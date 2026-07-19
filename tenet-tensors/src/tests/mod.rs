@@ -154,8 +154,8 @@ fn fusion_tree_test_key<
     coupled: usize,
     codomain_is_dual: [bool; COD_DUAL],
     domain_is_dual: [bool; DOM_DUAL],
-) -> BlockKey {
-    BlockKey::from(FusionTreePairKey::pair_from_sector_ids(
+) -> FusionTreePairKey {
+    FusionTreePairKey::pair_from_sector_ids(
         codomain,
         domain,
         Some(coupled),
@@ -165,14 +165,39 @@ fn fusion_tree_test_key<
         [coupled + 200],
         [coupled + 300],
         [coupled + 400],
-    ))
+    )
 }
 
-fn expect_tree_key(key: &BlockKey) -> FusionTreePairKey {
-    match key {
-        BlockKey::FusionTree(tree) => tree.clone(),
-        _ => panic!("test expected a fusion-tree key"),
+trait TestFusionTreePair {
+    fn test_fusion_tree_pair(&self) -> &FusionTreePairKey;
+}
+
+impl TestFusionTreePair for BlockKey {
+    fn test_fusion_tree_pair(&self) -> &FusionTreePairKey {
+        self.as_fusion_tree_pair()
+            .expect("test expected a fusion-tree key")
     }
+}
+
+impl TestFusionTreePair for FusionTreePairKey {
+    fn test_fusion_tree_pair(&self) -> &FusionTreePairKey {
+        self
+    }
+}
+
+fn expect_tree_key(key: &impl TestFusionTreePair) -> FusionTreePairKey {
+    key.test_fusion_tree_pair().clone()
+}
+
+fn block_offset_for_tree_pair(structure: &BlockStructure, key: &FusionTreePairKey) -> usize {
+    structure
+        .block(
+            structure
+                .find_block_index_by_fusion_tree_pair(key)
+                .expect("test tree pair must identify a stored block"),
+        )
+        .unwrap()
+        .offset()
 }
 
 fn empty_fusion_tree() -> FusionTreeKey {
@@ -202,7 +227,7 @@ fn all_codomain_fusion_tree_test_key<
     codomain_is_dual: [bool; COD_DUAL],
     codomain_innerlines: [usize; COD_INNER],
     codomain_vertices: [usize; COD_VERTICES],
-) -> BlockKey {
+) -> FusionTreePairKey {
     all_codomain_fusion_tree_test_key_for_rule(
         &Z2FusionRule,
         codomain,
@@ -226,7 +251,7 @@ fn all_codomain_fusion_tree_test_key_for_rule<
     codomain_is_dual: [bool; COD_DUAL],
     codomain_innerlines: [usize; COD_INNER],
     codomain_vertices: [usize; COD_VERTICES],
-) -> BlockKey
+) -> FusionTreePairKey
 where
     R: FusionRule,
 {
@@ -251,7 +276,7 @@ where
         .unwrap(),
     );
     tree_pair.validate_for_rule(rule).unwrap();
-    BlockKey::from(tree_pair)
+    tree_pair
 }
 
 type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
@@ -362,8 +387,8 @@ fn expected_single_tree_pair_replay(
         assert_eq!(spec.recoupling_coefficients_dst_src().len(), 1);
         let src_key = &spec.src_keys()[0];
         let dst_key = &spec.dst_keys()[0];
-        let src_offset = src_structure.block_by_key(src_key).unwrap().offset();
-        let dst_offset = dst_structure.block_by_key(dst_key).unwrap().offset();
+        let src_offset = block_offset_for_tree_pair(src_structure, src_key);
+        let dst_offset = block_offset_for_tree_pair(dst_structure, dst_key);
         expected[dst_offset] +=
             alpha * spec.recoupling_coefficients_dst_src()[0] * src_data[src_offset];
     }

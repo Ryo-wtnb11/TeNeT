@@ -544,13 +544,8 @@ where
         }
         let dst_key = FusionTreePairKey::pair(destination, src_key.domain_tree().clone());
         specs.push(
-            TreeTransformGroupBlockSpec::single(
-                src_key.group_key(),
-                dst_key,
-                src_key.clone(),
-                coefficient,
-            )
-            .with_shared_source_axes(Arc::clone(&source_axes)),
+            TreeTransformGroupBlockSpec::single(dst_key, src_key.clone(), coefficient)
+                .with_shared_source_axes(Arc::clone(&source_axes)),
         );
     }
     Ok(TreeTransformGroupPlan::new(specs))
@@ -1259,13 +1254,8 @@ where
         let dst_key =
             FusionTreePairKey::pair(dst_codomain_tree.clone(), src_key.domain_tree().clone());
         specs.push(
-            TreeTransformGroupBlockSpec::single(
-                group.group_key().clone(),
-                dst_key,
-                src_key.clone(),
-                coefficient.clone(),
-            )
-            .with_shared_source_axes(Arc::clone(source_axes)),
+            TreeTransformGroupBlockSpec::single(dst_key, src_key.clone(), coefficient.clone())
+                .with_shared_source_axes(Arc::clone(source_axes)),
         );
     }
     Ok(specs)
@@ -1315,9 +1305,9 @@ where
     F: FnMut(usize, &FusionTreeKey) -> Result<Arc<Vec<(FusionTreeKey, T)>>, OperationError>,
 {
     let src_block_indices = group.block_indices();
-    let mut src_keys = Vec::<BlockKey>::with_capacity(src_block_indices.len());
-    let mut dst_keys = Vec::<BlockKey>::new();
-    let mut dst_index_by_key = FxHashMap::<BlockKey, usize>::default();
+    let mut src_keys = Vec::<FusionTreePairKey>::with_capacity(src_block_indices.len());
+    let mut dst_keys = Vec::<FusionTreePairKey>::new();
+    let mut dst_index_by_key = FxHashMap::<FusionTreePairKey, usize>::default();
     let mut rows = DenseRecouplingRows::new(src_block_indices.len());
     let mut direct_rows = Vec::with_capacity(src_block_indices.len());
     let mut direct_dst_keys = FxHashSet::default();
@@ -1331,30 +1321,22 @@ where
                 index: src_block_index,
             });
         };
-        src_keys.push(BlockKey::from(src_key.clone()));
+        src_keys.push(src_key.clone());
 
         let transformed = rows_for(src_block_index, src_key.codomain_tree())?;
         if let [(dst_codomain_tree, coefficient)] = transformed.as_slice() {
-            let dst_key = BlockKey::from(FusionTreePairKey::pair(
-                dst_codomain_tree.clone(),
-                src_key.domain_tree().clone(),
-            ));
+            let dst_key =
+                FusionTreePairKey::pair(dst_codomain_tree.clone(), src_key.domain_tree().clone());
             if !direct_dst_keys.insert(dst_key.clone()) {
                 is_injective_singleton = false;
             }
-            direct_rows.push((
-                BlockKey::from(src_key.clone()),
-                dst_key,
-                coefficient.clone(),
-            ));
+            direct_rows.push((src_key.clone(), dst_key, coefficient.clone()));
         } else {
             is_injective_singleton = false;
         }
         for (dst_codomain_tree, coefficient) in transformed.iter() {
-            let dst_key = BlockKey::from(FusionTreePairKey::pair(
-                dst_codomain_tree.clone(),
-                src_key.domain_tree().clone(),
-            ));
+            let dst_key =
+                FusionTreePairKey::pair(dst_codomain_tree.clone(), src_key.domain_tree().clone());
             let dst_row = if let Some(&dst_row) = dst_index_by_key.get(&dst_key) {
                 dst_row
             } else {
@@ -1370,7 +1352,6 @@ where
     }
 
     if let Some(direct_specs) = lower_injective_singleton_rows(
-        group,
         source_axes,
         direct_rows,
         src_keys.len(),
@@ -1382,12 +1363,11 @@ where
         return Err(OperationError::EmptyTransformBlock);
     }
 
-    Ok(vec![TreeTransformGroupBlockSpec::multi(
-        group.group_key().clone(),
+    Ok(vec![TreeTransformGroupBlockSpec::try_multi(
         dst_keys,
         src_keys,
         rows.into_coefficients(),
-    )
+    )?
     .with_shared_source_axes(Arc::clone(source_axes))])
 }
 
@@ -1956,7 +1936,6 @@ where
         // scalar-conversion semantics across serial and parallel builders.
         specs.push(
             TreeTransformGroupBlockSpec::single(
-                group.group_key().clone(),
                 dst_key.clone(),
                 src_key.clone(),
                 coefficient.clone(),
@@ -1982,9 +1961,9 @@ where
     F: FnMut(usize, &FusionTreePairKey) -> Result<Arc<Vec<(FusionTreePairKey, T)>>, OperationError>,
 {
     let src_block_indices = group.block_indices();
-    let mut src_keys = Vec::<BlockKey>::with_capacity(src_block_indices.len());
-    let mut dst_keys = Vec::<BlockKey>::new();
-    let mut dst_index_by_key = FxHashMap::<BlockKey, usize>::default();
+    let mut src_keys = Vec::<FusionTreePairKey>::with_capacity(src_block_indices.len());
+    let mut dst_keys = Vec::<FusionTreePairKey>::new();
+    let mut dst_index_by_key = FxHashMap::<FusionTreePairKey, usize>::default();
     let mut rows = DenseRecouplingRows::new(src_block_indices.len());
     let mut direct_rows = Vec::with_capacity(src_block_indices.len());
     let mut direct_dst_keys = FxHashSet::default();
@@ -1998,25 +1977,21 @@ where
                 index: src_block_index,
             });
         };
-        src_keys.push(BlockKey::from(src_key.clone()));
+        src_keys.push(src_key.clone());
 
         let transformed = rows_for(src_block_index, src_key)?;
         if let [(dst_tree_key, coefficient)] = transformed.as_slice() {
-            let dst_key = BlockKey::from(dst_tree_key.clone());
+            let dst_key = dst_tree_key.clone();
             if !direct_dst_keys.insert(dst_key.clone()) {
                 is_injective_singleton = false;
             }
-            direct_rows.push((
-                BlockKey::from(src_key.clone()),
-                dst_key,
-                coefficient.clone(),
-            ));
+            direct_rows.push((src_key.clone(), dst_key, coefficient.clone()));
         } else {
             is_injective_singleton = false;
         }
 
         for (dst_tree_key, coefficient) in transformed.iter() {
-            let dst_key = BlockKey::from(dst_tree_key.clone());
+            let dst_key = dst_tree_key.clone();
             let dst_row = if let Some(&dst_row) = dst_index_by_key.get(&dst_key) {
                 dst_row
             } else {
@@ -2032,7 +2007,6 @@ where
     }
 
     if let Some(direct_specs) = lower_injective_singleton_rows(
-        group,
         source_axes,
         direct_rows,
         src_keys.len(),
@@ -2044,19 +2018,17 @@ where
         return Err(OperationError::EmptyTransformBlock);
     }
 
-    Ok(vec![TreeTransformGroupBlockSpec::multi(
-        group.group_key().clone(),
+    Ok(vec![TreeTransformGroupBlockSpec::try_multi(
         dst_keys,
         src_keys,
         rows.into_coefficients(),
-    )
+    )?
     .with_shared_source_axes(Arc::clone(source_axes))])
 }
 
 fn lower_injective_singleton_rows<T>(
-    group: &FusionTreeBlockGroup,
     source_axes: &Arc<[usize]>,
-    direct_rows: Vec<(BlockKey, BlockKey, T)>,
+    direct_rows: Vec<(FusionTreePairKey, FusionTreePairKey, T)>,
     src_count: usize,
     is_injective_singleton: bool,
 ) -> Option<Vec<TreeTransformGroupBlockSpec<T>>> {
@@ -2071,13 +2043,8 @@ fn lower_injective_singleton_rows<T>(
         direct_rows
             .into_iter()
             .map(|(src_key, dst_key, coefficient)| {
-                TreeTransformGroupBlockSpec::single(
-                    group.group_key().clone(),
-                    dst_key,
-                    src_key,
-                    coefficient,
-                )
-                .with_shared_source_axes(Arc::clone(source_axes))
+                TreeTransformGroupBlockSpec::single(dst_key, src_key, coefficient)
+                    .with_shared_source_axes(Arc::clone(source_axes))
             })
             .collect(),
     )
@@ -2151,13 +2118,8 @@ where
         }
         .map_err(OperationError::from_core_preserving_context)?;
         specs.push(
-            TreeTransformGroupBlockSpec::single(
-                src_key.group_key(),
-                transformed.0,
-                src_key.clone(),
-                transformed.1,
-            )
-            .with_shared_source_axes(Arc::clone(&source_axes)),
+            TreeTransformGroupBlockSpec::single(transformed.0, src_key.clone(), transformed.1)
+                .with_shared_source_axes(Arc::clone(&source_axes)),
         );
     }
     Ok(TreeTransformGroupPlan::new(specs))

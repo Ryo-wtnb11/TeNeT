@@ -8,11 +8,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use num_traits::Zero;
+#[cfg(test)]
+use tenet_core::BlockKey;
 use tenet_core::{
-    BlockKey, BlockStructure, FusionTreeBlockGroup, FusionTreeGroupKey, FusionTreeKey,
-    FusionTreePairKey, GenericBraidScalar, GenericRigidSymbols,
-    LocallyValidatedFusionTreeBlockStructure, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, SectorId, TensorMap, TensorStorage,
+    BlockStructure, FusionTreeBlockGroup, FusionTreeGroupKey, FusionTreeKey, FusionTreePairKey,
+    GenericBraidScalar, GenericRigidSymbols, LocallyValidatedFusionTreeBlockStructure,
+    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, SectorId, TensorMap,
+    TensorStorage,
 };
 
 use crate::cache::{
@@ -21,7 +23,9 @@ use crate::cache::{
 };
 use crate::{OperationError, TreeTransformStructure, TreeTransformStructureCache};
 
-use super::helpers::fusion_tree_group_block_keys;
+use super::helpers::{
+    duplicate_fusion_tree_pair_index, fusion_tree_group_block_keys, fusion_tree_pair_matches_group,
+};
 use super::operation::{
     TreeTransformBuiltinRuleCacheKey, TreeTransformOperation, TreeTransformRuleCacheKey,
 };
@@ -131,7 +135,7 @@ where
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TreeTransformSourceGroupKey {
     group_key: FusionTreeGroupKey,
-    src_keys: Vec<BlockKey>,
+    src_keys: Vec<FusionTreePairKey>,
 }
 
 impl TreeTransformSourceGroupKey {
@@ -139,9 +143,20 @@ impl TreeTransformSourceGroupKey {
         structure: &BlockStructure,
         group: &FusionTreeBlockGroup,
     ) -> Result<Self, OperationError> {
+        let src_keys = fusion_tree_group_block_keys(structure, group, "src")?;
+        let Some(first) = src_keys.first() else {
+            return Err(OperationError::EmptyTransformBlock);
+        };
+        if let Some(index) = duplicate_fusion_tree_pair_index(&src_keys) {
+            return Err(OperationError::DuplicateTreeTransformKey {
+                tensor: "src",
+                index,
+            });
+        }
+        let group_key = first.group_key();
         Ok(Self {
-            group_key: group.group_key().clone(),
-            src_keys: fusion_tree_group_block_keys(structure, group, "src")?,
+            group_key,
+            src_keys,
         })
     }
 
@@ -151,7 +166,7 @@ impl TreeTransformSourceGroupKey {
     }
 
     #[inline]
-    pub fn src_keys(&self) -> &[BlockKey] {
+    pub fn src_keys(&self) -> &[FusionTreePairKey] {
         &self.src_keys
     }
 }
@@ -192,8 +207,8 @@ impl TreeTransformGroupPlanKey {
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TreeTransformCachedGroupKey {
     group_key: FusionTreeGroupKey,
-    dst_keys: Vec<BlockKey>,
-    src_keys: Vec<BlockKey>,
+    dst_keys: Vec<FusionTreePairKey>,
+    src_keys: Vec<FusionTreePairKey>,
 }
 
 #[cfg(test)]
@@ -500,16 +515,11 @@ fn builtin_tree_plan_is_multiplicity_free(
                 .iter()
                 .flat_map(|spec| spec.src_keys().iter().chain(spec.dst_keys())),
         )
-        .all(block_key_is_multiplicity_free)
+        .all(fusion_tree_pair_is_multiplicity_free)
 }
 
-fn block_key_is_multiplicity_free(key: &BlockKey) -> bool {
-    match key {
-        BlockKey::FusionTree(tree) => {
-            !tree.codomain_tree().has_multiplicity() && !tree.domain_tree().has_multiplicity()
-        }
-        _ => false,
-    }
+fn fusion_tree_pair_is_multiplicity_free(tree: &FusionTreePairKey) -> bool {
+    !tree.codomain_tree().has_multiplicity() && !tree.domain_tree().has_multiplicity()
 }
 
 fn decode_builtin_tree_plan_cache(
@@ -531,7 +541,9 @@ fn decode_builtin_tree_plan_cache(
     for _ in 0..len {
         let key = decode_builtin_tree_plan_key(&mut input)?;
         let plan = decode_tree_transform_group_plan_f64(&mut input)?;
-        entries.push((key, plan));
+        if let (Some(key), Some(plan)) = (key, plan) {
+            entries.push((key, plan));
+        }
     }
     input.finish()?;
     Ok(entries)
@@ -549,7 +561,7 @@ fn encode_builtin_tree_plan_key(
         encode_fusion_tree_group_key(out, group.group_key());
         write_usize(out, group.src_keys().len());
         for key in group.src_keys() {
-            encode_block_key(out, key)?;
+            encode_v2_fusion_tree_pair_key(out, key);
         }
     }
     Ok(())
@@ -557,30 +569,53 @@ fn encode_builtin_tree_plan_key(
 
 fn decode_builtin_tree_plan_key(
     input: &mut CacheBytes<'_>,
-) -> Result<TreeTransformSectorPlanKey<TreeTransformBuiltinRuleCacheKey>, ()> {
+) -> Result<Option<TreeTransformSectorPlanKey<TreeTransformBuiltinRuleCacheKey>>, ()> {
     let rule = decode_builtin_rule_key(input)?;
     let scope = decode_plan_scope(input)?;
     let operation = decode_tree_transform_operation(input)?;
     let group_count = input.read_usize()?;
     let mut source_groups = Vec::with_capacity(group_count);
+    let mut categorical = true;
     for _ in 0..group_count {
-        let group_key = decode_fusion_tree_group_key(input)?;
+        let serialized_group_key = decode_fusion_tree_group_key(input)?;
         let key_count = input.read_usize()?;
         let mut src_keys = Vec::with_capacity(key_count);
+        let mut group_is_categorical = true;
         for _ in 0..key_count {
-            src_keys.push(decode_block_key(input)?);
+            match decode_v2_fusion_tree_pair_key(input)? {
+                Some(key) => src_keys.push(key),
+                None => group_is_categorical = false,
+            }
         }
-        source_groups.push(TreeTransformSourceGroupKey {
-            group_key,
-            src_keys,
-        });
+        let derived_group_key = src_keys.first().map(FusionTreePairKey::group_key);
+        let source_group = match derived_group_key {
+            Some(group_key)
+                if group_is_categorical
+                    && group_key == serialized_group_key
+                    && src_keys
+                        .iter()
+                        .all(|key| fusion_tree_pair_matches_group(key, &group_key))
+                    && duplicate_fusion_tree_pair_index(&src_keys).is_none() =>
+            {
+                Some(TreeTransformSourceGroupKey {
+                    group_key,
+                    src_keys,
+                })
+            }
+            _ => None,
+        };
+        if let Some(source_group) = source_group {
+            source_groups.push(source_group);
+        } else {
+            categorical = false;
+        }
     }
-    Ok(TreeTransformSectorPlanKey {
+    Ok(categorical.then_some(TreeTransformSectorPlanKey {
         rule,
         scope,
         operation,
         source_groups,
-    })
+    }))
 }
 
 fn encode_tree_transform_group_plan_f64(
@@ -592,11 +627,11 @@ fn encode_tree_transform_group_plan_f64(
         encode_fusion_tree_group_key(out, spec.group_key());
         write_usize(out, spec.dst_keys().len());
         for key in spec.dst_keys() {
-            encode_block_key(out, key)?;
+            encode_v2_fusion_tree_pair_key(out, key);
         }
         write_usize(out, spec.src_keys().len());
         for key in spec.src_keys() {
-            encode_block_key(out, key)?;
+            encode_v2_fusion_tree_pair_key(out, key);
         }
         write_usize(out, spec.recoupling_coefficients_dst_src().len());
         for &coefficient in spec.recoupling_coefficients_dst_src() {
@@ -618,36 +653,55 @@ fn encode_tree_transform_group_plan_f64(
 
 fn decode_tree_transform_group_plan_f64(
     input: &mut CacheBytes<'_>,
-) -> Result<TreeTransformGroupPlan<f64>, ()> {
+) -> Result<Option<TreeTransformGroupPlan<f64>>, ()> {
     let spec_count = input.read_usize()?;
     let mut specs = Vec::with_capacity(spec_count);
     let mut shared_axes = FxHashMap::<Arc<[usize]>, Arc<[usize]>>::default();
+    let mut categorical = true;
     for _ in 0..spec_count {
-        let group_key = decode_fusion_tree_group_key(input)?;
+        let serialized_group_key = decode_fusion_tree_group_key(input)?;
         let dst_count = input.read_usize()?;
         let mut dst_keys = Vec::with_capacity(dst_count);
+        let mut spec_is_categorical = true;
         for _ in 0..dst_count {
-            dst_keys.push(decode_block_key(input)?);
+            match decode_v2_fusion_tree_pair_key(input)? {
+                Some(key) => dst_keys.push(key),
+                None => spec_is_categorical = false,
+            }
         }
         let src_count = input.read_usize()?;
         let mut src_keys = Vec::with_capacity(src_count);
         for _ in 0..src_count {
-            src_keys.push(decode_block_key(input)?);
+            match decode_v2_fusion_tree_pair_key(input)? {
+                Some(key) => src_keys.push(key),
+                None => spec_is_categorical = false,
+            }
         }
         let coeff_count = input.read_usize()?;
         let mut coefficients = Vec::with_capacity(coeff_count);
         for _ in 0..coeff_count {
             coefficients.push(f64::from_bits(input.read_u64()?));
         }
-        let mut spec = if dst_count == 1 && src_count == 1 && coeff_count == 1 {
-            TreeTransformGroupBlockSpec::single(
-                group_key,
-                dst_keys.pop().ok_or(())?,
-                src_keys.pop().ok_or(())?,
-                coefficients.pop().ok_or(())?,
-            )
+        let mut spec = if spec_is_categorical {
+            let candidate = if dst_count == 1 && src_count == 1 && coeff_count == 1 {
+                Ok(TreeTransformGroupBlockSpec::single(
+                    dst_keys.pop().ok_or(())?,
+                    src_keys.pop().ok_or(())?,
+                    coefficients.pop().ok_or(())?,
+                ))
+            } else {
+                TreeTransformGroupBlockSpec::try_multi(dst_keys, src_keys, coefficients)
+            };
+            match candidate {
+                Ok(spec) if spec.group_key() == &serialized_group_key => Some(spec),
+                Ok(_) | Err(_) => {
+                    categorical = false;
+                    None
+                }
+            }
         } else {
-            TreeTransformGroupBlockSpec::multi(group_key, dst_keys, src_keys, coefficients)
+            categorical = false;
+            None
         };
         if input.read_u8()? != 0 {
             let axis_count = input.read_usize()?;
@@ -660,11 +714,13 @@ fn decode_tree_transform_group_plan_f64(
                 shared_axes.insert(Arc::clone(&axes), Arc::clone(&axes));
                 axes
             });
-            spec = spec.with_shared_source_axes(axes);
+            spec = spec.map(|spec| spec.with_shared_source_axes(axes));
         }
-        specs.push(spec);
+        if let Some(spec) = spec {
+            specs.push(spec);
+        }
     }
-    Ok(TreeTransformGroupPlan::new(specs))
+    Ok(categorical.then(|| TreeTransformGroupPlan::new(specs)))
 }
 
 fn encode_builtin_rule_key(out: &mut Vec<u8>, key: TreeTransformBuiltinRuleCacheKey) {
@@ -783,19 +839,20 @@ fn decode_fusion_tree_group_key(input: &mut CacheBytes<'_>) -> Result<FusionTree
     ))
 }
 
-fn encode_block_key(out: &mut Vec<u8>, key: &BlockKey) -> Result<(), ()> {
-    let Some(tree) = key.as_fusion_tree_pair() else {
-        return Err(());
-    };
+fn encode_v2_fusion_tree_pair_key(out: &mut Vec<u8>, tree: &FusionTreePairKey) {
     out.push(1);
     encode_fusion_tree_pair_key(out, tree);
-    Ok(())
 }
 
-fn decode_block_key(input: &mut CacheBytes<'_>) -> Result<BlockKey, ()> {
+fn decode_v2_fusion_tree_pair_key(
+    input: &mut CacheBytes<'_>,
+) -> Result<Option<FusionTreePairKey>, ()> {
     match input.read_u8()? {
-        0 => Ok(BlockKey::Dense),
-        1 => Ok(BlockKey::FusionTree(decode_fusion_tree_pair_key(input)?)),
+        // Why not fail on the legacy dense tag: v2 files can contain later
+        // categorical entries. The decoder must consume this whole entry and
+        // discard it without losing the following wire position.
+        0 => Ok(None),
+        1 => Ok(Some(decode_fusion_tree_pair_key(input)?)),
         _ => Err(()),
     }
 }
@@ -1006,8 +1063,8 @@ mod persistence_tests {
         }
     }
 
-    fn multiplicity_free_key() -> BlockKey {
-        BlockKey::FusionTree(FusionTreePairKey::pair_from_sector_ids(
+    fn multiplicity_free_key() -> FusionTreePairKey {
+        FusionTreePairKey::pair_from_sector_ids(
             [1, 1],
             [],
             Some(0),
@@ -1017,7 +1074,7 @@ mod persistence_tests {
             [],
             [1],
             [],
-        ))
+        )
     }
 
     fn decode_hex_fixture(hex: &str) -> Vec<u8> {
@@ -1037,8 +1094,7 @@ mod persistence_tests {
             .collect()
     }
 
-    #[test]
-    fn origin_main_v2_fixture_decodes_to_canonical_shared_storage() {
+    fn origin_main_legacy_dense_v2_fixture() -> Vec<u8> {
         // What: bytes produced by origin/main 35de652's encoder with two one-by-one
         // `multi` specs sharing source axes [0, 1]. Keeping literal bytes
         // catches representation migrations that a current-encoder roundtrip
@@ -1058,37 +1114,333 @@ mod persistence_tests {
             "0000000000010000000000000000000000000004c00102000000000000000000",
             "0000000000000100000000000000",
         );
-        let bytes = decode_hex_fixture(ORIGIN_MAIN_35DE652_V2);
+        decode_hex_fixture(ORIGIN_MAIN_35DE652_V2)
+    }
+
+    fn base_87065ed_categorical_matrix_v2_fixture() -> Vec<u8> {
+        // What: whole-file bytes produced by the exact 87065ed encoder for one
+        // two-by-two SU(2) categorical cohort. A literal from the predecessor
+        // implementation detects one-sided writer or reader drift.
+        decode_hex_fixture(include_str!(
+            "fixtures/base_87065ed_categorical_matrix_v2.hex"
+        ))
+    }
+
+    #[test]
+    fn origin_main_v2_fixture_consumes_and_drops_legacy_dense_plan() {
+        let bytes = origin_main_legacy_dense_v2_fixture();
         let decoded = decode_builtin_tree_plan_cache(&bytes).unwrap();
 
-        // What: the committed v2 wire format remains readable and its legacy
-        // one-by-one multi entries canonicalize to the compact single form.
-        assert_eq!(decoded.len(), 1);
-        let specs = decoded[0].1.specs();
-        assert_eq!(specs.len(), 2);
-        assert_eq!(specs[0].recoupling_coefficients_dst_src(), &[1.25]);
-        assert_eq!(specs[1].recoupling_coefficients_dst_src(), &[-2.5]);
-        assert!(format!("{:?}", specs[0]).contains("Single"));
-        assert!(format!("{:?}", specs[1]).contains("Single"));
+        // What: the decoder fully consumes a valid legacy v2 record but drops
+        // its whole plan once any source or destination key is Dense.
+        assert!(decoded.is_empty());
+    }
 
-        // What: equal decoded axis maps retain one allocation rather than one
-        // Arc payload per spec. Slice identity observes the shared allocation
-        // without adding a production-only representation accessor.
-        assert!(std::ptr::eq(
-            specs[0].source_axes().unwrap(),
-            specs[1].source_axes().unwrap(),
-        ));
-        assert!(!builtin_tree_plan_is_multiplicity_free(
-            &decoded[0].0,
-            &decoded[0].1
-        ));
+    #[test]
+    fn base_87065ed_categorical_v2_bytes_preserve_exact_matrix_contract() {
+        let pair = |inner| {
+            FusionTreePairKey::pair_from_sector_ids(
+                [1; 4],
+                [],
+                Some(0),
+                [false; 4],
+                [],
+                inner,
+                [],
+                [1; 3],
+                [],
+            )
+        };
+        let first = pair([0, 1]);
+        let second = pair([2, 1]);
+        let key = TreeTransformSectorPlanKey {
+            rule: TreeTransformBuiltinRuleCacheKey::SU2Exact {
+                authority_version: tenet_core::SU2_EXACT_AUTHORITY_VERSION,
+            },
+            scope: TreeTransformPlanScope::TreePair,
+            operation: TreeTransformOperation::braid([1, 0, 2, 3], [], [5, 3, 0, 0], []),
+            source_groups: vec![TreeTransformSourceGroupKey {
+                group_key: first.group_key(),
+                src_keys: vec![first.clone(), second.clone()],
+            }],
+        };
+        let plan = TreeTransformGroupPlan::new(vec![TreeTransformGroupBlockSpec::try_multi(
+            [second.clone(), first.clone()],
+            [first.clone(), second.clone()],
+            vec![1.25, -2.5, 3.75, -4.5],
+        )
+        .unwrap()
+        .with_source_axes([1, 0, 2, 3])]);
+        let literal = base_87065ed_categorical_matrix_v2_fixture();
+        let mut entries = FxHashMap::default();
+        entries.insert(key.clone(), Arc::new(plan.clone()));
 
-        // What: legacy dense entries remain readable, but the current v2
-        // writer and loader never admit a non-categorical block namespace.
-        let mut reencoded = FxHashMap::default();
-        reencoded.insert(decoded[0].0.clone(), Arc::new(decoded[0].1.clone()));
-        let current = encode_builtin_tree_plan_cache(&reencoded).unwrap();
-        assert!(decode_builtin_tree_plan_cache(&current).unwrap().is_empty());
+        // What: the current writer emits the exact whole-file categorical v2
+        // representation produced by 87065ed, independently of current decode.
+        let encoded = encode_builtin_tree_plan_cache(&entries).unwrap();
+        assert_eq!(literal.len(), 1_348);
+        assert_eq!(encoded.len(), literal.len());
+        if let Some(index) = encoded
+            .iter()
+            .zip(&literal)
+            .position(|(current, base)| current != base)
+        {
+            panic!(
+                "categorical v2 byte differs at {index}: current={:02x}, base={:02x}",
+                encoded[index], literal[index]
+            );
+        }
+        assert_eq!(encoded, literal);
+
+        let decoded = decode_builtin_tree_plan_cache(&literal).unwrap();
+        assert_eq!(decoded, vec![(key, plan)]);
+        let spec = &decoded[0].1.specs()[0];
+
+        // What: decoding preserves destination-row/source-column order,
+        // row-major U[dst, src] coefficients, and the source-axis map exactly.
+        assert_eq!(spec.dst_keys(), &[second.clone(), first.clone()]);
+        assert_eq!(spec.src_keys(), &[first, second]);
+        assert_eq!(
+            spec.recoupling_coefficients_dst_src(),
+            &[1.25, -2.5, 3.75, -4.5]
+        );
+        assert_eq!(spec.source_axes(), Some([1, 0, 2, 3].as_slice()));
+    }
+
+    fn categorical_v2_fixture() -> (
+        TreeTransformSectorPlanKey<TreeTransformBuiltinRuleCacheKey>,
+        TreeTransformGroupPlan<f64>,
+        Vec<u8>,
+    ) {
+        let tree = multiplicity_free_key();
+        let group_key = tree.group_key();
+        let categorical_key = TreeTransformSectorPlanKey {
+            rule: TreeTransformBuiltinRuleCacheKey::SU2Exact {
+                authority_version: tenet_core::SU2_EXACT_AUTHORITY_VERSION,
+            },
+            scope: TreeTransformPlanScope::TreePair,
+            operation: TreeTransformOperation::braid([1, 0], [], [5, 3], []),
+            source_groups: vec![TreeTransformSourceGroupKey {
+                group_key: group_key.clone(),
+                src_keys: vec![tree.clone()],
+            }],
+        };
+        let categorical_plan =
+            TreeTransformGroupPlan::new(vec![TreeTransformGroupBlockSpec::single(
+                tree.clone(),
+                tree,
+                3.25,
+            )
+            .with_source_axes([1, 0])]);
+        let mut categorical_entries = FxHashMap::default();
+        categorical_entries.insert(categorical_key.clone(), Arc::new(categorical_plan.clone()));
+        let categorical_bytes = encode_builtin_tree_plan_cache(&categorical_entries).unwrap();
+        (categorical_key, categorical_plan, categorical_bytes)
+    }
+
+    #[test]
+    fn v2_dense_record_does_not_misalign_following_categorical_record() {
+        let (categorical_key, categorical_plan, categorical_bytes) = categorical_v2_fixture();
+        let legacy_bytes = origin_main_legacy_dense_v2_fixture();
+        let records_offset = TREE_PLAN_CACHE_MAGIC.len() + 8 + 8;
+
+        assert_eq!(
+            &legacy_bytes[..TREE_PLAN_CACHE_MAGIC.len() + 8],
+            &categorical_bytes[..TREE_PLAN_CACHE_MAGIC.len() + 8]
+        );
+        let mut mixed = legacy_bytes[..TREE_PLAN_CACHE_MAGIC.len() + 8].to_vec();
+        write_usize(&mut mixed, 2);
+        mixed.extend_from_slice(&legacy_bytes[records_offset..]);
+        mixed.extend_from_slice(&categorical_bytes[records_offset..]);
+
+        let decoded = decode_builtin_tree_plan_cache(&mixed).unwrap();
+
+        // What: one real v2 stream drops the complete legacy Dense record and
+        // resumes at the exact boundary of the following categorical record.
+        assert_eq!(decoded, vec![(categorical_key, categorical_plan)]);
+        assert_eq!(
+            decoded[0].1.specs()[0].recoupling_coefficients_dst_src(),
+            &[3.25]
+        );
+        assert_eq!(
+            decoded[0].1.specs()[0].source_axes(),
+            Some([1, 0].as_slice())
+        );
+        assert!(format!("{:?}", decoded[0].1.specs()[0]).contains("Single"));
+    }
+
+    #[test]
+    fn v2_mismatched_group_does_not_misalign_following_categorical_record() {
+        let (categorical_key, categorical_plan, categorical_bytes) = categorical_v2_fixture();
+        let records_offset = TREE_PLAN_CACHE_MAGIC.len() + 8 + 8;
+        let plan_offset = {
+            let mut record = CacheBytes::new(&categorical_bytes[records_offset..]);
+            assert!(decode_builtin_tree_plan_key(&mut record).unwrap().is_some());
+            records_offset + record.pos
+        };
+        let first_plan_group_sector = plan_offset + 8 + 8;
+        let mut mismatched = categorical_bytes.clone();
+        mismatched[first_plan_group_sector..first_plan_group_sector + 8]
+            .copy_from_slice(&99_u64.to_le_bytes());
+        let mut mixed = categorical_bytes[..TREE_PLAN_CACHE_MAGIC.len() + 8].to_vec();
+        write_usize(&mut mixed, 2);
+        mixed.extend_from_slice(&mismatched[records_offset..]);
+        mixed.extend_from_slice(&categorical_bytes[records_offset..]);
+
+        let decoded = decode_builtin_tree_plan_cache(&mixed).unwrap();
+
+        // What: a legacy categorical record whose serialized source group
+        // disagrees with its source pairs is dropped only after its full wire
+        // body is consumed, so the next record remains aligned and exact.
+        assert_eq!(decoded, vec![(categorical_key, categorical_plan)]);
+        assert_eq!(
+            decoded[0].1.specs()[0].recoupling_coefficients_dst_src(),
+            &[3.25]
+        );
+        assert_eq!(
+            decoded[0].1.specs()[0].source_axes(),
+            Some([1, 0].as_slice())
+        );
+    }
+
+    fn two_source_categorical_v2_fixture() -> Vec<u8> {
+        let src1 = multiplicity_free_key();
+        let src2 = FusionTreePairKey::pair_from_sector_ids(
+            [1, 1],
+            [],
+            Some(0),
+            [false, false],
+            [],
+            [],
+            [],
+            [2],
+            [],
+        );
+        let group_key = src1.group_key();
+        let duplicate_key = TreeTransformSectorPlanKey {
+            rule: TreeTransformBuiltinRuleCacheKey::SU2Exact {
+                authority_version: tenet_core::SU2_EXACT_AUTHORITY_VERSION,
+            },
+            scope: TreeTransformPlanScope::TreePair,
+            operation: TreeTransformOperation::braid([1, 0], [], [5, 3], []),
+            source_groups: vec![TreeTransformSourceGroupKey {
+                group_key,
+                src_keys: vec![src1.clone(), src2.clone()],
+            }],
+        };
+        let duplicate_plan =
+            TreeTransformGroupPlan::new(vec![TreeTransformGroupBlockSpec::try_multi(
+                [src1.clone()],
+                [src1.clone(), src2],
+                vec![1.0, 2.0],
+            )
+            .unwrap()]);
+        let mut duplicate_entries = FxHashMap::default();
+        duplicate_entries.insert(duplicate_key, Arc::new(duplicate_plan));
+        encode_builtin_tree_plan_cache(&duplicate_entries).unwrap()
+    }
+
+    #[test]
+    fn v2_duplicate_plan_source_key_drops_only_its_record() {
+        let mut duplicate_bytes = two_source_categorical_v2_fixture();
+        let records_offset = TREE_PLAN_CACHE_MAGIC.len() + 8 + 8;
+        let (first_src, second_src) = {
+            let mut record = CacheBytes::new(&duplicate_bytes[records_offset..]);
+            assert!(decode_builtin_tree_plan_key(&mut record).unwrap().is_some());
+            assert_eq!(record.read_usize().unwrap(), 1);
+            decode_fusion_tree_group_key(&mut record).unwrap();
+            assert_eq!(record.read_usize().unwrap(), 1);
+            assert!(decode_v2_fusion_tree_pair_key(&mut record)
+                .unwrap()
+                .is_some());
+            assert_eq!(record.read_usize().unwrap(), 2);
+            let first_start = records_offset + record.pos;
+            assert!(decode_v2_fusion_tree_pair_key(&mut record)
+                .unwrap()
+                .is_some());
+            let first_end = records_offset + record.pos;
+            let second_start = first_end;
+            assert!(decode_v2_fusion_tree_pair_key(&mut record)
+                .unwrap()
+                .is_some());
+            let second_end = records_offset + record.pos;
+            (first_start..first_end, second_start..second_end)
+        };
+        assert_eq!(first_src.len(), second_src.len());
+        let first_src_bytes = duplicate_bytes[first_src].to_vec();
+        duplicate_bytes[second_src].copy_from_slice(&first_src_bytes);
+        let (categorical_key, categorical_plan, categorical_bytes) = categorical_v2_fixture();
+        let mut mixed = categorical_bytes[..TREE_PLAN_CACHE_MAGIC.len() + 8].to_vec();
+        write_usize(&mut mixed, 2);
+        mixed.extend_from_slice(&duplicate_bytes[records_offset..]);
+        mixed.extend_from_slice(&categorical_bytes[records_offset..]);
+
+        let decoded = decode_builtin_tree_plan_cache(&mixed).unwrap();
+
+        // What: duplicate categorical columns invalidate one legacy plan after
+        // complete consumption without disturbing the following record.
+        assert_eq!(decoded, vec![(categorical_key, categorical_plan)]);
+    }
+
+    #[test]
+    fn v2_duplicate_cache_key_source_drops_only_its_record() {
+        let mut duplicate_bytes = two_source_categorical_v2_fixture();
+        let records_offset = TREE_PLAN_CACHE_MAGIC.len() + 8 + 8;
+        let (first_src, second_src) = {
+            let mut record = CacheBytes::new(&duplicate_bytes[records_offset..]);
+            decode_builtin_rule_key(&mut record).unwrap();
+            decode_plan_scope(&mut record).unwrap();
+            decode_tree_transform_operation(&mut record).unwrap();
+            assert_eq!(record.read_usize().unwrap(), 1);
+            decode_fusion_tree_group_key(&mut record).unwrap();
+            assert_eq!(record.read_usize().unwrap(), 2);
+            let first_start = records_offset + record.pos;
+            assert!(decode_v2_fusion_tree_pair_key(&mut record)
+                .unwrap()
+                .is_some());
+            let first_end = records_offset + record.pos;
+            let second_start = first_end;
+            assert!(decode_v2_fusion_tree_pair_key(&mut record)
+                .unwrap()
+                .is_some());
+            let second_end = records_offset + record.pos;
+            (first_start..first_end, second_start..second_end)
+        };
+        assert_eq!(first_src.len(), second_src.len());
+        let first_src_bytes = duplicate_bytes[first_src].to_vec();
+        duplicate_bytes[second_src].copy_from_slice(&first_src_bytes);
+        let (categorical_key, categorical_plan, categorical_bytes) = categorical_v2_fixture();
+        let mut mixed = categorical_bytes[..TREE_PLAN_CACHE_MAGIC.len() + 8].to_vec();
+        write_usize(&mut mixed, 2);
+        mixed.extend_from_slice(&duplicate_bytes[records_offset..]);
+        mixed.extend_from_slice(&categorical_bytes[records_offset..]);
+
+        let decoded = decode_builtin_tree_plan_cache(&mixed).unwrap();
+
+        // What: duplicate source identities make a persisted cache key
+        // non-canonical, but its paired plan is still consumed before replay
+        // resumes at the next record.
+        assert_eq!(decoded, vec![(categorical_key, categorical_plan)]);
+    }
+
+    #[test]
+    fn source_group_key_rejects_repeated_public_group_indices() {
+        let key = multiplicity_free_key();
+        let structure =
+            crate::tests::packed_fixture_structure(2, [(key.clone(), vec![1, 1])]).unwrap();
+        let repeated = FusionTreeBlockGroup::new(key.group_key(), vec![0, 0]);
+
+        let err = TreeTransformSourceGroupKey::from_group(&structure, &repeated).unwrap_err();
+
+        // What: a caller-built group cannot create a non-canonical cache key by
+        // repeating one valid source basis index.
+        assert_eq!(
+            err,
+            OperationError::DuplicateTreeTransformKey {
+                tensor: "src",
+                index: 1,
+            }
+        );
     }
 
     #[test]
@@ -1105,30 +1457,58 @@ mod persistence_tests {
                 src_keys: vec![multiplicity_free_key()],
             }],
         };
+        fn assert_categorical_keys(_: &[FusionTreePairKey]) {}
+        assert_categorical_keys(key.source_groups()[0].src_keys());
         let categorical_key = multiplicity_free_key();
-        let legacy_single = TreeTransformGroupBlockSpec::multi(
-            group_key.clone(),
+        let legacy_single = TreeTransformGroupBlockSpec::try_multi(
             [categorical_key.clone()],
             [categorical_key.clone()],
             vec![1.25],
         )
+        .unwrap()
         .with_source_axes([0, 1]);
-        let plan = Arc::new(TreeTransformGroupPlan::new(vec![legacy_single]));
+        let legacy_second = TreeTransformGroupBlockSpec::try_multi(
+            [categorical_key.clone()],
+            [categorical_key.clone()],
+            vec![-2.5],
+        )
+        .unwrap()
+        .with_source_axes([0, 1]);
+        let plan = Arc::new(TreeTransformGroupPlan::new(vec![
+            legacy_single,
+            legacy_second,
+        ]));
         let current_plan = Arc::new(TreeTransformGroupPlan::new(vec![
             TreeTransformGroupBlockSpec::single(
-                group_key,
                 categorical_key.clone(),
-                categorical_key,
+                categorical_key.clone(),
                 1.25,
             )
             .with_source_axes([0, 1]),
+            TreeTransformGroupBlockSpec::single(categorical_key.clone(), categorical_key, -2.5)
+                .with_source_axes([0, 1]),
         ]));
         let mut plans = FxHashMap::default();
         plans.insert(key.clone(), Arc::clone(&plan));
 
         let mut bytes = encode_builtin_tree_plan_cache(&plans).unwrap();
+        assert_eq!(
+            &bytes[TREE_PLAN_CACHE_MAGIC.len()..TREE_PLAN_CACHE_MAGIC.len() + 8],
+            &TREE_PLAN_CACHE_VERSION.to_le_bytes()
+        );
         let decoded = decode_builtin_tree_plan_cache(&bytes).unwrap();
         assert_eq!(decoded, vec![(key, (*plan).clone())]);
+        // What: categorical v2 bytes preserve canonical Single lowering and
+        // share equal source-axis storage after decoding.
+        assert!(decoded[0]
+            .1
+            .specs()
+            .iter()
+            .all(|spec| format!("{spec:?}").contains("Single")));
+        assert!(std::ptr::eq(
+            decoded[0].1.specs()[0].source_axes().unwrap(),
+            decoded[0].1.specs()[1].source_axes().unwrap(),
+        ));
         let mut current_plans = FxHashMap::default();
         current_plans.insert(decoded[0].0.clone(), current_plan);
         assert_eq!(
@@ -1165,8 +1545,7 @@ mod persistence_tests {
         )
         .unwrap();
         let generic_domain = FusionTreeKey::try_new_for_rule(&rule, [], None, [], [], []).unwrap();
-        let generic_key =
-            BlockKey::FusionTree(FusionTreePairKey::pair(generic_codomain, generic_domain));
+        let generic_key = FusionTreePairKey::pair(generic_codomain, generic_domain);
         let group_key = FusionTreeGroupKey::from_sector_ids([0], [], [false], []);
         let operation = TreeTransformOperation::braid([0], [], [0], []);
         let generic_plan_key = TreeTransformSectorPlanKey {
@@ -1181,13 +1560,9 @@ mod persistence_tests {
             }],
         };
         let generic_plan = Arc::new(TreeTransformGroupPlan::new(vec![
-            TreeTransformGroupBlockSpec::single(
-                group_key.clone(),
-                generic_key.clone(),
-                generic_key,
-                1.0,
-            ),
+            TreeTransformGroupBlockSpec::single(generic_key.clone(), generic_key, 1.0),
         ]));
+        let multiplicity_free_key = multiplicity_free_key();
         let multiplicity_free_plan_key = TreeTransformSectorPlanKey {
             rule: TreeTransformBuiltinRuleCacheKey::SU2Exact {
                 authority_version: tenet_core::SU2_EXACT_AUTHORITY_VERSION,
@@ -1195,14 +1570,12 @@ mod persistence_tests {
             scope: TreeTransformPlanScope::TreePair,
             operation,
             source_groups: vec![TreeTransformSourceGroupKey {
-                group_key: group_key.clone(),
-                src_keys: vec![multiplicity_free_key()],
+                group_key: multiplicity_free_key.group_key(),
+                src_keys: vec![multiplicity_free_key.clone()],
             }],
         };
-        let multiplicity_free_key = multiplicity_free_key();
         let multiplicity_free_plan = Arc::new(TreeTransformGroupPlan::new(vec![
             TreeTransformGroupBlockSpec::single(
-                group_key,
                 multiplicity_free_key.clone(),
                 multiplicity_free_key,
                 1.0,
@@ -1222,47 +1595,6 @@ mod persistence_tests {
         assert_eq!(decoded[0].0, multiplicity_free_plan_key);
         assert_eq!(plans.len(), 2);
         assert!(plans.contains_key(&generic_plan_key));
-    }
-
-    #[test]
-    fn persistent_v2_never_writes_dense_or_opaque_block_keys() {
-        let group_key = FusionTreeGroupKey::from_sector_ids([1, 1], [], [false, false], []);
-        let operation = TreeTransformOperation::braid([0, 1], [], [0, 1], []);
-        let make_entry = |block_key: BlockKey| {
-            let key = TreeTransformSectorPlanKey {
-                rule: TreeTransformBuiltinRuleCacheKey::Z2,
-                scope: TreeTransformPlanScope::TreePair,
-                operation: operation.clone(),
-                source_groups: vec![TreeTransformSourceGroupKey {
-                    group_key: group_key.clone(),
-                    src_keys: vec![block_key.clone()],
-                }],
-            };
-            let plan = Arc::new(TreeTransformGroupPlan::new(vec![
-                TreeTransformGroupBlockSpec::single(
-                    group_key.clone(),
-                    block_key.clone(),
-                    block_key,
-                    1.0,
-                ),
-            ]));
-            (key, plan)
-        };
-        let mut plans = FxHashMap::default();
-        let (dense_key, dense_plan) = make_entry(BlockKey::Dense);
-        let (opaque_key, opaque_plan) = make_entry(BlockKey::opaque([7, 11]));
-        let (categorical_key, categorical_plan) = make_entry(multiplicity_free_key());
-        plans.insert(dense_key, dense_plan);
-        plans.insert(opaque_key, opaque_plan);
-        plans.insert(categorical_key.clone(), categorical_plan);
-
-        let encoded = encode_builtin_tree_plan_cache(&plans).unwrap();
-        let decoded = decode_builtin_tree_plan_cache(&encoded).unwrap();
-
-        // What: v2 persistence skips whole non-categorical plans rather than
-        // emitting an ambiguous tag or a partially encoded entry.
-        assert_eq!(decoded.len(), 1);
-        assert_eq!(decoded[0].0, categorical_key);
     }
 
     #[test]
@@ -1290,20 +1622,21 @@ mod persistence_tests {
         );
         let bytes = decode_hex_fixture(PRE_SPLIT_FAKE_CATEGORICAL_KEY);
         let mut input = CacheBytes::new(&bytes);
-        let decoded = decode_block_key(&mut input).unwrap();
+        let decoded = decode_v2_fusion_tree_pair_key(&mut input)
+            .unwrap()
+            .expect("legacy tag 1 remains categorical");
         input.finish().unwrap();
 
-        let tree = decoded
-            .as_fusion_tree_pair()
-            .expect("legacy tag 1 remains categorical");
         assert_eq!(
-            tree.codomain_uncoupled(),
+            decoded.codomain_uncoupled(),
             &[SectorId::new(1), SectorId::new(1)]
         );
-        assert_eq!(tree.coupled(), None);
-        assert!(tree.codomain_vertices().is_empty());
-        assert!(tree.validate_for_rule(&tenet_core::Z2FusionRule).is_err());
-        assert_ne!(decoded, BlockKey::opaque([1, 1]));
+        assert_eq!(decoded.coupled(), None);
+        assert!(decoded.codomain_vertices().is_empty());
+        assert!(decoded
+            .validate_for_rule(&tenet_core::Z2FusionRule)
+            .is_err());
+        assert_ne!(BlockKey::from(decoded), BlockKey::opaque([1, 1]));
     }
 }
 

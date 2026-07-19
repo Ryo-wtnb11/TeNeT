@@ -7,10 +7,14 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use tenet_core::{
-    BlockKey, BlockStructure, FusionTreeBlockGroup, FusionTreeGroupKey, TensorMap, TensorStorage,
+    BlockKey, BlockStructure, FusionTreeBlockGroup, FusionTreeGroupKey, FusionTreePairKey,
+    TensorMap, TensorStorage,
 };
 
-use crate::transform_helpers::{block_indices_for_keys, fusion_tree_group_block_keys};
+use crate::transform_helpers::{
+    duplicate_fusion_tree_pair_indices, fusion_tree_group_block_keys,
+    fusion_tree_pair_matches_group, fusion_tree_pairs_share_group,
+};
 use crate::transform_structure::TreeTransformStructure;
 use crate::OperationError;
 
@@ -116,41 +120,46 @@ pub(crate) struct ResolvedTreeTransformBlockSpec<'a, T> {
 }
 
 impl<'a, T> ResolvedTreeTransformBlockSpec<'a, T> {
-    fn from_entries(
-        entries: &'a SpecEntries<BlockKey, T>,
+    fn from_entries<K, FindIndex, EraseKey>(
+        entries: &'a SpecEntries<K, T>,
         source_axes: Option<&'a [usize]>,
         dst_structure: &BlockStructure,
         src_structure: &BlockStructure,
-    ) -> Result<Self, OperationError> {
+        find_index: FindIndex,
+        erase_key: EraseKey,
+    ) -> Result<Self, OperationError>
+    where
+        FindIndex: Fn(&BlockStructure, &K) -> Option<usize>,
+        EraseKey: Fn(&K) -> BlockKey,
+    {
+        let resolve = |structure: &BlockStructure, key: &K| {
+            find_index(structure, key).ok_or_else(|| OperationError::MissingBlockKey {
+                key: Box::new(erase_key(key)),
+            })
+        };
         let entries = match entries {
             SpecEntries::Single {
                 dst,
                 src,
                 coefficient,
-            } => {
-                let dst = dst_structure.find_block_index_by_key(dst).ok_or_else(|| {
-                    OperationError::MissingBlockKey {
-                        key: Box::new(dst.clone()),
-                    }
-                })?;
-                let src = src_structure.find_block_index_by_key(src).ok_or_else(|| {
-                    OperationError::MissingBlockKey {
-                        key: Box::new(src.clone()),
-                    }
-                })?;
-                ResolvedSpecEntries::Single {
-                    dst,
-                    src,
-                    coefficient,
-                }
-            }
+            } => ResolvedSpecEntries::Single {
+                dst: resolve(dst_structure, dst)?,
+                src: resolve(src_structure, src)?,
+                coefficient,
+            },
             SpecEntries::Multi {
                 dst,
                 src,
                 coefficients,
             } => ResolvedSpecEntries::Multi {
-                dst: block_indices_for_keys(dst_structure, dst)?,
-                src: block_indices_for_keys(src_structure, src)?,
+                dst: dst
+                    .iter()
+                    .map(|key| resolve(dst_structure, key))
+                    .collect::<Result<_, _>>()?,
+                src: src
+                    .iter()
+                    .map(|key| resolve(src_structure, key))
+                    .collect::<Result<_, _>>()?,
                 coefficients,
             },
         };
@@ -274,6 +283,11 @@ impl<T> TreeTransformBlockSpec<T> {
     }
 }
 
+/// Explicit replay descriptor keyed by application block labels.
+///
+/// This is the namespace-neutral entry point for Dense, Opaque, and
+/// FusionTree block labels. Categorical grouped recoupling uses
+/// [`TreeTransformGroupBlockSpec`] instead.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TreeTransformKeyBlockSpec<T> {
     entries: SpecEntries<BlockKey, T>,
@@ -359,60 +373,133 @@ impl<T> TreeTransformKeyBlockSpec<T> {
             self.source_axes(),
             dst_structure,
             src_structure,
+            BlockStructure::find_block_index_by_key,
+            Clone::clone,
         )
     }
 }
 
+/// Categorical grouped-recoupling descriptor.
+///
+/// Source and destination identities are fusion-tree pairs. Use
+/// [`TreeTransformKeyBlockSpec`] when replay must address arbitrary Dense or
+/// Opaque application labels.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TreeTransformGroupBlockSpec<T> {
     group_key: FusionTreeGroupKey,
-    entries: SpecEntries<BlockKey, T>,
+    entries: SpecEntries<FusionTreePairKey, T>,
     source_axes: Option<Arc<[usize]>>,
 }
 
 impl<T> TreeTransformGroupBlockSpec<T> {
-    pub fn single<KDst, KSrc>(
-        group_key: FusionTreeGroupKey,
-        dst_key: KDst,
-        src_key: KSrc,
-        coefficient: T,
-    ) -> Self
-    where
-        KDst: Into<BlockKey>,
-        KSrc: Into<BlockKey>,
-    {
+    /// Creates one categorical row/column transform.
+    ///
+    /// The stored group identity is the source key's fusion-tree group.
+    pub fn single(dst_key: FusionTreePairKey, src_key: FusionTreePairKey, coefficient: T) -> Self {
+        let group_key = src_key.group_key();
         Self {
             group_key,
             entries: SpecEntries::Single {
-                dst: dst_key.into(),
-                src: src_key.into(),
+                dst: dst_key,
+                src: src_key,
                 coefficient,
             },
             source_axes: None,
         }
     }
 
-    pub fn multi<DstKeys, SrcKeys, KDst, KSrc>(
-        group_key: FusionTreeGroupKey,
+    /// Creates a categorical transform with coefficients ordered as `U[dst, src]`.
+    ///
+    /// Each side must be nonempty, internally group-coherent, and free of
+    /// duplicate fusion-tree identities. The source and destination groups may
+    /// differ. Violations return [`OperationError::EmptyTransformBlock`],
+    /// [`OperationError::FusionTreeGroupMismatch`],
+    /// [`OperationError::DuplicateTreeTransformKey`], or
+    /// [`OperationError::CoefficientCountMismatch`]; an unrepresentable
+    /// row/column product returns [`OperationError::ElementCountOverflow`].
+    pub fn try_multi<DstKeys, SrcKeys>(
         dst_keys: DstKeys,
         src_keys: SrcKeys,
         recoupling_coefficients_dst_src: Vec<T>,
-    ) -> Self
+    ) -> Result<Self, OperationError>
     where
-        DstKeys: IntoIterator<Item = KDst>,
-        SrcKeys: IntoIterator<Item = KSrc>,
-        KDst: Into<BlockKey>,
-        KSrc: Into<BlockKey>,
+        DstKeys: IntoIterator<Item = FusionTreePairKey>,
+        SrcKeys: IntoIterator<Item = FusionTreePairKey>,
     {
-        Self {
+        let dst_keys = dst_keys.into_iter().collect::<Vec<_>>();
+        let src_keys = src_keys.into_iter().collect::<Vec<_>>();
+        let Some(first_src) = src_keys.first() else {
+            return Err(OperationError::EmptyTransformBlock);
+        };
+        let Some(first_dst) = dst_keys.first() else {
+            return Err(OperationError::EmptyTransformBlock);
+        };
+        let group_key = first_src.group_key();
+        if let Some(index) = src_keys
+            .iter()
+            .position(|key| !fusion_tree_pair_matches_group(key, &group_key))
+        {
+            return Err(OperationError::FusionTreeGroupMismatch {
+                tensor: "src",
+                index,
+            });
+        }
+        if let Some(index) = dst_keys
+            .iter()
+            .position(|key| !fusion_tree_pairs_share_group(key, first_dst))
+        {
+            return Err(OperationError::FusionTreeGroupMismatch {
+                tensor: "dst",
+                index,
+            });
+        }
+        let (duplicate_src, duplicate_dst) =
+            duplicate_fusion_tree_pair_indices(&src_keys, &dst_keys);
+        if let Some(index) = duplicate_src {
+            return Err(OperationError::DuplicateTreeTransformKey {
+                tensor: "src",
+                index,
+            });
+        }
+        if let Some(index) = duplicate_dst {
+            return Err(OperationError::DuplicateTreeTransformKey {
+                tensor: "dst",
+                index,
+            });
+        }
+        Self::multi_from_validated(
+            group_key,
+            dst_keys,
+            src_keys,
+            recoupling_coefficients_dst_src,
+        )
+    }
+
+    fn multi_from_validated(
+        group_key: FusionTreeGroupKey,
+        dst_keys: Vec<FusionTreePairKey>,
+        src_keys: Vec<FusionTreePairKey>,
+        recoupling_coefficients_dst_src: Vec<T>,
+    ) -> Result<Self, OperationError> {
+        let expected = dst_keys
+            .len()
+            .checked_mul(src_keys.len())
+            .ok_or(OperationError::ElementCountOverflow)?;
+        if recoupling_coefficients_dst_src.len() != expected {
+            return Err(OperationError::CoefficientCountMismatch {
+                expected,
+                actual: recoupling_coefficients_dst_src.len(),
+            });
+        }
+        Ok(Self {
             group_key,
             entries: SpecEntries::Multi {
-                dst: dst_keys.into_iter().map(Into::into).collect(),
-                src: src_keys.into_iter().map(Into::into).collect(),
+                dst: dst_keys,
+                src: src_keys,
                 coefficients: recoupling_coefficients_dst_src,
             },
             source_axes: None,
-        }
+        })
     }
 
     pub fn with_source_axes<I>(mut self, axes: I) -> Self
@@ -439,22 +526,32 @@ impl<T> TreeTransformGroupBlockSpec<T> {
     ) -> Result<Self, OperationError> {
         let dst_keys = fusion_tree_group_block_keys(dst_structure, dst_group, "dst")?;
         let src_keys = fusion_tree_group_block_keys(src_structure, src_group, "src")?;
-        let expected = dst_keys
-            .len()
-            .checked_mul(src_keys.len())
-            .ok_or(OperationError::ElementCountOverflow)?;
-        if recoupling_coefficients_dst_src.len() != expected {
-            return Err(OperationError::CoefficientCountMismatch {
-                expected,
-                actual: recoupling_coefficients_dst_src.len(),
+        let Some(first_src) = src_keys.first() else {
+            return Err(OperationError::EmptyTransformBlock);
+        };
+        if dst_keys.is_empty() {
+            return Err(OperationError::EmptyTransformBlock);
+        }
+        let (duplicate_src, duplicate_dst) =
+            duplicate_fusion_tree_pair_indices(&src_keys, &dst_keys);
+        if let Some(index) = duplicate_src {
+            return Err(OperationError::DuplicateTreeTransformKey {
+                tensor: "src",
+                index,
             });
         }
-        Ok(Self::multi(
-            src_group.group_key().clone(),
+        if let Some(index) = duplicate_dst {
+            return Err(OperationError::DuplicateTreeTransformKey {
+                tensor: "dst",
+                index,
+            });
+        }
+        Self::multi_from_validated(
+            first_src.group_key(),
             dst_keys,
             src_keys,
             recoupling_coefficients_dst_src,
-        ))
+        )
     }
 
     #[inline]
@@ -463,12 +560,12 @@ impl<T> TreeTransformGroupBlockSpec<T> {
     }
 
     #[inline]
-    pub fn dst_keys(&self) -> &[BlockKey] {
+    pub fn dst_keys(&self) -> &[FusionTreePairKey] {
         self.entries.dst()
     }
 
     #[inline]
-    pub fn src_keys(&self) -> &[BlockKey] {
+    pub fn src_keys(&self) -> &[FusionTreePairKey] {
         self.entries.src()
     }
 
@@ -496,6 +593,8 @@ impl<T> TreeTransformGroupBlockSpec<T> {
             self.source_axes(),
             dst_structure,
             src_structure,
+            BlockStructure::find_block_index_by_fusion_tree_pair,
+            |key| BlockKey::FusionTree(key.clone()),
         )
     }
 }

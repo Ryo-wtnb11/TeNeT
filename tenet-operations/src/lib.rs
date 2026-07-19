@@ -4,8 +4,9 @@
 //! scalar contracts, strided kernels and the host kernel adapter, scratch and
 //! workspace reuse, and the replay-facing error and profile types. Nothing in
 //! this crate consumes fusion rules or enumerates fusion trees; the symmetric
-//! compile layer (`tenet-tensors`) hands plans down as offsets, strides,
-//! `SectorId`s, and scalar coefficients.
+//! compile layer (`tenet-tensors`) hands down already-enumerated fusion-tree
+//! pair identities and scalar coefficients, which are resolved to offsets and
+//! strides before kernel execution.
 
 #[cfg(not(any(
     feature = "cpu-faer",
