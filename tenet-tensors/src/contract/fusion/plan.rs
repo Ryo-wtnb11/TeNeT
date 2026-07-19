@@ -112,6 +112,116 @@ impl ContractAxisOrderCandidate {
     }
 }
 
+/// Operand orientation for a fusion-level contraction candidate.
+///
+/// Slice 1 has only the existing forward route. Keeping orientation in the
+/// facts prevents later reversed candidates from overloading paired-axis
+/// ordering with a second meaning.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FusionContractOrientation {
+    LhsRhs,
+}
+
+/// Provider-independent structural facts used by the current fusion selector.
+///
+/// The value owns no provider, transformed HomSpace, backend, or cache handle.
+/// It is therefore safe to carry into later route lowering without retaining
+/// the semantic machinery used to prove these facts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FusionContractCandidateFacts {
+    axis_order: ContractAxisOrderCandidate,
+    orientation: FusionContractOrientation,
+    lhs_conjugate: bool,
+    rhs_conjugate: bool,
+    lhs_exact_identity_borrowable: bool,
+    rhs_exact_identity_borrowable: bool,
+    rhs_requires_twist: bool,
+    output_exact_identity: bool,
+    lhs_materialized_elements: usize,
+    rhs_materialized_elements: usize,
+    output_materialized_elements: usize,
+    total_materialized_elements: usize,
+}
+
+impl FusionContractCandidateFacts {
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn axis_order(&self) -> &ContractAxisOrderCandidate {
+        &self.axis_order
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn orientation(&self) -> FusionContractOrientation {
+        self.orientation
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn lhs_conjugate(&self) -> bool {
+        self.lhs_conjugate
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn rhs_conjugate(&self) -> bool {
+        self.rhs_conjugate
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn lhs_exact_identity_borrowable(&self) -> bool {
+        self.lhs_exact_identity_borrowable
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn rhs_exact_identity_borrowable(&self) -> bool {
+        self.rhs_exact_identity_borrowable
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn rhs_requires_twist(&self) -> bool {
+        self.rhs_requires_twist
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn output_exact_identity(&self) -> bool {
+        self.output_exact_identity
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn lhs_materialized_elements(&self) -> usize {
+        self.lhs_materialized_elements
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn rhs_materialized_elements(&self) -> usize {
+        self.rhs_materialized_elements
+    }
+
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn output_materialized_elements(&self) -> usize {
+        self.output_materialized_elements
+    }
+
+    #[inline]
+    pub(crate) fn total_materialized_elements(&self) -> usize {
+        self.total_materialized_elements
+    }
+}
+
+#[derive(Debug)]
+struct ScoredFusionContractCandidate {
+    plan: FusionContractPlan,
+    facts: FusionContractCandidateFacts,
+}
+
 /// Build the side-sorted candidates for a contraction.
 ///
 /// Sorting is stable and always applies the same permutation to both sides.
@@ -507,6 +617,50 @@ where
     )
 }
 
+#[cfg(test)]
+pub(crate) fn prepare_tensorcontract_fusion_candidate_facts_dyn_raw<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+) -> Result<Vec<FusionContractCandidateFacts>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    dst.validate_rule(rule)?;
+    lhs.validate_rule(rule)?;
+    rhs.validate_rule(rule)?;
+    let lowered_axes =
+        lower_tensorcontract_adjoint_axes(lhs.nout(), lhs.nin(), rhs.nout(), rhs.nin(), axes)?;
+    let lhs_adjoint;
+    let lhs = if axes.lhs_conjugate() {
+        lhs_adjoint = lhs.adjoint_view()?;
+        &lhs_adjoint
+    } else {
+        lhs
+    };
+    let rhs_adjoint;
+    let rhs = if axes.rhs_conjugate() {
+        rhs_adjoint = rhs.adjoint_view()?;
+        &rhs_adjoint
+    } else {
+        rhs
+    };
+    fusion_contract_candidate_facts_from_spaces_with_probe(
+        rule,
+        dst,
+        lhs,
+        rhs,
+        lowered_axes.as_spec(),
+        lowered_axes.lhs_storage_conjugate(),
+        lowered_axes.rhs_storage_conjugate(),
+        encoded_layout_probe::<R>,
+        encoded_homspace_builder::<R>,
+        None,
+    )
+}
+
 fn select_tensorcontract_fusion_plan_from_spaces<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
@@ -531,6 +685,47 @@ where
         encoded_homspace_builder::<R>,
         None,
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn fusion_contract_candidate_facts_from_spaces_with_probe<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+    lhs_source_conjugate: bool,
+    rhs_source_conjugate: bool,
+    probe: LayoutProbeBuilder<R>,
+    homspace_builder: HomSpaceBuilder<R>,
+    primer: Option<LayoutKeyBuilder<R>>,
+) -> Result<Vec<FusionContractCandidateFacts>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    validate_tensorcontract_fusion_plan_inputs(rule, dst, lhs, rhs, axes, homspace_builder)?;
+    contracted_axis_order_candidates(axes.lhs_contracting_axes(), axes.rhs_contracting_axes())
+        .into_iter()
+        .map(|candidate| {
+            let candidate_axes = TensorContractSpec::new(
+                candidate.lhs(),
+                candidate.rhs(),
+                axes.output_permutation(),
+            );
+            let plan = prepare_tensorcontract_fusion_plan_from_spaces(
+                rule,
+                dst,
+                lhs,
+                rhs,
+                candidate_axes,
+                lhs_source_conjugate,
+                rhs_source_conjugate,
+            )?;
+            score_fusion_contract_candidate(rule, dst, lhs, rhs, candidate, plan, probe, primer)
+                .map(|scored| scored.facts)
+        })
+        .collect()
 }
 
 type LayoutProbeBuilder<R> = for<'a> fn(
@@ -599,17 +794,21 @@ where
             lhs_source_conjugate,
             rhs_source_conjugate,
         )?;
-        let cost = plan_allocation_elements(rule, dst, lhs, rhs, &plan, probe, primer)?;
+        let scored =
+            score_fusion_contract_candidate(rule, dst, lhs, rhs, candidate, plan, probe, primer)?;
         if best
             .as_ref()
-            .is_none_or(|(best_cost, _): &(usize, FusionContractPlan)| cost < *best_cost)
+            .is_none_or(|best: &ScoredFusionContractCandidate| {
+                scored.facts.total_materialized_elements()
+                    < best.facts.total_materialized_elements()
+            })
         {
-            best = Some((cost, plan));
+            best = Some(scored);
         }
     }
     Ok(best
         .expect("paired contraction always has at least the LHS-sorted candidate")
-        .1)
+        .plan)
 }
 
 pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer<R>(
@@ -656,15 +855,16 @@ where
     )
 }
 
-fn plan_allocation_elements<R>(
+fn score_fusion_contract_candidate<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
     lhs: &DynamicFusionMapSpace,
     rhs: &DynamicFusionMapSpace,
-    plan: &FusionContractPlan,
+    axis_order: ContractAxisOrderCandidate,
+    plan: FusionContractPlan,
     probe: LayoutProbeBuilder<R>,
     primer: Option<LayoutKeyBuilder<R>>,
-) -> Result<usize, OperationError>
+) -> Result<ScoredFusionContractCandidate, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
@@ -680,48 +880,65 @@ where
         plan.lhs_transform(),
         plan.lhs_source_conjugate(),
     ) && lhs_core.source_structure_matches;
-    let rhs_twisted = super::super::resolution::rhs_contract_homspace_requires_twist(
+    let rhs_requires_twist = super::super::resolution::rhs_contract_homspace_requires_twist(
         rule,
         &rhs_core.homspace,
         plan.core_axes().as_spec(),
     )?;
-    let rhs_borrowed = super::super::dynamic::source_layout_metadata_is_borrowable(
+    let rhs_exact_identity_borrowable = super::super::dynamic::source_layout_metadata_is_borrowable(
         rhs,
         rhs_core.nout,
         rhs_core.homspace.rank(),
         || rhs_core.homspace == *rhs.homspace(),
         plan.rhs_transform(),
         plan.rhs_source_conjugate(),
-    ) && rhs_core.source_structure_matches
-        && !rhs_twisted;
-    let mut elements = 0usize;
-    if !lhs_borrowed {
-        elements = elements.checked_add(lhs_core.required_len).ok_or_else(|| {
+    ) && rhs_core.source_structure_matches;
+    let lhs_materialized_elements = if lhs_borrowed {
+        0
+    } else {
+        lhs_core.required_len
+    };
+    let rhs_materialized_elements = if rhs_exact_identity_borrowable && !rhs_requires_twist {
+        0
+    } else {
+        rhs_core.required_len
+    };
+    let lhs_rhs_materialized_elements = lhs_materialized_elements
+        .checked_add(rhs_materialized_elements)
+        .ok_or_else(|| {
             OperationError::from_core_preserving_context(
                 tenet_core::CoreError::ElementCountOverflow,
             )
         })?;
-    }
-    if !rhs_borrowed {
-        elements = elements.checked_add(rhs_core.required_len).ok_or_else(|| {
+    let output_exact_identity = plan.output_transform_is_identity();
+    let output_materialized_elements = if output_exact_identity {
+        0
+    } else {
+        dst.required_len()
+            .map_err(OperationError::from_core_preserving_context)?
+    };
+    let total_materialized_elements = lhs_rhs_materialized_elements
+        .checked_add(output_materialized_elements)
+        .ok_or_else(|| {
             OperationError::from_core_preserving_context(
                 tenet_core::CoreError::ElementCountOverflow,
             )
         })?;
-    }
-    if !plan.output_transform_is_identity() {
-        elements = elements
-            .checked_add(
-                dst.required_len()
-                    .map_err(OperationError::from_core_preserving_context)?,
-            )
-            .ok_or_else(|| {
-                OperationError::from_core_preserving_context(
-                    tenet_core::CoreError::ElementCountOverflow,
-                )
-            })?;
-    }
-    Ok(elements)
+    let facts = FusionContractCandidateFacts {
+        axis_order,
+        orientation: FusionContractOrientation::LhsRhs,
+        lhs_conjugate: plan.lhs_source_conjugate(),
+        rhs_conjugate: plan.rhs_source_conjugate(),
+        lhs_exact_identity_borrowable: lhs_borrowed,
+        rhs_exact_identity_borrowable,
+        rhs_requires_twist,
+        output_exact_identity,
+        lhs_materialized_elements,
+        rhs_materialized_elements,
+        output_materialized_elements,
+        total_materialized_elements,
+    };
+    Ok(ScoredFusionContractCandidate { plan, facts })
 }
 
 fn validate_tensorcontract_fusion_plan_inputs<R>(
@@ -819,14 +1036,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        contracted_axis_order_candidates, encoded_layout_probe, plan_allocation_elements,
-        prepare_tensorcontract_fusion_plan_dyn_raw,
+        contracted_axis_order_candidates, prepare_tensorcontract_fusion_candidate_facts_dyn_raw,
+        prepare_tensorcontract_fusion_plan_dyn_raw, FusionContractOrientation,
     };
     use crate::contract::DynamicFusionMapSpace;
     use crate::TreeTransformOperation;
     use tenet_core::{
-        BlockKey, FusionTensorMapSpace, FusionTreeHomSpace, SU2FusionRule, TensorMapSpace,
-        U1FusionRule,
+        BlockKey, FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace, SU2FusionRule,
+        SectorLeg, TensorMapSpace, U1FusionRule,
     };
     use tenet_operations::{OutputAxisOrder, TensorContractSpec};
 
@@ -940,6 +1157,140 @@ mod tests {
     }
 
     #[test]
+    fn asymmetric_u1_candidates_expose_separate_source_components() {
+        // What: each paired U1 candidate reports the exact source it must
+        // materialize, rather than exposing only the winning total.
+        let rule = U1FusionRule;
+        let lhs = single_sector_space(&rule, [16, 16, 2, 3]);
+        let rhs = single_sector_space(&rule, [3, 2, 1, 1]);
+        let dst = single_sector_space(&rule, [16, 16, 1, 1]);
+        let facts = prepare_tensorcontract_fusion_candidate_facts_dyn_raw(
+            &rule,
+            &dst,
+            &lhs,
+            &rhs,
+            TensorContractSpec::with_default_output_order(&[2, 3], &[1, 0]),
+        )
+        .unwrap();
+
+        assert_eq!(facts.len(), 2);
+        assert_eq!(facts[0].axis_order().lhs(), &[2, 3]);
+        assert_eq!(facts[0].axis_order().rhs(), &[1, 0]);
+        assert_eq!(facts[0].orientation(), FusionContractOrientation::LhsRhs);
+        assert!(!facts[0].lhs_conjugate());
+        assert!(!facts[0].rhs_conjugate());
+        assert!(facts[0].lhs_exact_identity_borrowable());
+        assert!(!facts[0].rhs_exact_identity_borrowable());
+        assert!(!facts[0].rhs_requires_twist());
+        assert!(facts[0].output_exact_identity());
+        assert_eq!(facts[0].lhs_materialized_elements(), 0);
+        assert_eq!(facts[0].rhs_materialized_elements(), 6);
+        assert_eq!(facts[0].output_materialized_elements(), 0);
+        assert_eq!(facts[0].total_materialized_elements(), 6);
+
+        assert_eq!(facts[1].axis_order().lhs(), &[3, 2]);
+        assert_eq!(facts[1].axis_order().rhs(), &[0, 1]);
+        assert!(!facts[1].lhs_exact_identity_borrowable());
+        assert!(facts[1].rhs_exact_identity_borrowable());
+        assert_eq!(facts[1].lhs_materialized_elements(), 1_536);
+        assert_eq!(facts[1].rhs_materialized_elements(), 0);
+        assert_eq!(facts[1].output_materialized_elements(), 0);
+        assert_eq!(facts[1].total_materialized_elements(), 1_536);
+    }
+
+    #[test]
+    fn nonidentity_output_is_one_checked_score_component() {
+        // What: a requested nonidentity output order contributes exactly one
+        // complete destination buffer to every current candidate.
+        let rule = U1FusionRule;
+        let lhs = single_sector_space(&rule, [11, 13, 2, 3]);
+        let rhs = single_sector_space(&rule, [3, 2, 5, 7]);
+        let dst = single_sector_space(&rule, [13, 11, 7, 5]);
+        let facts = prepare_tensorcontract_fusion_candidate_facts_dyn_raw(
+            &rule,
+            &dst,
+            &lhs,
+            &rhs,
+            TensorContractSpec::new(&[2, 3], &[1, 0], OutputAxisOrder::from_axes(&[1, 0, 3, 2])),
+        )
+        .unwrap();
+        let dst_elements = dst.required_len().unwrap();
+
+        assert_eq!(facts.len(), 2);
+        for candidate in facts {
+            assert!(!candidate.output_exact_identity());
+            assert_eq!(candidate.output_materialized_elements(), dst_elements);
+            assert_eq!(
+                candidate.total_materialized_elements(),
+                candidate.lhs_materialized_elements()
+                    + candidate.rhs_materialized_elements()
+                    + dst_elements
+            );
+        }
+    }
+
+    #[test]
+    fn source_conjugation_is_an_explicit_candidate_fact() {
+        // What: adjoint lowering records storage conjugation independently
+        // from axis order and charges the affected source exactly once.
+        let rule = U1FusionRule;
+        let sector = tenet_core::U1Irrep::new(0).sector_id();
+        let vector_space = || {
+            FusionTensorMapSpace::from_degeneracy_shapes(
+                TensorMapSpace::<1, 0>::from_dims([1], []).unwrap(),
+                FusionTreeHomSpace::new(
+                    FusionProductSpace::new([SectorLeg::new([(sector, 1)], false)]),
+                    FusionProductSpace::new(Vec::<SectorLeg>::new()),
+                ),
+                &rule,
+                [vec![1]],
+            )
+            .unwrap()
+        };
+        let lhs_typed = vector_space();
+        let rhs_typed = vector_space();
+        let dst_typed = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([SectorLeg::new([(sector, 1)], true)]),
+                FusionProductSpace::new([SectorLeg::new([(sector, 1)], true)]),
+            ),
+            &rule,
+            [vec![1, 1]],
+        )
+        .unwrap();
+        let lhs = DynamicFusionMapSpace::from_typed(&lhs_typed);
+        let rhs = DynamicFusionMapSpace::from_typed(&rhs_typed);
+        let dst = DynamicFusionMapSpace::from_typed(&dst_typed);
+        let facts = prepare_tensorcontract_fusion_candidate_facts_dyn_raw(
+            &rule,
+            &dst,
+            &lhs,
+            &rhs,
+            TensorContractSpec::new_with_conjugation(
+                &[],
+                &[],
+                OutputAxisOrder::identity(),
+                true,
+                false,
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(facts.len(), 1);
+        assert!(facts[0].lhs_conjugate());
+        assert!(!facts[0].rhs_conjugate());
+        assert!(!facts[0].lhs_exact_identity_borrowable());
+        assert_eq!(facts[0].lhs_materialized_elements(), 1);
+        assert_eq!(
+            facts[0].total_materialized_elements(),
+            facts[0].lhs_materialized_elements()
+                + facts[0].rhs_materialized_elements()
+                + facts[0].output_materialized_elements()
+        );
+    }
+
+    #[test]
     fn selector_cost_materializes_identity_operand_with_missing_structural_zero() {
         // What: an identity-axis operand with an incomplete SU2 tree grid is
         // charged for the complete core layout instead of treated as borrowed.
@@ -986,7 +1337,7 @@ mod tests {
         let lhs = DynamicFusionMapSpace::from_typed(&lhs_typed);
         let rhs = DynamicFusionMapSpace::from_typed(&rhs_typed);
         let dst = DynamicFusionMapSpace::from_typed(&dst_typed);
-        let plan = prepare_tensorcontract_fusion_plan_dyn_raw(
+        let facts = prepare_tensorcontract_fusion_candidate_facts_dyn_raw(
             &rule,
             &dst,
             &lhs,
@@ -995,18 +1346,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            plan_allocation_elements(
-                &rule,
-                &dst,
-                &lhs,
-                &rhs,
-                &plan,
-                encoded_layout_probe::<SU2FusionRule>,
-                None,
-            )
-            .unwrap(),
-            4
-        );
+        assert_eq!(facts.len(), 1);
+        assert!(!facts[0].rhs_exact_identity_borrowable());
+        assert_eq!(facts[0].lhs_materialized_elements(), 0);
+        assert_eq!(facts[0].rhs_materialized_elements(), 2);
+        assert_eq!(facts[0].output_materialized_elements(), 2);
+        assert_eq!(facts[0].total_materialized_elements(), 4);
     }
 }

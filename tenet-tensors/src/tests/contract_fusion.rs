@@ -2464,9 +2464,36 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
         space(true, false),
     )
     .unwrap();
+    let initial = [0.25, -0.5, 1.0, -1.5, 2.0];
+    let alpha = 1.5;
+    let beta = -0.25;
     let mut dst =
-        TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(vec![0.0; 5], space(false, false))
+        TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(initial.to_vec(), space(false, false))
             .unwrap();
+    let facts: Vec<crate::contract::FusionContractCandidateFacts> =
+        crate::contract::prepare_tensorcontract_fusion_candidate_facts_dyn_raw(
+            &rule,
+            &DynamicFusionMapSpace::from_typed(dst.fusion_space().unwrap()),
+            &DynamicFusionMapSpace::from_typed(lhs.fusion_space().unwrap()),
+            &DynamicFusionMapSpace::from_typed(rhs.fusion_space().unwrap()),
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
+        )
+        .unwrap();
+
+    // What: the canonical RHS layout remains exactly borrowable before the
+    // independently recorded fermionic twist forces its materialization.
+    assert_eq!(facts.len(), 1);
+    assert_eq!(
+        facts[0].orientation(),
+        crate::contract::FusionContractOrientation::LhsRhs
+    );
+    assert!(facts[0].lhs_exact_identity_borrowable());
+    assert!(facts[0].rhs_exact_identity_borrowable());
+    assert!(facts[0].rhs_requires_twist());
+    assert_eq!(facts[0].lhs_materialized_elements(), 0);
+    assert_eq!(facts[0].rhs_materialized_elements(), 5);
+    assert_eq!(facts[0].output_materialized_elements(), 0);
+    assert_eq!(facts[0].total_materialized_elements(), 5);
 
     tensorcontract_fusion_into(
         &rule,
@@ -2474,12 +2501,29 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
         &lhs,
         &rhs,
         TensorContractSpec::with_default_output_order(&[1], &[0]),
-        1.0,
-        0.0,
+        alpha,
+        beta,
     )
     .unwrap();
 
-    let expected = [-0.625, 2.0, 3.0, -3.0, -4.0];
+    // What: an explicit dense core calculation with one odd-sector RHS twist
+    // remains an independent numerical oracle, including destination axpby.
+    let mut contracted = [0.0; 5];
+    contracted[0] = lhs.data()[0] * rhs.data()[0];
+    for col in 0..2 {
+        for row in 0..2 {
+            let mut sum = 0.0;
+            for inner in 0..2 {
+                let lhs_value = lhs.data()[1 + row + 2 * inner];
+                let twisted_rhs_value = -rhs.data()[1 + inner + 2 * col];
+                sum += lhs_value * twisted_rhs_value;
+            }
+            contracted[1 + row + 2 * col] = sum;
+        }
+    }
+    assert_eq!(contracted, [-0.625, 2.0, 3.0, -3.0, -4.0]);
+    let expected =
+        std::array::from_fn::<_, 5, _>(|index| alpha * contracted[index] + beta * initial[index]);
     for (index, (&actual, &want)) in dst.data().iter().zip(expected.iter()).enumerate() {
         assert!(
             (actual - want).abs() < 1.0e-12,
@@ -2487,7 +2531,7 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
         );
     }
 
-    dst.data_mut().fill(0.0);
+    dst.data_mut().copy_from_slice(&initial);
     let mut context = TensorContractFusionExecutionContext::<f64, _>::default();
     let mut profile = TensorContractFusionProfile::default();
     context
@@ -2497,8 +2541,8 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
             &lhs,
             &rhs,
             TensorContractSpec::with_default_output_order(&[1], &[0]),
-            1.0,
-            0.0,
+            alpha,
+            beta,
             &mut profile,
         )
         .unwrap();

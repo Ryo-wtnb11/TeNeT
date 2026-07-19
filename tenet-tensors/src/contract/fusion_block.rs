@@ -334,7 +334,7 @@ mod tests {
     use std::rc::Rc;
     use tenet_core::{
         FusionProductSpace, FusionTensorMapSpace, HostReadableStorage, HostWritableStorage,
-        SectorLeg, TensorMap, TensorMapSpace, TensorStorage, Trivial, Z2FusionRule,
+        SU2FusionRule, SectorLeg, TensorMap, TensorMapSpace, TensorStorage, Trivial, Z2FusionRule,
     };
     use tenet_core::{Placement, SimilarStorage};
     use tenet_operations::fusion_replay::HostFusionBlockContractWorkspace;
@@ -491,6 +491,88 @@ mod tests {
                 }
             }
             Ok(())
+        }
+    }
+
+    #[test]
+    fn incomplete_su2_grid_is_nonborrowed_and_keeps_sparse_group_clear() {
+        // What: a legal SU2 structure missing off-diagonal tree pairs is
+        // charged as RHS materialization and its packed matrix remains marked
+        // for clearing before replay.
+        let rule = SU2FusionRule;
+        let scalar = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
+            FusionTreeHomSpace::from_sector_ids([], []),
+            &rule,
+            [vec![]],
+        )
+        .unwrap();
+        let homspace = FusionTreeHomSpace::from_sector_ids(
+            [(1, 1), (1, 1), (1, 1), (1, 1)],
+            [(1, 1), (1, 1), (1, 1), (1, 1)],
+        );
+        let keys = homspace.fusion_tree_keys(&rule);
+        let diagonal_keys = keys
+            .iter()
+            .filter(|key| key.codomain_tree() == key.domain_tree())
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(keys.len(), 14);
+        assert_eq!(diagonal_keys.len(), 6);
+        let sparse = FusionTensorMapSpace::new_unbound(
+            TensorMapSpace::<4, 4>::from_dims([1, 1, 1, 1], [1, 1, 1, 1]).unwrap(),
+            homspace.clone(),
+            crate::tests::packed_fixture_structure(
+                8,
+                diagonal_keys
+                    .into_iter()
+                    .map(|key| (BlockKey::from(key), vec![1; 8])),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .try_bind_rule(&rule)
+        .unwrap();
+        let complete = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<4, 4>::from_dims([1, 1, 1, 1], [1, 1, 1, 1]).unwrap(),
+            homspace,
+            &rule,
+            vec![vec![1; 8]; keys.len()],
+        )
+        .unwrap();
+        let scalar = DynamicFusionMapSpace::from_typed(&scalar);
+        let sparse = DynamicFusionMapSpace::from_typed(&sparse);
+        let complete = DynamicFusionMapSpace::from_typed(&complete);
+
+        let facts = crate::contract::prepare_tensorcontract_fusion_candidate_facts_dyn_raw(
+            &rule,
+            &complete,
+            &scalar,
+            &sparse,
+            TensorContractSpec::new(&[], &[], tenet_operations::OutputAxisOrder::identity()),
+        )
+        .unwrap();
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].lhs_materialized_elements(), 0);
+        assert!(!facts[0].rhs_exact_identity_borrowable());
+        assert_eq!(facts[0].rhs_materialized_elements(), 14);
+        assert_eq!(facts[0].output_materialized_elements(), 14);
+
+        let layout = FusionBlockMatrixLayout::compile(&rule, &sparse).unwrap();
+        assert_eq!(layout.groups.len(), 3);
+        assert_eq!(
+            layout
+                .groups
+                .iter()
+                .filter(|group| group.needs_clear)
+                .count(),
+            2
+        );
+        for group in &layout.groups {
+            assert_eq!(
+                group.needs_clear,
+                group.subblocks.len() != group.rows * group.cols
+            );
         }
     }
 
