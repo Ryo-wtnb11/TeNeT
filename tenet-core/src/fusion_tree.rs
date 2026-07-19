@@ -500,6 +500,7 @@ where
 
 /// Shared codomain×domain merge on equal coupled sectors (the generic sibling
 /// of the loop in `fusion_tree_keys_uncached`).
+#[cfg(test)]
 fn merge_generic_tree_groups(
     codomain: &[CoupledFusionTrees],
     domain: &[CoupledFusionTrees],
