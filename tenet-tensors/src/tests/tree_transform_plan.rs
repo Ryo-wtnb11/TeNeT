@@ -2663,11 +2663,16 @@ fn malformed_source_precedes_noncategorical_destination_without_cache_mutation()
 
 #[test]
 fn invalid_operation_precedes_malformed_simple_source_without_cache_mutation() {
+    use crate::tree_transform::{
+        reset_tree_pair_operation_preparations, tree_pair_operation_preparations,
+    };
+
     // What: operation syntax has deterministic precedence over categorical
     // source admission and neither failure is counted as a cache miss.
     let (dst, src) = malformed_simple_su2_tree_pair_tensors();
     let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
 
+    reset_tree_pair_operation_preparations();
     let error = cache
         .get_or_compile_tree_pair(
             &SU2FusionRule,
@@ -2684,6 +2689,7 @@ fn invalid_operation_precedes_malformed_simple_source_without_cache_mutation() {
             rank: 2,
         })
     );
+    assert_eq!(tree_pair_operation_preparations(), 0);
     assert_eq!(cache.stats(), TreeTransformCacheStats::default());
     assert!(cache.is_empty());
 }
@@ -4119,6 +4125,105 @@ fn eager_product_tree_pair_plan_bypasses_legacy_row_assembly() {
             src_space.subblock_structure(),
         )
         .unwrap();
+}
+
+#[test]
+fn eager_simple_plan_prepares_once_per_distinct_source_split() {
+    use crate::tree_transform::{
+        reset_tree_pair_operation_preparations, tree_pair_operation_preparations,
+    };
+
+    let half_id = 1usize;
+    let one_id = 2usize;
+    let vacuum_id = 0usize;
+    let half = SU2Irrep::from_twice_spin(half_id).sector_id();
+    let vacuum = SU2FusionRule.vacuum();
+    let group_a = [[vacuum_id, half_id], [one_id, half_id]].map(|inner| {
+        all_codomain_fusion_tree_test_key_for_rule(
+            &SU2FusionRule,
+            [half_id; 4],
+            vacuum_id,
+            [false; 4],
+            inner,
+            [1, 1, 1],
+        )
+    });
+    let group_b = all_codomain_fusion_tree_test_key_for_rule(
+        &SU2FusionRule,
+        [half_id, half_id, one_id, one_id],
+        vacuum_id,
+        [false; 4],
+        [vacuum_id, one_id],
+        [1, 1, 1],
+    );
+    let split_group = FusionTreePairKey::pair(
+        FusionTreeKey::try_new_for_rule(
+            &SU2FusionRule,
+            [half; 3],
+            half,
+            [false; 3],
+            [vacuum],
+            [MultiplicityIndex::ONE; 2],
+        )
+        .unwrap(),
+        FusionTreeKey::try_new_for_rule(&SU2FusionRule, [half], half, [false], [], []).unwrap(),
+    );
+    let source_order = [group_a[0].clone(), group_b, group_a[1].clone(), split_group];
+    let structure = packed_fixture_structure(
+        4,
+        source_order
+            .iter()
+            .cloned()
+            .map(|key| (key, vec![1usize; 4])),
+    )
+    .unwrap();
+    assert_eq!(
+        structure
+            .fusion_tree_group_slice()
+            .iter()
+            .map(|group| group.block_indices())
+            .collect::<Vec<_>>(),
+        vec![&[0, 2][..], &[1][..], &[3][..]]
+    );
+    let operation = TreeTransformOperation::permute([1, 0, 2], [3]);
+    let oracle =
+        build_tree_transform_group_plan(&SU2FusionRule, operation.clone(), &structure, |source| {
+            tenet_core::multiplicity_free_permute_tree_pair(
+                &SU2FusionRule,
+                source,
+                &[1, 0, 2],
+                &[3],
+            )
+            .map_err(OperationError::from_core_preserving_context)
+        })
+        .unwrap();
+
+    reset_tree_pair_operation_preparations();
+    let prepared =
+        build_tree_pair_transform_group_plan(&SU2FusionRule, operation, &structure).unwrap();
+
+    // What: two source splits across three interleaved groups prepare exactly
+    // twice, while preserving the independent per-source oracle's grouping,
+    // source/destination order, and coefficients.
+    assert_eq!(tree_pair_operation_preparations(), 2);
+    assert_eq!(prepared.specs().len(), oracle.specs().len());
+    for (actual, expected) in prepared.specs().iter().zip(oracle.specs()) {
+        assert_eq!(actual.group_key(), expected.group_key());
+        assert_eq!(actual.src_keys(), expected.src_keys());
+        assert_eq!(actual.dst_keys(), expected.dst_keys());
+        assert_eq!(actual.source_axes(), expected.source_axes());
+        assert_eq!(
+            actual.recoupling_coefficients_dst_src().len(),
+            expected.recoupling_coefficients_dst_src().len()
+        );
+        for (&actual, &expected) in actual
+            .recoupling_coefficients_dst_src()
+            .iter()
+            .zip(expected.recoupling_coefficients_dst_src())
+        {
+            assert!((actual - expected).abs() <= 1.0e-12);
+        }
+    }
 }
 
 #[test]

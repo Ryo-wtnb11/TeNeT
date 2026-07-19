@@ -1472,14 +1472,28 @@ where
 {
     let src_structure = source_proof.structure();
     let source_axes = operation_source_axes(&operation);
+    let mut primary_prepared = None;
+    let mut additional_prepared = None::<FxHashMap<(usize, usize), PreparedTreePairOperation>>;
     let mut specs = Vec::new();
     for group in src_structure.fusion_tree_group_slice() {
-        if operation.is_identity_for(
+        let source_split = (
             group.group_key().codomain_uncoupled().len(),
             group.group_key().domain_uncoupled().len(),
-        ) {
-            let mut rows_for = |index: usize, source: &FusionTreePairKey| {
-                transform_tree_pair_rows_for_block_index(source_proof, &operation, index, source)
+        );
+        let prepared = prepared_tree_pair_operation_for_split(
+            &mut primary_prepared,
+            &mut additional_prepared,
+            source_proof.rule(),
+            &operation,
+            source_split,
+        )?;
+        // Why not clone this plan per group: ranks beyond the inline step
+        // capacity would reallocate identical Artin metadata for every group.
+        if operation.is_identity_for(source_split.0, source_split.1) {
+            let mut rows_for = |index: usize, _: &FusionTreePairKey| {
+                source_proof
+                    .execute_multiplicity_free_for_block_index(index, prepared)
+                    .map_err(OperationError::from_core_preserving_context)
                     .map(Arc::new)
             };
             specs.extend(assemble_identity_tree_pair_group_specs(
@@ -1493,28 +1507,20 @@ where
                 .block_indices()
                 .first()
                 .ok_or(OperationError::EmptyTransformBlock)?;
-            let first = source_proof.fusion_tree_pair_key(first_index)?.ok_or(
+            source_proof.fusion_tree_pair_key(first_index)?.ok_or(
                 OperationError::ExpectedFusionTreeBlock {
                     tensor: "src",
                     index: first_index,
                 },
             )?;
-            let prepared = prepare_tree_pair_operation(
-                source_proof.rule(),
-                &operation,
-                (
-                    first.codomain_tree().uncoupled().len(),
-                    first.domain_tree().uncoupled().len(),
-                ),
-            )?;
             let indices = group.block_indices().iter().copied();
             let ordered = match &operation {
                 TreeTransformOperation::Transpose { .. } => source_proof
-                    .execute_multiplicity_free_transpose_ordered_for_block_indices(
+                    .execute_multiplicity_free_transpose_ordered_for_block_indices_borrowed(
                         indices, prepared,
                     ),
                 TreeTransformOperation::Permute { .. } | TreeTransformOperation::Braid { .. } => {
-                    source_proof.execute_multiplicity_free_braid_ordered_for_block_indices(
+                    source_proof.execute_multiplicity_free_braid_ordered_for_block_indices_borrowed(
                         indices, prepared,
                     )
                 }
@@ -1537,6 +1543,8 @@ std::thread_local! {
         const { std::cell::Cell::new(0) };
     static LEGACY_TREE_PAIR_ASSEMBLY_CALLS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+    static TREE_PAIR_OPERATION_PREPARATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -1551,6 +1559,16 @@ pub(crate) fn tree_pair_lowering_calls() -> (usize, usize) {
         ORDERED_TREE_PAIR_LOWERING_CALLS.get(),
         LEGACY_TREE_PAIR_ASSEMBLY_CALLS.get(),
     )
+}
+
+#[cfg(test)]
+pub(crate) fn reset_tree_pair_operation_preparations() {
+    TREE_PAIR_OPERATION_PREPARATIONS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn tree_pair_operation_preparations() -> usize {
+    TREE_PAIR_OPERATION_PREPARATIONS.get()
 }
 
 fn assemble_ordered_tree_pair_group_specs<T>(
@@ -1874,40 +1892,6 @@ where
         }
     };
     transformed.map_err(OperationError::from_core_preserving_context)
-}
-
-fn transform_tree_pair_rows_for_block_index<R>(
-    proof: &LocallyValidatedFusionTreeBlockStructure<'_, '_, R>,
-    operation: &TreeTransformOperation,
-    block_index: usize,
-    source: &FusionTreePairKey,
-) -> Result<TransformRows<FusionTreePairKey, R::Scalar>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
-{
-    let actual_source = proof.fusion_tree_pair_key(block_index)?.ok_or(
-        OperationError::ExpectedFusionTreeBlock {
-            tensor: "src",
-            index: block_index,
-        },
-    )?;
-    if actual_source != source {
-        return Err(OperationError::StructureMismatch {
-            tensor: "proof-bound tree-pair source",
-        });
-    }
-    let prepared = prepare_tree_pair_operation(
-        proof.rule(),
-        operation,
-        (
-            source.codomain_tree().uncoupled().len(),
-            source.domain_tree().uncoupled().len(),
-        ),
-    )?;
-    proof
-        .execute_multiplicity_free_for_block_index(block_index, &prepared)
-        .map_err(OperationError::from_core_preserving_context)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2270,37 +2254,53 @@ where
             src_key.codomain_tree().uncoupled().len(),
             src_key.domain_tree().uncoupled().len(),
         );
-        if primary_prepared.is_none() {
-            primary_prepared = Some((
-                source_split,
-                prepare_tree_pair_operation(source_proof.rule(), &operation, source_split)?,
-            ));
-        }
-        let transformed = if let Some((primary_split, prepared)) = primary_prepared.as_ref() {
-            if *primary_split == source_split {
-                source_proof.execute_unique_rigid_for_block_index(index, prepared)
-            } else {
-                let prepared_by_split = additional_prepared.get_or_insert_with(FxHashMap::default);
-                let prepared = match prepared_by_split.entry(source_split) {
-                    Entry::Occupied(entry) => entry.into_mut(),
-                    Entry::Vacant(entry) => entry.insert(prepare_tree_pair_operation(
-                        source_proof.rule(),
-                        &operation,
-                        source_split,
-                    )?),
-                };
-                source_proof.execute_unique_rigid_for_block_index(index, prepared)
-            }
-        } else {
-            unreachable!("first fusion-tree block prepares its source split")
-        }
-        .map_err(OperationError::from_core_preserving_context)?;
+        let prepared = prepared_tree_pair_operation_for_split(
+            &mut primary_prepared,
+            &mut additional_prepared,
+            source_proof.rule(),
+            &operation,
+            source_split,
+        )?;
+        let transformed = source_proof
+            .execute_unique_rigid_for_block_index(index, prepared)
+            .map_err(OperationError::from_core_preserving_context)?;
         specs.push(
             TreeTransformGroupBlockSpec::single(transformed.0, src_key.clone(), transformed.1)
                 .with_shared_source_axes(Arc::clone(&source_axes)),
         );
     }
     Ok(TreeTransformGroupPlan::new(specs))
+}
+
+fn prepared_tree_pair_operation_for_split<'prepared, R>(
+    primary: &'prepared mut Option<((usize, usize), PreparedTreePairOperation)>,
+    additional: &'prepared mut Option<FxHashMap<(usize, usize), PreparedTreePairOperation>>,
+    rule: &R,
+    operation: &TreeTransformOperation,
+    source_split: (usize, usize),
+) -> Result<&'prepared PreparedTreePairOperation, OperationError>
+where
+    R: FusionRule,
+{
+    if primary.is_none() {
+        *primary = Some((
+            source_split,
+            prepare_tree_pair_operation(rule, operation, source_split)?,
+        ));
+    }
+    if let Some((primary_split, prepared)) = primary.as_ref() {
+        if *primary_split == source_split {
+            return Ok(prepared);
+        }
+    }
+    let prepared_by_split = additional.get_or_insert_with(FxHashMap::default);
+    let prepared = match prepared_by_split.entry(source_split) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => {
+            entry.insert(prepare_tree_pair_operation(rule, operation, source_split)?)
+        }
+    };
+    Ok(prepared)
 }
 
 fn prepare_tree_pair_operation<R>(
@@ -2311,6 +2311,8 @@ fn prepare_tree_pair_operation<R>(
 where
     R: FusionRule,
 {
+    #[cfg(test)]
+    TREE_PAIR_OPERATION_PREPARATIONS.set(TREE_PAIR_OPERATION_PREPARATIONS.get() + 1);
     match operation {
         TreeTransformOperation::Permute {
             codomain_permutation,

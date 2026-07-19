@@ -1490,19 +1490,25 @@ where
         I: IntoIterator<Item = usize>,
     {
         validate_multiplicity_free_execution_style(self.rule)?;
+        operation
+            .validate_block_preflight(self.rule, PreparedTreePairFamily::BraidLike)?;
         if operation.is_identity() {
             let indices = indices.into_iter();
             let (lower, upper) = indices.size_hint();
             let mut rows = Vec::with_capacity(upper.unwrap_or(lower));
             for index in indices {
                 let source = self.required_fusion_tree_pair_key(index)?;
+                operation.validate_source_split(
+                    source.codomain_tree().uncoupled().len(),
+                    source.domain_tree().uncoupled().len(),
+                )?;
                 rows.push(vec![(source.clone(), self.rule.scalar_one())]);
             }
             return Ok(rows);
         }
         let batch =
             ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
-        multiplicity_free_braid_tree_pair_block_proven(batch, operation)
+        multiplicity_free_braid_tree_pair_block_proven(batch, &operation)
     }
 
     pub fn execute_multiplicity_free_braid_ordered_for_block_indices<I>(
@@ -1513,7 +1519,23 @@ where
     where
         I: IntoIterator<Item = usize>,
     {
+        self.execute_multiplicity_free_braid_ordered_for_block_indices_borrowed(
+            indices, &operation,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn execute_multiplicity_free_braid_ordered_for_block_indices_borrowed<I>(
+        &self,
+        indices: I,
+        operation: &PreparedTreePairOperation,
+    ) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
+    where
+        I: IntoIterator<Item = usize>,
+    {
         validate_multiplicity_free_execution_style(self.rule)?;
+        operation
+            .validate_block_preflight(self.rule, PreparedTreePairFamily::BraidLike)?;
         let batch =
             ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
         multiplicity_free_braid_tree_pair_block_ordered_proven(batch, operation)
@@ -1528,19 +1550,24 @@ where
         I: IntoIterator<Item = usize>,
     {
         validate_multiplicity_free_execution_style(self.rule)?;
+        operation.validate_block_preflight(self.rule, PreparedTreePairFamily::Transpose)?;
         if operation.is_identity() {
             let indices = indices.into_iter();
             let (lower, upper) = indices.size_hint();
             let mut rows = Vec::with_capacity(upper.unwrap_or(lower));
             for index in indices {
                 let source = self.required_fusion_tree_pair_key(index)?;
+                operation.validate_source_split(
+                    source.codomain_tree().uncoupled().len(),
+                    source.domain_tree().uncoupled().len(),
+                )?;
                 rows.push(vec![(source.clone(), self.rule.scalar_one())]);
             }
             return Ok(rows);
         }
         let batch =
             ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
-        multiplicity_free_transpose_tree_pair_block_proven(batch, operation)
+        multiplicity_free_transpose_tree_pair_block_proven(batch, &operation)
     }
 
     pub fn execute_multiplicity_free_transpose_ordered_for_block_indices<I>(
@@ -1551,7 +1578,22 @@ where
     where
         I: IntoIterator<Item = usize>,
     {
+        self.execute_multiplicity_free_transpose_ordered_for_block_indices_borrowed(
+            indices, &operation,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn execute_multiplicity_free_transpose_ordered_for_block_indices_borrowed<I>(
+        &self,
+        indices: I,
+        operation: &PreparedTreePairOperation,
+    ) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
+    where
+        I: IntoIterator<Item = usize>,
+    {
         validate_multiplicity_free_execution_style(self.rule)?;
+        operation.validate_block_preflight(self.rule, PreparedTreePairFamily::Transpose)?;
         let batch =
             ValidatedMultiplicityFreePairBatch::from_locally_validated(self, indices)?;
         multiplicity_free_transpose_tree_pair_block_ordered_proven(batch, operation)
