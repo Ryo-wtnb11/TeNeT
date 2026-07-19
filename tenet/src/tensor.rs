@@ -1153,6 +1153,66 @@ enum TransformKind<'a> {
     Transpose,
 }
 
+struct LoweredAdjointTransformRequest {
+    codomain_axes: Vec<usize>,
+    domain_axes: Vec<usize>,
+    levels: Vec<usize>,
+}
+
+fn lower_adjoint_transform_request(
+    parent_codomain_rank: usize,
+    parent_domain_rank: usize,
+    logical_codomain_axes: &[usize],
+    logical_domain_axes: &[usize],
+    kind: &TransformKind<'_>,
+) -> Result<LoweredAdjointTransformRequest, Error> {
+    let rank = parent_codomain_rank
+        .checked_add(parent_domain_rank)
+        .ok_or_else(|| Error::InvalidArgument("tensor rank overflow".to_string()))?;
+    let logical_axes = logical_codomain_axes
+        .iter()
+        .chain(logical_domain_axes)
+        .copied()
+        .collect::<Vec<_>>();
+    validate_axis_permutation(&logical_axes, rank)?;
+
+    let logical_to_parent = |axis: usize| {
+        if axis < parent_domain_rank {
+            parent_codomain_rank + axis
+        } else {
+            axis - parent_domain_rank
+        }
+    };
+    let codomain_axes = logical_domain_axes
+        .iter()
+        .copied()
+        .map(logical_to_parent)
+        .collect();
+    let domain_axes = logical_codomain_axes
+        .iter()
+        .copied()
+        .map(logical_to_parent)
+        .collect();
+    let levels = match kind {
+        TransformKind::Braid { levels } => {
+            // Why not reflect the level values: the outer adjoint conjugates
+            // coefficients; TensorKit only reindexes levels into parent order.
+            levels[parent_domain_rank..]
+                .iter()
+                .chain(&levels[..parent_domain_rank])
+                .copied()
+                .collect()
+        }
+        TransformKind::Permute | TransformKind::Transpose => Vec::new(),
+    };
+
+    Ok(LoweredAdjointTransformRequest {
+        codomain_axes,
+        domain_axes,
+        levels,
+    })
+}
+
 fn validate_contracted_axes(contracted: &[usize], rank: usize) -> Result<(), Error> {
     let mut seen = SmallVec::<[bool; 16]>::new();
     seen.resize(rank, false);
@@ -4110,11 +4170,6 @@ impl Tensor {
         domain_axes: &[usize],
         kind: TransformKind<'_>,
     ) -> Result<Self, Error> {
-        if self.is_adjoint_view() {
-            return self
-                .materialized_tensor()?
-                .transformed(codomain_axes, domain_axes, kind);
-        }
         let rank = self.rank();
         let nout = self.codomain_rank();
         if let TransformKind::Braid { levels } = &kind {
@@ -4137,6 +4192,42 @@ impl Tensor {
                 && domain_axes.iter().copied().eq(nout..rank);
         if shares_identity_storage {
             return Ok(self.clone());
+        }
+        if let TensorRepr::Adjoint(view) = &self.repr {
+            let parent_nout = view.parent.space.homspace().codomain().len();
+            let parent_nin = view.parent.space.homspace().domain().len();
+            let lowered = lower_adjoint_transform_request(
+                parent_nout,
+                parent_nin,
+                codomain_axes,
+                domain_axes,
+                &kind,
+            )?;
+            let parent = Self::owned(
+                self.rt.clone(),
+                Arc::clone(&view.parent.space),
+                Arc::clone(&view.parent.data),
+            );
+            let transformed = match kind {
+                TransformKind::Permute => parent.transformed(
+                    &lowered.codomain_axes,
+                    &lowered.domain_axes,
+                    TransformKind::Permute,
+                ),
+                TransformKind::Braid { .. } => parent.transformed(
+                    &lowered.codomain_axes,
+                    &lowered.domain_axes,
+                    TransformKind::Braid {
+                        levels: &lowered.levels,
+                    },
+                ),
+                TransformKind::Transpose => parent.transformed(
+                    &lowered.codomain_axes,
+                    &lowered.domain_axes,
+                    TransformKind::Transpose,
+                ),
+            }?;
+            return transformed.adjoint();
         }
         let operation = match kind {
             TransformKind::Permute => TreeTransformOperation::permute(
@@ -8125,6 +8216,228 @@ mod adjoint_parent_view_tests {
         let trace = endomorphism.tr().unwrap().to_c64();
         let adjoint_trace = endomorphism.adjoint().unwrap().tr().unwrap().to_c64();
         assert!((adjoint_trace - trace.conj()).norm() < 1e-12);
+    }
+
+    fn assert_lowered_transform_matches_eager_oracle(
+        lazy: &Tensor,
+        actual: Tensor,
+        expected: Tensor,
+    ) {
+        assert_eq!(actual.codomain_spaces(), expected.codomain_spaces());
+        assert_eq!(actual.domain_spaces(), expected.domain_spaces());
+        assert_eq!(actual.dtype(), expected.dtype());
+        assert!(actual.is_adjoint_view());
+        assert_eq!(actual.adjoint_build_counts(), (0, 0));
+        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+
+        let expected_parent = expected.adjoint().unwrap().materialized_tensor().unwrap();
+        let actual_parent = actual.adjoint().unwrap();
+        assert_close(&actual_parent, &expected_parent);
+
+        assert_eq!(actual.adjoint_build_counts(), (0, 0));
+        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+    }
+
+    fn assert_adjoint_transforms_stay_parent_lowered(space: Space, dtype: Dtype, seed: u64) {
+        let runtime = Runtime::builder()
+            .dense_threads(1)
+            .recoupling_threads(1)
+            .build()
+            .unwrap();
+        let parent =
+            Tensor::rand_with_seed(&runtime, dtype, [&space, &space, &space], [&space], seed)
+                .unwrap();
+        if dtype == Dtype::C64 {
+            assert!(parent
+                .data_c64()
+                .iter()
+                .any(|value| value.im.abs() > f64::EPSILON));
+        }
+        let lazy = parent.adjoint().unwrap();
+        let eager = parent.adjoint().unwrap().materialized_tensor().unwrap();
+        let codomain_axes = [3, 0, 2];
+        let domain_axes = [1];
+        let levels = [17, 3, 11, 5];
+
+        assert_lowered_transform_matches_eager_oracle(
+            &lazy,
+            lazy.permute(&codomain_axes, &domain_axes).unwrap(),
+            eager.permute(&codomain_axes, &domain_axes).unwrap(),
+        );
+        assert_lowered_transform_matches_eager_oracle(
+            &lazy,
+            lazy.braid(&codomain_axes, &domain_axes, &levels).unwrap(),
+            eager.braid(&codomain_axes, &domain_axes, &levels).unwrap(),
+        );
+        assert_lowered_transform_matches_eager_oracle(
+            &lazy,
+            lazy.repartition(3).unwrap(),
+            eager.repartition(3).unwrap(),
+        );
+        assert_lowered_transform_matches_eager_oracle(
+            &lazy,
+            lazy.transpose().unwrap(),
+            eager.transpose().unwrap(),
+        );
+
+        let involution = lazy.adjoint().unwrap();
+        assert!(!involution.is_adjoint_view());
+        assert!(Arc::ptr_eq(
+            &involution.ordinary_body().space,
+            &parent.ordinary_body().space
+        ));
+        assert!(Arc::ptr_eq(
+            &involution.ordinary_body().data,
+            &parent.ordinary_body().data
+        ));
+        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+    }
+
+    fn nested_product_space(degeneracies: [usize; 4]) -> Space {
+        Space::fz2_u1_su2([
+            ((0, 0, 0), degeneracies[0]),
+            ((0, 0, 2), degeneracies[1]),
+            ((1, -1, 1), degeneracies[2]),
+            ((1, 1, 1), degeneracies[3]),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn adjoint_transforms_match_eager_oracles_without_building_adjoint_grids() {
+        // What: non-self-dual, fermionic, SU2 inner-line, and product
+        // transforms lower to the parent for real and genuinely complex data.
+        let spaces = [
+            Space::u1([(-2, 1), (-1, 2), (0, 1), (1, 1)]),
+            Space::fz2([(1, 2)]),
+            Space::su2([(0, 1), (1, 2), (2, 1)]),
+            nested_product_space([1, 1, 1, 1]),
+        ];
+        for (case, space) in spaces.into_iter().enumerate() {
+            assert_adjoint_transforms_stay_parent_lowered(
+                space.clone(),
+                Dtype::F64,
+                261_300 + case as u64 * 10,
+            );
+            assert_adjoint_transforms_stay_parent_lowered(
+                space,
+                Dtype::C64,
+                261_301 + case as u64 * 10,
+            );
+        }
+    }
+
+    #[test]
+    fn asymmetric_product_lazy_transpose_matches_eager_materialization() {
+        // What: transpose of a complex 3|1 product adjoint preserves the exact
+        // reversed split without materializing either lazy transform result.
+        let runtime = Runtime::builder()
+            .dense_threads(1)
+            .recoupling_threads(1)
+            .build()
+            .unwrap();
+        let first = nested_product_space([1, 1, 1, 1]);
+        let second = nested_product_space([2, 1, 1, 1]);
+        let third = nested_product_space([1, 2, 1, 1]);
+        let domain = nested_product_space([1, 1, 2, 1]);
+        let parent = Tensor::rand_with_seed(
+            &runtime,
+            Dtype::C64,
+            [&first, &second, &third],
+            [&domain],
+            261_380,
+        )
+        .unwrap();
+        assert!(parent
+            .data_c64()
+            .iter()
+            .any(|value| value.im.abs() > f64::EPSILON));
+        let lazy = parent.adjoint().unwrap();
+        let eager = parent.adjoint().unwrap().materialized_tensor().unwrap();
+
+        let actual = lazy.transpose().unwrap();
+        let expected = eager.transpose().unwrap();
+
+        assert_eq!(
+            actual.codomain_spaces(),
+            vec![third.dual(), second.dual(), first.dual()]
+        );
+        assert_eq!(actual.domain_spaces(), vec![domain.dual()]);
+        assert_lowered_transform_matches_eager_oracle(&lazy, actual, expected);
+    }
+
+    #[test]
+    fn adjoint_braid_levels_follow_tensorkit_parent_axis_order() {
+        // What: a 3|1 parent's logical levels map to [3, 11, 5, 17], with
+        // unchanged values, while the output tuples swap around the adjoint.
+        let levels = [17, 3, 11, 5];
+        let kind = TransformKind::Braid { levels: &levels };
+        let lowered = lower_adjoint_transform_request(3, 1, &[3, 0, 2], &[1], &kind).unwrap();
+
+        assert_eq!(lowered.codomain_axes, [0]);
+        assert_eq!(lowered.domain_axes, [2, 3, 1]);
+        assert_eq!(lowered.levels, [3, 11, 5, 17]);
+    }
+
+    #[test]
+    fn lowered_adjoint_braid_preserves_the_exact_fermionic_swap_sign() {
+        // What: swapping two odd fZ2 legs through a lazy adjoint keeps the
+        // TensorKit fermionic minus sign and does not build an adjoint grid.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let odd = Space::fz2([(1, 1)]);
+        let parent = Tensor::from_block_fn(
+            &runtime,
+            [&odd, &odd],
+            std::iter::empty::<&Space>(),
+            |_, _| 1.0,
+        )
+        .unwrap();
+        let lazy = parent.adjoint().unwrap();
+
+        let transformed = lazy.braid(&[], &[1, 0], &[0, 1]).unwrap();
+        let transformed_parent = transformed.adjoint().unwrap();
+
+        assert!(transformed_parent.data().iter().all(|&value| value == -1.0));
+        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+        assert_eq!(transformed.adjoint_build_counts(), (0, 0));
+    }
+
+    #[test]
+    fn malformed_adjoint_transform_errors_precede_any_view_build() {
+        // What: level-count errors precede axis errors, and all invalid
+        // transform requests leave the lazy adjoint representation untouched.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let space = Space::u1([(-2, 1), (0, 2), (1, 1)]);
+        let lazy = Tensor::rand_with_seed(
+            &runtime,
+            Dtype::C64,
+            [&space, &space, &space],
+            [&space],
+            261_390,
+        )
+        .unwrap()
+        .adjoint()
+        .unwrap();
+
+        let bad_levels_and_axes = lazy.braid(&[4, 0, 2], &[1], &[17, 3, 11]).unwrap_err();
+        assert!(matches!(bad_levels_and_axes, Error::InvalidArgument(_)));
+        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+
+        let bad_axes = lazy.permute(&[4, 0, 2], &[1]).unwrap_err();
+        let Error::Operation(error) = bad_axes else {
+            panic!("invalid axes returned the wrong error layer");
+        };
+        assert!(matches!(
+            error.as_ref(),
+            OperationError::Core(tenet_core::CoreError::InvalidPermutation { .. })
+        ));
+        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+
+        assert!(matches!(
+            lazy.repartition(5),
+            Err(Error::InvalidArgument(_))
+        ));
+        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
     }
 
     fn assert_concurrent_raw_reads_initialize_one_shared_body(dtype: Dtype, seed: u64) {
