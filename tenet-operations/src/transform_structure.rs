@@ -1281,11 +1281,12 @@ impl TreeTransformLayoutTable {
         }
         let start = slot.start as usize;
         let end = start + slot.rank as usize;
-        Some(BakedFusedLayout {
-            dims: &self.fused_dims[start..end],
-            dst_strides: &self.fused_dst_strides[start..end],
-            src_strides: &self.fused_src_strides[start..end],
-        })
+        BakedFusedLayout::try_from_normalized_slices(
+            &self.fused_dims[start..end],
+            &self.fused_dst_strides[start..end],
+            &self.fused_src_strides[start..end],
+        )
+        .ok()
     }
 
     /// Heap bytes of the pre-#232 layout metadata (entries + shape/stride/packed
@@ -1395,9 +1396,9 @@ impl TreeTransformLayoutTable {
             fuse_pair_layout(shape, dst, src),
         ) {
             (Some(baked), Some(recomputed)) => {
-                baked.dims == &recomputed.dims[..recomputed.rank]
-                    && baked.dst_strides == &recomputed.dst_strides[..recomputed.rank]
-                    && baked.src_strides == &recomputed.src_strides[..recomputed.rank]
+                baked.dims() == &recomputed.dims[..recomputed.rank]
+                    && baked.dst_strides() == &recomputed.dst_strides[..recomputed.rank]
+                    && baked.src_strides() == &recomputed.src_strides[..recomputed.rank]
             }
             (None, None) => true,
             _ => false,

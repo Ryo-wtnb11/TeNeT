@@ -146,11 +146,111 @@ pub(crate) struct FusedPairLayout {
 /// `apply_fused_pair_slices` consumes them directly. dtype-independent — one
 /// baked layout serves f64 and c64 alike (the normalization never inspects
 /// values).
+///
+/// Safe downstream adapters retain direct read access to the normalized slices:
+///
+/// ```
+/// use tenet_operations::BakedFusedLayout;
+///
+/// fn inspect(layout: BakedFusedLayout<'_>) {
+///     let _ = (layout.dims, layout.dst_strides, layout.src_strides);
+/// }
+/// ```
+///
+/// Construction remains sealed:
+///
+/// ```compile_fail
+/// use tenet_operations::BakedFusedLayout;
+///
+/// let _ = BakedFusedLayout {
+///     dims: &[2],
+///     dst_strides: &[1],
+///     src_strides: &[1],
+/// };
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub struct BakedFusedLayout<'a> {
     pub dims: &'a [usize],
     pub dst_strides: &'a [isize],
     pub src_strides: &'a [isize],
+    // Why not expose the seal: readable fields preserve custom-adapter
+    // compatibility, while construction must remain tied to normalized data.
+    _sealed: (),
+}
+
+impl<'a> BakedFusedLayout<'a> {
+    pub(crate) fn try_from_normalized_slices(
+        dims: &'a [usize],
+        dst_strides: &'a [isize],
+        src_strides: &'a [isize],
+    ) -> Result<Self, OperationError> {
+        if dims.is_empty() {
+            return Err(OperationError::RankMismatch {
+                expected: 1,
+                actual: 0,
+            });
+        }
+        if dims.len() > FUSED_RANK_LIMIT {
+            return Err(OperationError::RankMismatch {
+                expected: FUSED_RANK_LIMIT,
+                actual: dims.len(),
+            });
+        }
+        if dims.len() != dst_strides.len() {
+            return Err(OperationError::RankMismatch {
+                expected: dims.len(),
+                actual: dst_strides.len(),
+            });
+        }
+        if dims.len() != src_strides.len() {
+            return Err(OperationError::RankMismatch {
+                expected: dims.len(),
+                actual: src_strides.len(),
+            });
+        }
+        Ok(Self {
+            dims,
+            dst_strides,
+            src_strides,
+            _sealed: (),
+        })
+    }
+
+    #[inline]
+    pub fn dims(&self) -> &'a [usize] {
+        self.dims
+    }
+
+    #[inline]
+    pub fn dst_strides(&self) -> &'a [isize] {
+        self.dst_strides
+    }
+
+    #[inline]
+    pub fn src_strides(&self) -> &'a [isize] {
+        self.src_strides
+    }
+}
+
+#[inline]
+fn validate_strided_ranks(
+    shape: &[usize],
+    dst_strides: &[isize],
+    src_strides: &[isize],
+) -> Result<(), OperationError> {
+    if shape.len() != dst_strides.len() {
+        return Err(OperationError::RankMismatch {
+            expected: shape.len(),
+            actual: dst_strides.len(),
+        });
+    }
+    if shape.len() != src_strides.len() {
+        return Err(OperationError::RankMismatch {
+            expected: shape.len(),
+            actual: src_strides.len(),
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn fuse_pair_layout(
@@ -472,9 +572,9 @@ fn fused_pair_baked<T, Apply, ElementOp>(
         Some(baked) => apply_fused_pair_slices(
             dst_data,
             src_data,
-            baked.dims,
-            baked.dst_strides,
-            baked.src_strides,
+            baked.dims(),
+            baked.dst_strides(),
+            baked.src_strides(),
             dst_offset,
             src_offset,
             apply,
@@ -766,6 +866,7 @@ where
         beta: T,
         baked: Option<BakedFusedLayout<'_>>,
     ) -> Result<(), OperationError> {
+        validate_strided_ranks(shape, dst_strides, src_strides)?;
         if beta.is_zero() || beta.is_one() {
             let assign = beta.is_zero();
             fused_pair_baked(
@@ -843,6 +944,7 @@ where
         beta: T,
         baked: Option<BakedFusedLayout<'_>>,
     ) -> Result<(), OperationError> {
+        validate_strided_ranks(shape, dst_strides, src_strides)?;
         // Assign-scatter (beta=0, alpha=1, positive strides) is a pure permuted
         // copy: route through the strided-perm blocked transpose when that
         // backend was selected and the layout is eligible; otherwise fall
@@ -941,6 +1043,7 @@ where
         alpha: T,
         baked: Option<BakedFusedLayout<'_>>,
     ) -> Result<(), OperationError> {
+        validate_strided_ranks(shape, dst_strides, src_strides)?;
         // Pack is a pure permuted copy (alpha=1, no conjugate, positive
         // strides): route it through the strided-perm blocked transpose when
         // that backend was selected and the layout is eligible; otherwise fall
@@ -1227,6 +1330,216 @@ mod tests {
         let shape = [1usize; FUSED_RANK_LIMIT + 1];
         let strides = [0isize; FUSED_RANK_LIMIT + 1];
         assert!(fuse_pair_layout(&shape, &strides, &strides).is_none());
+    }
+
+    #[test]
+    fn baked_fused_layout_admission_rejects_rank_and_length_mismatches() {
+        let empty_dims = [];
+        let empty_strides = [];
+        let rank_nine_dims = [1usize; FUSED_RANK_LIMIT + 1];
+        let rank_nine_strides = [0isize; FUSED_RANK_LIMIT + 1];
+
+        // What: only nonempty normalized slices with one stride per dimension
+        // can become trusted replay tokens.
+        assert_eq!(
+            BakedFusedLayout::try_from_normalized_slices(
+                &empty_dims,
+                &empty_strides,
+                &empty_strides
+            )
+            .unwrap_err(),
+            OperationError::RankMismatch {
+                expected: 1,
+                actual: 0,
+            }
+        );
+        assert_eq!(
+            BakedFusedLayout::try_from_normalized_slices(
+                &rank_nine_dims,
+                &rank_nine_strides,
+                &rank_nine_strides
+            )
+            .unwrap_err(),
+            OperationError::RankMismatch {
+                expected: FUSED_RANK_LIMIT,
+                actual: FUSED_RANK_LIMIT + 1,
+            }
+        );
+
+        let dims = [2usize, 3];
+        let short = [1isize];
+        let complete = [1isize, 2];
+        assert_eq!(
+            BakedFusedLayout::try_from_normalized_slices(&dims, &short, &complete).unwrap_err(),
+            OperationError::RankMismatch {
+                expected: 2,
+                actual: 1,
+            }
+        );
+        assert_eq!(
+            BakedFusedLayout::try_from_normalized_slices(&dims, &complete, &short).unwrap_err(),
+            OperationError::RankMismatch {
+                expected: 2,
+                actual: 1,
+            }
+        );
+    }
+
+    fn assert_baked_copy_matches_recomputed(
+        shape: &[usize],
+        strides: &[isize],
+        expected_normalized_rank: usize,
+    ) {
+        let backing_len = shape
+            .iter()
+            .zip(strides)
+            .map(|(&dim, &stride)| (dim - 1) * stride as usize)
+            .sum::<usize>()
+            + 1;
+        let src = (0..backing_len)
+            .map(|index| index as f64 + 0.25)
+            .collect::<Vec<_>>();
+        let mut expected = vec![-1.0; backing_len];
+        let mut actual = expected.clone();
+        let mut adapter = StridedHostKernelAdapter::default();
+
+        adapter
+            .copy_scale_strided(
+                &mut expected,
+                &src,
+                shape,
+                &strides,
+                &strides,
+                0,
+                0,
+                false,
+                2.0,
+            )
+            .unwrap();
+        let normalized = fuse_pair_layout(shape, strides, strides).unwrap();
+        assert_eq!(normalized.rank, expected_normalized_rank);
+        let baked = BakedFusedLayout::try_from_normalized_slices(
+            &normalized.dims[..normalized.rank],
+            &normalized.dst_strides[..normalized.rank],
+            &normalized.src_strides[..normalized.rank],
+        )
+        .unwrap();
+        adapter
+            .copy_scale_strided_baked(
+                &mut actual,
+                &src,
+                shape,
+                &strides,
+                &strides,
+                0,
+                0,
+                false,
+                2.0,
+                Some(baked),
+            )
+            .unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn baked_fused_layout_valid_boundary_ranks_match_recomputed_results() {
+        // What: tokens borrowed from actual rank-1 and maximum-rank normalized
+        // layouts preserve the recomputed path's numerical result.
+        assert_baked_copy_matches_recomputed(&[4], &[1], 1);
+        assert_baked_copy_matches_recomputed(
+            &[2, 2, 2, 2, 2, 2, 2, 2],
+            &[1, 3, 9, 27, 81, 243, 729, 2187],
+            FUSED_RANK_LIMIT,
+        );
+    }
+
+    #[test]
+    fn public_baked_methods_reject_raw_rank_mismatches_before_dispatch() {
+        let mut adapter = StridedHostKernelAdapter::default();
+        let mut zero_strides = Vec::new();
+        let mut dst = [0.0_f64; 2];
+        let src = [1.0_f64; 2];
+        let shape = [2usize];
+        let strides = [1isize];
+        let missing = [];
+        let dst_error = OperationError::RankMismatch {
+            expected: 1,
+            actual: 0,
+        };
+
+        // What: all three public baked entry points validate both raw stride
+        // ranks even without a baked token and on general-beta paths.
+        assert_eq!(
+            adapter
+                .add_strided_baked(
+                    &mut zero_strides,
+                    &mut dst,
+                    &src,
+                    &shape,
+                    &missing,
+                    &strides,
+                    0,
+                    0,
+                    false,
+                    1.0,
+                    2.0,
+                    None,
+                )
+                .unwrap_err(),
+            dst_error
+        );
+        assert_eq!(
+            adapter
+                .add_strided_baked(
+                    &mut zero_strides,
+                    &mut dst,
+                    &src,
+                    &shape,
+                    &strides,
+                    &missing,
+                    0,
+                    0,
+                    false,
+                    1.0,
+                    2.0,
+                    None,
+                )
+                .unwrap_err(),
+            dst_error
+        );
+        assert_eq!(
+            adapter
+                .axpby_strided_baked(
+                    &mut dst, &src, &shape, &missing, &strides, 0, 0, 1.0, 2.0, None,
+                )
+                .unwrap_err(),
+            dst_error
+        );
+        assert_eq!(
+            adapter
+                .axpby_strided_baked(
+                    &mut dst, &src, &shape, &strides, &missing, 0, 0, 1.0, 2.0, None,
+                )
+                .unwrap_err(),
+            dst_error
+        );
+        assert_eq!(
+            adapter
+                .copy_scale_strided_baked(
+                    &mut dst, &src, &shape, &missing, &strides, 0, 0, false, 1.0, None,
+                )
+                .unwrap_err(),
+            dst_error
+        );
+        assert_eq!(
+            adapter
+                .copy_scale_strided_baked(
+                    &mut dst, &src, &shape, &strides, &missing, 0, 0, false, 1.0, None,
+                )
+                .unwrap_err(),
+            dst_error
+        );
     }
 
     #[test]
