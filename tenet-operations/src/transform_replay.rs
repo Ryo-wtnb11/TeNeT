@@ -2474,9 +2474,9 @@ fn write_fused_uninit<D, F>(
     D: Copy,
     F: Fn(D) -> D,
 {
-    let dims = baked.dims;
-    let dst_strides = baked.dst_strides;
-    let src_strides = baked.src_strides;
+    let dims = baked.dims();
+    let dst_strides = baked.dst_strides();
+    let src_strides = baked.src_strides();
     let rank = dims.len();
     if rank == 0 || dims.iter().any(|&dim| dim == 0) {
         return;
