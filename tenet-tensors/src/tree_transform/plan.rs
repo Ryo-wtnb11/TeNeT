@@ -1385,11 +1385,12 @@ where
     .with_shared_source_axes(Arc::clone(source_axes))])
 }
 
-/// Shape-independent recoupling rows for one source tree under one
-/// operation: the caching unit of TensorKit's `@cached` `fstranspose`/`fsbraid`. Rows survive
-/// degeneracy (bond-dimension) changes because they depend only on the tree
-/// keys, so chi sweeps recompile plans without recomputing F/R-symbol
-/// contractions.
+/// Context-local compatibility memo for shape-independent source-column rows.
+///
+/// Why not treat this as TensorKit's `@cached` `fstranspose`/`fsbraid` unit:
+/// TensorKit retains a `FusionTreeBlock` and its destination-basis matrix,
+/// whereas this map stores one source tree's full-key rows. Slice B replaces
+/// this compatibility format at the block-linear lowering boundary.
 pub(crate) type TreePairRowMemo<T, RuleKey> = FxHashMap<
     (RuleKey, TreeTransformOperation, FusionTreePairKey),
     SharedTransformRows<FusionTreePairKey, T>,
