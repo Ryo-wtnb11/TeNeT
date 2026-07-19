@@ -6785,6 +6785,54 @@ mod tests {
         assert_eq!(actual.required_len().unwrap(), expected.required_len().unwrap());
     }
 
+    fn assert_coupled_grid_layout_matches_key_reconstruction<R>(
+        rule: &R,
+        homspace: &FusionTreeHomSpace,
+    ) where
+        R: MultiplicityFreeFusionRule,
+    {
+        let reconstructed =
+            reconstructed_fusion_tree_layout_data_from_keys(homspace.fusion_tree_keys_uncached(rule));
+        let direct = homspace.fusion_tree_layout_data_uncached(rule);
+
+        assert_eq!(direct.keys, reconstructed.keys);
+        assert_eq!(direct.sectors.len(), reconstructed.sectors.len());
+        for (actual, expected) in direct.sectors.iter().zip(&reconstructed.sectors) {
+            assert_eq!(actual.start, expected.start);
+            assert_eq!(actual.row_count, expected.row_count);
+            assert_eq!(actual.col_count, expected.col_count);
+            assert_eq!(
+                expected.row_key_offsets,
+                (0..actual.row_count).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                expected.col_key_offsets,
+                (0..actual.col_count)
+                    .map(|col| col * actual.row_count)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                expected.entries,
+                (0..actual.col_count)
+                    .flat_map(|col| {
+                        (0..actual.row_count)
+                            .map(move |row| FusionTreeBlockLayoutEntry { row, col })
+                    })
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        let direct_parts =
+            coupled_subblock_parts_from_leg_degeneracies(homspace, &direct).unwrap();
+        let reconstructed_parts = legacy_leg_degeneracy_structure(rule, homspace);
+        assert_eq!(direct_parts.0, *reconstructed_parts.sector_structure());
+        assert_eq!(direct_parts.1, *reconstructed_parts.degeneracy_structure());
+        assert_eq!(
+            direct_parts.1.required_len().unwrap(),
+            reconstructed_parts.required_len().unwrap()
+        );
+    }
+
     #[test]
     fn direct_leg_degeneracy_layout_matches_legacy_for_supported_rules() {
         let mixed_leg = |sectors: &[(SectorId, usize)], dual| {
@@ -6805,9 +6853,14 @@ mod tests {
 
         let u1_hom = build(&[(u1(-2), 2), (u1(1), 1)]);
         assert_direct_leg_degeneracy_structure_matches_legacy(&U1FusionRule, &u1_hom);
+        assert_coupled_grid_layout_matches_key_reconstruction(&U1FusionRule, &u1_hom);
 
         let parity_hom = build(&[(SectorId::new(0), 3), (SectorId::new(1), 2)]);
         assert_direct_leg_degeneracy_structure_matches_legacy(
+            &FermionParityFusionRule,
+            &parity_hom,
+        );
+        assert_coupled_grid_layout_matches_key_reconstruction(
             &FermionParityFusionRule,
             &parity_hom,
         );
@@ -6817,6 +6870,7 @@ mod tests {
             (SU2Irrep::from_twice_spin(1).sector_id(), 1),
         ]);
         assert_direct_leg_degeneracy_structure_matches_legacy(&SU2FusionRule, &su2_hom);
+        assert_coupled_grid_layout_matches_key_reconstruction(&SU2FusionRule, &su2_hom);
 
         let product_rule = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
         let product_hom = build(&[
@@ -6824,10 +6878,38 @@ mod tests {
             (product_rule.encode_sector(SectorId::new(1), u1(2)), 1),
         ]);
         assert_direct_leg_degeneracy_structure_matches_legacy(&product_rule, &product_hom);
+        assert_coupled_grid_layout_matches_key_reconstruction(&product_rule, &product_hom);
 
         let scalar =
             FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
         assert_direct_leg_degeneracy_structure_matches_legacy(&U1FusionRule, &scalar);
+        assert_coupled_grid_layout_matches_key_reconstruction(&U1FusionRule, &scalar);
+
+        let rank_one = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(u1(0), 5)], true)]),
+            FusionProductSpace::new(Vec::<SectorLeg>::new()),
+        );
+        assert_direct_leg_degeneracy_structure_matches_legacy(&U1FusionRule, &rank_one);
+        assert_coupled_grid_layout_matches_key_reconstruction(&U1FusionRule, &rank_one);
+        let rank_one_block = rank_one
+            .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+            .unwrap();
+        assert_eq!(rank_one_block.required_len().unwrap(), 5);
+        assert_eq!(rank_one_block.block(0).unwrap().shape(), &[5]);
+        assert_eq!(rank_one_block.block(0).unwrap().strides(), &[1]);
+        assert_eq!(rank_one_block.block(0).unwrap().offset(), 0);
+
+        let rank_one_domain = FusionTreeHomSpace::new(
+            FusionProductSpace::new(Vec::<SectorLeg>::new()),
+            FusionProductSpace::new([SectorLeg::new([(u1(0), 7)], true)]),
+        );
+        let rank_one_domain_block = rank_one_domain
+            .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+            .unwrap();
+        assert_eq!(rank_one_domain_block.required_len().unwrap(), 7);
+        assert_eq!(rank_one_domain_block.block(0).unwrap().shape(), &[7]);
+        assert_eq!(rank_one_domain_block.block(0).unwrap().strides(), &[1]);
+        assert_eq!(rank_one_domain_block.block(0).unwrap().offset(), 0);
 
         let empty_domain = FusionTreeHomSpace::new(
             FusionProductSpace::new([
@@ -6837,6 +6919,396 @@ mod tests {
             FusionProductSpace::new(Vec::<SectorLeg>::new()),
         );
         assert_direct_leg_degeneracy_structure_matches_legacy(&U1FusionRule, &empty_domain);
+        assert_coupled_grid_layout_matches_key_reconstruction(&U1FusionRule, &empty_domain);
+    }
+
+    #[test]
+    fn canonical_coupled_grid_matches_literal_u1_sector_matrices() {
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(u1(0), 2), (u1(1), 3)], false),
+                SectorLeg::new([(u1(0), 5), (u1(1), 7)], true),
+            ]),
+            FusionProductSpace::new([
+                SectorLeg::new([(u1(0), 11), (u1(1), 13)], true),
+                SectorLeg::new([(u1(0), 17), (u1(1), 19)], false),
+            ]),
+        );
+
+        let structure = homspace
+            .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+            .unwrap();
+        let expected = [
+            (
+                [u1(0), u1(0)],
+                [u1(0), u1(0)],
+                u1(0),
+                [2, 5, 11, 17],
+                [1, 2, 10, 110],
+                0,
+            ),
+            (
+                [u1(1), u1(0)],
+                [u1(1), u1(0)],
+                u1(1),
+                [3, 5, 13, 17],
+                [1, 3, 29, 377],
+                1870,
+            ),
+            (
+                [u1(0), u1(1)],
+                [u1(1), u1(0)],
+                u1(1),
+                [2, 7, 13, 17],
+                [1, 2, 29, 377],
+                1885,
+            ),
+            (
+                [u1(1), u1(0)],
+                [u1(0), u1(1)],
+                u1(1),
+                [3, 5, 11, 19],
+                [1, 3, 29, 319],
+                8279,
+            ),
+            (
+                [u1(0), u1(1)],
+                [u1(0), u1(1)],
+                u1(1),
+                [2, 7, 11, 19],
+                [1, 2, 29, 319],
+                8294,
+            ),
+            (
+                [u1(1), u1(1)],
+                [u1(1), u1(1)],
+                u1(2),
+                [3, 7, 13, 19],
+                [1, 3, 21, 273],
+                14340,
+            ),
+        ];
+
+        assert_eq!(structure.block_count(), expected.len());
+        for (index, (codomain, domain, coupled, shape, strides, offset)) in
+            expected.iter().enumerate()
+        {
+            let block = structure.block(index).unwrap();
+            let BlockKey::FusionTree(key) = block.key() else {
+                panic!("canonical symmetric block must use a fusion-tree key");
+            };
+            assert_eq!(key.codomain_uncoupled(), codomain);
+            assert_eq!(key.domain_uncoupled(), domain);
+            assert_eq!(key.codomain_is_dual(), &[false, true]);
+            assert_eq!(key.domain_is_dual(), &[true, false]);
+            assert_eq!(key.coupled(), *coupled);
+            assert_eq!(block.shape(), shape);
+            assert_eq!(block.strides(), strides);
+            assert_eq!(block.offset(), *offset);
+        }
+        assert_eq!(structure.required_len().unwrap(), 19527);
+
+        let regions = structure.coupled_sector_regions(2).unwrap().unwrap();
+        assert_eq!(regions.len(), 3);
+        assert_eq!(
+            regions
+                .iter()
+                .map(|region| (
+                    region.coupled(),
+                    region.rows(),
+                    region.cols(),
+                    region.range(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (u1(0), 10, 187, 0..1870),
+                (u1(1), 29, 430, 1870..14340),
+                (u1(2), 21, 247, 14340..19527),
+            ]
+        );
+    }
+
+    fn assert_literal_binary_choice_sector_grids<R>(
+        rule: &R,
+        vacuum: SectorId,
+        external: SectorId,
+        mut groups: Vec<(SectorId, Vec<[SectorId; 2]>)>,
+    ) where
+        R: MultiplicityFreeFusionRule,
+    {
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(vacuum, 2), (external, 3)], false),
+                SectorLeg::new([(vacuum, 5), (external, 7)], true),
+            ]),
+            FusionProductSpace::new([
+                SectorLeg::new([(vacuum, 11), (external, 13)], true),
+                SectorLeg::new([(vacuum, 17), (external, 19)], false),
+            ]),
+        );
+
+        groups.sort_by_key(|(coupled, _)| *coupled);
+        let layout = homspace.fusion_tree_layout_data_uncached(rule);
+        assert_eq!(layout.sectors.len(), groups.len());
+        let expected_key_count = groups
+            .iter()
+            .map(|(_, trees)| trees.len() * trees.len())
+            .sum::<usize>();
+        assert_eq!(layout.keys.len(), expected_key_count);
+
+        let structure = homspace
+            .coupled_subblock_structure_from_leg_degeneracies(rule)
+            .unwrap();
+        let regions = structure.coupled_sector_regions(2).unwrap().unwrap();
+        assert_eq!(regions.len(), groups.len());
+        let mut block_index = 0usize;
+        let mut sector_offset = 0usize;
+        for (sector_index, ((expected_coupled, trees), sector)) in
+            groups.iter().zip(&layout.sectors).enumerate()
+        {
+            assert_eq!(
+                (sector.start, sector.row_count, sector.col_count),
+                (block_index, trees.len(), trees.len())
+            );
+
+            let row_shapes = trees
+                .iter()
+                .map(|tree| {
+                    [
+                        if tree[0] == vacuum { 2 } else { 3 },
+                        if tree[1] == vacuum { 5 } else { 7 },
+                    ]
+                })
+                .collect::<Vec<_>>();
+            let col_shapes = trees
+                .iter()
+                .map(|tree| {
+                    [
+                        if tree[0] == vacuum { 11 } else { 13 },
+                        if tree[1] == vacuum { 17 } else { 19 },
+                    ]
+                })
+                .collect::<Vec<_>>();
+            let row_dims = row_shapes
+                .iter()
+                .map(|shape| shape[0] * shape[1])
+                .collect::<Vec<_>>();
+            let col_dims = col_shapes
+                .iter()
+                .map(|shape| shape[0] * shape[1])
+                .collect::<Vec<_>>();
+            let matrix_rows = row_dims.iter().sum::<usize>();
+            let matrix_cols = col_dims.iter().sum::<usize>();
+            let mut col_offset = 0usize;
+            for (col, domain_tree) in trees.iter().enumerate() {
+                let mut row_offset = 0usize;
+                for (row, codomain_tree) in trees.iter().enumerate() {
+                    let key = &layout.keys[block_index];
+                    assert_eq!(key.codomain_uncoupled(), codomain_tree);
+                    assert_eq!(key.domain_uncoupled(), domain_tree);
+                    assert_eq!(key.codomain_is_dual(), &[false, true]);
+                    assert_eq!(key.domain_is_dual(), &[true, false]);
+                    assert_eq!(key.coupled(), *expected_coupled);
+
+                    let block = structure.block(block_index).unwrap();
+                    assert_eq!(
+                        block.shape(),
+                        &[
+                            row_shapes[row][0],
+                            row_shapes[row][1],
+                            col_shapes[col][0],
+                            col_shapes[col][1],
+                        ]
+                    );
+                    assert_eq!(
+                        block.strides(),
+                        &[
+                            1,
+                            row_shapes[row][0],
+                            matrix_rows,
+                            matrix_rows * col_shapes[col][0],
+                        ]
+                    );
+                    assert_eq!(
+                        block.offset(),
+                        sector_offset + row_offset + matrix_rows * col_offset
+                    );
+                    row_offset += row_dims[row];
+                    block_index += 1;
+                }
+                col_offset += col_dims[col];
+            }
+
+            let sector_end = sector_offset + matrix_rows * matrix_cols;
+            assert_eq!(regions[sector_index].coupled(), *expected_coupled);
+            assert_eq!(regions[sector_index].rows(), matrix_rows);
+            assert_eq!(regions[sector_index].cols(), matrix_cols);
+            assert_eq!(regions[sector_index].range(), sector_offset..sector_end);
+            sector_offset = sector_end;
+        }
+        assert_eq!(block_index, expected_key_count);
+        assert_eq!(structure.required_len().unwrap(), sector_offset);
+    }
+
+    #[test]
+    fn canonical_coupled_grid_has_literal_nonabelian_and_product_metadata() {
+        assert_literal_binary_choice_sector_grids(
+            &FermionParityFusionRule,
+            z2_even(),
+            z2_odd(),
+            vec![
+                (z2_even(), vec![[z2_even(), z2_even()], [z2_odd(), z2_odd()]]),
+                (z2_odd(), vec![[z2_odd(), z2_even()], [z2_even(), z2_odd()]]),
+            ],
+        );
+        assert_literal_binary_choice_sector_grids(
+            &SU2FusionRule,
+            su2(0),
+            su2(1),
+            vec![
+                (su2(0), vec![[su2(0), su2(0)], [su2(1), su2(1)]]),
+                (su2(1), vec![[su2(1), su2(0)], [su2(0), su2(1)]]),
+                (su2(2), vec![[su2(1), su2(1)]]),
+            ],
+        );
+
+        type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
+        type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
+        type Fz2U1Rule =
+            ProductFusionRule<FermionParityFusionRule, U1FusionRule, Fz2U1Codec>;
+        type TripleCodec = PackedProductCodec<Fz2U1Layout, Su2SectorLayout>;
+        type TripleRule = ProductFusionRule<Fz2U1Rule, SU2FusionRule, TripleCodec>;
+
+        let triple_rule = TripleRule::new(
+            Fz2U1Rule::new(FermionParityFusionRule, U1FusionRule),
+            SU2FusionRule,
+        );
+        let vacuum =
+            TripleCodec::encode(Fz2U1Codec::encode(z2_even(), u1(0)), su2(0));
+        let external =
+            TripleCodec::encode(Fz2U1Codec::encode(z2_odd(), u1(0)), su2(1));
+        let second_channel =
+            TripleCodec::encode(Fz2U1Codec::encode(z2_even(), u1(0)), su2(2));
+        assert_literal_binary_choice_sector_grids(
+            &triple_rule,
+            vacuum,
+            external,
+            vec![
+                (vacuum, vec![[vacuum, vacuum], [external, external]]),
+                (
+                    external,
+                    vec![[external, vacuum], [vacuum, external]],
+                ),
+                (second_channel, vec![[external, external]]),
+            ],
+        );
+    }
+
+    #[test]
+    fn canonical_su2_innerline_grid_matches_literal_sector_matrices() {
+        let half = su2(1);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(half, 2)], false),
+                SectorLeg::new([(half, 3)], true),
+                SectorLeg::new([(half, 5)], false),
+            ]),
+            FusionProductSpace::new([
+                SectorLeg::new([(half, 7)], true),
+                SectorLeg::new([(half, 11)], false),
+                SectorLeg::new([(half, 13)], true),
+            ]),
+        );
+
+        let layout = homspace.fusion_tree_layout_data_uncached(&SU2FusionRule);
+        assert_eq!(layout.keys.len(), 5);
+        assert_eq!(layout.sectors.len(), 2);
+        assert_eq!(
+            (
+                layout.sectors[0].start,
+                layout.sectors[0].row_count,
+                layout.sectors[0].col_count,
+            ),
+            (0, 2, 2)
+        );
+        assert_eq!(
+            (
+                layout.sectors[1].start,
+                layout.sectors[1].row_count,
+                layout.sectors[1].col_count,
+            ),
+            (4, 1, 1)
+        );
+        let expected_innerlines = [
+            (su2(0), su2(0), su2(1)),
+            (su2(2), su2(0), su2(1)),
+            (su2(0), su2(2), su2(1)),
+            (su2(2), su2(2), su2(1)),
+            (su2(2), su2(2), su2(3)),
+        ];
+        for (key, &(codomain_inner, domain_inner, coupled)) in
+            layout.keys.iter().zip(&expected_innerlines)
+        {
+            assert_eq!(key.codomain_uncoupled(), &[half, half, half]);
+            assert_eq!(key.domain_uncoupled(), &[half, half, half]);
+            assert_eq!(key.codomain_is_dual(), &[false, true, false]);
+            assert_eq!(key.domain_is_dual(), &[true, false, true]);
+            assert_eq!(key.codomain_innerlines(), &[codomain_inner]);
+            assert_eq!(key.domain_innerlines(), &[domain_inner]);
+            assert_eq!(key.coupled(), coupled);
+        }
+
+        let structure = homspace
+            .coupled_subblock_structure_from_leg_degeneracies(&SU2FusionRule)
+            .unwrap();
+        let expected_offsets = [0, 30, 60060, 60090, 120120];
+        for (index, &offset) in expected_offsets.iter().enumerate() {
+            let block = structure.block(index).unwrap();
+            assert_eq!(block.shape(), &[2, 3, 5, 7, 11, 13]);
+            if index < 4 {
+                assert_eq!(block.strides(), &[1, 2, 6, 60, 420, 4620]);
+            } else {
+                assert_eq!(block.strides(), &[1, 2, 6, 30, 210, 2310]);
+            }
+            assert_eq!(block.offset(), offset);
+        }
+        assert_eq!(structure.required_len().unwrap(), 150150);
+        let regions = structure.coupled_sector_regions(3).unwrap().unwrap();
+        assert_eq!(regions.len(), 2);
+        assert_eq!(
+            (
+                regions[0].coupled(),
+                regions[0].rows(),
+                regions[0].cols(),
+                regions[0].range(),
+            ),
+            (su2(1), 60, 2002, 0..120120)
+        );
+        assert_eq!(
+            (
+                regions[1].coupled(),
+                regions[1].rows(),
+                regions[1].cols(),
+                regions[1].range(),
+            ),
+            (su2(3), 30, 1001, 120120..150150)
+        );
+    }
+
+    #[test]
+    fn explicit_shape_coupled_grid_reports_extent_overflow() {
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(u1(0), usize::MAX)], false),
+                SectorLeg::new([(u1(0), 2)], false),
+            ]),
+            FusionProductSpace::new(Vec::<SectorLeg>::new()),
+        );
+
+        let error = homspace
+            .coupled_subblock_structure(&U1FusionRule, 2, [[usize::MAX, 2]])
+            .unwrap_err();
+        assert_eq!(error, CoreError::ElementCountOverflow);
     }
 
     fn assert_direct_generic_leg_degeneracy_structure_matches_legacy<R>(
@@ -6894,28 +7366,29 @@ mod tests {
     }
 
     #[test]
-    fn direct_leg_degeneracy_layout_evaluates_each_tree_shape_once() {
+    fn canonical_coupled_grid_derives_each_row_and_column_once() {
         let rule = U1FusionRule;
         let leg = SectorLeg::new([(u1(-1), 2), (u1(0), 3), (u1(2), 1)], false);
         let homspace = FusionTreeHomSpace::new(
             FusionProductSpace::new([leg.clone(), leg.clone()]),
             FusionProductSpace::new([leg.clone(), leg]),
         );
-        let layout = homspace.cached_fusion_tree_layout(&rule);
-        let evaluations = std::cell::Cell::new(0usize);
-        let actual = coupled_subblock_structure_from_layout(
-            &homspace,
-            homspace.codomain().len(),
-            &layout,
-            |key| {
-                evaluations.set(evaluations.get() + 1);
-                homspace.degeneracy_shape_for_key(key)
-            },
-        )
-        .unwrap();
+        reset_coupled_grid_build_observations();
+        let layout = homspace.fusion_tree_layout_data_uncached(&rule);
+        let expected_derivations = layout
+            .sectors
+            .iter()
+            .map(|sector| sector.row_count + sector.col_count)
+            .sum::<usize>();
+        let actual =
+            coupled_subblock_parts_from_leg_degeneracies(&homspace, &layout).unwrap();
         let expected = legacy_leg_degeneracy_structure(&rule, &homspace);
-        assert_eq!(actual, expected);
-        assert_eq!(evaluations.get(), layout.keys.len());
+        assert_eq!(actual.0, *expected.sector_structure());
+        assert_eq!(actual.1, *expected.degeneracy_structure());
+        assert_eq!(
+            coupled_grid_build_observations(),
+            (0, expected_derivations)
+        );
     }
 
     #[test]
@@ -7167,9 +7640,9 @@ mod tests {
             [(U1Irrep::new(charge), 1)],
         );
         let key = Arc::new(FusionTreeHomSpaceCacheKey::new(&rule, &hom));
-        let layout = Arc::new(fusion_tree_layout_from_keys(
+        let layout = Arc::new(fusion_tree_layout_from_data(
             next_fusion_tree_layout_id(),
-            hom.fusion_tree_keys_uncached(&rule),
+            hom.fusion_tree_layout_data_uncached(&rule),
         ));
         (key, layout)
     }
@@ -7181,6 +7654,22 @@ mod tests {
         let encoded = hom.fusion_tree_keys_uncached(rule);
         let lowered = hom.try_fusion_tree_keys_uncached_lowered(rule).unwrap();
         assert_eq!(lowered, encoded);
+
+        let encoded_layout = hom.fusion_tree_layout_data_uncached(rule);
+        let lowered_layout = hom
+            .try_fusion_tree_layout_data_uncached_lowered(rule)
+            .unwrap();
+        assert_eq!(lowered_layout.keys, encoded_layout.keys);
+        assert_eq!(lowered_layout.sectors.len(), encoded_layout.sectors.len());
+        for (actual, expected) in lowered_layout
+            .sectors
+            .iter()
+            .zip(&encoded_layout.sectors)
+        {
+            assert_eq!(actual.start, expected.start);
+            assert_eq!(actual.row_count, expected.row_count);
+            assert_eq!(actual.col_count, expected.col_count);
+        }
     }
 
     fn singleton_rank_hom(sector: SectorId, rank: usize) -> FusionTreeHomSpace {
@@ -7890,9 +8379,9 @@ mod tests {
             Vec::<(SectorId, usize)>::new(),
         );
         let key = Arc::new(FusionTreeHomSpaceCacheKey::new(&rule, &hom));
-        let layout = Arc::new(fusion_tree_layout_from_keys(
+        let layout = Arc::new(fusion_tree_layout_from_data(
             next_fusion_tree_layout_id(),
-            hom.fusion_tree_keys_uncached(&rule),
+            hom.fusion_tree_layout_data_uncached(&rule),
         ));
         let charged_bytes = charged_fusion_tree_layout_bytes(&key, &layout);
         assert!(charged_bytes > FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES);
