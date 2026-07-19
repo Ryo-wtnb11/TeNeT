@@ -195,6 +195,17 @@ where
     )
 }
 
+fn validate_adjoint_data_extent(
+    expected: Result<usize, CoreError>,
+    actual: usize,
+) -> Result<(), OperationError> {
+    let expected = expected.map_err(OperationError::from_core_preserving_context)?;
+    if actual != expected {
+        return Err(OperationError::ElementCountMismatch { expected, actual });
+    }
+    Ok(())
+}
+
 /// Dynamic-rank adjoint (dagger): returns the adjoint space (codomain and
 /// domain swapped) together with freshly allocated coupled-layout data whose
 /// blocks are the conjugate transposes of the source blocks.
@@ -222,6 +233,7 @@ where
     D: Copy + num_traits::Zero + Clone + ConjugateValue,
 {
     space.validate_rule(rule)?;
+    validate_adjoint_data_extent(space.required_len(), data.len())?;
     let nout = space.nout();
     let nin = space.nin();
     let structure = Arc::clone(space.structure());
@@ -450,6 +462,7 @@ where
     D: Copy + num_traits::Zero + Clone + ConjugateValue,
 {
     space.validate_rule(rule)?;
+    validate_adjoint_data_extent(space.required_len(), data.len())?;
     let nout = space.nout();
     let nin = space.nin();
     let structure = Arc::clone(space.structure());
@@ -535,6 +548,7 @@ where
     fusion_space
         .validate_rule(rule)
         .map_err(OperationError::Core)?;
+    validate_adjoint_data_extent(fusion_space.required_len(), tensor.storage_dim())?;
     let homspace = fusion_space.homspace();
     let adjoint_hom =
         FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone());
@@ -658,11 +672,12 @@ mod cache_tests {
     use super::*;
     use crate::tree_transform::TreeTransformBuiltinRuleCacheKey;
     use std::cell::Cell;
+    use std::ops::Add;
     use tenet_core::{
-        BlockStructure, FermionParityFusionRule, FusionProductSpace, Fz2SectorLayout,
-        PackedProductCodec, ProductFusionRule, ProductSectorCodec, ProductSectorLayout,
-        SU2FusionRule, SU2Irrep, SectorId, SectorLeg, Su2SectorLayout, U1FusionRule, U1Irrep,
-        U1SectorLayout, Z2Irrep,
+        BlockStructure, BraidingStyleKind, FermionParityFusionRule, FusionProductSpace,
+        FusionStyleKind, Fz2SectorLayout, PackedProductCodec, ProductFusionRule,
+        ProductSectorCodec, ProductSectorLayout, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
+        SectorVec, Su2SectorLayout, U1FusionRule, U1Irrep, U1SectorLayout, Z2Irrep,
     };
 
     type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
@@ -673,6 +688,78 @@ mod cache_tests {
 
     thread_local! {
         static LOWERED_PRIMER_CALLS: Cell<usize> = const { Cell::new(0) };
+        static OUTPUT_ZERO_CALLS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct OutputObservedValue(f64);
+
+    impl Add for OutputObservedValue {
+        type Output = Self;
+
+        fn add(self, rhs: Self) -> Self::Output {
+            Self(self.0 + rhs.0)
+        }
+    }
+
+    impl num_traits::Zero for OutputObservedValue {
+        fn zero() -> Self {
+            OUTPUT_ZERO_CALLS.with(|calls| calls.set(calls.get() + 1));
+            Self(0.0)
+        }
+
+        fn is_zero(&self) -> bool {
+            self.0 == 0.0
+        }
+    }
+
+    impl strided_kernel::ElementOpApply for OutputObservedValue {}
+
+    impl ConjugateValue for OutputObservedValue {
+        fn maybe_conj(self, _conjugate: bool) -> Self {
+            self
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct ToyGenericRule<const ID: u8>;
+
+    impl<const ID: u8> FusionRule for ToyGenericRule<ID> {
+        fn rule_identity(&self) -> tenet_core::RuleIdentity {
+            tenet_core::RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn dual(&self, sector: SectorId) -> SectorId {
+            sector
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (0, sector) | (sector, 0) => [SectorId::new(sector)].into_iter().collect(),
+                (1, 1) => [SectorId::new(0), SectorId::new(1)].into_iter().collect(),
+                _ => SectorVec::new(),
+            }
+        }
+
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            if (left.id(), right.id(), coupled.id()) == (1, 1, 1) {
+                2
+            } else {
+                usize::from(self.fusion_channels(left, right).contains(&coupled))
+            }
+        }
     }
 
     fn triple_rule() -> TripleRule {
@@ -722,6 +809,203 @@ mod cache_tests {
         let count = hom.fusion_tree_keys(&rule).len();
         DynamicFusionMapSpace::from_degeneracy_shapes(&rule, hom, vec![vec![deg, deg]; count])
             .unwrap()
+    }
+
+    fn toy_generic_bound<const ID: u8>() -> BoundDynamicFusionMapSpace<ToyGenericRule<ID>> {
+        let one = SectorId::new(1);
+        let leg = || SectorLeg::new([(one, 1)], false);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg()]),
+            FusionProductSpace::new([leg()]),
+        );
+        let provider = Arc::new(ToyGenericRule::<ID>);
+        let count = homspace
+            .fusion_tree_keys_generic(provider.as_ref())
+            .unwrap()
+            .len();
+        assert_eq!(count, 2);
+        BoundDynamicFusionMapSpace::from_degeneracy_shapes_generic(
+            provider,
+            homspace,
+            vec![vec![1; 3]; count],
+        )
+        .unwrap()
+    }
+
+    fn typed_u1_tensor() -> TensorMap<OutputObservedValue, 1, 1> {
+        let rule = U1FusionRule;
+        let one = U1Irrep::new(1).sector_id();
+        let leg = || FusionProductSpace::new([SectorLeg::new([(one, 2)], false)]);
+        let homspace = FusionTreeHomSpace::new(leg(), leg());
+        let count = homspace.fusion_tree_keys(&rule).len();
+        let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
+            homspace,
+            &rule,
+            vec![vec![2, 2]; count],
+        )
+        .unwrap();
+        let len = space.required_len().unwrap();
+        TensorMap::from_vec_with_fusion_space(vec![OutputObservedValue(1.0); len], space).unwrap()
+    }
+
+    #[test]
+    fn eager_adjoint_accepts_exact_multiplicity_free_storage() {
+        // What: exact raw storage succeeds for a non-self-dual U(1) sector and
+        // the ordinary fZ2 x U(1) x SU(2) product path.
+        let u1 = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            u1_source(1, 2),
+            Arc::new(U1FusionRule),
+        )
+        .unwrap();
+        let u1_len = u1.space().required_len().unwrap();
+        let (_, u1_data) = adjoint_bound_dyn(&u1, &vec![1.0; u1_len]).unwrap();
+        assert_eq!(u1_data.len(), u1_len);
+
+        let rule = triple_rule();
+        let product = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            triple_source(&rule),
+            Arc::new(rule),
+        )
+        .unwrap();
+        let product_len = product.space().required_len().unwrap();
+        let (_, product_data) = adjoint_bound_dyn(&product, &vec![1.0; product_len]).unwrap();
+        assert_eq!(product_data.len(), product_len);
+    }
+
+    #[test]
+    fn eager_adjoint_rejects_inexact_storage_before_target_work() {
+        // What: short and oversized ordinary storage fail before target
+        // preparation, cache admission, layout publication, or output zero-fill.
+        let _guard = crate::test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let rule = triple_rule();
+        let source = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            triple_source(&rule),
+            Arc::new(rule),
+        )
+        .unwrap()
+        .with_test_layout_primer(counting_primer);
+        let expected = source.space().required_len().unwrap();
+        let cache = adjoint_space_cache::<<TripleRule as TreeTransformRuleCacheKey>::Key>();
+
+        for actual in [expected - 1, expected + 1] {
+            LOWERED_PRIMER_CALLS.with(|calls| calls.set(0));
+            OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
+            reset_scratch_publication_observations();
+            let data = vec![OutputObservedValue(1.0); actual];
+
+            let error = adjoint_bound_dyn(&source, &data).unwrap_err();
+
+            assert_eq!(
+                error,
+                OperationError::ElementCountMismatch { expected, actual }
+            );
+            assert_eq!(LOWERED_PRIMER_CALLS.with(Cell::get), 0);
+            assert_eq!(OUTPUT_ZERO_CALLS.with(Cell::get), 0);
+            assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+            assert_eq!(
+                cache
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .entries
+                    .len(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn eager_adjoint_keeps_rule_mismatch_precedence_over_extent() {
+        // What: source rule validation remains the first eager-adjoint error
+        // even when raw storage is also short.
+        let source = u1_source(1, 2);
+        let error = adjoint_dyn(&SU2FusionRule, &source, &[] as &[f64]).unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::FusionRuleMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn generic_eager_adjoint_enforces_the_same_extent_boundary() {
+        // What: a genuinely outer-multiplicity dynamic space accepts exact
+        // storage and rejects short/oversized storage before output zero-fill.
+        let source = toy_generic_bound::<1>();
+        let expected = source.space().required_len().unwrap();
+        let (_, exact) =
+            adjoint_bound_dyn_generic(&source, &vec![OutputObservedValue(1.0); expected]).unwrap();
+        assert_eq!(exact.len(), expected);
+
+        for actual in [expected - 1, expected + 1] {
+            OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
+            let data = vec![OutputObservedValue(1.0); actual];
+            let error = adjoint_bound_dyn_generic(&source, &data).unwrap_err();
+            assert_eq!(
+                error,
+                OperationError::ElementCountMismatch { expected, actual }
+            );
+            assert_eq!(OUTPUT_ZERO_CALLS.with(Cell::get), 0);
+        }
+
+        let wrong_rule = ToyGenericRule::<2>;
+        let error = adjoint_dyn_generic(&wrong_rule, source.space(), &[] as &[OutputObservedValue])
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::FusionRuleMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn typed_eager_adjoint_rejects_storage_resized_through_the_public_api() {
+        // What: typed eager adjoint accepts exact storage, while public
+        // storage mutation cannot make short or oversized backing vectors
+        // reach target construction or output zero-fill.
+        let exact = typed_u1_tensor();
+        let expected = exact.structure().required_len().unwrap();
+        OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
+        let output = adjoint(&U1FusionRule, &exact).unwrap();
+        assert_eq!(output.storage_dim(), expected);
+        assert!(OUTPUT_ZERO_CALLS.with(Cell::get) > 0);
+
+        for oversized in [false, true] {
+            let mut source = typed_u1_tensor();
+            if oversized {
+                source.storage_mut().push(OutputObservedValue(2.0));
+            } else {
+                source.storage_mut().pop();
+            }
+            let actual = source.storage_dim();
+            OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
+
+            let error = adjoint(&U1FusionRule, &source).unwrap_err();
+
+            assert_eq!(
+                error,
+                OperationError::ElementCountMismatch { expected, actual }
+            );
+            assert_eq!(OUTPUT_ZERO_CALLS.with(Cell::get), 0);
+            assert_eq!(source.storage_dim(), actual);
+        }
+    }
+
+    #[test]
+    fn typed_eager_adjoint_keeps_rule_mismatch_precedence_over_extent() {
+        // What: a typed source with both a wrong rule and short backing storage
+        // reports the structural rule mismatch before its extent defect.
+        let mut source = typed_u1_tensor();
+        source.storage_mut().clear();
+
+        let error = adjoint(&SU2FusionRule, &source).unwrap_err();
+
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::FusionRuleMismatch { .. })
+        ));
     }
 
     #[test]
