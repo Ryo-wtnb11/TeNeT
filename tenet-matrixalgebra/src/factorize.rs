@@ -757,22 +757,7 @@ where
         FusionProductSpace::new([new_leg.clone()]),
         FusionProductSpace::new([new_leg]),
     );
-    let length_by_sector: HashMap<SectorId, usize> = spectrum
-        .iter()
-        .map(|entry| (entry.sector, entry.values.len()))
-        .collect();
-    authority.derive_from_fusion_tree_shapes(homspace, |keys| {
-        Ok(keys
-            .iter()
-            .map(|key| {
-                let count = length_by_sector
-                    .get(&coupled_of(key.codomain_tree()))
-                    .copied()
-                    .unwrap_or(0);
-                vec![count, count]
-            })
-            .collect::<Vec<_>>())
-    })
+    authority.derive_from_final_homspace(homspace)
 }
 
 pub fn diagonal_bond_bound_space<R, V>(
@@ -782,7 +767,6 @@ pub fn diagonal_bond_bound_space<R, V>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    let rule = provider.as_ref();
     let new_leg = SectorLeg::new(
         spectrum
             .iter()
@@ -793,22 +777,7 @@ where
         FusionProductSpace::new([new_leg.clone()]),
         FusionProductSpace::new([new_leg]),
     );
-    let length_by_sector: HashMap<SectorId, usize> = spectrum
-        .iter()
-        .map(|entry| (entry.sector, entry.values.len()))
-        .collect();
-    let shapes = homspace
-        .fusion_tree_keys(rule)
-        .iter()
-        .map(|key| {
-            let count = length_by_sector
-                .get(&coupled_of(key.codomain_tree()))
-                .copied()
-                .unwrap_or(0);
-            vec![count, count]
-        })
-        .collect::<Vec<_>>();
-    BoundDynamicFusionMapSpace::from_degeneracy_shapes(provider, homspace, shapes)
+    BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(provider, homspace)
 }
 
 /// Fills the dense block-diagonal data of `space` from `spectrum`, mapping
@@ -1384,7 +1353,7 @@ where
         })
         .collect::<Vec<_>>();
     let (u_space, vt_space) =
-        build_left_right_bound_spaces(input.space(), space.homspace(), &matricizations, &ranks)?;
+        build_left_right_bound_spaces(input.space(), space.homspace(), &ranks)?;
     let u_len = u_space
         .space()
         .required_len()
@@ -1608,9 +1577,7 @@ where
             kept: region.rows().min(region.cols()),
         })
         .collect::<Vec<_>>();
-    let layouts = region_matricization_skeletons::<f64>(&source.regions);
-    let (u_space, vh_space) =
-        build_left_right_bound_spaces::<R, f64>(input, space.homspace(), &layouts, &ranks)?;
+    let (u_space, vh_space) = build_left_right_bound_spaces(input, space.homspace(), &ranks)?;
     let left_regions = checked_sector_regions(u_space.space().structure(), u_space.space().nout())?
         .ok_or(OperationError::UnsupportedTensorContractScope {
             message: "compact left factor is not a coupled-sector matrix layout",
@@ -1787,30 +1754,6 @@ where
     let u = BoundDynFactor::from_bound(u_space, u_data, space.nout(), 1)?;
     let vh = BoundDynFactor::from_bound(vh_space, vh_data, 1, space.nin())?;
     Ok((u, vh, singular_values))
-}
-
-fn region_matricization_skeletons<D>(
-    regions: &[CoupledSectorRegion],
-) -> Vec<SectorMatricization<D>> {
-    regions
-        .iter()
-        .map(|region| SectorMatricization {
-            sector: region_sector(region),
-            rows: region.rows(),
-            cols: region.cols(),
-            row_trees: region
-                .row_trees()
-                .iter()
-                .map(|tree| (tree.tree().clone(), tree.offset(), tree.shape().to_vec()))
-                .collect(),
-            col_trees: region
-                .col_trees()
-                .iter()
-                .map(|tree| (tree.tree().clone(), tree.offset(), tree.shape().to_vec()))
-                .collect(),
-            data: Vec::new(),
-        })
-        .collect()
 }
 
 fn region_sector(region: &CoupledSectorRegion) -> SectorId {
@@ -2126,28 +2069,7 @@ where
         legs[axis - nout] = bond_leg;
         FusionTreeHomSpace::new(homspace.codomain().clone(), FusionProductSpace::new(legs))
     };
-    let space = authority.derive_from_fusion_tree_shapes(new_hom, |keys| {
-        keys.iter()
-            .map(|key| {
-                let old_index = source_structure
-                    .find_block_index_by_key(&BlockKey::FusionTree(key.clone()))
-                    .ok_or(OperationError::UnsupportedTensorContractScope {
-                        message: "truncated factor tree must exist in the full factor",
-                    })?;
-                let old_block = source_structure
-                    .block(old_index)
-                    .map_err(OperationError::from_core_preserving_context)?;
-                let mut shape = old_block.shape().to_vec();
-                let bond_tree = if axis < nout {
-                    key.codomain_tree()
-                } else {
-                    key.domain_tree()
-                };
-                shape[axis] = kept_of(coupled_of(bond_tree));
-                Ok(shape)
-            })
-            .collect::<Result<Vec<_>, OperationError>>()
-    })?;
+    let space = authority.derive_from_final_homspace(new_hom)?;
     let mut data = vec![D::zero(); space.space().required_len()?];
     for index in 0..space.space().structure().block_count() {
         let new_block = space.space().structure().block(index)?;
@@ -2187,83 +2109,44 @@ struct SectorRank {
     kept: usize,
 }
 
-fn build_left_right_bound_spaces<R, D>(
+fn build_left_right_bound_spaces<R>(
     authority: &BoundDynamicFusionMapSpace<R>,
     homspace: &FusionTreeHomSpace,
-    matricizations: &[SectorMatricization<D>],
     ranks: &[SectorRank],
 ) -> Result<(BoundDynamicFusionMapSpace<R>, BoundDynamicFusionMapSpace<R>), OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
 {
-    let rank_by_sector: HashMap<SectorId, usize> =
-        ranks.iter().map(|rank| (rank.sector, rank.kept)).collect();
-    let matrix_by_sector = matricization_map(matricizations);
-    let sector_rank =
-        |sector: SectorId| -> usize { rank_by_sector.get(&sector).copied().unwrap_or(0) };
     let new_leg = SectorLeg::new(ranks.iter().map(|rank| (rank.sector, rank.kept)), false);
 
     let left_hom = FusionTreeHomSpace::new(
         homspace.codomain().clone(),
         FusionProductSpace::new([new_leg.clone()]),
     );
-    let left = authority.derive_from_fusion_tree_shapes(left_hom, |keys| {
-        keys.iter()
-            .map(|key| {
-                let sector = coupled_of(key.codomain_tree());
-                let mut shape = row_shape_of(&matrix_by_sector, sector, key.codomain_tree())?;
-                shape.push(sector_rank(sector));
-                Ok(shape)
-            })
-            .collect::<Result<Vec<_>, OperationError>>()
-    })?;
+    let left = authority.derive_from_final_homspace(left_hom)?;
 
     let right_hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([new_leg]),
         homspace.domain().clone(),
     );
-    let right = authority.derive_from_fusion_tree_shapes(right_hom, |keys| {
-        keys.iter()
-            .map(|key| {
-                let sector = coupled_of(key.domain_tree());
-                let mut shape = vec![sector_rank(sector)];
-                shape.extend(col_shape_of(&matrix_by_sector, sector, key.domain_tree())?);
-                Ok(shape)
-            })
-            .collect::<Result<Vec<_>, OperationError>>()
-    })?;
+    let right = authority.derive_from_final_homspace(right_hom)?;
     Ok((left, right))
 }
 
-fn build_left_bound_space<R, D>(
+fn build_left_bound_space<R>(
     authority: &BoundDynamicFusionMapSpace<R>,
     homspace: &FusionTreeHomSpace,
-    matricizations: &[SectorMatricization<D>],
     ranks: &[SectorRank],
 ) -> Result<BoundDynamicFusionMapSpace<R>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: FactorScalar,
 {
-    let rank_by_sector: HashMap<SectorId, usize> =
-        ranks.iter().map(|rank| (rank.sector, rank.kept)).collect();
-    let matrix_by_sector = matricization_map(matricizations);
     let new_leg = SectorLeg::new(ranks.iter().map(|rank| (rank.sector, rank.kept)), false);
     let hom = FusionTreeHomSpace::new(
         homspace.codomain().clone(),
         FusionProductSpace::new([new_leg]),
     );
-    authority.derive_from_fusion_tree_shapes(hom, |keys| {
-        keys.iter()
-            .map(|key| {
-                let sector = coupled_of(key.codomain_tree());
-                let mut shape = row_shape_of(&matrix_by_sector, sector, key.codomain_tree())?;
-                shape.push(rank_by_sector.get(&sector).copied().unwrap_or(0));
-                Ok(shape)
-            })
-            .collect::<Result<Vec<_>, OperationError>>()
-    })
+    authority.derive_from_final_homspace(hom)
 }
 
 /// Builds the `(codomain <- W, W <- domain)` factor pair shared by SVD and
@@ -2285,8 +2168,7 @@ where
             kept: pair.kept,
         })
         .collect::<Vec<_>>();
-    let (left_space, right_space) =
-        build_left_right_bound_spaces(authority, homspace, matricizations, &ranks)?;
+    let (left_space, right_space) = build_left_right_bound_spaces(authority, homspace, &ranks)?;
     let matrix_by_sector = matricization_map(matricizations);
     let pair_by_sector: HashMap<SectorId, &FactorPair<D>> =
         pairs.iter().map(|pair| (pair.sector, pair)).collect();
@@ -2357,7 +2239,7 @@ where
             kept: pair.kept,
         })
         .collect::<Vec<_>>();
-    let space = build_left_bound_space(authority, homspace, matricizations, &ranks)?;
+    let space = build_left_bound_space(authority, homspace, &ranks)?;
     let mut data = vec![D::zero(); space.space().required_len()?];
     let pair_by_sector: HashMap<SectorId, &FactorPair<D>> =
         pairs.iter().map(|pair| (pair.sector, pair)).collect();
@@ -2568,7 +2450,7 @@ where
             kept: matrix.rows,
         })
         .collect::<Vec<_>>();
-    let v_space = build_left_bound_space(input.space(), space.homspace(), &matricizations, &ranks)?;
+    let v_space = build_left_bound_space(input.space(), space.homspace(), &ranks)?;
     let v_len = v_space
         .space()
         .required_len()
@@ -3158,15 +3040,7 @@ where
         FusionProductSpace::new([row_leg]),
         FusionProductSpace::new([col_leg]),
     );
-    let space = authority.derive_from_fusion_tree_shapes(homspace, |keys| {
-        Ok(keys
-            .iter()
-            .map(|key| {
-                let sector = coupled_of(key.codomain_tree());
-                vec![rows_of(sector), cols_of(sector)]
-            })
-            .collect::<Vec<_>>())
-    })?;
+    let space = authority.derive_from_final_homspace(homspace)?;
     let len = space
         .space()
         .required_len()

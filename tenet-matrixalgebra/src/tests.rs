@@ -404,6 +404,61 @@ fn assert_svd_blocks_match<const NOUT: usize, const NIN: usize>(
     }
 }
 
+fn assert_factor_layout_matches_legacy_shapes<R>(actual: &BoundDynamicFusionMapSpace<R>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    // What: canonical factor construction has the exact block layout produced
+    // by the former per-tree shape authority.
+    let provider = Arc::clone(actual.provider_arc());
+    let homspace = actual.space().homspace().clone();
+    let shapes = homspace
+        .fusion_tree_keys(provider.as_ref())
+        .iter()
+        .map(|key| {
+            homspace
+                .codomain()
+                .legs()
+                .iter()
+                .zip(key.codomain_tree().uncoupled())
+                .chain(
+                    homspace
+                        .domain()
+                        .legs()
+                        .iter()
+                        .zip(key.domain_tree().uncoupled()),
+                )
+                .map(|(leg, &sector)| {
+                    leg.degeneracy(sector)
+                        .expect("factor tree sector must belong to its final leg")
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let legacy =
+        BoundDynamicFusionMapSpace::from_degeneracy_shapes(provider, homspace, shapes).unwrap();
+    let actual_space = actual.space();
+    let legacy_space = legacy.space();
+    assert_eq!(actual_space.nout(), legacy_space.nout());
+    assert_eq!(actual_space.nin(), legacy_space.nin());
+    assert_eq!(
+        actual_space.required_len().unwrap(),
+        legacy_space.required_len().unwrap()
+    );
+    assert_eq!(
+        actual_space.structure().block_count(),
+        legacy_space.structure().block_count()
+    );
+    for index in 0..actual_space.structure().block_count() {
+        let actual_block = actual_space.structure().block(index).unwrap();
+        let legacy_block = legacy_space.structure().block(index).unwrap();
+        assert_eq!(actual_block.key(), legacy_block.key());
+        assert_eq!(actual_block.shape(), legacy_block.shape());
+        assert_eq!(actual_block.strides(), legacy_block.strides());
+        assert_eq!(actual_block.offset(), legacy_block.offset());
+    }
+}
+
 fn scale_vt_rows_by_singular_values<const NIN: usize>(
     vt: &mut TensorMap<f64, 1, NIN>,
     singular_values: &[SectorSpectrum],
@@ -477,6 +532,9 @@ where
         &Truncation::Full,
     )
     .unwrap();
+    assert_factor_layout_matches_legacy_shapes(svd.u.space());
+    assert_factor_layout_matches_legacy_shapes(svd.s.space());
+    assert_factor_layout_matches_legacy_shapes(svd.vh.space());
 
     for entry in &svd.singular_values {
         for pair in entry.values.windows(2) {
@@ -1118,6 +1176,9 @@ fn assert_rectangular_direct_svd(rows: usize, cols: usize) {
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     crate::factorize::reset_compact_svd_copy_probe();
     let svd = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+    assert_factor_layout_matches_legacy_shapes(svd.u.space());
+    assert_factor_layout_matches_legacy_shapes(svd.s.space());
+    assert_factor_layout_matches_legacy_shapes(svd.vh.space());
     assert_eq!(
         crate::factorize::compact_svd_copy_probe(),
         crate::factorize::CompactSvdCopyProbe::default()
@@ -1172,6 +1233,8 @@ fn assert_rectangular_direct_qr(rows: usize, cols: usize) {
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     crate::factorize::reset_compact_qr_copy_probe();
     let (q, r) = qr_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+    assert_factor_layout_matches_legacy_shapes(q.space());
+    assert_factor_layout_matches_legacy_shapes(r.space());
     assert_eq!(
         crate::factorize::compact_qr_copy_probe(),
         crate::factorize::CompactQrCopyProbe::default()
@@ -1217,6 +1280,8 @@ fn assert_rectangular_direct_lq(rows: usize, cols: usize) {
     crate::factorize::reset_compact_lq_copy_probe();
     let (left, right) =
         lq_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+    assert_factor_layout_matches_legacy_shapes(left.space());
+    assert_factor_layout_matches_legacy_shapes(right.space());
     let probe = crate::factorize::compact_lq_copy_probe();
     assert_eq!(probe.input_pack_bytes, 0);
     assert_eq!(probe.output_scatter_bytes, 0);
@@ -1879,6 +1944,9 @@ fn svd_compact_factor_dims_include_sectors_without_populated_trees() {
 
     let result = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
 
+    assert_factor_layout_matches_legacy_shapes(result.u.space());
+    assert_factor_layout_matches_legacy_shapes(result.s.space());
+    assert_factor_layout_matches_legacy_shapes(result.vh.space());
     assert_eq!(result.u.tensor().space().dims(), &[5, 2]);
     assert_eq!(result.vh.tensor().space().dims(), &[2, 2]);
     assert_eq!(
@@ -1901,6 +1969,100 @@ fn svd_compact_factor_dims_include_sectors_without_populated_trees() {
             .domain(),
         original_homspace.domain()
     );
+}
+
+#[test]
+fn svd_compact_preserves_asymmetric_non_self_dual_u1_factor_layouts() {
+    // What: canonical factors retain unequal degeneracies and the dual U(1)
+    // domain convention while reconstructing both coupled sectors.
+    let rule = U1FusionRule;
+    let neutral = U1Irrep::new(0).sector_id();
+    let positive = U1Irrep::new(1).sector_id();
+    let negative = U1Irrep::new(-1).sector_id();
+    let codomain = SectorLeg::new([(neutral, 3), (positive, 2)], false);
+    let domain = SectorLeg::new([(neutral, 1), (negative, 4)], true);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([codomain]),
+        FusionProductSpace::new([domain]),
+    );
+    let shapes = homspace
+        .fusion_tree_keys(&rule)
+        .iter()
+        .map(|key| match key.codomain_tree().coupled() {
+            sector if sector == neutral => vec![3, 1],
+            sector if sector == positive => vec![2, 4],
+            sector => panic!("unexpected U(1) sector {sector:?}"),
+        })
+        .collect::<Vec<_>>();
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims([5], [5]).unwrap(),
+        homspace,
+        &rule,
+        shapes,
+    )
+    .unwrap();
+    let tensor = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+        (0..space.required_len().unwrap())
+            .map(|index| ((index * 7 + 3) % 17) as f64 - 6.0)
+            .collect(),
+        space,
+    )
+    .unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let svd = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+
+    assert_factor_layout_matches_legacy_shapes(svd.u.space());
+    assert_factor_layout_matches_legacy_shapes(svd.s.space());
+    assert_factor_layout_matches_legacy_shapes(svd.vh.space());
+    let input_regions = tensor
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    let u_regions = svd
+        .u
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    let vh_regions = svd
+        .vh
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    for input_region in input_regions.iter() {
+        let sector = input_region.coupled();
+        let u_region = u_regions
+            .iter()
+            .find(|region| region.coupled() == sector)
+            .unwrap();
+        let vh_region = vh_regions
+            .iter()
+            .find(|region| region.coupled() == sector)
+            .unwrap();
+        let singular = &svd
+            .singular_values
+            .iter()
+            .find(|entry| entry.sector == sector)
+            .unwrap()
+            .values;
+        for col in 0..input_region.cols() {
+            for row in 0..input_region.rows() {
+                let reconstructed = (0..singular.len())
+                    .map(|bond| {
+                        svd.u.data()[u_region.range().start + row + input_region.rows() * bond]
+                            * singular[bond]
+                            * svd.vh.data()[vh_region.range().start + bond + singular.len() * col]
+                    })
+                    .sum::<f64>();
+                let expected =
+                    tensor.data()[input_region.range().start + row + input_region.rows() * col];
+                assert!((reconstructed - expected).abs() < 1.0e-10);
+            }
+        }
+    }
 }
 
 #[test]
@@ -2470,6 +2632,8 @@ where
         &bound_tensor_ref!(Arc::new((*rule).clone()), &tensor),
     )
     .unwrap();
+    assert_factor_layout_matches_legacy_shapes(q.space());
+    assert_factor_layout_matches_legacy_shapes(r.space());
     let reconstructed = contract_pair(rule, &tensor, &q, &r);
     assert_svd_blocks_match(&tensor, &reconstructed);
 }
@@ -2520,6 +2684,8 @@ where
         &bound_tensor_ref!(Arc::new((*rule).clone()), &tensor),
     )
     .unwrap();
+    assert_factor_layout_matches_legacy_shapes(left.space());
+    assert_factor_layout_matches_legacy_shapes(right.space());
     let reconstructed = contract_pair(rule, &tensor, &left, &right);
     assert_svd_blocks_match(&tensor, &reconstructed);
 }
@@ -2767,6 +2933,9 @@ fn svd_trunc_builds_only_the_returned_diagonal_factor() {
         .iter()
         .map(|entry| entry.values.len())
         .sum();
+    for factor in [partial.u(), partial.s(), partial.vh()] {
+        assert_factor_layout_matches_legacy_shapes(factor.space());
+    }
     assert!(partial_rank < full_rank);
     assert!(partial.error() > 0.0);
     assert_eq!(
@@ -2784,6 +2953,9 @@ fn svd_trunc_builds_only_the_returned_diagonal_factor() {
         .iter()
         .map(|entry| entry.values.len())
         .sum::<usize>();
+    for factor in [full.u(), full.s(), full.vh()] {
+        assert_factor_layout_matches_legacy_shapes(factor.space());
+    }
     assert_eq!(returned_full_rank, full_rank);
     assert_eq!(full.error(), 0.0);
     assert_eq!(
@@ -2827,6 +2999,10 @@ fn svd_trunc_zero_rank_returns_empty_factors_and_the_full_error() {
     assert!(result.u().data().is_empty());
     assert!(result.s().data().is_empty());
     assert!(result.vh().data().is_empty());
+    for factor in [result.u(), result.s(), result.vh()] {
+        assert_eq!(factor.space().space().structure().block_count(), 0);
+        assert_factor_layout_matches_legacy_shapes(factor.space());
+    }
     assert!((result.error() - expected_error).abs() < 1e-12);
     assert_eq!(
         crate::factorize::diagonal_bond_build_probe(),
@@ -2883,6 +3059,10 @@ fn assert_zero_axis_svd_trunc(rows: usize, cols: usize) {
         assert!(result.u().data().is_empty());
         assert!(result.s().data().is_empty());
         assert!(result.vh().data().is_empty());
+        for factor in [result.u(), result.s(), result.vh()] {
+            assert_eq!(factor.space().space().structure().block_count(), 0);
+            assert_factor_layout_matches_legacy_shapes(factor.space());
+        }
         assert_eq!(result.error(), 0.0);
         assert_eq!(
             crate::factorize::diagonal_bond_build_probe(),
@@ -3040,6 +3220,8 @@ where
         &bound_tensor_ref!(Arc::new((*rule).clone()), &tensor),
     )
     .unwrap();
+    assert_factor_layout_matches_legacy_shapes(eigh.v.space());
+    assert_factor_layout_matches_legacy_shapes(eigh.d.space());
     for entry in &eigh.eigenvalues {
         for pair in entry.values.windows(2) {
             assert!(pair[0].abs() >= pair[1].abs() - 1e-12);
@@ -3811,6 +3993,9 @@ fn rectangular_full_svd_has_square_outer_factors_and_reconstructs() {
         );
         let input = bound_tensor(Arc::new(rule), &matrix);
         let full = svd_full(&mut dense, &input.as_ref()).unwrap();
+        assert_factor_layout_matches_legacy_shapes(full.u.space());
+        assert_factor_layout_matches_legacy_shapes(full.s.space());
+        assert_factor_layout_matches_legacy_shapes(full.vh.space());
         assert_eq!(full.u.structure().block(0).unwrap().shape(), &[rows, rows]);
         assert_eq!(full.s.structure().block(0).unwrap().shape(), &[rows, cols]);
         assert_eq!(full.vh.structure().block(0).unwrap().shape(), &[cols, cols]);
