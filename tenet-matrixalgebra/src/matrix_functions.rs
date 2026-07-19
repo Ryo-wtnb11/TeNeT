@@ -133,9 +133,8 @@ where
     pinv_from_factors(context, factors, rcond)
 }
 
-/// Shared `pinv` core: given the compact SVD factors `(U, Vh, σ)`, form
-/// `t^+ = V S^+ U^H`. `inv_dyn` reuses this so it computes the SVD once (its
-/// own full-rank check already has the factors) instead of recomputing it.
+/// Applies the public `pinv` cutoff to compact SVD factors before the
+/// factor-recomposition step shared with `inv_dyn`.
 fn pinv_from_factors<RuleKey, BT, BC, R, D>(
     context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     factors: SvdFactorsDyn<R, D>,
@@ -165,13 +164,29 @@ where
                 .collect(),
         })
         .collect();
+    inverse_from_factors(context, u, vh, &inverted)
+}
+
+fn inverse_from_factors<RuleKey, BT, BC, R, D>(
+    context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
+    u: BoundDynFactor<R, D>,
+    vh: BoundDynFactor<R, D>,
+    inverted: &[SectorSpectrum],
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
+    BT: TreeTransformBackend<D, f64>,
+    BC: TensorContractBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+{
     // t^+ = V S^+ U^H. Fold S^+ into a column scaling of V (bond = trailing
     // axis) instead of building the dense diagonal and running an extra GEMM
     // (issue #46).
     let mut v = adjoint_bound_factor(&vh)?;
     let uh = adjoint_bound_factor(&u)?;
     let v_space = v.space().space().clone();
-    scale_axis_by_spectrum(&v_space, v.data_mut(), None, &inverted)?;
+    scale_axis_by_spectrum(&v_space, v.data_mut(), None, inverted)?;
     compose_bound_dyn(context, &v, &uh)
 }
 
@@ -214,23 +229,27 @@ where
             message: "inv requires an endomorphism (codomain == domain)",
         });
     }
-    // Compute the compact SVD once: the full-rank check needs the spectrum and
-    // `pinv_from_factors` needs the factors, so reuse the same decomposition
-    // instead of recomputing it inside `pinv_dyn`.
-    let factors = svd_compact_factors_dyn(dense, input)?;
-    let singular_values = &factors.2;
-    let sigma_max = singular_values
-        .iter()
-        .flat_map(|entry| entry.values.iter().copied())
-        .fold(0.0_f64, f64::max);
-    let tolerance = sigma_max * 1e-13;
-    if singular_values
-        .iter()
-        .any(|entry| entry.values.iter().any(|&sigma| sigma <= tolerance))
-    {
+    // Why not block LU like TensorKit: DenseExecutor does not yet expose an
+    // LU/solve capability, so retain one compact SVD until that backend seam
+    // exists.
+    let (u, vh, mut singular_values) = svd_compact_factors_dyn(dense, input)?;
+    let has_rank_deficient_sector = singular_values.iter().any(|entry| {
+        let sigma_max = entry.values.first().copied().unwrap_or(0.0);
+        let tolerance = D::epsilon() * entry.values.len() as f64 * sigma_max;
+        entry
+            .values
+            .iter()
+            .any(|&sigma| !sigma.is_finite() || sigma <= tolerance)
+    });
+    if has_rank_deficient_sector {
         return Err(OperationError::UnsupportedTensorContractScope {
             message: "inv requires full-rank blocks",
         });
     }
-    pinv_from_factors(context, factors, 1e-14)
+    for entry in &mut singular_values {
+        for sigma in &mut entry.values {
+            *sigma = sigma.recip();
+        }
+    }
+    inverse_from_factors(context, u, vh, &singular_values)
 }
