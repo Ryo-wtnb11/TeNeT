@@ -96,6 +96,39 @@ fn adjoint_involution_does_not_allocate() {
 }
 
 #[test]
+fn identity_adjoint_transform_cost_is_independent_of_rank_and_block_count() {
+    // What: identity permute, braid, and repartition share the lazy view with
+    // zero allocations across increasing rank and U1 sector counts.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    for (rank, radius) in [(2, 0), (2, 6), (4, 4), (6, 1), (8, 0), (10, 0)] {
+        let source = tensor(&runtime, (-radius..=radius).map(|charge| (charge, 2)), rank);
+        let adjoint = source.adjoint().unwrap();
+        let split = adjoint.codomain_rank();
+        let codomain_axes = (0..split).collect::<Vec<_>>();
+        let domain_axes = (split..rank).collect::<Vec<_>>();
+        let levels = (0..rank).map(|axis| rank - axis).collect::<Vec<_>>();
+
+        for cost in [
+            measure(|| {
+                black_box(adjoint.permute(&codomain_axes, &domain_axes).unwrap());
+            }),
+            measure(|| {
+                black_box(
+                    adjoint
+                        .braid(&codomain_axes, &domain_axes, &levels)
+                        .unwrap(),
+                );
+            }),
+            measure(|| {
+                black_box(adjoint.repartition(split).unwrap());
+            }),
+        ] {
+            assert_eq!(cost, (0, 0), "rank={rank}, sector radius={radius}");
+        }
+    }
+}
+
+#[test]
 fn ordinary_tensor_clone_does_not_allocate() {
     // What: the representation split keeps an owned tensor's value-like Arc clone cost.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
