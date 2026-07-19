@@ -12648,7 +12648,9 @@ mod tests {
         let bytes = std::fs::read(path).unwrap();
         let rule = TabulatedFusionRule::try_from_bytes(&bytes, "generated-su4").unwrap();
         assert_eq!(rule.group_n(), 4);
-        assert_eq!(rule.provenance(), 0x2afd_b9a5_dcf6_18e6);
+        // What: the CI-generated SU(4) smoke artifact uses the current
+        // order-preserving, group-agnostic table generator.
+        assert_eq!(rule.provenance(), 0xcffd_d18b_bba9_155a);
     }
 
     // --- table integrity + hard-error boundary ---------------------------
@@ -12684,6 +12686,60 @@ mod tests {
         assert_eq!(rule.nsymbol(three, three, su3_id(2, 0)), 1); // 3⊗3 ∋ 6, N=1
         // 8⊗10 escapes (∋ 35): not covered.
         assert!(!rule.covers(eight, su3_id(3, 0)));
+    }
+
+    #[test]
+    fn b3b_su3_channel_order_matches_tensorkit_directproduct() {
+        let rule = su3();
+        let eight = su3_id(1, 1);
+        let channels = rule.fusion_channels(eight, eight);
+
+        // What: the public channel sequence and every sector-keyed
+        // multiplicity follow TensorKit/SUNRepresentations' directproduct
+        // basis order: 1, 8, 27, 10bar, 10.
+        assert_eq!(
+            channels.iter().map(|sector| sector.id()).collect::<Vec<_>>(),
+            vec![0, 5, 16, 6, 7],
+        );
+        assert_eq!(
+            channels
+                .iter()
+                .map(|&sector| (sector.id(), rule.nsymbol(eight, eight, sector)))
+                .collect::<Vec<_>>(),
+            vec![(0, 1), (5, 2), (16, 1), (6, 1), (7, 1)],
+        );
+
+        let twenty_seven = su3_id(2, 2);
+        assert!(!rule.covers(twenty_seven, eight));
+        let in_table = rule.fusion_channels_in_table(twenty_seven, eight);
+        // What: an escaping pair retains the order-preserving in-table
+        // subsequence of SUN directproduct(27, 8): 8, 27, 10bar, 10.
+        assert_eq!(
+            in_table
+                .iter()
+                .map(|sector| sector.id())
+                .collect::<Vec<_>>(),
+            vec![5, 16, 6, 7],
+        );
+        assert_eq!(
+            in_table
+                .iter()
+                .map(|&sector| {
+                    (
+                        sector.id(),
+                        rule.nsymbol(twenty_seven, eight, sector),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![(5, 1), (16, 2), (6, 1), (7, 1)],
+        );
+
+        // What: changing sequence order does not change keyed coefficient
+        // lookup or the genuine outer-multiplicity matrix.
+        let r888 = rule.r_symbol_generic(eight, eight, eight);
+        assert_eq!(r888.shape(), (2, 2));
+        assert!((r888.get(0, 0) + 0.2857142857142853).abs() < 1e-10);
+        assert!((r888.get(0, 1) - 0.9583148474999088).abs() < 1e-10);
     }
 
     #[test]
@@ -13123,7 +13179,7 @@ mod tests {
                 FusionProductSpace::new([dom_leg]),
             );
             let keys = hom.fusion_tree_keys_generic_for_coupled(&rule, c).unwrap();
-            let got: std::collections::BTreeSet<(usize, usize, usize)> = keys
+            let got: Vec<(usize, usize, usize)> = keys
                 .iter()
                 .map(|k| {
                     let t = k.codomain_tree();
@@ -13135,9 +13191,13 @@ mod tests {
                     )
                 })
                 .collect();
-            let want: std::collections::BTreeSet<(usize, usize, usize)> =
-                trees.iter().copied().collect();
-            assert_eq!(got, want, "coupled {coupled}: tree set mismatch vs TK");
+            // What: the iterator retains TensorKit's categorical basis order,
+            // not merely the same unordered set of tree identities.
+            assert_eq!(
+                got,
+                trees.to_vec(),
+                "coupled {coupled}: tree order mismatch vs TK"
+            );
             assert_eq!(keys.len(), trees.len(), "coupled {coupled}: multiplicity lost");
             total += keys.len();
         }

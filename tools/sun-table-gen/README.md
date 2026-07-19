@@ -29,6 +29,24 @@ changes (proven by `b3c1_su4_table_is_data_only`).
 
 `SectorId` is the dense index into the irrep list sorted by `(dim, label…)`, so
 the vacuum (all-zero Dynkin label) is id 0 (matches `FusionRule::vacuum`).
+Fusion-channel sequences separately preserve SUNRepresentations'
+`directproduct` order because TensorKit exposes that order as fusion-tree
+inner-line basis order; numeric `SectorId` order is not a substitute.
+The production reference is TensorKit revision
+`cfaa073e4d1e3eb2167edcbdc3be9872f41e7d91`,
+`src/fusiontrees/iterator.jl::_fusiontree_iterate`, where provider product
+iteration determines inner-line order, and
+`src/fusiontrees/fusiontrees.jl::treeindex_data/treeindex_map`, where that
+order becomes an observable basis index. QSpace revision
+`dd2cc7e10dc7d3917b23309a44d1fe67adb4dc43` has no corresponding public
+fusion-tree iterator/channel-order contract; `Source/QSpace.hh::QSpace` and
+`Source/QSpace.cc::QSpace` instead retain provider-specific QIDX/DATA/CGR row
+order. Within fusion-tree basis construction, TeNeT therefore preserves the
+pinned SUN `directproduct` sequence for inner lines, while coupled block groups
+remain numeric-`SectorId` ordered. The Julia generator records the provenance
+of the current offline artifact; TeNeT's runtime and Rust build do not require
+Julia, and a future Pure Rust generator can preserve the same ordering
+contract.
 
 ## Bounded table (exact or `Err`, never silently truncated)
 
@@ -77,15 +95,15 @@ byte-identical to v2 (rank 2), so the provenance hash is unchanged; only the
 | field | SU(3) blob | SU(4) smoke blob |
 |-------|-----------|------------------|
 | group / dim cut | SU(3), dim ≤ 27 | SU(4), dim ≤ 15 |
-| generated | 2026-07-11 | 2026-07-11 |
+| generated | 2026-07-19 | 2026-07-19 |
 | SUNRepresentations | 0.4.0 | 0.4.0 |
-| TensorKitSectors | 0.3.4 | 0.3.4 |
+| TensorKitSectors | 0.3.9 | 0.3.9 |
 | Julia | 1.11.6 | 1.11.6 |
 | format version | 3 | 3 |
 | irreps / covered pairs / R / F | 17 / 82 / 731 / 76853 | 7 / 17 / 59 / 589 |
 | frontier / escaping / one-hop | 41 / 207 / 697 | 15 / 32 / 105 |
 | size | 1 874 710 bytes | 13 473 bytes |
-| payload FNV-1a-64 | `0x7274b209c9676316` | `0x2afdb9a5dcf618e6` |
+| payload FNV-1a-64 | `0x1d8f726bf9928176` | `0xcffdd18bbba9155a` |
 
 > Size note: the full SU(3) `dim ≤ 27` table is 1.87 MB (the 135 805 F-symbol
 > `f64`s are the irreducible bulk), stored as a little-endian binary blob loaded
