@@ -636,6 +636,31 @@ fn visit_fusion_trees<R, F>(
     R: MultiplicityFreeFusionRule,
     F: FnMut(&[SectorId]),
 {
+    visit_fusion_trees_where(
+        rule,
+        effective,
+        coupled,
+        inner_rev,
+        &|_, _| true,
+        emit,
+    );
+}
+
+fn visit_fusion_trees_where<R, P, F>(
+    rule: &R,
+    effective: &[SectorId],
+    coupled: SectorId,
+    inner_rev: &mut Vec<SectorId>,
+    prefix_allowed: &P,
+    emit: &mut F,
+) where
+    R: MultiplicityFreeFusionRule,
+    P: Fn(usize, SectorId) -> bool,
+    F: FnMut(&[SectorId]),
+{
+    if !prefix_allowed(effective.len(), coupled) {
+        return;
+    }
     match effective.len() {
         0 => {
             if coupled == rule.vacuum() {
@@ -664,7 +689,14 @@ fn visit_fusion_trees<R, F>(
                     continue;
                 }
                 inner_rev.push(front_coupled);
-                visit_fusion_trees(rule, front_effective, front_coupled, inner_rev, emit);
+                visit_fusion_trees_where(
+                    rule,
+                    front_effective,
+                    front_coupled,
+                    inner_rev,
+                    prefix_allowed,
+                    emit,
+                );
                 inner_rev.pop();
             }
         }
@@ -7396,7 +7428,447 @@ where
     }
 }
 
+fn collect_multiplicity_free_tree_locals_for_coupled<R>(
+    rule: &R,
+    effective: &[SectorId],
+    coupled: SectorId,
+) -> Vec<MultiplicityFreeTreeLocal>
+where
+    R: MultiplicityFreeFusionRule,
+{
+    collect_multiplicity_free_tree_locals_for_coupled_where(
+        rule,
+        effective,
+        coupled,
+        |_, _| true,
+    )
+}
+
+fn collect_multiplicity_free_tree_locals_for_coupled_where<R, P>(
+    rule: &R,
+    effective: &[SectorId],
+    coupled: SectorId,
+    prefix_allowed: P,
+) -> Vec<MultiplicityFreeTreeLocal>
+where
+    R: MultiplicityFreeFusionRule,
+    P: Fn(usize, SectorId) -> bool,
+{
+    let mut locals = Vec::new();
+    let mut inner_rev = Vec::new();
+    visit_fusion_trees_where(
+        rule,
+        effective,
+        coupled,
+        &mut inner_rev,
+        &prefix_allowed,
+        &mut |inner_rev| {
+            locals.push(MultiplicityFreeTreeLocal {
+                coupled,
+                innerlines: inner_rev.iter().rev().copied().collect(),
+            });
+        },
+    );
+    locals
+}
+
+fn collect_multiplicity_free_tree_pair_locals_for_frame<R>(
+    rule: &R,
+    frame: &MultiplicityFreeTreePairFrame,
+) -> Vec<MultiplicityFreeTreePairLocal>
+where
+    R: MultiplicityFreeFusionRule,
+{
+    let codomain_coupled = reachable_coupled_sectors(rule, &frame.codomain.uncoupled);
+    let domain_coupled = reachable_coupled_sectors(rule, &frame.domain.uncoupled);
+    let mut codomain_index = 0usize;
+    let mut domain_index = 0usize;
+    let mut locals = Vec::new();
+    while codomain_index < codomain_coupled.len() && domain_index < domain_coupled.len() {
+        let codomain_sector = codomain_coupled[codomain_index];
+        let domain_sector = domain_coupled[domain_index];
+        match codomain_sector.cmp(&domain_sector) {
+            std::cmp::Ordering::Less => codomain_index += 1,
+            std::cmp::Ordering::Greater => domain_index += 1,
+            std::cmp::Ordering::Equal => {
+                let codomain = collect_multiplicity_free_tree_locals_for_coupled(
+                    rule,
+                    &frame.codomain.uncoupled,
+                    codomain_sector,
+                );
+                let domain = collect_multiplicity_free_tree_locals_for_coupled(
+                    rule,
+                    &frame.domain.uncoupled,
+                    domain_sector,
+                );
+                for domain_local in &domain {
+                    for codomain_local in &codomain {
+                        locals.push(MultiplicityFreeTreePairLocal {
+                            codomain: codomain_local.clone(),
+                            domain: domain_local.clone(),
+                        });
+                    }
+                }
+                codomain_index += 1;
+                domain_index += 1;
+            }
+        }
+    }
+    locals
+}
+
+fn multiplicity_free_forward_prefix_targets<T>(
+    long_uncoupled: &[SectorId],
+    long: &T,
+) -> Result<SectorVec, CoreError>
+where
+    T: MultiplicityFreeTreeLocalData + ?Sized,
+{
+    let mut targets = SectorVec::with_capacity(long_uncoupled.len().saturating_sub(2));
+    for leg_index in 2..long_uncoupled.len() {
+        let (_, right) =
+            fusion_tree_vertex_neighbors_from_parts(long_uncoupled, long, leg_index)?;
+        targets.push(right);
+    }
+    Ok(targets)
+}
+
+fn multiplicity_free_inverse_prefix_targets<T>(
+    short_uncoupled: &[SectorId],
+    short: &T,
+) -> Result<SectorVec, CoreError>
+where
+    T: MultiplicityFreeTreeLocalData + ?Sized,
+{
+    let mut targets = SectorVec::with_capacity(short_uncoupled.len());
+    for leg_index in 1..short_uncoupled.len() {
+        let (left, right) =
+            fusion_tree_vertex_neighbors_from_parts(short_uncoupled, short, leg_index)?;
+        if leg_index == 1 {
+            targets.push(left);
+        }
+        targets.push(right);
+    }
+    Ok(targets)
+}
+
+#[inline]
+fn multiplicity_free_forward_prefix_allowed<R>(
+    rule: &R,
+    leading: SectorId,
+    targets: &[SectorId],
+    tail_prefix_len: usize,
+    tail_prefix_coupled: SectorId,
+) -> bool
+where
+    R: MultiplicityFreeFusionRule,
+{
+    tail_prefix_len < 2
+        || rule.nsymbol(
+            leading,
+            tail_prefix_coupled,
+            targets[tail_prefix_len - 2],
+        ) != 0
+}
+
+#[inline]
+fn multiplicity_free_inverse_prefix_allowed<R>(
+    rule: &R,
+    leading: SectorId,
+    targets: &[SectorId],
+    candidate_prefix_len: usize,
+    candidate_rank: usize,
+    candidate_prefix_coupled: SectorId,
+) -> bool
+where
+    R: MultiplicityFreeFusionRule,
+{
+    candidate_prefix_len <= 2
+        || candidate_prefix_len >= candidate_rank
+        || rule.nsymbol(
+            leading,
+            targets[candidate_prefix_len - 2],
+            candidate_prefix_coupled,
+        ) != 0
+}
+
+fn multiplicity_free_multi_fmove_local<R>(
+    rule: &R,
+    frame: &MultiplicityFreeTreeFrame,
+    local: &MultiplicityFreeTreeLocal,
+) -> Result<Vec<(MultiplicityFreeTreeLocal, R::Scalar)>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Mul<Output = R::Scalar>,
+{
+    let rank = frame.uncoupled.len();
+    if rank != frame.is_dual.len() {
+        return Err(CoreError::MalformedFusionTree {
+            message: "fusion tree sectors and duality flags must have matching length",
+        });
+    }
+    if rank == 0 {
+        return Err(CoreError::MalformedFusionTree {
+            message: "multi_Fmove requires at least one uncoupled sector",
+        });
+    }
+    if rank == 1 {
+        return Ok(vec![(
+            MultiplicityFreeTreeLocal {
+                coupled: rule.vacuum(),
+                innerlines: SectorVec::new(),
+            },
+            rule.scalar_one(),
+        )]);
+    }
+    if rank == 2 {
+        return Ok(vec![(
+            MultiplicityFreeTreeLocal {
+                coupled: frame.uncoupled[1],
+                innerlines: SectorVec::new(),
+            },
+            rule.scalar_one(),
+        )]);
+    }
+
+    let first = frame.uncoupled[0];
+    let coupled = local.coupled;
+    let tail_uncoupled = &frame.uncoupled[1..];
+    let tail_is_dual = &frame.is_dual[1..];
+    let prefix_targets =
+        multiplicity_free_forward_prefix_targets(&frame.uncoupled, local)?;
+    let mut candidates = Vec::new();
+    for tail_coupled in rule.fusion_channels(rule.dual(first), coupled) {
+        candidates.extend(collect_multiplicity_free_tree_locals_for_coupled_where(
+            rule,
+            tail_uncoupled,
+            tail_coupled,
+            |prefix_len, prefix_coupled| {
+                multiplicity_free_forward_prefix_allowed(
+                    rule,
+                    first,
+                    &prefix_targets,
+                    prefix_len,
+                    prefix_coupled,
+                )
+            },
+        ));
+    }
+    let coefficients = multiplicity_free_multi_associator_grouped_fixed_long(
+        rule,
+        &frame.uncoupled,
+        &frame.is_dual,
+        local,
+        tail_uncoupled,
+        tail_is_dual,
+        &candidates,
+    )?;
+    Ok(candidates
+        .into_iter()
+        .zip(coefficients)
+        .filter_map(|(candidate, coefficient)| {
+            coefficient.map(|coefficient| (candidate, coefficient))
+        })
+        .collect())
+}
+
+fn multiplicity_free_multi_fmove_inv_local<R>(
+    rule: &R,
+    coupled: SectorId,
+    source_frame: &MultiplicityFreeTreeFrame,
+    source: &MultiplicityFreeTreeLocal,
+    output_frame: &MultiplicityFreeTreeFrame,
+) -> Result<Vec<(MultiplicityFreeTreeLocal, R::Scalar)>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Mul<Output = R::Scalar>,
+{
+    if source_frame.uncoupled.len() != source_frame.is_dual.len()
+        || output_frame.uncoupled.len() != output_frame.is_dual.len()
+        || output_frame.uncoupled.len() != source_frame.uncoupled.len() + 1
+        || output_frame.uncoupled[1..] != *source_frame.uncoupled.as_slice()
+        || output_frame.is_dual[1..] != *source_frame.is_dual.as_slice()
+    {
+        return Err(CoreError::MalformedFusionTree {
+            message: "multi_Fmove inverse requires one leading external sector",
+        });
+    }
+    let leading_sector = output_frame.uncoupled[0];
+    if rule.nsymbol(leading_sector, source.coupled, coupled) == 0 {
+        return Err(CoreError::SectorMismatch {
+            expected: coupled,
+            actual: source.coupled,
+        });
+    }
+
+    let prefix_targets =
+        multiplicity_free_inverse_prefix_targets(&source_frame.uncoupled, source)?;
+    let candidates = collect_multiplicity_free_tree_locals_for_coupled_where(
+        rule,
+        &output_frame.uncoupled,
+        coupled,
+        |prefix_len, prefix_coupled| {
+            multiplicity_free_inverse_prefix_allowed(
+                rule,
+                leading_sector,
+                &prefix_targets,
+                prefix_len,
+                output_frame.uncoupled.len(),
+                prefix_coupled,
+            )
+        },
+    );
+    let coefficients = multiplicity_free_multi_associator_grouped_fixed_short(
+        rule,
+        &output_frame.uncoupled,
+        &output_frame.is_dual,
+        &candidates,
+        &source_frame.uncoupled,
+        &source_frame.is_dual,
+        source,
+    )?;
+    Ok(candidates
+        .into_iter()
+        .zip(coefficients)
+        .filter_map(|(candidate, coefficient)| {
+            coefficient.map(|coefficient| (candidate, rule.scalar_conj(coefficient)))
+        })
+        .collect())
+}
+
 fn multiplicity_free_multi_fmove_tree<R>(
+    rule: &R,
+    tree: &FusionTreeKey,
+) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Mul<Output = R::Scalar>,
+{
+    let (frame, local) = project_multiplicity_free_tree(rule, tree)?;
+    let terms = multiplicity_free_multi_fmove_local(rule, &frame, &local)?;
+    let output_frame = MultiplicityFreeTreeFrame {
+        uncoupled: frame.uncoupled[1..].iter().copied().collect(),
+        is_dual: frame.is_dual[1..].iter().copied().collect(),
+    };
+    Ok(terms
+        .into_iter()
+        .map(|(local, coefficient)| (output_frame.materialize(local), coefficient))
+        .collect())
+}
+
+fn multiplicity_free_multi_fmove_inv_tree<R>(
+    rule: &R,
+    leading_sector: SectorId,
+    coupled: SectorId,
+    tree: &FusionTreeKey,
+    leading_is_dual: bool,
+) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Mul<Output = R::Scalar>,
+{
+    let (source_frame, source) = project_multiplicity_free_tree(rule, tree)?;
+    let mut uncoupled = Vec::with_capacity(tree.uncoupled().len() + 1);
+    uncoupled.push(leading_sector);
+    uncoupled.extend_from_slice(tree.uncoupled());
+    let mut is_dual = Vec::with_capacity(tree.is_dual().len() + 1);
+    is_dual.push(leading_is_dual);
+    is_dual.extend_from_slice(tree.is_dual());
+    let output_frame = MultiplicityFreeTreeFrame {
+        uncoupled: uncoupled.into_iter().collect(),
+        is_dual: is_dual.into_iter().collect(),
+    };
+    Ok(multiplicity_free_multi_fmove_inv_local(
+        rule,
+        coupled,
+        &source_frame,
+        &source,
+        &output_frame,
+    )?
+    .into_iter()
+    .map(|(local, coefficient)| (output_frame.materialize(local), coefficient))
+    .collect())
+}
+
+#[cfg(test)]
+fn fusion_tree_vertex_neighbors_legacy_oracle(
+    tree: &FusionTreeKey,
+    leg_index: usize,
+) -> Result<(SectorId, SectorId), CoreError> {
+    if leg_index == 0 || leg_index >= tree.uncoupled().len() {
+        return Err(CoreError::MalformedFusionTree {
+            message: "vertex_info requires a non-first uncoupled leg",
+        });
+    }
+    let left = if leg_index == 1 {
+        tree.uncoupled()[0]
+    } else {
+        tree.innerlines()
+            .get(leg_index - 2)
+            .copied()
+            .ok_or(CoreError::MalformedFusionTree {
+                message: "fusion tree is missing a left innerline",
+            })?
+    };
+    let right = if leg_index + 1 == tree.uncoupled().len() {
+        tree.coupled()
+    } else {
+        tree.innerlines()
+            .get(leg_index - 1)
+            .copied()
+            .ok_or(CoreError::MalformedFusionTree {
+                message: "fusion tree is missing a right innerline",
+            })?
+    };
+    Ok((left, right))
+}
+
+#[cfg(test)]
+fn multiplicity_free_multi_associator_scalar_legacy_oracle<R>(
+    rule: &R,
+    long: &FusionTreeKey,
+    short: &FusionTreeKey,
+) -> Result<Option<R::Scalar>, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Mul<Output = R::Scalar>,
+{
+    let rank = long.uncoupled().len();
+    if short.uncoupled().len() + 1 != rank
+        || long.uncoupled()[1..] != *short.uncoupled()
+        || long.is_dual()[1..] != *short.is_dual()
+    {
+        return Ok(None);
+    }
+
+    let mut coefficient = rule.scalar_one();
+    let first = long.uncoupled()[0];
+    for tensor_kit_k in 2..rank {
+        let right = long.uncoupled()[tensor_kit_k];
+        let (left_coupled, coupled) =
+            fusion_tree_vertex_neighbors_legacy_oracle(long, tensor_kit_k)?;
+        let (middle, right_coupled) =
+            fusion_tree_vertex_neighbors_legacy_oracle(short, tensor_kit_k - 1)?;
+        // Why not reuse the production admissibility helper: this oracle must
+        // retain the pre-grouping decision path to expose a shared-helper bug.
+        if rule.nsymbol(first, right_coupled, coupled) == 0 {
+            return Ok(None);
+        }
+        coefficient = coefficient
+            * rule.f_symbol_scalar(
+                first,
+                middle,
+                right,
+                coupled,
+                left_coupled,
+                right_coupled,
+            );
+    }
+    Ok(Some(coefficient))
+}
+
+#[cfg(test)]
+fn multiplicity_free_multi_fmove_tree_legacy_oracle<R>(
     rule: &R,
     tree: &FusionTreeKey,
 ) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>
@@ -7450,7 +7922,7 @@ where
             tail_coupled,
         ) {
             if let Some(coefficient) =
-                multiplicity_free_multi_associator_scalar(rule, tree, &tail_tree)?
+                multiplicity_free_multi_associator_scalar_legacy_oracle(rule, tree, &tail_tree)?
             {
                 terms.push((tail_tree, coefficient));
             }
@@ -7459,7 +7931,8 @@ where
     Ok(terms)
 }
 
-fn multiplicity_free_multi_fmove_inv_tree<R>(
+#[cfg(test)]
+fn multiplicity_free_multi_fmove_inv_tree_legacy_oracle<R>(
     rule: &R,
     leading_sector: SectorId,
     coupled: SectorId,
@@ -7488,26 +7961,221 @@ where
     let candidates =
         collect_fusion_trees_for_coupled(rule, &uncoupled, &is_dual, &effective, coupled);
 
-    // Constructive inverse (TensorKit `multi_Fmove_inv`,
-    // `basic_manipulations.jl`): every candidate shares `tree`'s uncoupled
-    // tail, so the expansion coefficient is directly the conjugated
-    // multi-associator relating the (N+1)-leg candidate to the N-leg `tree` —
-    // exactly the F-symbol product the forward `multi_Fmove` would assign that
-    // tail. Reuse it instead of running the full forward recoupling on every
-    // candidate and searching for the matching tail (was invert-by-search,
-    // O(candidates²·N); now O(candidates·N)). The two are term-for-term
-    // identical: `multi_associator_scalar` returns `Some` iff the uncoupled/dual
-    // tails match — which they do for every enumerated candidate — with the same
-    // coefficient (zeros included) the forward pass produced.
     let mut terms = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         if let Some(coefficient) =
-            multiplicity_free_multi_associator_scalar(rule, &candidate, tree)?
+            multiplicity_free_multi_associator_scalar_legacy_oracle(rule, &candidate, tree)?
         {
             terms.push((candidate, rule.scalar_conj(coefficient)));
         }
     }
     Ok(terms)
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct MultiplicityFreeFsymbolArguments {
+    left: SectorId,
+    middle: SectorId,
+    right: SectorId,
+    coupled: SectorId,
+    left_coupled: SectorId,
+    right_coupled: SectorId,
+}
+
+impl MultiplicityFreeFsymbolArguments {
+    #[inline]
+    fn is_admissible<R>(self, rule: &R) -> bool
+    where
+        R: MultiplicityFreeFusionSymbols,
+    {
+        multi_associator_new_cross_channel_is_admissible(
+            rule,
+            self.left,
+            self.right_coupled,
+            self.coupled,
+        )
+    }
+
+    #[inline]
+    fn evaluate<R>(self, rule: &R) -> R::Scalar
+    where
+        R: MultiplicityFreeFusionSymbols,
+    {
+        rule.f_symbol_scalar(
+            self.left,
+            self.middle,
+            self.right,
+            self.coupled,
+            self.left_coupled,
+            self.right_coupled,
+        )
+    }
+}
+
+fn multiplicity_free_multi_associator_arguments_from_parts<L, S>(
+    long_uncoupled: &[SectorId],
+    long: &L,
+    short_uncoupled: &[SectorId],
+    short: &S,
+    tensor_kit_k: usize,
+) -> Result<MultiplicityFreeFsymbolArguments, CoreError>
+where
+    L: MultiplicityFreeTreeLocalData + ?Sized,
+    S: MultiplicityFreeTreeLocalData + ?Sized,
+{
+    let right = long_uncoupled[tensor_kit_k];
+    let (left_coupled, coupled) =
+        fusion_tree_vertex_neighbors_from_parts(long_uncoupled, long, tensor_kit_k)?;
+    let (middle, right_coupled) =
+        fusion_tree_vertex_neighbors_from_parts(short_uncoupled, short, tensor_kit_k - 1)?;
+    Ok(MultiplicityFreeFsymbolArguments {
+        left: long_uncoupled[0],
+        middle,
+        right,
+        coupled,
+        left_coupled,
+        right_coupled,
+    })
+}
+
+fn multiplicity_free_multi_associator_grouped<R, F>(
+    rule: &R,
+    rank: usize,
+    candidate_count: usize,
+    arguments_for: F,
+) -> Result<Vec<Option<R::Scalar>>, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Mul<Output = R::Scalar>,
+    F: Fn(usize, usize) -> Result<MultiplicityFreeFsymbolArguments, CoreError>,
+{
+    enum Coefficient<S> {
+        Pending,
+        Active(S),
+        Rejected,
+    }
+
+    let mut coefficients = (0..candidate_count)
+        .map(|_| Coefficient::Pending)
+        .collect::<Vec<_>>();
+    // Why not retain this table between stages or invocations: TensorKit's
+    // grouping is stage-local, and a longer-lived table would create an
+    // implicit provider cache for a pure eager reduction.
+    let mut stage_symbols: FxHashMap<MultiplicityFreeFsymbolArguments, R::Scalar> =
+        FxHashMap::default();
+    stage_symbols.reserve(candidate_count);
+    for tensor_kit_k in 2..rank {
+        stage_symbols.clear();
+        for (candidate, coefficient) in coefficients.iter_mut().enumerate() {
+            if matches!(coefficient, Coefficient::Rejected) {
+                continue;
+            }
+            let arguments = arguments_for(candidate, tensor_kit_k)?;
+            if !arguments.is_admissible(rule) {
+                *coefficient = Coefficient::Rejected;
+                continue;
+            }
+            let symbol = match stage_symbols.entry(arguments) {
+                Entry::Occupied(entry) => entry.get().clone(),
+                Entry::Vacant(entry) => {
+                    let symbol = arguments.evaluate(rule);
+                    entry.insert(symbol.clone());
+                    symbol
+                }
+            };
+            *coefficient = match std::mem::replace(coefficient, Coefficient::Rejected) {
+                Coefficient::Pending => Coefficient::Active(symbol),
+                Coefficient::Active(prefix) => Coefficient::Active(prefix * symbol),
+                Coefficient::Rejected => unreachable!("rejected coefficients are skipped"),
+            };
+        }
+    }
+    Ok(coefficients
+        .into_iter()
+        .map(|coefficient| match coefficient {
+            Coefficient::Pending => Some(rule.scalar_one()),
+            Coefficient::Active(value) => Some(value),
+            Coefficient::Rejected => None,
+        })
+        .collect())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn multiplicity_free_multi_associator_grouped_fixed_long<R, L, S>(
+    rule: &R,
+    long_uncoupled: &[SectorId],
+    long_is_dual: &[bool],
+    long: &L,
+    short_uncoupled: &[SectorId],
+    short_is_dual: &[bool],
+    shorts: &[S],
+) -> Result<Vec<Option<R::Scalar>>, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Mul<Output = R::Scalar>,
+    L: MultiplicityFreeTreeLocalData + ?Sized,
+    S: MultiplicityFreeTreeLocalData,
+{
+    let rank = long_uncoupled.len();
+    if short_uncoupled.len() + 1 != rank
+        || long_uncoupled[1..] != *short_uncoupled
+        || long_is_dual[1..] != *short_is_dual
+    {
+        return Ok((0..shorts.len()).map(|_| None).collect());
+    }
+    multiplicity_free_multi_associator_grouped(
+        rule,
+        rank,
+        shorts.len(),
+        |candidate, tensor_kit_k| {
+            multiplicity_free_multi_associator_arguments_from_parts(
+                long_uncoupled,
+                long,
+                short_uncoupled,
+                &shorts[candidate],
+                tensor_kit_k,
+            )
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn multiplicity_free_multi_associator_grouped_fixed_short<R, L, S>(
+    rule: &R,
+    long_uncoupled: &[SectorId],
+    long_is_dual: &[bool],
+    longs: &[L],
+    short_uncoupled: &[SectorId],
+    short_is_dual: &[bool],
+    short: &S,
+) -> Result<Vec<Option<R::Scalar>>, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Clone + Mul<Output = R::Scalar>,
+    L: MultiplicityFreeTreeLocalData,
+    S: MultiplicityFreeTreeLocalData + ?Sized,
+{
+    let rank = long_uncoupled.len();
+    if short_uncoupled.len() + 1 != rank
+        || long_uncoupled[1..] != *short_uncoupled
+        || long_is_dual[1..] != *short_is_dual
+    {
+        return Ok((0..longs.len()).map(|_| None).collect());
+    }
+    multiplicity_free_multi_associator_grouped(
+        rule,
+        rank,
+        longs.len(),
+        |candidate, tensor_kit_k| {
+            multiplicity_free_multi_associator_arguments_from_parts(
+                long_uncoupled,
+                &longs[candidate],
+                short_uncoupled,
+                short,
+                tensor_kit_k,
+            )
+        },
+    )
 }
 
 fn multiplicity_free_multi_associator_scalar<R>(
@@ -7519,20 +8187,49 @@ where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Mul<Output = R::Scalar>,
 {
-    let rank = long.uncoupled().len();
-    if short.uncoupled().len() + 1 != rank {
+    multiplicity_free_multi_associator_from_parts(
+        rule,
+        long.uncoupled(),
+        long.is_dual(),
+        long,
+        short.uncoupled(),
+        short.is_dual(),
+        short,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn multiplicity_free_multi_associator_from_parts<R, L, S>(
+    rule: &R,
+    long_uncoupled: &[SectorId],
+    long_is_dual: &[bool],
+    long: &L,
+    short_uncoupled: &[SectorId],
+    short_is_dual: &[bool],
+    short: &S,
+) -> Result<Option<R::Scalar>, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Mul<Output = R::Scalar>,
+    L: MultiplicityFreeTreeLocalData + ?Sized,
+    S: MultiplicityFreeTreeLocalData + ?Sized,
+{
+    let rank = long_uncoupled.len();
+    if short_uncoupled.len() + 1 != rank {
         return Ok(None);
     }
-    if long.uncoupled()[1..] != *short.uncoupled() || long.is_dual()[1..] != *short.is_dual() {
+    if long_uncoupled[1..] != *short_uncoupled || long_is_dual[1..] != *short_is_dual {
         return Ok(None);
     }
 
     let mut coefficient = rule.scalar_one();
-    let first = long.uncoupled()[0];
+    let first = long_uncoupled[0];
     for tensor_kit_k in 2..rank {
-        let right_sector = long.uncoupled()[tensor_kit_k];
-        let (middle_left, middle_right) = fusion_tree_vertex_neighbors(long, tensor_kit_k)?;
-        let (short_left, short_right) = fusion_tree_vertex_neighbors(short, tensor_kit_k - 1)?;
+        let right_sector = long_uncoupled[tensor_kit_k];
+        let (middle_left, middle_right) =
+            fusion_tree_vertex_neighbors_from_parts(long_uncoupled, long, tensor_kit_k)?;
+        let (short_left, short_right) =
+            fusion_tree_vertex_neighbors_from_parts(short_uncoupled, short, tensor_kit_k - 1)?;
         if !multi_associator_new_cross_channel_is_admissible(
             rule,
             first,
@@ -7558,13 +8255,24 @@ fn fusion_tree_vertex_neighbors(
     tree: &FusionTreeKey,
     leg_index: usize,
 ) -> Result<(SectorId, SectorId), CoreError> {
-    if leg_index == 0 || leg_index >= tree.uncoupled().len() {
+    fusion_tree_vertex_neighbors_from_parts(tree.uncoupled(), tree, leg_index)
+}
+
+fn fusion_tree_vertex_neighbors_from_parts<T>(
+    uncoupled: &[SectorId],
+    tree: &T,
+    leg_index: usize,
+) -> Result<(SectorId, SectorId), CoreError>
+where
+    T: MultiplicityFreeTreeLocalData + ?Sized,
+{
+    if leg_index == 0 || leg_index >= uncoupled.len() {
         return Err(CoreError::MalformedFusionTree {
             message: "vertex_info requires a non-first uncoupled leg",
         });
     }
     let left = if leg_index == 1 {
-        tree.uncoupled()[0]
+        uncoupled[0]
     } else {
         tree.innerlines()
             .get(leg_index - 2)
@@ -7573,7 +8281,7 @@ fn fusion_tree_vertex_neighbors(
                 message: "fusion tree is missing a left innerline",
             })?
     };
-    let right = if leg_index + 1 == tree.uncoupled().len() {
+    let right = if leg_index + 1 == uncoupled.len() {
         tree.coupled()
     } else {
         tree.innerlines()
