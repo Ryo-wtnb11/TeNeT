@@ -1164,6 +1164,99 @@ where
         )
     }
 
+    /// Categorical map composition on the coupled-sector block matrices.
+    ///
+    /// Unlike `tensorcontract!`, TensorKit `mul!` does not insert a
+    /// fermionic supertrace twist. The logical/storage split still carries
+    /// lazy adjoints without materializing either operand.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn tensorcompose_fusion_dyn_into_lowered<R>(
+        &mut self,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        dst_data: &mut [D],
+        lhs: FusionOperand<'_>,
+        lhs_data: &[D],
+        rhs: FusionOperand<'_>,
+        rhs_data: &[D],
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>
+            + LoweredMultiplicityFreeAlgebra
+            + CheckedFusionAlgebra
+            + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    {
+        let rule = dst_space.provider();
+        for space in [
+            lhs.logical_space(),
+            lhs.storage_space(),
+            rhs.logical_space(),
+            rhs.storage_space(),
+        ] {
+            space.validate_rule(rule)?;
+        }
+        let axes = TensorContractSpec::new_with_conjugation(
+            lhs_axes,
+            rhs_axes,
+            tenet_operations::OutputAxisOrder::identity(),
+            lhs.storage_conjugate(),
+            rhs.storage_conjugate(),
+        );
+        // Why not give bosonic composition its own cache namespace: without a
+        // supertrace twist it is exactly the existing contract operation, so a
+        // second plan would duplicate cold layout work and retained state.
+        if rule.braiding_style() != tenet_core::BraidingStyleKind::Fermionic {
+            if !lhs.storage_conjugate() && !rhs.storage_conjugate() {
+                return self.tensorcontract_fusion_dyn_into_raw_with_primer(
+                    rule,
+                    dst_space.space(),
+                    dst_data,
+                    lhs.logical_space(),
+                    lhs_data,
+                    rhs.logical_space(),
+                    rhs_data,
+                    axes,
+                    alpha,
+                    beta,
+                    dst_space.layout_primer(),
+                );
+            }
+            return self.tensorcontract_fusion_dyn_prelowered_into_lowered(
+                dst_space, dst_data, lhs, lhs_data, rhs, rhs_data, axes, alpha, beta,
+            );
+        }
+        let plan = self.resolution_cache.get_or_compile_composition_plan(
+            rule,
+            dst_space.space(),
+            lhs.logical_space(),
+            lhs.storage_space(),
+            rhs.logical_space(),
+            rhs.storage_space(),
+            axes,
+        )?;
+        #[cfg(test)]
+        {
+            self.last_top_level_resolution_was_core = true;
+        }
+        self.execute_resolution_dyn(
+            &Resolution::Core(plan),
+            None,
+            dst_space.space().structure(),
+            dst_data,
+            lhs.storage_space().structure(),
+            lhs_data,
+            rhs.storage_space().structure(),
+            rhs_data,
+            alpha,
+            beta,
+        )
+    }
+
     /// Generic-fusion (Stage B3c-1) sibling of [`Self::tensorcontract_fusion_dyn_into`]:
     /// the SU(N) core/compose (fully-direct GEMM) route. Non-memoized (mirrors
     /// the generic tree-transform path) — the block GEMM is symmetry-agnostic,

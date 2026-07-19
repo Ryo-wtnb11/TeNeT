@@ -7720,6 +7720,9 @@ mod tests {
 
     #[test]
     fn direct_leg_degeneracy_layout_matches_legacy_for_supported_rules() {
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mixed_leg = |sectors: &[(SectorId, usize)], dual| {
             SectorLeg::new(sectors.iter().copied(), dual)
         };
@@ -8229,6 +8232,9 @@ mod tests {
 
     #[test]
     fn direct_generic_leg_degeneracy_layout_matches_legacy() {
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let rule = UnitaryToyOmRule;
         let a = SectorId::new(UnitaryToyOmRule::A);
         let c = SectorId::new(UnitaryToyOmRule::C);

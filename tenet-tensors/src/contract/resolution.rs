@@ -23,7 +23,7 @@ use super::structure::TensorContractStructure;
 use crate::cache::{typed_global_map, BlockStructureCacheKey, OperationCachePolicy};
 use crate::OperationError;
 use tenet_operations::axis::{OutputAxisOrder, TensorContractSpec, TensorContractSpecOwned};
-use tenet_operations::fusion_replay::FusionBlockContractPlan;
+use tenet_operations::fusion_replay::{FusionBlockContractPlan, MatrixOp};
 
 use super::dynamic_space::DynamicFusionMapSpace;
 use super::fusion::{external_axis_is_dual, FusionContractPlan};
@@ -81,6 +81,10 @@ struct FullKey<RuleKey> {
 enum FullResolutionScope {
     Ordinary,
     Prelowered {
+        lhs_storage: FullSpaceKey,
+        rhs_storage: FullSpaceKey,
+    },
+    Composition {
         lhs_storage: FullSpaceKey,
         rhs_storage: FullSpaceKey,
     },
@@ -159,6 +163,10 @@ enum FastResolutionScope {
         lhs_storage: FastSpaceKey,
         rhs_storage: FastSpaceKey,
     },
+    Composition {
+        lhs_storage: FastSpaceKey,
+        rhs_storage: FastSpaceKey,
+    },
     CoreOnly,
 }
 
@@ -199,6 +207,10 @@ enum LastResolutionScope {
         lhs_storage: LastSpace,
         rhs_storage: LastSpace,
     },
+    Composition {
+        lhs_storage: LastSpace,
+        rhs_storage: LastSpace,
+    },
     CoreOnly,
 }
 
@@ -206,6 +218,10 @@ enum LastResolutionScope {
 enum LiveResolutionScope<'a> {
     Ordinary,
     Prelowered {
+        lhs_storage: &'a DynamicFusionMapSpace,
+        rhs_storage: &'a DynamicFusionMapSpace,
+    },
+    Composition {
         lhs_storage: &'a DynamicFusionMapSpace,
         rhs_storage: &'a DynamicFusionMapSpace,
     },
@@ -251,6 +267,16 @@ impl LastResolutionScope {
                     rhs_storage: live_rhs,
                 },
             ) => lhs_storage.matches(live_lhs) && rhs_storage.matches(live_rhs),
+            (
+                Self::Composition {
+                    lhs_storage,
+                    rhs_storage,
+                },
+                LiveResolutionScope::Composition {
+                    lhs_storage: live_lhs,
+                    rhs_storage: live_rhs,
+                },
+            ) => lhs_storage.matches(live_lhs) && rhs_storage.matches(live_rhs),
             _ => false,
         }
     }
@@ -264,6 +290,13 @@ impl LiveResolutionScope<'_> {
                 lhs_storage,
                 rhs_storage,
             } => Ok(FullResolutionScope::Prelowered {
+                lhs_storage: FullSpaceKey::from_space(lhs_storage)?,
+                rhs_storage: FullSpaceKey::from_space(rhs_storage)?,
+            }),
+            Self::Composition {
+                lhs_storage,
+                rhs_storage,
+            } => Ok(FullResolutionScope::Composition {
                 lhs_storage: FullSpaceKey::from_space(lhs_storage)?,
                 rhs_storage: FullSpaceKey::from_space(rhs_storage)?,
             }),
@@ -281,6 +314,13 @@ impl LiveResolutionScope<'_> {
                 lhs_storage: FastSpaceKey::from_space(lhs_storage),
                 rhs_storage: FastSpaceKey::from_space(rhs_storage),
             },
+            Self::Composition {
+                lhs_storage,
+                rhs_storage,
+            } => FastResolutionScope::Composition {
+                lhs_storage: FastSpaceKey::from_space(lhs_storage),
+                rhs_storage: FastSpaceKey::from_space(rhs_storage),
+            },
             Self::CoreOnly => FastResolutionScope::CoreOnly,
         }
     }
@@ -292,6 +332,13 @@ impl LiveResolutionScope<'_> {
                 lhs_storage,
                 rhs_storage,
             } => LastResolutionScope::Prelowered {
+                lhs_storage: LastSpace::from_space(lhs_storage),
+                rhs_storage: LastSpace::from_space(rhs_storage),
+            },
+            Self::Composition {
+                lhs_storage,
+                rhs_storage,
+            } => LastResolutionScope::Composition {
                 lhs_storage: LastSpace::from_space(lhs_storage),
                 rhs_storage: LastSpace::from_space(rhs_storage),
             },
@@ -608,6 +655,90 @@ where
             Resolution::Core(plan) => Ok(plan),
             _ => Err(OperationError::UnsupportedTensorContractScope {
                 message: "internal scratch contraction resolved to a non-core plan",
+            }),
+        }
+    }
+
+    /// Resolve categorical map composition to the coefficient-free coupled
+    /// block product used by TensorKit `mul!`.
+    ///
+    /// The composition scope is distinct from ordinary `tensorcontract!`:
+    /// identical spaces and axes request different fermionic semantics.
+    /// Storage spaces and access modes are both part of the key because a
+    /// lazy adjoint replays the same logical map from a different block layout.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn get_or_compile_composition_plan<R>(
+        &mut self,
+        rule: &R,
+        dst: &DynamicFusionMapSpace,
+        lhs_logical: &DynamicFusionMapSpace,
+        lhs_storage: &DynamicFusionMapSpace,
+        rhs_logical: &DynamicFusionMapSpace,
+        rhs_storage: &DynamicFusionMapSpace,
+        axes: TensorContractSpec<'_>,
+    ) -> Result<Arc<FusionBlockContractPlan>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>
+            + crate::TreeTransformRuleCacheKey<Key = RuleKey>,
+        RuleKey: 'static + Send + Sync,
+    {
+        lhs_storage.validate_rule(rule)?;
+        rhs_storage.validate_rule(rule)?;
+        let access = OperandAccess {
+            lhs: if axes.lhs_conjugate() {
+                OperandAccessMode::AdjointParent
+            } else {
+                OperandAccessMode::Direct
+            },
+            rhs: if axes.rhs_conjugate() {
+                OperandAccessMode::AdjointParent
+            } else {
+                OperandAccessMode::Direct
+            },
+        };
+        let resolution = self.get_or_resolve_with(
+            rule,
+            dst,
+            lhs_logical,
+            rhs_logical,
+            axes,
+            LiveResolutionScope::Composition {
+                lhs_storage,
+                rhs_storage,
+            },
+            access,
+            || {
+                let logical_axes = TensorContractSpec::new(
+                    axes.lhs_contracting_axes(),
+                    axes.rhs_contracting_axes(),
+                    axes.output_permutation(),
+                );
+                compile_fusion_block_contract_plan_prelowered(
+                    rule,
+                    dst,
+                    lhs_logical,
+                    lhs_storage,
+                    rhs_logical,
+                    rhs_storage,
+                    logical_axes,
+                    if axes.lhs_conjugate() {
+                        MatrixOp::Adjoint
+                    } else {
+                        MatrixOp::Identity
+                    },
+                    if axes.rhs_conjugate() {
+                        MatrixOp::Adjoint
+                    } else {
+                        MatrixOp::Identity
+                    },
+                )
+                .map(|plan| Resolution::Core(Arc::new(plan)))
+            },
+        )?;
+        match resolution {
+            Resolution::Core(plan) => Ok(plan),
+            _ => Err(OperationError::UnsupportedTensorContractScope {
+                message: "categorical composition resolved to a non-core plan",
             }),
         }
     }
