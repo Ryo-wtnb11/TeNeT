@@ -513,6 +513,45 @@ impl DenseExecutor for DefaultDenseExecutor {
             .map_err(|err| tenferro_error("eigh_read", err))
     }
 
+    fn solve_into(
+        &mut self,
+        a: DenseRead<'_>,
+        b: DenseRead<'_>,
+        x: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        if x.dtype() != b.dtype() {
+            return Err(DenseError::DTypeMismatch {
+                op: "solve_into",
+                expected: b.dtype(),
+                actual: x.dtype(),
+            });
+        }
+        if x.shape() != b.shape() {
+            return Err(DenseError::ShapeMismatch {
+                op: "solve_into",
+                expected: b.shape().to_vec(),
+                actual: x.shape().to_vec(),
+            });
+        }
+        // Tenferro currently exposes only owned solve; writing before it
+        // succeeds could publish a partial result on numerical failure.
+        let a = self
+            .backend
+            .to_contiguous_read(TensorRead::from_view(tenferro_view(a)?))
+            .map_err(|err| tenferro_error("solve_into", err))?;
+        let b = self
+            .backend
+            .to_contiguous_read(TensorRead::from_view(tenferro_view(b)?))
+            .map_err(|err| tenferro_error("solve_into", err))?;
+        let solution = self.backend.solve(&a, &b).map_err(tenferro_solve_error)?;
+        self.backend
+            .copy_read_into(
+                TensorRead::from_tensor(&solution),
+                TensorWrite::from_view(tenferro_view_mut(x)?),
+            )
+            .map_err(|err| tenferro_error("solve_into", err))
+    }
+
     // Values-only overrides route to tenferro's no-vector LAPACK entries
     // (`job='N'`), skipping the U/Vt (or eigenvector) computation the default
     // fallback would do. The backend entries take an owned `&Tensor`, so the
@@ -851,5 +890,17 @@ pub(crate) fn tenferro_error(op: &'static str, err: tenferro_tensor::Error) -> D
         backend: DenseBackend::Tenferro,
         op,
         message: err.to_string(),
+    }
+}
+
+fn tenferro_solve_error(err: tenferro_tensor::Error) -> DenseError {
+    if err.kind() == tenferro_tensor::ErrorKind::NumericalFailure {
+        DenseError::NumericalFailure {
+            backend: DenseBackend::Tenferro,
+            op: "solve_into",
+            message: err.to_string(),
+        }
+    } else {
+        tenferro_error("solve_into", err)
     }
 }

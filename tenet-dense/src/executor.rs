@@ -35,6 +35,19 @@ pub trait DenseExecutor {
     fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
     fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError>;
 
+    /// Solve `a * x = b` into caller-owned storage.
+    fn solve_into(
+        &mut self,
+        _a: DenseRead<'_>,
+        _b: DenseRead<'_>,
+        _x: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        Err(DenseError::Unsupported {
+            op: "solve_into",
+            message: "executor does not implement dense linear solve".to_string(),
+        })
+    }
+
     fn svd_into(
         &mut self,
         input: DenseRead<'_>,
