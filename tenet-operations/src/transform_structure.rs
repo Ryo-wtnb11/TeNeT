@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
-use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
-use tenet_core::{BlockStructure, TensorMap, TensorStorage};
+use tenet_core::{
+    validate_block_storage_injective, BlockStructure, CoreError, TensorMap, TensorStorage,
+};
 use tenet_dense::{strided_batch_runs, DenseGemmBatchJob};
 
 use crate::kernel_adapter::{fuse_pair_layout, BakedFusedLayout};
@@ -688,159 +689,18 @@ pub fn validate_destination_layouts_injective(
     // Why-not deduplicate only the beta scale: aliased logical destination
     // blocks can also require distinct alpha contributions, so no replay order
     // can represent their outputs in one physical element.
-    #[derive(Clone, Copy)]
-    struct BoundedBlock {
-        dst_block: usize,
-        start: usize,
-        end: usize,
-        proven_injective: bool,
-    }
-
-    let mut bounded = Vec::with_capacity(dst_structure.block_count());
-    for dst_block in 0..dst_structure.block_count() {
-        let block = dst_structure.block(dst_block)?;
-        let Some((start, end)) = layout_bounds(block.shape(), block.strides(), block.offset())?
-        else {
-            continue;
-        };
-        bounded.push(BoundedBlock {
-            dst_block,
-            start,
-            end,
-            proven_injective: layout_is_proven_injective(block.shape(), block.strides()),
-        });
-    }
-    bounded.sort_by_key(|block| block.start);
-
-    let mut component_start = 0;
-    while component_start < bounded.len() {
-        let mut component_end = component_start + 1;
-        let mut max_end = bounded[component_start].end;
-        while component_end < bounded.len() && bounded[component_end].start <= max_end {
-            max_end = max_end.max(bounded[component_end].end);
-            component_end += 1;
+    match validate_block_storage_injective(dst_structure) {
+        Ok(()) => Ok(()),
+        Err(CoreError::OverlappingBlockStorage { .. }) => {
+            // Why not expose block/offset details in a new variant:
+            // OperationError is a public exhaustive enum, so that would
+            // break downstream matches for a validation-only diagnostic.
+            Err(OperationError::InvalidArgument {
+                message: overlap_message,
+            })
         }
-        let component = &bounded[component_start..component_end];
-        if component.len() == 1 && component[0].proven_injective {
-            component_start = component_end;
-            continue;
-        }
-
-        // Range-connected layouts may be physically disjoint (coupled and
-        // interleaved blocks), so enumerate each suspicious footprint once.
-        let mut offsets = FxHashSet::<usize>::default();
-        for bounded_block in component {
-            let block = dst_structure.block(bounded_block.dst_block)?;
-            let mut overlap = false;
-            visit_layout_offsets(block.shape(), block.strides(), block.offset(), |offset| {
-                overlap = !offsets.insert(offset);
-                overlap
-            })?;
-            if overlap {
-                // Why not expose block/offset details in a new variant:
-                // OperationError is a public exhaustive enum, so that would
-                // break downstream matches for a validation-only diagnostic.
-                return Err(OperationError::InvalidArgument {
-                    message: overlap_message,
-                });
-            }
-        }
-        component_start = component_end;
-    }
-    Ok(())
-}
-
-fn layout_is_proven_injective(shape: &[usize], strides: &[usize]) -> bool {
-    let mut axes = shape
-        .iter()
-        .copied()
-        .zip(strides.iter().copied())
-        .filter(|&(extent, _)| extent > 1)
-        .collect::<SmallVec<[(usize, usize); 8]>>();
-    axes.sort_unstable_by_key(|&(_, stride)| stride);
-    let mut lower_span = 0usize;
-    for (extent, stride) in axes {
-        if stride == 0 || stride <= lower_span {
-            return false;
-        }
-        let Some(span) = (extent - 1).checked_mul(stride) else {
-            return false;
-        };
-        let Some(next_span) = lower_span.checked_add(span) else {
-            return false;
-        };
-        lower_span = next_span;
-    }
-    true
-}
-
-fn layout_bounds(
-    shape: &[usize],
-    strides: &[usize],
-    offset: usize,
-) -> Result<Option<(usize, usize)>, OperationError> {
-    if shape.contains(&0) {
-        return Ok(None);
-    }
-    let mut end = offset;
-    for (&extent, &stride) in shape.iter().zip(strides) {
-        end = end
-            .checked_add(
-                extent
-                    .saturating_sub(1)
-                    .checked_mul(stride)
-                    .ok_or(OperationError::ElementCountOverflow)?,
-            )
-            .ok_or(OperationError::ElementCountOverflow)?;
-    }
-    Ok(Some((offset, end)))
-}
-
-fn visit_layout_offsets<F>(
-    shape: &[usize],
-    strides: &[usize],
-    offset: usize,
-    mut stop: F,
-) -> Result<Option<usize>, OperationError>
-where
-    F: FnMut(usize) -> bool,
-{
-    if shape.contains(&0) {
-        return Ok(None);
-    }
-    let mut indices = shape
-        .iter()
-        .map(|_| 0usize)
-        .collect::<SmallVec<[usize; 8]>>();
-    loop {
-        let physical =
-            indices
-                .iter()
-                .zip(strides)
-                .try_fold(offset, |physical, (&index, &stride)| {
-                    physical
-                        .checked_add(
-                            index
-                                .checked_mul(stride)
-                                .ok_or(OperationError::ElementCountOverflow)?,
-                        )
-                        .ok_or(OperationError::ElementCountOverflow)
-                })?;
-        if stop(physical) {
-            return Ok(Some(physical));
-        }
-        let mut axis = 0;
-        while axis < indices.len() {
-            indices[axis] += 1;
-            if indices[axis] < shape[axis] {
-                break;
-            }
-            indices[axis] = 0;
-            axis += 1;
-        }
-        if axis == indices.len() {
-            return Ok(None);
-        }
+        Err(CoreError::ElementCountOverflow) => Err(OperationError::ElementCountOverflow),
+        Err(error) => Err(OperationError::Core(error)),
     }
 }
 

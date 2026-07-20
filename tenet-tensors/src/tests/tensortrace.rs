@@ -202,7 +202,7 @@ fn relayout_fz2_destination(
     reference: &FusionTensorMapSpace<1, 1>,
     strides: [[usize; 2]; 2],
     offsets: [usize; 2],
-) -> FusionTensorMapSpace<1, 1> {
+) -> Result<FusionTensorMapSpace<1, 1>, CoreError> {
     let structure = BlockStructure::from_blocks_with_rank(
         2,
         (0..2)
@@ -223,10 +223,8 @@ fn relayout_fz2_destination(
         reference.dense_space().clone(),
         reference.homspace().clone(),
         structure,
-    )
-    .unwrap()
+    )?
     .try_bind_rule(&FermionParityFusionRule)
-    .unwrap()
 }
 
 #[test]
@@ -485,12 +483,13 @@ fn typed_fz2_multiple_trace_terms_and_inactive_block_scale_beta_once() {
 }
 
 #[test]
-fn typed_fz2_trace_validates_destination_layout_injectivity() {
+fn typed_fz2_trace_admits_only_injective_destination_spaces() {
     let rule = FermionParityFusionRule;
-    let (canonical_dst, one_term_src) = strided_fz2_identity_trace_spaces();
+    let (canonical_dst, _) = strided_fz2_identity_trace_spaces();
     let aliased_dst = relayout_fz2_destination(&canonical_dst, [[2, 4], [2, 4]], [0, 0]);
     let self_overlapping_dst = relayout_fz2_destination(&canonical_dst, [[0, 4], [2, 4]], [0, 4]);
-    let interleaved_dst = relayout_fz2_destination(&canonical_dst, [[2, 4], [2, 4]], [0, 1]);
+    let interleaved_dst =
+        relayout_fz2_destination(&canonical_dst, [[2, 4], [2, 4]], [0, 1]).unwrap();
     let full_src = FusionTensorMapSpace::from_degeneracy_shapes(
         canonical_dst.dense_space().clone(),
         canonical_dst.homspace().clone(),
@@ -498,45 +497,24 @@ fn typed_fz2_trace_validates_destination_layout_injectivity() {
         [vec![2, 1], vec![2, 1]],
     )
     .unwrap();
-    let empty_src = FusionTensorMapSpace::new_unbound(
-        canonical_dst.dense_space().clone(),
-        canonical_dst.homspace().clone(),
-        BlockStructure::empty(2),
-    )
-    .unwrap()
-    .try_bind_rule(&rule)
-    .unwrap();
-    let expected = OperationError::InvalidArgument {
-        message: "tensor trace destination layouts overlap",
-    };
 
-    for (name, src) in [
-        ("active-active", &full_src),
-        ("active-inactive", &one_term_src),
-        ("inactive-inactive", &empty_src),
-    ] {
-        assert_eq!(
-            TensorTraceFusionStructure::<f64>::compile_fusion_spaces(
-                &rule,
-                &aliased_dst,
-                src,
-                TensorTraceAxisSpec::new(&[0, 1], &[], &[]),
-            )
-            .unwrap_err(),
-            expected,
-            "{name}"
-        );
-    }
+    // What: owning symmetric spaces reject both cross-block and self aliases
+    // before an operation can observe them.
     assert_eq!(
-        TensorTraceFusionStructure::<f64>::compile_fusion_spaces(
-            &rule,
-            &self_overlapping_dst,
-            &one_term_src,
-            TensorTraceAxisSpec::new(&[0, 1], &[], &[]),
-        )
-        .unwrap_err(),
-        expected,
-        "self-overlap"
+        aliased_dst,
+        Err(CoreError::OverlappingBlockStorage {
+            first_block: 0,
+            second_block: 1,
+            offset: 0,
+        })
+    );
+    assert_eq!(
+        self_overlapping_dst,
+        Err(CoreError::OverlappingBlockStorage {
+            first_block: 0,
+            second_block: 0,
+            offset: 0,
+        })
     );
 
     // What: intersecting bounds are valid when exact logical footprints remain

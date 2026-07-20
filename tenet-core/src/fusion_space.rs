@@ -2912,31 +2912,42 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
     /// Shared-handle variant of [`Self::new_unbound`].
     ///
     /// This is the same expert compatibility/import boundary: the caller has
-    /// already selected the complete block layout. This constructor checks only
-    /// that the hom space's codomain/domain ranks match the const generics and
-    /// that the structure's total rank matches their sum. Key, sector, duality,
-    /// and logical-shape admission remain the responsibility of
-    /// [`Self::try_bind_rule`].
+    /// already selected the complete block layout. This constructor checks that
+    /// the hom-space and structure ranks match and that logical block footprints
+    /// do not overlap. Key, sector, duality, and logical-shape admission remain
+    /// the responsibility of [`Self::try_bind_rule`].
     pub fn from_shared_subblock_structure(
         dense_space: TensorMapSpace<NOUT, NIN>,
         homspace: FusionTreeHomSpace,
         subblock_structure: Arc<BlockStructure>,
     ) -> Result<Self, CoreError> {
         Self::validate_homspace_rank(&homspace)?;
-        let rank = NOUT + NIN;
-        if subblock_structure.rank() != rank {
-            return Err(CoreError::StructureRankMismatch {
-                expected: rank,
-                actual: subblock_structure.rank(),
-            });
+        Self::validate_structure_rank(&subblock_structure)?;
+        if subblock_structure
+            .coupled_sector_regions(NOUT)?
+            .is_none()
+        {
+            validate_block_storage_injective(&subblock_structure)?;
         }
+        Ok(Self::from_admitted_shared_subblock_structure(
+            dense_space,
+            homspace,
+            subblock_structure,
+        ))
+    }
+
+    fn from_admitted_shared_subblock_structure(
+        dense_space: TensorMapSpace<NOUT, NIN>,
+        homspace: FusionTreeHomSpace,
+        subblock_structure: Arc<BlockStructure>,
+    ) -> Self {
         let subblock_structure = BlockStructure::canonicalize_shared(subblock_structure);
-        Ok(Self {
+        Self {
             dense_space,
             homspace: Arc::new(homspace),
             subblock_structure,
             rule_identity: None,
-        })
+        }
     }
 
     /// Expert compatibility constructor for caller-supplied fusion-tree
@@ -3028,8 +3039,13 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
     {
         Self::validate_homspace_rank(&homspace)?;
         let subblock_structure = homspace.coupled_subblock_structure(rule, NOUT, shapes)?;
-        Self::from_shared_subblock_structure(dense_space, homspace, subblock_structure)
-            .map(|space| space.with_rule_identity(rule.rule_identity()))
+        Self::validate_structure_rank(&subblock_structure)?;
+        Ok(Self::from_admitted_shared_subblock_structure(
+            dense_space,
+            homspace,
+            subblock_structure,
+        )
+        .with_rule_identity(rule.rule_identity()))
     }
 
     fn validate_homspace_rank(homspace: &FusionTreeHomSpace) -> Result<(), CoreError> {
@@ -3046,6 +3062,62 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
             });
         }
         Ok(())
+    }
+
+    fn validate_structure_rank(subblock_structure: &BlockStructure) -> Result<(), CoreError> {
+        let rank = NOUT + NIN;
+        if subblock_structure.rank() != rank {
+            return Err(CoreError::StructureRankMismatch {
+                expected: rank,
+                actual: subblock_structure.rank(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Builds the adjoint metadata view without rechecking its physical
+    /// footprint.
+    ///
+    /// Why not route through the expert constructor: swapping the two sides
+    /// only permutes each admitted block's shape/stride axes, so its exact set of
+    /// storage offsets is unchanged.
+    pub fn adjoint_view(&self) -> Result<FusionTensorMapSpace<NIN, NOUT>, CoreError> {
+        let dense_space = TensorMapSpace::<NIN, NOUT>::from_dims(
+            std::array::from_fn(|index| self.dense_space.domain().dims()[index]),
+            std::array::from_fn(|index| self.dense_space.codomain().dims()[index]),
+        )?;
+        let homspace = FusionTreeHomSpace::new(
+            self.homspace.domain().clone(),
+            self.homspace.codomain().clone(),
+        );
+        let rank = NOUT + NIN;
+        let mut blocks = Vec::with_capacity(self.subblock_structure.block_count());
+        for index in 0..self.subblock_structure.block_count() {
+            let block = self.subblock_structure.block(index)?;
+            let key = match block.key() {
+                BlockKey::Dense => BlockKey::Dense,
+                BlockKey::Opaque(key) => BlockKey::Opaque(key.clone()),
+                BlockKey::FusionTree(tree) => BlockKey::FusionTree(FusionTreePairKey::pair(
+                    tree.domain_tree().clone(),
+                    tree.codomain_tree().clone(),
+                )),
+            };
+            let mut shape = Vec::with_capacity(rank);
+            shape.extend_from_slice(&block.shape()[NOUT..]);
+            shape.extend_from_slice(&block.shape()[..NOUT]);
+            let mut strides = Vec::with_capacity(rank);
+            strides.extend_from_slice(&block.strides()[NOUT..]);
+            strides.extend_from_slice(&block.strides()[..NOUT]);
+            blocks.push(BlockSpec::with_key(key, shape, strides, block.offset())?);
+        }
+        let structure =
+            BlockStructure::from_blocks_with_rank(rank, blocks)?.into_shared();
+        Ok(FusionTensorMapSpace::<NIN, NOUT> {
+            dense_space,
+            homspace: Arc::new(homspace),
+            subblock_structure: structure,
+            rule_identity: self.rule_identity.clone(),
+        })
     }
 
     #[inline]

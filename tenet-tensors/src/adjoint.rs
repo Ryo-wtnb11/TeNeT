@@ -1423,7 +1423,7 @@ mod cache_tests {
                 .collect(),
         )
         .unwrap();
-        let overlapping = BlockStructure::from_blocks_with_rank(
+        let gapped = BlockStructure::from_blocks_with_rank(
             2,
             (0..canonical.block_count())
                 .map(|index| {
@@ -1432,7 +1432,7 @@ mod cache_tests {
                         block.key().clone(),
                         block.shape().to_vec(),
                         block.strides().to_vec(),
-                        0,
+                        block.offset() + index,
                     )
                     .unwrap()
                 })
@@ -1440,7 +1440,7 @@ mod cache_tests {
         )
         .unwrap();
 
-        for structure in [reordered, overlapping] {
+        for structure in [reordered, gapped] {
             let tensor = typed_u1_expert_tensor(2, 2, homspace.clone(), structure);
             OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
 

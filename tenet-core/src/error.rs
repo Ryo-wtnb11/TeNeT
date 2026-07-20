@@ -1,3 +1,4 @@
+#[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CoreError {
     RankMismatch {
@@ -77,6 +78,11 @@ pub enum CoreError {
     BlockIndexOutOfBounds {
         index: usize,
         count: usize,
+    },
+    OverlappingBlockStorage {
+        first_block: usize,
+        second_block: usize,
+        offset: usize,
     },
     DuplicateBlockKey {
         key: Box<BlockKey>,
@@ -200,6 +206,16 @@ impl fmt::Display for CoreError {
             }
             Self::BlockIndexOutOfBounds { index, count } => {
                 write!(f, "block index {index} is out of bounds for {count} blocks")
+            }
+            Self::OverlappingBlockStorage {
+                first_block,
+                second_block,
+                offset,
+            } => {
+                write!(
+                    f,
+                    "logical blocks {first_block} and {second_block} overlap at storage offset {offset}"
+                )
             }
             Self::DuplicateBlockKey { key } => {
                 write!(f, "duplicate block key {key:?}")
