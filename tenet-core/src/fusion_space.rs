@@ -140,6 +140,160 @@ impl std::hash::Hash for FusionTreeHomSpace {
     }
 }
 
+/// Proof that one exact fusion-tree block subset matches a HomSpace.
+///
+/// The proof is provider-free: it covers ranks, tree shapes, external-sector
+/// membership, duality, and block degeneracies. Categorical validation remains
+/// an explicit second step so malformed structure is rejected before provider
+/// algebra is queried.
+#[doc(hidden)]
+pub struct StructurallyValidatedFusionTreeSubset<'homspace, 'structure> {
+    homspace: &'homspace FusionTreeHomSpace,
+    structure: &'structure BlockStructure,
+}
+
+#[doc(hidden)]
+impl<'homspace, 'structure>
+    StructurallyValidatedFusionTreeSubset<'homspace, 'structure>
+{
+    pub fn try_new(
+        homspace: &'homspace FusionTreeHomSpace,
+        structure: &'structure BlockStructure,
+    ) -> Result<Self, CoreError> {
+        let expected_rank = homspace.rank();
+        if structure.rank() != expected_rank {
+            return Err(CoreError::StructureRankMismatch {
+                expected: expected_rank,
+                actual: structure.rank(),
+            });
+        }
+
+        for index in 0..structure.block_count() {
+            let block = structure.block(index)?;
+            let BlockKey::FusionTree(key) = block.key() else {
+                return Err(CoreError::ExpectedFusionTreePairKey {
+                    actual: block.key().kind(),
+                });
+            };
+            let codomain_tree = key.codomain_tree();
+            let domain_tree = key.domain_tree();
+
+            validate_fusion_tree_key_shape(codomain_tree)?;
+            validate_fusion_tree_key_shape(domain_tree)?;
+            if codomain_tree.uncoupled().len() != homspace.codomain.len()
+                || domain_tree.uncoupled().len() != homspace.domain.len()
+            {
+                return Err(CoreError::FusionSpaceSplitMismatch {
+                    expected_nout: homspace.codomain.len(),
+                    expected_nin: homspace.domain.len(),
+                    actual_nout: codomain_tree.uncoupled().len(),
+                    actual_nin: domain_tree.uncoupled().len(),
+                });
+            }
+
+            for (space, tree) in [
+                (&homspace.codomain, codomain_tree),
+                (&homspace.domain, domain_tree),
+            ] {
+                for (leg, &sector) in space.legs().iter().zip(tree.uncoupled()) {
+                    if leg.degeneracy(sector).is_none() {
+                        return Err(CoreError::MalformedFusionTree {
+                            message: "fusion tree uses a sector absent from its HomSpace leg",
+                        });
+                    }
+                }
+                for (leg, &is_dual) in space.legs().iter().zip(tree.is_dual()) {
+                    if leg.is_dual() != is_dual {
+                        return Err(CoreError::MalformedFusionTree {
+                            message: "fusion tree duality disagrees with its HomSpace leg",
+                        });
+                    }
+                }
+            }
+
+            let (codomain_shape, domain_shape) = block.shape().split_at(homspace.codomain.len());
+            for (space, tree, shape) in [
+                (&homspace.codomain, codomain_tree, codomain_shape),
+                (&homspace.domain, domain_tree, domain_shape),
+            ] {
+                for ((leg, &sector), &actual) in
+                    space.legs().iter().zip(tree.uncoupled()).zip(shape)
+                {
+                    let expected =
+                        leg.degeneracy(sector)
+                            .ok_or(CoreError::MalformedFusionTree {
+                                message:
+                                    "fusion tree uses a sector absent from its HomSpace leg",
+                            })?;
+                    if expected != actual {
+                        return Err(CoreError::LegDegeneracyMismatch {
+                            sector,
+                            expected,
+                            actual,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            homspace,
+            structure,
+        })
+    }
+
+    pub fn validate_for_rule<R>(&self, rule: &R) -> Result<(), CoreError>
+    where
+        R: FusionRule,
+    {
+        for index in 0..self.structure.block_count() {
+            let block = self.structure.block(index)?;
+            let BlockKey::FusionTree(key) = block.key() else {
+                return Err(CoreError::ExpectedFusionTreePairKey {
+                    actual: block.key().kind(),
+                });
+            };
+            key.validate_for_rule(rule)?;
+        }
+        Ok(())
+    }
+
+    pub fn validate_for_rule_checked<R>(
+        &self,
+        rule: &R,
+    ) -> Result<(), CheckedFusionSpaceError>
+    where
+        R: CheckedFusionAlgebra,
+    {
+        for index in 0..self.structure.block_count() {
+            let block = self.structure.block(index)?;
+            let BlockKey::FusionTree(key) = block.key() else {
+                return Err(CoreError::ExpectedFusionTreePairKey {
+                    actual: block.key().kind(),
+                }
+                .into());
+            };
+            validate_fusion_tree_pair_coupled(key.codomain_tree(), key.domain_tree())?;
+        }
+        for index in 0..self.structure.block_count() {
+            let block = self.structure.block(index)?;
+            let BlockKey::FusionTree(key) = block.key() else {
+                return Err(CoreError::ExpectedFusionTreePairKey {
+                    actual: block.key().kind(),
+                }
+                .into());
+            };
+            validate_fusion_tree_for_rule_checked_after_shape(rule, key.codomain_tree())?;
+            validate_fusion_tree_for_rule_checked_after_shape(rule, key.domain_tree())?;
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub fn homspace(&self) -> &'homspace FusionTreeHomSpace {
+        self.homspace
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 struct FusionTreeLegSetSignature {
     sectors: SectorVec,
@@ -2149,94 +2303,21 @@ impl FusionTreeHomSpace {
     where
         R: FusionRule,
     {
-        let expected_rank = self.rank();
-        if structure.rank() != expected_rank {
-            return Err(CoreError::StructureRankMismatch {
-                expected: expected_rank,
-                actual: structure.rank(),
-            });
-        }
+        StructurallyValidatedFusionTreeSubset::try_new(self, structure)?.validate_for_rule(rule)
+    }
 
-        for index in 0..structure.block_count() {
-            let block = structure.block(index)?;
-            let BlockKey::FusionTree(key) = block.key() else {
-                return Err(CoreError::ExpectedFusionTreePairKey {
-                    actual: block.key().kind(),
-                });
-            };
-            let codomain_tree = key.codomain_tree();
-            let domain_tree = key.domain_tree();
-
-            // Validate every vector arity before indexing or asking the provider
-            // about caller-supplied categorical labels.
-            validate_fusion_tree_key_shape(codomain_tree)?;
-            validate_fusion_tree_key_shape(domain_tree)?;
-            if codomain_tree.uncoupled().len() != self.codomain.len()
-                || domain_tree.uncoupled().len() != self.domain.len()
-            {
-                return Err(CoreError::FusionSpaceSplitMismatch {
-                    expected_nout: self.codomain.len(),
-                    expected_nin: self.domain.len(),
-                    actual_nout: codomain_tree.uncoupled().len(),
-                    actual_nin: domain_tree.uncoupled().len(),
-                });
-            }
-
-            // Why not let local categorical validation establish membership:
-            // FusionRule assumes provider-domain labels, while the HomSpace
-            // legs are the authority for which external sectors are admitted.
-            for (space, tree) in [
-                (&self.codomain, codomain_tree),
-                (&self.domain, domain_tree),
-            ] {
-                for (leg, &sector) in space.legs().iter().zip(tree.uncoupled()) {
-                    if leg.degeneracy(sector).is_none() {
-                        return Err(CoreError::MalformedFusionTree {
-                            message: "fusion tree uses a sector absent from its HomSpace leg",
-                        });
-                    }
-                }
-            }
-
-            for (space, tree) in [
-                (&self.codomain, codomain_tree),
-                (&self.domain, domain_tree),
-            ] {
-                for (leg, &is_dual) in space.legs().iter().zip(tree.is_dual()) {
-                    if leg.is_dual() != is_dual {
-                        return Err(CoreError::MalformedFusionTree {
-                            message: "fusion tree duality disagrees with its HomSpace leg",
-                        });
-                    }
-                }
-            }
-
-            let (codomain_shape, domain_shape) = block.shape().split_at(self.codomain.len());
-            for (space, tree, shape) in [
-                (&self.codomain, codomain_tree, codomain_shape),
-                (&self.domain, domain_tree, domain_shape),
-            ] {
-                for ((leg, &sector), &actual) in
-                    space.legs().iter().zip(tree.uncoupled()).zip(shape)
-                {
-                    let expected =
-                        leg.degeneracy(sector)
-                            .ok_or(CoreError::MalformedFusionTree {
-                                message:
-                                    "fusion tree uses a sector absent from its HomSpace leg",
-                            })?;
-                    if expected != actual {
-                        return Err(CoreError::LegDegeneracyMismatch {
-                            sector,
-                            expected,
-                            actual,
-                        });
-                    }
-                }
-            }
-        }
-        LocallyValidatedFusionTreeBlockStructure::try_new(rule, structure)?;
-        Ok(())
+    /// Checked finite-algebra sibling of [`Self::validate_subblock_structure_subset`].
+    #[doc(hidden)]
+    pub fn validate_subblock_structure_subset_checked<R>(
+        &self,
+        rule: &R,
+        structure: &BlockStructure,
+    ) -> Result<(), CheckedFusionSpaceError>
+    where
+        R: CheckedFusionAlgebra,
+    {
+        StructurallyValidatedFusionTreeSubset::try_new(self, structure)?
+            .validate_for_rule_checked(rule)
     }
 
     pub fn fusion_tree_groups<R>(&self, rule: &R) -> Result<Vec<FusionTreeBlockGroup>, CoreError>
@@ -2657,22 +2738,42 @@ fn coupled_subblock_parts_from_leg_degeneracies(
 
 /// Computes coupled-sector matrix block specs for fusion-tree subblocks.
 ///
-/// Keys must arrive grouped by coupled sector (the `fusion_tree_keys`
-/// enumeration order). Within one coupled sector every codomain tree defines a
+/// Keys must arrive stable-sorted by coupled sector. Both owning callers
+/// establish that order before this private helper. Within one coupled sector
+/// every codomain tree defines a
 /// row block and every domain tree a column block of one column-major sector
 /// matrix; the subblock for `(codomain tree, domain tree)` is the strided view
 /// at that (row block, column block) position. Full coverage of the
 /// `rows × columns` grid is required so the sector matrix has no
 /// uninitialized holes.
-fn coupled_sector_matrix_block_specs<S>(
+fn coupled_sector_matrix_block_specs<K, S>(
     nout: usize,
     rank: usize,
-    keys: &[FusionTreePairKey],
+    keys: &[K],
     shapes: &[S],
 ) -> Result<Vec<BlockSpec>, CoreError>
 where
+    K: std::borrow::Borrow<FusionTreePairKey>,
     S: AsRef<[usize]>,
 {
+    validate_coupled_sector_matrix_dimensions(nout, rank, shapes.iter())?;
+    coupled_sector_matrix_block_specs_after_dimension_validation(nout, rank, keys, shapes)
+}
+
+fn validate_coupled_sector_matrix_dimensions<'shape, S>(
+    nout: usize,
+    rank: usize,
+    shapes: impl IntoIterator<Item = &'shape S>,
+) -> Result<(), CoreError>
+where
+    S: AsRef<[usize]> + 'shape,
+{
+    if nout > rank {
+        return Err(CoreError::StructureRankMismatch {
+            expected: rank,
+            actual: nout,
+        });
+    }
     for shape in shapes {
         let shape = shape.as_ref();
         if shape.len() != rank {
@@ -2682,24 +2783,29 @@ where
             });
         }
     }
+    Ok(())
+}
 
+fn coupled_sector_matrix_block_specs_after_dimension_validation<K, S>(
+    nout: usize,
+    rank: usize,
+    keys: &[K],
+    shapes: &[S],
+) -> Result<Vec<BlockSpec>, CoreError>
+where
+    K: std::borrow::Borrow<FusionTreePairKey>,
+    S: AsRef<[usize]>,
+{
     let mut specs = Vec::with_capacity(keys.len());
-    let mut seen_sectors: Vec<SectorId> = Vec::new();
     let mut sector_offset = 0usize;
     let mut run_start = 0usize;
     while run_start < keys.len() {
-        let coupled = keys[run_start].codomain_tree().coupled();
-        if seen_sectors.contains(&coupled) {
-            return Err(CoreError::MalformedFusionTree {
-                message: "coupled sectors must be contiguous in fusion tree key order",
-            });
-        }
-        seen_sectors.push(coupled);
+        let coupled = keys[run_start].borrow().codomain_tree().coupled();
         let mut run_end = run_start;
         while run_end < keys.len()
-            && keys[run_end].codomain_tree().coupled() == coupled
+            && keys[run_end].borrow().codomain_tree().coupled() == coupled
         {
-            if keys[run_end].domain_tree().coupled() != coupled {
+            if keys[run_end].borrow().domain_tree().coupled() != coupled {
                 return Err(CoreError::MalformedFusionTree {
                     message: "codomain and domain trees must share the coupled sector",
                 });
@@ -2715,10 +2821,10 @@ where
         let mut row_index: FxHashMap<&FusionTreeKey, usize> = FxHashMap::default();
         let mut col_index: FxHashMap<&FusionTreeKey, usize> = FxHashMap::default();
         for index in run_start..run_end {
-            let key = &keys[index];
+            let key = keys[index].borrow();
             let shape = shapes[index].as_ref();
-            let row_dim = shape[..nout].iter().product::<usize>();
-            let col_dim = shape[nout..].iter().product::<usize>();
+            let row_dim = checked_product(&shape[..nout])?;
+            let col_dim = checked_product(&shape[nout..])?;
             match row_index.get(key.codomain_tree()).copied() {
                 Some(existing_index) if row_blocks[existing_index].2 != row_dim => {
                     return Err(CoreError::DimensionMismatch {
@@ -2728,10 +2834,12 @@ where
                 }
                 Some(_) => {}
                 None => {
-                    let offset = row_blocks
-                        .last()
-                        .map(|(_, start, dim)| start + dim)
-                        .unwrap_or(0);
+                    let offset = match row_blocks.last() {
+                        Some((_, start, dim)) => start
+                            .checked_add(*dim)
+                            .ok_or(CoreError::ElementCountOverflow)?,
+                        None => 0,
+                    };
                     row_index.insert(key.codomain_tree(), row_blocks.len());
                     row_blocks.push((key.codomain_tree(), offset, row_dim));
                 }
@@ -2745,32 +2853,42 @@ where
                 }
                 Some(_) => {}
                 None => {
-                    let offset = col_blocks
-                        .last()
-                        .map(|(_, start, dim)| start + dim)
-                        .unwrap_or(0);
+                    let offset = match col_blocks.last() {
+                        Some((_, start, dim)) => start
+                            .checked_add(*dim)
+                            .ok_or(CoreError::ElementCountOverflow)?,
+                        None => 0,
+                    };
                     col_index.insert(key.domain_tree(), col_blocks.len());
                     col_blocks.push((key.domain_tree(), offset, col_dim));
                 }
             }
         }
-        if run_end - run_start != row_blocks.len() * col_blocks.len() {
+        let expected_blocks = row_blocks
+            .len()
+            .checked_mul(col_blocks.len())
+            .ok_or(CoreError::ElementCountOverflow)?;
+        if run_end - run_start != expected_blocks {
             return Err(CoreError::BlockCountMismatch {
-                expected: row_blocks.len() * col_blocks.len(),
+                expected: expected_blocks,
                 actual: run_end - run_start,
             });
         }
-        let matrix_rows = row_blocks
-            .last()
-            .map(|(_, start, dim)| start + dim)
-            .unwrap_or(0);
-        let matrix_cols = col_blocks
-            .last()
-            .map(|(_, start, dim)| start + dim)
-            .unwrap_or(0);
+        let matrix_rows = match row_blocks.last() {
+            Some((_, start, dim)) => start
+                .checked_add(*dim)
+                .ok_or(CoreError::ElementCountOverflow)?,
+            None => 0,
+        };
+        let matrix_cols = match col_blocks.last() {
+            Some((_, start, dim)) => start
+                .checked_add(*dim)
+                .ok_or(CoreError::ElementCountOverflow)?,
+            None => 0,
+        };
 
         for index in run_start..run_end {
-            let key = &keys[index];
+            let key = keys[index].borrow();
             let shape = shapes[index].as_ref();
             let row_start = row_blocks[row_index
                 .get(key.codomain_tree())
@@ -2797,11 +2915,10 @@ where
                     .checked_mul(dim)
                     .ok_or(CoreError::ElementCountOverflow)?;
             }
-            let offset = sector_offset
-                + row_start
-                + matrix_rows
-                    .checked_mul(col_start)
-                    .ok_or(CoreError::ElementCountOverflow)?;
+            let offset = matrix_rows
+                .checked_mul(col_start)
+                .and_then(|column| sector_offset.checked_add(row_start)?.checked_add(column))
+                .ok_or(CoreError::ElementCountOverflow)?;
             specs.push(BlockSpec::with_key(
                 BlockKey::FusionTree(key.clone()),
                 shape.to_vec(),
@@ -3350,6 +3467,38 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
         self.homspace
             .validate_subblock_structure_subset(rule, self.subblock_structure())?;
         self.admission = FusionSpaceAdmission::Subset(actual);
+        Ok(self)
+    }
+
+    /// Checked finite-algebra admission for a caller-supplied block layout.
+    ///
+    /// An existing matching admission is deliberately revalidated because a
+    /// legacy stamp does not prove checked finite-algebra closure.
+    pub fn try_bind_rule_checked<R>(
+        mut self,
+        rule: &R,
+    ) -> Result<Self, CheckedFusionSpaceError>
+    where
+        R: CheckedFusionAlgebra,
+    {
+        let actual = rule.rule_identity();
+        let was_complete = matches!(self.admission, FusionSpaceAdmission::Complete(_));
+        if let Some(expected) = self.admission.rule_identity() {
+            if expected != &actual {
+                return Err(CoreError::FusionRuleMismatch {
+                    expected: expected.clone(),
+                    actual,
+                }
+                .into());
+            }
+        }
+        self.homspace
+            .validate_subblock_structure_subset_checked(rule, self.subblock_structure())?;
+        self.admission = if was_complete {
+            FusionSpaceAdmission::Complete(actual)
+        } else {
+            FusionSpaceAdmission::Subset(actual)
+        };
         Ok(self)
     }
 

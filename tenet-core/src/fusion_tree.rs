@@ -1056,23 +1056,58 @@ fn validate_fusion_tree_for_rule_checked<'a, R>(
 where
     R: CheckedFusionAlgebra,
 {
-    validate_fusion_tree_structure(rule, tree)?;
-    if tree.uncoupled().len() == 1 {
-        let multiplicity =
-            rule.try_nsymbol(tree.coupled(), rule.vacuum(), tree.coupled())?;
-        if multiplicity == 0 {
-            return Err(CoreError::MalformedFusionTree {
-                message: "rank-1 fusion tree sector is absent from unit fusion",
-            }
-            .into());
-        }
+    ShapeValidatedFusionTree::try_new(tree)?.validate_for_rule_checked(rule)
+}
+
+fn validate_fusion_tree_for_rule_checked_after_shape<'tree, R>(
+    rule: &'tree R,
+    tree: &'tree FusionTreeKey,
+) -> Result<ValidatedFusionTree<'tree, R>, CheckedFusionSpaceError>
+where
+    R: CheckedFusionAlgebra,
+{
+    ShapeValidatedFusionTree { tree }.validate_for_rule_checked(rule)
+}
+
+#[derive(Clone, Copy)]
+struct ShapeValidatedFusionTree<'tree> {
+    tree: &'tree FusionTreeKey,
+}
+
+impl<'tree> ShapeValidatedFusionTree<'tree> {
+    fn try_new(tree: &'tree FusionTreeKey) -> Result<Self, CoreError> {
+        validate_fusion_tree_key_shape(tree)?;
+        Ok(Self { tree })
     }
-    validate_fusion_tree_vertices(tree, |left, right, coupled| {
-        rule.try_fusion_channels(left, right)?;
-        rule.try_nsymbol(left, right, coupled)
-            .map_err(CheckedFusionSpaceError::from)
-    })?;
-    Ok(ValidatedFusionTree { rule, key: tree })
+
+    fn validate_for_rule_checked<R>(
+        self,
+        rule: &'tree R,
+    ) -> Result<ValidatedFusionTree<'tree, R>, CheckedFusionSpaceError>
+    where
+        R: CheckedFusionAlgebra,
+    {
+        validate_fusion_tree_structure_after_shape(rule, self.tree)?;
+        if self.tree.uncoupled().len() == 1 {
+        let multiplicity =
+                rule.try_nsymbol(self.tree.coupled(), rule.vacuum(), self.tree.coupled())?;
+            if multiplicity == 0 {
+                return Err(CoreError::MalformedFusionTree {
+                    message: "rank-1 fusion tree sector is absent from unit fusion",
+                }
+                .into());
+            }
+        }
+        validate_fusion_tree_vertices(self.tree, |left, right, coupled| {
+            rule.try_fusion_channels(left, right)?;
+            rule.try_nsymbol(left, right, coupled)
+                .map_err(CheckedFusionSpaceError::from)
+        })?;
+        Ok(ValidatedFusionTree {
+            rule,
+            key: self.tree,
+        })
+    }
 }
 
 fn validate_fusion_tree_structure<R>(rule: &R, tree: &FusionTreeKey) -> Result<(), CoreError>
@@ -1080,6 +1115,16 @@ where
     R: FusionRule,
 {
     validate_fusion_tree_key_shape(tree)?;
+    validate_fusion_tree_structure_after_shape(rule, tree)
+}
+
+fn validate_fusion_tree_structure_after_shape<R>(
+    rule: &R,
+    tree: &FusionTreeKey,
+) -> Result<(), CoreError>
+where
+    R: FusionRule,
+{
     match tree.uncoupled().len() {
         0 if tree.coupled() != rule.vacuum() => Err(CoreError::MalformedFusionTree {
             message: "rank-0 fusion tree coupled sector must equal the vacuum",

@@ -1939,6 +1939,7 @@ mod tests {
     struct CheckedTreeProbe {
         channel_calls: AtomicUsize,
         nsymbol_calls: AtomicUsize,
+        legacy_nsymbol_calls: AtomicUsize,
     }
 
     impl FusionRule for CheckedTreeProbe {
@@ -1963,6 +1964,7 @@ mod tests {
         }
 
         fn nsymbol(&self, _left: SectorId, _right: SectorId, _coupled: SectorId) -> usize {
+            self.legacy_nsymbol_calls.fetch_add(1, Ordering::Relaxed);
             1
         }
     }
@@ -2114,6 +2116,412 @@ mod tests {
                 }
             )))
         );
+    }
+
+    #[test]
+    fn fusion_subset_structural_proof_precedes_algebra_and_preserves_legacy_work() {
+        // What: HomSpace metadata is proved without provider calls, while the
+        // legacy categorical phase retains the former local-validator work.
+        let scalar = FusionTreeKey::new([], SectorId::new(0), [], [], []);
+        let malformed = FusionTreeKey::new(
+            [SectorId::new(0); 2],
+            SectorId::new(0),
+            [false],
+            [],
+            [MultiplicityIndex::ONE],
+        );
+        let malformed_structure = packed_fixture_structure(
+            2,
+            [(
+                FusionTreePairKey::pair(malformed, scalar.clone()),
+                vec![1, 1],
+            )],
+        )
+        .unwrap();
+        let homspace = FusionTreeHomSpace::from_sector_ids([(0, 1), (0, 1)], []);
+        let checked = CheckedTreeProbe::default();
+        assert!(matches!(
+            homspace.validate_subblock_structure_subset_checked(
+                &checked,
+                &malformed_structure,
+            ),
+            Err(CheckedFusionSpaceError::Core(_))
+        ));
+        assert_eq!(checked.channel_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(checked.nsymbol_calls.load(Ordering::Relaxed), 0);
+
+        let valid = FusionTreeKey::new(
+            [SectorId::new(0); 2],
+            SectorId::new(0),
+            [false; 2],
+            [],
+            [MultiplicityIndex::ONE],
+        );
+        let coupling_probe = CheckedTreeProbe::default();
+        let mismatched_structure = packed_fixture_structure(
+            2,
+            [
+                (
+                    FusionTreePairKey::pair(valid.clone(), scalar.clone()),
+                    vec![1, 1],
+                ),
+                (
+                    FusionTreePairKey::pair(
+                        valid.clone(),
+                        FusionTreeKey::new([], SectorId::new(1), [], [], []),
+                    ),
+                    vec![1, 1],
+                ),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            homspace.validate_subblock_structure_subset_checked(
+                &coupling_probe,
+                &mismatched_structure,
+            ),
+            Err(CheckedFusionSpaceError::Core(_))
+        ));
+        assert_eq!(coupling_probe.channel_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(coupling_probe.nsymbol_calls.load(Ordering::Relaxed), 0);
+
+        let structure = packed_fixture_structure(
+            2,
+            [(FusionTreePairKey::pair(valid, scalar), vec![1, 1])],
+        )
+        .unwrap();
+        let direct = CheckedTreeProbe::default();
+        LocallyValidatedFusionTreeBlockStructure::try_new(&direct, &structure).unwrap();
+        let expected_calls = direct.legacy_nsymbol_calls.load(Ordering::Relaxed);
+        let admitted = CheckedTreeProbe::default();
+        homspace
+            .validate_subblock_structure_subset(&admitted, &structure)
+            .unwrap();
+        assert!(expected_calls > 0);
+        assert_eq!(
+            admitted.legacy_nsymbol_calls.load(Ordering::Relaxed),
+            expected_calls
+        );
+    }
+
+    #[test]
+    fn checked_layout_and_space_admission_reject_finite_nonclosure_transactionally() {
+        // What: caller-order layout validation and same-rule legacy admission
+        // surface the exact finite-algebra error without publishing a new stamp.
+        let scalar_zero = FusionTreeKey::new([], SectorId::new(0), [], [], []);
+        let valid = FusionTreeKey::new(
+            [SectorId::new(0); 2],
+            SectorId::new(0),
+            [false; 2],
+            [],
+            [MultiplicityIndex::ONE],
+        );
+        let malformed = FusionTreeKey::new(
+            [SectorId::new(0); 2],
+            SectorId::new(0),
+            [false],
+            [],
+            [MultiplicityIndex::ONE],
+        );
+        let structural_probe = CheckedTreeProbe::default();
+        assert!(matches!(
+            BlockStructure::coupled_sector_matrix_with_keys_checked(
+                &structural_probe,
+                2,
+                2,
+                vec![
+                    (
+                        FusionTreePairKey::pair(valid.clone(), scalar_zero.clone()),
+                        vec![1, 1],
+                    ),
+                    (
+                        FusionTreePairKey::pair(malformed, scalar_zero.clone()),
+                        vec![1, 1],
+                    ),
+                ],
+            ),
+            Err(CheckedFusionSpaceError::Core(_))
+        ));
+        assert_eq!(structural_probe.channel_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(structural_probe.nsymbol_calls.load(Ordering::Relaxed), 0);
+
+        let split_probe = CheckedTreeProbe::default();
+        assert_eq!(
+            BlockStructure::coupled_sector_matrix_with_keys_checked(
+                &split_probe,
+                3,
+                2,
+                vec![(
+                    FusionTreePairKey::pair(valid.clone(), scalar_zero.clone()),
+                    vec![1, 1],
+                )],
+            ),
+            Err(CheckedFusionSpaceError::Core(Box::new(
+                CoreError::StructureRankMismatch {
+                    expected: 2,
+                    actual: 3,
+                },
+            )))
+        );
+        assert_eq!(split_probe.channel_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(split_probe.nsymbol_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            BlockStructure::coupled_sector_matrix_with_keys(
+                &CheckedTreeProbe::default(),
+                3,
+                2,
+                vec![(FusionTreePairKey::pair(valid, scalar_zero), vec![1, 1])],
+            ),
+            Err(CoreError::StructureRankMismatch {
+                expected: 2,
+                actual: 3,
+            })
+        );
+
+        let overflow = FusionTreeKey::new(
+            [u1(i32::MAX), u1(1)],
+            u1(0),
+            [false; 2],
+            [],
+            [MultiplicityIndex::ONE],
+        );
+        let scalar = FusionTreeKey::new([], u1(0), [], [], []);
+        let pair = FusionTreePairKey::pair(overflow, scalar);
+        let expected = CheckedFusionSpaceError::FusionAlgebra(Box::new(
+            FusionAlgebraError::U1FusionOverflow {
+                left: i32::MAX,
+                right: 1,
+            },
+        ));
+        reset_block_structure_intern_calls();
+        assert_eq!(
+            BlockStructure::coupled_sector_matrix_with_keys_checked(
+                &U1FusionRule,
+                2,
+                2,
+                vec![(pair.clone(), vec![1, 1])],
+            ),
+            Err(expected.clone())
+        );
+        assert_eq!(block_structure_intern_calls(), 0);
+
+        let probe = CheckedTreeProbe::default();
+        let failing_pair = FusionTreePairKey::pair(
+            FusionTreeKey::new(
+                [SectorId::new(9), SectorId::new(0)],
+                SectorId::new(0),
+                [false; 2],
+                [],
+                [MultiplicityIndex::ONE],
+            ),
+            FusionTreeKey::new([], SectorId::new(0), [], [], []),
+        );
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(SectorId::new(9), 1)], false),
+                SectorLeg::new([(SectorId::new(0), 1)], false),
+            ]),
+            FusionProductSpace::new([]),
+        );
+        let legacy = FusionTensorMapSpace::<2, 0>::new_unbound(
+            TensorMapSpace::from_dims([1, 1], []).unwrap(),
+            homspace,
+            packed_fixture_structure(2, [(failing_pair, vec![1, 1])]).unwrap(),
+        )
+        .unwrap()
+        .try_bind_rule(&probe)
+        .unwrap();
+        assert!(matches!(legacy.admission(), FusionSpaceAdmission::Subset(_)));
+        assert_eq!(
+            legacy.try_bind_rule_checked(&probe),
+            Err(CheckedFusionSpaceError::FusionAlgebra(Box::new(
+                FusionAlgebraError::FusionNotRepresentable {
+                    left: SectorId::new(9),
+                    right: SectorId::new(0),
+                },
+            )))
+        );
+    }
+
+    #[test]
+    fn checked_coupled_layout_finishes_structural_preflight_before_algebra() {
+        // What: incomplete grids, conflicting row extents, and overflowing
+        // dimensions fail before checked algebra and publish no structure.
+        let tree = |left| {
+            FusionTreeKey::new(
+                [SectorId::new(left), SectorId::new(0)],
+                SectorId::new(0),
+                [false; 2],
+                [],
+                [MultiplicityIndex::ONE],
+            )
+        };
+        let row_zero = tree(0);
+        let row_one = tree(1);
+        let col_zero = tree(2);
+        let col_one = tree(3);
+
+        let wrong_split = CheckedTreeProbe::default();
+        let rank_one = FusionTreeKey::new(
+            [SectorId::new(0)],
+            SectorId::new(0),
+            [false],
+            [],
+            [],
+        );
+        reset_block_structure_intern_calls();
+        assert_eq!(
+            BlockStructure::coupled_sector_matrix_with_keys_checked(
+                &wrong_split,
+                2,
+                2,
+                vec![(
+                    FusionTreePairKey::pair(rank_one.clone(), rank_one),
+                    vec![1; 2],
+                )],
+            ),
+            Err(CheckedFusionSpaceError::Core(Box::new(
+                CoreError::FusionSpaceSplitMismatch {
+                    expected_nout: 2,
+                    expected_nin: 0,
+                    actual_nout: 1,
+                    actual_nin: 1,
+                },
+            )))
+        );
+        assert_eq!(wrong_split.channel_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(wrong_split.nsymbol_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(block_structure_intern_calls(), 0);
+
+        let missing_grid = CheckedTreeProbe::default();
+        reset_block_structure_intern_calls();
+        assert_eq!(
+            BlockStructure::coupled_sector_matrix_with_keys_checked(
+                &missing_grid,
+                2,
+                4,
+                vec![
+                    (
+                        FusionTreePairKey::pair(row_zero.clone(), col_zero.clone()),
+                        vec![1; 4],
+                    ),
+                    (
+                        FusionTreePairKey::pair(row_one, col_one.clone()),
+                        vec![1; 4],
+                    ),
+                ],
+            ),
+            Err(CheckedFusionSpaceError::Core(Box::new(
+                CoreError::BlockCountMismatch {
+                    expected: 4,
+                    actual: 2,
+                },
+            )))
+        );
+        assert_eq!(missing_grid.channel_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(missing_grid.nsymbol_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(block_structure_intern_calls(), 0);
+
+        let conflicting_extent = CheckedTreeProbe::default();
+        reset_block_structure_intern_calls();
+        assert_eq!(
+            BlockStructure::coupled_sector_matrix_with_keys_checked(
+                &conflicting_extent,
+                2,
+                4,
+                vec![
+                    (
+                        FusionTreePairKey::pair(row_zero.clone(), col_zero.clone()),
+                        vec![1; 4],
+                    ),
+                    (
+                        FusionTreePairKey::pair(row_zero.clone(), col_one.clone()),
+                        vec![2, 1, 1, 1],
+                    ),
+                ],
+            ),
+            Err(CheckedFusionSpaceError::Core(Box::new(
+                CoreError::DimensionMismatch {
+                    expected: 1,
+                    actual: 2,
+                },
+            )))
+        );
+        assert_eq!(
+            conflicting_extent.channel_calls.load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            conflicting_extent.nsymbol_calls.load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(block_structure_intern_calls(), 0);
+
+        let overflowing_extent = CheckedTreeProbe::default();
+        reset_block_structure_intern_calls();
+        assert_eq!(
+            BlockStructure::coupled_sector_matrix_with_keys_checked(
+                &overflowing_extent,
+                2,
+                4,
+                vec![(
+                    FusionTreePairKey::pair(row_zero, col_zero),
+                    vec![usize::MAX, 2, 1, 1],
+                )],
+            ),
+            Err(CheckedFusionSpaceError::Core(Box::new(
+                CoreError::ElementCountOverflow,
+            )))
+        );
+        assert_eq!(
+            overflowing_extent.channel_calls.load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            overflowing_extent.nsymbol_calls.load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(block_structure_intern_calls(), 0);
+    }
+
+    #[test]
+    fn checked_revalidation_preserves_complete_admission() {
+        // What: adding finite-algebra proof to canonical built-in Complete
+        // spaces preserves both their layouts and complete-grid admission.
+        fn assert_rule<R>(rule: &R, sector: SectorId)
+        where
+            R: MultiplicityFreeFusionRule + CheckedFusionAlgebra,
+        {
+            let space = FusionTensorMapSpace::from_degeneracy_shapes(
+                TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+                FusionTreeHomSpace::from_sectors([(sector, 1)], [(sector, 1)]),
+                rule,
+                [vec![1, 1]],
+            )
+            .unwrap();
+            let structure = Arc::clone(space.subblock_structure());
+            assert!(matches!(space.admission(), FusionSpaceAdmission::Complete(_)));
+            let checked = space.try_bind_rule_checked(rule).unwrap();
+            assert!(matches!(
+                checked.admission(),
+                FusionSpaceAdmission::Complete(_)
+            ));
+            assert!(Arc::ptr_eq(&structure, checked.subblock_structure()));
+        }
+
+        assert_rule(&Z2FusionRule, z2_even());
+        assert_rule(&FermionParityFusionRule, z2_odd());
+        assert_rule(&U1FusionRule, u1(7));
+        assert_rule(&SU2FusionRule, su2(3));
+        assert_rule(&FibonacciFusionRule, SectorId::new(1));
+
+        type Fz2U1 = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        type Triple = ProductFusionRule<Fz2U1, SU2FusionRule>;
+        let pair = Fz2U1::new(FermionParityFusionRule, U1FusionRule);
+        let pair_sector = pair.encode_sector(z2_odd(), u1(2));
+        let triple = Triple::new(pair, SU2FusionRule);
+        let triple_sector = triple.encode_sector(pair_sector, su2(1));
+        assert_rule(&triple, triple_sector);
     }
 
     fn assert_checked_tree_matches_infallible<R>(rule: &R, tree: FusionTreeKey)
@@ -7390,6 +7798,28 @@ mod tests {
     }
 
     #[test]
+    fn block_structure_validates_degeneracy_before_sector_keys() {
+        // What: preparing an owned block structure preserves the historical
+        // error order when both degeneracy metadata and sector keys are bad.
+        let key = BlockKey::opaque([7]);
+        let first = BlockSpec::column_major_with_key(key.clone(), vec![2, 2], 0).unwrap();
+        let malformed = BlockSpec {
+            key,
+            shape: smallvec![1, 3],
+            strides: smallvec![1],
+            offset: 4,
+        };
+
+        assert_eq!(
+            BlockStructure::from_blocks_with_rank(2, vec![first, malformed]),
+            Err(CoreError::RankMismatch {
+                shape: 2,
+                strides: 1,
+            })
+        );
+    }
+
+    #[test]
     fn fusion_tree_group_key_records_external_sector_tuples_and_duality() {
         let group = FusionTreeGroupKey::from_sector_ids([2, 3], [5], [false, true], [true]);
 
@@ -9667,7 +10097,23 @@ mod tests {
             error.static_message(),
             "built-in fusion-tree layout contains an invalid product sector"
         );
+        assert_eq!(
+            error.clone().into_checked_fusion_algebra(),
+            FusionAlgebraError::ProductCodec(
+                Codec::decode_checked(SectorId::new(usize::MAX)).unwrap_err(),
+            )
+        );
         assert!(error.into_fusion_algebra().is_err());
+
+        let invalid_z2 = singleton_rank_hom(SectorId::new(2), 1)
+            .try_fusion_tree_keys_uncached_lowered(&Z2FusionRule)
+            .unwrap_err();
+        assert_eq!(
+            invalid_z2.into_checked_fusion_algebra(),
+            FusionAlgebraError::InvalidSector {
+                sector: SectorId::new(2),
+            }
+        );
 
         let u1_overflow = FusionTreeHomSpace::new(
             FusionProductSpace::new([

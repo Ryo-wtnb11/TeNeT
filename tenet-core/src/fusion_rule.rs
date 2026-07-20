@@ -392,6 +392,21 @@ impl LoweredFusionTreeBuildError {
         }
     }
 
+    /// Converts every lowered built-in failure into the checked-algebra error
+    /// vocabulary without discarding invalid-sector or product-codec details.
+    #[doc(hidden)]
+    pub fn into_checked_fusion_algebra(self) -> FusionAlgebraError {
+        match self.kind {
+            LoweredFusionTreeBuildErrorKind::InvalidSector(sector) => {
+                FusionAlgebraError::InvalidSector { sector }
+            }
+            LoweredFusionTreeBuildErrorKind::Codec(error) => {
+                FusionAlgebraError::ProductCodec(error)
+            }
+            LoweredFusionTreeBuildErrorKind::FusionAlgebra(error) => *error,
+        }
+    }
+
     #[doc(hidden)]
     pub const fn static_message(&self) -> &'static str {
         match &self.kind {
