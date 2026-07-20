@@ -365,6 +365,29 @@ fn tensorcontract_fusion_su2_swap_matches_explicit_permute_then_compose() {
                 0.0,
             )
             .unwrap();
+            let mut artifact = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+                vec![0.0; len],
+                tensor_space.clone(),
+            )
+            .unwrap();
+            crate::contract::execute_dynamic_tree_execution_artifact_for_test(
+                &rule,
+                &plan,
+                &mut artifact,
+                &lhs,
+                &rhs,
+                1.0,
+                0.0,
+            )
+            .unwrap();
+            // What: either physical operand orientation compiles to the same
+            // SU2 destination structure and reduced-block values as the
+            // explicit permute-then-compose oracle.
+            assert_eq!(artifact.structure(), dst_compose.structure());
+            assert_eq!(artifact.data(), actual.data());
+            for (&actual, &expected) in artifact.data().iter().zip(dst_compose.data()) {
+                assert!((actual - expected).abs() < 1.0e-10);
+            }
             for (&actual, &expected) in actual.data().iter().zip(dst_compose.data()) {
                 assert!((actual - expected).abs() < 1.0e-10);
             }
@@ -427,22 +450,8 @@ fn forced_axis_order_candidates_have_identical_u1_result() {
             let mut dst =
                 TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; len], space.clone())
                     .unwrap();
-            let mut tree_backend = DenseTreeTransformOperations::default_executor();
-            let mut tree_workspace = TreeTransformWorkspace::default();
-            let mut contract_backend = DenseTreeTransformOperations::default_executor();
-            let mut contract_workspace = TensorContractWorkspace::default();
-            crate::contract::tensorcontract_fusion_dynamic_plan_into_with(
-                &mut tree_backend,
-                &mut tree_workspace,
-                &mut contract_backend,
-                &mut contract_workspace,
-                &rule,
-                &plan,
-                &mut dst,
-                &lhs,
-                &rhs,
-                1.0,
-                0.0,
+            crate::contract::execute_dynamic_tree_execution_artifact_for_test(
+                &rule, &plan, &mut dst, &lhs, &rhs, 1.0, 0.0,
             )
             .unwrap();
             outputs.push(dst);
@@ -463,6 +472,10 @@ fn forced_axis_order_candidates_have_identical_u1_result() {
         TensorContractSpec::new(&[3, 2], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
     )
     .unwrap();
+    assert_eq!(
+        selected.orientation(),
+        crate::contract::FusionContractOrientation::LhsRhs
+    );
     assert!(matches!(
         selected.lhs_transform(),
         TreeTransformOperation::Permute {
@@ -512,6 +525,8 @@ fn forced_axis_order_candidates_have_identical_u1_result() {
         0.0,
     )
     .unwrap();
+    // What: compiling the selected forward orientation preserves its eager bytes.
+    assert_eq!(normal.data(), outputs[0].data());
     for ((actual, expected), fixed) in normal
         .data()
         .iter()
@@ -650,22 +665,8 @@ fn forced_orientations_match_asymmetric_u1_reduced_block_oracle() {
                 dst_space.clone(),
             )
             .unwrap();
-            let mut tree_backend = DenseTreeTransformOperations::default_executor();
-            let mut tree_workspace = TreeTransformWorkspace::default();
-            let mut contract_backend = DenseTreeTransformOperations::default_executor();
-            let mut contract_workspace = TensorContractWorkspace::default();
-            crate::contract::tensorcontract_fusion_dynamic_plan_into_with(
-                &mut tree_backend,
-                &mut tree_workspace,
-                &mut contract_backend,
-                &mut contract_workspace,
-                &rule,
-                &plan,
-                &mut dst,
-                &lhs,
-                &rhs,
-                alpha,
-                beta,
+            crate::contract::execute_dynamic_tree_execution_artifact_for_test(
+                &rule, &plan, &mut dst, &lhs, &rhs, alpha, beta,
             )
             .unwrap();
             for (&actual, &expected) in dst.data().iter().zip(&expected) {
@@ -1028,6 +1029,26 @@ fn crossed_axis_selection_preserves_asymmetric_fz2_u1_su2_result() {
                 Complex64::zero(),
             )
             .unwrap();
+            let mut artifact = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+                vec![Complex64::zero(); dst_len],
+                dst_space.clone(),
+            )
+            .unwrap();
+            crate::contract::execute_dynamic_tree_execution_artifact_for_test(
+                &rule,
+                &plan,
+                &mut artifact,
+                &lhs,
+                &rhs,
+                Complex64::one(),
+                Complex64::zero(),
+            )
+            .unwrap();
+            // What: compiled orientation preserves the eager destination
+            // structure and every reduced-block value for the odd, charged,
+            // half-spin product sector.
+            assert_eq!(artifact.structure(), dst.structure());
+            assert_eq!(artifact.data(), dst.data());
             outputs.push(dst);
         }
     }
@@ -2803,6 +2824,27 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
         assert!(
             (actual - want).abs() < 1.0e-12,
             "reverse element {index}: got {actual}, TensorKit reference {want}"
+        );
+    }
+    let mut artifact_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+        initial.to_vec(),
+        dst.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    crate::contract::execute_dynamic_tree_execution_artifact_for_test(
+        &rule,
+        &reverse_plan,
+        &mut artifact_dst,
+        &lhs,
+        &rhs,
+        alpha,
+        beta,
+    )
+    .unwrap();
+    for (index, (&actual, &want)) in artifact_dst.data().iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (actual - want).abs() < 1.0e-12,
+            "artifact element {index}: got {actual}, TensorKit reference {want}"
         );
     }
 
@@ -5911,6 +5953,24 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
     for (&actual, &expected) in reverse_dst.data().iter().zip(&oracle) {
         assert!((actual - expected).norm() < 1.0e-10);
     }
+    let mut artifact_dst = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+        vec![Complex64::zero(); oracle.len()],
+        reverse_dst.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    crate::contract::execute_dynamic_tree_execution_artifact_for_test(
+        provider.as_ref(),
+        &reverse_plan,
+        &mut artifact_dst,
+        &lhs_typed,
+        &rhs_typed,
+        Complex64::one(),
+        Complex64::zero(),
+    )
+    .unwrap();
+    for (&actual, &expected) in artifact_dst.data().iter().zip(&oracle) {
+        assert!((actual - expected).norm() < 1.0e-10);
+    }
 }
 
 #[test]
@@ -5999,6 +6059,54 @@ fn prelowered_resolution_cache_keys_storage_layout_and_execution_namespace() {
     // symmetry-aware contraction route exercised below.
     let oracle = vec![0.0, 2.0, 6.5, 13.5];
     assert_eq!(dst.required_len().unwrap(), oracle.len());
+
+    let swapped_dst_bound =
+        crate::BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+            &logical_lhs_bound,
+            &rhs_bound,
+            &[1],
+            &[0],
+            crate::OutputAxisOrder::from_axes(&[1, 0]),
+        )
+        .unwrap();
+    let candidate = crate::contract::contracted_axis_order_candidates(&[0], &[0]).remove(0);
+    let reverse_plan = crate::contract::prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation(
+        provider.as_ref(),
+        swapped_dst_bound.space(),
+        &canonical,
+        &rhs,
+        TensorContractSpec::new_with_conjugation(
+            &[0],
+            &[0],
+            crate::OutputAxisOrder::from_axes(&[1, 0]),
+            true,
+            false,
+        ),
+        &candidate,
+        crate::contract::FusionContractOrientation::RhsLhs,
+    )
+    .unwrap();
+    let mut padded_artifact_output = vec![0.0; swapped_dst_bound.space().required_len().unwrap()];
+    crate::contract::execute_prelowered_dynamic_tree_execution_artifact_for_test(
+        provider.as_ref(),
+        &reverse_plan,
+        swapped_dst_bound.space(),
+        &mut padded_artifact_output,
+        padded_operand,
+        &padded_data,
+        rhs_operand,
+        &rhs_data,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+    // What: reverse artifact execution reads the six-element padded physical
+    // adjoint storage while contracting the distinct four-element logical layout.
+    assert_eq!(padded_data.len(), 6);
+    assert_eq!(logical_lhs.required_len().unwrap(), 4);
+    // What: requested output order [1, 0] writes the hand-computed transpose
+    // of the identity-order column-major oracle below.
+    assert_eq!(padded_artifact_output, [0.0, 6.5, 2.0, 13.5]);
 
     let execute_prelowered = |context: &mut TensorContractFusionExecutionContext<
         f64,

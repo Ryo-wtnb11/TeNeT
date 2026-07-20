@@ -4,6 +4,8 @@ mod context;
 mod dynamic;
 #[cfg(test)]
 pub(crate) use dynamic::{
+    execute_dynamic_tree_execution_artifact_for_test,
+    execute_prelowered_dynamic_tree_execution_artifact_for_test,
     reset_source_layout_homspace_id_comparisons, source_layout_homspace_id_comparisons,
     tensorcontract_fusion_dynamic_plan_into_with,
 };
