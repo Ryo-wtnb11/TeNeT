@@ -5038,6 +5038,84 @@ fn inv_composes_to_the_identity() {
     assert_identity_matrices(&dense_sector_matrices(2, &identity));
 }
 
+fn u1_cross_space_map(codomain: &[(i32, usize)], domain: &[(i32, usize)]) -> TensorMap<f64, 1, 1> {
+    let codomain_leg = SectorLeg::new(
+        codomain
+            .iter()
+            .map(|&(charge, degeneracy)| (U1Irrep::new(charge).sector_id(), degeneracy)),
+        false,
+    );
+    let domain_leg = SectorLeg::new(
+        domain
+            .iter()
+            .map(|&(charge, degeneracy)| (U1Irrep::new(charge).sector_id(), degeneracy)),
+        false,
+    );
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([codomain_leg.clone()]),
+        FusionProductSpace::new([domain_leg.clone()]),
+    );
+    let shapes = homspace
+        .fusion_tree_keys(&U1FusionRule)
+        .iter()
+        .map(|key| {
+            let coupled = key.codomain_tree().coupled();
+            vec![
+                codomain_leg.degeneracy(coupled).unwrap(),
+                domain_leg.degeneracy(coupled).unwrap(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims(
+            [codomain.iter().map(|(_, degeneracy)| degeneracy).sum()],
+            [domain.iter().map(|(_, degeneracy)| degeneracy).sum()],
+        )
+        .unwrap(),
+        homspace,
+        &U1FusionRule,
+        shapes,
+    )
+    .unwrap();
+    TensorMap::from_block_fn_with_fusion_space(space, 0.0, |_, indices| {
+        if indices[0] == indices[1] {
+            1.0
+        } else {
+            0.0
+        }
+    })
+    .unwrap()
+}
+
+#[test]
+fn inv_rejects_nonisomorphic_spaces_before_dense_execution() {
+    // What: neither a square stored-sector intersection nor equal total
+    // dimension substitutes for complete coupled-sector isomorphism.
+    let cases: &[(&[(i32, usize)], &[(i32, usize)])] = &[
+        (&[(0, 1), (1, 1)], &[(0, 1)]),
+        (&[(0, 1), (1, 1)], &[(0, 1), (2, 1)]),
+    ];
+    for &(codomain, domain) in cases {
+        let tensor = u1_cross_space_map(codomain, domain);
+        let mut dense = RejectExecutorCalls;
+        let mut context =
+            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
+            );
+        let error = inv(
+            &mut dense,
+            &mut context,
+            &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::UnsupportedTensorContractScope {
+                message: "inv requires isomorphic codomain and domain"
+            }
+        ));
+    }
+}
+
 fn u1_block_endomorphism<D>(blocks: &[(i32, usize, Vec<D>)]) -> TensorMap<D, 1, 1>
 where
     D: Copy + Zero,

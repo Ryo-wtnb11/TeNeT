@@ -1259,6 +1259,26 @@ where
         &self.provider
     }
 
+    /// Whether codomain and domain have the same reduced dimension in every
+    /// coupled sector under this bound provider.
+    pub fn codomain_isomorphic_to_domain(&self) -> Result<bool, OperationError> {
+        let homspace = self.space.homspace();
+        if homspace.codomain() == homspace.domain() {
+            return Ok(true);
+        }
+        // Why not compare stored regions or total dimension: storage contains
+        // only the shared coupled sectors, while isomorphism concerns both
+        // complete sector-dimension maps.
+        Ok(homspace
+            .codomain()
+            .coupled_sector_block_dimensions(self.provider.as_ref())
+            .map_err(OperationError::from_core_preserving_context)?
+            == homspace
+                .domain()
+                .coupled_sector_block_dimensions(self.provider.as_ref())
+                .map_err(OperationError::from_core_preserving_context)?)
+    }
+
     pub(crate) fn layout_primer(&self) -> LayoutKeyBuilder<R> {
         self.layout_build.dispatch
     }

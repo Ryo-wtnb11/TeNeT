@@ -5939,9 +5939,9 @@ impl Tensor {
         })
     }
 
-    /// True inverse of a full-rank endomorphism (MatrixAlgebraKit-style
-    /// `inv`); fails when any coupled block is rank-deficient at working
-    /// precision.
+    /// True inverse of a full-rank map between isomorphic spaces
+    /// (MatrixAlgebraKit-style `inv`); fails when any coupled block is
+    /// rank-deficient at working precision.
     pub fn inv(&self) -> Result<Self, Error> {
         if self.is_adjoint_view() {
             return self.materialized_tensor()?.inv();

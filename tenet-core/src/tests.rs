@@ -284,6 +284,167 @@ mod tests {
         SU2Irrep::from_twice_spin(twice_spin).sector_id()
     }
 
+    #[test]
+    fn coupled_sector_dimensions_cover_empty_and_multiplicity_free_products() {
+        // What: product-space dimensions use the tensor unit for rank zero,
+        // annihilate on an empty leg, and reproduce U1/SU2 fusion dimensions.
+        let empty = FusionProductSpace::new(std::iter::empty::<SectorLeg>());
+        assert_eq!(
+            empty
+                .coupled_sector_block_dimensions(&U1FusionRule)
+                .unwrap(),
+            BTreeMap::from([(u1(0), 1)])
+        );
+
+        let empty_leg = FusionProductSpace::new([SectorLeg::new(
+            std::iter::empty::<(SectorId, usize)>(),
+            false,
+        )]);
+        assert!(empty_leg
+            .coupled_sector_block_dimensions(&U1FusionRule)
+            .unwrap()
+            .is_empty());
+
+        let u1_leg = SectorLeg::new([(u1(0), 1), (u1(1), 1)], false);
+        let u1_product = FusionProductSpace::new([u1_leg.clone(), u1_leg]);
+        assert_eq!(
+            u1_product
+                .coupled_sector_block_dimensions(&U1FusionRule)
+                .unwrap(),
+            BTreeMap::from([(u1(0), 1), (u1(1), 2), (u1(2), 1)])
+        );
+
+        let half = SectorLeg::new([(su2(1), 1)], false);
+        let su2_product = FusionProductSpace::new([half.clone(), half]);
+        assert_eq!(
+            su2_product
+                .coupled_sector_block_dimensions(&SU2FusionRule)
+                .unwrap(),
+            BTreeMap::from([(su2(0), 1), (su2(2), 1)])
+        );
+    }
+
+    #[test]
+    fn coupled_sector_dimensions_keep_outward_labels_for_dual_legs() {
+        // What: the pivotal dual flag does not dualize an already-outward U1
+        // sector label a second time.
+        let product =
+            FusionProductSpace::new([SectorLeg::new([(u1(-3), 2)], true)]);
+        assert_eq!(
+            product
+                .coupled_sector_block_dimensions(&U1FusionRule)
+                .unwrap(),
+            BTreeMap::from([(u1(-3), 2)])
+        );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct IsomorphismMultiplicityRule;
+
+    impl FusionRule for IsomorphismMultiplicityRule {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (0, sector) | (sector, 0) => smallvec![SectorId::new(sector)],
+                (1, 1) => smallvec![SectorId::new(2)],
+                _ => SectorVec::new(),
+            }
+        }
+
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            if (left.id(), right.id(), coupled.id()) == (1, 1, 2) {
+                2
+            } else {
+                usize::from(self.fusion_channels(left, right).contains(&coupled))
+            }
+        }
+    }
+
+    #[test]
+    fn coupled_sector_dimensions_include_outer_multiplicity_and_check_overflow() {
+        // What: a generic fusion channel contributes N(a,b,c), and dimension
+        // arithmetic reports overflow rather than wrapping.
+        let sector = SectorId::new(1);
+        let product = FusionProductSpace::new([
+            SectorLeg::new([(sector, 3)], false),
+            SectorLeg::new([(sector, 5)], false),
+        ]);
+        assert_eq!(
+            product
+                .coupled_sector_block_dimensions(&IsomorphismMultiplicityRule)
+                .unwrap(),
+            BTreeMap::from([(SectorId::new(2), 30)])
+        );
+
+        let overflowing = FusionProductSpace::new([
+            SectorLeg::new([(sector, usize::MAX)], false),
+            SectorLeg::new([(sector, 1)], false),
+        ]);
+        assert_eq!(
+            overflowing.coupled_sector_block_dimensions(&IsomorphismMultiplicityRule),
+            Err(CoreError::ElementCountOverflow)
+        );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct IncompleteDimensionFoldRule;
+
+    impl FusionRule for IncompleteDimensionFoldRule {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, _left: SectorId, _right: SectorId) -> SectorVec {
+            SectorVec::new()
+        }
+
+        fn coupled_sector_fold(&self, _effective: &[SectorId]) -> CoupledSectorFold {
+            CoupledSectorFold {
+                tainted: vec![SectorId::new(1)],
+                ..CoupledSectorFold::default()
+            }
+        }
+    }
+
+    #[test]
+    fn coupled_sector_dimensions_reject_incomplete_bounded_folds() {
+        // What: an incomplete bounded fusion result is a typed error, never a
+        // silently truncated sector-dimension map.
+        let product =
+            FusionProductSpace::new([SectorLeg::new([(SectorId::new(1), 1)], false)]);
+        assert!(matches!(
+            product.coupled_sector_block_dimensions(&IncompleteDimensionFoldRule),
+            Err(CoreError::FusionOutsideTable { .. })
+        ));
+    }
+
     #[derive(Clone, Copy, Debug)]
     struct BranchingMultiplicityFreeRule;
 
