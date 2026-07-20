@@ -75,6 +75,22 @@ fn assert_compact_unmaterialized(tensor: &Tensor) {
     assert!(!tensor.has_cached_materialization());
 }
 
+#[test]
+fn nonempty_trace_pairs_keeps_the_existing_diagonal_densification_boundary() {
+    // What: partial trace of compact storage remains the established dense
+    // fallback and agrees with an explicitly densified tensor.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = product_space();
+    let diagonal = complex_diagonal(&runtime, &space, 261_408);
+    let oracle = diagonal.clone().densified_if_diagonal();
+
+    let actual = diagonal.trace_pairs(&[(0, 1)]).unwrap();
+    let expected = oracle.trace_pairs(&[(0, 1)]).unwrap();
+
+    assert_tensor_close(&actual, &expected);
+    assert!(diagonal.has_cached_materialization());
+}
+
 fn fixed_diagonal(
     rt: &Runtime,
     space: &Space,
