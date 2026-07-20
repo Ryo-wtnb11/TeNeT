@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use num_complex::Complex64;
 use tenet::core::{
     FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
     SU2FusionRule, SectorLeg, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep,
@@ -52,6 +53,18 @@ fn assert_polar_direction_error(result: Result<(Tensor, Tensor), Error>, operati
                 OperationError::InvalidArgument { message }
                     if message.contains(operation)
                         && message.contains("coupled-sector")
+            )
+    ));
+}
+
+fn assert_hermitian_input_error<T>(result: Result<T, Error>) {
+    assert!(matches!(
+        result,
+        Err(Error::Operation(error))
+            if matches!(
+                error.as_ref(),
+                OperationError::InvalidArgument { message }
+                    if *message == "eigh requires Hermitian coupled-sector blocks"
             )
     ));
 }
@@ -493,6 +506,36 @@ fn eigh_reconstructs_a_hermitized_tensor() {
             .compose(&trunc.v.adjoint().unwrap())
             .unwrap();
         assert!(relative_distance(&recon, &h) < 1e-10);
+    }
+}
+
+#[test]
+fn public_hermitian_spectral_entries_reject_nonhermitian_f64_and_c64() {
+    // What: host full, values-only, truncated EIGH and spectral exp share one checked contract.
+    let rt = Runtime::builder().build().unwrap();
+    let v = Space::u1([(0, 2)]);
+    let real = Tensor::from_block_fn(&rt, [&v], [&v], |_, indices| match indices {
+        [0, 0] => 1.0,
+        [0, 1] => 2.0,
+        [1, 0] => 0.0,
+        [1, 1] => 3.0,
+        _ => unreachable!(),
+    })
+    .unwrap();
+    let complex = Tensor::from_block_fn(&rt, [&v], [&v], |_, indices| match indices {
+        [0, 0] => Complex64::new(1.0, 0.0),
+        [0, 1] => Complex64::new(1.0, 2.0),
+        [1, 0] => Complex64::new(3.0, 4.0),
+        [1, 1] => Complex64::new(2.0, 0.0),
+        _ => unreachable!(),
+    })
+    .unwrap();
+
+    for tensor in [&real, &complex] {
+        assert_hermitian_input_error(tensor.eigh_full());
+        assert_hermitian_input_error(tensor.eigh_vals());
+        assert_hermitian_input_error(tensor.eigh_trunc(&Truncation::Full));
+        assert_hermitian_input_error(tensor.exp());
     }
 }
 

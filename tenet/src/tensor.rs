@@ -28,7 +28,7 @@ use tenet_dense::{
     CudaDenseStorage,
 };
 #[cfg(feature = "cuda")]
-use tenet_matrixalgebra::{select_truncation, WeightedSpectrum};
+use tenet_matrixalgebra::{select_truncation, validate_hermitian_regions, WeightedSpectrum};
 use tenet_matrixalgebra::{
     BoundDynFactor, BoundDynamicTensorRef, FactorScalar, SectorSpectrum, Truncation,
 };
@@ -7823,6 +7823,9 @@ impl Tensor {
         let mut guard = self.rt.lock();
         let state = &mut *guard;
         let cuda = require_cuda(state.cuda.as_mut())?;
+        // No device validator exists; skipping this copy lets cuSOLVER silently trust one triangle.
+        let host_data = storage.0.download_f64(cuda).map_err(dense_err)?;
+        validate_hermitian_regions(&host_data, &regions)?;
         let out = with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
             let rule = bound.provider();
             let mut spectra: Vec<SectorSpectrum> = Vec::with_capacity(regions.len());

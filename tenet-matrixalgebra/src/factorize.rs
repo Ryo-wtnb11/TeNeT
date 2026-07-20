@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::cell::Cell;
 
 use num_complex::Complex64;
-use num_traits::Zero;
+use num_traits::{Float, Zero};
 use tenet_core::{
     BlockKey, BlockStructure, CoreError, CoupledSectorRegion, FusionProductSpace, FusionRule,
     FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, GenericRigidSymbols,
@@ -55,6 +55,45 @@ pub trait FactorScalar: DenseRecouplingScalar {
         scratch.resize(rank, Self::Real::zero());
         compute(&mut scratch[..rank])?;
         Ok(scratch[..rank].iter().copied().map(Into::into).collect())
+    }
+}
+
+trait HermitianReal: Float {
+    fn from_f64(value: f64) -> Self;
+    fn tolerance(max_abs: Self) -> Self;
+}
+
+impl HermitianReal for f32 {
+    fn from_f64(value: f64) -> Self {
+        value as Self
+    }
+
+    fn tolerance(max_abs: Self) -> Self {
+        let spacing = if max_abs == 0.0 {
+            Self::from_bits(1)
+        } else if max_abs == Self::MAX {
+            max_abs - Self::from_bits(max_abs.to_bits() - 1)
+        } else {
+            Self::from_bits(max_abs.to_bits() + 1) - max_abs
+        };
+        f64::from(spacing).powf(0.75) as Self
+    }
+}
+
+impl HermitianReal for f64 {
+    fn from_f64(value: f64) -> Self {
+        value
+    }
+
+    fn tolerance(max_abs: Self) -> Self {
+        let spacing = if max_abs == 0.0 {
+            Self::from_bits(1)
+        } else if max_abs == Self::MAX {
+            max_abs - Self::from_bits(max_abs.to_bits() - 1)
+        } else {
+            Self::from_bits(max_abs.to_bits() + 1) - max_abs
+        };
+        spacing.powf(0.75)
     }
 }
 
@@ -2510,6 +2549,7 @@ where
     let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
     #[cfg(test)]
     record_eigh_input_pack(&matricizations);
+    validate_hermitian_matricizations(&matricizations)?;
 
     let ranks = matricizations
         .iter()
@@ -2606,16 +2646,7 @@ where
 {
     let space = input.space().space();
     debug_assert_eq!(plan.source.layout, input.space().validated_layout());
-    if plan
-        .source
-        .regions
-        .iter()
-        .any(|region| region.rows() != region.cols())
-    {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: "eigh requires square coupled-sector matrices",
-        });
-    }
+    validate_hermitian_regions(input.data(), &plan.source.regions)?;
 
     let v_space = input.space().rebind_validated(&plan.left_layout)?;
     let mut v_data = vec![D::zero(); plan.left_layout.required_len()?];
@@ -3800,6 +3831,7 @@ where
         });
     }
     let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
+    validate_hermitian_matricizations(&matricizations)?;
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
     for matrix in &matricizations {
         let n = matrix.rows;
@@ -4875,6 +4907,200 @@ fn validate_dense_shape(actual: &[usize], expected: &[usize]) -> Result<(), Oper
             dst: expected.to_vec(),
             src: actual.to_vec(),
         });
+    }
+    Ok(())
+}
+
+fn hermitian_projection<D: FactorScalar, R: HermitianReal>(
+    data: &[D],
+    n: usize,
+    row: usize,
+    col: usize,
+) -> (R, R) {
+    let upper = data[row + n * col].widen_complex();
+    let lower = data[col + n * row].widen_complex();
+    let residual_re = (R::from_f64(upper.re) - R::from_f64(lower.re)) / (R::one() + R::one());
+    let residual_im = (R::from_f64(upper.im) + R::from_f64(lower.im)) / (R::one() + R::one());
+    (residual_re, residual_im)
+}
+
+fn hermitian_projection_norm_squared<D: FactorScalar, R: HermitianReal>(
+    data: &[D],
+    n: usize,
+    row: usize,
+    col: usize,
+) -> R {
+    let (residual_re, residual_im) = hermitian_projection::<D, R>(data, n, row, col);
+    residual_re * residual_re + residual_im * residual_im
+}
+
+fn hermitian_residual_within<R, F>(n: usize, limit: R, mut term: F) -> bool
+where
+    R: HermitianReal,
+    F: FnMut(usize, usize) -> Option<R>,
+{
+    const BLOCK_SIZE: usize = 32;
+    let mut residual_squared = R::zero();
+    for block_col in (0..n).step_by(BLOCK_SIZE) {
+        let block_width = BLOCK_SIZE.min(n - block_col);
+        for local_col in 0..block_width {
+            let col = block_col + local_col;
+            for local_row in 0..=local_col {
+                let row = block_col + local_row;
+                let multiplicity = if row == col {
+                    R::one()
+                } else {
+                    R::one() + R::one()
+                };
+                let Some(term) = term(row, col) else {
+                    return false;
+                };
+                residual_squared = residual_squared + term * multiplicity;
+            }
+        }
+        if !residual_squared.is_finite() || residual_squared > limit {
+            return false;
+        }
+
+        for block_row in (0..block_col).step_by(BLOCK_SIZE) {
+            let mut block_squared = R::zero();
+            for local_col in 0..block_width {
+                let col = block_col + local_col;
+                for local_row in 0..BLOCK_SIZE {
+                    let row = block_row + local_row;
+                    let Some(term) = term(row, col) else {
+                        return false;
+                    };
+                    block_squared = block_squared + term;
+                }
+            }
+            residual_squared = residual_squared + (R::one() + R::one()) * block_squared;
+            if !residual_squared.is_finite() || residual_squared > limit {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn matrixalgebrakit_hermitian<D: FactorScalar, R: HermitianReal>(data: &[D], n: usize) -> bool {
+    let mut max_abs = R::zero();
+    for &value in data {
+        let value = value.widen_complex();
+        let re = R::from_f64(value.re);
+        let im = R::from_f64(value.im);
+        if !re.is_finite() || !im.is_finite() {
+            return false;
+        }
+        let magnitude = re.hypot(im);
+        if !magnitude.is_finite() {
+            return false;
+        }
+        max_abs = max_abs.max(magnitude);
+    }
+
+    let tolerance = R::tolerance(max_abs);
+    if !tolerance.is_finite() {
+        return false;
+    }
+    let limit = tolerance * tolerance;
+    if limit.is_finite() && limit != R::zero() {
+        return hermitian_residual_within(n, limit, |row, col| {
+            Some(hermitian_projection_norm_squared::<D, R>(data, n, row, col))
+        });
+    }
+
+    hermitian_residual_within(n, R::one(), |row, col| {
+        let (residual_re, residual_im) = hermitian_projection::<D, R>(data, n, row, col);
+        let magnitude = residual_re.hypot(residual_im);
+        if !magnitude.is_finite() || magnitude > tolerance {
+            return None;
+        }
+        if tolerance == R::zero() {
+            return (magnitude == R::zero()).then_some(R::zero());
+        }
+        let ratio = magnitude / tolerance;
+        Some(ratio * ratio)
+    })
+}
+
+fn validate_hermitian_matrix_shape<D>(
+    data: &[D],
+    rows: usize,
+    cols: usize,
+) -> Result<(), OperationError> {
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    if data.len() != expected {
+        return Err(OperationError::ElementCountMismatch {
+            expected,
+            actual: data.len(),
+        });
+    }
+    if rows != cols {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "eigh requires square coupled-sector matrices",
+        });
+    }
+    Ok(())
+}
+
+fn validate_hermitian_matrix_contents<D: FactorScalar>(
+    data: &[D],
+    n: usize,
+) -> Result<(), OperationError> {
+    let is_hermitian = if D::epsilon() == f32::EPSILON as f64 {
+        matrixalgebrakit_hermitian::<D, f32>(data, n)
+    } else if D::epsilon() == f64::EPSILON {
+        matrixalgebrakit_hermitian::<D, f64>(data, n)
+    } else {
+        false
+    };
+    if !is_hermitian {
+        return Err(OperationError::InvalidArgument {
+            message: "eigh requires Hermitian coupled-sector blocks",
+        });
+    }
+    Ok(())
+}
+
+fn validate_hermitian_matricizations<D: FactorScalar>(
+    matricizations: &[SectorMatricization<D>],
+) -> Result<(), OperationError> {
+    for matrix in matricizations {
+        validate_hermitian_matrix_shape(&matrix.data, matrix.rows, matrix.cols)?;
+    }
+    for matrix in matricizations {
+        validate_hermitian_matrix_contents(&matrix.data, matrix.rows)?;
+    }
+    Ok(())
+}
+
+#[doc(hidden)]
+pub fn validate_hermitian_regions<D: FactorScalar>(
+    data: &[D],
+    regions: &[CoupledSectorRegion],
+) -> Result<(), OperationError> {
+    for region in regions {
+        let range = region.range();
+        let matrix = data
+            .get(range.clone())
+            .ok_or(OperationError::ElementCountMismatch {
+                expected: range.end,
+                actual: data.len(),
+            })?;
+        validate_hermitian_matrix_shape(matrix, region.rows(), region.cols())?;
+    }
+    for region in regions {
+        let range = region.range();
+        let matrix = data
+            .get(range.clone())
+            .ok_or(OperationError::ElementCountMismatch {
+                expected: range.end,
+                actual: data.len(),
+            })?;
+        validate_hermitian_matrix_contents(matrix, region.rows())?;
     }
     Ok(())
 }
