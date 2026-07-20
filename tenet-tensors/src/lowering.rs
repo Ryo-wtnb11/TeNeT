@@ -1,8 +1,5 @@
-use std::array;
-
 use tenet_core::{
-    BlockKey, BlockSpec, BlockStructure, FusionRule, FusionTensorMapSpace, FusionTreeHomSpace,
-    FusionTreePairKey, TensorMapSpace,
+    BlockKey, BlockSpec, BlockStructure, FusionRule, FusionTensorMapSpace, FusionTreePairKey,
 };
 
 use crate::DynamicFusionMapSpace;
@@ -364,19 +361,8 @@ where
     source
         .validate_rule(rule)
         .map_err(OperationError::from_core_preserving_context)?;
-    let codomain_dims = array::from_fn(|index| source.dense_space().domain().dims()[index]);
-    let domain_dims = array::from_fn(|index| source.dense_space().codomain().dims()[index]);
-    let dense_space = TensorMapSpace::<NIN, NOUT>::from_dims(codomain_dims, domain_dims)
-        .map_err(OperationError::from_core_preserving_context)?;
-    let homspace = FusionTreeHomSpace::new(
-        source.homspace().domain().clone(),
-        source.homspace().codomain().clone(),
-    );
-    let structure =
-        adjoint_block_structure_view(NOUT, NIN, source.subblock_structure())?.into_shared();
-    FusionTensorMapSpace::from_shared_subblock_structure(dense_space, homspace, structure)
-        .map_err(OperationError::from_core_preserving_context)?
-        .try_bind_rule(rule)
+    source
+        .adjoint_view()
         .map_err(OperationError::from_core_preserving_context)
 }
 
