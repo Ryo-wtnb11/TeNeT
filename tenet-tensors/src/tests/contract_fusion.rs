@@ -737,8 +737,8 @@ fn paired_axis_selector_scores_once_and_publishes_only_winner_replay() {
     context
         .tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, 1.0, 0.0)
         .unwrap();
-    // What: cold resolution scores both candidates but publishes one two-transform artifact.
-    assert_eq!(crate::contract::candidate_score_calls(), 2);
+    // What: cold resolution scores four candidates but publishes one two-transform artifact.
+    assert_eq!(crate::contract::candidate_score_calls(), 4);
     assert_eq!(context.tree_context().cache().plan_len(), 2);
     assert_eq!(context.tree_context().cache().structure_len(), 2);
     assert_eq!(context.dynamic_fusion_space_cache_len(), 3);
@@ -748,9 +748,491 @@ fn paired_axis_selector_scores_once_and_publishes_only_winner_replay() {
         .tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, 1.0, 0.0)
         .unwrap();
     // What: a warm resolution reuses the winner without rescoring or publishing loser state.
-    assert_eq!(crate::contract::candidate_score_calls(), 2);
+    assert_eq!(crate::contract::candidate_score_calls(), 4);
     assert_eq!(context.dynamic_fusion_space_cache_len(), cache_len);
     assert!(context.contraction_resolution_cache_hits() >= 1);
+}
+
+#[test]
+fn reverse_winner_is_independent_of_first_cached_consumer() {
+    struct RejectingStorageGemm;
+
+    impl tenet_operations::fusion_replay::StorageGemm<f64, Vec<f64>, Vec<f64>, Vec<f64>>
+        for RejectingStorageGemm
+    {
+        fn matmul_range_into(
+            &mut self,
+            _dst: &mut Vec<f64>,
+            _dst_offset: usize,
+            _lhs: &Vec<f64>,
+            _lhs_offset: usize,
+            _rhs: &Vec<f64>,
+            _rhs_offset: usize,
+            _rows: usize,
+            _contracted: usize,
+            _cols: usize,
+        ) -> Result<(), OperationError> {
+            panic!("reverse storage-direct resolution must reject before GEMM")
+        }
+    }
+
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let rule = U1FusionRule;
+    let space = |dimensions: [usize; 4]| {
+        let homspace = FusionTreeHomSpace::from_sector_ids(
+            [(0, dimensions[0]), (0, dimensions[1])],
+            [(0, dimensions[2]), (0, dimensions[3])],
+        );
+        FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<2, 2>::from_dims(
+                [dimensions[0], dimensions[1]],
+                [dimensions[2], dimensions[3]],
+            )
+            .unwrap(),
+            homspace,
+            &rule,
+            [dimensions.to_vec()],
+        )
+        .unwrap()
+    };
+    let lhs_space = space([2, 3, 5, 7]);
+    let rhs_space = space([11, 13, 3, 2]);
+    let dst_space = space([11, 13, 5, 7]);
+    let lhs = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        (0..lhs_space.required_len().unwrap())
+            .map(|index| index as f64 * 0.125 - 3.0)
+            .collect(),
+        lhs_space,
+    )
+    .unwrap();
+    let rhs = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        (0..rhs_space.required_len().unwrap())
+            .map(|index| 2.0 - index as f64 * 0.03125)
+            .collect(),
+        rhs_space,
+    )
+    .unwrap();
+    let initial = (0..dst_space.required_len().unwrap())
+        .map(|index| index as f64 * 0.0625 - 1.0)
+        .collect::<Vec<_>>();
+    let alpha = 1.25;
+    let beta = -0.5;
+    let axes =
+        || TensorContractSpec::new(&[1, 0], &[2, 3], OutputAxisOrder::from_axes(&[2, 3, 0, 1]));
+
+    let lhs_block = lhs.structure().block(0).unwrap();
+    let rhs_block = rhs.structure().block(0).unwrap();
+    let dst_block = dst_space.subblock_structure().block(0).unwrap();
+    let mut oracle = initial.iter().map(|value| beta * value).collect::<Vec<_>>();
+    for r0 in 0..11 {
+        for r1 in 0..13 {
+            for l2 in 0..5 {
+                for l3 in 0..7 {
+                    let mut sum = 0.0;
+                    for c0 in 0..2 {
+                        for c1 in 0..3 {
+                            let lhs_offset = lhs_block.offset()
+                                + [c0, c1, l2, l3]
+                                    .iter()
+                                    .zip(lhs_block.strides())
+                                    .map(|(&index, &stride)| index * stride)
+                                    .sum::<usize>();
+                            let rhs_offset = rhs_block.offset()
+                                + [r0, r1, c1, c0]
+                                    .iter()
+                                    .zip(rhs_block.strides())
+                                    .map(|(&index, &stride)| index * stride)
+                                    .sum::<usize>();
+                            sum += lhs.data()[lhs_offset] * rhs.data()[rhs_offset];
+                        }
+                    }
+                    let dst_offset = dst_block.offset()
+                        + [r0, r1, l2, l3]
+                            .iter()
+                            .zip(dst_block.strides())
+                            .map(|(&index, &stride)| index * stride)
+                            .sum::<usize>();
+                    oracle[dst_offset] += alpha * sum;
+                }
+            }
+        }
+    }
+    let assert_oracle = |actual: &[f64]| {
+        for (index, (&actual, &expected)) in actual.iter().zip(&oracle).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1.0e-9,
+                "element {index}: {actual} != {expected}"
+            );
+        }
+    };
+    let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs.fusion_space().unwrap());
+    let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs.fusion_space().unwrap());
+    let dst_dynamic = DynamicFusionMapSpace::from_typed(&dst_space);
+    let reverse_plan =
+        crate::contract::prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation(
+            &rule,
+            &dst_dynamic,
+            &lhs_dynamic,
+            &rhs_dynamic,
+            axes(),
+            &crate::contract::contracted_axis_order_candidates(&[1, 0], &[2, 3])[1],
+            crate::contract::FusionContractOrientation::RhsLhs,
+        )
+        .unwrap();
+    let reverse_unsupported = OperationError::UnsupportedTensorContractScope {
+        message: "caller-owned fusion contraction scratch supports only LhsRhs orientation",
+    };
+    let mut explicit_dst =
+        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(initial.clone(), dst_space.clone())
+            .unwrap();
+    let mut explicit_core_dst = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        vec![9.0; initial.len()],
+        dst_space.clone(),
+    )
+    .unwrap();
+    let mut explicit_lhs_core = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        vec![8.0; lhs.data().len()],
+        lhs.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let mut explicit_rhs_core = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        vec![7.0; rhs.data().len()],
+        rhs.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let explicit_dst_before = explicit_dst.data().to_vec();
+    let explicit_core_dst_before = explicit_core_dst.data().to_vec();
+    let explicit_lhs_before = explicit_lhs_core.data().to_vec();
+    let explicit_rhs_before = explicit_rhs_core.data().to_vec();
+    assert_eq!(
+        tensorcontract_fusion_prepared_into(
+            &rule,
+            &reverse_plan,
+            &mut explicit_dst,
+            &mut explicit_lhs_core,
+            &mut explicit_rhs_core,
+            &lhs,
+            &rhs,
+            alpha,
+            beta,
+        ),
+        Err(reverse_unsupported.clone())
+    );
+    assert_eq!(
+        tensorcontract_fusion_prepared_into_core_dst(
+            &rule,
+            &reverse_plan,
+            &mut explicit_dst,
+            &mut explicit_core_dst,
+            &mut explicit_lhs_core,
+            &mut explicit_rhs_core,
+            &lhs,
+            &rhs,
+            alpha,
+            beta,
+        ),
+        Err(reverse_unsupported.clone())
+    );
+    let mut explicit_context =
+        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    assert_eq!(
+        explicit_context.tensorcontract_fusion_prepared_into(
+            &rule,
+            &reverse_plan,
+            &mut explicit_dst,
+            &mut explicit_lhs_core,
+            &mut explicit_rhs_core,
+            &lhs,
+            &rhs,
+            alpha,
+            beta,
+        ),
+        Err(reverse_unsupported.clone())
+    );
+    assert_eq!(
+        explicit_context.tensorcontract_fusion_prepared_into_core_dst(
+            &rule,
+            &reverse_plan,
+            &mut explicit_dst,
+            &mut explicit_core_dst,
+            &mut explicit_lhs_core,
+            &mut explicit_rhs_core,
+            &lhs,
+            &rhs,
+            alpha,
+            beta,
+        ),
+        Err(reverse_unsupported)
+    );
+    assert_eq!(explicit_dst.data(), explicit_dst_before);
+    assert_eq!(explicit_core_dst.data(), explicit_core_dst_before);
+    assert_eq!(explicit_lhs_core.data(), explicit_lhs_before);
+    assert_eq!(explicit_rhs_core.data(), explicit_rhs_before);
+
+    let fresh_dst = || {
+        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(initial.clone(), dst_space.clone())
+            .unwrap()
+    };
+
+    crate::contract::reset_candidate_score_calls();
+    let mut one_shot_dst = fresh_dst();
+    tensorcontract_fusion_into(&rule, &mut one_shot_dst, &lhs, &rhs, axes(), alpha, beta).unwrap();
+    assert_eq!(crate::contract::candidate_score_calls(), 4);
+    assert_oracle(one_shot_dst.data());
+
+    crate::contract::reset_candidate_score_calls();
+    let mut with_dst = fresh_dst();
+    let mut backend = DenseTreeTransformOperations::default_executor();
+    let mut workspace = TensorContractWorkspace::default();
+    tensorcontract_fusion_into_with(
+        &mut backend,
+        &mut workspace,
+        &rule,
+        &mut with_dst,
+        &lhs,
+        &rhs,
+        axes(),
+        alpha,
+        beta,
+    )
+    .unwrap();
+    assert_eq!(crate::contract::candidate_score_calls(), 4);
+    assert_oracle(with_dst.data());
+
+    crate::contract::reset_candidate_score_calls();
+    let mut with_backends_dst = fresh_dst();
+    let mut tree_backend = HostTensorOperations;
+    let mut tree_workspace = TreeTransformWorkspace::default();
+    let mut contract_backend = DenseTreeTransformOperations::default_executor();
+    let mut contract_workspace = TensorContractWorkspace::default();
+    tensorcontract_fusion_into_with_backends(
+        &mut tree_backend,
+        &mut tree_workspace,
+        &mut contract_backend,
+        &mut contract_workspace,
+        &rule,
+        &mut with_backends_dst,
+        &lhs,
+        &rhs,
+        axes(),
+        alpha,
+        beta,
+    )
+    .unwrap();
+    assert_eq!(crate::contract::candidate_score_calls(), 4);
+    assert_oracle(with_backends_dst.data());
+
+    let provider = Arc::new(rule);
+    let lhs_bound = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        DynamicFusionMapSpace::from_typed(lhs.fusion_space().unwrap()),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let rhs_bound = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        DynamicFusionMapSpace::from_typed(rhs.fusion_space().unwrap()),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let dst_bound = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        DynamicFusionMapSpace::from_typed(&dst_space),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let unsupported = OperationError::UnsupportedTensorContractScope {
+        message: "storage-direct contraction supports only the canonical fully-direct route; \
+                  this contraction needs tree transforms or conjugate structures, which have \
+                  no device kernels yet",
+    };
+
+    for storage_first in [true, false] {
+        reset_global_operation_caches();
+        let mut context =
+            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
+            );
+        let mut storage_dst = vec![0.0; initial.len()];
+        let mut owned_dst =
+            TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(initial.clone(), dst_space.clone())
+                .unwrap();
+        let storage_call = |context: &mut TensorContractFusionExecutionContext<
+            f64,
+            TreeTransformBuiltinRuleCacheKey,
+        >,
+                            storage_dst: &mut Vec<f64>| {
+            context.tensorcontract_fusion_dyn_direct_on_storage(
+                &mut RejectingStorageGemm,
+                &dst_bound,
+                storage_dst,
+                &lhs_bound,
+                &lhs.data().to_vec(),
+                &rhs_bound,
+                &rhs.data().to_vec(),
+                axes(),
+            )
+        };
+        if storage_first {
+            assert_eq!(
+                storage_call(&mut context, &mut storage_dst),
+                Err(unsupported.clone())
+            );
+            context
+                .tensorcontract_fusion_into(
+                    provider.as_ref(),
+                    &mut owned_dst,
+                    &lhs,
+                    &rhs,
+                    axes(),
+                    alpha,
+                    beta,
+                )
+                .unwrap();
+        } else {
+            context
+                .tensorcontract_fusion_into(
+                    provider.as_ref(),
+                    &mut owned_dst,
+                    &lhs,
+                    &rhs,
+                    axes(),
+                    alpha,
+                    beta,
+                )
+                .unwrap();
+            assert_eq!(
+                storage_call(&mut context, &mut storage_dst),
+                Err(unsupported.clone())
+            );
+        }
+        assert_eq!(storage_dst, vec![0.0; initial.len()]);
+        assert_oracle(owned_dst.data());
+        assert_eq!(context.contraction_resolution_cache_len(), 2);
+        assert_eq!(
+            context.last_resolution_orientation(),
+            Some(crate::contract::FusionContractOrientation::RhsLhs)
+        );
+        assert!(context.contraction_resolution_cache_hits() >= 1);
+    }
+
+    for typed_first in [true, false] {
+        reset_global_operation_caches();
+        let mut context =
+            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
+            );
+        let mut typed_dst =
+            TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(initial.clone(), dst_space.clone())
+                .unwrap();
+        let mut dynamic_dst = initial.clone();
+        let typed_call = |context: &mut TensorContractFusionExecutionContext<
+            f64,
+            TreeTransformBuiltinRuleCacheKey,
+        >,
+                          dst: &mut TensorMap<f64, 2, 2>| {
+            context.tensorcontract_fusion_into(
+                provider.as_ref(),
+                dst,
+                &lhs,
+                &rhs,
+                axes(),
+                alpha,
+                beta,
+            )
+        };
+        let dynamic_call = |context: &mut TensorContractFusionExecutionContext<
+            f64,
+            TreeTransformBuiltinRuleCacheKey,
+        >,
+                            dst: &mut [f64]| {
+            context.tensorcontract_fusion_dyn_into(
+                &dst_bound,
+                dst,
+                &lhs_bound,
+                lhs.data(),
+                &rhs_bound,
+                rhs.data(),
+                axes(),
+                alpha,
+                beta,
+            )
+        };
+        if typed_first {
+            typed_call(&mut context, &mut typed_dst).unwrap();
+            dynamic_call(&mut context, &mut dynamic_dst).unwrap();
+        } else {
+            dynamic_call(&mut context, &mut dynamic_dst).unwrap();
+            typed_call(&mut context, &mut typed_dst).unwrap();
+        }
+        assert_oracle(typed_dst.data());
+        assert_oracle(&dynamic_dst);
+        assert_eq!(context.contraction_resolution_cache_len(), 2);
+        assert_eq!(
+            context.last_resolution_orientation(),
+            Some(crate::contract::FusionContractOrientation::RhsLhs)
+        );
+        assert!(context.contraction_resolution_cache_hits() >= 1);
+    }
+
+    for profiled_first in [true, false] {
+        reset_global_operation_caches();
+        let mut context =
+            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
+            );
+        let mut ordinary_dst =
+            TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(initial.clone(), dst_space.clone())
+                .unwrap();
+        let mut profiled_dst =
+            TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(initial.clone(), dst_space.clone())
+                .unwrap();
+        let ordinary_call = |context: &mut TensorContractFusionExecutionContext<
+            f64,
+            TreeTransformBuiltinRuleCacheKey,
+        >,
+                             dst: &mut TensorMap<f64, 2, 2>| {
+            context.tensorcontract_fusion_into(
+                provider.as_ref(),
+                dst,
+                &lhs,
+                &rhs,
+                axes(),
+                alpha,
+                beta,
+            )
+        };
+        let profiled_call = |context: &mut TensorContractFusionExecutionContext<
+            f64,
+            TreeTransformBuiltinRuleCacheKey,
+        >,
+                             dst: &mut TensorMap<f64, 2, 2>| {
+            let mut profile = TensorContractFusionProfile::default();
+            context.tensorcontract_fusion_into_profiled(
+                provider.as_ref(),
+                dst,
+                &lhs,
+                &rhs,
+                axes(),
+                alpha,
+                beta,
+                &mut profile,
+            )?;
+            assert_eq!(profile.route, TensorContractFusionRoute::DynamicTreeCore);
+            Ok::<_, OperationError>(())
+        };
+        if profiled_first {
+            profiled_call(&mut context, &mut profiled_dst).unwrap();
+            ordinary_call(&mut context, &mut ordinary_dst).unwrap();
+        } else {
+            ordinary_call(&mut context, &mut ordinary_dst).unwrap();
+            profiled_call(&mut context, &mut profiled_dst).unwrap();
+        }
+        assert_oracle(ordinary_dst.data());
+        assert_oracle(profiled_dst.data());
+        assert_eq!(context.contraction_resolution_cache_len(), 2);
+        assert_eq!(
+            context.last_resolution_orientation(),
+            Some(crate::contract::FusionContractOrientation::RhsLhs)
+        );
+        assert!(context.contraction_resolution_cache_hits() >= 1);
+    }
 }
 
 #[test]
@@ -2761,7 +3243,7 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
 
     // What: the canonical RHS layout remains exactly borrowable before the
     // independently recorded fermionic twist forces its materialization.
-    assert_eq!(facts.len(), 1);
+    assert_eq!(facts.len(), 2);
     assert_eq!(
         facts[0].orientation(),
         crate::contract::FusionContractOrientation::LhsRhs
@@ -2773,6 +3255,11 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
     assert_eq!(facts[0].rhs_materialized_elements(), 5);
     assert_eq!(facts[0].output_materialized_elements(), 0);
     assert_eq!(facts[0].total_materialized_elements(), 5);
+    assert_eq!(
+        facts[1].orientation(),
+        crate::contract::FusionContractOrientation::RhsLhs
+    );
+    assert!(!facts[1].rhs_requires_twist());
 
     tensorcontract_fusion_into(
         &rule,
@@ -3964,8 +4451,8 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     assert_eq!(context.tree_context().cache().plan_len(), 2);
     assert_eq!(context.tree_context().cache().structure_len(), 2);
     assert!(context.contraction_resolution_cache_len() >= 1);
-    assert!(context.contraction_resolution_cache_hits() >= 1);
-    assert!(context.contraction_resolution_cache_fast_hits() >= 1);
+    assert_eq!(context.contraction_resolution_cache_hits(), 0);
+    assert_eq!(context.contraction_resolution_cache_fast_hits(), 0);
     assert!(context.contraction_resolution_cache_misses() >= 1);
 
     let mut automatic_context_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
@@ -4194,9 +4681,13 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
         );
     }
     assert_eq!(profile.route, TensorContractFusionRoute::DynamicTreeCore);
-    assert_eq!(profile.lhs_transform_calls, 1);
-    assert_eq!(profile.rhs_transform_calls, 1);
-    assert_eq!(profile.output_transform_calls, 0);
+    assert_eq!(
+        automatic_context.last_resolution_orientation(),
+        Some(crate::contract::FusionContractOrientation::RhsLhs)
+    );
+    assert_eq!(profile.lhs_transform_calls, 0);
+    assert_eq!(profile.rhs_transform_calls, 0);
+    assert_eq!(profile.output_transform_calls, 1);
     assert!(profile.core_contract_groups > 0);
     assert_eq!(profile.tree_replay.cache_lookup.as_nanos(), 0);
     assert_eq!(profile.tree_replay.strided_view_setup.as_nanos(), 0);
@@ -4206,12 +4697,9 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
         profile.tree_replay.multi_matmul_total,
         profile.tree_replay.multi_scalar_recoupling
     );
-    assert!(profile.tree_replay.multi_blocks > 0);
-    assert!(profile.tree_replay.packed_columns > 0);
-    assert_eq!(
-        profile.tree_replay.packed_columns,
-        profile.tree_replay.scattered_columns
-    );
+    assert_eq!(profile.tree_replay.multi_blocks, 0);
+    assert_eq!(profile.tree_replay.packed_columns, 0);
+    assert_eq!(profile.tree_replay.scattered_columns, 0);
 }
 
 #[test]
