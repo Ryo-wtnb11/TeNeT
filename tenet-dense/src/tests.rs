@@ -1218,18 +1218,23 @@ fn default_executor_solves_f64_from_and_into_strided_views() {
     a[3] = 1.0;
     a[6] = 1.0;
     a[8] = 2.0;
-    let b = [2.0, -1.0, 9.0, 8.0];
+    let mut b = vec![-88.0; 12];
+    b[2] = 2.0;
+    b[5] = -1.0;
+    b[8] = 9.0;
+    b[11] = 8.0;
     let mut x = vec![-77.0; 9];
     let shape = [2, 2];
-    let compact = [1, 2];
-    let strided = [2, 5];
+    let a_strides = [2, 5];
+    let b_strides = [3, 6];
+    let x_strides = [2, 5];
     let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
 
     executor
         .solve_into(
-            DenseRead::F64(DenseView::new(&a, &shape, &strided, 1).unwrap()),
-            DenseRead::F64(DenseView::new(&b, &shape, &compact, 0).unwrap()),
-            DenseWrite::F64(DenseViewMut::new(&mut x, &shape, &strided, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&a, &shape, &a_strides, 1).unwrap()),
+            DenseRead::F64(DenseView::new(&b, &shape, &b_strides, 2).unwrap()),
+            DenseWrite::F64(DenseViewMut::new(&mut x, &shape, &x_strides, 0).unwrap()),
         )
         .unwrap();
 
