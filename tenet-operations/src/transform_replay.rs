@@ -17,7 +17,8 @@ use crate::storage_scratch::{StorageTreeTransformWorkspace, TreeTransformScratch
 use crate::strided::offset_to_isize;
 use crate::tensoradd::{TensorAddDescriptor, TensorAddDescriptorTerm};
 use crate::transform_structure::{
-    TreeTransformPackReplay, TreeTransformScatterReplay, TreeTransformSingleReplay,
+    TreeTransformPackReplay, TreeTransformScatterGroupReplay, TreeTransformScatterReplay,
+    TreeTransformSingleReplay,
 };
 use crate::{
     tensoradd_raw_strided_kernel, tensoradd_raw_strided_kernel_trusted, BakedFusedLayout,
@@ -781,10 +782,8 @@ mod inactive_destination_tests {
             )],
         )
         .unwrap();
-        assert_eq!(
-            transform.parallel_schedule().scatter_group_slice_disjoint,
-            [false]
-        );
+        assert_eq!(transform.parallel_schedule().scatter_groups.len(), 1);
+        assert!(!transform.parallel_schedule().scatter_groups[0].slice_disjoint);
         let src = [1.0, 2.0, 3.0, 4.0];
         let mut serial = [10.0, 20.0, 30.0, 40.0];
         let mut threaded = serial;
@@ -2029,11 +2028,11 @@ where
 /// Replays a prepared structural-recoupling tree transform on host slices.
 ///
 /// `threads` selects the replay parallelism (a property of the executing
-/// backend, not of the cached structure): `<= 1` runs the existing serial
-/// path unchanged; `> 1` runs Single applies, Multi pack columns and Multi
-/// scatter columns as independent work items over up to `threads`
-/// work-stealing workers. Multi blocks submit bounded grouped recoupling
-/// batches between their pack and scatter phases.
+/// backend, not of the cached structure): `<= 1` reuses one pack buffer and
+/// submits each Multi group independently; `> 1` runs Single applies, Multi
+/// pack columns and Multi scatter columns as independent work items over up to
+/// `threads` work-stealing workers. Multi blocks submit bounded grouped
+/// recoupling batches between their pack and scatter phases.
 #[allow(clippy::too_many_arguments)]
 pub fn tree_transform_structure_with_structural_recoupling_raw<A, E, D, C>(
     kernels: &mut A,
@@ -3390,7 +3389,7 @@ fn replay_scatter_groups<A, D>(
     kernels: A,
     layouts: &TreeTransformLayoutTable,
     scatter_columns: &[TreeTransformScatterReplay],
-    scatter_group_starts: &[usize],
+    scatter_groups: &[TreeTransformScatterGroupReplay],
     groups: &[usize],
     dst_data: &mut [D],
     dst_start: isize,
@@ -3409,12 +3408,11 @@ where
     }
     if threads <= 1 || groups.len() == 1 {
         for &group in groups {
-            let start = scatter_group_starts[group];
-            let end = scatter_group_starts[group + 1];
+            let columns = scatter_groups[group].columns.clone();
             replay_scatter_columns(
                 kernels.clone(),
                 layouts,
-                &scatter_columns[start..end],
+                &scatter_columns[columns],
                 dst_data,
                 dst_start,
                 packed_destination,
@@ -3428,7 +3426,7 @@ where
     }
 
     let middle = parallel_split(groups.len(), threads);
-    let boundary = scatter_columns[scatter_group_starts[groups[middle]]].dst_lo;
+    let boundary = scatter_columns[scatter_groups[groups[middle]].columns.start].dst_lo;
     let split =
         usize::try_from(boundary - dst_start).map_err(|_| OperationError::ElementCountOverflow)?;
     let (left_data, right_data) = dst_data.split_at_mut(split);
@@ -3442,7 +3440,7 @@ where
                 kernels,
                 layouts,
                 scatter_columns,
-                scatter_group_starts,
+                scatter_groups,
                 left_groups,
                 left_data,
                 dst_start,
@@ -3458,7 +3456,7 @@ where
                 right_kernels,
                 layouts,
                 scatter_columns,
-                scatter_group_starts,
+                scatter_groups,
                 right_groups,
                 right_data,
                 boundary,
@@ -3586,6 +3584,7 @@ where
     // per concurrently executing fusion block. The existing replay-thread
     // budget is also the natural bound for a grouped dense submission.
     let chunk_size = threads.max(1);
+    let mut pack_cursor = 0;
     for (chunk_index, chunk) in recoupling_plan.jobs().chunks(chunk_size).enumerate() {
         let packed_column_count = chunk.iter().map(|job| job.contracted).sum::<usize>();
         let scattered_column_count = chunk.iter().map(|job| job.cols).sum::<usize>();
@@ -3628,17 +3627,17 @@ where
             profile.multi_workspace_prepare += start.elapsed();
         }
 
-        let pack_start = schedule
-            .pack_columns
-            .partition_point(|item| item.packed_offset < source_start);
-        let pack_end = schedule
-            .pack_columns
-            .partition_point(|item| item.packed_offset < source_end);
+        let pack_start = pack_cursor;
+        while pack_cursor < schedule.pack_columns.len()
+            && schedule.pack_columns[pack_cursor].packed_offset < source_end
+        {
+            pack_cursor += 1;
+        }
         let start = profile.as_ref().map(|_| std::time::Instant::now());
         replay_pack_columns(
             kernels.clone(),
             layouts,
-            &schedule.pack_columns[pack_start..pack_end],
+            &schedule.pack_columns[pack_start..pack_cursor],
             workspace.packed.source_mut().as_mut_slice(),
             source_start,
             src_data,
@@ -3670,25 +3669,24 @@ where
         let packed_destination = workspace.packed.destination().as_slice();
         let first_group = chunk_index * chunk_size;
         workspace.chunk_scatter_groups.clear();
-        workspace
-            .chunk_scatter_groups
-            .extend((first_group..first_group + chunk.len()).filter(|&group| {
-                schedule.scatter_group_starts[group] != schedule.scatter_group_starts[group + 1]
-            }));
+        workspace.chunk_scatter_groups.extend(
+            (first_group..first_group + chunk.len())
+                .filter(|&group| !schedule.scatter_groups[group].columns.is_empty()),
+        );
         // Why not sort/copy every scatter descriptor: only the at-most-T group
         // indices need destination order for one safe Rayon split tree.
         workspace
             .chunk_scatter_groups
             .sort_unstable_by_key(|&group| {
-                schedule.scatter_columns[schedule.scatter_group_starts[group]].dst_lo
+                schedule.scatter_columns[schedule.scatter_groups[group].columns.start].dst_lo
             });
         let scatter_slice_disjoint = workspace
             .chunk_scatter_groups
             .iter()
-            .all(|&group| schedule.scatter_group_slice_disjoint[group])
+            .all(|&group| schedule.scatter_groups[group].slice_disjoint)
             && workspace.chunk_scatter_groups.windows(2).all(|groups| {
-                let left_end = schedule.scatter_group_starts[groups[0] + 1];
-                let right_start = schedule.scatter_group_starts[groups[1]];
+                let left_end = schedule.scatter_groups[groups[0]].columns.end;
+                let right_start = schedule.scatter_groups[groups[1]].columns.start;
                 schedule.scatter_columns[left_end - 1].dst_hi
                     < schedule.scatter_columns[right_start].dst_lo
             });
@@ -3697,7 +3695,7 @@ where
                 kernels.clone(),
                 layouts,
                 &schedule.scatter_columns,
-                &schedule.scatter_group_starts,
+                &schedule.scatter_groups,
                 &workspace.chunk_scatter_groups,
                 dst_data,
                 0,
@@ -3710,9 +3708,9 @@ where
         } else {
             let mut zero_strides = Vec::new();
             for &group in &workspace.chunk_scatter_groups {
-                let group_start = schedule.scatter_group_starts[group];
-                let group_end = schedule.scatter_group_starts[group + 1];
-                for item in &schedule.scatter_columns[group_start..group_end] {
+                for item in
+                    &schedule.scatter_columns[schedule.scatter_groups[group].columns.clone()]
+                {
                     scatter_column_into_layout(
                         kernels,
                         &mut zero_strides,
@@ -3732,6 +3730,7 @@ where
             profile.multi_scatter += start.elapsed();
         }
     }
+    debug_assert_eq!(pack_cursor, schedule.pack_columns.len());
     Ok(())
 }
 
