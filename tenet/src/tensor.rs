@@ -18,8 +18,9 @@ use num_complex::Complex64;
 use smallvec::SmallVec;
 use tenet_core::{
     BlockKey, BlockStructure, BlockView, BlockViewMut, CheckedFusionAlgebra, CoupledSectorRegion,
-    FusionProductSpace, FusionRule, FusionTreeHomSpace, LoweredMultiplicityFreeAlgebra,
-    MultiplicityFreeRigidSymbols, Placement, SectorId, Su3FusionRule,
+    FusionProductSpace, FusionRule, FusionTreeHomSpace, FusionTreePairKey,
+    LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols, Placement, SectorId,
+    Su3FusionRule,
 };
 #[cfg(feature = "cuda")]
 use tenet_core::{SectorLeg, TensorStorage};
@@ -834,8 +835,10 @@ struct CatCopy {
     destination_offset: usize,
     rows: usize,
     cols: usize,
-    source_leading_dimension: usize,
+    source_row_stride: usize,
+    source_column_stride: usize,
     destination_leading_dimension: usize,
+    conjugate: bool,
 }
 
 struct CatDescriptor {
@@ -857,48 +860,115 @@ impl CatDescriptor {
         side: CatSide,
         homspace: FusionTreeHomSpace,
     ) -> Result<Self, Error> {
+        let lhs = TensorMetadataView {
+            body: lhs,
+            orientation: TensorOrientation::Owned,
+        };
+        let rhs = TensorMetadataView {
+            body: rhs,
+            orientation: TensorOrientation::Owned,
+        };
+        let source_regions = [
+            sector_regions(lhs.body.space.structure(), lhs.body.space.nout())?,
+            sector_regions(rhs.body.space.structure(), rhs.body.space.nout())?,
+        ];
+        Self::compile(&lhs, &rhs, source_regions, axis, side, homspace)?.ok_or_else(|| {
+            internal_layout_error("owned concatenation unexpectedly declined its layout")
+        })
+    }
+
+    fn try_new_oriented(
+        lhs: &TensorMetadataView<'_>,
+        rhs: &TensorMetadataView<'_>,
+        axis: usize,
+        side: CatSide,
+        homspace: FusionTreeHomSpace,
+    ) -> Result<Option<Self>, Error> {
+        // Why not use logical_space/materialized_body: either constructs the
+        // complete adjoint block grid that this borrowed cat route avoids.
+        let source_regions = [
+            lhs.body
+                .space
+                .structure()
+                .coupled_sector_regions(lhs.body.space.nout())?,
+            rhs.body
+                .space
+                .structure()
+                .coupled_sector_regions(rhs.body.space.nout())?,
+        ];
+        let [Some(lhs_regions), Some(rhs_regions)] = source_regions else {
+            return Ok(None);
+        };
+        let Some(descriptor) =
+            Self::compile(lhs, rhs, [lhs_regions, rhs_regions], axis, side, homspace)?
+        else {
+            return Ok(None);
+        };
+        descriptor.preflight([
+            lhs.body.space.structure().required_len()?,
+            rhs.body.space.structure().required_len()?,
+        ])?;
+        Ok(Some(descriptor))
+    }
+
+    fn compile(
+        lhs: &TensorMetadataView<'_>,
+        rhs: &TensorMetadataView<'_>,
+        source_regions: [Arc<[SectorRegion]>; 2],
+        axis: usize,
+        side: CatSide,
+        homspace: FusionTreeHomSpace,
+    ) -> Result<Option<Self>, Error> {
         #[cfg(test)]
         observe_cat_result_layout_build();
-        let space = lhs.space.from_homspace(homspace)?;
+        let space = lhs.body.space.from_homspace(homspace)?;
         let destination = space.structure();
         let source_structures = [
-            Arc::clone(lhs.space.structure()),
-            Arc::clone(rhs.space.structure()),
+            Arc::clone(lhs.body.space.structure()),
+            Arc::clone(rhs.body.space.structure()),
         ];
         let sources = [&source_structures[0], &source_structures[1]];
         let source_blocks = [
-            cat_source_blocks(destination, sources[0])?,
-            cat_source_blocks(destination, sources[1])?,
+            cat_source_blocks(destination, sources[0], lhs.orientation)?,
+            cat_source_blocks(destination, sources[1], rhs.orientation)?,
         ];
-        for destination_block in 0..destination.block_count() {
+        let source_metadata = [lhs, rhs];
+        for (destination_block, (&lhs_source_block, &rhs_source_block)) in
+            source_blocks[0].iter().zip(&source_blocks[1]).enumerate()
+        {
             let dst = destination.block(destination_block)?;
-            if source_blocks[0][destination_block].is_none()
-                && source_blocks[1][destination_block].is_none()
-            {
+            let source_for_destination = [lhs_source_block, rhs_source_block];
+            if source_for_destination.iter().all(Option::is_none) {
                 return Err(internal_layout_error(
                     "concatenated fusion-tree key has no source",
                 ));
             }
             let mut destination_axis_offset = 0usize;
             for source in 0..2 {
-                let Some(source_block) = source_blocks[source][destination_block] else {
+                let Some(source_block) = source_for_destination[source] else {
                     continue;
                 };
                 let src = sources[source].block(source_block)?;
                 if src.shape().len() != dst.shape().len()
-                    || src
-                        .shape()
-                        .iter()
-                        .zip(dst.shape())
-                        .enumerate()
-                        .any(|(i, (src, dst))| i != axis && src != dst)
+                    || (0..dst.shape().len()).any(|logical_axis| {
+                        if logical_axis == axis {
+                            return false;
+                        }
+                        match cat_storage_axis(source_metadata[source], logical_axis) {
+                            Ok(storage_axis) => {
+                                src.shape()[storage_axis] != dst.shape()[logical_axis]
+                            }
+                            Err(_) => true,
+                        }
+                    })
                 {
                     return Err(internal_layout_error(
                         "concatenated source and destination subblock shapes disagree",
                     ));
                 }
+                let storage_axis = cat_storage_axis(source_metadata[source], axis)?;
                 destination_axis_offset = destination_axis_offset
-                    .checked_add(src.shape()[axis])
+                    .checked_add(src.shape()[storage_axis])
                     .ok_or_else(|| internal_layout_error("concatenated axis offset overflow"))?;
             }
             if destination_axis_offset != dst.shape()[axis] {
@@ -908,14 +978,33 @@ impl CatDescriptor {
             }
         }
         let destination_regions = sector_regions(destination, space.nout())?;
-        let source_regions = [
-            sector_regions(sources[0], lhs.space.nout())?,
-            sector_regions(sources[1], rhs.space.nout())?,
-        ];
-        let source_region_indices = [
-            cat_source_regions(&destination_regions, &source_regions[0])?,
-            cat_source_regions(&destination_regions, &source_regions[1])?,
-        ];
+        let oriented = matches!(lhs.orientation, TensorOrientation::Adjoint)
+            || matches!(rhs.orientation, TensorOrientation::Adjoint);
+        let source_region_indices = if oriented {
+            let (Some(lhs_indices), Some(rhs_indices)) = (
+                cat_source_regions_if_monotone(&destination_regions, &source_regions[0]),
+                cat_source_regions_if_monotone(&destination_regions, &source_regions[1]),
+            ) else {
+                return Ok(None);
+            };
+            [lhs_indices, rhs_indices]
+        } else {
+            [
+                cat_source_regions(&destination_regions, &source_regions[0])?,
+                cat_source_regions(&destination_regions, &source_regions[1])?,
+            ]
+        };
+        if oriented
+            && !cat_region_tree_orders_match(
+                &destination_regions,
+                [&source_regions[0], &source_regions[1]],
+                [&source_region_indices[0], &source_region_indices[1]],
+                [lhs, rhs],
+                side,
+            )
+        {
+            return Ok(None);
+        }
         let mut copies = Vec::with_capacity(source_regions[0].len() + source_regions[1].len());
         for (destination_index, destination) in destination_regions.iter().enumerate() {
             let mut changed_axis_offset = 0usize;
@@ -924,16 +1013,21 @@ impl CatDescriptor {
                     continue;
                 };
                 let src = &source_regions[source][source_index];
+                let (source_rows, source_cols, source_row_stride, source_column_stride) =
+                    match source_metadata[source].orientation {
+                        TensorOrientation::Owned => (src.rows(), src.cols(), 1, src.rows()),
+                        TensorOrientation::Adjoint => (src.cols(), src.rows(), src.rows(), 1),
+                    };
                 let (rows, cols, destination_offset) = match side {
                     CatSide::Codomain => {
-                        if src.cols() != destination.cols() {
+                        if source_cols != destination.cols() {
                             return Err(internal_layout_error(
                                 "catcodomain coupled-sector columns disagree",
                             ));
                         }
                         (
-                            src.rows(),
-                            src.cols(),
+                            source_rows,
+                            source_cols,
                             destination
                                 .range()
                                 .start
@@ -946,14 +1040,14 @@ impl CatDescriptor {
                         )
                     }
                     CatSide::Domain => {
-                        if src.rows() != destination.rows() {
+                        if source_rows != destination.rows() {
                             return Err(internal_layout_error(
                                 "catdomain coupled-sector rows disagree",
                             ));
                         }
                         (
-                            src.rows(),
-                            src.cols(),
+                            source_rows,
+                            source_cols,
                             destination
                                 .rows()
                                 .checked_mul(changed_axis_offset)
@@ -972,13 +1066,18 @@ impl CatDescriptor {
                     destination_offset,
                     rows,
                     cols,
-                    source_leading_dimension: src.rows(),
+                    source_row_stride,
+                    source_column_stride,
                     destination_leading_dimension: destination.rows(),
+                    conjugate: matches!(
+                        source_metadata[source].orientation,
+                        TensorOrientation::Adjoint
+                    ),
                 });
                 changed_axis_offset = changed_axis_offset
                     .checked_add(match side {
-                        CatSide::Codomain => src.rows(),
-                        CatSide::Domain => src.cols(),
+                        CatSide::Codomain => source_rows,
+                        CatSide::Domain => source_cols,
                     })
                     .ok_or_else(|| internal_layout_error("concatenated region offset overflow"))?;
             }
@@ -992,7 +1091,28 @@ impl CatDescriptor {
                 ));
             }
         }
-        Ok(Self { space, copies })
+        Ok(Some(Self { space, copies }))
+    }
+
+    fn preflight(&self, source_lengths: [usize; 2]) -> Result<(), Error> {
+        let required_len = self.space.required_len()?;
+        let mut copied_elements = 0usize;
+        for copy in &self.copies {
+            preflight_cat_copy(copy, source_lengths[copy.source], required_len)?;
+            copied_elements = copied_elements
+                .checked_add(copy.rows.checked_mul(copy.cols).ok_or_else(|| {
+                    internal_layout_error("concatenated copy element count overflow")
+                })?)
+                .ok_or_else(|| {
+                    internal_layout_error("concatenated total element count overflow")
+                })?;
+        }
+        if copied_elements != required_len {
+            return Err(internal_layout_error(
+                "concatenated copies do not cover the destination storage",
+            ));
+        }
+        Ok(())
     }
 
     fn execute<D: UserScalar>(&self, lhs: &[D], rhs: &[D]) -> Result<Vec<D>, Error> {
@@ -1002,22 +1122,30 @@ impl CatDescriptor {
         let mut output = vec![D::from_real(0.0); self.space.required_len()?];
         for copy in &self.copies {
             let shape = [copy.rows, copy.cols];
-            let source_strides = [1, copy.source_leading_dimension];
+            let source_strides = [copy.source_row_stride, copy.source_column_stride];
             let destination_strides = [1, copy.destination_leading_dimension];
-            tenet_tensors::copy_into(
-                BlockViewMut::new(
-                    &mut output,
-                    &shape,
-                    &destination_strides,
-                    copy.destination_offset,
-                )?,
-                BlockView::new(
-                    sources[copy.source],
-                    &shape,
-                    &source_strides,
-                    copy.source_offset,
-                )?,
-            )?;
+            if copy.conjugate {
+                // Why not copy_into: the strided kernel transposes views but
+                // does not conjugate complex values.
+                copy_cat_mapped(&mut output, sources[copy.source], copy, |value| {
+                    FactorScalar::adjoint(value)
+                });
+            } else {
+                tenet_tensors::copy_into(
+                    BlockViewMut::new(
+                        &mut output,
+                        &shape,
+                        &destination_strides,
+                        copy.destination_offset,
+                    )?,
+                    BlockView::new(
+                        sources[copy.source],
+                        &shape,
+                        &source_strides,
+                        copy.source_offset,
+                    )?,
+                )?;
+            }
         }
         Ok(output)
     }
@@ -1032,53 +1160,66 @@ impl CatDescriptor {
         for copy in &self.copies {
             match sources[copy.source] {
                 CatC64Source::C64(source) => {
-                    let shape = [copy.rows, copy.cols];
-                    let source_strides = [1, copy.source_leading_dimension];
-                    let destination_strides = [1, copy.destination_leading_dimension];
-                    tenet_tensors::copy_into(
-                        BlockViewMut::new(
-                            &mut output,
-                            &shape,
-                            &destination_strides,
-                            copy.destination_offset,
-                        )?,
-                        BlockView::new(source, &shape, &source_strides, copy.source_offset)?,
-                    )?;
+                    if copy.conjugate {
+                        copy_cat_mapped(&mut output, source, copy, |value| value.conj());
+                    } else {
+                        let shape = [copy.rows, copy.cols];
+                        let source_strides = [copy.source_row_stride, copy.source_column_stride];
+                        let destination_strides = [1, copy.destination_leading_dimension];
+                        tenet_tensors::copy_into(
+                            BlockViewMut::new(
+                                &mut output,
+                                &shape,
+                                &destination_strides,
+                                copy.destination_offset,
+                            )?,
+                            BlockView::new(source, &shape, &source_strides, copy.source_offset)?,
+                        )?;
+                    }
                 }
                 CatC64Source::F64(source) => {
-                    for column in 0..copy.cols {
-                        let source_start = column
-                            .checked_mul(copy.source_leading_dimension)
-                            .and_then(|offset| copy.source_offset.checked_add(offset))
-                            .ok_or_else(|| {
-                                internal_layout_error("mixed cat source offset overflow")
-                            })?;
-                        let destination_start = column
-                            .checked_mul(copy.destination_leading_dimension)
-                            .and_then(|offset| copy.destination_offset.checked_add(offset))
-                            .ok_or_else(|| {
-                                internal_layout_error("mixed cat destination offset overflow")
-                            })?;
-                        let source_end = source_start.checked_add(copy.rows).ok_or_else(|| {
-                            internal_layout_error("mixed cat source extent overflow")
-                        })?;
-                        let destination_end =
-                            destination_start.checked_add(copy.rows).ok_or_else(|| {
-                                internal_layout_error("mixed cat destination extent overflow")
-                            })?;
-                        let source_column =
-                            source.get(source_start..source_end).ok_or_else(|| {
-                                internal_layout_error("mixed cat source slab is out of bounds")
-                            })?;
-                        let destination_column = output
-                            .get_mut(destination_start..destination_end)
-                            .ok_or_else(|| {
-                                internal_layout_error("mixed cat destination slab is out of bounds")
-                            })?;
-                        for (destination, &source) in
-                            destination_column.iter_mut().zip(source_column)
-                        {
-                            *destination = Complex64::new(source, 0.0);
+                    if copy.conjugate {
+                        copy_cat_mapped(&mut output, source, copy, |value| {
+                            Complex64::new(value, 0.0)
+                        });
+                    } else {
+                        for column in 0..copy.cols {
+                            let source_start = column
+                                .checked_mul(copy.source_column_stride)
+                                .and_then(|offset| copy.source_offset.checked_add(offset))
+                                .ok_or_else(|| {
+                                    internal_layout_error("mixed cat source offset overflow")
+                                })?;
+                            let destination_start = column
+                                .checked_mul(copy.destination_leading_dimension)
+                                .and_then(|offset| copy.destination_offset.checked_add(offset))
+                                .ok_or_else(|| {
+                                    internal_layout_error("mixed cat destination offset overflow")
+                                })?;
+                            let source_end =
+                                source_start.checked_add(copy.rows).ok_or_else(|| {
+                                    internal_layout_error("mixed cat source extent overflow")
+                                })?;
+                            let destination_end =
+                                destination_start.checked_add(copy.rows).ok_or_else(|| {
+                                    internal_layout_error("mixed cat destination extent overflow")
+                                })?;
+                            let source_column =
+                                source.get(source_start..source_end).ok_or_else(|| {
+                                    internal_layout_error("mixed cat source slab is out of bounds")
+                                })?;
+                            let destination_column = output
+                                .get_mut(destination_start..destination_end)
+                                .ok_or_else(|| {
+                                    internal_layout_error(
+                                        "mixed cat destination slab is out of bounds",
+                                    )
+                                })?;
+                            for (destination, &source) in
+                                destination_column.iter_mut().zip(source_column)
+                            {
+                                *destination = Complex64::new(source, 0.0);
+                            }
                         }
                     }
                 }
@@ -1088,10 +1229,124 @@ impl CatDescriptor {
     }
 }
 
+fn execute_cat_data(descriptor: &CatDescriptor, lhs: &Data, rhs: &Data) -> Result<Data, Error> {
+    match (lhs, rhs) {
+        (Data::F64(lhs), Data::F64(rhs)) => Ok(Data::F64(descriptor.execute(lhs, rhs)?)),
+        (Data::C64(lhs), Data::C64(rhs)) => Ok(Data::C64(descriptor.execute(lhs, rhs)?)),
+        (Data::F64(lhs), Data::C64(rhs)) => Ok(Data::C64(
+            descriptor.execute_c64(CatC64Source::F64(lhs), CatC64Source::C64(rhs))?,
+        )),
+        (Data::C64(lhs), Data::F64(rhs)) => Ok(Data::C64(
+            descriptor.execute_c64(CatC64Source::C64(lhs), CatC64Source::F64(rhs))?,
+        )),
+        (Data::Diagonal(_), _) | (_, Data::Diagonal(_)) => Err(internal_layout_error(
+            "compact diagonal reached cat execution",
+        )),
+        #[cfg(feature = "cuda")]
+        (Data::CudaF64(_), _) | (_, Data::CudaF64(_)) => Err(Error::UnsupportedOnDevice(
+            "catdomain/catcodomain has no device implementation yet".to_string(),
+        )),
+    }
+}
+
+fn copy_cat_mapped<D, S>(
+    destination: &mut [D],
+    source: &[S],
+    copy: &CatCopy,
+    mut map: impl FnMut(S) -> D,
+) where
+    S: Copy,
+{
+    for column in 0..copy.cols {
+        for row in 0..copy.rows {
+            let source_index = copy.source_offset
+                + row * copy.source_row_stride
+                + column * copy.source_column_stride;
+            let destination_index =
+                copy.destination_offset + row + column * copy.destination_leading_dimension;
+            destination[destination_index] = map(source[source_index]);
+        }
+    }
+}
+
+fn preflight_cat_copy(
+    copy: &CatCopy,
+    source_len: usize,
+    destination_len: usize,
+) -> Result<(), Error> {
+    let max_offset =
+        |base: usize, rows: usize, cols: usize, row_stride: usize, column_stride: usize| {
+            if rows == 0 || cols == 0 {
+                return Ok(None);
+            }
+            let row_offset = (rows - 1)
+                .checked_mul(row_stride)
+                .ok_or_else(|| internal_layout_error("concatenated row offset overflow"))?;
+            let column_offset = (cols - 1)
+                .checked_mul(column_stride)
+                .ok_or_else(|| internal_layout_error("concatenated column offset overflow"))?;
+            base.checked_add(row_offset)
+                .and_then(|offset| offset.checked_add(column_offset))
+                .map(Some)
+                .ok_or_else(|| internal_layout_error("concatenated scalar offset overflow"))
+        };
+    if max_offset(
+        copy.source_offset,
+        copy.rows,
+        copy.cols,
+        copy.source_row_stride,
+        copy.source_column_stride,
+    )?
+    .is_some_and(|offset| offset >= source_len)
+    {
+        return Err(internal_layout_error(
+            "concatenated source region exceeds scalar storage",
+        ));
+    }
+    if max_offset(
+        copy.destination_offset,
+        copy.rows,
+        copy.cols,
+        1,
+        copy.destination_leading_dimension,
+    )?
+    .is_some_and(|offset| offset >= destination_len)
+    {
+        return Err(internal_layout_error(
+            "concatenated destination region exceeds scalar storage",
+        ));
+    }
+    Ok(())
+}
+
 fn cat_source_blocks(
     destination: &BlockStructure,
     source: &BlockStructure,
+    orientation: TensorOrientation,
 ) -> Result<Vec<Option<usize>>, Error> {
+    if matches!(orientation, TensorOrientation::Adjoint) {
+        let mut source_for_destination = vec![None; destination.block_count()];
+        for source_index in 0..source.block_count() {
+            let logical_key = cat_logical_block_key(source.block(source_index)?.key())?;
+            let destination_index = destination
+                .find_block_index_by_key(&logical_key)
+                .ok_or_else(|| {
+                    internal_layout_error(
+                        "source fusion-tree key is absent from concatenated destination",
+                    )
+                })?;
+            if source_for_destination[destination_index]
+                .replace(source_index)
+                .is_some()
+            {
+                return Err(internal_layout_error(
+                    "multiple source fusion-tree keys map to one destination",
+                ));
+            }
+        }
+        return Ok(source_for_destination);
+    }
+
     let destination_sector = destination.sector_structure();
     let source_sector = source.sector_structure();
     let mut source_for_destination = vec![None; destination.block_count()];
@@ -1126,10 +1381,61 @@ fn cat_source_blocks(
     Ok(source_for_destination)
 }
 
+fn cat_logical_block_key(key: &BlockKey) -> Result<BlockKey, Error> {
+    match key {
+        BlockKey::FusionTree(key) => Ok(BlockKey::from(FusionTreePairKey::pair(
+            key.domain_tree().clone(),
+            key.codomain_tree().clone(),
+        ))),
+        _ => Err(internal_layout_error(
+            "unsupported block key in adjoint concatenation",
+        )),
+    }
+}
+
+fn cat_storage_axis(source: &TensorMetadataView<'_>, logical_axis: usize) -> Result<usize, Error> {
+    if logical_axis >= source.rank() {
+        return Err(internal_layout_error(
+            "concatenated logical axis exceeds source rank",
+        ));
+    }
+    match source.orientation {
+        TensorOrientation::Owned => Ok(logical_axis),
+        TensorOrientation::Adjoint => {
+            let storage_nout = source.body.space.nout();
+            if logical_axis < source.nout() {
+                storage_nout
+                    .checked_add(logical_axis)
+                    .ok_or_else(|| internal_layout_error("concatenated storage axis overflow"))
+            } else {
+                Ok(logical_axis - source.nout())
+            }
+        }
+    }
+}
+
 fn cat_source_regions(
     destination: &[SectorRegion],
     source: &[SectorRegion],
 ) -> Result<Vec<Option<usize>>, Error> {
+    cat_source_regions_if_monotone(destination, source).ok_or_else(|| {
+        internal_layout_error("source coupled sectors do not map monotonically to destination")
+    })
+}
+
+fn cat_source_regions_if_monotone(
+    destination: &[SectorRegion],
+    source: &[SectorRegion],
+) -> Option<Vec<Option<usize>>> {
+    if destination
+        .windows(2)
+        .any(|pair| pair[0].coupled() >= pair[1].coupled())
+        || source
+            .windows(2)
+            .any(|pair| pair[0].coupled() >= pair[1].coupled())
+    {
+        return None;
+    }
     let mut source_for_destination = vec![None; destination.len()];
     let mut destination_position = 0usize;
     let mut source_position = 0usize;
@@ -1139,11 +1445,7 @@ fn cat_source_regions(
             .cmp(&source[source_position].coupled())
         {
             std::cmp::Ordering::Less => destination_position += 1,
-            std::cmp::Ordering::Greater => {
-                return Err(internal_layout_error(
-                    "source coupled sector is absent from concatenated destination",
-                ));
-            }
+            std::cmp::Ordering::Greater => return None,
             std::cmp::Ordering::Equal => {
                 source_for_destination[destination_position] = Some(source_position);
                 destination_position += 1;
@@ -1152,11 +1454,43 @@ fn cat_source_regions(
         }
     }
     if source_position != source.len() {
-        return Err(internal_layout_error(
-            "source coupled sector is absent from concatenated destination",
-        ));
+        return None;
     }
-    Ok(source_for_destination)
+    Some(source_for_destination)
+}
+
+fn cat_region_tree_orders_match(
+    destination: &[SectorRegion],
+    sources: [&[SectorRegion]; 2],
+    source_indices: [&[Option<usize>]; 2],
+    metadata: [&TensorMetadataView<'_>; 2],
+    side: CatSide,
+) -> bool {
+    destination
+        .iter()
+        .enumerate()
+        .all(|(destination_index, destination)| {
+            (0..2).all(|source| {
+                let Some(source_index) = source_indices[source][destination_index] else {
+                    return true;
+                };
+                let source_region = &sources[source][source_index];
+                match (side, metadata[source].orientation) {
+                    (CatSide::Domain, TensorOrientation::Owned) => {
+                        source_region.row_trees() == destination.row_trees()
+                    }
+                    (CatSide::Domain, TensorOrientation::Adjoint) => {
+                        source_region.col_trees() == destination.row_trees()
+                    }
+                    (CatSide::Codomain, TensorOrientation::Owned) => {
+                        source_region.col_trees() == destination.col_trees()
+                    }
+                    (CatSide::Codomain, TensorOrientation::Adjoint) => {
+                        source_region.row_trees() == destination.col_trees()
+                    }
+                }
+            })
+        })
 }
 
 fn cat_homspace(
@@ -2646,28 +2980,26 @@ impl Tensor {
             side,
         )?;
 
+        if (self.is_adjoint_view() || other.is_adjoint_view())
+            && !matches!(self.stored_data(), Data::Diagonal(_))
+            && !matches!(other.stored_data(), Data::Diagonal(_))
+        {
+            if let Some(descriptor) =
+                CatDescriptor::try_new_oriented(&lhs, &rhs, axis, side, homspace.clone())?
+            {
+                let data = execute_cat_data(&descriptor, self.stored_data(), other.stored_data())?;
+                return Ok(Self::owned(
+                    self.rt.clone(),
+                    Arc::new(descriptor.space),
+                    Arc::new(data),
+                ));
+            }
+        }
+
         let lhs_body = self.materialized_body()?;
         let rhs_body = other.materialized_body()?;
         let descriptor = CatDescriptor::new(lhs_body, rhs_body, axis, side, homspace)?;
-        let data = match (self.coupled_data()?, other.coupled_data()?) {
-            (Data::F64(lhs), Data::F64(rhs)) => Data::F64(descriptor.execute(lhs, rhs)?),
-            (Data::C64(lhs), Data::C64(rhs)) => Data::C64(descriptor.execute(lhs, rhs)?),
-            (Data::F64(lhs), Data::C64(rhs)) => {
-                Data::C64(descriptor.execute_c64(CatC64Source::F64(lhs), CatC64Source::C64(rhs))?)
-            }
-            (Data::C64(lhs), Data::F64(rhs)) => {
-                Data::C64(descriptor.execute_c64(CatC64Source::C64(lhs), CatC64Source::F64(rhs))?)
-            }
-            (Data::Diagonal(_), _) | (_, Data::Diagonal(_)) => {
-                unreachable!("coupled_data materializes Data::Diagonal")
-            }
-            #[cfg(feature = "cuda")]
-            (Data::CudaF64(_), _) | (_, Data::CudaF64(_)) => {
-                return Err(Error::UnsupportedOnDevice(
-                    "catdomain/catcodomain has no device implementation yet".to_string(),
-                ));
-            }
-        };
+        let data = execute_cat_data(&descriptor, self.coupled_data()?, other.coupled_data()?)?;
         Ok(Self::owned(
             self.rt.clone(),
             Arc::new(descriptor.space),
@@ -10830,21 +11162,181 @@ mod cat_tests {
         );
     }
 
-    fn assert_c64_sources(lhs: &Tensor, rhs: &Tensor, output: &Tensor, side: CatSide) {
-        let sources = [lhs.try_data_c64().unwrap(), rhs.try_data_c64().unwrap()];
-        let destination = output.try_data_c64().unwrap();
-        for_each_cat_element(
-            lhs,
-            rhs,
-            output,
-            side,
-            |source, source_position, output_position| {
-                assert_eq!(
-                    destination[output_position],
-                    sources[source][source_position]
-                );
-            },
+    fn independent_materialized(tensor: &Tensor) -> Tensor {
+        let equivalent = match &tensor.repr {
+            TensorRepr::Owned(_) => tensor.clone(),
+            TensorRepr::Adjoint(view) => Tensor::owned(
+                tensor.rt.clone(),
+                Arc::clone(&view.parent.space),
+                Arc::clone(&view.parent.data),
+            )
+            .adjoint()
+            .unwrap(),
+        };
+        equivalent.materialized_tensor().unwrap()
+    }
+
+    fn assert_dense_storage_eq(actual: &Data, expected: &Data) {
+        match (actual, expected) {
+            (Data::F64(actual), Data::F64(expected)) => assert_eq!(actual, expected),
+            (Data::C64(actual), Data::C64(expected)) => assert_eq!(actual, expected),
+            _ => panic!("cat oracle storage dtype changed"),
+        }
+    }
+
+    fn assert_lazy_cat_matches_eager(lhs: &Tensor, rhs: &Tensor, side: CatSide) -> Tensor {
+        let lhs_before = lhs.stored_data().clone();
+        let rhs_before = rhs.stored_data().clone();
+        let eager_lhs = independent_materialized(lhs);
+        let eager_rhs = independent_materialized(rhs);
+        let expected = match side {
+            CatSide::Domain => eager_lhs.catdomain(&eager_rhs).unwrap(),
+            CatSide::Codomain => eager_lhs.catcodomain(&eager_rhs).unwrap(),
+        };
+
+        let actual = match side {
+            CatSide::Domain => lhs.catdomain(rhs).unwrap(),
+            CatSide::Codomain => lhs.catcodomain(rhs).unwrap(),
+        };
+
+        assert_eq!(
+            actual.ordinary_body().space.homspace(),
+            expected.ordinary_body().space.homspace()
         );
+        assert_eq!(
+            actual.ordinary_body().space.structure(),
+            expected.ordinary_body().space.structure()
+        );
+        assert_dense_storage_eq(actual.stored_data(), expected.stored_data());
+        assert_dense_storage_eq(lhs.stored_data(), &lhs_before);
+        assert_dense_storage_eq(rhs.stored_data(), &rhs_before);
+        assert_eq!(lhs.adjoint_build_counts(), (0, 0));
+        assert_eq!(rhs.adjoint_build_counts(), (0, 0));
+        actual
+    }
+
+    fn u1_cat_operand(
+        runtime: &Runtime,
+        common: &Space,
+        changed: &Space,
+        side: CatSide,
+        adjoint: bool,
+        dtype: Dtype,
+        source: usize,
+    ) -> Tensor {
+        let (codomain, domain): (Vec<&Space>, Vec<&Space>) = match (side, adjoint) {
+            (CatSide::Domain, false) | (CatSide::Codomain, true) => (vec![common], vec![changed]),
+            (CatSide::Domain, true) | (CatSide::Codomain, false) => (vec![changed], vec![common]),
+        };
+        let tensor = match dtype {
+            Dtype::F64 => Tensor::from_block_fn(runtime, codomain, domain, |key, indices| {
+                oracle_value(source, key, indices)
+            })
+            .unwrap(),
+            Dtype::C64 => Tensor::from_block_fn(runtime, codomain, domain, |key, indices| {
+                let value = oracle_value(source, key, indices);
+                Complex64::new(value, value / (source + 3) as f64 + 0.25)
+            })
+            .unwrap(),
+        };
+        if adjoint {
+            tensor.adjoint().unwrap()
+        } else {
+            tensor
+        }
+    }
+
+    fn repack_c64_by_key(source: &Tensor, destination: &BlockStructure) -> Vec<Complex64> {
+        let source_structure = source.ordinary_body().space.structure();
+        let source_data = source.data_c64();
+        let mut destination_data =
+            vec![Complex64::new(0.0, 0.0); destination.required_len().unwrap()];
+        for destination_index in 0..destination.block_count() {
+            let destination_block = destination.block(destination_index).unwrap();
+            let source_block = source_structure
+                .find_block_index_by_key(destination_block.key())
+                .and_then(|index| source_structure.block(index).ok())
+                .unwrap();
+            assert_eq!(source_block.shape(), destination_block.shape());
+            let mut indices = vec![0; destination_block.shape().len()];
+            for _ in 0..destination_block.shape().iter().product() {
+                let source_position = source_block.offset()
+                    + indices
+                        .iter()
+                        .zip(source_block.strides())
+                        .map(|(&index, &stride)| index * stride)
+                        .sum::<usize>();
+                let destination_position = destination_block.offset()
+                    + indices
+                        .iter()
+                        .zip(destination_block.strides())
+                        .map(|(&index, &stride)| index * stride)
+                        .sum::<usize>();
+                destination_data[destination_position] = source_data[source_position];
+                advance_indices(&mut indices, destination_block.shape());
+            }
+        }
+        destination_data
+    }
+
+    fn reordered_complete_su2_parent(source: &Tensor) -> Tensor {
+        let UserBoundSpace::SU2(authority) = source.ordinary_body().space.as_ref() else {
+            unreachable!()
+        };
+        let canonical = authority.space().structure();
+        let mut blocks = (0..canonical.block_count())
+            .map(|index| {
+                let block = canonical.block(index).unwrap();
+                let BlockKey::FusionTree(key) = block.key() else {
+                    unreachable!()
+                };
+                (key.clone(), block.shape().to_vec())
+            })
+            .collect::<Vec<_>>();
+        let mut start = 0;
+        while start < blocks.len() {
+            let coupled = blocks[start].0.codomain_tree().coupled();
+            let end = blocks[start..]
+                .iter()
+                .position(|(key, _)| key.codomain_tree().coupled() != coupled)
+                .map_or(blocks.len(), |relative| start + relative);
+            blocks[start..end].reverse();
+            start = end;
+        }
+        let reordered = BlockStructure::coupled_sector_matrix_with_keys(
+            authority.provider(),
+            authority.space().nout(),
+            authority.space().rank(),
+            blocks,
+        )
+        .unwrap();
+        let data = repack_c64_by_key(source, &reordered);
+        let dense = tenet_core::TensorMapSpace::<1, 2>::from_dims(
+            [source.codomain_spaces()[0].dim()],
+            [
+                source.domain_spaces()[0].dim(),
+                source.domain_spaces()[1].dim(),
+            ],
+        )
+        .unwrap();
+        let typed = tenet_core::FusionTensorMapSpace::<1, 2>::new_unbound(
+            dense,
+            authority.space().homspace().clone(),
+            reordered,
+        )
+        .unwrap()
+        .try_bind_rule(authority.provider())
+        .unwrap();
+        let bound = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            DynamicFusionMapSpace::from_typed(&typed),
+            Arc::clone(authority.provider_arc()),
+        )
+        .unwrap();
+        Tensor::owned(
+            source.rt.clone(),
+            Arc::new(UserBoundSpace::SU2(bound)),
+            Arc::new(Data::C64(data)),
+        )
     }
 
     #[test]
@@ -11092,27 +11584,371 @@ mod cat_tests {
     }
 
     #[test]
-    fn catdomain_materializes_lazy_complex_adjoint_operands() {
+    fn lazy_adjoint_cat_u1_matches_eager_for_both_sides_and_operand_orientations() {
+        // What: AD, DA, and AA concatenation read asymmetric dual U1 parent
+        // storage directly for both cat sides, including both mixed-dtype orders.
         let runtime = Runtime::builder().build().unwrap();
-        let common = Space::su2([(0, 2), (1, 1)]);
+        let common = Space::u1([(-2, 1), (0, 2), (1, 1)]);
+        let left = Space::u1([(-1, 2), (2, 1)]).dual();
+        let right = Space::u1([(-1, 1), (3, 2)]).dual();
+        for side in [CatSide::Domain, CatSide::Codomain] {
+            for (lhs_adjoint, rhs_adjoint, lhs_dtype, rhs_dtype) in [
+                (true, false, Dtype::C64, Dtype::F64),
+                (false, true, Dtype::F64, Dtype::C64),
+                (true, true, Dtype::C64, Dtype::C64),
+            ] {
+                let lhs = u1_cat_operand(&runtime, &common, &left, side, lhs_adjoint, lhs_dtype, 0);
+                let rhs =
+                    u1_cat_operand(&runtime, &common, &right, side, rhs_adjoint, rhs_dtype, 1);
+                assert_lazy_cat_matches_eager(&lhs, &rhs, side);
+            }
+        }
+    }
+
+    #[test]
+    fn lazy_adjoint_catdomain_su2_routes_multi_tree_keys_without_sorted_projection() {
+        // What: complete SU2 fusion-tree pairs remain exact when swapping the
+        // parent key order does not preserve the destination's sorted order.
+        let runtime = Runtime::builder().build().unwrap();
+        let common0 = Space::su2([(0, 2), (1, 1), (2, 1)]);
+        let common1 = Space::su2([(0, 1), (1, 2), (2, 1)]);
         let left = Space::su2([(0, 1), (1, 2)]);
         let right = Space::su2([(1, 1), (2, 2)]);
         let lhs_parent =
-            Tensor::rand_with_seed(&runtime, Dtype::C64, [&left], [&common], 11_056).unwrap();
+            Tensor::from_block_fn(&runtime, [&left], [&common0, &common1], |key, indices| {
+                let value = oracle_value(0, key, indices);
+                Complex64::new(value, value / 3.0 + 0.5)
+            })
+            .unwrap();
         let rhs_parent =
-            Tensor::rand_with_seed(&runtime, Dtype::C64, [&right], [&common], 11_057).unwrap();
+            Tensor::from_block_fn(&runtime, [&right], [&common0, &common1], |key, indices| {
+                let value = oracle_value(1, key, indices);
+                Complex64::new(value, -value / 3.0 - 0.25)
+            })
+            .unwrap();
         let lhs = lhs_parent.adjoint().unwrap();
         let rhs = rhs_parent.adjoint().unwrap();
-        assert!(lhs.is_adjoint_view());
-        assert!(rhs.is_adjoint_view());
-        assert!(!lhs.has_cached_materialization());
-        assert!(!rhs.has_cached_materialization());
+        let source = lhs.parent_body_for_lowering().space.structure();
+        let projected = source
+            .sector_structure()
+            .sorted_indices()
+            .iter()
+            .map(|&index| cat_logical_block_key(source.block(index).unwrap().key()).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            projected.windows(2).any(|pair| pair[0] > pair[1]),
+            "fixture must exercise a non-sorted swapped-key projection"
+        );
 
-        let output = lhs.catdomain(&rhs).unwrap();
+        assert_lazy_cat_matches_eager(&lhs, &rhs, CatSide::Domain);
+    }
 
-        assert!(lhs.has_cached_materialization());
-        assert!(rhs.has_cached_materialization());
-        assert_c64_sources(&lhs, &rhs, &output, CatSide::Domain);
+    #[test]
+    fn lazy_adjoint_cat_declines_reordered_complete_coupled_regions() {
+        // What: a valid complete region whose parent tree extents use a
+        // different order takes the eager oracle path instead of misrouting
+        // whole-matrix columns between fusion-tree subblocks.
+        let runtime = Runtime::builder().build().unwrap();
+        let common0 = Space::su2([(0, 2), (1, 1), (2, 1)]);
+        let common1 = Space::su2([(0, 1), (1, 2), (2, 1)]);
+        let left = Space::su2([(0, 1), (1, 2)]);
+        let right = Space::su2([(1, 1), (2, 2)]);
+        let canonical_parent =
+            Tensor::from_block_fn(&runtime, [&left], [&common0, &common1], |key, indices| {
+                let value = oracle_value(0, key, indices);
+                Complex64::new(value, value / 5.0 + 0.75)
+            })
+            .unwrap();
+        let reordered_parent = reordered_complete_su2_parent(&canonical_parent);
+        let canonical_regions = canonical_parent
+            .ordinary_body()
+            .space
+            .structure()
+            .coupled_sector_regions(1)
+            .unwrap()
+            .unwrap();
+        let reordered_regions = reordered_parent
+            .ordinary_body()
+            .space
+            .structure()
+            .coupled_sector_regions(1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(canonical_regions.len(), reordered_regions.len());
+        assert_eq!(
+            canonical_regions
+                .iter()
+                .map(SectorRegion::coupled)
+                .collect::<Vec<_>>(),
+            reordered_regions
+                .iter()
+                .map(SectorRegion::coupled)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            reordered_regions
+                .windows(2)
+                .all(|pair| pair[0].coupled() < pair[1].coupled()),
+            "fixture must preserve monotone coupled-sector mapping"
+        );
+        assert!(
+            canonical_regions
+                .iter()
+                .zip(reordered_regions.iter())
+                .any(|(canonical, reordered)| {
+                    canonical.coupled() == reordered.coupled()
+                        && canonical.col_trees() != reordered.col_trees()
+                }),
+            "fixture must retain a complete region with reordered domain-tree extents"
+        );
+
+        let lhs = reordered_parent.adjoint().unwrap();
+        let rhs =
+            Tensor::from_block_fn(&runtime, [&common0, &common1], [&right], |key, indices| {
+                let value = oracle_value(1, key, indices);
+                Complex64::new(value, -value / 7.0 - 0.5)
+            })
+            .unwrap();
+        let lhs_metadata = lhs.metadata();
+        let rhs_metadata = rhs.metadata();
+        let (axis, homspace) = cat_homspace(
+            lhs_metadata.codomain(),
+            lhs_metadata.domain(),
+            rhs_metadata.codomain(),
+            rhs_metadata.domain(),
+            &lhs.domain_spaces(),
+            &rhs.domain_spaces(),
+            CatSide::Domain,
+        )
+        .unwrap();
+        assert!(
+            CatDescriptor::try_new_oriented(
+                &lhs_metadata,
+                &rhs_metadata,
+                axis,
+                CatSide::Domain,
+                homspace
+            )
+            .unwrap()
+            .is_none(),
+            "reordered unchanged-side tree extents must decline the whole-region copy"
+        );
+        assert_eq!(lhs.adjoint_build_counts(), (0, 0));
+
+        let eager_lhs = Tensor::owned(
+            lhs.rt.clone(),
+            Arc::clone(&lhs.parent_body_for_lowering().space),
+            Arc::clone(&lhs.parent_body_for_lowering().data),
+        )
+        .adjoint()
+        .unwrap();
+        let expected_error = eager_lhs.materialized_tensor().unwrap_err();
+        let actual_error = lhs.catdomain(&rhs).unwrap_err();
+
+        assert_eq!(actual_error, expected_error);
+        assert_eq!(lhs.adjoint_build_counts(), (0, 0));
+    }
+
+    #[test]
+    fn lazy_adjoint_cat_preserves_fermionic_and_product_tree_pairs() {
+        // What: odd fZ2 sectors and nested-product fusion-tree identities use
+        // the same borrowed adjoint route as bosonic multiplicity-free rules.
+        let runtime = Runtime::builder().build().unwrap();
+        let f_common0 = Space::fz2([(0, 2), (1, 1)]);
+        let f_common1 = Space::fz2([(0, 1), (1, 2)]);
+        let f_left = Space::fz2([(0, 1), (1, 2)]);
+        let f_right = Space::fz2([(1, 3)]);
+        let f_lhs_parent = Tensor::from_block_fn(
+            &runtime,
+            [&f_left],
+            [&f_common0, &f_common1],
+            |key, indices| oracle_value(0, key, indices),
+        )
+        .unwrap();
+        let f_rhs_parent = Tensor::from_block_fn(
+            &runtime,
+            [&f_right],
+            [&f_common0, &f_common1],
+            |key, indices| oracle_value(1, key, indices),
+        )
+        .unwrap();
+        assert_lazy_cat_matches_eager(
+            &f_lhs_parent.adjoint().unwrap(),
+            &f_rhs_parent.adjoint().unwrap(),
+            CatSide::Domain,
+        );
+
+        let p_common0 = Space::fz2_u1_su2([((0, 0, 0), 2), ((1, -1, 1), 1)]).unwrap();
+        let p_common1 = Space::fz2_u1_su2([((0, 0, 0), 1), ((1, 1, 1), 2)]).unwrap();
+        let p_left = Space::fz2_u1_su2([((0, 0, 0), 1), ((1, -1, 1), 2)]).unwrap();
+        let p_right = Space::fz2_u1_su2([((1, -1, 1), 1), ((1, 1, 1), 2)]).unwrap();
+        let p_lhs_parent = Tensor::from_block_fn(
+            &runtime,
+            [&p_common0, &p_common1],
+            [&p_left],
+            |key, indices| oracle_value(0, key, indices),
+        )
+        .unwrap();
+        let p_rhs_parent = Tensor::from_block_fn(
+            &runtime,
+            [&p_common0, &p_common1],
+            [&p_right],
+            |key, indices| oracle_value(1, key, indices),
+        )
+        .unwrap();
+        assert_lazy_cat_matches_eager(
+            &p_lhs_parent.adjoint().unwrap(),
+            &p_rhs_parent.adjoint().unwrap(),
+            CatSide::Codomain,
+        );
+    }
+
+    #[test]
+    fn lazy_adjoint_catdomain_generic_su3_preserves_vertex_labels() {
+        // What: generic SU3 outer-multiplicity vertex labels remain part of
+        // the exact swapped key instead of collapsing to uncoupled sectors.
+        let runtime = Runtime::builder().build().unwrap();
+        let eight = Space::su3([((1, 1), 1)]).unwrap();
+        let left = Space::su3([((1, 1), 1)]).unwrap();
+        let right = Space::su3([((1, 1), 2)]).unwrap();
+        let lhs_parent =
+            Tensor::from_block_fn(&runtime, [&left], [&eight, &eight], |key, indices| {
+                let value = oracle_value(0, key, indices);
+                Complex64::new(value, value / 17.0 + 0.5)
+            })
+            .unwrap();
+        let rhs_parent =
+            Tensor::from_block_fn(&runtime, [&right], [&eight, &eight], |key, indices| {
+                let value = oracle_value(1, key, indices);
+                Complex64::new(value, -value / 19.0 - 0.25)
+            })
+            .unwrap();
+        let output = assert_lazy_cat_matches_eager(
+            &lhs_parent.adjoint().unwrap(),
+            &rhs_parent.adjoint().unwrap(),
+            CatSide::Domain,
+        );
+        let mut vertices = output
+            .ordinary_body()
+            .space
+            .structure()
+            .sector_structure()
+            .blocks()
+            .iter()
+            .filter_map(|block| match block.key() {
+                BlockKey::FusionTree(key) => Some(key.codomain_tree().vertices().to_vec()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        vertices.sort();
+        vertices.dedup();
+        assert!(vertices.len() > 1);
+    }
+
+    #[test]
+    fn lazy_adjoint_cat_supports_empty_unchanged_products() {
+        // What: rank-one adjoint vectors concatenate when the unchanged
+        // codomain or domain product is empty.
+        let runtime = Runtime::builder().build().unwrap();
+        let left = Space::u1([(0, 1)]);
+        let right = Space::u1([(0, 2)]);
+        let domain_lhs_parent =
+            Tensor::from_block_fn(&runtime, [&left], std::iter::empty(), |_, indices| {
+                (indices[0] + 1) as f64
+            })
+            .unwrap();
+        let domain_rhs_parent =
+            Tensor::from_block_fn(&runtime, [&right], std::iter::empty(), |_, indices| {
+                (indices[0] + 2) as f64
+            })
+            .unwrap();
+        let domain = assert_lazy_cat_matches_eager(
+            &domain_lhs_parent.adjoint().unwrap(),
+            &domain_rhs_parent.adjoint().unwrap(),
+            CatSide::Domain,
+        );
+        assert_eq!((domain.codomain_rank(), domain.domain_rank()), (0, 1));
+
+        let codomain_lhs_parent =
+            Tensor::from_block_fn(&runtime, std::iter::empty(), [&left], |_, indices| {
+                (indices[0] + 1) as f64
+            })
+            .unwrap();
+        let codomain_rhs_parent =
+            Tensor::from_block_fn(&runtime, std::iter::empty(), [&right], |_, indices| {
+                (indices[0] + 2) as f64
+            })
+            .unwrap();
+        let codomain = assert_lazy_cat_matches_eager(
+            &codomain_lhs_parent.adjoint().unwrap(),
+            &codomain_rhs_parent.adjoint().unwrap(),
+            CatSide::Codomain,
+        );
+        assert_eq!((codomain.codomain_rank(), codomain.domain_rank()), (1, 0));
+    }
+
+    #[test]
+    fn lazy_adjoint_cat_rejects_invalid_contracts_before_building_layouts() {
+        // What: lazy metadata preserves rule/runtime/rank/unchanged-space/dual
+        // validation precedence without constructing either logical input.
+        let runtime = Runtime::builder().build().unwrap();
+        let other_runtime = Runtime::builder().build().unwrap();
+        let codomain = Space::u1([(0, 2)]);
+        let bad_codomain = Space::u1([(0, 3)]);
+        let left = Space::u1([(0, 1)]);
+        let right = Space::u1([(0, 2)]);
+        let lhs = Tensor::zeros(&runtime, Dtype::F64, [&left], [&codomain])
+            .unwrap()
+            .adjoint()
+            .unwrap();
+        let bad_rank = Tensor::zeros(&runtime, Dtype::F64, [&right, &right], [&codomain])
+            .unwrap()
+            .adjoint()
+            .unwrap();
+        let bad_runtime = Tensor::zeros(&other_runtime, Dtype::F64, [&right], [&codomain])
+            .unwrap()
+            .adjoint()
+            .unwrap();
+        let other_rule = Space::z2([(0, 1)]);
+        let bad_provider = Tensor::zeros(&runtime, Dtype::F64, [&other_rule], [&other_rule])
+            .unwrap()
+            .adjoint()
+            .unwrap();
+        let bad_unchanged = Tensor::zeros(&runtime, Dtype::F64, [&right], [&bad_codomain])
+            .unwrap()
+            .adjoint()
+            .unwrap();
+        let bad_dual = Tensor::zeros(&runtime, Dtype::F64, [&right.dual()], [&codomain])
+            .unwrap()
+            .adjoint()
+            .unwrap();
+
+        CAT_RESULT_LAYOUT_BUILDS.with(|observation| observation.set(Some(0)));
+        assert!(lhs.catdomain(&bad_rank).is_err());
+        assert!(matches!(
+            lhs.catdomain(&bad_runtime),
+            Err(Error::RuntimeMismatch)
+        ));
+        assert!(matches!(
+            lhs.catdomain(&bad_provider),
+            Err(Error::RuleMismatch)
+        ));
+        assert!(lhs.catdomain(&bad_unchanged).is_err());
+        assert!(lhs.catdomain(&bad_dual).is_err());
+        assert_eq!(
+            CAT_RESULT_LAYOUT_BUILDS.with(|observation| observation.replace(None)),
+            Some(0)
+        );
+        for tensor in [
+            &lhs,
+            &bad_rank,
+            &bad_runtime,
+            &bad_provider,
+            &bad_unchanged,
+            &bad_dual,
+        ] {
+            assert_eq!(tensor.adjoint_build_counts(), (0, 0));
+        }
     }
 
     #[test]
