@@ -62,7 +62,7 @@ fn su3_sector_readback_is_nonbreaking() {
     dual.sort();
     assert_eq!(dual, vec![((0, 1), 2), ((1, 0), 1)]);
     // Rule guard: SU(3) accessor on a non-SU(3) space errors, and vice versa.
-    assert!(Space::su2([(0, 1)]).su3_sectors().is_err());
+    assert!(Space::su2([(0, 1)]).unwrap().su3_sectors().is_err());
 }
 
 #[test]

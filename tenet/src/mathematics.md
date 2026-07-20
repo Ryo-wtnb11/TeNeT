@@ -65,7 +65,7 @@ because every U(1) charge has quantum dimension `1`. For SU(2), TeNeT stores
 </math>
 </div>
 
-So `Space::su2([(0, 2), (1, 2)])` has dimension
+So `Space::su2([(0, 2), (1, 2)]).unwrap()` has dimension
 
 <div class="math" style="margin: 1.25rem 0; padding: 0.2rem 0; overflow-x: auto;">
 <math display="block" style="font-size: 1.12em; line-height: 1.8;" xmlns="http://www.w3.org/1998/Math/MathML">

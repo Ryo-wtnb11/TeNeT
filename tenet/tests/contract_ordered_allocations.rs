@@ -53,7 +53,7 @@ fn ordered_contract_does_not_allocate_the_default_order_owned_payload() {
         .recoupling_threads(1)
         .build()
         .unwrap();
-    let space = Space::su2([(0, 4), (1, 6), (2, 4)]);
+    let space = Space::su2([(0, 4), (1, 6), (2, 4)]).unwrap();
     let lhs = Tensor::rand_with_seed(
         &runtime,
         Dtype::F64,
@@ -118,7 +118,7 @@ fn identity_output_order_adds_no_axis_validation_allocation() {
         .recoupling_threads(1)
         .build()
         .unwrap();
-    let space = Space::su2([(0, 2), (1, 3), (2, 2)]);
+    let space = Space::su2([(0, 2), (1, 3), (2, 2)]).unwrap();
     let lhs =
         Tensor::rand_with_seed(&runtime, Dtype::F64, [&space, &space], [&space], 224_701).unwrap();
     let rhs =

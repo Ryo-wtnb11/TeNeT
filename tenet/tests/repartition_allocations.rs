@@ -41,7 +41,7 @@ fn repartition_to_current_split_does_not_allocate() {
     // What: a repartition which leaves the boundary unchanged only clones Arc
     // handles and performs no heap allocation.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let space = Space::su2([(0, 1), (1, 2)]);
+    let space = Space::su2([(0, 1), (1, 2)]).unwrap();
     let source =
         Tensor::rand_with_seed(&runtime, Dtype::F64, [&space, &space], [&space], 191).unwrap();
 

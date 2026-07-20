@@ -12,7 +12,7 @@ fn u1_space() -> Space {
 }
 
 fn su2_space() -> Space {
-    Space::su2([(0, 1), (1, 2)])
+    Space::su2([(0, 1), (1, 2)]).unwrap()
 }
 
 fn i() -> Complex64 {
@@ -469,7 +469,7 @@ fn mixed_dtype_operations_are_rejected() {
 #[test]
 fn structural_constructors_c64_and_twist_on_c64_data() {
     let rt = Runtime::builder().build().unwrap();
-    let l = Space::fz2([(0, 1), (1, 2)]);
+    let l = Space::fz2([(0, 1), (1, 2)]).unwrap();
     let fused = l.dual().fuse(&l).unwrap();
 
     // c64 structural constructors are the widened f64 ones.
@@ -490,7 +490,7 @@ fn structural_constructors_c64_and_twist_on_c64_data() {
             .data_c64(),
         f.data_c64()
     );
-    let big = Space::fz2([(0, 2), (1, 3)]);
+    let big = Space::fz2([(0, 2), (1, 3)]).unwrap();
     let w = Tensor::isometry(&rt, Dtype::C64, [&big], [&l]).unwrap();
     assert_eq!(
         w.adjoint().unwrap().compose(&w).unwrap().data_c64(),

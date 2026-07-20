@@ -559,7 +559,9 @@ impl Workload {
     fn space(self, chi: usize) -> Space {
         match self {
             Self::U1F64 | Self::U1C64 => Space::u1([(-1, chi), (0, chi), (1, chi)]),
-            Self::Su2F64 | Self::Su2PermuteF64 => Space::su2([(0, chi), (1, chi), (2, chi)]),
+            Self::Su2F64 | Self::Su2PermuteF64 => {
+                Space::su2([(0, chi), (1, chi), (2, chi)]).unwrap()
+            }
             Self::Su3C64 => Space::su3([((1, 0), chi), ((0, 1), chi)]).unwrap(),
         }
     }
@@ -1047,7 +1049,7 @@ fn rank_nine_cached_permutation_has_no_caller_thread_operation_allocation() {
     // Keep this cache-reuse probe on a non-Unique fusion rule. Unique fusion
     // intentionally bypasses the global plan cache and therefore cannot
     // satisfy the warmed-cache contract exercised below.
-    let space = Space::su2([(0, 1)]);
+    let space = Space::su2([(0, 1)]).unwrap();
     let source = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space; 9], [], 31_901).unwrap();
     let axes = [8, 7, 6, 5, 4, 3, 2, 1, 0];
     let expected = source.permute(&axes, &[]).unwrap();

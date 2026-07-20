@@ -57,7 +57,7 @@ fn env_usize(key: &str, default: usize) -> usize {
 
 /// SU(2) sectors {0, 1/2, 1} (twice-spin 0,1,2) each with degeneracy `d`.
 fn space(d: usize) -> Space {
-    Space::su2([(0, d), (1, d), (2, d)])
+    Space::su2([(0, d), (1, d), (2, d)]).unwrap()
 }
 
 /// Rank-4 endomorphism `[v,v] <- [v,v]` with a deterministic per-thread seed.

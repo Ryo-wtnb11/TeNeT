@@ -56,8 +56,8 @@ fn spaces() -> Vec<(&'static str, Space, bool)> {
     vec![
         ("Z2", Space::z2([(0, 2), (1, 2)]), false),
         ("U1", Space::u1([(-1, 2), (0, 2), (1, 1)]), false),
-        ("SU2", Space::su2([(0, 2), (1, 2), (2, 1)]), false),
-        ("fZ2", Space::fz2([(0, 2), (1, 2)]), true),
+        ("SU2", Space::su2([(0, 2), (1, 2), (2, 1)]).unwrap(), false),
+        ("fZ2", Space::fz2([(0, 2), (1, 2)]).unwrap(), true),
         (
             "fZ2xU1xSU2",
             Space::fz2_u1_su2([((0, 0, 0), 1), ((1, 1, 1), 1), ((0, 2, 0), 1)]).unwrap(),
@@ -395,7 +395,7 @@ fn contraction_order_independence() {
 }
 
 /// Regression test for issue #12: SU(2) with non-uniform sector
-/// degeneracies (`Space::su2([(0, 2), (1, 2), (2, 1)])`) used to fail every
+/// degeneracies (`Space::su2([(0, 2), (1, 2), (2, 1)]).unwrap()`) used to fail every
 /// contract route that needs source tree transforms with
 /// `Operation(ShapeMismatch { dst: [2, 2, 2, 2], src: [2, 1, 1, 2] })` —
 /// `infer_core_dst_shapes` keyed inferred shapes by
@@ -407,7 +407,7 @@ fn contraction_order_independence() {
 #[test]
 fn su2_nonuniform_degeneracy_crossed_contract() {
     let rt = Runtime::builder().build().unwrap();
-    let v = Space::su2([(0, 2), (1, 2), (2, 1)]);
+    let v = Space::su2([(0, 2), (1, 2), (2, 1)]).unwrap();
     let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 85).unwrap();
     let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 86).unwrap();
     let via_macro = tensor!([p, q; r, s] = a[p, x; y, s] * b[q, y; x, r]).unwrap();
@@ -426,14 +426,14 @@ fn su2_nonuniform_degeneracy_crossed_contract() {
 }
 
 /// Regression test for issue #12, fZ2 shape: decreasing degeneracies
-/// (`Space::fz2([(0, 2), (1, 1)])`, the fused norm leg of the finite-torus
+/// (`Space::fz2([(0, 2), (1, 1)]).unwrap()`, the fused norm leg of the finite-torus
 /// DL network) with a single contracted leg moving open legs across the
 /// codomain/domain boundary. Same root cause as the SU(2) case above; the
 /// reference route (permute first, then plain compose) never triggered it.
 #[test]
 fn fz2_decreasing_degeneracy_boundary_crossing_contract() {
     let rt = Runtime::builder().build().unwrap();
-    let v = Space::fz2([(0, 2), (1, 1)]);
+    let v = Space::fz2([(0, 2), (1, 1)]).unwrap();
     let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 5).unwrap();
     let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 6).unwrap();
     // Open legs cross the split: a's domain axis 3 stays open, b's axes
@@ -482,7 +482,7 @@ fn random_space(name: &str, state: &mut u64) -> Space {
     let deg = |state: &mut u64| 1 + rand_below(state, 2);
     match name {
         "Z2" => Space::z2([(0, deg(state)), (1, deg(state))]),
-        "fZ2" => Space::fz2([(0, deg(state)), (1, deg(state))]),
+        "fZ2" => Space::fz2([(0, deg(state)), (1, deg(state))]).unwrap(),
         "U1" => {
             let mut sectors = vec![(0, deg(state))];
             for q in [-2, -1, 1, 2] {
@@ -499,7 +499,7 @@ fn random_space(name: &str, state: &mut u64) -> Space {
                     sectors.push((j, deg(state)));
                 }
             }
-            Space::su2(sectors)
+            Space::su2(sectors).unwrap()
         }
         "fZ2xU1xSU2" => {
             let mut sectors = vec![((0u8, 0i32, 0usize), deg(state))];
@@ -738,7 +738,7 @@ fn cross_library_invariant_stream_u1_vs_tensorkit() {
 #[test]
 #[ignore = "cross-library stream, run explicitly (release recommended)"]
 fn cross_library_invariant_stream_su2_vs_tensorkit() {
-    let v = Space::su2([(0, 2), (1, 2), (2, 1)]);
+    let v = Space::su2([(0, 2), (1, 2), (2, 1)]).unwrap();
     let label = |sector: SectorId| {
         i64::try_from(tenet::core::SU2Irrep::from_sector_id(sector).twice_spin()).unwrap()
     };

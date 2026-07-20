@@ -22,7 +22,7 @@ fn u1_space() -> Space {
 }
 
 fn su2_space() -> Space {
-    Space::su2([(0, 2), (1, 2), (2, 1)])
+    Space::su2([(0, 2), (1, 2), (2, 1)]).unwrap()
 }
 
 #[test]

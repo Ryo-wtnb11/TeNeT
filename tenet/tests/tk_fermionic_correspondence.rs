@@ -13,7 +13,7 @@ use tenet_network::tensor;
 /// FZ2 map `V <- V`, degeneracy 1, with `even`/`odd` block values — the exact
 /// tensor `build(f)` produces in the Julia reference.
 fn fz2_map(rt: &Runtime, even: f64, odd: f64) -> Tensor {
-    let v = Space::fz2([(0, 1), (1, 1)]);
+    let v = Space::fz2([(0, 1), (1, 1)]).unwrap();
     Tensor::from_block_fn(rt, [&v], [&v], move |key, _| {
         let BlockKey::FusionTree(key) = key else {
             return 0.0;
@@ -77,7 +77,7 @@ fn fz2_contractions_match_tensorkit() {
 
     // What: `eig_full().d` uses genuine complex diagonal storage. Its ordinary
     // trace sums both sectors without the odd parity twist.
-    let v = Space::fz2([(0, 1), (1, 1)]);
+    let v = Space::fz2([(0, 1), (1, 1)]).unwrap();
     let complex_source = Tensor::from_block_fn(&rt, [&v], [&v], |key, _| {
         let BlockKey::FusionTree(key) = key else {
             return Complex64::new(0.0, 0.0);

@@ -106,8 +106,8 @@ fn assert_polar_direction_error_without_mutation(tensor: &Tensor, operation: &'s
 fn rectangular_polar_spaces() -> Vec<(Space, Space)> {
     vec![
         (Space::u1([(0, 2)]), Space::u1([(0, 3)])),
-        (Space::su2([(1, 2)]), Space::su2([(1, 3)])),
-        (Space::fz2([(1, 2)]), Space::fz2([(1, 3)])),
+        (Space::su2([(1, 2)]).unwrap(), Space::su2([(1, 3)]).unwrap()),
+        (Space::fz2([(1, 2)]).unwrap(), Space::fz2([(1, 3)]).unwrap()),
         (
             Space::fz2_u1_su2([((1, 1, 1), 2)]).unwrap(),
             Space::fz2_u1_su2([((1, 1, 1), 3)]).unwrap(),
@@ -120,7 +120,7 @@ fn u1_space() -> Space {
 }
 
 fn su2_space() -> Space {
-    Space::su2([(0, 2), (1, 2), (2, 1)])
+    Space::su2([(0, 2), (1, 2), (2, 1)]).unwrap()
 }
 
 #[test]
@@ -146,7 +146,11 @@ fn diagonal_contract_matches_dense_diagonal() {
     let rt = Runtime::builder().build().unwrap();
     // Includes a fermionic (FZ2) space: `contract` twists dual contracted legs,
     // so the fast path must fold that supertrace θ to match the dense diagonal.
-    for v in [u1_space(), su2_space(), Space::fz2([(0, 2), (1, 2)])] {
+    for v in [
+        u1_space(),
+        su2_space(),
+        Space::fz2([(0, 2), (1, 2)]).unwrap(),
+    ] {
         // A genuine diagonal S on the bond `v`, from an SVD.
         let src = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 105).unwrap();
         let (_, s, _) = src.svd_compact().unwrap();
@@ -256,7 +260,11 @@ fn svd_compact_s_is_diagonal_storage() {
 #[test]
 fn diagonal_matrix_functions_match_dense() {
     let rt = Runtime::builder().build().unwrap();
-    for v in [u1_space(), su2_space(), Space::fz2([(0, 2), (1, 2)])] {
+    for v in [
+        u1_space(),
+        su2_space(),
+        Space::fz2([(0, 2), (1, 2)]).unwrap(),
+    ] {
         let src = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 105).unwrap();
         let (_, s, _) = src.svd_compact().unwrap();
         let bond = s.codomain_spaces()[0].clone();

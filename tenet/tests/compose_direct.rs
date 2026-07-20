@@ -78,7 +78,7 @@ fn fermionic_compose_matches_explicit_twist_cancellation_without_specializing_th
     // semantics directly, while ordinary tensorcontract retains its twist.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let spaces = [
-        Space::fz2([(0, 2), (1, 3)]),
+        Space::fz2([(0, 2), (1, 3)]).unwrap(),
         Space::fz2_u1_su2([((0, 0, 0), 2), ((1, 0, 1), 3)]).unwrap(),
     ];
     for (fixture, space) in spaces.into_iter().enumerate() {
@@ -193,7 +193,7 @@ fn bosonic_u1_and_su2_compose_keep_output_order_and_values() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     for (fixture, space) in [
         Space::u1([(-2, 1), (0, 2), (1, 3)]),
-        Space::su2([(0, 2), (1, 3), (2, 1)]),
+        Space::su2([(0, 2), (1, 3), (2, 1)]).unwrap(),
     ]
     .into_iter()
     .enumerate()
@@ -240,7 +240,7 @@ fn compose_errors_leave_borrowed_operands_unchanged() {
     // either borrowed operand's storage.
     let runtime = Runtime::builder().build().unwrap();
     let foreign_runtime = Runtime::builder().build().unwrap();
-    let space = Space::fz2([(0, 2), (1, 2)]);
+    let space = Space::fz2([(0, 2), (1, 2)]).unwrap();
     let lhs =
         Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space.dual()], 353_401).unwrap();
     let rhs =
@@ -273,7 +273,7 @@ fn direct_compose_does_not_allocate_the_rhs_twist_payload() {
     // one complete RHS payload versus the former twist-then-contract sequence.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     for degeneracy in [12, 24] {
-        let space = Space::fz2([(0, degeneracy), (1, degeneracy)]);
+        let space = Space::fz2([(0, degeneracy), (1, degeneracy)]).unwrap();
         let lhs = Tensor::rand_with_seed(
             &runtime,
             Dtype::C64,

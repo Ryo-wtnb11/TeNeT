@@ -131,7 +131,7 @@ fn one_axis_diagonal_products_stay_compact() {
     let rt = Runtime::builder().dense_threads(1).build().unwrap();
     for space in [
         Space::u1([(-1, 2), (0, 3), (1, 2)]),
-        Space::su2([(0, 2), (1, 2), (2, 1)]),
+        Space::su2([(0, 2), (1, 2), (2, 1)]).unwrap(),
         product_space(),
     ] {
         for (lhs, rhs) in [
@@ -177,7 +177,7 @@ fn fermionic_diagonal_compose_multiplies_compact_values_without_supertrace_twist
     // compact and equals the same coefficient-free coupled-block product.
     let rt = Runtime::builder().dense_threads(1).build().unwrap();
     for space in [
-        Space::fz2([(0, 2), (1, 2)]).dual(),
+        Space::fz2([(0, 2), (1, 2)]).unwrap().dual(),
         Space::fz2_u1_su2([((0, 0, 0), 2), ((1, 0, 1), 2)])
             .unwrap()
             .dual(),
@@ -202,7 +202,7 @@ fn complex_diagonal_scales_dense_and_lazy_operands() {
     let rt = Runtime::builder().dense_threads(1).build().unwrap();
     for space in [
         Space::u1([(-1, 2), (0, 3), (1, 2)]),
-        Space::su2([(0, 2), (1, 2), (2, 1)]),
+        Space::su2([(0, 2), (1, 2), (2, 1)]).unwrap(),
         product_space(),
     ] {
         let dense =
@@ -282,8 +282,8 @@ fn compact_storage_local_operations_match_dense_oracles() {
     let rt = Runtime::builder().dense_threads(1).build().unwrap();
     for space in [
         Space::u1([(-2, 1), (1, 3)]),
-        Space::fz2([(0, 2), (1, 3)]),
-        Space::su2([(0, 2), (1, 3), (2, 1)]),
+        Space::fz2([(0, 2), (1, 3)]).unwrap(),
+        Space::su2([(0, 2), (1, 3), (2, 1)]).unwrap(),
         product_space(),
     ] {
         let lhs = real_diagonal(&rt, &space, 801);
@@ -332,8 +332,8 @@ fn compact_c64_operations_match_dense_oracles() {
     let rt = Runtime::builder().dense_threads(1).build().unwrap();
     for space in [
         Space::u1([(-2, 1), (1, 3)]),
-        Space::fz2([(0, 2), (1, 3)]),
-        Space::su2([(0, 2), (1, 3), (2, 1)]),
+        Space::fz2([(0, 2), (1, 3)]).unwrap(),
+        Space::su2([(0, 2), (1, 3), (2, 1)]).unwrap(),
         product_space(),
     ] {
         for (lhs, rhs) in [
@@ -404,8 +404,8 @@ fn compact_dense_binary_operations_scatter_without_materializing_source() {
     let rt = Runtime::builder().dense_threads(1).build().unwrap();
     for space in [
         Space::u1([(-2, 1), (1, 3)]),
-        Space::fz2([(0, 2), (1, 3)]),
-        Space::su2([(0, 2), (1, 3), (2, 1)]),
+        Space::fz2([(0, 2), (1, 3)]).unwrap(),
+        Space::su2([(0, 2), (1, 3), (2, 1)]).unwrap(),
         product_space(),
     ] {
         let diagonal = real_diagonal(&rt, &space, 821);
@@ -519,8 +519,8 @@ fn identity_compact_twist_shares_storage() {
     let rt = Runtime::builder().dense_threads(1).build().unwrap();
     for space in [
         Space::u1([(-1, 2), (2, 1)]),
-        Space::su2([(0, 2), (1, 1)]),
-        Space::fz2([(0, 3)]),
+        Space::su2([(0, 2), (1, 1)]).unwrap(),
+        Space::fz2([(0, 3)]).unwrap(),
     ] {
         let diagonal = real_diagonal(&rt, &space, 841);
         let twisted = diagonal.twist(&[0]).unwrap();
@@ -532,7 +532,7 @@ fn identity_compact_twist_shares_storage() {
         assert_compact_unmaterialized(&twisted);
     }
 
-    let odd = Space::fz2([(1, 3)]);
+    let odd = Space::fz2([(1, 3)]).unwrap();
     let diagonal = real_diagonal(&rt, &odd, 842);
     let twisted = diagonal.twist(&[0]).unwrap();
     assert!(!Arc::ptr_eq(
@@ -684,7 +684,7 @@ fn fermionic_adjoint_diagonal_contractions_match_dense_oracles() {
     // What: lhs dagger, rhs dagger, and both preserve the odd-sector contraction sign.
     let rt = Runtime::builder().dense_threads(1).build().unwrap();
     let spaces = [
-        Space::fz2([(0, 2), (1, 2)]),
+        Space::fz2([(0, 2), (1, 2)]).unwrap(),
         Space::product([((0, 0), 2), ((1, 1), 2)]).unwrap(),
     ];
 

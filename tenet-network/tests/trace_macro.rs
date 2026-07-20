@@ -27,11 +27,11 @@ fn u1_space() -> Space {
 }
 
 fn su2_space() -> Space {
-    Space::su2([(0, 2), (1, 2), (2, 1)])
+    Space::su2([(0, 2), (1, 2), (2, 1)]).unwrap()
 }
 
 fn fz2_space() -> Space {
-    Space::fz2([(0, 2), (1, 3)])
+    Space::fz2([(0, 2), (1, 3)]).unwrap()
 }
 
 /// Identity endomorphism on `v`.

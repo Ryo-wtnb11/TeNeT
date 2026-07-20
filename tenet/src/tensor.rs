@@ -3172,8 +3172,8 @@ impl Tensor {
     /// use tenet::prelude::*;
     ///
     /// let rt = Runtime::builder().build()?;
-    /// let small = Space::su2([(0, 1), (1, 1)]);
-    /// let big = Space::su2([(0, 2), (1, 3), (2, 1)]);
+    /// let small = Space::su2([(0, 1), (1, 1)]).unwrap();
+    /// let big = Space::su2([(0, 2), (1, 3), (2, 1)]).unwrap();
     /// let w = Tensor::isometry(&rt, Dtype::F64, [&big], [&small])?;
     /// let id = Tensor::id(&rt, Dtype::F64, [&small])?;
     /// assert_eq!(w.adjoint()?.compose(&w)?.data(), id.data());
@@ -3210,7 +3210,7 @@ impl Tensor {
     /// use tenet::prelude::*;
     ///
     /// let rt = Runtime::builder().build()?;
-    /// let v = Space::fz2([(0, 1), (1, 1)]);
+    /// let v = Space::fz2([(0, 1), (1, 1)]).unwrap();
     /// let t = Tensor::rand(&rt, Dtype::F64, [&v], [&v])?;
     /// let twisted = t.twist(&[0])?;
     /// assert_eq!(twisted.twist(&[0])?.data(), t.data()); // θ² = 1
@@ -3312,7 +3312,7 @@ impl Tensor {
     /// use tenet::prelude::*;
     ///
     /// let rt = Runtime::builder().build()?;
-    /// let v = Space::fz2([(0, 1), (1, 1)]);
+    /// let v = Space::fz2([(0, 1), (1, 1)]).unwrap();
     /// let t = Tensor::from_block_fn(&rt, [&v], [&v], |key, _| match key {
     ///     BlockKey::FusionTree(key) if key.codomain_uncoupled()[0].id() == 0 => 2.0,
     ///     _ => 3.0,
@@ -4188,7 +4188,7 @@ impl Tensor {
     /// use tenet::prelude::*;
     ///
     /// let rt = Runtime::builder().build()?;
-    /// let v = Space::fz2([(0, 1), (1, 1)]);
+    /// let v = Space::fz2([(0, 1), (1, 1)]).unwrap();
     /// // a : v <- v*, b : v* <- v; the composed legs are dual (v*).
     /// let odd = |key: &BlockKey| matches!(key, BlockKey::FusionTree(k)
     ///     if k.codomain_uncoupled()[0].id() == 1);
@@ -8050,7 +8050,10 @@ mod coupled_region_inner_tests {
     fn non_abelian_regions_match_the_block_odometer_oracle() {
         // What: contiguous coupled-sector reduction preserves every block of
         // multi-sector, multi-tree SU(2) and fermionic product tensors.
-        assert_multiplicity_free_oracle(Space::su2([(0, 2), (1, 2), (2, 1), (3, 1)]), 282_001);
+        assert_multiplicity_free_oracle(
+            Space::su2([(0, 2), (1, 2), (2, 1), (3, 1)]).unwrap(),
+            282_001,
+        );
         assert_multiplicity_free_oracle(
             Space::fz2_u1_su2([
                 ((0, -2, 0), 2),
@@ -8095,7 +8098,7 @@ mod coupled_region_inner_tests {
         // What: the lowest contiguous-region boundary rejects a scalar buffer
         // that cannot be covered exactly instead of entering an odometer path.
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-        let space = Space::su2([(0, 2), (1, 2), (2, 1)]);
+        let space = Space::su2([(0, 2), (1, 2), (2, 1)]).unwrap();
         let tensor =
             Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 282_301).unwrap();
         let data = tensor.data();
@@ -9078,8 +9081,8 @@ mod adjoint_parent_view_tests {
     fn metadata_and_shared_materialization_cover_supported_rules() {
         // What: an adjoint view swaps only logical orientation until one owned consumer reads it.
         assert_metadata_and_materialization(Space::u1([(-1, 1), (0, 2), (1, 1)]), 261_001);
-        assert_metadata_and_materialization(Space::fz2([(0, 2), (1, 2)]), 261_002);
-        assert_metadata_and_materialization(Space::su2([(0, 2), (1, 2), (2, 1)]), 261_003);
+        assert_metadata_and_materialization(Space::fz2([(0, 2), (1, 2)]).unwrap(), 261_002);
+        assert_metadata_and_materialization(Space::su2([(0, 2), (1, 2), (2, 1)]).unwrap(), 261_003);
         assert_metadata_and_materialization(
             Space::product([((-1, 0), 1), ((0, 1), 2), ((1, 0), 1)]).unwrap(),
             261_004,
@@ -9174,13 +9177,13 @@ mod adjoint_parent_view_tests {
             &[(1, 3), (0, 2)],
         );
         assert_adjoint_trace_matches_eager_oracle(
-            Space::su2([(0, 1), (1, 2), (2, 1), (3, 1)]),
+            Space::su2([(0, 1), (1, 2), (2, 1), (3, 1)]).unwrap(),
             Dtype::C64,
             261_403,
             &[(1, 3)],
         );
         assert_adjoint_trace_matches_eager_oracle(
-            Space::fz2([(1, 2)]),
+            Space::fz2([(1, 2)]).unwrap(),
             Dtype::F64,
             261_404,
             &[(1, 3), (0, 2)],
@@ -9442,7 +9445,7 @@ mod adjoint_parent_view_tests {
         // What: public full partial-trace syntax applies the fermionic odd
         // sign and the spin-half quantum dimension.
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-        let fz2 = Space::fz2([(0, 1), (1, 1)]);
+        let fz2 = Space::fz2([(0, 1), (1, 1)]).unwrap();
         let fermionic = Tensor::from_block_fn(&runtime, [&fz2], [&fz2], |key, _| match key {
             BlockKey::FusionTree(key) if key.codomain_uncoupled()[0].id() == 0 => 2.0,
             _ => 3.0,
@@ -9459,7 +9462,7 @@ mod adjoint_parent_view_tests {
             -1.0
         );
 
-        let spin_half = Space::su2([(1, 1)]);
+        let spin_half = Space::su2([(1, 1)]).unwrap();
         let su2 = Tensor::from_block_fn(&runtime, [&spin_half], [&spin_half], |_, _| 7.0).unwrap();
         assert_eq!(
             su2.trace_pairs(&[(0, 1)])
@@ -9563,8 +9566,8 @@ mod adjoint_parent_view_tests {
         // transforms lower to the parent for real and genuinely complex data.
         let spaces = [
             Space::u1([(-2, 1), (-1, 2), (0, 1), (1, 1)]),
-            Space::fz2([(1, 2)]),
-            Space::su2([(0, 1), (1, 2), (2, 1)]),
+            Space::fz2([(1, 2)]).unwrap(),
+            Space::su2([(0, 1), (1, 2), (2, 1)]).unwrap(),
             nested_product_space([1, 1, 1, 1]),
         ];
         for (case, space) in spaces.into_iter().enumerate() {
@@ -9638,7 +9641,7 @@ mod adjoint_parent_view_tests {
         // What: swapping two odd fZ2 legs through a lazy adjoint keeps the
         // TensorKit fermionic minus sign and does not build an adjoint grid.
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-        let odd = Space::fz2([(1, 1)]);
+        let odd = Space::fz2([(1, 1)]).unwrap();
         let parent = Tensor::from_block_fn(
             &runtime,
             [&odd, &odd],
@@ -9890,8 +9893,11 @@ mod adjoint_parent_view_tests {
         // What: lhs, rhs, and double adjoints preserve non-self-dual labels,
         // recoupling coefficients, fermionic signs, and crossed output order.
         assert_lazy_contract_matches_eager_oracle(Space::u1([(-2, 1), (-1, 2), (1, 3)]), 261_201);
-        assert_lazy_contract_matches_eager_oracle(Space::su2([(0, 2), (1, 3), (2, 1)]), 261_211);
-        assert_lazy_contract_matches_eager_oracle(Space::fz2([(0, 2), (1, 3)]), 261_221);
+        assert_lazy_contract_matches_eager_oracle(
+            Space::su2([(0, 2), (1, 3), (2, 1)]).unwrap(),
+            261_211,
+        );
+        assert_lazy_contract_matches_eager_oracle(Space::fz2([(0, 2), (1, 3)]).unwrap(), 261_221);
         assert_lazy_contract_matches_eager_oracle(
             Space::fz2_u1_su2([
                 ((0, 0, 0), 2),
@@ -9914,9 +9920,9 @@ mod adjoint_parent_view_tests {
         // parent matrices and conjugates complex values exactly once.
         for (dtype, seed) in [(Dtype::F64, 272_100), (Dtype::C64, 272_200)] {
             assert_lazy_core_adjoint_matches_eager(
-                Space::su2([(0, 2), (1, 1)]),
-                Space::su2([(0, 1), (1, 3)]),
-                Space::su2([(0, 3), (1, 2)]),
+                Space::su2([(0, 2), (1, 1)]).unwrap(),
+                Space::su2([(0, 1), (1, 3)]).unwrap(),
+                Space::su2([(0, 3), (1, 2)]).unwrap(),
                 dtype,
                 seed,
             );
@@ -9928,9 +9934,9 @@ mod adjoint_parent_view_tests {
                 seed + 20,
             );
             assert_lazy_core_adjoint_matches_eager(
-                Space::fz2([(0, 2), (1, 1)]),
-                Space::fz2([(0, 1), (1, 3)]),
-                Space::fz2([(0, 3), (1, 2)]),
+                Space::fz2([(0, 2), (1, 1)]).unwrap(),
+                Space::fz2([(0, 1), (1, 3)]).unwrap(),
+                Space::fz2([(0, 3), (1, 2)]).unwrap(),
                 dtype,
                 seed + 40,
             );
@@ -10040,7 +10046,7 @@ mod bound_provider_tests {
         // What: the top-level destination boundary does not clear logical data
         // before handing it to the explicit overwrite replay.
         let runtime = Runtime::builder().build().unwrap();
-        let space = Space::su2([(0, 2), (1, 2), (2, 1)]);
+        let space = Space::su2([(0, 2), (1, 2), (2, 1)]).unwrap();
         let source =
             Tensor::rand_with_seed(&runtime, Dtype::F64, [&space, &space], [&space], 17).unwrap();
         let expected = source.permute(&[1], &[2, 0]).unwrap();
@@ -10595,7 +10601,7 @@ mod tk_user_api_tests {
     fn repartition_same_split_shares_storage_without_transforming() {
         // What: repartitioning to the current split is a zero-copy no-op.
         let rt = Runtime::builder().build().unwrap();
-        let v = Space::su2([(0, 1), (1, 2)]);
+        let v = Space::su2([(0, 1), (1, 2)]).unwrap();
         let source = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 191).unwrap();
 
         let output = source.repartition(source.codomain_rank()).unwrap();
@@ -10616,8 +10622,8 @@ mod tk_user_api_tests {
         // non-Abelian, and nested-product tensors even with nonmonotone levels.
         let rt = Runtime::builder().build().unwrap();
         let spaces = [
-            Space::fz2([(0, 1), (1, 2)]),
-            Space::su2([(0, 1), (1, 2), (2, 1)]),
+            Space::fz2([(0, 1), (1, 2)]).unwrap(),
+            Space::su2([(0, 1), (1, 2), (2, 1)]).unwrap(),
             Space::fz2_u1_su2([((0, 0, 0), 1), ((1, 1, 1), 2)]).unwrap(),
         ];
 
@@ -10643,7 +10649,7 @@ mod tk_user_api_tests {
         // What: malformed braid levels remain an error even when the axis map
         // itself is the identity.
         let rt = Runtime::builder().build().unwrap();
-        let space = Space::fz2([(0, 1), (1, 1)]);
+        let space = Space::fz2([(0, 1), (1, 1)]).unwrap();
         let source =
             Tensor::rand_with_seed(&rt, Dtype::F64, [&space, &space], [&space], 203).unwrap();
 
@@ -10679,7 +10685,7 @@ mod tk_user_api_tests {
         // What: the identity shortcut does not absorb a real crossing of two
         // odd fZ2 legs, whose reduced data acquires the fermionic minus sign.
         let rt = Runtime::builder().build().unwrap();
-        let odd = Space::fz2([(1, 1)]);
+        let odd = Space::fz2([(1, 1)]).unwrap();
         let source =
             Tensor::from_block_fn(&rt, [&odd, &odd], std::iter::empty::<&Space>(), |_, _| 1.0)
                 .unwrap();
@@ -10698,10 +10704,10 @@ mod tk_user_api_tests {
         // What: a planar boundary move preserves TensorKit's fZ2 odd-sector
         // signs from semantic oracle section 4, `fZ2 2|2 -> 3|1`.
         let rt = Runtime::builder().build().unwrap();
-        let a = Space::fz2([(0, 1), (1, 1)]);
-        let b = Space::fz2([(0, 2), (1, 1)]);
-        let c = Space::fz2([(0, 1), (1, 2)]);
-        let d = Space::fz2([(0, 2), (1, 2)]);
+        let a = Space::fz2([(0, 1), (1, 1)]).unwrap();
+        let b = Space::fz2([(0, 2), (1, 1)]).unwrap();
+        let c = Space::fz2([(0, 1), (1, 2)]).unwrap();
+        let d = Space::fz2([(0, 2), (1, 2)]).unwrap();
         let source = sequential_f64_tensor(&rt, &[&a, &b], &[&c, &d]);
 
         let output = source.repartition(3).unwrap();
@@ -10723,10 +10729,10 @@ mod tk_user_api_tests {
         // TensorKit F-move coefficients from semantic oracle section 4,
         // `SU2 2|2 -> 3|1`.
         let rt = Runtime::builder().build().unwrap();
-        let a = Space::su2([(0, 1), (1, 1)]);
-        let b = Space::su2([(0, 1), (1, 1)]);
-        let c = Space::su2([(0, 1), (1, 1)]);
-        let d = Space::su2([(0, 1), (1, 2)]);
+        let a = Space::su2([(0, 1), (1, 1)]).unwrap();
+        let b = Space::su2([(0, 1), (1, 1)]).unwrap();
+        let c = Space::su2([(0, 1), (1, 1)]).unwrap();
+        let d = Space::su2([(0, 1), (1, 2)]).unwrap();
         let source = sequential_f64_tensor(&rt, &[&a, &b], &[&c, &d]);
 
         let output = source.repartition(3).unwrap();
@@ -10807,7 +10813,7 @@ mod tk_user_api_tests {
         let serial = Runtime::builder().build().unwrap();
         let threaded = Runtime::builder().recoupling_threads(2).build().unwrap();
 
-        let su2 = Space::su2([(0, 1), (1, 2)]);
+        let su2 = Space::su2([(0, 1), (1, 2)]).unwrap();
         let serial_su2 =
             Tensor::rand_with_seed(&serial, Dtype::C64, [&su2, &su2], [&su2, &su2], 226)
                 .unwrap()
@@ -10849,10 +10855,10 @@ mod tk_user_api_tests {
         // What: moving the boundary in the opposite direction preserves the
         // fZ2 oracle signs from section 4, `fZ2 2|2 -> 1|3`.
         let rt = Runtime::builder().build().unwrap();
-        let a = Space::fz2([(0, 1), (1, 1)]);
-        let b = Space::fz2([(0, 2), (1, 1)]);
-        let c = Space::fz2([(0, 1), (1, 2)]);
-        let d = Space::fz2([(0, 2), (1, 2)]);
+        let a = Space::fz2([(0, 1), (1, 1)]).unwrap();
+        let b = Space::fz2([(0, 2), (1, 1)]).unwrap();
+        let c = Space::fz2([(0, 1), (1, 2)]).unwrap();
+        let d = Space::fz2([(0, 2), (1, 2)]).unwrap();
         let source = sequential_f64_tensor(&rt, &[&a, &b], &[&c, &d]);
 
         let output = source.repartition(1).unwrap();
@@ -11502,10 +11508,10 @@ mod cat_tests {
     #[test]
     fn catcodomain_su2_complex_matches_independent_row_slab_oracle() {
         let runtime = Runtime::builder().build().unwrap();
-        let left = Space::su2([(0, 2), (1, 1)]);
-        let right = Space::su2([(1, 3), (2, 2)]);
-        let d0 = Space::su2([(0, 1), (1, 2), (2, 1)]);
-        let d1 = Space::su2([(0, 2), (1, 1)]);
+        let left = Space::su2([(0, 2), (1, 1)]).unwrap();
+        let right = Space::su2([(1, 3), (2, 2)]).unwrap();
+        let d0 = Space::su2([(0, 1), (1, 2), (2, 1)]).unwrap();
+        let d1 = Space::su2([(0, 2), (1, 1)]).unwrap();
         let lhs = Tensor::from_block_fn(&runtime, [&left], [&d0, &d1], |key, indices| {
             let value = oracle_value(0, key, indices);
             Complex64::new(value, -value)
@@ -11531,9 +11537,9 @@ mod cat_tests {
     #[test]
     fn cat_handles_fermionic_odd_and_product_fusion_keys() {
         let runtime = Runtime::builder().build().unwrap();
-        let f0 = Space::fz2([(0, 1), (1, 2)]);
-        let f1 = Space::fz2([(1, 3)]);
-        let unchanged = Space::fz2([(0, 2), (1, 1)]);
+        let f0 = Space::fz2([(0, 1), (1, 2)]).unwrap();
+        let f1 = Space::fz2([(1, 3)]).unwrap();
+        let unchanged = Space::fz2([(0, 2), (1, 1)]).unwrap();
         let lhs = Tensor::from_block_fn(&runtime, [&unchanged], [&f0], |key, indices| {
             oracle_value(0, key, indices)
         })
@@ -11723,10 +11729,10 @@ mod cat_tests {
         // What: complete SU2 fusion-tree pairs remain exact when swapping the
         // parent key order does not preserve the destination's sorted order.
         let runtime = Runtime::builder().build().unwrap();
-        let common0 = Space::su2([(0, 2), (1, 1), (2, 1)]);
-        let common1 = Space::su2([(0, 1), (1, 2), (2, 1)]);
-        let left = Space::su2([(0, 1), (1, 2)]);
-        let right = Space::su2([(1, 1), (2, 2)]);
+        let common0 = Space::su2([(0, 2), (1, 1), (2, 1)]).unwrap();
+        let common1 = Space::su2([(0, 1), (1, 2), (2, 1)]).unwrap();
+        let left = Space::su2([(0, 1), (1, 2)]).unwrap();
+        let right = Space::su2([(1, 1), (2, 2)]).unwrap();
         let lhs_parent =
             Tensor::from_block_fn(&runtime, [&left], [&common0, &common1], |key, indices| {
                 let value = oracle_value(0, key, indices);
@@ -11762,10 +11768,10 @@ mod cat_tests {
         // different order takes the eager oracle path instead of misrouting
         // whole-matrix columns between fusion-tree subblocks.
         let runtime = Runtime::builder().build().unwrap();
-        let common0 = Space::su2([(0, 2), (1, 1), (2, 1)]);
-        let common1 = Space::su2([(0, 1), (1, 2), (2, 1)]);
-        let left = Space::su2([(0, 1), (1, 2)]);
-        let right = Space::su2([(1, 1), (2, 2)]);
+        let common0 = Space::su2([(0, 2), (1, 1), (2, 1)]).unwrap();
+        let common1 = Space::su2([(0, 1), (1, 2), (2, 1)]).unwrap();
+        let left = Space::su2([(0, 1), (1, 2)]).unwrap();
+        let right = Space::su2([(1, 1), (2, 2)]).unwrap();
         let canonical_parent =
             Tensor::from_block_fn(&runtime, [&left], [&common0, &common1], |key, indices| {
                 let value = oracle_value(0, key, indices);
@@ -11867,10 +11873,10 @@ mod cat_tests {
         // What: odd fZ2 sectors and nested-product fusion-tree identities use
         // the same borrowed adjoint route as bosonic multiplicity-free rules.
         let runtime = Runtime::builder().build().unwrap();
-        let f_common0 = Space::fz2([(0, 2), (1, 1)]);
-        let f_common1 = Space::fz2([(0, 1), (1, 2)]);
-        let f_left = Space::fz2([(0, 1), (1, 2)]);
-        let f_right = Space::fz2([(1, 3)]);
+        let f_common0 = Space::fz2([(0, 2), (1, 1)]).unwrap();
+        let f_common1 = Space::fz2([(0, 1), (1, 2)]).unwrap();
+        let f_left = Space::fz2([(0, 1), (1, 2)]).unwrap();
+        let f_right = Space::fz2([(1, 3)]).unwrap();
         let f_lhs_parent = Tensor::from_block_fn(
             &runtime,
             [&f_left],
@@ -12128,7 +12134,7 @@ mod ordered_contract_route_tests {
         // What: a crossed SU2 pAB is handed to the contraction plan instead of
         // returning a default-order owned tensor to a second public permute.
         let runtime = Runtime::builder().build().unwrap();
-        let space = Space::su2([(0, 2), (1, 2), (2, 1)]);
+        let space = Space::su2([(0, 2), (1, 2), (2, 1)]).unwrap();
         let lhs = Tensor::rand_with_seed(
             &runtime,
             Dtype::F64,

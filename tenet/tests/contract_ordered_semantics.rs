@@ -56,8 +56,8 @@ fn crossed_output_order_matches_sequential_for_multiplicity_free_rules() {
         .unwrap();
     let spaces = [
         Space::u1([(-2, 1), (0, 3), (1, 2)]),
-        Space::su2([(0, 2), (1, 3), (2, 1)]),
-        Space::fz2([(0, 2), (1, 3)]),
+        Space::su2([(0, 2), (1, 3), (2, 1)]).unwrap(),
+        Space::fz2([(0, 2), (1, 3)]).unwrap(),
         Space::fz2_u1_su2([
             ((0, 0, 0), 2),
             ((1, -1, 1), 2),
@@ -143,7 +143,7 @@ fn crossed_output_order_matches_sequential_for_rhs_and_both_lazy_adjoints() {
 #[test]
 fn ordered_contract_preserves_output_validation_and_zero_splits() {
     let runtime = Runtime::builder().build().unwrap();
-    let space = Space::fz2([(0, 1), (1, 2)]);
+    let space = Space::fz2([(0, 1), (1, 2)]).unwrap();
     let lhs = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 224_301).unwrap();
     let rhs = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 224_302).unwrap();
 
@@ -235,8 +235,8 @@ fn ordered_contract_preserves_dtype_precedence_over_bad_pab_and_space() {
 fn ordered_contract_parallel_replay_matches_serial() {
     let serial = Runtime::builder().recoupling_threads(1).build().unwrap();
     let parallel = Runtime::builder().recoupling_threads(2).build().unwrap();
-    let serial_space = Space::su2([(0, 2), (1, 3), (2, 2)]);
-    let parallel_space = Space::su2([(0, 2), (1, 3), (2, 2)]);
+    let serial_space = Space::su2([(0, 2), (1, 3), (2, 2)]).unwrap();
+    let parallel_space = Space::su2([(0, 2), (1, 3), (2, 2)]).unwrap();
     let run = |runtime: &Runtime, space: &Space| {
         let lhs =
             Tensor::rand_with_seed(runtime, Dtype::F64, [space, space], [space, space], 224_401)

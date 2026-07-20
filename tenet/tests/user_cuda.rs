@@ -27,7 +27,7 @@ fn u1_space() -> Space {
 }
 
 fn su2_space() -> Space {
-    Space::su2([(0, 2), (1, 1)])
+    Space::su2([(0, 2), (1, 1)]).unwrap()
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn u1_contract_on_cuda_matches_host() {
 #[ignore]
 fn su2_rank5_peps_contract_on_cuda_matches_host() {
     let rt = Runtime::builder().cuda(0).build().unwrap();
-    let phys = Space::su2([(0, 1), (1, 1)]);
+    let phys = Space::su2([(0, 1), (1, 1)]).unwrap();
     let bond = su2_space();
 
     // PEPS-shaped rank-5 tensors: (phys, left, up) <- (right, down),
@@ -338,7 +338,7 @@ fn norm_inner_add_scale_on_cuda_match_host_u1() {
 fn norm_and_inner_on_cuda_apply_su2_quantum_dimension_weights() {
     let rt = Runtime::builder().cuda(0).build().unwrap();
     let bond = su2_space();
-    let phys = Space::su2([(0, 1), (1, 1)]);
+    let phys = Space::su2([(0, 1), (1, 1)]).unwrap();
     // The gold check (permute-invariance of the weighted norm) needs a
     // device permute, which slice 1 does not have; instead the host norm of
     // the *same* tensor is the reference — it already carries the per-sector
@@ -548,7 +548,7 @@ fn eigh_on_cuda_rejects_nonhermitian_input() {
 #[ignore]
 fn device_pipeline_contract_svd_trunc_matches_host_pipeline() {
     let rt = Runtime::builder().cuda(0).build().unwrap();
-    let phys = Space::su2([(0, 1), (1, 1)]);
+    let phys = Space::su2([(0, 1), (1, 1)]).unwrap();
     let bond = su2_space();
     let truncation = Truncation::Rank(4);
 
