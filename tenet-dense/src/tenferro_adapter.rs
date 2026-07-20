@@ -533,17 +533,15 @@ impl DenseExecutor for DefaultDenseExecutor {
                 actual: x.shape().to_vec(),
             });
         }
-        // Tenferro currently exposes only owned solve; writing before it
-        // succeeds could publish a partial result on numerical failure.
-        let a = self
+        let solution = self
             .backend
-            .to_contiguous_read(TensorRead::from_view(tenferro_view(a)?))
-            .map_err(|err| tenferro_error("solve_into", err))?;
-        let b = self
-            .backend
-            .to_contiguous_read(TensorRead::from_view(tenferro_view(b)?))
-            .map_err(|err| tenferro_error("solve_into", err))?;
-        let solution = self.backend.solve(&a, &b).map_err(tenferro_solve_error)?;
+            .solve_read(
+                TensorRead::from_view(tenferro_view(a)?),
+                TensorRead::from_view(tenferro_view(b)?),
+            )
+            .map_err(tenferro_solve_error)?;
+        // Keep the owned result until Tenferro exposes a destination solve;
+        // publishing only after success preserves error atomicity.
         self.backend
             .copy_read_into(
                 TensorRead::from_tensor(&solution),
