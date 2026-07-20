@@ -8,7 +8,7 @@ use tenet_core::{
     FusionRule, FusionSpaceAdmission, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
     FusionTreePairKey, HomSpaceId, LoweredFusionTreeBuildError, LoweredMultiplicityFreeAlgebra,
     MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols, PreparedLoweredFusionTreeLayout,
-    RuleIdentity, SectorLeg,
+    RuleIdentity, SectorLeg, StructurallyValidatedFusionTreeSubset,
 };
 
 use crate::cache::registered_operation_cache;
@@ -258,6 +258,10 @@ fn lowered_build_operation_error(error: LoweredFusionTreeBuildError) -> Operatio
             message: error.static_message(),
         },
     }
+}
+
+fn checked_lowered_build_operation_error(error: LoweredFusionTreeBuildError) -> OperationError {
+    OperationError::FusionAlgebra(Box::new(error.into_checked_fusion_algebra()))
 }
 
 pub(crate) fn lowered_layout_primer<R>(
@@ -1014,6 +1018,40 @@ where
             .fusion_tree_keys(provider.as_ref())
             .to_vec();
         Self::bind_subset_with_keys(space, provider, keys)
+    }
+
+    /// Checked built-in admission using transactional lowered tree metadata.
+    ///
+    /// Matching legacy Subset and Complete stamps are revalidated; publication
+    /// occurs only after structural, algebraic, and complete-grid proofs pass.
+    #[doc(hidden)]
+    pub fn bind_multiplicity_free_lowered(
+        mut space: DynamicFusionMapSpace,
+        provider: Arc<R>,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeFusionRule + LoweredMultiplicityFreeAlgebra + CheckedFusionAlgebra,
+    {
+        space.validate_rule(provider.as_ref())?;
+        validate_bound_space_invariants(&space)?;
+        let proof =
+            StructurallyValidatedFusionTreeSubset::try_new(space.homspace(), space.structure())
+                .map_err(OperationError::from_core_preserving_context)?;
+        proof
+            .validate_for_rule_checked(provider.as_ref())
+            .map_err(checked_metadata_operation_error)?;
+        let prepared = proof
+            .homspace()
+            .prepare_fusion_tree_layout_lowered(provider.as_ref())
+            .map_err(checked_lowered_build_operation_error)?;
+        space.validate_complete_tree_grid(prepared.keys())?;
+        PreparedLayoutKeys::Lowered(prepared).commit();
+        space.admission = FusionSpaceAdmission::Complete(provider.rule_identity());
+        Ok(Self {
+            space,
+            provider,
+            layout_build: LayoutBuildCapability::lowered(),
+        })
     }
 
     /// Builds a checked contraction result while retaining the exact provider
@@ -2322,9 +2360,25 @@ mod bound_invariant_tests {
     use super::*;
     use crate::tests::GenericMultiplicityRule;
     use tenet_core::{
-        BlockSpec, FusionProductSpace, SectorLeg, Su3FusionRule, TensorMapSpace, Z2FusionRule,
-        Z2Irrep,
+        reset_core_intern_tables, BlockSpec, FermionParityFusionRule, FusionAlgebraError,
+        FusionProductSpace, FusionTreePairKey, Fz2SectorLayout, PackedProductCodec,
+        ProductFusionRule, ProductSectorCodec, ProductSectorLayout, SU2FusionRule, SU2Irrep,
+        SectorId, SectorLeg, Su2SectorLayout, Su3FusionRule, TensorMapSpace, U1FusionRule, U1Irrep,
+        U1SectorLayout, Z2FusionRule, Z2Irrep,
     };
+
+    type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
+    type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
+    type TripleCodec = PackedProductCodec<Fz2U1Layout, Su2SectorLayout>;
+    type Fz2U1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule, Fz2U1Codec>;
+    type TripleRule = ProductFusionRule<Fz2U1Rule, SU2FusionRule, TripleCodec>;
+
+    fn lowered_product_rule() -> TripleRule {
+        TripleRule::new(
+            Fz2U1Rule::new(FermionParityFusionRule, U1FusionRule),
+            SU2FusionRule,
+        )
+    }
 
     fn matrix_space() -> DynamicFusionMapSpace {
         let rule = Z2FusionRule;
@@ -2439,6 +2493,230 @@ mod bound_invariant_tests {
             bound.space().admission(),
             FusionSpaceAdmission::Complete(_)
         ));
+    }
+
+    #[test]
+    fn lowered_bind_revalidates_complete_without_replacing_layout() {
+        // What: a legacy Complete stamp gains checked algebra proof, commits
+        // one lowered capability, and retains the caller's exact block layout.
+        let _guard = crate::test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+        reset_scratch_publication_observations();
+        let raw = DynamicFusionMapSpace::from_typed(&typed_z2_matrix_space());
+        let structure = Arc::clone(raw.structure());
+
+        let bound =
+            BoundDynamicFusionMapSpace::bind_multiplicity_free_lowered(raw, Arc::new(Z2FusionRule))
+                .unwrap();
+
+        assert!(matches!(
+            bound.space().admission(),
+            FusionSpaceAdmission::Complete(_)
+        ));
+        assert!(Arc::ptr_eq(&structure, &bound.space.subblock_structure));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0, 1));
+
+        let rule = lowered_product_rule();
+        let pair = Fz2U1Codec::encode(Z2Irrep::ODD.sector_id(), U1Irrep::new(2).sector_id());
+        let sector = TripleCodec::encode(pair, SU2Irrep::from_twice_spin(1).sector_id());
+        let typed = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            FusionTreeHomSpace::from_sectors([(sector, 1)], [(sector, 1)]),
+            &rule,
+            [vec![1, 1]],
+        )
+        .unwrap();
+        let raw = DynamicFusionMapSpace::from_typed(&typed);
+        let structure = Arc::clone(raw.structure());
+        reset_scratch_publication_observations();
+
+        let bound = BoundDynamicFusionMapSpace::bind_multiplicity_free_lowered(raw, Arc::new(rule))
+            .unwrap();
+
+        assert!(matches!(
+            bound.space().admission(),
+            FusionSpaceAdmission::Complete(_)
+        ));
+        assert!(Arc::ptr_eq(&structure, &bound.space.subblock_structure));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0, 1));
+    }
+
+    #[test]
+    fn lowered_bind_failure_publishes_no_layout_or_admission() {
+        // What: finite U1 nonclosure revalidates matching legacy Subset and
+        // Complete stamps, returns the exact algebra failure, and commits no state.
+        let _guard = crate::test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let max = U1Irrep::new(i32::MAX).sector_id();
+        let one = U1Irrep::new(1).sector_id();
+        let vacuum = U1Irrep::new(0).sector_id();
+        let pair = FusionTreePairKey::try_pair_from_sector_ids(
+            [max.id(), one.id()],
+            [],
+            vacuum.id(),
+            [false; 2],
+            [],
+            [],
+            [],
+            [1],
+            [],
+        )
+        .unwrap();
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([
+                SectorLeg::new([(max, 1)], false),
+                SectorLeg::new([(one, 1)], false),
+            ]),
+            FusionProductSpace::new([]),
+        );
+        let structure =
+            crate::tests::packed_fixture_structure(2, [(BlockKey::FusionTree(pair), vec![1, 1])])
+                .unwrap()
+                .into_shared();
+        let base = DynamicFusionMapSpace {
+            nout: 2,
+            nin: 0,
+            homspace: Arc::new(homspace),
+            subblock_structure: structure,
+            admission: FusionSpaceAdmission::Unbound,
+        };
+
+        reset_core_intern_tables();
+        reset_scratch_publication_observations();
+        let mut mismatched = base.clone();
+        mismatched.admission = FusionSpaceAdmission::Subset(Z2FusionRule.rule_identity());
+        assert!(matches!(
+            BoundDynamicFusionMapSpace::bind_multiplicity_free_lowered(
+                mismatched,
+                Arc::new(U1FusionRule),
+            ),
+            Err(OperationError::Core(CoreError::FusionRuleMismatch { .. }))
+        ));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+
+        for admission in [
+            FusionSpaceAdmission::Subset(U1FusionRule.rule_identity()),
+            FusionSpaceAdmission::Complete(U1FusionRule.rule_identity()),
+        ] {
+            reset_core_intern_tables();
+            reset_scratch_publication_observations();
+            let mut raw = base.clone();
+            raw.admission = admission.clone();
+            let original = raw.clone();
+            let error = BoundDynamicFusionMapSpace::bind_multiplicity_free_lowered(
+                raw,
+                Arc::new(U1FusionRule),
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                OperationError::FusionAlgebra(cause)
+                    if *cause == FusionAlgebraError::U1FusionOverflow {
+                        left: i32::MAX,
+                        right: 1,
+                    }
+            ));
+            assert_eq!(original.admission(), &admission);
+            assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+        }
+    }
+
+    #[test]
+    fn lowered_bind_preserves_omitted_product_codec_failure() {
+        // What: an invalid packed-product sector omitted by a valid Subset is
+        // reported exactly when complete-grid preparation reaches it, without publication.
+        let _guard = crate::test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let rule = lowered_product_rule();
+        let valid = rule.vacuum();
+        let invalid = SectorId::new(usize::MAX);
+        let expected = TripleCodec::decode_checked(invalid).unwrap_err();
+        let pair = FusionTreePairKey::try_pair_from_sector_ids(
+            [valid.id()],
+            [valid.id()],
+            valid.id(),
+            [false],
+            [false],
+            [],
+            [],
+            [],
+            [],
+        )
+        .unwrap();
+        let leg = || SectorLeg::new([(valid, 1), (invalid, 1)], false);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg()]),
+            FusionProductSpace::new([leg()]),
+        );
+        let structure =
+            crate::tests::packed_fixture_structure(2, [(BlockKey::FusionTree(pair), vec![1, 1])])
+                .unwrap()
+                .into_shared();
+        let raw = DynamicFusionMapSpace {
+            nout: 1,
+            nin: 1,
+            homspace: Arc::new(homspace),
+            subblock_structure: structure,
+            admission: FusionSpaceAdmission::Subset(rule.rule_identity()),
+        };
+        reset_core_intern_tables();
+        reset_scratch_publication_observations();
+
+        let error = BoundDynamicFusionMapSpace::bind_multiplicity_free_lowered(raw, Arc::new(rule))
+            .unwrap_err();
+        assert_eq!(
+            error,
+            OperationError::FusionAlgebra(Box::new(FusionAlgebraError::ProductCodec(expected)))
+        );
+        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn lowered_subset_to_complete_validates_grid_before_commit() {
+        // What: a checked sparse subset remains a subset when complete-grid
+        // validation fails, and the prepared lowered layout is not published.
+        let _guard = crate::test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+        let complete = typed_z2_matrix_space();
+        let first = complete.subblock_structure().block(0).unwrap();
+        let structure = BlockStructure::from_blocks_with_rank(
+            2,
+            vec![BlockSpec::with_key(
+                first.key().clone(),
+                first.shape().to_vec(),
+                first.strides().to_vec(),
+                first.offset(),
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let subset = FusionTensorMapSpace::new_unbound(
+            complete.dense_space().clone(),
+            complete.homspace().clone(),
+            structure,
+        )
+        .unwrap()
+        .try_bind_rule_checked(&Z2FusionRule)
+        .unwrap();
+        let raw = DynamicFusionMapSpace::from_typed(&subset);
+        let original = raw.clone();
+        reset_scratch_publication_observations();
+
+        assert!(matches!(
+            BoundDynamicFusionMapSpace::bind_multiplicity_free_lowered(raw, Arc::new(Z2FusionRule),),
+            Err(OperationError::Core(CoreError::BlockCountMismatch { .. }))
+        ));
+        assert!(matches!(
+            original.admission(),
+            FusionSpaceAdmission::Subset(_)
+        ));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
     }
 
     #[test]

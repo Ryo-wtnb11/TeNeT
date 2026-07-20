@@ -1357,6 +1357,62 @@ pub struct BlockStructure {
     required_len: usize,
 }
 
+struct PreparedBlockStructure {
+    sector: SectorStructure,
+    degeneracy: DegeneracyStructure,
+    required_len: usize,
+}
+
+impl PreparedBlockStructure {
+    fn from_blocks_with_rank(rank: usize, blocks: Vec<BlockSpec>) -> Result<Self, CoreError> {
+        let keys = blocks
+            .iter()
+            .map(|block| block.key().clone())
+            .collect::<Vec<_>>();
+        let degeneracy_blocks = blocks
+            .into_iter()
+            .map(|block| DegeneracyBlock::new(block.shape, block.strides, block.offset))
+            .collect::<Result<Vec<_>, _>>()?;
+        let sector = SectorStructure::from_keys(rank, keys)?;
+        let degeneracy = DegeneracyStructure::from_blocks_with_rank(rank, degeneracy_blocks)?;
+        Self::from_parts(sector, degeneracy)
+    }
+
+    fn from_parts(
+        sector: SectorStructure,
+        degeneracy: DegeneracyStructure,
+    ) -> Result<Self, CoreError> {
+        if sector.rank() != degeneracy.rank() {
+            return Err(CoreError::StructureRankMismatch {
+                expected: sector.rank(),
+                actual: degeneracy.rank(),
+            });
+        }
+        if sector.block_count() != degeneracy.block_count() {
+            return Err(CoreError::BlockCountMismatch {
+                expected: sector.block_count(),
+                actual: degeneracy.block_count(),
+            });
+        }
+        let required_len = degeneracy.required_len()?;
+        Ok(Self {
+            sector,
+            degeneracy,
+            required_len,
+        })
+    }
+
+    fn commit(self) -> BlockStructure {
+        let content = intern_block_structure_content(&self.sector, &self.degeneracy);
+        BlockStructure {
+            sector: self.sector,
+            degeneracy: self.degeneracy,
+            content,
+            required_len: self.required_len,
+        }
+    }
+}
+
 /// Proof that one exact [`BlockStructure`] is categorically valid for `rule`.
 ///
 /// This proof is deliberately LOCAL: it covers tree shape, fusion and
@@ -1830,44 +1886,14 @@ impl BlockStructure {
     }
 
     pub fn from_blocks_with_rank(rank: usize, blocks: Vec<BlockSpec>) -> Result<Self, CoreError> {
-        let keys = blocks
-            .iter()
-            .map(|block| block.key().clone())
-            .collect::<Vec<_>>();
-        let degeneracy_blocks = blocks
-            .into_iter()
-            .map(|block| DegeneracyBlock::new(block.shape, block.strides, block.offset))
-            .collect::<Result<Vec<_>, _>>()?;
-        Self::from_parts(
-            SectorStructure::from_keys(rank, keys)?,
-            DegeneracyStructure::from_blocks_with_rank(rank, degeneracy_blocks)?,
-        )
+        PreparedBlockStructure::from_blocks_with_rank(rank, blocks).map(|prepared| prepared.commit())
     }
 
     pub fn from_parts(
         sector: SectorStructure,
         degeneracy: DegeneracyStructure,
     ) -> Result<Self, CoreError> {
-        if sector.rank() != degeneracy.rank() {
-            return Err(CoreError::StructureRankMismatch {
-                expected: sector.rank(),
-                actual: degeneracy.rank(),
-            });
-        }
-        if sector.block_count() != degeneracy.block_count() {
-            return Err(CoreError::BlockCountMismatch {
-                expected: sector.block_count(),
-                actual: degeneracy.block_count(),
-            });
-        }
-        let required_len = degeneracy.required_len()?;
-        let content = intern_block_structure_content(&sector, &degeneracy);
-        Ok(Self {
-            sector,
-            degeneracy,
-            content,
-            required_len,
-        })
+        PreparedBlockStructure::from_parts(sector, degeneracy).map(|prepared| prepared.commit())
     }
 
     pub fn into_shared(self) -> Arc<Self> {
@@ -1919,11 +1945,61 @@ impl BlockStructure {
         for (key, _) in &blocks {
             key.validate_for_rule(rule)?;
         }
-        let mut blocks = blocks;
-        blocks.sort_by_key(|(key, _)| key.codomain_tree().coupled().id());
-        let (keys, shapes): (Vec<_>, Vec<_>) = blocks.into_iter().unzip();
-        let specs = coupled_sector_matrix_block_specs(nout, rank, &keys, &shapes)?;
-        Self::from_blocks_with_rank(rank, specs)
+        coupled_sector_matrix_from_validated_keys(nout, rank, blocks)
+    }
+
+    /// Checked finite-algebra sibling of [`Self::coupled_sector_matrix_with_keys`].
+    pub fn coupled_sector_matrix_with_keys_checked<R>(
+        rule: &R,
+        nout: usize,
+        rank: usize,
+        blocks: Vec<(FusionTreePairKey, Vec<usize>)>,
+    ) -> Result<Self, CheckedFusionSpaceError>
+    where
+        R: CheckedFusionAlgebra,
+    {
+        validate_coupled_sector_matrix_dimensions(
+            nout,
+            rank,
+            blocks.iter().map(|(_, shape)| shape),
+        )?;
+        for (key, _) in &blocks {
+            ShapeValidatedFusionTree::try_new(key.codomain_tree())?;
+            ShapeValidatedFusionTree::try_new(key.domain_tree())?;
+            let actual_nout = key.codomain_tree().uncoupled().len();
+            let actual_nin = key.domain_tree().uncoupled().len();
+            if actual_nout != nout || actual_nin != rank - nout {
+                return Err(CoreError::FusionSpaceSplitMismatch {
+                    expected_nout: nout,
+                    expected_nin: rank - nout,
+                    actual_nout,
+                    actual_nin,
+                }
+                .into());
+            }
+            validate_fusion_tree_pair_coupled(key.codomain_tree(), key.domain_tree())?;
+        }
+        let prepared = {
+            let mut order = (0..blocks.len()).collect::<Vec<_>>();
+            order.sort_by_key(|&index| blocks[index].0.codomain_tree().coupled().id());
+            let keys = order
+                .iter()
+                .map(|&index| &blocks[index].0)
+                .collect::<Vec<_>>();
+            let shapes = order
+                .iter()
+                .map(|&index| blocks[index].1.as_slice())
+                .collect::<Vec<_>>();
+            let specs = coupled_sector_matrix_block_specs_after_dimension_validation(
+                nout, rank, &keys, &shapes,
+            )?;
+            PreparedBlockStructure::from_blocks_with_rank(rank, specs)?
+        };
+        for (key, _) in &blocks {
+            validate_fusion_tree_for_rule_checked_after_shape(rule, key.codomain_tree())?;
+            validate_fusion_tree_for_rule_checked_after_shape(rule, key.domain_tree())?;
+        }
+        Ok(prepared.commit())
     }
 
     #[inline]
@@ -2063,6 +2139,17 @@ impl BlockStructure {
     pub(crate) fn coupled_region_cache_is_initialized(&self) -> bool {
         self.content.coupled_region_cache.get().is_some()
     }
+}
+
+fn coupled_sector_matrix_from_validated_keys(
+    nout: usize,
+    rank: usize,
+    mut blocks: Vec<(FusionTreePairKey, Vec<usize>)>,
+) -> Result<BlockStructure, CoreError> {
+    blocks.sort_by_key(|(key, _)| key.codomain_tree().coupled().id());
+    let (keys, shapes): (Vec<_>, Vec<_>) = blocks.into_iter().unzip();
+    let specs = coupled_sector_matrix_block_specs(nout, rank, &keys, &shapes)?;
+    BlockStructure::from_blocks_with_rank(rank, specs)
 }
 
 #[cfg(test)]
