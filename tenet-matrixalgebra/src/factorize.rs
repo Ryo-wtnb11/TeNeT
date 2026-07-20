@@ -979,6 +979,67 @@ struct SectorMatricization<D> {
     data: Vec<D>,
 }
 
+struct SectorMatrixRef<'a, D> {
+    sector: SectorId,
+    rows: usize,
+    cols: usize,
+    data: &'a [D],
+}
+
+enum ValueMatricizations<'a, D> {
+    Regions {
+        data: &'a [D],
+        regions: Arc<[CoupledSectorRegion]>,
+    },
+    Packed(Vec<SectorMatricization<D>>),
+}
+
+impl<'a, D: FactorScalar> ValueMatricizations<'a, D> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Regions { regions, .. } => regions.len(),
+            Self::Packed(matrices) => matrices.len(),
+        }
+    }
+
+    fn get(&self, index: usize) -> Result<SectorMatrixRef<'_, D>, OperationError> {
+        match self {
+            Self::Regions { data, regions } => {
+                let region = &regions[index];
+                let range = region.range();
+                let matrix =
+                    data.get(range.clone())
+                        .ok_or(OperationError::ElementCountMismatch {
+                            expected: range.end,
+                            actual: data.len(),
+                        })?;
+                Ok(SectorMatrixRef {
+                    sector: region_sector(region),
+                    rows: region.rows(),
+                    cols: region.cols(),
+                    data: matrix,
+                })
+            }
+            Self::Packed(matrices) => {
+                let matrix = &matrices[index];
+                Ok(SectorMatrixRef {
+                    sector: matrix.sector,
+                    rows: matrix.rows,
+                    cols: matrix.cols,
+                    data: &matrix.data,
+                })
+            }
+        }
+    }
+
+    fn validate_hermitian(&self) -> Result<(), OperationError> {
+        match self {
+            Self::Regions { data, regions } => validate_hermitian_regions(data, regions),
+            Self::Packed(matrices) => validate_hermitian_matricizations(matrices),
+        }
+    }
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct CompactSvdCopyProbe {
@@ -995,6 +1056,7 @@ thread_local! {
     static EIGH_COPY_PROBE: Cell<EighCopyProbe> = Cell::default();
     static COMPACT_LQ_COPY_PROBE: Cell<CompactLqCopyProbe> = Cell::default();
     static DIAGONAL_BOND_BUILD_PROBE: Cell<DiagonalBondBuildProbe> = Cell::default();
+    static VALUES_MATRICIZATION_FALLBACKS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -1022,6 +1084,21 @@ pub(crate) fn reset_diagonal_bond_build_probe() {
 #[cfg(test)]
 pub(crate) fn diagonal_bond_build_probe() -> DiagonalBondBuildProbe {
     DIAGONAL_BOND_BUILD_PROBE.with(Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_values_matricization_fallbacks() {
+    VALUES_MATRICIZATION_FALLBACKS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn values_matricization_fallbacks() -> usize {
+    VALUES_MATRICIZATION_FALLBACKS.with(Cell::get)
+}
+
+#[cfg(test)]
+fn record_values_matricization_fallback() {
+    VALUES_MATRICIZATION_FALLBACKS.with(|count| count.set(count.get() + 1));
 }
 
 #[cfg(test)]
@@ -1275,13 +1352,14 @@ where
     // `svd_compact_dyn(..).map(|svd| svd.singular_values)` computed then threw
     // away. LAPACK computes the singular values identically with or without
     // vectors, so the spectrum is bit-for-bit the full-SVD spectrum.
-    let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
+    let matricizations = value_matricizations(space.structure(), input.data(), space.nout())?;
     let mut singular_values = Vec::with_capacity(matricizations.len());
-    for matrix in &matricizations {
+    for index in 0..matricizations.len() {
+        let matrix = matricizations.get(index)?;
         let rank = matrix.rows.min(matrix.cols);
         let input_shape = [matrix.rows, matrix.cols];
         let input_strides = [1usize, matrix.rows];
-        let input = DenseView::new(&matrix.data, &input_shape, &input_strides, 0)
+        let input = DenseView::new(matrix.data, &input_shape, &input_strides, 0)
             .map_err(OperationError::Dense)?;
         let s_tensor = dense
             .svd_vals(D::dense_read(input))
@@ -3830,15 +3908,16 @@ where
             message: "eigh requires an endomorphism (codomain == domain)",
         });
     }
-    let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
-    validate_hermitian_matricizations(&matricizations)?;
+    let matricizations = value_matricizations(space.structure(), input.data(), space.nout())?;
+    matricizations.validate_hermitian()?;
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
-    for matrix in &matricizations {
+    for index in 0..matricizations.len() {
+        let matrix = matricizations.get(index)?;
         let n = matrix.rows;
         let shape = [matrix.rows, matrix.cols];
         let strides = [1usize, matrix.rows];
         let view =
-            DenseView::new(&matrix.data, &shape, &strides, 0).map_err(OperationError::Dense)?;
+            DenseView::new(matrix.data, &shape, &strides, 0).map_err(OperationError::Dense)?;
         let values_tensor = dense
             .eigh_vals(D::dense_read(view))
             .map_err(OperationError::Dense)?;
@@ -3889,14 +3968,15 @@ where
             message: "eig requires an endomorphism (codomain == domain)",
         });
     }
-    let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
+    let matricizations = value_matricizations(space.structure(), input.data(), space.nout())?;
     let mut eigenvalues = Vec::with_capacity(matricizations.len());
-    for matrix in &matricizations {
+    for index in 0..matricizations.len() {
+        let matrix = matricizations.get(index)?;
         let n = matrix.rows;
         let shape = [matrix.rows, matrix.cols];
         let strides = [1usize, matrix.rows];
         let view =
-            DenseView::new(&matrix.data, &shape, &strides, 0).map_err(OperationError::Dense)?;
+            DenseView::new(matrix.data, &shape, &strides, 0).map_err(OperationError::Dense)?;
         let values_tensor = dense
             .eig_vals(D::dense_read(view))
             .map_err(OperationError::Dense)?;
@@ -5096,6 +5176,25 @@ fn checked_sector_regions(
     structure
         .coupled_sector_regions(nout)
         .map_err(OperationError::from_core_preserving_context)
+}
+
+fn value_matricizations<'a, D>(
+    structure: &BlockStructure,
+    data: &'a [D],
+    nout: usize,
+) -> Result<ValueMatricizations<'a, D>, OperationError>
+where
+    D: FactorScalar,
+{
+    if let Some(regions) = checked_sector_regions(structure, nout)? {
+        Ok(ValueMatricizations::Regions { data, regions })
+    } else {
+        #[cfg(test)]
+        record_values_matricization_fallback();
+        Ok(ValueMatricizations::Packed(sector_matricizations(
+            structure, data, nout,
+        )?))
+    }
 }
 
 /// Packs every coupled sector of the source data into its dense column-major
