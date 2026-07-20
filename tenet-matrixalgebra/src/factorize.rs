@@ -4885,22 +4885,6 @@ fn col_placement<'a, D>(
         })
 }
 
-fn row_shape_of<D>(
-    matricizations: &HashMap<SectorId, &SectorMatricization<D>>,
-    sector: SectorId,
-    tree: &FusionTreeKey,
-) -> Result<Vec<usize>, OperationError> {
-    row_placement(matricization_of(matricizations, sector)?, tree).map(|(_, shape)| shape.to_vec())
-}
-
-fn col_shape_of<D>(
-    matricizations: &HashMap<SectorId, &SectorMatricization<D>>,
-    sector: SectorId,
-    tree: &FusionTreeKey,
-) -> Result<Vec<usize>, OperationError> {
-    col_placement(matricization_of(matricizations, sector)?, tree).map(|(_, shape)| shape.to_vec())
-}
-
 fn validate_dense_shape(actual: &[usize], expected: &[usize]) -> Result<(), OperationError> {
     if actual != expected {
         return Err(OperationError::ShapeMismatch {
@@ -5385,11 +5369,7 @@ where
     D: FactorScalar,
 {
     let rule = provider.as_ref();
-    let rank_by_sector: HashMap<SectorId, usize> =
-        ranks.iter().map(|rank| (rank.sector, rank.kept)).collect();
     let matrix_by_sector = matricization_map(matricizations);
-    let sector_rank =
-        |sector: SectorId| -> usize { rank_by_sector.get(&sector).copied().unwrap_or(0) };
     let new_leg = SectorLeg::new(ranks.iter().map(|rank| (rank.sector, rank.kept)), false);
     let left_hom = FusionTreeHomSpace::new(
         homspace.codomain().clone(),
@@ -5398,20 +5378,18 @@ where
     let left_keys = left_hom
         .fusion_tree_keys_generic(rule)
         .map_err(OperationError::from_core_preserving_context)?;
-    let left_shapes = left_keys
-        .iter()
-        .map(|key| {
-            let sector = coupled_of_generic(key.codomain_tree());
-            let mut shape = row_shape_of(&matrix_by_sector, sector, key.codomain_tree())?;
-            shape.push(sector_rank(sector));
-            Ok(shape)
-        })
-        .collect::<Result<Vec<_>, OperationError>>()?;
-    let left = BoundDynamicFusionMapSpace::from_degeneracy_shapes_generic(
-        Arc::clone(provider),
-        left_hom,
-        left_shapes,
-    )?;
+    for key in left_keys.iter() {
+        // Why not build the final layout first: missing source placements must
+        // fail before output construction; sharing this Generic enumeration is
+        // the prepared-enumeration boundary tracked by #257.
+        let sector = coupled_of_generic(key.codomain_tree());
+        row_placement(
+            matricization_of(&matrix_by_sector, sector)?,
+            key.codomain_tree(),
+        )?;
+    }
+    let left =
+        BoundDynamicFusionMapSpace::from_final_homspace_generic(Arc::clone(provider), left_hom)?;
     let right_hom = FusionTreeHomSpace::new(
         FusionProductSpace::new([new_leg]),
         homspace.domain().clone(),
@@ -5419,20 +5397,17 @@ where
     let right_keys = right_hom
         .fusion_tree_keys_generic(rule)
         .map_err(OperationError::from_core_preserving_context)?;
-    let right_shapes = right_keys
-        .iter()
-        .map(|key| {
-            let sector = coupled_of_generic(key.domain_tree());
-            let mut shape = vec![sector_rank(sector)];
-            shape.extend(col_shape_of(&matrix_by_sector, sector, key.domain_tree())?);
-            Ok(shape)
-        })
-        .collect::<Result<Vec<_>, OperationError>>()?;
-    let right = BoundDynamicFusionMapSpace::from_degeneracy_shapes_generic(
-        Arc::clone(provider),
-        right_hom,
-        right_shapes,
-    )?;
+    for key in right_keys.iter() {
+        // Why not build the final layout first: preserve the left-to-right
+        // missing-placement error boundary without adding a second plan API.
+        let sector = coupled_of_generic(key.domain_tree());
+        col_placement(
+            matricization_of(&matrix_by_sector, sector)?,
+            key.domain_tree(),
+        )?;
+    }
+    let right =
+        BoundDynamicFusionMapSpace::from_final_homspace_generic(Arc::clone(provider), right_hom)?;
     Ok((left, right))
 }
 
@@ -5695,7 +5670,6 @@ pub fn diagonal_bond_bound_space_generic<R, V>(
 where
     R: FusionRule,
 {
-    let rule = provider.as_ref();
     let new_leg = SectorLeg::new(
         spectrum
             .iter()
@@ -5706,24 +5680,7 @@ where
         FusionProductSpace::new([new_leg.clone()]),
         FusionProductSpace::new([new_leg]),
     );
-    let length_by_sector: HashMap<SectorId, usize> = spectrum
-        .iter()
-        .map(|entry| (entry.sector, entry.values.len()))
-        .collect();
-    let keys = homspace
-        .fusion_tree_keys_generic(rule)
-        .map_err(OperationError::from_core_preserving_context)?;
-    let shapes = keys
-        .iter()
-        .map(|key| {
-            let count = length_by_sector
-                .get(&coupled_of_generic(key.codomain_tree()))
-                .copied()
-                .unwrap_or(0);
-            vec![count, count]
-        })
-        .collect::<Vec<_>>();
-    BoundDynamicFusionMapSpace::from_degeneracy_shapes_generic(provider, homspace, shapes)
+    BoundDynamicFusionMapSpace::from_final_homspace_generic(provider, homspace)
 }
 
 /// Generic sibling of [`svd_compact_dyn`].
@@ -5906,30 +5863,21 @@ where
     let keys = new_hom
         .fusion_tree_keys_generic(rule)
         .map_err(OperationError::from_core_preserving_context)?;
-    let shapes = keys
-        .iter()
-        .map(|key| {
-            let old_index = source_structure
-                .find_block_index_by_key(&BlockKey::FusionTree(key.clone()))
-                .ok_or(OperationError::UnsupportedTensorContractScope {
-                    message: "truncated factor tree must exist in the full factor",
-                })?;
-            let old_block = source_structure
-                .block(old_index)
-                .map_err(OperationError::from_core_preserving_context)?;
-            let mut shape = old_block.shape().to_vec();
-            let bond_tree = if axis < nout {
-                key.codomain_tree()
-            } else {
-                key.domain_tree()
-            };
-            shape[axis] = kept_of(coupled_of_generic(bond_tree));
-            Ok(shape)
-        })
-        .collect::<Result<Vec<_>, OperationError>>()?;
+    for key in keys.iter() {
+        // Why not build the truncated layout first: a missing full-factor tree
+        // remains a source error, while prepared Generic enumeration belongs
+        // to #257 rather than a second layout abstraction here.
+        let old_index = source_structure
+            .find_block_index_by_key(&BlockKey::FusionTree(key.clone()))
+            .ok_or(OperationError::UnsupportedTensorContractScope {
+                message: "truncated factor tree must exist in the full factor",
+            })?;
+        source_structure
+            .block(old_index)
+            .map_err(OperationError::from_core_preserving_context)?;
+    }
 
-    let space =
-        BoundDynamicFusionMapSpace::from_degeneracy_shapes_generic(provider, new_hom, shapes)?;
+    let space = BoundDynamicFusionMapSpace::from_final_homspace_generic(provider, new_hom)?;
     let len = space
         .space()
         .required_len()
