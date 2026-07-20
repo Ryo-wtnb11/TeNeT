@@ -319,8 +319,6 @@ pub struct TreeTransformCacheStats {
     plan_misses: usize,
     structure_hits: usize,
     structure_misses: usize,
-    tree_row_hits: usize,
-    tree_row_misses: usize,
 }
 
 impl TreeTransformCacheStats {
