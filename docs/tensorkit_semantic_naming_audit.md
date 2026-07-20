@@ -386,15 +386,20 @@ core_dst_open_rhs_rank
 意味:
 
 ```text
-FusionTreeHomSpace の各 fusion-tree block に dense degeneracy dimensions を与える。
+FusionTreeHomSpace の各 fusion-tree subblock に caller が dense degeneracy
+dimensions という冗長な shape authority を与え、固定の coupled-sector
+layout を構築する。
 ```
 
-これは意味論としては正しい。ただし、TensorKit ユーザーが最初に触る constructor としては低レイヤすぎる。
+これは expert compatibility/import 境界として意味論上正しい。ただし、
+final `FusionTreeHomSpace` が既に持つ leg degeneracy から通常の演算出力
+layout を導出する経路ではない。
 
 方針:
 
-- core constructor として残してよい。
-- 上位 facade では `TensorMapSpace` / `HomSpace` / `TensorMap` 風の builder を用意する。
+- expert constructor として残す。
+- 通常の演算出力では final `FusionTreeHomSpace` を layout authority とする。
+- typed core に HomSpace-only constructor が既に存在するとは扱わない。
 
 追加注意:
 
@@ -428,8 +433,13 @@ Rust としては正しいが、TensorKit の `TensorMap(data, codomain, domain)
 
 方針:
 
-- 低レイヤ constructor として残す。
-- public tutorial では、より高レベルな constructor を優先する。
+- 既に layout を選択した `FusionTensorMapSpace` へ storage/data を attach
+  する低レイヤ constructor として残す。
+- `_with_structure` の custom layout 選択とは区別する。
+
+境界整理後も、typed eager adjoint、lowering 用 custom-stride adjoint view、
+`tenet-matrixalgebra::factorize::typed_from_dyn` は現行の内部 bridge である。
+この監査は、それらの削除や別 API への migration を約束しない。
 
 ### `BlockStructure::packed_column_major`
 

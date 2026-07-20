@@ -36,8 +36,8 @@
 
 | 現行 | 対応 | 備考 |
 |---|---|---|
-| `from_degeneracy_shapes` | 名前維持 + doc に「fusion-tree **subblock** ごとの degeneracy shape」を明記 | TensorKit の block(coupled)/subblock(tree)区別を明示 |
-| `from_vec_with_fusion_space` | 名前維持(低レイヤ constructor)| 高レベル constructor はユーザー層で提供 |
+| `from_degeneracy_shapes` | 名前維持。caller が fusion-tree **subblock** ごとの shape を渡す expert compatibility/import 境界 | 通常の演算出力は final `FusionTreeHomSpace` から layout を導出する |
+| `from_vec_with_fusion_space` | 名前維持(低レイヤ attach constructor) | layout は既に `FusionTensorMapSpace` が選択済み。この関数は storage/data を attach するだけ |
 | `coefficients_src_by_dst` | `recoupling_coefficients_dst_src` | `U[dst, src]` の線形写像向きを名前に |
 | `fusion_tree_keys_from_external_sectors` | 名前維持 + doc に domain 側 dualize を明記 | |
 | `tensorcontract_homspace` | 名前維持 + doc で `tensorcontract!` lowering 相当と明記 | `compose` との関係を doc に |
@@ -56,6 +56,11 @@ TeNeT     tensortrace_into(&mut C, A, ..., α, β)
 
 `TensorMap` / `TensorMapSpace` / `FusionTreeHomSpace` / `FusionProductSpace` /
 `SectorLeg` / `DenseExecutor` / `DenseKernelBackend` / `DenseView` は維持。
+
+この境界整理は既存内部 bridge の削除・移行計画ではない。typed eager
+adjoint、lowering 用 custom-stride adjoint view、および
+`tenet-matrixalgebra::factorize::typed_from_dyn` は現行 bridge として残り、
+本表は将来の migration を約束しない。
 
 ## 実施順
 

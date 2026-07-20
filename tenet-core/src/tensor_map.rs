@@ -30,8 +30,8 @@ impl<T, const NOUT: usize, const NIN: usize, S> TensorMap<T, NOUT, NIN, S, Vec<T
         Self::from_vec_with_structure(data, space.clone(), BlockStructure::trivial(space.dims())?)
     }
 
-    /// Builds a dense tensor backed by `Vec<T>` and an explicit block
-    /// structure.
+    /// Builds a dense tensor backed by `Vec<T>` and selects an explicit custom
+    /// block layout.
     ///
     /// # Examples
     ///
@@ -56,6 +56,8 @@ impl<T, const NOUT: usize, const NIN: usize, S> TensorMap<T, NOUT, NIN, S, Vec<T
         Self::from_vec_with_shared_structure(data, space, structure.into_shared())
     }
 
+    /// Shared-handle variant of [`Self::from_vec_with_structure`]; the caller
+    /// still selects the custom block layout.
     pub fn from_vec_with_shared_structure(
         data: Vec<T>,
         space: TensorMapSpace<NOUT, NIN>,
@@ -64,7 +66,10 @@ impl<T, const NOUT: usize, const NIN: usize, S> TensorMap<T, NOUT, NIN, S, Vec<T
         Self::from_storage_with_shared_structure(data, space, structure)
     }
 
-    /// Builds a symmetric tensor backed by `Vec<T>`.
+    /// Attaches `Vec<T>` data to an already-selected symmetric tensor layout.
+    ///
+    /// Unlike [`Self::from_vec_with_structure`], this method does not choose a
+    /// block layout; `fusion_space` already owns it.
     ///
     /// # Examples
     ///
@@ -96,6 +101,8 @@ impl<T, const NOUT: usize, const NIN: usize, S> TensorMap<T, NOUT, NIN, S, Vec<T
         Self::from_storage_with_fusion_space(data, fusion_space)
     }
 
+    /// Shared-handle variant of [`Self::from_vec_with_fusion_space`]; the
+    /// fusion space has already selected the layout.
     pub fn from_vec_with_shared_fusion_space(
         data: Vec<T>,
         fusion_space: Arc<FusionTensorMapSpace<NOUT, NIN>>,
@@ -169,8 +176,8 @@ impl<T, const NOUT: usize, const NIN: usize, S, D> TensorMap<T, NOUT, NIN, S, D>
 where
     D: TensorStorage<T>,
 {
-    /// Builds a tensor from caller-provided storage and an explicit block
-    /// structure.
+    /// Builds a tensor from caller-provided storage and selects an explicit
+    /// custom block layout.
     ///
     /// # Examples
     ///
@@ -195,6 +202,8 @@ where
         Self::from_storage_with_shared_structure(storage, space, structure.into_shared())
     }
 
+    /// Shared-handle variant of [`Self::from_storage_with_structure`]; the
+    /// caller still selects the custom block layout.
     pub fn from_storage_with_shared_structure(
         storage: D,
         space: TensorMapSpace<NOUT, NIN>,
@@ -208,7 +217,11 @@ where
         )
     }
 
-    /// Builds a symmetric tensor from caller-provided storage.
+    /// Attaches caller-provided storage to an already-selected symmetric
+    /// tensor layout.
+    ///
+    /// Unlike [`Self::from_storage_with_structure`], this method does not
+    /// choose a block layout; `fusion_space` already owns it.
     ///
     /// # Examples
     ///
@@ -240,6 +253,8 @@ where
         Self::from_storage_with_shared_fusion_space(storage, Arc::new(fusion_space))
     }
 
+    /// Shared-handle variant of [`Self::from_storage_with_fusion_space`]; the
+    /// fusion space has already selected the layout.
     pub fn from_storage_with_shared_fusion_space(
         storage: D,
         fusion_space: Arc<FusionTensorMapSpace<NOUT, NIN>>,
