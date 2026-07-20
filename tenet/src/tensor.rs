@@ -4952,33 +4952,28 @@ impl Tensor {
             Ok::<_, Error>(hom)
         })?;
         let dst_bound = source.space.from_selected_homspace(hom)?;
-        let mut data = vec![D::from_real(0.0); dst_bound.raw().required_len()?];
         macro_rules! trace_bound {
             ($dst:expr, $src:expr) => {
                 if operation.source_conjugate() {
-                    tenet_tensors::tensortrace_fusion_dyn_into_checked(
+                    tenet_tensors::tensortrace_fusion_dyn_owned_checked(
                         $dst,
-                        &mut data,
                         $src,
                         src_data,
                         operation,
                         D::from_real(1.0),
-                        D::from_real(0.0),
                     )
                 } else {
-                    tenet_tensors::tensortrace_fusion_dyn_into(
+                    tenet_tensors::tensortrace_fusion_dyn_owned(
                         $dst,
-                        &mut data,
                         $src,
                         src_data,
                         operation,
                         D::from_real(1.0),
-                        D::from_real(0.0),
                     )
                 }
             };
         }
-        match (&dst_bound, source.space.as_ref()) {
+        let data = match (&dst_bound, source.space.as_ref()) {
             (UserBoundSpace::U1(dst), UserBoundSpace::U1(src)) => trace_bound!(dst, src),
             (UserBoundSpace::Z2(dst), UserBoundSpace::Z2(src)) => trace_bound!(dst, src),
             (UserBoundSpace::FZ2(dst), UserBoundSpace::FZ2(src)) => trace_bound!(dst, src),

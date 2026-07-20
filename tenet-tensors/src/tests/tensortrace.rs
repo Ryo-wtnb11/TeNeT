@@ -13,6 +13,46 @@ fn lowered_u1_dynamic_space(
     .unwrap()
 }
 
+fn assert_owned_trace_matches_initialized_for_real_and_complex<R>(
+    dst: &BoundDynamicFusionMapSpace<R>,
+    src: &BoundDynamicFusionMapSpace<R>,
+    axes: TensorTraceAxisSpec<'_>,
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let src_len = src.space().required_len().unwrap();
+    let dst_len = dst.space().required_len().unwrap();
+    let real_source = (0..src_len)
+        .map(|index| index as f64 + 0.25)
+        .collect::<Vec<_>>();
+    let mut expected_real = vec![0.0; dst_len];
+    tensortrace_fusion_dyn_into(dst, &mut expected_real, src, &real_source, axes, 1.0, 0.0)
+        .unwrap();
+    let actual_real = tensortrace_fusion_dyn_owned(dst, src, &real_source, axes, 1.0).unwrap();
+    assert_eq!(actual_real, expected_real);
+
+    let complex_source = real_source
+        .iter()
+        .enumerate()
+        .map(|(index, &real)| Complex64::new(real, index as f64 + 0.5))
+        .collect::<Vec<_>>();
+    let mut expected_complex = vec![Complex64::new(0.0, 0.0); dst_len];
+    tensortrace_fusion_dyn_into(
+        dst,
+        &mut expected_complex,
+        src,
+        &complex_source,
+        axes,
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 0.0),
+    )
+    .unwrap();
+    let actual_complex =
+        tensortrace_fusion_dyn_owned(dst, src, &complex_source, axes, Complex64::new(1.0, 0.0))
+            .unwrap();
+    assert_eq!(actual_complex, expected_complex);
+}
+
 #[derive(Clone, Debug)]
 struct ReportedLenHostStorage<T> {
     data: Vec<T>,
@@ -137,6 +177,101 @@ fn public_dynamic_fz2_trace_validates_exact_extents_before_mutation() {
             }
         }
     }
+}
+
+#[test]
+fn owned_trace_matches_initialized_across_supported_multiplicity_free_rules() {
+    // What: the owned writer preserves the initialized trace oracle for both
+    // storage dtypes across U1, SU2, fermionic, and product coefficient paths.
+    fn scalar_destination<R>(provider: std::sync::Arc<R>) -> BoundDynamicFusionMapSpace<R>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+            provider,
+            FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([])),
+            [Vec::<usize>::new()],
+        )
+        .unwrap()
+    }
+
+    let u1_provider = std::sync::Arc::new(U1FusionRule);
+    let u1_leg = || SectorLeg::new([(U1Irrep::new(1).sector_id(), 2)], false);
+    let u1_src = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+        std::sync::Arc::clone(&u1_provider),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([u1_leg()]),
+            FusionProductSpace::new([u1_leg()]),
+        ),
+        [vec![2, 2]],
+    )
+    .unwrap();
+    let u1_dst = scalar_destination(u1_provider);
+    assert_owned_trace_matches_initialized_for_real_and_complex(
+        &u1_dst,
+        &u1_src,
+        TensorTraceAxisSpec::new(&[], &[0], &[1]),
+    );
+
+    let su2_provider = std::sync::Arc::new(SU2FusionRule);
+    let su2_leg = || SectorLeg::new([(SU2Irrep::from_twice_spin(1).sector_id(), 2)], false);
+    let su2_src = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+        std::sync::Arc::clone(&su2_provider),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([su2_leg()]),
+            FusionProductSpace::new([su2_leg()]),
+        ),
+        [vec![2, 2]],
+    )
+    .unwrap();
+    let su2_dst = scalar_destination(su2_provider);
+    assert_owned_trace_matches_initialized_for_real_and_complex(
+        &su2_dst,
+        &su2_src,
+        TensorTraceAxisSpec::new(&[], &[0], &[1]),
+    );
+
+    let fz2_provider = std::sync::Arc::new(FermionParityFusionRule);
+    let fz2_leg = || SectorLeg::new([(SectorId::new(0), 2), (SectorId::new(1), 2)], false);
+    let fz2_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([fz2_leg()]),
+        FusionProductSpace::new([fz2_leg()]),
+    );
+    let fz2_src = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+        std::sync::Arc::clone(&fz2_provider),
+        fz2_hom.clone(),
+        vec![vec![2, 2]; fz2_hom.fusion_tree_keys(fz2_provider.as_ref()).len()],
+    )
+    .unwrap();
+    let fz2_dst = scalar_destination(fz2_provider);
+    assert_owned_trace_matches_initialized_for_real_and_complex(
+        &fz2_dst,
+        &fz2_src,
+        TensorTraceAxisSpec::new(&[], &[0], &[1]),
+    );
+
+    let left_rule = FpU1Rule::default();
+    let product_provider = std::sync::Arc::new(FpU1Su2Rule::default());
+    let product_sector = product_provider.encode_sector(
+        left_rule.encode_sector(SectorId::new(1), U1Irrep::new(1).sector_id()),
+        SU2Irrep::from_twice_spin(1).sector_id(),
+    );
+    let product_leg = || SectorLeg::new([(product_sector, 2)], false);
+    let product_src = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+        std::sync::Arc::clone(&product_provider),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([product_leg()]),
+            FusionProductSpace::new([product_leg()]),
+        ),
+        [vec![2, 2]],
+    )
+    .unwrap();
+    let product_dst = scalar_destination(product_provider);
+    assert_owned_trace_matches_initialized_for_real_and_complex(
+        &product_dst,
+        &product_src,
+        TensorTraceAxisSpec::new(&[], &[0], &[1]),
+    );
 }
 
 fn strided_fz2_identity_trace_spaces() -> (FusionTensorMapSpace<1, 1>, FusionTensorMapSpace<1, 1>) {
@@ -1655,6 +1790,16 @@ fn dynamic_u1_conjugating_trace_matches_hand_indexed_logical_adjoint() {
     )
     .unwrap();
     assert_eq!(checked, expected);
+    let owned =
+        tensortrace_fusion_dyn_owned_checked(&dynamic_dst, &dynamic_src, &src_data, axes, alpha)
+            .unwrap();
+    assert_eq!(
+        owned,
+        hand_trace
+            .into_iter()
+            .map(|trace| alpha * trace)
+            .collect::<Vec<_>>()
+    );
 
     let mut unchanged = initial.clone();
     let error = tensortrace_fusion_dyn_into_checked(
@@ -1675,6 +1820,19 @@ fn dynamic_u1_conjugating_trace_matches_hand_indexed_logical_adjoint() {
         }
     );
     assert_eq!(unchanged, initial);
+    assert_eq!(
+        tensortrace_fusion_dyn_owned_checked(
+            &dynamic_dst,
+            &dynamic_src,
+            &src_data[..11],
+            axes,
+            alpha,
+        ),
+        Err(OperationError::ElementCountMismatch {
+            expected: 12,
+            actual: 11,
+        })
+    );
     // What: typed, dynamic unchecked, dynamic checked, and their error path all
     // retain the parent block grid for asymmetric non-self-dual U1.
     assert_eq!(crate::lowering::adjoint_view_build_count(), 0);
@@ -1825,6 +1983,65 @@ fn dynamic_u1_adjoint_trace_replays_two_pairs_from_padded_storage() {
     assert_eq!(unchecked, expected);
     assert_eq!(checked, expected);
     assert_eq!(crate::lowering::adjoint_view_build_count(), 0);
+}
+
+#[test]
+fn owned_trace_reuses_initialized_fallback_for_padded_destination() {
+    // What: a destination hole retains initialized storage semantics while the
+    // owned API reuses the already-compiled oriented trace structure.
+    let rule = U1FusionRule;
+    let provider = std::sync::Arc::new(rule);
+    let leg = || SectorLeg::new([(U1Irrep::new(1).sector_id(), 2)], false);
+    let src = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+        std::sync::Arc::clone(&provider),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg()]),
+            FusionProductSpace::new([leg()]),
+        ),
+        [vec![2, 2]],
+    )
+    .unwrap();
+
+    let dst_hom = FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
+    let dense = TensorMapSpace::<0, 0>::from_dims([], []).unwrap();
+    let canonical = FusionTensorMapSpace::from_degeneracy_shapes(
+        dense.clone(),
+        dst_hom.clone(),
+        &rule,
+        [Vec::<usize>::new()],
+    )
+    .unwrap();
+    let key = canonical
+        .subblock_structure()
+        .block(0)
+        .unwrap()
+        .key()
+        .clone();
+    let padded = FusionTensorMapSpace::new_unbound(
+        dense,
+        dst_hom,
+        BlockStructure::from_blocks_with_rank(
+            0,
+            vec![BlockSpec::with_key(key, vec![], vec![], 1).unwrap()],
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .try_bind_rule(&rule)
+    .unwrap();
+    let dst = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        DynamicFusionMapSpace::from_typed(&padded),
+        provider,
+    )
+    .unwrap();
+    let src_data = vec![1.0, 2.0, 3.0, 4.0];
+    let axes = TensorTraceAxisSpec::new(&[], &[0], &[1]);
+    let mut expected = vec![0.0; 2];
+    tensortrace_fusion_dyn_into(&dst, &mut expected, &src, &src_data, axes, 1.0, 0.0).unwrap();
+    let actual = tensortrace_fusion_dyn_owned(&dst, &src, &src_data, axes, 1.0).unwrap();
+
+    assert_eq!(actual, expected);
+    assert_eq!(actual[0], 0.0);
 }
 
 #[test]
@@ -2234,6 +2451,22 @@ fn tensortrace_fusion_recouples_once_per_simple_fusion_group() {
         .terms()
         .windows(2)
         .all(|pair| pair[0].src_block() <= pair[1].src_block()));
+    let provider = std::sync::Arc::new(SU2FusionRule);
+    let dynamic_src = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        DynamicFusionMapSpace::from_typed(src.fusion_space().unwrap()),
+        std::sync::Arc::clone(&provider),
+    )
+    .unwrap();
+    let dynamic_dst = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        DynamicFusionMapSpace::from_typed(dst.fusion_space().unwrap()),
+        provider,
+    )
+    .unwrap();
+    assert_owned_trace_matches_initialized_for_real_and_complex(
+        &dynamic_dst,
+        &dynamic_src,
+        TensorTraceAxisSpec::new(&[1, 3], &[0], &[2]),
+    );
 
     let conjugate_axes = TensorTraceAxisSpec::new_with_conjugation(&[1, 3], &[0], &[2], true);
     let adjoint_src =
@@ -2396,6 +2629,22 @@ fn tensortrace_fusion_product_block_matches_scalar_trace_terms() {
             .iter()
             .any(|term| *term.coefficient() < 0.0),
         "odd-sector conjugate trace fixture must retain a negative structural coefficient"
+    );
+    let provider = std::sync::Arc::new(FpU1Su2Rule::default());
+    let dynamic_src = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        DynamicFusionMapSpace::from_typed(src.fusion_space().unwrap()),
+        std::sync::Arc::clone(&provider),
+    )
+    .unwrap();
+    let dynamic_dst = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        DynamicFusionMapSpace::from_typed(conjugate_dst.fusion_space().unwrap()),
+        provider,
+    )
+    .unwrap();
+    assert_owned_trace_matches_initialized_for_real_and_complex(
+        &dynamic_dst,
+        &dynamic_src,
+        conjugate_axes,
     );
     assert_eq!(crate::lowering::adjoint_view_build_count(), 0);
 }

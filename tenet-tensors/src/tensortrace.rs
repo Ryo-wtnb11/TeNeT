@@ -18,9 +18,9 @@ use crate::strided::offset_to_isize;
 use crate::{tensortrace_raw_strided_kernel, tensortrace_raw_strided_kernel_add_with_coefficient};
 use tenet_operations::structure_identity::validate_structure_identity;
 use tenet_operations::transform_structure::validate_destination_layouts_injective;
-use tenet_operations::OperationError;
 use tenet_operations::TensorTraceAxisSpec;
 use tenet_operations::{axpby_raw_strided_kernel_trusted, scale_raw_strided_kernel_trusted};
+use tenet_operations::{try_tensortrace_owned_raw, OperationError, OwnedTraceTerm};
 use tenet_operations::{ConjugateValue, RealStructuralCoefficient, RecouplingCoefficientAction};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -791,6 +791,7 @@ pub(crate) struct TensorTraceDescriptor {
     dst_strides: Vec<isize>,
     src_output_strides: Vec<isize>,
     src_trace_strides: Vec<isize>,
+    destination_producers: Vec<usize>,
 }
 
 impl TensorTraceDescriptor {
@@ -840,6 +841,14 @@ impl TensorTraceDescriptor {
 
     pub(crate) fn src_trace_strides(&self, term: &TensorTraceDescriptorTerm) -> &[isize] {
         &self.src_trace_strides[term.trace_layout_start..term.trace_layout_start + term.trace_rank]
+    }
+
+    fn destination_producer_offsets(&self) -> &[usize] {
+        &self.destination_producers[..self.destination_layouts.len() + 1]
+    }
+
+    fn destination_producer_indices(&self) -> &[usize] {
+        &self.destination_producers[self.destination_layouts.len() + 1..]
     }
 
     fn compile(
@@ -985,8 +994,53 @@ impl TensorTraceDescriptor {
                     offset: offset_to_isize(block.offset())?,
                 });
         }
+        descriptor.compile_destination_producer_partition(dst_structure.block_count())?;
 
         Ok(descriptor)
+    }
+
+    fn compile_destination_producer_partition(
+        &mut self,
+        block_count: usize,
+    ) -> Result<(), OperationError> {
+        let offsets_len = block_count
+            .checked_add(1)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        let total_len = offsets_len
+            .checked_add(self.terms.len())
+            .ok_or(OperationError::ElementCountOverflow)?;
+        self.destination_producers.resize(total_len, 0);
+        let (offsets, indices) = self.destination_producers.split_at_mut(offsets_len);
+        for term in &self.terms {
+            let end = offsets.get_mut(term.dst_block + 1).ok_or(
+                OperationError::BlockIndexOutOfBounds {
+                    tensor: "trace destination",
+                    index: term.dst_block,
+                    count: block_count,
+                },
+            )?;
+            *end = end
+                .checked_add(1)
+                .ok_or(OperationError::ElementCountOverflow)?;
+        }
+
+        for block in 0..block_count {
+            offsets[block + 1] = offsets[block]
+                .checked_add(offsets[block + 1])
+                .ok_or(OperationError::ElementCountOverflow)?;
+        }
+        for (term_index, term) in self.terms.iter().enumerate().rev() {
+            let cursor = &mut offsets[term.dst_block + 1];
+            *cursor = cursor
+                .checked_sub(1)
+                .ok_or(OperationError::ElementCountOverflow)?;
+            indices[*cursor] = term_index;
+        }
+        for block in 0..block_count {
+            offsets[block] = offsets[block + 1];
+        }
+        offsets[block_count] = self.terms.len();
+        Ok(())
     }
 }
 
@@ -1561,6 +1615,86 @@ where
     )
 }
 
+/// Internal owned-output trace path for built-in host storage.
+///
+/// This compiles the oriented trace semantics once, then either uses the
+/// private-initialization writer or replays that same structure into an
+/// initialized destination when canonical physical coverage is unavailable.
+#[doc(hidden)]
+pub fn tensortrace_fusion_dyn_owned<R, D>(
+    dst_space: &BoundDynamicFusionMapSpace<R>,
+    src_space: &BoundDynamicFusionMapSpace<R>,
+    src_data: &[D],
+    axes: TensorTraceAxisSpec<'_>,
+    alpha: D,
+) -> Result<Vec<D>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar:
+        Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + RealStructuralCoefficient,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<R::Scalar>
+        + strided_kernel::MaybeSendSync,
+{
+    let structure = TensorTraceFusionStructure::compile_fusion_dyn_raw(
+        src_space.provider(),
+        dst_space.space(),
+        src_space.space(),
+        axes,
+    )?;
+    tensortrace_fusion_dyn_structure_owned(
+        &structure,
+        dst_space.space(),
+        src_space.space(),
+        src_data,
+        alpha,
+    )
+}
+
+/// Checked built-in counterpart of [`tensortrace_fusion_dyn_owned`].
+#[doc(hidden)]
+pub fn tensortrace_fusion_dyn_owned_checked<R, D>(
+    dst_space: &BoundDynamicFusionMapSpace<R>,
+    src_space: &BoundDynamicFusionMapSpace<R>,
+    src_data: &[D],
+    axes: TensorTraceAxisSpec<'_>,
+    alpha: D,
+) -> Result<Vec<D>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra,
+    R::Scalar:
+        Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + RealStructuralCoefficient,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<R::Scalar>
+        + strided_kernel::MaybeSendSync,
+{
+    let structure = TensorTraceFusionStructure::compile_fusion_dyn_checked_raw(
+        src_space.provider(),
+        dst_space.space(),
+        src_space.space(),
+        axes,
+    )?;
+    tensortrace_fusion_dyn_structure_owned(
+        &structure,
+        dst_space.space(),
+        src_space.space(),
+        src_data,
+        alpha,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn tensortrace_fusion_dyn_into_raw<R, D>(
     rule: &R,
@@ -1591,6 +1725,84 @@ where
     tensortrace_fusion_dyn_structure_into_raw(
         &structure, dst_space, dst_data, src_space, src_data, alpha, beta,
     )
+}
+
+fn tensortrace_fusion_dyn_structure_owned<C, D>(
+    structure: &TensorTraceFusionStructure<C>,
+    dst_space: &DynamicFusionMapSpace,
+    src_space: &DynamicFusionMapSpace,
+    src_data: &[D],
+    alpha: D,
+) -> Result<Vec<D>, OperationError>
+where
+    C: Copy,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<C>
+        + strided_kernel::MaybeSendSync,
+{
+    let descriptor = structure.descriptor();
+    if descriptor.terms().len() != structure.terms().len() {
+        return Err(OperationError::CoefficientCountMismatch {
+            expected: descriptor.terms().len(),
+            actual: structure.terms().len(),
+        });
+    }
+    for (term, fusion_term) in descriptor.terms().iter().zip(structure.terms()) {
+        if term.dst_block != fusion_term.dst_block() || term.src_block != fusion_term.src_block() {
+            return Err(OperationError::StructureMismatch {
+                tensor: "trace term",
+            });
+        }
+    }
+
+    if let Some(data) = try_tensortrace_owned_raw(
+        dst_space.structure(),
+        dst_space.nout(),
+        src_space.structure(),
+        src_data,
+        descriptor.source_conjugate(),
+        descriptor.terms().len(),
+        descriptor.destination_producer_indices(),
+        descriptor.destination_producer_offsets(),
+        |term_index| {
+            let term = &descriptor.terms()[term_index];
+            let fusion_term = &structure.terms()[term_index];
+            OwnedTraceTerm::new(
+                term.dst_block,
+                term.src_block,
+                descriptor.output_shape(term),
+                descriptor.trace_shape(term),
+                descriptor.src_output_strides(term),
+                descriptor.src_trace_strides(term),
+                fusion_term.coefficient,
+            )
+        },
+        alpha,
+    )? {
+        return Ok(data);
+    }
+
+    let required_len = dst_space
+        .structure()
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let mut data = vec![D::zero(); required_len];
+    tensortrace_fusion_dyn_structure_into_raw(
+        structure,
+        dst_space,
+        &mut data,
+        src_space,
+        src_data,
+        alpha,
+        D::zero(),
+    )?;
+    Ok(data)
 }
 
 #[allow(clippy::too_many_arguments)]
