@@ -5109,6 +5109,10 @@ where
     D: FactorScalar,
 {
     let mut matricizations: Vec<SectorMatricization<D>> = Vec::new();
+    let mut matrix_indices = HashMap::new();
+    let mut row_offsets: Vec<HashMap<&FusionTreeKey, usize>> = Vec::new();
+    let mut col_offsets: Vec<HashMap<&FusionTreeKey, usize>> = Vec::new();
+    let mut routes = Vec::with_capacity(structure.block_count());
 
     for index in 0..structure.block_count() {
         let block = structure
@@ -5123,12 +5127,10 @@ where
         let sector = coupled_of(key.codomain_tree());
         let row_dim: usize = block.shape()[..nout].iter().product();
         let col_dim: usize = block.shape()[nout..].iter().product();
-        let matrix = match matricizations
-            .iter_mut()
-            .find(|matrix| matrix.sector == sector)
-        {
-            Some(matrix) => matrix,
+        let matrix_index = match matrix_indices.get(&sector) {
+            Some(&matrix_index) => matrix_index,
             None => {
+                let matrix_index = matricizations.len();
                 matricizations.push(SectorMatricization::<D> {
                     sector,
                     rows: 0,
@@ -5137,63 +5139,52 @@ where
                     col_trees: Vec::new(),
                     data: Vec::new(),
                 });
-                matricizations.last_mut().expect("just pushed")
+                matrix_indices.insert(sector, matrix_index);
+                row_offsets.push(HashMap::new());
+                col_offsets.push(HashMap::new());
+                matrix_index
             }
         };
-        if !matrix
-            .row_trees
-            .iter()
-            .any(|(tree, _, _)| tree == key.codomain_tree())
-        {
-            matrix.row_trees.push((
-                key.codomain_tree().clone(),
-                matrix.rows,
-                block.shape()[..nout].to_vec(),
-            ));
-            matrix.rows += row_dim;
-        }
-        if !matrix
-            .col_trees
-            .iter()
-            .any(|(tree, _, _)| tree == key.domain_tree())
-        {
-            matrix.col_trees.push((
-                key.domain_tree().clone(),
-                matrix.cols,
-                block.shape()[nout..].to_vec(),
-            ));
-            matrix.cols += col_dim;
-        }
+        let matrix = &mut matricizations[matrix_index];
+        let row_offset = match row_offsets[matrix_index].get(key.codomain_tree()) {
+            Some(&offset) => offset,
+            None => {
+                let offset = matrix.rows;
+                matrix.row_trees.push((
+                    key.codomain_tree().clone(),
+                    offset,
+                    block.shape()[..nout].to_vec(),
+                ));
+                matrix.rows += row_dim;
+                row_offsets[matrix_index].insert(key.codomain_tree(), offset);
+                offset
+            }
+        };
+        let col_offset = match col_offsets[matrix_index].get(key.domain_tree()) {
+            Some(&offset) => offset,
+            None => {
+                let offset = matrix.cols;
+                matrix.col_trees.push((
+                    key.domain_tree().clone(),
+                    offset,
+                    block.shape()[nout..].to_vec(),
+                ));
+                matrix.cols += col_dim;
+                col_offsets[matrix_index].insert(key.domain_tree(), offset);
+                offset
+            }
+        };
+        routes.push((matrix_index, row_offset, col_offset));
     }
     for matrix in &mut matricizations {
         matrix.data = vec![D::zero(); matrix.rows * matrix.cols];
     }
 
-    for index in 0..structure.block_count() {
+    for (index, (matrix_index, row_offset, col_offset)) in routes.into_iter().enumerate() {
         let block = structure
             .block(index)
             .map_err(OperationError::from_core_preserving_context)?;
-        let BlockKey::FusionTree(key) = block.key() else {
-            continue;
-        };
-        let sector = coupled_of(key.codomain_tree());
-        let matrix = matricizations
-            .iter_mut()
-            .find(|matrix| matrix.sector == sector)
-            .expect("matricization registered in first pass");
-        let row_offset = matrix
-            .row_trees
-            .iter()
-            .find(|(tree, _, _)| tree == key.codomain_tree())
-            .map(|(_, offset, _)| *offset)
-            .expect("row tree registered in first pass");
-        let col_offset = matrix
-            .col_trees
-            .iter()
-            .find(|(tree, _, _)| tree == key.domain_tree())
-            .map(|(_, offset, _)| *offset)
-            .expect("column tree registered in first pass");
-
+        let matrix = &mut matricizations[matrix_index];
         let shape = block.shape();
         let strides = block.strides();
         let offset = block.offset();
@@ -6106,4 +6097,170 @@ where
         });
     }
     build_left_right_bound_pair_generic(provider, space.homspace(), &matrices, &pairs)
+}
+
+#[cfg(test)]
+mod sector_matricization_tests {
+    use super::*;
+    use tenet_core::{BlockSpec, FusionTreePairKey, Z2FusionRule};
+
+    fn z2_pair(codomain: [usize; 2], domain: [usize; 2], coupled: usize) -> FusionTreePairKey {
+        let pair = FusionTreePairKey::try_pair_from_sector_ids(
+            codomain,
+            domain,
+            coupled,
+            [false; 2],
+            [false; 2],
+            std::iter::empty::<usize>(),
+            std::iter::empty::<usize>(),
+            [1],
+            [1],
+        )
+        .unwrap();
+        pair.validate_for_rule(&Z2FusionRule).unwrap();
+        pair
+    }
+
+    #[test]
+    fn sector_matricizations_preserve_encounter_order_and_padded_block_values() {
+        // What: noncanonical storage packs repeated row/column trees into
+        // first-encounter sector geometry without changing block copy order.
+        let structure = BlockStructure::from_blocks_with_rank(
+            4,
+            vec![
+                BlockSpec::with_key(
+                    z2_pair([0, 1], [1, 0], 1).into(),
+                    vec![1, 2, 3, 1],
+                    vec![2, 9, 1, 20],
+                    3,
+                )
+                .unwrap(),
+                BlockSpec::with_key(
+                    z2_pair([0, 0], [1, 1], 0).into(),
+                    vec![2, 1, 1, 2],
+                    vec![2, 20, 1, 7],
+                    30,
+                )
+                .unwrap(),
+                BlockSpec::with_key(
+                    z2_pair([0, 0], [0, 0], 0).into(),
+                    vec![2, 1, 2, 1],
+                    vec![3, 20, 1, 50],
+                    50,
+                )
+                .unwrap(),
+                BlockSpec::with_key(
+                    z2_pair([1, 1], [1, 1], 0).into(),
+                    vec![1, 2, 1, 2],
+                    vec![4, 1, 20, 7],
+                    70,
+                )
+                .unwrap(),
+                BlockSpec::with_key(
+                    z2_pair([1, 1], [0, 0], 0).into(),
+                    vec![1, 2, 2, 1],
+                    vec![4, 1, 5, 20],
+                    90,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let mut data = vec![0.0; structure.required_len().unwrap()];
+        for (position, value) in [
+            (3, 101.0),
+            (12, 102.0),
+            (4, 103.0),
+            (13, 104.0),
+            (5, 105.0),
+            (14, 106.0),
+            (30, 1.0),
+            (32, 2.0),
+            (37, 5.0),
+            (39, 6.0),
+            (50, 3.0),
+            (53, 4.0),
+            (51, 7.0),
+            (54, 8.0),
+            (70, 9.0),
+            (71, 10.0),
+            (77, 13.0),
+            (78, 14.0),
+            (90, 11.0),
+            (91, 12.0),
+            (95, 15.0),
+            (96, 16.0),
+        ] {
+            data[position] = value;
+        }
+
+        let matrices = sector_matricizations::<f64>(&structure, &data, 2).unwrap();
+
+        assert_eq!(
+            matrices
+                .iter()
+                .map(|matrix| matrix.sector)
+                .collect::<Vec<_>>(),
+            [SectorId::new(1), SectorId::new(0)]
+        );
+        assert_eq!(matrices[0].rows, 2);
+        assert_eq!(matrices[0].cols, 3);
+        assert_eq!(matrices[0].data, [101.0, 102.0, 103.0, 104.0, 105.0, 106.0]);
+        assert_eq!(
+            matrices[0].row_trees,
+            vec![(
+                z2_pair([0, 1], [1, 0], 1).codomain_tree().clone(),
+                0,
+                vec![1, 2],
+            )]
+        );
+        assert_eq!(
+            matrices[0].col_trees,
+            vec![(
+                z2_pair([0, 1], [1, 0], 1).domain_tree().clone(),
+                0,
+                vec![3, 1],
+            )]
+        );
+
+        assert_eq!(matrices[1].rows, 4);
+        assert_eq!(matrices[1].cols, 4);
+        assert_eq!(
+            matrices[1].data,
+            [
+                1.0, 2.0, 9.0, 10.0, 5.0, 6.0, 13.0, 14.0, 3.0, 4.0, 11.0, 12.0, 7.0, 8.0, 15.0,
+                16.0,
+            ]
+        );
+        assert_eq!(
+            matrices[1].row_trees,
+            vec![
+                (
+                    z2_pair([0, 0], [1, 1], 0).codomain_tree().clone(),
+                    0,
+                    vec![2, 1],
+                ),
+                (
+                    z2_pair([1, 1], [1, 1], 0).codomain_tree().clone(),
+                    2,
+                    vec![1, 2],
+                ),
+            ]
+        );
+        assert_eq!(
+            matrices[1].col_trees,
+            vec![
+                (
+                    z2_pair([0, 0], [1, 1], 0).domain_tree().clone(),
+                    0,
+                    vec![1, 2],
+                ),
+                (
+                    z2_pair([0, 0], [0, 0], 0).domain_tree().clone(),
+                    2,
+                    vec![2, 1],
+                ),
+            ]
+        );
+    }
 }
