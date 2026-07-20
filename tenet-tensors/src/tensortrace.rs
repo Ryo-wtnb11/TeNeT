@@ -108,7 +108,7 @@ where
         .fusion_space()
         .ok_or(tenet_core::CoreError::MissingFusionSpace)?;
     if axes.source_conjugate() {
-        let adjoint_src = adjoint_fusion_space_view(src_fusion)?;
+        let adjoint_src = adjoint_fusion_space_view(rule, src_fusion)?;
         let adjoint_axes = lower_tensortrace_source_adjoint_axes::<SRC_NOUT, SRC_NIN>(axes)?;
         TensorTraceFusionStructure::compile_fusion_spaces_with_storage_structure(
             rule,

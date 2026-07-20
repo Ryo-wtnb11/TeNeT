@@ -1236,7 +1236,7 @@ fn categorical_adjoint_view_swaps_homspace_and_block_layout_without_dualizing() 
     .try_bind_rule(&Z2FusionRule)
     .unwrap();
 
-    let adjoint = crate::lowering::adjoint_fusion_space_view(&space).unwrap();
+    let adjoint = crate::lowering::adjoint_fusion_space_view(&Z2FusionRule, &space).unwrap();
 
     assert_eq!(
         adjoint.homspace().codomain().legs(),
@@ -1274,7 +1274,7 @@ fn categorical_adjoint_view_does_not_dualize_nonselfdual_u1_stored_legs() {
     .try_bind_rule(&U1FusionRule)
     .unwrap();
 
-    let adjoint = crate::lowering::adjoint_fusion_space_view(&space).unwrap();
+    let adjoint = crate::lowering::adjoint_fusion_space_view(&U1FusionRule, &space).unwrap();
 
     assert_eq!(
         adjoint.homspace().codomain().legs(),
@@ -1947,7 +1947,7 @@ fn tensortrace_fusion_recouples_once_per_simple_fusion_group() {
 
     let conjugate_axes = TensorTraceAxisSpec::new_with_conjugation(&[1, 3], &[0], &[2], true);
     let adjoint_src =
-        crate::lowering::adjoint_fusion_space_view(src.fusion_space().unwrap()).unwrap();
+        crate::lowering::adjoint_fusion_space_view(&rule, src.fusion_space().unwrap()).unwrap();
     let lowered_axes =
         crate::lowering::lower_tensortrace_source_adjoint_axes::<2, 2>(conjugate_axes).unwrap();
     let lowered_axes = lowered_axes.as_spec();
@@ -2058,7 +2058,7 @@ fn tensortrace_fusion_product_block_matches_scalar_trace_terms() {
 
     let conjugate_axes = TensorTraceAxisSpec::new_with_conjugation(&[1, 2], &[0], &[3], true);
     let adjoint_src =
-        crate::lowering::adjoint_fusion_space_view(src.fusion_space().unwrap()).unwrap();
+        crate::lowering::adjoint_fusion_space_view(&rule, src.fusion_space().unwrap()).unwrap();
     let lowered_axes =
         crate::lowering::lower_tensortrace_source_adjoint_axes::<2, 2>(conjugate_axes).unwrap();
     let lowered_axes = lowered_axes.as_spec();
@@ -2285,9 +2285,8 @@ fn tensortrace_fusion_interleaved_groups_lower_in_global_source_order() {
                         panic!("fixture source must use fusion-tree keys");
                     };
                     let codomain = key.codomain_tree();
-                    // What: the later member omits its rank-two vertex while
-                    // retaining the same external group, so the public trace
-                    // boundary proves source-major group admission.
+                    // What: a later block that retains its external sectors but
+                    // omits a rank-two vertex is invalid fusion-space metadata.
                     let raw = FusionTreePairKey::try_pair_from_sector_ids(
                         codomain.uncoupled().iter().map(|sector| sector.id()),
                         Vec::<usize>::new(),
@@ -2316,45 +2315,20 @@ fn tensortrace_fusion_interleaved_groups_lower_in_global_source_order() {
             .collect(),
     )
     .unwrap();
-    let malformed_src_space = FusionTensorMapSpace::new_unbound(
+    let malformed_error = FusionTensorMapSpace::new_unbound(
         src.fusion_space().unwrap().dense_space().clone(),
         src.fusion_space().unwrap().homspace().clone(),
         malformed_structure,
     )
     .unwrap()
-    .try_inherit_rule_identity(src.fusion_space().unwrap())
-    .unwrap();
-    let malformed_src: TensorMap<f64, 2, 2> = TensorMap::from_vec_with_fusion_space(
-        vec![0.0; malformed_src_space.required_len().unwrap()],
-        malformed_src_space,
-    )
-    .unwrap();
-    let incomplete_dst_tensor: TensorMap<f64, 1, 1> = TensorMap::from_vec_with_fusion_space(
-        vec![0.0; incomplete_space.required_len().unwrap()],
-        incomplete_space,
-    )
-    .unwrap();
-
-    for _ in 0..2 {
-        crate::tensortrace::reset_trace_transform_invocations();
-        let error = tensortrace_fusion_structure(
-            &rule,
-            &incomplete_dst_tensor,
-            &malformed_src,
-            TensorTraceAxisSpec::new(&[0, 3], &[1], &[2]),
-        )
-        .unwrap_err();
-        // What: a Simple-fusion group transforms atomically, so its later
-        // malformed member is diagnosed before lowering its first member.
-        assert!(
-            matches!(
-                error,
-                OperationError::Core(tenet_core::CoreError::MalformedFusionTree { .. })
-            ),
-            "unexpected block-atomic error: {error:?}"
-        );
-        assert_eq!(crate::tensortrace::take_trace_transform_sources(), vec![0]);
-    }
+    .try_bind_rule(&rule)
+    .unwrap_err();
+    // What: malformed expert structures stop at the fusion-space admission
+    // boundary and cannot reach trace planning with an inherited identity tag.
+    assert!(matches!(
+        malformed_error,
+        tenet_core::CoreError::MalformedFusionTree { .. }
+    ));
 }
 
 #[test]

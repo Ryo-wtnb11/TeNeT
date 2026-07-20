@@ -1,7 +1,7 @@
 use std::array;
 
 use tenet_core::{
-    BlockKey, BlockSpec, BlockStructure, FusionTensorMapSpace, FusionTreeHomSpace,
+    BlockKey, BlockSpec, BlockStructure, FusionRule, FusionTensorMapSpace, FusionTreeHomSpace,
     FusionTreePairKey, TensorMapSpace,
 };
 
@@ -354,9 +354,16 @@ pub(crate) fn adjoint_tensor_axes(
         .collect()
 }
 
-pub(crate) fn adjoint_fusion_space_view<const NOUT: usize, const NIN: usize>(
+pub(crate) fn adjoint_fusion_space_view<R, const NOUT: usize, const NIN: usize>(
+    rule: &R,
     source: &FusionTensorMapSpace<NOUT, NIN>,
-) -> Result<FusionTensorMapSpace<NIN, NOUT>, OperationError> {
+) -> Result<FusionTensorMapSpace<NIN, NOUT>, OperationError>
+where
+    R: FusionRule,
+{
+    source
+        .validate_rule(rule)
+        .map_err(OperationError::from_core_preserving_context)?;
     let codomain_dims = array::from_fn(|index| source.dense_space().domain().dims()[index]);
     let domain_dims = array::from_fn(|index| source.dense_space().codomain().dims()[index]);
     let dense_space = TensorMapSpace::<NIN, NOUT>::from_dims(codomain_dims, domain_dims)
@@ -369,7 +376,7 @@ pub(crate) fn adjoint_fusion_space_view<const NOUT: usize, const NIN: usize>(
         adjoint_block_structure_view(NOUT, NIN, source.subblock_structure())?.into_shared();
     FusionTensorMapSpace::from_shared_subblock_structure(dense_space, homspace, structure)
         .map_err(OperationError::from_core_preserving_context)?
-        .try_inherit_rule_identity(source)
+        .try_bind_rule(rule)
         .map_err(OperationError::from_core_preserving_context)
 }
 

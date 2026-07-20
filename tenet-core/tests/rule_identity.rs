@@ -153,6 +153,31 @@ fn raw_scalar_space_for_rule<R: FusionRule>(rule: &R) -> FusionTensorMapSpace<0,
     raw_scalar_space_with_key(key.into())
 }
 
+fn z2_rank_one_pair(sector: SectorId, is_dual: bool) -> FusionTreePairKey {
+    let tree = FusionTreeKey::try_new_for_rule(&Z2FusionRule, [sector], sector, [is_dual], [], [])
+        .unwrap();
+    FusionTreePairKey::pair(tree.clone(), tree)
+}
+
+fn raw_z2_matrix_space(
+    leg_sector: SectorId,
+    degeneracy: usize,
+    key: FusionTreePairKey,
+    shape: Vec<usize>,
+) -> FusionTensorMapSpace<1, 1> {
+    let leg = || FusionProductSpace::new([SectorLeg::new([(leg_sector, degeneracy)], false)]);
+    FusionTensorMapSpace::new_unbound(
+        TensorMapSpace::from_dims([degeneracy], [degeneracy]).unwrap(),
+        FusionTreeHomSpace::new(leg(), leg()),
+        BlockStructure::from_blocks_with_rank(
+            2,
+            vec![BlockSpec::column_major_with_key(key.into(), shape, 0).unwrap()],
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
+
 #[test]
 fn binding_a_rule_rejects_non_categorical_block_namespaces() {
     // What: neither the anonymous dense key nor application routing metadata
@@ -166,74 +191,68 @@ fn binding_a_rule_rejects_non_categorical_block_namespaces() {
 }
 
 #[test]
-fn identity_inheritance_rejects_non_categorical_destinations() {
-    let source = raw_scalar_space_for_rule(&Z2FusionRule)
-        .try_bind_rule(&Z2FusionRule)
-        .unwrap();
+fn rule_binding_requires_every_present_block_to_be_a_homspace_subset() {
+    let even = SectorId::new(0);
+    let odd = SectorId::new(1);
+    let split_codomain = FusionTreeKey::try_new_for_rule(
+        &Z2FusionRule,
+        [even, even],
+        even,
+        [false, false],
+        [],
+        [MultiplicityIndex::ONE],
+    )
+    .unwrap();
+    let split_domain =
+        FusionTreeKey::try_new_for_rule(&Z2FusionRule, [], even, [], [], []).unwrap();
+    let cases = [
+        (
+            "codomain/domain split",
+            raw_z2_matrix_space(
+                even,
+                1,
+                FusionTreePairKey::pair(split_codomain, split_domain),
+                vec![1, 1],
+            ),
+            CoreError::FusionSpaceSplitMismatch {
+                expected_nout: 1,
+                expected_nin: 1,
+                actual_nout: 2,
+                actual_nin: 0,
+            },
+        ),
+        (
+            "leg membership",
+            raw_z2_matrix_space(even, 1, z2_rank_one_pair(odd, false), vec![1, 1]),
+            CoreError::MalformedFusionTree {
+                message: "fusion tree uses a sector absent from its HomSpace leg",
+            },
+        ),
+        (
+            "leg duality",
+            raw_z2_matrix_space(even, 1, z2_rank_one_pair(even, true), vec![1, 1]),
+            CoreError::MalformedFusionTree {
+                message: "fusion tree duality disagrees with its HomSpace leg",
+            },
+        ),
+        (
+            "leg degeneracy",
+            raw_z2_matrix_space(even, 2, z2_rank_one_pair(even, false), vec![1, 2]),
+            CoreError::LegDegeneracyMismatch {
+                sector: even,
+                expected: 2,
+                actual: 1,
+            },
+        ),
+    ];
 
-    for key in [BlockKey::Dense, BlockKey::opaque([0])] {
-        let error = raw_scalar_space_with_key(key.clone())
-            .try_inherit_rule_identity(&source)
-            .unwrap_err();
-
-        // What: a valid source tag cannot turn anonymous or application-owned
-        // block routing into a categorical contract space.
-        assert_eq!(
-            error,
-            CoreError::ExpectedFusionTreePairKey { actual: key.kind() }
-        );
+    for (name, space, expected) in cases {
+        // What: a locally admissible tree cannot acquire a rule identity when
+        // its external sectors, orientations, or logical shape disagree with
+        // the declared HomSpace.
+        assert_eq!(space.rule_identity(), None, "{name}");
+        assert_eq!(space.try_bind_rule(&Z2FusionRule), Err(expected), "{name}");
     }
-}
-
-#[test]
-fn missing_source_identity_precedes_destination_namespace_rejection() {
-    let source = raw_scalar_space();
-    let destination = raw_scalar_space_with_key(BlockKey::opaque([0]));
-
-    // What: the established source-capability error remains observable before
-    // the new constant-time destination namespace gate.
-    assert_eq!(
-        destination.try_inherit_rule_identity(&source),
-        Err(CoreError::MissingFusionRuleIdentity)
-    );
-}
-
-#[test]
-fn inherited_malformed_tree_is_revalidated_by_same_rule_binding() {
-    let source = raw_scalar_space_for_rule(&Z2FusionRule)
-        .try_bind_rule(&Z2FusionRule)
-        .unwrap();
-    let malformed =
-        FusionTreePairKey::try_pair_from_sector_ids([1], [], 1, [false], [], [], [], [], [])
-            .unwrap();
-    let inherited = raw_scalar_space_with_key(malformed.into())
-        .try_inherit_rule_identity(&source)
-        .unwrap();
-
-    // What: an inherited identity remains a migration tag; rebinding the same
-    // rule performs LOCAL validation and rejects the rank-incoherent tree.
-    assert_eq!(
-        inherited.try_bind_rule(&Z2FusionRule),
-        Err(CoreError::StructureRankMismatch {
-            expected: 0,
-            actual: 1,
-        })
-    );
-}
-
-#[test]
-fn noncategorical_contract_route_cannot_acquire_an_inherited_tag() {
-    let source = raw_scalar_space_for_rule(&Z2FusionRule)
-        .try_bind_rule(&Z2FusionRule)
-        .unwrap();
-    let contract_layout = raw_scalar_space_with_key(BlockKey::opaque([17, 23]));
-
-    // What: the former silent contract-layout route stops at namespace
-    // admission instead of returning a rule-tagged application-key space.
-    assert!(matches!(
-        contract_layout.try_inherit_rule_identity(&source),
-        Err(CoreError::ExpectedFusionTreePairKey { .. })
-    ));
 }
 
 #[test]
@@ -244,19 +263,6 @@ fn bound_space_rejects_rebinding_to_same_type_with_different_semantics() {
 
     assert!(matches!(
         space.try_bind_rule(&second),
-        Err(CoreError::FusionRuleMismatch { .. })
-    ));
-}
-
-#[test]
-fn identity_inheritance_rejects_overwriting_a_bound_space() {
-    let first = StatefulPointedRule::new(0);
-    let second = StatefulPointedRule::new(1);
-    let destination = raw_scalar_space().try_bind_rule(&first).unwrap();
-    let source = raw_scalar_space().try_bind_rule(&second).unwrap();
-
-    assert!(matches!(
-        destination.try_inherit_rule_identity(&source),
         Err(CoreError::FusionRuleMismatch { .. })
     ));
 }

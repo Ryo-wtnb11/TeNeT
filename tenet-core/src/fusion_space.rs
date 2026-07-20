@@ -2001,6 +2001,110 @@ impl FusionTreeHomSpace {
         Ok(())
     }
 
+    /// Validates every present fusion-tree block against this HomSpace.
+    ///
+    /// Missing valid tree pairs are structural zeros. Block order, strides,
+    /// offsets, and overlap are storage properties and are intentionally not
+    /// part of this categorical subset proof.
+    #[doc(hidden)]
+    pub fn validate_subblock_structure_subset<R>(
+        &self,
+        rule: &R,
+        structure: &BlockStructure,
+    ) -> Result<(), CoreError>
+    where
+        R: FusionRule,
+    {
+        let expected_rank = self.rank();
+        if structure.rank() != expected_rank {
+            return Err(CoreError::StructureRankMismatch {
+                expected: expected_rank,
+                actual: structure.rank(),
+            });
+        }
+
+        for index in 0..structure.block_count() {
+            let block = structure.block(index)?;
+            let BlockKey::FusionTree(key) = block.key() else {
+                return Err(CoreError::ExpectedFusionTreePairKey {
+                    actual: block.key().kind(),
+                });
+            };
+            let codomain_tree = key.codomain_tree();
+            let domain_tree = key.domain_tree();
+
+            // Validate every vector arity before indexing or asking the provider
+            // about caller-supplied categorical labels.
+            validate_fusion_tree_key_shape(codomain_tree)?;
+            validate_fusion_tree_key_shape(domain_tree)?;
+            if codomain_tree.uncoupled().len() != self.codomain.len()
+                || domain_tree.uncoupled().len() != self.domain.len()
+            {
+                return Err(CoreError::FusionSpaceSplitMismatch {
+                    expected_nout: self.codomain.len(),
+                    expected_nin: self.domain.len(),
+                    actual_nout: codomain_tree.uncoupled().len(),
+                    actual_nin: domain_tree.uncoupled().len(),
+                });
+            }
+
+            // Why not let local categorical validation establish membership:
+            // FusionRule assumes provider-domain labels, while the HomSpace
+            // legs are the authority for which external sectors are admitted.
+            for (space, tree) in [
+                (&self.codomain, codomain_tree),
+                (&self.domain, domain_tree),
+            ] {
+                for (leg, &sector) in space.legs().iter().zip(tree.uncoupled()) {
+                    if leg.degeneracy(sector).is_none() {
+                        return Err(CoreError::MalformedFusionTree {
+                            message: "fusion tree uses a sector absent from its HomSpace leg",
+                        });
+                    }
+                }
+            }
+
+            for (space, tree) in [
+                (&self.codomain, codomain_tree),
+                (&self.domain, domain_tree),
+            ] {
+                for (leg, &is_dual) in space.legs().iter().zip(tree.is_dual()) {
+                    if leg.is_dual() != is_dual {
+                        return Err(CoreError::MalformedFusionTree {
+                            message: "fusion tree duality disagrees with its HomSpace leg",
+                        });
+                    }
+                }
+            }
+
+            let (codomain_shape, domain_shape) = block.shape().split_at(self.codomain.len());
+            for (space, tree, shape) in [
+                (&self.codomain, codomain_tree, codomain_shape),
+                (&self.domain, domain_tree, domain_shape),
+            ] {
+                for ((leg, &sector), &actual) in
+                    space.legs().iter().zip(tree.uncoupled()).zip(shape)
+                {
+                    let expected =
+                        leg.degeneracy(sector)
+                            .ok_or(CoreError::MalformedFusionTree {
+                                message:
+                                    "fusion tree uses a sector absent from its HomSpace leg",
+                            })?;
+                    if expected != actual {
+                        return Err(CoreError::LegDegeneracyMismatch {
+                            sector,
+                            expected,
+                            actual,
+                        });
+                    }
+                }
+            }
+        }
+        LocallyValidatedFusionTreeBlockStructure::try_new(rule, structure)?;
+        Ok(())
+    }
+
     pub fn fusion_tree_groups<R>(&self, rule: &R) -> Result<Vec<FusionTreeBlockGroup>, CoreError>
     where
         R: MultiplicityFreeFusionRule,
@@ -2968,6 +3072,12 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
         }
     }
 
+    /// Certifies every present block against the rule and HomSpace split,
+    /// sector membership, duality, and logical degeneracy shape.
+    ///
+    /// Missing valid pairs remain structural zeros. Storage order, strides,
+    /// and offsets are orthogonal to this subset proof; ordinary complete
+    /// layouts should use the `from_degeneracy_shapes*` constructors.
     pub fn try_bind_rule<R: FusionRule>(mut self, rule: &R) -> Result<Self, CoreError> {
         let actual = rule.rule_identity();
         if let Some(expected) = self.rule_identity.as_ref() {
@@ -2978,37 +3088,9 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
                 });
             }
         }
-        // Why not treat an equal identity tag as LOCAL proof: inheritance can
-        // copy the tag without a provider. Binding therefore revalidates the
-        // exact categorical structure before retaining or returning the tag.
-        LocallyValidatedFusionTreeBlockStructure::try_new(rule, self.subblock_structure())?;
+        self.homspace
+            .validate_subblock_structure_subset(rule, self.subblock_structure())?;
         self.rule_identity = Some(actual);
-        Ok(self)
-    }
-
-    pub fn try_inherit_rule_identity<const OTHER_NOUT: usize, const OTHER_NIN: usize>(
-        mut self,
-        source: &FusionTensorMapSpace<OTHER_NOUT, OTHER_NIN>,
-    ) -> Result<Self, CoreError> {
-        match (self.rule_identity.as_ref(), source.rule_identity.as_ref()) {
-            (Some(expected), Some(actual)) if expected != actual => {
-                return Err(CoreError::FusionRuleMismatch {
-                    expected: expected.clone(),
-                    actual: actual.clone(),
-                });
-            }
-            (_, None) => return Err(CoreError::MissingFusionRuleIdentity),
-            _ => {}
-        }
-        match self.subblock_structure.sector_structure().key_kind() {
-            None | Some(BlockKeyKind::FusionTree) => {}
-            Some(actual) => {
-                return Err(CoreError::ExpectedFusionTreePairKey { actual });
-            }
-        }
-        if self.rule_identity.is_none() {
-            self.rule_identity = source.rule_identity.clone();
-        }
         Ok(self)
     }
 

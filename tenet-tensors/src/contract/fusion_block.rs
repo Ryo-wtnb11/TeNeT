@@ -941,7 +941,7 @@ mod tests {
             [vec![2, 2], vec![2, 2]],
         )
         .unwrap();
-        let logical = crate::lowering::adjoint_fusion_space_view(&storage).unwrap();
+        let logical = crate::lowering::adjoint_fusion_space_view(&rule, &storage).unwrap();
         let logical = DynamicFusionMapSpace::from_typed(&logical);
         let storage = DynamicFusionMapSpace::from_typed(&storage);
         let logical_layout = FusionBlockMatrixLayout::compile(&rule, &logical).unwrap();
@@ -966,7 +966,7 @@ mod tests {
             vec![vec![1, 1]; 3],
         )
         .unwrap();
-        let logical = crate::lowering::adjoint_fusion_space_view(&canonical).unwrap();
+        let logical = crate::lowering::adjoint_fusion_space_view(&rule, &canonical).unwrap();
         let reversed_keys = (0..canonical.subblock_structure().block_count())
             .rev()
             .map(|index| {
@@ -988,7 +988,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap()
-        .try_inherit_rule_identity(&canonical)
+        .try_bind_rule(&rule)
         .unwrap();
         let logical = DynamicFusionMapSpace::from_typed(&logical);
         let storage = DynamicFusionMapSpace::from_typed(&reordered);

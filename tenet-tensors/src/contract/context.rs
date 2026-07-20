@@ -2259,7 +2259,7 @@ where
             .fusion_space()
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
         let src_replay_structure = if source_conjugate {
-            Arc::clone(adjoint_fusion_space_view(src_fusion)?.subblock_structure())
+            Arc::clone(adjoint_fusion_space_view(rule, src_fusion)?.subblock_structure())
         } else {
             Arc::clone(src.structure())
         };
