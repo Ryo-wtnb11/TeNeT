@@ -904,6 +904,140 @@ impl<'a> HomSpaceDescriptor<'a> {
     }
 }
 
+#[doc(hidden)]
+#[derive(Clone, Copy)]
+pub struct OrientedFusionTreeHomSpace<'a> {
+    source: &'a FusionTreeHomSpace,
+    orientation: FusionTreePairOrientation,
+}
+
+impl<'a> OrientedFusionTreeHomSpace<'a> {
+    #[doc(hidden)]
+    pub fn new(
+        source: &'a FusionTreeHomSpace,
+        orientation: FusionTreePairOrientation,
+    ) -> Self {
+        Self {
+            source,
+            orientation,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn rank(self) -> usize {
+        self.source.rank()
+    }
+
+    #[doc(hidden)]
+    pub fn select<R>(
+        self,
+        rule: &R,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+    ) -> Result<FusionTreeHomSpace, CoreError>
+    where
+        R: FusionRule,
+    {
+        let descriptor = self.select_descriptor(codomain_axes, domain_axes)?;
+        Ok(descriptor.materialize(rule))
+    }
+
+    #[doc(hidden)]
+    pub fn try_select_checked<R>(
+        self,
+        rule: &R,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+    ) -> Result<FusionTreeHomSpace, CheckedFusionSpaceError>
+    where
+        R: CheckedFusionAlgebra,
+    {
+        let descriptor = self.select_descriptor(codomain_axes, domain_axes)?;
+        descriptor.try_materialize(rule).map_err(Into::into)
+    }
+
+    #[doc(hidden)]
+    pub fn external_axis_leg<R>(self, rule: &R, axis: usize) -> Option<SectorLeg>
+    where
+        R: FusionRule,
+    {
+        self.external_axis_leg_view(axis)
+            .map(|view| view.materialize(rule))
+    }
+
+    #[doc(hidden)]
+    pub fn try_external_axis_leg<R>(
+        self,
+        rule: &R,
+        axis: usize,
+    ) -> Result<Option<SectorLeg>, FusionAlgebraError>
+    where
+        R: CheckedFusionAlgebra,
+    {
+        self.external_axis_leg_view(axis)
+            .map(|view| view.try_materialize(rule))
+            .transpose()
+    }
+
+    fn select_descriptor(
+        self,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+    ) -> Result<HomSpaceDescriptor<'a>, CoreError> {
+        validate_axis_selection(codomain_axes, domain_axes, self.rank())?;
+        Ok(HomSpaceDescriptor::new(
+            codomain_axes
+                .iter()
+                .map(|&axis| {
+                    self.external_axis_leg_view(axis)
+                        .expect("validated axis belongs to the source")
+                }),
+            domain_axes.iter().map(|&axis| {
+                self.external_axis_leg_view(axis)
+                    .expect("validated axis belongs to the source")
+                    .toggled()
+            }),
+        ))
+    }
+
+    fn external_axis_leg_view(self, axis: usize) -> Option<OrientedLegView<'a>> {
+        match self.orientation {
+            FusionTreePairOrientation::Direct => {
+                if axis < self.source.codomain.len() {
+                    Some(OrientedLegView::borrowed(
+                        &self.source.codomain.legs()[axis],
+                    ))
+                } else if axis < self.source.rank() {
+                    Some(
+                        OrientedLegView::borrowed(
+                            &self.source.domain.legs()[axis - self.source.codomain.len()],
+                        )
+                        .toggled(),
+                    )
+                } else {
+                    None
+                }
+            }
+            FusionTreePairOrientation::Adjoint => {
+                if axis < self.source.domain.len() {
+                    Some(OrientedLegView::borrowed(
+                        &self.source.domain.legs()[axis],
+                    ))
+                } else if axis < self.source.rank() {
+                    Some(
+                        OrientedLegView::borrowed(
+                            &self.source.codomain.legs()[axis - self.source.domain.len()],
+                        )
+                        .toggled(),
+                    )
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
 struct HomSpaceInternTable {
     entries: lru::LruCache<HomSpaceInternKey, Arc<HomSpaceInternKey>>,
 }

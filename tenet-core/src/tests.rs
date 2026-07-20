@@ -4397,6 +4397,100 @@ mod tests {
     }
 
     #[test]
+    fn indexed_adjoint_tree_pair_block_reuses_parent_group_order() {
+        let half = su2(1).id();
+        let keys = [
+            tree_pair_group_fixture(
+                &[half, half],
+                &[half, half],
+                su2(0).id(),
+                &[false; 2],
+                &[false; 2],
+            ),
+            tree_pair_group_fixture(
+                &[half, half],
+                &[half, half],
+                su2(0).id(),
+                &[true, false],
+                &[false; 2],
+            ),
+            tree_pair_group_fixture(
+                &[half, half],
+                &[half, half],
+                su2(2).id(),
+                &[false; 2],
+                &[false; 2],
+            ),
+            tree_pair_group_fixture(
+                &[half, half],
+                &[half, half],
+                su2(2).id(),
+                &[true, false],
+                &[false; 2],
+            ),
+        ];
+        let structure = packed_fixture_structure(
+            4,
+            keys.iter().cloned().map(|key| (key, vec![1; 4])),
+        )
+        .unwrap();
+        let eager_adjoint_keys = keys
+            .iter()
+            .map(|key| {
+                FusionTreePairKey::pair(
+                    key.domain_tree().clone(),
+                    key.codomain_tree().clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let eager_adjoint = packed_fixture_structure(
+            4,
+            eager_adjoint_keys
+                .iter()
+                .cloned()
+                .map(|key| (key, vec![1; 4])),
+        )
+        .unwrap();
+
+        // What: side swapping is a bijection on group labels, so an adjoint
+        // projection preserves the parent group partition and storage order.
+        assert_eq!(
+            structure
+                .fusion_tree_group_slice()
+                .iter()
+                .map(FusionTreeBlockGroup::block_indices)
+                .collect::<Vec<_>>(),
+            eager_adjoint
+                .fusion_tree_group_slice()
+                .iter()
+                .map(FusionTreeBlockGroup::block_indices)
+                .collect::<Vec<_>>(),
+        );
+
+        for group in structure.fusion_tree_group_slice() {
+            let rows = multiplicity_free_permute_tree_pair_block_indexed(
+                &SU2FusionRule,
+                &structure,
+                group.block_indices(),
+                FusionTreePairOrientation::Adjoint,
+                &[0, 1],
+                &[2, 3],
+            )
+            .unwrap();
+            // What: indexed adjoint identity emits logical swapped keys once,
+            // in parent source order, without changing compact transform rows.
+            assert_eq!(
+                rows,
+                group
+                    .block_indices()
+                    .iter()
+                    .map(|&index| vec![(eager_adjoint_keys[index].clone(), 1.0)])
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
     fn empty_block_permute_preserves_braiding_style_error_precedence() {
         // What: an empty source block does not bypass the public permutation
         // API's symmetric-braiding capability check.

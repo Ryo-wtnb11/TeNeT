@@ -3,20 +3,18 @@ use std::sync::Arc;
 
 use num_traits::{One, Zero};
 use tenet_core::{
-    multiplicity_free_permute_tree_pair, split_fusion_tree, BlockKey, BlockStructure,
+    multiplicity_free_permute_tree_pair_block_indexed, split_fusion_tree, BlockKey, BlockStructure,
     CheckedFusionAlgebra, CheckedFusionSpaceError, FusionRule, FusionStyleKind,
     FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
-    HostReadableStorage, HostWritableStorage, MultiplicityFreeRigidSymbols, SectorLeg, TensorMap,
-    TensorStorage,
+    FusionTreePairOrientation, HostReadableStorage, HostWritableStorage,
+    MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace, SectorLeg, TensorMap, TensorStorage,
 };
 
 use crate::contract::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
 use crate::lowering::{
-    adjoint_fusion_space_view, lower_tensortrace_source_adjoint_axes,
-    lower_tensortrace_source_adjoint_axes_dyn,
+    lower_tensortrace_source_adjoint_axes, lower_tensortrace_source_adjoint_axes_dyn,
 };
 use crate::strided::offset_to_isize;
-use crate::tree_transform::{transformed_tree_pair_rows_block, TreeTransformOperation};
 use crate::{tensortrace_raw_strided_kernel, tensortrace_raw_strided_kernel_add_with_coefficient};
 use tenet_operations::structure_identity::validate_structure_identity;
 use tenet_operations::transform_structure::validate_destination_layouts_injective;
@@ -111,13 +109,12 @@ where
         .fusion_space()
         .ok_or(tenet_core::CoreError::MissingFusionSpace)?;
     if axes.source_conjugate() {
-        let adjoint_src = adjoint_fusion_space_view(rule, src_fusion)?;
         let adjoint_axes = lower_tensortrace_source_adjoint_axes::<SRC_NOUT, SRC_NIN>(axes)?;
-        TensorTraceFusionStructure::compile_fusion_spaces_with_storage_structure(
+        TensorTraceFusionStructure::compile_fusion_spaces_oriented(
             rule,
             dst_fusion,
-            &adjoint_src,
-            Arc::clone(src.structure()),
+            src_fusion,
+            FusionTreePairOrientation::Adjoint,
             adjoint_axes.as_spec(),
         )
     } else {
@@ -131,6 +128,75 @@ pub(crate) const PLAIN_TENSORTRACE_BLOCK_SPARSE_UNSUPPORTED: &str =
     "block-sparse tensortrace enumeration is not implemented yet";
 pub(crate) const FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING: &str =
     "fusion tensortrace requires symmetric braiding";
+
+#[derive(Clone, Copy)]
+struct OrientedTraceSource<'a> {
+    homspace: OrientedFusionTreeHomSpace<'a>,
+    structure: &'a Arc<BlockStructure>,
+    orientation: FusionTreePairOrientation,
+    storage_nout: usize,
+    storage_nin: usize,
+}
+
+impl<'a> OrientedTraceSource<'a> {
+    fn new(
+        homspace: &'a FusionTreeHomSpace,
+        structure: &'a Arc<BlockStructure>,
+        storage_nout: usize,
+        storage_nin: usize,
+        orientation: FusionTreePairOrientation,
+    ) -> Self {
+        Self {
+            homspace: OrientedFusionTreeHomSpace::new(homspace, orientation),
+            structure,
+            orientation,
+            storage_nout,
+            storage_nin,
+        }
+    }
+
+    fn logical_axis_to_storage(self, axis: usize) -> usize {
+        match self.orientation {
+            FusionTreePairOrientation::Direct => axis,
+            FusionTreePairOrientation::Adjoint => {
+                if axis < self.storage_nin {
+                    self.storage_nout + axis
+                } else {
+                    axis - self.storage_nin
+                }
+            }
+        }
+    }
+
+    fn source_key(self, index: usize) -> Result<FusionTreePairKey, OperationError> {
+        let block = self.structure.block(index)?;
+        let BlockKey::FusionTree(key) = block.key() else {
+            return Err(OperationError::ExpectedFusionTreeBlock {
+                tensor: "src",
+                index,
+            });
+        };
+        Ok(match self.orientation {
+            FusionTreePairOrientation::Direct => key.clone(),
+            FusionTreePairOrientation::Adjoint => {
+                FusionTreePairKey::pair(key.domain_tree().clone(), key.codomain_tree().clone())
+            }
+        })
+    }
+
+    fn validate_source_keys(self) -> Result<(), OperationError> {
+        for index in 0..self.structure.block_count() {
+            let block = self.structure.block(index)?;
+            if !matches!(block.key(), BlockKey::FusionTree(_)) {
+                return Err(OperationError::ExpectedFusionTreeBlock {
+                    tensor: "src",
+                    index,
+                });
+            }
+        }
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 thread_local! {
@@ -175,7 +241,6 @@ pub struct TensorTraceFusionStructure<C> {
     descriptor: TensorTraceDescriptor,
     dst_structure: Arc<BlockStructure>,
     src_structure: Arc<BlockStructure>,
-    src_storage_structure: Arc<BlockStructure>,
 }
 
 impl<C> TensorTraceFusionStructure<C> {
@@ -197,16 +262,16 @@ impl<C> TensorTraceFusionStructure<C> {
     {
         dst.validate_rule(rule).map_err(OperationError::Core)?;
         src.validate_rule(rule).map_err(OperationError::Core)?;
-        Self::compile_fusion_spaces_with_storage_structure(
+        Self::compile_fusion_spaces_oriented(
             rule,
             dst,
             src,
-            Arc::clone(src.subblock_structure()),
+            FusionTreePairOrientation::Direct,
             axes,
         )
     }
 
-    pub(crate) fn compile_fusion_spaces_with_storage_structure<
+    fn compile_fusion_spaces_oriented<
         R,
         const DST_NOUT: usize,
         const DST_NIN: usize,
@@ -216,7 +281,7 @@ impl<C> TensorTraceFusionStructure<C> {
         rule: &R,
         dst: &FusionTensorMapSpace<DST_NOUT, DST_NIN>,
         src: &FusionTensorMapSpace<SRC_NOUT, SRC_NIN>,
-        src_storage_structure: Arc<BlockStructure>,
+        orientation: FusionTreePairOrientation,
         axes: TensorTraceAxisSpec<'_>,
     ) -> Result<Self, OperationError>
     where
@@ -225,13 +290,18 @@ impl<C> TensorTraceFusionStructure<C> {
     {
         dst.validate_rule(rule)?;
         src.validate_rule(rule)?;
+        let source = OrientedTraceSource::new(
+            src.homspace(),
+            src.subblock_structure(),
+            SRC_NOUT,
+            SRC_NIN,
+            orientation,
+        );
         Self::compile_fusion_parts(
             rule,
             dst.homspace(),
             Arc::clone(dst.subblock_structure()),
-            src.homspace(),
-            Arc::clone(src.subblock_structure()),
-            src_storage_structure,
+            source,
             DST_NOUT,
             axes,
         )
@@ -281,24 +351,31 @@ impl<C> TensorTraceFusionStructure<C> {
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C>,
         C: Clone + Add<Output = C> + Mul<Output = C> + Zero + RealStructuralCoefficient,
-        F: FnOnce(&FusionTreeHomSpace, &TensorTraceAxisPlan) -> Result<(), OperationError>,
+        F: FnOnce(
+            OrientedFusionTreeHomSpace<'_>,
+            &TensorTraceAxisPlan,
+        ) -> Result<(), OperationError>,
     {
         dst.validate_rule(rule)?;
         src.validate_rule(rule)?;
-        let adjoint_src = if axes.source_conjugate() {
-            Some(src.adjoint_view()?)
+        let orientation = if axes.source_conjugate() {
+            FusionTreePairOrientation::Adjoint
         } else {
-            None
+            FusionTreePairOrientation::Direct
         };
-        let logical_src = adjoint_src.as_ref().unwrap_or(src);
         let lowered_axes = lower_tensortrace_source_adjoint_axes_dyn(src.nout(), src.nin(), axes)?;
+        let source = OrientedTraceSource::new(
+            src.homspace(),
+            src.structure(),
+            src.nout(),
+            src.nin(),
+            orientation,
+        );
         Self::compile_fusion_parts_with_preflight(
             rule,
             dst.homspace(),
             Arc::clone(dst.structure()),
-            logical_src.homspace(),
-            Arc::clone(logical_src.structure()),
-            Arc::clone(src.structure()),
+            source,
             dst.nout(),
             lowered_axes.as_spec(),
             preflight,
@@ -311,9 +388,7 @@ impl<C> TensorTraceFusionStructure<C> {
         rule: &R,
         dst_homspace: &FusionTreeHomSpace,
         dst_structure: Arc<BlockStructure>,
-        src_homspace: &FusionTreeHomSpace,
-        src_structure: Arc<BlockStructure>,
-        src_storage_structure: Arc<BlockStructure>,
+        src: OrientedTraceSource<'_>,
         dst_codomain_rank: usize,
         axes: TensorTraceAxisSpec<'_>,
     ) -> Result<Self, OperationError>
@@ -325,9 +400,7 @@ impl<C> TensorTraceFusionStructure<C> {
             rule,
             dst_homspace,
             dst_structure,
-            src_homspace,
-            src_structure,
-            src_storage_structure,
+            src,
             dst_codomain_rank,
             axes,
             |_, _| Ok(()),
@@ -339,9 +412,7 @@ impl<C> TensorTraceFusionStructure<C> {
         rule: &R,
         dst_homspace: &FusionTreeHomSpace,
         dst_structure: Arc<BlockStructure>,
-        src_homspace: &FusionTreeHomSpace,
-        src_structure: Arc<BlockStructure>,
-        src_storage_structure: Arc<BlockStructure>,
+        src: OrientedTraceSource<'_>,
         dst_codomain_rank: usize,
         axes: TensorTraceAxisSpec<'_>,
         preflight: F,
@@ -349,7 +420,10 @@ impl<C> TensorTraceFusionStructure<C> {
     where
         R: MultiplicityFreeRigidSymbols<Scalar = C>,
         C: Clone + Add<Output = C> + Mul<Output = C> + Zero + RealStructuralCoefficient,
-        F: FnOnce(&FusionTreeHomSpace, &TensorTraceAxisPlan) -> Result<(), OperationError>,
+        F: FnOnce(
+            OrientedFusionTreeHomSpace<'_>,
+            &TensorTraceAxisPlan,
+        ) -> Result<(), OperationError>,
     {
         if !rule.braiding_style().is_symmetric() {
             return Err(OperationError::UnsupportedTensorContractScope {
@@ -357,22 +431,17 @@ impl<C> TensorTraceFusionStructure<C> {
             });
         }
         let axis_plan =
-            TensorTraceAxisPlan::compile(src_structure.rank(), dst_structure.rank(), axes)?;
-        preflight(src_homspace, &axis_plan)?;
+            TensorTraceAxisPlan::compile(src.structure.rank(), dst_structure.rank(), axes)?;
+        preflight(src.homspace, &axis_plan)?;
         validate_fusion_trace_homspace(
             rule,
             dst_homspace,
-            src_homspace,
+            src.homspace,
             &axis_plan,
             dst_codomain_rank,
         )?;
-        let terms = build_fusion_trace_terms(
-            rule,
-            &dst_structure,
-            &src_structure,
-            &axis_plan,
-            dst_codomain_rank,
-        )?;
+        let terms =
+            build_fusion_trace_terms(rule, &dst_structure, src, &axis_plan, dst_codomain_rank)?;
         let dense_terms = terms
             .iter()
             .map(|term| TensorTraceStructureTerm {
@@ -381,12 +450,8 @@ impl<C> TensorTraceFusionStructure<C> {
                 src_block: term.src_block,
             })
             .collect::<Vec<_>>();
-        let descriptor = TensorTraceDescriptor::compile(
-            &axis_plan,
-            &dense_terms,
-            &dst_structure,
-            &src_structure,
-        )?;
+        let descriptor =
+            TensorTraceDescriptor::compile_oriented(&axis_plan, &dense_terms, &dst_structure, src)?;
         validate_destination_layouts_injective(
             &dst_structure,
             "tensor trace destination layouts overlap",
@@ -394,15 +459,14 @@ impl<C> TensorTraceFusionStructure<C> {
 
         Ok(Self {
             dst_rank: dst_structure.rank(),
-            src_rank: src_structure.rank(),
+            src_rank: src.structure.rank(),
             output_axes: axis_plan.output_axes,
             trace_lhs_axes: axis_plan.trace_lhs_axes,
             trace_rhs_axes: axis_plan.trace_rhs_axes,
             terms,
             descriptor,
             dst_structure,
-            src_structure,
-            src_storage_structure,
+            src_structure: Arc::clone(src.structure),
         })
     }
 
@@ -447,7 +511,7 @@ impl<C> TensorTraceFusionStructure<C> {
         src_structure: &Arc<BlockStructure>,
     ) -> Result<(), OperationError> {
         validate_structure_identity("dst", &self.dst_structure, dst_structure)?;
-        validate_structure_identity("src", &self.src_storage_structure, src_structure)
+        validate_structure_identity("src", &self.src_structure, src_structure)
     }
 
     pub fn execute_with<
@@ -784,6 +848,32 @@ impl TensorTraceDescriptor {
         dst_structure: &BlockStructure,
         src_structure: &BlockStructure,
     ) -> Result<Self, OperationError> {
+        Self::compile_with_source_axis_map(axis_plan, terms, dst_structure, src_structure, |axis| {
+            axis
+        })
+    }
+
+    fn compile_oriented(
+        axis_plan: &TensorTraceAxisPlan,
+        terms: &[TensorTraceStructureTerm],
+        dst_structure: &BlockStructure,
+        src: OrientedTraceSource<'_>,
+    ) -> Result<Self, OperationError> {
+        Self::compile_with_source_axis_map(axis_plan, terms, dst_structure, src.structure, |axis| {
+            src.logical_axis_to_storage(axis)
+        })
+    }
+
+    fn compile_with_source_axis_map<F>(
+        axis_plan: &TensorTraceAxisPlan,
+        terms: &[TensorTraceStructureTerm],
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+        source_axis: F,
+    ) -> Result<Self, OperationError>
+    where
+        F: Fn(usize) -> usize,
+    {
         let mut descriptor = Self {
             source_conjugate: axis_plan.source_conjugate,
             ..Self::default()
@@ -816,13 +906,14 @@ impl TensorTraceDescriptor {
             let src_block = src_structure.block(term.src_block())?;
             let output_layout_start = descriptor.output_shape.len();
             for (dst_axis, &src_axis) in axis_plan.output_axes.iter().enumerate() {
+                let src_axis = source_axis(src_axis);
                 let dst_dim = dst_block.shape()[dst_axis];
                 let src_dim = src_block.shape()[src_axis];
                 if dst_dim != src_dim {
                     let src_shape = axis_plan
                         .output_axes
                         .iter()
-                        .map(|&axis| src_block.shape()[axis])
+                        .map(|&axis| src_block.shape()[source_axis(axis)])
                         .collect::<Vec<_>>();
                     return Err(OperationError::ShapeMismatch {
                         dst: dst_block.shape().to_vec(),
@@ -844,6 +935,8 @@ impl TensorTraceDescriptor {
                 .iter()
                 .zip(axis_plan.trace_rhs_axes.iter())
             {
+                let lhs_axis = source_axis(lhs_axis);
+                let rhs_axis = source_axis(rhs_axis);
                 let lhs_dim = src_block.shape()[lhs_axis];
                 let rhs_dim = src_block.shape()[rhs_axis];
                 if lhs_dim != rhs_dim {
@@ -975,7 +1068,7 @@ impl TensorTraceAxisPlan {
 fn build_fusion_trace_terms<R>(
     rule: &R,
     dst_structure: &BlockStructure,
-    src_structure: &BlockStructure,
+    src: OrientedTraceSource<'_>,
     axis_plan: &TensorTraceAxisPlan,
     dst_codomain_rank: usize,
 ) -> Result<Vec<TensorTraceFusionStructureTerm<R::Scalar>>, OperationError>
@@ -993,35 +1086,20 @@ where
     domain_permutation.extend_from_slice(&axis_plan.output_axes[dst_codomain_rank..]);
     domain_permutation.extend_from_slice(&axis_plan.trace_rhs_axes);
 
-    // Collect source keys in storage order before symbol evaluation so malformed
-    // structural blocks retain their original error precedence.
-    let mut source_keys = Vec::with_capacity(src_structure.block_count());
-    for src_block_index in 0..src_structure.block_count() {
-        let src_block = src_structure.block(src_block_index)?;
-        let BlockKey::FusionTree(src_key) = src_block.key() else {
-            return Err(OperationError::ExpectedFusionTreeBlock {
-                tensor: "src",
-                index: src_block_index,
-            });
-        };
-        source_keys.push(src_key.clone());
-    }
-
-    let operation =
-        TreeTransformOperation::permute(codomain_permutation.clone(), domain_permutation.clone());
-    let mut rows_by_source = (0..source_keys.len())
+    src.validate_source_keys()?;
+    let mut rows_by_source = (0..src.structure.block_count())
         .map(|_| None)
         .collect::<Vec<Option<Vec<(FusionTreePairKey, R::Scalar)>>>>();
     let is_unique = rule.fusion_style() == FusionStyleKind::Unique;
     let groups = if is_unique {
         &[][..]
     } else {
-        src_structure.fusion_tree_group_slice()
+        src.structure.fusion_tree_group_slice()
     };
     let mut group_by_source = if is_unique {
         Vec::new()
     } else {
-        vec![None; source_keys.len()]
+        vec![None; src.structure.block_count()]
     };
     if !is_unique {
         for (group_index, group) in groups.iter().enumerate() {
@@ -1032,33 +1110,36 @@ where
     }
 
     let mut terms = Vec::new();
-    for (src_block_index, src_key) in source_keys.iter().enumerate() {
+    for src_block_index in 0..src.structure.block_count() {
         if is_unique {
-            // Why not route Unique fusion through the block matrix: every source
-            // has one destination, so its existing scalar transform is direct.
             record_trace_transform_invocation(src_block_index);
-            rows_by_source[src_block_index] = Some(
-                multiplicity_free_permute_tree_pair(
-                    rule,
-                    src_key,
-                    &codomain_permutation,
-                    &domain_permutation,
-                )
-                .map_err(OperationError::from_core_preserving_context)?,
-            );
+            let source_indices = [src_block_index];
+            let mut rows = multiplicity_free_permute_tree_pair_block_indexed(
+                rule,
+                src.structure,
+                &source_indices,
+                src.orientation,
+                &codomain_permutation,
+                &domain_permutation,
+            )
+            .map_err(OperationError::from_core_preserving_context)?;
+            rows_by_source[src_block_index] = rows.pop();
         } else if rows_by_source[src_block_index].is_none() {
             let group_index =
                 group_by_source[src_block_index].ok_or(OperationError::InvalidArgument {
                     message: "trace source block was not assigned to a fusion group",
                 })?;
             let group = &groups[group_index];
-            let group_keys = group
-                .block_indices()
-                .iter()
-                .map(|&src_block_index| source_keys[src_block_index].clone())
-                .collect::<Vec<_>>();
             record_trace_transform_invocation(src_block_index);
-            let group_rows = transformed_tree_pair_rows_block(rule, &operation, &group_keys)?;
+            let group_rows = multiplicity_free_permute_tree_pair_block_indexed(
+                rule,
+                src.structure,
+                group.block_indices(),
+                src.orientation,
+                &codomain_permutation,
+                &domain_permutation,
+            )
+            .map_err(OperationError::from_core_preserving_context)?;
             if group_rows.len() != group.block_indices().len() {
                 return Err(OperationError::InvalidArgument {
                     message: "trace block transform returned the wrong source row count",
@@ -1086,7 +1167,7 @@ where
             axis_plan,
             dst_codomain_rank,
             src_block_index,
-            src_key,
+            src,
             rows,
             &mut terms,
         )?;
@@ -1107,13 +1188,19 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
 {
     let axis_plan = TensorTraceAxisPlan::compile(src_structure.rank(), dst_structure.rank(), axes)?;
-    build_fusion_trace_terms(
-        rule,
-        dst_structure,
-        src_structure,
-        &axis_plan,
-        dst_codomain_rank,
-    )
+    let homspace = FusionTreeHomSpace::new(
+        tenet_core::FusionProductSpace::new([]),
+        tenet_core::FusionProductSpace::new([]),
+    );
+    let src_structure = Arc::new(src_structure.clone());
+    let src = OrientedTraceSource::new(
+        &homspace,
+        &src_structure,
+        src_structure.rank(),
+        0,
+        FusionTreePairOrientation::Direct,
+    );
+    build_fusion_trace_terms(rule, dst_structure, src, &axis_plan, dst_codomain_rank)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1123,7 +1210,7 @@ fn lower_fusion_trace_source_rows<R>(
     axis_plan: &TensorTraceAxisPlan,
     dst_codomain_rank: usize,
     src_block_index: usize,
-    src_key: &FusionTreePairKey,
+    src: OrientedTraceSource<'_>,
     rows: Vec<(FusionTreePairKey, R::Scalar)>,
     terms: &mut Vec<TensorTraceFusionStructureTerm<R::Scalar>>,
 ) -> Result<(), OperationError>
@@ -1156,7 +1243,7 @@ where
             })?;
         terms.push(TensorTraceFusionStructureTerm {
             dst_key,
-            src_key: src_key.clone(),
+            src_key: src.source_key(src_block_index)?,
             dst_block,
             src_block: src_block_index,
             coefficient,
@@ -1196,7 +1283,7 @@ where
 fn validate_fusion_trace_homspace<R>(
     rule: &R,
     dst: &FusionTreeHomSpace,
-    src: &FusionTreeHomSpace,
+    src: OrientedFusionTreeHomSpace<'_>,
     axis_plan: &TensorTraceAxisPlan,
     dst_codomain_rank: usize,
 ) -> Result<(), OperationError>
@@ -1238,26 +1325,19 @@ where
 
 fn outward_axis_leg<R>(
     rule: &R,
-    homspace: &FusionTreeHomSpace,
+    homspace: OrientedFusionTreeHomSpace<'_>,
     axis: usize,
 ) -> Result<SectorLeg, OperationError>
 where
     R: FusionRule,
 {
-    if axis < homspace.codomain().len() {
-        Ok(homspace.codomain().legs()[axis].clone())
-    } else if axis < homspace.rank() {
-        Ok(dual_sector_leg(
-            rule,
-            &homspace.domain().legs()[axis - homspace.codomain().len()],
-        ))
-    } else {
-        Err(OperationError::InvalidAxisSet {
+    homspace
+        .external_axis_leg(rule, axis)
+        .ok_or_else(|| OperationError::InvalidAxisSet {
             tensor: "trace source",
             axes: vec![axis],
             rank: homspace.rank(),
         })
-    }
 }
 
 fn dual_sector_leg<R>(rule: &R, leg: &SectorLeg) -> SectorLeg
@@ -1269,25 +1349,20 @@ where
 
 fn outward_axis_leg_checked<R>(
     rule: &R,
-    homspace: &FusionTreeHomSpace,
+    homspace: OrientedFusionTreeHomSpace<'_>,
     axis: usize,
 ) -> Result<SectorLeg, OperationError>
 where
     R: FusionRule + CheckedFusionAlgebra,
 {
-    if axis < homspace.codomain().len() {
-        Ok(homspace.codomain().legs()[axis].clone())
-    } else if axis < homspace.rank() {
-        homspace.domain().legs()[axis - homspace.codomain().len()]
-            .try_dual(rule)
-            .map_err(|error| OperationError::FusionAlgebra(Box::new(error)))
-    } else {
-        Err(OperationError::InvalidAxisSet {
+    homspace
+        .try_external_axis_leg(rule, axis)
+        .map_err(|error| OperationError::FusionAlgebra(Box::new(error)))?
+        .ok_or_else(|| OperationError::InvalidAxisSet {
             tensor: "trace source",
             axes: vec![axis],
             rank: homspace.rank(),
         })
-    }
 }
 
 pub(crate) fn tensortrace_structure_with_strided_kernel<
@@ -1605,7 +1680,7 @@ where
 
 fn validate_checked_fusion_trace_metadata<R>(
     rule: &R,
-    src_homspace: &FusionTreeHomSpace,
+    src_homspace: OrientedFusionTreeHomSpace<'_>,
     axis_plan: &TensorTraceAxisPlan,
     dst_nout: usize,
 ) -> Result<(), OperationError>

@@ -4,9 +4,11 @@ use std::hint::black_box;
 
 use tenet_core::{
     multiplicity_free_braid_tree_block, multiplicity_free_permute_tree_pair_block,
-    unique_permute_tree, BlockKey, FermionParityFusionRule, FusionProductSpace, FusionTreeHomSpace,
-    FusionTreeKey, FusionTreePairKey, MultiplicityIndex, PreparedTreePairOperation, SU2FusionRule,
-    SU2Irrep, SectorLeg, SectorStructure, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
+    multiplicity_free_permute_tree_pair_block_indexed, unique_permute_tree, BlockKey, BlockSpec,
+    BlockStructure, FermionParityFusionRule, FusionProductSpace, FusionTreeHomSpace, FusionTreeKey,
+    FusionTreePairKey, FusionTreePairOrientation, MultiplicityIndex, PreparedTreePairOperation,
+    SU2FusionRule, SU2Irrep, SectorLeg, SectorStructure, U1FusionRule, U1Irrep, Z2FusionRule,
+    Z2Irrep,
 };
 
 struct CountingAllocator;
@@ -202,6 +204,107 @@ fn block_identity_permute_allocates_only_owned_output() {
     // outer result and its one owned row, with no level-vector temporaries.
     assert_eq!(transformed, vec![vec![(source, 1.0)]]);
     assert_eq!(ALLOCATIONS.get(), 2);
+}
+
+#[test]
+fn indexed_adjoint_identity_allocates_only_owned_output() {
+    let source = FusionTreePairKey::try_pair_from_sector_ids(
+        [1, 1],
+        [0],
+        0,
+        [false, false],
+        [false],
+        [],
+        [],
+        [1],
+        [],
+    )
+    .unwrap();
+    let structure = BlockStructure::from_blocks(vec![BlockSpec::column_major_with_key(
+        source.clone().into(),
+        vec![1; 3],
+        0,
+    )
+    .unwrap()])
+    .unwrap();
+    let indices = structure.fusion_tree_group_slice()[0].block_indices();
+    let run = || {
+        multiplicity_free_permute_tree_pair_block_indexed(
+            &Z2FusionRule,
+            &structure,
+            indices,
+            FusionTreePairOrientation::Adjoint,
+            &[0],
+            &[1, 2],
+        )
+        .unwrap()
+    };
+    let _ = run();
+
+    let (transformed, allocations) = measured_allocations(|| black_box(run()));
+    let logical_source =
+        FusionTreePairKey::pair(source.domain_tree().clone(), source.codomain_tree().clone());
+
+    // What: oriented indexed preparation borrows parent key, group, shape, and
+    // stride metadata; only the intentional owned result and row allocate.
+    assert_eq!(transformed, vec![vec![(logical_source, 1.0)]]);
+    assert_eq!(allocations, 2);
+}
+
+#[test]
+fn indexed_adjoint_simple_group_allocates_only_owned_rows() {
+    let half = SU2Irrep::from_twice_spin(1).sector_id();
+    let leg = || SectorLeg::new([(half, 1)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(), leg()]),
+        FusionProductSpace::new([leg(), leg()]),
+    );
+    let sources = homspace.fusion_tree_keys(&SU2FusionRule);
+    assert_eq!(sources.len(), 2);
+    let structure = BlockStructure::from_blocks(
+        sources
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, key)| {
+                BlockSpec::column_major_with_key(key.into(), vec![1; 4], index).unwrap()
+            })
+            .collect(),
+    )
+    .unwrap();
+    let indices = structure.fusion_tree_group_slice()[0].block_indices();
+    assert_eq!(indices, &[0, 1]);
+    let run = || {
+        multiplicity_free_permute_tree_pair_block_indexed(
+            &SU2FusionRule,
+            &structure,
+            indices,
+            FusionTreePairOrientation::Adjoint,
+            &[0, 1],
+            &[2, 3],
+        )
+        .unwrap()
+    };
+    let _ = run();
+
+    let (transformed, allocations) = measured_allocations(|| black_box(run()));
+    let expected = sources
+        .iter()
+        .map(|source| {
+            vec![(
+                FusionTreePairKey::pair(
+                    source.domain_tree().clone(),
+                    source.codomain_tree().clone(),
+                ),
+                1.0,
+            )]
+        })
+        .collect::<Vec<_>>();
+
+    // What: a Simple cohort borrows its parent group and pair frames; the
+    // outer result plus two intentional owned rows are the only allocations.
+    assert_eq!(transformed, expected);
+    assert_eq!(allocations, 1 + sources.len());
 }
 
 #[test]
