@@ -909,7 +909,7 @@ impl FusionRule for SimpleSu2Rule {
 impl MultiplicityFreeFusionRule for SimpleSu2Rule {}
 
 #[derive(Clone, Copy, Debug)]
-struct GenericMultiplicityRule;
+pub(crate) struct GenericMultiplicityRule;
 
 impl FusionRule for GenericMultiplicityRule {
     fn rule_identity(&self) -> tenet_core::RuleIdentity {

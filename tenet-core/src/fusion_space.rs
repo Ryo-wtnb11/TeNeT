@@ -2867,13 +2867,43 @@ fn prefix_offsets(dims: &[usize]) -> Result<Vec<usize>, CoreError> {
     Ok(offsets)
 }
 
+#[doc(hidden)]
+#[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FusionSpaceAdmission {
+    Unbound,
+    Subset(RuleIdentity),
+    Complete(RuleIdentity),
+}
+
+impl FusionSpaceAdmission {
+    #[doc(hidden)]
+    pub fn rule_identity(&self) -> Option<&RuleIdentity> {
+        match self {
+            Self::Unbound => None,
+            Self::Subset(identity) | Self::Complete(identity) => Some(identity),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct FusionTensorMapSpace<const NOUT: usize, const NIN: usize> {
     dense_space: TensorMapSpace<NOUT, NIN>,
     homspace: Arc<FusionTreeHomSpace>,
     subblock_structure: Arc<BlockStructure>,
-    rule_identity: Option<RuleIdentity>,
+    admission: FusionSpaceAdmission,
 }
+
+impl<const NOUT: usize, const NIN: usize> PartialEq for FusionTensorMapSpace<NOUT, NIN> {
+    fn eq(&self, other: &Self) -> bool {
+        self.dense_space == other.dense_space
+            && self.homspace == other.homspace
+            && self.subblock_structure == other.subblock_structure
+            && self.admission.rule_identity() == other.admission.rule_identity()
+    }
+}
+
+impl<const NOUT: usize, const NIN: usize> Eq for FusionTensorMapSpace<NOUT, NIN> {}
 
 impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
     /// Expert compatibility constructor for an explicit caller-selected block
@@ -2912,7 +2942,7 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
     /// Shared-handle variant of [`Self::new_unbound`].
     ///
     /// This is the same expert compatibility/import boundary: the caller has
-    /// already selected the complete block layout. This constructor checks that
+    /// already selected the block layout. This constructor checks that
     /// the hom-space and structure ranks match and that logical block footprints
     /// do not overlap. Key, sector, duality, and logical-shape admission remain
     /// the responsibility of [`Self::try_bind_rule`].
@@ -2946,7 +2976,7 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
             dense_space,
             homspace: Arc::new(homspace),
             subblock_structure,
-            rule_identity: None,
+            admission: FusionSpaceAdmission::Unbound,
         }
     }
 
@@ -3045,7 +3075,7 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
             homspace,
             subblock_structure,
         )
-        .with_rule_identity(rule.rule_identity()))
+        .with_complete_rule(rule.rule_identity()))
     }
 
     fn validate_homspace_rank(homspace: &FusionTreeHomSpace) -> Result<(), CoreError> {
@@ -3116,7 +3146,7 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
             dense_space,
             homspace: Arc::new(homspace),
             subblock_structure: structure,
-            rule_identity: self.rule_identity.clone(),
+            admission: self.admission.clone(),
         })
     }
 
@@ -3144,11 +3174,17 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
 
     #[inline]
     pub fn rule_identity(&self) -> Option<RuleIdentity> {
-        self.rule_identity.clone()
+        self.admission.rule_identity().cloned()
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn admission(&self) -> &FusionSpaceAdmission {
+        &self.admission
     }
 
     pub fn validate_rule<R: FusionRule>(&self, rule: &R) -> Result<(), CoreError> {
-        match self.rule_identity.as_ref() {
+        match self.admission.rule_identity() {
             Some(expected) if expected != &rule.rule_identity() => Err(CoreError::FusionRuleMismatch {
                 expected: expected.clone(),
                 actual: rule.rule_identity(),
@@ -3168,24 +3204,25 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
     /// admission.
     pub fn try_bind_rule<R: FusionRule>(mut self, rule: &R) -> Result<Self, CoreError> {
         let actual = rule.rule_identity();
-        if let Some(expected) = self.rule_identity.as_ref() {
+        if let Some(expected) = self.admission.rule_identity() {
             if expected != &actual {
                 return Err(CoreError::FusionRuleMismatch {
                     expected: expected.clone(),
                     actual,
                 });
             }
+            return Ok(self);
         }
         self.homspace
             .validate_subblock_structure_subset(rule, self.subblock_structure())?;
-        self.rule_identity = Some(actual);
+        self.admission = FusionSpaceAdmission::Subset(actual);
         Ok(self)
     }
 
-    // Why not expose a general tag setter: this path is reserved for structures
+    // Why not expose a general stamp setter: this path is reserved for structures
     // enumerated directly from the same HomSpace and rule above.
-    fn with_rule_identity(mut self, identity: RuleIdentity) -> Self {
-        self.rule_identity = Some(identity);
+    fn with_complete_rule(mut self, identity: RuleIdentity) -> Self {
+        self.admission = FusionSpaceAdmission::Complete(identity);
         self
     }
 

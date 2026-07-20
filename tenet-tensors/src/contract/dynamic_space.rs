@@ -5,8 +5,8 @@ use std::sync::{Arc, RwLock};
 use rustc_hash::FxHashMap;
 use tenet_core::{
     BlockKey, BlockStructure, CheckedFusionAlgebra, CheckedFusionSpaceError, CoreError, DimVec,
-    FusionRule, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreePairKey,
-    HomSpaceId, LoweredFusionTreeBuildError, LoweredMultiplicityFreeAlgebra,
+    FusionRule, FusionSpaceAdmission, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
+    FusionTreePairKey, HomSpaceId, LoweredFusionTreeBuildError, LoweredMultiplicityFreeAlgebra,
     MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols, PreparedLoweredFusionTreeLayout,
     RuleIdentity, SectorLeg,
 };
@@ -675,14 +675,26 @@ pub(crate) struct TransformedLayoutProbe {
 /// Typed [`FusionTensorMapSpace`] facades lower to this type internally; the
 /// dynamic expert entry points (`*_dyn_into`) take it directly together with
 /// raw `f64` slices in the coupled-sector matrix layout.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct DynamicFusionMapSpace {
     nout: usize,
     nin: usize,
     homspace: Arc<FusionTreeHomSpace>,
     subblock_structure: Arc<BlockStructure>,
-    rule_identity: Option<tenet_core::RuleIdentity>,
+    admission: FusionSpaceAdmission,
 }
+
+impl PartialEq for DynamicFusionMapSpace {
+    fn eq(&self, other: &Self) -> bool {
+        self.nout == other.nout
+            && self.nin == other.nin
+            && self.homspace == other.homspace
+            && self.subblock_structure == other.subblock_structure
+            && self.admission.rule_identity() == other.admission.rule_identity()
+    }
+}
+
+impl Eq for DynamicFusionMapSpace {}
 
 /// Internal contraction operand separating categorical and storage authority.
 ///
@@ -716,7 +728,7 @@ impl<'a> FusionOperand<'a> {
             || logical_space.nin() != storage_space.nout()
             || logical_space.homspace().codomain() != storage_space.homspace().domain()
             || logical_space.homspace().domain() != storage_space.homspace().codomain()
-            || logical_space.rule_identity != storage_space.rule_identity
+            || logical_space.admission.rule_identity() != storage_space.admission.rule_identity()
         {
             return Err(OperationError::StructureMismatch {
                 tensor: "prelowered adjoint operand",
@@ -770,6 +782,16 @@ fn validate_bound_space_invariants(space: &DynamicFusionMapSpace) -> Result<(), 
     Ok(())
 }
 
+fn validate_complete_admission(space: &DynamicFusionMapSpace) -> Result<(), OperationError> {
+    if matches!(&space.admission, FusionSpaceAdmission::Complete(_)) {
+        Ok(())
+    } else {
+        Err(OperationError::StructureMismatch {
+            tensor: "complete fusion layout",
+        })
+    }
+}
+
 fn validate_generic_provider_style<R>(rule: &R) -> Result<(), OperationError>
 where
     R: FusionRule,
@@ -821,7 +843,7 @@ impl ValidatedDynamicFusionLayout {
 
 impl PartialEq for ValidatedDynamicFusionLayout {
     fn eq(&self, other: &Self) -> bool {
-        self.0.rule_identity == other.0.rule_identity
+        self.0.admission.rule_identity() == other.0.admission.rule_identity()
             && self.0.homspace().id() == other.0.homspace().id()
             && self.0.structure().content_id() == other.0.structure().content_id()
             && self.0.nout() == other.0.nout()
@@ -833,7 +855,7 @@ impl Eq for ValidatedDynamicFusionLayout {}
 
 impl Hash for ValidatedDynamicFusionLayout {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.0.rule_identity.hash(state);
+        self.0.admission.rule_identity().hash(state);
         self.0.homspace().id().hash(state);
         self.0.structure().content_id().hash(state);
         self.0.nout().hash(state);
@@ -875,6 +897,7 @@ where
         // new trust boundary; the rule identity remains cheap to verify.
         validate_bound_space_invariants(&space)?;
         space.validate_rule(provider.as_ref())?;
+        validate_complete_admission(&space)?;
         Ok(Self {
             space,
             provider,
@@ -957,18 +980,15 @@ where
         Self::from_derived(provider, space)
     }
 
-    fn bind_with_keys(
-        space: DynamicFusionMapSpace,
+    fn bind_subset_with_keys(
+        mut space: DynamicFusionMapSpace,
         provider: Arc<R>,
         keys: Vec<FusionTreePairKey>,
     ) -> Result<Self, OperationError> {
-        space.validate_rule(provider.as_ref())?;
+        debug_assert!(matches!(&space.admission, FusionSpaceAdmission::Subset(_)));
         validate_bound_space_invariants(&space)?;
-        space
-            .homspace()
-            .validate_subblock_structure_subset(provider.as_ref(), space.structure())
-            .map_err(OperationError::from_core_preserving_context)?;
         space.validate_complete_tree_grid(&keys)?;
+        space.admission = FusionSpaceAdmission::Complete(provider.rule_identity());
         Ok(Self {
             space,
             provider,
@@ -986,11 +1006,14 @@ where
         R: MultiplicityFreeFusionRule,
     {
         space.validate_rule(provider.as_ref())?;
+        if matches!(&space.admission, FusionSpaceAdmission::Complete(_)) {
+            return Self::from_derived(provider, space);
+        }
         let keys = space
             .homspace()
             .fusion_tree_keys(provider.as_ref())
             .to_vec();
-        Self::bind_with_keys(space, provider, keys)
+        Self::bind_subset_with_keys(space, provider, keys)
     }
 
     /// Builds a checked contraction result while retaining the exact provider
@@ -1253,11 +1276,14 @@ where
     ) -> Result<Self, OperationError> {
         space.validate_rule(provider.as_ref())?;
         validate_generic_provider_style(provider.as_ref())?;
+        if matches!(&space.admission, FusionSpaceAdmission::Complete(_)) {
+            return Self::from_derived(provider, space);
+        }
         let keys = space
             .homspace()
             .fusion_tree_keys_generic(provider.as_ref())
             .map_err(OperationError::from_core_preserving_context)?;
-        Self::bind_with_keys(space, provider, keys)
+        Self::bind_subset_with_keys(space, provider, keys)
     }
 
     #[inline]
@@ -1404,14 +1430,18 @@ where
         layout: &ValidatedDynamicFusionLayout,
     ) -> Result<Self, OperationError> {
         let expected = self.provider.rule_identity();
-        let actual = layout.0.rule_identity.clone().ok_or_else(|| {
+        let actual = layout.0.admission.rule_identity().ok_or_else(|| {
             OperationError::from_core_preserving_context(CoreError::MissingFusionRuleIdentity)
         })?;
-        if expected != actual {
+        if &expected != actual {
             return Err(OperationError::from_core_preserving_context(
-                CoreError::FusionRuleMismatch { expected, actual },
+                CoreError::FusionRuleMismatch {
+                    expected,
+                    actual: actual.clone(),
+                },
             ));
         }
+        validate_complete_admission(&layout.0)?;
         Ok(Self {
             space: layout.0.clone(),
             provider: Arc::clone(&self.provider),
@@ -1469,7 +1499,7 @@ impl DynamicFusionMapSpace {
                 nin,
                 homspace: Arc::new(homspace),
                 subblock_structure,
-                rule_identity: Some(rule.rule_identity()),
+                admission: FusionSpaceAdmission::Complete(rule.rule_identity()),
             });
         }
         let nout = homspace.codomain().len();
@@ -1482,7 +1512,7 @@ impl DynamicFusionMapSpace {
             nin,
             homspace: Arc::new(homspace),
             subblock_structure,
-            rule_identity: Some(rule.rule_identity()),
+            admission: FusionSpaceAdmission::Complete(rule.rule_identity()),
         })
     }
 
@@ -1505,7 +1535,7 @@ impl DynamicFusionMapSpace {
             nin,
             homspace: Arc::new(homspace),
             subblock_structure,
-            rule_identity: Some(rule.rule_identity()),
+            admission: FusionSpaceAdmission::Complete(rule.rule_identity()),
         })
     }
 
@@ -1544,7 +1574,7 @@ impl DynamicFusionMapSpace {
             nin: NIN,
             homspace: Arc::clone(space.homspace_arc()),
             subblock_structure: Arc::clone(space.subblock_structure()),
-            rule_identity: space.rule_identity(),
+            admission: space.admission().clone(),
         }
     }
 
@@ -1612,7 +1642,7 @@ impl DynamicFusionMapSpace {
                         nin,
                         homspace: Arc::new(homspace),
                         subblock_structure,
-                        rule_identity: Some(rule.rule_identity()),
+                        admission: FusionSpaceAdmission::Complete(rule.rule_identity()),
                     });
                 }
             };
@@ -1673,7 +1703,7 @@ impl DynamicFusionMapSpace {
             nin,
             homspace: Arc::new(homspace),
             subblock_structure,
-            rule_identity: Some(rule.rule_identity()),
+            admission: FusionSpaceAdmission::Complete(rule.rule_identity()),
         })
     }
 
@@ -1856,7 +1886,7 @@ impl DynamicFusionMapSpace {
             nin,
             homspace: Arc::new(homspace),
             subblock_structure,
-            rule_identity: Some(rule.rule_identity()),
+            admission: FusionSpaceAdmission::Complete(rule.rule_identity()),
         })
     }
 
@@ -2200,7 +2230,7 @@ impl DynamicFusionMapSpace {
             nin: self.nout,
             homspace: Arc::new(homspace),
             subblock_structure: Arc::new(structure),
-            rule_identity: self.rule_identity.clone(),
+            admission: self.admission.clone(),
         })
     }
 
@@ -2223,7 +2253,7 @@ impl DynamicFusionMapSpace {
     }
 
     pub(crate) fn validate_rule<R: FusionRule>(&self, rule: &R) -> Result<(), OperationError> {
-        match self.rule_identity.as_ref() {
+        match self.admission.rule_identity() {
             Some(expected) if expected != &rule.rule_identity() => Err(
                 OperationError::from_core_preserving_context(CoreError::FusionRuleMismatch {
                     expected: expected.clone(),
@@ -2235,6 +2265,12 @@ impl DynamicFusionMapSpace {
                 CoreError::MissingFusionRuleIdentity,
             )),
         }
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn admission(&self) -> &FusionSpaceAdmission {
+        &self.admission
     }
 
     #[inline]
@@ -2284,12 +2320,159 @@ fn tree_transform_operation_axes(operation: &TreeTransformOperation) -> (&[usize
 #[cfg(test)]
 mod bound_invariant_tests {
     use super::*;
-    use tenet_core::{BlockSpec, Su3FusionRule, Z2FusionRule};
+    use crate::tests::GenericMultiplicityRule;
+    use tenet_core::{
+        BlockSpec, FusionProductSpace, SectorLeg, Su3FusionRule, TensorMapSpace, Z2FusionRule,
+        Z2Irrep,
+    };
 
     fn matrix_space() -> DynamicFusionMapSpace {
         let rule = Z2FusionRule;
         let homspace = FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]);
         DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace, [vec![1, 1]]).unwrap()
+    }
+
+    fn typed_z2_matrix_space() -> FusionTensorMapSpace<1, 1> {
+        let leg = || SectorLeg::new([(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)], false);
+        FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::from_dims([2], [2]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg()]),
+                FusionProductSpace::new([leg()]),
+            ),
+            &Z2FusionRule,
+            [vec![1, 1], vec![1, 1]],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn expert_sparse_layout_is_a_subset_with_structural_zeros() {
+        // What: filtering an expert layout drops completeness, while an omitted
+        // valid tree remains an accepted structural zero.
+        let complete = typed_z2_matrix_space();
+        let keys = complete.homspace().fusion_tree_keys(&Z2FusionRule);
+        assert!(matches!(
+            complete.admission(),
+            FusionSpaceAdmission::Complete(_)
+        ));
+        let first = complete.subblock_structure().block(0).unwrap();
+        let structure = BlockStructure::from_blocks_with_rank(
+            2,
+            vec![BlockSpec::with_key(
+                first.key().clone(),
+                first.shape().to_vec(),
+                first.strides().to_vec(),
+                first.offset(),
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let raw = FusionTensorMapSpace::new_unbound(
+            complete.dense_space().clone(),
+            complete.homspace().clone(),
+            structure,
+        )
+        .unwrap();
+        assert_eq!(raw.admission(), &FusionSpaceAdmission::Unbound);
+        assert!(matches!(
+            raw.validate_rule(&Z2FusionRule),
+            Err(CoreError::MissingFusionRuleIdentity)
+        ));
+
+        let subset = raw.try_bind_rule(&Z2FusionRule).unwrap();
+        assert!(matches!(
+            subset.admission(),
+            FusionSpaceAdmission::Subset(_)
+        ));
+        assert!(subset.find_subblock_index(&keys[0]).is_some());
+        assert!(subset.find_subblock_index(&keys[1]).is_none());
+        assert_eq!(
+            subset.adjoint_view().unwrap().admission(),
+            subset.admission()
+        );
+        assert_eq!(
+            DynamicFusionMapSpace::from_typed(&subset).admission(),
+            subset.admission()
+        );
+    }
+
+    #[test]
+    fn complete_and_subset_spaces_are_mathematically_equal() {
+        // What: proof strength survives typed erasure and adjoint views without
+        // changing mathematical equality.
+        let complete = typed_z2_matrix_space();
+        let subset = FusionTensorMapSpace::from_shared_subblock_structure(
+            complete.dense_space().clone(),
+            complete.homspace().clone(),
+            Arc::clone(complete.subblock_structure()),
+        )
+        .unwrap()
+        .try_bind_rule(&Z2FusionRule)
+        .unwrap();
+        assert_eq!(complete, subset);
+
+        let complete = DynamicFusionMapSpace::from_typed(&complete);
+        let subset = DynamicFusionMapSpace::from_typed(&subset);
+        assert_eq!(complete, subset);
+        assert!(matches!(
+            complete.admission(),
+            FusionSpaceAdmission::Complete(_)
+        ));
+        assert!(matches!(
+            subset.admission(),
+            FusionSpaceAdmission::Subset(_)
+        ));
+        assert!(matches!(
+            complete.adjoint_view().unwrap().admission(),
+            FusionSpaceAdmission::Complete(_)
+        ));
+        assert!(matches!(
+            subset.adjoint_view().unwrap().admission(),
+            FusionSpaceAdmission::Subset(_)
+        ));
+
+        let bound =
+            BoundDynamicFusionMapSpace::bind_multiplicity_free(subset, Arc::new(Z2FusionRule))
+                .unwrap();
+        assert!(matches!(
+            bound.space().admission(),
+            FusionSpaceAdmission::Complete(_)
+        ));
+    }
+
+    #[test]
+    fn derived_and_validated_paths_reject_subset_proofs() {
+        // What: internal derived construction and validated-layout rebinding
+        // require an executable Complete proof in release builds.
+        let complete = typed_z2_matrix_space();
+        let subset = FusionTensorMapSpace::from_shared_subblock_structure(
+            complete.dense_space().clone(),
+            complete.homspace().clone(),
+            Arc::clone(complete.subblock_structure()),
+        )
+        .unwrap()
+        .try_bind_rule(&Z2FusionRule)
+        .unwrap();
+        let complete = DynamicFusionMapSpace::from_typed(&complete);
+        let subset = DynamicFusionMapSpace::from_typed(&subset);
+        let provider = Arc::new(Z2FusionRule);
+        let expected = OperationError::StructureMismatch {
+            tensor: "complete fusion layout",
+        };
+
+        assert_eq!(
+            BoundDynamicFusionMapSpace::from_derived(Arc::clone(&provider), subset.clone())
+                .unwrap_err(),
+            expected
+        );
+        let authority = BoundDynamicFusionMapSpace::from_derived(provider, complete).unwrap();
+        assert_eq!(
+            authority
+                .rebind_validated(&ValidatedDynamicFusionLayout(subset))
+                .unwrap_err(),
+            expected
+        );
     }
 
     #[test]
@@ -2389,6 +2572,60 @@ mod bound_invariant_tests {
             assert_eq!(actual.strides(), expected.strides());
             assert_eq!(actual.offset(), expected.offset());
         }
+    }
+
+    #[test]
+    fn generic_completeness_requires_every_vertex_label() {
+        // What: N(1,1,1)=2 requires both vertex labels 1 and 2 in a Complete grid.
+        let provider = Arc::new(GenericMultiplicityRule);
+        let homspace = FusionTreeHomSpace::from_sector_ids([(1, 1), (1, 1)], [(1, 1)]);
+        let keys = homspace
+            .fusion_tree_keys_generic(provider.as_ref())
+            .unwrap();
+        assert_eq!(
+            keys.iter()
+                .map(|key| key.codomain_vertices()[0].get())
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        let complete = DynamicFusionMapSpace::from_degeneracy_shapes_generic(
+            provider.as_ref(),
+            homspace,
+            [vec![1, 1, 1], vec![1, 1, 1]],
+        )
+        .unwrap();
+        assert_eq!(complete.structure().block_count(), 2);
+        assert!(matches!(
+            complete.admission(),
+            FusionSpaceAdmission::Complete(_)
+        ));
+
+        let first = complete.structure().block(0).unwrap();
+        let structure = BlockStructure::from_blocks_with_rank(
+            complete.rank(),
+            vec![BlockSpec::with_key(
+                first.key().clone(),
+                first.shape().to_vec(),
+                first.strides().to_vec(),
+                first.offset(),
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let subset = DynamicFusionMapSpace {
+            subblock_structure: Arc::new(structure),
+            admission: FusionSpaceAdmission::Subset(provider.rule_identity()),
+            ..complete
+        };
+
+        let error = BoundDynamicFusionMapSpace::bind_generic(subset, provider).unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::BlockCountMismatch {
+                expected: 2,
+                actual: 1,
+            })
+        ));
     }
 
     #[test]
@@ -2557,7 +2794,10 @@ mod lowered_metadata_tests {
         .unwrap();
 
         assert!(Arc::ptr_eq(actual.provider_arc(), &provider));
-        assert_eq!(actual.space().rule_identity, Some(expected_rule));
+        assert_eq!(
+            actual.space().admission().rule_identity(),
+            Some(&expected_rule)
+        );
         assert_eq!(layout_snapshot(actual.space()), expected_layout);
         assert_eq!(actual.space().required_len().unwrap(), expected_len);
         assert_eq!(legacy_shape_path_builds(), 0);
@@ -4157,7 +4397,7 @@ mod scratch_cache_tests {
         ));
 
         let unbound = DynamicFusionMapSpace {
-            rule_identity: None,
+            admission: FusionSpaceAdmission::Unbound,
             ..space
         };
         let missing =
@@ -4170,7 +4410,7 @@ mod scratch_cache_tests {
     }
 
     #[test]
-    fn bound_space_rejects_wrong_identity_before_provider_enumeration() {
+    fn bound_space_rejects_wrong_and_missing_identity_before_provider_enumeration() {
         let source_rule = CountingRule::new();
         let homspace = FusionTreeHomSpace::from_sector_ids([(0, 1), (0, 1)], []);
         let space =
@@ -4196,6 +4436,28 @@ mod scratch_cache_tests {
             ));
             assert_eq!(wrong_rule.calls.load(Ordering::Relaxed), 0);
         }
+
+        source_rule.calls.store(0, Ordering::Relaxed);
+        let unbound = DynamicFusionMapSpace {
+            admission: FusionSpaceAdmission::Unbound,
+            ..space
+        };
+        let matching_rule = Arc::new(source_rule);
+        for error in [
+            BoundDynamicFusionMapSpace::bind_multiplicity_free(
+                unbound.clone(),
+                Arc::clone(&matching_rule),
+            )
+            .unwrap_err(),
+            BoundDynamicFusionMapSpace::bind_generic(unbound, Arc::clone(&matching_rule))
+                .unwrap_err(),
+        ] {
+            assert!(matches!(
+                error,
+                OperationError::Core(CoreError::MissingFusionRuleIdentity)
+            ));
+            assert_eq!(matching_rule.calls.load(Ordering::Relaxed), 0);
+        }
     }
 
     #[test]
@@ -4215,6 +4477,7 @@ mod scratch_cache_tests {
         .unwrap();
         let incomplete = DynamicFusionMapSpace {
             subblock_structure: Arc::new(incomplete_structure),
+            admission: FusionSpaceAdmission::Subset(Z2FusionRule.rule_identity()),
             ..complete
         };
 
@@ -4305,10 +4568,22 @@ mod scratch_cache_tests {
 
     #[test]
     fn direct_bound_construction_enumerates_no_more_than_raw_construction() {
+        // What: canonical construction and later Complete admission add no
+        // second fusion-tree enumeration.
         let hom = || FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]);
         let raw_rule = CountingRule::new();
-        DynamicFusionMapSpace::from_degeneracy_shapes(&raw_rule, hom(), [vec![1, 1]]).unwrap();
+        let raw =
+            DynamicFusionMapSpace::from_degeneracy_shapes(&raw_rule, hom(), [vec![1, 1]]).unwrap();
         let raw_calls = raw_rule.calls.load(Ordering::Relaxed);
+        raw_rule.calls.store(0, Ordering::Relaxed);
+        let provider = Arc::new(raw_rule);
+        let rebound =
+            BoundDynamicFusionMapSpace::bind_multiplicity_free(raw, Arc::clone(&provider)).unwrap();
+        assert_eq!(provider.calls.load(Ordering::Relaxed), 0);
+        assert!(matches!(
+            rebound.space().admission(),
+            FusionSpaceAdmission::Complete(_)
+        ));
 
         let bound_rule = Arc::new(CountingRule::new());
         BoundDynamicFusionMapSpace::from_degeneracy_shapes(

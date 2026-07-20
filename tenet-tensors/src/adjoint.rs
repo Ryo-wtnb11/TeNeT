@@ -55,6 +55,19 @@ struct AdjointSpaceKey<RuleKey> {
     nin: usize,
 }
 
+fn adjoint_space_key<R>(rule: &R, space: &DynamicFusionMapSpace) -> AdjointSpaceKey<R::Key>
+where
+    R: TreeTransformRuleCacheKey,
+{
+    AdjointSpaceKey {
+        rule_key: rule.tree_transform_rule_cache_key(),
+        source_homspace_id: space.homspace().id(),
+        source_content_id: space.structure().content_id(),
+        nout: space.nout(),
+        nin: space.nin(),
+    }
+}
+
 /// Bounded LRU store of built adjoint spaces (strong `Arc`, since
 /// `adjoint_space_dyn` returns by value and would leave a `Weak` with no owner).
 struct AdjointSpaceCache<RuleKey> {
@@ -121,13 +134,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
 {
     space.validate_rule(rule)?;
-    let key = AdjointSpaceKey {
-        rule_key: rule.tree_transform_rule_cache_key(),
-        source_homspace_id: space.homspace().id(),
-        source_content_id: space.structure().content_id(),
-        nout: space.nout(),
-        nin: space.nin(),
-    };
+    let key = adjoint_space_key(rule, space);
     let cache = adjoint_space_cache::<R::Key>();
     if let Ok(mut guard) = cache.write() {
         if let Some(hit) = guard.entries.get(&key).cloned() {
@@ -1454,7 +1461,8 @@ mod cache_tests {
     #[test]
     fn lazy_adjoint_rejects_noncanonical_source_before_cache_admission() {
         // What: metadata-only dagger construction rejects noncanonical source
-        // ordering without publishing an adjoint-space cache entry.
+        // ordering without publishing that source's adjoint-space cache key;
+        // unrelated successful adjoints may share this process-global cache.
         let _guard = crate::test_support::CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1488,6 +1496,7 @@ mod cache_tests {
         .unwrap();
         let reordered_tensor = typed_u1_expert_tensor(2, 2, double_homspace, reordered);
         let reordered = DynamicFusionMapSpace::from_typed(reordered_tensor.fusion_space().unwrap());
+        let rejected_key = adjoint_space_key(&U1FusionRule, &reordered);
 
         let reordered_error = adjoint_space_dyn(&U1FusionRule, &reordered).unwrap_err();
         assert_eq!(
@@ -1495,13 +1504,14 @@ mod cache_tests {
             OperationError::StructureMismatch { tensor: "src" }
         );
         let cache = adjoint_space_cache::<<U1FusionRule as TreeTransformRuleCacheKey>::Key>();
-        assert_eq!(
+        assert!(
             cache
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .entries
-                .len(),
-            0
+                .peek(&rejected_key)
+                .is_none(),
+            "rejected source must not publish its adjoint-space cache key"
         );
     }
 
