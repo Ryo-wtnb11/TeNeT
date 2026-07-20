@@ -3762,7 +3762,9 @@ fn eager_product_tree_pair_plan_bypasses_legacy_row_assembly() {
 #[test]
 fn eager_simple_plan_prepares_once_per_distinct_source_split() {
     use crate::tree_transform::{
+        build_tree_pair_transform_group_plan_validated_with_threads,
         reset_tree_pair_operation_preparations, tree_pair_operation_preparations,
+        validate_multiplicity_free_tree_pair_preflight,
     };
 
     let half_id = 1usize;
@@ -3829,31 +3831,40 @@ fn eager_simple_plan_prepares_once_per_distinct_source_split() {
             .map_err(OperationError::from_core_preserving_context)
         })
         .unwrap();
+    let proof =
+        validate_multiplicity_free_tree_pair_preflight(&SU2FusionRule, &operation, &structure)
+            .unwrap();
 
-    reset_tree_pair_operation_preparations();
-    let prepared =
-        build_tree_pair_transform_group_plan(&SU2FusionRule, operation, &structure).unwrap();
+    for threads in [1, 4] {
+        reset_tree_pair_operation_preparations();
+        let prepared = build_tree_pair_transform_group_plan_validated_with_threads(
+            &proof,
+            operation.clone(),
+            threads,
+        )
+        .unwrap();
 
-    // What: two source splits across three interleaved groups prepare exactly
-    // twice, while preserving the independent per-source oracle's grouping,
-    // source/destination order, and coefficients.
-    assert_eq!(tree_pair_operation_preparations(), 2);
-    assert_eq!(prepared.specs().len(), oracle.specs().len());
-    for (actual, expected) in prepared.specs().iter().zip(oracle.specs()) {
-        assert_eq!(actual.group_key(), expected.group_key());
-        assert_eq!(actual.src_keys(), expected.src_keys());
-        assert_eq!(actual.dst_keys(), expected.dst_keys());
-        assert_eq!(actual.source_axes(), expected.source_axes());
-        assert_eq!(
-            actual.recoupling_coefficients_dst_src().len(),
-            expected.recoupling_coefficients_dst_src().len()
-        );
-        for (&actual, &expected) in actual
-            .recoupling_coefficients_dst_src()
-            .iter()
-            .zip(expected.recoupling_coefficients_dst_src())
-        {
-            assert!((actual - expected).abs() <= 1.0e-12);
+        // What: serial and threaded lowering each prepare two source splits
+        // across three interleaved groups while preserving the independent
+        // per-source oracle's grouping, order, and coefficients.
+        assert_eq!(tree_pair_operation_preparations(), 2);
+        assert_eq!(prepared.specs().len(), oracle.specs().len());
+        for (actual, expected) in prepared.specs().iter().zip(oracle.specs()) {
+            assert_eq!(actual.group_key(), expected.group_key());
+            assert_eq!(actual.src_keys(), expected.src_keys());
+            assert_eq!(actual.dst_keys(), expected.dst_keys());
+            assert_eq!(actual.source_axes(), expected.source_axes());
+            assert_eq!(
+                actual.recoupling_coefficients_dst_src().len(),
+                expected.recoupling_coefficients_dst_src().len()
+            );
+            for (&actual, &expected) in actual
+                .recoupling_coefficients_dst_src()
+                .iter()
+                .zip(expected.recoupling_coefficients_dst_src())
+            {
+                assert!((actual - expected).abs() <= 1.0e-12);
+            }
         }
     }
 }
