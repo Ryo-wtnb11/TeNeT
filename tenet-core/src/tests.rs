@@ -1763,6 +1763,462 @@ mod tests {
     }
 
     #[test]
+    fn checked_tree_constructors_report_builtin_closure_without_unwinding() {
+        // What: raw checked construction preserves exact finite-algebra
+        // failures instead of entering the infallible provider path.
+        assert_eq!(
+            FusionTreeKey::try_new_for_rule_checked(
+                &U1FusionRule,
+                [u1(i32::MAX), u1(1)],
+                u1(0),
+                [false; 2],
+                [],
+                [MultiplicityIndex::ONE],
+            ),
+            Err(CheckedFusionSpaceError::FusionAlgebra(Box::new(
+                FusionAlgebraError::U1FusionOverflow {
+                    left: i32::MAX,
+                    right: 1,
+                }
+            )))
+        );
+        assert_eq!(
+            FusionTreeKey::try_from_sector_ids_for_rule_checked(
+                &SU2FusionRule,
+                [128, 127],
+                0,
+                [false; 2],
+                [],
+                [1],
+            ),
+            Err(CheckedFusionSpaceError::FusionAlgebra(Box::new(
+                FusionAlgebraError::FusionNotRepresentable {
+                    left: su2(128),
+                    right: su2(127),
+                }
+            )))
+        );
+    }
+
+    fn assert_invalid_rank_one_checked<R>(
+        rule: &R,
+        invalid: SectorId,
+        expected: FusionAlgebraError,
+    ) where
+        R: CheckedFusionAlgebra,
+    {
+        let tree = FusionTreeKey::new([invalid], invalid, [false], [], []);
+        assert_eq!(
+            tree.validate_for_rule_checked(rule),
+            Err(CheckedFusionSpaceError::FusionAlgebra(Box::new(expected)))
+        );
+    }
+
+    #[test]
+    fn checked_rank_one_validates_ids_by_unit_fusion() {
+        // What: rank-one raw imports reject every unrepresentable built-in ID,
+        // while U1 MIN remains valid without computing its overflowing dual.
+        let invalid = SectorId::new(2);
+        assert_invalid_rank_one_checked(
+            &Z2FusionRule,
+            invalid,
+            FusionAlgebraError::InvalidSector { sector: invalid },
+        );
+        assert_invalid_rank_one_checked(
+            &FermionParityFusionRule,
+            invalid,
+            FusionAlgebraError::InvalidSector { sector: invalid },
+        );
+        assert_invalid_rank_one_checked(
+            &FibonacciFusionRule,
+            invalid,
+            FusionAlgebraError::InvalidSector { sector: invalid },
+        );
+        let invalid_su2 = SectorId::new(255);
+        assert_invalid_rank_one_checked(
+            &SU2FusionRule,
+            invalid_su2,
+            FusionAlgebraError::InvalidSector {
+                sector: invalid_su2,
+            },
+        );
+        #[cfg(target_pointer_width = "64")]
+        {
+            let invalid_u1 = SectorId::new(u32::MAX as usize + 1);
+            assert_invalid_rank_one_checked(
+                &U1FusionRule,
+                invalid_u1,
+                FusionAlgebraError::InvalidSector { sector: invalid_u1 },
+            );
+
+            type Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
+            type Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
+            type Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule, Codec>;
+            let rule = Rule::new(FermionParityFusionRule, U1FusionRule);
+            let invalid_product = SectorId::new(1usize << Layout::BITS);
+            assert_invalid_rank_one_checked(
+                &rule,
+                invalid_product,
+                FusionAlgebraError::ProductCodec(
+                    ProductSectorCodecError::InvalidHighBits {
+                        sector: invalid_product,
+                        total_bits: Layout::BITS,
+                    },
+                ),
+            );
+        }
+
+        FusionTreeKey::new([u1(i32::MIN)], u1(i32::MIN), [false], [], [])
+            .validate_for_rule_checked(&U1FusionRule)
+            .unwrap();
+    }
+
+    #[test]
+    fn checked_tree_distinguishes_absent_channels_from_algebra_failure() {
+        // What: a representable but mathematically absent stored channel is a
+        // malformed tree, while invalid stored IDs and recursive product
+        // closure keep their exact algebra causes.
+        assert_eq!(
+            FusionTreeKey::new(
+                [u1(1), u1(2)],
+                u1(4),
+                [false; 2],
+                [],
+                [MultiplicityIndex::ONE],
+            )
+            .validate_for_rule_checked(&U1FusionRule),
+            Err(CheckedFusionSpaceError::Core(Box::new(
+                CoreError::MalformedFusionTree {
+                    message: "fusion tree contains an inadmissible fusion vertex",
+                }
+            )))
+        );
+        let invalid = SectorId::new(2);
+        assert_eq!(
+            FusionTreeKey::new(
+                [z2_odd(), z2_odd()],
+                invalid,
+                [false; 2],
+                [],
+                [MultiplicityIndex::ONE],
+            )
+            .validate_for_rule_checked(&Z2FusionRule),
+            Err(CheckedFusionSpaceError::FusionAlgebra(Box::new(
+                FusionAlgebraError::InvalidSector { sector: invalid }
+            )))
+        );
+
+        #[cfg(target_pointer_width = "64")]
+        {
+            type Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
+            type Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule, Codec>;
+            let rule = Rule::new(FermionParityFusionRule, U1FusionRule);
+            let left = Codec::encode(z2_even(), u1(i32::MAX));
+            let right = Codec::encode(z2_odd(), u1(1));
+            let coupled = Codec::encode(z2_odd(), u1(0));
+            assert_eq!(
+                FusionTreeKey::new(
+                    [left, right],
+                    coupled,
+                    [false; 2],
+                    [],
+                    [MultiplicityIndex::ONE],
+                )
+                .validate_for_rule_checked(&rule),
+                Err(CheckedFusionSpaceError::FusionAlgebra(Box::new(
+                    FusionAlgebraError::U1FusionOverflow {
+                        left: i32::MAX,
+                        right: 1,
+                    }
+                )))
+            );
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct CheckedTreeProbe {
+        channel_calls: AtomicUsize,
+        nsymbol_calls: AtomicUsize,
+    }
+
+    impl FusionRule for CheckedTreeProbe {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn fusion_channels(&self, _left: SectorId, _right: SectorId) -> SectorVec {
+            core::iter::once(SectorId::new(0)).collect()
+        }
+
+        fn nsymbol(&self, _left: SectorId, _right: SectorId, _coupled: SectorId) -> usize {
+            1
+        }
+    }
+
+    impl CheckedFusionAlgebra for CheckedTreeProbe {
+        fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+            Ok(sector)
+        }
+
+        fn try_fusion_channels(
+            &self,
+            left: SectorId,
+            right: SectorId,
+        ) -> Result<SectorVec, FusionAlgebraError> {
+            self.channel_calls.fetch_add(1, Ordering::Relaxed);
+            if left == SectorId::new(9) {
+                Err(FusionAlgebraError::FusionNotRepresentable { left, right })
+            } else {
+                Ok(self.fusion_channels(left, right))
+            }
+        }
+
+        fn try_nsymbol(
+            &self,
+            _left: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+        ) -> Result<usize, FusionAlgebraError> {
+            self.nsymbol_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(1)
+        }
+    }
+
+    #[test]
+    fn checked_tree_normalizes_structure_before_provider_calls() {
+        // What: shape and rank errors touch no checked provider operation, and
+        // generated-channel failure precedes stored multiplicity validation.
+        let rule = CheckedTreeProbe::default();
+        for tree in [
+            FusionTreeKey::new(
+                [SectorId::new(0); 2],
+                SectorId::new(0),
+                [false],
+                [],
+                [MultiplicityIndex::ONE],
+            ),
+            FusionTreeKey::new(
+                [SectorId::new(0)],
+                SectorId::new(1),
+                [false],
+                [],
+                [],
+            ),
+        ] {
+            assert!(matches!(
+                tree.validate_for_rule_checked(&rule),
+                Err(CheckedFusionSpaceError::Core(_))
+            ));
+        }
+        assert_eq!(rule.channel_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(rule.nsymbol_calls.load(Ordering::Relaxed), 0);
+
+        let failure = FusionTreeKey::new(
+            [SectorId::new(9), SectorId::new(0)],
+            SectorId::new(0),
+            [false; 2],
+            [],
+            [MultiplicityIndex::new(2).unwrap()],
+        )
+        .validate_for_rule_checked(&rule);
+        assert_eq!(
+            failure,
+            Err(CheckedFusionSpaceError::FusionAlgebra(Box::new(
+                FusionAlgebraError::FusionNotRepresentable {
+                    left: SectorId::new(9),
+                    right: SectorId::new(0),
+                }
+            )))
+        );
+        assert_eq!(rule.channel_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(rule.nsymbol_calls.load(Ordering::Relaxed), 0);
+
+        rule.channel_calls.store(0, Ordering::Relaxed);
+        rule.nsymbol_calls.store(0, Ordering::Relaxed);
+        assert_eq!(
+            FusionTreeKey::new(
+                [SectorId::new(0); 2],
+                SectorId::new(0),
+                [false; 2],
+                [],
+                [MultiplicityIndex::new(2).unwrap()],
+            )
+            .validate_for_rule_checked(&rule),
+            Err(CheckedFusionSpaceError::Core(Box::new(
+                CoreError::MalformedFusionTree {
+                    message: "fusion tree vertex label exceeds its fusion multiplicity",
+                }
+            )))
+        );
+        assert_eq!(rule.channel_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(rule.nsymbol_calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn checked_tree_pair_preserves_validation_precedence() {
+        // What: pair validation reports codomain, then domain, then coupled
+        // mismatch without reordering finite-algebra checks.
+        let bad_shape = FusionTreeKey::new(
+            [u1(0); 2],
+            u1(0),
+            [false],
+            [],
+            [MultiplicityIndex::ONE],
+        );
+        let overflow = FusionTreeKey::new(
+            [u1(i32::MAX), u1(1)],
+            u1(0),
+            [false; 2],
+            [],
+            [MultiplicityIndex::ONE],
+        );
+        assert!(matches!(
+            FusionTreePairKey::pair(bad_shape, overflow.clone())
+                .validate_for_rule_checked(&U1FusionRule),
+            Err(CheckedFusionSpaceError::Core(_))
+        ));
+        assert_eq!(
+            FusionTreePairKey::pair(
+                FusionTreeKey::new([], u1(0), [], [], []),
+                overflow,
+            )
+            .validate_for_rule_checked(&U1FusionRule),
+            Err(CheckedFusionSpaceError::FusionAlgebra(Box::new(
+                FusionAlgebraError::U1FusionOverflow {
+                    left: i32::MAX,
+                    right: 1,
+                }
+            )))
+        );
+        assert_eq!(
+            FusionTreePairKey::pair(
+                FusionTreeKey::new([u1(1)], u1(1), [false], [], []),
+                FusionTreeKey::new([u1(2)], u1(2), [false], [], []),
+            )
+            .validate_for_rule_checked(&U1FusionRule),
+            Err(CheckedFusionSpaceError::Core(Box::new(
+                CoreError::MalformedFusionTree {
+                    message: "fusion tree pair requires matching coupled sectors",
+                }
+            )))
+        );
+    }
+
+    fn assert_checked_tree_matches_infallible<R>(rule: &R, tree: FusionTreeKey)
+    where
+        R: CheckedFusionAlgebra,
+    {
+        tree.validate_for_rule(rule).unwrap();
+        tree.validate_for_rule_checked(rule).unwrap();
+    }
+
+    #[test]
+    fn checked_tree_matches_closed_builtin_and_nested_product_rules() {
+        // What: checked validation accepts the same valid raw trees as the
+        // established validator across built-in and recursive product rules.
+        assert_checked_tree_matches_infallible(
+            &Z2FusionRule,
+            FusionTreeKey::new(
+                [z2_odd(); 2],
+                z2_even(),
+                [false; 2],
+                [],
+                [MultiplicityIndex::ONE],
+            ),
+        );
+        assert_checked_tree_matches_infallible(
+            &FermionParityFusionRule,
+            FusionTreeKey::new(
+                [z2_odd(); 2],
+                z2_even(),
+                [false; 2],
+                [],
+                [MultiplicityIndex::ONE],
+            ),
+        );
+        assert_checked_tree_matches_infallible(
+            &U1FusionRule,
+            FusionTreeKey::new(
+                [u1(2), u1(-1)],
+                u1(1),
+                [false; 2],
+                [],
+                [MultiplicityIndex::ONE],
+            ),
+        );
+        assert_checked_tree_matches_infallible(
+            &SU2FusionRule,
+            FusionTreeKey::new(
+                [su2(1); 2],
+                su2(0),
+                [false; 2],
+                [],
+                [MultiplicityIndex::ONE],
+            ),
+        );
+        assert_checked_tree_matches_infallible(
+            &FibonacciFusionRule,
+            FusionTreeKey::new(
+                [SectorId::new(1); 2],
+                SectorId::new(1),
+                [false; 2],
+                [],
+                [MultiplicityIndex::ONE],
+            ),
+        );
+
+        #[cfg(target_pointer_width = "64")]
+        {
+            type InnerCodec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
+            type InnerRule =
+                ProductFusionRule<FermionParityFusionRule, U1FusionRule, InnerCodec>;
+            type InnerLayout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
+            type Codec = PackedProductCodec<InnerLayout, Su2SectorLayout>;
+            type Rule = ProductFusionRule<InnerRule, SU2FusionRule, Codec>;
+            let rule = Rule::new(
+                InnerRule::new(FermionParityFusionRule, U1FusionRule),
+                SU2FusionRule,
+            );
+            let sector = |parity, charge, spin| {
+                Codec::encode(InnerCodec::encode(parity, charge), spin)
+            };
+            assert_checked_tree_matches_infallible(
+                &rule,
+                FusionTreeKey::new(
+                    [sector(z2_odd(), u1(2), su2(1)), sector(z2_odd(), u1(-1), su2(1))],
+                    sector(z2_even(), u1(1), su2(0)),
+                    [false; 2],
+                    [],
+                    [MultiplicityIndex::ONE],
+                ),
+            );
+        }
+
+        assert_checked_tree_matches_infallible(
+            &CheckedTreeProbe::default(),
+            FusionTreeKey::new(
+                [SectorId::new(0); 2],
+                SectorId::new(0),
+                [false; 2],
+                [],
+                [MultiplicityIndex::ONE],
+            ),
+        );
+    }
+
+    #[test]
     fn raw_tree_pair_constructor_rejects_zero_vertices_in_source_order() {
         let domain_vertices = std::iter::once_with(|| {
             panic!("domain vertices must not be consumed after a codomain error")
