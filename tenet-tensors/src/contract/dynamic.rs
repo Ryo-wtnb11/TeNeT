@@ -581,6 +581,110 @@ where
     )
 }
 
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_dynamic_tree_execution_artifact_for_test<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+>(
+    rule: &R,
+    plan: &FusionContractPlan,
+    dst: &mut TensorMap<D, DST_NOUT, DST_NIN>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN>,
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    let mut tree_context =
+        TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
+    let mut contract_backend = DenseTreeTransformOperations::default();
+    let mut contract_workspace = super::backend::TensorContractWorkspace::default();
+    let mut dynamic_space_cache = DynamicFusionSpaceCache::default();
+    let mut fusion_block_cache = super::resolution::ContractionResolutionCache::default();
+    let mut fusion_block_workspace = FusionBlockContractWorkspace::default();
+    let mut scratch = DynamicFusionScratchWorkspace::default();
+    tensorcontract_fusion_dynamic_plan_into_context(
+        &mut tree_context,
+        &mut contract_backend,
+        &mut contract_workspace,
+        &mut dynamic_space_cache,
+        &mut fusion_block_cache,
+        &mut fusion_block_workspace,
+        &mut scratch,
+        rule,
+        plan,
+        dst,
+        lhs,
+        rhs,
+        alpha,
+        beta,
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_prelowered_dynamic_tree_execution_artifact_for_test<R, D>(
+    rule: &R,
+    plan: &FusionContractPlan,
+    dst_space: &DynamicFusionMapSpace,
+    dst_data: &mut [D],
+    lhs: super::dynamic_space::FusionOperand<'_>,
+    lhs_data: &[D],
+    rhs: super::dynamic_space::FusionOperand<'_>,
+    rhs_data: &[D],
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + TreeTransformRuleCacheKey<Key = crate::tree_transform::TreeTransformBuiltinRuleCacheKey>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    let mut tree_context =
+        TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
+    let mut contract_backend = DenseTreeTransformOperations::default();
+    let mut contract_workspace = super::backend::TensorContractWorkspace::default();
+    let mut dynamic_space_cache = DynamicFusionSpaceCache::default();
+    let mut fusion_block_cache = super::resolution::ContractionResolutionCache::default();
+    let mut fusion_block_workspace = FusionBlockContractWorkspace::default();
+    let mut scratch = DynamicFusionScratchWorkspace::default();
+    tensorcontract_fusion_dynamic_plan_dyn_into_context(
+        &mut tree_context,
+        &mut contract_backend,
+        &mut contract_workspace,
+        &mut dynamic_space_cache,
+        &mut fusion_block_cache,
+        &mut fusion_block_workspace,
+        &mut scratch,
+        rule,
+        encoded_layout_primer::<R>,
+        plan,
+        dst_space,
+        dst_space.structure(),
+        dst_data,
+        lhs.logical_space(),
+        Some(lhs.storage_space()),
+        lhs.storage_space().structure(),
+        lhs_data,
+        rhs.logical_space(),
+        Some(rhs.storage_space()),
+        rhs.storage_space().structure(),
+        rhs_data,
+        alpha,
+        beta,
+    )
+}
+
 /// Dynamic-rank core of the TensorKit `@tensor`-shaped route: source
 /// tree-pair transforms, core coupled GEMM, optional output transform. All
 /// operands are (space, storage structure, raw slice) triples.
@@ -651,11 +755,12 @@ where
 
 #[derive(Clone, Debug)]
 pub(crate) struct DynamicTreeExecutionArtifact {
+    orientation: FusionContractOrientation,
     lhs_transform: DynamicFusionTransformedSourceEntry,
     rhs_transform: DynamicFusionTransformedSourceEntry,
     lhs_borrowed: bool,
     rhs_borrowed: bool,
-    rhs_twist: Arc<[RhsTwistAction]>,
+    core_right_twist: Arc<[RhsTwistAction]>,
     core_dst: Option<DynamicFusionCoreDstEntry>,
     block_plan: Arc<FusionBlockContractPlan>,
 }
@@ -682,6 +787,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: DenseRecouplingScalar,
 {
+    let reverse = plan.orientation() == FusionContractOrientation::RhsLhs;
     let lhs_transform = match lhs_storage_space {
         Some(storage_space) => dynamic_space_cache.get_or_compile_transformed_source_prelowered(
             tree_context,
@@ -703,13 +809,25 @@ where
             layout_primer,
         )?,
     };
-    let lhs_borrowed = source_is_borrowable_core_layout(
-        lhs_space,
-        lhs_structure,
-        &lhs_transform.space,
-        plan.lhs_transform(),
-        plan.lhs_source_conjugate(),
-    );
+    let lhs_borrowed = if reverse {
+        rhs_source_is_borrowable(
+            rule,
+            lhs_space,
+            lhs_structure,
+            &lhs_transform.space,
+            plan.lhs_transform(),
+            plan.lhs_source_conjugate(),
+            plan.core_axes().as_spec(),
+        )?
+    } else {
+        source_is_borrowable_core_layout(
+            lhs_space,
+            lhs_structure,
+            &lhs_transform.space,
+            plan.lhs_transform(),
+            plan.lhs_source_conjugate(),
+        )
+    };
     let rhs_transform = match rhs_storage_space {
         Some(storage_space) => dynamic_space_cache.get_or_compile_transformed_source_prelowered(
             tree_context,
@@ -731,20 +849,35 @@ where
             layout_primer,
         )?,
     };
-    let lhs_core_space = lhs_transform.space.clone();
-    let rhs_core_space = rhs_transform.space.clone();
-    let rhs_borrowed = rhs_source_is_borrowable(
+    let physical_lhs_core_space = lhs_transform.space.clone();
+    let physical_rhs_core_space = rhs_transform.space.clone();
+    let rhs_borrowed = if reverse {
+        source_is_borrowable_core_layout(
+            rhs_space,
+            rhs_structure,
+            &physical_rhs_core_space,
+            plan.rhs_transform(),
+            plan.rhs_source_conjugate(),
+        )
+    } else {
+        rhs_source_is_borrowable(
+            rule,
+            rhs_space,
+            rhs_structure,
+            &physical_rhs_core_space,
+            plan.rhs_transform(),
+            plan.rhs_source_conjugate(),
+            plan.core_axes().as_spec(),
+        )?
+    };
+    let (core_left_space, core_right_space) = if reverse {
+        (&physical_rhs_core_space, &physical_lhs_core_space)
+    } else {
+        (&physical_lhs_core_space, &physical_rhs_core_space)
+    };
+    let core_right_twist = compile_rhs_contract_twist(
         rule,
-        rhs_space,
-        rhs_structure,
-        &rhs_core_space,
-        plan.rhs_transform(),
-        plan.rhs_source_conjugate(),
-        plan.core_axes().as_spec(),
-    )?;
-    let rhs_twist = compile_rhs_contract_twist(
-        rule,
-        &rhs_core_space,
+        core_right_space,
         plan.core_axes().as_spec().rhs_contracting_axes(),
     )?;
 
@@ -754,8 +887,8 @@ where
         Some(dynamic_space_cache.get_or_compile_core_dst(
             tree_context,
             rule,
-            &lhs_core_space,
-            &rhs_core_space,
+            core_left_space,
+            core_right_space,
             plan,
             dst_space,
             layout_primer,
@@ -767,16 +900,17 @@ where
     let block_plan = fusion_block_cache.get_or_compile_core_plan(
         rule,
         block_dst_space,
-        &lhs_core_space,
-        &rhs_core_space,
+        core_left_space,
+        core_right_space,
         plan.core_axes().as_spec(),
     )?;
     Ok(DynamicTreeExecutionArtifact {
+        orientation: plan.orientation(),
         lhs_transform,
         rhs_transform,
         lhs_borrowed,
         rhs_borrowed,
-        rhs_twist,
+        core_right_twist,
         core_dst,
         block_plan,
     })
@@ -803,6 +937,7 @@ where
     BC: TensorContractBackend<D, f64>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
+    let reverse = artifact.orientation == FusionContractOrientation::RhsLhs;
     let lhs_transform = &artifact.lhs_transform;
     let rhs_transform = &artifact.rhs_transform;
     let lhs_borrowed = artifact.lhs_borrowed;
@@ -821,6 +956,15 @@ where
             lhs_data,
             D::one(),
         )?;
+        if reverse {
+            execute_rhs_contract_twist(
+                &mut crate::StridedHostKernelAdapter::with_transpose_backend(
+                    tree_context.backend().transpose_backend(),
+                ),
+                lhs_scratch.data_mut(),
+                &artifact.core_right_twist,
+            )?;
+        }
     }
     if !rhs_borrowed {
         let rhs_dst_structure = std::sync::Arc::clone(rhs_core_space.structure());
@@ -833,22 +977,29 @@ where
             rhs_data,
             D::one(),
         )?;
-        execute_rhs_contract_twist(
-            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                tree_context.backend().transpose_backend(),
-            ),
-            rhs_scratch.data_mut(),
-            &artifact.rhs_twist,
-        )?;
+        if !reverse {
+            execute_rhs_contract_twist(
+                &mut crate::StridedHostKernelAdapter::with_transpose_backend(
+                    tree_context.backend().transpose_backend(),
+                ),
+                rhs_scratch.data_mut(),
+                &artifact.core_right_twist,
+            )?;
+        }
     }
 
     if artifact.core_dst.is_none() {
-        let lhs_core = select_core_source(lhs_borrowed, &lhs_core_space, lhs_data, || {
+        let physical_lhs_core = select_core_source(lhs_borrowed, &lhs_core_space, lhs_data, || {
             CoreSource::from_host_scratch(scratch.lhs())
         });
-        let rhs_core = select_core_source(rhs_borrowed, &rhs_core_space, rhs_data, || {
+        let physical_rhs_core = select_core_source(rhs_borrowed, &rhs_core_space, rhs_data, || {
             CoreSource::from_host_scratch(scratch.rhs())
         });
+        let (core_left, core_right) = if reverse {
+            (physical_rhs_core, physical_lhs_core)
+        } else {
+            (physical_lhs_core, physical_rhs_core)
+        };
         return artifact.block_plan.execute_raw(
             &mut crate::StridedHostKernelAdapter::with_transpose_backend(
                 tree_context.backend().transpose_backend(),
@@ -860,10 +1011,10 @@ where
             fusion_block_workspace,
             dst_structure,
             dst_data,
-            lhs_core.structure(),
-            lhs_core.data(),
-            rhs_core.structure(),
-            rhs_core.data(),
+            core_left.structure(),
+            core_left.data(),
+            core_right.structure(),
+            core_right.data(),
             alpha,
             beta,
         );
@@ -900,17 +1051,22 @@ where
             )
         };
         let (lhs_scratch, rhs_scratch, core_dst) = scratch.optional_sources_dst_mut();
-        let lhs_core = select_core_source(lhs_borrowed, &lhs_core_space, lhs_data, || {
+        let physical_lhs_core = select_core_source(lhs_borrowed, &lhs_core_space, lhs_data, || {
             CoreSource::from_host_scratch(
                 lhs_scratch.expect("non-borrowed LHS materialized before core contraction"),
             )
         });
-        let rhs_core = select_core_source(rhs_borrowed, &rhs_core_space, rhs_data, || {
+        let physical_rhs_core = select_core_source(rhs_borrowed, &rhs_core_space, rhs_data, || {
             CoreSource::from_host_scratch(
                 rhs_scratch.expect("non-borrowed RHS materialized before core contraction"),
             )
         });
-        execute(lhs_core, rhs_core, core_dst)?;
+        let (core_left, core_right) = if reverse {
+            (physical_rhs_core, physical_lhs_core)
+        } else {
+            (physical_lhs_core, physical_rhs_core)
+        };
+        execute(core_left, core_right, core_dst)?;
     }
     tree_context.tree_transform_structure_into_raw(
         core_dst.output_transform_structure.as_ref(),
