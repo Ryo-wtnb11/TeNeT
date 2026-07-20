@@ -1034,6 +1034,13 @@ struct ValidatedFusionTreePair<'a, R> {
     key: &'a FusionTreePairKey,
 }
 
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FusionTreePairOrientation {
+    Direct,
+    Adjoint,
+}
+
 fn validate_fusion_tree_pair_for_rule<'a, R>(
     rule: &'a R,
     tree_pair: &'a FusionTreePairKey,
@@ -2712,7 +2719,6 @@ impl CompactMultiplicityFreeTreePairBasis {
     fn from_group<R>(
         group: ValidatedTreePairBlockGroup<'_, R>,
     ) -> Result<Self, CoreError> {
-        let src_keys = group.src_keys;
         let (frame, first_local) = MultiplicityFreeTreePairFrame::split(
             group
                 .projection
@@ -2721,19 +2727,20 @@ impl CompactMultiplicityFreeTreePairBasis {
                     message: "compact block basis requires at least one source",
                 })?,
         );
-        let mut locals = Vec::with_capacity(src_keys.len());
+        let mut locals = Vec::with_capacity(group.source_len);
         locals.push(first_local);
-        for (index, source) in src_keys.iter().enumerate().skip(1) {
-            if !frame.matches_tree_pair(source) {
+        for index in 1..group.source_len {
+            let source = group
+                .projection
+                .pair_at(index)
+                .expect("validated projection covers every source");
+            if !frame.matches_tree_pair_ref(source) {
                 return Err(CoreError::MalformedFusionTree {
                     message: TREE_PAIR_BLOCK_GROUP_ERROR,
                 });
             }
             locals.push(MultiplicityFreeTreePairLocal::from_proven(
-                group
-                    .projection
-                    .pair_at(index)
-                    .expect("validated projection covers every source"),
+                source,
             ));
         }
         Ok(Self { frame, locals })
@@ -3691,7 +3698,6 @@ where
     R: MultiplicityFreeRigidSymbols,
 {
     let rule = group.rule;
-    let src_keys = group.src_keys;
     let (initial_frame, first_local) = MultiplicityFreeTreePairFrame::split(
         group
             .projection
@@ -3718,7 +3724,7 @@ where
             }
             steps.push(prepared);
         }
-        for (index, _source) in src_keys.iter().enumerate().skip(1) {
+        for index in 1..group.source_len {
             let (source_frame, mut local) =
                 MultiplicityFreeTreePairFrame::split(
                     group
@@ -3755,7 +3761,7 @@ where
             }
             steps.push(prepared);
         }
-        for (index, _source) in src_keys.iter().enumerate().skip(1) {
+        for index in 1..group.source_len {
             let (source_frame, mut local) =
                 MultiplicityFreeTreePairFrame::split(
                     group
@@ -3788,12 +3794,12 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
     let rule = group.rule;
-    let src_keys = group.src_keys;
     let mut current_codomain_rank = group.codomain_rank;
     if current_codomain_rank == target_codomain_rank {
+        let source_len = group.source_len;
         let basis = CompactMultiplicityFreeTreePairBasis::from_group(group)?;
-        let mut columns = DenseColumns::with_capacity(src_keys.len(), src_keys.len());
-        for source in 0..src_keys.len() {
+        let mut columns = DenseColumns::with_capacity(source_len, source_len);
+        for source in 0..source_len {
             let row = columns.push_empty_row();
             columns.row_mut(row)[source] = Some(rule.scalar_one());
         }
@@ -3818,9 +3824,9 @@ where
                 message: "compact repartition requires at least one source",
             })?,
     );
-    let mut rows = Vec::with_capacity(src_keys.len());
+    let mut rows = Vec::with_capacity(group.source_len);
     rows.push((first_local, rule.scalar_one()));
-    for (index, _source) in src_keys.iter().enumerate().skip(1) {
+    for index in 1..group.source_len {
         let (source_frame, source_local) =
             MultiplicityFreeTreePairFrame::split(
                 group
@@ -4086,7 +4092,7 @@ where
 #[derive(Clone, Copy)]
 struct ValidatedTreePairBlockGroup<'a, R> {
     rule: &'a R,
-    src_keys: &'a [FusionTreePairKey],
+    source_len: usize,
     codomain_rank: usize,
     domain_rank: usize,
     projection: MultiplicityFreePairProjection<'a>,
@@ -4104,7 +4110,8 @@ where
     for source in src_keys {
         validate_fusion_tree_pair_for_rule(rule, source)?;
     }
-    validate_tree_pair_block_group_proven(rule, src_keys)
+    let projection = MultiplicityFreePairProjection::from_validated(rule, src_keys)?;
+    validate_tree_pair_block_group_projection(rule, projection)
 }
 
 fn validate_tree_pair_block_group_proven<'a, R>(
@@ -4115,20 +4122,47 @@ where
     R: FusionRule,
 {
     let projection = MultiplicityFreePairProjection::from_validated(rule, src_keys)?;
-    let Some(reference) = src_keys.first() else {
+    validate_tree_pair_block_group_projection(rule, projection)
+}
+
+fn validate_tree_pair_block_group_structure<'a, R>(
+    rule: &'a R,
+    structure: &'a BlockStructure,
+    indices: &'a [usize],
+    orientation: FusionTreePairOrientation,
+) -> Result<Option<ValidatedTreePairBlockGroup<'a, R>>, CoreError>
+where
+    R: FusionRule,
+{
+    let projection =
+        MultiplicityFreePairProjection::checked_structure(rule, structure, indices, orientation)?;
+    validate_tree_pair_block_group_projection(rule, projection)
+}
+
+fn validate_tree_pair_block_group_projection<'a, R>(
+    rule: &'a R,
+    projection: MultiplicityFreePairProjection<'a>,
+) -> Result<Option<ValidatedTreePairBlockGroup<'a, R>>, CoreError>
+where
+    R: FusionRule,
+{
+    let Some(reference) = projection.pair_at(0) else {
         return Ok(None);
     };
-    let reference_codomain = reference.codomain_tree();
-    let reference_domain = reference.domain_tree();
-    let same_group = |key: &FusionTreePairKey| {
-        let codomain = key.codomain_tree();
-        let domain = key.domain_tree();
+    let reference_codomain = reference.codomain().key();
+    let reference_domain = reference.domain().key();
+    let same_group = |pair: ValidatedMultiplicityFreeTreePair<'_>| {
+        let codomain = pair.codomain().key();
+        let domain = pair.domain().key();
         codomain.uncoupled() == reference_codomain.uncoupled()
             && domain.uncoupled() == reference_domain.uncoupled()
             && codomain.is_dual() == reference_codomain.is_dual()
             && domain.is_dual() == reference_domain.is_dual()
     };
-    for source in src_keys {
+    for index in 0..projection.len() {
+        let source = projection
+            .pair_at(index)
+            .expect("validated projection covers every source");
         // Why not infer a block from matching ranks or tree shape:
         // coefficients share a basis only when every external sector,
         // orientation, and multiplicity invariant agrees. Coupled sectors are
@@ -4141,7 +4175,7 @@ where
     }
     Ok(Some(ValidatedTreePairBlockGroup {
         rule,
-        src_keys,
+        source_len: projection.len(),
         codomain_rank: reference_codomain.uncoupled().len(),
         domain_rank: reference_domain.uncoupled().len(),
         projection,
@@ -4278,10 +4312,15 @@ where
 {
     prepared.validate_source_split(group.codomain_rank, group.domain_rank)?;
     if prepared.is_identity() {
-        return Ok(group
-            .src_keys
-            .iter()
-            .map(|key| vec![(key.clone(), group.rule.scalar_one())])
+        return Ok((0..group.source_len)
+            .map(|index| {
+                let key = group
+                    .projection
+                    .pair_at(index)
+                    .expect("validated projection covers every source")
+                    .materialize();
+                vec![(key, group.rule.scalar_one())]
+            })
             .collect());
     }
     multiplicity_free_braid_tree_pair_block_compact_validated(group, prepared)
@@ -4444,6 +4483,59 @@ where
     multiplicity_free_braid_tree_pair_block_validated(group, &prepared)
 }
 
+#[doc(hidden)]
+#[allow(clippy::type_complexity)]
+pub fn multiplicity_free_permute_tree_pair_block_indexed<R>(
+    rule: &R,
+    structure: &BlockStructure,
+    src_indices: &[usize],
+    orientation: FusionTreePairOrientation,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+) -> Result<Vec<Vec<(FusionTreePairKey, R::Scalar)>>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    if !rule.braiding_style().is_symmetric() {
+        return Err(CoreError::UnsupportedBraidingStyle {
+            expected: "symmetric braiding",
+            actual: rule.braiding_style(),
+        });
+    }
+    validate_multiplicity_free_execution_style(rule)?;
+    let Some(&first_index) = src_indices.first() else {
+        return Ok(Vec::new());
+    };
+    let first = structure.block(first_index)?;
+    let BlockKey::FusionTree(first) = first.key() else {
+        return Err(CoreError::ExpectedFusionTreePairKey {
+            actual: first.key().kind(),
+        });
+    };
+    let (codomain_rank, domain_rank) = match orientation {
+        FusionTreePairOrientation::Direct => (
+            first.codomain_tree().uncoupled().len(),
+            first.domain_tree().uncoupled().len(),
+        ),
+        FusionTreePairOrientation::Adjoint => (
+            first.domain_tree().uncoupled().len(),
+            first.codomain_tree().uncoupled().len(),
+        ),
+    };
+    let prepared = PreparedTreePairOperation::prepare_permute(
+        rule,
+        codomain_rank,
+        domain_rank,
+        codomain_permutation,
+        domain_permutation,
+    )?;
+    let group =
+        validate_tree_pair_block_group_structure(rule, structure, src_indices, orientation)?
+            .expect("nonempty source block produces a validation proof");
+    multiplicity_free_braid_tree_pair_block_validated(group, &prepared)
+}
+
 /// Batched [`multiplicity_free_transpose_tree_pair`] over every source
 /// tree-pair of a block (all sharing uncoupled sectors / duality). The planar
 /// cyclic-transpose step sequence — repartition to the target codomain rank,
@@ -4500,10 +4592,15 @@ where
 {
     prepared.validate_source_split(group.codomain_rank, group.domain_rank)?;
     if prepared.is_identity() {
-        return Ok(group
-            .src_keys
-            .iter()
-            .map(|key| vec![(key.clone(), group.rule.scalar_one())])
+        return Ok((0..group.source_len)
+            .map(|index| {
+                let key = group
+                    .projection
+                    .pair_at(index)
+                    .expect("validated projection covers every source")
+                    .materialize();
+                vec![(key, group.rule.scalar_one())]
+            })
             .collect());
     }
     multiplicity_free_transpose_tree_pair_block_compact_validated(group, prepared)
@@ -5692,7 +5789,7 @@ mod multiplicity_free_projection {
 
     #[derive(Clone, Copy)]
     pub(super) struct Pairs<'a> {
-        keys: &'a [FusionTreePairKey],
+        source: PairSource<'a>,
     }
 
     #[derive(Clone, Copy)]
@@ -5702,7 +5799,18 @@ mod multiplicity_free_projection {
 
     #[derive(Clone, Copy)]
     pub(super) struct Pair<'a> {
-        key: &'a FusionTreePairKey,
+        codomain: &'a FusionTreeKey,
+        domain: &'a FusionTreeKey,
+    }
+
+    #[derive(Clone, Copy)]
+    enum PairSource<'a> {
+        Slice(&'a [FusionTreePairKey]),
+        Structure {
+            structure: &'a BlockStructure,
+            indices: &'a [usize],
+            orientation: FusionTreePairOrientation,
+        },
     }
 
     pub(super) struct TreeBatch<'rule, R> {
@@ -5822,7 +5930,9 @@ mod multiplicity_free_projection {
                 check_vertices(pair.codomain_tree())?;
                 check_vertices(pair.domain_tree())?;
             }
-            Ok(Self { keys: pairs })
+            Ok(Self {
+                source: PairSource::Slice(pairs),
+            })
         }
 
         pub(super) fn from_validated<R>(
@@ -5835,11 +5945,84 @@ mod multiplicity_free_projection {
             // Pair validation proves the same vertex invariant for both trees
             // in the single categorical validation pass.
             validate_multiplicity_free_execution_style(rule)?;
-            Ok(Self { keys: pairs })
+            Ok(Self {
+                source: PairSource::Slice(pairs),
+            })
+        }
+
+        pub(super) fn checked_structure<R>(
+            rule: &R,
+            structure: &'a BlockStructure,
+            indices: &'a [usize],
+            orientation: FusionTreePairOrientation,
+        ) -> Result<Self, CoreError>
+        where
+            R: FusionRule,
+        {
+            validate_multiplicity_free_execution_style(rule)?;
+            let projection = Self {
+                source: PairSource::Structure {
+                    structure,
+                    indices,
+                    orientation,
+                },
+            };
+            for (index, &block_index) in indices.iter().enumerate() {
+                let block = structure.block(block_index)?;
+                if !matches!(block.key(), BlockKey::FusionTree(_)) {
+                    return Err(CoreError::ExpectedFusionTreePairKey {
+                        actual: block.key().kind(),
+                    });
+                }
+                let pair = projection
+                    .pair_at(index)
+                    .expect("validated block index and key kind produce a pair");
+                let codomain = validate_fusion_tree_for_rule(rule, pair.codomain().key())?;
+                let domain = validate_fusion_tree_for_rule(rule, pair.domain().key())?;
+                if codomain.key.coupled() != domain.key.coupled() {
+                    return Err(CoreError::MalformedFusionTree {
+                        message: "fusion tree pair requires matching coupled sectors",
+                    });
+                }
+                check_vertices(pair.codomain().key())?;
+                check_vertices(pair.domain().key())?;
+            }
+            Ok(projection)
+        }
+
+        pub(super) fn len(&self) -> usize {
+            match self.source {
+                PairSource::Slice(keys) => keys.len(),
+                PairSource::Structure { indices, .. } => indices.len(),
+            }
         }
 
         pub(super) fn pair_at(&self, index: usize) -> Option<Pair<'a>> {
-            self.keys.get(index).map(|key| Pair { key })
+            match self.source {
+                PairSource::Slice(keys) => keys.get(index).map(|key| Pair {
+                    codomain: key.codomain_tree(),
+                    domain: key.domain_tree(),
+                }),
+                PairSource::Structure {
+                    structure,
+                    indices,
+                    orientation,
+                } => {
+                    let block = structure.block(*indices.get(index)?).ok()?;
+                    let BlockKey::FusionTree(key) = block.key() else {
+                        return None;
+                    };
+                    let (codomain, domain) = match orientation {
+                        FusionTreePairOrientation::Direct => {
+                            (key.codomain_tree(), key.domain_tree())
+                        }
+                        FusionTreePairOrientation::Adjoint => {
+                            (key.domain_tree(), key.codomain_tree())
+                        }
+                    };
+                    Some(Pair { codomain, domain })
+                }
+            }
         }
     }
 
@@ -5863,20 +6046,16 @@ mod multiplicity_free_projection {
     }
 
     impl<'a> Pair<'a> {
-        pub(super) fn key(self) -> &'a FusionTreePairKey {
-            self.key
+        pub(super) fn materialize(self) -> FusionTreePairKey {
+            FusionTreePairKey::pair(self.codomain.clone(), self.domain.clone())
         }
 
         pub(super) fn codomain(self) -> Tree<'a> {
-            Tree {
-                key: self.key.codomain_tree(),
-            }
+            Tree { key: self.codomain }
         }
 
         pub(super) fn domain(self) -> Tree<'a> {
-            Tree {
-                key: self.key.domain_tree(),
-            }
+            Tree { key: self.domain }
         }
     }
 }
@@ -5990,18 +6169,17 @@ impl MultiplicityFreeTreePairFrame {
     fn split(
         tree_pair: ValidatedMultiplicityFreeTreePair<'_>,
     ) -> (Self, MultiplicityFreeTreePairLocal) {
-        let key = tree_pair.key();
-        let codomain = MultiplicityFreeTreeFrame::from_tree(key.codomain_tree());
-        let domain = MultiplicityFreeTreeFrame::from_tree(key.domain_tree());
+        let codomain = MultiplicityFreeTreeFrame::from_tree(tree_pair.codomain().key());
+        let domain = MultiplicityFreeTreeFrame::from_tree(tree_pair.domain().key());
         (
             Self { codomain, domain },
             MultiplicityFreeTreePairLocal::from_proven(tree_pair),
         )
     }
 
-    fn matches_tree_pair(&self, tree_pair: &FusionTreePairKey) -> bool {
-        self.codomain.matches_tree(tree_pair.codomain_tree())
-            && self.domain.matches_tree(tree_pair.domain_tree())
+    fn matches_tree_pair_ref(&self, tree_pair: ValidatedMultiplicityFreeTreePair<'_>) -> bool {
+        self.codomain.matches_tree(tree_pair.codomain().key())
+            && self.domain.matches_tree(tree_pair.domain().key())
     }
 
     fn materialize(&self, local: MultiplicityFreeTreePairLocal) -> FusionTreePairKey {

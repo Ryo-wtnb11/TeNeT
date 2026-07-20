@@ -5,12 +5,11 @@ use std::{collections::hash_map::Entry, sync::Arc};
 
 use num_traits::Zero;
 use tenet_core::{
-    multiplicity_free_braid_tree_pair_block, multiplicity_free_permute_tree_pair_block,
-    multiplicity_free_transpose_tree_pair_block, BlockKey, BlockKeyKind, BlockStructure, CoreError,
-    FusionRule, FusionStyleKind, FusionTreeBlockGroup, FusionTreeKey, FusionTreePairKey,
-    GenericBraidScalar, GenericRigidSymbols, LocallyValidatedFusionTreeBlockStructure,
-    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, OrderedBlockLinearMap,
-    OrderedBlockLinearStorage, PreparedTreePairOperation,
+    BlockKey, BlockKeyKind, BlockStructure, CoreError, FusionRule, FusionStyleKind,
+    FusionTreeBlockGroup, FusionTreeKey, FusionTreePairKey, GenericBraidScalar,
+    GenericRigidSymbols, LocallyValidatedFusionTreeBlockStructure, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, OrderedBlockLinearMap, OrderedBlockLinearStorage,
+    PreparedTreePairOperation,
 };
 
 use crate::OperationError;
@@ -734,7 +733,6 @@ where
 }
 
 type TransformRows<K, T> = Vec<(K, T)>;
-type TransformBlockRows<K, T> = Vec<TransformRows<K, T>>;
 
 #[cfg(test)]
 mod generic_preflight_tests {
@@ -1135,58 +1133,6 @@ where
         rows.into_coefficients(),
     )?
     .with_shared_source_axes(Arc::clone(source_axes))])
-}
-
-/// Batched tree-pair rows over a whole block's source trees
-/// (all sharing uncoupled sectors, e.g. one [`FusionTreeBlockGroup`]). The
-/// TensorKit 0.17 `fsbraid`/`fstranspose` batching: the bend/braid/cyclic step
-/// structure is walked once for the block, not once per source. Returns rows
-/// per source in `src_keys` order.
-pub(crate) fn transformed_tree_pair_rows_block<R>(
-    rule: &R,
-    operation: &TreeTransformOperation,
-    src_keys: &[FusionTreePairKey],
-) -> Result<TransformBlockRows<FusionTreePairKey, R::Scalar>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
-{
-    match operation {
-        TreeTransformOperation::Permute {
-            codomain_permutation,
-            domain_permutation,
-        } => multiplicity_free_permute_tree_pair_block(
-            rule,
-            src_keys,
-            codomain_permutation,
-            domain_permutation,
-        )
-        .map_err(OperationError::from_core_preserving_context),
-        TreeTransformOperation::Braid {
-            codomain_permutation,
-            domain_permutation,
-            codomain_levels,
-            domain_levels,
-        } => multiplicity_free_braid_tree_pair_block(
-            rule,
-            src_keys,
-            codomain_permutation,
-            domain_permutation,
-            codomain_levels,
-            domain_levels,
-        )
-        .map_err(OperationError::from_core_preserving_context),
-        TreeTransformOperation::Transpose {
-            codomain_permutation,
-            domain_permutation,
-        } => multiplicity_free_transpose_tree_pair_block(
-            rule,
-            src_keys,
-            codomain_permutation,
-            domain_permutation,
-        )
-        .map_err(OperationError::from_core_preserving_context),
-    }
 }
 
 pub(crate) fn build_multiplicity_free_tree_pair_transform_group_plan<R>(
