@@ -11,7 +11,10 @@ use tenet_core::{
 };
 
 use crate::contract::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
-use crate::lowering::{adjoint_fusion_space_view, lower_tensortrace_source_adjoint_axes};
+use crate::lowering::{
+    adjoint_fusion_space_view, lower_tensortrace_source_adjoint_axes,
+    lower_tensortrace_source_adjoint_axes_dyn,
+};
 use crate::strided::offset_to_isize;
 use crate::tree_transform::{transformed_tree_pair_rows_block, TreeTransformOperation};
 use crate::{tensortrace_raw_strided_kernel, tensortrace_raw_strided_kernel_add_with_coefficient};
@@ -244,17 +247,61 @@ impl<C> TensorTraceFusionStructure<C> {
         R: MultiplicityFreeRigidSymbols<Scalar = C>,
         C: Clone + Add<Output = C> + Mul<Output = C> + Zero + RealStructuralCoefficient,
     {
+        Self::compile_fusion_dyn_raw_with_preflight(rule, dst, src, axes, |_, _| Ok(()))
+    }
+
+    fn compile_fusion_dyn_checked_raw<R>(
+        rule: &R,
+        dst: &DynamicFusionMapSpace,
+        src: &DynamicFusionMapSpace,
+        axes: TensorTraceAxisSpec<'_>,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C> + CheckedFusionAlgebra,
+        C: Clone + Add<Output = C> + Mul<Output = C> + Zero + RealStructuralCoefficient,
+    {
+        Self::compile_fusion_dyn_raw_with_preflight(
+            rule,
+            dst,
+            src,
+            axes,
+            |logical_src, axis_plan| {
+                validate_checked_fusion_trace_metadata(rule, logical_src, axis_plan, dst.nout())
+            },
+        )
+    }
+
+    fn compile_fusion_dyn_raw_with_preflight<R, F>(
+        rule: &R,
+        dst: &DynamicFusionMapSpace,
+        src: &DynamicFusionMapSpace,
+        axes: TensorTraceAxisSpec<'_>,
+        preflight: F,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C>,
+        C: Clone + Add<Output = C> + Mul<Output = C> + Zero + RealStructuralCoefficient,
+        F: FnOnce(&FusionTreeHomSpace, &TensorTraceAxisPlan) -> Result<(), OperationError>,
+    {
         dst.validate_rule(rule)?;
         src.validate_rule(rule)?;
-        Self::compile_fusion_parts(
+        let adjoint_src = if axes.source_conjugate() {
+            Some(src.adjoint_view()?)
+        } else {
+            None
+        };
+        let logical_src = adjoint_src.as_ref().unwrap_or(src);
+        let lowered_axes = lower_tensortrace_source_adjoint_axes_dyn(src.nout(), src.nin(), axes)?;
+        Self::compile_fusion_parts_with_preflight(
             rule,
             dst.homspace(),
             Arc::clone(dst.structure()),
-            src.homspace(),
-            Arc::clone(src.structure()),
+            logical_src.homspace(),
+            Arc::clone(logical_src.structure()),
             Arc::clone(src.structure()),
             dst.nout(),
-            axes,
+            lowered_axes.as_spec(),
+            preflight,
         )
     }
 
@@ -274,6 +321,36 @@ impl<C> TensorTraceFusionStructure<C> {
         R: MultiplicityFreeRigidSymbols<Scalar = C>,
         C: Clone + Add<Output = C> + Mul<Output = C> + Zero + RealStructuralCoefficient,
     {
+        Self::compile_fusion_parts_with_preflight(
+            rule,
+            dst_homspace,
+            dst_structure,
+            src_homspace,
+            src_structure,
+            src_storage_structure,
+            dst_codomain_rank,
+            axes,
+            |_, _| Ok(()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compile_fusion_parts_with_preflight<R, F>(
+        rule: &R,
+        dst_homspace: &FusionTreeHomSpace,
+        dst_structure: Arc<BlockStructure>,
+        src_homspace: &FusionTreeHomSpace,
+        src_structure: Arc<BlockStructure>,
+        src_storage_structure: Arc<BlockStructure>,
+        dst_codomain_rank: usize,
+        axes: TensorTraceAxisSpec<'_>,
+        preflight: F,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = C>,
+        C: Clone + Add<Output = C> + Mul<Output = C> + Zero + RealStructuralCoefficient,
+        F: FnOnce(&FusionTreeHomSpace, &TensorTraceAxisPlan) -> Result<(), OperationError>,
+    {
         if !rule.braiding_style().is_symmetric() {
             return Err(OperationError::UnsupportedTensorContractScope {
                 message: FUSION_TENSORTRACE_REQUIRES_SYMMETRIC_BRAIDING,
@@ -281,6 +358,7 @@ impl<C> TensorTraceFusionStructure<C> {
         }
         let axis_plan =
             TensorTraceAxisPlan::compile(src_structure.rank(), dst_structure.rank(), axes)?;
+        preflight(src_homspace, &axis_plan)?;
         validate_fusion_trace_homspace(
             rule,
             dst_homspace,
@@ -1435,6 +1513,33 @@ where
 {
     let structure =
         TensorTraceFusionStructure::compile_fusion_dyn_raw(rule, dst_space, src_space, axes)?;
+    tensortrace_fusion_dyn_structure_into_raw(
+        &structure, dst_space, dst_data, src_space, src_data, alpha, beta,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tensortrace_fusion_dyn_structure_into_raw<C, D>(
+    structure: &TensorTraceFusionStructure<C>,
+    dst_space: &DynamicFusionMapSpace,
+    dst_data: &mut [D],
+    src_space: &DynamicFusionMapSpace,
+    src_data: &[D],
+    alpha: D,
+    beta: D,
+) -> Result<(), OperationError>
+where
+    C: Copy,
+    D: Copy
+        + Add<D, Output = D>
+        + Mul<D, Output = D>
+        + PartialEq
+        + Zero
+        + One
+        + ConjugateValue
+        + RecouplingCoefficientAction<C>
+        + strided_kernel::MaybeSendSync,
+{
     validate_trace_data_extents(
         dst_space.structure(),
         dst_data.len(),
@@ -1490,20 +1595,30 @@ where
         + RecouplingCoefficientAction<R::Scalar>
         + strided_kernel::MaybeSendSync,
 {
-    // Checked preflight closes the machine-integer boundary before the legacy
-    // structural compiler traverses metadata. Why not widen the public API:
-    // encoded/custom rules retain their established infallible contract.
-    let axis_plan = TensorTraceAxisPlan::compile(
-        src_space.structure().rank(),
-        dst_space.structure().rank(),
-        axes,
+    let structure = TensorTraceFusionStructure::compile_fusion_dyn_checked_raw(
+        rule, dst_space, src_space, axes,
     )?;
-    src_space
-        .homspace()
+    tensortrace_fusion_dyn_structure_into_raw(
+        &structure, dst_space, dst_data, src_space, src_data, alpha, beta,
+    )
+}
+
+fn validate_checked_fusion_trace_metadata<R>(
+    rule: &R,
+    src_homspace: &FusionTreeHomSpace,
+    axis_plan: &TensorTraceAxisPlan,
+    dst_nout: usize,
+) -> Result<(), OperationError>
+where
+    R: FusionRule + CheckedFusionAlgebra,
+{
+    // Why not widen the public rule bound: custom encoded rules retain their
+    // established infallible contract while lowered built-ins close overflow.
+    src_homspace
         .try_select_checked(
             rule,
-            &axis_plan.output_axes[..dst_space.nout()],
-            &axis_plan.output_axes[dst_space.nout()..],
+            &axis_plan.output_axes[..dst_nout],
+            &axis_plan.output_axes[dst_nout..],
         )
         .map_err(|error| match error {
             CheckedFusionSpaceError::FusionAlgebra(error) => OperationError::FusionAlgebra(error),
@@ -1517,16 +1632,14 @@ where
         .iter()
         .zip(axis_plan.trace_rhs_axes.iter())
     {
-        let lhs = outward_axis_leg_checked(rule, src_space.homspace(), lhs_axis)?;
-        let rhs = outward_axis_leg_checked(rule, src_space.homspace(), rhs_axis)?;
+        let lhs = outward_axis_leg_checked(rule, src_homspace, lhs_axis)?;
+        let rhs = outward_axis_leg_checked(rule, src_homspace, rhs_axis)?;
         rhs.try_dual(rule)
             .map_err(|error| OperationError::FusionAlgebra(Box::new(error)))?;
         lhs.try_dual(rule)
             .map_err(|error| OperationError::FusionAlgebra(Box::new(error)))?;
     }
-    tensortrace_fusion_dyn_into_raw(
-        rule, dst_space, dst_data, src_space, src_data, axes, alpha, beta,
-    )
+    Ok(())
 }
 
 fn validate_trace_data_extents(
