@@ -114,12 +114,12 @@ impl ContractAxisOrderCandidate {
 
 /// Operand orientation for a fusion-level contraction candidate.
 ///
-/// Slice 1 has only the existing forward route. Keeping orientation in the
-/// facts prevents later reversed candidates from overloading paired-axis
-/// ordering with a second meaning.
+/// Keeping orientation separate prevents reversed candidates from overloading
+/// paired-axis ordering with a second meaning.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FusionContractOrientation {
     LhsRhs,
+    RhsLhs,
 }
 
 /// Provider-independent structural facts used by the current fusion selector.
@@ -257,6 +257,7 @@ pub(crate) fn contracted_axis_order_candidates(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FusionContractPlan {
+    orientation: FusionContractOrientation,
     lhs_transform: TreeTransformOperation,
     rhs_transform: TreeTransformOperation,
     output_transform: TreeTransformOperation,
@@ -272,6 +273,11 @@ pub struct FusionContractPlan {
 }
 
 impl FusionContractPlan {
+    #[inline]
+    pub(crate) fn orientation(&self) -> FusionContractOrientation {
+        self.orientation
+    }
+
     #[inline]
     pub fn lhs_transform(&self) -> &TreeTransformOperation {
         &self.lhs_transform
@@ -574,6 +580,80 @@ where
         axes.rhs_conjugate(),
     );
     prepare_tensorcontract_fusion_plan_dyn_raw_fixed(rule, dst, lhs, rhs, candidate_axes)
+}
+
+#[cfg(test)]
+pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+    candidate: &ContractAxisOrderCandidate,
+    orientation: FusionContractOrientation,
+) -> Result<FusionContractPlan, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let mut plan = prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order(
+        rule, dst, lhs, rhs, axes, candidate,
+    )?;
+    if orientation == FusionContractOrientation::RhsLhs {
+        let lhs_open_rank = plan.lhs_open_rank;
+        let rhs_open_rank = plan.rhs_open_rank;
+        let contract_rank = plan.lhs_contract_rank;
+        let semantic_to_core = |axis: usize| {
+            if axis < lhs_open_rank {
+                axis + rhs_open_rank
+            } else {
+                axis - lhs_open_rank
+            }
+        };
+        let (output_axes, dst_nout) = match &plan.output_transform {
+            TreeTransformOperation::Permute {
+                codomain_permutation,
+                domain_permutation,
+            } => (
+                codomain_permutation
+                    .iter()
+                    .chain(domain_permutation)
+                    .copied()
+                    .map(semantic_to_core)
+                    .collect::<Vec<_>>(),
+                codomain_permutation.len(),
+            ),
+            _ => unreachable!("fusion contraction output lowering uses a permutation"),
+        };
+        let (lhs_open_axes, lhs_contracting_axes) = match &plan.lhs_transform {
+            TreeTransformOperation::Permute {
+                codomain_permutation,
+                domain_permutation,
+            } => (codomain_permutation.clone(), domain_permutation.clone()),
+            _ => unreachable!("fusion contraction source lowering uses a permutation"),
+        };
+        let (rhs_contracting_axes, rhs_open_axes) = match &plan.rhs_transform {
+            TreeTransformOperation::Permute {
+                codomain_permutation,
+                domain_permutation,
+            } => (codomain_permutation.clone(), domain_permutation.clone()),
+            _ => unreachable!("fusion contraction source lowering uses a permutation"),
+        };
+        plan.orientation = orientation;
+        plan.lhs_transform = TreeTransformOperation::permute(lhs_contracting_axes, lhs_open_axes);
+        plan.rhs_transform = TreeTransformOperation::permute(rhs_open_axes, rhs_contracting_axes);
+        plan.core_axes = TensorContractSpecOwned::new(
+            (rhs_open_rank..rhs_open_rank + contract_rank).collect(),
+            (0..contract_rank).collect(),
+            (0..lhs_open_rank + rhs_open_rank).collect(),
+        );
+        plan.output_transform = TreeTransformOperation::permute(
+            output_axes[..dst_nout].iter().copied(),
+            output_axes[dst_nout..].iter().copied(),
+        );
+        plan.core_dst_open_lhs_rank = rhs_open_rank;
+        plan.core_dst_open_rhs_rank = lhs_open_rank;
+    }
+    Ok(plan)
 }
 
 #[cfg(test)]
@@ -1008,6 +1088,7 @@ where
         axis_plan.output_axes[dst_nout..].to_vec(),
     );
     Ok(FusionContractPlan {
+        orientation: FusionContractOrientation::LhsRhs,
         lhs_transform: TreeTransformOperation::permute(
             axis_plan.lhs_open_axes,
             axis_plan.lhs_contracting_axes,
@@ -1037,7 +1118,9 @@ where
 mod tests {
     use super::{
         contracted_axis_order_candidates, prepare_tensorcontract_fusion_candidate_facts_dyn_raw,
-        prepare_tensorcontract_fusion_plan_dyn_raw, FusionContractOrientation,
+        prepare_tensorcontract_fusion_plan_dyn_raw,
+        prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation,
+        FusionContractOrientation,
     };
     use crate::contract::DynamicFusionMapSpace;
     use crate::TreeTransformOperation;
@@ -1288,6 +1371,27 @@ mod tests {
                 + facts[0].rhs_materialized_elements()
                 + facts[0].output_materialized_elements()
         );
+
+        let candidate = contracted_axis_order_candidates(&[], &[]).remove(0);
+        let reverse = prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation(
+            &rule,
+            &dst,
+            &lhs,
+            &rhs,
+            TensorContractSpec::new_with_conjugation(
+                &[],
+                &[],
+                OutputAxisOrder::identity(),
+                true,
+                false,
+            ),
+            &candidate,
+            FusionContractOrientation::RhsLhs,
+        )
+        .unwrap();
+        assert_eq!(reverse.orientation(), FusionContractOrientation::RhsLhs);
+        assert!(reverse.lhs_source_conjugate());
+        assert!(!reverse.rhs_source_conjugate());
     }
 
     #[test]
