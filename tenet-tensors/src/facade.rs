@@ -319,7 +319,7 @@ where
     let lowered =
         lower_tensoradd_source_operation::<SRC_NOUT, SRC_NIN>(operation, source_conjugate)?;
     if lowered.storage_conjugate() {
-        let adjoint_src = adjoint_fusion_space_view(src_fusion)?;
+        let adjoint_src = adjoint_fusion_space_view(rule, src_fusion)?;
         let dst_structure = std::sync::Arc::clone(dst.structure());
         let src_replay_structure = std::sync::Arc::clone(adjoint_src.subblock_structure());
         let plan = build_tree_pair_transform_group_plan(
@@ -421,7 +421,7 @@ where
     let lowered =
         lower_tensoradd_source_operation::<SRC_NOUT, SRC_NIN>(operation, source_conjugate)?;
     if lowered.storage_conjugate() {
-        let adjoint_src = adjoint_fusion_space_view(src_fusion)?;
+        let adjoint_src = adjoint_fusion_space_view(rule, src_fusion)?;
         let dst_structure = std::sync::Arc::clone(dst.structure());
         let src_replay_structure = std::sync::Arc::clone(adjoint_src.subblock_structure());
         context.tree_transform_into_raw_with_storage_conjugation(

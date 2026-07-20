@@ -808,7 +808,7 @@ where
     let src_fusion = src
         .fusion_space()
         .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
-    let adjoint_src = adjoint_fusion_space_view(src_fusion)?;
+    let adjoint_src = adjoint_fusion_space_view(rule, src_fusion)?;
     let dst_structure = std::sync::Arc::clone(dst.structure());
     let src_replay_structure = std::sync::Arc::clone(adjoint_src.subblock_structure());
     let plan = build_tree_pair_transform_group_plan(rule, operation, &src_replay_structure)?;

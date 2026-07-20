@@ -1482,8 +1482,8 @@ fn tensorcontract_fusion_lowers_both_categorical_adjoint_inputs_lazily() {
     };
     let lhs_space = space();
     let rhs_space = space();
-    let lhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&lhs_space).unwrap();
-    let rhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&rhs_space).unwrap();
+    let lhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&rule, &lhs_space).unwrap();
+    let rhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&rule, &rhs_space).unwrap();
     let dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
         &rule,
         lhs_adjoint_space.homspace(),
@@ -1818,7 +1818,7 @@ fn tensorcontract_fusion_lhs_adjoint_uses_degeneracy_matrix_contract() {
     let rule = Z2FusionRule;
     let lhs_space = z2_matrix_space_with_homspace(z2_matrix_homspace(), vec![2, 2]);
     let rhs_space = z2_matrix_space_with_homspace(z2_matrix_homspace(), vec![2, 2]);
-    let lhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&lhs_space).unwrap();
+    let lhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&rule, &lhs_space).unwrap();
     let dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
         &rule,
         lhs_adjoint_space.homspace(),
@@ -1898,7 +1898,7 @@ fn tensorcontract_fusion_fermion_lhs_adjoint_uses_degeneracy_matrix_contract() {
         fermion_parity_matrix_space_with_homspace(fermion_parity_matrix_homspace(), vec![2, 2]);
     let rhs_space =
         fermion_parity_matrix_space_with_homspace(fermion_parity_matrix_homspace(), vec![2, 2]);
-    let lhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&lhs_space).unwrap();
+    let lhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&rule, &lhs_space).unwrap();
     let dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
         &rule,
         lhs_adjoint_space.homspace(),
@@ -1976,7 +1976,7 @@ fn tensorcontract_fusion_rhs_adjoint_uses_degeneracy_matrix_contract() {
     let rule = Z2FusionRule;
     let lhs_space = z2_matrix_space_with_homspace(z2_matrix_homspace(), vec![2, 2]);
     let rhs_space = z2_matrix_space_with_homspace(z2_matrix_homspace(), vec![2, 2]);
-    let rhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&rhs_space).unwrap();
+    let rhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&rule, &rhs_space).unwrap();
     let dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
         &rule,
         lhs_space.homspace(),
@@ -2055,7 +2055,7 @@ fn tensorcontract_fusion_fermion_rhs_adjoint_uses_degeneracy_matrix_contract() {
         fermion_parity_matrix_space_with_homspace(fermion_parity_matrix_homspace(), vec![2, 2]);
     let rhs_space =
         fermion_parity_matrix_space_with_homspace(fermion_parity_matrix_homspace(), vec![2, 2]);
-    let rhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&rhs_space).unwrap();
+    let rhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&rule, &rhs_space).unwrap();
     let dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
         &rule,
         lhs_space.homspace(),
@@ -2133,8 +2133,8 @@ fn tensorcontract_fusion_both_adjoint_uses_degeneracy_matrix_contract() {
     let rule = Z2FusionRule;
     let lhs_space = z2_matrix_space_with_homspace(z2_matrix_homspace(), vec![2, 2]);
     let rhs_space = z2_matrix_space_with_homspace(z2_matrix_homspace(), vec![2, 2]);
-    let lhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&lhs_space).unwrap();
-    let rhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&rhs_space).unwrap();
+    let lhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&rule, &lhs_space).unwrap();
+    let rhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&rule, &rhs_space).unwrap();
     let dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
         &rule,
         lhs_adjoint_space.homspace(),
@@ -2213,8 +2213,8 @@ fn tensorcontract_fusion_fermion_both_adjoint_uses_degeneracy_matrix_contract() 
         fermion_parity_matrix_space_with_homspace(fermion_parity_matrix_homspace(), vec![2, 2]);
     let rhs_space =
         fermion_parity_matrix_space_with_homspace(fermion_parity_matrix_homspace(), vec![2, 2]);
-    let lhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&lhs_space).unwrap();
-    let rhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&rhs_space).unwrap();
+    let lhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&rule, &lhs_space).unwrap();
+    let rhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&rule, &rhs_space).unwrap();
     let dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
         &rule,
         lhs_adjoint_space.homspace(),
@@ -4101,8 +4101,10 @@ fn tensorcontract_fusion_granular_caches_distinguish_source_conjugation() {
             [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
         )
         .unwrap();
-        let lhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&lhs_space).unwrap();
-        let rhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&rhs_space).unwrap();
+        let lhs_adjoint_space =
+            crate::lowering::adjoint_fusion_space_view(&rule, &lhs_space).unwrap();
+        let rhs_adjoint_space =
+            crate::lowering::adjoint_fusion_space_view(&rule, &rhs_space).unwrap();
         let effective_lhs_hom = if lhs_conjugate {
             lhs_adjoint_space.homspace()
         } else {
@@ -4237,8 +4239,8 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
         [vec![2, 2, 2, 2], vec![2, 2, 2, 2]],
     )
     .unwrap();
-    let lhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&lhs_space).unwrap();
-    let rhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&rhs_space).unwrap();
+    let lhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&rule, &lhs_space).unwrap();
+    let rhs_adjoint_space = crate::lowering::adjoint_fusion_space_view(&rule, &rhs_space).unwrap();
     let lowered_lhs_axes = maybe_adjoint_axes::<3, 1>(&source_lhs_contracting_axes, lhs_conjugate);
     let lowered_rhs_axes = maybe_adjoint_axes::<1, 3>(&source_rhs_contracting_axes, rhs_conjugate);
     let lowered_lhs_open_axes = complement_axes(4, &lowered_lhs_axes);
@@ -5613,7 +5615,7 @@ fn prelowered_resolution_cache_keys_storage_layout_and_execution_namespace() {
         padded_structure,
     )
     .unwrap()
-    .try_inherit_rule_identity(&canonical_typed)
+    .try_bind_rule(&rule)
     .unwrap();
     let padded = crate::DynamicFusionMapSpace::from_typed(&padded_typed);
     assert_ne!(
@@ -5786,7 +5788,7 @@ fn prelowered_resolution_cache_keys_storage_layout_and_execution_namespace() {
 
     let ordinary_tensor = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
         eager_lhs_data,
-        crate::lowering::adjoint_fusion_space_view(&canonical_typed).unwrap(),
+        crate::lowering::adjoint_fusion_space_view(&rule, &canonical_typed).unwrap(),
     )
     .unwrap();
     // What: the ordinary tensor constructor aliases its physical structure to

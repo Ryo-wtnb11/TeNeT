@@ -1056,7 +1056,7 @@ fn tensoradd_fusion_source_adjoint_explicit_braid_matches_manual_inverse_braid_r
     .unwrap();
 
     let adjoint_src_space =
-        crate::lowering::adjoint_fusion_space_view(src.fusion_space().unwrap()).unwrap();
+        crate::lowering::adjoint_fusion_space_view(&rule, src.fusion_space().unwrap()).unwrap();
     let adjoint_src = TensorMap::<Complex64, 0, 2>::from_vec_with_fusion_space(
         src_data.iter().map(|value| value.conj()).collect(),
         adjoint_src_space,
@@ -1120,7 +1120,7 @@ fn tensoradd_fusion_source_adjoint_domain_only_braid_matches_manual_inverse_brai
     .unwrap();
 
     let adjoint_src_space =
-        crate::lowering::adjoint_fusion_space_view(src.fusion_space().unwrap()).unwrap();
+        crate::lowering::adjoint_fusion_space_view(&rule, src.fusion_space().unwrap()).unwrap();
     let adjoint_src = TensorMap::<Complex64, 2, 0>::from_vec_with_fusion_space(
         src_data.iter().map(|value| value.conj()).collect(),
         adjoint_src_space,
@@ -1186,7 +1186,7 @@ fn tensoradd_fusion_source_adjoint_mixed_braid_matches_manual_inverse_braid_refe
     .unwrap();
 
     let adjoint_src_space =
-        crate::lowering::adjoint_fusion_space_view(src.fusion_space().unwrap()).unwrap();
+        crate::lowering::adjoint_fusion_space_view(&rule, src.fusion_space().unwrap()).unwrap();
     let adjoint_src = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
         src_data.iter().map(|value| value.conj()).collect(),
         adjoint_src_space,

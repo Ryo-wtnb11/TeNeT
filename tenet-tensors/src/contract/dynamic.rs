@@ -2433,7 +2433,7 @@ where
         .fusion_space()
         .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?;
     if source_conjugate {
-        let adjoint = adjoint_fusion_space_view(src_fusion)?;
+        let adjoint = adjoint_fusion_space_view(rule, src_fusion)?;
         let replay_structure = std::sync::Arc::clone(adjoint.subblock_structure());
         let space = DynamicFusionMapSpace::transformed_from_typed(rule, &adjoint, operation)?;
         Ok((space, replay_structure))

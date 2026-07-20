@@ -958,8 +958,12 @@ where
         provider: Arc<R>,
         keys: Vec<FusionTreePairKey>,
     ) -> Result<Self, OperationError> {
-        validate_bound_space_invariants(&space)?;
         space.validate_rule(provider.as_ref())?;
+        validate_bound_space_invariants(&space)?;
+        space
+            .homspace()
+            .validate_subblock_structure_subset(provider.as_ref(), space.structure())
+            .map_err(OperationError::from_core_preserving_context)?;
         space.validate_complete_tree_grid(&keys)?;
         Ok(Self {
             space,
@@ -976,6 +980,7 @@ where
     where
         R: MultiplicityFreeFusionRule,
     {
+        space.validate_rule(provider.as_ref())?;
         let keys = space
             .homspace()
             .fusion_tree_keys(provider.as_ref())
@@ -1234,6 +1239,7 @@ where
         space: DynamicFusionMapSpace,
         provider: Arc<R>,
     ) -> Result<Self, OperationError> {
+        space.validate_rule(provider.as_ref())?;
         validate_generic_provider_style(provider.as_ref())?;
         let keys = space
             .homspace()
@@ -1502,23 +1508,16 @@ impl DynamicFusionMapSpace {
                 },
             ));
         }
-        let mut shapes = Vec::with_capacity(keys.len());
         for key in keys {
-            let block_index = structure
+            structure
                 .find_block_index_by_key(&BlockKey::FusionTree(key.clone()))
                 .ok_or_else(|| {
                     OperationError::from_core_preserving_context(CoreError::MissingBlockKey {
                         key: Box::new(BlockKey::FusionTree(key.clone())),
                     })
                 })?;
-            let block = structure
-                .block(block_index)
-                .map_err(OperationError::from_core_preserving_context)?;
-            shapes.push(block.shape().to_vec());
         }
-        self.homspace
-            .validate_degeneracy_shapes(keys, &shapes)
-            .map_err(OperationError::from_core_preserving_context)
+        Ok(())
     }
 
     /// Rank-erases a typed fusion space (shares the hom space and subblock
@@ -4109,6 +4108,35 @@ mod scratch_cache_tests {
             missing,
             OperationError::Core(CoreError::MissingFusionRuleIdentity)
         ));
+    }
+
+    #[test]
+    fn bound_space_rejects_wrong_identity_before_provider_enumeration() {
+        let source_rule = CountingRule::new();
+        let homspace = FusionTreeHomSpace::from_sector_ids([(0, 1), (0, 1)], []);
+        let space =
+            DynamicFusionMapSpace::from_degeneracy_shapes(&source_rule, homspace, [vec![1, 1]])
+                .unwrap();
+        assert!(source_rule.calls.load(Ordering::Relaxed) > 0);
+
+        let wrong_rule = Arc::new(CountingRule::new());
+        for error in [
+            BoundDynamicFusionMapSpace::bind_multiplicity_free(
+                space.clone(),
+                Arc::clone(&wrong_rule),
+            )
+            .unwrap_err(),
+            BoundDynamicFusionMapSpace::bind_generic(space.clone(), Arc::clone(&wrong_rule))
+                .unwrap_err(),
+        ] {
+            // What: a known rule mismatch is reported before either binding
+            // mode can inspect provider style or enumerate the HomSpace.
+            assert!(matches!(
+                error,
+                OperationError::Core(CoreError::FusionRuleMismatch { .. })
+            ));
+            assert_eq!(wrong_rule.calls.load(Ordering::Relaxed), 0);
+        }
     }
 
     #[test]

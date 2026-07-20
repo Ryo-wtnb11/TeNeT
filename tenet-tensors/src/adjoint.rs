@@ -686,7 +686,7 @@ where
         subblock_structure,
     )
     .map_err(OperationError::from_core_preserving_context)?
-    .try_inherit_rule_identity(fusion_space)
+    .try_bind_rule(rule)
     .map_err(OperationError::from_core_preserving_context)?;
     let len = space
         .required_len()
@@ -929,21 +929,28 @@ mod cache_tests {
         FusionTreePairKey::pair(tree.clone(), tree)
     }
 
+    fn typed_u1_expert_space(
+        codomain_dim: usize,
+        domain_dim: usize,
+        homspace: FusionTreeHomSpace,
+        structure: BlockStructure,
+    ) -> Result<FusionTensorMapSpace<1, 1>, CoreError> {
+        FusionTensorMapSpace::new_unbound(
+            TensorMapSpace::<1, 1>::from_dims([codomain_dim], [domain_dim]).unwrap(),
+            homspace,
+            structure,
+        )?
+        .try_bind_rule(&U1FusionRule)
+    }
+
     fn typed_u1_expert_tensor(
         codomain_dim: usize,
         domain_dim: usize,
         homspace: FusionTreeHomSpace,
         structure: BlockStructure,
     ) -> TensorMap<OutputObservedValue, 1, 1> {
-        let len = structure.required_len().unwrap();
-        let space = FusionTensorMapSpace::new_unbound(
-            TensorMapSpace::<1, 1>::from_dims([codomain_dim], [domain_dim]).unwrap(),
-            homspace,
-            structure,
-        )
-        .unwrap()
-        .try_bind_rule(&U1FusionRule)
-        .unwrap();
+        let space = typed_u1_expert_space(codomain_dim, domain_dim, homspace, structure).unwrap();
+        let len = space.required_len().unwrap();
         TensorMap::from_vec_with_fusion_space(vec![OutputObservedValue(1.0); len], space).unwrap()
     }
 
@@ -1263,9 +1270,9 @@ mod cache_tests {
     }
 
     #[test]
-    fn eager_adjoint_rejects_extra_expert_block_before_target_work() {
-        // What: a locally valid U(1) block outside the source HomSpace is
-        // rejected by both typed and dynamic eager adjoint without output work.
+    fn rule_binding_rejects_extra_expert_block_before_adjoint_target_work() {
+        // What: a locally valid U(1) block outside the source HomSpace cannot
+        // acquire the rule identity required to reach adjoint target work.
         let zero = U1Irrep::new(0).sector_id();
         let leg = || FusionProductSpace::new([SectorLeg::new([(zero, 1)], false)]);
         let homspace = FusionTreeHomSpace::new(leg(), leg());
@@ -1279,26 +1286,13 @@ mod cache_tests {
             ],
         )
         .unwrap();
-        let tensor = typed_u1_expert_tensor(1, 1, homspace, structure);
-        let dynamic = DynamicFusionMapSpace::from_typed(tensor.fusion_space().unwrap());
-
-        let typed_error = adjoint(&U1FusionRule, &tensor).unwrap_err();
+        OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
+        let error = typed_u1_expert_space(1, 1, homspace, structure).unwrap_err();
         assert_eq!(
-            typed_error,
-            OperationError::Core(CoreError::BlockCountMismatch {
-                expected: 1,
-                actual: 2,
-            })
-        );
-        assert_eq!(OUTPUT_ZERO_CALLS.with(Cell::get), 0);
-
-        let dynamic_error = adjoint_dyn(&U1FusionRule, &dynamic, tensor.data()).unwrap_err();
-        assert_eq!(
-            dynamic_error,
-            OperationError::Core(CoreError::BlockCountMismatch {
-                expected: 1,
-                actual: 2,
-            })
+            error,
+            CoreError::MalformedFusionTree {
+                message: "fusion tree uses a sector absent from its HomSpace leg",
+            }
         );
         assert_eq!(OUTPUT_ZERO_CALLS.with(Cell::get), 0);
     }
@@ -1306,21 +1300,32 @@ mod cache_tests {
     #[test]
     fn eager_adjoint_keeps_rule_mismatch_precedence_over_canonical_preflight() {
         // What: a wrong rule is rejected before canonical preflight inspects a
-        // safe public expert structure that contains an extra U(1) block.
+        // safe public expert structure whose complete blocks are reordered.
         let zero = U1Irrep::new(0).sector_id();
-        let leg = || FusionProductSpace::new([SectorLeg::new([(zero, 1)], false)]);
+        let one = U1Irrep::new(1).sector_id();
+        let leg = || FusionProductSpace::new([SectorLeg::new([(zero, 1), (one, 1)], false)]);
         let homspace = FusionTreeHomSpace::new(leg(), leg());
+        let canonical = homspace
+            .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+            .unwrap();
         let structure = BlockStructure::from_blocks_with_rank(
             2,
-            vec![
-                BlockSpec::column_major_with_key(u1_rank_one_pair(0).into(), vec![1, 1], 0)
-                    .unwrap(),
-                BlockSpec::column_major_with_key(u1_rank_one_pair(1).into(), vec![1, 1], 1)
-                    .unwrap(),
-            ],
+            [1, 0]
+                .into_iter()
+                .map(|index| {
+                    let block = canonical.block(index).unwrap();
+                    BlockSpec::with_key(
+                        block.key().clone(),
+                        block.shape().to_vec(),
+                        block.strides().to_vec(),
+                        block.offset(),
+                    )
+                    .unwrap()
+                })
+                .collect(),
         )
         .unwrap();
-        let tensor = typed_u1_expert_tensor(1, 1, homspace, structure);
+        let tensor = typed_u1_expert_tensor(2, 2, homspace, structure);
 
         OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
         let error = adjoint(&SU2FusionRule, &tensor).unwrap_err();
@@ -1366,9 +1371,9 @@ mod cache_tests {
     }
 
     #[test]
-    fn eager_adjoint_rejects_wrong_expert_shape_before_target_work() {
+    fn rule_binding_rejects_wrong_expert_shape_before_adjoint_target_work() {
         // What: a source block whose degeneracy shape disagrees with its
-        // HomSpace is rejected before output allocation or initialization.
+        // HomSpace cannot acquire the rule identity required by adjoint.
         let zero = U1Irrep::new(0).sector_id();
         let homspace = FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([(zero, 2)], false)]),
@@ -1382,16 +1387,16 @@ mod cache_tests {
             ],
         )
         .unwrap();
-        let tensor = typed_u1_expert_tensor(2, 3, homspace, structure);
 
         OUTPUT_ZERO_CALLS.with(|calls| calls.set(0));
-        let error = adjoint(&U1FusionRule, &tensor).unwrap_err();
+        let error = typed_u1_expert_space(2, 3, homspace, structure).unwrap_err();
 
         assert_eq!(
             error,
-            OperationError::ShapeMismatch {
-                dst: vec![2, 3],
-                src: vec![2, 2],
+            CoreError::LegDegeneracyMismatch {
+                sector: zero,
+                expected: 3,
+                actual: 2,
             }
         );
         assert_eq!(OUTPUT_ZERO_CALLS.with(Cell::get), 0);
@@ -1457,10 +1462,9 @@ mod cache_tests {
     }
 
     #[test]
-    fn lazy_adjoint_rejects_extra_and_noncanonical_sources_before_cache_admission() {
-        // What: metadata-only dagger construction cannot use the final
-        // HomSpace authority to conceal extra blocks or noncanonical source
-        // ordering, and failed sources publish no adjoint-space cache entry.
+    fn lazy_adjoint_rejects_noncanonical_source_before_cache_admission() {
+        // What: metadata-only dagger construction rejects noncanonical source
+        // ordering without publishing an adjoint-space cache entry.
         let _guard = crate::test_support::CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1468,21 +1472,6 @@ mod cache_tests {
         tenet_core::reset_core_intern_tables();
         let zero = U1Irrep::new(0).sector_id();
         let one = U1Irrep::new(1).sector_id();
-
-        let single_leg = || FusionProductSpace::new([SectorLeg::new([(zero, 1)], false)]);
-        let single_homspace = FusionTreeHomSpace::new(single_leg(), single_leg());
-        let extra_structure = BlockStructure::from_blocks_with_rank(
-            2,
-            vec![
-                BlockSpec::column_major_with_key(u1_rank_one_pair(0).into(), vec![1, 1], 0)
-                    .unwrap(),
-                BlockSpec::column_major_with_key(u1_rank_one_pair(1).into(), vec![1, 1], 1)
-                    .unwrap(),
-            ],
-        )
-        .unwrap();
-        let extra_tensor = typed_u1_expert_tensor(1, 1, single_homspace, extra_structure);
-        let extra = DynamicFusionMapSpace::from_typed(extra_tensor.fusion_space().unwrap());
 
         let sectors = [(zero, 1), (one, 1)];
         let double_leg = || FusionProductSpace::new([SectorLeg::new(sectors, false)]);
@@ -1510,14 +1499,6 @@ mod cache_tests {
         let reordered_tensor = typed_u1_expert_tensor(2, 2, double_homspace, reordered);
         let reordered = DynamicFusionMapSpace::from_typed(reordered_tensor.fusion_space().unwrap());
 
-        let extra_error = adjoint_space_dyn(&U1FusionRule, &extra).unwrap_err();
-        assert_eq!(
-            extra_error,
-            OperationError::Core(CoreError::BlockCountMismatch {
-                expected: 1,
-                actual: 2,
-            })
-        );
         let reordered_error = adjoint_space_dyn(&U1FusionRule, &reordered).unwrap_err();
         assert_eq!(
             reordered_error,
