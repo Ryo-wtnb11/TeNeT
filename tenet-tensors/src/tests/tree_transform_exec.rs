@@ -577,7 +577,9 @@ fn tree_transform_recoupling_replay_uses_sorted_plan_offsets() {
 
     dst.data_mut().fill(0.0);
     let mut backend = DenseTreeTransformOperations::default();
-    backend.set_recoupling_threads(4);
+    // What: two jobs enter the first chunk and the distinct third coefficient
+    // matrix enters a later chunk, pinning global coefficient offsets.
+    backend.set_recoupling_threads(2);
     backend.set_transform_parallel_min_len(0);
     let mut workspace = TreeTransformWorkspace::default();
     tree_transform_execute_with(

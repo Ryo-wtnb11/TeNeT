@@ -51,6 +51,12 @@ impl<T> HostScratchBuffer<T> {
         self.data.len()
     }
 
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn capacity(&self) -> usize {
+        self.data.capacity()
+    }
+
     #[inline]
     pub fn as_slice(&self) -> &[T] {
         &self.data

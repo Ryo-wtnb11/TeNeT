@@ -25,8 +25,11 @@ use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
 
 use super::backend::TensorContractBackend;
 use super::dynamic_space::{encoded_layout_primer, DynamicFusionMapSpace, LayoutKeyBuilder};
+#[cfg(test)]
+use super::fusion::prepare_tensorcontract_fusion_plan;
 use super::fusion::{
-    prepare_tensorcontract_fusion_plan, FusionContractOrientation, FusionContractPlan,
+    prepare_tensorcontract_fusion_plan_dyn_raw_canonical, FusionContractOrientation,
+    FusionContractPlan,
 };
 use super::fusion_block::{
     tensorcontract_core_fusion_blocks_into_raw, FusionBlockContractWorkspace,
@@ -264,15 +267,20 @@ where
     DLhs: HostReadableStorage<D>,
     DRhs: HostReadableStorage<D>,
 {
-    let plan = prepare_tensorcontract_fusion_plan(
-        rule,
+    let dst_space = DynamicFusionMapSpace::from_typed(
         dst.fusion_space()
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
+    );
+    let lhs_space = DynamicFusionMapSpace::from_typed(
         lhs.fusion_space()
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
+    );
+    let rhs_space = DynamicFusionMapSpace::from_typed(
         rhs.fusion_space()
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-        axes,
+    );
+    let plan = prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
+        rule, &dst_space, &lhs_space, &rhs_space, axes,
     )?;
     let mut tree_backend = DenseTreeTransformOperations::default_executor();
     let mut tree_workspace = TreeTransformWorkspace::default();
@@ -1512,6 +1520,7 @@ where
     DRhs: HostReadableStorage<D> + SimilarStorage<D>,
     DRhs::Similar: HostWritableStorage<D> + ScratchStorage<D>,
 {
+    plan.require_forward_scratch()?;
     let lhs_src_space = DynamicFusionMapSpace::from_typed(
         lhs.fusion_space()
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,

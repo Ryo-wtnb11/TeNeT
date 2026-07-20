@@ -1409,6 +1409,16 @@ fn strided_batch_runs_partitions_same_shape_constant_stride_runs() {
         batch_job((1, 5, 1), (20, 14, 12)),
     ];
     assert_eq!(strided_batch_runs(&jobs), vec![2, 2, 1]);
+    let mut reused = vec![usize::MAX; jobs.len()];
+    let capacity = reused.capacity();
+    strided_batch_runs_into(&jobs, &mut reused);
+    // What: caller-owned run storage receives the same partition and retains
+    // its warm capacity for subsequent batches.
+    assert_eq!(reused, [2, 2, 1]);
+    assert_eq!(reused.capacity(), capacity);
+    strided_batch_runs_into(&[], &mut reused);
+    assert!(reused.is_empty());
+    assert_eq!(reused.capacity(), capacity);
     // Empty batch => empty partition; the lengths always cover every job.
     assert_eq!(strided_batch_runs(&[]), Vec::<usize>::new());
     assert_eq!(

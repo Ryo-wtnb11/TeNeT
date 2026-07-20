@@ -30,9 +30,12 @@ use super::dynamic_space::{
     encoded_layout_primer, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
     LayoutKeyBuilder,
 };
+#[cfg(test)]
+use super::fusion::FusionContractOrientation;
 use super::fusion::{
-    prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn_prelowered,
-    prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer, tensorcontract_fusion_structure,
+    prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical,
+    prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer_canonical,
+    prepare_tensorcontract_fusion_plan_dyn_raw_canonical, tensorcontract_fusion_structure,
     tensorcontract_fusion_structure_dyn_prelowered, FusionContractPlan,
     EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST, SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
 };
@@ -55,7 +58,7 @@ fn prelowered_plan_builder<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    prepare_tensorcontract_fusion_plan_dyn_prelowered(
+    prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical(
         rule,
         dst,
         lhs,
@@ -82,7 +85,7 @@ where
         + LoweredMultiplicityFreeAlgebra
         + CheckedFusionAlgebra,
 {
-    prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer(
+    prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer_canonical(
         rule,
         dst,
         lhs,
@@ -623,6 +626,11 @@ where
         self.last_top_level_resolution_was_core
     }
 
+    #[cfg(test)]
+    pub(crate) fn last_resolution_orientation(&self) -> Option<FusionContractOrientation> {
+        self.resolution_cache.last_orientation()
+    }
+
     pub fn set_cache_policy(&mut self, policy: OperationCachePolicy) {
         self.tree_context.set_cache_policy(policy);
         self.dynamic_space_cache.set_policy(policy);
@@ -790,8 +798,14 @@ where
                 Err(err) => Err(err),
             },
             || {
-                prepare_tensorcontract_fusion_plan(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)
-                    .map(std::sync::Arc::new)
+                prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
+                    rule,
+                    &dst_dynamic,
+                    &lhs_dynamic,
+                    &rhs_dynamic,
+                    axes,
+                )
+                .map(std::sync::Arc::new)
             },
         )?;
         self.execute_resolution(&resolution, rule, dst, lhs, rhs, alpha, beta)
@@ -939,7 +953,7 @@ where
                 Err(err) => Err(err),
             },
             || {
-                super::fusion::prepare_tensorcontract_fusion_plan_dyn_raw(
+                prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
                     rule, dst_space, lhs_space, rhs_space, axes,
                 )
                 .map(Arc::new)
@@ -1429,7 +1443,7 @@ where
                 Err(err) => Err(err),
             },
             || {
-                super::fusion::prepare_tensorcontract_fusion_plan_dyn_raw(
+                prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
                     rule, dst_space, lhs_space, rhs_space, axes,
                 )
                 .map(Arc::new)
@@ -1770,8 +1784,14 @@ where
                 Err(err) => Err(err),
             },
             || {
-                prepare_tensorcontract_fusion_plan(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)
-                    .map(Arc::new)
+                prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
+                    rule,
+                    &dst_dynamic,
+                    &lhs_dynamic,
+                    &rhs_dynamic,
+                    axes,
+                )
+                .map(Arc::new)
             },
         )?;
         let dst_structure = Arc::clone(dst.structure());
@@ -1949,8 +1969,14 @@ where
                 Err(err) => Err(err),
             },
             || {
-                prepare_tensorcontract_fusion_plan(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)
-                    .map(std::sync::Arc::new)
+                prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
+                    rule,
+                    &dst_dynamic,
+                    &lhs_dynamic,
+                    &rhs_dynamic,
+                    axes,
+                )
+                .map(std::sync::Arc::new)
             },
         )?;
         profile.fusion_block_plan_lookup += start.elapsed();
@@ -2090,6 +2116,7 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
     {
+        plan.require_forward_scratch()?;
         if !plan.output_transform_is_identity()
             || DST_NOUT != plan.core_dst_open_lhs_rank()
             || DST_NIN != plan.core_dst_open_rhs_rank()
@@ -2140,6 +2167,7 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
     {
+        plan.require_forward_scratch()?;
         if DST_CAN_NOUT != plan.core_dst_open_lhs_rank()
             || DST_CAN_NIN != plan.core_dst_open_rhs_rank()
         {

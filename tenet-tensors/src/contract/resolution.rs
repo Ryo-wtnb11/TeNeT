@@ -136,11 +136,10 @@ impl FullSpaceKey {
 /// Arc — a hit the pointer key missed. That extra hit is semantically safe for
 /// every [`Resolution`] payload: `Core`/`Structure` carry their own pinned
 /// operand structures and replay re-validates them against the live operands
-/// (`validate_structure_identity`), and `DynamicTree` plans are pure functions
-/// of (rank, axes, conj) and content-independent (the χ1-vs-χ3 regression test
-/// pins that invariant). This is exactly what a `FullKey` hit already does —
-/// `FullKey` and `FastKey` now share one content-equivalence class, so a
-/// `FastKey` hit is always a would-be `FullKey` hit, never a divergent one.
+/// (`validate_structure_identity`), while `DynamicTree` selection may depend on
+/// operand content and is separated by the same hom-space and structure
+/// identities in both `FastSpaceKey` and `FullSpaceKey`. A `FastKey` hit is
+/// therefore always a would-be `FullKey` hit, never a divergent one.
 ///
 /// Why-not (pin the operand Arcs instead, à la [`LastSpace`]): pinning keeps
 /// dead structures alive only to keep a pointer key valid; re-keying on content
@@ -436,6 +435,14 @@ where
     #[inline]
     pub(crate) fn stats(&self) -> ContractionResolutionStats {
         self.stats
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_orientation(&self) -> Option<super::fusion::FusionContractOrientation> {
+        self.last.iter().find_map(|entry| match &entry.resolution {
+            Resolution::DynamicTree(plan) => Some(plan.orientation()),
+            Resolution::Core(_) | Resolution::Structure(_) => None,
+        })
     }
 
     pub(crate) fn set_policy(&mut self, policy: OperationCachePolicy) {
@@ -1016,8 +1023,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::fusion::prepare_tensorcontract_fusion_plan_dyn;
-    use crate::BoundDynamicFusionMapSpace;
+    use crate::contract::fusion::prepare_tensorcontract_fusion_plan_dyn_raw_canonical;
     use tenet_core::{
         FermionParityFusionRule, FusionProductSpace, FusionTreeHomSpace, ProductFusionRuleExt,
         SU2FusionRule, SU2Irrep, SectorId, SectorLeg, U1FusionRule, U1Irrep,
@@ -1131,24 +1137,70 @@ mod tests {
         assert_ne!(FastSpaceKey::from_space(&a), FastSpaceKey::from_space(&c));
     }
 
-    // Pins the invariant the fast key's safety argument rests on: a
-    // `DynamicTree` plan is a pure function of (rank, axes, conj) and carries no
-    // degeneracy, so the same swap contraction at χ=1 and χ=3 compiles to a
-    // byte-identical plan. If a future plan change made plans degeneracy-
-    // dependent, this loud failure flags that the Why-not comment on
-    // [`FastKey`] no longer holds.
     #[test]
-    fn dynamic_tree_plan_is_content_independent_across_chi() {
+    fn dynamic_tree_cache_separates_distinct_operand_content() {
+        let _guard = crate::test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::reset_global_operation_caches();
         let rule = Arc::new(U1FusionRule);
-        // Swap contraction (permutes rhs), forcing the tree-transform route.
         let axes =
             TensorContractSpec::new(&[3, 2], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3]));
-        let plan = |deg| {
-            let raw = u1_matrix_space(rule.as_ref(), deg);
-            let space =
-                BoundDynamicFusionMapSpace::bind_multiplicity_free(raw, Arc::clone(&rule)).unwrap();
-            prepare_tensorcontract_fusion_plan_dyn(&space, &space, &space, axes).unwrap()
-        };
-        assert_eq!(plan(1), plan(3));
+        let chi1 = u1_matrix_space(rule.as_ref(), 1);
+        let chi3 = u1_matrix_space(rule.as_ref(), 3);
+        let mut cache =
+            ContractionResolutionCache::<crate::TreeTransformBuiltinRuleCacheKey>::default();
+        let compile_calls = std::cell::Cell::new(0);
+
+        for space in [&chi1, &chi3] {
+            let resolution = cache
+                .get_or_resolve(
+                    rule.as_ref(),
+                    space,
+                    space,
+                    space,
+                    axes,
+                    || Ok(None),
+                    || {
+                        compile_calls.set(compile_calls.get() + 1);
+                        prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
+                            rule.as_ref(),
+                            space,
+                            space,
+                            space,
+                            axes,
+                        )
+                        .map(Arc::new)
+                    },
+                )
+                .unwrap();
+            assert!(matches!(resolution, Resolution::DynamicTree(_)));
+        }
+
+        assert_ne!(
+            FastSpaceKey::from_space(&chi1),
+            FastSpaceKey::from_space(&chi3)
+        );
+        assert_ne!(
+            FullSpaceKey::from_space(&chi1).unwrap(),
+            FullSpaceKey::from_space(&chi3).unwrap()
+        );
+        assert_eq!(compile_calls.get(), 2);
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.stats().misses, 2);
+
+        let repeated = cache
+            .get_or_resolve(
+                rule.as_ref(),
+                &chi1,
+                &chi1,
+                &chi1,
+                axes,
+                || panic!("cached DynamicTree must skip structure compilation"),
+                || panic!("cached DynamicTree must skip plan compilation"),
+            )
+            .unwrap();
+        assert!(matches!(repeated, Resolution::DynamicTree(_)));
+        assert_eq!(cache.stats().hits, 1);
     }
 }
