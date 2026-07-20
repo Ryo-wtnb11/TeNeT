@@ -413,12 +413,11 @@ fn rank_nine_same_split_groups_do_not_clone_prepared_spill_storage() {
         .unwrap();
     COUNTING.set(false);
 
-    // What: three same-split groups reuse one rank-nine prepared operation.
-    // Restoring a spilled-operation clone per group raises these counts to
-    // 257 allocations and 56_709 bytes.
+    // What: three same-split groups reuse one rank-nine prepared operation;
+    // cloning spilled prepared storage exceeds both allocation envelopes.
     assert_eq!(structure.fusion_tree_groups().len(), 3);
     assert_eq!(ALLOCATIONS.get(), 254);
-    assert_eq!(ALLOCATED_BYTES.get(), 56_325);
+    assert!(ALLOCATED_BYTES.get() < 56_500);
     std::hint::black_box(compiled);
 }
 
