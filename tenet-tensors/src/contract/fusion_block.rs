@@ -330,11 +330,13 @@ fn is_core_form_output(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
     use tenet_core::{
-        FusionProductSpace, FusionTensorMapSpace, HostReadableStorage, HostWritableStorage,
-        SU2FusionRule, SectorLeg, TensorMap, TensorMapSpace, TensorStorage, Trivial, Z2FusionRule,
+        BraidingStyleKind, CoreError, FusionProductSpace, FusionStyleKind, FusionTensorMapSpace,
+        FusionTreePairKey, HostReadableStorage, HostWritableStorage, MultiplicityIndex,
+        ProductFusionRule, SU2FusionRule, SU2Irrep, SectorLeg, SectorVec, TensorMap,
+        TensorMapSpace, TensorStorage, Trivial, U1FusionRule, U1Irrep, Z2FusionRule,
     };
     use tenet_core::{Placement, SimilarStorage};
     use tenet_operations::fusion_replay::HostFusionBlockContractWorkspace;
@@ -342,6 +344,14 @@ mod tests {
     use tenet_operations::ReportsPlacement;
 
     use crate::{DenseTreeTransformOperations, TensorContractWorkspace};
+
+    fn reset_layout_lookups() {
+        FUSION_LAYOUT_LOOKUPS.with(|lookups| lookups.set((0, 0)));
+    }
+
+    fn layout_lookups() -> (usize, usize) {
+        FUSION_LAYOUT_LOOKUPS.with(Cell::get)
+    }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct ScratchAllocation {
@@ -576,6 +586,234 @@ mod tests {
         }
     }
 
+    fn assert_missing_input_group_scales_destination<R>(rule: &R, coupled: [SectorId; 2])
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        let codomain = SectorLeg::new(coupled.map(|sector| (sector, 1)), false);
+        let domain = SectorLeg::new(coupled.map(|sector| (sector, 1)), false);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([codomain]),
+            FusionProductSpace::new([domain]),
+        );
+        let keys = homspace.fusion_tree_keys(rule);
+        assert_eq!(keys.len(), 2);
+        let full_order = vec![keys[1].clone(), keys[0].clone()];
+        let make_space = |keys: Vec<FusionTreePairKey>| {
+            FusionTensorMapSpace::new_unbound(
+                TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
+                homspace.clone(),
+                crate::tests::packed_fixture_structure(
+                    2,
+                    keys.into_iter().map(|key| (key, vec![1, 1])),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .try_bind_rule(rule)
+            .unwrap()
+        };
+        let lhs = DynamicFusionMapSpace::from_typed(&make_space(full_order.clone()));
+        let rhs = DynamicFusionMapSpace::from_typed(&make_space(vec![keys[0].clone()]));
+        let dst = DynamicFusionMapSpace::from_typed(&make_space(full_order));
+
+        reset_layout_lookups();
+        let plan = compile_fusion_block_contract_plan(
+            rule,
+            &dst,
+            &lhs,
+            &rhs,
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
+        )
+        .unwrap();
+        // What: each destination group performs one LHS and one RHS lookup;
+        // ordinary joins never build or query a prelowered block locator.
+        assert_eq!(layout_lookups(), (4, 0));
+
+        let mut output = vec![11.0, 7.0];
+        let mut dense = DenseTreeTransformOperations::default();
+        let mut dense_workspace = TensorContractWorkspace::default();
+        let mut fusion_workspace = FusionBlockContractWorkspace::<f64>::default();
+        plan.execute_raw(
+            &mut crate::StridedHostKernelAdapter::default(),
+            &mut BackendRank2Gemm {
+                backend: &mut dense,
+                workspace: &mut dense_workspace,
+            },
+            &mut fusion_workspace,
+            dst.structure(),
+            &mut output,
+            lhs.structure(),
+            &[3.0, 2.0],
+            rhs.structure(),
+            &[5.0],
+            2.0,
+            3.0,
+        )
+        .unwrap();
+
+        // What: the missing RHS group is structural zero and receives beta
+        // exactly once while the matched group applies alpha and beta.
+        assert_eq!(output, vec![33.0, 41.0]);
+    }
+
+    #[test]
+    fn destination_order_join_preserves_structural_zero_for_builtin_rules() {
+        assert_missing_input_group_scales_destination(
+            &U1FusionRule,
+            [U1Irrep::new(-1).sector_id(), U1Irrep::new(1).sector_id()],
+        );
+        assert_missing_input_group_scales_destination(
+            &SU2FusionRule,
+            [
+                SU2Irrep::from_twice_spin(0).sector_id(),
+                SU2Irrep::from_twice_spin(1).sector_id(),
+            ],
+        );
+        type U1Su2Rule = ProductFusionRule<U1FusionRule, SU2FusionRule>;
+        let product = U1Su2Rule::default();
+        assert_missing_input_group_scales_destination(
+            &product,
+            [
+                product.encode_sector(
+                    U1Irrep::new(0).sector_id(),
+                    SU2Irrep::from_twice_spin(0).sector_id(),
+                ),
+                product.encode_sector(
+                    U1Irrep::new(1).sector_id(),
+                    SU2Irrep::from_twice_spin(1).sector_id(),
+                ),
+            ],
+        );
+    }
+
+    #[derive(Clone, Copy)]
+    struct LayoutToyGenericRule;
+
+    impl FusionRule for LayoutToyGenericRule {
+        fn rule_identity(&self) -> tenet_core::RuleIdentity {
+            tenet_core::RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn dual(&self, sector: SectorId) -> SectorId {
+            sector
+        }
+
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            match (left.id(), right.id()) {
+                (0, 0) => [SectorId::new(0)].into_iter().collect(),
+                (1, 1) => [SectorId::new(1)].into_iter().collect(),
+                _ => SectorVec::new(),
+            }
+        }
+
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            if (left.id(), right.id(), coupled.id()) == (1, 1, 1) {
+                2
+            } else {
+                usize::from(self.fusion_channels(left, right).contains(&coupled))
+            }
+        }
+    }
+
+    fn toy_vertex_tree(coupled: usize, vertex: usize) -> FusionTreeKey {
+        FusionTreeKey::try_new_for_rule(
+            &LayoutToyGenericRule,
+            [SectorId::new(coupled); 2],
+            SectorId::new(coupled),
+            [false; 2],
+            [],
+            [MultiplicityIndex::new(vertex).unwrap()],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn generic_layout_keeps_interleaved_cartesian_vertex_order() {
+        let vacuum = FusionTreePairKey::pair(toy_vertex_tree(0, 1), toy_vertex_tree(0, 1));
+        let pair = |row_vertex, col_vertex| {
+            FusionTreePairKey::pair(
+                toy_vertex_tree(1, row_vertex),
+                toy_vertex_tree(1, col_vertex),
+            )
+        };
+        let ordered = vec![
+            pair(2, 2),
+            vacuum.clone(),
+            pair(1, 1),
+            pair(1, 2),
+            pair(2, 1),
+        ];
+        let duplicate = crate::tests::packed_fixture_structure(
+            4,
+            [ordered[0].clone(), ordered[0].clone()]
+                .into_iter()
+                .map(|key| (key, vec![1; 4])),
+        )
+        .unwrap_err();
+        // What: an exact duplicate tree pair remains a typed construction error.
+        assert!(matches!(duplicate, CoreError::DuplicateBlockKey { .. }));
+
+        let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
+        let space = FusionTensorMapSpace::new_unbound(
+            TensorMapSpace::<2, 2>::from_dims([2, 2], [2, 2]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg(), leg()]),
+                FusionProductSpace::new([leg(), leg()]),
+            ),
+            crate::tests::packed_fixture_structure(
+                4,
+                ordered.into_iter().map(|key| (key, vec![1; 4])),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let dynamic = DynamicFusionMapSpace::from_typed(&space);
+        let layout = FusionBlockMatrixLayout::compile_generic(&dynamic).unwrap();
+
+        // What: first destination occurrence fixes group order, while distinct
+        // row/column vertex labels retain their full Cartesian block set.
+        assert_eq!(
+            layout
+                .groups
+                .iter()
+                .map(|group| group.coupled)
+                .collect::<Vec<_>>(),
+            vec![SectorId::new(1), SectorId::new(0)]
+        );
+        let multiplicity = layout.group(SectorId::new(1)).unwrap();
+        assert_eq!(multiplicity.block_indices, vec![0, 2, 3, 4]);
+        assert_eq!((multiplicity.rows, multiplicity.cols), (2, 2));
+        assert_eq!(
+            multiplicity
+                .subblocks
+                .iter()
+                .map(|subblock| subblock.matrix_offset)
+                .collect::<Vec<_>>(),
+            vec![0, 3, 1, 2]
+        );
+        assert!(!multiplicity.needs_clear);
+
+        reset_layout_lookups();
+        assert!(layout.group(SectorId::new(1)).is_some());
+        assert!(layout.group(SectorId::new(0)).is_some());
+        assert!(layout.group(SectorId::new(9)).is_none());
+        // What: finalized coupled-sector hits and misses use one indexed probe each.
+        assert_eq!(layout_lookups(), (3, 0));
+    }
+
     #[test]
     fn storage_direct_replay_runs_without_host_slice_contract() {
         let rule = Z2FusionRule;
@@ -712,16 +950,93 @@ mod tests {
     }
 
     #[test]
+    fn prelowered_nonselfdual_u1_uses_one_locator_access_per_reordered_block() {
+        let rule = U1FusionRule;
+        let charges = [-1, 0, 1].map(|charge| U1Irrep::new(charge).sector_id());
+        let codomain = SectorLeg::new(charges.map(|sector| (sector, 1)), false);
+        let domain = SectorLeg::new(charges.map(|sector| (rule.dual(sector), 1)), false);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([codomain]),
+            FusionProductSpace::new([domain]),
+        );
+        let canonical = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
+            homspace.clone(),
+            &rule,
+            vec![vec![1, 1]; 3],
+        )
+        .unwrap();
+        let logical = crate::lowering::adjoint_fusion_space_view(&canonical).unwrap();
+        let reversed_keys = (0..canonical.subblock_structure().block_count())
+            .rev()
+            .map(|index| {
+                canonical
+                    .subblock_structure()
+                    .block(index)
+                    .unwrap()
+                    .key()
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        let reordered = FusionTensorMapSpace::new_unbound(
+            TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
+            homspace,
+            crate::tests::packed_fixture_structure(
+                2,
+                reversed_keys.into_iter().map(|key| (key, vec![1, 1])),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .try_inherit_rule_identity(&canonical)
+        .unwrap();
+        let logical = DynamicFusionMapSpace::from_typed(&logical);
+        let storage = DynamicFusionMapSpace::from_typed(&reordered);
+        let logical_layout = FusionBlockMatrixLayout::compile(&rule, &logical).unwrap();
+        let storage_layout = FusionBlockMatrixLayout::compile(&rule, &storage).unwrap();
+        let storage_locator =
+            FusionBlockMatrixLocator::compile(&storage_layout, storage.structure().block_count())
+                .unwrap();
+
+        reset_layout_lookups();
+        let mapped = logical_layout
+            .groups
+            .iter()
+            .map(|logical_group| {
+                map_logical_group_to_storage(
+                    logical_group,
+                    &logical,
+                    &storage,
+                    &storage_layout,
+                    &storage_locator,
+                    MatrixOp::Adjoint,
+                )
+                .map(|group| group.block_indices[0])
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        // What: non-self-dual lazy-adjoint keys resolve against physical
+        // storage order without a group scan or repeated position search.
+        assert_eq!(mapped, vec![2, 1, 0]);
+        assert_eq!(layout_lookups(), (0, logical.structure().block_count()));
+    }
+
+    #[test]
     fn prelowered_mapping_rejects_mismatched_tree_ordering() {
         let (logical, storage, mut logical_layout, storage_layout) = z2_adjoint_mapping_spaces();
         let logical_group = logical_layout.groups.first_mut().unwrap();
         logical_group.subblocks[0].matrix_offset += 1;
+        let storage_locator =
+            FusionBlockMatrixLocator::compile(&storage_layout, storage.structure().block_count())
+                .unwrap();
 
         let error = map_logical_group_to_storage(
             logical_group,
             &logical,
             &storage,
             &storage_layout,
+            &storage_locator,
             MatrixOp::Adjoint,
         )
         .unwrap_err();
@@ -738,11 +1053,15 @@ mod tests {
         let (logical, storage, logical_layout, mut storage_layout) = z2_adjoint_mapping_spaces();
         let logical_group = logical_layout.groups[0].clone();
         storage_layout.groups[0].direct_offset = None;
+        let storage_locator =
+            FusionBlockMatrixLocator::compile(&storage_layout, storage.structure().block_count())
+                .unwrap();
         let physical = map_logical_group_to_storage(
             &logical_group,
             &logical,
             &storage,
             &storage_layout,
+            &storage_locator,
             MatrixOp::Adjoint,
         )
         .unwrap();
@@ -942,11 +1261,11 @@ where
 
     let mut groups = Vec::new();
     let mut active_dst_blocks = HashSet::<usize>::new();
-    for lhs_group in lhs_layout.groups {
-        let Some(rhs_group) = rhs_layout.group(lhs_group.coupled) else {
+    for dst_group in dst_layout.groups {
+        let Some(lhs_group) = lhs_layout.group(dst_group.coupled) else {
             continue;
         };
-        let Some(dst_group) = dst_layout.group(lhs_group.coupled) else {
+        let Some(rhs_group) = rhs_layout.group(dst_group.coupled) else {
             continue;
         };
         for block_index in &dst_group.block_indices {
@@ -957,9 +1276,9 @@ where
         }
         active_dst_blocks.extend(dst_group.block_indices.iter().copied());
         groups.push(FusionBlockContractGroupPlan::new(
-            lhs_group,
+            lhs_group.clone(),
             rhs_group.clone(),
-            dst_group.clone(),
+            dst_group,
         )?);
     }
     FusionBlockContractPlan::from_parts(
@@ -996,21 +1315,32 @@ where
     let rhs_logical_layout = FusionBlockMatrixLayout::compile(rule, rhs_logical)?;
     let rhs_storage_layout = FusionBlockMatrixLayout::compile(rule, rhs_storage)?;
     let dst_layout = FusionBlockMatrixLayout::compile(rule, dst_space)?;
+    // Why not retain this on every layout: only prelowered operands translate
+    // logical block identity into a separately ordered physical structure.
+    let lhs_storage_locator = FusionBlockMatrixLocator::compile(
+        &lhs_storage_layout,
+        lhs_storage.structure().block_count(),
+    )?;
+    let rhs_storage_locator = FusionBlockMatrixLocator::compile(
+        &rhs_storage_layout,
+        rhs_storage.structure().block_count(),
+    )?;
 
     let mut groups = Vec::new();
     let mut active_dst_blocks = HashSet::<usize>::new();
-    for lhs_group in lhs_logical_layout.groups {
-        let Some(rhs_group) = rhs_logical_layout.group(lhs_group.coupled) else {
+    for dst_group in dst_layout.groups {
+        let Some(lhs_group) = lhs_logical_layout.group(dst_group.coupled) else {
             continue;
         };
-        let Some(dst_group) = dst_layout.group(lhs_group.coupled) else {
+        let Some(rhs_group) = rhs_logical_layout.group(dst_group.coupled) else {
             continue;
         };
         let lhs_physical = map_logical_group_to_storage(
-            &lhs_group,
+            lhs_group,
             lhs_logical,
             lhs_storage,
             &lhs_storage_layout,
+            &lhs_storage_locator,
             lhs_op,
         )?;
         let rhs_physical = map_logical_group_to_storage(
@@ -1018,6 +1348,7 @@ where
             rhs_logical,
             rhs_storage,
             &rhs_storage_layout,
+            &rhs_storage_locator,
             rhs_op,
         )?;
         for block_index in &dst_group.block_indices {
@@ -1030,7 +1361,7 @@ where
         groups.push(FusionBlockContractGroupPlan::new(
             lhs_physical,
             rhs_physical,
-            dst_group.clone(),
+            dst_group,
         )?);
     }
     FusionBlockContractPlan::from_parts_with_ops(
@@ -1049,28 +1380,30 @@ fn map_logical_group_to_storage(
     logical_space: &DynamicFusionMapSpace,
     storage_space: &DynamicFusionMapSpace,
     storage_layout: &FusionBlockMatrixLayout,
+    storage_locator: &FusionBlockMatrixLocator,
     op: MatrixOp,
 ) -> Result<FusionBlockMatrixGroup, OperationError> {
     let storage_conjugate = op != MatrixOp::Identity;
     let map_block = prelowered_storage_block_index(logical_space, storage_space, storage_conjugate);
-    let mapped = logical_group
+    let (&first_logical_index, remaining_logical_indices) = logical_group
         .block_indices
-        .iter()
-        .map(|&index| map_block(index))
-        .collect::<Result<HashSet<_>, _>>()?;
+        .split_first()
+        .ok_or(OperationError::StructureMismatch {
+            tensor: "prelowered logical group",
+        })?;
+    let first_storage_index = map_block(first_logical_index)?;
+    let first_storage_location = storage_locator.get(first_storage_index)?;
     let storage_group = storage_layout
         .groups
-        .iter()
-        .find(|group| {
-            group.block_indices.len() == mapped.len()
-                && group
-                    .block_indices
-                    .iter()
-                    .all(|index| mapped.contains(index))
-        })
+        .get(first_storage_location.group_ordinal)
         .ok_or(OperationError::StructureMismatch {
             tensor: "prelowered physical group",
         })?;
+    if storage_group.block_indices.len() != logical_group.block_indices.len() {
+        return Err(OperationError::StructureMismatch {
+            tensor: "prelowered physical group",
+        });
+    }
 
     let expected_dims = match op {
         MatrixOp::Identity => (storage_group.rows, storage_group.cols),
@@ -1082,8 +1415,21 @@ fn map_logical_group_to_storage(
             src: vec![expected_dims.0, expected_dims.1],
         });
     }
-    for &logical_index in &logical_group.block_indices {
-        let storage_index = map_block(logical_index)?;
+    for (logical_position, &logical_index) in std::iter::once(&first_logical_index)
+        .chain(remaining_logical_indices)
+        .enumerate()
+    {
+        let (storage_index, storage_location) = if logical_position == 0 {
+            (first_storage_index, first_storage_location)
+        } else {
+            let storage_index = map_block(logical_index)?;
+            (storage_index, storage_locator.get(storage_index)?)
+        };
+        if storage_location.group_ordinal != first_storage_location.group_ordinal {
+            return Err(OperationError::StructureMismatch {
+                tensor: "prelowered physical group",
+            });
+        }
         let logical = logical_space.structure().block(logical_index)?;
         let storage = storage_space.structure().block(storage_index)?;
         let split = storage_space.nout();
@@ -1103,27 +1449,26 @@ fn map_logical_group_to_storage(
                 tensor: "prelowered block layout",
             });
         }
-        let logical_position = logical_group
-            .block_indices
-            .iter()
-            .position(|&index| index == logical_index)
-            .expect("logical block belongs to its group");
-        let storage_position = storage_group
-            .block_indices
-            .iter()
-            .position(|&index| index == storage_index)
-            .expect("mapped storage block belongs to its group");
-        let logical_offset = usize::try_from(
-            logical_group.subblocks[logical_position].matrix_offset,
-        )
-        .map_err(|_| OperationError::StructureMismatch {
-            tensor: "prelowered logical tree offset",
+        let logical_subblock = logical_group.subblocks.get(logical_position).ok_or(
+            OperationError::StructureMismatch {
+                tensor: "prelowered logical group",
+            },
+        )?;
+        let storage_subblock = storage_group
+            .subblocks
+            .get(storage_location.position)
+            .ok_or(OperationError::StructureMismatch {
+                tensor: "prelowered physical group",
+            })?;
+        let logical_offset = usize::try_from(logical_subblock.matrix_offset).map_err(|_| {
+            OperationError::StructureMismatch {
+                tensor: "prelowered logical tree offset",
+            }
         })?;
-        let storage_offset = usize::try_from(
-            storage_group.subblocks[storage_position].matrix_offset,
-        )
-        .map_err(|_| OperationError::StructureMismatch {
-            tensor: "prelowered physical tree offset",
+        let storage_offset = usize::try_from(storage_subblock.matrix_offset).map_err(|_| {
+            OperationError::StructureMismatch {
+                tensor: "prelowered physical tree offset",
+            }
         })?;
         let logical_tree_offset = (
             logical_offset % logical_group.rows,
@@ -1205,11 +1550,11 @@ where
 
     let mut groups = Vec::new();
     let mut active_dst_blocks = HashSet::<usize>::new();
-    for lhs_group in lhs_layout.groups {
-        let Some(rhs_group) = rhs_layout.group(lhs_group.coupled) else {
+    for dst_group in dst_layout.groups {
+        let Some(lhs_group) = lhs_layout.group(dst_group.coupled) else {
             continue;
         };
-        let Some(dst_group) = dst_layout.group(lhs_group.coupled) else {
+        let Some(rhs_group) = rhs_layout.group(dst_group.coupled) else {
             continue;
         };
         for block_index in &dst_group.block_indices {
@@ -1220,9 +1565,9 @@ where
         }
         active_dst_blocks.extend(dst_group.block_indices.iter().copied());
         groups.push(FusionBlockContractGroupPlan::new(
-            lhs_group,
+            lhs_group.clone(),
             rhs_group.clone(),
-            dst_group.clone(),
+            dst_group,
         )?);
     }
     FusionBlockContractPlan::from_parts(
@@ -1287,6 +1632,9 @@ where
 #[derive(Clone, Debug)]
 struct FusionBlockMatrixLayout {
     groups: Vec<FusionBlockMatrixGroup>,
+    // Why not sort for a merge walk: expert block layouts retain first
+    // destination occurrence order, while this compile-time map preserves it.
+    group_indices: FxHashMap<SectorId, usize>,
 }
 
 impl FusionBlockMatrixLayout {
@@ -1333,7 +1681,10 @@ impl FusionBlockMatrixLayout {
         for builder in builders {
             groups.push(builder.finish(rule, space)?);
         }
-        Ok(Self { groups })
+        Ok(Self {
+            groups,
+            group_indices,
+        })
     }
 
     /// Generic-fusion (Stage B3c-1) sibling of [`Self::compile`]: relaxed to any
@@ -1381,12 +1732,103 @@ impl FusionBlockMatrixLayout {
         for builder in builders {
             groups.push(builder.finish_generic(space)?);
         }
-        Ok(Self { groups })
+        Ok(Self {
+            groups,
+            group_indices,
+        })
     }
 
     fn group(&self, coupled: SectorId) -> Option<&FusionBlockMatrixGroup> {
-        self.groups.iter().find(|group| group.coupled == coupled)
+        #[cfg(test)]
+        record_fusion_group_lookup();
+        self.group_indices
+            .get(&coupled)
+            .and_then(|&group_index| self.groups.get(group_index))
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FusionBlockMatrixLocation {
+    group_ordinal: usize,
+    position: usize,
+}
+
+#[derive(Debug)]
+struct FusionBlockMatrixLocator {
+    by_block: Vec<FusionBlockMatrixLocation>,
+}
+
+impl FusionBlockMatrixLocator {
+    const MISSING: FusionBlockMatrixLocation = FusionBlockMatrixLocation {
+        group_ordinal: usize::MAX,
+        position: usize::MAX,
+    };
+
+    fn compile(
+        layout: &FusionBlockMatrixLayout,
+        block_count: usize,
+    ) -> Result<Self, OperationError> {
+        let mut by_block = vec![Self::MISSING; block_count];
+        for (group_ordinal, group) in layout.groups.iter().enumerate() {
+            for (position, &block_index) in group.block_indices.iter().enumerate() {
+                let location =
+                    by_block
+                        .get_mut(block_index)
+                        .ok_or(OperationError::StructureMismatch {
+                            tensor: "prelowered physical group",
+                        })?;
+                if *location != Self::MISSING {
+                    return Err(OperationError::StructureMismatch {
+                        tensor: "prelowered physical group",
+                    });
+                }
+                *location = FusionBlockMatrixLocation {
+                    group_ordinal,
+                    position,
+                };
+            }
+        }
+        if by_block.iter().any(|&location| location == Self::MISSING) {
+            return Err(OperationError::StructureMismatch {
+                tensor: "prelowered physical group",
+            });
+        }
+        Ok(Self { by_block })
+    }
+
+    fn get(&self, block_index: usize) -> Result<FusionBlockMatrixLocation, OperationError> {
+        #[cfg(test)]
+        record_fusion_block_locator_lookup();
+        self.by_block
+            .get(block_index)
+            .copied()
+            .filter(|&location| location != Self::MISSING)
+            .ok_or(OperationError::StructureMismatch {
+                tensor: "prelowered physical group",
+            })
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static FUSION_LAYOUT_LOOKUPS: std::cell::Cell<(usize, usize)> =
+        const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+fn record_fusion_group_lookup() {
+    FUSION_LAYOUT_LOOKUPS.with(|lookups| {
+        let (groups, blocks) = lookups.get();
+        lookups.set((groups + 1, blocks));
+    });
+}
+
+#[cfg(test)]
+fn record_fusion_block_locator_lookup() {
+    FUSION_LAYOUT_LOOKUPS.with(|lookups| {
+        let (groups, blocks) = lookups.get();
+        lookups.set((groups, blocks + 1));
+    });
 }
 
 #[derive(Clone, Debug)]
