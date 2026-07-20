@@ -584,6 +584,28 @@ mod tests {
                 group.subblocks.len() != group.rows * group.cols
             );
         }
+
+        // What: the actual incomplete SU2 grid passes the executable plan's
+        // packed-matrix geometry proof, not only the layout builder's count.
+        let mut active = HashSet::new();
+        let groups = layout
+            .groups
+            .iter()
+            .cloned()
+            .map(|group| {
+                active.extend(group.block_indices.iter().copied());
+                FusionBlockContractGroupPlan::new(group.clone(), group.clone(), group)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        FusionBlockContractPlan::from_parts(
+            Arc::clone(sparse.structure()),
+            Arc::clone(sparse.structure()),
+            Arc::clone(sparse.structure()),
+            fusion_scale_block_layouts_excluding(sparse.structure(), &active).unwrap(),
+            groups,
+        )
+        .unwrap();
     }
 
     fn assert_missing_input_group_scales_destination<R>(rule: &R, coupled: [SectorId; 2])
@@ -1049,7 +1071,7 @@ mod tests {
     }
 
     #[test]
-    fn prelowered_non_direct_physical_layout_yields_fallback_plan() {
+    fn prelowered_non_direct_physical_layout_keeps_executable_plan() {
         let (logical, storage, logical_layout, mut storage_layout) = z2_adjoint_mapping_spaces();
         let logical_group = logical_layout.groups[0].clone();
         storage_layout.groups[0].direct_offset = None;
@@ -1069,19 +1091,22 @@ mod tests {
 
         let group =
             FusionBlockContractGroupPlan::new(physical.clone(), physical, logical_group).unwrap();
+        let active_dst_blocks = group.dst.block_indices.iter().copied().collect();
+        let inactive_dst_blocks =
+            fusion_scale_block_layouts_excluding(logical.structure(), &active_dst_blocks).unwrap();
         let plan = FusionBlockContractPlan::from_parts_with_ops(
             Arc::clone(logical.structure()),
             Arc::clone(storage.structure()),
             Arc::clone(storage.structure()),
-            Vec::new(),
+            inactive_dst_blocks,
             vec![group],
             MatrixOp::Adjoint,
             MatrixOp::Adjoint,
         )
         .unwrap();
 
-        // What: a valid but non-direct physical layout is a route decision,
-        // not a user-visible Core compilation error.
+        // What: a valid non-direct physical layout remains an executable core
+        // plan instead of becoming a user-visible compilation error.
         assert!(!plan.is_fully_direct());
     }
 

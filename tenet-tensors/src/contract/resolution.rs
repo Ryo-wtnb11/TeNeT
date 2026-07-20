@@ -617,9 +617,7 @@ where
                             tenet_operations::fusion_replay::MatrixOp::Identity
                         },
                     )?;
-                    if plan.is_fully_direct() {
-                        return Ok(Resolution::Core(Arc::new(plan)));
-                    }
+                    return Ok(Resolution::Core(Arc::new(plan)));
                 }
                 if let Some(structure) = compile_structure()? {
                     return Ok(Resolution::Structure(structure));
@@ -974,9 +972,7 @@ where
             && !rhs_contract_requires_twist(rule, rhs, axes)?
         {
             let plan = compile_fusion_block_contract_plan_validated(rule, dst, lhs, rhs, axes)?;
-            if plan.is_fully_direct() {
-                return Ok(Resolution::Core(Arc::new(plan)));
-            }
+            return Ok(Resolution::Core(Arc::new(plan)));
         }
         return Ok(Resolution::DynamicTree(compile_dynamic()?));
     }
