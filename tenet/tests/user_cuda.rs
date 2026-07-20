@@ -507,6 +507,39 @@ fn eigh_trunc_on_cuda_matches_host_spectrum_and_error() {
 
 #[test]
 #[ignore]
+fn eigh_on_cuda_rejects_nonhermitian_input() {
+    // What: CUDA full and truncated EIGH reject an asymmetric block before cuSOLVER execution.
+    let rt = Runtime::builder().cuda(0).build().unwrap();
+    let v = Space::u1([(0, 2)]);
+    let tensor = Tensor::from_block_fn(&rt, [&v], [&v], |_, indices| match indices {
+        [0, 0] => 1.0,
+        [0, 1] => 2.0,
+        [1, 0] => 0.0,
+        [1, 1] => 3.0,
+        _ => unreachable!(),
+    })
+    .unwrap()
+    .to_cuda()
+    .unwrap();
+
+    for result in [
+        tensor.eigh_full().map(|_| ()),
+        tensor.eigh_trunc(&Truncation::Full).map(|_| ()),
+    ] {
+        assert!(matches!(
+            result,
+            Err(Error::Operation(error))
+                if matches!(
+                    error.as_ref(),
+                    tenet::operations::OperationError::InvalidArgument { message }
+                        if *message == "eigh requires Hermitian coupled-sector blocks"
+                )
+        ));
+    }
+}
+
+#[test]
+#[ignore]
 fn device_pipeline_contract_svd_trunc_matches_host_pipeline() {
     let rt = Runtime::builder().cuda(0).build().unwrap();
     let phys = Space::su2([(0, 1), (1, 1)]);

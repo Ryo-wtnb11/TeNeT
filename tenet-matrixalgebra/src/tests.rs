@@ -45,6 +45,11 @@ struct FailAfterObservingEighInput {
     observed: Vec<Vec<f64>>,
 }
 
+#[derive(Default)]
+struct EighCallSpy {
+    calls: usize,
+}
+
 struct NonFiniteSvdSpectrum {
     singular_value: f64,
 }
@@ -387,6 +392,53 @@ impl DenseExecutor for FailAfterObservingEighInput {
         Err(DenseError::Backend {
             backend: DenseBackend::Tenferro,
             op: "eigh_into",
+            message: "injected failure".to_string(),
+        })
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("test only exercises EIGH")
+    }
+}
+
+impl DenseExecutor for EighCallSpy {
+    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises EIGH")
+    }
+
+    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises EIGH")
+    }
+
+    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("canonical EIGH must use the destination API")
+    }
+
+    fn eigh_into(
+        &mut self,
+        _: DenseRead<'_>,
+        _: DenseWrite<'_>,
+        _: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        self.calls += 1;
+        Err(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "eigh_into",
+            message: "injected failure".to_string(),
+        })
+    }
+
+    fn eigh_vals(&mut self, _: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
+        self.calls += 1;
+        Err(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "eigh_vals",
             message: "injected failure".to_string(),
         })
     }
@@ -805,6 +857,266 @@ fn eigh_noncanonical_layout_uses_copy_fallback() {
 }
 
 #[test]
+fn eigh_direct_rejects_a_later_nonhermitian_sector_before_any_dense_call() {
+    // What: canonical EIGH validates every coupled sector without packing before any driver call.
+    let rule = Z2FusionRule;
+    let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let regions = tensor
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap();
+    let later = regions.last().unwrap();
+    let mut data = tensor.data().to_vec();
+    data[later.range().start + 1] += 1.0;
+    let nonhermitian = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        data,
+        tensor.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let mut dense = EighCallSpy::default();
+
+    crate::factorize::reset_eigh_copy_probe();
+    let error = eigh_full(
+        &mut dense,
+        &bound_tensor_ref!(Arc::new(rule), &nonhermitian),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        OperationError::InvalidArgument {
+            message: "eigh requires Hermitian coupled-sector blocks",
+        }
+    );
+    assert_eq!(dense.calls, 0);
+    assert_eq!(
+        crate::factorize::eigh_copy_probe(),
+        crate::factorize::EighCopyProbe::default()
+    );
+}
+
+#[test]
+fn eigh_fallback_rejects_nonhermitian_complex_input_before_dense_execution() {
+    // What: a valid noncanonical layout receives the same complex Hermitian preflight after packing.
+    let rule = Z2FusionRule;
+    let real = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let regions = real.structure().coupled_sector_regions(2).unwrap().unwrap();
+    let later = regions.last().unwrap();
+    let mut data = real
+        .data()
+        .iter()
+        .map(|&value| Complex64::new(value, 0.0))
+        .collect::<Vec<_>>();
+    data[later.range().start + 1] += Complex64::new(1.0, 2.0);
+    let tensor = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+        data,
+        real.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let bound = bound_tensor(Arc::new(rule), &tensor);
+    let adjoint_space = bound.space().adjoint_view().unwrap();
+    let input = BoundDynamicTensorRef::try_new(&adjoint_space, bound.data()).unwrap();
+    let mut dense = EighCallSpy::default();
+
+    crate::factorize::reset_eigh_copy_probe();
+    let error = eigh_full_dyn(&mut dense, &input).unwrap_err();
+
+    assert_eq!(
+        error,
+        OperationError::InvalidArgument {
+            message: "eigh requires Hermitian coupled-sector blocks",
+        }
+    );
+    assert_eq!(dense.calls, 0);
+    assert!(crate::factorize::eigh_copy_probe().input_pack_bytes > 0);
+}
+
+#[test]
+fn eigh_vals_rejects_a_later_nonhermitian_sector_before_any_dense_call() {
+    // What: values-only EIGH validates all packed sectors before its first no-vector driver.
+    let rule = Z2FusionRule;
+    let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let regions = tensor
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap();
+    let later = regions.last().unwrap();
+    let mut data = tensor.data().to_vec();
+    data[later.range().start + 1] += 1.0;
+    let nonhermitian = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        data,
+        tensor.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let mut dense = EighCallSpy::default();
+
+    let error = eigh_vals(
+        &mut dense,
+        &bound_tensor_ref!(Arc::new(rule), &nonhermitian),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        OperationError::InvalidArgument {
+            message: "eigh requires Hermitian coupled-sector blocks",
+        }
+    );
+    assert_eq!(dense.calls, 0);
+}
+
+#[test]
+fn eigh_uses_matrixalgebrakit_tolerance_for_f32_c32_and_f64() {
+    // What: expert EIGH uses each real dtype's eps(maxabs)^(3/4) boundary.
+    let within_f32 = one_sector_matrix(vec![1.0_f32, 1.0e-7, 0.0, 2.0]);
+    let outside_f32 = one_sector_matrix(vec![1.0_f32, 1.0e-3, 0.0, 2.0]);
+    let within_c32 = one_sector_matrix(vec![
+        Complex32::new(1.0, 0.0),
+        Complex32::new(1.0e-7, 0.0),
+        Complex32::new(0.0, 0.0),
+        Complex32::new(2.0, 0.0),
+    ]);
+    let outside_c32 = one_sector_matrix(vec![
+        Complex32::new(1.0, 0.0),
+        Complex32::new(1.0e-3, 0.0),
+        Complex32::new(0.0, 0.0),
+        Complex32::new(2.0, 0.0),
+    ]);
+    let within_f64 = one_sector_matrix(vec![1.0_f64, 1.0e-13, 0.0, 2.0]);
+    let outside_f64 = one_sector_matrix(vec![1.0_f64, 1.0e-8, 0.0, 2.0]);
+
+    assert_eigh_preflight(&within_f32, true);
+    assert_eigh_preflight(&outside_f32, false);
+    assert_eigh_preflight(&within_c32, true);
+    assert_eigh_preflight(&outside_c32, false);
+    assert_eigh_preflight(&within_f64, true);
+    assert_eigh_preflight(&outside_f64, false);
+}
+
+#[test]
+fn eigh_accepts_exact_hermitian_max_magnitude_inputs() {
+    // What: tolerance squaring cannot reject exact Hermitian f32 or f64 matrices at finite maxima.
+    let max_f32 = one_sector_matrix(vec![f32::MAX, 0.0, 0.0, f32::MAX]);
+    let max_f64 = one_sector_matrix(vec![f64::MAX, 0.0, 0.0, f64::MAX]);
+
+    assert_eigh_preflight(&max_f32, true);
+    assert_eigh_preflight(&max_f64, true);
+}
+
+#[test]
+fn eigh_rejects_a_large_nonhermitian_input() {
+    // What: overflow-safe tolerance comparison still rejects large finite asymmetry.
+    let tensor = one_sector_matrix(vec![f64::MAX, f64::MAX, 0.0, f64::MAX]);
+
+    assert_eigh_preflight(&tensor, false);
+}
+
+#[test]
+fn eigh_matches_the_blocked_matrixalgebrakit_hermitian_oracle() {
+    // What: cross-block residuals use projection halves, pair multiplicity, and a global sum.
+    const N: usize = 33;
+    const MAK_TOL: f64 = 3.059_163_337_652_406e-12;
+    let accepted_delta = 1.2 * MAK_TOL;
+    assert!(accepted_delta / 2.0_f64.sqrt() < MAK_TOL);
+
+    let mut accepted = vec![0.0; N * N];
+    accepted[0] = 2.0;
+    accepted[N * 32] = accepted_delta;
+    assert_eigh_preflight(&one_sector_rectangular_matrix(accepted, N, N), true);
+
+    let rejected_delta = 1.1 * MAK_TOL;
+    assert!(rejected_delta / 2.0_f64.sqrt() < MAK_TOL);
+    assert!((2.0 * rejected_delta.powi(2) / 2.0).sqrt() > MAK_TOL);
+
+    let mut rejected = vec![0.0; N * N];
+    rejected[0] = 2.0;
+    rejected[N * 32] = rejected_delta;
+    rejected[1 + N * 32] = rejected_delta;
+    assert_eigh_preflight(&one_sector_rectangular_matrix(rejected, N, N), false);
+}
+
+#[test]
+fn eigh_rejects_a_nonreal_complex_diagonal_before_dense_execution() {
+    // What: complex Hermitian validation checks diagonal reality as well as off-diagonal conjugacy.
+    let tensor = one_sector_matrix(vec![
+        Complex64::new(1.0, 1.0),
+        Complex64::new(0.0, 0.0),
+        Complex64::new(0.0, 0.0),
+        Complex64::new(2.0, 0.0),
+    ]);
+    let mut dense = EighCallSpy::default();
+
+    let error = eigh_full(
+        &mut dense,
+        &bound_tensor_ref!(Arc::new(Z2FusionRule), &tensor),
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, OperationError::InvalidArgument { .. }));
+    assert_eq!(dense.calls, 0);
+}
+
+#[test]
+fn eigh_rejects_nonfinite_input_before_dense_execution() {
+    // What: NaN and infinity cannot satisfy the Hermitian EIGH input contract.
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let tensor = one_sector_matrix(vec![value, 0.0, 0.0, 2.0]);
+        let mut dense = EighCallSpy::default();
+        let error = eigh_full(
+            &mut dense,
+            &bound_tensor_ref!(Arc::new(Z2FusionRule), &tensor),
+        )
+        .unwrap_err();
+        assert!(matches!(error, OperationError::InvalidArgument { .. }));
+        assert_eq!(dense.calls, 0);
+    }
+}
+
+#[test]
+fn eigh_preserves_endomorphism_error_precedence() {
+    // What: a non-endomorphism retains its structural error before numeric Hermitian inspection.
+    let tensor = one_sector_rectangular_matrix(vec![f64::NAN; 6], 2, 3);
+    let mut dense = EighCallSpy::default();
+
+    let error = eigh_full(
+        &mut dense,
+        &bound_tensor_ref!(Arc::new(Z2FusionRule), &tensor),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        OperationError::UnsupportedTensorContractScope {
+            message: "eigh requires an endomorphism (codomain == domain)",
+        }
+    );
+    assert_eq!(dense.calls, 0);
+}
+
+#[test]
+fn hermitian_region_validation_rejects_short_storage_without_panicking() {
+    // What: the cross-crate region validator reports malformed storage as a typed structural error.
+    let tensor = one_sector_matrix(vec![1.0_f64, 0.0, 0.0, 2.0]);
+    let regions = tensor
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+
+    let error = validate_hermitian_regions(&tensor.data()[..3], &regions).unwrap_err();
+
+    assert_eq!(
+        error,
+        OperationError::ElementCountMismatch {
+            expected: 4,
+            actual: 3,
+        }
+    );
+}
+
+#[test]
 fn compact_lq_noncanonical_layout_uses_copy_fallback() {
     // What: expert noncanonical compact LQ retains positive general pack-and-scatter evidence without direct-region scratch accounting.
     let rule = Z2FusionRule;
@@ -847,7 +1159,8 @@ fn eigh_error_preserves_borrowed_input_and_publishes_no_output() {
 #[test]
 fn eigh_stably_orders_equal_magnitudes_and_reorders_vectors_in_place() {
     // What: equal magnitudes retain backend order while larger-magnitude columns move together.
-    let tensor = rectangular_svd_tensor(3, 3);
+    let tensor =
+        one_sector_rectangular_matrix(vec![1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0], 3, 3);
     let mut dense = EqualMagnitudeEigh;
 
     let eigh = eigh_full(
@@ -4111,6 +4424,26 @@ fn null_spaces_are_orthonormal_and_annihilate_the_tensor() {
 
 fn one_sector_matrix<D: Clone>(data: Vec<D>) -> TensorMap<D, 1, 1> {
     one_sector_rectangular_matrix(data, 2, 2)
+}
+
+fn assert_eigh_preflight<D: FactorScalar + std::fmt::Debug>(
+    tensor: &TensorMap<D, 1, 1>,
+    accepted: bool,
+) {
+    let mut dense = EighCallSpy::default();
+    let error = eigh_full(
+        &mut dense,
+        &bound_tensor_ref!(Arc::new(Z2FusionRule), tensor),
+    )
+    .unwrap_err();
+
+    if accepted {
+        assert!(matches!(error, OperationError::Dense(_)));
+        assert_eq!(dense.calls, 1);
+    } else {
+        assert!(matches!(error, OperationError::InvalidArgument { .. }));
+        assert_eq!(dense.calls, 0);
+    }
 }
 
 fn one_sector_rectangular_matrix<D: Clone>(
