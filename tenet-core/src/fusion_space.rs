@@ -2876,10 +2876,12 @@ pub struct FusionTensorMapSpace<const NOUT: usize, const NIN: usize> {
 }
 
 impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
-    /// Builds a symmetric tensor-map space from an explicit block structure.
+    /// Expert compatibility constructor for an explicit caller-selected block
+    /// structure.
     ///
-    /// Prefer [`Self::from_degeneracy_shapes`] for ordinary construction; use
-    /// this method when the block structure has already been prepared.
+    /// Use this at an import or custom-layout boundary where the
+    /// [`BlockStructure`] has already been prepared. It does not derive the
+    /// ordinary operation-output layout from the final hom space.
     ///
     /// # Examples
     ///
@@ -2907,6 +2909,14 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
         )
     }
 
+    /// Shared-handle variant of [`Self::new_unbound`].
+    ///
+    /// This is the same expert compatibility/import boundary: the caller has
+    /// already selected the complete block layout. This constructor checks only
+    /// that the hom space's codomain/domain ranks match the const generics and
+    /// that the structure's total rank matches their sum. Key, sector, duality,
+    /// and logical-shape admission remain the responsibility of
+    /// [`Self::try_bind_rule`].
     pub fn from_shared_subblock_structure(
         dense_space: TensorMapSpace<NOUT, NIN>,
         homspace: FusionTreeHomSpace,
@@ -2929,14 +2939,15 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
         })
     }
 
-    /// Default constructor: TensorKit-equivalent coupled-sector matrix
-    /// layout (see [`Self::from_degeneracy_shapes_coupled`]). This is the
-    /// only product layout.
+    /// Expert compatibility constructor for caller-supplied fusion-tree
+    /// subblock shapes.
     ///
     /// The shapes are given per fusion-tree **subblock** (one entry per
     /// fusion-tree key, in key order), not per coupled-sector matrix block.
     /// This mirrors TensorKit's block/subblock distinction: a coupled-sector
     /// matrix block is assembled from these tree-resolved degeneracy shapes.
+    /// Ordinary TeNeT operation outputs instead derive their layout from the
+    /// final hom space that already owns the leg degeneracies.
     ///
     /// # Examples
     ///
@@ -2969,7 +2980,8 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
         Self::from_degeneracy_shapes_coupled(dense_space, homspace, rule, shapes)
     }
 
-    /// TensorKit-style coupled-sector matrix layout.
+    /// Expert compatibility constructor for a TensorKit-style coupled-sector
+    /// matrix layout from caller-supplied subblock shapes.
     ///
     /// Each coupled sector stores one contiguous column-major matrix whose
     /// rows enumerate (codomain fusion tree × codomain degeneracies) and whose
@@ -2977,7 +2989,9 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
     /// tree subblocks are strided views into that matrix, so the canonical
     /// (codomain | domain) matricization needs no packing. Block keys and
     /// their order are identical to [`Self::from_degeneracy_shapes`]; only
-    /// strides and offsets differ.
+    /// strides and offsets differ. This explicit shape list is an
+    /// import/compatibility boundary, not the ordinary final-hom-space output
+    /// path.
     ///
     /// # Examples
     ///
@@ -3072,12 +3086,14 @@ impl<const NOUT: usize, const NIN: usize> FusionTensorMapSpace<NOUT, NIN> {
         }
     }
 
-    /// Certifies every present block against the rule and HomSpace split,
-    /// sector membership, duality, and logical degeneracy shape.
+    /// Expert admission boundary for an imported or custom block layout.
     ///
-    /// Missing valid pairs remain structural zeros. Storage order, strides,
-    /// and offsets are orthogonal to this subset proof; ordinary complete
-    /// layouts should use the `from_degeneracy_shapes*` constructors.
+    /// This certifies every present block against the rule and hom-space split,
+    /// sector membership, duality, and logical degeneracy shape. Missing valid
+    /// pairs remain structural zeros. It does not rebuild, repack, or otherwise
+    /// select the caller's storage order, strides, or offsets; ordinary
+    /// operation outputs derive those from their final hom space before
+    /// admission.
     pub fn try_bind_rule<R: FusionRule>(mut self, rule: &R) -> Result<Self, CoreError> {
         let actual = rule.rule_identity();
         if let Some(expected) = self.rule_identity.as_ref() {

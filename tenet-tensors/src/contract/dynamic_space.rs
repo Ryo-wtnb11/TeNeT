@@ -788,11 +788,13 @@ where
 
 /// A complete dynamic fusion space bound to the provider that defines it.
 ///
-/// Construct this with [`Self::bind_multiplicity_free`] for a
-/// [`MultiplicityFreeFusionRule`] and [`Self::bind_generic`] for a generic
-/// fusion rule. Generic roots first require the provider-owned
-/// [`FusionStyleKind::Generic`] capability; tree keys do not carry a duplicate
-/// binding-mode flag. A missing rule identity is rejected rather than inferred.
+/// Ordinary operation-output layouts are built from their final hom space with
+/// [`Self::from_final_homspace_multiplicity_free`] or
+/// [`Self::from_final_homspace_generic`]. The `bind_*` methods are expert
+/// admission boundaries for an already-constructed dynamic layout. Generic
+/// roots require the provider-owned [`FusionStyleKind::Generic`] capability;
+/// tree keys do not carry a duplicate binding-mode flag. A missing rule
+/// identity is rejected rather than inferred.
 pub struct BoundDynamicFusionMapSpace<R> {
     space: DynamicFusionMapSpace,
     provider: Arc<R>,
@@ -894,7 +896,8 @@ where
         Self::from_derived_with_capability(Arc::clone(&source.provider), space, source.layout_build)
     }
 
-    /// Builds and binds a multiplicity-free space in one checked pass.
+    /// Expert compatibility root from caller-supplied fusion-tree subblock
+    /// shapes, bound to a multiplicity-free provider in one checked pass.
     pub fn from_degeneracy_shapes<Shapes>(
         provider: Arc<R>,
         homspace: FusionTreeHomSpace,
@@ -910,7 +913,7 @@ where
         Self::from_derived(provider, space)
     }
 
-    /// Builds the ordinary TeNeT multiplicity-free root with lowered metadata.
+    /// Internal shape-admission bridge using lowered metadata.
     #[doc(hidden)]
     pub fn from_degeneracy_shapes_lowered<Shapes>(
         provider: Arc<R>,
@@ -934,7 +937,8 @@ where
         Self::from_derived_with_capability(provider, space, layout_build)
     }
 
-    /// Builds and binds a multiplicity-aware space in one checked pass.
+    /// Expert compatibility root from caller-supplied fusion-tree subblock
+    /// shapes, bound to a multiplicity-aware provider in one checked pass.
     pub fn from_degeneracy_shapes_generic<Shapes>(
         provider: Arc<R>,
         homspace: FusionTreeHomSpace,
@@ -972,7 +976,8 @@ where
         })
     }
 
-    /// Binds a space using multiplicity-free tree enumeration.
+    /// Expert admission boundary for an already-constructed multiplicity-free
+    /// dynamic layout.
     pub fn bind_multiplicity_free(
         space: DynamicFusionMapSpace,
         provider: Arc<R>,
@@ -1114,8 +1119,9 @@ where
         Ok(())
     }
 
-    /// Builds a bound space from the final HomSpace's stored leg
-    /// degeneracies without materializing per-tree shape scratch.
+    /// Ordinary multiplicity-free root/output layout derived from the final
+    /// hom space's stored leg degeneracies, without a caller-supplied per-tree
+    /// shape list.
     pub fn from_final_homspace_multiplicity_free(
         provider: Arc<R>,
         homspace: FusionTreeHomSpace,
@@ -1177,7 +1183,8 @@ where
         Self::from_derived_like(lhs, space)
     }
 
-    /// Generic sibling of [`Self::from_final_homspace_multiplicity_free`].
+    /// Ordinary Generic root/output layout derived from the final hom space's
+    /// stored leg degeneracies.
     pub fn from_final_homspace_generic(
         provider: Arc<R>,
         homspace: FusionTreeHomSpace,
@@ -1226,14 +1233,20 @@ where
         Self::from_derived_like(self, space)
     }
 
-    /// Creates the zero-copy adjoint replay view while retaining the exact
-    /// provider allocation of the source binding.
+    /// Creates the zero-copy adjoint lowering/replay view while retaining the
+    /// exact provider allocation of the source binding.
+    ///
+    /// This preserves the source blocks' offsets and custom strides while
+    /// swapping their logical codomain/domain axes. It is an expert view
+    /// capability used by lazy lowering, not an owned ordinary adjoint output
+    /// layout.
     pub fn adjoint_view(&self) -> Result<Self, OperationError> {
         let space = self.space.adjoint_view()?;
         Self::from_derived_like(self, space)
     }
 
-    /// Binds a space using multiplicity-aware generic tree enumeration.
+    /// Expert admission boundary for an already-constructed
+    /// multiplicity-aware dynamic layout.
     pub fn bind_generic(
         space: DynamicFusionMapSpace,
         provider: Arc<R>,
@@ -1331,7 +1344,7 @@ where
         Self::from_derived_like(self, space)
     }
 
-    /// Builds a derived layout while preserving this binding's build strategy.
+    /// Internal expert shape bridge preserving this binding's build strategy.
     #[doc(hidden)]
     pub fn derive_from_degeneracy_shapes<Shapes>(
         &self,
@@ -1353,7 +1366,8 @@ where
         Self::from_derived_like(self, space)
     }
 
-    /// Builds a final derived layout from the HomSpace's leg degeneracies.
+    /// Builds an ordinary derived layout from the final hom space's leg
+    /// degeneracies.
     #[doc(hidden)]
     pub fn derive_from_final_homspace(
         &self,
@@ -1520,8 +1534,8 @@ impl DynamicFusionMapSpace {
         Ok(())
     }
 
-    /// Rank-erases a typed fusion space (shares the hom space and subblock
-    /// structure handles; no data copies).
+    /// Current typed-to-dynamic bridge (shares the hom space and selected
+    /// subblock layout handles; no data copies).
     pub fn from_typed<const NOUT: usize, const NIN: usize>(
         space: &FusionTensorMapSpace<NOUT, NIN>,
     ) -> Self {
@@ -1534,11 +1548,12 @@ impl DynamicFusionMapSpace {
         }
     }
 
-    /// Builds a dynamic space directly from an untyped description: a hom
-    /// space plus one degeneracy shape per fusion-tree key (in
+    /// Expert compatibility constructor from an untyped description: a hom
+    /// space plus one caller-supplied degeneracy shape per fusion-tree key (in
     /// [`FusionTreeHomSpace::fusion_tree_keys`] order). The storage layout is
     /// the TensorKit-equivalent coupled-sector matrix layout, identical to
-    /// [`FusionTensorMapSpace::from_degeneracy_shapes`].
+    /// [`FusionTensorMapSpace::from_degeneracy_shapes`]. Ordinary operation
+    /// outputs derive the layout from their final hom space instead.
     pub fn from_degeneracy_shapes<R, Shapes>(
         rule: &R,
         homspace: FusionTreeHomSpace,
@@ -1792,9 +1807,10 @@ impl DynamicFusionMapSpace {
         })
     }
 
-    /// Generic-fusion (SU(3)) sibling of [`Self::from_degeneracy_shapes`] for
-    /// caller-supplied per-tree shapes. Derived transform/contraction results
-    /// instead use the final HomSpace's stored leg degeneracies directly.
+    /// Expert Generic-fusion sibling of [`Self::from_degeneracy_shapes`] for
+    /// caller-supplied per-tree shapes. Ordinary derived
+    /// transform/contraction results instead use the final hom space's stored
+    /// leg degeneracies directly.
     ///
     /// This is a Generic execution capability boundary, not an alternate
     /// spelling for multiplicity-free construction. The provider must report
