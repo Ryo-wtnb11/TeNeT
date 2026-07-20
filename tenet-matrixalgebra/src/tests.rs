@@ -50,6 +50,43 @@ struct EighCallSpy {
     calls: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ValuesOperation {
+    Svd,
+    Eigh,
+    Eig,
+}
+
+struct FailSecondValues {
+    inner: tenet_dense::DefaultDenseExecutor,
+    operation: ValuesOperation,
+    calls: usize,
+}
+
+impl FailSecondValues {
+    fn new(operation: ValuesOperation) -> Self {
+        Self {
+            inner: tenet_dense::DefaultDenseExecutor::new(),
+            operation,
+            calls: 0,
+        }
+    }
+
+    fn fail(&mut self, operation: ValuesOperation) -> Result<(), DenseError> {
+        assert_eq!(self.operation, operation);
+        self.calls += 1;
+        if self.calls == 2 {
+            Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "values",
+                message: "injected second-sector failure".to_string(),
+            })
+        } else {
+            Ok(())
+        }
+    }
+}
+
 struct NonFiniteSvdSpectrum {
     singular_value: f64,
 }
@@ -451,6 +488,45 @@ impl DenseExecutor for EighCallSpy {
         _: &DenseDotConfig,
     ) -> Result<(), DenseError> {
         panic!("test only exercises EIGH")
+    }
+}
+
+impl DenseExecutor for FailSecondValues {
+    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises values-only operations")
+    }
+
+    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises values-only operations")
+    }
+
+    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises values-only operations")
+    }
+
+    fn svd_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
+        self.fail(ValuesOperation::Svd)?;
+        self.inner.svd_vals(input)
+    }
+
+    fn eigh_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
+        self.fail(ValuesOperation::Eigh)?;
+        self.inner.eigh_vals(input)
+    }
+
+    fn eig_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
+        self.fail(ValuesOperation::Eig)?;
+        self.inner.eig_vals(input)
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("test only exercises values-only operations")
     }
 }
 
@@ -4767,7 +4843,10 @@ fn assert_complex_spectra_close(
     }
 }
 
-fn padded_copy<R, D>(rule: &R, source: &TensorMap<D, 2, 2>) -> TensorMap<D, 2, 2>
+fn padded_copy<R, D, const NOUT: usize, const NIN: usize>(
+    rule: &R,
+    source: &TensorMap<D, NOUT, NIN>,
+) -> TensorMap<D, NOUT, NIN>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
@@ -4783,7 +4862,7 @@ where
         offset += block.shape().iter().product::<usize>() + 1;
     }
     let source_space = source.fusion_space().unwrap();
-    let structure = BlockStructure::from_blocks_with_rank(4, blocks).unwrap();
+    let structure = BlockStructure::from_blocks_with_rank(NOUT + NIN, blocks).unwrap();
     let padded_space = FusionTensorMapSpace::new_unbound(
         source_space.dense_space().clone(),
         source_space.homspace().clone(),
@@ -4913,7 +4992,8 @@ fn value_region_paths_match_packed_oracles_across_supported_rules() {
 
 #[test]
 fn value_region_paths_match_packed_oracles_for_complex64() {
-    // What: borrowed C64 sector spans preserve all three values-only dtype paths.
+    // What: borrowed C64 spans preserve nonreal general matrices and conjugate
+    // off-diagonal Hermitian matrices across all three values-only operations.
     let rule = Z2FusionRule;
     let sectors = [SectorId::new(0), SectorId::new(1)];
     let general = tsvd_test_tensor(&rule, &sectors);
@@ -4922,22 +5002,181 @@ fn value_region_paths_match_packed_oracles_for_complex64() {
         general
             .data()
             .iter()
-            .map(|&value| Complex64::new(value, 0.0))
+            .enumerate()
+            .map(|(index, &value)| Complex64::new(value, (index % 7) as f64 * 0.125 - 0.25))
             .collect(),
         general.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
+    let regions = hermitian
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap();
+    let mut hermitian_data = hermitian
+        .data()
+        .iter()
+        .map(|&value| Complex64::new(value, 0.0))
+        .collect::<Vec<_>>();
+    for region in regions.iter().filter(|region| region.rows() >= 2) {
+        let start = region.range().start;
+        hermitian_data[start + 1].im = -0.75;
+        hermitian_data[start + region.rows()].im = 0.75;
+    }
     let hermitian = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
-        hermitian
-            .data()
-            .iter()
-            .map(|&value| Complex64::new(value, 0.0))
-            .collect(),
+        hermitian_data,
         hermitian.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
 
     assert_value_region_paths_match(Arc::new(rule), &general, &hermitian);
+}
+
+#[test]
+fn values_only_public_boundaries_distinguish_empty_sectors_from_a_scalar() {
+    // What: zero degeneracies remove the sector entirely, while a rank-zero
+    // scalar remains one vacuum-sector 1x1 matrix for every values operation.
+    let empty = rectangular_svd_tensor(0, 0);
+    assert_eq!(empty.structure().block_count(), 0);
+    assert!(empty.data().is_empty());
+    let mut reject = RejectExecutorCalls;
+    crate::factorize::reset_values_matricization_fallbacks();
+    assert!(svd_vals(
+        &mut reject,
+        &bound_tensor_ref!(Arc::new(Z2FusionRule), &empty)
+    )
+    .unwrap()
+    .is_empty());
+    assert!(eigh_vals(
+        &mut reject,
+        &bound_tensor_ref!(Arc::new(Z2FusionRule), &empty)
+    )
+    .unwrap()
+    .is_empty());
+    assert!(eig_vals(
+        &mut reject,
+        &bound_tensor_ref!(Arc::new(Z2FusionRule), &empty)
+    )
+    .unwrap()
+    .is_empty());
+    assert_eq!(crate::factorize::values_matricization_fallbacks(), 0);
+
+    let rule = Z2FusionRule;
+    let homspace =
+        FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
+    let shapes = vec![Vec::new(); homspace.fusion_tree_keys(&rule).len()];
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
+        homspace,
+        &rule,
+        shapes,
+    )
+    .unwrap();
+    let scalar = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![-3.0], space).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let svd = svd_vals(&mut dense, &bound_tensor_ref!(Arc::new(rule), &scalar)).unwrap();
+    let eigh = eigh_vals(&mut dense, &bound_tensor_ref!(Arc::new(rule), &scalar)).unwrap();
+    let eig = eig_vals(&mut dense, &bound_tensor_ref!(Arc::new(rule), &scalar)).unwrap();
+    assert_eq!(svd[0].sector, rule.vacuum());
+    assert_eq!(svd[0].values, vec![3.0]);
+    assert_eq!(eigh[0].sector, rule.vacuum());
+    assert_eq!(eigh[0].values, vec![-3.0]);
+    assert_eq!(eig[0].sector, rule.vacuum());
+    assert_eq!(eig[0].values, vec![Complex64::new(-3.0, 0.0)]);
+}
+
+#[test]
+fn values_only_second_sector_failures_publish_no_partial_spectrum() {
+    // What: after one successful sector, each dense values failure returns Err
+    // without exposing the accumulated prefix or mutating borrowed input.
+    let sectors = [SectorId::new(0), SectorId::new(1)];
+    let general = tsvd_test_tensor(&Z2FusionRule, &sectors);
+    let hermitian = hermitian_test_tensor(&Z2FusionRule, &sectors);
+    for operation in [
+        ValuesOperation::Svd,
+        ValuesOperation::Eigh,
+        ValuesOperation::Eig,
+    ] {
+        let tensor = if operation == ValuesOperation::Eigh {
+            &hermitian
+        } else {
+            &general
+        };
+        let input = bound_tensor(Arc::new(Z2FusionRule), tensor);
+        let before = input.data().to_vec();
+        let mut dense = FailSecondValues::new(operation);
+        let result = match operation {
+            ValuesOperation::Svd => svd_vals(&mut dense, &input.as_ref()).map(|_| ()),
+            ValuesOperation::Eigh => eigh_vals(&mut dense, &input.as_ref()).map(|_| ()),
+            ValuesOperation::Eig => eig_vals(&mut dense, &input.as_ref()).map(|_| ()),
+        };
+
+        assert!(matches!(result, Err(OperationError::Dense(_))));
+        assert_eq!(dense.calls, 2);
+        assert_eq!(input.data(), before);
+    }
+}
+
+#[test]
+fn values_only_stable_ties_match_provider_order_on_direct_and_padded_layouts() {
+    // What: equal singular values and equal-magnitude eigenvalues retain the
+    // dense provider's order on both the borrowed and packed sector paths.
+    let rule = Z2FusionRule;
+    let svd_input =
+        one_sector_rectangular_matrix(vec![2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 1.0], 3, 3);
+    let eigh_input =
+        one_sector_rectangular_matrix(vec![1.0, 0.0, 0.0, 0.0, -2.0, 0.0, 0.0, 0.0, 2.0], 3, 3);
+    let eig_input =
+        one_sector_rectangular_matrix(vec![0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 1.0], 3, 3);
+    let svd_padded = padded_copy(&rule, &svd_input);
+    let eigh_padded = padded_copy(&rule, &eigh_input);
+    let eig_padded = padded_copy(&rule, &eig_input);
+    let shape = [3, 3];
+    let strides = [1, 3];
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let raw_svd = dense
+        .svd_vals(DenseRead::F64(
+            tenet_dense::DenseView::new(svd_input.data(), &shape, &strides, 0).unwrap(),
+        ))
+        .unwrap()
+        .as_f64_slice()
+        .unwrap()
+        .to_vec();
+    let mut raw_eigh = dense
+        .eigh_vals(DenseRead::F64(
+            tenet_dense::DenseView::new(eigh_input.data(), &shape, &strides, 0).unwrap(),
+        ))
+        .unwrap()
+        .as_f64_slice()
+        .unwrap()
+        .to_vec();
+    raw_eigh.sort_by(|a, b| b.abs().partial_cmp(&a.abs()).unwrap());
+    let mut raw_eig = dense
+        .eig_vals(DenseRead::F64(
+            tenet_dense::DenseView::new(eig_input.data(), &shape, &strides, 0).unwrap(),
+        ))
+        .unwrap()
+        .as_c64_slice()
+        .unwrap()
+        .to_vec();
+    raw_eig.sort_by(|a, b| b.norm().partial_cmp(&a.norm()).unwrap());
+
+    let direct_svd = svd_vals(&mut dense, &bound_tensor_ref!(Arc::new(rule), &svd_input)).unwrap();
+    let padded_svd = svd_vals(&mut dense, &bound_tensor_ref!(Arc::new(rule), &svd_padded)).unwrap();
+    let direct_eigh =
+        eigh_vals(&mut dense, &bound_tensor_ref!(Arc::new(rule), &eigh_input)).unwrap();
+    let padded_eigh =
+        eigh_vals(&mut dense, &bound_tensor_ref!(Arc::new(rule), &eigh_padded)).unwrap();
+    let direct_eig = eig_vals(&mut dense, &bound_tensor_ref!(Arc::new(rule), &eig_input)).unwrap();
+    let padded_eig = eig_vals(&mut dense, &bound_tensor_ref!(Arc::new(rule), &eig_padded)).unwrap();
+
+    assert_eq!(direct_svd[0].values, raw_svd);
+    assert_eq!(direct_eigh[0].values, raw_eigh);
+    assert_eq!(direct_eig[0].values, raw_eig);
+    assert_real_spectra_close(&direct_svd, &padded_svd);
+    assert_real_spectra_close(&direct_eigh, &padded_eigh);
+    assert_complex_spectra_close(&direct_eig, &padded_eig);
 }
 
 #[test]
