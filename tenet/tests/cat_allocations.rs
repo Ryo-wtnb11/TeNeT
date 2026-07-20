@@ -79,3 +79,53 @@ fn mixed_cat_widens_into_the_final_c64_payload() {
          promoted payload is {promoted_payload} B"
     );
 }
+
+#[test]
+fn lazy_adjoint_cat_allocates_the_output_without_materializing_inputs() {
+    // What: lazy dense adjoints retain the intentional owned result while
+    // avoiding both parent-sized conjugate-transpose payloads.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let common = Space::u1([(0, 64)]);
+    let left = Space::u1([(0, 192)]);
+    let right = Space::u1([(0, 320)]);
+    let lhs_parent =
+        Tensor::rand_with_seed(&runtime, Dtype::C64, [&left], [&common], 388_001).unwrap();
+    let rhs_parent =
+        Tensor::rand_with_seed(&runtime, Dtype::C64, [&right], [&common], 388_002).unwrap();
+
+    let warm_lhs = lhs_parent.adjoint().unwrap();
+    let warm_rhs = rhs_parent.adjoint().unwrap();
+    let warm_output = warm_lhs.catdomain(&warm_rhs).unwrap();
+    let output_payload =
+        warm_output.data_c64().len() as u64 * std::mem::size_of::<Complex64>() as u64;
+    let input_payload = (lhs_parent.data_c64().len() + rhs_parent.data_c64().len()) as u64
+        * std::mem::size_of::<Complex64>() as u64;
+
+    let fast_lhs = lhs_parent.adjoint().unwrap();
+    let fast_rhs = rhs_parent.adjoint().unwrap();
+    let fast_bytes = measured_bytes(|| fast_lhs.catdomain(&fast_rhs).unwrap());
+
+    let eager_lhs = lhs_parent.adjoint().unwrap();
+    let eager_rhs = rhs_parent.adjoint().unwrap();
+    let eager_bytes = measured_bytes(|| {
+        black_box(eager_lhs.data_c64());
+        black_box(eager_rhs.data_c64());
+        eager_lhs.catdomain(&eager_rhs).unwrap()
+    });
+    let structural_tolerance = 128 * 1024;
+
+    assert!(
+        fast_bytes >= output_payload,
+        "lazy cat allocated {fast_bytes} B, below its {output_payload} B owned output"
+    );
+    assert!(
+        fast_bytes <= output_payload + structural_tolerance,
+        "lazy cat allocated {fast_bytes} B for a {output_payload} B output, exceeding the \
+         {structural_tolerance} B structural allowance"
+    );
+    assert!(
+        eager_bytes.saturating_sub(fast_bytes) >= input_payload,
+        "lazy cat saved {} B, below the {input_payload} B input payloads",
+        eager_bytes.saturating_sub(fast_bytes)
+    );
+}
