@@ -39,6 +39,34 @@ use super::scratch::{
 use crate::storage_scratch::StorageFusionBlockContractWorkspace;
 use tenet_operations::TensorContractFusionProfile;
 
+#[cfg(test)]
+const PROFILED_ARTIFACT_SOURCE_PHASE: u8 = 1 << 0;
+#[cfg(test)]
+const PROFILED_ARTIFACT_CORE_DST_PHASE: u8 = 1 << 1;
+#[cfg(test)]
+const PROFILED_ARTIFACT_BLOCK_PLAN_PHASE: u8 = 1 << 2;
+
+#[cfg(test)]
+std::thread_local! {
+    static PROFILED_ARTIFACT_COMPILE_PHASES: std::cell::Cell<u8> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_profiled_artifact_compile_phases() {
+    PROFILED_ARTIFACT_COMPILE_PHASES.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn profiled_artifact_compile_phases() -> (bool, bool, bool) {
+    let phases = PROFILED_ARTIFACT_COMPILE_PHASES.get();
+    (
+        phases & PROFILED_ARTIFACT_SOURCE_PHASE != 0,
+        phases & PROFILED_ARTIFACT_CORE_DST_PHASE != 0,
+        phases & PROFILED_ARTIFACT_BLOCK_PLAN_PHASE != 0,
+    )
+}
+
 #[derive(Clone, Copy)]
 struct CoreSource<'a, D> {
     space: &'a DynamicFusionMapSpace,
@@ -633,6 +661,104 @@ where
 
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_dynamic_tree_execution_artifact_profile_pair_for_test<
+    R,
+    D,
+    const DST_NOUT: usize,
+    const DST_NIN: usize,
+    const LHS_NOUT: usize,
+    const LHS_NIN: usize,
+    const RHS_NOUT: usize,
+    const RHS_NIN: usize,
+>(
+    rule: &R,
+    plan: &FusionContractPlan,
+    ordinary_dst: &mut TensorMap<D, DST_NOUT, DST_NIN>,
+    profiled_dst: &mut TensorMap<D, DST_NOUT, DST_NIN>,
+    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN>,
+    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN>,
+    alpha: D,
+    beta: D,
+) -> Result<TensorContractFusionProfile, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    let mut tree_context =
+        TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
+    let mut contract_backend = DenseTreeTransformOperations::default();
+    let mut contract_workspace = super::backend::TensorContractWorkspace::default();
+    let mut dynamic_space_cache = DynamicFusionSpaceCache::default();
+    let mut fusion_block_cache = super::resolution::ContractionResolutionCache::default();
+    let mut fusion_block_workspace = FusionBlockContractWorkspace::default();
+    let dst_space = DynamicFusionMapSpace::from_typed(
+        ordinary_dst
+            .fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
+    );
+    let lhs_space = DynamicFusionMapSpace::from_typed(
+        lhs.fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
+    );
+    let rhs_space = DynamicFusionMapSpace::from_typed(
+        rhs.fusion_space()
+            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
+    );
+    let artifact = compile_dynamic_tree_execution_artifact::<_, _, _, _, false>(
+        &mut tree_context,
+        &mut dynamic_space_cache,
+        &mut fusion_block_cache,
+        rule,
+        encoded_layout_primer::<R>,
+        plan,
+        &dst_space,
+        &lhs_space,
+        None,
+        lhs.structure(),
+        &rhs_space,
+        None,
+        rhs.structure(),
+        None,
+    )?;
+    let mut ordinary_scratch = DynamicFusionScratchWorkspace::default();
+    let ordinary_dst_structure = Arc::clone(ordinary_dst.structure());
+    execute_dynamic_tree_execution_artifact(
+        &mut tree_context,
+        &mut contract_backend,
+        &mut contract_workspace,
+        &mut fusion_block_workspace,
+        &mut ordinary_scratch,
+        &artifact,
+        &ordinary_dst_structure,
+        ordinary_dst.data_mut(),
+        lhs.data(),
+        rhs.data(),
+        alpha,
+        beta,
+    )?;
+    let mut profiled_scratch = DynamicFusionScratchWorkspace::default();
+    let mut profile = TensorContractFusionProfile::default();
+    let profiled_dst_structure = Arc::clone(profiled_dst.structure());
+    execute_dynamic_tree_execution_artifact_profiled(
+        &mut tree_context,
+        &mut contract_backend,
+        &mut contract_workspace,
+        &mut fusion_block_workspace,
+        &mut profiled_scratch,
+        &artifact,
+        &profiled_dst_structure,
+        profiled_dst.data_mut(),
+        lhs.data(),
+        rhs.data(),
+        alpha,
+        beta,
+        &mut profile,
+    )?;
+    Ok(profile)
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_prelowered_dynamic_tree_execution_artifact_for_test<R, D>(
     rule: &R,
     plan: &FusionContractPlan,
@@ -722,7 +848,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
-    let artifact = compile_dynamic_tree_execution_artifact(
+    let artifact = compile_dynamic_tree_execution_artifact::<_, _, _, _, false>(
         tree_context,
         dynamic_space_cache,
         fusion_block_cache,
@@ -736,6 +862,7 @@ where
         rhs_space,
         rhs_storage_space,
         rhs_structure,
+        None,
     )?;
     execute_dynamic_tree_execution_artifact(
         tree_context,
@@ -766,7 +893,7 @@ pub(crate) struct DynamicTreeExecutionArtifact {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn compile_dynamic_tree_execution_artifact<RuleKey, BT, R, D>(
+pub(crate) fn compile_dynamic_tree_execution_artifact<RuleKey, BT, R, D, const PROFILED: bool>(
     tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
     dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
     fusion_block_cache: &mut super::resolution::ContractionResolutionCache<RuleKey>,
@@ -780,6 +907,7 @@ pub(crate) fn compile_dynamic_tree_execution_artifact<RuleKey, BT, R, D>(
     rhs_space: &DynamicFusionMapSpace,
     rhs_storage_space: Option<&DynamicFusionMapSpace>,
     rhs_structure: &Arc<BlockStructure>,
+    mut profile: Option<&mut TensorContractFusionProfile>,
 ) -> Result<DynamicTreeExecutionArtifact, OperationError>
 where
     RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
@@ -787,6 +915,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: DenseRecouplingScalar,
 {
+    let source_start = PROFILED.then(std::time::Instant::now);
     let reverse = plan.orientation() == FusionContractOrientation::RhsLhs;
     let lhs_transform = match lhs_storage_space {
         Some(storage_space) => dynamic_space_cache.get_or_compile_transformed_source_prelowered(
@@ -880,7 +1009,17 @@ where
         core_right_space,
         plan.core_axes().as_spec().rhs_contracting_axes(),
     )?;
+    if let Some(start) = source_start {
+        profile
+            .as_deref_mut()
+            .expect("profiled compilation carries a profile")
+            .source_space_lookup += start.elapsed();
+        #[cfg(test)]
+        PROFILED_ARTIFACT_COMPILE_PHASES
+            .with(|phases| phases.set(phases.get() | PROFILED_ARTIFACT_SOURCE_PHASE));
+    }
 
+    let core_dst_start = PROFILED.then(std::time::Instant::now);
     let core_dst = if plan.output_transform_is_identity() {
         None
     } else {
@@ -894,9 +1033,21 @@ where
             layout_primer,
         )?)
     };
+    if core_dst.is_some() {
+        if let Some(start) = core_dst_start {
+            profile
+                .as_deref_mut()
+                .expect("profiled compilation carries a profile")
+                .core_dst_space_lookup += start.elapsed();
+            #[cfg(test)]
+            PROFILED_ARTIFACT_COMPILE_PHASES
+                .with(|phases| phases.set(phases.get() | PROFILED_ARTIFACT_CORE_DST_PHASE));
+        }
+    }
     let block_dst_space = core_dst
         .as_ref()
         .map_or(dst_space, |entry| entry.space.as_ref());
+    let block_plan_start = PROFILED.then(std::time::Instant::now);
     let block_plan = fusion_block_cache.get_or_compile_core_plan(
         rule,
         block_dst_space,
@@ -904,6 +1055,15 @@ where
         core_right_space,
         plan.core_axes().as_spec(),
     )?;
+    if let Some(start) = block_plan_start {
+        profile
+            .as_deref_mut()
+            .expect("profiled compilation carries a profile")
+            .fusion_block_plan_lookup += start.elapsed();
+        #[cfg(test)]
+        PROFILED_ARTIFACT_COMPILE_PHASES
+            .with(|phases| phases.set(phases.get() | PROFILED_ARTIFACT_BLOCK_PLAN_PHASE));
+    }
     Ok(DynamicTreeExecutionArtifact {
         orientation: plan.orientation(),
         lhs_transform,
@@ -937,6 +1097,84 @@ where
     BC: TensorContractBackend<D, f64>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
+    execute_dynamic_tree_execution_artifact_impl::<_, _, _, _, false>(
+        tree_context,
+        contract_backend,
+        contract_workspace,
+        fusion_block_workspace,
+        scratch,
+        artifact,
+        dst_structure,
+        dst_data,
+        lhs_data,
+        rhs_data,
+        alpha,
+        beta,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_dynamic_tree_execution_artifact_profiled<RuleKey, BT, BC, D>(
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+    contract_backend: &mut BC,
+    contract_workspace: &mut BC::Workspace,
+    fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
+    scratch: &mut DynamicFusionScratchWorkspace<D>,
+    artifact: &DynamicTreeExecutionArtifact,
+    dst_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    lhs_data: &[D],
+    rhs_data: &[D],
+    alpha: D,
+    beta: D,
+    profile: &mut TensorContractFusionProfile,
+) -> Result<(), OperationError>
+where
+    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
+    BT: TreeTransformBackend<D, f64>,
+    BC: TensorContractBackend<D, f64>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
+    execute_dynamic_tree_execution_artifact_impl::<_, _, _, _, true>(
+        tree_context,
+        contract_backend,
+        contract_workspace,
+        fusion_block_workspace,
+        scratch,
+        artifact,
+        dst_structure,
+        dst_data,
+        lhs_data,
+        rhs_data,
+        alpha,
+        beta,
+        Some(profile),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_dynamic_tree_execution_artifact_impl<RuleKey, BT, BC, D, const PROFILED: bool>(
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+    contract_backend: &mut BC,
+    contract_workspace: &mut BC::Workspace,
+    fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
+    scratch: &mut DynamicFusionScratchWorkspace<D>,
+    artifact: &DynamicTreeExecutionArtifact,
+    dst_structure: &Arc<BlockStructure>,
+    dst_data: &mut [D],
+    lhs_data: &[D],
+    rhs_data: &[D],
+    alpha: D,
+    beta: D,
+    mut profile: Option<&mut TensorContractFusionProfile>,
+) -> Result<(), OperationError>
+where
+    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
+    BT: TreeTransformBackend<D, f64>,
+    BC: TensorContractBackend<D, f64>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+{
     let reverse = artifact.orientation == FusionContractOrientation::RhsLhs;
     let lhs_transform = &artifact.lhs_transform;
     let rhs_transform = &artifact.rhs_transform;
@@ -946,16 +1184,39 @@ where
     let rhs_core_space = rhs_transform.space.clone();
 
     if !lhs_borrowed {
+        let scratch_start = PROFILED.then(std::time::Instant::now);
         let lhs_dst_structure = std::sync::Arc::clone(lhs_core_space.structure());
         let lhs_scratch = scratch.prepare_lhs(lhs_transform.space.clone())?;
-        tree_context.tree_transform_structure_overwrite_into_raw(
-            lhs_transform.transform_structure.as_ref(),
-            &lhs_dst_structure,
-            &lhs_transform.replay_structure,
-            lhs_scratch.data_mut(),
-            lhs_data,
-            D::one(),
-        )?;
+        if let Some(start) = scratch_start {
+            profile
+                .as_deref_mut()
+                .expect("profiled replay carries a profile")
+                .lhs_scratch_prepare += start.elapsed();
+        }
+        let transform_start = PROFILED.then(std::time::Instant::now);
+        if PROFILED {
+            let profile = profile
+                .as_deref_mut()
+                .expect("profiled replay carries a profile");
+            tree_context.tree_transform_structure_overwrite_into_raw_profiled(
+                lhs_transform.transform_structure.as_ref(),
+                &lhs_dst_structure,
+                &lhs_transform.replay_structure,
+                lhs_scratch.data_mut(),
+                lhs_data,
+                D::one(),
+                &mut profile.tree_replay,
+            )?;
+        } else {
+            tree_context.tree_transform_structure_overwrite_into_raw(
+                lhs_transform.transform_structure.as_ref(),
+                &lhs_dst_structure,
+                &lhs_transform.replay_structure,
+                lhs_scratch.data_mut(),
+                lhs_data,
+                D::one(),
+            )?;
+        }
         if reverse {
             execute_rhs_contract_twist(
                 &mut crate::StridedHostKernelAdapter::with_transpose_backend(
@@ -965,18 +1226,48 @@ where
                 &artifact.core_right_twist,
             )?;
         }
+        if let Some(start) = transform_start {
+            let profile = profile
+                .as_deref_mut()
+                .expect("profiled replay carries a profile");
+            profile.lhs_transform += start.elapsed();
+            profile.lhs_transform_calls += 1;
+        }
     }
     if !rhs_borrowed {
+        let scratch_start = PROFILED.then(std::time::Instant::now);
         let rhs_dst_structure = std::sync::Arc::clone(rhs_core_space.structure());
         let rhs_scratch = scratch.prepare_rhs(rhs_core_space.clone())?;
-        tree_context.tree_transform_structure_overwrite_into_raw(
-            rhs_transform.transform_structure.as_ref(),
-            &rhs_dst_structure,
-            &rhs_transform.replay_structure,
-            rhs_scratch.data_mut(),
-            rhs_data,
-            D::one(),
-        )?;
+        if let Some(start) = scratch_start {
+            profile
+                .as_deref_mut()
+                .expect("profiled replay carries a profile")
+                .rhs_scratch_prepare += start.elapsed();
+        }
+        let transform_start = PROFILED.then(std::time::Instant::now);
+        if PROFILED {
+            let profile = profile
+                .as_deref_mut()
+                .expect("profiled replay carries a profile");
+            tree_context.tree_transform_structure_overwrite_into_raw_profiled(
+                rhs_transform.transform_structure.as_ref(),
+                &rhs_dst_structure,
+                &rhs_transform.replay_structure,
+                rhs_scratch.data_mut(),
+                rhs_data,
+                D::one(),
+                &mut profile.tree_replay,
+            )?;
+        } else {
+            tree_context.tree_transform_structure_overwrite_into_raw(
+                rhs_transform.transform_structure.as_ref(),
+                &rhs_dst_structure,
+                &rhs_transform.replay_structure,
+                rhs_scratch.data_mut(),
+                rhs_data,
+                D::one(),
+            )?;
+        }
         if !reverse {
             execute_rhs_contract_twist(
                 &mut crate::StridedHostKernelAdapter::with_transpose_backend(
@@ -985,6 +1276,13 @@ where
                 rhs_scratch.data_mut(),
                 &artifact.core_right_twist,
             )?;
+        }
+        if let Some(start) = transform_start {
+            let profile = profile
+                .as_deref_mut()
+                .expect("profiled replay carries a profile");
+            profile.rhs_transform += start.elapsed();
+            profile.rhs_transform_calls += 1;
         }
     }
 
@@ -1000,24 +1298,45 @@ where
         } else {
             (physical_lhs_core, physical_rhs_core)
         };
-        return artifact.block_plan.execute_raw(
-            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                tree_context.backend().transpose_backend(),
-            ),
-            &mut super::fusion_block::BackendRank2Gemm {
-                backend: contract_backend,
-                workspace: contract_workspace,
-            },
-            fusion_block_workspace,
-            dst_structure,
-            dst_data,
-            core_left.structure(),
-            core_left.data(),
-            core_right.structure(),
-            core_right.data(),
-            alpha,
-            beta,
+        let mut kernels = crate::StridedHostKernelAdapter::with_transpose_backend(
+            tree_context.backend().transpose_backend(),
         );
+        let mut gemm = super::fusion_block::BackendRank2Gemm {
+            backend: contract_backend,
+            workspace: contract_workspace,
+        };
+        return if PROFILED {
+            artifact.block_plan.execute_raw_profiled(
+                &mut kernels,
+                &mut gemm,
+                fusion_block_workspace,
+                dst_structure,
+                dst_data,
+                core_left.structure(),
+                core_left.data(),
+                core_right.structure(),
+                core_right.data(),
+                alpha,
+                beta,
+                profile
+                    .as_deref_mut()
+                    .expect("profiled replay carries a profile"),
+            )
+        } else {
+            artifact.block_plan.execute_raw(
+                &mut kernels,
+                &mut gemm,
+                fusion_block_workspace,
+                dst_structure,
+                dst_data,
+                core_left.structure(),
+                core_left.data(),
+                core_right.structure(),
+                core_right.data(),
+                alpha,
+                beta,
+            )
+        };
     }
 
     let core_dst = artifact
@@ -1026,29 +1345,57 @@ where
         .expect("non-identity output artifact carries its destination transform");
     let core_dst_space = core_dst.space.clone();
     let core_dst_structure = std::sync::Arc::clone(core_dst_space.structure());
+    let scratch_start = PROFILED.then(std::time::Instant::now);
     scratch.prepare_dst(core_dst_space.clone())?;
+    if let Some(start) = scratch_start {
+        profile
+            .as_deref_mut()
+            .expect("profiled replay carries a profile")
+            .dst_scratch_prepare += start.elapsed();
+    }
     {
         let mut execute = |lhs_core: CoreSource<'_, D>,
                            rhs_core: CoreSource<'_, D>,
                            core_dst: &mut DynamicFusionScratch<D>| {
-            artifact.block_plan.execute_raw(
-                &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                    tree_context.backend().transpose_backend(),
-                ),
-                &mut super::fusion_block::BackendRank2Gemm {
-                    backend: contract_backend,
-                    workspace: contract_workspace,
-                },
-                fusion_block_workspace,
-                &core_dst_structure,
-                core_dst.data_mut(),
-                lhs_core.structure(),
-                lhs_core.data(),
-                rhs_core.structure(),
-                rhs_core.data(),
-                alpha,
-                D::zero(),
-            )
+            let mut kernels = crate::StridedHostKernelAdapter::with_transpose_backend(
+                tree_context.backend().transpose_backend(),
+            );
+            let mut gemm = super::fusion_block::BackendRank2Gemm {
+                backend: contract_backend,
+                workspace: contract_workspace,
+            };
+            if PROFILED {
+                artifact.block_plan.execute_raw_profiled(
+                    &mut kernels,
+                    &mut gemm,
+                    fusion_block_workspace,
+                    &core_dst_structure,
+                    core_dst.data_mut(),
+                    lhs_core.structure(),
+                    lhs_core.data(),
+                    rhs_core.structure(),
+                    rhs_core.data(),
+                    alpha,
+                    D::zero(),
+                    profile
+                        .as_deref_mut()
+                        .expect("profiled replay carries a profile"),
+                )
+            } else {
+                artifact.block_plan.execute_raw(
+                    &mut kernels,
+                    &mut gemm,
+                    fusion_block_workspace,
+                    &core_dst_structure,
+                    core_dst.data_mut(),
+                    lhs_core.structure(),
+                    lhs_core.data(),
+                    rhs_core.structure(),
+                    rhs_core.data(),
+                    alpha,
+                    D::zero(),
+                )
+            }
         };
         let (lhs_scratch, rhs_scratch, core_dst) = scratch.optional_sources_dst_mut();
         let physical_lhs_core = select_core_source(lhs_borrowed, &lhs_core_space, lhs_data, || {
@@ -1068,15 +1415,40 @@ where
         };
         execute(core_left, core_right, core_dst)?;
     }
-    tree_context.tree_transform_structure_into_raw(
-        core_dst.output_transform_structure.as_ref(),
-        dst_structure,
-        &core_dst_structure,
-        dst_data,
-        scratch.dst().data(),
-        D::one(),
-        beta,
-    )
+    let transform_start = PROFILED.then(std::time::Instant::now);
+    let result = if PROFILED {
+        let profile = profile
+            .as_deref_mut()
+            .expect("profiled replay carries a profile");
+        tree_context.tree_transform_structure_into_raw_profiled(
+            core_dst.output_transform_structure.as_ref(),
+            dst_structure,
+            &core_dst_structure,
+            dst_data,
+            scratch.dst().data(),
+            D::one(),
+            beta,
+            &mut profile.tree_replay,
+        )
+    } else {
+        tree_context.tree_transform_structure_into_raw(
+            core_dst.output_transform_structure.as_ref(),
+            dst_structure,
+            &core_dst_structure,
+            dst_data,
+            scratch.dst().data(),
+            D::one(),
+            beta,
+        )
+    };
+    if let Some(start) = transform_start {
+        let profile = profile
+            .as_deref_mut()
+            .expect("profiled replay carries a profile");
+        profile.output_transform += start.elapsed();
+        profile.output_transform_calls += 1;
+    }
+    result
 }
 
 /// Storage-aware dynamic core route.
@@ -1335,277 +1707,6 @@ where
         D::one(),
         beta,
     )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context_profiled<
-    RuleKey,
-    BT,
-    BC,
-    R,
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
-    SDst,
-    SLhs,
-    SRhs,
-    DDst,
-    DLhs,
-    DRhs,
->(
-    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
-    contract_backend: &mut BC,
-    contract_workspace: &mut BC::Workspace,
-    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
-    fusion_block_cache: &mut super::resolution::ContractionResolutionCache<RuleKey>,
-    fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
-    scratch: &mut DynamicFusionScratchWorkspace<D>,
-    rule: &R,
-    plan: &FusionContractPlan,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-    alpha: D,
-    beta: D,
-    profile: &mut TensorContractFusionProfile,
-) -> Result<(), OperationError>
-where
-    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
-    BT: TreeTransformBackend<D, f64>,
-    BC: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
-    DDst: HostWritableStorage<D>,
-    DLhs: HostReadableStorage<D>,
-    DRhs: HostReadableStorage<D>,
-{
-    let start = std::time::Instant::now();
-    let lhs_src_space = DynamicFusionMapSpace::from_typed(
-        lhs.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-    );
-    let rhs_src_space = DynamicFusionMapSpace::from_typed(
-        rhs.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-    );
-    let lhs_transform = dynamic_space_cache.get_or_compile_transformed_source(
-        tree_context,
-        rule,
-        &lhs_src_space,
-        lhs.structure(),
-        plan.lhs_transform(),
-        plan.lhs_source_conjugate(),
-        encoded_layout_primer::<R>,
-    )?;
-    let lhs_borrowed = source_is_borrowable_core_layout(
-        &lhs_src_space,
-        lhs.structure(),
-        &lhs_transform.space,
-        plan.lhs_transform(),
-        plan.lhs_source_conjugate(),
-    );
-    let rhs_transform = dynamic_space_cache.get_or_compile_transformed_source(
-        tree_context,
-        rule,
-        &rhs_src_space,
-        rhs.structure(),
-        plan.rhs_transform(),
-        plan.rhs_source_conjugate(),
-        encoded_layout_primer::<R>,
-    )?;
-    let lhs_space = lhs_transform.space.clone();
-    let rhs_space = rhs_transform.space.clone();
-    let rhs_borrowed = rhs_source_is_borrowable(
-        rule,
-        &rhs_src_space,
-        rhs.structure(),
-        &rhs_space,
-        plan.rhs_transform(),
-        plan.rhs_source_conjugate(),
-        plan.core_axes().as_spec(),
-    )?;
-    profile.source_space_lookup += start.elapsed();
-
-    if !lhs_borrowed {
-        let start = std::time::Instant::now();
-        let lhs_dst_structure = std::sync::Arc::clone(lhs_space.structure());
-        let lhs_scratch = scratch.prepare_lhs(lhs_space.clone())?;
-        profile.lhs_scratch_prepare += start.elapsed();
-
-        let start = std::time::Instant::now();
-        tree_context.tree_transform_structure_overwrite_into_raw_profiled(
-            lhs_transform.transform_structure.as_ref(),
-            &lhs_dst_structure,
-            &lhs_transform.replay_structure,
-            lhs_scratch.data_mut(),
-            lhs.data(),
-            D::one(),
-            &mut profile.tree_replay,
-        )?;
-        profile.lhs_transform += start.elapsed();
-        profile.lhs_transform_calls += 1;
-    }
-    if !rhs_borrowed {
-        let start = std::time::Instant::now();
-        let rhs_dst_structure = std::sync::Arc::clone(rhs_space.structure());
-        let rhs_scratch = scratch.prepare_rhs(rhs_space.clone())?;
-        profile.rhs_scratch_prepare += start.elapsed();
-
-        let start = std::time::Instant::now();
-        tree_context.tree_transform_structure_overwrite_into_raw_profiled(
-            rhs_transform.transform_structure.as_ref(),
-            &rhs_dst_structure,
-            &rhs_transform.replay_structure,
-            rhs_scratch.data_mut(),
-            rhs.data(),
-            D::one(),
-            &mut profile.tree_replay,
-        )?;
-        apply_rhs_contract_twist(
-            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                tree_context.backend().transpose_backend(),
-            ),
-            rule,
-            &rhs_space,
-            rhs_scratch.data_mut(),
-            plan.core_axes().as_spec().rhs_contracting_axes(),
-        )?;
-        profile.rhs_transform += start.elapsed();
-        profile.rhs_transform_calls += 1;
-    }
-
-    if plan.output_transform_is_identity() {
-        let dst_space = DynamicFusionMapSpace::from_typed(
-            dst.fusion_space()
-                .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-        );
-        let start = std::time::Instant::now();
-        let block_plan = fusion_block_cache.get_or_compile_core_plan(
-            rule,
-            &dst_space,
-            &lhs_space,
-            &rhs_space,
-            plan.core_axes().as_spec(),
-        )?;
-        profile.fusion_block_plan_lookup += start.elapsed();
-
-        let dst_structure = std::sync::Arc::clone(dst.structure());
-        let lhs_core = select_core_source(lhs_borrowed, &lhs_space, lhs.data(), || {
-            CoreSource::from_host_scratch(scratch.lhs())
-        });
-        let rhs_core = select_core_source(rhs_borrowed, &rhs_space, rhs.data(), || {
-            CoreSource::from_host_scratch(scratch.rhs())
-        });
-        return block_plan.execute_raw_profiled(
-            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                tree_context.backend().transpose_backend(),
-            ),
-            &mut super::fusion_block::BackendRank2Gemm {
-                backend: contract_backend,
-                workspace: contract_workspace,
-            },
-            fusion_block_workspace,
-            &dst_structure,
-            dst.data_mut(),
-            lhs_core.structure(),
-            lhs_core.data(),
-            rhs_core.structure(),
-            rhs_core.data(),
-            alpha,
-            beta,
-            profile,
-        );
-    }
-
-    let output_dst_space = DynamicFusionMapSpace::from_typed(
-        dst.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-    );
-    let start = std::time::Instant::now();
-    let core_dst = dynamic_space_cache.get_or_compile_core_dst(
-        tree_context,
-        rule,
-        &lhs_space,
-        &rhs_space,
-        plan,
-        &output_dst_space,
-        encoded_layout_primer::<R>,
-    )?;
-    let core_dst_space = core_dst.space.clone();
-    profile.core_dst_space_lookup += start.elapsed();
-
-    let start = std::time::Instant::now();
-    let block_plan = fusion_block_cache.get_or_compile_core_plan(
-        rule,
-        &core_dst_space,
-        &lhs_space,
-        &rhs_space,
-        plan.core_axes().as_spec(),
-    )?;
-    profile.fusion_block_plan_lookup += start.elapsed();
-
-    let core_dst_structure = std::sync::Arc::clone(core_dst_space.structure());
-    let start = std::time::Instant::now();
-    scratch.prepare_dst(core_dst_space.clone())?;
-    profile.dst_scratch_prepare += start.elapsed();
-
-    {
-        let mut execute = |lhs: CoreSource<'_, D>,
-                           rhs_core: CoreSource<'_, D>,
-                           core_dst: &mut DynamicFusionScratch<D>| {
-            block_plan.execute_raw_profiled(
-                &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                    tree_context.backend().transpose_backend(),
-                ),
-                &mut super::fusion_block::BackendRank2Gemm {
-                    backend: contract_backend,
-                    workspace: contract_workspace,
-                },
-                fusion_block_workspace,
-                &core_dst_structure,
-                core_dst.data_mut(),
-                lhs.structure(),
-                lhs.data(),
-                rhs_core.structure(),
-                rhs_core.data(),
-                alpha,
-                D::zero(),
-                profile,
-            )
-        };
-        let (lhs_scratch, rhs_scratch, core_dst) = scratch.optional_sources_dst_mut();
-        let lhs_core = select_core_source(lhs_borrowed, &lhs_space, lhs.data(), || {
-            CoreSource::from_host_scratch(
-                lhs_scratch.expect("non-borrowed LHS materialized before core contraction"),
-            )
-        });
-        let rhs_core = select_core_source(rhs_borrowed, &rhs_space, rhs.data(), || {
-            CoreSource::from_host_scratch(
-                rhs_scratch.expect("non-borrowed RHS materialized before core contraction"),
-            )
-        });
-        execute(lhs_core, rhs_core, core_dst)?;
-    }
-
-    let dst_structure = std::sync::Arc::clone(dst.structure());
-    let start = std::time::Instant::now();
-    tree_context.tree_transform_structure_into_raw_profiled(
-        core_dst.output_transform_structure.as_ref(),
-        &dst_structure,
-        &core_dst_structure,
-        dst.data_mut(),
-        scratch.dst().data(),
-        D::one(),
-        beta,
-        &mut profile.tree_replay,
-    )?;
-    profile.output_transform += start.elapsed();
-    profile.output_transform_calls += 1;
-    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

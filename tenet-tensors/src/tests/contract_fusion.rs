@@ -370,10 +370,16 @@ fn tensorcontract_fusion_su2_swap_matches_explicit_permute_then_compose() {
                 tensor_space.clone(),
             )
             .unwrap();
-            crate::contract::execute_dynamic_tree_execution_artifact_for_test(
+            let mut profiled = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+                vec![0.0; len],
+                tensor_space.clone(),
+            )
+            .unwrap();
+            crate::contract::execute_dynamic_tree_execution_artifact_profile_pair_for_test(
                 &rule,
                 &plan,
                 &mut artifact,
+                &mut profiled,
                 &lhs,
                 &rhs,
                 1.0,
@@ -385,6 +391,7 @@ fn tensorcontract_fusion_su2_swap_matches_explicit_permute_then_compose() {
             // explicit permute-then-compose oracle.
             assert_eq!(artifact.structure(), dst_compose.structure());
             assert_eq!(artifact.data(), actual.data());
+            assert_eq!(profiled.data(), artifact.data());
             for (&actual, &expected) in artifact.data().iter().zip(dst_compose.data()) {
                 assert!((actual - expected).abs() < 1.0e-10);
             }
@@ -665,10 +672,23 @@ fn forced_orientations_match_asymmetric_u1_reduced_block_oracle() {
                 dst_space.clone(),
             )
             .unwrap();
-            crate::contract::execute_dynamic_tree_execution_artifact_for_test(
-                &rule, &plan, &mut dst, &lhs, &rhs, alpha, beta,
+            let mut profiled = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+                initial.clone(),
+                dst_space.clone(),
             )
             .unwrap();
+            crate::contract::execute_dynamic_tree_execution_artifact_profile_pair_for_test(
+                &rule,
+                &plan,
+                &mut dst,
+                &mut profiled,
+                &lhs,
+                &rhs,
+                alpha,
+                beta,
+            )
+            .unwrap();
+            assert_eq!(profiled.data(), dst.data());
             for (&actual, &expected) in dst.data().iter().zip(&expected) {
                 assert!((actual - expected).abs() < 1.0e-10);
             }
@@ -1034,10 +1054,16 @@ fn crossed_axis_selection_preserves_asymmetric_fz2_u1_su2_result() {
                 dst_space.clone(),
             )
             .unwrap();
-            crate::contract::execute_dynamic_tree_execution_artifact_for_test(
+            let mut profiled = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+                vec![Complex64::zero(); dst_len],
+                dst_space.clone(),
+            )
+            .unwrap();
+            crate::contract::execute_dynamic_tree_execution_artifact_profile_pair_for_test(
                 &rule,
                 &plan,
                 &mut artifact,
+                &mut profiled,
                 &lhs,
                 &rhs,
                 Complex64::one(),
@@ -1049,6 +1075,7 @@ fn crossed_axis_selection_preserves_asymmetric_fz2_u1_su2_result() {
             // half-spin product sector.
             assert_eq!(artifact.structure(), dst.structure());
             assert_eq!(artifact.data(), dst.data());
+            assert_eq!(profiled.data(), artifact.data());
             outputs.push(dst);
         }
     }
@@ -2831,16 +2858,23 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
         dst.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
-    crate::contract::execute_dynamic_tree_execution_artifact_for_test(
+    let mut profiled_artifact_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+        initial.to_vec(),
+        dst.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    crate::contract::execute_dynamic_tree_execution_artifact_profile_pair_for_test(
         &rule,
         &reverse_plan,
         &mut artifact_dst,
+        &mut profiled_artifact_dst,
         &lhs,
         &rhs,
         alpha,
         beta,
     )
     .unwrap();
+    assert_eq!(profiled_artifact_dst.data(), artifact_dst.data());
     for (index, (&actual, &want)) in artifact_dst.data().iter().zip(expected.iter()).enumerate() {
         assert!(
             (actual - want).abs() < 1.0e-12,
@@ -3406,8 +3440,10 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
     .unwrap();
     let mut automatic_context =
         TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    crate::contract::reset_profiled_artifact_compile_phases();
+    let mut profile = TensorContractFusionProfile::default();
     automatic_context
-        .tensorcontract_fusion_into(
+        .tensorcontract_fusion_into_profiled(
             &rule,
             &mut automatic_context_dst,
             &lhs,
@@ -3415,8 +3451,15 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
             axes,
             alpha,
             beta,
+            &mut profile,
         )
         .unwrap();
+    // What: a cold profiled dynamic artifact attributes each owning compile phase.
+    assert_eq!(profile.route, TensorContractFusionRoute::DynamicTreeCore);
+    assert_eq!(
+        crate::contract::profiled_artifact_compile_phases(),
+        (true, true, true)
+    );
     for (&actual, &expected) in automatic_context_dst.data().iter().zip(expected_dst.data()) {
         assert!(
             (actual - expected).abs() < 1.0e-12,
@@ -4119,6 +4162,9 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     automatic_context_dst
         .data_mut()
         .copy_from_slice(&initial_dst_for_context_replay);
+    let artifact_hits_before_profile = automatic_context.dynamic_fusion_space_cache_hits();
+    let artifact_fast_hits_before_profile =
+        automatic_context.dynamic_fusion_space_cache_fast_hits();
     let mut profile = TensorContractFusionProfile::default();
     automatic_context
         .tensorcontract_fusion_into_profiled(
@@ -4132,6 +4178,15 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
             &mut profile,
         )
         .unwrap();
+    // What: profiling selects the already-compiled ordinary execution artifact.
+    assert_eq!(
+        automatic_context.dynamic_fusion_space_cache_hits(),
+        artifact_hits_before_profile + 1
+    );
+    assert_eq!(
+        automatic_context.dynamic_fusion_space_cache_fast_hits(),
+        artifact_fast_hits_before_profile + 1
+    );
     for (&actual, &expected) in automatic_context_dst.data().iter().zip(expected_dst.data()) {
         assert!(
             (actual - expected).abs() < 1.0e-10,
@@ -4266,9 +4321,27 @@ fn tensorcontract_fusion_granular_caches_handle_block_structure_variants() {
             dst_space.clone(),
         )
         .unwrap();
-        context
-            .tensorcontract_fusion_into(&rule, &mut actual, &lhs, &rhs, axes, alpha, beta)
-            .unwrap();
+        if case_index == 2 {
+            let mut profile = TensorContractFusionProfile::default();
+            context
+                .tensorcontract_fusion_into_profiled(
+                    &rule,
+                    &mut actual,
+                    &lhs,
+                    &rhs,
+                    axes,
+                    alpha,
+                    beta,
+                    &mut profile,
+                )
+                .unwrap();
+            // What: profiling replays the ordinary artifact for padded expert storage.
+            assert_eq!(profile.route, TensorContractFusionRoute::DynamicTreeCore);
+        } else {
+            context
+                .tensorcontract_fusion_into(&rule, &mut actual, &lhs, &rhs, axes, alpha, beta)
+                .unwrap();
+        }
         for (&actual, &expected) in actual.data().iter().zip(expected.data()) {
             assert!(
                 (actual - expected).abs() < 1.0e-10,
@@ -5958,16 +6031,23 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
         reverse_dst.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
-    crate::contract::execute_dynamic_tree_execution_artifact_for_test(
+    let mut profiled_artifact_dst = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+        vec![Complex64::zero(); oracle.len()],
+        reverse_dst.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    crate::contract::execute_dynamic_tree_execution_artifact_profile_pair_for_test(
         provider.as_ref(),
         &reverse_plan,
         &mut artifact_dst,
+        &mut profiled_artifact_dst,
         &lhs_typed,
         &rhs_typed,
         Complex64::one(),
         Complex64::zero(),
     )
     .unwrap();
+    assert_eq!(profiled_artifact_dst.data(), artifact_dst.data());
     for (&actual, &expected) in artifact_dst.data().iter().zip(&oracle) {
         assert!((actual - expected).norm() < 1.0e-10);
     }
