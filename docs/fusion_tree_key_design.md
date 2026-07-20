@@ -1,7 +1,9 @@
-> **Current implementation boundary (issue #322, N3b):** tree-transform plans,
-> structures, and recoupling rows are reused only in validated process-resident
-> caches. Cache bounds remain separate policy work; retiring disk persistence
-> does not claim or introduce a new bound. The former automatic v1/v2 disk
+> **Current implementation boundary (issues #249 and #322):** complete
+> tree-transform plans and structures are reused only in the owning execution
+> context. Source-column recoupling rows are compile-local: an exact plan hit
+> already owns the whole transform, and measured partial-row reuse was slower
+> than ordered whole-block eager compilation. Cache bounds remain explicit
+> policy work. The former automatic v1/v2 disk
 > execution-plan cache has been retired, so stale `tree_transform_plans_v1.bin` and
 > `tree_transform_plans_v2.bin` files are ignored and may be deleted manually.
 > The persistent-cache sections below are historical design exploration, not
@@ -73,10 +75,11 @@ Migration from the pre-N3b API:
   the same non-aliasing requirement. The mandatory coupled tree sector has no
   direct QSpace-tree counterpart because QSpace stores block quantum-number
   records rather than fusion trees.
-- TeNeT therefore keeps validated tree-transform plans, structures, and
-  recoupling rows process-resident. This follows TensorKit's execution-cache
-  boundary while retaining QSpace's distinction between reusable category
-  data and workload-specific lowered execution state.
+- TeNeT therefore keeps validated complete tree-transform plans and structures
+  in an explicit execution context, while recoupling rows remain compile-local.
+  This preserves TensorKit's complete-transform reuse boundary and QSpace's
+  distinction between reusable category data and workload-specific lowered
+  execution state without a second partial representation.
 
 > **Historical design record:** The long-form analysis below predates the N3b
 > migration and preserves the reasoning that led to it. Statements phrased as
@@ -474,6 +477,10 @@ rank は dynamic のままです。
 ---
 
 ## 3.7 Runtime cache key
+
+> **Superseded by issue #249:** this section records the rejected retained-row
+> design. Production now keeps rows compile-local and caches only complete
+> transform plans and structures in the explicit execution context.
 
 recoupling row memo の最終 key は、概念的にはこうです。
 
@@ -1321,6 +1328,8 @@ compose_block_terms 内で FusionTreeBlockKey を HashMap key にしない
 ---
 
 ## Phase 4: row memo key を `TreePairId` にする
+
+> **Superseded by issue #249:** no production `TreePairRowMemo` remains.
 
 次に `TreePairRowMemo` の key を変更します。
 

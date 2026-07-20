@@ -24,9 +24,11 @@ use super::operation::{TreeTransformOperation, TreeTransformRuleCacheKey};
 use super::plan::TreeTransformGroupBlockSpec;
 use super::plan::{
     build_all_codomain_tree_transform_group_plan_validated,
+    build_all_codomain_tree_transform_group_plan_validated_with_threads,
     build_generic_tree_pair_transform_group_plan_validated,
-    build_tree_pair_transform_group_plan_validated, validate_all_codomain_namespace_before_cache,
-    validate_generic_tree_pair_preflight,
+    build_tree_pair_transform_group_plan_validated,
+    build_tree_pair_transform_group_plan_validated_with_threads,
+    validate_all_codomain_namespace_before_cache, validate_generic_tree_pair_preflight,
     validate_multiplicity_free_all_codomain_preflight_after_capability,
     validate_multiplicity_free_tree_pair_preflight,
     validate_multiplicity_free_tree_pair_preflight_after_capability,
@@ -263,12 +265,10 @@ pub struct TreeTransformCache<T, RuleKey> {
         FxHashMap<TreeTransformFastStructureKey<RuleKey>, Arc<TreeTransformStructure<T>>>,
     policy: OperationCachePolicy,
     stats: TreeTransformCacheStats,
-    // Why not store recoupling rows inside each plan: context-local rows are
-    // independent of degeneracy shape and remain reusable across plan-key misses.
-    tree_rows: crate::tree_transform::plan::TreePairRowMemo<T, RuleKey>,
-    // Why not key all-codomain rows by a full tree pair: this scope leaves the
-    // domain unchanged, so the codomain tree contains every deciding input.
-    all_codomain_rows: crate::tree_transform::plan::AllCodomainRowMemo<T, RuleKey>,
+    // Why not retain source-column rows beside plans: an exact plan hit already
+    // owns the complete transform, while partial-row replay repeated group
+    // lowering and was slower than rebuilding the ordered whole block. This
+    // keeps the persistent boundary at the TensorKit-style complete transform.
     // Why not expose a second compile knob: the execution context propagates
     // the backend's `recoupling_threads` to whole-group transform + assembly,
     // keeping one setting for replay and compile.
@@ -319,8 +319,6 @@ pub struct TreeTransformCacheStats {
     plan_misses: usize,
     structure_hits: usize,
     structure_misses: usize,
-    tree_row_hits: usize,
-    tree_row_misses: usize,
 }
 
 impl TreeTransformCacheStats {
@@ -329,15 +327,26 @@ impl TreeTransformCacheStats {
         self.plan_hits
     }
 
-    /// Shape-independent context-local recoupling-row memo hits.
+    /// Always zero: retained source-row memoization was removed.
+    ///
+    /// Exact transform reuse is reported by [`Self::plan_hits`].
+    #[deprecated(
+        since = "0.1.0",
+        note = "source rows are no longer cached; use plan_hits for exact transform reuse"
+    )]
     #[inline]
     pub fn tree_row_hits(self) -> usize {
-        self.tree_row_hits
+        0
     }
 
+    /// Always zero: retained source-row memoization was removed.
+    #[deprecated(
+        since = "0.1.0",
+        note = "source rows are no longer cached; use plan_misses for transform compilation"
+    )]
     #[inline]
     pub fn tree_row_misses(self) -> usize {
-        self.tree_row_misses
+        0
     }
 
     #[inline]
@@ -396,8 +405,6 @@ impl<T, RuleKey> Default for TreeTransformCache<T, RuleKey> {
             fast_structures: FxHashMap::default(),
             policy: OperationCachePolicy::default(),
             stats: TreeTransformCacheStats::default(),
-            tree_rows: crate::tree_transform::plan::TreePairRowMemo::default(),
-            all_codomain_rows: crate::tree_transform::plan::AllCodomainRowMemo::default(),
             recoupling_threads: 1,
         }
     }
@@ -420,8 +427,6 @@ where
             fast_structures: FxHashMap::default(),
             policy,
             stats: TreeTransformCacheStats::default(),
-            tree_rows: crate::tree_transform::plan::TreePairRowMemo::default(),
-            all_codomain_rows: crate::tree_transform::plan::AllCodomainRowMemo::default(),
             recoupling_threads: 1,
         }
     }
@@ -452,8 +457,6 @@ where
         if !policy.stores_entries() {
             self.plans.clear();
             self.plan_lru_order.clear();
-            self.tree_rows.clear();
-            self.all_codomain_rows.clear();
         } else if let Some(max_entries) = policy.max_entries() {
             rebuild_lru_order_from_keys(&self.plans, &mut self.plan_lru_order);
             self.enforce_plan_lru_limit(max_entries);
@@ -468,16 +471,6 @@ where
     #[inline]
     pub fn structure_len(&self) -> usize {
         self.structures.len()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn tree_row_len(&self) -> usize {
-        self.tree_rows.len()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn all_codomain_row_len(&self) -> usize {
-        self.all_codomain_rows.len()
     }
 
     #[cfg(test)]
@@ -621,7 +614,6 @@ where
     fn compile_tree_pair_plan<R>(
         &mut self,
         source_proof: &LocallyValidatedFusionTreeBlockStructure<'_, '_, R>,
-        rule_key: &RuleKey,
         operation: TreeTransformOperation,
     ) -> Result<Arc<TreeTransformGroupPlan<T>>, OperationError>
     where
@@ -629,23 +621,17 @@ where
         T: 'static + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
         RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
     {
-        let plan =
-            crate::tree_transform::plan::build_multiplicity_free_tree_pair_transform_group_plan_memoized_validated(
+        build_tree_pair_transform_group_plan_validated_with_threads(
             source_proof,
-            rule_key,
             operation,
-            &mut self.tree_rows,
-            &mut self.stats.tree_row_hits,
-            &mut self.stats.tree_row_misses,
             self.recoupling_threads,
-        )?;
-        Ok(Arc::new(plan))
+        )
+        .map(Arc::new)
     }
 
     fn compile_all_codomain_plan<R>(
         &mut self,
         source_proof: &LocallyValidatedAllCodomainFusionTreeBlockStructure<'_, '_, R>,
-        rule_key: &RuleKey,
         operation: TreeTransformOperation,
     ) -> Result<Arc<TreeTransformGroupPlan<T>>, OperationError>
     where
@@ -653,17 +639,12 @@ where
         T: 'static + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
         RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
     {
-        let plan =
-            crate::tree_transform::plan::build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized_validated(
+        build_all_codomain_tree_transform_group_plan_validated_with_threads(
             source_proof,
-            rule_key,
             operation,
-            &mut self.all_codomain_rows,
-            &mut self.stats.tree_row_hits,
-            &mut self.stats.tree_row_misses,
             self.recoupling_threads,
-        )?;
-        Ok(Arc::new(plan))
+        )
+        .map(Arc::new)
     }
 
     /// Resolve an exact tree-pair replay structure.
@@ -752,7 +733,7 @@ where
             self.touch_plan(&plan_key);
         } else {
             self.stats.plan_misses += 1;
-            let plan = self.compile_tree_pair_plan(&source_proof, &rule_key, operation.clone())?;
+            let plan = self.compile_tree_pair_plan(&source_proof, operation.clone())?;
             self.insert_plan_arc(plan_key.clone(), plan);
         }
         self.get_or_compile_structure(
@@ -874,7 +855,7 @@ where
             self.touch_plan(&plan_key);
         } else {
             self.stats.plan_misses += 1;
-            let plan = self.compile_tree_pair_plan(&source_proof, &rule_key, operation.clone())?;
+            let plan = self.compile_tree_pair_plan(&source_proof, operation.clone())?;
             self.insert_plan_arc(plan_key.clone(), plan);
         }
         self.get_or_compile_structure_from_structures_with_storage_conjugation(
@@ -947,7 +928,7 @@ where
             self.touch_plan(&plan_key);
         } else {
             self.stats.plan_misses += 1;
-            let plan = self.compile_tree_pair_plan(&source_proof, &rule_key, operation.clone())?;
+            let plan = self.compile_tree_pair_plan(&source_proof, operation.clone())?;
             self.insert_plan_arc(plan_key.clone(), plan);
         }
         let structure_key =
@@ -985,13 +966,14 @@ where
     ///
     /// ponytail: NON-MEMOIZED to start — it rebuilds and compiles the generic
     /// plan on every call. Generic (SU(3)) recoupling is not yet on any hot
-    /// path, and correctness-before-perf is the Stage B rule; the memoized
-    /// builder (the generic analogue of `TreePairRowMemo` / the plan/row cache
-    /// the mult-free sibling above uses) is deferred until a real Generic
-    /// workload measures the recompile cost (the B3c / perf handoff). The
+    /// path, and correctness-before-perf is the Stage B rule. The
+    /// multiplicity-free sibling caches a complete context-owned plan and uses
+    /// compile-local ordered whole-block lowering on misses; extending that
+    /// boundary is deferred until a real Generic workload measures the
+    /// recompile cost (the B3c / perf handoff). The
     /// `TreeTransformRuleCacheKey` bound is still required: the Su3 `Key` embeds
-    /// the table's provenance hash, so once memoization lands a swapped table
-    /// can never reuse another table's plans.
+    /// the table's provenance hash, so once complete-plan caching lands a
+    /// swapped table can never reuse another table's plans.
     ///
     /// Raw block keys follow
     /// [`tenet_core::FusionTreeKey::validate_for_rule`]'s provider-domain precondition.
@@ -1160,8 +1142,7 @@ where
             self.touch_plan(&plan_key);
         } else {
             self.stats.plan_misses += 1;
-            let plan =
-                self.compile_all_codomain_plan(&source_proof, &rule_key, operation.clone())?;
+            let plan = self.compile_all_codomain_plan(&source_proof, operation.clone())?;
             self.insert_plan_arc(plan_key.clone(), plan);
         }
         self.get_or_compile_structure(
