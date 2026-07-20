@@ -1,0 +1,55 @@
+name: OpenBLAS Contract
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '43 4 * * 3'
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - '**/Cargo.toml'
+      - 'tenet-dense/**'
+      - 'tenet/src/runtime.rs'
+      - 'tenet-operations/**'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/openblas.yml'
+      - '.github/actions/cargo-build-script-cache/**'
+      - '.cargo/**'
+      - 'rust-toolchain*'
+      - 'Cargo.lock'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  GMP_MPFR_SYS_CACHE: ${{ github.workspace }}/.cache/gmp-mpfr-sys
+
+jobs:
+  openblas-contract:
+    name: OpenBLAS compile contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tenet
+      - uses: actions/checkout@v4
+        with:
+          repository: tensor4all/tenferro-rs
+          ref: main
+          path: tenferro-rs
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./tenet/.github/actions/cache-gmp
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tenet
+          key: backend-openblas
+      - uses: ./tenet/.github/actions/cargo-build-script-cache
+        with:
+          key: backend-openblas
+      - run: cargo check --workspace --all-targets --no-default-features --features blas-openblas
+        working-directory: tenet

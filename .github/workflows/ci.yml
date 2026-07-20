@@ -94,7 +94,6 @@ jobs:
       matrix:
         include:
           - { name: cpu-blas-core, os: ubuntu-latest, features: cpu-blas }
-          - { name: openblas, os: ubuntu-latest, features: blas-openblas }
           - { name: mkl, os: ubuntu-latest, features: blas-mkl }
           - { name: provider-inject, os: ubuntu-latest, features: provider-inject }
           - { name: accelerate, os: macos-latest, features: blas-accelerate }
@@ -116,12 +115,6 @@ jobs:
         with:
           workspaces: tenet
           key: backend-${{ matrix.name }}
-      # Only openblas pays a native source build; the other rows are ~1 min and
-      # would only lose time to the extra cache round-trip.
-      - if: matrix.name == 'openblas'
-        uses: ./tenet/.github/actions/cargo-build-script-cache
-        with:
-          key: backend-openblas
       - run: cargo check --workspace --all-targets --no-default-features --features "${{ matrix.features }}"
         working-directory: tenet
 
