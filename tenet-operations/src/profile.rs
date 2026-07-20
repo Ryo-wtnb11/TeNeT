@@ -21,6 +21,7 @@ pub struct TensorContractFusionProfile {
     pub dense_block_specs: Duration,
     pub dense_structure_lookup: Duration,
     pub dense_contract: Duration,
+    /// Execution-artifact cache lookup and publication, excluding compilation.
     pub prepared_plan: Duration,
     pub source_space_lookup: Duration,
     pub lhs_scratch_prepare: Duration,

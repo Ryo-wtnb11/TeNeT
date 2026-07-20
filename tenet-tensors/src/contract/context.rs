@@ -25,9 +25,7 @@ use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
 use super::backend::{
     tensorcontract_structure_with_storage_workspace_dense_executor, TensorContractBackend,
 };
-use super::dynamic::{
-    tensorcontract_fusion_dynamic_plan_into_context_profiled, DynamicFusionSpaceCache,
-};
+use super::dynamic::DynamicFusionSpaceCache;
 use super::dynamic_space::{
     encoded_layout_primer, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
     LayoutKeyBuilder,
@@ -951,7 +949,7 @@ where
         {
             self.last_top_level_resolution_was_core = matches!(resolution, Resolution::Core(_));
         }
-        let dynamic_artifact = self.prepare_dynamic_execution_artifact(
+        let dynamic_artifact = self.prepare_dynamic_execution_artifact::<_, false>(
             &resolution,
             rule,
             Some(dst_space),
@@ -963,6 +961,7 @@ where
             None,
             rhs_space.structure(),
             layout_primer,
+            None,
         )?;
         self.execute_resolution_dyn(
             &resolution,
@@ -1137,7 +1136,7 @@ where
         {
             self.last_top_level_resolution_was_core = matches!(resolution, Resolution::Core(_));
         }
-        let dynamic_artifact = self.prepare_dynamic_execution_artifact(
+        let dynamic_artifact = self.prepare_dynamic_execution_artifact::<_, false>(
             &resolution,
             rule,
             Some(dst_space.space()),
@@ -1149,6 +1148,7 @@ where
             Some(rhs.storage_space()),
             rhs.storage_space().structure(),
             layout_primer,
+            None,
         )?;
         self.execute_resolution_dyn(
             &resolution,
@@ -1450,7 +1450,7 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn prepare_dynamic_execution_artifact<R>(
+    fn prepare_dynamic_execution_artifact<R, const PROFILED: bool>(
         &mut self,
         resolution: &Resolution,
         rule: &R,
@@ -1463,6 +1463,7 @@ where
         rhs_storage_space: Option<&DynamicFusionMapSpace>,
         rhs_structure: &Arc<BlockStructure>,
         layout_primer: LayoutKeyBuilder<R>,
+        mut profile: Option<&mut TensorContractFusionProfile>,
     ) -> Result<Option<Arc<super::dynamic::DynamicTreeExecutionArtifact>>, OperationError>
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
@@ -1475,17 +1476,31 @@ where
         let dst_space = dst_space.ok_or_else(missing)?;
         let lhs_space = lhs_space.ok_or_else(missing)?;
         let rhs_space = rhs_space.ok_or_else(missing)?;
-        if let Some(artifact) = self.dynamic_space_cache.get_execution_artifact(
+        let lookup_start = PROFILED.then(std::time::Instant::now);
+        let cached = self.dynamic_space_cache.get_execution_artifact(
             plan,
             dst_structure,
             lhs_structure,
             lhs_storage_space,
             rhs_structure,
             rhs_storage_space,
-        ) {
+        );
+        if let Some(start) = lookup_start {
+            profile
+                .as_deref_mut()
+                .expect("profiled artifact preparation carries a profile")
+                .prepared_plan += start.elapsed();
+        }
+        if let Some(artifact) = cached {
             return Ok(Some(artifact));
         }
-        let artifact = Arc::new(super::dynamic::compile_dynamic_tree_execution_artifact(
+        let artifact = Arc::new(super::dynamic::compile_dynamic_tree_execution_artifact::<
+            _,
+            _,
+            _,
+            _,
+            PROFILED,
+        >(
             &mut self.tree_context,
             &mut self.dynamic_space_cache,
             &mut self.resolution_cache,
@@ -1499,7 +1514,9 @@ where
             rhs_space,
             rhs_storage_space,
             rhs_structure,
+            profile.as_deref_mut(),
         )?);
+        let publish_start = PROFILED.then(std::time::Instant::now);
         self.dynamic_space_cache.insert_execution_artifact(
             Arc::clone(plan),
             dst_structure,
@@ -1509,6 +1526,12 @@ where
             rhs_storage_space,
             Arc::clone(&artifact),
         );
+        if let Some(start) = publish_start {
+            profile
+                .as_deref_mut()
+                .expect("profiled artifact preparation carries a profile")
+                .prepared_plan += start.elapsed();
+        }
         Ok(Some(artifact))
     }
 
@@ -1660,7 +1683,7 @@ where
         let dst_structure = Arc::clone(dst.structure());
         let lhs_structure = Arc::clone(lhs.structure());
         let rhs_structure = Arc::clone(rhs.structure());
-        let dynamic_artifact = self.prepare_dynamic_execution_artifact(
+        let dynamic_artifact = self.prepare_dynamic_execution_artifact::<_, false>(
             resolution,
             rule,
             dst_space.as_ref(),
@@ -1672,6 +1695,7 @@ where
             None,
             &rhs_structure,
             encoded_layout_primer::<R>,
+            None,
         )?;
         self.execute_resolution_dyn(
             resolution,
@@ -1753,7 +1777,7 @@ where
         let dst_structure = Arc::clone(dst.structure());
         let lhs_structure = Arc::clone(lhs.structure());
         let rhs_structure = Arc::clone(rhs.structure());
-        let dynamic_artifact = self.prepare_dynamic_execution_artifact(
+        let dynamic_artifact = self.prepare_dynamic_execution_artifact::<_, false>(
             &resolution,
             rule,
             Some(&dst_dynamic),
@@ -1765,6 +1789,7 @@ where
             None,
             &rhs_structure,
             encoded_layout_primer::<R>,
+            None,
         )?;
         Ok(PreparedTensorContractFusion {
             rule: rule.tree_transform_rule_cache_key(),
@@ -1966,31 +1991,46 @@ where
                 profile.total += total_start.elapsed();
                 result
             }
-            Resolution::DynamicTree(plan) => {
+            Resolution::DynamicTree(_) => {
                 profile.route = TensorContractFusionRoute::DynamicTreeCore;
+                let dst_structure = Arc::clone(dst.structure());
+                let lhs_structure = Arc::clone(lhs.structure());
+                let rhs_structure = Arc::clone(rhs.structure());
+                let artifact = self
+                    .prepare_dynamic_execution_artifact::<_, true>(
+                        &resolution,
+                        rule,
+                        Some(&dst_dynamic),
+                        &dst_structure,
+                        Some(&lhs_dynamic),
+                        None,
+                        &lhs_structure,
+                        Some(&rhs_dynamic),
+                        None,
+                        &rhs_structure,
+                        encoded_layout_primer::<R>,
+                        Some(profile),
+                    )?
+                    .expect("dynamic-tree resolution compiles an execution artifact");
                 let Self {
                     tree_context,
-                    dynamic_space_cache,
-                    resolution_cache,
                     contract_backend,
                     contract_workspace,
                     fusion_block_workspace,
                     fusion_scratch,
                     ..
                 } = self;
-                let result = tensorcontract_fusion_dynamic_plan_into_context_profiled(
+                let result = super::dynamic::execute_dynamic_tree_execution_artifact_profiled(
                     tree_context,
                     contract_backend,
                     contract_workspace,
-                    dynamic_space_cache,
-                    resolution_cache,
                     fusion_block_workspace,
                     fusion_scratch,
-                    rule,
-                    plan.as_ref(),
-                    dst,
-                    lhs,
-                    rhs,
+                    artifact.as_ref(),
+                    &dst_structure,
+                    dst.data_mut(),
+                    lhs.data(),
+                    rhs.data(),
                     alpha,
                     beta,
                     profile,
