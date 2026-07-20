@@ -512,6 +512,14 @@ pub trait TensorScalar: UserScalar {}
 impl TensorScalar for f64 {}
 impl TensorScalar for Complex64 {}
 
+fn map_trace_preflight_error(error: OperationError) -> Error {
+    match error {
+        OperationError::Core(error) => Error::Core(Box::new(error)),
+        OperationError::FusionAlgebra(error) => Error::FusionAlgebra(error),
+        other => Error::from(other),
+    }
+}
+
 /// The scalar types the user layer stores: the expert-layer scalar machinery
 /// plus the glue to lift typed data into the erased [`Data`] storage and to
 /// pick the matching per-scalar execution context. Crate-private supertrait
@@ -5196,6 +5204,10 @@ impl Tensor {
                 seen[axis] = true;
             }
         }
+        #[cfg(feature = "cuda")]
+        if matches!(self.stored_data(), Data::CudaF64(_)) {
+            return Err(device_unsupported("Tensor::trace_pairs"));
+        }
         let output_axes: Vec<usize> = (0..rank).filter(|&axis| !seen[axis]).collect();
         let dst_codomain_rank = output_axes
             .iter()
@@ -5240,18 +5252,22 @@ impl Tensor {
             &operation_trace_rhs,
             source_conjugate,
         );
+        let hom = with_bound_multiplicity_free!(source.space, bound, {
+            tenet_tensors::tensortrace_fusion_dyn_selected_homspace_checked(
+                bound,
+                operation,
+                dst_codomain_rank,
+            )
+            .map_err(map_trace_preflight_error)
+        })?;
         let data = if source_conjugate {
             self.stored_data()
         } else {
             self.coupled_data()?
         };
         match data {
-            Data::F64(data) => {
-                self.trace_pairs_impl(data, &output_axes, dst_codomain_rank, operation)
-            }
-            Data::C64(data) => {
-                self.trace_pairs_impl(data, &output_axes, dst_codomain_rank, operation)
-            }
+            Data::F64(data) => self.trace_pairs_impl(data, hom, operation),
+            Data::C64(data) => self.trace_pairs_impl(data, hom, operation),
             Data::Diagonal(_) => unreachable!("coupled_data materializes Data::Diagonal"),
             #[cfg(feature = "cuda")]
             Data::CudaF64(_) => Err(device_unsupported("Tensor::trace_pairs")),
@@ -5261,48 +5277,20 @@ impl Tensor {
     fn trace_pairs_impl<D: UserScalar>(
         &self,
         src_data: &[D],
-        output_axes: &[usize],
-        dst_codomain_rank: usize,
+        hom: FusionTreeHomSpace,
         operation: tenet_tensors::TensorTraceAxisSpec<'_>,
     ) -> Result<Self, Error> {
         let source = self.parent_body_for_lowering();
-        let logical_homspace: Cow<'_, FusionTreeHomSpace> = if operation.source_conjugate() {
-            let metadata = self.metadata();
-            Cow::Owned(FusionTreeHomSpace::new(
-                metadata.codomain().clone(),
-                metadata.domain().clone(),
-            ))
-        } else {
-            Cow::Borrowed(source.space.homspace())
-        };
-        let hom = with_user_rule!(source.space, rule, {
-            let hom = logical_homspace.select(
-                rule,
-                &output_axes[..dst_codomain_rank],
-                &output_axes[dst_codomain_rank..],
-            )?;
-            Ok::<_, Error>(hom)
-        })?;
         let dst_bound = source.space.from_selected_homspace(hom)?;
         macro_rules! trace_bound {
             ($dst:expr, $src:expr) => {
-                if operation.source_conjugate() {
-                    tenet_tensors::tensortrace_fusion_dyn_owned_checked(
-                        $dst,
-                        $src,
-                        src_data,
-                        operation,
-                        D::from_real(1.0),
-                    )
-                } else {
-                    tenet_tensors::tensortrace_fusion_dyn_owned(
-                        $dst,
-                        $src,
-                        src_data,
-                        operation,
-                        D::from_real(1.0),
-                    )
-                }
+                tenet_tensors::tensortrace_fusion_dyn_owned_checked(
+                    $dst,
+                    $src,
+                    src_data,
+                    operation,
+                    D::from_real(1.0),
+                )
             };
         }
         let data = match (&dst_bound, source.space.as_ref()) {
@@ -9021,6 +9009,7 @@ mod runtime_detached_tests {
 #[cfg(test)]
 mod adjoint_parent_view_tests {
     use super::*;
+    use tenet_core::FusionAlgebraError;
 
     fn assert_close(actual: &Tensor, expected: &Tensor) {
         assert_eq!(actual.codomain_spaces(), expected.codomain_spaces());
@@ -9357,6 +9346,130 @@ mod adjoint_parent_view_tests {
         assert_eq!(lazy.adjoint_build_counts(), (0, 0));
         SELECTED_RESULT_LAYOUT_BUILDS.with(|builds| assert_eq!(builds.get(), Some(0)));
         SELECTED_RESULT_LAYOUT_BUILDS.with(|builds| builds.set(None));
+    }
+
+    #[test]
+    fn finite_u1_trace_failure_is_atomic_for_owned_and_lazy_adjoint_sources() {
+        // What: both public trace routes report the exact finite U1 dual
+        // failure without mutating source bytes, materializing an adjoint, or
+        // building a result layout.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let space = Space::u1([(0, 1), (i32::MIN, 1)]);
+        let parent = Tensor::from_block_fn(&runtime, [&space], [&space], |key, _| match key {
+            BlockKey::FusionTree(key) if key.codomain_uncoupled()[0].id() == 0 => 2.0,
+            _ => 3.0,
+        })
+        .unwrap();
+        let parent_data = Arc::clone(&parent.ordinary_body().data);
+        let parent_bytes = parent.data().to_vec();
+        let lazy = parent.adjoint().unwrap();
+        let expected = Error::FusionAlgebra(Box::new(FusionAlgebraError::U1DualOverflow {
+            charge: i32::MIN,
+        }));
+
+        SELECTED_RESULT_LAYOUT_BUILDS.with(|builds| builds.set(Some(0)));
+        let ordinary = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            parent.trace_pairs(&[(0, 1)])
+        }));
+        assert_eq!(
+            ordinary.expect("owned trace must not unwind").unwrap_err(),
+            expected
+        );
+        assert!(Arc::ptr_eq(&parent.ordinary_body().data, &parent_data));
+        assert_eq!(parent.data(), parent_bytes);
+        SELECTED_RESULT_LAYOUT_BUILDS.with(|builds| assert_eq!(builds.get(), Some(0)));
+
+        let adjoint =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lazy.trace_pairs(&[(0, 1)])));
+        assert_eq!(
+            adjoint.expect("adjoint trace must not unwind").unwrap_err(),
+            expected
+        );
+
+        assert!(Arc::ptr_eq(&parent.ordinary_body().data, &parent_data));
+        assert_eq!(parent.data(), parent_bytes);
+        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+        assert!(!lazy.has_cached_materialization());
+        SELECTED_RESULT_LAYOUT_BUILDS.with(|builds| assert_eq!(builds.get(), Some(0)));
+        SELECTED_RESULT_LAYOUT_BUILDS.with(|builds| builds.set(None));
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn product_trace_preserves_nested_u1_dual_failure() {
+        // What: checked product trace exposes its U1 child closure failure,
+        // rather than replacing it with a packed-sector codec error.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let space = Space::product([((0, 0), 1), ((i32::MIN, 1), 1)]).unwrap();
+        let tensor = Tensor::zeros(&runtime, Dtype::F64, [&space], [&space]).unwrap();
+
+        assert_eq!(
+            tensor.trace_pairs(&[(0, 1)]).unwrap_err(),
+            Error::FusionAlgebra(Box::new(FusionAlgebraError::U1DualOverflow {
+                charge: i32::MIN,
+            }))
+        );
+    }
+
+    #[test]
+    fn public_trace_validation_precedes_finite_algebra_preflight() {
+        // What: malformed public axes retain their error precedence over a
+        // representable tensor whose traced labels have no finite U1 dual.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let space = Space::u1([(0, 1), (i32::MIN, 1)]);
+        let tensor = Tensor::zeros(&runtime, Dtype::F64, [&space], [&space]).unwrap();
+
+        for pairs in [&[(0, 0)][..], &[(0, 1), (0, 1)][..], &[(0, 2)][..]] {
+            assert!(matches!(
+                tensor.trace_pairs(pairs),
+                Err(Error::InvalidArgument(_))
+            ));
+        }
+
+        let su3 = Space::su3([((1, 0), 1), ((0, 1), 1)]).unwrap();
+        let su3_tensor = Tensor::zeros(&runtime, Dtype::F64, [&su3], [&su3]).unwrap();
+        assert_eq!(
+            su3_tensor.trace_pairs(&[(0, 2)]).unwrap_err(),
+            Error::UnsupportedForRule {
+                operation: "Tensor::trace_pairs",
+                rule: "SU(3)",
+            }
+        );
+    }
+
+    #[test]
+    fn public_trace_matches_fz2_and_su2_hand_oracles() {
+        // What: public full partial-trace syntax applies the fermionic odd
+        // sign and the spin-half quantum dimension.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let fz2 = Space::fz2([(0, 1), (1, 1)]);
+        let fermionic = Tensor::from_block_fn(&runtime, [&fz2], [&fz2], |key, _| match key {
+            BlockKey::FusionTree(key) if key.codomain_uncoupled()[0].id() == 0 => 2.0,
+            _ => 3.0,
+        })
+        .unwrap();
+        assert_eq!(
+            fermionic
+                .trace_pairs(&[(0, 1)])
+                .unwrap()
+                .scalar()
+                .unwrap()
+                .try_f64()
+                .unwrap(),
+            -1.0
+        );
+
+        let spin_half = Space::su2([(1, 1)]);
+        let su2 = Tensor::from_block_fn(&runtime, [&spin_half], [&spin_half], |_, _| 7.0).unwrap();
+        assert_eq!(
+            su2.trace_pairs(&[(0, 1)])
+                .unwrap()
+                .scalar()
+                .unwrap()
+                .try_f64()
+                .unwrap(),
+            14.0
+        );
     }
 
     fn assert_lowered_transform_matches_eager_oracle(

@@ -336,7 +336,7 @@ impl<C> TensorTraceFusionStructure<C> {
             src,
             axes,
             |logical_src, axis_plan| {
-                validate_checked_fusion_trace_metadata(rule, logical_src, axis_plan, dst.nout())
+                checked_fusion_trace_homspace(rule, logical_src, axis_plan, dst.nout()).map(|_| ())
             },
         )
     }
@@ -1854,6 +1854,42 @@ where
     Ok(())
 }
 
+/// Preflights finite-label trace metadata and returns the selected result HomSpace.
+///
+/// The user facade calls this before materializing source data or constructing
+/// a result layout, so a checked algebra failure cannot publish either derived
+/// state first.
+#[doc(hidden)]
+pub fn tensortrace_fusion_dyn_selected_homspace_checked<R>(
+    src: &BoundDynamicFusionMapSpace<R>,
+    axes: TensorTraceAxisSpec<'_>,
+    dst_nout: usize,
+) -> Result<FusionTreeHomSpace, OperationError>
+where
+    R: FusionRule + CheckedFusionAlgebra,
+{
+    src.space().validate_rule(src.provider())?;
+    let orientation = if axes.source_conjugate() {
+        FusionTreePairOrientation::Adjoint
+    } else {
+        FusionTreePairOrientation::Direct
+    };
+    let lowered_axes =
+        lower_tensortrace_source_adjoint_axes_dyn(src.space().nout(), src.space().nin(), axes)?;
+    let lowered_spec = lowered_axes.as_spec();
+    let axis_plan = TensorTraceAxisPlan::compile(
+        src.space().rank(),
+        lowered_spec.output_axes().len(),
+        lowered_spec,
+    )?;
+    checked_fusion_trace_homspace(
+        src.provider(),
+        OrientedFusionTreeHomSpace::new(src.space().homspace(), orientation),
+        &axis_plan,
+        dst_nout,
+    )
+}
+
 /// Checked lowered trace entry point. The legacy dynamic API intentionally
 /// keeps its `MultiplicityFreeRigidSymbols` bound for custom rules; lowered
 /// built-in callers use this wrapper to validate metadata before compilation.
@@ -1890,18 +1926,24 @@ where
     )
 }
 
-fn validate_checked_fusion_trace_metadata<R>(
+fn checked_fusion_trace_homspace<R>(
     rule: &R,
     src_homspace: OrientedFusionTreeHomSpace<'_>,
     axis_plan: &TensorTraceAxisPlan,
     dst_nout: usize,
-) -> Result<(), OperationError>
+) -> Result<FusionTreeHomSpace, OperationError>
 where
     R: FusionRule + CheckedFusionAlgebra,
 {
+    if dst_nout > axis_plan.output_axes.len() {
+        return Err(OperationError::RankMismatch {
+            expected: axis_plan.output_axes.len(),
+            actual: dst_nout,
+        });
+    }
     // Why not widen the public rule bound: custom encoded rules retain their
     // established infallible contract while lowered built-ins close overflow.
-    src_homspace
+    let selected = src_homspace
         .try_select_checked(
             rule,
             &axis_plan.output_axes[..dst_nout],
@@ -1926,7 +1968,7 @@ where
         lhs.try_dual(rule)
             .map_err(|error| OperationError::FusionAlgebra(Box::new(error)))?;
     }
-    Ok(())
+    Ok(selected)
 }
 
 fn validate_trace_data_extents(
