@@ -5867,10 +5867,42 @@ fn coupled_layout_contraction_matches_packed_layout_su2() {
     );
 }
 
+#[test]
+fn coupled_layout_contraction_matches_packed_layout_asymmetric_u1() {
+    run_coupled_vs_packed_contractions(
+        &U1FusionRule,
+        &[
+            U1Irrep::new(-1).sector_id(),
+            U1Irrep::new(0).sector_id(),
+            U1Irrep::new(2).sector_id(),
+        ],
+    );
+}
+
+#[test]
+fn coupled_layout_contraction_matches_packed_layout_product() {
+    let left = FpU1Rule::default();
+    let rule = FpU1Su2Rule::default();
+    let sector = |parity, charge, twice_spin| {
+        rule.encode_sector(
+            left.encode_sector(parity, U1Irrep::new(charge).sector_id()),
+            SU2Irrep::from_twice_spin(twice_spin).sector_id(),
+        )
+    };
+    run_coupled_vs_packed_contractions(
+        &rule,
+        &[
+            sector(SectorId::new(0), 0, 0),
+            sector(SectorId::new(1), 1, 1),
+            sector(SectorId::new(1), -1, 1),
+        ],
+    );
+}
+
 fn run_coupled_vs_packed_contractions<R>(rule: &R, sectors: &[SectorId])
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + TreeTransformRuleCacheKey<Key = TreeTransformBuiltinRuleCacheKey>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
+    R::Key: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
 {
     let degeneracy = 2usize;
     let leg = || SectorLeg::new(sectors.iter().map(|&sector| (sector, degeneracy)), false);
@@ -5880,7 +5912,7 @@ where
             FusionProductSpace::new([leg(), leg()]),
         )
     };
-    let leg_dim = 2 * degeneracy;
+    let leg_dim = sectors.len() * degeneracy;
     let dense =
         || TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap();
     let shapes =
@@ -5928,7 +5960,7 @@ where
         (&[3, 2], &[0, 1], &[0, 1, 2, 3]),
         (&[3, 2], &[0, 1], &[1, 0, 2, 3]),
     ];
-    for (lhs_axes, rhs_axes, output_axes) in workloads {
+    for (workload_index, (lhs_axes, rhs_axes, output_axes)) in workloads.into_iter().enumerate() {
         let dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
             rule,
             lhs_packed.fusion_space().unwrap().homspace(),
@@ -5954,9 +5986,7 @@ where
 
         let axes =
             || TensorContractSpec::new(lhs_axes, rhs_axes, OutputAxisOrder::from_axes(output_axes));
-        let mut packed_context =
-            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
-            );
+        let mut packed_context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
         packed_context
             .tensorcontract_fusion_into(
                 rule,
@@ -5968,9 +5998,64 @@ where
                 0.0,
             )
             .unwrap();
-        let mut coupled_context =
-            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
-            );
+        if workload_index == 0 {
+            let ordinary = dst_packed.data().to_vec();
+            let prepared = packed_context
+                .prepare_tensorcontract_fusion(rule, &dst_packed, &lhs_packed, &rhs_packed, axes())
+                .unwrap();
+            dst_packed.data_mut().fill(0.0);
+            packed_context
+                .execute_prepared_tensorcontract_fusion(
+                    &prepared,
+                    rule,
+                    &mut dst_packed,
+                    &lhs_packed,
+                    &rhs_packed,
+                    1.0,
+                    0.0,
+                )
+                .unwrap();
+            assert_eq!(dst_packed.data(), ordinary);
+
+            dst_packed.data_mut().fill(0.0);
+            let mut profile = TensorContractFusionProfile::default();
+            packed_context
+                .tensorcontract_fusion_into_profiled(
+                    rule,
+                    &mut dst_packed,
+                    &lhs_packed,
+                    &rhs_packed,
+                    axes(),
+                    1.0,
+                    0.0,
+                    &mut profile,
+                )
+                .unwrap();
+            assert_eq!(dst_packed.data(), ordinary);
+            assert_eq!(profile.route, TensorContractFusionRoute::CoreFusionBlocks);
+            assert!(profile.core_contract_groups > 0);
+
+            let dst_dynamic = DynamicFusionMapSpace::from_typed(dst_packed.fusion_space().unwrap());
+            let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs_packed.fusion_space().unwrap());
+            let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_packed.fusion_space().unwrap());
+            let mut dynamic = vec![0.0; ordinary.len()];
+            packed_context
+                .tensorcontract_fusion_dyn_into_raw(
+                    rule,
+                    &dst_dynamic,
+                    &mut dynamic,
+                    &lhs_dynamic,
+                    lhs_packed.data(),
+                    &rhs_dynamic,
+                    rhs_packed.data(),
+                    axes(),
+                    1.0,
+                    0.0,
+                )
+                .unwrap();
+            assert_eq!(dynamic, ordinary);
+        }
+        let mut coupled_context = TensorContractFusionExecutionContext::<f64, R::Key>::default();
         coupled_context
             .tensorcontract_fusion_into(
                 rule,
@@ -6068,8 +6153,8 @@ fn coupled_layout_compose_uses_direct_gemm_groups() {
         profile.core_direct_gemm_groups, profile.core_contract_groups,
         "coupled layout compose must GEMM directly into destination blocks"
     );
-    // Pack/scatter no longer exist on the core route: replay is
-    // direct-GEMM only, so the pack counters stay at their zero defaults.
+    // Pack/scatter no longer exist on the fully-direct core route, so the
+    // pack counters stay at their zero defaults.
     assert_eq!(profile.core_direct_pack_skips, 0);
     assert_eq!(profile.core_pack_lhs, std::time::Duration::ZERO);
     assert_eq!(profile.core_scatter, std::time::Duration::ZERO);

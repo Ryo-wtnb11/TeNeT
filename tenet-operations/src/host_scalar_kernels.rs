@@ -435,7 +435,7 @@ fn validate_raw_strided_views<T>(
     Ok(())
 }
 
-fn validate_raw_strided_bounds(
+pub(crate) fn validate_raw_strided_bounds(
     len: usize,
     shape: &[usize],
     strides: &[isize],
