@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::sync::Arc;
 
 use smallvec::SmallVec;
@@ -127,16 +128,22 @@ pub(crate) struct TreeTransformScatterReplay {
     pub dst_hi: isize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TreeTransformScatterGroupReplay {
+    pub columns: Range<usize>,
+    pub slice_disjoint: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TreeTransformParallelSchedule {
     pub singles: Vec<TreeTransformSingleReplay>,
     pub pack_columns: Vec<TreeTransformPackReplay>,
     pub scatter_columns: Vec<TreeTransformScatterReplay>,
+    pub scatter_groups: Vec<TreeTransformScatterGroupReplay>,
     pub single_block_count: usize,
     pub packed_column_count: usize,
     pub scattered_column_count: usize,
     pub singles_slice_disjoint: bool,
-    pub scatter_slice_disjoint: bool,
 }
 
 impl TreeTransformRecouplingPlan {
@@ -740,6 +747,7 @@ fn compile_parallel_schedule(
 
     let mut pack_columns = Vec::new();
     let mut scatter_columns = Vec::new();
+    let mut scatter_groups = Vec::new();
     for (block_index, job) in recoupling_plan.entries() {
         let TreeTransformBlock::Multi {
             dst_layout_start,
@@ -760,7 +768,12 @@ fn compile_parallel_schedule(
         scattered_column_count = scattered_column_count
             .checked_add(dst_count)
             .ok_or(OperationError::ElementCountOverflow)?;
+        let group_start = scatter_columns.len();
         if element_count == 0 {
+            scatter_groups.push(TreeTransformScatterGroupReplay {
+                columns: group_start..group_start,
+                slice_disjoint: true,
+            });
             continue;
         }
         for src_index in 0..src_count {
@@ -801,9 +814,17 @@ fn compile_parallel_schedule(
                 dst_hi,
             });
         }
+        scatter_columns[group_start..].sort_unstable_by_key(|item| item.dst_lo);
+        scatter_groups.push(TreeTransformScatterGroupReplay {
+            columns: group_start..scatter_columns.len(),
+            slice_disjoint: destination_ranges_are_slice_disjoint(
+                scatter_columns[group_start..]
+                    .iter()
+                    .map(|item| (item.dst_lo, item.dst_hi)),
+            ),
+        });
     }
     pack_columns.sort_unstable_by_key(|item| item.packed_offset);
-    scatter_columns.sort_unstable_by_key(|item| item.dst_lo);
 
     let pack_disjoint = pack_columns
         .windows(2)
@@ -822,17 +843,13 @@ fn compile_parallel_schedule(
         singles_slice_disjoint: destination_ranges_are_slice_disjoint(
             singles.iter().map(|item| (item.dst_lo, item.dst_hi)),
         ),
-        scatter_slice_disjoint: destination_ranges_are_slice_disjoint(
-            scatter_columns
-                .iter()
-                .map(|item| (item.dst_lo, item.dst_hi)),
-        ),
         single_block_count,
         packed_column_count,
         scattered_column_count,
         singles,
         pack_columns,
         scatter_columns,
+        scatter_groups,
     })
 }
 
@@ -1637,6 +1654,24 @@ mod tests {
         assert_eq!(layout_index_range(&layouts, 0).unwrap(), Some((1, 5)));
         assert_eq!(layout_index_range(&layouts, 1).unwrap(), Some((7, 7)));
         assert_eq!(layout_index_range(&layouts, 2).unwrap(), None);
+    }
+
+    #[test]
+    fn single_only_schedule_allocates_no_scatter_group_metadata() {
+        let structure = BlockStructure::packed_column_major(1, [vec![2]]).unwrap();
+        let transform = TreeTransformStructure::compile_structures(
+            &structure,
+            &structure,
+            &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+        )
+        .unwrap();
+        let schedule = transform.parallel_schedule();
+
+        // What: an empty recoupling plan owns no Multi replay metadata.
+        assert!(schedule.pack_columns.is_empty());
+        assert!(schedule.scatter_columns.is_empty());
+        assert!(schedule.scatter_groups.is_empty());
+        assert_eq!(schedule.scatter_groups.capacity(), 0);
     }
 
     #[test]

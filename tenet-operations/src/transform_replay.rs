@@ -7,7 +7,9 @@ use tenet_core::{
     BlockStructure, BlockView, BlockViewMut, HostReadableStorage, HostWritableStorage, Placement,
     ScratchStorage, SimilarStorage, TensorMap,
 };
-use tenet_dense::{DefaultDenseExecutor, DenseExecutor, DenseGemmBatchJob};
+use tenet_dense::{
+    strided_batch_runs_into, DefaultDenseExecutor, DenseExecutor, DenseGemmBatchJob,
+};
 
 use crate::host_scratch::HostScratchBuffer;
 use crate::owned_overwrite_buffer::initialize_owned;
@@ -15,7 +17,8 @@ use crate::storage_scratch::{StorageTreeTransformWorkspace, TreeTransformScratch
 use crate::strided::offset_to_isize;
 use crate::tensoradd::{TensorAddDescriptor, TensorAddDescriptorTerm};
 use crate::transform_structure::{
-    TreeTransformPackReplay, TreeTransformScatterReplay, TreeTransformSingleReplay,
+    TreeTransformPackReplay, TreeTransformScatterGroupReplay, TreeTransformScatterReplay,
+    TreeTransformSingleReplay,
 };
 use crate::{
     tensoradd_raw_strided_kernel, tensoradd_raw_strided_kernel_trusted, BakedFusedLayout,
@@ -87,11 +90,12 @@ pub struct HostTreeTransformWorkspace<T> {
     zero_strides: Vec<isize>,
     packed: TreeTransformScratchBuffers<HostScratchBuffer<T>, HostScratchBuffer<T>>,
     // Recoupling matrices converted into the data scalar type for the GEMM
-    // application (TensorKit's basistransform buffer); replay packs every
-    // Multi block's matrix into this one buffer so the recoupling GEMMs
-    // submit as a single batch.
+    // application (TensorKit's basistransform buffer).
     coefficient_scratch: Vec<T>,
     coefficient_structure_identity: Option<Weak<()>>,
+    chunk_jobs: Vec<DenseGemmBatchJob>,
+    chunk_runs: Vec<usize>,
+    chunk_scatter_groups: Vec<usize>,
 }
 
 pub type TreeTransformWorkspace<T> = HostTreeTransformWorkspace<T>;
@@ -103,6 +107,9 @@ impl<T> Default for HostTreeTransformWorkspace<T> {
             packed: TreeTransformScratchBuffers::default(),
             coefficient_scratch: Vec::new(),
             coefficient_structure_identity: None,
+            chunk_jobs: Vec::new(),
+            chunk_runs: Vec::new(),
+            chunk_scatter_groups: Vec::new(),
         }
     }
 }
@@ -124,6 +131,14 @@ impl<T> HostTreeTransformWorkspace<T> {
 
     pub fn destination_len(&self) -> usize {
         self.packed.destination().len()
+    }
+
+    #[cfg(test)]
+    fn packed_capacities(&self) -> (usize, usize) {
+        (
+            self.packed.source().capacity(),
+            self.packed.destination().capacity(),
+        )
     }
 
     fn prepare_packed_buffers(&mut self, source_len: usize, destination_len: usize, zero: T)
@@ -767,7 +782,8 @@ mod inactive_destination_tests {
             )],
         )
         .unwrap();
-        assert!(!transform.parallel_schedule().scatter_slice_disjoint);
+        assert_eq!(transform.parallel_schedule().scatter_groups.len(), 1);
+        assert!(!transform.parallel_schedule().scatter_groups[0].slice_disjoint);
         let src = [1.0, 2.0, 3.0, 4.0];
         let mut serial = [10.0, 20.0, 30.0, 40.0];
         let mut threaded = serial;
@@ -2012,11 +2028,11 @@ where
 /// Replays a prepared structural-recoupling tree transform on host slices.
 ///
 /// `threads` selects the replay parallelism (a property of the executing
-/// backend, not of the cached structure): `<= 1` runs the existing serial
-/// path unchanged; `> 1` runs Single applies, Multi pack columns and Multi
-/// scatter columns as independent work items over up to `threads`
-/// work-stealing workers, with the batched recoupling GEMM staying a single
-/// serial call between the two parallel phases.
+/// backend, not of the cached structure): `<= 1` reuses one pack buffer and
+/// submits each Multi group independently; `> 1` runs Single applies, Multi
+/// pack columns and Multi scatter columns as independent work items over up to
+/// `threads` work-stealing workers. Multi blocks submit bounded grouped
+/// recoupling batches between their pack and scatter phases.
 #[allow(clippy::too_many_arguments)]
 pub fn tree_transform_structure_with_structural_recoupling_raw<A, E, D, C>(
     kernels: &mut A,
@@ -2157,14 +2173,11 @@ where
         if recoupling_plan.is_empty() {
             return Ok(());
         }
-        workspace.prepare_packed_buffers(
-            recoupling_plan.source_len(),
-            recoupling_plan.destination_len(),
-            D::zero(),
-        );
         ensure_recoupling_coefficients(workspace, structure)?;
         for (block_index, job) in recoupling_plan.entries() {
             let TreeTransformBlock::Multi {
+                dst_layout_start,
+                dst_count,
                 src_layout_start,
                 src_count,
                 element_count,
@@ -2173,6 +2186,13 @@ where
             else {
                 unreachable!("recoupling_multi_block only returns Multi blocks");
             };
+            let source_len = element_count
+                .checked_mul(src_count)
+                .ok_or(OperationError::ElementCountOverflow)?;
+            let destination_len = element_count
+                .checked_mul(dst_count)
+                .ok_or(OperationError::ElementCountOverflow)?;
+            workspace.prepare_packed_buffers(source_len, destination_len, D::zero());
             for src_index in 0..src_count {
                 pack_layout_into_column(
                     &mut kernels,
@@ -2180,39 +2200,33 @@ where
                     src_layout_start + src_index,
                     src_data,
                     workspace.packed.source_mut().as_mut_slice(),
-                    job.lhs_offset + src_index * element_count,
+                    src_index * element_count,
                     structure.storage_conjugate(),
                 )?;
             }
-        }
-        {
-            let (source, destination) = workspace.packed.source_and_destination_mut();
-            recoupling_gemm_batch(
-                dense,
-                destination.as_mut_slice(),
-                source.as_slice(),
-                &workspace.coefficient_scratch,
-                recoupling_plan.jobs(),
-                recoupling_plan.runs(),
-            )?;
-        }
-        for (block_index, job) in recoupling_plan.entries() {
-            let TreeTransformBlock::Multi {
-                dst_layout_start,
-                dst_count,
-                element_count,
-                ..
-            } = *recoupling_multi_block(structure, block_index)?
-            else {
-                unreachable!("recoupling_multi_block only returns Multi blocks");
-            };
+            {
+                let local_job = DenseGemmBatchJob {
+                    dst_offset: 0,
+                    lhs_offset: 0,
+                    ..*job
+                };
+                let (source, destination) = workspace.packed.source_and_destination_mut();
+                recoupling_gemm_batch(
+                    dense,
+                    destination.as_mut_slice(),
+                    source.as_slice(),
+                    &workspace.coefficient_scratch,
+                    core::slice::from_ref(&local_job),
+                    &[1],
+                )?;
+            }
             for dst_index in 0..dst_count {
                 write_uninit_layout_from_packed(
                     layouts,
                     dst_layout_start + dst_index,
                     dst_data,
                     workspace.packed.destination().as_slice(),
-                    job.dst_offset + dst_index * element_count,
+                    dst_index * element_count,
                     alpha,
                 )?;
             }
@@ -2220,6 +2234,109 @@ where
         Ok(())
     })
     .map(Some)
+}
+
+#[cfg(test)]
+mod bounded_workspace_tests {
+    use super::*;
+    use crate::{StridedHostKernelAdapter, TreeTransformBlockSpec};
+    use num_complex::Complex64;
+
+    fn many_group_fixture() -> (Arc<BlockStructure>, TreeTransformStructure<f64>, Vec<f64>) {
+        const GROUPS: usize = 32;
+        let mut shapes = Vec::with_capacity(2 * GROUPS);
+        let mut specs = Vec::with_capacity(GROUPS);
+        let mut source = Vec::new();
+        for group in 0..GROUPS {
+            let elements = group % 8 + 1;
+            shapes.push(vec![elements]);
+            shapes.push(vec![elements]);
+            let first = 2 * group;
+            specs.push(TreeTransformBlockSpec::multi(
+                vec![first, first + 1],
+                vec![first, first + 1],
+                vec![1.0, 0.0, 0.0, 1.0],
+            ));
+            let base = source.len();
+            source.extend((0..2 * elements).map(|index| (base + index + 1) as f64));
+        }
+        let structure = Arc::new(BlockStructure::packed_column_major(1, shapes).unwrap());
+        let transform =
+            TreeTransformStructure::compile_structures(&structure, &structure, &specs).unwrap();
+        (structure, transform, source)
+    }
+
+    #[test]
+    fn many_groups_bound_serial_and_parallel_pack_scratch_by_concurrency() {
+        let (structure, transform, source) = many_group_fixture();
+        let total_source = transform.recoupling_plan().source_len();
+        let total_destination = transform.recoupling_plan().destination_len();
+
+        for threads in [1, 3] {
+            let mut destination = vec![0.0; source.len()];
+            let mut workspace = TreeTransformWorkspace::default();
+            tree_transform_structure_with_structural_recoupling_raw(
+                &mut StridedHostKernelAdapter::default(),
+                &mut DefaultDenseExecutor::new(),
+                &mut workspace,
+                &transform,
+                &structure,
+                &structure,
+                &mut destination,
+                &source,
+                1.0,
+                0.0,
+                threads,
+            )
+            .unwrap();
+
+            // What: 32 independent groups replay exactly, while retained pack
+            // capacity follows at most `threads` largest groups rather than all.
+            assert_eq!(destination, source);
+            let (source_capacity, destination_capacity) = workspace.packed_capacities();
+            let chunk_source_bound = (threads * 2 * 8).next_power_of_two();
+            let chunk_destination_bound = (threads * 2 * 8).next_power_of_two();
+            assert!(source_capacity <= chunk_source_bound);
+            assert!(destination_capacity <= chunk_destination_bound);
+            assert!(source_capacity < total_source);
+            assert!(destination_capacity < total_destination);
+        }
+    }
+
+    #[test]
+    fn bounded_group_replay_preserves_complex_alpha_beta() {
+        let (structure, transform, source) = many_group_fixture();
+        let source = source
+            .into_iter()
+            .map(|value| Complex64::new(value, -value))
+            .collect::<Vec<_>>();
+        let initial = Complex64::new(2.0, -3.0);
+        let alpha = Complex64::new(0.5, 0.25);
+        let beta = Complex64::new(-0.5, 0.75);
+        let mut destination = vec![initial; source.len()];
+
+        tree_transform_structure_with_structural_recoupling_raw(
+            &mut StridedHostKernelAdapter::default(),
+            &mut DefaultDenseExecutor::new(),
+            &mut TreeTransformWorkspace::default(),
+            &transform,
+            &structure,
+            &structure,
+            &mut destination,
+            &source,
+            alpha,
+            beta,
+            3,
+        )
+        .unwrap();
+
+        // What: chunk boundaries do not change complex recoupling or axpby.
+        let expected = source
+            .iter()
+            .map(|&value| alpha * value + beta * initial)
+            .collect::<Vec<_>>();
+        assert_eq!(destination, expected);
+    }
 }
 
 #[cfg(test)]
@@ -2795,12 +2912,9 @@ where
     Ok(())
 }
 
-/// Executes a validated tree-transform block list against a dense executor:
-/// Single blocks apply directly through the strided kernel, and every Multi
-/// block packs into one shared source/destination scratch pair so all the
-/// recoupling GEMMs (`destination = source * U^T` per block) submit as a
-/// single batched call — small transform groups then pay the dense executor's
-/// per-call dispatch cost once per replay instead of once per block.
+/// Executes a validated tree-transform block list against a dense executor.
+/// Single blocks apply directly; each Multi block reuses one source/destination
+/// pack pair for `destination = source * U^T`.
 ///
 /// Inlined into both the plain and profiled entry points so the
 /// `Option<&mut profile>` checks constant-fold away in the unprofiled copy.
@@ -2862,17 +2976,6 @@ where
         return Ok(());
     }
 
-    // Size the shared pack scratch from the compile-time recoupling plan.
-    let start = profile.as_ref().map(|_| std::time::Instant::now());
-    workspace.prepare_packed_buffers(
-        recoupling_plan.source_len(),
-        recoupling_plan.destination_len(),
-        D::zero(),
-    );
-    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
-        profile.multi_workspace_prepare += start.elapsed();
-    }
-
     let start = profile.as_ref().map(|_| std::time::Instant::now());
     let converted = ensure_recoupling_coefficients(workspace, structure)?;
     if converted {
@@ -2919,6 +3022,8 @@ where
 
     for (block_index, job) in recoupling_plan.entries() {
         let TreeTransformBlock::Multi {
+            dst_layout_start,
+            dst_count,
             src_layout_start,
             src_count,
             element_count,
@@ -2929,6 +3034,18 @@ where
         };
         debug_assert_eq!(job.rows, element_count);
         debug_assert_eq!(job.contracted, src_count);
+        debug_assert_eq!(job.cols, dst_count);
+        let source_len = element_count
+            .checked_mul(src_count)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        let destination_len = element_count
+            .checked_mul(dst_count)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        let start = profile.as_ref().map(|_| std::time::Instant::now());
+        workspace.prepare_packed_buffers(source_len, destination_len, D::zero());
+        if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
+            profile.multi_workspace_prepare += start.elapsed();
+        }
         let start = profile.as_ref().map(|_| std::time::Instant::now());
         for src_index in 0..src_count {
             pack_layout_into_column(
@@ -2937,7 +3054,7 @@ where
                 src_layout_start + src_index,
                 src_data,
                 workspace.packed.source_mut().as_mut_slice(),
-                job.lhs_offset + src_index * element_count,
+                src_index * element_count,
                 structure.storage_conjugate(),
             )?;
         }
@@ -2946,60 +3063,48 @@ where
             profile.packed_columns += src_count;
             profile.multi_pack += start.elapsed();
         }
-    }
 
-    // One batched recoupling GEMM across all Multi blocks (TensorKit's
-    // `_add_transform_multi!` `mul!` step, grouped).
-    if !recoupling_plan.jobs().is_empty() {
         let start = profile.as_ref().map(|_| std::time::Instant::now());
-        let (source, destination) = workspace.packed.source_and_destination_mut();
-        recoupling_gemm_batch(
-            dense,
-            destination.as_mut_slice(),
-            source.as_slice(),
-            &workspace.coefficient_scratch,
-            recoupling_plan.jobs(),
-            recoupling_plan.runs(),
-        )?;
+        {
+            let local_job = DenseGemmBatchJob {
+                dst_offset: 0,
+                lhs_offset: 0,
+                ..*job
+            };
+            let (source, destination) = workspace.packed.source_and_destination_mut();
+            recoupling_gemm_batch(
+                dense,
+                destination.as_mut_slice(),
+                source.as_slice(),
+                &workspace.coefficient_scratch,
+                core::slice::from_ref(&local_job),
+                &[1],
+            )?;
+        }
         if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
             let elapsed = start.elapsed();
             profile.multi_scalar_recoupling += elapsed;
             profile.multi_matmul_total += elapsed;
         }
-    }
 
-    // Scatter each Multi block's destination columns back out.
-    let start = profile.as_ref().map(|_| std::time::Instant::now());
-    let mut scattered_columns = 0usize;
-    for (block_index, job) in recoupling_plan.entries() {
-        if let TreeTransformBlock::Multi {
-            dst_layout_start,
-            dst_count,
-            element_count,
-            ..
-        } = *recoupling_multi_block(structure, block_index)?
-        {
-            debug_assert_eq!(job.rows, element_count);
-            debug_assert_eq!(job.cols, dst_count);
-            for dst_index in 0..dst_count {
-                scatter_column_into_layout(
-                    kernels,
-                    &mut workspace.zero_strides,
-                    layouts,
-                    dst_layout_start + dst_index,
-                    workspace.packed.destination().as_slice(),
-                    job.dst_offset + dst_index * element_count,
-                    dst_data,
-                    alpha,
-                    mode,
-                )?;
-            }
-            scattered_columns += dst_count;
+        let start = profile.as_ref().map(|_| std::time::Instant::now());
+        for dst_index in 0..dst_count {
+            scatter_column_into_layout(
+                kernels,
+                &mut workspace.zero_strides,
+                layouts,
+                dst_layout_start + dst_index,
+                workspace.packed.destination().as_slice(),
+                dst_index * element_count,
+                dst_data,
+                alpha,
+                mode,
+            )?;
         }
-    }
-    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
-        profile.scattered_columns += scattered_columns;
-        profile.multi_scatter += start.elapsed();
+        if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
+            profile.scattered_columns += dst_count;
+            profile.multi_scatter += start.elapsed();
+        }
     }
     Ok(())
 }
@@ -3190,6 +3295,7 @@ fn replay_scatter_columns<A, D>(
     dst_data: &mut [D],
     dst_start: isize,
     packed_destination: &[D],
+    packed_start: usize,
     alpha: D,
     mode: DestinationMode<D>,
     threads: usize,
@@ -3213,7 +3319,7 @@ where
                     layouts.strides(layout),
                     layouts.packed_strides(layout),
                     layout.offset - dst_start,
-                    offset_to_isize(item.packed_offset)?,
+                    offset_to_isize(item.packed_offset - packed_start)?,
                     alpha,
                     beta,
                     baked,
@@ -3225,7 +3331,7 @@ where
                     layouts.strides(layout),
                     layouts.packed_strides(layout),
                     layout.offset - dst_start,
-                    offset_to_isize(item.packed_offset)?,
+                    offset_to_isize(item.packed_offset - packed_start)?,
                     false,
                     alpha,
                     baked,
@@ -3253,6 +3359,7 @@ where
                 left_data,
                 dst_start,
                 packed_destination,
+                packed_start,
                 alpha,
                 mode,
                 left_threads,
@@ -3266,6 +3373,95 @@ where
                 right_data,
                 boundary,
                 packed_destination,
+                packed_start,
+                alpha,
+                mode,
+                right_threads,
+            )
+        },
+    );
+    left?;
+    right
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replay_scatter_groups<A, D>(
+    kernels: A,
+    layouts: &TreeTransformLayoutTable,
+    scatter_columns: &[TreeTransformScatterReplay],
+    scatter_groups: &[TreeTransformScatterGroupReplay],
+    groups: &[usize],
+    dst_data: &mut [D],
+    dst_start: isize,
+    packed_destination: &[D],
+    packed_start: usize,
+    alpha: D,
+    mode: DestinationMode<D>,
+    threads: usize,
+) -> Result<(), OperationError>
+where
+    A: HostKernelAdapter<D> + Clone + Send + Sync,
+    D: DenseRecouplingScalar + ConjugateValue,
+{
+    if groups.is_empty() {
+        return Ok(());
+    }
+    if threads <= 1 || groups.len() == 1 {
+        for &group in groups {
+            let columns = scatter_groups[group].columns.clone();
+            replay_scatter_columns(
+                kernels.clone(),
+                layouts,
+                &scatter_columns[columns],
+                dst_data,
+                dst_start,
+                packed_destination,
+                packed_start,
+                alpha,
+                mode,
+                1,
+            )?;
+        }
+        return Ok(());
+    }
+
+    let middle = parallel_split(groups.len(), threads);
+    let boundary = scatter_columns[scatter_groups[groups[middle]].columns.start].dst_lo;
+    let split =
+        usize::try_from(boundary - dst_start).map_err(|_| OperationError::ElementCountOverflow)?;
+    let (left_data, right_data) = dst_data.split_at_mut(split);
+    let (left_groups, right_groups) = groups.split_at(middle);
+    let left_threads = threads / 2;
+    let right_threads = threads - left_threads;
+    let right_kernels = kernels.clone();
+    let (left, right) = rayon::join(
+        || {
+            replay_scatter_groups(
+                kernels,
+                layouts,
+                scatter_columns,
+                scatter_groups,
+                left_groups,
+                left_data,
+                dst_start,
+                packed_destination,
+                packed_start,
+                alpha,
+                mode,
+                left_threads,
+            )
+        },
+        || {
+            replay_scatter_groups(
+                right_kernels,
+                layouts,
+                scatter_columns,
+                scatter_groups,
+                right_groups,
+                right_data,
+                boundary,
+                packed_destination,
+                packed_start,
                 alpha,
                 mode,
                 right_threads,
@@ -3280,9 +3476,9 @@ where
 /// (TensorKit `_add_abelian_kernel_threaded!` / `_add_general_kernel_threaded!`
 /// precedent, indexmanipulations.jl:520-738):
 ///
-/// - Phase A packs every Multi source column and applies every Single block
-///   in parallel across tree pairs; phase B scatters every Multi destination
-///   column in parallel. Work items are independent because the compile step
+/// - Singles apply in parallel when their compiled slices are disjoint. Multi
+///   blocks replay in concurrency-bounded chunks whose pack and scatter phases
+///   each enter Rayon once. Work items are independent because the compile step
 ///   rejects duplicate destination blocks
 ///   (`OperationError::DuplicateTransformDestination`) and pack columns are
 ///   disjoint scratch ranges by construction; the workspace forbids `unsafe`,
@@ -3291,25 +3487,19 @@ where
 ///   instead of TensorKit-style shared writes. Interleaved layouts whose
 ///   bounding slices overlap stay serial: exact element disjointness is not
 ///   enough to create independent Rust slices without unsafe code.
-/// - The batched recoupling GEMM stays ONE serial grouped call between the
-///   two parallel phases — the dense executor owns its own parallelism and
-///   no nesting arises because the batch submits outside both regions.
+/// - Each chunk is one serial grouped GEMM call between its pack and scatter
+///   phases. The dense executor owns its own parallelism, so no nesting arises.
 ///
-/// Scheduling uses recursive `rayon::join` on the global pool (the same pool
-/// strided-kernel's threaded kernels use), capped by the configured worker
-/// count. The replay descriptors and split boundaries are compiled into the
-/// structure, so warm replay does not reconstruct operation-neutral Vecs.
+/// Parallel copy scheduling uses recursive `rayon::join` on the global pool,
+/// capped by the configured worker count. Replay descriptors and safe split
+/// boundaries are compiled into the structure.
 ///
-/// Per-task state is one cloned kernel adapter (a ZST for the strided
-/// adapter) and one `Vec::new()` zero-strides scratch (no allocation until a
-/// kernel actually needs it); the pack/destination scratch itself stays the
-/// reused workspace buffer, so the `ScratchStorage` reuse contract is
-/// untouched — a deliberate deviation from TensorKit, which allocates pack
-/// buffers inside every spawned task.
+/// Per-task state is one cloned kernel adapter (a ZST for the strided adapter)
+/// and one `Vec::new()` zero-strides scratch. Numerical and chunk-descriptor
+/// storage stays in the reused workspace.
 ///
-/// Profiling attribution is coarser than the serial path: phase A lands in
-/// `multi_pack` (Singles included) and phase B in `multi_scatter`; per-item
-/// clocks across workers would measure contention, not work.
+/// Profiling attribution is phase-level; per-item clocks across workers would
+/// measure contention, not work.
 #[allow(clippy::too_many_arguments)]
 fn tree_transform_blocks_with_batched_recoupling_parallel<A, E, D, C>(
     kernels: &mut A,
@@ -3333,18 +3523,6 @@ where
     let recoupling_plan = structure.recoupling_plan();
     let schedule = structure.parallel_schedule();
 
-    // Replay only prepares numerical scratch; operation-neutral descriptors
-    // and safe split boundaries were compiled with the structure.
-    let start = profile.as_ref().map(|_| std::time::Instant::now());
-    workspace.prepare_packed_buffers(
-        recoupling_plan.source_len(),
-        recoupling_plan.destination_len(),
-        D::zero(),
-    );
-    if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
-        profile.multi_workspace_prepare += start.elapsed();
-    }
-
     let single_count = schedule.single_block_count;
     let multi_count = recoupling_plan.jobs().len();
     let start = profile.as_ref().map(|_| std::time::Instant::now());
@@ -3361,21 +3539,9 @@ where
 
     let storage_conjugate = structure.storage_conjugate();
 
-    // Phase A: pack columns and Single applies in parallel.
+    // Single destinations are independent of every Multi destination.
     {
         let start = profile.as_ref().map(|_| std::time::Instant::now());
-
-        replay_pack_columns(
-            kernels.clone(),
-            layouts,
-            &schedule.pack_columns,
-            workspace.packed.source_mut().as_mut_slice(),
-            0,
-            src_data,
-            storage_conjugate,
-            threads,
-        )?;
-
         if schedule.singles_slice_disjoint {
             replay_single_blocks(
                 kernels.clone(),
@@ -3408,14 +3574,81 @@ where
         }
 
         if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
-            profile.packed_columns += schedule.packed_column_count;
-            profile.multi_pack += start.elapsed();
+            let elapsed = start.elapsed();
+            profile.single_total += elapsed;
+            profile.strided_kernel += elapsed;
         }
     }
 
-    // One batched recoupling GEMM across all Multi blocks, outside both
-    // parallel regions (the dense executor owns its parallelism).
-    if !recoupling_plan.jobs().is_empty() {
+    // Why not retain one pack arena for the whole plan: TensorKit owns scratch
+    // per concurrently executing fusion block. The existing replay-thread
+    // budget is also the natural bound for a grouped dense submission.
+    let chunk_size = threads.max(1);
+    let mut pack_cursor = 0;
+    for (chunk_index, chunk) in recoupling_plan.jobs().chunks(chunk_size).enumerate() {
+        let packed_column_count = chunk.iter().map(|job| job.contracted).sum::<usize>();
+        let scattered_column_count = chunk.iter().map(|job| job.cols).sum::<usize>();
+        let source_start = chunk[0].lhs_offset;
+        let destination_start = chunk[0].dst_offset;
+        let source_end = chunk
+            .last()
+            .and_then(|job| {
+                job.rows
+                    .checked_mul(job.contracted)
+                    .and_then(|len| job.lhs_offset.checked_add(len))
+            })
+            .ok_or(OperationError::ElementCountOverflow)?;
+        let destination_end = chunk
+            .last()
+            .and_then(|job| {
+                job.rows
+                    .checked_mul(job.cols)
+                    .and_then(|len| job.dst_offset.checked_add(len))
+            })
+            .ok_or(OperationError::ElementCountOverflow)?;
+
+        workspace.chunk_jobs.clear();
+        workspace
+            .chunk_jobs
+            .extend(chunk.iter().map(|job| DenseGemmBatchJob {
+                dst_offset: job.dst_offset - destination_start,
+                lhs_offset: job.lhs_offset - source_start,
+                ..*job
+            }));
+        strided_batch_runs_into(&workspace.chunk_jobs, &mut workspace.chunk_runs);
+
+        let start = profile.as_ref().map(|_| std::time::Instant::now());
+        workspace.prepare_packed_buffers(
+            source_end - source_start,
+            destination_end - destination_start,
+            D::zero(),
+        );
+        if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
+            profile.multi_workspace_prepare += start.elapsed();
+        }
+
+        let pack_start = pack_cursor;
+        while pack_cursor < schedule.pack_columns.len()
+            && schedule.pack_columns[pack_cursor].packed_offset < source_end
+        {
+            pack_cursor += 1;
+        }
+        let start = profile.as_ref().map(|_| std::time::Instant::now());
+        replay_pack_columns(
+            kernels.clone(),
+            layouts,
+            &schedule.pack_columns[pack_start..pack_cursor],
+            workspace.packed.source_mut().as_mut_slice(),
+            source_start,
+            src_data,
+            storage_conjugate,
+            threads,
+        )?;
+        if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
+            profile.packed_columns += packed_column_count;
+            profile.multi_pack += start.elapsed();
+        }
+
         let start = profile.as_ref().map(|_| std::time::Instant::now());
         let (source, destination) = workspace.packed.source_and_destination_mut();
         recoupling_gemm_batch(
@@ -3423,54 +3656,81 @@ where
             destination.as_mut_slice(),
             source.as_slice(),
             &workspace.coefficient_scratch,
-            recoupling_plan.jobs(),
-            recoupling_plan.runs(),
+            &workspace.chunk_jobs,
+            &workspace.chunk_runs,
         )?;
         if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
             let elapsed = start.elapsed();
             profile.multi_scalar_recoupling += elapsed;
             profile.multi_matmul_total += elapsed;
         }
-    }
 
-    // Phase B: scatter destination columns in parallel (disjoint destination
-    // subblocks, same compile guarantee as the Singles).
-    {
         let start = profile.as_ref().map(|_| std::time::Instant::now());
         let packed_destination = workspace.packed.destination().as_slice();
-        if schedule.scatter_slice_disjoint {
-            replay_scatter_columns(
+        let first_group = chunk_index * chunk_size;
+        workspace.chunk_scatter_groups.clear();
+        workspace.chunk_scatter_groups.extend(
+            (first_group..first_group + chunk.len())
+                .filter(|&group| !schedule.scatter_groups[group].columns.is_empty()),
+        );
+        // Why not sort/copy every scatter descriptor: only the at-most-T group
+        // indices need destination order for one safe Rayon split tree.
+        workspace
+            .chunk_scatter_groups
+            .sort_unstable_by_key(|&group| {
+                schedule.scatter_columns[schedule.scatter_groups[group].columns.start].dst_lo
+            });
+        let scatter_slice_disjoint = workspace
+            .chunk_scatter_groups
+            .iter()
+            .all(|&group| schedule.scatter_groups[group].slice_disjoint)
+            && workspace.chunk_scatter_groups.windows(2).all(|groups| {
+                let left_end = schedule.scatter_groups[groups[0]].columns.end;
+                let right_start = schedule.scatter_groups[groups[1]].columns.start;
+                schedule.scatter_columns[left_end - 1].dst_hi
+                    < schedule.scatter_columns[right_start].dst_lo
+            });
+        if scatter_slice_disjoint {
+            replay_scatter_groups(
                 kernels.clone(),
                 layouts,
                 &schedule.scatter_columns,
+                &schedule.scatter_groups,
+                &workspace.chunk_scatter_groups,
                 dst_data,
                 0,
                 packed_destination,
+                destination_start,
                 alpha,
                 mode,
                 threads,
             )?;
         } else {
             let mut zero_strides = Vec::new();
-            for item in &schedule.scatter_columns {
-                scatter_column_into_layout(
-                    kernels,
-                    &mut zero_strides,
-                    layouts,
-                    item.dst_layout,
-                    packed_destination,
-                    item.packed_offset,
-                    dst_data,
-                    alpha,
-                    mode,
-                )?;
+            for &group in &workspace.chunk_scatter_groups {
+                for item in
+                    &schedule.scatter_columns[schedule.scatter_groups[group].columns.clone()]
+                {
+                    scatter_column_into_layout(
+                        kernels,
+                        &mut zero_strides,
+                        layouts,
+                        item.dst_layout,
+                        packed_destination,
+                        item.packed_offset - destination_start,
+                        dst_data,
+                        alpha,
+                        mode,
+                    )?;
+                }
             }
         }
-        if let (Some(profile), Some(start)) = (profile, start) {
-            profile.scattered_columns += schedule.scattered_column_count;
+        if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
+            profile.scattered_columns += scattered_column_count;
             profile.multi_scatter += start.elapsed();
         }
     }
+    debug_assert_eq!(pack_cursor, schedule.pack_columns.len());
     Ok(())
 }
 
@@ -3664,16 +3924,15 @@ where
     }
 }
 
-/// Applies every Multi block's recoupling matrix in one batched GEMM over
-/// shared flat scratch buffers: per job, the column-major
+/// Applies a batch of Multi-block recoupling matrices over shared flat scratch
+/// buffers: per job, the column-major
 /// (element_count x dst_count) destination block receives `source_block *
 /// U^T`, with `recoupling_coefficients_dst_src` (row-major `U[dst, src]`)
 /// reinterpreted as the column-major (src_count x dst_count) matrix `U^T`.
 /// This is TensorKit's `_add_transform_multi!` `mul!` step submitted as one
 /// grouped call; the naive per-element loop in the kernel adapter remains
-/// only for adapters without a dense executor. Job offsets are constructed by
-/// the replay against scratch sized to their exact totals, matching the
-/// plan-compile validation contract of the trusted views.
+/// only for adapters without a dense executor. Job offsets are relative to the
+/// supplied chunk scratch, matching the trusted-view validation contract.
 fn recoupling_gemm_batch<E, D>(
     dense: &mut E,
     destination: &mut [D],
