@@ -132,11 +132,12 @@ pub(crate) struct TreeTransformParallelSchedule {
     pub singles: Vec<TreeTransformSingleReplay>,
     pub pack_columns: Vec<TreeTransformPackReplay>,
     pub scatter_columns: Vec<TreeTransformScatterReplay>,
+    pub scatter_group_starts: Vec<usize>,
+    pub scatter_group_slice_disjoint: Vec<bool>,
     pub single_block_count: usize,
     pub packed_column_count: usize,
     pub scattered_column_count: usize,
     pub singles_slice_disjoint: bool,
-    pub scatter_slice_disjoint: bool,
 }
 
 impl TreeTransformRecouplingPlan {
@@ -740,6 +741,9 @@ fn compile_parallel_schedule(
 
     let mut pack_columns = Vec::new();
     let mut scatter_columns = Vec::new();
+    let mut scatter_group_starts = Vec::with_capacity(recoupling_plan.jobs().len() + 1);
+    let mut scatter_group_slice_disjoint = Vec::with_capacity(recoupling_plan.jobs().len());
+    scatter_group_starts.push(0);
     for (block_index, job) in recoupling_plan.entries() {
         let TreeTransformBlock::Multi {
             dst_layout_start,
@@ -761,6 +765,8 @@ fn compile_parallel_schedule(
             .checked_add(dst_count)
             .ok_or(OperationError::ElementCountOverflow)?;
         if element_count == 0 {
+            scatter_group_slice_disjoint.push(true);
+            scatter_group_starts.push(scatter_columns.len());
             continue;
         }
         for src_index in 0..src_count {
@@ -801,9 +807,18 @@ fn compile_parallel_schedule(
                 dst_hi,
             });
         }
+        let group_start = *scatter_group_starts
+            .last()
+            .expect("scatter group starts contains the initial boundary");
+        scatter_columns[group_start..].sort_unstable_by_key(|item| item.dst_lo);
+        scatter_group_slice_disjoint.push(destination_ranges_are_slice_disjoint(
+            scatter_columns[group_start..]
+                .iter()
+                .map(|item| (item.dst_lo, item.dst_hi)),
+        ));
+        scatter_group_starts.push(scatter_columns.len());
     }
     pack_columns.sort_unstable_by_key(|item| item.packed_offset);
-    scatter_columns.sort_unstable_by_key(|item| item.dst_lo);
 
     let pack_disjoint = pack_columns
         .windows(2)
@@ -822,17 +837,14 @@ fn compile_parallel_schedule(
         singles_slice_disjoint: destination_ranges_are_slice_disjoint(
             singles.iter().map(|item| (item.dst_lo, item.dst_hi)),
         ),
-        scatter_slice_disjoint: destination_ranges_are_slice_disjoint(
-            scatter_columns
-                .iter()
-                .map(|item| (item.dst_lo, item.dst_hi)),
-        ),
         single_block_count,
         packed_column_count,
         scattered_column_count,
         singles,
         pack_columns,
         scatter_columns,
+        scatter_group_starts,
+        scatter_group_slice_disjoint,
     })
 }
 

@@ -206,3 +206,62 @@ fn warm_threaded_overwrite_replay_does_not_allocate_on_the_caller_thread() {
 
     assert_eq!(ALLOCATIONS.get(), 0);
 }
+
+#[test]
+fn warm_many_group_chunks_do_not_allocate_on_the_caller_thread() {
+    const GROUPS: usize = 32;
+    let block_structure =
+        Arc::new(BlockStructure::packed_column_major(1, vec![vec![4]; 2 * GROUPS]).unwrap());
+    let specs = (0..GROUPS)
+        .map(|group| {
+            let first = 2 * group;
+            TreeTransformBlockSpec::multi(
+                vec![first, first + 1],
+                vec![first, first + 1],
+                vec![1.0, 0.0, 0.0, 1.0],
+            )
+        })
+        .collect::<Vec<_>>();
+    let structure =
+        TreeTransformStructure::compile_structures(&block_structure, &block_structure, &specs)
+            .unwrap();
+    let src = (0..8 * GROUPS)
+        .map(|value| value as f64 + 1.0)
+        .collect::<Vec<_>>();
+    let mut dst = vec![0.0; src.len()];
+    let mut kernels = StridedHostKernelAdapter::default();
+    let mut dense = NoAllocDenseExecutor;
+    let mut workspace = TreeTransformWorkspace::default();
+
+    let mut replay = || {
+        tree_transform_structure_with_structural_recoupling_raw(
+            &mut kernels,
+            &mut dense,
+            &mut workspace,
+            &structure,
+            &block_structure,
+            &block_structure,
+            &mut dst,
+            &src,
+            1.0,
+            0.0,
+            3,
+        )
+        .unwrap();
+    };
+
+    replay();
+    ALLOCATIONS.set(0);
+    COUNTING.set(true);
+    replay();
+    COUNTING.set(false);
+
+    // What: reusable chunk metadata and numerical scratch allocate only during
+    // warmup, even when the plan has more groups than the concurrency bound.
+    assert_eq!(
+        ALLOCATIONS.get(),
+        0,
+        "warm many-group replay allocated on the caller thread"
+    );
+    assert_eq!(dst, src);
+}

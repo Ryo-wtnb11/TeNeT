@@ -468,13 +468,19 @@ pub(crate) fn strided_batch_run_len(jobs: &[DenseGemmBatchJob], start: usize) ->
 /// #103) without recomputing it on every replay.
 pub fn strided_batch_runs(jobs: &[DenseGemmBatchJob]) -> Vec<usize> {
     let mut runs = Vec::new();
+    strided_batch_runs_into(jobs, &mut runs);
+    runs
+}
+
+/// Writes [`strided_batch_runs`] into caller-owned scratch.
+pub fn strided_batch_runs_into(jobs: &[DenseGemmBatchJob], runs: &mut Vec<usize>) {
+    runs.clear();
     let mut start = 0usize;
     while start < jobs.len() {
         let run_len = strided_batch_run_len(jobs, start);
         runs.push(run_len);
         start += run_len;
     }
-    runs
 }
 
 /// Serial fallback for [`DenseExecutor::matmul_batch_axpby_into`]: one

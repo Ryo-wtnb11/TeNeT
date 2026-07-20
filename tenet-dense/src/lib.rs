@@ -26,7 +26,9 @@ mod tests;
 pub use dot::DenseDotConfig;
 pub use dtype::{DenseBackend, DenseDType, DensePlacement};
 pub use error::DenseError;
-pub use executor::{strided_batch_runs, DenseExecutor, DenseGemmBatchJob, MatrixOp};
+pub use executor::{
+    strided_batch_runs, strided_batch_runs_into, DenseExecutor, DenseGemmBatchJob, MatrixOp,
+};
 pub use scalar::DenseScalar;
 pub use tensor::DenseTensor;
 pub use view::{DenseRead, DenseView, DenseViewMut, DenseWrite};
