@@ -10,6 +10,7 @@
 //! They dispatch on the stored rule and dtype once per call (never per block)
 //! and forward the bound authority to the expert layer.
 
+use std::borrow::Cow;
 use std::hash::Hash;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -1139,6 +1140,29 @@ struct LoweredAdjointTransformRequest {
     levels: Vec<usize>,
 }
 
+fn logical_adjoint_axis_to_parent(
+    parent_codomain_rank: usize,
+    parent_domain_rank: usize,
+    axis: usize,
+) -> usize {
+    debug_assert!(axis < parent_codomain_rank + parent_domain_rank);
+    if axis < parent_domain_rank {
+        parent_codomain_rank + axis
+    } else {
+        axis - parent_domain_rank
+    }
+}
+
+fn logical_adjoint_axes_to_parent(
+    parent_codomain_rank: usize,
+    parent_domain_rank: usize,
+    axes: &[usize],
+) -> Vec<usize> {
+    axes.iter()
+        .map(|&axis| logical_adjoint_axis_to_parent(parent_codomain_rank, parent_domain_rank, axis))
+        .collect()
+}
+
 fn lower_adjoint_transform_request(
     parent_codomain_rank: usize,
     parent_domain_rank: usize,
@@ -1156,22 +1180,15 @@ fn lower_adjoint_transform_request(
         .collect::<Vec<_>>();
     validate_axis_permutation(&logical_axes, rank)?;
 
-    let logical_to_parent = |axis: usize| {
-        if axis < parent_domain_rank {
-            parent_codomain_rank + axis
-        } else {
-            axis - parent_domain_rank
-        }
-    };
     let codomain_axes = logical_domain_axes
         .iter()
         .copied()
-        .map(logical_to_parent)
+        .map(|axis| logical_adjoint_axis_to_parent(parent_codomain_rank, parent_domain_rank, axis))
         .collect();
     let domain_axes = logical_codomain_axes
         .iter()
         .copied()
-        .map(logical_to_parent)
+        .map(|axis| logical_adjoint_axis_to_parent(parent_codomain_rank, parent_domain_rank, axis))
         .collect();
     let levels = match kind {
         TransformKind::Braid { levels } => {
@@ -4303,9 +4320,6 @@ impl Tensor {
     /// rules apply the categorical trace coefficients (quantum-dimension
     /// factors, and twists for fermionic rules: the supertrace).
     pub fn trace_pairs(&self, pairs: &[(usize, usize)]) -> Result<Self, Error> {
-        if self.is_adjoint_view() {
-            return self.materialized_tensor()?.trace_pairs(pairs);
-        }
         // SU(N) (Generic): the partial-trace engine rides the mult-free
         // recoupling (`multiplicity_free_permute_tree_pair`); its generic
         // sibling is Stage B3c-3. Full trace (`tr`) IS wired generically.
@@ -4335,15 +4349,59 @@ impl Tensor {
             .count();
         let trace_lhs: Vec<usize> = pairs.iter().map(|&(lhs, _)| lhs).collect();
         let trace_rhs: Vec<usize> = pairs.iter().map(|&(_, rhs)| rhs).collect();
-        with_data!(self, data, {
-            self.trace_pairs_impl(
-                data,
+        let source_conjugate = self.is_adjoint_view();
+        let source = self.parent_body_for_lowering();
+        let parent_nout = source.space.homspace().codomain().len();
+        let parent_nin = source.space.homspace().domain().len();
+        let operation_output_axes = if source_conjugate {
+            Cow::Owned(logical_adjoint_axes_to_parent(
+                parent_nout,
+                parent_nin,
                 &output_axes,
-                dst_codomain_rank,
+            ))
+        } else {
+            Cow::Borrowed(output_axes.as_slice())
+        };
+        let operation_trace_lhs = if source_conjugate {
+            Cow::Owned(logical_adjoint_axes_to_parent(
+                parent_nout,
+                parent_nin,
                 &trace_lhs,
+            ))
+        } else {
+            Cow::Borrowed(trace_lhs.as_slice())
+        };
+        let operation_trace_rhs = if source_conjugate {
+            Cow::Owned(logical_adjoint_axes_to_parent(
+                parent_nout,
+                parent_nin,
                 &trace_rhs,
-            )
-        })
+            ))
+        } else {
+            Cow::Borrowed(trace_rhs.as_slice())
+        };
+        let operation = tenet_tensors::TensorTraceAxisSpec::new_with_conjugation(
+            &operation_output_axes,
+            &operation_trace_lhs,
+            &operation_trace_rhs,
+            source_conjugate,
+        );
+        let data = if source_conjugate {
+            self.stored_data()
+        } else {
+            self.coupled_data()?
+        };
+        match data {
+            Data::F64(data) => {
+                self.trace_pairs_impl(data, &output_axes, dst_codomain_rank, operation)
+            }
+            Data::C64(data) => {
+                self.trace_pairs_impl(data, &output_axes, dst_codomain_rank, operation)
+            }
+            Data::Diagonal(_) => unreachable!("coupled_data materializes Data::Diagonal"),
+            #[cfg(feature = "cuda")]
+            Data::CudaF64(_) => Err(device_unsupported("Tensor::trace_pairs")),
+        }
     }
 
     fn trace_pairs_impl<D: UserScalar>(
@@ -4351,33 +4409,54 @@ impl Tensor {
         src_data: &[D],
         output_axes: &[usize],
         dst_codomain_rank: usize,
-        trace_lhs: &[usize],
-        trace_rhs: &[usize],
+        operation: tenet_tensors::TensorTraceAxisSpec<'_>,
     ) -> Result<Self, Error> {
-        let hom = with_user_rule!(self.ordinary_body().space, rule, {
-            let hom = self.ordinary_body().space.homspace().select(
+        let source = self.parent_body_for_lowering();
+        let logical_homspace: Cow<'_, FusionTreeHomSpace> = if operation.source_conjugate() {
+            let metadata = self.metadata();
+            Cow::Owned(FusionTreeHomSpace::new(
+                metadata.codomain().clone(),
+                metadata.domain().clone(),
+            ))
+        } else {
+            Cow::Borrowed(source.space.homspace())
+        };
+        let hom = with_user_rule!(source.space, rule, {
+            let hom = logical_homspace.select(
                 rule,
                 &output_axes[..dst_codomain_rank],
                 &output_axes[dst_codomain_rank..],
             )?;
             Ok::<_, Error>(hom)
         })?;
-        let dst_bound = self.ordinary_body().space.from_selected_homspace(hom)?;
+        let dst_bound = source.space.from_selected_homspace(hom)?;
         let mut data = vec![D::from_real(0.0); dst_bound.raw().required_len()?];
         macro_rules! trace_bound {
             ($dst:expr, $src:expr) => {
-                tenet_tensors::tensortrace_fusion_dyn_into(
-                    $dst,
-                    &mut data,
-                    $src,
-                    src_data,
-                    tenet_tensors::TensorTraceAxisSpec::new(output_axes, trace_lhs, trace_rhs),
-                    D::from_real(1.0),
-                    D::from_real(0.0),
-                )
+                if operation.source_conjugate() {
+                    tenet_tensors::tensortrace_fusion_dyn_into_checked(
+                        $dst,
+                        &mut data,
+                        $src,
+                        src_data,
+                        operation,
+                        D::from_real(1.0),
+                        D::from_real(0.0),
+                    )
+                } else {
+                    tenet_tensors::tensortrace_fusion_dyn_into(
+                        $dst,
+                        &mut data,
+                        $src,
+                        src_data,
+                        operation,
+                        D::from_real(1.0),
+                        D::from_real(0.0),
+                    )
+                }
             };
         }
-        match (&dst_bound, self.ordinary_body().space.as_ref()) {
+        match (&dst_bound, source.space.as_ref()) {
             (UserBoundSpace::U1(dst), UserBoundSpace::U1(src)) => trace_bound!(dst, src),
             (UserBoundSpace::Z2(dst), UserBoundSpace::Z2(src)) => trace_bound!(dst, src),
             (UserBoundSpace::FZ2(dst), UserBoundSpace::FZ2(src)) => trace_bound!(dst, src),
@@ -8199,6 +8278,236 @@ mod adjoint_parent_view_tests {
         let trace = endomorphism.tr().unwrap().to_c64();
         let adjoint_trace = endomorphism.adjoint().unwrap().tr().unwrap().to_c64();
         assert!((adjoint_trace - trace.conj()).norm() < 1e-12);
+    }
+
+    fn assert_adjoint_trace_matches_eager_oracle(
+        space: Space,
+        dtype: Dtype,
+        seed: u64,
+        pairs: &[(usize, usize)],
+    ) {
+        let runtime = Runtime::builder()
+            .dense_threads(1)
+            .recoupling_threads(1)
+            .build()
+            .unwrap();
+        let parent =
+            Tensor::rand_with_seed(&runtime, dtype, [&space, &space], [&space, &space], seed)
+                .unwrap();
+        let parent_data = Arc::clone(&parent.ordinary_body().data);
+        let parent_f64 = (dtype == Dtype::F64).then(|| parent.data().to_vec());
+        let parent_c64 = (dtype == Dtype::C64).then(|| parent.data_c64().to_vec());
+        let lazy = parent.adjoint().unwrap();
+        let eager = parent.adjoint().unwrap().materialized_tensor().unwrap();
+
+        if dtype == Dtype::C64 {
+            assert!(parent
+                .data_c64()
+                .iter()
+                .any(|value| value.im.abs() > f64::EPSILON));
+        }
+        let actual = lazy.trace_pairs(pairs).unwrap();
+        let expected = eager.trace_pairs(pairs).unwrap();
+
+        assert_close(&actual, &expected);
+        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+        match parent_data.as_ref() {
+            Data::F64(data) => assert_eq!(data, parent_f64.as_ref().unwrap()),
+            Data::C64(data) => assert_eq!(data, parent_c64.as_ref().unwrap()),
+            _ => panic!("unexpected parent storage"),
+        }
+    }
+
+    #[test]
+    fn adjoint_trace_matches_eager_oracles_without_materializing_parent_storage() {
+        // What: logical adjoint traces preserve non-self-dual labels, SU2
+        // recoupling, fermionic twists, products, pair order, and complex conjugation.
+        let asymmetric_u1 = Space::u1([(-3, 1), (-1, 2), (0, 1), (2, 1)]);
+        assert_adjoint_trace_matches_eager_oracle(
+            asymmetric_u1.clone(),
+            Dtype::F64,
+            261_401,
+            &[(0, 2)],
+        );
+        assert_adjoint_trace_matches_eager_oracle(
+            asymmetric_u1,
+            Dtype::C64,
+            261_402,
+            &[(1, 3), (0, 2)],
+        );
+        assert_adjoint_trace_matches_eager_oracle(
+            Space::su2([(0, 1), (1, 2), (2, 1), (3, 1)]),
+            Dtype::C64,
+            261_403,
+            &[(1, 3)],
+        );
+        assert_adjoint_trace_matches_eager_oracle(
+            Space::fz2([(1, 2)]),
+            Dtype::F64,
+            261_404,
+            &[(1, 3), (0, 2)],
+        );
+        assert_adjoint_trace_matches_eager_oracle(
+            nested_product_space([1, 2, 1, 1]),
+            Dtype::C64,
+            261_405,
+            &[(0, 2)],
+        );
+    }
+
+    #[test]
+    fn asymmetric_rank_adjoint_trace_maps_logical_axes_to_parent_once() {
+        // What: a 3|1 parent is a 1|3 logical adjoint, and tracing logical
+        // axes (0, 1) retains logical domain axes (2, 3) without a double rotation.
+        let runtime = Runtime::builder()
+            .dense_threads(1)
+            .recoupling_threads(1)
+            .build()
+            .unwrap();
+        let space = Space::u1([(-2, 1), (0, 2), (1, 1)]);
+        let parent = Tensor::rand_with_seed(
+            &runtime,
+            Dtype::C64,
+            [&space, &space, &space],
+            [&space],
+            261_407,
+        )
+        .unwrap();
+        let lazy = parent.adjoint().unwrap();
+        let eager = parent.adjoint().unwrap().materialized_tensor().unwrap();
+
+        assert_eq!(
+            logical_adjoint_axes_to_parent(3, 1, &[0, 1, 2, 3]),
+            [3, 0, 1, 2]
+        );
+        let actual = lazy.trace_pairs(&[(0, 1)]).unwrap();
+        let expected = eager.trace_pairs(&[(0, 1)]).unwrap();
+
+        assert_close(&actual, &expected);
+        assert_eq!(actual.codomain_rank(), 0);
+        assert_eq!(actual.domain_rank(), 2);
+        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+    }
+
+    #[test]
+    fn padded_parent_adjoint_trace_reads_custom_strides_without_materialization() {
+        // What: a lazy adjoint trace reads the parent's padded offsets and
+        // strides directly, leaves every source cell unchanged, and matches
+        // the eager owned-adjoint oracle.
+        let runtime = Runtime::builder()
+            .dense_threads(1)
+            .recoupling_threads(1)
+            .build()
+            .unwrap();
+        let p1 = Space::u1([(1, 2)]);
+        let m1 = Space::u1([(-1, 2)]);
+        let p2 = Space::u1([(2, 2)]);
+        let m2 = Space::u1([(-2, 3)]);
+        let canonical =
+            Tensor::zeros(&runtime, Dtype::C64, [&p1, &m1, &p2, &m2], [&p1, &m1]).unwrap();
+        let UserBoundSpace::U1(authority) = canonical.ordinary_body().space.as_ref() else {
+            unreachable!()
+        };
+        let canonical_block = authority.space().structure().block(0).unwrap();
+        assert_eq!(authority.space().structure().block_count(), 1);
+        assert_eq!(canonical_block.shape(), [2, 2, 2, 3, 2, 2]);
+        let structure = BlockStructure::from_blocks_with_rank(
+            6,
+            vec![tenet_core::BlockSpec::with_key(
+                canonical_block.key().clone(),
+                canonical_block.shape().to_vec(),
+                vec![1, 3, 6, 12, 36, 72],
+                1,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let typed = tenet_core::FusionTensorMapSpace::<4, 2>::new_unbound(
+            tenet_core::TensorMapSpace::from_dims([2, 2, 2, 3], [2, 2]).unwrap(),
+            authority.space().homspace().clone(),
+            structure,
+        )
+        .unwrap()
+        .try_bind_rule(authority.provider())
+        .unwrap();
+        let bound = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            DynamicFusionMapSpace::from_typed(&typed),
+            Arc::clone(authority.provider_arc()),
+        )
+        .unwrap();
+        let source = (0..bound.space().required_len().unwrap())
+            .map(|index| Complex64::new(index as f64, index as f64 + 0.5))
+            .collect::<Vec<_>>();
+        let mut canonical_data = vec![
+            Complex64::new(0.0, 0.0);
+            canonical
+                .ordinary_body()
+                .space
+                .raw()
+                .required_len()
+                .unwrap()
+        ];
+        for linear in 0..canonical_block.shape().iter().product() {
+            let mut remainder = linear;
+            let mut padded_offset = 1;
+            for (&dim, stride) in canonical_block.shape().iter().zip([1, 3, 6, 12, 36, 72]) {
+                padded_offset += (remainder % dim) * stride;
+                remainder /= dim;
+            }
+            canonical_data[canonical_block.offset() + linear] = source[padded_offset];
+        }
+        let oracle_parent = Tensor::owned(
+            runtime.clone(),
+            Arc::clone(&canonical.ordinary_body().space),
+            Arc::new(Data::C64(canonical_data)),
+        );
+        let parent = Tensor::owned(
+            runtime,
+            Arc::new(UserBoundSpace::U1(bound)),
+            Arc::new(Data::C64(source.clone())),
+        );
+        let lazy = parent.adjoint().unwrap();
+        let eager = oracle_parent
+            .adjoint()
+            .unwrap()
+            .materialized_tensor()
+            .unwrap();
+
+        let actual = lazy.trace_pairs(&[(0, 2), (1, 3)]).unwrap();
+        let expected = eager.trace_pairs(&[(0, 2), (1, 3)]).unwrap();
+
+        assert_close(&actual, &expected);
+        assert_eq!(parent.data_c64(), source);
+        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+    }
+
+    #[test]
+    fn malformed_adjoint_trace_pairs_fail_before_view_or_destination_builds() {
+        // What: the public logical-axis error contract is unchanged and no
+        // adjoint grid or result layout is built for an invalid pair list.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let space = Space::u1([(-1, 1), (0, 2), (2, 1)]);
+        let lazy = Tensor::rand_with_seed(
+            &runtime,
+            Dtype::C64,
+            [&space, &space],
+            [&space, &space],
+            261_406,
+        )
+        .unwrap()
+        .adjoint()
+        .unwrap();
+
+        SELECTED_RESULT_LAYOUT_BUILDS.with(|builds| builds.set(Some(0)));
+        for pairs in [&[(0, 4)][..], &[(0, 2), (0, 3)][..]] {
+            assert!(matches!(
+                lazy.trace_pairs(pairs),
+                Err(Error::InvalidArgument(_))
+            ));
+        }
+        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+        SELECTED_RESULT_LAYOUT_BUILDS.with(|builds| assert_eq!(builds.get(), Some(0)));
+        SELECTED_RESULT_LAYOUT_BUILDS.with(|builds| builds.set(None));
     }
 
     fn assert_lowered_transform_matches_eager_oracle(
