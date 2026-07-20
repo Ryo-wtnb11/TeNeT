@@ -1641,6 +1641,8 @@ mod contract_dense;
 
 mod contract_fusion;
 
+mod subset_cross_operations;
+
 mod tensoradd;
 
 mod tensortrace;
