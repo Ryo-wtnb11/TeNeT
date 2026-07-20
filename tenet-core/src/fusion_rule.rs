@@ -313,14 +313,28 @@ impl From<ProductSectorCodecError> for FusionAlgebraError {
 ///
 /// The infallible [`FusionRule`] methods remain the validated expert hot path.
 pub trait CheckedFusionAlgebra: FusionRule {
+    /// Return the exact dual when both the input and output are representable
+    /// by this provider; otherwise return the exact representation failure.
     fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError>;
 
+    /// Return the complete mathematical channel set for two representable
+    /// inputs.
+    ///
+    /// On success this is exactly [`FusionRule::fusion_channels`], and every
+    /// returned sector is representable by this provider. Failure preserves
+    /// the exact cause for an invalid input or an unrepresentable generated
+    /// channel.
     fn try_fusion_channels(
         &self,
         left: SectorId,
         right: SectorId,
     ) -> Result<SectorVec, FusionAlgebraError>;
 
+    /// Return the exact multiplicity for three representable sectors.
+    ///
+    /// Zero means the coupled sector is mathematically absent from the fusion
+    /// product. Failure preserves the exact representation error for any
+    /// input sector.
     fn try_nsymbol(
         &self,
         left: SectorId,
