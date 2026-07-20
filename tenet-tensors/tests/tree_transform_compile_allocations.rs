@@ -80,6 +80,33 @@ fn su2_f_move_structure() -> BlockStructure {
     .unwrap()
 }
 
+fn rank_nine_same_split_su2_groups() -> BlockStructure {
+    let vacuum = SU2FusionRule.vacuum();
+    let keys = [0usize, 1, 2].map(|twice_spin| {
+        let mut uncoupled = [vacuum; 9];
+        uncoupled[0] = SectorId::new(twice_spin);
+        uncoupled[1] = SectorId::new(twice_spin);
+        BlockKey::from(FusionTreePairKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &SU2FusionRule,
+                uncoupled,
+                vacuum,
+                [false; 9],
+                [vacuum; 7],
+                [MultiplicityIndex::ONE; 8],
+            )
+            .unwrap(),
+            FusionTreeKey::try_new_for_rule(&SU2FusionRule, [], vacuum, [], [], []).unwrap(),
+        ))
+    });
+    BlockStructure::from_parts(
+        SectorStructure::from_keys(9, keys).unwrap(),
+        DegeneracyStructure::packed_column_major(9, std::array::from_fn::<_, 3, _>(|_| vec![1; 9]))
+            .unwrap(),
+    )
+    .unwrap()
+}
+
 #[derive(Clone)]
 struct AdmissionCountingSu2Rule {
     nsymbol_calls: Arc<AtomicUsize>,
@@ -335,7 +362,7 @@ fn cold_ordered_tree_pair_compile_has_stable_allocation_counts() {
     reset_global_operation_caches();
 
     for (source_count, expected_allocations) in
-        [(1, 45), (2, 50), (4, 58), (5, 66), (8, 72), (9, 80)]
+        [(1, 44), (2, 49), (4, 57), (5, 65), (8, 71), (9, 79)]
     {
         reset_global_operation_caches();
         let (dst, src) = rank_eight_su2_subset(source_count);
@@ -363,6 +390,36 @@ fn cold_ordered_tree_pair_compile_has_stable_allocation_counts() {
         );
         std::hint::black_box(plan);
     }
+}
+
+#[test]
+fn rank_nine_same_split_groups_do_not_clone_prepared_spill_storage() {
+    let structure = Arc::new(rank_nine_same_split_su2_groups());
+    let operation = TreeTransformOperation::braid([1, 0, 2, 3, 4, 5, 6, 7, 8], [], 0..9, []);
+    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
+    cache.set_recoupling_threads(1);
+
+    ALLOCATIONS.set(0);
+    ALLOCATED_BYTES.set(0);
+    COUNTING.set(true);
+    let compiled = cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &SU2FusionRule,
+            &operation,
+            &structure,
+            &structure,
+            false,
+        )
+        .unwrap();
+    COUNTING.set(false);
+
+    // What: three same-split groups reuse one rank-nine prepared operation.
+    // Restoring a spilled-operation clone per group raises these counts to
+    // 257 allocations and 56_709 bytes.
+    assert_eq!(structure.fusion_tree_groups().len(), 3);
+    assert_eq!(ALLOCATIONS.get(), 254);
+    assert_eq!(ALLOCATED_BYTES.get(), 56_325);
+    std::hint::black_box(compiled);
 }
 
 fn rank_one_u1_pair_structure(count: usize) -> BlockStructure {

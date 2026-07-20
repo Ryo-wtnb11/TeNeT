@@ -4,6 +4,11 @@ use std::sync::{
     Arc,
 };
 
+#[allow(deprecated)]
+fn legacy_tree_row_stats(stats: TreeTransformCacheStats) -> (usize, usize) {
+    (stats.tree_row_hits(), stats.tree_row_misses())
+}
+
 fn grouped_su2_test_pair(first_inner: usize) -> FusionTreePairKey {
     all_codomain_fusion_tree_test_key_for_rule(
         &SimpleSu2Rule,
@@ -658,13 +663,9 @@ fn su2_first_pair_braid_lowers_nonidentity_monomial_group_to_singles() {
         )
         .unwrap()
     };
-    let (serial, serial_hits, serial_misses) = build(1);
-    let (parallel, parallel_hits, parallel_misses) = build(4);
+    let serial = build(1);
+    let parallel = build(4);
     assert_eq!(parallel, serial);
-    assert_eq!(
-        (parallel_hits, parallel_misses),
-        (serial_hits, serial_misses)
-    );
 
     // What: direct replay honors alpha/beta and overwrite on strided blocks
     // without touching storage padding or allocating pack/GEMM/scatter jobs.
@@ -1151,9 +1152,9 @@ fn tree_transform_structure_replays_su2_recoupling_without_recompiling() {
 }
 
 #[test]
-fn parallel_plan_compile_matches_serial_plan_and_row_stats() {
+fn parallel_plan_compile_matches_serial_plan() {
     // What: shared group compilation produces the same transformer,
-    // source/group order, and compile-local row accounting.
+    // source order, and group order.
     use crate::tree_transform::{
         build_tree_pair_transform_group_plan_validated_with_threads,
         validate_multiplicity_free_tree_pair_preflight,
@@ -1196,16 +1197,9 @@ fn parallel_plan_compile_matches_serial_plan_and_row_stats() {
         .unwrap()
     };
 
-    let (serial_plan, serial_hits, serial_misses) = build(1);
-    let (parallel_plan, parallel_hits, parallel_misses) = build(8);
-
+    let serial_plan = build(1);
+    let parallel_plan = build(8);
     assert_eq!(parallel_plan, serial_plan);
-    assert_eq!(
-        (parallel_hits, parallel_misses),
-        (serial_hits, serial_misses)
-    );
-    assert_eq!(parallel_hits, 0);
-    assert!(parallel_misses > 0);
 }
 
 #[test]
@@ -1248,10 +1242,9 @@ fn all_codomain_canonical_empty_domain_row_is_thread_count_invariant() {
 
         let mut expected_plan = None;
         for threads in [1, 2, 4] {
-            let (cold, hits, misses) = build(threads);
+            let cold = build(threads);
             // What: the mandatory vacuum removes the prior empty-domain alias,
-            // and its canonical row has worker-count-independent compile stats.
-            assert_eq!((hits, misses), (0, 1));
+            // and its canonical transform is worker-count-independent.
             if let Some(expected) = &expected_plan {
                 assert_eq!(&cold, expected);
             } else {
@@ -1357,14 +1350,9 @@ fn split_only_repartition_plan_matches_serial_and_parallel_builders() {
         .unwrap()
     };
 
-    let (serial, serial_hits, serial_misses) = build(1);
-    let (parallel, parallel_hits, parallel_misses) = build(8);
+    let serial = build(1);
+    let parallel = build(8);
     assert_eq!(parallel, serial);
-    assert_eq!(
-        (parallel_hits, parallel_misses),
-        (serial_hits, serial_misses)
-    );
-    assert_eq!((serial_hits, serial_misses), (0, 1));
 
     let spec = &serial.specs()[0];
     assert_eq!(spec.dst_keys(), &[expected[0].0.clone()]);
@@ -1406,14 +1394,9 @@ fn identity_group_plan_lowers_each_su2_tree_to_a_direct_single() {
         .unwrap()
     };
 
-    let (serial, serial_hits, serial_misses) = build(1);
-    let (parallel, parallel_hits, parallel_misses) = build(8);
+    let serial = build(1);
+    let parallel = build(8);
     assert_eq!(parallel, serial);
-    assert_eq!(
-        (parallel_hits, parallel_misses),
-        (serial_hits, serial_misses)
-    );
-    assert_eq!(serial_misses, keys.len());
     assert_eq!(serial.specs().len(), keys.len());
     for spec in serial.specs() {
         assert_eq!(spec.src_keys().len(), 1);
@@ -1682,9 +1665,7 @@ fn tree_pair_plan_miss_does_not_retain_source_rows() {
     cache
         .get_or_compile_tree_pair(&SU2FusionRule, operation.clone(), &dst1, &src1)
         .unwrap();
-    let misses_after_first = cache.stats().tree_row_misses();
-    assert!(misses_after_first > 0);
-    assert_eq!(cache.stats().tree_row_hits(), 0);
+    assert_eq!(legacy_tree_row_stats(cache.stats()), (0, 0));
 
     // What: a different source tree set recompiles its whole block without
     // reporting cross-plan row hits from hidden retained state.
@@ -1693,11 +1674,7 @@ fn tree_pair_plan_miss_does_not_retain_source_rows() {
         .get_or_compile_tree_pair(&SU2FusionRule, operation.clone(), &dst2, &src2)
         .unwrap();
     assert_eq!(cache.stats().plan_misses(), 2);
-    assert_eq!(cache.stats().tree_row_hits(), 0);
-    assert_eq!(
-        cache.stats().tree_row_misses(),
-        misses_after_first + destination_keys.len()
-    );
+    assert_eq!(legacy_tree_row_stats(cache.stats()), (0, 0));
 }
 
 fn malformed_simple_su2_tree_pair_tensors() -> (TensorMap<f64, 2, 0>, TensorMap<f64, 2, 0>) {
@@ -2652,7 +2629,7 @@ fn independent_tree_transform_contexts_compile_their_own_artifacts() {
         };
     let first_data = run(&mut first);
     assert_eq!(first.cache().stats().plan_misses(), 1);
-    assert!(first.cache().stats().tree_row_misses() > 0);
+    assert_eq!(legacy_tree_row_stats(first.cache().stats()), (0, 0));
     assert!(calls.load(Ordering::Relaxed) > 0);
 
     calls.store(0, Ordering::Relaxed);
@@ -2660,8 +2637,7 @@ fn independent_tree_transform_contexts_compile_their_own_artifacts() {
         TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
     let second_data = run(&mut second);
     assert_eq!(second.cache().stats().plan_misses(), 1);
-    assert!(second.cache().stats().tree_row_misses() > 0);
-    assert_eq!(second.cache().stats().tree_row_hits(), 0);
+    assert_eq!(legacy_tree_row_stats(second.cache().stats()), (0, 0));
     assert!(calls.load(Ordering::Relaxed) > 0);
 
     // What: a fresh execution context recompiles the exact SU(2) transform
@@ -2937,17 +2913,15 @@ fn all_codomain_plan_miss_does_not_retain_source_rows() {
     cache
         .get_or_compile_all_codomain(&SU2FusionRule, operation.clone(), &dst_small, &src_small)
         .unwrap();
-    assert_eq!(cache.stats().tree_row_hits(), 0);
-    assert_eq!(cache.stats().tree_row_misses(), 2);
+    assert_eq!(legacy_tree_row_stats(cache.stats()), (0, 0));
 
     let cached_structure = cache
         .get_or_compile_all_codomain(&SU2FusionRule, operation.clone(), &dst_cached, &src_big)
         .unwrap();
     assert_eq!(cache.stats().plan_misses(), 2);
-    // What: a different all-codomain source set compiles every distinct
-    // source row again while preserving the direct ordered numerical result.
-    assert_eq!(cache.stats().tree_row_hits(), 0);
-    assert_eq!(cache.stats().tree_row_misses(), 6);
+    // What: a different all-codomain source set preserves the direct ordered
+    // numerical result without reviving retained row-cache statistics.
+    assert_eq!(legacy_tree_row_stats(cache.stats()), (0, 0));
 
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
@@ -3132,7 +3106,7 @@ fn all_codomain_artifacts_do_not_cross_context_boundaries() {
     assert_eq!(first.stats().structure_hits(), 1);
     assert_eq!(fresh.stats().plan_hits(), 0);
     assert_eq!(fresh.stats().plan_misses(), 1);
-    assert!(fresh.stats().tree_row_misses() > 0);
+    assert_eq!(legacy_tree_row_stats(fresh.stats()), (0, 0));
 }
 
 #[test]
@@ -3196,6 +3170,7 @@ fn tree_transform_execution_context_no_cache_rebuilds_without_retaining_entries(
         assert_eq!(context.cache().stats().structure_hits(), 0);
         assert_eq!(context.cache().stats().plan_misses(), expected_misses);
         assert_eq!(context.cache().stats().structure_misses(), expected_misses);
+        assert_eq!(legacy_tree_row_stats(context.cache().stats()), (0, 0));
     }
 
     let expected = dst.data().to_vec();
@@ -3222,6 +3197,10 @@ fn tree_transform_execution_context_no_cache_rebuilds_without_retaining_entries(
         // What: cache ownership and eviction policy do not change the tensor
         // produced by the shared eager compiler.
         assert_eq!(policy_dst.data(), expected);
+        assert_eq!(
+            legacy_tree_row_stats(policy_context.cache().stats()),
+            (0, 0)
+        );
     }
 }
 
@@ -3880,6 +3859,53 @@ fn eager_simple_plan_prepares_once_per_distinct_source_split() {
 }
 
 #[test]
+fn rank_nine_same_split_groups_prepare_once_and_lower_once_each() {
+    // What: rank beyond the prepared operation's inline capacity does not
+    // clone spilled step storage for each same-split fusion group.
+    use crate::tree_transform::{
+        build_tree_pair_transform_group_plan_validated_with_threads,
+        reset_tree_pair_lowering_calls, reset_tree_pair_operation_preparations,
+        tree_pair_lowering_calls, tree_pair_operation_preparations,
+        validate_multiplicity_free_tree_pair_preflight,
+    };
+
+    let vacuum = SU2FusionRule.vacuum();
+    let keys = [0usize, 1, 2].map(|twice_spin| {
+        let mut uncoupled = [vacuum; 9];
+        uncoupled[0] = SectorId::new(twice_spin);
+        uncoupled[1] = SectorId::new(twice_spin);
+        BlockKey::from(FusionTreePairKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &SU2FusionRule,
+                uncoupled,
+                vacuum,
+                [false; 9],
+                [vacuum; 7],
+                [MultiplicityIndex::ONE; 8],
+            )
+            .unwrap(),
+            empty_fusion_tree(),
+        ))
+    });
+    let structure =
+        packed_fixture_structure(9, keys.into_iter().map(|key| (key, vec![1usize; 9]))).unwrap();
+    let operation = TreeTransformOperation::braid([1, 0, 2, 3, 4, 5, 6, 7, 8], [], 0..9, []);
+    let proof =
+        validate_multiplicity_free_tree_pair_preflight(&SU2FusionRule, &operation, &structure)
+            .unwrap();
+
+    reset_tree_pair_operation_preparations();
+    reset_tree_pair_lowering_calls();
+    let plan =
+        build_tree_pair_transform_group_plan_validated_with_threads(&proof, operation, 1).unwrap();
+
+    assert_eq!(structure.fusion_tree_groups().len(), 3);
+    assert_eq!(tree_pair_operation_preparations(), 1);
+    assert_eq!(tree_pair_lowering_calls(), (3, 0));
+    assert_eq!(plan.specs().len(), 3);
+}
+
+#[test]
 fn eager_su2_dense_tree_pair_plan_matches_legacy_replay() {
     use crate::tree_transform::{reset_tree_pair_lowering_calls, tree_pair_lowering_calls};
 
@@ -3994,13 +4020,12 @@ fn product_tree_pair_plan_is_thread_count_invariant() {
         .unwrap()
     };
 
-    let (serial, serial_hits, serial_misses) = build(1);
+    let serial = build(1);
     for threads in [2, 4] {
-        let (threaded, hits, misses) = build(threads);
-        // What: product-symmetry fermionic phases, plan order, and cold row
-        // accounting are identical when scheduling the same fusion groups.
+        let threaded = build(threads);
+        // What: product-symmetry fermionic phases and plan order are identical
+        // when scheduling the same fusion groups.
         assert_eq!(threaded, serial);
-        assert_eq!((hits, misses), (serial_hits, serial_misses));
         threaded
             .compile_structures(
                 dst_space.subblock_structure(),
@@ -4008,8 +4033,6 @@ fn product_tree_pair_plan_is_thread_count_invariant() {
             )
             .unwrap();
     }
-    assert_eq!(serial_hits, 0);
-    assert_eq!(serial_misses, 2);
     assert!((single_transform_coefficient_for_coupled(&serial, c0) - 1.0).abs() < 1.0e-12);
     assert!((single_transform_coefficient_for_coupled(&serial, c1) + 1.0).abs() < 1.0e-12);
 }
@@ -4082,7 +4105,7 @@ fn product_tree_transform_reuse_is_owned_by_one_explicit_context() {
     assert_eq!(fresh_structure.as_ref(), cold.as_ref());
     assert_eq!(fresh.stats().plan_hits(), 0);
     assert_eq!(fresh.stats().plan_misses(), 1);
-    assert!(fresh.stats().tree_row_misses() > 0);
+    assert_eq!(legacy_tree_row_stats(fresh.stats()), (0, 0));
 
     let mut no_cache =
         TreeTransformCache::<f64, RuleKey>::with_policy(OperationCachePolicy::NoCache);

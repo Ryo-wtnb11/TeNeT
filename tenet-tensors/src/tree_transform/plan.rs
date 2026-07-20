@@ -445,22 +445,19 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
 {
     build_tree_pair_transform_group_plan_validated_with_threads(source_proof, operation, 1)
-        .map(|(plan, _, _)| plan)
 }
 
 pub(crate) fn build_all_codomain_tree_transform_group_plan_validated_with_threads<R>(
     source_proof: &LocallyValidatedAllCodomainFusionTreeBlockStructure<'_, '_, R>,
     operation: TreeTransformOperation,
     threads: usize,
-) -> Result<(TreeTransformGroupPlan<R::Scalar>, usize, usize), OperationError>
+) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeFusionSymbols + Sync,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
 {
     if source_proof.rule().fusion_style() == FusionStyleKind::Unique {
-        let plan =
-            build_unique_all_codomain_tree_transform_group_plan_validated(source_proof, operation)?;
-        Ok((plan, 0, 0))
+        build_unique_all_codomain_tree_transform_group_plan_validated(source_proof, operation)
     } else {
         build_multiplicity_free_all_codomain_tree_transform_group_plan_validated_with_threads(
             source_proof,
@@ -474,14 +471,13 @@ pub(crate) fn build_tree_pair_transform_group_plan_validated_with_threads<R>(
     source_proof: &LocallyValidatedFusionTreeBlockStructure<'_, '_, R>,
     operation: TreeTransformOperation,
     threads: usize,
-) -> Result<(TreeTransformGroupPlan<R::Scalar>, usize, usize), OperationError>
+) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
 {
     if source_proof.rule().fusion_style() == FusionStyleKind::Unique {
-        let plan = build_unique_tree_pair_transform_group_plan_validated(source_proof, operation)?;
-        Ok((plan, 0, 0))
+        build_unique_tree_pair_transform_group_plan_validated(source_proof, operation)
     } else {
         build_multiplicity_free_tree_pair_transform_group_plan_validated_with_threads(
             source_proof,
@@ -617,15 +613,12 @@ where
     let source_axes = operation_source_axes(&operation);
     let mut specs = Vec::new();
     for group in src_structure.fusion_tree_group_slice() {
-        specs.extend(
-            build_one_multiplicity_free_all_codomain_group(
-                source_proof,
-                &operation,
-                &source_axes,
-                group,
-            )?
-            .0,
-        );
+        specs.extend(build_one_multiplicity_free_all_codomain_group(
+            source_proof,
+            &operation,
+            &source_axes,
+            group,
+        )?);
     }
     Ok(TreeTransformGroupPlan::new(specs))
 }
@@ -635,7 +628,7 @@ fn build_one_multiplicity_free_all_codomain_group<R>(
     operation: &TreeTransformOperation,
     source_axes: &Arc<[usize]>,
     group: &FusionTreeBlockGroup,
-) -> Result<(Vec<TreeTransformGroupBlockSpec<R::Scalar>>, usize, usize), OperationError>
+) -> Result<Vec<TreeTransformGroupBlockSpec<R::Scalar>>, OperationError>
 where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
@@ -706,18 +699,14 @@ where
             tensor: "compile-local all-codomain row order",
         });
     }
-    Ok((
-        specs,
-        source_alignment.len() - unique_indices.len(),
-        unique_indices.len(),
-    ))
+    Ok(specs)
 }
 
 fn build_multiplicity_free_all_codomain_tree_transform_group_plan_validated_with_threads<R>(
     source_proof: &LocallyValidatedAllCodomainFusionTreeBlockStructure<'_, '_, R>,
     operation: TreeTransformOperation,
     threads: usize,
-) -> Result<(TreeTransformGroupPlan<R::Scalar>, usize, usize), OperationError>
+) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeFusionSymbols + Sync,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
@@ -738,14 +727,10 @@ where
     })?;
 
     let mut specs = Vec::new();
-    let mut row_hits = 0usize;
-    let mut row_misses = 0usize;
-    for (group_specs, hits, misses) in completed {
+    for group_specs in completed {
         specs.extend(group_specs);
-        row_hits += hits;
-        row_misses += misses;
     }
-    Ok((TreeTransformGroupPlan::new(specs), row_hits, row_misses))
+    Ok(TreeTransformGroupPlan::new(specs))
 }
 
 type TransformRows<K, T> = Vec<(K, T)>;
@@ -1314,7 +1299,7 @@ fn build_multiplicity_free_tree_pair_transform_group_plan_validated_with_threads
     source_proof: &LocallyValidatedFusionTreeBlockStructure<'_, '_, R>,
     operation: TreeTransformOperation,
     threads: usize,
-) -> Result<(TreeTransformGroupPlan<R::Scalar>, usize, usize), OperationError>
+) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
@@ -1329,38 +1314,43 @@ where
             group.group_key().codomain_uncoupled().len(),
             group.group_key().domain_uncoupled().len(),
         );
-        let prepared = prepared_tree_pair_operation_for_split(
+        prepared_tree_pair_operation_for_split(
             &mut primary_prepared,
             &mut additional_prepared,
             source_proof.rule(),
             &operation,
             source_split,
-        )?
-        .clone();
-        staged_groups.push((group, prepared));
+        )?;
+        // Why not stage the prepared value itself: ranks beyond its inline
+        // step capacity would deep-clone spilled storage once per group.
+        staged_groups.push((group, source_split));
     }
 
-    let completed = execute_staged_groups(staged_groups, threads, |(group, prepared)| {
-        let source_count = group.block_indices().len();
-        let specs = build_one_multiplicity_free_tree_pair_group(
+    let completed = execute_staged_groups(staged_groups, threads, |(group, source_split)| {
+        let prepared = primary_prepared
+            .as_ref()
+            .filter(|(split, _)| *split == source_split)
+            .map(|(_, prepared)| prepared)
+            .or_else(|| {
+                additional_prepared
+                    .as_ref()
+                    .and_then(|prepared| prepared.get(&source_split))
+            })
+            .expect("every staged source split was prepared");
+        build_one_multiplicity_free_tree_pair_group(
             source_proof,
             &operation,
             &source_axes,
             group,
-            &prepared,
-        )?;
-        Ok((specs, 0usize, source_count))
+            prepared,
+        )
     })?;
 
     let mut specs = Vec::new();
-    let mut row_hits = 0usize;
-    let mut row_misses = 0usize;
-    for (group_specs, hits, misses) in completed {
+    for group_specs in completed {
         specs.extend(group_specs);
-        row_hits += hits;
-        row_misses += misses;
     }
-    Ok((TreeTransformGroupPlan::new(specs), row_hits, row_misses))
+    Ok(TreeTransformGroupPlan::new(specs))
 }
 
 #[cfg(test)]
