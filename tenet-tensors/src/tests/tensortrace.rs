@@ -1516,6 +1516,270 @@ fn tensortrace_fusion_with_conjugation_lowers_lazy_adjoint_supertrace() {
 }
 
 #[test]
+fn dynamic_u1_conjugating_trace_matches_hand_indexed_logical_adjoint() {
+    let rule = U1FusionRule;
+    let charge = U1Irrep::new(1).sector_id();
+    let neutral = U1Irrep::new(0).sector_id();
+    let charged_leg = || SectorLeg::new([(charge, 2)], false);
+    let neutral_leg = || SectorLeg::new([(neutral, 3)], false);
+    let src_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([charged_leg(), neutral_leg()]),
+        FusionProductSpace::new([charged_leg()]),
+    );
+    let src_fusion = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<2, 1>::from_dims([2, 3], [2]).unwrap(),
+        src_hom.clone(),
+        &rule,
+        [vec![2, 3, 2]],
+    )
+    .unwrap();
+    let src_data = (1..=12)
+        .map(|value| Complex64::new(value as f64, value as f64 + 0.25))
+        .collect::<Vec<_>>();
+    let src: TensorMap<Complex64, 2, 1> =
+        TensorMap::from_vec_with_fusion_space(src_data.clone(), src_fusion).unwrap();
+
+    let dst_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([]),
+        FusionProductSpace::new([neutral_leg()]),
+    );
+    let dst_fusion = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<0, 1>::from_dims([], [3]).unwrap(),
+        dst_hom.clone(),
+        &rule,
+        [vec![3]],
+    )
+    .unwrap();
+    let initial = vec![
+        Complex64::new(1.0, 2.0),
+        Complex64::new(3.0, 4.0),
+        Complex64::new(5.0, 6.0),
+    ];
+    let alpha = Complex64::new(2.0, -1.0);
+    let beta = Complex64::new(-0.5, 0.25);
+    let axes = TensorTraceAxisSpec::new_with_conjugation(&[1], &[0], &[2], true);
+
+    // What: source storage is column-major [charged, neutral, charged].
+    // The logical adjoint swaps the HomSpace sides, remaps axes, and traces
+    // exactly the original storage diagonal before conjugating each value.
+    let hand_trace = [
+        src_data[0].conj() + src_data[7].conj(),
+        src_data[2].conj() + src_data[9].conj(),
+        src_data[4].conj() + src_data[11].conj(),
+    ];
+    let expected = initial
+        .iter()
+        .zip(hand_trace)
+        .map(|(&dst, trace)| beta * dst + alpha * trace)
+        .collect::<Vec<_>>();
+
+    let mut typed: TensorMap<Complex64, 0, 1> =
+        TensorMap::from_vec_with_fusion_space(initial.clone(), dst_fusion).unwrap();
+    tensortrace_fusion_into(&rule, &mut typed, &src, axes, alpha, beta).unwrap();
+    assert_eq!(typed.data(), expected);
+
+    let provider = std::sync::Arc::new(rule);
+    let dynamic_src = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+        std::sync::Arc::clone(&provider),
+        src_hom,
+        [vec![2, 3, 2]],
+    )
+    .unwrap();
+    let dynamic_dst =
+        BoundDynamicFusionMapSpace::from_degeneracy_shapes(provider, dst_hom, [vec![3]]).unwrap();
+    let mut unchecked = initial.clone();
+    tensortrace_fusion_dyn_into(
+        &dynamic_dst,
+        &mut unchecked,
+        &dynamic_src,
+        &src_data,
+        axes,
+        alpha,
+        beta,
+    )
+    .unwrap();
+    assert_eq!(unchecked, expected);
+
+    let mut checked = initial.clone();
+    tensortrace_fusion_dyn_into_checked(
+        &dynamic_dst,
+        &mut checked,
+        &dynamic_src,
+        &src_data,
+        axes,
+        alpha,
+        beta,
+    )
+    .unwrap();
+    assert_eq!(checked, expected);
+
+    let mut unchanged = initial.clone();
+    let error = tensortrace_fusion_dyn_into_checked(
+        &dynamic_dst,
+        &mut unchanged,
+        &dynamic_src,
+        &src_data[..11],
+        axes,
+        alpha,
+        beta,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        OperationError::ElementCountMismatch {
+            expected: 12,
+            actual: 11,
+        }
+    );
+    assert_eq!(unchanged, initial);
+}
+
+#[test]
+fn dynamic_u1_nonconjugating_trace_keeps_parent_axis_geometry() {
+    let charge = U1Irrep::new(1).sector_id();
+    let neutral = U1Irrep::new(0).sector_id();
+    let charged_leg = || SectorLeg::new([(charge, 2)], false);
+    let neutral_leg = || SectorLeg::new([(neutral, 3)], false);
+    let provider = std::sync::Arc::new(U1FusionRule);
+    let src = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+        std::sync::Arc::clone(&provider),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([charged_leg(), neutral_leg()]),
+            FusionProductSpace::new([charged_leg()]),
+        ),
+        [vec![2, 3, 2]],
+    )
+    .unwrap();
+    let dst = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+        provider,
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([neutral_leg()]),
+            FusionProductSpace::new([]),
+        ),
+        [vec![3]],
+    )
+    .unwrap();
+    let src_data = (1..=12)
+        .map(|value| Complex64::new(value as f64, value as f64 + 0.25))
+        .collect::<Vec<_>>();
+    let expected = vec![
+        src_data[0] + src_data[7],
+        src_data[2] + src_data[9],
+        src_data[4] + src_data[11],
+    ];
+    let mut actual = vec![Complex64::new(0.0, 0.0); 3];
+
+    tensortrace_fusion_dyn_into(
+        &dst,
+        &mut actual,
+        &src,
+        &src_data,
+        TensorTraceAxisSpec::new(&[1], &[0], &[2]),
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 0.0),
+    )
+    .unwrap();
+
+    // What: disabling conjugation retains the source HomSpace and values.
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn dynamic_u1_adjoint_trace_replays_two_pairs_from_padded_storage() {
+    let rule = U1FusionRule;
+    let provider = std::sync::Arc::new(rule);
+    let leg = |charge, degeneracy| {
+        SectorLeg::new([(U1Irrep::new(charge).sector_id(), degeneracy)], false)
+    };
+    let src_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(1, 2), leg(-1, 2), leg(2, 2), leg(-2, 3)]),
+        FusionProductSpace::new([leg(1, 2), leg(-1, 2)]),
+    );
+    let dense = TensorMapSpace::<4, 2>::from_dims([2, 2, 2, 3], [2, 2]).unwrap();
+    let canonical = FusionTensorMapSpace::from_degeneracy_shapes(
+        dense.clone(),
+        src_hom.clone(),
+        &rule,
+        [vec![2, 2, 2, 3, 2, 2]],
+    )
+    .unwrap();
+    let key = canonical
+        .subblock_structure()
+        .block(0)
+        .unwrap()
+        .key()
+        .clone();
+    let padded = FusionTensorMapSpace::new_unbound(
+        dense,
+        src_hom,
+        BlockStructure::from_blocks_with_rank(
+            6,
+            vec![
+                BlockSpec::with_key(key, vec![2, 2, 2, 3, 2, 2], vec![1, 3, 6, 12, 36, 72], 1)
+                    .unwrap(),
+            ],
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .try_bind_rule(&rule)
+    .unwrap();
+    let src = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        DynamicFusionMapSpace::from_typed(&padded),
+        std::sync::Arc::clone(&provider),
+    )
+    .unwrap();
+    let dst = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+        provider,
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([]),
+            FusionProductSpace::new([leg(-2, 3), leg(2, 2)]),
+        ),
+        [vec![3, 2]],
+    )
+    .unwrap();
+    let src_data = (0..144)
+        .map(|index| Complex64::new(index as f64, index as f64 + 0.5))
+        .collect::<Vec<_>>();
+    let initial = (1..=6)
+        .map(|value| Complex64::new(value as f64, -(value as f64)))
+        .collect::<Vec<_>>();
+    let alpha = Complex64::new(0.75, -1.25);
+    let beta = Complex64::new(-0.5, 0.125);
+    let traced_offsets = [
+        [1, 38, 76, 113],
+        [13, 50, 88, 125],
+        [25, 62, 100, 137],
+        [7, 44, 82, 119],
+        [19, 56, 94, 131],
+        [31, 68, 106, 143],
+    ];
+    let expected = traced_offsets
+        .map(|offsets| {
+            offsets
+                .map(|offset| src_data[offset].conj())
+                .into_iter()
+                .sum::<Complex64>()
+        })
+        .into_iter()
+        .zip(&initial)
+        .map(|(trace, &dst)| alpha * trace + beta * dst)
+        .collect::<Vec<_>>();
+    let axes = TensorTraceAxisSpec::new_with_conjugation(&[3, 2], &[0, 1], &[4, 5], true);
+
+    let mut unchecked = initial.clone();
+    tensortrace_fusion_dyn_into(&dst, &mut unchecked, &src, &src_data, axes, alpha, beta).unwrap();
+    let mut checked = initial;
+    tensortrace_fusion_dyn_into_checked(&dst, &mut checked, &src, &src_data, axes, alpha, beta)
+        .unwrap();
+
+    // What: logical adjoint lowering remaps two trace pairs and the reversed
+    // retained axes while reading only the hand-indexed padded storage cells.
+    assert_eq!(unchecked, expected);
+    assert_eq!(checked, expected);
+}
+
+#[test]
 fn tensortrace_fusion_scales_destination_once_for_multiple_source_terms() {
     let rule = FermionParityFusionRule;
     let even = SectorId::new(0);

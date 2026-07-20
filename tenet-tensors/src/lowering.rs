@@ -228,11 +228,19 @@ impl LoweredTensorTraceAxisSpec {
 pub(crate) fn lower_tensortrace_source_adjoint_axes<const SRC_NOUT: usize, const SRC_NIN: usize>(
     axes: TensorTraceAxisSpec<'_>,
 ) -> Result<LoweredTensorTraceAxisSpec, OperationError> {
+    lower_tensortrace_source_adjoint_axes_dyn(SRC_NOUT, SRC_NIN, axes)
+}
+
+pub(crate) fn lower_tensortrace_source_adjoint_axes_dyn(
+    src_nout: usize,
+    src_nin: usize,
+    axes: TensorTraceAxisSpec<'_>,
+) -> Result<LoweredTensorTraceAxisSpec, OperationError> {
     if axes.source_conjugate() {
         Ok(LoweredTensorTraceAxisSpec {
-            output_axes: adjoint_tensor_axes(SRC_NOUT, SRC_NIN, axes.output_axes())?,
-            trace_lhs_axes: adjoint_tensor_axes(SRC_NOUT, SRC_NIN, axes.trace_lhs_axes())?,
-            trace_rhs_axes: adjoint_tensor_axes(SRC_NOUT, SRC_NIN, axes.trace_rhs_axes())?,
+            output_axes: adjoint_tensor_axes(src_nout, src_nin, axes.output_axes())?,
+            trace_lhs_axes: adjoint_tensor_axes(src_nout, src_nin, axes.trace_lhs_axes())?,
+            trace_rhs_axes: adjoint_tensor_axes(src_nout, src_nin, axes.trace_rhs_axes())?,
             storage_conjugate: true,
         })
     } else {
