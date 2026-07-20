@@ -319,11 +319,63 @@ fn tensorcontract_fusion_su2_swap_matches_explicit_permute_then_compose() {
             "swap vs permute+compose mismatch at {index}: {actual} vs {expected}"
         );
     }
+
+    let dst_dyn = DynamicFusionMapSpace::from_typed(dst_compose.fusion_space().unwrap());
+    let lhs_dyn = DynamicFusionMapSpace::from_typed(lhs.fusion_space().unwrap());
+    let rhs_dyn = DynamicFusionMapSpace::from_typed(rhs.fusion_space().unwrap());
+    for candidate in crate::contract::contracted_axis_order_candidates(&[3, 2], &[0, 1]) {
+        for orientation in [
+            crate::contract::FusionContractOrientation::LhsRhs,
+            crate::contract::FusionContractOrientation::RhsLhs,
+        ] {
+            let plan = crate::contract::prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation(
+                &rule,
+                &dst_dyn,
+                &lhs_dyn,
+                &rhs_dyn,
+                TensorContractSpec::new(
+                    &[3, 2],
+                    &[0, 1],
+                    OutputAxisOrder::from_axes(&[0, 1, 2, 3]),
+                ),
+                &candidate,
+                orientation,
+            )
+            .unwrap();
+            let mut actual = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+                vec![0.0; len],
+                tensor_space.clone(),
+            )
+            .unwrap();
+            let mut tree_backend = DenseTreeTransformOperations::default_executor();
+            let mut tree_workspace = TreeTransformWorkspace::default();
+            let mut contract_backend = DenseTreeTransformOperations::default_executor();
+            let mut contract_workspace = TensorContractWorkspace::default();
+            crate::contract::tensorcontract_fusion_dynamic_plan_into_with(
+                &mut tree_backend,
+                &mut tree_workspace,
+                &mut contract_backend,
+                &mut contract_workspace,
+                &rule,
+                &plan,
+                &mut actual,
+                &lhs,
+                &rhs,
+                1.0,
+                0.0,
+            )
+            .unwrap();
+            for (&actual, &expected) in actual.data().iter().zip(dst_compose.data()) {
+                assert!((actual - expected).abs() < 1.0e-10);
+            }
+        }
+    }
 }
 
 #[test]
 fn forced_axis_order_candidates_have_identical_u1_result() {
-    // What: both paired caller orders produce the same U1 contraction result.
+    // What: both paired caller orders and both operand orientations produce
+    // the same U1 contraction result.
     let rule = U1FusionRule;
     let sectors = [
         U1Irrep::new(-1).sector_id(),
@@ -358,41 +410,50 @@ fn forced_axis_order_candidates_have_identical_u1_result() {
     let rhs_dyn = DynamicFusionMapSpace::from_typed(&space);
     let mut outputs = Vec::new();
     for candidate in candidates.iter().take(2) {
-        let plan = crate::contract::prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order(
-            &rule,
-            &dst_dyn,
-            &lhs_dyn,
-            &rhs_dyn,
-            TensorContractSpec::new(&[3, 2], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
-            candidate,
-        )
-        .unwrap();
-        let mut dst =
-            TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; len], space.clone())
-                .unwrap();
-        let mut tree_backend = DenseTreeTransformOperations::default_executor();
-        let mut tree_workspace = TreeTransformWorkspace::default();
-        let mut contract_backend = DenseTreeTransformOperations::default_executor();
-        let mut contract_workspace = TensorContractWorkspace::default();
-        crate::contract::tensorcontract_fusion_dynamic_plan_into_with(
-            &mut tree_backend,
-            &mut tree_workspace,
-            &mut contract_backend,
-            &mut contract_workspace,
-            &rule,
-            &plan,
-            &mut dst,
-            &lhs,
-            &rhs,
-            1.0,
-            0.0,
-        )
-        .unwrap();
-        outputs.push(dst);
+        for orientation in [
+            crate::contract::FusionContractOrientation::LhsRhs,
+            crate::contract::FusionContractOrientation::RhsLhs,
+        ] {
+            let plan = crate::contract::prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation(
+                &rule,
+                &dst_dyn,
+                &lhs_dyn,
+                &rhs_dyn,
+                TensorContractSpec::new(&[3, 2], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
+                candidate,
+                orientation,
+            )
+            .unwrap();
+            let mut dst =
+                TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; len], space.clone())
+                    .unwrap();
+            let mut tree_backend = DenseTreeTransformOperations::default_executor();
+            let mut tree_workspace = TreeTransformWorkspace::default();
+            let mut contract_backend = DenseTreeTransformOperations::default_executor();
+            let mut contract_workspace = TensorContractWorkspace::default();
+            crate::contract::tensorcontract_fusion_dynamic_plan_into_with(
+                &mut tree_backend,
+                &mut tree_workspace,
+                &mut contract_backend,
+                &mut contract_workspace,
+                &rule,
+                &plan,
+                &mut dst,
+                &lhs,
+                &rhs,
+                1.0,
+                0.0,
+            )
+            .unwrap();
+            outputs.push(dst);
+        }
     }
-    assert_eq!(outputs[0].fusion_space(), outputs[1].fusion_space());
-    for (a, b) in outputs[0].data().iter().zip(outputs[1].data()) {
-        assert!((a - b).abs() < 1.0e-10, "candidate mismatch: {a} vs {b}");
+    assert_eq!(outputs.len(), 4);
+    for output in &outputs[1..] {
+        assert_eq!(outputs[0].fusion_space(), output.fusion_space());
+        for (a, b) in outputs[0].data().iter().zip(output.data()) {
+            assert!((a - b).abs() < 1.0e-10, "candidate mismatch: {a} vs {b}");
+        }
     }
     let selected = prepare_tensorcontract_fusion_plan(
         &rule,
@@ -459,6 +520,158 @@ fn forced_axis_order_candidates_have_identical_u1_result() {
     {
         assert!((*actual - *expected).abs() < 1.0e-10);
         assert!((*actual - *fixed).abs() < 1.0e-10);
+    }
+}
+
+#[test]
+fn forced_orientations_match_asymmetric_u1_reduced_block_oracle() {
+    let rule = U1FusionRule;
+    let neutral = U1Irrep::new(0).sector_id();
+    let leg = |dimension| SectorLeg::new([(neutral, dimension)], false);
+    let lhs_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(2), leg(3)]),
+        FusionProductSpace::new([leg(4), leg(5)]),
+    );
+    let rhs_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(5), leg(4)]),
+        FusionProductSpace::new([leg(6), leg(7)]),
+    );
+    let output_axes = [1, 0, 3, 2];
+    let dst_hom = FusionTreeHomSpace::tensorcontract_homspace(
+        &rule,
+        &lhs_hom,
+        &rhs_hom,
+        &[3, 2],
+        &[0, 1],
+        &output_axes,
+        2,
+    )
+    .unwrap();
+    let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<2, 2>::from_dims([2, 3], [4, 5]).unwrap(),
+        lhs_hom,
+        &rule,
+        [vec![2, 3, 4, 5]],
+    )
+    .unwrap();
+    let rhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<2, 2>::from_dims([5, 4], [6, 7]).unwrap(),
+        rhs_hom,
+        &rule,
+        [vec![5, 4, 6, 7]],
+    )
+    .unwrap();
+    let dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<2, 2>::from_dims([3, 2], [7, 6]).unwrap(),
+        dst_hom,
+        &rule,
+        [vec![3, 2, 7, 6]],
+    )
+    .unwrap();
+    let lhs = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        (0..lhs_space.required_len().unwrap())
+            .map(|index| index as f64 * 0.125 - 2.0)
+            .collect(),
+        lhs_space,
+    )
+    .unwrap();
+    let rhs = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        (0..rhs_space.required_len().unwrap())
+            .map(|index| 1.5 - index as f64 * 0.0625)
+            .collect(),
+        rhs_space,
+    )
+    .unwrap();
+    let initial = (0..dst_space.required_len().unwrap())
+        .map(|index| index as f64 * 0.25 + 0.5)
+        .collect::<Vec<_>>();
+    let alpha = 1.25;
+    let beta = -0.75;
+    let lhs_block = lhs.structure().block(0).unwrap();
+    let rhs_block = rhs.structure().block(0).unwrap();
+    let dst_block = dst_space.subblock_structure().block(0).unwrap();
+    let mut expected = initial.iter().map(|value| beta * value).collect::<Vec<_>>();
+    for l0 in 0..2 {
+        for l1 in 0..3 {
+            for r2 in 0..6 {
+                for r3 in 0..7 {
+                    let mut sum = 0.0;
+                    for c0 in 0..4 {
+                        for c1 in 0..5 {
+                            let lhs_offset = lhs_block.offset()
+                                + [l0, l1, c0, c1]
+                                    .iter()
+                                    .zip(lhs_block.strides())
+                                    .map(|(&index, &stride)| index * stride)
+                                    .sum::<usize>();
+                            let rhs_offset = rhs_block.offset()
+                                + [c1, c0, r2, r3]
+                                    .iter()
+                                    .zip(rhs_block.strides())
+                                    .map(|(&index, &stride)| index * stride)
+                                    .sum::<usize>();
+                            sum += lhs.data()[lhs_offset] * rhs.data()[rhs_offset];
+                        }
+                    }
+                    let dst_offset = dst_block.offset()
+                        + [l1, l0, r3, r2]
+                            .iter()
+                            .zip(dst_block.strides())
+                            .map(|(&index, &stride)| index * stride)
+                            .sum::<usize>();
+                    expected[dst_offset] += alpha * sum;
+                }
+            }
+        }
+    }
+
+    let axes = TensorContractSpec::new(&[3, 2], &[0, 1], OutputAxisOrder::from_axes(&output_axes));
+    let candidates = crate::contract::contracted_axis_order_candidates(&[3, 2], &[0, 1]);
+    let dst_dyn = DynamicFusionMapSpace::from_typed(&dst_space);
+    let lhs_dyn = DynamicFusionMapSpace::from_typed(lhs.fusion_space().unwrap());
+    let rhs_dyn = DynamicFusionMapSpace::from_typed(rhs.fusion_space().unwrap());
+    for candidate in candidates.iter().take(2) {
+        for orientation in [
+            crate::contract::FusionContractOrientation::LhsRhs,
+            crate::contract::FusionContractOrientation::RhsLhs,
+        ] {
+            let plan = crate::contract::prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation(
+                &rule,
+                &dst_dyn,
+                &lhs_dyn,
+                &rhs_dyn,
+                axes,
+                candidate,
+                orientation,
+            )
+            .unwrap();
+            let mut dst = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+                initial.clone(),
+                dst_space.clone(),
+            )
+            .unwrap();
+            let mut tree_backend = DenseTreeTransformOperations::default_executor();
+            let mut tree_workspace = TreeTransformWorkspace::default();
+            let mut contract_backend = DenseTreeTransformOperations::default_executor();
+            let mut contract_workspace = TensorContractWorkspace::default();
+            crate::contract::tensorcontract_fusion_dynamic_plan_into_with(
+                &mut tree_backend,
+                &mut tree_workspace,
+                &mut contract_backend,
+                &mut contract_workspace,
+                &rule,
+                &plan,
+                &mut dst,
+                &lhs,
+                &rhs,
+                alpha,
+                beta,
+            )
+            .unwrap();
+            for (&actual, &expected) in dst.data().iter().zip(&expected) {
+                assert!((actual - expected).abs() < 1.0e-10);
+            }
+        }
     }
 }
 
@@ -601,43 +814,52 @@ fn crossed_axis_selection_preserves_real_fermion_parity_complex_result() {
     let rhs_dyn = DynamicFusionMapSpace::from_typed(&space);
     let mut outputs = Vec::new();
     for candidate in candidates.iter().take(2) {
-        let plan = crate::contract::prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order(
-            &rule,
-            &dst_dyn,
-            &lhs_dyn,
-            &rhs_dyn,
-            TensorContractSpec::new(&[3, 2], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
-            candidate,
-        )
-        .unwrap();
-        let mut dst = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
-            vec![Complex64::zero(); len],
-            space.clone(),
-        )
-        .unwrap();
-        let mut tree_backend = DenseTreeTransformOperations::default_executor();
-        let mut tree_workspace = TreeTransformWorkspace::default();
-        let mut contract_backend = DenseTreeTransformOperations::default_executor();
-        let mut contract_workspace = TensorContractWorkspace::default();
-        crate::contract::tensorcontract_fusion_dynamic_plan_into_with(
-            &mut tree_backend,
-            &mut tree_workspace,
-            &mut contract_backend,
-            &mut contract_workspace,
-            &rule,
-            &plan,
-            &mut dst,
-            &lhs,
-            &rhs,
-            Complex64::one(),
-            Complex64::zero(),
-        )
-        .unwrap();
-        outputs.push(dst);
+        for orientation in [
+            crate::contract::FusionContractOrientation::LhsRhs,
+            crate::contract::FusionContractOrientation::RhsLhs,
+        ] {
+            let plan = crate::contract::prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation(
+                &rule,
+                &dst_dyn,
+                &lhs_dyn,
+                &rhs_dyn,
+                TensorContractSpec::new(&[3, 2], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
+                candidate,
+                orientation,
+            )
+            .unwrap();
+            let mut dst = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+                vec![Complex64::zero(); len],
+                space.clone(),
+            )
+            .unwrap();
+            let mut tree_backend = DenseTreeTransformOperations::default_executor();
+            let mut tree_workspace = TreeTransformWorkspace::default();
+            let mut contract_backend = DenseTreeTransformOperations::default_executor();
+            let mut contract_workspace = TensorContractWorkspace::default();
+            crate::contract::tensorcontract_fusion_dynamic_plan_into_with(
+                &mut tree_backend,
+                &mut tree_workspace,
+                &mut contract_backend,
+                &mut contract_workspace,
+                &rule,
+                &plan,
+                &mut dst,
+                &lhs,
+                &rhs,
+                Complex64::one(),
+                Complex64::zero(),
+            )
+            .unwrap();
+            outputs.push(dst);
+        }
     }
-    assert_eq!(outputs[0].fusion_space(), outputs[1].fusion_space());
-    for (a, b) in outputs[0].data().iter().zip(outputs[1].data()) {
-        assert!((a - b).norm() < 1.0e-10, "candidate mismatch: {a} vs {b}");
+    assert_eq!(outputs.len(), 4);
+    for output in &outputs[1..] {
+        assert_eq!(outputs[0].fusion_space(), output.fusion_space());
+        for (a, b) in outputs[0].data().iter().zip(output.data()) {
+            assert!((a - b).norm() < 1.0e-10, "candidate mismatch: {a} vs {b}");
+        }
     }
     let selected = prepare_tensorcontract_fusion_plan(
         &rule,
@@ -769,44 +991,53 @@ fn crossed_axis_selection_preserves_asymmetric_fz2_u1_su2_result() {
     let rhs_dyn = DynamicFusionMapSpace::from_typed(rhs.fusion_space().unwrap());
     let mut outputs = Vec::new();
     for candidate in &candidates {
-        let plan = crate::contract::prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order(
-            &rule,
-            &dst_dyn,
-            &lhs_dyn,
-            &rhs_dyn,
-            TensorContractSpec::with_default_output_order(&[3, 2], &[0, 1]),
-            candidate,
-        )
-        .unwrap();
-        let mut dst = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
-            vec![Complex64::zero(); dst_len],
-            dst_space.clone(),
-        )
-        .unwrap();
-        let mut tree_backend = DenseTreeTransformOperations::default_executor();
-        let mut tree_workspace = TreeTransformWorkspace::default();
-        let mut contract_backend = DenseTreeTransformOperations::default_executor();
-        let mut contract_workspace = TensorContractWorkspace::default();
-        crate::contract::tensorcontract_fusion_dynamic_plan_into_with(
-            &mut tree_backend,
-            &mut tree_workspace,
-            &mut contract_backend,
-            &mut contract_workspace,
-            &rule,
-            &plan,
-            &mut dst,
-            &lhs,
-            &rhs,
-            Complex64::one(),
-            Complex64::zero(),
-        )
-        .unwrap();
-        outputs.push(dst);
+        for orientation in [
+            crate::contract::FusionContractOrientation::LhsRhs,
+            crate::contract::FusionContractOrientation::RhsLhs,
+        ] {
+            let plan = crate::contract::prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation(
+                &rule,
+                &dst_dyn,
+                &lhs_dyn,
+                &rhs_dyn,
+                TensorContractSpec::with_default_output_order(&[3, 2], &[0, 1]),
+                candidate,
+                orientation,
+            )
+            .unwrap();
+            let mut dst = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+                vec![Complex64::zero(); dst_len],
+                dst_space.clone(),
+            )
+            .unwrap();
+            let mut tree_backend = DenseTreeTransformOperations::default_executor();
+            let mut tree_workspace = TreeTransformWorkspace::default();
+            let mut contract_backend = DenseTreeTransformOperations::default_executor();
+            let mut contract_workspace = TensorContractWorkspace::default();
+            crate::contract::tensorcontract_fusion_dynamic_plan_into_with(
+                &mut tree_backend,
+                &mut tree_workspace,
+                &mut contract_backend,
+                &mut contract_workspace,
+                &rule,
+                &plan,
+                &mut dst,
+                &lhs,
+                &rhs,
+                Complex64::one(),
+                Complex64::zero(),
+            )
+            .unwrap();
+            outputs.push(dst);
+        }
     }
-    // What: crossed pair order is immaterial for an odd, charged, half-spin product sector.
-    assert_eq!(outputs.len(), 2);
-    for (lhs, rhs) in outputs[0].data().iter().zip(outputs[1].data()) {
-        assert!((*lhs - *rhs).norm() < 1.0e-10);
+    // What: crossed pair order and operand orientation are immaterial for an
+    // odd, charged, half-spin product sector.
+    assert_eq!(outputs.len(), 4);
+    for output in &outputs[1..] {
+        for (lhs, rhs) in outputs[0].data().iter().zip(output.data()) {
+            assert!((*lhs - *rhs).norm() < 1.0e-10);
+        }
     }
     let selected = prepare_tensorcontract_fusion_plan(
         &rule,
@@ -2528,6 +2759,50 @@ fn tensorcontract_fusion_fermion_twist_deg2_matches_tensorkit_reference() {
         assert!(
             (actual - want).abs() < 1.0e-12,
             "element {index}: got {actual}, TensorKit reference {want}"
+        );
+    }
+
+    let dst_dynamic = DynamicFusionMapSpace::from_typed(dst.fusion_space().unwrap());
+    let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs.fusion_space().unwrap());
+    let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs.fusion_space().unwrap());
+    let candidate = crate::contract::contracted_axis_order_candidates(&[1], &[0]).remove(0);
+    let reverse_plan = crate::contract::prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation(
+        &rule,
+        &dst_dynamic,
+        &lhs_dynamic,
+        &rhs_dynamic,
+        TensorContractSpec::with_default_output_order(&[1], &[0]),
+        &candidate,
+        crate::contract::FusionContractOrientation::RhsLhs,
+    )
+    .unwrap();
+    let mut reverse_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+        initial.to_vec(),
+        dst.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let mut tree_backend = DenseTreeTransformOperations::default_executor();
+    let mut tree_workspace = TreeTransformWorkspace::default();
+    let mut contract_backend = DenseTreeTransformOperations::default_executor();
+    let mut contract_workspace = TensorContractWorkspace::default();
+    crate::contract::tensorcontract_fusion_dynamic_plan_into_with(
+        &mut tree_backend,
+        &mut tree_workspace,
+        &mut contract_backend,
+        &mut contract_workspace,
+        &rule,
+        &reverse_plan,
+        &mut reverse_dst,
+        &lhs,
+        &rhs,
+        alpha,
+        beta,
+    )
+    .unwrap();
+    for (index, (&actual, &want)) in reverse_dst.data().iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (actual - want).abs() < 1.0e-12,
+            "reverse element {index}: got {actual}, TensorKit reference {want}"
         );
     }
 
@@ -5577,6 +5852,64 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
         // What: neither cold/reset execution nor NoCache may reconstruct the
         // full categorical adjoint view hidden behind the prelowered operand.
         assert_eq!(crate::lowering::adjoint_view_build_count(), 0);
+    }
+
+    let typed_dst_hom = dst_space.homspace().clone();
+    let typed_dst_space = FusionTensorMapSpace::from_degeneracy_shapes(
+        TensorMapSpace::<1, 1>::from_dims([4], [4]).unwrap(),
+        typed_dst_hom.clone(),
+        provider.as_ref(),
+        vec![vec![2, 2]; typed_dst_hom.fusion_tree_keys(provider.as_ref()).len()],
+    )
+    .unwrap();
+    let lhs_typed =
+        TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(lhs_data.clone(), lhs_fusion)
+            .unwrap();
+    let rhs_typed =
+        TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(rhs_data.clone(), rhs_fusion)
+            .unwrap();
+    let candidate = crate::contract::contracted_axis_order_candidates(&[0], &[0]).remove(0);
+    let reverse_plan = crate::contract::prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation(
+        provider.as_ref(),
+        &dst_space,
+        &DynamicFusionMapSpace::from_typed(lhs_typed.fusion_space().unwrap()),
+        &DynamicFusionMapSpace::from_typed(rhs_typed.fusion_space().unwrap()),
+        TensorContractSpec::new_with_conjugation(
+            &[0],
+            &[0],
+            OutputAxisOrder::identity(),
+            true,
+            false,
+        ),
+        &candidate,
+        crate::contract::FusionContractOrientation::RhsLhs,
+    )
+    .unwrap();
+    let mut reverse_dst = TensorMap::<Complex64, 1, 1>::from_vec_with_fusion_space(
+        vec![Complex64::zero(); oracle.len()],
+        typed_dst_space,
+    )
+    .unwrap();
+    let mut tree_backend = DenseTreeTransformOperations::default_executor();
+    let mut tree_workspace = TreeTransformWorkspace::default();
+    let mut contract_backend = DenseTreeTransformOperations::default_executor();
+    let mut contract_workspace = TensorContractWorkspace::default();
+    crate::contract::tensorcontract_fusion_dynamic_plan_into_with(
+        &mut tree_backend,
+        &mut tree_workspace,
+        &mut contract_backend,
+        &mut contract_workspace,
+        provider.as_ref(),
+        &reverse_plan,
+        &mut reverse_dst,
+        &lhs_typed,
+        &rhs_typed,
+        Complex64::one(),
+        Complex64::zero(),
+    )
+    .unwrap();
+    for (&actual, &expected) in reverse_dst.data().iter().zip(&oracle) {
+        assert!((actual - expected).norm() < 1.0e-10);
     }
 }
 

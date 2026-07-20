@@ -25,7 +25,9 @@ use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
 
 use super::backend::TensorContractBackend;
 use super::dynamic_space::{encoded_layout_primer, DynamicFusionMapSpace, LayoutKeyBuilder};
-use super::fusion::{prepare_tensorcontract_fusion_plan, FusionContractPlan};
+use super::fusion::{
+    prepare_tensorcontract_fusion_plan, FusionContractOrientation, FusionContractPlan,
+};
 use super::fusion_block::{
     tensorcontract_core_fusion_blocks_into_raw, FusionBlockContractWorkspace,
 };
@@ -301,6 +303,7 @@ where
     DLhs: HostReadableStorage<D>,
     DRhs: HostReadableStorage<D>,
 {
+    let reverse = plan.orientation() == FusionContractOrientation::RhsLhs;
     let lhs_source_space = DynamicFusionMapSpace::from_typed(
         lhs.fusion_space()
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
@@ -311,13 +314,25 @@ where
         plan.lhs_transform(),
         plan.lhs_source_conjugate(),
     )?;
-    let lhs_borrowed = source_is_borrowable_core_layout(
-        &lhs_source_space,
-        lhs.structure(),
-        &lhs_transformed.0,
-        plan.lhs_transform(),
-        plan.lhs_source_conjugate(),
-    );
+    let lhs_borrowed = if reverse {
+        rhs_source_is_borrowable(
+            rule,
+            &lhs_source_space,
+            lhs.structure(),
+            &lhs_transformed.0,
+            plan.lhs_transform(),
+            plan.lhs_source_conjugate(),
+            plan.core_axes().as_spec(),
+        )?
+    } else {
+        source_is_borrowable_core_layout(
+            &lhs_source_space,
+            lhs.structure(),
+            &lhs_transformed.0,
+            plan.lhs_transform(),
+            plan.lhs_source_conjugate(),
+        )
+    };
     let (rhs_space, rhs_replay_structure) = transformed_source_space_and_structure(
         rule,
         rhs,
@@ -328,15 +343,25 @@ where
         rhs.fusion_space()
             .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
     );
-    let rhs_borrowed = rhs_source_is_borrowable(
-        rule,
-        &rhs_source_space,
-        rhs.structure(),
-        &rhs_space,
-        plan.rhs_transform(),
-        plan.rhs_source_conjugate(),
-        plan.core_axes().as_spec(),
-    )?;
+    let rhs_borrowed = if reverse {
+        source_is_borrowable_core_layout(
+            &rhs_source_space,
+            rhs.structure(),
+            &rhs_space,
+            plan.rhs_transform(),
+            plan.rhs_source_conjugate(),
+        )
+    } else {
+        rhs_source_is_borrowable(
+            rule,
+            &rhs_source_space,
+            rhs.structure(),
+            &rhs_space,
+            plan.rhs_transform(),
+            plan.rhs_source_conjugate(),
+            plan.core_axes().as_spec(),
+        )?
+    };
     let mut lhs_core = (!lhs_borrowed)
         .then(|| DynamicFusionScratch::<D>::zeroed(Arc::new(lhs_transformed.0.clone())))
         .transpose()?;
@@ -356,6 +381,18 @@ where
             plan.lhs_source_conjugate(),
             D::one(),
         )?;
+        if reverse {
+            let lhs_scratch_space = lhs_core.space().clone();
+            apply_rhs_contract_twist(
+                &mut crate::StridedHostKernelAdapter::with_transpose_backend(
+                    tree_backend.transpose_backend(),
+                ),
+                rule,
+                &lhs_scratch_space,
+                lhs_core.data_mut(),
+                plan.core_axes().as_spec().rhs_contracting_axes(),
+            )?;
+        }
     }
     if let Some(rhs_core) = rhs_core.as_mut() {
         tree_pair_transform_typed_to_dynamic(
@@ -369,29 +406,36 @@ where
             plan.rhs_source_conjugate(),
             D::one(),
         )?;
-        let rhs_scratch_space = rhs_core.space().clone();
-        apply_rhs_contract_twist(
-            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                tree_backend.transpose_backend(),
-            ),
-            rule,
-            &rhs_scratch_space,
-            rhs_core.data_mut(),
-            plan.core_axes().as_spec().rhs_contracting_axes(),
-        )?;
+        if !reverse {
+            let rhs_scratch_space = rhs_core.space().clone();
+            apply_rhs_contract_twist(
+                &mut crate::StridedHostKernelAdapter::with_transpose_backend(
+                    tree_backend.transpose_backend(),
+                ),
+                rule,
+                &rhs_scratch_space,
+                rhs_core.data_mut(),
+                plan.core_axes().as_spec().rhs_contracting_axes(),
+            )?;
+        }
     }
 
-    let lhs_core = match lhs_core.as_ref() {
+    let physical_lhs_core = match lhs_core.as_ref() {
         Some(scratch) => CoreSource::from_host_scratch(scratch),
         None => CoreSource::borrowed(&lhs_transformed.0, lhs.data()),
     };
-    let rhs_core_view = select_core_source(rhs_borrowed, &rhs_space, rhs.data(), || {
+    let physical_rhs_core = select_core_source(rhs_borrowed, &rhs_space, rhs.data(), || {
         CoreSource::from_host_scratch(
             rhs_core
                 .as_ref()
                 .expect("non-borrowed RHS materialized before core contraction"),
         )
     });
+    let (lhs_core, rhs_core_view) = if reverse {
+        (physical_rhs_core, physical_lhs_core)
+    } else {
+        (physical_lhs_core, physical_rhs_core)
+    };
 
     if plan.output_transform_is_identity() {
         let dst_space = DynamicFusionMapSpace::from_typed(
