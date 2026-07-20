@@ -34,7 +34,7 @@ fn contract_overwrite_into_matches_owned_f64() {
 #[test]
 fn permute_overwrite_into_matches_owned_c64() {
     let runtime = Runtime::builder().build().unwrap();
-    let space = Space::su2([(0, 2), (1, 2), (2, 1)]);
+    let space = Space::su2([(0, 2), (1, 2), (2, 1)]).unwrap();
     let source =
         Tensor::rand_with_seed(&runtime, Dtype::C64, [&space, &space], [&space], 30111).unwrap();
     let permuted = source.permute(&[1], &[2, 0]).unwrap();
@@ -196,7 +196,7 @@ fn su3_contract_overwrite_clears_structural_zero_output() {
 #[test]
 fn ordered_contract_overwrite_rejects_invalid_pab_without_mutation() {
     let runtime = Runtime::builder().build().unwrap();
-    let space = Space::su2([(0, 2), (1, 2), (2, 1)]);
+    let space = Space::su2([(0, 2), (1, 2), (2, 1)]).unwrap();
     let lhs = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 30_141).unwrap();
     let rhs = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 30_142).unwrap();
     let mut destination = lhs.contract(&rhs, &[1], &[0]).unwrap();
@@ -222,7 +222,7 @@ fn ordered_contract_overwrite_rejects_invalid_pab_without_mutation() {
         assert_eq!(destination.data(), before);
     }
 
-    let incompatible_space = Space::su2([(0, 2), (1, 3), (2, 1)]);
+    let incompatible_space = Space::su2([(0, 2), (1, 3), (2, 1)]).unwrap();
     let incompatible_rhs = Tensor::rand_with_seed(
         &runtime,
         Dtype::F64,
@@ -287,8 +287,8 @@ fn destination_dispatch_matches_owned_for_every_rule() {
     let spaces = vec![
         Space::u1([(-1, 1), (0, 2), (1, 1)]),
         Space::z2([(0, 2), (1, 1)]),
-        Space::fz2([(0, 2), (1, 1)]),
-        Space::su2([(0, 2), (1, 1)]),
+        Space::fz2([(0, 2), (1, 1)]).unwrap(),
+        Space::su2([(0, 2), (1, 1)]).unwrap(),
         Space::product([((0, 0), 2), ((1, 1), 1)]).unwrap(),
         Space::fz2_u1_su2([((0, 0, 0), 2), ((1, 1, 1), 1)]).unwrap(),
         Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap(),

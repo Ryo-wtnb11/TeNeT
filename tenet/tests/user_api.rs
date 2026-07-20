@@ -25,7 +25,7 @@ fn u1_space() -> Space {
 }
 
 fn su2_space() -> Space {
-    Space::su2([(0, 2), (1, 2), (2, 1)])
+    Space::su2([(0, 2), (1, 2), (2, 1)]).unwrap()
 }
 
 #[test]
@@ -115,8 +115,8 @@ fn tensor_construction_preserves_lowered_su2_closure_and_valid_boundary() {
     // What: an unrepresentable SU2 output is exact, while representable
     // near-boundary U1 construction retains the ordinary zero-tensor result.
     let rt = Runtime::builder().build().unwrap();
-    let spin_64 = Space::su2([(128, 1)]);
-    let spin_63_5 = Space::su2([(127, 1)]);
+    let spin_64 = Space::su2([(128, 1)]).unwrap();
+    let spin_63_5 = Space::su2([(127, 1)]).unwrap();
     assert_eq!(
         Tensor::zeros(&rt, Dtype::F64, [&spin_64, &spin_63_5], [])
             .err()
@@ -542,13 +542,13 @@ fn ordinary_nonabelian_contracts_match_legacy_lowering_bitwise() {
 
     check_rule!(
         FermionParityFusionRule,
-        Space::fz2([(0, 2), (1, 3)]),
+        Space::fz2([(0, 2), (1, 3)]).unwrap(),
         vec![(SectorId::new(0), 2), (SectorId::new(1), 3)],
         261_801
     );
     check_rule!(
         SU2FusionRule,
-        Space::su2([(0, 2), (1, 2), (2, 1)]),
+        Space::su2([(0, 2), (1, 2), (2, 1)]).unwrap(),
         vec![
             (SU2Irrep::from_twice_spin(0).sector_id(), 2),
             (SU2Irrep::from_twice_spin(1).sector_id(), 2),
@@ -670,7 +670,7 @@ fn vector_interface_identities() {
 fn fz2_and_product_rule_smoke() {
     let rt = Runtime::builder().build().unwrap();
 
-    let f = Space::fz2([(0, 2), (1, 2)]);
+    let f = Space::fz2([(0, 2), (1, 2)]).unwrap();
     let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&f, &f], [&f, &f], 61).unwrap();
     let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&f, &f], [&f, &f], 62).unwrap();
     assert!(a.compose(&b).unwrap().norm().unwrap() > 0.0);
@@ -1045,11 +1045,44 @@ fn u1_fz2_space_represents_the_full_packed_u1_label_domain() {
 }
 
 #[test]
-fn fz2_u1_su2_space_rejects_labels_outside_the_packed_leaf_layout() {
-    // What: the user boundary reports unsupported SU2 labels instead of
-    // truncating the high bit into another product component.
+fn fz2_u1_su2_space_rejects_invalid_su2_child() {
+    // What: the user boundary preserves the exact invalid SU2 child label.
     let error = Space::fz2_u1_su2([((1, 0, 255), 1)]).unwrap_err();
-    assert!(error.to_string().contains("doubled-spin maximum 254"));
+    assert_eq!(
+        error,
+        Error::FusionAlgebra(Box::new(FusionAlgebraError::InvalidSector {
+            sector: SectorId::new(255),
+        }))
+    );
+}
+
+#[test]
+fn builtin_space_constructors_reject_invalid_numeric_labels() {
+    // What: every ordinary fZ2 input and the ordinary SU2 input expose the
+    // existing typed invalid-sector authority without normalization or unwind.
+    let invalid_parity = Error::FusionAlgebra(Box::new(FusionAlgebraError::InvalidSector {
+        sector: SectorId::new(2),
+    }));
+    assert_eq!(Space::fz2([(2, 1)]).unwrap_err(), invalid_parity);
+    assert_eq!(Space::product([((0, 2), 1)]).unwrap_err(), invalid_parity);
+    assert_eq!(
+        Space::fz2_u1_su2([((2, 0, 0), 1)]).unwrap_err(),
+        invalid_parity
+    );
+
+    assert_eq!(
+        Space::su2([(255, 1)]).unwrap_err(),
+        Error::FusionAlgebra(Box::new(FusionAlgebraError::InvalidSector {
+            sector: SectorId::new(255),
+        }))
+    );
+}
+
+#[test]
+fn builtin_space_constructor_signatures_are_checked() {
+    // What: public callers must handle fZ2 and SU2 construction failure.
+    let _: Result<Space, Error> = Space::fz2([(0, 1)]);
+    let _: Result<Space, Error> = Space::su2([(0, 1)]);
 }
 
 #[cfg(target_pointer_width = "32")]
@@ -1271,13 +1304,13 @@ fn space_sectors_round_trip_all_constructors() {
         set_of([(SectorLabel::Z2(0), 2), (SectorLabel::Z2(1), 3)])
     );
 
-    let fz2 = Space::fz2([(0, 1), (1, 4)]);
+    let fz2 = Space::fz2([(0, 1), (1, 4)]).unwrap();
     assert_eq!(
         sector_set(&fz2),
         set_of([(SectorLabel::FZ2(0), 1), (SectorLabel::FZ2(1), 4)])
     );
 
-    let su2 = Space::su2([(0, 2), (1, 3), (2, 1)]);
+    let su2 = Space::su2([(0, 2), (1, 3), (2, 1)]).unwrap();
     assert_eq!(
         sector_set(&su2),
         set_of([
@@ -1333,13 +1366,67 @@ fn space_sectors_round_trip_all_constructors() {
 }
 
 #[test]
+fn z2_numeric_labels_remain_cyclic_modulo_two() {
+    // What: Z2 keeps TensorKit ZNIrrep{2} modulo semantics and valid IDs.
+    let space = Space::z2([(2, 3), (3, 4)]);
+    assert_eq!(
+        space.sectors(),
+        vec![(SectorLabel::Z2(0), 3), (SectorLabel::Z2(1), 4)]
+    );
+    assert_eq!(space.degeneracy(SectorLabel::Z2(4)), Some(3));
+    assert_eq!(space.degeneracy(SectorLabel::Z2(5)), Some(4));
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn invalid_builtin_sector_labels_are_absent() {
+    // What: invalid fZ2 and SU2 labels never normalize or unwind during lookup.
+    let fz2 = Space::fz2([(0, 2), (1, 3)]).unwrap();
+    assert_eq!(fz2.degeneracy(SectorLabel::FZ2(2)), None);
+    assert!(!fz2.has_sector(SectorLabel::FZ2(3)));
+
+    let su2 = Space::su2([(0, 2), (254, 3)]).unwrap();
+    assert_eq!(su2.degeneracy(SectorLabel::SU2 { twice_spin: 255 }), None);
+    assert!(!su2.has_sector(SectorLabel::SU2 {
+        twice_spin: usize::MAX,
+    }));
+
+    let pair = Space::product([((0, 0), 2)]).unwrap();
+    assert_eq!(
+        pair.degeneracy(SectorLabel::U1FZ2 {
+            charge: 0,
+            parity: 2,
+        }),
+        None
+    );
+
+    let triple = Space::fz2_u1_su2([((0, 0, 0), 2)]).unwrap();
+    assert_eq!(
+        triple.degeneracy(SectorLabel::FZ2U1SU2 {
+            parity: 2,
+            charge: 0,
+            twice_spin: 0,
+        }),
+        None
+    );
+    assert_eq!(
+        triple.degeneracy(SectorLabel::FZ2U1SU2 {
+            parity: 0,
+            charge: 0,
+            twice_spin: 255,
+        }),
+        None
+    );
+}
+
+#[test]
 fn try_sectors_matches_sectors_on_multiplicity_free_rules() {
     // try_sectors is Ok with byte-identical content to sectors() on every
     // mult-free rule (the SU(3) Err path lives in su3_panic_firewall.rs).
     for space in [
         Space::u1([(-1, 2), (0, 3), (1, 2)]),
         Space::z2([(0, 2), (1, 3)]),
-        Space::su2([(0, 2), (1, 3)]),
+        Space::su2([(0, 2), (1, 3)]).unwrap(),
     ] {
         assert_eq!(space.try_sectors(), Ok(space.sectors()));
     }
@@ -1463,8 +1550,8 @@ fn space_fuse_preserves_product_child_errors() {
 fn space_fuse_reports_su2_output_outside_supported_domain() {
     // What: valid SU2 input labels whose output exceeds the supported table
     // return closure failure rather than being misclassified as invalid input.
-    let left = Space::su2([(128, 1)]);
-    let right = Space::su2([(127, 1)]);
+    let left = Space::su2([(128, 1)]).unwrap();
+    let right = Space::su2([(127, 1)]).unwrap();
     assert_eq!(
         left.fuse(&right),
         Err(Error::FusionAlgebra(Box::new(
@@ -1479,7 +1566,7 @@ fn space_fuse_reports_su2_output_outside_supported_domain() {
 #[test]
 fn space_fuse_su2_half_times_half() {
     // TensorKit: fuse(SU2Space(1/2=>1), same) == Rep[SU2](0=>1, 1=>1).
-    let half = Space::su2([(1, 1)]);
+    let half = Space::su2([(1, 1)]).unwrap();
     let fused = half.fuse(&half).unwrap();
     assert_eq!(
         sector_set(&fused),
@@ -1492,7 +1579,7 @@ fn space_fuse_su2_half_times_half() {
     assert_eq!(fused.dim(), half.dim() * half.dim());
 
     // A degenerate multi-spin case: (j=0 x2, j=1/2 x1) squared.
-    let a = Space::su2([(0, 2), (1, 1)]);
+    let a = Space::su2([(0, 2), (1, 1)]).unwrap();
     let fused = a.fuse(&a).unwrap();
     // 0x0 (x4), 1/2x1/2 -> 0: total 5; 0x1/2 + 1/2x0: 4; 1/2x1/2 -> 1: 1.
     assert_eq!(
@@ -1731,8 +1818,8 @@ fn fuser_contraction_matches_tensorkit_u1() {
 #[test]
 fn fuser_contraction_and_twist_match_tensorkit_fz2() {
     let rt = Runtime::builder().build().unwrap();
-    let l = Space::fz2([(0, 1), (1, 2)]);
-    let m = Space::fz2([(0, 1), (1, 1)]);
+    let l = Space::fz2([(0, 1), (1, 2)]).unwrap();
+    let m = Space::fz2([(0, 1), (1, 1)]).unwrap();
     let label = |sector: SectorId| sector.id() as f64;
     // Untwisted fuser, then the twist on each of the three legs (tenet flat
     // leg i is Julia index i+1).
@@ -1782,8 +1869,8 @@ fn fuser_contraction_and_twist_match_tensorkit_fz2() {
 fn fuser_contraction_matches_tensorkit_su2() {
     use tenet::core::SU2Irrep;
     let rt = Runtime::builder().build().unwrap();
-    let l = Space::su2([(0, 1), (1, 2)]);
-    let m = Space::su2([(0, 1), (1, 1), (2, 1)]);
+    let l = Space::su2([(0, 1), (1, 2)]).unwrap();
+    let m = Space::su2([(0, 1), (1, 1), (2, 1)]).unwrap();
     let label = |sector: SectorId| SU2Irrep::from_sector_id(sector).twice_spin() as f64;
     let value = fuser_oracle_scalar(&rt, &l, &m, &[], label);
     assert_rel(value, 2.8621579710249998e7);
@@ -1810,8 +1897,8 @@ fn fuser_roundtrips_to_identity_on_both_sides() {
     let rt = Runtime::builder().build().unwrap();
     for l in [
         Space::u1([(0, 1), (1, 2)]),
-        Space::su2([(0, 1), (1, 2)]),
-        Space::fz2([(0, 1), (1, 2)]),
+        Space::su2([(0, 1), (1, 2)]).unwrap(),
+        Space::fz2([(0, 1), (1, 2)]).unwrap(),
     ] {
         let fused = l.dual().fuse(&l).unwrap();
         let f = Tensor::isomorphism(&rt, Dtype::F64, [&fused], [&l.dual(), &l]).unwrap();
@@ -1847,8 +1934,8 @@ fn unitary_matches_isomorphism_and_rejects_non_isomorphic_spaces() {
 #[test]
 fn isometry_embeds_isometrically_and_rejects_too_small_codomains() {
     let rt = Runtime::builder().build().unwrap();
-    let small = Space::su2([(0, 1), (1, 1)]);
-    let big = Space::su2([(0, 2), (1, 3), (2, 1)]);
+    let small = Space::su2([(0, 1), (1, 1)]).unwrap();
+    let big = Space::su2([(0, 2), (1, 3), (2, 1)]).unwrap();
     let w = Tensor::isometry(&rt, Dtype::F64, [&big], [&small]).unwrap();
     // Julia: norm(W' * W - id(small)) = 0.0, norm(W) = sqrt(3).
     let id = Tensor::id(&rt, Dtype::F64, [&small]).unwrap();
@@ -1861,12 +1948,15 @@ fn isometry_embeds_isometrically_and_rejects_too_small_codomains() {
 fn twist_is_trivial_on_bosonic_legs_and_involutive_on_fermionic_ones() {
     let rt = Runtime::builder().build().unwrap();
     // Bosonic rules: θ = +1 everywhere, twist is the identity.
-    for l in [Space::u1([(0, 1), (1, 2)]), Space::su2([(0, 1), (1, 2)])] {
+    for l in [
+        Space::u1([(0, 1), (1, 2)]),
+        Space::su2([(0, 1), (1, 2)]).unwrap(),
+    ] {
         let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&l, &l], [&l], 5).unwrap();
         assert_eq!(t.twist(&[0, 1, 2]).unwrap().data(), t.data());
     }
     // Fermionic rule: θ(odd) = −1, twist² = id and odd blocks flip sign.
-    let l = Space::fz2([(0, 1), (1, 2)]);
+    let l = Space::fz2([(0, 1), (1, 2)]).unwrap();
     let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&l, &l], [&l], 6).unwrap();
     let twisted = t.twist(&[2]).unwrap();
     assert_ne!(twisted.data(), t.data());
@@ -1878,7 +1968,7 @@ fn twist_is_trivial_on_bosonic_legs_and_involutive_on_fermionic_ones() {
 /// Two-value fz2 `[v] <- [v]` fixture: even block 2.0, odd block 3.0, with
 /// each leg optionally dual, matching the TensorKit oracle tensors below.
 fn fz2_two_block(rt: &Runtime, dual: bool) -> Tensor {
-    let v = Space::fz2([(0, 1), (1, 1)]);
+    let v = Space::fz2([(0, 1), (1, 1)]).unwrap();
     let v = if dual { v.dual() } else { v };
     Tensor::from_block_fn(rt, [&v], [&v], |key, _| match key {
         BlockKey::FusionTree(key) if key.codomain_uncoupled()[0].id() == 0 => 2.0,
@@ -1988,7 +2078,7 @@ fn flip_bosonic_is_structural_and_su2_carries_frobenius_schur_phase() {
     assert!(flipped.space(0).unwrap().is_dual());
     assert!(!flipped.space(1).unwrap().is_dual());
 
-    let u = Space::su2([(1, 1)]); // j = 1/2
+    let u = Space::su2([(1, 1)]).unwrap(); // j = 1/2
     let ud = u.dual();
     let td = Tensor::from_block_fn(&rt, [&ud], [&u], |_, _| 5.0).unwrap();
     assert_eq!(td.flip(&[0]).unwrap().data(), &[-5.0]);
@@ -2032,7 +2122,7 @@ fn flip_c64_and_fliptwist_composition() {
 #[test]
 fn sqrt_splits_singular_values_and_rejects_non_diagonal_tensors() {
     let rt = Runtime::builder().build().unwrap();
-    for v in [u1_space(), Space::fz2([(0, 2), (1, 2)])] {
+    for v in [u1_space(), Space::fz2([(0, 2), (1, 2)]).unwrap()] {
         let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 13).unwrap();
         let s = t.svd_trunc(&Truncation::Full).unwrap().s;
         let sqrt_s = s.sqrt().unwrap();
@@ -2092,8 +2182,14 @@ fn space_zero_degeneracy_matches_omission_across_supported_constructors() {
     // zero-is-absent contract from the core leg representation.
     for (explicit_zero, omitted) in [
         (Space::u1([(-1, 0), (0, 2)]), Space::u1([(0, 2)])),
-        (Space::su2([(2, 0), (0, 2)]), Space::su2([(0, 2)])),
-        (Space::fz2([(1, 0), (0, 2)]), Space::fz2([(0, 2)])),
+        (
+            Space::su2([(2, 0), (0, 2)]).unwrap(),
+            Space::su2([(0, 2)]).unwrap(),
+        ),
+        (
+            Space::fz2([(1, 0), (0, 2)]).unwrap(),
+            Space::fz2([(0, 2)]).unwrap(),
+        ),
     ] {
         assert_eq!(explicit_zero, omitted);
     }
@@ -2152,7 +2248,7 @@ fn abelian_inner_is_unweighted_whole_buffer_dot() {
     for v in [
         Space::u1([(-1, 2), (0, 3), (1, 2)]),
         Space::z2([(0, 2), (1, 3)]),
-        Space::fz2([(0, 2), (1, 2)]),
+        Space::fz2([(0, 2), (1, 2)]).unwrap(),
     ] {
         let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 11).unwrap();
         let whole: f64 = t.data().iter().map(|x| x * x).sum();
@@ -2166,7 +2262,7 @@ fn abelian_inner_is_unweighted_whole_buffer_dot() {
 
     // Non-abelian SU(2) with dim>1 sectors: dim-weighted, so inner must differ
     // from the unweighted whole-buffer sum.
-    let v = Space::su2([(0, 2), (1, 2), (2, 1)]);
+    let v = Space::su2([(0, 2), (1, 2), (2, 1)]).unwrap();
     let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 11).unwrap();
     let whole: f64 = t.data().iter().map(|x| x * x).sum();
     let inner = t.inner(&t).unwrap().re();
@@ -2195,8 +2291,8 @@ fn identity_permute_is_a_noop() {
     let rt = Runtime::builder().build().unwrap();
     for v in [
         Space::u1([(-1, 2), (0, 2), (1, 2)]),
-        Space::su2([(0, 2), (1, 2)]),
-        Space::fz2([(0, 2), (1, 2)]),
+        Space::su2([(0, 2), (1, 2)]).unwrap(),
+        Space::fz2([(0, 2), (1, 2)]).unwrap(),
     ] {
         // rank-3 tensor, codomain [v, v] (nout = 2), domain [v] (nin = 1).
         let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 21).unwrap();

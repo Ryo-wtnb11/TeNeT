@@ -18,7 +18,7 @@ use std::thread;
 use tenet::prelude::{Dtype, Runtime, Space, Tensor};
 
 fn space() -> Space {
-    Space::su2([(0, 3), (1, 2), (2, 1)])
+    Space::su2([(0, 3), (1, 2), (2, 1)]).unwrap()
 }
 
 /// A rank-4 contract, a permute, and a factorization (each hits a different

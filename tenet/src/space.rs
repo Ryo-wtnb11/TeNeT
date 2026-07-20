@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use tenet_core::{
-    CheckedFusionAlgebra, FermionParityFusionRule, FusionRule, Fz2SectorLayout, PackedProductCodec,
-    ProductFusionRule, ProductSectorCodec, ProductSectorLayout, RuleIdentity, SU2FusionRule,
-    SU2Irrep, SectorId, SectorLeg, Su2SectorLayout, Su3FusionRule, U1FusionRule, U1Irrep,
-    U1SectorLayout, Z2FusionRule, Z2Irrep,
+    CheckedFusionAlgebra, FermionParityFusionRule, FusionAlgebraError, FusionRule, Fz2SectorLayout,
+    PackedProductCodec, ProductFusionRule, ProductSectorCodec, ProductSectorLayout, RuleIdentity,
+    SU2FusionRule, SU2Irrep, SectorId, SectorLeg, Su2SectorLayout, Su3FusionRule, U1FusionRule,
+    U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep,
 };
 
 use crate::error::Error;
@@ -19,11 +19,12 @@ use crate::error::Error;
 pub enum SectorLabel {
     /// U(1) charge, as passed to [`Space::u1`].
     U1(i32),
-    /// Z2 parity (`0` even, `1` odd), as passed to [`Space::z2`].
+    /// Z2 parity, reduced modulo 2 (`0` even, `1` odd), as in [`Space::z2`].
     Z2(u8),
     /// Fermion parity (`0` even, `1` odd), as passed to [`Space::fz2`].
     FZ2(u8),
-    /// SU(2) spin as `twice_spin = 2j`, as passed to [`Space::su2`].
+    /// SU(2) spin as `twice_spin = 2j`, as passed to [`Space::su2`] (currently
+    /// at most 254).
     SU2 {
         /// Twice the spin, `2j` (integer).
         twice_spin: usize,
@@ -80,6 +81,22 @@ type U1Fz2Codec = PackedProductCodec<U1SectorLayout, Fz2SectorLayout>;
 type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
 type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
 type Fz2U1Su2Codec = PackedProductCodec<Fz2U1Layout, Su2SectorLayout>;
+
+fn checked_fz2_sector(parity: u8) -> Result<SectorId, Error> {
+    let sector = SectorId::new(usize::from(parity));
+    Z2Irrep::from_sector_id(sector)
+        .map(Into::into)
+        .ok_or_else(|| FusionAlgebraError::InvalidSector { sector }.into())
+}
+
+fn checked_su2_irrep(twice_spin: usize) -> Result<SU2Irrep, Error> {
+    SU2Irrep::try_from_twice_spin(twice_spin).ok_or_else(|| {
+        FusionAlgebraError::InvalidSector {
+            sector: SectorId::new(twice_spin),
+        }
+        .into()
+    })
+}
 
 // Why not use the default Cantor codec for built-in spaces: nested IDs lose
 // most of the i32 U1 domain and every algebra call pays magnitude-dependent
@@ -251,10 +268,8 @@ impl Space {
     /// constructor call. This follows TensorKit's strict tuple-constructor
     /// invariant without reproducing its order-dependent `SectorDict`
     /// zero-entry corner. [`tenet_core::SectorLeg`] defines the normalization
-    /// contract. The
-    /// [`Self::product`] / [`Self::fz2_u1_su2`] constructors return
-    /// `Result` instead only because their product-sector *encoding* can
-    /// fail on data-dependent capacity, not for duplicates.
+    /// contract. Constructors with a bounded numeric provider domain return
+    /// `Result`; duplicate labels keep this common programming-error contract.
     pub fn u1<I>(charges: I) -> Self
     where
         I: IntoIterator<Item = (i32, usize)>,
@@ -268,7 +283,8 @@ impl Space {
         )
     }
 
-    /// Z2-graded space from `(parity, degeneracy)` pairs (`0` even, `1` odd).
+    /// Z2-graded space from `(parity, degeneracy)` pairs. Numeric labels are
+    /// reduced modulo 2 (`0` even, `1` odd), matching TensorKit's `ZNIrrep{2}`.
     ///
     /// TensorKit equivalent: `Z2Space(0 => deg_even, 1 => deg_odd)`.
     ///
@@ -294,44 +310,58 @@ impl Space {
     ///
     /// TensorKit equivalent: `Vect[FermionParity](0 => deg_even, 1 => deg_odd)`.
     ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FusionAlgebra`] when a parity is not `0` or `1`.
+    ///
     /// # Panics
     ///
     /// Panics on a duplicate sector label (TensorKit `ArgumentError`
     /// parity); see [`Self::u1`].
-    pub fn fz2<I>(parities: I) -> Self
+    pub fn fz2<I>(parities: I) -> Result<Self, Error>
     where
         I: IntoIterator<Item = (u8, usize)>,
     {
-        Self::new(
+        let sectors = parities
+            .into_iter()
+            .map(|(parity, deg)| checked_fz2_sector(parity).map(|sector| (sector, deg)))
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(Self::new(
             Arc::new(UserRuleContext::FZ2(Arc::new(FermionParityFusionRule))),
-            parities
-                .into_iter()
-                .map(|(parity, deg)| (SectorId::new(usize::from(parity & 1)), deg))
-                .collect(),
-        )
+            sectors,
+        ))
     }
 
     /// SU(2)-graded space from `(twice_spin, degeneracy)` pairs, mirroring
     /// [`tenet_core::SU2Irrep::from_twice_spin`] (`twice_spin = 2j`, so `1`
     /// is spin-1/2 and `2` is spin-1).
     ///
-    /// TensorKit equivalent: `SU2Space(j => degeneracy, ...)`.
+    /// TensorKit equivalent: `SU2Space(j => degeneracy, ...)`. TeNeT's current
+    /// exact coefficient provider accepts `twice_spin <= 254`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FusionAlgebra`] above the provider's doubled-spin
+    /// maximum 254.
     ///
     /// # Panics
     ///
     /// Panics on a duplicate sector label (TensorKit `ArgumentError`
     /// parity); see [`Self::u1`].
-    pub fn su2<I>(spins: I) -> Self
+    pub fn su2<I>(spins: I) -> Result<Self, Error>
     where
         I: IntoIterator<Item = (usize, usize)>,
     {
-        Self::new(
+        let sectors = spins
+            .into_iter()
+            .map(|(twice_spin, deg)| {
+                checked_su2_irrep(twice_spin).map(|spin| (spin.sector_id(), deg))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(Self::new(
             Arc::new(UserRuleContext::SU2(Arc::new(SU2FusionRule))),
-            spins
-                .into_iter()
-                .map(|(twice_spin, deg)| (SU2Irrep::from_twice_spin(twice_spin).sector_id(), deg))
-                .collect(),
-        )
+            sectors,
+        ))
     }
 
     /// SU(3)-graded space from `((p, q), degeneracy)` pairs, where `(p, q)` is
@@ -371,8 +401,9 @@ impl Space {
     /// Cantor-coded built-in IDs. Labels and algebraic semantics are unchanged;
     /// raw `usize` sector IDs are not a stable wire format.
     ///
-    /// The packed layout requires a 64-bit target. Narrower targets return
-    /// [`Error::InvalidArgument`] instead of truncating a component.
+    /// Invalid fermion parity returns [`Error::FusionAlgebra`]. The packed
+    /// layout requires a 64-bit target; narrower targets return
+    /// [`Error::InvalidArgument`] instead of truncating a valid component.
     ///
     /// TensorKit equivalent: `Vect[U1Irrep ⊠ FermionParity]`.
     pub fn product<I>(sectors: I) -> Result<Self, Error>
@@ -382,17 +413,15 @@ impl Space {
         let sectors = sectors
             .into_iter()
             .map(|((charge, parity), deg)| {
-                U1Fz2Codec::encode_checked(
-                    U1Irrep::new(charge).sector_id(),
-                    SectorId::new(usize::from(parity & 1)),
-                )
-                .map(|sector| (sector, deg))
-                .map_err(|error| {
-                    Error::InvalidArgument(format!(
-                        "product sector ({charge}, {parity}) does not fit the packed \
+                let parity_sector = checked_fz2_sector(parity)?;
+                U1Fz2Codec::encode_checked(U1Irrep::new(charge).sector_id(), parity_sector)
+                    .map(|sector| (sector, deg))
+                    .map_err(|error| {
+                        Error::InvalidArgument(format!(
+                            "product sector ({charge}, {parity}) does not fit the packed \
                          sector-id encoding: {error}"
-                    ))
-                })
+                        ))
+                    })
             })
             .collect::<Result<Vec<_>, Error>>()?;
         Ok(Self::new(
@@ -413,8 +442,10 @@ impl Space {
     /// Cantor-coded built-in IDs. Labels and algebraic semantics are unchanged;
     /// raw `usize` sector IDs are not a stable wire format.
     ///
-    /// The packed layout requires a 64-bit target. Narrower targets return
-    /// [`Error::InvalidArgument`] instead of truncating a component.
+    /// Invalid fermion parity or SU(2) doubled spin returns
+    /// [`Error::FusionAlgebra`]. The packed layout requires a 64-bit target;
+    /// narrower targets return [`Error::InvalidArgument`] instead of
+    /// truncating a valid component.
     ///
     /// TensorKit equivalent: `Vect[FermionParity ⊠ Irrep[U₁] ⊠ Irrep[SU₂]]`.
     pub fn fz2_u1_su2<I>(sectors: I) -> Result<Self, Error>
@@ -424,24 +455,17 @@ impl Space {
         let sectors = sectors
             .into_iter()
             .map(|((parity, charge, twice_spin), deg)| {
-                let spin = SU2Irrep::try_from_twice_spin(twice_spin).ok_or_else(|| {
-                    Error::InvalidArgument(format!(
-                        "product sector ({parity}, {charge}, {twice_spin}) exceeds the \
-                         supported SU(2) doubled-spin maximum 254"
-                    ))
-                })?;
-                Fz2U1Codec::encode_checked(
-                    SectorId::new(usize::from(parity & 1)),
-                    U1Irrep::new(charge).sector_id(),
-                )
-                .and_then(|inner| Fz2U1Su2Codec::encode_checked(inner, spin.sector_id()))
-                .map(|sector| (sector, deg))
-                .map_err(|error| {
-                    Error::InvalidArgument(format!(
-                        "product sector ({parity}, {charge}, {twice_spin}) does not fit the \
+                let parity_sector = checked_fz2_sector(parity)?;
+                let spin = checked_su2_irrep(twice_spin)?;
+                Fz2U1Codec::encode_checked(parity_sector, U1Irrep::new(charge).sector_id())
+                    .and_then(|inner| Fz2U1Su2Codec::encode_checked(inner, spin.sector_id()))
+                    .map(|sector| (sector, deg))
+                    .map_err(|error| {
+                        Error::InvalidArgument(format!(
+                            "product sector ({parity}, {charge}, {twice_spin}) does not fit the \
                          packed sector-id encoding: {error}"
-                    ))
-                })
+                        ))
+                    })
             })
             .collect::<Result<Vec<_>, Error>>()?;
         Ok(Self::new(
@@ -602,15 +626,15 @@ impl Space {
             (RuleKind::U1, SectorLabel::U1(charge)) => Some(U1Irrep::new(charge).sector_id()),
             (RuleKind::Z2, SectorLabel::Z2(parity)) => Some(Z2Irrep::new(parity).sector_id()),
             (RuleKind::FZ2, SectorLabel::FZ2(parity)) => {
-                Some(SectorId::new(usize::from(parity & 1)))
+                Z2Irrep::from_sector_id(SectorId::new(usize::from(parity))).map(Into::into)
             }
             (RuleKind::SU2, SectorLabel::SU2 { twice_spin }) => {
-                Some(SU2Irrep::from_twice_spin(twice_spin).sector_id())
+                SU2Irrep::try_from_twice_spin(twice_spin).map(Into::into)
             }
-            (RuleKind::U1FZ2, SectorLabel::U1FZ2 { charge, parity }) => U1Fz2Codec::try_encode(
-                U1Irrep::new(charge).sector_id(),
-                SectorId::new(usize::from(parity & 1)),
-            ),
+            (RuleKind::U1FZ2, SectorLabel::U1FZ2 { charge, parity }) => {
+                let parity = Z2Irrep::from_sector_id(SectorId::new(usize::from(parity)))?;
+                U1Fz2Codec::try_encode(U1Irrep::new(charge).sector_id(), parity.into())
+            }
             (
                 RuleKind::FZ2U1SU2,
                 SectorLabel::FZ2U1SU2 {
@@ -618,12 +642,11 @@ impl Space {
                     charge,
                     twice_spin,
                 },
-            ) => SU2Irrep::try_from_twice_spin(twice_spin).and_then(|spin| {
-                Fz2U1Codec::try_encode(
-                    SectorId::new(usize::from(parity & 1)),
-                    U1Irrep::new(charge).sector_id(),
-                )
-                .and_then(|inner| Fz2U1Su2Codec::try_encode(inner, spin.sector_id()))
+            ) => Z2Irrep::from_sector_id(SectorId::new(usize::from(parity))).and_then(|parity| {
+                SU2Irrep::try_from_twice_spin(twice_spin).and_then(|spin| {
+                    Fz2U1Codec::try_encode(parity.into(), U1Irrep::new(charge).sector_id())
+                        .and_then(|inner| Fz2U1Su2Codec::try_encode(inner, spin.sector_id()))
+                })
             }),
             _ => None,
         }
@@ -916,6 +939,23 @@ mod provider_context_tests {
 #[cfg(test)]
 mod tk_space_api_tests {
     use super::*;
+
+    #[test]
+    fn checked_constructors_preserve_valid_sector_ids() {
+        // What: making ordinary construction fallible does not renumber valid
+        // fZ2 or SU2 sectors at either provider boundary.
+        let fz2 = Space::fz2([(0, 2), (1, 3)]).unwrap();
+        assert_eq!(
+            fz2.sectors,
+            vec![(SectorId::new(0), 2), (SectorId::new(1), 3)]
+        );
+
+        let su2 = Space::su2([(0, 2), (254, 3)]).unwrap();
+        assert_eq!(
+            su2.sectors,
+            vec![(SectorId::new(0), 2), (SectorId::new(254), 3)]
+        );
+    }
 
     #[test]
     fn has_sector_tracks_membership() {

@@ -36,7 +36,7 @@ fn autohq_falls_back_on_all_dim1_gram_topology() {
         })
         .build()
         .unwrap();
-    let v = Space::su2([(0, 1)]);
+    let v = Space::su2([(0, 1)]).unwrap();
     let cne = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 1).unwrap();
     let sne = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 2).unwrap();
     let ev = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 3).unwrap();

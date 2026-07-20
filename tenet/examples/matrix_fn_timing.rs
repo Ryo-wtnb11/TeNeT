@@ -63,5 +63,5 @@ fn main() {
         2_000,
     );
     // SU(2): quantum-dimension weighting exercises the recompose norm path.
-    bench("SU2", &Space::su2([(0, 6), (1, 6), (2, 4)]), 2_000);
+    bench("SU2", &Space::su2([(0, 6), (1, 6), (2, 4)]).unwrap(), 2_000);
 }

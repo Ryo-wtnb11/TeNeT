@@ -31,7 +31,7 @@ assert_eq!(v.dual().dual(), v);
 
 // SU(2): (twice_spin, degeneracy) pairs; dim is quantum-dimension
 // weighted: 2 * 1 (spin 0) + 2 * 2 (spin 1/2).
-let s = Space::su2([(0, 2), (1, 2)]);
+let s = Space::su2([(0, 2), (1, 2)]).unwrap();
 assert_eq!(s.dim(), 6);
 
 // Tensors on codomain <- domain leg lists.
@@ -411,7 +411,7 @@ assert_eq!(v.fuse(&w)?.dim(), v.dim() * w.dim());
 assert_eq!(v.oplus(&w)?.degeneracy(SectorLabel::U1(0)), Some(3 + 1));
 
 // SU(2) dims are quantum-dimension weighted; SU(3) reads back (p, q) irreps.
-let s = Space::su2([(0, 1), (1, 1)]);          // spin 0 ⊕ spin 1/2
+let s = Space::su2([(0, 1), (1, 1)]).unwrap();          // spin 0 ⊕ spin 1/2
 assert_eq!(s.dim(), 1 + 2);
 let fundamental = Space::su3([((1, 0), 1)])?;  // the 3
 assert_eq!(fundamental.su3_sectors()?, vec![((1, 0), 1)]);
