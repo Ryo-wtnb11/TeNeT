@@ -562,7 +562,7 @@ mod tests {
             TensorContractSpec::new(&[], &[], tenet_operations::OutputAxisOrder::identity()),
         )
         .unwrap();
-        assert_eq!(facts.len(), 1);
+        assert_eq!(facts.len(), 2);
         assert_eq!(facts[0].lhs_materialized_elements(), 0);
         assert!(!facts[0].rhs_exact_identity_borrowable());
         assert_eq!(facts[0].rhs_materialized_elements(), 14);

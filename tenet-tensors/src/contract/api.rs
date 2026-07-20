@@ -19,7 +19,8 @@ use super::dynamic::{
 };
 use super::dynamic_space::DynamicFusionMapSpace;
 use super::fusion::{
-    prepare_tensorcontract_fusion_plan, tensorcontract_fusion_structure, FusionContractPlan,
+    prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn_raw_canonical,
+    tensorcontract_fusion_structure, FusionContractPlan,
     EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST, SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
 };
 use super::fusion_block::{
@@ -589,6 +590,7 @@ where
     DLhsCan: HostWritableStorage<D> + HostReadableStorage<D>,
     DRhsCan: HostWritableStorage<D> + HostReadableStorage<D>,
 {
+    plan.require_forward_scratch()?;
     if !plan.output_transform_is_identity()
         || DST_NOUT != plan.core_dst_open_lhs_rank()
         || DST_NIN != plan.core_dst_open_rhs_rank()
@@ -701,6 +703,7 @@ where
     DLhsCan: HostWritableStorage<D> + HostReadableStorage<D>,
     DRhsCan: HostWritableStorage<D> + HostReadableStorage<D>,
 {
+    plan.require_forward_scratch()?;
     if DST_CAN_NOUT != plan.core_dst_open_lhs_rank() || DST_CAN_NIN != plan.core_dst_open_rhs_rank()
     {
         return Err(OperationError::StructureRankMismatch {
@@ -1020,8 +1023,13 @@ where
         Err(OperationError::UnsupportedTensorContractScope {
             message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
         }) => {
-            let plan =
-                prepare_tensorcontract_fusion_plan(rule, dst_fusion, lhs_fusion, rhs_fusion, axes)?;
+            let plan = prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
+                rule,
+                &dst_dynamic,
+                &lhs_dynamic,
+                &rhs_dynamic,
+                axes,
+            )?;
             tensorcontract_fusion_dynamic_plan_into_with(
                 tree_backend,
                 tree_workspace,

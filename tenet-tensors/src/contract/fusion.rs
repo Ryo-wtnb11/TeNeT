@@ -24,11 +24,13 @@ pub use block_specs::{
 };
 #[cfg(test)]
 pub(crate) use plan::prepare_tensorcontract_fusion_plan_dyn_lowered;
+#[cfg(test)]
+pub(crate) use plan::prepare_tensorcontract_fusion_plan_dyn_raw;
 pub use plan::{
     prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn, FusionContractPlan,
 };
 pub(crate) use plan::{
-    prepare_tensorcontract_fusion_plan_dyn_prelowered,
-    prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer,
-    prepare_tensorcontract_fusion_plan_dyn_raw,
+    prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical,
+    prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer_canonical,
+    prepare_tensorcontract_fusion_plan_dyn_raw_canonical,
 };
