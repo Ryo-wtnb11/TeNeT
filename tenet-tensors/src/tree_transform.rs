@@ -27,14 +27,13 @@ pub(crate) use plan::{
 pub(crate) use cache::{TreeTransformGroupPlanCache, TreeTransformGroupPlanKey};
 #[cfg(test)]
 pub(crate) use plan::{
+    build_all_codomain_tree_transform_group_plan_validated_with_threads,
     build_multiplicity_free_all_codomain_tree_transform_group_plan,
-    build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized,
     build_multiplicity_free_tree_pair_transform_group_plan,
-    build_multiplicity_free_tree_pair_transform_group_plan_memoized,
-    build_multiplicity_free_tree_pair_transform_group_plan_memoized_with_block_transform,
+    build_tree_pair_transform_group_plan_validated_with_threads,
     build_unique_all_codomain_tree_transform_group_plan,
     build_unique_tree_pair_transform_group_plan, build_unique_tree_transform_group_plan,
     partition_staged_groups_for_test, reset_tree_pair_lowering_calls,
     reset_tree_pair_operation_preparations, tree_pair_lowering_calls,
-    tree_pair_operation_preparations, AllCodomainRowMemo, TreePairRowMemo,
+    tree_pair_operation_preparations, validate_multiplicity_free_all_codomain_preflight,
 };

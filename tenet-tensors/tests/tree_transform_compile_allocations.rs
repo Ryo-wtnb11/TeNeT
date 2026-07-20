@@ -286,36 +286,6 @@ fn su2_tree_pair_f_move_compile_has_no_per_destination_coefficient_rows() {
     assert!(ALLOCATIONS.get() <= 52, "allocations={}", ALLOCATIONS.get());
 }
 
-#[test]
-fn missing_position_rescan_removes_cardinality_dependent_metadata_allocations() {
-    for (missing, expected_removed_calls) in [(1, 1), (2, 1), (4, 1), (5, 2), (8, 2), (9, 3)] {
-        let sources = vec![None::<()>; missing];
-
-        ALLOCATIONS.set(0);
-        COUNTING.set(true);
-        let positions = sources
-            .iter()
-            .enumerate()
-            .filter_map(|(position, rows)| rows.is_none().then_some(position))
-            .collect::<Vec<_>>();
-        COUNTING.set(false);
-        let old_calls = ALLOCATIONS.get();
-
-        ALLOCATIONS.set(0);
-        COUNTING.set(true);
-        let missing_count = sources.iter().filter(|rows| rows.is_none()).count();
-        COUNTING.set(false);
-        let rescan_calls = ALLOCATIONS.get();
-
-        // What: replacing the old position Vec with ordered rescans removes
-        // every allocation/reallocation at and above its growth boundaries.
-        assert_eq!(positions.len(), missing);
-        assert_eq!(missing_count, missing);
-        assert_eq!(old_calls, expected_removed_calls);
-        assert_eq!(rescan_calls, 0);
-    }
-}
-
 fn rank_eight_su2_subset(count: usize) -> (TensorMap<f64, 8, 0>, TensorMap<f64, 8, 0>) {
     let half = SU2Irrep::from_twice_spin(1).sector_id();
     let leg = || SectorLeg::new([(half, 1)], false);
@@ -345,7 +315,7 @@ fn rank_eight_su2_subset(count: usize) -> (TensorMap<f64, 8, 0>, TensorMap<f64, 
 }
 
 #[test]
-fn cold_memoized_tree_pair_compile_avoids_missing_position_allocations() {
+fn cold_ordered_tree_pair_compile_has_stable_allocation_counts() {
     let _global_cache_guard = GLOBAL_CACHE_RESET_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -364,9 +334,11 @@ fn cold_memoized_tree_pair_compile_avoids_missing_position_allocations() {
         .unwrap();
     reset_global_operation_caches();
 
-    for (missing, expected_allocations) in [(1, 48), (2, 53), (4, 62), (5, 71), (8, 78), (9, 87)] {
+    for (source_count, expected_allocations) in
+        [(1, 45), (2, 50), (4, 58), (5, 66), (8, 72), (9, 80)]
+    {
         reset_global_operation_caches();
-        let (dst, src) = rank_eight_su2_subset(missing);
+        let (dst, src) = rank_eight_su2_subset(source_count);
         let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
         cache.set_recoupling_threads(1);
 
@@ -382,9 +354,13 @@ fn cold_memoized_tree_pair_compile_avoids_missing_position_allocations() {
             .unwrap();
         COUNTING.set(false);
 
-        // What: exact cold allocation counts have no additional
-        // missing-position-dependent temporary growth.
-        assert_eq!(ALLOCATIONS.get(), expected_allocations, "missing={missing}");
+        // What: the ordered whole-block compiler retains its measured cold
+        // allocation envelope without a source-column memo or position list.
+        assert_eq!(
+            ALLOCATIONS.get(),
+            expected_allocations,
+            "source_count={source_count}"
+        );
         std::hint::black_box(plan);
     }
 }

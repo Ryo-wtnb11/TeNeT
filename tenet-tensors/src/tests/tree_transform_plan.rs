@@ -641,37 +641,30 @@ fn su2_first_pair_braid_lowers_nonidentity_monomial_group_to_singles() {
         .has_pack_gemm_scatter_blocks());
 
     use crate::tree_transform::{
-        build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized, AllCodomainRowMemo,
+        build_all_codomain_tree_transform_group_plan_validated_with_threads,
+        validate_multiplicity_free_all_codomain_preflight,
     };
-    let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
-    let build = |threads: usize, memo: &mut AllCodomainRowMemo<f64, _>| {
-        let mut hits = 0;
-        let mut misses = 0;
-        let plan = build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized(
+    let build = |threads: usize| {
+        let proof = validate_multiplicity_free_all_codomain_preflight(
             &SU2FusionRule,
-            &rule_key,
-            operation.clone(),
+            &operation,
             &structure,
-            memo,
-            &mut hits,
-            &mut misses,
-            threads,
         )
         .unwrap();
-        (plan, hits, misses)
+        build_all_codomain_tree_transform_group_plan_validated_with_threads(
+            &proof,
+            operation.clone(),
+            threads,
+        )
+        .unwrap()
     };
-    let mut serial_memo = AllCodomainRowMemo::default();
-    let (serial, serial_hits, serial_misses) = build(1, &mut serial_memo);
-    let mut parallel_memo = AllCodomainRowMemo::default();
-    let (parallel, parallel_hits, parallel_misses) = build(4, &mut parallel_memo);
+    let (serial, serial_hits, serial_misses) = build(1);
+    let (parallel, parallel_hits, parallel_misses) = build(4);
     assert_eq!(parallel, serial);
     assert_eq!(
         (parallel_hits, parallel_misses),
         (serial_hits, serial_misses)
     );
-    let (warm, warm_hits, warm_misses) = build(4, &mut parallel_memo);
-    assert_eq!(warm, serial);
-    assert_eq!((warm_hits, warm_misses), (keys.len(), 0));
 
     // What: direct replay honors alpha/beta and overwrite on strided blocks
     // without touching storage padding or allocating pack/GEMM/scatter jobs.
@@ -1158,11 +1151,12 @@ fn tree_transform_structure_replays_su2_recoupling_without_recompiling() {
 }
 
 #[test]
-fn parallel_plan_compile_matches_serial_plan_and_memo_stats() {
-    // What: shared staged-group execution produces the same transformer,
-    // source/group order, and memo accounting for serial and threaded builds.
+fn parallel_plan_compile_matches_serial_plan_and_row_stats() {
+    // What: shared group compilation produces the same transformer,
+    // source/group order, and compile-local row accounting.
     use crate::tree_transform::{
-        build_multiplicity_free_tree_pair_transform_group_plan_memoized, TreePairRowMemo,
+        build_tree_pair_transform_group_plan_validated_with_threads,
+        validate_multiplicity_free_tree_pair_preflight,
     };
 
     let key = |uncoupled: [usize; 4], inner: [usize; 2]| {
@@ -1187,50 +1181,38 @@ fn parallel_plan_compile_matches_serial_plan_and_memo_stats() {
     )
     .unwrap();
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
-    let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
-
-    let build = |threads: usize, memo: &mut TreePairRowMemo<f64, _>| {
-        let mut hits = 0;
-        let mut misses = 0;
-        let plan = build_multiplicity_free_tree_pair_transform_group_plan_memoized(
+    let build = |threads: usize| {
+        let proof = validate_multiplicity_free_tree_pair_preflight(
             &SU2FusionRule,
-            &rule_key,
-            operation.clone(),
+            &operation,
             &src_structure,
-            memo,
-            &mut hits,
-            &mut misses,
-            threads,
         )
         .unwrap();
-        (plan, hits, misses)
+        build_tree_pair_transform_group_plan_validated_with_threads(
+            &proof,
+            operation.clone(),
+            threads,
+        )
+        .unwrap()
     };
 
-    let mut serial_memo = TreePairRowMemo::default();
-    let (serial_plan, serial_hits, serial_misses) = build(1, &mut serial_memo);
-    let mut parallel_memo = TreePairRowMemo::default();
-    let (parallel_plan, parallel_hits, parallel_misses) = build(8, &mut parallel_memo);
+    let (serial_plan, serial_hits, serial_misses) = build(1);
+    let (parallel_plan, parallel_hits, parallel_misses) = build(8);
 
     assert_eq!(parallel_plan, serial_plan);
-    // Stats semantics are unchanged: prefilled rows still count as misses.
     assert_eq!(
         (parallel_hits, parallel_misses),
         (serial_hits, serial_misses)
     );
+    assert_eq!(parallel_hits, 0);
     assert!(parallel_misses > 0);
-    assert_eq!(parallel_memo.len(), serial_memo.len());
-
-    // Warm memo: a second parallel build finds every row prefetched-free.
-    let (warm_plan, warm_hits, warm_misses) = build(8, &mut parallel_memo);
-    assert_eq!(warm_plan, serial_plan);
-    assert_eq!(warm_hits, parallel_misses);
-    assert_eq!(warm_misses, 0);
 }
 
 #[test]
-fn all_codomain_canonical_empty_domain_row_has_stable_cold_warm_lookups() {
+fn all_codomain_canonical_empty_domain_row_is_thread_count_invariant() {
     use crate::tree_transform::{
-        build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized, AllCodomainRowMemo,
+        build_all_codomain_tree_transform_group_plan_validated_with_threads,
+        validate_multiplicity_free_all_codomain_preflight,
     };
 
     let codomain = FusionTreeKey::try_new_for_rule(
@@ -1245,54 +1227,42 @@ fn all_codomain_canonical_empty_domain_row_has_stable_cold_warm_lookups() {
     let keys = [FusionTreePairKey::pair(codomain, empty_fusion_tree())];
     let structure =
         packed_fixture_structure(2, keys.iter().cloned().map(|key| (key, vec![1, 1]))).unwrap();
-    let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
     for operation in [
         TreeTransformOperation::braid([0, 1], [], [7, 3], []),
         TreeTransformOperation::braid([1, 0], [], [0, 1], []),
     ] {
-        let build = |threads, memo: &mut AllCodomainRowMemo<f64, _>| {
-            let mut hits = 0;
-            let mut misses = 0;
-            let plan = build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized(
+        let build = |threads| {
+            let proof = validate_multiplicity_free_all_codomain_preflight(
                 &SU2FusionRule,
-                &rule_key,
-                operation.clone(),
+                &operation,
                 &structure,
-                memo,
-                &mut hits,
-                &mut misses,
-                threads,
             )
             .unwrap();
-            (plan, hits, misses)
+            build_all_codomain_tree_transform_group_plan_validated_with_threads(
+                &proof,
+                operation.clone(),
+                threads,
+            )
+            .unwrap()
         };
 
         let mut expected_plan = None;
         for threads in [1, 2, 4] {
-            let mut memo = AllCodomainRowMemo::default();
-            let (cold, hits, misses) = build(threads, &mut memo);
+            let (cold, hits, misses) = build(threads);
             // What: the mandatory vacuum removes the prior empty-domain alias,
-            // and its canonical row has worker-count-independent cache stats.
-            assert_eq!((hits, misses, memo.len()), (0, 1, 1));
+            // and its canonical row has worker-count-independent compile stats.
+            assert_eq!((hits, misses), (0, 1));
             if let Some(expected) = &expected_plan {
                 assert_eq!(&cold, expected);
             } else {
                 expected_plan = Some(cold.clone());
             }
-
-            let (warm, hits, misses) = build(threads, &mut memo);
-            assert_eq!(warm, cold);
-            assert_eq!((hits, misses, memo.len()), (1, 0, 1));
         }
     }
 }
 
 #[test]
-fn all_codomain_worker_error_does_not_commit_rows_or_stats() {
-    use crate::tree_transform::{
-        build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized, AllCodomainRowMemo,
-    };
-
+fn all_codomain_invalid_operation_is_thread_count_invariant() {
     let keys = [1, 2].map(|sector| {
         FusionTreePairKey::pair(
             FusionTreeKey::try_new_for_rule(
@@ -1310,28 +1280,17 @@ fn all_codomain_worker_error_does_not_commit_rows_or_stats() {
     let structure =
         packed_fixture_structure(2, keys.into_iter().map(|key| (key, vec![1, 1]))).unwrap();
     let invalid_operation = TreeTransformOperation::braid([0, 0], [], [0, 1], []);
-    let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
-
     for threads in [1, 2, 4] {
-        let mut memo = AllCodomainRowMemo::default();
-        let mut hits = 7;
-        let mut misses = 11;
-        let result = build_multiplicity_free_all_codomain_tree_transform_group_plan_memoized(
+        let result = build_all_codomain_tree_transform_group_plan(
             &SU2FusionRule,
-            &rule_key,
             invalid_operation.clone(),
             &structure,
-            &mut memo,
-            &mut hits,
-            &mut misses,
-            threads,
         );
 
-        // What: a worker-side row-transform error across two independently
-        // scheduled groups publishes neither staged misses nor rows.
+        // What: invalid syntax is rejected before worker count can affect
+        // compilation or publish any cache entry.
         assert!(result.is_err());
-        assert!(memo.is_empty());
-        assert_eq!((hits, misses), (7, 11));
+        let _ = threads;
     }
 }
 
@@ -1359,302 +1318,12 @@ fn staged_group_scheduler_builds_bounded_balanced_contiguous_batches() {
 }
 
 #[test]
-fn tree_pair_worker_panic_does_not_commit_rows_or_stats() {
-    use crate::tree_transform::{
-        build_multiplicity_free_tree_pair_transform_group_plan_memoized_with_block_transform,
-        TreePairRowMemo,
-    };
-
-    let keys = [
-        all_codomain_fusion_tree_test_key_for_rule(
-            &SU2FusionRule,
-            [1, 1],
-            0,
-            [false, false],
-            [],
-            [1],
-        ),
-        all_codomain_fusion_tree_test_key_for_rule(
-            &SU2FusionRule,
-            [2, 2],
-            0,
-            [false, false],
-            [],
-            [1],
-        ),
-    ];
-    let structure =
-        packed_fixture_structure(2, keys.into_iter().map(|key| (key, vec![1, 1]))).unwrap();
-    let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
-    let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
-
-    for threads in [1, 2, 4] {
-        let mut memo = TreePairRowMemo::default();
-        let mut hits = 7;
-        let mut misses = 11;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            build_multiplicity_free_tree_pair_transform_group_plan_memoized_with_block_transform(
-                &SU2FusionRule,
-                &rule_key,
-                operation.clone(),
-                &structure,
-                &mut memo,
-                &mut hits,
-                &mut misses,
-                threads,
-                |_, _, _| panic!("injected block-transform panic"),
-            )
-        }));
-
-        // What: unwinding from either scheduler mode with two independent
-        // groups occurs before commit and leaves memo/stat state unchanged.
-        assert!(result.is_err());
-        assert!(memo.is_empty());
-        assert_eq!((hits, misses), (7, 11));
-    }
-}
-
-#[test]
-fn parallel_group_callbacks_expose_reversed_completion_order_and_preserve_transaction_state() {
-    use crate::tree_transform::{
-        build_multiplicity_free_tree_pair_transform_group_plan_memoized_with_block_transform,
-        TreePairRowMemo,
-    };
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    };
-    use std::time::{Duration, Instant};
-
-    struct CompletionFlag(Arc<AtomicBool>);
-
-    impl Drop for CompletionFlag {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Release);
-        }
-    }
-
-    let keys = [
-        all_codomain_fusion_tree_test_key_for_rule(
-            &SU2FusionRule,
-            [1, 1],
-            0,
-            [false, false],
-            [],
-            [1],
-        ),
-        all_codomain_fusion_tree_test_key_for_rule(
-            &SU2FusionRule,
-            [2, 2],
-            0,
-            [false, false],
-            [],
-            [1],
-        ),
-    ];
-    let structure =
-        packed_fixture_structure(2, keys.into_iter().map(|key| (key, vec![1, 1]))).unwrap();
-    let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
-    let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
-    let expected = OperationError::InvalidArgument {
-        message: "first source-group error",
-    };
-
-    for threads in [1, 2, 4] {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build()
-            .unwrap();
-        for _ in 0..32 {
-            let later_completed = Arc::new(AtomicBool::new(false));
-            let completion_order_observed = Arc::new(AtomicBool::new(false));
-            let mut memo = TreePairRowMemo::default();
-            let mut hits = 7;
-            let mut misses = 11;
-            let result = pool.install(|| {
-                build_multiplicity_free_tree_pair_transform_group_plan_memoized_with_block_transform(
-                    &SU2FusionRule,
-                    &rule_key,
-                    operation.clone(),
-                    &structure,
-                    &mut memo,
-                    &mut hits,
-                    &mut misses,
-                    threads,
-                    |_, _, missing| {
-                        let first_sector = missing[0].codomain_uncoupled()[0].id();
-                        if first_sector == 1 {
-                            if threads > 1 {
-                                let deadline = Instant::now() + Duration::from_secs(5);
-                                while !later_completed.load(Ordering::Acquire) {
-                                    assert!(
-                                        Instant::now() < deadline,
-                                        "later source-group closure did not complete"
-                                    );
-                                    std::thread::yield_now();
-                                }
-                                completion_order_observed.store(true, Ordering::Release);
-                            }
-                            Err(OperationError::InvalidArgument {
-                                message: "first source-group error",
-                            })
-                        } else {
-                            let _completion = CompletionFlag(Arc::clone(&later_completed));
-                            Err(OperationError::InvalidArgument {
-                                message: "second source-group error",
-                            })
-                        }
-                    },
-                )
-            });
-
-            // What: the integration path remains transactional while the
-            // witness proves the later callback epilogue completed first.
-            // The helper unit test owns collector error-selection semantics.
-            assert_eq!(result.unwrap_err(), expected);
-            assert!(memo.is_empty());
-            assert_eq!((hits, misses), (7, 11));
-            if threads > 1 {
-                assert!(completion_order_observed.load(Ordering::Acquire));
-            }
-        }
-    }
-}
-
-#[test]
-fn tree_pair_block_transform_runs_once_per_group_for_cold_and_partial_memos() {
-    use crate::tree_transform::{
-        build_multiplicity_free_tree_pair_transform_group_plan_memoized_with_block_transform,
-        transformed_tree_pair_rows_block, TreePairRowMemo,
-    };
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    let key = |uncoupled: [usize; 4], inner: [usize; 2]| {
-        all_codomain_fusion_tree_test_key_for_rule(
-            &SU2FusionRule,
-            uncoupled,
-            0,
-            [false, false, false, false],
-            inner,
-            [1, 1, 1],
-        )
-    };
-    let keys = [
-        key([1, 1, 1, 1], [0, 1]),
-        key([1, 1, 1, 1], [2, 1]),
-        key([1, 3, 3, 1], [2, 1]),
-        key([1, 3, 3, 1], [4, 1]),
-    ];
-    let structure =
-        packed_fixture_structure(4, keys.iter().map(|key| (key.clone(), vec![1usize; 4]))).unwrap();
-    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
-    let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
-    let group_count = structure.fusion_tree_groups().len();
-    let build = |threads, memo: &mut TreePairRowMemo<f64, _>, calls: &AtomicUsize| {
-        let mut hits = 0;
-        let mut misses = 0;
-        let plan =
-            build_multiplicity_free_tree_pair_transform_group_plan_memoized_with_block_transform(
-                &SU2FusionRule,
-                &rule_key,
-                operation.clone(),
-                &structure,
-                memo,
-                &mut hits,
-                &mut misses,
-                threads,
-                |rule, operation, missing| {
-                    calls.fetch_add(1, Ordering::Relaxed);
-                    transformed_tree_pair_rows_block(rule, operation, missing)
-                },
-            )
-            .unwrap();
-        (plan, hits, misses)
-    };
-    let assert_plan_close = |actual: &TreeTransformGroupPlan<f64>,
-                             expected: &TreeTransformGroupPlan<f64>| {
-        assert_eq!(actual.specs().len(), expected.specs().len());
-        for (actual, expected) in actual.specs().iter().zip(expected.specs()) {
-            assert_eq!(actual.group_key(), expected.group_key());
-            assert_eq!(actual.src_keys(), expected.src_keys());
-            assert_eq!(actual.dst_keys(), expected.dst_keys());
-            assert_eq!(actual.source_axes(), expected.source_axes());
-            let actual_coefficients = actual.recoupling_coefficients_dst_src();
-            let expected_coefficients = expected.recoupling_coefficients_dst_src();
-            assert_eq!(actual_coefficients.len(), expected_coefficients.len());
-            for (actual, expected) in actual_coefficients.iter().zip(expected_coefficients) {
-                assert!((actual - expected).abs() <= 1.0e-12 * (1.0 + expected.abs()));
-            }
-        }
-    };
-
-    let mut oracle_plan = None;
-    let mut oracle_memo = None;
-    for threads in [1, 2, 4] {
-        let calls = AtomicUsize::new(0);
-        let mut memo = TreePairRowMemo::default();
-        let (plan, hits, misses) = build(threads, &mut memo, &calls);
-        // What: worker count never splits one fusion group into source-tree
-        // transforms; cold compilation invokes one block transform per group.
-        assert_eq!(calls.load(Ordering::Relaxed), group_count);
-        assert_eq!((hits, misses), (0, keys.len()));
-        if let Some(expected) = &oracle_plan {
-            assert_plan_close(&plan, expected);
-        } else {
-            oracle_plan = Some(plan);
-            oracle_memo = Some(memo);
-        }
-    }
-
-    let full_memo = oracle_memo.unwrap();
-    let first_key = expect_tree_key(&keys[0]);
-    let first_memo_key = (rule_key.clone(), operation.clone(), first_key);
-    let mut partial_memo = TreePairRowMemo::default();
-    partial_memo.insert(
-        first_memo_key.clone(),
-        Arc::clone(full_memo.get(&first_memo_key).unwrap()),
-    );
-    let warm_keys = partial_memo
-        .keys()
-        .map(|(_, _, key)| key)
-        .collect::<std::collections::HashSet<_>>();
-    let expected_missing_groups = structure
-        .fusion_tree_groups()
-        .iter()
-        .filter(|group| {
-            group.block_indices().iter().any(|&index| {
-                let block = structure.block(index).unwrap();
-                let BlockKey::FusionTree(key) = block.key() else {
-                    panic!("test expected a fusion-tree key");
-                };
-                !warm_keys.contains(key)
-            })
-        })
-        .count();
-    let calls = AtomicUsize::new(0);
-    let (partial, hits, misses) = build(4, &mut partial_memo, &calls);
-    // What: a partially warm group batches its missing subset once and retains
-    // exact key/order plus coefficient agreement at the numerical contract.
-    assert_eq!(calls.load(Ordering::Relaxed), expected_missing_groups);
-    assert_eq!((hits, misses), (1, keys.len() - 1));
-    assert_plan_close(&partial, oracle_plan.as_ref().unwrap());
-
-    let calls = AtomicUsize::new(0);
-    let (warm, hits, misses) = build(4, &mut partial_memo, &calls);
-    // What: a fully warm group assembles from memo rows without invoking an
-    // empty block transform.
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
-    assert_eq!((hits, misses), (keys.len(), 0));
-    assert_plan_close(&warm, oracle_plan.as_ref().unwrap());
-}
-
-#[test]
-fn split_only_repartition_plan_matches_serial_parallel_and_warm_memo_paths() {
+fn split_only_repartition_plan_matches_serial_and_parallel_builders() {
     // What: a SU(2) 2|2 -> 3|1 split-only braid compiles to the direct
-    // repartition row identically through serial, parallel, and warm-memo plan
-    // construction.
+    // repartition row independently of the compile worker count.
     use crate::tree_transform::{
-        build_multiplicity_free_tree_pair_transform_group_plan_memoized, TreePairRowMemo,
+        build_tree_pair_transform_group_plan_validated_with_threads,
+        validate_multiplicity_free_tree_pair_preflight,
     };
 
     let source = FusionTreePairKey::try_pair_from_sector_ids(
@@ -1673,29 +1342,23 @@ fn split_only_repartition_plan_matches_serial_parallel_and_warm_memo_paths() {
     let source_structure = packed_fixture_structure(4, [(source_key, vec![1usize; 4])]).unwrap();
     let operation = TreeTransformOperation::braid([0, 1, 3], [2], [0, 1], [2, 3]);
     let expected = multiplicity_free_repartition_tree_pair(&SU2FusionRule, &source, 3).unwrap();
-    let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
-
-    let build = |threads: usize, memo: &mut TreePairRowMemo<f64, _>| {
-        let mut hits = 0;
-        let mut misses = 0;
-        let plan = build_multiplicity_free_tree_pair_transform_group_plan_memoized(
+    let build = |threads| {
+        let proof = validate_multiplicity_free_tree_pair_preflight(
             &SU2FusionRule,
-            &rule_key,
-            operation.clone(),
+            &operation,
             &source_structure,
-            memo,
-            &mut hits,
-            &mut misses,
-            threads,
         )
         .unwrap();
-        (plan, hits, misses)
+        build_tree_pair_transform_group_plan_validated_with_threads(
+            &proof,
+            operation.clone(),
+            threads,
+        )
+        .unwrap()
     };
 
-    let mut serial_memo = TreePairRowMemo::default();
-    let (serial, serial_hits, serial_misses) = build(1, &mut serial_memo);
-    let mut parallel_memo = TreePairRowMemo::default();
-    let (parallel, parallel_hits, parallel_misses) = build(8, &mut parallel_memo);
+    let (serial, serial_hits, serial_misses) = build(1);
+    let (parallel, parallel_hits, parallel_misses) = build(8);
     assert_eq!(parallel, serial);
     assert_eq!(
         (parallel_hits, parallel_misses),
@@ -1706,18 +1369,15 @@ fn split_only_repartition_plan_matches_serial_parallel_and_warm_memo_paths() {
     let spec = &serial.specs()[0];
     assert_eq!(spec.dst_keys(), &[expected[0].0.clone()]);
     assert!((spec.recoupling_coefficients_dst_src()[0] - expected[0].1).abs() < 1.0e-12);
-
-    let (warm, warm_hits, warm_misses) = build(8, &mut parallel_memo);
-    assert_eq!(warm, serial);
-    assert_eq!((warm_hits, warm_misses), (1, 0));
 }
 
 #[test]
 fn identity_group_plan_lowers_each_su2_tree_to_a_direct_single() {
     // What: an identity operation over a multi-tree SU2 fusion group compiles
-    // to independent direct copies, not one identity-matrix recoupling job.
+    // to independent direct copies for every supported facade and worker count.
     use crate::tree_transform::{
-        build_multiplicity_free_tree_pair_transform_group_plan_memoized, TreePairRowMemo,
+        build_tree_pair_transform_group_plan_validated_with_threads,
+        validate_multiplicity_free_tree_pair_preflight,
     };
 
     let key = |inner: [usize; 2]| {
@@ -1734,30 +1394,20 @@ fn identity_group_plan_lowers_each_su2_tree_to_a_direct_single() {
     let structure =
         packed_fixture_structure(4, keys.iter().map(|key| (key.clone(), vec![1usize; 4]))).unwrap();
     let operation = TreeTransformOperation::braid([0, 1, 2, 3], [], [17, 3, 11, 5], []);
-    let rule_key = SU2FusionRule.tree_transform_rule_cache_key();
-
-    let build = |threads: usize, memo: &mut TreePairRowMemo<f64, _>| {
-        let mut hits = 0;
-        let mut misses = 0;
-        let plan = build_multiplicity_free_tree_pair_transform_group_plan_memoized(
-            &SU2FusionRule,
-            &rule_key,
+    let build = |threads| {
+        let proof =
+            validate_multiplicity_free_tree_pair_preflight(&SU2FusionRule, &operation, &structure)
+                .unwrap();
+        build_tree_pair_transform_group_plan_validated_with_threads(
+            &proof,
             operation.clone(),
-            &structure,
-            memo,
-            &mut hits,
-            &mut misses,
             threads,
         )
-        .unwrap();
-        (plan, hits, misses)
+        .unwrap()
     };
 
-    let mut serial_memo = TreePairRowMemo::default();
-    let (serial, serial_hits, serial_misses) = build(1, &mut serial_memo);
-    let mut parallel_memo = TreePairRowMemo::default();
-    let (parallel, parallel_hits, parallel_misses) = build(8, &mut parallel_memo);
-
+    let (serial, serial_hits, serial_misses) = build(1);
+    let (parallel, parallel_hits, parallel_misses) = build(8);
     assert_eq!(parallel, serial);
     assert_eq!(
         (parallel_hits, parallel_misses),
@@ -1771,9 +1421,10 @@ fn identity_group_plan_lowers_each_su2_tree_to_a_direct_single() {
         assert_eq!(spec.recoupling_coefficients_dst_src(), &[1.0]);
         assert_eq!(spec.source_axes(), Some([0, 1, 2, 3].as_slice()));
     }
-
-    let compiled = serial.compile_structures(&structure, &structure).unwrap();
-    assert!(!compiled.has_pack_gemm_scatter_blocks());
+    assert!(!serial
+        .compile_structures(&structure, &structure)
+        .unwrap()
+        .has_pack_gemm_scatter_blocks());
 
     let transpose = build_tree_pair_transform_group_plan(
         &SU2FusionRule,
@@ -1781,7 +1432,6 @@ fn identity_group_plan_lowers_each_su2_tree_to_a_direct_single() {
         &structure,
     )
     .unwrap();
-    assert_eq!(transpose.specs().len(), keys.len());
     assert!(transpose.specs().iter().all(|spec| {
         spec.src_keys().len() == 1
             && spec.dst_keys() == spec.src_keys()
@@ -1793,18 +1443,9 @@ fn identity_group_plan_lowers_each_su2_tree_to_a_direct_single() {
         .has_pack_gemm_scatter_blocks());
 
     let all_codomain =
-        build_all_codomain_tree_transform_group_plan(&SU2FusionRule, operation.clone(), &structure)
+        build_all_codomain_tree_transform_group_plan(&SU2FusionRule, operation, &structure)
             .unwrap();
-    assert_eq!(all_codomain.specs().len(), keys.len());
-    for spec in all_codomain.specs() {
-        assert_eq!(spec.src_keys().len(), 1);
-        assert_eq!(spec.dst_keys(), spec.src_keys());
-        assert_eq!(spec.recoupling_coefficients_dst_src(), &[1.0]);
-    }
-    assert!(!all_codomain
-        .compile_structures(&structure, &structure)
-        .unwrap()
-        .has_pack_gemm_scatter_blocks());
+    assert_eq!(all_codomain, serial);
 
     let tensor_space = TensorMapSpace::<4, 0>::from_dims([1, 1, 1, 1], []).unwrap();
     let src = TensorMap::<f64, 4, 0>::from_vec_with_structure(
@@ -1816,7 +1457,7 @@ fn identity_group_plan_lowers_each_su2_tree_to_a_direct_single() {
     let mut dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
         vec![5.0, 6.0, 7.0, 8.0],
         tensor_space,
-        structure.clone(),
+        structure,
     )
     .unwrap();
     let compiled = serial.compile(&dst, &src).unwrap();
@@ -1847,10 +1488,6 @@ fn identity_group_plan_lowers_each_su2_tree_to_a_direct_single() {
     )
     .unwrap();
     assert_eq!(dst.data(), &[-2.0, -4.0, -6.0, -8.0]);
-
-    let (warm, warm_hits, warm_misses) = build(8, &mut parallel_memo);
-    assert_eq!(warm, serial);
-    assert_eq!((warm_hits, warm_misses), (keys.len(), 0));
 }
 
 #[test]
@@ -1984,12 +1621,7 @@ fn same_split_transpose_is_direct_for_real_tree_pairs_but_split_change_is_not() 
 }
 
 #[test]
-fn tree_row_memo_survives_structure_change() {
-    // TensorKit fstranspose/fsbraid cache parity: a truncation step changes the tree
-    // subset of a structure, so the sector-keyed plan cache misses — but
-    // recoupling rows for trees shared with earlier structures must be
-    // reused from the tree-granular memo instead of recomputing F/R-symbol
-    // contractions.
+fn tree_pair_plan_miss_does_not_retain_source_rows() {
     let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
         &SU2FusionRule,
         [2, 2, 2, 2],
@@ -2054,15 +1686,18 @@ fn tree_row_memo_survives_structure_change() {
     assert!(misses_after_first > 0);
     assert_eq!(cache.stats().tree_row_hits(), 0);
 
-    // What: adding a new admissible tree/channel changes the structure while
-    // retaining the earlier rows, so only the new row computes F/R symbols.
+    // What: a different source tree set recompiles its whole block without
+    // reporting cross-plan row hits from hidden retained state.
     let (dst2, src2) = make(&destination_keys, &destination_keys);
     cache
         .get_or_compile_tree_pair(&SU2FusionRule, operation.clone(), &dst2, &src2)
         .unwrap();
     assert_eq!(cache.stats().plan_misses(), 2);
-    assert!(cache.stats().tree_row_hits() >= misses_after_first);
-    assert!(cache.stats().tree_row_misses() > misses_after_first);
+    assert_eq!(cache.stats().tree_row_hits(), 0);
+    assert_eq!(
+        cache.stats().tree_row_misses(),
+        misses_after_first + destination_keys.len()
+    );
 }
 
 fn malformed_simple_su2_tree_pair_tensors() -> (TensorMap<f64, 2, 0>, TensorMap<f64, 2, 0>) {
@@ -2220,13 +1855,11 @@ impl TreeTransformRuleCacheKey for AdmissionCountingSu2Rule {
 
 fn builtin_tree_cache_state(
     cache: &TreeTransformCache<f64, TreeTransformBuiltinRuleCacheKey>,
-) -> (TreeTransformCacheStats, usize, usize, usize, usize, usize) {
+) -> (TreeTransformCacheStats, usize, usize, usize) {
     (
         cache.stats(),
         cache.plan_len(),
         cache.structure_len(),
-        cache.tree_row_len(),
-        cache.all_codomain_row_len(),
         cache.fast_structure_len(),
     )
 }
@@ -2489,8 +2122,6 @@ fn exact_warm_structure_reuses_prior_local_admission_proof() {
     assert_eq!(calls.load(Ordering::Relaxed), 0);
 
     cache.set_policy(OperationCachePolicy::NoCache);
-    assert_eq!(cache.tree_row_len(), 0);
-    assert_eq!(cache.all_codomain_row_len(), 0);
     calls.store(0, Ordering::Relaxed);
     cache
         .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
@@ -2622,8 +2253,6 @@ fn invalid_simple_source_does_not_mutate_cached_or_no_cache_state() {
         assert_eq!(cache.stats(), before_stats);
         assert_eq!(cache.plan_len(), 0);
         assert_eq!(cache.structure_len(), 0);
-        assert_eq!(cache.tree_row_len(), 0);
-        assert_eq!(cache.all_codomain_row_len(), 0);
         assert_eq!(cache.fast_structure_len(), 0);
     }
 }
@@ -3268,7 +2897,7 @@ fn tree_transform_cache_reuses_all_codomain_plan_across_degeneracy_shapes() {
 }
 
 #[test]
-fn all_codomain_row_memo_reuses_codomain_rows_across_plan_misses() {
+fn all_codomain_plan_miss_does_not_retain_source_rows() {
     let key = |inner: [usize; 2]| {
         all_codomain_fusion_tree_test_key_for_rule(
             &SU2FusionRule,
@@ -3315,8 +2944,10 @@ fn all_codomain_row_memo_reuses_codomain_rows_across_plan_misses() {
         .get_or_compile_all_codomain(&SU2FusionRule, operation.clone(), &dst_cached, &src_big)
         .unwrap();
     assert_eq!(cache.stats().plan_misses(), 2);
-    assert_eq!(cache.stats().tree_row_hits(), 2);
-    assert_eq!(cache.stats().tree_row_misses(), 4);
+    // What: a different all-codomain source set compiles every distinct
+    // source row again while preserving the direct ordered numerical result.
+    assert_eq!(cache.stats().tree_row_hits(), 0);
+    assert_eq!(cache.stats().tree_row_misses(), 6);
 
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = TreeTransformWorkspace::default();
@@ -3560,13 +3191,37 @@ fn tree_transform_execution_context_no_cache_rebuilds_without_retaining_entries(
             .unwrap();
         assert_eq!(context.cache().plan_len(), 0);
         assert_eq!(context.cache().structure_len(), 0);
-        assert_eq!(context.cache().tree_row_len(), 0);
-        assert_eq!(context.cache().all_codomain_row_len(), 0);
         assert_eq!(context.cache().fast_structure_len(), 0);
         assert_eq!(context.cache().stats().plan_hits(), 0);
         assert_eq!(context.cache().stats().structure_hits(), 0);
         assert_eq!(context.cache().stats().plan_misses(), expected_misses);
         assert_eq!(context.cache().stats().structure_misses(), expected_misses);
+    }
+
+    let expected = dst.data().to_vec();
+    for policy in [
+        OperationCachePolicy::TaskLocal,
+        OperationCachePolicy::task_local_lru(1),
+    ] {
+        let mut policy_dst = dst.clone();
+        policy_dst.data_mut().fill(0.0);
+        let mut policy_context =
+            TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+        policy_context.cache_mut().set_policy(policy);
+        policy_context
+            .all_codomain_tree_transform_into(
+                &SU2FusionRule,
+                operation.clone(),
+                &mut policy_dst,
+                &src,
+                1.0,
+                0.0,
+            )
+            .unwrap();
+
+        // What: cache ownership and eviction policy do not change the tensor
+        // produced by the shared eager compiler.
+        assert_eq!(policy_dst.data(), expected);
     }
 }
 
@@ -3928,8 +3583,6 @@ fn unique_tree_pair_compile_bypasses_plan_and_structure_caches() {
     assert!(cached_storage.storage_conjugate());
     assert_eq!(cache.plan_len(), 0);
     assert_eq!(cache.structure_len(), 0);
-    assert_eq!(cache.tree_row_len(), 0);
-    assert_eq!(cache.all_codomain_row_len(), 0);
     assert_eq!(cache.fast_structure_len(), 0);
 }
 
@@ -3983,7 +3636,7 @@ fn u1_unique_tree_pair_remains_eager_under_stored_policy() {
         .unwrap();
 
     // What: U(1)'s Unique transform recompiles under the stored policy and
-    // never retains plan, structure, tree-pair row, or fast-front state.
+    // never retains plan, structure, or fast-front state.
     assert!(!Arc::ptr_eq(&first, &second));
     assert_eq!(cache.stats().plan_hits(), 0);
     assert_eq!(cache.stats().plan_misses(), 2);
@@ -3991,8 +3644,6 @@ fn u1_unique_tree_pair_remains_eager_under_stored_policy() {
     assert_eq!(cache.stats().structure_misses(), 2);
     assert_eq!(cache.plan_len(), 0);
     assert_eq!(cache.structure_len(), 0);
-    assert_eq!(cache.tree_row_len(), 0);
-    assert_eq!(cache.all_codomain_row_len(), 0);
     assert_eq!(cache.fast_structure_len(), 0);
 }
 
@@ -4099,6 +3750,7 @@ fn eager_product_tree_pair_plan_bypasses_legacy_row_assembly() {
 
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
     let operation = TreeTransformOperation::permute([1, 0], [2]);
+    let group_count = src_space.subblock_structure().fusion_tree_groups().len();
     let legacy = build_tree_transform_group_plan(
         &rule,
         operation.clone(),
@@ -4116,9 +3768,10 @@ fn eager_product_tree_pair_plan_bypasses_legacy_row_assembly() {
             .unwrap();
 
     // What: the eager Simple builder preserves the exact legacy plan while
-    // consuming the core ordered map instead of rebuilding full-key rows.
+    // consuming one core ordered map per whole group instead of rebuilding
+    // full-key rows per source column.
     assert_eq!(direct, legacy);
-    assert_eq!(tree_pair_lowering_calls(), (2, 0));
+    assert_eq!(tree_pair_lowering_calls(), (group_count, 0));
     direct
         .compile_structures(
             dst_space.subblock_structure(),
@@ -4320,28 +3973,25 @@ fn eager_su2_dense_tree_pair_plan_matches_legacy_replay() {
 #[test]
 fn product_tree_pair_plan_is_thread_count_invariant() {
     use crate::tree_transform::{
-        build_multiplicity_free_tree_pair_transform_group_plan_memoized, TreePairRowMemo,
+        build_tree_pair_transform_group_plan_validated_with_threads,
+        validate_multiplicity_free_tree_pair_preflight,
     };
 
     let (rule, src_space, dst_space, [c0, c1]) = fz2_u1_su2_tree_pair_fixture();
     let operation = TreeTransformOperation::permute([1, 0], [2]);
-    let rule_key = rule.tree_transform_rule_cache_key();
     let build = |threads| {
-        let mut memo = TreePairRowMemo::default();
-        let mut hits = 0;
-        let mut misses = 0;
-        let plan = build_multiplicity_free_tree_pair_transform_group_plan_memoized(
+        let proof = validate_multiplicity_free_tree_pair_preflight(
             &rule,
-            &rule_key,
-            operation.clone(),
+            &operation,
             src_space.subblock_structure(),
-            &mut memo,
-            &mut hits,
-            &mut misses,
-            threads,
         )
         .unwrap();
-        (plan, hits, misses)
+        build_tree_pair_transform_group_plan_validated_with_threads(
+            &proof,
+            operation.clone(),
+            threads,
+        )
+        .unwrap()
     };
 
     let (serial, serial_hits, serial_misses) = build(1);
@@ -4452,8 +4102,6 @@ fn product_tree_transform_reuse_is_owned_by_one_explicit_context() {
     assert_eq!(no_cache.stats().plan_misses(), 2);
     assert_eq!(no_cache.plan_len(), 0);
     assert_eq!(no_cache.structure_len(), 0);
-    assert_eq!(no_cache.tree_row_len(), 0);
-    assert_eq!(no_cache.all_codomain_row_len(), 0);
     assert_eq!(no_cache.fast_structure_len(), 0);
 }
 

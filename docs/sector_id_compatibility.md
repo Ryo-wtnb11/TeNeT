@@ -37,8 +37,9 @@ semantic-label ordering rather than relying on the returned `Vec` order.
 ## Cache migration
 
 Codec types participate in fusion-rule identity, so in-process TeNeT caches do
-not reuse Cantor plans as packed plans. Tree-transform plans and recoupling rows
-are process-resident only; TeNeT no longer reads or writes the former
+not reuse Cantor plans as packed plans. Complete tree-transform plans and
+structures are execution-context-local; source-column recoupling rows are
+compile-local and are not retained across plan misses. TeNeT no longer reads or writes the former
 `tree_transform_plans_v1.bin` and `tree_transform_plans_v2.bin` files. Existing
 files are ignored and may be deleted manually. Raw-ID-keyed application caches
 must likewise be rebuilt from semantic labels.
