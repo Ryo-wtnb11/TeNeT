@@ -1150,6 +1150,194 @@ fn blas_only_build_rejects_uncompiled_faer_provider() {
     assert!(error.to_string().contains("cpu-faer"));
 }
 
+struct FullOnly(DefaultDenseExecutor);
+
+impl DenseExecutor for FullOnly {
+    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.0.svd(input)
+    }
+
+    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.0.qr(input)
+    }
+
+    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.0.eigh(input)
+    }
+
+    fn eig(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.0.eig(input)
+    }
+
+    fn dot_general_into(
+        &mut self,
+        output: DenseWrite<'_>,
+        lhs: DenseRead<'_>,
+        rhs: DenseRead<'_>,
+        config: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        self.0.dot_general_into(output, lhs, rhs, config)
+    }
+}
+
+#[test]
+fn solve_default_is_explicitly_unsupported_without_writing() {
+    // What: executors without solve capability reject the operation before
+    // publishing anything into the caller's destination.
+    let a = [1.0_f64];
+    let b = [2.0_f64];
+    let mut x = [37.0_f64];
+    let shape = [1, 1];
+    let strides = [1, 1];
+    let mut executor = FullOnly(DefaultDenseExecutor::new());
+
+    let error = executor
+        .solve_into(
+            DenseRead::F64(DenseView::new(&a, &shape, &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&b, &shape, &strides, 0).unwrap()),
+            DenseWrite::F64(DenseViewMut::new(&mut x, &shape, &strides, 0).unwrap()),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        DenseError::Unsupported {
+            op: "solve_into",
+            ..
+        }
+    ));
+    assert_eq!(x, [37.0]);
+}
+
+#[test]
+fn default_executor_solves_f64_from_and_into_strided_views() {
+    // What: solve reads legal noncontiguous coefficients and writes only the
+    // logical elements of a noncontiguous caller-owned destination.
+    let mut a = vec![-99.0; 10];
+    a[1] = 3.0;
+    a[3] = 1.0;
+    a[6] = 1.0;
+    a[8] = 2.0;
+    let b = [2.0, -1.0, 9.0, 8.0];
+    let mut x = vec![-77.0; 9];
+    let shape = [2, 2];
+    let compact = [1, 2];
+    let strided = [2, 5];
+    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
+
+    executor
+        .solve_into(
+            DenseRead::F64(DenseView::new(&a, &shape, &strided, 1).unwrap()),
+            DenseRead::F64(DenseView::new(&b, &shape, &compact, 0).unwrap()),
+            DenseWrite::F64(DenseViewMut::new(&mut x, &shape, &strided, 0).unwrap()),
+        )
+        .unwrap();
+
+    for (actual, expected) in [x[0], x[2], x[5], x[7]]
+        .into_iter()
+        .zip([1.0, -1.0, 2.0, 3.0])
+    {
+        assert_f64_close(actual, expected, 1.0e-12);
+    }
+    assert_eq!([x[1], x[3], x[4], x[6], x[8]], [-77.0; 5]);
+}
+
+#[test]
+fn default_executor_solves_c64_system() {
+    // What: complex solve preserves both real and imaginary components for a
+    // rank-2 right-hand side.
+    let c = |re, im| Complex64::new(re, im);
+    let a = [c(2.0, 1.0), c(0.0, 0.0), c(1.0, 0.0), c(1.0, -1.0)];
+    let b = [c(-1.0, 6.0), c(0.0, 2.0)];
+    let mut x = [c(0.0, 0.0); 2];
+    let a_shape = [2, 2];
+    let b_shape = [2, 1];
+    let strides = [1, 2];
+    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
+
+    executor
+        .solve_into(
+            DenseRead::C64(DenseView::new(&a, &a_shape, &strides, 0).unwrap()),
+            DenseRead::C64(DenseView::new(&b, &b_shape, &strides, 0).unwrap()),
+            DenseWrite::C64(DenseViewMut::new(&mut x, &b_shape, &strides, 0).unwrap()),
+        )
+        .unwrap();
+
+    assert_c64_close(x[0], c(1.0, 2.0), 1.0e-12);
+    assert_c64_close(x[1], c(-1.0, 1.0), 1.0e-12);
+}
+
+#[test]
+fn solve_validates_destination_before_singular_factorization() {
+    // What: destination dtype and shape errors take precedence over a singular
+    // factorization, while a valid destination exposes the numerical failure;
+    // no failed call publishes output.
+    let a = [1.0_f64, 2.0, 2.0, 4.0];
+    let b = [1.0_f64, 1.0];
+    let a_shape = [2, 2];
+    let b_shape = [2, 1];
+    let strides = [1, 2];
+    let mut executor = DefaultDenseExecutor::with_threads(1).unwrap();
+
+    let mut wrong_dtype = [Complex64::new(19.0, 23.0); 2];
+    let error = executor
+        .solve_into(
+            DenseRead::F64(DenseView::new(&a, &a_shape, &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&b, &b_shape, &strides, 0).unwrap()),
+            DenseWrite::C64(DenseViewMut::new(&mut wrong_dtype, &b_shape, &strides, 0).unwrap()),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        DenseError::DTypeMismatch {
+            op: "solve_into",
+            expected: DenseDType::F64,
+            actual: DenseDType::C64,
+        }
+    ));
+    assert_eq!(wrong_dtype, [Complex64::new(19.0, 23.0); 2]);
+
+    let mut wrong_shape = [29.0_f64];
+    let wrong_shape_dims = [1, 1];
+    let error = executor
+        .solve_into(
+            DenseRead::F64(DenseView::new(&a, &a_shape, &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&b, &b_shape, &strides, 0).unwrap()),
+            DenseWrite::F64(
+                DenseViewMut::new(&mut wrong_shape, &wrong_shape_dims, &strides, 0).unwrap(),
+            ),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        DenseError::ShapeMismatch {
+            op: "solve_into",
+            ref expected,
+            ref actual,
+        } if expected == &[2, 1] && actual == &[1, 1]
+    ));
+    assert_eq!(wrong_shape, [29.0]);
+
+    let mut x = [13.0_f64, 17.0];
+    let error = executor
+        .solve_into(
+            DenseRead::F64(DenseView::new(&a, &a_shape, &strides, 0).unwrap()),
+            DenseRead::F64(DenseView::new(&b, &b_shape, &strides, 0).unwrap()),
+            DenseWrite::F64(DenseViewMut::new(&mut x, &b_shape, &strides, 0).unwrap()),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        DenseError::NumericalFailure {
+            backend: DenseBackend::Tenferro,
+            op: "solve_into",
+            ..
+        }
+    ));
+    assert_eq!(x, [13.0, 17.0]);
+}
+
 // Exercises the values-only trait *defaults* (full decomposition minus the
 // vectors). `DefaultDenseExecutor` overrides them, so this wraps it in an
 // executor that implements svd/eigh/eig but leaves svd_vals/eigh_vals/eig_vals
@@ -1157,31 +1345,6 @@ fn blas_only_build_rejects_uncompiled_faer_provider() {
 // backend's no-vector override to LAPACK precision.
 #[test]
 fn values_only_defaults_fall_back_to_the_full_decomposition_spectrum() {
-    struct FullOnly(DefaultDenseExecutor);
-    impl DenseExecutor for FullOnly {
-        fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-            self.0.svd(input)
-        }
-        fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-            self.0.qr(input)
-        }
-        fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-            self.0.eigh(input)
-        }
-        fn eig(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-            self.0.eig(input)
-        }
-        fn dot_general_into(
-            &mut self,
-            output: DenseWrite<'_>,
-            lhs: DenseRead<'_>,
-            rhs: DenseRead<'_>,
-            config: &DenseDotConfig,
-        ) -> Result<(), DenseError> {
-            self.0.dot_general_into(output, lhs, rhs, config)
-        }
-    }
-
     let shape = [2usize, 2];
     let strides = [1usize, 2]; // column-major
     let m = vec![2.0f64, 1.0, 1.0, 3.0]; // symmetric, so eigh applies too
