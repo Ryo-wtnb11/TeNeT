@@ -90,8 +90,8 @@ Added this sweep: `Tensor::numout` / `numin` / `numind`, `Tensor::repartition`,
 | `flip` (tensor) | has | `Tensor::flip` | |
 | `repartition` | added | `Tensor::repartition` | Single split-point arg (domain rank fixed by `rank`). |
 | `insertleftunit` / `insertrightunit` / `removeunit` | design-gated | — | Needs a trivial-unit `Space` constructor on the facade (see `unitspace` below). |
-| `catdomain` / `catcodomain` | design-gated | — | Block-diagonal leg concatenation; a new block-assembly kernel, not a wrapper. |
-| `absorb` | design-gated | — | Diagonal-into-leg absorption; `compose` with a diagonal covers the common case but not the leg-choice API. |
+| `catdomain` / `catcodomain` | has | `Tensor::catdomain` / `Tensor::catcodomain` | TensorKit names as Rust binary methods; concatenate the sole domain/codomain leg and place reduced blocks in adjacent column/row slabs. |
+| `absorb` | design-gated | — | Copies the shared prefix of every matching fusion-tree subblock from a source into a destination-shaped tensor; distinct from composition and diagonal absorption. |
 | `*!` bang forms | N/A | — | Immutable facade. |
 
 ## Factorizations & matrix functions
