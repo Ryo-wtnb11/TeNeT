@@ -837,7 +837,13 @@ impl Space {
         let mut sectors = self.sectors.clone();
         for &(sector, deg) in &other.sectors {
             match sectors.iter_mut().find(|(s, _)| *s == sector) {
-                Some(entry) => entry.1 += deg,
+                Some(entry) => {
+                    entry.1 = entry.1.checked_add(deg).ok_or_else(|| {
+                        Error::InvalidArgument(format!(
+                            "oplus: degeneracy overflow for sector {sector:?}"
+                        ))
+                    })?;
+                }
                 None => sectors.push((sector, deg)),
             }
         }
@@ -942,5 +948,13 @@ mod tk_space_api_tests {
             Err(Error::RuleMismatch)
         ));
         assert!(matches!(v.oplus(&v.dual()), Err(Error::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn oplus_reports_degeneracy_overflow() {
+        // What: direct-sum size overflow is a typed error, not a debug panic.
+        let lhs = Space::u1([(0, usize::MAX)]);
+        let rhs = Space::u1([(0, 1)]);
+        assert!(matches!(lhs.oplus(&rhs), Err(Error::InvalidArgument(_))));
     }
 }
