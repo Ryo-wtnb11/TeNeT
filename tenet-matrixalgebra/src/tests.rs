@@ -1,7 +1,7 @@
 use tenet_core::{
-    product_fusion_rule, BlockKey, BraidingStyleKind, CoreError, FermionParityFusionRule,
-    FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
-    FusionTreeKey, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
+    product_fusion_rule, BlockKey, BlockSpec, BlockStructure, BraidingStyleKind, CoreError,
+    FermionParityFusionRule, FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace,
+    FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
     MultiplicityFreeRigidSymbols, RuleIdentity, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
     SectorVec, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
 };
@@ -934,7 +934,7 @@ fn eigh_fallback_rejects_nonhermitian_complex_input_before_dense_execution() {
 
 #[test]
 fn eigh_vals_rejects_a_later_nonhermitian_sector_before_any_dense_call() {
-    // What: values-only EIGH validates all packed sectors before its first no-vector driver.
+    // What: values-only EIGH validates every borrowed sector before its first no-vector driver.
     let rule = Z2FusionRule;
     let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
     let regions = tensor
@@ -950,6 +950,7 @@ fn eigh_vals_rejects_a_later_nonhermitian_sector_before_any_dense_call() {
         tensor.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
+    let before = nonhermitian.data().to_vec();
     let mut dense = EighCallSpy::default();
 
     let error = eigh_vals(
@@ -965,6 +966,7 @@ fn eigh_vals_rejects_a_later_nonhermitian_sector_before_any_dense_call() {
         }
     );
     assert_eq!(dense.calls, 0);
+    assert_eq!(nonhermitian.data(), before);
 }
 
 #[test]
@@ -4738,6 +4740,204 @@ fn spectrum_only_entry_points_return_descending_magnitudes() {
             assert!(pair[0].norm() >= pair[1].norm() - 1e-12);
         }
     }
+}
+
+fn assert_real_spectra_close(lhs: &[SectorSpectrum], rhs: &[SectorSpectrum]) {
+    assert_eq!(lhs.len(), rhs.len());
+    for (lhs, rhs) in lhs.iter().zip(rhs) {
+        assert_eq!(lhs.sector, rhs.sector);
+        assert_eq!(lhs.values.len(), rhs.values.len());
+        for (&lhs, &rhs) in lhs.values.iter().zip(&rhs.values) {
+            assert!((lhs - rhs).abs() <= 1e-10, "{lhs} vs {rhs}");
+        }
+    }
+}
+
+fn assert_complex_spectra_close(
+    lhs: &[SectorSpectrum<Complex64>],
+    rhs: &[SectorSpectrum<Complex64>],
+) {
+    assert_eq!(lhs.len(), rhs.len());
+    for (lhs, rhs) in lhs.iter().zip(rhs) {
+        assert_eq!(lhs.sector, rhs.sector);
+        assert_eq!(lhs.values.len(), rhs.values.len());
+        for (&lhs, &rhs) in lhs.values.iter().zip(&rhs.values) {
+            assert!((lhs - rhs).norm() <= 1e-10, "{lhs} vs {rhs}");
+        }
+    }
+}
+
+fn padded_copy<R, D>(rule: &R, source: &TensorMap<D, 2, 2>) -> TensorMap<D, 2, 2>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let mut offset = 1usize;
+    let mut blocks = Vec::with_capacity(source.structure().block_count());
+    for index in 0..source.structure().block_count() {
+        let block = source.structure().block(index).unwrap();
+        blocks.push(
+            BlockSpec::column_major_with_key(block.key().clone(), block.shape().to_vec(), offset)
+                .unwrap(),
+        );
+        offset += block.shape().iter().product::<usize>() + 1;
+    }
+    let source_space = source.fusion_space().unwrap();
+    let structure = BlockStructure::from_blocks_with_rank(4, blocks).unwrap();
+    let padded_space = FusionTensorMapSpace::new_unbound(
+        source_space.dense_space().clone(),
+        source_space.homspace().clone(),
+        structure,
+    )
+    .unwrap()
+    .try_bind_rule(rule)
+    .unwrap();
+    TensorMap::from_block_fn_with_fusion_space(padded_space, D::zero(), |key, indices| {
+        let block = source.block_by_key(key).unwrap();
+        let position = block.offset()
+            + indices
+                .iter()
+                .zip(block.strides())
+                .map(|(&index, &stride)| index * stride)
+                .sum::<usize>();
+        block.data()[position]
+    })
+    .unwrap()
+}
+
+fn assert_value_region_paths_match<R, D>(
+    rule: Arc<R>,
+    general: &TensorMap<D, 2, 2>,
+    hermitian: &TensorMap<D, 2, 2>,
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let general_padded = padded_copy(rule.as_ref(), general);
+    let hermitian_padded = padded_copy(rule.as_ref(), hermitian);
+    let general_bound = bound_tensor(Arc::clone(&rule), general);
+    let hermitian_bound = bound_tensor(Arc::clone(&rule), hermitian);
+    let general_fallback = bound_tensor(Arc::clone(&rule), &general_padded);
+    let hermitian_fallback = bound_tensor(rule, &hermitian_padded);
+    assert!(general_bound
+        .space()
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .is_some());
+    assert!(general_fallback
+        .space()
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .is_none());
+    assert!(hermitian_fallback
+        .space()
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .is_none());
+    let general_before = general_bound.data().to_vec();
+    let hermitian_before = hermitian_bound.data().to_vec();
+    let general_fallback_before = general_fallback.data().to_vec();
+    let hermitian_fallback_before = hermitian_fallback.data().to_vec();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    crate::factorize::reset_values_matricization_fallbacks();
+    let direct_svd = svd_vals_dyn(&mut dense, &general_bound.as_ref().dynamic()).unwrap();
+    let direct_eigh = eigh_vals_dyn(&mut dense, &hermitian_bound.as_ref().dynamic()).unwrap();
+    let direct_eig = eig_vals_dyn(&mut dense, &general_bound.as_ref().dynamic()).unwrap();
+    assert_eq!(crate::factorize::values_matricization_fallbacks(), 0);
+
+    crate::factorize::reset_values_matricization_fallbacks();
+    let packed_svd = svd_vals_dyn(&mut dense, &general_fallback.as_ref().dynamic()).unwrap();
+    let packed_eigh = eigh_vals_dyn(&mut dense, &hermitian_fallback.as_ref().dynamic()).unwrap();
+    let packed_eig = eig_vals_dyn(&mut dense, &general_fallback.as_ref().dynamic()).unwrap();
+    assert_eq!(crate::factorize::values_matricization_fallbacks(), 3);
+
+    assert_real_spectra_close(&direct_svd, &packed_svd);
+    assert_real_spectra_close(&direct_eigh, &packed_eigh);
+    assert_complex_spectra_close(&direct_eig, &packed_eig);
+    assert!(general_bound.data() == general_before);
+    assert!(hermitian_bound.data() == hermitian_before);
+    assert!(general_fallback.data() == general_fallback_before);
+    assert!(hermitian_fallback.data() == hermitian_fallback_before);
+}
+
+#[test]
+fn value_region_paths_match_packed_oracles_across_supported_rules() {
+    // What: canonical region borrowing and noncanonical packing return the same
+    // ordered spectra for Abelian, non-Abelian, fermionic, and product rules.
+    let u1 = [
+        U1Irrep::new(-1).sector_id(),
+        U1Irrep::new(0).sector_id(),
+        U1Irrep::new(1).sector_id(),
+    ];
+    assert_value_region_paths_match(
+        Arc::new(U1FusionRule),
+        &tsvd_test_tensor(&U1FusionRule, &u1),
+        &hermitian_test_tensor(&U1FusionRule, &u1),
+    );
+
+    let su2 = [
+        SU2Irrep::from_twice_spin(0).sector_id(),
+        SU2Irrep::from_twice_spin(1).sector_id(),
+    ];
+    assert_value_region_paths_match(
+        Arc::new(SU2FusionRule),
+        &tsvd_test_tensor(&SU2FusionRule, &su2),
+        &hermitian_test_tensor(&SU2FusionRule, &su2),
+    );
+
+    let fz2 = [SectorId::new(0), SectorId::new(1)];
+    assert_value_region_paths_match(
+        Arc::new(FermionParityFusionRule),
+        &tsvd_test_tensor(&FermionParityFusionRule, &fz2),
+        &hermitian_test_tensor(&FermionParityFusionRule, &fz2),
+    );
+
+    let product = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
+    let product_sectors = [
+        product.encode_sector(SectorId::new(0), U1Irrep::new(0).sector_id()),
+        product.encode_sector(SectorId::new(1), U1Irrep::new(1).sector_id()),
+    ];
+    assert_value_region_paths_match(
+        Arc::new(product.clone()),
+        &tsvd_test_tensor(&product, &product_sectors),
+        &hermitian_test_tensor(&product, &product_sectors),
+    );
+}
+
+#[test]
+fn value_region_paths_match_packed_oracles_for_complex64() {
+    // What: borrowed C64 sector spans preserve all three values-only dtype paths.
+    let rule = Z2FusionRule;
+    let sectors = [SectorId::new(0), SectorId::new(1)];
+    let general = tsvd_test_tensor(&rule, &sectors);
+    let hermitian = hermitian_test_tensor(&rule, &sectors);
+    let general = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+        general
+            .data()
+            .iter()
+            .map(|&value| Complex64::new(value, 0.0))
+            .collect(),
+        general.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let hermitian = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
+        hermitian
+            .data()
+            .iter()
+            .map(|&value| Complex64::new(value, 0.0))
+            .collect(),
+        hermitian.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+
+    assert_value_region_paths_match(Arc::new(rule), &general, &hermitian);
 }
 
 #[test]
