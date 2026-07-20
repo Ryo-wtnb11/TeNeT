@@ -1182,7 +1182,6 @@ where
         provider: Arc<R>,
         homspace: FusionTreeHomSpace,
     ) -> Result<Self, OperationError> {
-        validate_generic_provider_style(provider.as_ref())?;
         let space =
             DynamicFusionMapSpace::from_final_homspace_generic(provider.as_ref(), homspace)?;
         Self::from_derived(provider, space)
@@ -1473,13 +1472,14 @@ impl DynamicFusionMapSpace {
         })
     }
 
-    fn from_final_homspace_generic<R>(
+    pub(crate) fn from_final_homspace_generic<R>(
         rule: &R,
         homspace: FusionTreeHomSpace,
     ) -> Result<Self, OperationError>
     where
         R: FusionRule,
     {
+        validate_generic_provider_style(rule)?;
         observe_final_result_layout_build();
         let nout = homspace.codomain().len();
         let nin = homspace.domain().len();
@@ -2320,7 +2320,9 @@ mod bound_invariant_tests {
 
     #[test]
     fn direct_bound_builders_keep_coherent_split_and_rank() {
-        // What: both multiplicity-free and generic direct builders satisfy bound invariants.
+        // What: direct multiplicity-free and Generic builders satisfy bound
+        // invariants, and final-HomSpace Generic layout exactly matches the
+        // caller-shape expert layout for a genuine outer multiplicity.
         let provider = Arc::new(Z2FusionRule);
         let homspace = FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]);
         let multiplicity_free = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
@@ -2334,18 +2336,23 @@ mod bound_invariant_tests {
             .sector_of(1, 1)
             .expect("the production SU(3) table contains the octet");
         let generic_homspace = FusionTreeHomSpace::from_sector_ids(
-            [(octet.id(), 1), (octet.id(), 1)],
-            [(octet.id(), 1)],
+            [(octet.id(), 2), (octet.id(), 3)],
+            [(octet.id(), 4)],
         );
         let generic_key_count = generic_homspace
             .fusion_tree_keys_generic(generic_provider.as_ref())
             .expect("8 x 8 -> 8 is covered by the production SU(3) table")
             .len();
         assert_eq!(generic_key_count, 2, "8 x 8 -> 8 has multiplicity two");
-        let generic = BoundDynamicFusionMapSpace::from_degeneracy_shapes_generic(
+        let expert = BoundDynamicFusionMapSpace::from_degeneracy_shapes_generic(
+            Arc::clone(&generic_provider),
+            generic_homspace.clone(),
+            vec![vec![2, 3, 4]; generic_key_count],
+        )
+        .unwrap();
+        let generic = BoundDynamicFusionMapSpace::from_final_homspace_generic(
             generic_provider,
             generic_homspace,
-            vec![vec![1, 1, 1]; generic_key_count],
         )
         .unwrap();
 
@@ -2353,6 +2360,42 @@ mod bound_invariant_tests {
         assert_eq!(generic.space().nin(), 1);
         assert_eq!(multiplicity_free.space().structure().rank(), 2);
         assert_eq!(generic.space().structure().rank(), 3);
+        assert_eq!(generic.space().structure(), expert.space().structure());
+        assert_eq!(
+            generic.space().required_len().unwrap(),
+            expert.space().required_len().unwrap()
+        );
+        for index in 0..expert.space().structure().block_count() {
+            let actual = generic.space().structure().block(index).unwrap();
+            let expected = expert.space().structure().block(index).unwrap();
+            assert_eq!(actual.key(), expected.key());
+            assert_eq!(actual.shape(), expected.shape());
+            assert_eq!(actual.strides(), expected.strides());
+            assert_eq!(actual.offset(), expected.offset());
+        }
+    }
+
+    #[test]
+    fn generic_adjoint_rejects_multiplicity_free_before_final_layout_build() {
+        // What: a Generic adjoint rejects a multiplicity-free provider before
+        // constructing its target layout.
+        let source = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            matrix_space(),
+            Arc::new(Z2FusionRule),
+        )
+        .unwrap();
+        reset_final_result_layout_builds();
+
+        let error = crate::adjoint::adjoint_bound_space_dyn_generic(&source).unwrap_err();
+
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Generic,
+                actual: FusionStyleKind::Unique,
+            })
+        ));
+        assert_eq!(final_result_layout_builds(), 0);
     }
 }
 

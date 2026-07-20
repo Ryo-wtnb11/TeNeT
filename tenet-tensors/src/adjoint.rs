@@ -523,7 +523,6 @@ where
     R: FusionRule,
 {
     space.validate_rule(rule)?;
-    let nout = space.nout();
     let homspace = space.homspace();
     let adjoint_hom =
         FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone());
@@ -532,33 +531,22 @@ where
     let keys = adjoint_hom
         .fusion_tree_keys_generic(rule)
         .map_err(OperationError::from_core_preserving_context)?;
-    let shapes = keys
-        .iter()
-        .map(|key| {
-            let source_key = BlockKey::FusionTree(FusionTreePairKey::pair(
-                key.domain_tree().clone(),
-                key.codomain_tree().clone(),
-            ));
-            let index = structure
-                .find_block_index_by_key(&source_key)
-                .ok_or_else(|| OperationError::MissingBlockKey {
-                    key: Box::new(source_key.clone()),
-                })?;
-            let source_shape = structure
-                .block(index)
-                .map_err(OperationError::from_core_preserving_context)?
-                .shape();
-            let mut shape = source_shape[nout..].to_vec();
-            shape.extend_from_slice(&source_shape[..nout]);
-            Ok(shape)
-        })
-        .collect::<Result<Vec<_>, OperationError>>()?;
+    for key in keys.iter() {
+        // Why not rely only on the bound source proof: the cold generic
+        // adjoint has historically reported its target-ordered missing key
+        // before constructing the target layout.
+        let source_key = BlockKey::FusionTree(FusionTreePairKey::pair(
+            key.domain_tree().clone(),
+            key.codomain_tree().clone(),
+        ));
+        if structure.find_block_index_by_key(&source_key).is_none() {
+            return Err(OperationError::MissingBlockKey {
+                key: Box::new(source_key),
+            });
+        }
+    }
 
-    Ok(DynamicFusionMapSpace::from_degeneracy_shapes_generic(
-        rule,
-        adjoint_hom,
-        shapes,
-    )?)
+    DynamicFusionMapSpace::from_final_homspace_generic(rule, adjoint_hom)
 }
 
 /// Generic-fusion (SU(N)) sibling of [`adjoint_dyn`]: same block relabel +
@@ -956,10 +944,12 @@ mod cache_tests {
 
     fn toy_generic_bound<const ID: u8>() -> BoundDynamicFusionMapSpace<ToyGenericRule<ID>> {
         let one = SectorId::new(1);
-        let leg = || SectorLeg::new([(one, 1)], false);
         let homspace = FusionTreeHomSpace::new(
-            FusionProductSpace::new([leg(), leg()]),
-            FusionProductSpace::new([leg()]),
+            FusionProductSpace::new([
+                SectorLeg::new([(one, 2)], false),
+                SectorLeg::new([(one, 3)], false),
+            ]),
+            FusionProductSpace::new([SectorLeg::new([(one, 5)], false)]),
         );
         let provider = Arc::new(ToyGenericRule::<ID>);
         let count = homspace
@@ -970,7 +960,7 @@ mod cache_tests {
         BoundDynamicFusionMapSpace::from_degeneracy_shapes_generic(
             provider,
             homspace,
-            vec![vec![1; 3]; count],
+            vec![vec![2, 3, 5]; count],
         )
         .unwrap()
     }
@@ -1617,6 +1607,50 @@ mod cache_tests {
             error,
             OperationError::Core(CoreError::FusionRuleMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn generic_adjoint_final_homspace_matches_reconstructed_layout() {
+        // What: a genuine outer-multiplicity adjoint keeps the legacy tree
+        // order, shapes, strides, offsets, and storage length when its target
+        // layout is derived directly from the swapped final HomSpace.
+        let source = toy_generic_bound::<1>();
+        let source_space = source.space();
+        let source_structure = source_space.structure();
+        let source_nout = source_space.nout();
+        let homspace = source_space.homspace();
+        let adjoint_hom =
+            FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone());
+        let keys = adjoint_hom
+            .fusion_tree_keys_generic(source.provider())
+            .unwrap();
+        let shapes = keys
+            .iter()
+            .map(|key| {
+                let source_key = BlockKey::FusionTree(FusionTreePairKey::pair(
+                    key.domain_tree().clone(),
+                    key.codomain_tree().clone(),
+                ));
+                let source_block = source_structure
+                    .find_block_index_by_key(&source_key)
+                    .and_then(|index| source_structure.block(index).ok())
+                    .unwrap();
+                let mut shape = source_block.shape()[source_nout..].to_vec();
+                shape.extend_from_slice(&source_block.shape()[..source_nout]);
+                shape
+            })
+            .collect::<Vec<_>>();
+        let reconstructed = DynamicFusionMapSpace::from_degeneracy_shapes_generic(
+            source.provider(),
+            adjoint_hom,
+            shapes,
+        )
+        .unwrap();
+
+        let canonical = adjoint_space_dyn_generic(source.provider(), source_space).unwrap();
+
+        assert_complete_structure_eq(canonical.structure(), reconstructed.structure());
+        assert_eq!(canonical.homspace(), reconstructed.homspace());
     }
 
     #[test]
