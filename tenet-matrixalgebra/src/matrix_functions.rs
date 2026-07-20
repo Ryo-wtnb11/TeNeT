@@ -190,8 +190,8 @@ where
     compose_bound_dyn(context, &v, &uh)
 }
 
-/// True inverse of a full-rank endomorphism via the compact SVD; fails when
-/// any block is rank-deficient at working precision.
+/// True inverse of a full-rank map between isomorphic spaces via the compact
+/// SVD; fails when any block is rank-deficient at working precision.
 pub fn inv<E, RuleKey, BT, BC, R, D, const N: usize>(
     dense: &mut E,
     context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
@@ -223,10 +223,9 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
-    let space = input.space().space();
-    if space.homspace().codomain() != space.homspace().domain() {
+    if !input.space().codomain_isomorphic_to_domain()? {
         return Err(OperationError::UnsupportedTensorContractScope {
-            message: "inv requires an endomorphism (codomain == domain)",
+            message: "inv requires isomorphic codomain and domain",
         });
     }
     // Why not block LU like TensorKit: DenseExecutor does not yet expose an

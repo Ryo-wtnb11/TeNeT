@@ -28,6 +28,27 @@ fn relative_distance(lhs: &Tensor, rhs: &Tensor) -> f64 {
     diff.norm().unwrap() / (1.0 + rhs.norm().unwrap())
 }
 
+fn assert_isomorphic_inverse(rt: &Runtime, dtype: Dtype, leg: Space) {
+    let fused = leg.fuse(&leg).unwrap();
+    let map = Tensor::isomorphism(rt, dtype, [&fused], [&leg, &leg]).unwrap();
+    let inverse = map.inv().unwrap();
+
+    assert_eq!(inverse.codomain_spaces(), map.domain_spaces());
+    assert_eq!(inverse.domain_spaces(), map.codomain_spaces());
+    assert!(
+        relative_distance(
+            &inverse.compose(&map).unwrap(),
+            &Tensor::id(rt, dtype, [&leg, &leg]).unwrap()
+        ) < 1e-10
+    );
+    assert!(
+        relative_distance(
+            &map.compose(&inverse).unwrap(),
+            &Tensor::id(rt, dtype, [&fused]).unwrap()
+        ) < 1e-10
+    );
+}
+
 fn assert_left_polar_contract(rt: &Runtime, tensor: &Tensor, domain: &Space) {
     let (isometry, positive) = tensor.left_polar().unwrap();
     assert!(relative_distance(&isometry.compose(&positive).unwrap(), tensor) < 1e-10);
@@ -593,6 +614,19 @@ fn inv_and_pinv_sanity() {
         let round_trip = pinv.compose(&tall).unwrap().compose(&x).unwrap();
         assert!(relative_distance(&round_trip, &x) < 1e-8);
     }
+}
+
+#[test]
+fn inv_accepts_tensorkit_isomorphic_exact_unequal_spaces() {
+    // What: Abelian and fermionic non-Abelian fused/product isomorphisms are
+    // invertible and return the exact swapped external spaces.
+    let rt = Runtime::builder().dense_threads(1).build().unwrap();
+    assert_isomorphic_inverse(&rt, Dtype::F64, Space::u1([(0, 1), (1, 1)]));
+    assert_isomorphic_inverse(
+        &rt,
+        Dtype::C64,
+        Space::fz2_u1_su2([((0, 0, 0), 1), ((1, 1, 1), 1)]).unwrap(),
+    );
 }
 
 #[test]

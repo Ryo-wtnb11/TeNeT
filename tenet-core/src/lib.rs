@@ -9,7 +9,7 @@
 use core::fmt;
 use core::marker::PhantomData;
 use core::ops::{Add, Mul};
-use std::collections::hash_map::Entry;
+use std::collections::{hash_map::Entry, BTreeMap};
 use std::hash::Hash;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock, Weak};

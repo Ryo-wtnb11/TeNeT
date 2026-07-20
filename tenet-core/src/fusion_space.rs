@@ -54,6 +54,62 @@ impl FusionProductSpace {
         self.legs.is_empty()
     }
 
+    /// Computes every coupled sector's reduced dimension under `rule`.
+    ///
+    /// The eager fold includes external degeneracies and fusion multiplicities
+    /// without constructing fusion trees or publishing cache state.
+    pub fn coupled_sector_block_dimensions<R>(
+        &self,
+        rule: &R,
+    ) -> Result<BTreeMap<SectorId, usize>, CoreError>
+    where
+        R: FusionRule,
+    {
+        // Why not cache or enumerate fusion trees: this map is a small
+        // structural preflight, and the dynamic program computes only the
+        // dimensions that the caller needs.
+        let mut dimensions = BTreeMap::from([(rule.vacuum(), 1usize)]);
+        for leg in self.legs() {
+            let mut next = BTreeMap::<SectorId, usize>::new();
+            for (&left, &left_dimension) in &dimensions {
+                for (right, right_degeneracy) in leg.iter() {
+                    // Why not dualize `right` from `SectorLeg::is_dual`: stored
+                    // sector IDs are already outward labels; the flag controls
+                    // pivotal and braiding data, not ProductSpace block dimensions.
+                    let mut fold = rule.coupled_sector_fold(&[left, right]);
+                    if !fold.is_fully_clean() {
+                        return Err(CoreError::FusionOutsideTable {
+                            message: format!(
+                                "coupled-sector dimension fold is incomplete: \
+                                 tainted={:?}, out_of_table={:?}, poisoned={}",
+                                fold.tainted, fold.out_of_table, fold.poisoned
+                            ),
+                        });
+                    }
+                    fold.clean.sort_unstable();
+                    fold.clean.dedup();
+                    for coupled in fold.clean {
+                        let contribution = left_dimension
+                            .checked_mul(right_degeneracy)
+                            .and_then(|value| {
+                                value.checked_mul(rule.nsymbol(left, right, coupled))
+                            })
+                            .ok_or(CoreError::ElementCountOverflow)?;
+                        if contribution == 0 {
+                            continue;
+                        }
+                        let coupled_dimension = next.entry(coupled).or_default();
+                        *coupled_dimension = coupled_dimension
+                            .checked_add(contribution)
+                            .ok_or(CoreError::ElementCountOverflow)?;
+                    }
+                }
+            }
+            dimensions = next;
+        }
+        Ok(dimensions)
+    }
+
     fn selected_leg_tuples(&self) -> Vec<Vec<FusionTreeLeg>> {
         let mut tuples = Vec::new();
         let mut current = vec![None; self.legs.len()];
