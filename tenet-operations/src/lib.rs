@@ -81,3 +81,6 @@ pub use tree_profile::TreeTransformReplayProfile;
 // owns the audited Vec length transition.
 #[allow(unsafe_code)]
 mod owned_overwrite_buffer;
+mod owned_trace;
+#[doc(hidden)]
+pub use owned_trace::{try_tensortrace_owned_raw, OwnedTraceTerm};
