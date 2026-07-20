@@ -207,6 +207,10 @@ fn unsupported_ops_on_device_are_explicit_errors() {
         .unwrap()
         .to_cuda()
         .unwrap();
+    let u = Tensor::rand(&rt, Dtype::F64, [&v], [&v, &v])
+        .unwrap()
+        .to_cuda()
+        .unwrap();
 
     for (name, err) in [
         ("permute", t.permute(&[1, 0], &[2]).unwrap_err()),
@@ -218,6 +222,8 @@ fn unsupported_ops_on_device_are_explicit_errors() {
         ("adjoint", t.adjoint().unwrap_err()),
         ("svd_vals", t.svd_vals().map(|_| ()).unwrap_err()),
         ("lq", t.lq_compact().map(|_| ()).unwrap_err()),
+        ("catdomain", t.catdomain(&t).unwrap_err()),
+        ("catcodomain", u.catcodomain(&u).unwrap_err()),
     ] {
         assert!(
             matches!(err, Error::UnsupportedOnDevice(_)),

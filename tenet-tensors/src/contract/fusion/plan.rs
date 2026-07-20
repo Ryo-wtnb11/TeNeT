@@ -122,6 +122,12 @@ pub(crate) enum FusionContractOrientation {
     RhsLhs,
 }
 
+const FORWARD_ORIENTATIONS: [FusionContractOrientation; 1] = [FusionContractOrientation::LhsRhs];
+const CACHED_ORIENTATIONS: [FusionContractOrientation; 2] = [
+    FusionContractOrientation::LhsRhs,
+    FusionContractOrientation::RhsLhs,
+];
+
 /// Provider-independent structural facts used by the current fusion selector.
 ///
 /// The value owns no provider, transformed HomSpace, backend, or cache handle.
@@ -276,6 +282,15 @@ impl FusionContractPlan {
     #[inline]
     pub(crate) fn orientation(&self) -> FusionContractOrientation {
         self.orientation
+    }
+
+    pub(crate) fn require_forward_scratch(&self) -> Result<(), OperationError> {
+        if self.orientation == FusionContractOrientation::RhsLhs {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "caller-owned fusion contraction scratch supports only LhsRhs orientation",
+            });
+        }
+        Ok(())
     }
 
     #[inline]
@@ -473,6 +488,47 @@ pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_raw<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
+    prepare_tensorcontract_fusion_plan_dyn_raw_with_orientations(
+        rule,
+        dst,
+        lhs,
+        rhs,
+        axes,
+        &FORWARD_ORIENTATIONS,
+    )
+}
+
+pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_raw_canonical<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+) -> Result<FusionContractPlan, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    prepare_tensorcontract_fusion_plan_dyn_raw_with_orientations(
+        rule,
+        dst,
+        lhs,
+        rhs,
+        axes,
+        &CACHED_ORIENTATIONS,
+    )
+}
+
+fn prepare_tensorcontract_fusion_plan_dyn_raw_with_orientations<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+    orientations: &[FusionContractOrientation],
+) -> Result<FusionContractPlan, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
     dst.validate_rule(rule)?;
     lhs.validate_rule(rule)?;
     rhs.validate_rule(rule)?;
@@ -492,7 +548,7 @@ where
     } else {
         rhs
     };
-    select_tensorcontract_fusion_plan_from_spaces(
+    select_tensorcontract_fusion_plan_from_spaces_with_orientations(
         rule,
         dst,
         lhs,
@@ -500,10 +556,11 @@ where
         lowered_axes.as_spec(),
         lowered_axes.lhs_storage_conjugate(),
         lowered_axes.rhs_storage_conjugate(),
+        orientations,
     )
 }
 
-pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_prelowered<R>(
+pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
     lhs: &DynamicFusionMapSpace,
@@ -511,6 +568,32 @@ pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_prelowered<R>(
     axes: TensorContractSpec<'_>,
     lhs_storage_conjugate: bool,
     rhs_storage_conjugate: bool,
+) -> Result<FusionContractPlan, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    prepare_tensorcontract_fusion_plan_dyn_prelowered_with_orientations(
+        rule,
+        dst,
+        lhs,
+        rhs,
+        axes,
+        lhs_storage_conjugate,
+        rhs_storage_conjugate,
+        &CACHED_ORIENTATIONS,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_tensorcontract_fusion_plan_dyn_prelowered_with_orientations<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+    lhs_storage_conjugate: bool,
+    rhs_storage_conjugate: bool,
+    orientations: &[FusionContractOrientation],
 ) -> Result<FusionContractPlan, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -530,7 +613,7 @@ where
         axes.rhs_contracting_axes(),
         axes.output_permutation(),
     );
-    select_tensorcontract_fusion_plan_from_spaces(
+    select_tensorcontract_fusion_plan_from_spaces_with_orientations(
         rule,
         dst,
         lhs,
@@ -538,6 +621,7 @@ where
         logical_axes,
         lhs_storage_conjugate,
         rhs_storage_conjugate,
+        orientations,
     )
 }
 
@@ -595,9 +679,16 @@ pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_ori
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    let mut plan = prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order(
+    let plan = prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order(
         rule, dst, lhs, rhs, axes, candidate,
     )?;
+    Ok(orient_fusion_contract_plan(plan, orientation))
+}
+
+fn orient_fusion_contract_plan(
+    mut plan: FusionContractPlan,
+    orientation: FusionContractOrientation,
+) -> FusionContractPlan {
     if orientation == FusionContractOrientation::RhsLhs {
         let lhs_open_rank = plan.lhs_open_rank;
         let rhs_open_rank = plan.rhs_open_rank;
@@ -653,7 +744,7 @@ where
         plan.core_dst_open_lhs_rank = rhs_open_rank;
         plan.core_dst_open_rhs_rank = lhs_open_rank;
     }
-    Ok(plan)
+    plan
 }
 
 #[cfg(test)]
@@ -738,10 +829,12 @@ where
         encoded_layout_probe::<R>,
         encoded_homspace_builder::<R>,
         None,
+        &CACHED_ORIENTATIONS,
     )
 }
 
-fn select_tensorcontract_fusion_plan_from_spaces<R>(
+#[allow(clippy::too_many_arguments)]
+fn select_tensorcontract_fusion_plan_from_spaces_with_orientations<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
     lhs: &DynamicFusionMapSpace,
@@ -749,11 +842,12 @@ fn select_tensorcontract_fusion_plan_from_spaces<R>(
     axes: TensorContractSpec<'_>,
     lhs_source_conjugate: bool,
     rhs_source_conjugate: bool,
+    orientations: &[FusionContractOrientation],
 ) -> Result<FusionContractPlan, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    select_tensorcontract_fusion_plan_from_spaces_with_probe(
+    select_tensorcontract_fusion_plan_from_spaces_with_probe_and_orientations(
         rule,
         dst,
         lhs,
@@ -764,6 +858,7 @@ where
         encoded_layout_probe::<R>,
         encoded_homspace_builder::<R>,
         None,
+        orientations,
     )
 }
 
@@ -780,28 +875,40 @@ fn fusion_contract_candidate_facts_from_spaces_with_probe<R>(
     probe: LayoutProbeBuilder<R>,
     homspace_builder: HomSpaceBuilder<R>,
     primer: Option<LayoutKeyBuilder<R>>,
+    orientations: &[FusionContractOrientation],
 ) -> Result<Vec<FusionContractCandidateFacts>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     validate_tensorcontract_fusion_plan_inputs(rule, dst, lhs, rhs, axes, homspace_builder)?;
-    contracted_axis_order_candidates(axes.lhs_contracting_axes(), axes.rhs_contracting_axes())
-        .into_iter()
-        .map(|candidate| {
+    orientations
+        .iter()
+        .flat_map(|&orientation| {
+            contracted_axis_order_candidates(
+                axes.lhs_contracting_axes(),
+                axes.rhs_contracting_axes(),
+            )
+            .into_iter()
+            .map(move |candidate| (orientation, candidate))
+        })
+        .map(|(orientation, candidate)| {
             let candidate_axes = TensorContractSpec::new(
                 candidate.lhs(),
                 candidate.rhs(),
                 axes.output_permutation(),
             );
-            let plan = prepare_tensorcontract_fusion_plan_from_spaces(
-                rule,
-                dst,
-                lhs,
-                rhs,
-                candidate_axes,
-                lhs_source_conjugate,
-                rhs_source_conjugate,
-            )?;
+            let plan = orient_fusion_contract_plan(
+                prepare_tensorcontract_fusion_plan_from_spaces(
+                    rule,
+                    dst,
+                    lhs,
+                    rhs,
+                    candidate_axes,
+                    lhs_source_conjugate,
+                    rhs_source_conjugate,
+                )?,
+                orientation,
+            );
             score_fusion_contract_candidate(rule, dst, lhs, rhs, candidate, plan, probe, primer)
                 .map(|scored| scored.facts)
         })
@@ -843,6 +950,7 @@ where
     )
 }
 
+#[cfg(test)]
 fn select_tensorcontract_fusion_plan_from_spaces_with_probe<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
@@ -858,32 +966,80 @@ fn select_tensorcontract_fusion_plan_from_spaces_with_probe<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
+    select_tensorcontract_fusion_plan_from_spaces_with_probe_and_orientations(
+        rule,
+        dst,
+        lhs,
+        rhs,
+        axes,
+        lhs_source_conjugate,
+        rhs_source_conjugate,
+        probe,
+        homspace_builder,
+        primer,
+        &FORWARD_ORIENTATIONS,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn select_tensorcontract_fusion_plan_from_spaces_with_probe_and_orientations<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+    lhs_source_conjugate: bool,
+    rhs_source_conjugate: bool,
+    probe: LayoutProbeBuilder<R>,
+    homspace_builder: HomSpaceBuilder<R>,
+    primer: Option<LayoutKeyBuilder<R>>,
+    orientations: &[FusionContractOrientation],
+) -> Result<FusionContractPlan, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
     validate_tensorcontract_fusion_plan_inputs(rule, dst, lhs, rhs, axes, homspace_builder)?;
     let candidates =
         contracted_axis_order_candidates(axes.lhs_contracting_axes(), axes.rhs_contracting_axes());
     let mut best = None;
-    for candidate in candidates {
-        let candidate_axes =
-            TensorContractSpec::new(candidate.lhs(), candidate.rhs(), axes.output_permutation());
-        let plan = prepare_tensorcontract_fusion_plan_from_spaces(
-            rule,
-            dst,
-            lhs,
-            rhs,
-            candidate_axes,
-            lhs_source_conjugate,
-            rhs_source_conjugate,
-        )?;
-        let scored =
-            score_fusion_contract_candidate(rule, dst, lhs, rhs, candidate, plan, probe, primer)?;
-        if best
-            .as_ref()
-            .is_none_or(|best: &ScoredFusionContractCandidate| {
-                scored.facts.total_materialized_elements()
-                    < best.facts.total_materialized_elements()
-            })
-        {
-            best = Some(scored);
+    for &orientation in orientations {
+        for candidate in &candidates {
+            let candidate_axes = TensorContractSpec::new(
+                candidate.lhs(),
+                candidate.rhs(),
+                axes.output_permutation(),
+            );
+            let plan = orient_fusion_contract_plan(
+                prepare_tensorcontract_fusion_plan_from_spaces(
+                    rule,
+                    dst,
+                    lhs,
+                    rhs,
+                    candidate_axes,
+                    lhs_source_conjugate,
+                    rhs_source_conjugate,
+                )?,
+                orientation,
+            );
+            let scored = score_fusion_contract_candidate(
+                rule,
+                dst,
+                lhs,
+                rhs,
+                candidate.clone(),
+                plan,
+                probe,
+                primer,
+            )?;
+            if best
+                .as_ref()
+                .is_none_or(|best: &ScoredFusionContractCandidate| {
+                    scored.facts.total_materialized_elements()
+                        < best.facts.total_materialized_elements()
+                })
+            {
+                best = Some(scored);
+            }
         }
     }
     Ok(best
@@ -891,7 +1047,8 @@ where
         .plan)
 }
 
-pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer<R>(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer_canonical<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
     lhs: &DynamicFusionMapSpace,
@@ -900,6 +1057,36 @@ pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer<R>(
     lhs_storage_conjugate: bool,
     rhs_storage_conjugate: bool,
     primer: LayoutKeyBuilder<R>,
+) -> Result<FusionContractPlan, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + LoweredMultiplicityFreeAlgebra
+        + CheckedFusionAlgebra,
+{
+    prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer_and_orientations(
+        rule,
+        dst,
+        lhs,
+        rhs,
+        axes,
+        lhs_storage_conjugate,
+        rhs_storage_conjugate,
+        primer,
+        &CACHED_ORIENTATIONS,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer_and_orientations<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+    lhs_storage_conjugate: bool,
+    rhs_storage_conjugate: bool,
+    primer: LayoutKeyBuilder<R>,
+    orientations: &[FusionContractOrientation],
 ) -> Result<FusionContractPlan, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
@@ -921,7 +1108,7 @@ where
         axes.rhs_contracting_axes(),
         axes.output_permutation(),
     );
-    select_tensorcontract_fusion_plan_from_spaces_with_probe(
+    select_tensorcontract_fusion_plan_from_spaces_with_probe_and_orientations(
         rule,
         dst,
         lhs,
@@ -932,6 +1119,7 @@ where
         lowered_layout_probe::<R>,
         lowered_homspace_builder::<R>,
         Some(primer),
+        orientations,
     )
 }
 
@@ -952,7 +1140,7 @@ where
     CANDIDATE_SCORE_CALLS.set(CANDIDATE_SCORE_CALLS.get() + 1);
     let lhs_core = probe(rule, lhs, plan.lhs_transform(), primer)?;
     let rhs_core = probe(rule, rhs, plan.rhs_transform(), primer)?;
-    let lhs_borrowed = super::super::dynamic::source_layout_metadata_is_borrowable(
+    let lhs_exact_identity_borrowable = super::super::dynamic::source_layout_metadata_is_borrowable(
         lhs,
         lhs_core.nout,
         lhs_core.homspace.rank(),
@@ -960,11 +1148,6 @@ where
         plan.lhs_transform(),
         plan.lhs_source_conjugate(),
     ) && lhs_core.source_structure_matches;
-    let rhs_requires_twist = super::super::resolution::rhs_contract_homspace_requires_twist(
-        rule,
-        &rhs_core.homspace,
-        plan.core_axes().as_spec(),
-    )?;
     let rhs_exact_identity_borrowable = super::super::dynamic::source_layout_metadata_is_borrowable(
         rhs,
         rhs_core.nout,
@@ -973,7 +1156,16 @@ where
         plan.rhs_transform(),
         plan.rhs_source_conjugate(),
     ) && rhs_core.source_structure_matches;
-    let lhs_materialized_elements = if lhs_borrowed {
+    let reverse = plan.orientation() == FusionContractOrientation::RhsLhs;
+    let core_right = if reverse { &lhs_core } else { &rhs_core };
+    let core_right_requires_twist = super::super::resolution::rhs_contract_homspace_requires_twist(
+        rule,
+        &core_right.homspace,
+        plan.core_axes().as_spec(),
+    )?;
+    let lhs_requires_twist = reverse && core_right_requires_twist;
+    let rhs_requires_twist = !reverse && core_right_requires_twist;
+    let lhs_materialized_elements = if lhs_exact_identity_borrowable && !lhs_requires_twist {
         0
     } else {
         lhs_core.required_len
@@ -1006,10 +1198,10 @@ where
         })?;
     let facts = FusionContractCandidateFacts {
         axis_order,
-        orientation: FusionContractOrientation::LhsRhs,
+        orientation: plan.orientation(),
         lhs_conjugate: plan.lhs_source_conjugate(),
         rhs_conjugate: plan.rhs_source_conjugate(),
-        lhs_exact_identity_borrowable: lhs_borrowed,
+        lhs_exact_identity_borrowable,
         rhs_exact_identity_borrowable,
         rhs_requires_twist,
         output_exact_identity,
@@ -1223,6 +1415,50 @@ mod tests {
     }
 
     #[test]
+    fn canonical_selector_chooses_reverse_when_it_avoids_both_forward_transforms() {
+        let rule = U1FusionRule;
+        let lhs = single_sector_space(&rule, [2, 3, 5, 7]);
+        let rhs = single_sector_space(&rule, [11, 13, 3, 2]);
+        let dst = single_sector_space(&rule, [11, 13, 5, 7]);
+        let axes =
+            TensorContractSpec::new(&[1, 0], &[2, 3], OutputAxisOrder::from_axes(&[2, 3, 0, 1]));
+        let facts =
+            prepare_tensorcontract_fusion_candidate_facts_dyn_raw(&rule, &dst, &lhs, &rhs, axes)
+                .unwrap();
+        let selected = super::prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
+            &rule, &dst, &lhs, &rhs, axes,
+        )
+        .unwrap();
+
+        assert_eq!(facts.len(), 4);
+        assert!(facts[..2]
+            .iter()
+            .all(|candidate| candidate.total_materialized_elements() > 0));
+        assert!(
+            facts[2..]
+                .iter()
+                .map(|candidate| candidate.total_materialized_elements())
+                .min()
+                .unwrap()
+                < facts[..2]
+                    .iter()
+                    .map(|candidate| candidate.total_materialized_elements())
+                    .min()
+                    .unwrap()
+        );
+        assert_eq!(selected.orientation(), FusionContractOrientation::RhsLhs);
+        assert_eq!(
+            selected.lhs_transform(),
+            &TreeTransformOperation::permute([1, 0], [2, 3])
+        );
+        assert_eq!(
+            selected.rhs_transform(),
+            &TreeTransformOperation::permute([0, 1], [2, 3])
+        );
+        assert!(selected.output_transform_is_identity());
+    }
+
+    #[test]
     fn equal_cost_keeps_lhs_first_across_repeats_and_thread_counts() {
         // What: an equal allocation cost always selects the stable LHS-sorted candidate.
         for threads in [1, 2, 4] {
@@ -1256,7 +1492,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(facts.len(), 2);
+        assert_eq!(facts.len(), 4);
         assert_eq!(facts[0].axis_order().lhs(), &[2, 3]);
         assert_eq!(facts[0].axis_order().rhs(), &[1, 0]);
         assert_eq!(facts[0].orientation(), FusionContractOrientation::LhsRhs);
@@ -1279,6 +1515,8 @@ mod tests {
         assert_eq!(facts[1].rhs_materialized_elements(), 0);
         assert_eq!(facts[1].output_materialized_elements(), 0);
         assert_eq!(facts[1].total_materialized_elements(), 1_536);
+        assert_eq!(facts[2].orientation(), FusionContractOrientation::RhsLhs);
+        assert_eq!(facts[3].orientation(), FusionContractOrientation::RhsLhs);
     }
 
     #[test]
@@ -1299,7 +1537,7 @@ mod tests {
         .unwrap();
         let dst_elements = dst.required_len().unwrap();
 
-        assert_eq!(facts.len(), 2);
+        assert_eq!(facts.len(), 4);
         for candidate in facts {
             assert!(!candidate.output_exact_identity());
             assert_eq!(candidate.output_materialized_elements(), dst_elements);
@@ -1360,7 +1598,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(facts.len(), 1);
+        assert_eq!(facts.len(), 2);
         assert!(facts[0].lhs_conjugate());
         assert!(!facts[0].rhs_conjugate());
         assert!(!facts[0].lhs_exact_identity_borrowable());
@@ -1371,6 +1609,8 @@ mod tests {
                 + facts[0].rhs_materialized_elements()
                 + facts[0].output_materialized_elements()
         );
+        assert_eq!(facts[1].orientation(), FusionContractOrientation::RhsLhs);
+        assert!(!facts[1].lhs_exact_identity_borrowable());
 
         let candidate = contracted_axis_order_candidates(&[], &[]).remove(0);
         let reverse = prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation(
@@ -1450,7 +1690,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(facts.len(), 1);
+        assert_eq!(facts.len(), 2);
         assert!(!facts[0].rhs_exact_identity_borrowable());
         assert_eq!(facts[0].lhs_materialized_elements(), 0);
         assert_eq!(facts[0].rhs_materialized_elements(), 2);
