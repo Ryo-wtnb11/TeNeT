@@ -1,0 +1,45 @@
+name: SU(N) Tables
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  sun-table-generator:
+    name: SU(N) table generator
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tenet
+      - uses: actions/checkout@v4
+        with:
+          repository: tensor4all/tenferro-rs
+          ref: main
+          path: tenferro-rs
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.11.6'
+      - uses: julia-actions/cache@v2
+      - name: Instantiate generator environment
+        run: julia --project=tools/sun-table-gen -e 'using Pkg; Pkg.instantiate()'
+        working-directory: tenet
+      - name: Regenerate the SU(4) smoke table
+        run: |
+          julia --project=tools/sun-table-gen tools/sun-table-gen/gen.jl 4 15 /tmp/su4_table.bin
+          julia --project=tools/sun-table-gen tools/sun-table-gen/gen.jl 3 10 /tmp/su3_om_table.bin
+        working-directory: tenet
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./tenet/.github/actions/cache-gmp
+      - name: Load the generated artifact through TeNeT
+        run: cargo test -p tenet-core generated_su4_artifact_passes_the_production_loader -- --ignored
+        working-directory: tenet
+        env:
+          TENET_GENERATED_SU4: /tmp/su4_table.bin
+      - name: Compare the generated artifact
+        run: cmp /tmp/su4_table.bin tenet-core/src/testdata/su4_table.bin
+        working-directory: tenet
