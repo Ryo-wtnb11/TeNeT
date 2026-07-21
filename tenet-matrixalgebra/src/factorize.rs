@@ -700,6 +700,16 @@ impl<R, D> SvdTruncDyn<R, D> {
     }
 }
 
+/// Truncated SVD factors without a materialized diagonal `S`:
+/// `(U, Vh, spectrum, error)`.
+#[doc(hidden)]
+pub type SvdTruncFactorsDyn<R, D> = (
+    BoundDynFactor<R, D>,
+    BoundDynFactor<R, D>,
+    Vec<SectorSpectrum>,
+    f64,
+);
+
 /// Compact (thin, untruncated) fusion-tensor SVD `t = U * S * Vh`
 /// (MatrixAlgebraKit `svd_compact`).
 ///
@@ -764,6 +774,14 @@ where
     V: Copy,
 {
     #[cfg(test)]
+    record_diagonal_bond_build(spectrum);
+    let space = diagonal_bond_bound_space_like(authority, spectrum)?;
+    let data = diagonal_bond_data(space.space(), spectrum, to_scalar)?;
+    BoundDynFactor::from_bound(space, data, 1, 1)
+}
+
+#[cfg(test)]
+fn record_diagonal_bond_build<V>(spectrum: &[SectorSpectrum<V>]) {
     DIAGONAL_BOND_BUILD_PROBE.with(|probe| {
         let mut current = probe.get();
         current.calls += 1;
@@ -773,9 +791,6 @@ where
             .sum::<usize>();
         probe.set(current);
     });
-    let space = diagonal_bond_bound_space_like(authority, spectrum)?;
-    let data = diagonal_bond_data(space.space(), spectrum, to_scalar)?;
-    BoundDynFactor::from_bound(space, data, 1, 1)
 }
 
 #[doc(hidden)]
@@ -1411,8 +1426,31 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
+    let (u, vh, singular_values, error) = svd_trunc_factors_dyn(dense, input, truncation)?;
+    let s = diagonal_bond_svd_factor(u.space(), &singular_values, &D::from_real)?;
+    Ok(SvdTruncDyn {
+        u,
+        s,
+        vh,
+        singular_values,
+        error,
+    })
+}
+
+/// Dynamic-rank truncated SVD without materializing the diagonal `S` factor.
+#[doc(hidden)]
+pub fn svd_trunc_factors_dyn<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    truncation: &Truncation,
+) -> Result<SvdTruncFactorsDyn<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
     let (u, vh, singular_values) = svd_compact_factors_dyn(dense, input)?;
-    truncate_svd_factors_dyn(u, None, vh, singular_values, truncation)
+    truncate_svd_factors_only_dyn(u, vh, singular_values, truncation)
 }
 
 /// Compact (untruncated) fusion-tensor SVD through the device boundary.
@@ -2132,29 +2170,43 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    truncate_svd_factors_dyn(
-        compact.u,
-        Some(compact.s),
-        compact.vh,
-        compact.singular_values,
-        truncation,
-    )
+    let SvdCompactDyn {
+        u,
+        s,
+        vh,
+        singular_values,
+    } = compact;
+    let full_rank = singular_values
+        .iter()
+        .map(|entry| entry.values.len())
+        .sum::<usize>();
+    let (u, vh, singular_values, error) =
+        truncate_svd_factors_only_dyn(u, vh, singular_values, truncation)?;
+    let kept_rank = singular_values
+        .iter()
+        .map(|entry| entry.values.len())
+        .sum::<usize>();
+    let s = if kept_rank == full_rank {
+        s
+    } else {
+        diagonal_bond_svd_factor(u.space(), &singular_values, &D::from_real)?
+    };
+    Ok(SvdTruncDyn {
+        u,
+        s,
+        vh,
+        singular_values,
+        error,
+    })
 }
 
-/// Decides and applies SVD truncation to compact factors, then materializes
-/// the returned diagonal factor at the selected rank.
-///
-/// Why not always build `S` here: the public truncating path has no useful
-/// untruncated diagonal to reuse. Why not always require a missing `S`: the
-/// composed compact-then-truncate path can return its existing factor when the
-/// decision keeps every value.
-fn truncate_svd_factors_dyn<R, D>(
+/// Decides and applies SVD truncation without constructing the diagonal factor.
+fn truncate_svd_factors_only_dyn<R, D>(
     u: BoundDynFactor<R, D>,
-    untruncated_s: Option<BoundDynFactor<R, D>>,
     vh: BoundDynFactor<R, D>,
     mut singular_values: Vec<SectorSpectrum>,
     truncation: &Truncation,
-) -> Result<SvdTruncDyn<R, D>, OperationError>
+) -> Result<SvdTruncFactorsDyn<R, D>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
@@ -2165,17 +2217,7 @@ where
         .zip(&decision.kept)
         .all(|(entry, &count)| entry.values.len() == count)
     {
-        let s = match untruncated_s {
-            Some(s) => s,
-            None => diagonal_bond_svd_factor(u.space(), &singular_values, &D::from_real)?,
-        };
-        return Ok(SvdTruncDyn {
-            u,
-            s,
-            vh,
-            singular_values,
-            error: decision.error,
-        });
+        return Ok((u, vh, singular_values, decision.error));
     }
 
     for (entry, &count) in singular_values.iter_mut().zip(&decision.kept) {
@@ -2206,14 +2248,7 @@ where
         1,
         vh.space().space().nin(),
     )?;
-    let s_factor = diagonal_bond_svd_factor(u.space(), &singular_values, &D::from_real)?;
-    Ok(SvdTruncDyn {
-        u: u_factor,
-        s: s_factor,
-        vh: vh_factor,
-        singular_values,
-        error: decision.error,
-    })
+    Ok((u_factor, vh_factor, singular_values, decision.error))
 }
 
 fn sliced_bond_bound_factor<R, D>(
@@ -5748,6 +5783,8 @@ where
     D: FactorScalar,
     V: Copy,
 {
+    #[cfg(test)]
+    record_diagonal_bond_build(spectrum);
     let space = diagonal_bond_bound_space_generic(provider, spectrum)?;
     let data = diagonal_bond_data(space.space(), spectrum, to_scalar)?;
     BoundDynFactor::from_bound(space, data, 1, 1)
@@ -5771,30 +5808,6 @@ where
         FusionProductSpace::new([new_leg]),
     );
     BoundDynamicFusionMapSpace::from_final_homspace_generic(provider, homspace)
-}
-
-/// Generic sibling of [`svd_compact_dyn`].
-pub(crate) fn svd_compact_dyn_generic<E, R, D>(
-    dense: &mut E,
-    input: &BoundDynamicTensorRef<'_, R, D>,
-) -> Result<SvdCompactDyn<R, D>, OperationError>
-where
-    E: DenseExecutor + ?Sized,
-    R: FusionRule,
-    D: FactorScalar,
-{
-    let (u, vh, singular_values) = svd_compact_factors_dyn_generic(dense, input)?;
-    let s = diagonal_bond_svd_factor_generic(
-        Arc::clone(input.space().provider_arc()),
-        &singular_values,
-        &D::from_real,
-    )?;
-    Ok(SvdCompactDyn {
-        u,
-        s,
-        vh,
-        singular_values,
-    })
 }
 
 /// Generic sibling of [`svd_vals_dyn`].
@@ -6006,33 +6019,26 @@ where
     BoundDynFactor::from_bound(space, data, expected_nout, expected_nin)
 }
 
-/// Generic sibling of [`truncate_svd_dyn`].
-pub(crate) fn truncate_svd_dyn_generic<R, D>(
-    compact: SvdCompactDyn<R, D>,
+fn truncate_svd_factors_only_dyn_generic<R, D>(
+    u: BoundDynFactor<R, D>,
+    vh: BoundDynFactor<R, D>,
+    mut singular_values: Vec<SectorSpectrum>,
     truncation: &Truncation,
-) -> Result<SvdTruncDyn<R, D>, OperationError>
+) -> Result<SvdTruncFactorsDyn<R, D>, OperationError>
 where
     R: GenericRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let rule = compact.u.space().provider();
-    let decision = decide_bond_truncation_generic(rule, &compact.singular_values, truncation, true);
-    if compact
-        .singular_values
+    let rule = u.space().provider();
+    let decision = decide_bond_truncation_generic(rule, &singular_values, truncation, true);
+    if singular_values
         .iter()
         .zip(&decision.kept)
         .all(|(entry, &count)| entry.values.len() == count)
     {
-        return Ok(SvdTruncDyn {
-            u: compact.u,
-            s: compact.s,
-            vh: compact.vh,
-            singular_values: compact.singular_values,
-            error: 0.0,
-        });
+        return Ok((u, vh, singular_values, decision.error));
     }
 
-    let mut singular_values = compact.singular_values;
     for (entry, &count) in singular_values.iter_mut().zip(&decision.kept) {
         entry.values.truncate(count);
     }
@@ -6044,34 +6050,27 @@ where
 
     let kept_of = |sector: SectorId| -> usize { kept_by_sector.get(&sector).copied().unwrap_or(0) };
 
-    let bond_axis = compact.u.space().space().nout();
-    let provider = Arc::clone(compact.u.space().provider_arc());
+    let bond_axis = u.space().space().nout();
+    let provider = Arc::clone(u.space().provider_arc());
     let u_factor = sliced_bond_tensor_generic(
         Arc::clone(&provider),
-        compact.u.space().space(),
-        compact.u.data(),
+        u.space().space(),
+        u.data(),
         bond_axis,
         &kept_of,
-        compact.u.space().space().nout(),
+        u.space().space().nout(),
         1,
     )?;
     let vh_factor = sliced_bond_tensor_generic(
-        Arc::clone(&provider),
-        compact.vh.space().space(),
-        compact.vh.data(),
+        provider,
+        vh.space().space(),
+        vh.data(),
         0,
         &kept_of,
         1,
-        compact.vh.space().space().nin(),
+        vh.space().space().nin(),
     )?;
-    let s_factor = diagonal_bond_svd_factor_generic(provider, &singular_values, &D::from_real)?;
-    Ok(SvdTruncDyn {
-        u: u_factor,
-        s: s_factor,
-        vh: vh_factor,
-        singular_values,
-        error: decision.error,
-    })
+    Ok((u_factor, vh_factor, singular_values, decision.error))
 }
 
 /// Generic sibling of [`svd_trunc_dyn`].
@@ -6085,8 +6084,35 @@ where
     R: GenericRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let compact = svd_compact_dyn_generic(dense, input)?;
-    truncate_svd_dyn_generic(compact, truncation)
+    let (u, vh, singular_values, error) = svd_trunc_factors_dyn_generic(dense, input, truncation)?;
+    let s = diagonal_bond_svd_factor_generic(
+        Arc::clone(input.space().provider_arc()),
+        &singular_values,
+        &D::from_real,
+    )?;
+    Ok(SvdTruncDyn {
+        u,
+        s,
+        vh,
+        singular_values,
+        error,
+    })
+}
+
+/// Generic dynamic-rank truncated SVD without a materialized diagonal `S`.
+#[doc(hidden)]
+pub fn svd_trunc_factors_dyn_generic<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    truncation: &Truncation,
+) -> Result<SvdTruncFactorsDyn<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: GenericRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let (u, vh, singular_values) = svd_compact_factors_dyn_generic(dense, input)?;
+    truncate_svd_factors_only_dyn_generic(u, vh, singular_values, truncation)
 }
 
 /// Provider-bound compact QR for a generic rule.
