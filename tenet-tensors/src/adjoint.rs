@@ -30,9 +30,9 @@ use crate::{ConjugateValue, OperationError};
 /// Identity of an adjoint (dagger) output space. The dagger is a pure function
 /// of the source: its hom space (legs carry the authoritative
 /// sector→degeneracy/duality map every adjoint block shape derives from) and its
-/// coupled subblock layout, under a given fusion rule. Mirrors
-/// `TransformedSpaceKey`/`ContractedSpaceKey` in `contract::dynamic_space`; the
-/// operation is fixed (dagger) so there is no operation field.
+/// coupled subblock layout, under a given fusion rule. Unlike ordinary
+/// transform and contraction result spaces, this fixed dagger operation has a
+/// dedicated bounded store and therefore needs no operation field.
 ///
 /// Why-not (`rule_type: &str` provenance): a type name distinguishes rule types
 /// but not two tables of the same type (a regenerated `TabulatedFusionRule` /
@@ -45,7 +45,7 @@ use crate::{ConjugateValue, OperationError};
 /// aliases them (measured: the finite-torus singlet then fails with a dimension
 /// mismatch). The hom space plus `content_id`/`nout`/`nin` is sound; the source
 /// hom space enters as its interned [`HomSpaceId`] (PR-2), so the key hashes a
-/// small id instead of walking the space's legs by value every warm eval.
+/// small id instead of walking the space's legs by value on every repeated call.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 struct AdjointSpaceKey<RuleKey> {
     rule_key: RuleKey,

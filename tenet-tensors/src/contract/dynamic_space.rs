@@ -2,7 +2,6 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
 
-use rustc_hash::FxHashMap;
 use tenet_core::{
     BlockKey, BlockStructure, CheckedFusionAlgebra, CheckedFusionSpaceError, CoreError, DimVec,
     FusionRule, FusionSpaceAdmission, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
@@ -449,53 +448,6 @@ where
             .map_err(|error| OperationError::FusionAlgebra(Box::new(error)))?;
     }
     Ok(leg)
-}
-
-/// Identity of a pairwise contraction's output space: the two operand hom
-/// spaces (by value — `Arc` gives cheap clones while `Hash`/`Eq` delegate to
-/// the pointee, so a rebuilt-but-identical space still matches) plus the
-/// contracted axis lists. The hom spaces carry the full sector/leg structure
-/// (authoritative even for structural-zero keys the subblock layout omits, so
-/// a subblock content id alone is NOT enough), and the output is a pure
-/// function of these. The same contraction across sweeps/evals thus reuses one
-/// built space instead of rebuilding the coupled-sector layout each call.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-struct ContractedSpaceKey {
-    /// Fusion rule discriminant: the same sector ids fuse differently under
-    /// different rules, so the process-global cache must key on the rule.
-    /// Mirrors `FusionTreeHomSpaceCacheKey` in tenet-core.
-    rule: tenet_core::RuleIdentity,
-    lhs_homspace: Arc<FusionTreeHomSpace>,
-    rhs_homspace: Arc<FusionTreeHomSpace>,
-    lhs_axes: DimVec,
-    rhs_axes: DimVec,
-    output_axes: DimVec,
-}
-
-type ContractedSpaceCache = RwLock<FxHashMap<ContractedSpaceKey, DynamicFusionMapSpace>>;
-
-fn contracted_space_cache() -> Arc<ContractedSpaceCache> {
-    registered_operation_cache::<ContractedSpaceCache>().1
-}
-
-/// Identity of a tree-transform (permute / braid / transpose) output space:
-/// the source hom space (by value — the legs carry the authoritative
-/// sector→degeneracy map the output shapes derive from) plus the transform
-/// operation, under a given fusion rule. Mirrors [`ContractedSpaceKey`].
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-struct TransformedSpaceKey {
-    rule: tenet_core::RuleIdentity,
-    source_homspace: Arc<FusionTreeHomSpace>,
-    operation: TreeTransformOperation,
-}
-
-type TransformedSpaceCache = RwLock<FxHashMap<TransformedSpaceKey, DynamicFusionMapSpace>>;
-
-fn transformed_space_cache() -> Arc<TransformedSpaceCache> {
-    // Why not retain either Arc in a OnceLock: reset replaces the registry
-    // generation, while an operation already holding the old Arc may finish
-    // and publish only into that discarded generation.
-    registered_operation_cache::<TransformedSpaceCache>().1
 }
 
 #[cfg(test)]
@@ -1782,19 +1734,6 @@ impl DynamicFusionMapSpace {
     {
         self.validate_rule(rule)?;
         let source = self;
-        let cache_key = TransformedSpaceKey {
-            rule: rule.rule_identity(),
-            source_homspace: Arc::clone(&source.homspace),
-            operation: operation.clone(),
-        };
-        let cache = transformed_space_cache();
-        if let Some(cached) = cache
-            .read()
-            .ok()
-            .and_then(|map| map.get(&cache_key).cloned())
-        {
-            return Ok(cached);
-        }
         let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
         let nout = codomain_axes.len();
         let nin = domain_axes.len();
@@ -1805,12 +1744,8 @@ impl DynamicFusionMapSpace {
         debug_assert_eq!(nin, homspace.domain().len());
         // Why not rebuild external source legs and per-tree shape vectors:
         // #256 already carried the authoritative degeneracies into the final
-        // HomSpace. The miss builder consumes that value directly.
-        let space = Self::from_final_homspace_with_prepared(rule, homspace, prepared)?;
-        if let Ok(mut map) = cache.write() {
-            map.insert(cache_key, space.clone());
-        }
-        Ok(space)
+        // HomSpace. The final grouped builder consumes that value directly.
+        Self::from_final_homspace_with_prepared(rule, homspace, prepared)
     }
 
     pub(crate) fn transformed_layout_probe<R>(
@@ -2018,32 +1953,8 @@ impl DynamicFusionMapSpace {
                 expected: axes.rhs_contracting_axes().len(),
                 actual: rhs.rank(),
             })?;
-        let output_axes = match axes.output_permutation() {
-            tenet_operations::OutputAxisOrder::Identity => (0..nout + nin).collect(),
-            tenet_operations::OutputAxisOrder::Axes(output_axes) => {
-                output_axes.iter().copied().collect()
-            }
-        };
-        let key = ContractedSpaceKey {
-            rule: rule.rule_identity(),
-            lhs_homspace: Arc::clone(&lhs.homspace),
-            rhs_homspace: Arc::clone(&rhs.homspace),
-            lhs_axes: axes.lhs_contracting_axes().iter().copied().collect(),
-            rhs_axes: axes.rhs_contracting_axes().iter().copied().collect(),
-            output_axes,
-        };
-        let cache = contracted_space_cache();
-        if let Some(cached) = cache.read().ok().and_then(|map| map.get(&key).cloned()) {
-            return Ok(cached);
-        }
         let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), nout + nin, axes)?;
-        debug_assert_eq!(key.output_axes.as_slice(), axis_plan.output_axes);
-        let space =
-            Self::contracted_space_from_plan(rule, lhs, rhs, axes, &axis_plan, nout, nin, primer)?;
-        if let Ok(mut map) = cache.write() {
-            map.insert(key, space.clone());
-        }
-        Ok(space)
+        Self::contracted_space_from_plan(rule, lhs, rhs, axes, &axis_plan, nout, nin, primer)
     }
 
     #[allow(dead_code)]
@@ -3366,9 +3277,9 @@ mod lowered_metadata_tests {
     }
 
     #[test]
-    fn lowered_metadata_routes_prime_only_after_operation_cache_misses() {
+    fn lowered_metadata_routes_every_eager_result_through_the_primer() {
         // What: final, transform, and ordered contraction metadata enter the
-        // lowered primer once on a cold miss and skip it on their warm cache hit.
+        // lowered primer once per eager result-space derivation.
         let _guard = CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3396,11 +3307,11 @@ mod lowered_metadata_tests {
         let transformed = source
             .transformed_with_primer(&rule, &operation, counting_primer)
             .unwrap();
-        let warm = source
+        let repeated = source
             .transformed_with_primer(&rule, &operation, counting_primer)
             .unwrap();
-        assert_eq!(primer_calls(), 1);
-        assert_eq!(transformed, warm);
+        assert_eq!(primer_calls(), 2);
+        assert_eq!(transformed, repeated);
         crate::reset_global_operation_caches();
         tenet_core::reset_core_intern_tables();
         let encoded_transformed = source.transformed(&rule, &operation).unwrap();
@@ -3421,7 +3332,7 @@ mod lowered_metadata_tests {
             counting_primer,
         )
         .unwrap();
-        let warm = DynamicFusionMapSpace::contracted_with_spec_and_primer(
+        let repeated = DynamicFusionMapSpace::contracted_with_spec_and_primer(
             &rule,
             &source,
             &source,
@@ -3429,8 +3340,8 @@ mod lowered_metadata_tests {
             counting_primer,
         )
         .unwrap();
-        assert_eq!(primer_calls(), 1);
-        assert_eq!(contracted, warm);
+        assert_eq!(primer_calls(), 2);
+        assert_eq!(contracted, repeated);
         crate::reset_global_operation_caches();
         tenet_core::reset_core_intern_tables();
         let encoded_contracted =
@@ -4212,188 +4123,86 @@ mod scratch_cache_tests {
     }
 
     #[test]
-    fn transformed_cache_lifecycle_follows_public_reset_generation() {
-        // What: transformed layouts build once per registry generation and
-        // reuse only the structure published in that generation.
+    fn transformed_space_is_derived_eagerly_per_call() {
+        // What: every transform eagerly derives one content-identical result
+        // space instead of retaining a source-plus-operation result.
         let _guard = CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        reset_final_result_layout_test_state();
         let rule = U1FusionRule;
         let source = u1_space(301, 3);
         let operation = TreeTransformOperation::permute([1], [0]);
-        let cache_key = TransformedSpaceKey {
-            rule: rule.rule_identity(),
-            source_homspace: Arc::clone(&source.homspace),
-            operation: operation.clone(),
-        };
-        let first_generation = transformed_space_cache();
+        reset_final_result_layout_test_state();
 
         let first = source.transformed(&rule, &operation).unwrap();
         assert_eq!(final_result_layout_builds(), 1);
-        assert!(first_generation
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(&cache_key));
 
-        reset_final_result_layout_builds();
         let second = source.transformed(&rule, &operation).unwrap();
-        assert_eq!(final_result_layout_builds(), 0);
-        assert!(first_generation
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(&cache_key));
-        assert!(Arc::ptr_eq(first.structure(), second.structure()));
-
-        crate::reset_global_operation_caches();
-        let second_generation = transformed_space_cache();
-        assert!(!Arc::ptr_eq(&first_generation, &second_generation));
-        assert!(second_generation
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_empty());
-
-        reset_final_result_layout_builds();
-        let rebuilt = source.transformed(&rule, &operation).unwrap();
-        assert_eq!(final_result_layout_builds(), 1);
-        assert!(!Arc::ptr_eq(first.structure(), rebuilt.structure()));
-        reset_final_result_layout_builds();
-        let replay = source.transformed(&rule, &operation).unwrap();
-        assert_eq!(final_result_layout_builds(), 0);
-        assert!(Arc::ptr_eq(rebuilt.structure(), replay.structure()));
+        assert_eq!(final_result_layout_builds(), 2);
+        assert_eq!(first, second);
     }
 
     #[test]
-    fn contracted_cache_lifecycle_follows_public_reset_generation() {
-        // What: contracted layouts build once per registry generation and
-        // reuse only the structure published in that generation.
+    fn contracted_space_is_derived_eagerly_per_call() {
+        // What: every contraction eagerly derives one content-identical result
+        // space instead of retaining a source-plus-operation result.
         let _guard = CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        reset_final_result_layout_test_state();
         let rule = U1FusionRule;
         let source = u1_space(901, 4);
-        let cache_key = ContractedSpaceKey {
-            rule: rule.rule_identity(),
-            lhs_homspace: Arc::clone(&source.homspace),
-            rhs_homspace: Arc::clone(&source.homspace),
-            lhs_axes: DimVec::from_slice(&[1]),
-            rhs_axes: DimVec::from_slice(&[0]),
-            output_axes: DimVec::from_slice(&[0, 1]),
-        };
-        let first_generation = contracted_space_cache();
+        reset_final_result_layout_test_state();
 
         let first = DynamicFusionMapSpace::contracted(&rule, &source, &source, &[1], &[0]).unwrap();
         assert_eq!(final_result_layout_builds(), 1);
-        assert!(first_generation
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(&cache_key));
 
-        reset_final_result_layout_builds();
         let second =
             DynamicFusionMapSpace::contracted(&rule, &source, &source, &[1], &[0]).unwrap();
-        assert_eq!(final_result_layout_builds(), 0);
-        assert!(first_generation
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(&cache_key));
-        assert!(Arc::ptr_eq(first.structure(), second.structure()));
-
-        crate::reset_global_operation_caches();
-        let second_generation = contracted_space_cache();
-        assert!(!Arc::ptr_eq(&first_generation, &second_generation));
-        assert!(second_generation
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_empty());
-
-        reset_final_result_layout_builds();
-        let rebuilt =
-            DynamicFusionMapSpace::contracted(&rule, &source, &source, &[1], &[0]).unwrap();
-        assert_eq!(final_result_layout_builds(), 1);
-        assert!(!Arc::ptr_eq(first.structure(), rebuilt.structure()));
-        reset_final_result_layout_builds();
-        let replay =
-            DynamicFusionMapSpace::contracted(&rule, &source, &source, &[1], &[0]).unwrap();
-        assert_eq!(final_result_layout_builds(), 0);
-        assert!(Arc::ptr_eq(rebuilt.structure(), replay.structure()));
+        assert_eq!(final_result_layout_builds(), 2);
+        assert_eq!(first, second);
     }
 
     #[test]
-    fn ordered_contraction_builds_only_final_layout_and_warm_hit_builds_zero() {
+    fn ordered_contraction_eagerly_builds_only_the_final_layout() {
         use tenet_operations::OutputAxisOrder;
 
         let _guard = CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        reset_final_result_layout_test_state();
         let rule = U1FusionRule;
         let source = u1_space(902, 4);
         let axes = TensorContractSpec::new(&[1], &[0], OutputAxisOrder::from_axes(&[1, 0]));
-        let cache_key = ContractedSpaceKey {
-            rule: rule.rule_identity(),
-            lhs_homspace: Arc::clone(&source.homspace),
-            rhs_homspace: Arc::clone(&source.homspace),
-            lhs_axes: DimVec::from_slice(&[1]),
-            rhs_axes: DimVec::from_slice(&[0]),
-            output_axes: DimVec::from_slice(&[1, 0]),
-        };
-        let default_homspace = FusionTreeHomSpace::tensorcontract_homspace(
+        let expected_homspace = FusionTreeHomSpace::tensorcontract_homspace(
             &rule,
             source.homspace(),
             source.homspace(),
             &[1],
             &[0],
-            &[0, 1],
+            &[1, 0],
             1,
         )
         .unwrap();
-        let legacy_transform_key = TransformedSpaceKey {
-            rule: rule.rule_identity(),
-            source_homspace: Arc::new(default_homspace),
-            operation: TreeTransformOperation::permute([1], [0]),
-        };
+        reset_final_result_layout_test_state();
 
         let first =
             DynamicFusionMapSpace::contracted_with_spec(&rule, &source, &source, axes).unwrap();
         assert_eq!(final_result_layout_builds(), 1);
-        assert!(contracted_space_cache()
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(&cache_key));
-        assert!(!transformed_space_cache()
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(&legacy_transform_key));
+        assert_eq!(first.homspace(), &expected_homspace);
 
-        reset_final_result_layout_builds();
         let second =
             DynamicFusionMapSpace::contracted_with_spec(&rule, &source, &source, axes).unwrap();
-        assert_eq!(final_result_layout_builds(), 0);
-        assert!(contracted_space_cache()
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(&cache_key));
-        assert!(Arc::ptr_eq(first.structure(), second.structure()));
+        assert_eq!(final_result_layout_builds(), 2);
+        assert_eq!(first, second);
     }
 
     #[test]
-    fn validation_only_contraction_never_builds_or_caches_a_default_layout() {
+    fn validation_only_contraction_never_builds_a_default_layout() {
         let _guard = CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_final_result_layout_test_state();
         let rule = U1FusionRule;
         let compatible = u1_space(903, 4);
-        let compatible_key = ContractedSpaceKey {
-            rule: rule.rule_identity(),
-            lhs_homspace: Arc::clone(&compatible.homspace),
-            rhs_homspace: Arc::clone(&compatible.homspace),
-            lhs_axes: DimVec::from_slice(&[1]),
-            rhs_axes: DimVec::from_slice(&[0]),
-            output_axes: DimVec::from_slice(&[0, 1]),
-        };
 
         DynamicFusionMapSpace::validate_contracted_homspace(
             &rule,
@@ -4404,20 +4213,8 @@ mod scratch_cache_tests {
         )
         .unwrap();
         assert_eq!(final_result_layout_builds(), 0);
-        assert!(!contracted_space_cache()
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(&compatible_key));
 
         let incompatible = u1_space(903, 5);
-        let incompatible_key = ContractedSpaceKey {
-            rule: rule.rule_identity(),
-            lhs_homspace: Arc::clone(&compatible.homspace),
-            rhs_homspace: Arc::clone(&incompatible.homspace),
-            lhs_axes: DimVec::from_slice(&[1]),
-            rhs_axes: DimVec::from_slice(&[0]),
-            output_axes: DimVec::from_slice(&[0, 1]),
-        };
         assert!(DynamicFusionMapSpace::validate_contracted_homspace(
             &rule,
             &compatible,
@@ -4427,14 +4224,10 @@ mod scratch_cache_tests {
         )
         .is_err());
         assert_eq!(final_result_layout_builds(), 0);
-        assert!(!contracted_space_cache()
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(&incompatible_key));
     }
 
     #[test]
-    fn generic_transform_uses_single_pass_without_entering_mult_free_cache() {
+    fn generic_transform_still_uses_one_final_layout_build() {
         use tenet_core::Su3FusionRule;
 
         let _guard = CACHE_TEST_LOCK
@@ -4451,23 +4244,14 @@ mod scratch_cache_tests {
         )
         .unwrap();
         let operation = TreeTransformOperation::permute([1], [0]);
-        let mult_free_cache_key = TransformedSpaceKey {
-            rule: rule.rule_identity(),
-            source_homspace: Arc::clone(&source.homspace),
-            operation: operation.clone(),
-        };
 
         let transformed = source.transformed_generic(&rule, &operation).unwrap();
         assert_eq!(final_result_layout_builds(), 1);
-        assert!(!transformed_space_cache()
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(&mult_free_cache_key));
         assert_eq!(transformed.structure().block_count(), key_count);
     }
 
     #[test]
-    fn generic_contraction_builds_once_without_entering_mult_free_cache() {
+    fn generic_contraction_still_uses_one_final_layout_build() {
         use tenet_core::Su3FusionRule;
 
         let _guard = CACHE_TEST_LOCK
@@ -4483,22 +4267,10 @@ mod scratch_cache_tests {
             vec![vec![2, 2]; key_count],
         )
         .unwrap();
-        let mult_free_cache_key = ContractedSpaceKey {
-            rule: rule.rule_identity(),
-            lhs_homspace: Arc::clone(&source.homspace),
-            rhs_homspace: Arc::clone(&source.homspace),
-            lhs_axes: DimVec::from_slice(&[1]),
-            rhs_axes: DimVec::from_slice(&[0]),
-            output_axes: DimVec::from_slice(&[0, 1]),
-        };
 
         let contracted =
             DynamicFusionMapSpace::contracted_generic(&rule, &source, &source, &[1], &[0]).unwrap();
         assert_eq!(final_result_layout_builds(), 1);
-        assert!(!contracted_space_cache()
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(&mult_free_cache_key));
         assert_eq!(contracted.structure().block_count(), key_count);
     }
 
