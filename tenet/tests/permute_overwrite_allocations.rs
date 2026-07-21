@@ -88,6 +88,51 @@ fn cached_permute_overwrite_does_not_allocate_on_the_caller_thread() {
 }
 
 #[test]
+fn cached_u1_permute_overwrite_does_not_allocate_on_the_caller_thread() {
+    // What: a warmed UniqueFusion permutation reuses its completed transformer
+    // and replay workspace without allocating on the caller.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = Space::u1([(-1, 4), (0, 8), (1, 4)]);
+    let source =
+        Tensor::rand_with_seed(&runtime, Dtype::F64, [&space, &space], [&space], 418).unwrap();
+    let mut destination = source.permute(&[1], &[2, 0]).unwrap();
+    let mut context = TensorExecutionContext::for_runtime(&runtime).unwrap();
+    let mut cache = PermuteOverwriteCache::default();
+
+    assert_eq!(
+        context
+            .try_permute_overwrite_into(
+                &mut cache,
+                &mut destination,
+                &source,
+                &[1],
+                &[2, 0],
+                Scalar::F64(1.0),
+            )
+            .unwrap(),
+        OverwriteOutcome::Written
+    );
+
+    ALLOCATIONS.set(0);
+    COUNTING.set(true);
+    let outcome = context
+        .try_permute_overwrite_into(
+            &mut cache,
+            &mut destination,
+            &source,
+            &[1],
+            &[2, 0],
+            Scalar::F64(1.0),
+        )
+        .unwrap();
+    COUNTING.set(false);
+    black_box(destination.data());
+
+    assert_eq!(outcome, OverwriteOutcome::Written);
+    assert_eq!(ALLOCATIONS.get(), 0);
+}
+
+#[test]
 fn cached_owned_rank_nine_permute_does_not_clone_operation_storage() {
     // What: the warmed public owned path pays for its returned tensor but does
     // not add a rank-spilled operation clone before consulting the plan cache.

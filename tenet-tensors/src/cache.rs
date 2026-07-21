@@ -1,5 +1,7 @@
 use std::any::{Any, TypeId};
 use std::collections::VecDeque;
+use std::fmt;
+use std::num::NonZeroUsize;
 
 use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};
@@ -314,20 +316,43 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
 pub struct TreeTransformStructureCache<T, PlanKey> {
-    structures: FxHashMap<TreeTransformStructureCacheKey<PlanKey>, Arc<TreeTransformStructure<T>>>,
-    lru_order: VecDeque<TreeTransformStructureCacheKey<PlanKey>>,
+    structures: lru::LruCache<
+        TreeTransformStructureCacheKey<PlanKey>,
+        Arc<TreeTransformStructure<T>>,
+        rustc_hash::FxBuildHasher,
+    >,
     policy: OperationCachePolicy,
 }
 
-impl<T, PlanKey> Default for TreeTransformStructureCache<T, PlanKey> {
-    fn default() -> Self {
-        Self {
-            structures: FxHashMap::default(),
-            lru_order: VecDeque::new(),
-            policy: OperationCachePolicy::default(),
+impl<T, PlanKey> Clone for TreeTransformStructureCache<T, PlanKey>
+where
+    PlanKey: Clone + Eq + Hash,
+{
+    fn clone(&self) -> Self {
+        let mut cloned = Self::with_policy(self.policy);
+        for (key, structure) in self.structures.iter().rev() {
+            cloned.structures.put(key.clone(), Arc::clone(structure));
         }
+        cloned
+    }
+}
+
+impl<T, PlanKey> fmt::Debug for TreeTransformStructureCache<T, PlanKey> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TreeTransformStructureCache")
+            .field("policy", &self.policy)
+            .finish()
+    }
+}
+
+impl<T, PlanKey> Default for TreeTransformStructureCache<T, PlanKey>
+where
+    PlanKey: Clone + Eq + Hash,
+{
+    fn default() -> Self {
+        Self::with_policy(OperationCachePolicy::default())
     }
 }
 
@@ -495,8 +520,7 @@ where
 
     pub fn with_policy(policy: OperationCachePolicy) -> Self {
         Self {
-            structures: FxHashMap::default(),
-            lru_order: VecDeque::new(),
+            structures: local_lru(policy),
             policy,
         }
     }
@@ -510,11 +534,8 @@ where
         self.policy = policy;
         if !policy.stores_entries() {
             self.structures.clear();
-            self.lru_order.clear();
-        } else if let Some(max_entries) = policy.max_entries() {
-            rebuild_lru_order_from_keys(&self.structures, &mut self.lru_order);
-            enforce_lru_limit(&mut self.structures, &mut self.lru_order, max_entries);
         }
+        self.structures.resize(local_lru_capacity(policy));
     }
 
     #[inline]
@@ -531,20 +552,18 @@ where
         &self,
         key: &TreeTransformStructureCacheKey<PlanKey>,
     ) -> Option<&TreeTransformStructure<T>> {
-        self.structures.get(key).map(Arc::as_ref)
+        self.structures.peek(key).map(Arc::as_ref)
     }
 
     pub fn get_arc(
         &self,
         key: &TreeTransformStructureCacheKey<PlanKey>,
     ) -> Option<Arc<TreeTransformStructure<T>>> {
-        self.structures.get(key).map(Arc::clone)
+        self.structures.peek(key).map(Arc::clone)
     }
 
     pub fn touch(&mut self, key: &TreeTransformStructureCacheKey<PlanKey>) {
-        if self.policy.max_entries().is_some() && self.structures.contains_key(key) {
-            touch_lru_key(&mut self.lru_order, key);
-        }
+        let _ = self.structures.get(key);
     }
 
     pub fn insert(
@@ -563,15 +582,24 @@ where
         if !self.policy.stores_entries() {
             return None;
         }
-        let old = self.structures.insert(key.clone(), structure);
-        if self.policy.max_entries().is_some() {
-            touch_lru_key(&mut self.lru_order, &key);
-        }
-        if let Some(max_entries) = self.policy.max_entries() {
-            enforce_lru_limit(&mut self.structures, &mut self.lru_order, max_entries);
-        }
-        old
+        self.structures.put(key, structure)
     }
+}
+
+pub(crate) fn local_lru_capacity(policy: OperationCachePolicy) -> NonZeroUsize {
+    NonZeroUsize::new(policy.max_entries().unwrap_or(usize::MAX).max(1))
+        .expect("local LRU capacity is at least one")
+}
+
+pub(crate) fn local_lru<K, V>(
+    policy: OperationCachePolicy,
+) -> lru::LruCache<K, V, rustc_hash::FxBuildHasher>
+where
+    K: Eq + Hash,
+{
+    let mut cache = lru::LruCache::unbounded_with_hasher(rustc_hash::FxBuildHasher);
+    cache.resize(local_lru_capacity(policy));
+    cache
 }
 
 #[cfg(test)]

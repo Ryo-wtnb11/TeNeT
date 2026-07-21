@@ -120,6 +120,9 @@ where
         &mut self.cache
     }
 
+    /// Replaces this context's tree-transform retention policy, including
+    /// disabling retention, selecting unbounded local retention, or changing
+    /// the independent plan and compiled-structure entry cap.
     pub fn set_cache_policy(&mut self, policy: OperationCachePolicy)
     where
         RuleKey: Clone + Eq + Hash,
