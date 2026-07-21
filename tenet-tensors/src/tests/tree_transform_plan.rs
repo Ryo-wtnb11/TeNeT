@@ -4469,6 +4469,90 @@ fn product_tree_transform_reuse_is_owned_by_one_explicit_context() {
 }
 
 #[test]
+fn recoupling_threads_do_not_change_cached_tree_transform_result() {
+    let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
+    type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;
+    let operation = TreeTransformOperation::permute([1, 0], [2]);
+    let src =
+        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![10.0, 20.0], src_space).unwrap();
+    let dst =
+        TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(vec![1.0, 2.0], dst_space).unwrap();
+
+    let mut cache = TreeTransformCache::<f64, RuleKey>::default();
+    cache.set_recoupling_threads(1);
+    let serial = cache
+        .get_or_compile_tree_pair(&rule, operation.clone(), &dst, &src)
+        .unwrap();
+    cache.set_policy(OperationCachePolicy::TaskLocal);
+    cache.set_recoupling_threads(4);
+    let cached = cache
+        .get_or_compile_tree_pair(&rule, operation.clone(), &dst, &src)
+        .unwrap();
+
+    assert!(Arc::ptr_eq(&serial, &cached));
+    assert_eq!(cache.stats().plan_hits(), 1);
+    assert_eq!(cache.stats().structure_hits(), 1);
+
+    let mut no_cache =
+        TreeTransformCache::<f64, RuleKey>::with_policy(OperationCachePolicy::NoCache);
+    no_cache.set_recoupling_threads(4);
+    let eager = no_cache
+        .get_or_compile_tree_pair(&rule, operation, &dst, &src)
+        .unwrap();
+    assert_eq!(eager.as_ref(), cached.as_ref());
+
+    let mut cached_dst = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+        vec![1.0, 2.0],
+        dst.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let mut eager_dst = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
+        vec![1.0, 2.0],
+        dst.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let mut cached_backend = DenseTreeTransformOperations::default();
+    let mut eager_backend = DenseTreeTransformOperations::default();
+    let mut cached_workspace = TreeTransformWorkspace::default();
+    let mut eager_workspace = TreeTransformWorkspace::default();
+    tree_transform_execute_with(
+        &mut cached_backend,
+        &mut cached_workspace,
+        &cached,
+        &mut cached_dst,
+        &src,
+        -2.0,
+        3.0,
+    )
+    .unwrap();
+    tree_transform_execute_with(
+        &mut eager_backend,
+        &mut eager_workspace,
+        &eager,
+        &mut eager_dst,
+        &src,
+        -2.0,
+        3.0,
+    )
+    .unwrap();
+
+    // What: `recoupling_threads` schedules plan compilation only; omitting it
+    // from the cache key must not change the compiled transform or replay bits.
+    assert_eq!(
+        cached_dst
+            .data()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        eager_dst
+            .data()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn product_tree_transform_rebuilds_after_global_cache_reset_with_old_values_live() {
     // What: a reset may drop every semantic layout/transform artifact while old
     // product-symmetry tensors remain live; rebuilding preserves the fZ2 swap sign.
