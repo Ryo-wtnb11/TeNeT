@@ -1,6 +1,32 @@
 use super::*;
 use std::sync::Arc;
 
+fn assert_f64_bits_eq(label: &str, actual: &[f64], expected: &[f64]) {
+    assert_eq!(actual.len(), expected.len(), "{label} length");
+    for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+        assert_eq!(
+            actual.to_bits(),
+            expected.to_bits(),
+            "{label} bit mismatch at {index}: {actual} vs {expected}"
+        );
+    }
+}
+
+fn assert_complex64_bits_eq(
+    label: &str,
+    actual: &[num_complex::Complex64],
+    expected: &[num_complex::Complex64],
+) {
+    assert_eq!(actual.len(), expected.len(), "{label} length");
+    for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+        assert_eq!(
+            (actual.re.to_bits(), actual.im.to_bits()),
+            (expected.re.to_bits(), expected.im.to_bits()),
+            "{label} bit mismatch at {index}: {actual} vs {expected}"
+        );
+    }
+}
+
 #[test]
 fn tensor_contract_fusion_execution_context_reports_host_placement() {
     let context =
@@ -4570,6 +4596,7 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
             .structure_misses()
             > 0
     );
+    let cached_contract_bits = automatic_context_dst.data().to_vec();
 
     let mut no_cache_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
         initial_dst_for_context_replay.clone(),
@@ -4598,6 +4625,13 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
         let dynamic_misses = no_cache_context.dynamic_fusion_space_cache_misses();
         assert!(dynamic_misses > previous_dynamic_misses);
         previous_dynamic_misses = dynamic_misses;
+        // What: disabling all execution caches changes reuse only, not the
+        // destination reduced-block values or floating-point operation order.
+        assert_f64_bits_eq(
+            "cached vs NoCache SU2 non-core contraction",
+            no_cache_dst.data(),
+            &cached_contract_bits,
+        );
         no_cache_dst
             .data_mut()
             .copy_from_slice(&initial_dst_for_context_replay);
@@ -7236,6 +7270,35 @@ fn tensorcontract_fusion_prelowered_fermion_twist_declines_core_and_matches_eage
         .unwrap();
 
     assert_eq!(lazy, eager);
+
+    let mut no_cache_context =
+        crate::TensorContractFusionExecutionContext::<Complex64, _>::default();
+    no_cache_context.set_cache_policy(OperationCachePolicy::NoCache);
+    let mut no_cache_lazy = vec![Complex64::new(0.0, 0.0); dst_space.required_len().unwrap()];
+    no_cache_context
+        .tensorcontract_fusion_dyn_prelowered_into(
+            &dst_bound,
+            &mut no_cache_lazy,
+            crate::FusionOperand::prelowered_adjoint(adj_bound.space(), lhs_bound.space()).unwrap(),
+            &lhs_data,
+            crate::FusionOperand::direct(rhs_bound.space()),
+            &rhs_data,
+            TensorContractSpec::new_with_conjugation(
+                &[1],
+                &[0],
+                crate::OutputAxisOrder::identity(),
+                true,
+                false,
+            ),
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 0.0),
+        )
+        .unwrap();
+    assert_complex64_bits_eq(
+        "cached vs NoCache complex fermion twist",
+        &no_cache_lazy,
+        &lazy,
+    );
     assert!(
         !context.last_resolution_is_core(),
         "a nontrivial fermionic RHS twist must stay on a twist-aware fallback route"
