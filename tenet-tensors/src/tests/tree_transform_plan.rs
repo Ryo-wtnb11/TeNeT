@@ -7497,12 +7497,145 @@ impl GenericRigidSymbols for ToyGenericRule {
     }
 }
 
-fn b2c_toy_src_pair() -> FusionTreePairKey {
-    // cod [1,1]->0 (vacuum-coupled, N(1,1,0)=1, single vertex label 1), dom []->0.
+#[derive(Clone, Copy)]
+struct DenseGenericRule;
+
+impl FusionRule for DenseGenericRule {
+    fn rule_identity(&self) -> tenet_core::RuleIdentity {
+        tenet_core::RuleIdentity::of_type::<Self>()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Generic
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Bosonic
+    }
+    fn vacuum(&self) -> SectorId {
+        SectorId::new(0)
+    }
+    fn dual(&self, sector: SectorId) -> SectorId {
+        sector
+    }
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        match (left.id(), right.id()) {
+            (0, x) | (x, 0) => [SectorId::new(x)].into_iter().collect(),
+            (1, 1) => [SectorId::new(0), SectorId::new(1)].into_iter().collect(),
+            _ => [SectorId::new(0)].into_iter().collect(),
+        }
+    }
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        if (left.id(), right.id(), coupled.id()) == (1, 1, 1) {
+            2
+        } else {
+            usize::from(self.fusion_channels(left, right).contains(&coupled))
+        }
+    }
+}
+
+impl GenericFusionSymbols for DenseGenericRule {
+    type Scalar = f64;
+    fn f_symbol_generic(
+        &self,
+        _a: SectorId,
+        _b: SectorId,
+        _c: SectorId,
+        _d: SectorId,
+        _e: SectorId,
+        _f: SectorId,
+    ) -> GenericFArray<Self::Scalar> {
+        GenericFArray::new(vec![1.0], (1, 1, 1, 1))
+    }
+    fn r_symbol_generic(
+        &self,
+        _a: SectorId,
+        _b: SectorId,
+        c: SectorId,
+    ) -> GenericRMatrix<Self::Scalar> {
+        if c == SectorId::new(1) {
+            GenericRMatrix::new(vec![2.0, 5.0, 7.0, 11.0], 2, 2)
+        } else {
+            GenericRMatrix::new(vec![1.0], 1, 1)
+        }
+    }
+}
+
+impl GenericRigidSymbols for DenseGenericRule {
+    fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+    fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+    fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AnyonicGenericRule;
+
+impl FusionRule for AnyonicGenericRule {
+    fn rule_identity(&self) -> tenet_core::RuleIdentity {
+        tenet_core::RuleIdentity::of_type::<Self>()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Generic
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Anyonic
+    }
+    fn vacuum(&self) -> SectorId {
+        DenseGenericRule.vacuum()
+    }
+    fn dual(&self, sector: SectorId) -> SectorId {
+        DenseGenericRule.dual(sector)
+    }
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        DenseGenericRule.fusion_channels(left, right)
+    }
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        DenseGenericRule.nsymbol(left, right, coupled)
+    }
+}
+
+impl GenericFusionSymbols for AnyonicGenericRule {
+    type Scalar = f64;
+    fn f_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> GenericFArray<Self::Scalar> {
+        DenseGenericRule.f_symbol_generic(a, b, c, d, e, f)
+    }
+    fn r_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+    ) -> GenericRMatrix<Self::Scalar> {
+        DenseGenericRule.r_symbol_generic(a, b, c)
+    }
+}
+
+impl GenericRigidSymbols for AnyonicGenericRule {
+    fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        DenseGenericRule.sqrt_dim_scalar(sector)
+    }
+    fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        DenseGenericRule.inv_sqrt_dim_scalar(sector)
+    }
+    fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar {
+        DenseGenericRule.frobenius_schur_phase_scalar(sector)
+    }
+}
+
+fn b2c_src_pair_for_rule<R: FusionRule>(rule: &R) -> FusionTreePairKey {
     let cod = FusionTreeKey::try_new_for_rule(
-        &ToyGenericRule {
-            style: FusionStyleKind::Generic,
-        },
+        rule,
         [SectorId::new(1), SectorId::new(1)],
         SectorId::new(0),
         [false, false],
@@ -7510,18 +7643,40 @@ fn b2c_toy_src_pair() -> FusionTreePairKey {
         [MultiplicityIndex::ONE],
     )
     .unwrap();
-    let dom = FusionTreeKey::try_new_for_rule(
-        &ToyGenericRule {
-            style: FusionStyleKind::Generic,
-        },
-        [],
-        SectorId::new(0),
-        [],
-        [],
-        [],
-    )
-    .unwrap();
+    let dom = FusionTreeKey::try_new_for_rule(rule, [], SectorId::new(0), [], [], []).unwrap();
     FusionTreePairKey::pair(cod, dom)
+}
+
+fn b2c_toy_src_pair() -> FusionTreePairKey {
+    // cod [1,1]->0 (vacuum-coupled, N(1,1,0)=1, single vertex label 1), dom []->0.
+    b2c_src_pair_for_rule(&ToyGenericRule {
+        style: FusionStyleKind::Generic,
+    })
+}
+
+fn dense_generic_source_pairs(rule: &DenseGenericRule) -> [FusionTreePairKey; 2] {
+    [MultiplicityIndex::ONE, MultiplicityIndex::new(2).unwrap()].map(|vertex| {
+        FusionTreePairKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                rule,
+                [SectorId::new(1), SectorId::new(1)],
+                SectorId::new(1),
+                [false, false],
+                [],
+                [vertex],
+            )
+            .unwrap(),
+            FusionTreeKey::try_new_for_rule(
+                rule,
+                [SectorId::new(1)],
+                SectorId::new(1),
+                [false],
+                [],
+                [],
+            )
+            .unwrap(),
+        )
+    })
 }
 
 // The generic plan compile reproduces the core `generic_permute_tree_pair`
@@ -7588,6 +7743,8 @@ fn build_generic_tree_pair_plan_matches_core_rows_and_guards_style() {
 
 #[test]
 fn generic_multiplicity_monomial_rows_compile_and_execute_as_direct_singles() {
+    use crate::tree_transform::{reset_tree_pair_lowering_calls, tree_pair_lowering_calls};
+
     // What: a GenericFusion R matrix whose core rows are structurally
     // singleton and destination-injective uses the same direct replay contract.
     let rule = ToyGenericRule {
@@ -7627,7 +7784,12 @@ fn generic_multiplicity_monomial_rows_compile_and_execute_as_direct_singles() {
     assert!(core_rows.iter().all(|row| row.len() == 1));
     assert_ne!(core_rows[0][0].0, core_rows[1][0].0);
 
+    reset_tree_pair_lowering_calls();
     let plan = build_generic_tree_pair_transform_group_plan(&rule, operation, &structure).unwrap();
+    assert_eq!(
+        tree_pair_lowering_calls(),
+        (structure.fusion_tree_groups().len(), 0)
+    );
     assert_eq!(plan.specs().len(), 2);
     assert_eq!(plan.specs()[0].recoupling_coefficients_dst_src(), &[2.0]);
     assert_eq!(plan.specs()[1].recoupling_coefficients_dst_src(), &[3.0]);
@@ -7661,6 +7823,89 @@ fn generic_multiplicity_monomial_rows_compile_and_execute_as_direct_singles() {
     assert_eq!(
         (workspace.source_len(), workspace.destination_len()),
         (0, 0)
+    );
+}
+
+#[test]
+fn generic_dense_block_plan_matches_per_source_oracle_matrix() {
+    let rule = DenseGenericRule;
+    let pairs = dense_generic_source_pairs(&rule);
+    let structure = packed_fixture_structure(
+        3,
+        pairs
+            .iter()
+            .cloned()
+            .map(BlockKey::from)
+            .map(|key| (key, vec![1usize; 3])),
+    )
+    .unwrap();
+    let operation = TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]);
+
+    let oracle = pairs
+        .iter()
+        .map(|pair| generic_braid_tree_pair(&rule, pair, &[1, 0], &[2], &[0, 1], &[2]).unwrap())
+        .collect::<Vec<_>>();
+    assert!(oracle.iter().all(|rows| rows.len() == 2));
+
+    let mut expected_destinations = Vec::<FusionTreePairKey>::new();
+    for rows in &oracle {
+        for (destination, _) in rows {
+            if !expected_destinations
+                .iter()
+                .any(|existing| existing == destination)
+            {
+                expected_destinations.push(destination.clone());
+            }
+        }
+    }
+    let mut expected_coefficients = vec![0.0; expected_destinations.len() * pairs.len()];
+    for (source, rows) in oracle.iter().enumerate() {
+        for (destination, coefficient) in rows {
+            let row = expected_destinations
+                .iter()
+                .position(|existing| existing == destination)
+                .unwrap();
+            expected_coefficients[row * pairs.len() + source] = *coefficient;
+        }
+    }
+
+    let plan = build_generic_tree_pair_transform_group_plan(&rule, operation, &structure).unwrap();
+    assert_eq!(plan.specs().len(), 1);
+    let spec = &plan.specs()[0];
+    assert_eq!(spec.src_keys(), pairs.as_slice());
+    assert_eq!(spec.dst_keys(), expected_destinations.as_slice());
+    assert_eq!(
+        spec.recoupling_coefficients_dst_src(),
+        expected_coefficients.as_slice()
+    );
+}
+
+#[test]
+fn generic_transpose_accepts_nonsymmetric_braiding_but_permute_rejects_it() {
+    let rule = AnyonicGenericRule;
+    let src_pair = b2c_src_pair_for_rule(&rule);
+    let structure =
+        packed_fixture_structure(2, [(BlockKey::from(src_pair.clone()), vec![1, 1])]).unwrap();
+
+    let transpose = TreeTransformOperation::transpose([1, 0], []);
+    let expected = generic_transpose_tree_pair(&rule, &src_pair, &[1, 0], &[]).unwrap();
+    let plan = build_generic_tree_pair_transform_group_plan(&rule, transpose, &structure).unwrap();
+    assert_eq!(plan.specs().len(), 1);
+    assert_eq!(plan.specs()[0].dst_keys(), &[expected[0].0.clone()]);
+    assert_eq!(
+        plan.specs()[0].recoupling_coefficients_dst_src(),
+        &[expected[0].1]
+    );
+
+    let permute = TreeTransformOperation::permute([1, 0], []);
+    let err = build_generic_tree_pair_transform_group_plan(&rule, permute.clone(), &structure)
+        .unwrap_err();
+    assert_eq!(
+        err,
+        OperationError::UnsupportedBraidingStyle {
+            operation: Box::new(permute),
+            style: BraidingStyleKind::Anyonic,
+        }
     );
 }
 

@@ -5,11 +5,12 @@ use std::{collections::hash_map::Entry, sync::Arc};
 
 use num_traits::Zero;
 use tenet_core::{
-    BlockKey, BlockKeyKind, BlockStructure, CoreError, FusionRule, FusionStyleKind,
-    FusionTreeBlockGroup, FusionTreeKey, FusionTreePairKey, GenericBraidScalar,
-    GenericRigidSymbols, LocallyValidatedFusionTreeBlockStructure, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, OrderedBlockLinearMap, OrderedBlockLinearStorage,
-    PreparedTreePairOperation,
+    generic_braid_tree_pair_block_ordered, generic_permute_tree_pair_block_ordered,
+    generic_transpose_tree_pair_block_ordered, BlockKey, BlockKeyKind, BlockStructure, CoreError,
+    FusionRule, FusionStyleKind, FusionTreeBlockGroup, FusionTreeKey, FusionTreePairKey,
+    GenericBraidScalar, GenericRigidSymbols, LocallyValidatedFusionTreeBlockStructure,
+    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, OrderedBlockLinearMap,
+    OrderedBlockLinearStorage, PreparedTreePairOperation,
 };
 
 use crate::OperationError;
@@ -1444,10 +1445,9 @@ where
 
 /// Generic-fusion (outer-multiplicity) tree-pair plan compile — the Stage B2c
 /// dispatch receptacle for SU(3)/SO(N≥7)/Sp(N) rules. Parallel entry to
-/// `build_multiplicity_free_tree_pair_transform_group_plan`: it reuses the
-/// exact same group-spec assembly (`assemble_tree_pair_group_specs`, generic
-/// over the coefficient type) and differs only in the recoupling-row source
-/// (the validated per-block Generic tree-pair executor).
+/// `build_multiplicity_free_tree_pair_transform_group_plan`: non-identity groups
+/// are compiled as one ordered block map over full tree-pair keys, while the
+/// identity path keeps the existing identity assembly.
 ///
 /// This is a SEPARATE entry rather than a runtime branch inside the mult-free
 /// builder because the two are disjoint at the type level:
@@ -1494,13 +1494,69 @@ where
 
     let mut specs = Vec::new();
     for group in src_structure.fusion_tree_group_slice() {
-        let mut rows_for = |index: usize, _: &FusionTreePairKey| {
-            let rows = match &operation {
+        if operation.is_identity_for(
+            group.group_key().codomain_uncoupled().len(),
+            group.group_key().domain_uncoupled().len(),
+        ) {
+            let mut rows_for = |index: usize, _: &FusionTreePairKey| {
+                let rows = match &operation {
+                    TreeTransformOperation::Permute {
+                        codomain_permutation,
+                        domain_permutation,
+                    } => source_proof.generic_permute_tree_pair_for_block_index(
+                        index,
+                        codomain_permutation,
+                        domain_permutation,
+                    ),
+                    TreeTransformOperation::Braid {
+                        codomain_permutation,
+                        domain_permutation,
+                        codomain_levels,
+                        domain_levels,
+                    } => source_proof.generic_braid_tree_pair_for_block_index(
+                        index,
+                        codomain_permutation,
+                        domain_permutation,
+                        codomain_levels,
+                        domain_levels,
+                    ),
+                    TreeTransformOperation::Transpose {
+                        codomain_permutation,
+                        domain_permutation,
+                    } => source_proof.generic_transpose_tree_pair_for_block_index(
+                        index,
+                        codomain_permutation,
+                        domain_permutation,
+                    ),
+                }
+                .map_err(OperationError::from_core_preserving_context)?;
+                Ok(Arc::new(rows))
+            };
+            specs.extend(assemble_identity_tree_pair_group_specs(
+                src_structure,
+                group,
+                &source_axes,
+                &mut rows_for,
+            )?);
+        } else {
+            let mut src_keys = Vec::with_capacity(group.block_indices().len());
+            for &src_block_index in group.block_indices() {
+                let block = src_structure.block(src_block_index)?;
+                let BlockKey::FusionTree(src_key) = block.key() else {
+                    return Err(OperationError::ExpectedFusionTreeBlock {
+                        tensor: "src",
+                        index: src_block_index,
+                    });
+                };
+                src_keys.push(src_key.clone());
+            }
+            let ordered = match &operation {
                 TreeTransformOperation::Permute {
                     codomain_permutation,
                     domain_permutation,
-                } => source_proof.generic_permute_tree_pair_for_block_index(
-                    index,
+                } => generic_permute_tree_pair_block_ordered(
+                    source_proof.rule(),
+                    &src_keys,
                     codomain_permutation,
                     domain_permutation,
                 ),
@@ -1509,8 +1565,9 @@ where
                     domain_permutation,
                     codomain_levels,
                     domain_levels,
-                } => source_proof.generic_braid_tree_pair_for_block_index(
-                    index,
+                } => generic_braid_tree_pair_block_ordered(
+                    source_proof.rule(),
+                    &src_keys,
                     codomain_permutation,
                     domain_permutation,
                     codomain_levels,
@@ -1519,31 +1576,19 @@ where
                 TreeTransformOperation::Transpose {
                     codomain_permutation,
                     domain_permutation,
-                } => source_proof.generic_transpose_tree_pair_for_block_index(
-                    index,
+                } => generic_transpose_tree_pair_block_ordered(
+                    source_proof.rule(),
+                    &src_keys,
                     codomain_permutation,
                     domain_permutation,
                 ),
             }
             .map_err(OperationError::from_core_preserving_context)?;
-            Ok(Arc::new(rows))
-        };
-        if operation.is_identity_for(
-            group.group_key().codomain_uncoupled().len(),
-            group.group_key().domain_uncoupled().len(),
-        ) {
-            specs.extend(assemble_identity_tree_pair_group_specs(
+            specs.extend(assemble_ordered_tree_pair_group_specs(
                 src_structure,
                 group,
                 &source_axes,
-                &mut rows_for,
-            )?);
-        } else {
-            specs.extend(assemble_tree_pair_group_specs(
-                src_structure,
-                group,
-                &source_axes,
-                &mut rows_for,
+                ordered,
             )?);
         }
     }
