@@ -90,6 +90,7 @@ pub fn operation_cache_reset_epoch() -> u64 {
     OPERATION_CACHE_RESET_EPOCH.load(Ordering::Acquire)
 }
 
+#[cfg(test)]
 pub(crate) fn typed_global_map<K, V>() -> Arc<RwLock<FxHashMap<K, V>>>
 where
     K: 'static + Eq + Hash + Send + Sync,
@@ -132,10 +133,10 @@ pub fn reset_global_operation_caches() {
 
 /// Cache policy for TensorKit-style replay caches.
 ///
-/// `TaskLocal` means the cache is owned by an explicit execution context. Keeping
-/// one context per task mirrors TensorKit's task-local cache; sharing the same
-/// context/cache handle from a process-level owner gives the corresponding
-/// global cache without hiding synchronization in ordinary tensor operations.
+/// `TaskLocal` and `TaskLocalLru` govern state retained by an explicit execution
+/// context. Cache-enabled contraction may also consult its bounded process-global
+/// immutable resolution owner after the context fronts miss. `NoCache` and a
+/// zero-entry local LRU bypass both tiers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperationCachePolicy {
     NoCache,
