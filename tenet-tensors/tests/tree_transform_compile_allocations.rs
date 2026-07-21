@@ -362,7 +362,7 @@ fn cold_ordered_tree_pair_compile_has_stable_allocation_counts() {
     reset_global_operation_caches();
 
     for (source_count, expected_allocations) in
-        [(1, 44), (2, 49), (4, 57), (5, 65), (8, 71), (9, 79)]
+        [(1, 41), (2, 46), (4, 54), (5, 62), (8, 68), (9, 76)]
     {
         reset_global_operation_caches();
         let (dst, src) = rank_eight_su2_subset(source_count);
@@ -416,7 +416,7 @@ fn rank_nine_same_split_groups_do_not_clone_prepared_spill_storage() {
     // What: three same-split groups reuse one rank-nine prepared operation;
     // cloning spilled prepared storage exceeds both allocation envelopes.
     assert_eq!(structure.fusion_tree_groups().len(), 3);
-    assert_eq!(ALLOCATIONS.get(), 254);
+    assert_eq!(ALLOCATIONS.get(), 217);
     assert!(ALLOCATED_BYTES.get() < 56_500);
     std::hint::black_box(compiled);
 }

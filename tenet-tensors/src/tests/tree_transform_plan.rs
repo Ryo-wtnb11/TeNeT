@@ -1832,13 +1832,8 @@ impl TreeTransformRuleCacheKey for AdmissionCountingSu2Rule {
 
 fn builtin_tree_cache_state(
     cache: &TreeTransformCache<f64, TreeTransformBuiltinRuleCacheKey>,
-) -> (TreeTransformCacheStats, usize, usize, usize) {
-    (
-        cache.stats(),
-        cache.plan_len(),
-        cache.structure_len(),
-        cache.fast_structure_len(),
-    )
+) -> (TreeTransformCacheStats, usize, usize) {
+    (cache.stats(), cache.plan_len(), cache.structure_len())
 }
 
 fn assert_invalid_simple_vertex(error: OperationError) {
@@ -2148,6 +2143,176 @@ fn prelowered_same_content_roles_share_one_local_admission() {
 }
 
 #[test]
+fn ordinary_front_repromotes_after_prelowered_lru_activity() {
+    let structure = simple_su2_vertex_structure(1);
+    let operation_a = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
+    let operation_b = TreeTransformOperation::permute([0, 1], []);
+    let operation_c = TreeTransformOperation::braid([1, 0], [], [1, 0], []);
+    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::with_policy(
+        OperationCachePolicy::task_local_lru(2),
+    );
+
+    let first_a = cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &SU2FusionRule,
+            &operation_a,
+            &structure,
+            &structure,
+            false,
+        )
+        .unwrap();
+    cache
+        .get_or_compile_tree_pair_prelowered(
+            &SU2FusionRule,
+            &operation_b,
+            &structure,
+            &structure,
+            &structure,
+            false,
+            Ok,
+            Ok,
+        )
+        .unwrap();
+    let warm_a = cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &SU2FusionRule,
+            &operation_a,
+            &structure,
+            &structure,
+            false,
+        )
+        .unwrap();
+    assert!(Arc::ptr_eq(&first_a, &warm_a));
+
+    cache.reset_stats();
+    cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &SU2FusionRule,
+            &operation_c,
+            &structure,
+            &structure,
+            false,
+        )
+        .unwrap();
+    cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &SU2FusionRule,
+            &operation_b,
+            &structure,
+            &structure,
+            false,
+        )
+        .unwrap();
+
+    // What: prelowered activity invalidates the ordinary front, so reusing A
+    // promotes it before C arrives and B is the entry evicted from both LRUs.
+    assert_eq!(cache.stats().plan_hits(), 0);
+    assert_eq!(cache.stats().structure_hits(), 0);
+    assert_eq!(cache.stats().plan_misses(), 2);
+    assert_eq!(cache.stats().structure_misses(), 2);
+}
+
+#[test]
+fn failed_structure_compile_does_not_leave_a_stale_lru_front() {
+    let structure = simple_su2_vertex_structure(1);
+    let wrong_destination = Arc::new(
+        packed_fixture_structure(
+            2,
+            [(
+                BlockKey::from(
+                    FusionTreePairKey::try_pair_from_sector_ids(
+                        [2, 2],
+                        [],
+                        0,
+                        [false, false],
+                        [],
+                        [],
+                        [],
+                        [1],
+                        [],
+                    )
+                    .unwrap(),
+                ),
+                vec![1, 1],
+            )],
+        )
+        .unwrap(),
+    );
+    let operation_a = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
+    let operation_b = TreeTransformOperation::permute([0, 1], []);
+    let operation_c = TreeTransformOperation::braid([1, 0], [], [1, 0], []);
+    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::with_policy(
+        OperationCachePolicy::task_local_lru(2),
+    );
+
+    cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &SU2FusionRule,
+            &operation_b,
+            &structure,
+            &structure,
+            false,
+        )
+        .unwrap();
+    let first_a = cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &SU2FusionRule,
+            &operation_a,
+            &structure,
+            &structure,
+            false,
+        )
+        .unwrap();
+    cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &SU2FusionRule,
+            &operation_b,
+            &wrong_destination,
+            &structure,
+            false,
+        )
+        .unwrap_err();
+
+    cache.reset_stats();
+    let warm_a = cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &SU2FusionRule,
+            &operation_a,
+            &structure,
+            &structure,
+            false,
+        )
+        .unwrap();
+    assert!(Arc::ptr_eq(&first_a, &warm_a));
+    cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &SU2FusionRule,
+            &operation_c,
+            &structure,
+            &structure,
+            false,
+        )
+        .unwrap();
+    let retained_a = cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &SU2FusionRule,
+            &operation_a,
+            &structure,
+            &structure,
+            false,
+        )
+        .unwrap();
+
+    // What: a failed structure miss invalidates the exact front, so A touches
+    // both deep LRUs before C arrives and remains the same retained artifact.
+    assert!(Arc::ptr_eq(&first_a, &retained_a));
+    assert_eq!(cache.stats().plan_hits(), 2);
+    assert_eq!(cache.stats().structure_hits(), 2);
+    assert_eq!(cache.stats().plan_misses(), 1);
+    assert_eq!(cache.stats().structure_misses(), 1);
+}
+
+#[test]
 fn warm_prelowered_raw_arc_aliases_do_not_observe_or_mutate_cache_state() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
@@ -2230,7 +2395,6 @@ fn invalid_simple_source_does_not_mutate_cached_or_no_cache_state() {
         assert_eq!(cache.stats(), before_stats);
         assert_eq!(cache.plan_len(), 0);
         assert_eq!(cache.structure_len(), 0);
-        assert_eq!(cache.fast_structure_len(), 0);
     }
 }
 
@@ -3165,7 +3329,6 @@ fn tree_transform_execution_context_no_cache_rebuilds_without_retaining_entries(
             .unwrap();
         assert_eq!(context.cache().plan_len(), 0);
         assert_eq!(context.cache().structure_len(), 0);
-        assert_eq!(context.cache().fast_structure_len(), 0);
         assert_eq!(context.cache().stats().plan_hits(), 0);
         assert_eq!(context.cache().stats().structure_hits(), 0);
         assert_eq!(context.cache().stats().plan_misses(), expected_misses);
@@ -3202,6 +3365,18 @@ fn tree_transform_execution_context_no_cache_rebuilds_without_retaining_entries(
             (0, 0)
         );
     }
+}
+
+#[test]
+fn tree_transform_execution_context_default_is_bounded() {
+    let context = TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+
+    // What: ordinary contexts retain at most the documented default number of
+    // completed tree-transform plans and structures.
+    assert_eq!(
+        context.cache().policy(),
+        OperationCachePolicy::task_local_lru(256)
+    );
 }
 
 #[test]
@@ -3267,7 +3442,7 @@ fn tree_transform_execution_context_task_local_lru_evicts_old_transformer() {
     assert_eq!(context.cache().structure_len(), 1);
 
     context
-        .tree_transform_into(&SU2FusionRule, operation, &mut dst, &src, 1.0, 0.0)
+        .tree_transform_into(&SU2FusionRule, operation.clone(), &mut dst, &src, 1.0, 0.0)
         .unwrap();
     assert_eq!(context.cache().plan_len(), 1);
     assert_eq!(context.cache().structure_len(), 1);
@@ -3275,6 +3450,68 @@ fn tree_transform_execution_context_task_local_lru_evicts_old_transformer() {
     assert_eq!(context.cache().stats().structure_hits(), 0);
     assert_eq!(context.cache().stats().plan_misses(), 3);
     assert_eq!(context.cache().stats().structure_misses(), 3);
+
+    context
+        .cache_mut()
+        .set_policy(OperationCachePolicy::task_local_lru(2));
+    context
+        .all_codomain_tree_transform_into(
+            &SU2FusionRule,
+            operation.clone(),
+            &mut dst,
+            &src,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+    context
+        .tree_transform_into(&SU2FusionRule, operation.clone(), &mut dst, &src, 1.0, 0.0)
+        .unwrap();
+
+    context.cache_mut().reset_stats();
+    for tree_pair in [false, true, false, true] {
+        if tree_pair {
+            context
+                .tree_transform_into(&SU2FusionRule, operation.clone(), &mut dst, &src, 1.0, 0.0)
+                .unwrap();
+        } else {
+            context
+                .all_codomain_tree_transform_into(
+                    &SU2FusionRule,
+                    operation.clone(),
+                    &mut dst,
+                    &src,
+                    1.0,
+                    0.0,
+                )
+                .unwrap();
+        }
+    }
+    assert_eq!(context.cache().stats().plan_hits(), 4);
+    assert_eq!(context.cache().stats().structure_hits(), 4);
+    assert_eq!(context.cache().stats().plan_misses(), 0);
+    assert_eq!(context.cache().stats().structure_misses(), 0);
+
+    let mut cloned = context.cache().clone();
+    cloned.reset_stats();
+    cloned
+        .get_or_compile_tree_pair(
+            &SU2FusionRule,
+            TreeTransformOperation::permute([0, 1, 2, 3], []),
+            &dst,
+            &src,
+        )
+        .unwrap();
+    cloned
+        .get_or_compile_all_codomain(&SU2FusionRule, operation, &dst, &src)
+        .unwrap();
+
+    // What: cloning a bounded context preserves recency for both the plan and
+    // compiled-structure owners, so the same least-recent entry is evicted.
+    assert_eq!(cloned.stats().plan_hits(), 0);
+    assert_eq!(cloned.stats().structure_hits(), 0);
+    assert_eq!(cloned.stats().plan_misses(), 2);
+    assert_eq!(cloned.stats().structure_misses(), 2);
 }
 
 #[test]
@@ -3475,9 +3712,7 @@ fn tree_pair_operation_key_uses_tensorkit_global_source_axes() {
 }
 
 #[test]
-fn unique_tree_pair_compile_bypasses_plan_and_structure_caches() {
-    // Why-not: UniqueFusion intentionally bypasses reusable plan/row caches;
-    // this protects the process from retaining cheap, layout-specific keys.
+fn unique_tree_pair_reuses_completed_transformers_with_complete_storage_keys() {
     let src_key = BlockKey::from(
         FusionTreePairKey::try_pair_from_sector_ids(
             [1],
@@ -3517,11 +3752,11 @@ fn unique_tree_pair_compile_bypasses_plan_and_structure_caches() {
     let second = cache
         .get_or_compile_tree_pair(&rule, operation, &dst, &src)
         .unwrap();
-    assert_eq!(first.as_ref(), second.as_ref());
-    assert_eq!(cache.plan_len(), 0);
-    assert_eq!(cache.structure_len(), 0);
-    assert_eq!(cache.stats().plan_hits(), 0);
-    assert_eq!(cache.stats().structure_hits(), 0);
+    assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!(cache.plan_len(), 1);
+    assert_eq!(cache.structure_len(), 1);
+    assert_eq!(cache.stats().plan_hits(), 1);
+    assert_eq!(cache.stats().structure_hits(), 1);
 
     let dst_structure = Arc::new(dst.structure().clone());
     let src_structure = Arc::new(src.structure().clone());
@@ -3538,7 +3773,7 @@ fn unique_tree_pair_compile_bypasses_plan_and_structure_caches() {
             true,
         )
         .unwrap();
-    let _ = cache
+    let first_storage = cache
         .get_or_compile_tree_pair_structures_with_storage_conjugation(
             &rule,
             TreeTransformOperation::permute([0, 2], [1]),
@@ -3547,8 +3782,6 @@ fn unique_tree_pair_compile_bypasses_plan_and_structure_caches() {
             true,
         )
         .unwrap();
-    // Why-not: bypassing the cache must not change the compiled structural or
-    // numerical result relative to the direct compiler.
     let cached_storage = cache
         .get_or_compile_tree_pair_structures_with_storage_conjugation(
             &rule,
@@ -3559,14 +3792,88 @@ fn unique_tree_pair_compile_bypasses_plan_and_structure_caches() {
         )
         .unwrap();
     assert_eq!(cached_storage.as_ref(), &direct);
+    assert!(Arc::ptr_eq(&first_storage, &cached_storage));
     assert!(cached_storage.storage_conjugate());
-    assert_eq!(cache.plan_len(), 0);
-    assert_eq!(cache.structure_len(), 0);
-    assert_eq!(cache.fast_structure_len(), 0);
+    // What: the complete Unique transformer is reused, while storage
+    // conjugation remains a distinct structure key over the shared plan.
+    assert_eq!(cache.plan_len(), 1);
+    assert_eq!(cache.structure_len(), 2);
+
+    let mut bounded = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::with_policy(
+        OperationCachePolicy::task_local_lru(1),
+    );
+    let evicted = bounded
+        .get_or_compile_tree_pair_structures_with_storage_conjugation(
+            &rule,
+            TreeTransformOperation::permute([0, 2], [1]),
+            &dst_structure,
+            &src_structure,
+            false,
+        )
+        .unwrap();
+    bounded
+        .get_or_compile_tree_pair_structures_with_storage_conjugation(
+            &rule,
+            TreeTransformOperation::permute([0, 2], [1]),
+            &dst_structure,
+            &src_structure,
+            true,
+        )
+        .unwrap();
+    assert_eq!(bounded.plan_len(), 1);
+    assert_eq!(bounded.structure_len(), 1);
+    // What: the one-entry front never keeps an evicted compiled structure
+    // alive beyond the caller-owned Arc.
+    assert_eq!(Arc::strong_count(&evicted), 1);
 }
 
 #[test]
-fn u1_unique_tree_pair_remains_eager_under_stored_policy() {
+fn fermionic_storage_conjugation_uses_distinct_reusable_structures() {
+    let rule = FermionParityFusionRule;
+    let odd = SectorId::new(1);
+    let tree = FusionTreePairKey::pair(
+        FusionTreeKey::try_new_for_rule(&rule, [odd], odd, [false], [], []).unwrap(),
+        FusionTreeKey::try_new_for_rule(&rule, [odd], odd, [true], [], []).unwrap(),
+    );
+    let structure =
+        Arc::new(packed_fixture_structure(2, [(BlockKey::from(tree), vec![1, 1])]).unwrap());
+    let operation = TreeTransformOperation::braid([1], [0], [0], [1]);
+    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+
+    let plain = cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &rule, &operation, &structure, &structure, false,
+        )
+        .unwrap();
+    let conjugated = cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &rule, &operation, &structure, &structure, true,
+        )
+        .unwrap();
+    let plain_warm = cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &rule, &operation, &structure, &structure, false,
+        )
+        .unwrap();
+    let conjugated_warm = cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &rule, &operation, &structure, &structure, true,
+        )
+        .unwrap();
+
+    // What: fermionic storage conjugation is part of the structure key while
+    // both variants reuse one completed algebraic plan.
+    assert!(!Arc::ptr_eq(&plain, &conjugated));
+    assert!(Arc::ptr_eq(&plain, &plain_warm));
+    assert!(Arc::ptr_eq(&conjugated, &conjugated_warm));
+    assert!(!plain.storage_conjugate());
+    assert!(conjugated.storage_conjugate());
+    assert_eq!(cache.plan_len(), 1);
+    assert_eq!(cache.structure_len(), 2);
+}
+
+#[test]
+fn u1_unique_tree_pair_reuses_completed_transformer_but_no_cache_stays_eager() {
     let positive = U1Irrep::new(1).sector_id();
     let negative = U1Irrep::new(-1).sector_id();
     let vacuum = U1FusionRule.vacuum();
@@ -3611,19 +3918,42 @@ fn u1_unique_tree_pair_remains_eager_under_stored_policy() {
         .get_or_compile_tree_pair(&U1FusionRule, operation.clone(), &dst, &src)
         .unwrap();
     let second = cache
-        .get_or_compile_tree_pair(&U1FusionRule, operation, &dst, &src)
+        .get_or_compile_tree_pair(&U1FusionRule, operation.clone(), &dst, &src)
         .unwrap();
 
-    // What: U(1)'s Unique transform recompiles under the stored policy and
-    // never retains plan, structure, or fast-front state.
-    assert!(!Arc::ptr_eq(&first, &second));
-    assert_eq!(cache.stats().plan_hits(), 0);
-    assert_eq!(cache.stats().plan_misses(), 2);
-    assert_eq!(cache.stats().structure_hits(), 0);
-    assert_eq!(cache.stats().structure_misses(), 2);
-    assert_eq!(cache.plan_len(), 0);
-    assert_eq!(cache.structure_len(), 0);
-    assert_eq!(cache.fast_structure_len(), 0);
+    // What: U(1) reuses the completed transformer in one explicit context.
+    assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!(cache.stats().plan_hits(), 1);
+    assert_eq!(cache.stats().plan_misses(), 1);
+    assert_eq!(cache.stats().structure_hits(), 1);
+    assert_eq!(cache.stats().structure_misses(), 1);
+    assert_eq!(cache.plan_len(), 1);
+    assert_eq!(cache.structure_len(), 1);
+
+    cache.set_policy(OperationCachePolicy::NoCache);
+    assert!(cache.is_empty());
+    let first_eager = cache
+        .get_or_compile_tree_pair(&U1FusionRule, operation.clone(), &dst, &src)
+        .unwrap();
+    let second_eager = cache
+        .get_or_compile_tree_pair(&U1FusionRule, operation.clone(), &dst, &src)
+        .unwrap();
+    assert!(!Arc::ptr_eq(&first_eager, &second_eager));
+    assert_eq!(first_eager.as_ref(), second_eager.as_ref());
+    assert!(cache.is_empty());
+
+    cache.set_policy(OperationCachePolicy::TaskLocal);
+    let first_unbounded = cache
+        .get_or_compile_tree_pair(&U1FusionRule, operation.clone(), &dst, &src)
+        .unwrap();
+    let second_unbounded = cache
+        .get_or_compile_tree_pair(&U1FusionRule, operation, &dst, &src)
+        .unwrap();
+    // What: the explicit unbounded policy retains the same completed artifact;
+    // only its eviction bound differs from the default policy.
+    assert!(Arc::ptr_eq(&first_unbounded, &second_unbounded));
+    assert_eq!(cache.plan_len(), 1);
+    assert_eq!(cache.structure_len(), 1);
 }
 
 #[test]
@@ -4136,7 +4466,6 @@ fn product_tree_transform_reuse_is_owned_by_one_explicit_context() {
     assert_eq!(no_cache.stats().plan_misses(), 2);
     assert_eq!(no_cache.plan_len(), 0);
     assert_eq!(no_cache.structure_len(), 0);
-    assert_eq!(no_cache.fast_structure_len(), 0);
 }
 
 #[test]
@@ -4818,7 +5147,7 @@ fn unique_all_codomain_permute_plan_builder_lowers_symmetric_permutation() {
 }
 
 #[test]
-fn unique_all_codomain_context_bypasses_plan_and_structure_caches() {
+fn unique_all_codomain_context_reuses_completed_transformer() {
     let src_key = all_codomain_fusion_tree_test_key([1, 1], 0, [false, true], [], [1]);
     let dst_key = all_codomain_fusion_tree_test_key([1, 1], 0, [true, false], [], [1]);
     let src_structure = packed_fixture_structure(2, [(src_key, vec![1, 1])]).unwrap();
@@ -4845,16 +5174,20 @@ fn unique_all_codomain_context_bypasses_plan_and_structure_caches() {
         )
         .unwrap();
     assert_eq!(dst.data(), &[3.0]);
-    assert_eq!(context.cache().plan_len(), 0);
-    assert_eq!(context.cache().structure_len(), 0);
+    assert_eq!(context.cache().plan_len(), 1);
+    assert_eq!(context.cache().structure_len(), 1);
 
     dst.data_mut().fill(0.0);
     context
         .all_codomain_tree_transform_into(&Z2FusionRule, operation, &mut dst, &src, 1.0, 0.0)
         .unwrap();
     assert_eq!(dst.data(), &[3.0]);
-    assert_eq!(context.cache().plan_len(), 0);
-    assert_eq!(context.cache().structure_len(), 0);
+    // What: all-codomain Unique lowering shares the same bounded completed
+    // transformer boundary as the tree-pair route.
+    assert_eq!(context.cache().plan_len(), 1);
+    assert_eq!(context.cache().structure_len(), 1);
+    assert_eq!(context.cache().stats().plan_hits(), 1);
+    assert_eq!(context.cache().stats().structure_hits(), 1);
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use core::ops::{Add, Mul};
-use std::collections::VecDeque;
-
+#[cfg(test)]
 use rustc_hash::FxHashMap;
+use std::fmt;
 use std::hash::Hash;
 use std::sync::Arc;
 
@@ -13,8 +13,7 @@ use tenet_core::{
 };
 
 use crate::cache::{
-    rebuild_lru_order_from_keys, touch_lru_key, OperationCachePolicy,
-    TreeTransformStructureCacheKey,
+    local_lru, local_lru_capacity, OperationCachePolicy, TreeTransformStructureCacheKey,
 };
 use crate::{OperationError, TreeTransformStructure, TreeTransformStructureCache};
 
@@ -42,6 +41,12 @@ pub enum TreeTransformPlanScope {
     AllCodomain,
     TreePair,
 }
+
+// Why not copy TensorKit's 10^4-entry global cache: TeNeT's explicit execution
+// contexts have shorter owner lifetimes and retain larger compiled artifacts.
+// Bound plans and structures at that owner without changing the separate
+// lifecycle contracts of contraction and derived-space caches.
+pub(crate) const DEFAULT_TREE_TRANSFORM_CACHE_ENTRIES: usize = 256;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TreeTransformSectorPlanKey<RuleKey> {
@@ -255,14 +260,14 @@ impl<T> TreeTransformGroupPlanCache<T> {
     }
 }
 
-#[derive(Clone, Debug)]
 pub struct TreeTransformCache<T, RuleKey> {
-    plans: FxHashMap<TreeTransformSectorPlanKey<RuleKey>, Arc<TreeTransformGroupPlan<T>>>,
-    plan_lru_order: VecDeque<TreeTransformSectorPlanKey<RuleKey>>,
+    plans: lru::LruCache<
+        TreeTransformSectorPlanKey<RuleKey>,
+        Arc<TreeTransformGroupPlan<T>>,
+        rustc_hash::FxBuildHasher,
+    >,
     structures: TreeTransformStructureCache<T, TreeTransformSectorPlanKey<RuleKey>>,
     last_structure: Option<TreeTransformLastStructure<T, RuleKey>>,
-    fast_structures:
-        FxHashMap<TreeTransformFastStructureKey<RuleKey>, Arc<TreeTransformStructure<T>>>,
     policy: OperationCachePolicy,
     stats: TreeTransformCacheStats,
     // Why not retain source-column rows beside plans: an exact plan hit already
@@ -273,6 +278,50 @@ pub struct TreeTransformCache<T, RuleKey> {
     // the backend's `recoupling_threads` to whole-group transform + assembly,
     // keeping one setting for replay and compile.
     recoupling_threads: usize,
+}
+
+impl<T, RuleKey> Clone for TreeTransformCache<T, RuleKey>
+where
+    RuleKey: Clone + Eq + Hash,
+{
+    fn clone(&self) -> Self {
+        let mut plans = local_lru(self.policy);
+        for (key, plan) in self.plans.iter().rev() {
+            plans.put(key.clone(), Arc::clone(plan));
+        }
+        Self {
+            plans,
+            structures: self.structures.clone(),
+            last_structure: self
+                .last_structure
+                .as_ref()
+                .map(|last| TreeTransformLastStructure {
+                    rule: last.rule.clone(),
+                    scope: last.scope,
+                    operation: last.operation.clone(),
+                    dst_ptr: last.dst_ptr,
+                    src_ptr: last.src_ptr,
+                    dst_content_id: last.dst_content_id,
+                    src_content_id: last.src_content_id,
+                    storage_conjugate: last.storage_conjugate,
+                    structure: Arc::clone(&last.structure),
+                }),
+            policy: self.policy,
+            stats: self.stats,
+            recoupling_threads: self.recoupling_threads,
+        }
+    }
+}
+
+impl<T, RuleKey> fmt::Debug for TreeTransformCache<T, RuleKey> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TreeTransformCache")
+            .field("policy", &self.policy)
+            .field("stats", &self.stats)
+            .field("recoupling_threads", &self.recoupling_threads)
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -367,8 +416,6 @@ impl TreeTransformCacheStats {
 
 #[derive(Clone, Debug)]
 struct TreeTransformLastStructure<T, RuleKey> {
-    plan_key: TreeTransformSectorPlanKey<RuleKey>,
-    structure_key: TreeTransformStructureCacheKey<TreeTransformSectorPlanKey<RuleKey>>,
     rule: RuleKey,
     scope: TreeTransformPlanScope,
     operation: TreeTransformOperation,
@@ -381,29 +428,28 @@ struct TreeTransformLastStructure<T, RuleKey> {
     // ever stopped holding those Arcs, these keys would become unsound (ABA).
     dst_ptr: usize,
     src_ptr: usize,
+    dst_content_id: usize,
+    src_content_id: usize,
     storage_conjugate: bool,
     structure: Arc<TreeTransformStructure<T>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-struct TreeTransformFastStructureKey<RuleKey> {
-    rule: RuleKey,
-    scope: TreeTransformPlanScope,
-    operation: TreeTransformOperation,
-    dst_structure_id: usize,
-    src_structure_id: usize,
-    storage_conjugate: bool,
-}
-
-impl<T, RuleKey> Default for TreeTransformCache<T, RuleKey> {
+/// Defaults to context-local LRUs bounded independently at 256 plan entries
+/// and 256 compiled-structure entries. These are entry bounds, not byte bounds.
+/// Use [`Self::with_policy`] or
+/// [`TreeTransformExecutionContext::set_cache_policy`](crate::TreeTransformExecutionContext::set_cache_policy)
+/// to select no retention, unbounded context-local retention, or another cap.
+impl<T, RuleKey> Default for TreeTransformCache<T, RuleKey>
+where
+    RuleKey: Clone + Eq + Hash,
+{
     fn default() -> Self {
+        let policy = OperationCachePolicy::task_local_lru(DEFAULT_TREE_TRANSFORM_CACHE_ENTRIES);
         Self {
-            plans: FxHashMap::default(),
-            plan_lru_order: VecDeque::new(),
-            structures: TreeTransformStructureCache::default(),
+            plans: local_lru(policy),
+            structures: TreeTransformStructureCache::with_policy(policy),
             last_structure: None,
-            fast_structures: FxHashMap::default(),
-            policy: OperationCachePolicy::default(),
+            policy,
             stats: TreeTransformCacheStats::default(),
             recoupling_threads: 1,
         }
@@ -414,17 +460,17 @@ impl<T, RuleKey> TreeTransformCache<T, RuleKey>
 where
     RuleKey: Clone + Eq + Hash,
 {
+    /// Creates the bounded context-local cache described by [`Self::default`].
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Creates a context-local cache with an explicit retention policy.
     pub fn with_policy(policy: OperationCachePolicy) -> Self {
         Self {
-            plans: FxHashMap::default(),
-            plan_lru_order: VecDeque::new(),
+            plans: local_lru(policy),
             structures: TreeTransformStructureCache::with_policy(policy),
             last_structure: None,
-            fast_structures: FxHashMap::default(),
             policy,
             stats: TreeTransformCacheStats::default(),
             recoupling_threads: 1,
@@ -453,14 +499,10 @@ where
         self.policy = policy;
         self.structures.set_policy(policy);
         self.last_structure = None;
-        self.fast_structures.clear();
         if !policy.stores_entries() {
             self.plans.clear();
-            self.plan_lru_order.clear();
-        } else if let Some(max_entries) = policy.max_entries() {
-            rebuild_lru_order_from_keys(&self.plans, &mut self.plan_lru_order);
-            self.enforce_plan_lru_limit(max_entries);
         }
+        self.plans.resize(local_lru_capacity(policy));
     }
 
     #[inline]
@@ -471,11 +513,6 @@ where
     #[inline]
     pub fn structure_len(&self) -> usize {
         self.structures.len()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fast_structure_len(&self) -> usize {
-        self.fast_structures.len()
     }
 
     #[inline]
@@ -508,43 +545,26 @@ where
         if &last.rule == rule_key
             && last.scope == scope
             && &last.operation == operation
-            && last.dst_ptr == Arc::as_ptr(dst_structure) as usize
-            && last.src_ptr == Arc::as_ptr(src_structure) as usize
+            && ((last.dst_ptr == Arc::as_ptr(dst_structure) as usize
+                && last.src_ptr == Arc::as_ptr(src_structure) as usize)
+                || (last.dst_content_id == dst_structure.content_id()
+                    && last.src_content_id == src_structure.content_id()))
             && last.storage_conjugate == storage_conjugate
         {
             let structure = Arc::clone(&last.structure);
             self.stats.plan_hits += 1;
             self.stats.structure_hits += 1;
-            if self.policy.max_entries().is_some() {
-                let plan_key = last.plan_key.clone();
-                let structure_key = last.structure_key.clone();
-                self.touch_plan(&plan_key);
-                self.structures.touch(&structure_key);
-            }
+            // Why not promote through both LRUs: every ordinary path publishes
+            // the entry it just promoted, so this front is already MRU. The
+            // prelowered path clears the front before touching either owner.
             Some(structure)
         } else {
-            if self.policy.max_entries().is_some() {
-                return None;
-            }
-            let key = TreeTransformFastStructureKey {
-                rule: rule_key.clone(),
-                scope,
-                operation: operation.clone(),
-                dst_structure_id: dst_structure.content_id(),
-                src_structure_id: src_structure.content_id(),
-                storage_conjugate,
-            };
-            let structure = self.fast_structures.get(&key)?;
-            self.stats.plan_hits += 1;
-            self.stats.structure_hits += 1;
-            Some(Arc::clone(structure))
+            None
         }
     }
 
     fn remember_structure(
         &mut self,
-        plan_key: TreeTransformSectorPlanKey<RuleKey>,
-        structure_key: TreeTransformStructureCacheKey<TreeTransformSectorPlanKey<RuleKey>>,
         rule: RuleKey,
         scope: TreeTransformPlanScope,
         operation: TreeTransformOperation,
@@ -553,36 +573,28 @@ where
         storage_conjugate: bool,
         structure: Arc<TreeTransformStructure<T>>,
     ) {
-        if self.policy.stores_entries() && self.policy.max_entries().is_none() {
-            self.fast_structures.insert(
-                TreeTransformFastStructureKey {
-                    rule: rule.clone(),
-                    scope,
-                    operation: operation.clone(),
-                    dst_structure_id: dst_structure.content_id(),
-                    src_structure_id: src_structure.content_id(),
-                    storage_conjugate,
-                },
-                Arc::clone(&structure),
-            );
-        }
         self.last_structure = Some(TreeTransformLastStructure {
-            plan_key,
-            structure_key,
             rule,
             scope,
             operation,
             dst_ptr: Arc::as_ptr(dst_structure) as usize,
             src_ptr: Arc::as_ptr(src_structure) as usize,
+            dst_content_id: dst_structure.content_id(),
+            src_content_id: src_structure.content_id(),
             storage_conjugate,
             structure,
         });
     }
 
+    fn begin_lru_activity(&mut self) {
+        // Why not retain the exact front across deep-cache activity: a later
+        // structure compile can fail after promoting only its plan, leaving
+        // the published front out of sync with LRU recency.
+        self.last_structure = None;
+    }
+
     fn touch_plan(&mut self, key: &TreeTransformSectorPlanKey<RuleKey>) {
-        if self.policy.max_entries().is_some() && self.plans.contains_key(key) {
-            touch_lru_key(&mut self.plan_lru_order, key);
-        }
+        let _ = self.plans.get(key);
     }
 
     fn insert_plan_arc(
@@ -593,22 +605,7 @@ where
         if !self.policy.stores_entries() {
             return;
         }
-        self.plans.insert(key.clone(), plan);
-        if self.policy.max_entries().is_some() {
-            self.touch_plan(&key);
-        }
-        if let Some(max_entries) = self.policy.max_entries() {
-            self.enforce_plan_lru_limit(max_entries);
-        }
-    }
-
-    fn enforce_plan_lru_limit(&mut self, max_entries: usize) {
-        while self.plans.len() > max_entries {
-            let Some(oldest) = self.plan_lru_order.pop_front() else {
-                break;
-            };
-            self.plans.remove(&oldest);
-        }
+        self.plans.put(key, plan);
     }
 
     fn compile_tree_pair_plan<R>(
@@ -679,24 +676,6 @@ where
     {
         validate_multiplicity_free_tree_transform_capability(rule, &operation)?;
         validate_tree_pair_namespace_before_cache(&operation, src.structure())?;
-        if rule.fusion_style() == tenet_core::FusionStyleKind::Unique {
-            let source_proof = validate_multiplicity_free_tree_pair_preflight_after_capability(
-                rule,
-                &operation,
-                src.structure(),
-            )?;
-            LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst.structure())
-                .map_err(OperationError::from_core_preserving_context)?;
-            // Why-not cache Unique plans: Unique removes fusion multiplicity,
-            // but does not imply a single total destination. Retaining
-            // plan/row state costs more than direct compilation here and
-            // risks process-lifetime growth for cheap keys.
-            self.stats.plan_misses += 1;
-            self.stats.structure_misses += 1;
-            let plan =
-                build_tree_pair_transform_group_plan_validated(&source_proof, operation.clone())?;
-            return Ok(Arc::new(plan.compile(dst, src)?));
-        }
         let rule_key = rule.tree_transform_rule_cache_key();
         if let Some(structure) = self.fast_structure(
             &rule_key,
@@ -728,7 +707,8 @@ where
                 build_tree_pair_transform_group_plan_validated(&source_proof, operation.clone())?;
             return Ok(Arc::new(plan.compile(dst, src)?));
         }
-        if self.plans.contains_key(&plan_key) {
+        self.begin_lru_activity();
+        if self.plans.contains(&plan_key) {
             self.stats.plan_hits += 1;
             self.touch_plan(&plan_key);
         } else {
@@ -788,31 +768,6 @@ where
     {
         validate_multiplicity_free_tree_transform_capability(rule, operation)?;
         validate_tree_pair_namespace_before_cache(operation, src_structure)?;
-        if rule.fusion_style() == tenet_core::FusionStyleKind::Unique {
-            let source_proof = validate_multiplicity_free_tree_pair_preflight_after_capability(
-                rule,
-                operation,
-                src_structure,
-            )?;
-            LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst_structure)
-                .map_err(OperationError::from_core_preserving_context)?;
-            // Why-not cache Unique plans: Unique removes fusion multiplicity,
-            // but does not imply a single total destination. The storage-only
-            // form still has cheap, layout-specific entries, so retaining a
-            // second structural cache would duplicate state and permit
-            // unbounded entries.
-            self.stats.plan_misses += 1;
-            self.stats.structure_misses += 1;
-            let plan =
-                build_tree_pair_transform_group_plan_validated(&source_proof, operation.clone())?;
-            return Ok(Arc::new(
-                plan.compile_shared_structures_with_storage_conjugation(
-                    Arc::clone(dst_structure),
-                    Arc::clone(src_structure),
-                    storage_conjugate,
-                )?,
-            ));
-        }
         let rule_key = rule.tree_transform_rule_cache_key();
         if let Some(structure) = self.fast_structure(
             &rule_key,
@@ -850,7 +805,8 @@ where
                 )?,
             ));
         }
-        if self.plans.contains_key(&plan_key) {
+        self.begin_lru_activity();
+        if self.plans.contains(&plan_key) {
             self.stats.plan_hits += 1;
             self.touch_plan(&plan_key);
         } else {
@@ -923,7 +879,8 @@ where
                 )?,
             ));
         }
-        if self.plans.contains_key(&plan_key) {
+        self.begin_lru_activity();
+        if self.plans.contains(&plan_key) {
             self.stats.plan_hits += 1;
             self.touch_plan(&plan_key);
         } else {
@@ -1083,27 +1040,6 @@ where
     {
         validate_multiplicity_free_tree_transform_capability(rule, &operation)?;
         validate_all_codomain_namespace_before_cache(&operation, src.structure())?;
-        if rule.fusion_style() == tenet_core::FusionStyleKind::Unique {
-            let source_proof = validate_multiplicity_free_all_codomain_preflight_after_capability(
-                rule,
-                &operation,
-                src.structure(),
-            )?;
-            LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst.structure())
-                .map_err(OperationError::from_core_preserving_context)?;
-            // Why-not cache Unique all-codomain transforms: with no fusion
-            // multiplicity this lowering is a direct tree relabeling.  A
-            // process/context cache only retains layout descriptors for a
-            // cheap, non-reusable key and defeats the eager Unique path used
-            // by tree-pair transforms.
-            self.stats.plan_misses += 1;
-            self.stats.structure_misses += 1;
-            let plan = build_all_codomain_tree_transform_group_plan_validated(
-                &source_proof,
-                operation.clone(),
-            )?;
-            return Ok(Arc::new(plan.compile(dst, src)?));
-        }
         let rule_key = rule.tree_transform_rule_cache_key();
         if let Some(structure) = self.fast_structure(
             &rule_key,
@@ -1137,7 +1073,8 @@ where
             )?;
             return Ok(Arc::new(plan.compile(dst, src)?));
         }
-        if self.plans.contains_key(&plan_key) {
+        self.begin_lru_activity();
+        if self.plans.contains(&plan_key) {
             self.stats.plan_hits += 1;
             self.touch_plan(&plan_key);
         } else {
@@ -1203,8 +1140,6 @@ where
             .get_arc(&structure_key)
             .expect("tree transform structure inserted before return");
         self.remember_structure(
-            plan_key,
-            structure_key,
             rule_key,
             scope,
             operation,
@@ -1266,8 +1201,6 @@ where
             .get_arc(&structure_key)
             .expect("tree transform structure inserted before return");
         self.remember_structure(
-            plan_key,
-            structure_key,
             rule_key,
             scope,
             operation,
