@@ -14,6 +14,10 @@ use tenet_tensors::{
     TreeTransformSu3RuleCacheKey,
 };
 
+/// Re-exported for the prelude: explicit policy for per-runtime operation
+/// artifact caches. This is an expert knob; leaving it unset keeps the ordinary
+/// bounded context defaults.
+pub use tenet_tensors::OperationCachePolicy;
 /// Re-exported for the prelude: the transpose-kernel selection consumed by
 /// [`RuntimeBuilder::transpose_backend`] (defined next to the kernel adapter
 /// it configures; see its docs for the opt-in rationale).
@@ -66,8 +70,9 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
     pub(crate) fn with_config(
         ctx: &tenet_dense::SharedCpuContext,
         gemm_kind: Option<tenet_dense::CpuBackendKind>,
+        operation_cache_policy: Option<OperationCachePolicy>,
     ) -> Result<Self, Error> {
-        Ok(Self {
+        let mut ctxs = Self {
             f64:
                 Ctx::with_parts(
                     tenet_tensors::TreeTransformExecutionContext::new(make_transform_ops(
@@ -89,7 +94,16 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
                     f64,
                 >>::Workspace::default(),
             ),
-        })
+        };
+        if let Some(policy) = operation_cache_policy {
+            ctxs.set_cache_policy(policy);
+        }
+        Ok(ctxs)
+    }
+
+    pub(crate) fn set_cache_policy(&mut self, policy: OperationCachePolicy) {
+        self.f64.set_cache_policy(policy);
+        self.c64.set_cache_policy(policy);
     }
 
     pub(crate) fn set_recoupling_threads(&mut self, threads: usize) {
@@ -150,6 +164,12 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
                 .transpose_backend()
                 == expected
             && self.c64.contract_backend().transpose_backend() == expected
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tree_cache_policy_is(&self, expected: OperationCachePolicy) -> bool {
+        self.f64.tree_context().cache().policy() == expected
+            && self.c64.tree_context().cache().policy() == expected
     }
 
     #[cfg(test)]
@@ -215,9 +235,10 @@ macro_rules! define_runtime_state {
                 dense: Box<dyn tenet_dense::DenseExecutor + Send>,
                 ctx: &tenet_dense::SharedCpuContext,
                 gemm_kind: Option<tenet_dense::CpuBackendKind>,
+                operation_cache_policy: Option<OperationCachePolicy>,
             ) -> Result<Self, Error> {
                 Ok(Self {
-                    $($field: Ctxs::with_config(ctx, gemm_kind)?,)+
+                    $($field: Ctxs::with_config(ctx, gemm_kind, operation_cache_policy)?,)+
                     dense,
                     #[cfg(feature = "cuda")]
                     cuda: None,
@@ -240,6 +261,11 @@ macro_rules! define_runtime_state {
             #[cfg(test)]
             fn transpose_backend_is(&mut self, expected: TransposeBackend) -> bool {
                 true $(&& self.$field.transpose_backend_is(expected))+
+            }
+
+            #[cfg(test)]
+            fn tree_cache_policy_is(&self, expected: OperationCachePolicy) -> bool {
+                true $(&& self.$field.tree_cache_policy_is(expected))+
             }
 
             #[cfg(test)]
@@ -419,6 +445,7 @@ pub(crate) struct RuntimeExecutionConfig {
     /// standalone-op executor pool can re-mint an executor identical to the one
     /// `RuntimeBuilder::build` created (issue #155). `None` uses faer.
     pub(crate) linalg_kind: Option<tenet_dense::CpuBackendKind>,
+    pub(crate) operation_cache_policy: Option<OperationCachePolicy>,
     /// THE runtime's CPU context: one rayon pool shared by every executor this
     /// runtime mints — the state's, the executor pool's, and all 28 transform
     /// backends of every pooled `TensorExecutionContext`. Without it each
@@ -670,6 +697,9 @@ pub struct RuntimeBuilder {
     /// Selected transpose kernel for pure permuted copies; `None` keeps the
     /// fused-loop default (dispatch-identical to not having the knob).
     transpose_backend: Option<TransposeBackend>,
+    /// Per-operation tree/dynamic artifact cache policy. `None` keeps the
+    /// context defaults, including the bounded ordinary context caches.
+    operation_cache_policy: Option<OperationCachePolicy>,
 }
 
 impl std::fmt::Debug for RuntimeBuilder {
@@ -684,6 +714,7 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("linalg_backend", &self.linalg_backend)
             .field("gemm_backend", &self.gemm_backend)
             .field("transpose_backend", &self.transpose_backend)
+            .field("operation_cache_policy", &self.operation_cache_policy)
             .finish()
     }
 }
@@ -838,6 +869,13 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Sets the operation-artifact cache policy for execution contexts minted
+    /// by this runtime. Unset keeps each context's default policy.
+    pub fn operation_cache_policy(mut self, policy: OperationCachePolicy) -> Self {
+        self.operation_cache_policy = Some(policy);
+        self
+    }
+
     /// Sets the CPU worker count for symmetry recoupling replays
     /// (permute/braid/transpose tree transforms — the cold-path cost of
     /// SU(2) workloads; **not** BLAS threads). Default is 1 (serial); values
@@ -884,7 +922,8 @@ impl RuntimeBuilder {
             ),
         };
         let gemm_kind = self.gemm_backend.map(LinalgBackend::to_kind);
-        let mut state = RuntimeState::with_config(dense, &shared_ctx, gemm_kind)?;
+        let mut state =
+            RuntimeState::with_config(dense, &shared_ctx, gemm_kind, self.operation_cache_policy)?;
         let plan_cache = PlanCacheHome {
             config: self.plan_cache,
             slot: None,
@@ -917,6 +956,7 @@ impl RuntimeBuilder {
                     recoupling_threads: self.recoupling_threads,
                     transpose_backend: self.transpose_backend,
                     linalg_kind,
+                    operation_cache_policy: self.operation_cache_policy,
                     shared_ctx,
                 },
                 context_pool: Mutex::new(Vec::new()),
@@ -1061,5 +1101,31 @@ mod tests {
 
         let default = Runtime::builder().build().unwrap();
         assert_state(&default, TransposeBackend::FusedLoops);
+    }
+
+    // What: a runtime-level cache policy must configure both the legacy
+    // state-owned contexts and contexts minted later from the runtime config.
+    #[test]
+    fn builder_operation_cache_policy_reaches_state_and_runtime_context() {
+        fn assert_state(runtime: &Runtime, expected: OperationCachePolicy) {
+            let state = runtime.inner.state.lock().unwrap();
+            assert!(state.tree_cache_policy_is(expected));
+        }
+
+        let selected = Runtime::builder()
+            .operation_cache_policy(OperationCachePolicy::NoCache)
+            .build()
+            .unwrap();
+        assert_state(&selected, OperationCachePolicy::NoCache);
+        let context = crate::tensor::TensorExecutionContext::for_runtime(&selected).unwrap();
+        assert!(context.tree_cache_policy_is(OperationCachePolicy::NoCache));
+
+        let lru = Runtime::builder()
+            .operation_cache_policy(OperationCachePolicy::task_local_lru(7))
+            .build()
+            .unwrap();
+        assert_state(&lru, OperationCachePolicy::task_local_lru(7));
+        let context = crate::tensor::TensorExecutionContext::for_runtime(&lru).unwrap();
+        assert!(context.tree_cache_policy_is(OperationCachePolicy::task_local_lru(7)));
     }
 }
