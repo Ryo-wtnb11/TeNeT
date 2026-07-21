@@ -16562,17 +16562,12 @@ mod tests {
 
     #[test]
     fn eager_hom_space_derivation_does_not_touch_lazy_id_interner() {
-        let _guard = test_support::CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        reset_hom_space_intern_table();
         let rule = U1FusionRule;
         let leg = SectorLeg::new([(u1(-1), 2), (u1(2), 1)], false);
         let hom = FusionTreeHomSpace::new(
             FusionProductSpace::new([leg.clone(), leg.clone()]),
             FusionProductSpace::new([leg.clone(), leg]),
         );
-        let before = hom_space_intern_table().read().unwrap().entries.len();
 
         let selected = hom.select(&rule, &[1, 0], &[3, 2]).unwrap();
         let permuted = hom.permute(&rule, &[1, 0], &[3, 2]).unwrap();
@@ -16587,39 +16582,30 @@ mod tests {
             2,
         )
         .unwrap();
-        assert_eq!(
-            hom_space_intern_table().read().unwrap().entries.len(),
-            before
-        );
+        assert!(selected.existing_id().is_none());
+        assert!(permuted.existing_id().is_none());
+        assert!(composed.existing_id().is_none());
+        assert!(contracted.existing_id().is_none());
 
         let selected_id = selected.id();
         assert_eq!(selected_id, permuted.id());
         assert_eq!(composed.id(), contracted.id());
-        assert_eq!(
-            hom_space_intern_table().read().unwrap().entries.len(),
-            before + 1
-        );
     }
 
     #[test]
     fn concurrent_eager_hom_space_derivation_does_not_touch_lazy_id_interner() {
-        let _guard = test_support::CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        reset_hom_space_intern_table();
         let rule = U1FusionRule;
         let leg = SectorLeg::new([(u1(-1), 2), (u1(2), 1)], false);
         let hom = FusionTreeHomSpace::new(
             FusionProductSpace::new([leg.clone(), leg.clone()]),
             FusionProductSpace::new([leg.clone(), leg]),
         );
-        let before = hom_space_intern_table().read().unwrap().entries.len();
         std::thread::scope(|scope| {
             for _ in 0..8 {
                 scope.spawn(|| {
                     for _ in 0..100 {
-                        let _ = hom.permute(&rule, &[1, 0], &[3, 2]).unwrap();
-                        let _ = FusionTreeHomSpace::tensorcontract_homspace(
+                        let permuted = hom.permute(&rule, &[1, 0], &[3, 2]).unwrap();
+                        let contracted = FusionTreeHomSpace::tensorcontract_homspace(
                             &rule,
                             &hom,
                             &hom,
@@ -16629,14 +16615,12 @@ mod tests {
                             2,
                         )
                         .unwrap();
+                        assert!(permuted.existing_id().is_none());
+                        assert!(contracted.existing_id().is_none());
                     }
                 });
             }
         });
-        assert_eq!(
-            hom_space_intern_table().read().unwrap().entries.len(),
-            before
-        );
     }
 
     #[test]
