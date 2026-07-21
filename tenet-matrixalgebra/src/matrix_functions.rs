@@ -1,6 +1,5 @@
-//! Matrix functions of fusion tensors, built from the spectral
-//! factorizations: factorize on the device boundary, transform the spectrum
-//! on the host, recompose through contraction.
+//! Matrix functions of fusion tensors, built from spectral factorizations or
+//! coupled-sector linear solves at the dense boundary.
 
 use std::hash::Hash;
 
@@ -13,9 +12,9 @@ use tenet_tensors::{
 
 use crate::compose::compose_bound_dyn;
 use crate::factorize::{
-    adjoint_bound_factor, eigh_full_dyn, scale_axis_by_spectrum, svd_compact_factors_dyn,
-    typed_from_bound_factor, BoundDynFactor, BoundDynamicTensorRef, BoundTensorMap,
-    BoundTensorMapRef, FactorScalar, SectorSpectrum, SvdFactorsDyn,
+    adjoint_bound_factor, eigh_full_dyn, inverse_by_sector_dyn, scale_axis_by_spectrum,
+    svd_compact_factors_dyn, typed_from_bound_factor, BoundDynFactor, BoundDynamicTensorRef,
+    BoundTensorMap, BoundTensorMapRef, FactorScalar, SectorSpectrum, SvdFactorsDyn,
 };
 
 /// Matrix exponential of a Hermitian endomorphism: `exp(t) = V exp(D) V^H`.
@@ -190,8 +189,10 @@ where
     compose_bound_dyn(context, &v, &uh)
 }
 
-/// True inverse of a full-rank map between isomorphic spaces via the compact
-/// SVD; fails when any block is rank-deficient at working precision.
+/// True inverse of a nonsingular map between isomorphic spaces.
+///
+/// The context parameter is retained for source compatibility. Inverse itself
+/// is context-free and performs one dense solve per nonempty coupled sector.
 pub fn inv<E, RuleKey, BT, BC, R, D, const N: usize>(
     dense: &mut E,
     context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
@@ -212,7 +213,7 @@ where
 /// Dynamic-rank [`inv`].
 pub fn inv_dyn<E, RuleKey, BT, BC, R, D>(
     dense: &mut E,
-    context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
+    _context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     input: &BoundDynamicTensorRef<'_, R, D>,
 ) -> Result<BoundDynFactor<R, D>, OperationError>
 where
@@ -223,32 +224,22 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
-    if !input.space().codomain_isomorphic_to_domain()? {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: "inv requires isomorphic codomain and domain",
-        });
-    }
-    // Why not block LU like TensorKit: DenseExecutor does not yet expose an
-    // LU/solve capability, so retain one compact SVD until that backend seam
-    // exists.
-    let (u, vh, mut singular_values) = svd_compact_factors_dyn(dense, input)?;
-    let has_rank_deficient_sector = singular_values.iter().any(|entry| {
-        let sigma_max = entry.values.first().copied().unwrap_or(0.0);
-        let tolerance = D::epsilon() * entry.values.len() as f64 * sigma_max;
-        entry
-            .values
-            .iter()
-            .any(|&sigma| !sigma.is_finite() || sigma <= tolerance)
-    });
-    if has_rank_deficient_sector {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: "inv requires full-rank blocks",
-        });
-    }
-    for entry in &mut singular_values {
-        for sigma in &mut entry.values {
-            *sigma = sigma.recip();
-        }
-    }
-    inverse_from_factors(context, u, vh, &singular_values)
+    inv_direct_dyn(dense, input)
+}
+
+/// Context-free dynamic-rank inverse used by the user layer.
+#[doc(hidden)]
+pub fn inv_direct_dyn<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    // Why not reuse pinv's SVD/recomposition path: ordinary inverse has no
+    // truncation policy, so factor tensors and a recoupling contraction are
+    // avoidable work.
+    inverse_by_sector_dyn(dense, input)
 }

@@ -11,7 +11,10 @@ use tenet_tensors::{
     TreeTransformRuleCacheKey,
 };
 
-use crate::factorize::{dyn_space_of, truncate_svd, typed_from_dyn, BoundTensorMap};
+use crate::factorize::{
+    dyn_space_of, truncate_svd, typed_from_bound_factor, typed_from_dyn,
+    validate_inverse_region_routes_for_test, BoundTensorMap,
+};
 use crate::*;
 use num_complex::{Complex32, Complex64};
 use num_traits::Zero;
@@ -28,6 +31,18 @@ struct RejectExecutorCalls;
 struct SvdCallSpy {
     inner: tenet_dense::DefaultDenseExecutor,
     svd_calls: usize,
+}
+
+#[derive(Default)]
+struct SolveCallSpy {
+    inner: tenet_dense::DefaultDenseExecutor,
+    solve_calls: usize,
+}
+
+#[derive(Default)]
+struct FailSecondSolve {
+    inner: tenet_dense::DefaultDenseExecutor,
+    solve_calls: usize,
 }
 
 #[derive(Default)]
@@ -85,10 +100,6 @@ impl FailSecondValues {
             Ok(())
         }
     }
-}
-
-struct NonFiniteSvdSpectrum {
-    singular_value: f64,
 }
 
 struct EqualMagnitudeEigh;
@@ -239,6 +250,81 @@ impl DenseExecutor for SvdCallSpy {
     }
 }
 
+impl DenseExecutor for SolveCallSpy {
+    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("inverse must not execute an SVD")
+    }
+
+    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.qr(input)
+    }
+
+    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.eigh(input)
+    }
+
+    fn solve_into(
+        &mut self,
+        a: DenseRead<'_>,
+        b: DenseRead<'_>,
+        x: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        self.solve_calls += 1;
+        self.inner.solve_into(a, b, x)
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("inverse must not recompose factors")
+    }
+}
+
+impl DenseExecutor for FailSecondSolve {
+    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("inverse must not execute an SVD")
+    }
+
+    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.qr(input)
+    }
+
+    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.eigh(input)
+    }
+
+    fn solve_into(
+        &mut self,
+        a: DenseRead<'_>,
+        b: DenseRead<'_>,
+        x: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        self.solve_calls += 1;
+        if self.solve_calls == 2 {
+            return Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "solve_into",
+                message: "injected second-sector failure".to_string(),
+            });
+        }
+        self.inner.solve_into(a, b, x)
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("inverse must not recompose factors")
+    }
+}
+
 impl DenseExecutor for FailAfterObservingSvdInput {
     fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         panic!("compact SVD must use the destination API")
@@ -272,59 +358,6 @@ impl DenseExecutor for FailAfterObservingSvdInput {
             op: "svd_into",
             message: "injected failure".to_string(),
         })
-    }
-
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises SVD")
-    }
-
-    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises SVD")
-    }
-
-    fn dot_general_into(
-        &mut self,
-        _: DenseWrite<'_>,
-        _: DenseRead<'_>,
-        _: DenseRead<'_>,
-        _: &DenseDotConfig,
-    ) -> Result<(), DenseError> {
-        panic!("test only exercises SVD")
-    }
-}
-
-impl DenseExecutor for NonFiniteSvdSpectrum {
-    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("compact SVD must use the destination API")
-    }
-
-    fn svd_into(
-        &mut self,
-        input: DenseRead<'_>,
-        u: DenseWrite<'_>,
-        s: DenseWrite<'_>,
-        vt: DenseWrite<'_>,
-    ) -> Result<(), DenseError> {
-        let DenseRead::F64(input) = input else {
-            panic!("test input must be f64")
-        };
-        assert_eq!(input.shape(), &[1, 1]);
-        let DenseWrite::F64(mut u) = u else {
-            panic!("test U must be f64")
-        };
-        let DenseWrite::F64(mut s) = s else {
-            panic!("test singular values must be f64")
-        };
-        let DenseWrite::F64(mut vt) = vt else {
-            panic!("test Vh must be f64")
-        };
-        assert_eq!(u.shape(), &[1, 1]);
-        assert_eq!(s.shape(), &[1]);
-        assert_eq!(vt.shape(), &[1, 1]);
-        u.data_mut()[0] = 1.0;
-        s.data_mut()[0] = self.singular_value;
-        vt.data_mut()[0] = 1.0;
-        Ok(())
     }
 
     fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
@@ -4923,6 +4956,47 @@ where
     .unwrap()
 }
 
+fn reversed_complete_grid_copy<R, D, const NOUT: usize, const NIN: usize>(
+    rule: &R,
+    source: &TensorMap<D, NOUT, NIN>,
+) -> TensorMap<D, NOUT, NIN>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let mut offset = 0usize;
+    let mut blocks = Vec::with_capacity(source.structure().block_count());
+    for index in (0..source.structure().block_count()).rev() {
+        let block = source.structure().block(index).unwrap();
+        blocks.push(
+            BlockSpec::column_major_with_key(block.key().clone(), block.shape().to_vec(), offset)
+                .unwrap(),
+        );
+        offset += block.shape().iter().product::<usize>();
+    }
+    let source_space = source.fusion_space().unwrap();
+    let structure = BlockStructure::from_blocks_with_rank(NOUT + NIN, blocks).unwrap();
+    let reordered_space = FusionTensorMapSpace::new_unbound(
+        source_space.dense_space().clone(),
+        source_space.homspace().clone(),
+        structure,
+    )
+    .unwrap()
+    .try_bind_rule(rule)
+    .unwrap();
+    TensorMap::from_block_fn_with_fusion_space(reordered_space, D::zero(), |key, indices| {
+        let block = source.block_by_key(key).unwrap();
+        let position = block.offset()
+            + indices
+                .iter()
+                .zip(block.strides())
+                .map(|(&index, &stride)| index * stride)
+                .sum::<usize>();
+        block.data()[position]
+    })
+    .unwrap()
+}
+
 fn assert_value_region_paths_match<R, D>(
     rule: Arc<R>,
     general: &TensorMap<D, 2, 2>,
@@ -5504,7 +5578,13 @@ fn pinv_satisfies_the_moore_penrose_identity() {
 fn inv_composes_to_the_identity() {
     let rule = Z2FusionRule;
     let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
-    let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
+    assert!(tensor
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .is_some());
+    let expected_sectors = dense_sector_matrices(2, &tensor).len();
+    let mut dense_executor = SolveCallSpy::default();
     let mut context = default_context();
     let inverse = inv(
         &mut dense_executor,
@@ -5512,6 +5592,7 @@ fn inv_composes_to_the_identity() {
         &bound_tensor_ref!(Arc::new(rule), &tensor),
     )
     .unwrap();
+    assert_eq!(dense_executor.solve_calls, expected_sectors);
     let identity = crate::compose::compose(&mut context, &rule, &tensor, &inverse).unwrap();
     assert_identity_matrices(&dense_sector_matrices(2, &identity));
 }
@@ -5794,83 +5875,300 @@ fn inv_uses_each_u1_sector_scale_for_phased_c64_values() {
 }
 
 #[test]
-fn inv_numerical_rank_uses_the_factor_dtype_epsilon() {
-    // What: the same condition ratio is full-rank in double precision and rank-deficient in single precision.
-    let matrix_f64 = vec![1.0, 0.0, 0.0, 1e-8];
-    let tensor_f64 = u1_block_endomorphism(&[(0, 2, matrix_f64)]);
-    let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let mut f64_context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
-    inv(
+fn inv_solves_padded_u1_sectors_and_matches_the_dense_oracle() {
+    // What: a legal expert layout uses the same sector solves and restores each
+    // dense inverse to the destination block layout.
+    let tensor = u1_block_endomorphism(&[
+        (0, 2, vec![2.0_f64, 1.0, 3.0, 4.0]),
+        (1, 2, vec![1.0_f64, 2.0, 0.0, 3.0]),
+    ]);
+    let padded = padded_copy(&U1FusionRule, &tensor);
+    assert!(padded
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .is_none());
+    let mut dense = SolveCallSpy::default();
+    let mut context = default_context();
+
+    let inverse = inv(
         &mut dense,
-        &mut f64_context,
-        &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor_f64),
+        &mut context,
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &padded),
     )
     .unwrap();
 
-    let matrix_f32 = vec![1.0_f32, 0.0, 0.0, 1e-8];
-    let tensor_f32 = u1_block_endomorphism(&[(0, 2, matrix_f32)]);
-    let mut f32_context =
-        TensorContractFusionExecutionContext::<f32, TreeTransformBuiltinRuleCacheKey>::default();
-    let f32_error = inv(
-        &mut dense,
-        &mut f32_context,
-        &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor_f32),
-    )
-    .unwrap_err();
-    assert!(matches!(
-        f32_error,
-        OperationError::UnsupportedTensorContractScope {
-            message: "inv requires full-rank blocks"
+    let expected = [
+        (U1Irrep::new(0).sector_id(), vec![0.8, -0.2, -0.6, 0.4]),
+        (
+            U1Irrep::new(1).sector_id(),
+            vec![1.0, -2.0 / 3.0, 0.0, 1.0 / 3.0],
+        ),
+    ];
+    for (sector, _, _, values) in dense_sector_matrices(1, inverse.tensor()) {
+        let oracle = expected
+            .iter()
+            .find_map(|(candidate, values)| (*candidate == sector).then_some(values))
+            .unwrap();
+        for (&actual, &expected) in values.iter().zip(oracle) {
+            assert!((actual - expected).abs() < 1.0e-12);
         }
-    ));
+    }
+    assert_eq!(dense.solve_calls, 2);
+}
 
-    let large_c64 = Complex64::from_polar(1.0, 0.23);
-    let small_c64 = Complex64::from_polar(1e-8, -0.41);
-    let tensor_c64 = u1_block_endomorphism(&[(
-        0,
-        2,
-        vec![large_c64, Complex64::zero(), Complex64::zero(), small_c64],
-    )]);
-    let mut c64_context = TensorContractFusionExecutionContext::<
-        Complex64,
-        TreeTransformBuiltinRuleCacheKey,
-    >::default();
-    inv(
+#[test]
+fn inv_reorders_a_complete_expert_tree_grid_by_key() {
+    // What: an expert layout's block order cannot transpose matrix axes or
+    // replace fusion-tree identity as the inverse routing authority.
+    let rule = Z2FusionRule;
+    let leg = || SectorLeg::new([(SectorId::new(0), 2), (SectorId::new(1), 2)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(), leg()]),
+        FusionProductSpace::new([leg(), leg()]),
+    );
+    let keys = homspace.fusion_tree_keys(&rule);
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<2, 2>::from_dims([4, 4], [4, 4]).unwrap(),
+        homspace,
+        &rule,
+        vec![vec![2; 4]; keys.len()],
+    )
+    .unwrap();
+    let tree_code = |tree: &FusionTreeKey| {
+        tree.uncoupled()
+            .iter()
+            .fold(0usize, |value, sector| value * 2 + sector.id())
+    };
+    let diagonal = |tree: &FusionTreeKey, row: usize| 2.0 + tree_code(tree) as f64 + row as f64;
+    let upper = |tree: &FusionTreeKey| 0.25 + tree_code(tree) as f64 * 0.125;
+    let canonical = TensorMap::from_block_fn_with_fusion_space(space, 0.0, |key, indices| {
+        let BlockKey::FusionTree(key) = key else {
+            return 0.0;
+        };
+        if key.codomain_tree() != key.domain_tree() {
+            return 0.0;
+        }
+        let row = indices[0] + 2 * indices[1];
+        let col = indices[2] + 2 * indices[3];
+        if row == col {
+            diagonal(key.codomain_tree(), row)
+        } else if row == 0 && col == 1 {
+            upper(key.codomain_tree())
+        } else {
+            0.0
+        }
+    })
+    .unwrap();
+    let reordered = reversed_complete_grid_copy(&rule, &canonical);
+    assert!(reordered
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .is_none());
+    let mut dense = SolveCallSpy::default();
+    let mut context = default_context();
+
+    let inverse = inv(
         &mut dense,
-        &mut c64_context,
-        &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor_c64),
+        &mut context,
+        &bound_tensor_ref!(Arc::new(rule), &reordered),
     )
     .unwrap();
 
-    let large_c32 = Complex32::from_polar(1.0, 0.23);
-    let small_c32 = Complex32::from_polar(1e-8, -0.41);
-    let tensor_c32 = u1_block_endomorphism(&[(
-        0,
-        2,
-        vec![large_c32, Complex32::zero(), Complex32::zero(), small_c32],
-    )]);
-    let mut c32_context = TensorContractFusionExecutionContext::<
-        Complex32,
-        TreeTransformBuiltinRuleCacheKey,
-    >::default();
-    let c32_error = inv(
-        &mut dense,
-        &mut c32_context,
-        &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor_c32),
+    for index in 0..inverse.structure().block_count() {
+        let block = inverse.structure().block(index).unwrap();
+        let BlockKey::FusionTree(key) = block.key() else {
+            panic!("inverse output must retain fusion-tree blocks")
+        };
+        for row in 0..4 {
+            for col in 0..4 {
+                let position = block.offset()
+                    + (row % 2) * block.strides()[0]
+                    + (row / 2) * block.strides()[1]
+                    + (col % 2) * block.strides()[2]
+                    + (col / 2) * block.strides()[3];
+                let expected = if key.codomain_tree() != key.domain_tree() {
+                    0.0
+                } else if row == col {
+                    diagonal(key.codomain_tree(), row).recip()
+                } else if row == 0 && col == 1 {
+                    -upper(key.codomain_tree())
+                        / (diagonal(key.codomain_tree(), 0) * diagonal(key.codomain_tree(), 1))
+                } else {
+                    0.0
+                };
+                assert!(
+                    (inverse.data()[position] - expected).abs() < 1.0e-12,
+                    "tree={key:?} row={row} col={col}"
+                );
+            }
+        }
+    }
+    assert_eq!(dense.solve_calls, 2);
+}
+
+#[test]
+fn inv_preserves_genuinely_complex_nonhermitian_sector_values() {
+    // What: inverse is an ordinary solve, not an adjoint or Hermitian spectral operation.
+    let a = Complex64::new(2.0, 1.0);
+    let b = Complex64::new(3.0, -2.0);
+    let c = Complex64::new(1.0, 4.0);
+    let d = Complex64::new(5.0, -1.0);
+    let tensor = u1_block_endomorphism(&[(0, 2, vec![a, b, c, d])]);
+    let mut dense = SolveCallSpy::default();
+    let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
+
+    let inverse = inv_direct_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
+
+    let determinant = a * d - b * c;
+    let oracle = [
+        d / determinant,
+        -b / determinant,
+        -c / determinant,
+        a / determinant,
+    ];
+    for (&actual, expected) in inverse.data().iter().zip(oracle) {
+        assert!((actual - expected).norm() < 1.0e-12);
+    }
+    assert_eq!(dense.solve_calls, 1);
+}
+
+#[test]
+fn inv_dyn_reverses_isomorphic_spaces_with_different_tree_ranks() {
+    // What: sector identity routes an inverse between isomorphic reduced spaces
+    // even when their external tree ranks differ.
+    let charge = U1Irrep::new(0).sector_id();
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([
+            SectorLeg::new([(charge, 2)], false),
+            SectorLeg::new([(charge, 3)], false),
+        ]),
+        FusionProductSpace::new([SectorLeg::new([(charge, 6)], false)]),
+    );
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<2, 1>::from_dims([2, 3], [6]).unwrap(),
+        homspace,
+        &U1FusionRule,
+        [vec![2, 3, 6]],
     )
-    .unwrap_err();
+    .unwrap();
+    let mut data = vec![0.0_f64; 36];
+    for index in 0..6 {
+        data[index + 6 * index] = index as f64 + 1.0;
+    }
+    let tensor = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(data, space).unwrap();
+    let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
+    let mut dense = SolveCallSpy::default();
+
+    let inverse = inv_direct_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
+    let inverse: BoundTensorMap<_, _, 1, 2> = typed_from_bound_factor(inverse).unwrap();
+
+    assert_eq!(
+        inverse
+            .tensor()
+            .fusion_space()
+            .unwrap()
+            .homspace()
+            .codomain(),
+        tensor.fusion_space().unwrap().homspace().domain()
+    );
+    assert_eq!(
+        inverse.tensor().fusion_space().unwrap().homspace().domain(),
+        tensor.fusion_space().unwrap().homspace().codomain()
+    );
+    for row in 0..6 {
+        for col in 0..6 {
+            let expected = if row == col {
+                1.0 / (row as f64 + 1.0)
+            } else {
+                0.0
+            };
+            assert!((inverse.data()[row + 6 * col] - expected).abs() < 1.0e-12);
+        }
+    }
+    assert_eq!(dense.solve_calls, 1);
+}
+
+#[test]
+fn inv_route_preflight_rejects_a_missing_later_sector_before_execution() {
+    // What: every sector route is checked before the first dense solve.
+    let source = u1_block_endomorphism(&[(0, 1, vec![1.0_f64]), (1, 1, vec![2.0])]);
+    let incomplete_output = u1_block_endomorphism(&[(0, 1, vec![1.0_f64])]);
+    let source_regions = source
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+    let output_regions = incomplete_output
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .unwrap();
+
+    let error =
+        validate_inverse_region_routes_for_test(&source_regions, &output_regions).unwrap_err();
+
     assert!(matches!(
-        c32_error,
+        error,
         OperationError::UnsupportedTensorContractScope {
-            message: "inv requires full-rank blocks"
+            message: "inverse output is missing a source coupled sector"
         }
     ));
 }
 
 #[test]
+fn inv_accepts_tiny_nonzero_pivots_for_all_factor_dtypes() {
+    // What: ordinary inverse follows provider LU singularity semantics rather
+    // than rejecting a nonzero pivot using a dtype-relative SVD cutoff.
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let tensor = u1_block_endomorphism(&[(0, 2, vec![1.0_f32, 0.0, 0.0, 1.0e-8])]);
+    let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
+    let inverse = inv_direct_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
+    assert!((inverse.data()[0] - 1.0).abs() < 1.0e-6);
+    assert!((inverse.data()[3] * 1.0e-8 - 1.0).abs() < 1.0e-5);
+
+    let tensor = u1_block_endomorphism(&[(0, 2, vec![1.0_f64, 0.0, 0.0, 1.0e-16])]);
+    let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
+    let inverse = inv_direct_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
+    assert!((inverse.data()[0] - 1.0).abs() < 1.0e-12);
+    assert!((inverse.data()[3] * 1.0e-16 - 1.0).abs() < 1.0e-12);
+
+    let phase = Complex32::from_polar(1.0e-8, -0.41);
+    let tensor = u1_block_endomorphism(&[(
+        0,
+        2,
+        vec![
+            Complex32::new(1.0, 0.0),
+            Complex32::zero(),
+            Complex32::zero(),
+            phase,
+        ],
+    )]);
+    let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
+    let inverse = inv_direct_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
+    assert!((inverse.data()[3] * phase - Complex32::new(1.0, 0.0)).norm() < 1.0e-5);
+
+    let phase = Complex64::from_polar(1.0e-16, 0.23);
+    let tensor = u1_block_endomorphism(&[(
+        0,
+        2,
+        vec![
+            Complex64::new(1.0, 0.0),
+            Complex64::zero(),
+            Complex64::zero(),
+            phase,
+        ],
+    )]);
+    let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
+    let inverse = inv_direct_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
+    assert!((inverse.data()[3] * phase - Complex64::new(1.0, 0.0)).norm() < 1.0e-12);
+}
+
+#[test]
 fn inv_rejects_a_genuinely_singular_sector_without_an_output() {
-    // What: one exact zero singular direction returns the typed full-rank error.
+    // What: the dense solve reports an exact singular direction as a typed numerical failure.
     let tensor = u1_block_endomorphism(&[(0, 2, vec![1.0_f64, 0.0, 0.0, 0.0])]);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let mut context =
@@ -5885,9 +6183,10 @@ fn inv_rejects_a_genuinely_singular_sector_without_an_output() {
 
     assert!(matches!(
         error,
-        OperationError::UnsupportedTensorContractScope {
-            message: "inv requires full-rank blocks"
-        }
+        OperationError::Dense(DenseError::NumericalFailure {
+            op: "solve_into",
+            ..
+        })
     ));
     assert_eq!(context.tree_context().cache().plan_len(), 0);
     assert_eq!(context.tree_context().cache().structure_len(), 0);
@@ -5895,32 +6194,42 @@ fn inv_rejects_a_genuinely_singular_sector_without_an_output() {
 }
 
 #[test]
-fn inv_rejects_nonfinite_backend_spectra_before_recomposition() {
-    // What: backend NaN and infinity spectra return the typed error without publishing an inverse.
-    let tensor = u1_block_endomorphism(&[(0, 1, vec![1.0_f64])]);
-    for singular_value in [f64::NAN, f64::INFINITY] {
-        let mut dense = NonFiniteSvdSpectrum { singular_value };
-        let mut context =
-            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
-            );
+fn inv_discards_unpublished_output_when_a_later_sector_fails() {
+    // What: success in an earlier sector cannot publish a partial inverse when
+    // a later backend solve fails.
+    let tensor = u1_block_endomorphism(&[(0, 1, vec![2.0_f64]), (1, 1, vec![3.0])]);
+    let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
+    let mut dense = FailSecondSolve::default();
 
-        let error = inv(
-            &mut dense,
-            &mut context,
-            &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
-        )
-        .unwrap_err();
+    let error = inv_direct_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap_err();
 
-        assert!(matches!(
-            error,
-            OperationError::UnsupportedTensorContractScope {
-                message: "inv requires full-rank blocks"
-            }
-        ));
-        assert_eq!(context.tree_context().cache().plan_len(), 0);
-        assert_eq!(context.tree_context().cache().structure_len(), 0);
-        assert_eq!(context.dynamic_fusion_space_cache_len(), 0);
-    }
+    assert!(matches!(
+        error,
+        OperationError::Dense(DenseError::Backend {
+            op: "solve_into",
+            ..
+        })
+    ));
+    assert_eq!(dense.solve_calls, 2);
+}
+
+#[test]
+fn inv_propagates_unsupported_solve_without_svd_fallback() {
+    // What: a dense executor without solve support returns its typed capability
+    // error instead of silently changing inverse algorithms.
+    let tensor = u1_block_endomorphism(&[(0, 1, vec![2.0_f64])]);
+    let mut dense = RejectExecutorCalls;
+    let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
+
+    let error = inv_direct_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap_err();
+
+    assert!(matches!(
+        error,
+        OperationError::Dense(DenseError::Unsupported {
+            op: "solve_into",
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -5940,6 +6249,35 @@ fn inv_accepts_a_zero_dimensional_endomorphism_without_dense_execution() {
 
     assert!(inverse.data().is_empty());
     assert_eq!(inverse.tensor().fusion_space(), tensor.fusion_space());
+}
+
+#[test]
+fn inv_solves_the_rank_zero_scalar_sector() {
+    // What: a rank-zero scalar is one 1x1 vacuum-sector solve, not an empty tensor.
+    let rule = Z2FusionRule;
+    let homspace =
+        FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
+    let shapes = vec![Vec::new(); homspace.fusion_tree_keys(&rule).len()];
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
+        homspace,
+        &rule,
+        shapes,
+    )
+    .unwrap();
+    let scalar = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![-4.0], space).unwrap();
+    let mut dense = SolveCallSpy::default();
+    let mut context = default_context();
+
+    let inverse = inv(
+        &mut dense,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(rule), &scalar),
+    )
+    .unwrap();
+
+    assert_eq!(inverse.data(), &[-0.25]);
+    assert_eq!(dense.solve_calls, 1);
 }
 
 #[test]
