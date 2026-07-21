@@ -20,6 +20,9 @@ fn tensor_contract_fusion_execution_context_reports_host_placement() {
 
 #[test]
 fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let rule = Z2FusionRule;
     let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
     let lhs_space = FusionTensorMapSpace::from_degeneracy_shapes(
@@ -196,6 +199,9 @@ fn tensorcontract_fusion_default_host_api_accepts_custom_host_storage() {
 
 #[test]
 fn tensorcontract_fusion_context_accepts_custom_host_storage() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let rule = Z2FusionRule;
     let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
     let fusion_space = || {
@@ -1873,6 +1879,9 @@ fn tensorcontract_fusion_block_replay_scales_inactive_dst_blocks_once() {
 
 #[test]
 fn self_dual_conjugate_structure_scales_inactive_block_like_eager_adjoint_oracle() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let rule = Z2FusionRule;
     let even = SectorId::new(0);
     let odd = SectorId::new(1);
@@ -2341,6 +2350,9 @@ fn fermion_parity_matrix_space_with_homspace(
 
 #[test]
 fn bosonic_tensorcompose_reuses_the_ordinary_contract_resolution() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // What: coefficient-free bosonic composition and ordinary contraction
     // share one compiled Core resolution instead of retaining parallel plans.
     let typed = z2_matrix_space_with_homspace(z2_matrix_homspace(), vec![2, 2]);
@@ -2489,6 +2501,9 @@ fn tensorcompose_fusion_preflights_all_extents_before_mutating_destination() {
 fn fermionic_tensorcompose_keeps_a_distinct_coefficient_free_resolution() {
     // What: a dual odd RHS leg gives ordinary contraction its supertrace sign,
     // while composition retains and reuses a separate direct Core plan.
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let rule = FermionParityFusionRule;
     let odd = SectorId::new(1);
     let typed_space = |codomain_dual: bool, domain_dual: bool| {
@@ -3692,6 +3707,9 @@ fn tensorcontract_fusion_output_recoupling_uses_su2_coefficients() {
 
 #[test]
 fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let rule = SU2FusionRule;
     let lhs_hom = FusionTreeHomSpace::from_sector_ids([(1, 1), (1, 1), (1, 1), (1, 1)], []);
     let lhs_keys = lhs_hom.fusion_tree_keys(&rule);
@@ -4849,6 +4867,9 @@ fn tensorcontract_fusion_granular_caches_handle_block_structure_variants() {
 
 #[test]
 fn tensorcontract_fusion_granular_caches_handle_output_axes() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let rule = SU2FusionRule;
     let lhs_hom = FusionTreeHomSpace::from_sector_ids([(1, 2), (1, 2), (1, 2)], [(1, 2)]);
     let rhs_hom = FusionTreeHomSpace::from_sector_ids([(1, 2)], [(1, 2), (1, 2), (1, 2)]);
@@ -4931,6 +4952,9 @@ fn tensorcontract_fusion_granular_caches_handle_output_axes() {
 
 #[test]
 fn tensorcontract_fusion_granular_caches_distinguish_source_conjugation() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let rule = SU2FusionRule;
     let mut context = TensorContractFusionExecutionContext::<
         Complex64,
@@ -5062,13 +5086,6 @@ fn tensorcontract_fusion_non_core_form_su2_lhs_adjoint_prepared_plan_matches_ref
 
 #[test]
 fn tensorcontract_fusion_non_core_form_su2_rhs_adjoint_prepared_plan_matches_reference_sequence() {
-    // What: the reference-sequence assertion counts prepared-plan cache
-    // activity, which shared-global-map promotions from concurrent sibling
-    // tests can shift (the #174 reset-race family; reproduces under default
-    // parallel --lib runs on wide machines). Serialize with the shared lock.
-    let _guard = crate::test_support::CACHE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
         su2_three_to_one_homspace(false, true),
         su2_one_to_three_homspace(false, true),
@@ -5093,6 +5110,11 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
     lhs_conjugate: bool,
     rhs_conjugate: bool,
 ) {
+    // What: all three callers compare exact warm cache state across two
+    // executions and therefore cannot overlap a process-global reset.
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let rule = SU2FusionRule;
     let source_lhs_contracting_axes = [0, 1, 2];
     let source_rhs_contracting_axes = [1, 2, 3];
@@ -5391,6 +5413,9 @@ fn su2_one_to_three_homspace(codomain_dual: bool, domain_dual: bool) -> FusionTr
 
 #[test]
 fn tensorcontract_fusion_product_non_core_form_absorbs_explicit_transform() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
     let rhs_hom = FusionTreeHomSpace::from_sector_ids([], []);
     let scalar_key = BlockKey::from(rhs_hom.fusion_tree_keys(&rule)[0].clone());
@@ -6375,6 +6400,9 @@ fn tensorcontract_fusion_parallel_replay_keeps_fermion_twist_reference() {
 // so the parent-storage matrix is consumed through the op-bearing Core batch.
 #[test]
 fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     use num_complex::Complex64;
     let rule = U1FusionRule;
     let c = |q: i32| U1Irrep::new(q).sector_id();

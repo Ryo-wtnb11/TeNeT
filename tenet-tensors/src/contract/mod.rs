@@ -22,6 +22,7 @@ pub(crate) use fusion::{
 };
 mod fusion_block;
 mod resolution;
+pub use resolution::{global_contraction_resolution_cache_info, ContractionResolutionCacheInfo};
 mod scratch;
 mod structure;
 
