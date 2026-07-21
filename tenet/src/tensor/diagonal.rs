@@ -1,5 +1,5 @@
 use num_complex::Complex64;
-use tenet_core::{BlockKey, MultiplicityFreeRigidSymbols, SectorId};
+use tenet_core::{BlockKey, SectorId};
 use tenet_matrixalgebra::{FactorScalar, SectorSpectrum};
 use tenet_tensors::DynamicFusionMapSpace;
 
@@ -291,16 +291,15 @@ pub(super) fn axpby_dense_c64(
     Ok(Data::C64(out))
 }
 
-pub(super) fn dense_inner<R, D, V>(
-    rule: &R,
+pub(super) fn dense_inner_with_weight<D, V>(
     space: &DynamicFusionMapSpace,
     spectrum: &[SectorSpectrum<V>],
     dense: &[D],
     diagonal_first: bool,
+    weight: impl Fn(SectorId) -> f64,
     map: impl Fn(V) -> D,
 ) -> Result<Complex64, Error>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: UserScalar,
     V: Copy,
 {
@@ -312,20 +311,19 @@ where
         } else {
             FactorScalar::adjoint(dense[position]) * diagonal
         };
-        total += product.widen_complex() * rule.dim_scalar(sector);
+        total += product.widen_complex() * weight(sector);
     })?;
     Ok(total)
 }
 
-pub(super) fn compact_inner<R, D, L, Rhs>(
-    rule: &R,
+pub(super) fn compact_inner_with_weight<D, L, Rhs>(
     lhs: &[SectorSpectrum<L>],
     rhs: &[SectorSpectrum<Rhs>],
+    weight: impl Fn(SectorId) -> f64,
     map_lhs: impl Fn(L) -> D,
     map_rhs: impl Fn(Rhs) -> D,
 ) -> Option<Complex64>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: UserScalar,
     L: Copy,
     Rhs: Copy,
@@ -342,7 +340,7 @@ where
         for (&lhs, &rhs) in lhs.values.iter().zip(&rhs.values) {
             partial = partial + FactorScalar::adjoint(map_lhs(lhs)) * map_rhs(rhs);
         }
-        total += partial.widen_complex() * rule.dim_scalar(lhs.sector);
+        total += partial.widen_complex() * weight(lhs.sector);
     }
     Some(total)
 }
