@@ -1,31 +1,16 @@
-//! Unified contraction resolution: one cache maps
-//! `(rule, dst/lhs/rhs spaces, axes)` to the resolved execution artifact —
-//! route and plan together.
+//! Eager contraction route compilation.
 //!
-//! TensorKit keeps exactly one cache entry per (spaces, permutation)
-//! (`treepermuter` and friends); its route decision is compile-time dispatch
-//! plus a cheap uncached cost heuristic and is never memoized. The previous
-//! three TeNeT caches (route / core fusion-block plan / explicit plan)
-//! all shared this key with different payloads — this module restores the
-//! one-entry granularity. Prepared contraction handles wrap the same
-//! [`Resolution`] value, so the facade and the plan-once API share one
-//! resolution machinery.
+//! Ordinary calls resolve per operation, as TensorKit and QSpace do. Explicit
+//! prepared handles own the returned [`Resolution`] and any complete dynamic
+//! execution artifact required for lookup-free replay.
 
-use std::collections::VecDeque;
+use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
-use std::hash::Hash;
-use std::sync::{Arc, Mutex};
-
-use tenet_core::{BlockStructure, FusionTreeHomSpace, HomSpaceId, MultiplicityFreeRigidSymbols};
+use tenet_core::{FusionTreeHomSpace, MultiplicityFreeRigidSymbols};
 
 use super::structure::TensorContractStructure;
-use crate::cache::{
-    operation_cache_reset_epoch, registered_operation_cache, BlockStructureCacheKey,
-    OperationCachePolicy,
-};
 use crate::OperationError;
-use tenet_operations::axis::{OutputAxisOrder, TensorContractSpec, TensorContractSpecOwned};
+use tenet_operations::axis::TensorContractSpec;
 use tenet_operations::fusion_replay::{FusionBlockContractPlan, MatrixOp};
 
 use super::dynamic_space::DynamicFusionMapSpace;
@@ -36,179 +21,13 @@ use super::fusion_block::{
 };
 use super::structure::TensorContractAxisPlan;
 
-// TensorKit provides the production precedent for a bounded true LRU. TeNeT's
-// route-plus-plan payload is coarser than TensorKit's transformer entries, so
-// its numeric cap is intentionally more conservative.
-const GLOBAL_CONTRACTION_RESOLUTION_ENTRY_CAPACITY: usize = 4096;
-
-// Why-not retain `FullKey` globally: `HomSpaceId` is collision-safe semantic
-// equality over its retained immutable key, and `structure_id` is exactly the
-// monotonic content id used by `BlockStructureCacheKey`. Rule, nout, axes,
-// scope, and access are otherwise identical, including product/custom rule
-// keys, so `FastKey` and `FullKey` define the same equivalence class while only
-// `FastKey` keeps hashing O(1).
-type GlobalContractionResolutionMap<RuleKey> = Mutex<GlobalContractionResolutionCache<RuleKey>>;
-
-fn global_contraction_resolutions<RuleKey>() -> (u64, Arc<GlobalContractionResolutionMap<RuleKey>>)
-where
-    RuleKey: 'static + Clone + Eq + Hash + Send + Sync,
-{
-    registered_operation_cache()
-}
-
-struct GlobalContractionResolutionCache<RuleKey> {
-    entries: lru::LruCache<FastKey<RuleKey>, Resolution, rustc_hash::FxBuildHasher>,
-    entry_capacity: usize,
-    peak_entries: usize,
-    hits: usize,
-    misses: usize,
-    insertions: usize,
-    evictions: usize,
-    publication_losers: usize,
-}
-
-impl<RuleKey> Default for GlobalContractionResolutionCache<RuleKey>
-where
-    RuleKey: Eq + Hash,
-{
-    fn default() -> Self {
-        Self::new(GLOBAL_CONTRACTION_RESOLUTION_ENTRY_CAPACITY)
-    }
-}
-
-impl<RuleKey> GlobalContractionResolutionCache<RuleKey>
-where
-    RuleKey: Eq + Hash,
-{
-    fn new(entry_capacity: usize) -> Self {
-        assert!(
-            entry_capacity > 0,
-            "contraction resolution cache capacity must be positive"
-        );
-        Self {
-            entries: lru::LruCache::with_hasher(
-                std::num::NonZeroUsize::new(entry_capacity).unwrap(),
-                rustc_hash::FxBuildHasher,
-            ),
-            entry_capacity,
-            peak_entries: 0,
-            hits: 0,
-            misses: 0,
-            insertions: 0,
-            evictions: 0,
-            publication_losers: 0,
-        }
-    }
-
-    fn lookup(&mut self, key: &FastKey<RuleKey>) -> Option<Resolution> {
-        let resolution = self.entries.get(key).cloned();
-        if resolution.is_some() {
-            self.hits = self.hits.saturating_add(1);
-        } else {
-            self.misses = self.misses.saturating_add(1);
-        }
-        resolution
-    }
-
-    #[cfg(test)]
-    fn peek(&self, key: &FastKey<RuleKey>) -> Option<Resolution> {
-        self.entries.peek(key).cloned()
-    }
-
-    fn publish(&mut self, key: FastKey<RuleKey>, resolution: Resolution) -> Resolution {
-        if let Some(existing) = self.entries.get(&key) {
-            self.publication_losers = self.publication_losers.saturating_add(1);
-            return existing.clone();
-        }
-        if self.entries.len() == self.entry_capacity {
-            self.entries.pop_lru();
-            self.evictions = self.evictions.saturating_add(1);
-        }
-        self.entries.put(key, resolution.clone());
-        self.insertions = self.insertions.saturating_add(1);
-        self.peak_entries = self.peak_entries.max(self.entries.len());
-        resolution
-    }
-
-    fn info(&self) -> ContractionResolutionCacheInfo {
-        ContractionResolutionCacheInfo {
-            entries: self.entries.len(),
-            entry_capacity: self.entry_capacity,
-            peak_entries: self.peak_entries,
-            hits: self.hits,
-            misses: self.misses,
-            insertions: self.insertions,
-            evictions: self.evictions,
-            publication_losers: self.publication_losers,
-        }
-    }
-}
-
-/// Snapshot of one process-global contraction-resolution owner generation.
-///
-/// Reset starts a new generation with zero counters and residents. Operations
-/// already holding an old immutable lease may finish; reset does not revoke
-/// live Arcs.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ContractionResolutionCacheInfo {
-    entries: usize,
-    entry_capacity: usize,
-    peak_entries: usize,
-    hits: usize,
-    misses: usize,
-    insertions: usize,
-    evictions: usize,
-    publication_losers: usize,
-}
-
-impl ContractionResolutionCacheInfo {
-    pub fn entries(self) -> usize {
-        self.entries
-    }
-    pub fn entry_capacity(self) -> usize {
-        self.entry_capacity
-    }
-    pub fn peak_entries(self) -> usize {
-        self.peak_entries
-    }
-    pub fn hits(self) -> usize {
-        self.hits
-    }
-    pub fn misses(self) -> usize {
-        self.misses
-    }
-    pub fn insertions(self) -> usize {
-        self.insertions
-    }
-    pub fn evictions(self) -> usize {
-        self.evictions
-    }
-    pub fn publication_losers(self) -> usize {
-        self.publication_losers
-    }
-}
-
-/// Returns bounds and counters for the rule's shared key family in the current generation.
-pub fn global_contraction_resolution_cache_info<R>(_rule: &R) -> ContractionResolutionCacheInfo
-where
-    R: crate::TreeTransformRuleCacheKey,
-    R::Key: 'static + Clone + Eq + Hash + Send + Sync,
-{
-    let (_, cache) = global_contraction_resolutions::<R::Key>();
-    let info = cache
-        .lock()
-        .expect("global contraction resolution cache poisoned")
-        .info();
-    info
-}
-
 /// Resolved execution artifact for one contraction key: the route decision
 /// and its compiled plan are one value, never cached separately.
 #[derive(Clone, Debug)]
 pub(crate) enum Resolution {
     /// Coupled-sector direct GEMM (TensorKit `mul!` shape).
     Core(Arc<FusionBlockContractPlan>),
-    /// Source/output tree transforms around a core core
+    /// Source/output tree transforms around a core contraction
     /// (TensorKit `@tensor` shape).
     DynamicTree(Arc<FusionContractPlan>),
     /// Dense one-shot structure for conjugated operands (TeNeT optimization
@@ -216,922 +35,8 @@ pub(crate) enum Resolution {
     Structure(Arc<TensorContractStructure<f64>>),
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ContractionResolutionStats {
-    pub(crate) hits: usize,
-    pub(crate) fast_hits: usize,
-    pub(crate) misses: usize,
-}
-
-/// Structural full key: reachable identically from typed and dynamic callers.
-/// `scope` separates ordinary resolution, prelowered storage-dependent
-/// resolution, and the dynamic route's internal scratch plans.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-struct FullKey<RuleKey> {
-    rule: RuleKey,
-    dst: FullSpaceKey,
-    lhs: FullSpaceKey,
-    rhs: FullSpaceKey,
-    axes: TensorContractSpecOwned,
-    scope: FullResolutionScope,
-    access: OperandAccess,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-enum FullResolutionScope {
-    Ordinary,
-    Prelowered {
-        lhs_storage: FullSpaceKey,
-        rhs_storage: FullSpaceKey,
-    },
-    Composition {
-        lhs_storage: FullSpaceKey,
-        rhs_storage: FullSpaceKey,
-    },
-    CoreOnly,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
-struct OperandAccess {
-    lhs: OperandAccessMode,
-    rhs: OperandAccessMode,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
-enum OperandAccessMode {
-    #[default]
-    Direct,
-    AdjointParent,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-struct FullSpaceKey {
-    nout: usize,
-    homspace: FusionTreeHomSpace,
-    structure: BlockStructureCacheKey,
-}
-
-impl FullSpaceKey {
-    fn from_space(space: &DynamicFusionMapSpace) -> Result<Self, OperationError> {
-        Ok(Self {
-            nout: space.nout(),
-            homspace: space.homspace().clone(),
-            structure: BlockStructureCacheKey::from_structure(space.structure())?,
-        })
-    }
-}
-
-/// Content-identity fast key: the cheap-hash precursor to [`FullKey`], serving
-/// many distinct keys without the full key's deep hom-space hash, so loops
-/// cycling through several fixed contractions (an iPEPS unit cell, energy
-/// environments) stay O(1) on the key hash even when they alternate. Keyed on
-/// the same interned semantic identities `FullKey` resolves to — the hom space's
-/// [`HomSpaceId`] (O(1) prehash) and the block structure's `content_id` —
-/// instead of the deep clone-and-hash of the whole `FusionTreeHomSpace`.
-///
-/// Why-not (raw `Arc::as_ptr` keys, the previous form): a pointer key is
-/// principally unsound (ABA — a freed operand Arc's address can be reused by an
-/// unrelated live structure) and hits only when the *same* Arc recurs. Content
-/// keys are sound and additionally hit when identical content arrives in a fresh
-/// Arc — a hit the pointer key missed. That extra hit is semantically safe for
-/// every [`Resolution`] payload: `Core`/`Structure` carry their own pinned
-/// operand structures and replay re-validates them against the live operands
-/// (`validate_structure_identity`), while `DynamicTree` selection may depend on
-/// operand content and is separated by the same hom-space and structure
-/// identities in both `FastSpaceKey` and `FullSpaceKey`. A `FastKey` hit is
-/// therefore always a would-be `FullKey` hit, never a divergent one.
-///
-/// Why-not (pin the operand Arcs instead, à la [`LastSpace`]): pinning keeps
-/// dead structures alive only to keep a pointer key valid; re-keying on content
-/// removes the unsoundness at the root without extending any lifetime.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-struct FastKey<RuleKey> {
-    rule: RuleKey,
-    dst: FastSpaceKey,
-    lhs: FastSpaceKey,
-    rhs: FastSpaceKey,
-    axes: TensorContractSpecOwned,
-    scope: FastResolutionScope,
-    access: OperandAccess,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-enum FastResolutionScope {
-    Ordinary,
-    Prelowered {
-        lhs_storage: FastSpaceKey,
-        rhs_storage: FastSpaceKey,
-    },
-    Composition {
-        lhs_storage: FastSpaceKey,
-        rhs_storage: FastSpaceKey,
-    },
-    CoreOnly,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-struct FastSpaceKey {
-    nout: usize,
-    homspace_id: HomSpaceId,
-    structure_id: usize,
-}
-
-impl FastSpaceKey {
-    fn from_space(space: &DynamicFusionMapSpace) -> Self {
-        Self {
-            nout: space.nout(),
-            homspace_id: space.homspace().id(),
-            structure_id: space.structure().content_id(),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct LastEntry<RuleKey> {
-    rule: RuleKey,
-    dst: LastSpace,
-    lhs: LastSpace,
-    rhs: LastSpace,
-    axes: RawAxes,
-    scope: LastResolutionScope,
-    access: OperandAccess,
-    full_key: Option<FullKey<RuleKey>>,
-    resolution: Resolution,
-}
-
-#[derive(Clone, Debug)]
-enum LastResolutionScope {
-    Ordinary,
-    Prelowered {
-        lhs_storage: LastSpace,
-        rhs_storage: LastSpace,
-    },
-    Composition {
-        lhs_storage: LastSpace,
-        rhs_storage: LastSpace,
-    },
-    CoreOnly,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum LiveResolutionScope<'a> {
-    Ordinary,
-    Prelowered {
-        lhs_storage: &'a DynamicFusionMapSpace,
-        rhs_storage: &'a DynamicFusionMapSpace,
-    },
-    Composition {
-        lhs_storage: &'a DynamicFusionMapSpace,
-        rhs_storage: &'a DynamicFusionMapSpace,
-    },
-    CoreOnly,
-}
-
-#[derive(Clone, Debug)]
-struct LastSpace {
-    nout: usize,
-    homspace: Arc<FusionTreeHomSpace>,
-    structure: Arc<BlockStructure>,
-}
-
-impl LastSpace {
-    fn from_space(space: &DynamicFusionMapSpace) -> Self {
-        Self {
-            nout: space.nout(),
-            homspace: Arc::clone(space.homspace_arc()),
-            structure: Arc::clone(space.structure()),
-        }
-    }
-
-    fn matches(&self, space: &DynamicFusionMapSpace) -> bool {
-        self.nout == space.nout()
-            && Arc::ptr_eq(&self.structure, space.structure())
-            && (Arc::ptr_eq(&self.homspace, space.homspace_arc())
-                || *self.homspace == *space.homspace())
-    }
-}
-
-impl LastResolutionScope {
-    fn matches(&self, live: LiveResolutionScope<'_>) -> bool {
-        match (self, live) {
-            (Self::Ordinary, LiveResolutionScope::Ordinary)
-            | (Self::CoreOnly, LiveResolutionScope::CoreOnly) => true,
-            (
-                Self::Prelowered {
-                    lhs_storage,
-                    rhs_storage,
-                },
-                LiveResolutionScope::Prelowered {
-                    lhs_storage: live_lhs,
-                    rhs_storage: live_rhs,
-                },
-            ) => lhs_storage.matches(live_lhs) && rhs_storage.matches(live_rhs),
-            (
-                Self::Composition {
-                    lhs_storage,
-                    rhs_storage,
-                },
-                LiveResolutionScope::Composition {
-                    lhs_storage: live_lhs,
-                    rhs_storage: live_rhs,
-                },
-            ) => lhs_storage.matches(live_lhs) && rhs_storage.matches(live_rhs),
-            _ => false,
-        }
-    }
-}
-
-impl LiveResolutionScope<'_> {
-    fn full(self) -> Result<FullResolutionScope, OperationError> {
-        match self {
-            Self::Ordinary => Ok(FullResolutionScope::Ordinary),
-            Self::Prelowered {
-                lhs_storage,
-                rhs_storage,
-            } => Ok(FullResolutionScope::Prelowered {
-                lhs_storage: FullSpaceKey::from_space(lhs_storage)?,
-                rhs_storage: FullSpaceKey::from_space(rhs_storage)?,
-            }),
-            Self::Composition {
-                lhs_storage,
-                rhs_storage,
-            } => Ok(FullResolutionScope::Composition {
-                lhs_storage: FullSpaceKey::from_space(lhs_storage)?,
-                rhs_storage: FullSpaceKey::from_space(rhs_storage)?,
-            }),
-            Self::CoreOnly => Ok(FullResolutionScope::CoreOnly),
-        }
-    }
-
-    fn fast(self) -> FastResolutionScope {
-        match self {
-            Self::Ordinary => FastResolutionScope::Ordinary,
-            Self::Prelowered {
-                lhs_storage,
-                rhs_storage,
-            } => FastResolutionScope::Prelowered {
-                lhs_storage: FastSpaceKey::from_space(lhs_storage),
-                rhs_storage: FastSpaceKey::from_space(rhs_storage),
-            },
-            Self::Composition {
-                lhs_storage,
-                rhs_storage,
-            } => FastResolutionScope::Composition {
-                lhs_storage: FastSpaceKey::from_space(lhs_storage),
-                rhs_storage: FastSpaceKey::from_space(rhs_storage),
-            },
-            Self::CoreOnly => FastResolutionScope::CoreOnly,
-        }
-    }
-
-    fn pinned(self) -> LastResolutionScope {
-        match self {
-            Self::Ordinary => LastResolutionScope::Ordinary,
-            Self::Prelowered {
-                lhs_storage,
-                rhs_storage,
-            } => LastResolutionScope::Prelowered {
-                lhs_storage: LastSpace::from_space(lhs_storage),
-                rhs_storage: LastSpace::from_space(rhs_storage),
-            },
-            Self::Composition {
-                lhs_storage,
-                rhs_storage,
-            } => LastResolutionScope::Composition {
-                lhs_storage: LastSpace::from_space(lhs_storage),
-                rhs_storage: LastSpace::from_space(rhs_storage),
-            },
-            Self::CoreOnly => LastResolutionScope::CoreOnly,
-        }
-    }
-}
-
-/// Raw axes copy for last-entry comparison without recompiling the axis plan.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct RawAxes {
-    lhs_contracting: Vec<usize>,
-    rhs_contracting: Vec<usize>,
-    output_identity: bool,
-    output_axes: Vec<usize>,
-    lhs_conjugate: bool,
-    rhs_conjugate: bool,
-}
-
-impl RawAxes {
-    fn from_axes(axes: TensorContractSpec<'_>) -> Self {
-        let (output_identity, output_axes) = match axes.output_permutation() {
-            OutputAxisOrder::Identity => (true, Vec::new()),
-            OutputAxisOrder::Axes(list) => (false, list.to_vec()),
-        };
-        Self {
-            lhs_contracting: axes.lhs_contracting_axes().to_vec(),
-            rhs_contracting: axes.rhs_contracting_axes().to_vec(),
-            output_identity,
-            output_axes,
-            lhs_conjugate: axes.lhs_conjugate(),
-            rhs_conjugate: axes.rhs_conjugate(),
-        }
-    }
-
-    fn matches(&self, axes: TensorContractSpec<'_>) -> bool {
-        let output_matches = match axes.output_permutation() {
-            OutputAxisOrder::Identity => self.output_identity,
-            OutputAxisOrder::Axes(list) => !self.output_identity && self.output_axes == list,
-        };
-        output_matches
-            && self.lhs_contracting == axes.lhs_contracting_axes()
-            && self.rhs_contracting == axes.rhs_contracting_axes()
-            && self.lhs_conjugate == axes.lhs_conjugate()
-            && self.rhs_conjugate == axes.rhs_conjugate()
-    }
-}
-
-/// Recently used entries kept for pointer-compared lookups. A dynamic
-/// contraction interleaves the facade key with several distinct internal
-/// scratch keys per replay, so a single slot would thrash on every call.
-const LAST_RING_CAPACITY: usize = 16;
-
-/// Cap on the content-keyed fast map. The fast map is a pure accelerator —
-/// every entry is reconstructible from `resolved`, so bounding it only costs a
-/// re-promotion (a `FullKey` hash) on the next miss, never correctness. This
-/// bounds fast-map growth even under the unbounded `TaskLocal` policy (the P3
-/// hardening: a long-lived process no longer grows it monotonically). Under an
-/// LRU policy the fast cap tracks `max_entries`, so fast never falls behind
-/// `resolved` and no working-set key needlessly pays the deep `FullKey` hash.
-const FAST_MAP_CAPACITY: usize = 4096;
-
-#[derive(Clone, Debug)]
-pub(crate) struct ContractionResolutionCache<RuleKey> {
-    last: Vec<LastEntry<RuleKey>>,
-    fast: FxHashMap<FastKey<RuleKey>, Resolution>,
-    resolved: FxHashMap<FullKey<RuleKey>, Resolution>,
-    lru_order: VecDeque<FullKey<RuleKey>>,
-    policy: OperationCachePolicy,
-    stats: ContractionResolutionStats,
-    reset_epoch: u64,
-}
-
-impl<RuleKey> Default for ContractionResolutionCache<RuleKey> {
-    fn default() -> Self {
-        Self {
-            last: Vec::new(),
-            fast: FxHashMap::default(),
-            resolved: FxHashMap::default(),
-            lru_order: VecDeque::new(),
-            policy: OperationCachePolicy::default(),
-            stats: ContractionResolutionStats::default(),
-            reset_epoch: operation_cache_reset_epoch(),
-        }
-    }
-}
-
-impl<RuleKey> ContractionResolutionCache<RuleKey>
-where
-    RuleKey: Clone + Eq + Hash,
-{
-    #[inline]
-    pub(crate) fn len(&self) -> usize {
-        self.resolved.len()
-    }
-
-    #[inline]
-    pub(crate) fn stats(&self) -> ContractionResolutionStats {
-        self.stats
-    }
-
-    #[cfg(test)]
-    pub(crate) fn last_orientation(&self) -> Option<super::fusion::FusionContractOrientation> {
-        self.last.iter().find_map(|entry| match &entry.resolution {
-            Resolution::DynamicTree(plan) => Some(plan.orientation()),
-            Resolution::Core(_) | Resolution::Structure(_) => None,
-        })
-    }
-
-    pub(crate) fn set_policy(&mut self, policy: OperationCachePolicy) {
-        self.synchronize_reset_epoch();
-        self.policy = policy;
-        self.last.clear();
-        self.fast.clear();
-        if !policy.stores_entries() {
-            self.resolved.clear();
-            self.lru_order.clear();
-        } else if let Some(max_entries) = policy.max_entries() {
-            crate::cache::rebuild_lru_order_from_keys(&self.resolved, &mut self.lru_order);
-            self.enforce_lru_limit(max_entries);
-        }
-    }
-
-    fn synchronize_reset_epoch(&mut self) {
-        let current_epoch = operation_cache_reset_epoch();
-        if self.reset_epoch != current_epoch {
-            self.last.clear();
-            self.fast.clear();
-            self.resolved.clear();
-            self.lru_order.clear();
-            self.reset_epoch = current_epoch;
-        }
-    }
-
-    fn enforce_lru_limit(&mut self, max_entries: usize) {
-        let mut evicted = false;
-        while self.resolved.len() > max_entries {
-            let Some(oldest) = self.lru_order.pop_front() else {
-                break;
-            };
-            evicted |= self.resolved.remove(&oldest).is_some();
-        }
-        if evicted {
-            self.fast.clear();
-            self.last.clear();
-        }
-    }
-
-    fn fast_insert(&mut self, key: FastKey<RuleKey>, resolution: Resolution) {
-        // ponytail: nuke-on-full, not per-entry LRU — keeps the hot fast-hit
-        // path free of reorder bookkeeping (the `last` ring already absorbs the
-        // hottest keys, and a lost fast entry only falls through to `resolved`).
-        // Upgrade to keyed LRU only if fast-map churn shows up in a profile.
-        let cap = self.policy.max_entries().unwrap_or(FAST_MAP_CAPACITY);
-        if self.fast.len() >= cap && !self.fast.contains_key(&key) {
-            self.fast.clear();
-        }
-        self.fast.insert(key, resolution);
-    }
-
-    fn touch(&mut self, key: &FullKey<RuleKey>) {
-        if self.policy.max_entries().is_some() {
-            crate::cache::touch_lru_key(&mut self.lru_order, key);
-        }
-    }
-
-    /// Resolve route and plan in one lookup. On a cold key the core
-    /// plan compiled during the route test is stored, never discarded;
-    /// non-core keys resolve through `compile_dynamic` (which has the
-    /// caller's typed context) or, for conjugated axes, `compile_structure`.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn get_or_resolve<R>(
-        &mut self,
-        rule: &R,
-        dst: &DynamicFusionMapSpace,
-        lhs: &DynamicFusionMapSpace,
-        rhs: &DynamicFusionMapSpace,
-        axes: TensorContractSpec<'_>,
-        compile_structure: impl FnOnce() -> Result<
-            Option<Arc<TensorContractStructure<f64>>>,
-            OperationError,
-        >,
-        compile_dynamic: impl FnOnce() -> Result<Arc<FusionContractPlan>, OperationError>,
-    ) -> Result<Resolution, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>
-            + crate::TreeTransformRuleCacheKey<Key = RuleKey>,
-        RuleKey: 'static + Send + Sync,
-    {
-        self.get_or_resolve_with(
-            rule,
-            dst,
-            lhs,
-            rhs,
-            axes,
-            LiveResolutionScope::Ordinary,
-            OperandAccess::default(),
-            || {
-                resolve(
-                    rule,
-                    dst,
-                    lhs,
-                    rhs,
-                    axes,
-                    compile_structure,
-                    compile_dynamic,
-                )
-            },
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn get_or_resolve_prelowered<R>(
-        &mut self,
-        rule: &R,
-        dst: &DynamicFusionMapSpace,
-        lhs_logical: &DynamicFusionMapSpace,
-        lhs_storage: &DynamicFusionMapSpace,
-        rhs_logical: &DynamicFusionMapSpace,
-        rhs_storage: &DynamicFusionMapSpace,
-        axes: TensorContractSpec<'_>,
-        compile_structure: impl FnOnce() -> Result<
-            Option<Arc<TensorContractStructure<f64>>>,
-            OperationError,
-        >,
-        compile_dynamic: impl FnOnce() -> Result<Arc<FusionContractPlan>, OperationError>,
-    ) -> Result<Resolution, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>
-            + crate::TreeTransformRuleCacheKey<Key = RuleKey>,
-        RuleKey: 'static + Send + Sync,
-    {
-        // Why not rely on the public context's preflight: this cache owns the
-        // storage-dependent identity and must reject foreign storage before a
-        // last/fast/global hit if another internal caller is added later.
-        lhs_storage.validate_rule(rule)?;
-        rhs_storage.validate_rule(rule)?;
-        let access = OperandAccess {
-            lhs: if axes.lhs_conjugate() {
-                OperandAccessMode::AdjointParent
-            } else {
-                OperandAccessMode::Direct
-            },
-            rhs: if axes.rhs_conjugate() {
-                OperandAccessMode::AdjointParent
-            } else {
-                OperandAccessMode::Direct
-            },
-        };
-        self.get_or_resolve_with(
-            rule,
-            dst,
-            lhs_logical,
-            rhs_logical,
-            axes,
-            LiveResolutionScope::Prelowered {
-                lhs_storage,
-                rhs_storage,
-            },
-            access,
-            || {
-                let logical_axes = TensorContractSpec::new(
-                    axes.lhs_contracting_axes(),
-                    axes.rhs_contracting_axes(),
-                    axes.output_permutation(),
-                );
-                if is_core_form_fusion_block_contract(
-                    rule,
-                    dst,
-                    lhs_logical,
-                    rhs_logical,
-                    logical_axes,
-                )? && !rhs_contract_requires_twist(rule, rhs_logical, logical_axes)?
-                {
-                    let plan = compile_fusion_block_contract_plan_prelowered(
-                        rule,
-                        dst,
-                        lhs_logical,
-                        lhs_storage,
-                        rhs_logical,
-                        rhs_storage,
-                        logical_axes,
-                        if axes.lhs_conjugate() {
-                            tenet_operations::fusion_replay::MatrixOp::Adjoint
-                        } else {
-                            tenet_operations::fusion_replay::MatrixOp::Identity
-                        },
-                        if axes.rhs_conjugate() {
-                            tenet_operations::fusion_replay::MatrixOp::Adjoint
-                        } else {
-                            tenet_operations::fusion_replay::MatrixOp::Identity
-                        },
-                    )?;
-                    return Ok(Resolution::Core(Arc::new(plan)));
-                }
-                if let Some(structure) = compile_structure()? {
-                    return Ok(Resolution::Structure(structure));
-                }
-                Ok(Resolution::DynamicTree(compile_dynamic()?))
-            },
-        )
-    }
-
-    /// Core-only entry for the dynamic route's internal scratch
-    /// contractions: operands are already materialized in coupled scratch
-    /// (twists applied), so the route test and twist gate do not apply.
-    pub(crate) fn get_or_compile_core_plan<R>(
-        &mut self,
-        rule: &R,
-        dst: &DynamicFusionMapSpace,
-        lhs: &DynamicFusionMapSpace,
-        rhs: &DynamicFusionMapSpace,
-        axes: TensorContractSpec<'_>,
-    ) -> Result<Arc<FusionBlockContractPlan>, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>
-            + crate::TreeTransformRuleCacheKey<Key = RuleKey>,
-        RuleKey: 'static + Send + Sync,
-    {
-        let resolution = self.get_or_resolve_with(
-            rule,
-            dst,
-            lhs,
-            rhs,
-            axes,
-            LiveResolutionScope::CoreOnly,
-            OperandAccess::default(),
-            || {
-                compile_fusion_block_contract_plan_validated(rule, dst, lhs, rhs, axes)
-                    .map(|plan| Resolution::Core(Arc::new(plan)))
-            },
-        )?;
-        match resolution {
-            Resolution::Core(plan) => Ok(plan),
-            _ => Err(OperationError::UnsupportedTensorContractScope {
-                message: "internal scratch contraction resolved to a non-core plan",
-            }),
-        }
-    }
-
-    /// Resolve categorical map composition to the coefficient-free coupled
-    /// block product used by TensorKit `mul!`.
-    ///
-    /// The composition scope is distinct from ordinary `tensorcontract!`:
-    /// identical spaces and axes request different fermionic semantics.
-    /// Storage spaces and access modes are both part of the key because a
-    /// lazy adjoint replays the same logical map from a different block layout.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn get_or_compile_composition_plan<R>(
-        &mut self,
-        rule: &R,
-        dst: &DynamicFusionMapSpace,
-        lhs_logical: &DynamicFusionMapSpace,
-        lhs_storage: &DynamicFusionMapSpace,
-        rhs_logical: &DynamicFusionMapSpace,
-        rhs_storage: &DynamicFusionMapSpace,
-        axes: TensorContractSpec<'_>,
-    ) -> Result<Arc<FusionBlockContractPlan>, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>
-            + crate::TreeTransformRuleCacheKey<Key = RuleKey>,
-        RuleKey: 'static + Send + Sync,
-    {
-        lhs_storage.validate_rule(rule)?;
-        rhs_storage.validate_rule(rule)?;
-        let access = OperandAccess {
-            lhs: if axes.lhs_conjugate() {
-                OperandAccessMode::AdjointParent
-            } else {
-                OperandAccessMode::Direct
-            },
-            rhs: if axes.rhs_conjugate() {
-                OperandAccessMode::AdjointParent
-            } else {
-                OperandAccessMode::Direct
-            },
-        };
-        let resolution = self.get_or_resolve_with(
-            rule,
-            dst,
-            lhs_logical,
-            rhs_logical,
-            axes,
-            LiveResolutionScope::Composition {
-                lhs_storage,
-                rhs_storage,
-            },
-            access,
-            || {
-                let logical_axes = TensorContractSpec::new(
-                    axes.lhs_contracting_axes(),
-                    axes.rhs_contracting_axes(),
-                    axes.output_permutation(),
-                );
-                compile_fusion_block_contract_plan_prelowered(
-                    rule,
-                    dst,
-                    lhs_logical,
-                    lhs_storage,
-                    rhs_logical,
-                    rhs_storage,
-                    logical_axes,
-                    if axes.lhs_conjugate() {
-                        MatrixOp::Adjoint
-                    } else {
-                        MatrixOp::Identity
-                    },
-                    if axes.rhs_conjugate() {
-                        MatrixOp::Adjoint
-                    } else {
-                        MatrixOp::Identity
-                    },
-                )
-                .map(|plan| Resolution::Core(Arc::new(plan)))
-            },
-        )?;
-        match resolution {
-            Resolution::Core(plan) => Ok(plan),
-            _ => Err(OperationError::UnsupportedTensorContractScope {
-                message: "categorical composition resolved to a non-core plan",
-            }),
-        }
-    }
-
-    /// Shared lookup skeleton: fast paths, then `resolve_cold` on a miss.
-    fn get_or_resolve_with<R>(
-        &mut self,
-        rule: &R,
-        dst: &DynamicFusionMapSpace,
-        lhs: &DynamicFusionMapSpace,
-        rhs: &DynamicFusionMapSpace,
-        axes: TensorContractSpec<'_>,
-        scope: LiveResolutionScope<'_>,
-        access: OperandAccess,
-        resolve_cold: impl FnOnce() -> Result<Resolution, OperationError>,
-    ) -> Result<Resolution, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>
-            + crate::TreeTransformRuleCacheKey<Key = RuleKey>,
-        RuleKey: 'static + Send + Sync,
-    {
-        validate_fusion_contract_rule(rule, dst, lhs, rhs)?;
-        let rule_key = rule.tree_transform_rule_cache_key();
-        if self.policy.stores_entries() {
-            self.synchronize_reset_epoch();
-            // Why-not validate global residency on every front hit: eviction
-            // bounds the global owner but does not invalidate an immutable
-            // context lease. Canonical publication applies while an entry is
-            // resident; only reset generation revokes retained context fronts.
-            let position = self.last.iter().position(|last| {
-                last.rule == rule_key
-                    && last.scope.matches(scope)
-                    && last.access == access
-                    && last.dst.matches(dst)
-                    && last.lhs.matches(lhs)
-                    && last.rhs.matches(rhs)
-                    && last.axes.matches(axes)
-            });
-            if let Some(index) = position {
-                self.stats.hits += 1;
-                self.stats.fast_hits += 1;
-                if index != 0 {
-                    let entry = self.last.remove(index);
-                    self.last.insert(0, entry);
-                }
-                let resolution = self.last[0].resolution.clone();
-                // Clone the deep structural key only when an LRU limit
-                // actually needs the touch; the clone dwarfs the whole
-                // hit path otherwise.
-                let touch_key = if self.policy.max_entries().is_some() {
-                    self.last[0].full_key.clone()
-                } else {
-                    None
-                };
-                if let Some(key) = touch_key {
-                    self.touch(&key);
-                }
-                return Ok(resolution);
-            }
-        }
-
-        let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), dst.rank(), axes)?;
-        let axes_key = TensorContractSpecOwned::new_with_conjugation(
-            axis_plan.lhs_contracting_axes,
-            axis_plan.rhs_contracting_axes,
-            axis_plan.output_axes,
-            axis_plan.lhs_conjugate,
-            axis_plan.rhs_conjugate,
-        );
-
-        if self.policy.stores_entries() {
-            let fast_key = FastKey {
-                rule: rule_key.clone(),
-                dst: FastSpaceKey::from_space(dst),
-                lhs: FastSpaceKey::from_space(lhs),
-                rhs: FastSpaceKey::from_space(rhs),
-                axes: axes_key.clone(),
-                scope: scope.fast(),
-                access,
-            };
-            if let Some(resolution) = self.fast.get(&fast_key) {
-                self.stats.hits += 1;
-                self.stats.fast_hits += 1;
-                let resolution = resolution.clone();
-                self.remember_last(
-                    &rule_key,
-                    dst,
-                    lhs,
-                    rhs,
-                    axes,
-                    scope,
-                    access,
-                    None,
-                    &resolution,
-                );
-                return Ok(resolution);
-            }
-
-            let full_key = FullKey {
-                rule: rule_key.clone(),
-                dst: FullSpaceKey::from_space(dst)?,
-                lhs: FullSpaceKey::from_space(lhs)?,
-                rhs: FullSpaceKey::from_space(rhs)?,
-                axes: axes_key.clone(),
-                scope: scope.full()?,
-                access,
-            };
-            if let Some(resolution) = self.resolved.get(&full_key) {
-                self.stats.hits += 1;
-                let resolution = resolution.clone();
-                self.touch(&full_key);
-                self.fast_insert(fast_key, resolution.clone());
-                self.remember_last(
-                    &rule_key,
-                    dst,
-                    lhs,
-                    rhs,
-                    axes,
-                    scope,
-                    access,
-                    Some(full_key),
-                    &resolution,
-                );
-                return Ok(resolution);
-            }
-
-            self.stats.misses += 1;
-            let (_, global) = global_contraction_resolutions::<RuleKey>();
-            if let Some(resolution) = global
-                .lock()
-                .expect("global contraction resolution cache poisoned")
-                .lookup(&fast_key)
-            {
-                self.resolved.insert(full_key.clone(), resolution.clone());
-                if let Some(max_entries) = self.policy.max_entries() {
-                    self.lru_order.push_back(full_key.clone());
-                    self.enforce_lru_limit(max_entries);
-                }
-                self.fast_insert(fast_key, resolution.clone());
-                self.remember_last(
-                    &rule_key,
-                    dst,
-                    lhs,
-                    rhs,
-                    axes,
-                    scope,
-                    access,
-                    Some(full_key),
-                    &resolution,
-                );
-                return Ok(resolution);
-            }
-            let resolution = resolve_cold()?;
-            let resolution = global
-                .lock()
-                .expect("global contraction resolution cache poisoned")
-                .publish(fast_key.clone(), resolution);
-            self.resolved.insert(full_key.clone(), resolution.clone());
-            if let Some(max_entries) = self.policy.max_entries() {
-                self.lru_order.push_back(full_key.clone());
-                self.enforce_lru_limit(max_entries);
-            }
-            self.fast_insert(fast_key, resolution.clone());
-            self.remember_last(
-                &rule_key,
-                dst,
-                lhs,
-                rhs,
-                axes,
-                scope,
-                access,
-                Some(full_key),
-                &resolution,
-            );
-            return Ok(resolution);
-        }
-
-        self.stats.misses += 1;
-        resolve_cold()
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn remember_last(
-        &mut self,
-        rule_key: &RuleKey,
-        dst: &DynamicFusionMapSpace,
-        lhs: &DynamicFusionMapSpace,
-        rhs: &DynamicFusionMapSpace,
-        axes: TensorContractSpec<'_>,
-        scope: LiveResolutionScope<'_>,
-        access: OperandAccess,
-        full_key: Option<FullKey<RuleKey>>,
-        resolution: &Resolution,
-    ) {
-        self.last.insert(
-            0,
-            LastEntry {
-                rule: rule_key.clone(),
-                dst: LastSpace::from_space(dst),
-                lhs: LastSpace::from_space(lhs),
-                rhs: LastSpace::from_space(rhs),
-                axes: RawAxes::from_axes(axes),
-                scope: scope.pinned(),
-                access,
-                full_key,
-                resolution: resolution.clone(),
-            },
-        );
-        self.last.truncate(LAST_RING_CAPACITY);
-    }
-}
-
-/// Uncached resolution: the route test and the plan compile are one step.
-fn resolve<R>(
+/// Compiles the route and plan for one ordinary contraction.
+pub(crate) fn compile_resolution<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
     lhs: &DynamicFusionMapSpace,
@@ -1144,6 +49,8 @@ fn resolve<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
+    validate_fusion_contract_rule(rule, dst, lhs, rhs)?;
+    TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), dst.rank(), axes)?;
     if !axes.lhs_conjugate() && !axes.rhs_conjugate() {
         if is_core_form_fusion_block_contract(rule, dst, lhs, rhs, axes)?
             && !rhs_contract_requires_twist(rule, rhs, axes)?
@@ -1157,6 +64,125 @@ where
         return Ok(Resolution::Structure(structure));
     }
     Ok(Resolution::DynamicTree(compile_dynamic()?))
+}
+
+/// Compiles one contraction whose logical and storage spaces are already
+/// separated by a validated lazy-adjoint boundary.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compile_prelowered_resolution<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs_logical: &DynamicFusionMapSpace,
+    lhs_storage: &DynamicFusionMapSpace,
+    rhs_logical: &DynamicFusionMapSpace,
+    rhs_storage: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+    compile_structure: impl FnOnce()
+        -> Result<Option<Arc<TensorContractStructure<f64>>>, OperationError>,
+    compile_dynamic: impl FnOnce() -> Result<Arc<FusionContractPlan>, OperationError>,
+) -> Result<Resolution, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    lhs_storage.validate_rule(rule)?;
+    rhs_storage.validate_rule(rule)?;
+    validate_fusion_contract_rule(rule, dst, lhs_logical, rhs_logical)?;
+    TensorContractAxisPlan::compile(lhs_logical.rank(), rhs_logical.rank(), dst.rank(), axes)?;
+    let logical_axes = TensorContractSpec::new(
+        axes.lhs_contracting_axes(),
+        axes.rhs_contracting_axes(),
+        axes.output_permutation(),
+    );
+    if is_core_form_fusion_block_contract(rule, dst, lhs_logical, rhs_logical, logical_axes)?
+        && !rhs_contract_requires_twist(rule, rhs_logical, logical_axes)?
+    {
+        let plan = compile_fusion_block_contract_plan_prelowered(
+            rule,
+            dst,
+            lhs_logical,
+            lhs_storage,
+            rhs_logical,
+            rhs_storage,
+            logical_axes,
+            if axes.lhs_conjugate() {
+                MatrixOp::Adjoint
+            } else {
+                MatrixOp::Identity
+            },
+            if axes.rhs_conjugate() {
+                MatrixOp::Adjoint
+            } else {
+                MatrixOp::Identity
+            },
+        )?;
+        return Ok(Resolution::Core(Arc::new(plan)));
+    }
+    if let Some(structure) = compile_structure()? {
+        return Ok(Resolution::Structure(structure));
+    }
+    Ok(Resolution::DynamicTree(compile_dynamic()?))
+}
+
+/// Compiles the coupled block plan for already-materialized core operands.
+pub(crate) fn compile_core_plan<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+) -> Result<Arc<FusionBlockContractPlan>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    validate_fusion_contract_rule(rule, dst, lhs, rhs)?;
+    TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), dst.rank(), axes)?;
+    compile_fusion_block_contract_plan_validated(rule, dst, lhs, rhs, axes).map(Arc::new)
+}
+
+/// Compiles TensorKit `mul!` composition without inserting a fermionic
+/// supertrace twist.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compile_composition_plan<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs_logical: &DynamicFusionMapSpace,
+    lhs_storage: &DynamicFusionMapSpace,
+    rhs_logical: &DynamicFusionMapSpace,
+    rhs_storage: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+) -> Result<Arc<FusionBlockContractPlan>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    lhs_storage.validate_rule(rule)?;
+    rhs_storage.validate_rule(rule)?;
+    validate_fusion_contract_rule(rule, dst, lhs_logical, rhs_logical)?;
+    TensorContractAxisPlan::compile(lhs_logical.rank(), rhs_logical.rank(), dst.rank(), axes)?;
+    let logical_axes = TensorContractSpec::new(
+        axes.lhs_contracting_axes(),
+        axes.rhs_contracting_axes(),
+        axes.output_permutation(),
+    );
+    compile_fusion_block_contract_plan_prelowered(
+        rule,
+        dst,
+        lhs_logical,
+        lhs_storage,
+        rhs_logical,
+        rhs_storage,
+        logical_axes,
+        if axes.lhs_conjugate() {
+            MatrixOp::Adjoint
+        } else {
+            MatrixOp::Identity
+        },
+        if axes.rhs_conjugate() {
+            MatrixOp::Adjoint
+        } else {
+            MatrixOp::Identity
+        },
+    )
+    .map(Arc::new)
 }
 
 /// True when the fermionic supertrace twist can be nontrivial: such
@@ -1196,82 +222,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::fusion::prepare_tensorcontract_fusion_plan_dyn_raw_canonical;
-    use crate::TreeTransformRuleCacheKey;
     use tenet_core::{
         FermionParityFusionRule, FusionProductSpace, FusionTreeHomSpace, ProductFusionRuleExt,
         SU2FusionRule, SU2Irrep, SectorId, SectorLeg, U1FusionRule, U1Irrep,
     };
-    use tenet_operations::axis::OutputAxisOrder;
-
-    fn dynamic_resolution(rule: &U1FusionRule, space: &DynamicFusionMapSpace) -> Resolution {
-        let axes =
-            TensorContractSpec::new(&[3, 2], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3]));
-        Resolution::DynamicTree(Arc::new(
-            prepare_tensorcontract_fusion_plan_dyn_raw_canonical(rule, space, space, space, axes)
-                .unwrap(),
-        ))
-    }
-
-    fn ordinary_fast_key(
-        rule: &U1FusionRule,
-        space: &DynamicFusionMapSpace,
-    ) -> FastKey<crate::TreeTransformBuiltinRuleCacheKey> {
-        FastKey {
-            rule: rule.tree_transform_rule_cache_key(),
-            dst: FastSpaceKey::from_space(space),
-            lhs: FastSpaceKey::from_space(space),
-            rhs: FastSpaceKey::from_space(space),
-            axes: TensorContractSpecOwned::new(vec![3, 2], vec![0, 1], vec![0, 1, 2, 3]),
-            scope: FastResolutionScope::Ordinary,
-            access: OperandAccess::default(),
-        }
-    }
-
-    fn ordinary_full_key<RuleKey: Clone>(
-        rule: RuleKey,
-        space: &DynamicFusionMapSpace,
-    ) -> FullKey<RuleKey> {
-        FullKey {
-            rule,
-            dst: FullSpaceKey::from_space(space).unwrap(),
-            lhs: FullSpaceKey::from_space(space).unwrap(),
-            rhs: FullSpaceKey::from_space(space).unwrap(),
-            axes: TensorContractSpecOwned::new(vec![3, 2], vec![0, 1], vec![0, 1, 2, 3]),
-            scope: FullResolutionScope::Ordinary,
-            access: OperandAccess::default(),
-        }
-    }
-
-    fn same_resolution(left: &Resolution, right: &Resolution) -> bool {
-        match (left, right) {
-            (Resolution::Core(left), Resolution::Core(right)) => Arc::ptr_eq(left, right),
-            (Resolution::DynamicTree(left), Resolution::DynamicTree(right)) => {
-                Arc::ptr_eq(left, right)
-            }
-            (Resolution::Structure(left), Resolution::Structure(right)) => Arc::ptr_eq(left, right),
-            _ => false,
-        }
-    }
-
-    // Two-leg-per-side U(1) matrix space (three charges) in a chosen bond
-    // dimension `deg`. Each call builds a fresh hom-space `Arc` (see
-    // `from_degeneracy_shapes`), so content-equal spaces from separate calls
-    // carry distinct pointers — the case that made the old raw-pointer key miss.
-    fn u1_matrix_space(rule: &U1FusionRule, deg: usize) -> DynamicFusionMapSpace {
-        let sectors = [
-            U1Irrep::new(-1).sector_id(),
-            U1Irrep::new(0).sector_id(),
-            U1Irrep::new(1).sector_id(),
-        ];
-        let leg = || SectorLeg::new(sectors.map(|sector| (sector, deg)), false);
-        let hom = FusionTreeHomSpace::new(
-            FusionProductSpace::new([leg(), leg()]),
-            FusionProductSpace::new([leg(), leg()]),
-        );
-        let count = hom.fusion_tree_keys(rule).len();
-        DynamicFusionMapSpace::from_degeneracy_shapes(rule, hom, vec![vec![deg; 4]; count]).unwrap()
-    }
 
     fn single_sector_matrix_space<R>(
         rule: &R,
@@ -1326,446 +280,5 @@ mod tests {
             TensorContractSpec::with_default_output_order(&[0], &[0]),
         )
         .unwrap());
-    }
-
-    // New capability of content re-keying: content-equal spaces backed by
-    // distinct Arcs now collapse to one fast key (a would-be `FullKey` hit),
-    // where the old `Arc::as_ptr` key saw two distinct keys and missed.
-    #[test]
-    fn fast_space_key_hits_on_equal_content_across_distinct_arcs() {
-        // What: `FastSpaceKey`/`FullSpaceKey` embed the block structure's
-        // interned `content_id`, so this relies on the tenet-core intern
-        // table handing `a` and `b`'s content-equal structures the *same*
-        // id. A concurrent `reset_global_operation_caches` (which chains
-        // into `reset_core_intern_tables`) landing between the two builds
-        // would evict the first entry and re-intern the second with a
-        // fresh id, breaking the `assert_eq!` below.
-        let _guard = crate::test_support::CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let rule = Arc::new(U1FusionRule);
-        let a = u1_matrix_space(&rule, 3);
-        let b = u1_matrix_space(&rule, 3);
-        // Precondition: independently built content-equal spaces do carry
-        // distinct hom-space Arcs, so this is a genuine ABA-shaped case.
-        assert!(!Arc::ptr_eq(a.homspace_arc(), b.homspace_arc()));
-        // Content keys agree, and they agree exactly where `FullKey` does —
-        // `FastKey` and `FullKey` share one content-equivalence class.
-        assert_eq!(FastSpaceKey::from_space(&a), FastSpaceKey::from_space(&b));
-        assert_eq!(
-            FullSpaceKey::from_space(&a).unwrap(),
-            FullSpaceKey::from_space(&b).unwrap()
-        );
-        // Distinct content (different bond dimension) still keys apart.
-        let c = u1_matrix_space(&rule, 4);
-        assert_ne!(FastSpaceKey::from_space(&a), FastSpaceKey::from_space(&c));
-    }
-
-    #[test]
-    fn fast_and_full_keys_keep_one_equivalence_class_across_reset_and_custom_rule_keys() {
-        #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-        struct CustomRuleKey(Arc<str>);
-
-        let _guard = crate::test_support::CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::reset_global_operation_caches();
-        let rule = U1FusionRule;
-        let before = u1_matrix_space(&rule, 2);
-        let equal_before = u1_matrix_space(&rule, 2);
-        let distinct_before = u1_matrix_space(&rule, 3);
-        let custom = CustomRuleKey(Arc::from("custom-rule"));
-        let make_fast = |space: &DynamicFusionMapSpace, rule: CustomRuleKey| FastKey {
-            rule,
-            dst: FastSpaceKey::from_space(space),
-            lhs: FastSpaceKey::from_space(space),
-            rhs: FastSpaceKey::from_space(space),
-            axes: TensorContractSpecOwned::new(vec![3, 2], vec![0, 1], vec![0, 1, 2, 3]),
-            scope: FastResolutionScope::Ordinary,
-            access: OperandAccess::default(),
-        };
-        for other in [&equal_before, &distinct_before] {
-            assert_eq!(
-                make_fast(&before, custom.clone()) == make_fast(other, custom.clone()),
-                ordinary_full_key(custom.clone(), &before)
-                    == ordinary_full_key(custom.clone(), other)
-            );
-        }
-
-        crate::reset_global_operation_caches();
-        let equal_after_reset = u1_matrix_space(&rule, 2);
-        assert_eq!(
-            make_fast(&before, custom.clone()) == make_fast(&equal_after_reset, custom.clone()),
-            ordinary_full_key(custom.clone(), &before)
-                == ordinary_full_key(custom, &equal_after_reset)
-        );
-    }
-
-    #[test]
-    fn global_resolution_owner_is_entry_bounded_and_promotes_hits() {
-        let rule = U1FusionRule;
-        let spaces = [
-            u1_matrix_space(&rule, 1),
-            u1_matrix_space(&rule, 2),
-            u1_matrix_space(&rule, 3),
-        ];
-        let resolution = dynamic_resolution(&rule, &spaces[0]);
-        let mut owner = GlobalContractionResolutionCache::new(2);
-
-        let first_key = ordinary_fast_key(&rule, &spaces[0]);
-        let second_key = ordinary_fast_key(&rule, &spaces[1]);
-        owner.publish(first_key.clone(), resolution.clone());
-        owner.publish(second_key.clone(), resolution.clone());
-        assert!(owner.lookup(&first_key).is_some());
-        let third_key = ordinary_fast_key(&rule, &spaces[2]);
-        owner.publish(third_key.clone(), resolution.clone());
-        assert!(owner.peek(&first_key).is_some());
-        assert!(owner.peek(&second_key).is_none());
-        let loser = dynamic_resolution(&rule, &spaces[2]);
-        assert!(!same_resolution(&resolution, &loser));
-        let winner = owner.publish(third_key, loser);
-        assert!(same_resolution(&winner, &resolution));
-        let info = owner.info();
-        assert_eq!(info.entries(), 2);
-        assert_eq!(info.peak_entries(), 2);
-        assert_eq!(info.insertions(), 3);
-        assert_eq!(info.evictions(), 1);
-        assert_eq!(info.publication_losers(), 1);
-    }
-
-    #[test]
-    fn public_global_resolution_info_is_rule_inferred_and_resettable() {
-        #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-        struct StatsKey;
-        struct StatsRule;
-        impl crate::TreeTransformRuleCacheKey for StatsRule {
-            type Key = StatsKey;
-
-            fn tree_transform_rule_cache_key(&self) -> Self::Key {
-                StatsKey
-            }
-        }
-
-        let _guard = crate::test_support::CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let rule = U1FusionRule;
-        let space = u1_matrix_space(&rule, 1);
-        let key = FastKey {
-            rule: StatsKey,
-            dst: FastSpaceKey::from_space(&space),
-            lhs: FastSpaceKey::from_space(&space),
-            rhs: FastSpaceKey::from_space(&space),
-            axes: TensorContractSpecOwned::new(vec![3, 2], vec![0, 1], vec![0, 1, 2, 3]),
-            scope: FastResolutionScope::Ordinary,
-            access: OperandAccess::default(),
-        };
-        let (_, owner) = global_contraction_resolutions::<StatsKey>();
-        owner
-            .lock()
-            .unwrap()
-            .publish(key, dynamic_resolution(&rule, &space));
-        let info = global_contraction_resolution_cache_info(&StatsRule);
-        assert_eq!(info.entries(), 1);
-        assert_eq!(info.insertions(), 1);
-
-        crate::reset_global_operation_caches();
-        assert_eq!(
-            global_contraction_resolution_cache_info(&StatsRule),
-            ContractionResolutionCacheInfo {
-                entry_capacity: GLOBAL_CONTRACTION_RESOLUTION_ENTRY_CAPACITY,
-                ..ContractionResolutionCacheInfo::default()
-            }
-        );
-    }
-
-    #[test]
-    fn racing_global_publication_returns_one_canonical_resolution() {
-        let _guard = crate::test_support::CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::reset_global_operation_caches();
-        let rule = U1FusionRule;
-        let space = u1_matrix_space(&rule, 1);
-        let axes =
-            TensorContractSpec::new(&[3, 2], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3]));
-        let barrier = Arc::new(std::sync::Barrier::new(2));
-        let compile_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let returned = std::thread::scope(|scope| {
-            let mut threads = Vec::new();
-            for _ in 0..2 {
-                let barrier = Arc::clone(&barrier);
-                let compile_calls = Arc::clone(&compile_calls);
-                let space = space.clone();
-                threads.push(scope.spawn(move || {
-                    let rule = U1FusionRule;
-                    let mut cache = ContractionResolutionCache::<
-                        crate::TreeTransformBuiltinRuleCacheKey,
-                    >::default();
-                    cache
-                        .get_or_resolve(
-                            &rule,
-                            &space,
-                            &space,
-                            &space,
-                            axes,
-                            || Ok(None),
-                            || {
-                                // What: both contexts miss the global owner and compile
-                                // before either is allowed to publish.
-                                compile_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                barrier.wait();
-                                prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
-                                    &rule, &space, &space, &space, axes,
-                                )
-                                .map(Arc::new)
-                            },
-                        )
-                        .unwrap()
-                }));
-            }
-            threads
-                .into_iter()
-                .map(|thread| thread.join().unwrap())
-                .collect::<Vec<_>>()
-        });
-        assert!(same_resolution(&returned[0], &returned[1]));
-        assert_eq!(compile_calls.load(std::sync::atomic::Ordering::Relaxed), 2);
-    }
-
-    #[test]
-    fn live_context_drops_retained_resolution_after_global_reset() {
-        let _guard = crate::test_support::CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::reset_global_operation_caches();
-        let rule = U1FusionRule;
-        let space = u1_matrix_space(&rule, 1);
-        let axes =
-            TensorContractSpec::new(&[3, 2], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3]));
-        let compile_calls = std::cell::Cell::new(0);
-        let mut cache =
-            ContractionResolutionCache::<crate::TreeTransformBuiltinRuleCacheKey>::default();
-        let mut resolve = || {
-            cache
-                .get_or_resolve(
-                    &rule,
-                    &space,
-                    &space,
-                    &space,
-                    axes,
-                    || Ok(None),
-                    || {
-                        compile_calls.set(compile_calls.get() + 1);
-                        prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
-                            &rule, &space, &space, &space, axes,
-                        )
-                        .map(Arc::new)
-                    },
-                )
-                .unwrap()
-        };
-
-        let before = resolve();
-        crate::reset_global_operation_caches();
-        let after = resolve();
-        assert_eq!(compile_calls.get(), 2);
-        assert!(!same_resolution(&before, &after));
-    }
-
-    #[test]
-    fn cache_enabled_policy_change_does_not_mask_a_global_reset() {
-        let _guard = crate::test_support::CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::reset_global_operation_caches();
-        let rule = U1FusionRule;
-        let space = u1_matrix_space(&rule, 1);
-        let axes =
-            TensorContractSpec::new(&[3, 2], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3]));
-        let compile_calls = std::cell::Cell::new(0);
-        let mut cache =
-            ContractionResolutionCache::<crate::TreeTransformBuiltinRuleCacheKey>::default();
-        let resolve = |cache: &mut ContractionResolutionCache<_>| {
-            cache
-                .get_or_resolve(
-                    &rule,
-                    &space,
-                    &space,
-                    &space,
-                    axes,
-                    || Ok(None),
-                    || {
-                        compile_calls.set(compile_calls.get() + 1);
-                        prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
-                            &rule, &space, &space, &space, axes,
-                        )
-                        .map(Arc::new)
-                    },
-                )
-                .unwrap()
-        };
-
-        let before = resolve(&mut cache);
-        crate::reset_global_operation_caches();
-        cache.set_policy(OperationCachePolicy::TaskLocal);
-        // What: changing to another cache-enabled policy after reset cannot
-        // retain a resolution from the previous global generation.
-        assert_eq!(cache.len(), 0);
-        let after = resolve(&mut cache);
-        assert_eq!(compile_calls.get(), 2);
-        assert!(!same_resolution(&before, &after));
-    }
-
-    #[test]
-    fn fresh_contexts_share_the_resident_canonical_resolution() {
-        let _guard = crate::test_support::CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::reset_global_operation_caches();
-        let rule = U1FusionRule;
-        let space = u1_matrix_space(&rule, 1);
-        let axes =
-            TensorContractSpec::new(&[3, 2], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3]));
-        let mut publisher =
-            ContractionResolutionCache::<crate::TreeTransformBuiltinRuleCacheKey>::default();
-        let first = publisher
-            .get_or_resolve(
-                &rule,
-                &space,
-                &space,
-                &space,
-                axes,
-                || Ok(None),
-                || {
-                    prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
-                        &rule, &space, &space, &space, axes,
-                    )
-                    .map(Arc::new)
-                },
-            )
-            .unwrap();
-        let mut consumer =
-            ContractionResolutionCache::<crate::TreeTransformBuiltinRuleCacheKey>::default();
-        let second = consumer
-            .get_or_resolve(
-                &rule,
-                &space,
-                &space,
-                &space,
-                axes,
-                || panic!("resident resolution must skip structure compilation"),
-                || panic!("resident resolution must skip plan compilation"),
-            )
-            .unwrap();
-
-        assert!(same_resolution(&first, &second));
-    }
-
-    #[test]
-    fn non_storing_policies_bypass_global_resolution_owner() {
-        let rule = U1FusionRule;
-        let space = u1_matrix_space(&rule, 1);
-        let axes =
-            TensorContractSpec::new(&[3, 2], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3]));
-        for policy in [
-            OperationCachePolicy::NoCache,
-            OperationCachePolicy::TaskLocalLru { max_entries: 0 },
-        ] {
-            let compile_calls = std::cell::Cell::new(0);
-            let mut cache =
-                ContractionResolutionCache::<crate::TreeTransformBuiltinRuleCacheKey>::default();
-            cache.set_policy(policy);
-            for _ in 0..2 {
-                cache
-                    .get_or_resolve(
-                        &rule,
-                        &space,
-                        &space,
-                        &space,
-                        axes,
-                        || Ok(None),
-                        || {
-                            compile_calls.set(compile_calls.get() + 1);
-                            prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
-                                &rule, &space, &space, &space, axes,
-                            )
-                            .map(Arc::new)
-                        },
-                    )
-                    .unwrap();
-            }
-            // What: a policy that stores zero entries cannot admit or reuse a
-            // local or process-global resolution.
-            assert_eq!(compile_calls.get(), 2);
-            assert_eq!(cache.len(), 0);
-        }
-    }
-
-    #[test]
-    fn dynamic_tree_cache_separates_distinct_operand_content() {
-        let _guard = crate::test_support::CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::reset_global_operation_caches();
-        let rule = Arc::new(U1FusionRule);
-        let axes =
-            TensorContractSpec::new(&[3, 2], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3]));
-        let chi1 = u1_matrix_space(rule.as_ref(), 1);
-        let chi3 = u1_matrix_space(rule.as_ref(), 3);
-        let mut cache =
-            ContractionResolutionCache::<crate::TreeTransformBuiltinRuleCacheKey>::default();
-        let compile_calls = std::cell::Cell::new(0);
-
-        for space in [&chi1, &chi3] {
-            let resolution = cache
-                .get_or_resolve(
-                    rule.as_ref(),
-                    space,
-                    space,
-                    space,
-                    axes,
-                    || Ok(None),
-                    || {
-                        compile_calls.set(compile_calls.get() + 1);
-                        prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
-                            rule.as_ref(),
-                            space,
-                            space,
-                            space,
-                            axes,
-                        )
-                        .map(Arc::new)
-                    },
-                )
-                .unwrap();
-            assert!(matches!(resolution, Resolution::DynamicTree(_)));
-        }
-
-        assert_ne!(
-            FastSpaceKey::from_space(&chi1),
-            FastSpaceKey::from_space(&chi3)
-        );
-        assert_ne!(
-            FullSpaceKey::from_space(&chi1).unwrap(),
-            FullSpaceKey::from_space(&chi3).unwrap()
-        );
-        assert_eq!(compile_calls.get(), 2);
-        assert_eq!(cache.len(), 2);
-        assert_eq!(cache.stats().misses, 2);
-
-        let repeated = cache
-            .get_or_resolve(
-                rule.as_ref(),
-                &chi1,
-                &chi1,
-                &chi1,
-                axes,
-                || panic!("cached DynamicTree must skip structure compilation"),
-                || panic!("cached DynamicTree must skip plan compilation"),
-            )
-            .unwrap();
-        assert!(matches!(repeated, Resolution::DynamicTree(_)));
-        assert_eq!(cache.stats().hits, 1);
     }
 }

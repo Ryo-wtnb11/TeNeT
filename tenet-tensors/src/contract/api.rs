@@ -13,21 +13,15 @@ use crate::{
 use tenet_operations::{OutputAxisOrder, TensorContractSpec};
 
 use super::backend::{TensorContractBackend, TensorContractWorkspace};
-use super::dynamic::{
-    tensorcontract_fusion_dynamic_plan_into_with,
-    tensorcontract_fusion_dynamic_transforms_into_with,
-};
+use super::dynamic::tensorcontract_fusion_dynamic_plan_into_with;
 use super::dynamic_space::DynamicFusionMapSpace;
 use super::fusion::{
     prepare_tensorcontract_fusion_plan, prepare_tensorcontract_fusion_plan_dyn_raw_canonical,
     tensorcontract_fusion_structure, FusionContractPlan,
     EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST, SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
 };
-use super::fusion_block::{
-    compile_fusion_block_contract_plan_validated, is_core_form_fusion_block_contract,
-    tensorcontract_core_fusion_blocks_with_plan_into_raw, validate_fusion_contract_rule,
-};
-use super::resolution::rhs_contract_requires_twist;
+use super::fusion_block::tensorcontract_core_fusion_blocks_with_plan_into_raw;
+use super::resolution::{compile_resolution, Resolution};
 use super::structure::{tensorcontract_structure, TensorContractStructure};
 
 pub fn tensorcontract_into<
@@ -404,6 +398,9 @@ where
     tensorcontract_fusion_prepared_into(rule, &plan, dst, lhs_core, rhs_core, lhs, rhs, alpha, beta)
 }
 
+/// Executes a caller-supplied source-transform plan. The core block plan is
+/// compiled eagerly on each call; complete compile-once replay is provided by
+/// [`crate::PreparedTensorContractFusion`].
 pub fn tensorcontract_fusion_prepared_into<
     R,
     D,
@@ -468,6 +465,9 @@ where
     )
 }
 
+/// Executes a caller-supplied source/output-transform plan. The core block
+/// plan is compiled eagerly on each call; complete compile-once replay is
+/// provided by [`crate::PreparedTensorContractFusion`].
 pub fn tensorcontract_fusion_prepared_into_core_dst<
     R,
     D,
@@ -539,6 +539,8 @@ where
     )
 }
 
+/// Backend-explicit plan-only contraction. The supplied plan does not own the
+/// core block plan, which is compiled eagerly on each call.
 pub fn tensorcontract_fusion_prepared_into_with<
     BT,
     BC,
@@ -646,6 +648,8 @@ where
     )
 }
 
+/// Backend-explicit plan-only contraction with output transform. The supplied
+/// plan does not own the core block plan, which is compiled eagerly per call.
 pub fn tensorcontract_fusion_prepared_into_core_dst_with<
     BT,
     BC,
@@ -878,49 +882,67 @@ where
     let dst_dynamic = DynamicFusionMapSpace::from_typed(dst_fusion);
     let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs_fusion);
     let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_fusion);
-    validate_fusion_contract_rule(rule, &dst_dynamic, &lhs_dynamic, &rhs_dynamic)?;
-    if !axes.lhs_conjugate()
-        && !axes.rhs_conjugate()
-        && is_core_form_fusion_block_contract(rule, &dst_dynamic, &lhs_dynamic, &rhs_dynamic, axes)?
-        && !rhs_contract_requires_twist(rule, &rhs_dynamic, axes)?
-    {
-        let plan = compile_fusion_block_contract_plan_validated(
-            rule,
-            &dst_dynamic,
-            &lhs_dynamic,
-            &rhs_dynamic,
-            axes,
-        )?;
-        if plan.is_fully_direct() {
-            return tensorcontract_core_fusion_blocks_with_plan_into_raw(
-                &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                    backend.transpose_backend(),
-                ),
-                backend,
-                workspace,
-                &plan,
+    let resolution = compile_resolution(
+        rule,
+        &dst_dynamic,
+        &lhs_dynamic,
+        &rhs_dynamic,
+        axes,
+        || match tensorcontract_fusion_structure(rule, dst, lhs, rhs, axes) {
+            Ok(structure) => Ok(Some(std::sync::Arc::new(structure))),
+            Err(OperationError::UnsupportedTensorContractScope {
+                message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+            }) => Ok(None),
+            Err(err) => Err(err),
+        },
+        || {
+            prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
+                rule,
                 &dst_dynamic,
-                dst.data_mut(),
                 &lhs_dynamic,
-                lhs.data(),
                 &rhs_dynamic,
-                rhs.data(),
-                alpha,
-                beta,
-            );
-        }
-    }
-
-    match tensorcontract_fusion_structure(rule, dst, lhs, rhs, axes) {
-        Ok(structure) => {
+                axes,
+            )
+            .map(std::sync::Arc::new)
+        },
+    )?;
+    match resolution {
+        Resolution::Core(plan) => tensorcontract_core_fusion_blocks_with_plan_into_raw(
+            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
+                backend.transpose_backend(),
+            ),
+            backend,
+            workspace,
+            &plan,
+            &dst_dynamic,
+            dst.data_mut(),
+            &lhs_dynamic,
+            lhs.data(),
+            &rhs_dynamic,
+            rhs.data(),
+            alpha,
+            beta,
+        ),
+        Resolution::Structure(structure) => {
             tensorcontract_execute_with(backend, workspace, &structure, dst, lhs, rhs, alpha, beta)
         }
-        Err(OperationError::UnsupportedTensorContractScope {
-            message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
-        }) => tensorcontract_fusion_dynamic_transforms_into_with(
-            backend, workspace, rule, dst, lhs, rhs, axes, alpha, beta,
-        ),
-        Err(err) => Err(err),
+        Resolution::DynamicTree(plan) => {
+            let mut tree_backend = DenseTreeTransformOperations::default_executor();
+            let mut tree_workspace = TreeTransformWorkspace::default();
+            tensorcontract_fusion_dynamic_plan_into_with(
+                &mut tree_backend,
+                &mut tree_workspace,
+                backend,
+                workspace,
+                rule,
+                &plan,
+                dst,
+                lhs,
+                rhs,
+                alpha,
+                beta,
+            )
+        }
     }
 }
 
@@ -976,41 +998,48 @@ where
     let dst_dynamic = DynamicFusionMapSpace::from_typed(dst_fusion);
     let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs_fusion);
     let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_fusion);
-    validate_fusion_contract_rule(rule, &dst_dynamic, &lhs_dynamic, &rhs_dynamic)?;
-    if !axes.lhs_conjugate()
-        && !axes.rhs_conjugate()
-        && is_core_form_fusion_block_contract(rule, &dst_dynamic, &lhs_dynamic, &rhs_dynamic, axes)?
-        && !rhs_contract_requires_twist(rule, &rhs_dynamic, axes)?
-    {
-        let plan = compile_fusion_block_contract_plan_validated(
-            rule,
-            &dst_dynamic,
-            &lhs_dynamic,
-            &rhs_dynamic,
-            axes,
-        )?;
-        if plan.is_fully_direct() {
-            return tensorcontract_core_fusion_blocks_with_plan_into_raw(
-                &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                    contract_backend.transpose_backend(),
-                ),
-                contract_backend,
-                contract_workspace,
-                &plan,
+    let resolution = compile_resolution(
+        rule,
+        &dst_dynamic,
+        &lhs_dynamic,
+        &rhs_dynamic,
+        axes,
+        || match tensorcontract_fusion_structure(rule, dst, lhs, rhs, axes) {
+            Ok(structure) => Ok(Some(std::sync::Arc::new(structure))),
+            Err(OperationError::UnsupportedTensorContractScope {
+                message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+            }) => Ok(None),
+            Err(err) => Err(err),
+        },
+        || {
+            prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
+                rule,
                 &dst_dynamic,
-                dst.data_mut(),
                 &lhs_dynamic,
-                lhs.data(),
                 &rhs_dynamic,
-                rhs.data(),
-                alpha,
-                beta,
-            );
-        }
-    }
-
-    match tensorcontract_fusion_structure(rule, dst, lhs, rhs, axes) {
-        Ok(structure) => tensorcontract_execute_with(
+                axes,
+            )
+            .map(std::sync::Arc::new)
+        },
+    )?;
+    match resolution {
+        Resolution::Core(plan) => tensorcontract_core_fusion_blocks_with_plan_into_raw(
+            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
+                contract_backend.transpose_backend(),
+            ),
+            contract_backend,
+            contract_workspace,
+            &plan,
+            &dst_dynamic,
+            dst.data_mut(),
+            &lhs_dynamic,
+            lhs.data(),
+            &rhs_dynamic,
+            rhs.data(),
+            alpha,
+            beta,
+        ),
+        Resolution::Structure(structure) => tensorcontract_execute_with(
             contract_backend,
             contract_workspace,
             &structure,
@@ -1020,31 +1049,19 @@ where
             alpha,
             beta,
         ),
-        Err(OperationError::UnsupportedTensorContractScope {
-            message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
-        }) => {
-            let plan = prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
-                rule,
-                &dst_dynamic,
-                &lhs_dynamic,
-                &rhs_dynamic,
-                axes,
-            )?;
-            tensorcontract_fusion_dynamic_plan_into_with(
-                tree_backend,
-                tree_workspace,
-                contract_backend,
-                contract_workspace,
-                rule,
-                &plan,
-                dst,
-                lhs,
-                rhs,
-                alpha,
-                beta,
-            )
-        }
-        Err(err) => Err(err),
+        Resolution::DynamicTree(plan) => tensorcontract_fusion_dynamic_plan_into_with(
+            tree_backend,
+            tree_workspace,
+            contract_backend,
+            contract_workspace,
+            rule,
+            &plan,
+            dst,
+            lhs,
+            rhs,
+            alpha,
+            beta,
+        ),
     }
 }
 

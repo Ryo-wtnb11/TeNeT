@@ -21,7 +21,8 @@ pub struct TensorContractFusionProfile {
     pub dense_block_specs: Duration,
     pub dense_structure_lookup: Duration,
     pub dense_contract: Duration,
-    /// Execution-artifact cache lookup and publication, excluding compilation.
+    /// Reserved for source compatibility; ordinary contraction no longer
+    /// looks up or publishes complete execution artifacts.
     pub prepared_plan: Duration,
     pub source_space_lookup: Duration,
     pub lhs_scratch_prepare: Duration,
@@ -30,6 +31,8 @@ pub struct TensorContractFusionProfile {
     pub rhs_transform: Duration,
     pub core_dst_space_lookup: Duration,
     pub dst_scratch_prepare: Duration,
+    /// Eager route and fusion-block plan compilation. The legacy field name is
+    /// retained to avoid breaking profile consumers.
     pub fusion_block_plan_lookup: Duration,
     pub core_contract_total: Duration,
     pub core_validate: Duration,

@@ -5853,7 +5853,6 @@ fn inv_rejects_a_genuinely_singular_sector_without_an_output() {
     assert_eq!(context.tree_context().cache().plan_len(), 0);
     assert_eq!(context.tree_context().cache().structure_len(), 0);
     assert_eq!(context.dynamic_fusion_space_cache_len(), 0);
-    assert_eq!(context.contraction_resolution_cache_len(), 0);
 }
 
 #[test]
@@ -5882,7 +5881,6 @@ fn inv_rejects_nonfinite_backend_spectra_before_recomposition() {
         assert_eq!(context.tree_context().cache().plan_len(), 0);
         assert_eq!(context.tree_context().cache().structure_len(), 0);
         assert_eq!(context.dynamic_fusion_space_cache_len(), 0);
-        assert_eq!(context.contraction_resolution_cache_len(), 0);
     }
 }
 

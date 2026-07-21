@@ -15,10 +15,11 @@ use crate::lowering::{
 };
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::build_tree_pair_transform_group_plan;
+#[cfg(test)]
+use crate::DenseTreeTransformOperations;
 use crate::{
-    DenseRecouplingScalar, DenseTreeTransformOperations, OperationError,
-    RecouplingCoefficientAction, TreeTransformBackend, TreeTransformOperation,
-    TreeTransformRuleCacheKey, TreeTransformStructure, TreeTransformWorkspace,
+    DenseRecouplingScalar, OperationError, RecouplingCoefficientAction, TreeTransformBackend,
+    TreeTransformOperation, TreeTransformRuleCacheKey, TreeTransformStructure,
 };
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
 use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
@@ -27,10 +28,7 @@ use super::backend::TensorContractBackend;
 use super::dynamic_space::{encoded_layout_primer, DynamicFusionMapSpace, LayoutKeyBuilder};
 #[cfg(test)]
 use super::fusion::prepare_tensorcontract_fusion_plan;
-use super::fusion::{
-    prepare_tensorcontract_fusion_plan_dyn_raw_canonical, FusionContractOrientation,
-    FusionContractPlan,
-};
+use super::fusion::{FusionContractOrientation, FusionContractPlan};
 use super::fusion_block::{
     tensorcontract_core_fusion_blocks_into_raw, FusionBlockContractWorkspace,
 };
@@ -229,74 +227,6 @@ where
         return Ok(false);
     }
     Ok(!rhs_contract_requires_twist(rule, core_space, core_axes)?)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn tensorcontract_fusion_dynamic_transforms_into_with<
-    B,
-    R,
-    D,
-    const DST_NOUT: usize,
-    const DST_NIN: usize,
-    const LHS_NOUT: usize,
-    const LHS_NIN: usize,
-    const RHS_NOUT: usize,
-    const RHS_NIN: usize,
-    SDst,
-    SLhs,
-    SRhs,
-    DDst,
-    DLhs,
-    DRhs,
->(
-    backend: &mut B,
-    workspace: &mut B::Workspace,
-    rule: &R,
-    dst: &mut TensorMap<D, DST_NOUT, DST_NIN, SDst, DDst>,
-    lhs: &TensorMap<D, LHS_NOUT, LHS_NIN, SLhs, DLhs>,
-    rhs: &TensorMap<D, RHS_NOUT, RHS_NIN, SRhs, DRhs>,
-    axes: TensorContractSpec<'_>,
-    alpha: D,
-    beta: D,
-) -> Result<(), OperationError>
-where
-    B: TensorContractBackend<D, f64>,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
-    DDst: HostWritableStorage<D>,
-    DLhs: HostReadableStorage<D>,
-    DRhs: HostReadableStorage<D>,
-{
-    let dst_space = DynamicFusionMapSpace::from_typed(
-        dst.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-    );
-    let lhs_space = DynamicFusionMapSpace::from_typed(
-        lhs.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-    );
-    let rhs_space = DynamicFusionMapSpace::from_typed(
-        rhs.fusion_space()
-            .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
-    );
-    let plan = prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
-        rule, &dst_space, &lhs_space, &rhs_space, axes,
-    )?;
-    let mut tree_backend = DenseTreeTransformOperations::default_executor();
-    let mut tree_workspace = TreeTransformWorkspace::default();
-    tensorcontract_fusion_dynamic_plan_into_with(
-        &mut tree_backend,
-        &mut tree_workspace,
-        backend,
-        workspace,
-        rule,
-        &plan,
-        dst,
-        lhs,
-        rhs,
-        alpha,
-        beta,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -554,7 +484,6 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_context<
     contract_backend: &mut BC,
     contract_workspace: &mut BC::Workspace,
     dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
-    fusion_block_cache: &mut super::resolution::ContractionResolutionCache<RuleKey>,
     fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
     scratch: &mut DynamicFusionScratchWorkspace<D>,
     rule: &R,
@@ -595,7 +524,6 @@ where
         contract_backend,
         contract_workspace,
         dynamic_space_cache,
-        fusion_block_cache,
         fusion_block_workspace,
         scratch,
         rule,
@@ -646,7 +574,6 @@ where
     let mut contract_backend = DenseTreeTransformOperations::default();
     let mut contract_workspace = super::backend::TensorContractWorkspace::default();
     let mut dynamic_space_cache = DynamicFusionSpaceCache::default();
-    let mut fusion_block_cache = super::resolution::ContractionResolutionCache::default();
     let mut fusion_block_workspace = FusionBlockContractWorkspace::default();
     let mut scratch = DynamicFusionScratchWorkspace::default();
     tensorcontract_fusion_dynamic_plan_into_context(
@@ -654,7 +581,6 @@ where
         &mut contract_backend,
         &mut contract_workspace,
         &mut dynamic_space_cache,
-        &mut fusion_block_cache,
         &mut fusion_block_workspace,
         &mut scratch,
         rule,
@@ -697,7 +623,6 @@ where
     let mut contract_backend = DenseTreeTransformOperations::default();
     let mut contract_workspace = super::backend::TensorContractWorkspace::default();
     let mut dynamic_space_cache = DynamicFusionSpaceCache::default();
-    let mut fusion_block_cache = super::resolution::ContractionResolutionCache::default();
     let mut fusion_block_workspace = FusionBlockContractWorkspace::default();
     let dst_space = DynamicFusionMapSpace::from_typed(
         ordinary_dst
@@ -715,7 +640,6 @@ where
     let artifact = compile_dynamic_tree_execution_artifact::<_, _, _, _, false>(
         &mut tree_context,
         &mut dynamic_space_cache,
-        &mut fusion_block_cache,
         rule,
         encoded_layout_primer::<R>,
         plan,
@@ -789,7 +713,6 @@ where
     let mut contract_backend = DenseTreeTransformOperations::default();
     let mut contract_workspace = super::backend::TensorContractWorkspace::default();
     let mut dynamic_space_cache = DynamicFusionSpaceCache::default();
-    let mut fusion_block_cache = super::resolution::ContractionResolutionCache::default();
     let mut fusion_block_workspace = FusionBlockContractWorkspace::default();
     let mut scratch = DynamicFusionScratchWorkspace::default();
     tensorcontract_fusion_dynamic_plan_dyn_into_context(
@@ -797,7 +720,6 @@ where
         &mut contract_backend,
         &mut contract_workspace,
         &mut dynamic_space_cache,
-        &mut fusion_block_cache,
         &mut fusion_block_workspace,
         &mut scratch,
         rule,
@@ -829,7 +751,6 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_dyn_into_context<RuleKey, BT, B
     contract_backend: &mut BC,
     contract_workspace: &mut BC::Workspace,
     dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
-    fusion_block_cache: &mut super::resolution::ContractionResolutionCache<RuleKey>,
     fusion_block_workspace: &mut FusionBlockContractWorkspace<D>,
     scratch: &mut DynamicFusionScratchWorkspace<D>,
     rule: &R,
@@ -859,7 +780,6 @@ where
     let artifact = compile_dynamic_tree_execution_artifact::<_, _, _, _, false>(
         tree_context,
         dynamic_space_cache,
-        fusion_block_cache,
         rule,
         layout_primer,
         plan,
@@ -904,7 +824,6 @@ pub(crate) struct DynamicTreeExecutionArtifact {
 pub(crate) fn compile_dynamic_tree_execution_artifact<RuleKey, BT, R, D, const PROFILED: bool>(
     tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
     dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
-    fusion_block_cache: &mut super::resolution::ContractionResolutionCache<RuleKey>,
     rule: &R,
     layout_primer: LayoutKeyBuilder<R>,
     plan: &FusionContractPlan,
@@ -1056,7 +975,7 @@ where
         .as_ref()
         .map_or(dst_space, |entry| entry.space.as_ref());
     let block_plan_start = PROFILED.then(std::time::Instant::now);
-    let block_plan = fusion_block_cache.get_or_compile_core_plan(
+    let block_plan = super::resolution::compile_core_plan(
         rule,
         block_dst_space,
         core_left_space,
@@ -1492,7 +1411,6 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_into_storage_context<
     contract_backend: &mut BC,
     contract_workspace: &mut BC::Workspace,
     dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
-    fusion_block_cache: &mut super::resolution::ContractionResolutionCache<RuleKey>,
     fusion_block_workspace: &mut StorageFusionBlockContractWorkspace<
         DLhs::Similar,
         DRhs::Similar,
@@ -1607,7 +1525,7 @@ where
             dst.fusion_space()
                 .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
         );
-        let block_plan = fusion_block_cache.get_or_compile_core_plan(
+        let block_plan = super::resolution::compile_core_plan(
             rule,
             &dst_space,
             &lhs_space,
@@ -1657,7 +1575,7 @@ where
         encoded_layout_primer::<R>,
     )?;
     let core_dst_space = core_dst.space.clone();
-    let block_plan = fusion_block_cache.get_or_compile_core_plan(
+    let block_plan = super::resolution::compile_core_plan(
         rule,
         &core_dst_space,
         &lhs_space,
@@ -1744,9 +1662,6 @@ impl DynamicFusionSpaceCacheStats {
 
 #[derive(Clone, Debug)]
 pub(crate) struct DynamicFusionSpaceCache<RuleKey> {
-    last_execution_artifact: Option<DynamicTreeExecutionArtifactLastEntry>,
-    execution_artifacts:
-        FxHashMap<DynamicTreeExecutionArtifactKey, DynamicTreeExecutionArtifactCacheEntry>,
     last_transformed_sources: Vec<DynamicFusionTransformedSourceLastEntry<RuleKey>>,
     fast_transformed_sources: FxHashMap<
         DynamicFusionTransformedSourceFastKey<RuleKey>,
@@ -1777,53 +1692,9 @@ struct DynamicFusionCoreDstEntry {
     output_transform_structure: Arc<TreeTransformStructure<f64>>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-struct DynamicTreeExecutionArtifactKey {
-    plan: usize,
-    dst_structure: usize,
-    lhs_structure: usize,
-    lhs_storage_structure: Option<usize>,
-    rhs_structure: usize,
-    rhs_storage_structure: Option<usize>,
-}
-
-impl DynamicTreeExecutionArtifactKey {
-    fn new(
-        plan: &Arc<FusionContractPlan>,
-        dst_structure: &Arc<BlockStructure>,
-        lhs_structure: &Arc<BlockStructure>,
-        lhs_storage_space: Option<&DynamicFusionMapSpace>,
-        rhs_structure: &Arc<BlockStructure>,
-        rhs_storage_space: Option<&DynamicFusionMapSpace>,
-    ) -> Self {
-        Self {
-            plan: Arc::as_ptr(plan) as usize,
-            dst_structure: dst_structure.content_id(),
-            lhs_structure: lhs_structure.content_id(),
-            lhs_storage_structure: lhs_storage_space.map(|space| space.structure().content_id()),
-            rhs_structure: rhs_structure.content_id(),
-            rhs_storage_structure: rhs_storage_space.map(|space| space.structure().content_id()),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct DynamicTreeExecutionArtifactCacheEntry {
-    _plan: Arc<FusionContractPlan>,
-    artifact: Arc<DynamicTreeExecutionArtifact>,
-}
-
-#[derive(Clone, Debug)]
-struct DynamicTreeExecutionArtifactLastEntry {
-    key: DynamicTreeExecutionArtifactKey,
-    entry: DynamicTreeExecutionArtifactCacheEntry,
-}
-
 impl<RuleKey> Default for DynamicFusionSpaceCache<RuleKey> {
     fn default() -> Self {
         Self {
-            last_execution_artifact: None,
-            execution_artifacts: FxHashMap::default(),
             last_transformed_sources: Vec::new(),
             fast_transformed_sources: FxHashMap::default(),
             transformed_sources: FxHashMap::default(),
@@ -1937,7 +1808,7 @@ where
 {
     #[inline]
     pub(crate) fn len(&self) -> usize {
-        self.execution_artifacts.len() + self.transformed_sources.len() + self.core_dsts.len()
+        self.transformed_sources.len() + self.core_dsts.len()
     }
 
     #[inline]
@@ -1949,7 +1820,6 @@ where
         self.policy = policy;
         self.clear_fast_entries();
         if !policy.stores_entries() {
-            self.execution_artifacts.clear();
             self.transformed_sources.clear();
             self.lru_order.clear();
             self.core_dsts.clear();
@@ -1960,7 +1830,6 @@ where
     }
 
     fn clear_fast_entries(&mut self) {
-        self.last_execution_artifact = None;
         self.last_transformed_sources.clear();
         self.fast_transformed_sources.clear();
         self.last_core_dst = None;
@@ -1969,12 +1838,6 @@ where
 
     fn rebuild_lru_order(&mut self) {
         self.lru_order.clear();
-        self.lru_order.extend(
-            self.execution_artifacts
-                .keys()
-                .copied()
-                .map(DynamicFusionSpaceCacheEntryKey::ExecutionArtifact),
-        );
         self.lru_order.extend(
             self.transformed_sources
                 .keys()
@@ -2060,7 +1923,6 @@ where
     }
 
     fn enforce_lru_limit(&mut self, max_entries: usize) {
-        let mut evicted_execution_artifact = false;
         let mut evicted_transformed_source = false;
         let mut evicted_core_dst = false;
         while self.len() > max_entries {
@@ -2068,9 +1930,6 @@ where
                 break;
             };
             match oldest {
-                DynamicFusionSpaceCacheEntryKey::ExecutionArtifact(key) => {
-                    evicted_execution_artifact |= self.execution_artifacts.remove(&key).is_some();
-                }
                 DynamicFusionSpaceCacheEntryKey::TransformedSource(key) => {
                     evicted_transformed_source |= self.transformed_sources.remove(&key).is_some();
                 }
@@ -2079,9 +1938,6 @@ where
                 }
             }
         }
-        if evicted_execution_artifact {
-            self.last_execution_artifact = None;
-        }
         if evicted_transformed_source {
             self.last_transformed_sources.clear();
             self.fast_transformed_sources.clear();
@@ -2089,86 +1945,6 @@ where
         if evicted_core_dst {
             self.last_core_dst = None;
             self.fast_core_dsts.clear();
-        }
-    }
-
-    pub(crate) fn get_execution_artifact(
-        &mut self,
-        plan: &Arc<FusionContractPlan>,
-        dst_structure: &Arc<BlockStructure>,
-        lhs_structure: &Arc<BlockStructure>,
-        lhs_storage_space: Option<&DynamicFusionMapSpace>,
-        rhs_structure: &Arc<BlockStructure>,
-        rhs_storage_space: Option<&DynamicFusionMapSpace>,
-    ) -> Option<Arc<DynamicTreeExecutionArtifact>> {
-        if !self.policy.stores_entries() {
-            return None;
-        }
-        let key = DynamicTreeExecutionArtifactKey::new(
-            plan,
-            dst_structure,
-            lhs_structure,
-            lhs_storage_space,
-            rhs_structure,
-            rhs_storage_space,
-        );
-        if let Some(last) = &self.last_execution_artifact {
-            if last.key == key {
-                self.stats.hits += 1;
-                self.stats.fast_hits += 1;
-                return Some(Arc::clone(&last.entry.artifact));
-            }
-        }
-        let entry = self.execution_artifacts.get(&key)?.clone();
-        self.stats.hits += 1;
-        if self.policy.max_entries().is_some() {
-            touch_lru_key(
-                &mut self.lru_order,
-                &DynamicFusionSpaceCacheEntryKey::ExecutionArtifact(key),
-            );
-        }
-        self.last_execution_artifact = Some(DynamicTreeExecutionArtifactLastEntry {
-            key,
-            entry: entry.clone(),
-        });
-        Some(entry.artifact)
-    }
-
-    pub(crate) fn insert_execution_artifact(
-        &mut self,
-        plan: Arc<FusionContractPlan>,
-        dst_structure: &Arc<BlockStructure>,
-        lhs_structure: &Arc<BlockStructure>,
-        lhs_storage_space: Option<&DynamicFusionMapSpace>,
-        rhs_structure: &Arc<BlockStructure>,
-        rhs_storage_space: Option<&DynamicFusionMapSpace>,
-        artifact: Arc<DynamicTreeExecutionArtifact>,
-    ) {
-        if !self.policy.stores_entries() {
-            return;
-        }
-        let key = DynamicTreeExecutionArtifactKey::new(
-            &plan,
-            dst_structure,
-            lhs_structure,
-            lhs_storage_space,
-            rhs_structure,
-            rhs_storage_space,
-        );
-        let entry = DynamicTreeExecutionArtifactCacheEntry {
-            _plan: plan,
-            artifact,
-        };
-        self.execution_artifacts.insert(key, entry.clone());
-        self.last_execution_artifact = Some(DynamicTreeExecutionArtifactLastEntry { key, entry });
-        if self.policy.max_entries().is_some() {
-            touch_lru_key(
-                &mut self.lru_order,
-                &DynamicFusionSpaceCacheEntryKey::ExecutionArtifact(key),
-            );
-        }
-        if let Some(max_entries) = self.policy.max_entries() {
-            self.enforce_lru_limit(max_entries);
         }
     }
 
@@ -2639,7 +2415,6 @@ where
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum DynamicFusionSpaceCacheEntryKey<RuleKey> {
-    ExecutionArtifact(DynamicTreeExecutionArtifactKey),
     TransformedSource(DynamicFusionTransformedSourceSpaceKey<RuleKey>),
     CoreDst(DynamicFusionCoreDstSpaceKey<RuleKey>),
 }
@@ -3555,8 +3330,6 @@ mod tests {
         let mut contract_backend = DenseTreeTransformOperations::default();
         let mut contract_workspace = TensorContractWorkspace::default();
         let mut dynamic_space_cache = DynamicFusionSpaceCache::default();
-        let mut fusion_block_cache =
-            super::super::resolution::ContractionResolutionCache::default();
         let mut fusion_block_workspace = StorageFusionBlockContractWorkspace::<
             TrackingScratch<f64>,
             TrackingScratch<f64>,
@@ -3577,7 +3350,6 @@ mod tests {
                 &mut contract_backend,
                 &mut contract_workspace,
                 &mut dynamic_space_cache,
-                &mut fusion_block_cache,
                 &mut fusion_block_workspace,
                 &mut scratch,
                 &rule,
@@ -3709,8 +3481,6 @@ mod tests {
         let mut contract_backend = DenseTreeTransformOperations::default();
         let mut contract_workspace = TensorContractWorkspace::default();
         let mut dynamic_space_cache = DynamicFusionSpaceCache::default();
-        let mut fusion_block_cache =
-            super::super::resolution::ContractionResolutionCache::default();
         let mut fusion_block_workspace = StorageFusionBlockContractWorkspace::<
             TrackingScratch<f64>,
             TrackingScratch<f64>,
@@ -3729,7 +3499,6 @@ mod tests {
                 &mut contract_backend,
                 &mut contract_workspace,
                 &mut dynamic_space_cache,
-                &mut fusion_block_cache,
                 &mut fusion_block_workspace,
                 &mut scratch,
                 &rule,
@@ -3865,8 +3634,6 @@ mod tests {
         let mut contract_backend = DenseTreeTransformOperations::default();
         let mut contract_workspace = TensorContractWorkspace::default();
         let mut dynamic_space_cache = DynamicFusionSpaceCache::default();
-        let mut fusion_block_cache =
-            super::super::resolution::ContractionResolutionCache::default();
         let mut fusion_block_workspace = StorageFusionBlockContractWorkspace::<
             TrackingScratch<f64>,
             TrackingScratch<f64>,
@@ -3883,7 +3650,6 @@ mod tests {
             &mut contract_backend,
             &mut contract_workspace,
             &mut dynamic_space_cache,
-            &mut fusion_block_cache,
             &mut fusion_block_workspace,
             &mut scratch,
             &rule,
@@ -3939,8 +3705,6 @@ mod tests {
         let mut contract_backend = DenseTreeTransformOperations::default();
         let mut contract_workspace = TensorContractWorkspace::default();
         let mut dynamic_space_cache = DynamicFusionSpaceCache::default();
-        let mut fusion_block_cache =
-            super::super::resolution::ContractionResolutionCache::default();
         let mut fusion_block_workspace = FusionBlockContractWorkspace::<f64>::default();
         let mut scratch = DynamicFusionScratchWorkspace::<f64>::default();
         tensorcontract_fusion_dynamic_plan_into_context(
@@ -3948,7 +3712,6 @@ mod tests {
             &mut contract_backend,
             &mut contract_workspace,
             &mut dynamic_space_cache,
-            &mut fusion_block_cache,
             &mut fusion_block_workspace,
             &mut scratch,
             rule,

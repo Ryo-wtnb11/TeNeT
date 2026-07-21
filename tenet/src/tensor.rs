@@ -5323,8 +5323,8 @@ impl Tensor {
         self.with_bound(dst_bound, data)
     }
 
-    /// Device contraction: same plan compilation and resolution cache as the
-    /// host path (spaces are host-side metadata), replayed directly on the
+    /// Device contraction: same eager route compilation as the host path
+    /// (spaces are host-side metadata), replayed directly on the
     /// device buffers via one offset GEMM per coupled-sector matrix.
     /// Phase-1 scope: only the canonical fully-direct route (exactly
     /// `contract`'s `alpha = 1`, `beta = 0` semantics); contractions that

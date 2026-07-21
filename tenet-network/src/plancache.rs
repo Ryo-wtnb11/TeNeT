@@ -13,8 +13,8 @@
 //! reuse the path regardless of rank" design (cotengra's reusable
 //! `ContractionTree`, `@tensoropt`'s compile-time bake) — so the
 //! (χ-dependent) order search is paid at most once per topology, not per χ.
-//! Eviction is LRU (same mechanism as the resolution cache in
-//! `tenet-tensors`).
+//! Eviction is LRU; ordinary pairwise contraction routes in `tenet-tensors`
+//! are resolved eagerly instead.
 //!
 //! Storage is per-[`Runtime`]: the configuration value types live in
 //! `tenet::plancache` (set them on `Runtime::builder()` or with

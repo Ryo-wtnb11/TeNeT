@@ -110,9 +110,6 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
         )
         .unwrap();
     assert_eq!(context_dst.data(), &[50.0, 102.0]);
-    assert!(context.contraction_resolution_cache_len() >= 1);
-    assert_eq!(context.contraction_resolution_cache_hits(), 0);
-    assert!(context.contraction_resolution_cache_misses() >= 1);
 
     context_dst.data_mut().copy_from_slice(&[10.0, 20.0]);
     context
@@ -127,9 +124,6 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
         )
         .unwrap();
     assert_eq!(context_dst.data(), &[50.0, 102.0]);
-    assert!(context.contraction_resolution_cache_len() >= 1);
-    assert!(context.contraction_resolution_cache_hits() >= 1);
-    assert!(context.contraction_resolution_cache_misses() >= 1);
 
     context_dst.data_mut().copy_from_slice(&[10.0, 20.0]);
     let mut profile = TensorContractFusionProfile::default();
@@ -146,7 +140,6 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
         )
         .unwrap();
     assert_eq!(context_dst.data(), &[50.0, 102.0]);
-    assert!(context.contraction_resolution_cache_len() >= 1);
     assert_eq!(profile.route, TensorContractFusionRoute::CoreFusionBlocks);
     assert_eq!(profile.lhs_transform_calls, 0);
     assert_eq!(profile.rhs_transform_calls, 0);
@@ -235,7 +228,6 @@ fn tensorcontract_fusion_context_accepts_custom_host_storage() {
         .unwrap();
 
     assert_eq!(dst.data(), &[50.0, 102.0]);
-    assert!(context.contraction_resolution_cache_len() >= 1);
 }
 
 #[test]
@@ -743,20 +735,21 @@ fn paired_axis_selector_scores_once_and_publishes_only_winner_replay() {
     context
         .tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, 1.0, 0.0)
         .unwrap();
-    // What: cold resolution scores four candidates but publishes one two-transform artifact.
+    // What: eager resolution scores four candidates and retains only reusable
+    // transform/core-destination components.
     assert_eq!(crate::contract::candidate_score_calls(), 4);
     assert_eq!(context.tree_context().cache().plan_len(), 2);
     assert_eq!(context.tree_context().cache().structure_len(), 2);
-    assert_eq!(context.dynamic_fusion_space_cache_len(), 3);
+    assert_eq!(context.dynamic_fusion_space_cache_len(), 2);
     let cache_len = context.dynamic_fusion_space_cache_len();
 
     context
         .tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, 1.0, 0.0)
         .unwrap();
-    // What: a warm resolution reuses the winner without rescoring or publishing loser state.
-    assert_eq!(crate::contract::candidate_score_calls(), 4);
+    // What: an ordinary repeat resolves eagerly while component caches do not
+    // accumulate another complete execution artifact.
+    assert_eq!(crate::contract::candidate_score_calls(), 8);
     assert_eq!(context.dynamic_fusion_space_cache_len(), cache_len);
-    assert!(context.contraction_resolution_cache_hits() >= 1);
 }
 
 #[test]
@@ -1112,12 +1105,10 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
         }
         assert_eq!(storage_dst, vec![0.0; initial.len()]);
         assert_oracle(owned_dst.data());
-        assert_eq!(context.contraction_resolution_cache_len(), 2);
         assert_eq!(
             context.last_resolution_orientation(),
             Some(crate::contract::FusionContractOrientation::RhsLhs)
         );
-        assert!(context.contraction_resolution_cache_hits() >= 1);
     }
 
     for typed_first in [true, false] {
@@ -1170,12 +1161,10 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
         }
         assert_oracle(typed_dst.data());
         assert_oracle(&dynamic_dst);
-        assert_eq!(context.contraction_resolution_cache_len(), 2);
         assert_eq!(
             context.last_resolution_orientation(),
             Some(crate::contract::FusionContractOrientation::RhsLhs)
         );
-        assert!(context.contraction_resolution_cache_hits() >= 1);
     }
 
     for profiled_first in [true, false] {
@@ -1232,12 +1221,10 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
         }
         assert_oracle(ordinary_dst.data());
         assert_oracle(profiled_dst.data());
-        assert_eq!(context.contraction_resolution_cache_len(), 2);
         assert_eq!(
             context.last_resolution_orientation(),
             Some(crate::contract::FusionContractOrientation::RhsLhs)
         );
-        assert!(context.contraction_resolution_cache_hits() >= 1);
     }
 }
 
@@ -1261,13 +1248,19 @@ fn paired_axis_selector_rejects_invalid_axes_before_scoring_or_mutation() {
     .unwrap();
     let lhs = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![2.0], space.clone()).unwrap();
     let rhs = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![3.0], space.clone()).unwrap();
-    let mut dst = TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![5.0], space).unwrap();
-    let error = tensorcontract_fusion_into(
+    let mut free_dst =
+        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![5.0], space.clone()).unwrap();
+    let axes = TensorContractSpec::with_default_output_order(&[3, 3], &[0, 1]);
+    let mut free_backend = DenseTreeTransformOperations::default_executor();
+    let mut free_workspace = TensorContractWorkspace::default();
+    let error = tensorcontract_fusion_into_with(
+        &mut free_backend,
+        &mut free_workspace,
         &rule,
-        &mut dst,
+        &mut free_dst,
         &lhs,
         &rhs,
-        TensorContractSpec::with_default_output_order(&[3, 3], &[0, 1]),
+        axes,
         1.0,
         0.0,
     )
@@ -1283,7 +1276,40 @@ fn paired_axis_selector_rejects_invalid_axes_before_scoring_or_mutation() {
     );
     assert_eq!(lhs.data(), &[2.0]);
     assert_eq!(rhs.data(), &[3.0]);
-    assert_eq!(dst.data(), &[5.0]);
+    assert_eq!(free_dst.data(), &[5.0]);
+
+    let mut split_dst =
+        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![5.0], space.clone()).unwrap();
+    let mut tree_backend = HostTensorOperations;
+    let mut tree_workspace = TreeTransformWorkspace::default();
+    let mut contract_backend = DenseTreeTransformOperations::default_executor();
+    let mut contract_workspace = TensorContractWorkspace::default();
+    let split_error = tensorcontract_fusion_into_with_backends(
+        &mut tree_backend,
+        &mut tree_workspace,
+        &mut contract_backend,
+        &mut contract_workspace,
+        &rule,
+        &mut split_dst,
+        &lhs,
+        &rhs,
+        axes,
+        1.0,
+        0.0,
+    )
+    .unwrap_err();
+    assert_eq!(split_error, error);
+    assert_eq!(split_dst.data(), &[5.0]);
+
+    let mut context_dst =
+        TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![5.0], space).unwrap();
+    let mut context =
+        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let context_error = context
+        .tensorcontract_fusion_into(&rule, &mut context_dst, &lhs, &rhs, axes, 1.0, 0.0)
+        .unwrap_err();
+    assert_eq!(context_error, error);
+    assert_eq!(context_dst.data(), &[5.0]);
 }
 
 #[test]
@@ -1872,9 +1898,61 @@ fn tensorcontract_fusion_block_replay_scales_inactive_dst_blocks_once() {
     .unwrap();
     assert_eq!(specs, vec![TensorContractBlockSpec::new(0, 0, 0)]);
 
-    tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, alpha, beta).unwrap();
+    let mut free_backend = DenseTreeTransformOperations::default_executor();
+    let mut free_workspace = TensorContractWorkspace::default();
+    tensorcontract_fusion_into_with(
+        &mut free_backend,
+        &mut free_workspace,
+        &rule,
+        &mut dst,
+        &lhs,
+        &rhs,
+        axes,
+        alpha,
+        beta,
+    )
+    .unwrap();
 
     assert_eq!(dst.data(), &[50.0, 60.0]);
+
+    let mut split_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+        vec![10.0, 20.0],
+        dst.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let mut tree_backend = HostTensorOperations;
+    let mut tree_workspace = TreeTransformWorkspace::default();
+    let mut contract_backend = DenseTreeTransformOperations::default_executor();
+    let mut contract_workspace = TensorContractWorkspace::default();
+    tensorcontract_fusion_into_with_backends(
+        &mut tree_backend,
+        &mut tree_workspace,
+        &mut contract_backend,
+        &mut contract_workspace,
+        &rule,
+        &mut split_dst,
+        &lhs,
+        &rhs,
+        axes,
+        alpha,
+        beta,
+    )
+    .unwrap();
+    assert_eq!(split_dst.data(), dst.data());
+
+    let mut context_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+        vec![10.0, 20.0],
+        dst.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let mut context =
+        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    context
+        .tensorcontract_fusion_into(&rule, &mut context_dst, &lhs, &rhs, axes, alpha, beta)
+        .unwrap();
+    // What: an irregular packed Core plan has identical free and context replay.
+    assert!(context.last_resolution_is_core());
+    assert_eq!(context_dst.data(), dst.data());
 }
 
 #[test]
@@ -2009,7 +2087,6 @@ fn self_dual_conjugate_structure_scales_inactive_block_like_eager_adjoint_oracle
             .unwrap();
         assert_eq!(actual.data(), oracle.as_slice());
     }
-    assert!(context.contraction_resolution_cache_hits() >= 1);
 }
 
 #[test]
@@ -2349,7 +2426,7 @@ fn fermion_parity_matrix_space_with_homspace(
 }
 
 #[test]
-fn bosonic_tensorcompose_reuses_the_ordinary_contract_resolution() {
+fn bosonic_tensorcompose_matches_ordinary_contract() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2391,9 +2468,6 @@ fn bosonic_tensorcompose_reuses_the_ordinary_contract_resolution() {
         )
         .unwrap();
     assert!(context.last_resolution_is_core());
-    let entries = context.contraction_resolution_cache_len();
-    let misses = context.contraction_resolution_cache_misses();
-    let hits = context.contraction_resolution_cache_hits();
 
     let mut composed = vec![0.0; dst.required_len().unwrap()];
     context
@@ -2412,9 +2486,6 @@ fn bosonic_tensorcompose_reuses_the_ordinary_contract_resolution() {
         .unwrap();
 
     assert_eq!(composed, ordinary);
-    assert_eq!(context.contraction_resolution_cache_len(), entries);
-    assert_eq!(context.contraction_resolution_cache_misses(), misses);
-    assert!(context.contraction_resolution_cache_hits() > hits);
     assert!(context.last_resolution_is_core());
 }
 
@@ -2498,7 +2569,7 @@ fn tensorcompose_fusion_preflights_all_extents_before_mutating_destination() {
 }
 
 #[test]
-fn fermionic_tensorcompose_keeps_a_distinct_coefficient_free_resolution() {
+fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
     // What: a dual odd RHS leg gives ordinary contraction its supertrace sign,
     // while composition retains and reuses a separate direct Core plan.
     let _guard = crate::test_support::CACHE_TEST_LOCK
@@ -2556,7 +2627,6 @@ fn fermionic_tensorcompose_keeps_a_distinct_coefficient_free_resolution() {
         )
         .unwrap();
     assert_eq!(contracted, [-6.0]);
-    let ordinary_entries = context.contraction_resolution_cache_len();
 
     let compose = |context: &mut crate::TensorContractFusionExecutionContext<
         f64,
@@ -2581,12 +2651,7 @@ fn fermionic_tensorcompose_keeps_a_distinct_coefficient_free_resolution() {
     };
     assert_eq!(compose(&mut context), [6.0]);
     assert!(context.last_resolution_is_core());
-    assert!(context.contraction_resolution_cache_len() > ordinary_entries);
-    let entries = context.contraction_resolution_cache_len();
-    let hits = context.contraction_resolution_cache_hits();
     assert_eq!(compose(&mut context), [6.0]);
-    assert_eq!(context.contraction_resolution_cache_len(), entries);
-    assert!(context.contraction_resolution_cache_hits() > hits);
 }
 
 #[test]
@@ -3934,9 +3999,6 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
             "actual {actual} expected {expected}"
         );
     }
-    assert!(context.contraction_resolution_cache_len() >= 1);
-    assert_eq!(context.contraction_resolution_cache_hits(), 0);
-    assert!(context.contraction_resolution_cache_misses() >= 1);
 
     let mut automatic_context_dst = TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(
         vec![1.0, 2.0],
@@ -3971,9 +4033,6 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
             "actual {actual} expected {expected}"
         );
     }
-    assert!(automatic_context.contraction_resolution_cache_len() >= 1);
-    assert_eq!(automatic_context.contraction_resolution_cache_hits(), 0);
-    assert!(automatic_context.contraction_resolution_cache_misses() >= 1);
 
     let mut beta_only_dst = TensorMap::<f64, 4, 0>::from_vec_with_fusion_space(
         vec![7.0, 11.0],
@@ -3988,10 +4047,6 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
         .tensorcontract_fusion_into(&rule, &mut beta_only_dst, &lhs, &rhs, axes, 0.0, 3.0)
         .unwrap();
     assert_eq!(beta_only_dst.data(), &[21.0, 33.0]);
-    assert!(automatic_context.contraction_resolution_cache_len() >= 1);
-    assert!(automatic_context.contraction_resolution_cache_hits() >= 1);
-    assert!(automatic_context.contraction_resolution_cache_fast_hits() >= 1);
-    assert!(automatic_context.contraction_resolution_cache_misses() >= 1);
 }
 
 #[test]
@@ -4416,32 +4471,33 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     }
     assert_eq!(context.tree_context().cache().plan_len(), 2);
     assert_eq!(context.tree_context().cache().structure_len(), 2);
-    assert!(context.contraction_resolution_cache_len() >= 1);
-    assert_eq!(context.contraction_resolution_cache_hits(), 0);
-    assert!(context.contraction_resolution_cache_misses() >= 1);
 
     let pinned = context
         .prepare_tensorcontract_fusion(&rule, &context_dst, &lhs, &rhs, axes)
         .unwrap();
     context.set_cache_policy(OperationCachePolicy::NoCache);
-    context_dst
-        .data_mut()
-        .copy_from_slice(&initial_dst_for_context_replay);
-    context
-        .execute_prepared_tensorcontract_fusion(
-            &pinned,
-            &rule,
-            &mut context_dst,
-            &lhs,
-            &rhs,
-            alpha,
-            beta,
-        )
-        .unwrap();
-    for (&actual, &expected) in context_dst.data().iter().zip(expected_dst.data()) {
-        assert!((actual - expected).abs() < 1.0e-10);
+    for _ in 0..2 {
+        context_dst
+            .data_mut()
+            .copy_from_slice(&initial_dst_for_context_replay);
+        context
+            .execute_prepared_tensorcontract_fusion(
+                &pinned,
+                &rule,
+                &mut context_dst,
+                &lhs,
+                &rhs,
+                alpha,
+                beta,
+            )
+            .unwrap();
+        for (&actual, &expected) in context_dst.data().iter().zip(expected_dst.data()) {
+            assert!((actual - expected).abs() < 1.0e-10);
+        }
+        // What: a prepared dynamic contraction owns the complete artifact;
+        // replay does not consult or populate execution-context caches.
+        assert_eq!(context.dynamic_fusion_space_cache_len(), 0);
     }
-    assert_eq!(context.dynamic_fusion_space_cache_len(), 0);
     context.set_cache_policy(OperationCachePolicy::TaskLocal);
 
     context_dst
@@ -4468,10 +4524,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     }
     assert_eq!(context.tree_context().cache().plan_len(), 2);
     assert_eq!(context.tree_context().cache().structure_len(), 2);
-    assert!(context.contraction_resolution_cache_len() >= 1);
-    assert_eq!(context.contraction_resolution_cache_hits(), 0);
-    assert_eq!(context.contraction_resolution_cache_fast_hits(), 0);
-    assert!(context.contraction_resolution_cache_misses() >= 1);
 
     let mut automatic_context_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
         initial_dst_for_context_replay.clone(),
@@ -4500,8 +4552,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     assert!(automatic_context.tree_context().cache().plan_len() > 0);
     assert!(automatic_context.tree_context().cache().structure_len() > 0);
     assert!(automatic_context.dynamic_fusion_space_cache_len() > 0);
-    assert!(automatic_context.contraction_resolution_cache_len() >= 1);
-    assert!(automatic_context.contraction_resolution_cache_len() > 0);
     assert!(automatic_context.dynamic_fusion_space_cache_misses() > 0);
     assert_eq!(automatic_context.dynamic_fusion_space_cache_hits(), 0);
     assert!(
@@ -4520,9 +4570,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
             .structure_misses()
             > 0
     );
-    assert!(automatic_context.contraction_resolution_cache_len() >= 1);
-    assert_eq!(automatic_context.contraction_resolution_cache_hits(), 0);
-    assert!(automatic_context.contraction_resolution_cache_misses() >= 1);
 
     let mut no_cache_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
         initial_dst_for_context_replay.clone(),
@@ -4551,9 +4598,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
         let dynamic_misses = no_cache_context.dynamic_fusion_space_cache_misses();
         assert!(dynamic_misses > previous_dynamic_misses);
         previous_dynamic_misses = dynamic_misses;
-        assert_eq!(no_cache_context.contraction_resolution_cache_len(), 0);
-        assert_eq!(no_cache_context.contraction_resolution_cache_len(), 0);
-        assert_eq!(no_cache_context.contraction_resolution_cache_len(), 0);
         no_cache_dst
             .data_mut()
             .copy_from_slice(&initial_dst_for_context_replay);
@@ -4574,9 +4618,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     assert!(warm_policy_context.tree_context().cache().plan_len() <= 1);
     assert!(warm_policy_context.tree_context().cache().structure_len() <= 1);
     assert!(warm_policy_context.dynamic_fusion_space_cache_len() <= 1);
-    assert!(warm_policy_context.contraction_resolution_cache_len() <= 1);
-    assert!(warm_policy_context.contraction_resolution_cache_len() <= 1);
-    assert!(warm_policy_context.contraction_resolution_cache_len() <= 1);
 
     let mut lru_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
         initial_dst_for_context_replay.clone(),
@@ -4598,9 +4639,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     assert!(lru_context.tree_context().cache().plan_len() <= 1);
     assert!(lru_context.tree_context().cache().structure_len() <= 1);
     assert!(lru_context.dynamic_fusion_space_cache_len() <= 1);
-    assert!(lru_context.contraction_resolution_cache_len() <= 1);
-    assert!(lru_context.contraction_resolution_cache_len() <= 1);
-    assert!(lru_context.contraction_resolution_cache_len() <= 1);
 
     let mut split_backend_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
         initial_dst_for_context_replay.clone(),
@@ -4659,10 +4697,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     );
     assert!(automatic_context.dynamic_fusion_space_cache_hits() > 0);
     assert!(automatic_context.dynamic_fusion_space_cache_fast_hits() > 0);
-    assert!(automatic_context.contraction_resolution_cache_len() >= 1);
-    assert!(automatic_context.contraction_resolution_cache_hits() >= 1);
-    assert!(automatic_context.contraction_resolution_cache_fast_hits() >= 1);
-    assert!(automatic_context.contraction_resolution_cache_misses() >= 1);
 
     automatic_context_dst
         .data_mut()
@@ -4683,14 +4717,15 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
             &mut profile,
         )
         .unwrap();
-    // What: profiling selects the already-compiled ordinary execution artifact.
+    // What: profiling compiles the eager execution artifact while reusing its
+    // two source transforms and core destination.
     assert_eq!(
         automatic_context.dynamic_fusion_space_cache_hits(),
-        artifact_hits_before_profile + 1
+        artifact_hits_before_profile + 3
     );
     assert_eq!(
         automatic_context.dynamic_fusion_space_cache_fast_hits(),
-        artifact_fast_hits_before_profile + 1
+        artifact_fast_hits_before_profile + 3
     );
     for (&actual, &expected) in automatic_context_dst.data().iter().zip(expected_dst.data()) {
         assert!(
@@ -4858,11 +4893,6 @@ fn tensorcontract_fusion_granular_caches_handle_block_structure_variants() {
     assert!(context.tree_context().cache().stats().structure_misses() >= 3);
     assert!(context.dynamic_fusion_space_cache_hits() > 0);
     assert!(context.dynamic_fusion_space_cache_fast_hits() > 0);
-    assert!(context.contraction_resolution_cache_len() >= 1);
-    assert!(context.contraction_resolution_cache_len() >= 1);
-    assert!(context.contraction_resolution_cache_len() >= 1);
-    assert!(context.contraction_resolution_cache_hits() >= 1);
-    assert!(context.contraction_resolution_cache_misses() >= 1);
 }
 
 #[test]
@@ -4945,9 +4975,6 @@ fn tensorcontract_fusion_granular_caches_handle_output_axes() {
         }
     }
     assert!(context.tree_context().cache().stats().structure_misses() > 0);
-    assert!(context.contraction_resolution_cache_len() >= 1);
-    assert!(context.contraction_resolution_cache_len() >= 1);
-    assert!(context.contraction_resolution_cache_misses() >= 1);
 }
 
 #[test]
@@ -5067,10 +5094,6 @@ fn tensorcontract_fusion_granular_caches_distinguish_source_conjugation() {
                 "actual {actual} expected {expected}"
             );
         }
-        assert!(context.contraction_resolution_cache_len() >= 1);
-        assert!(context.contraction_resolution_cache_len() >= 1);
-        assert!(context.contraction_resolution_cache_misses() >= 1);
-        assert_eq!(context.contraction_resolution_cache_hits(), 0);
     }
 }
 
@@ -5332,12 +5355,8 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
     let expects_dynamic_replay = !(lhs_conjugate && rhs_conjugate);
     if expects_dynamic_replay {
         assert!(context.tree_context().cache().stats().structure_misses() > 0);
-        assert!(context.contraction_resolution_cache_len() >= 1);
-        assert_eq!(context.contraction_resolution_cache_hits(), 0);
-        assert!(context.contraction_resolution_cache_misses() >= 1);
     } else {
         assert_eq!(context.tree_context().cache().structure_len(), 0);
-        assert!(context.contraction_resolution_cache_len() >= 1);
     }
 
     let tree_stats_after_first = context.tree_context().cache().stats();
@@ -5360,13 +5379,8 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
         );
         assert!(context.dynamic_fusion_space_cache_hits() > 0);
         assert!(context.dynamic_fusion_space_cache_fast_hits() > 0);
-        assert!(context.contraction_resolution_cache_len() >= 1);
-        assert!(context.contraction_resolution_cache_hits() >= 1);
-        assert!(context.contraction_resolution_cache_fast_hits() >= 1);
-        assert!(context.contraction_resolution_cache_misses() >= 1);
     } else {
         assert_eq!(context.tree_context().cache().structure_len(), 0);
-        assert!(context.contraction_resolution_cache_len() >= 1);
     }
 }
 
@@ -5557,9 +5571,6 @@ fn tensorcontract_fusion_product_non_core_form_absorbs_explicit_transform() {
             "actual {actual} expected {expected}"
         );
     }
-    assert!(context.contraction_resolution_cache_len() >= 1);
-    assert_eq!(context.contraction_resolution_cache_hits(), 0);
-    assert!(context.contraction_resolution_cache_misses() >= 1);
 
     context_dst
         .data_mut()
@@ -5567,9 +5578,6 @@ fn tensorcontract_fusion_product_non_core_form_absorbs_explicit_transform() {
     context
         .tensorcontract_fusion_into(&rule, &mut context_dst, &lhs, &rhs, axes, alpha, beta)
         .unwrap();
-    assert!(context.contraction_resolution_cache_len() >= 1);
-    assert!(context.contraction_resolution_cache_hits() >= 1);
-    assert!(context.contraction_resolution_cache_misses() >= 1);
 }
 
 #[test]
@@ -6762,8 +6770,6 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
             assert!(max < 1e-10, "fold vs eager oracle: max diff {max}");
         }
         if policy == OperationCachePolicy::default() {
-            assert!(ctx.contraction_resolution_cache_fast_hits() >= 1);
-            let prelowered_entries = ctx.contraction_resolution_cache_len();
             let mut ordinary = vec![Complex64::new(0.0, 0.0); dst_space.required_len().unwrap()];
             ctx.tensorcontract_fusion_dyn_into(
                 &dst_bound,
@@ -6788,7 +6794,6 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
                 !ctx.last_resolution_is_core(),
                 "ordinary conjugation must not alias the parent-storage Core resolution"
             );
-            assert!(ctx.contraction_resolution_cache_len() > prelowered_entries);
             crate::lowering::reset_adjoint_view_build_count();
 
             let mut folded_again =
@@ -6898,7 +6903,7 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
 }
 
 #[test]
-fn prelowered_resolution_cache_keys_storage_layout_and_execution_namespace() {
+fn prelowered_storage_layouts_and_execution_paths_match_oracle() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -7075,18 +7080,14 @@ fn prelowered_resolution_cache_keys_storage_layout_and_execution_namespace() {
             );
         let first_output = execute_prelowered(&mut context, first, first_data);
         assert_eq!(first_output, oracle);
-        let first_entries = context.contraction_resolution_cache_len();
         let second_output = execute_prelowered(&mut context, second, second_data);
-        // What: equal logical spaces with distinct admissible storage layouts
-        // compile independent resolution entries in either poison order.
+        // What: equal logical spaces accept distinct admissible physical
+        // layouts in either call order.
         assert_eq!(second_output, oracle);
-        assert!(context.contraction_resolution_cache_len() > first_entries);
 
-        let fast_hits = context.contraction_resolution_cache_fast_hits();
         let repeated = execute_prelowered(&mut context, second, second_data);
-        // What: an identical prelowered replay still reaches the pinned fast path.
+        // What: an identical prelowered call remains deterministic.
         assert_eq!(repeated, oracle);
-        assert!(context.contraction_resolution_cache_fast_hits() > fast_hits);
 
         reset_global_operation_caches();
         let mut publisher =
@@ -7099,18 +7100,15 @@ fn prelowered_resolution_cache_keys_storage_layout_and_execution_namespace() {
         let mut consumer =
             TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
             );
-        // What: a fresh context cannot consume the storage-dependent global
-        // resolution published for the other admissible layout.
+        // What: execution is independent of state built by another context.
         assert_eq!(
             execute_prelowered(&mut consumer, second, second_data),
             oracle
         );
-        let consumer_fast_hits = consumer.contraction_resolution_cache_fast_hits();
         assert_eq!(
             execute_prelowered(&mut consumer, second, second_data),
             oracle
         );
-        assert!(consumer.contraction_resolution_cache_fast_hits() > consumer_fast_hits);
     }
 
     reset_global_operation_caches();
@@ -7131,7 +7129,6 @@ fn prelowered_resolution_cache_keys_storage_layout_and_execution_namespace() {
         )
         .unwrap();
     assert_eq!(ordinary, oracle);
-    let ordinary_entries = namespace_context.contraction_resolution_cache_len();
     let mut direct_prelowered = vec![0.0; dst.required_len().unwrap()];
     namespace_context
         .tensorcontract_fusion_dyn_prelowered_into(
@@ -7146,10 +7143,9 @@ fn prelowered_resolution_cache_keys_storage_layout_and_execution_namespace() {
             0.0,
         )
         .unwrap();
-    // What: the prelowered API owns a distinct cache namespace even when its
-    // logical and storage spaces are the same ordinary tensor layout.
+    // What: the ordinary and prelowered APIs agree when logical and physical
+    // layouts are identical.
     assert_eq!(direct_prelowered, oracle);
-    assert!(namespace_context.contraction_resolution_cache_len() > ordinary_entries);
 
     let ordinary_tensor = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
         eager_lhs_data,
