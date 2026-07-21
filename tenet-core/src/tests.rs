@@ -7917,6 +7917,231 @@ mod tests {
         assert_eq!(structure.find_fusion_tree_pair_index(&dual), None);
     }
 
+    fn materialized_leg_tuple_oracle(space: &FusionProductSpace) -> Vec<Vec<FusionTreeLeg>> {
+        fn visit(
+            legs: &[SectorLeg],
+            remaining: usize,
+            current: &mut [FusionTreeLeg],
+            out: &mut Vec<Vec<FusionTreeLeg>>,
+        ) {
+            if remaining == 0 {
+                out.push(current.to_vec());
+                return;
+            }
+            let index = remaining - 1;
+            for &sector in legs[index].sectors() {
+                current[index] = FusionTreeLeg::new(sector, legs[index].is_dual());
+                visit(legs, remaining - 1, current, out);
+            }
+        }
+
+        let mut out = Vec::new();
+        let mut current = vec![FusionTreeLeg::new(SectorId::new(0), false); space.len()];
+        visit(space.legs(), space.len(), &mut current, &mut out);
+        out
+    }
+
+    fn materialized_multiplicity_free_group_oracle<R>(
+        rule: &R,
+        space: &FusionProductSpace,
+    ) -> Vec<CoupledFusionTrees>
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        let mut grouped = Vec::<CoupledFusionTrees>::new();
+        let mut index: FxHashMap<SectorId, usize> = FxHashMap::default();
+        for tuple in materialized_leg_tuple_oracle(space) {
+            let uncoupled = tuple.iter().map(|leg| leg.sector()).collect::<Vec<_>>();
+            let is_dual = tuple.iter().map(|leg| leg.is_dual()).collect::<Vec<_>>();
+            let effective = uncoupled.clone();
+            for coupled in reachable_coupled_sectors(rule, &effective) {
+                let trees = collect_fusion_trees_for_coupled(
+                    rule, &uncoupled, &is_dual, &effective, coupled,
+                );
+                match index.get(&coupled) {
+                    Some(&i) => grouped[i].trees.extend(trees),
+                    None => {
+                        index.insert(coupled, grouped.len());
+                        grouped.push(CoupledFusionTrees { coupled, trees });
+                    }
+                }
+            }
+        }
+        grouped.sort_by_key(|group| group.coupled);
+        grouped
+    }
+
+    fn materialized_multiplicity_free_key_oracle<R>(
+        rule: &R,
+        codomain: &FusionProductSpace,
+        domain: &FusionProductSpace,
+    ) -> Vec<FusionTreePairKey>
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        let codomain = materialized_multiplicity_free_group_oracle(rule, codomain);
+        let domain = materialized_multiplicity_free_group_oracle(rule, domain);
+        merge_generic_tree_groups(&codomain, &domain)
+    }
+
+    fn materialized_generic_fold_oracle<R>(
+        rule: &R,
+        space: &FusionProductSpace,
+    ) -> CoupledSectorFold
+    where
+        R: FusionRule,
+    {
+        let mut aggregate = CoupledSectorFold::default();
+        let mut clean_set = Vec::new();
+        for tuple in materialized_leg_tuple_oracle(space) {
+            let effective = tuple.iter().map(|leg| leg.sector()).collect::<Vec<_>>();
+            let fold = rule.coupled_sector_fold(&effective);
+            clean_set.extend(fold.clean);
+            aggregate.tainted.extend(fold.tainted);
+            aggregate.out_of_table.extend(fold.out_of_table);
+            aggregate.poisoned |= fold.poisoned;
+        }
+        aggregate.tainted.sort_unstable();
+        aggregate.tainted.dedup();
+        aggregate.out_of_table.sort();
+        aggregate.out_of_table.dedup();
+        clean_set.sort_unstable();
+        clean_set.dedup();
+        clean_set.retain(|sector| !aggregate.tainted.contains(sector));
+        aggregate.clean = clean_set;
+        if aggregate.poisoned {
+            let mut demoted = std::mem::take(&mut aggregate.clean);
+            aggregate.tainted.append(&mut demoted);
+            aggregate.tainted.sort_unstable();
+            aggregate.tainted.dedup();
+        }
+        aggregate
+    }
+
+    #[test]
+    fn fusion_tree_keys_match_materialized_cartesian_oracle_across_ranks_and_duals() {
+        // What: public key enumeration keeps the old tuple order without
+        // reusing the production visitor in the test oracle.
+        let rule = Z4PointedRule;
+        let leg = |sectors: &[usize], is_dual| {
+            SectorLeg::new(
+                sectors
+                    .iter()
+                    .copied()
+                    .map(|sector| (SectorId::new(sector), 1usize)),
+                is_dual,
+            )
+        };
+
+        let cases = [
+            (
+                "empty",
+                FusionProductSpace::new([]),
+                FusionProductSpace::new([]),
+            ),
+            (
+                "rank1",
+                FusionProductSpace::new([leg(&[1, 3], true)]),
+                FusionProductSpace::new([leg(&[1, 3], false)]),
+            ),
+            (
+                "rank2",
+                FusionProductSpace::new([leg(&[0, 1], false), leg(&[2, 3], true)]),
+                FusionProductSpace::new([leg(&[1, 2, 3], true)]),
+            ),
+            (
+                "rank8",
+                FusionProductSpace::new(
+                    (0..8).map(|axis| leg(&[axis % 4, (axis + 1) % 4], axis % 2 == 1)),
+                ),
+                FusionProductSpace::new([leg(&[0, 2], true)]),
+            ),
+        ];
+
+        for (name, codomain, domain) in cases {
+            let expected =
+                materialized_multiplicity_free_key_oracle(&rule, &codomain, &domain);
+            let hom = FusionTreeHomSpace::new(codomain, domain);
+            assert_eq!(hom.fusion_tree_keys(&rule).as_ref(), expected.as_slice(), "{name}");
+        }
+    }
+
+    #[test]
+    fn generic_fusion_tree_keys_error_uses_materialized_codomain_fold_order() {
+        // What: Generic full-space construction still reports the first
+        // non-clean side using the old materialized tuple fold semantics.
+        let rule = su3();
+        let eight = su3_id(1, 1);
+        let t27 = su3_id(2, 2);
+        let codomain = FusionProductSpace::new([
+            SectorLeg::new([(eight, 1usize), (t27, 1usize)], false),
+            SectorLeg::new([(eight, 1usize)], false),
+        ]);
+        let domain = FusionProductSpace::new([
+            SectorLeg::new([(t27, 1usize)], false),
+            SectorLeg::new([(eight, 1usize)], false),
+        ]);
+        let expected =
+            fusion_fold_error_message("codomain", &materialized_generic_fold_oracle(&rule, &codomain));
+
+        let hom = FusionTreeHomSpace::new(codomain, domain);
+        let message = hom.fusion_tree_keys_generic(&rule).unwrap_err().to_string();
+
+        assert_eq!(message, expected);
+    }
+
+    #[test]
+    fn selected_leg_tuple_visitor_is_fallible_and_restartable() {
+        // What: an early visitor error stops traversal without corrupting the
+        // reusable scratch used by a later traversal.
+        let space = FusionProductSpace::new([
+            SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false),
+            SectorLeg::new([(SectorId::new(2), 1), (SectorId::new(3), 1)], true),
+        ]);
+        let expected = materialized_leg_tuple_oracle(&space)
+            .into_iter()
+            .map(|tuple| {
+                tuple
+                    .into_iter()
+                    .map(|leg| (leg.sector(), leg.is_dual()))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        let mut partial = Vec::new();
+        let err = space
+            .try_visit_selected_leg_tuples(&mut |tuple| {
+                partial.push(
+                    tuple
+                        .iter()
+                        .map(|leg| (leg.sector(), leg.is_dual()))
+                        .collect::<Vec<_>>(),
+                );
+                if partial.len() == 2 {
+                    Err("stop")
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        assert_eq!(err, "stop");
+        assert_eq!(partial, expected[..2]);
+
+        let mut restarted = Vec::new();
+        space
+            .try_visit_selected_leg_tuples::<(), _>(&mut |tuple| {
+                restarted.push(
+                    tuple
+                        .iter()
+                        .map(|leg| (leg.sector(), leg.is_dual()))
+                        .collect::<Vec<_>>(),
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(restarted, expected);
+    }
+
     #[test]
     fn fusion_tree_homspace_generates_canonical_coupled_sector_order() {
         let rule = BranchingMultiplicityFreeRule;

@@ -18,27 +18,25 @@ where
     }
 }
 
-fn collect_selected_leg_tuples(
+fn try_visit_selected_leg_tuples<E, F>(
     legs: &[SectorLeg],
     remaining: usize,
-    current: &mut [Option<FusionTreeLeg>],
-    tuples: &mut Vec<Vec<FusionTreeLeg>>,
-) {
+    current: &mut [FusionTreeLeg],
+    emit: &mut F,
+) -> Result<(), E>
+where
+    F: FnMut(&[FusionTreeLeg]) -> Result<(), E>,
+{
     if remaining == 0 {
-        tuples.push(
-            current
-                .iter()
-                .map(|leg| leg.expect("fusion tree leg tuple should be fully assigned"))
-                .collect(),
-        );
-        return;
+        return emit(current);
     }
 
     let index = remaining - 1;
     for &sector in legs[index].sectors() {
-        current[index] = Some(FusionTreeLeg::new(sector, legs[index].is_dual()));
-        collect_selected_leg_tuples(legs, remaining - 1, current, tuples);
+        current[index] = FusionTreeLeg::new(sector, legs[index].is_dual());
+        try_visit_selected_leg_tuples(legs, remaining - 1, current, emit)?;
     }
+    Ok(())
 }
 
 fn fusion_trees_by_coupled_for_space<R>(
@@ -55,21 +53,36 @@ where
     // still fixes the canonical order, so the map need not preserve it.
     let mut grouped = Vec::<CoupledFusionTrees>::new();
     let mut index: FxHashMap<SectorId, usize> = FxHashMap::default();
-    for tuple in space.selected_leg_tuples() {
-        let effective = effective_sectors(rule, &tuple);
-        let uncoupled: Vec<SectorId> = tuple.iter().map(|leg| leg.sector()).collect();
-        let is_dual: Vec<bool> = tuple.iter().map(|leg| leg.is_dual()).collect();
-        for coupled in reachable_coupled_sectors(rule, &effective) {
-            let trees =
-                collect_fusion_trees_for_coupled(rule, &uncoupled, &is_dual, &effective, coupled);
-            match index.get(&coupled) {
-                Some(&i) => grouped[i].trees.extend(trees),
-                None => {
-                    index.insert(coupled, grouped.len());
-                    grouped.push(CoupledFusionTrees { coupled, trees });
+    let mut uncoupled = Vec::with_capacity(space.len());
+    let mut is_dual = Vec::with_capacity(space.len());
+    let mut effective = Vec::with_capacity(space.len());
+    let result: Result<(), std::convert::Infallible> =
+        space.try_visit_selected_leg_tuples(&mut |tuple| {
+            uncoupled.clear();
+            is_dual.clear();
+            effective.clear();
+            for leg in tuple {
+                uncoupled.push(leg.sector());
+                is_dual.push(leg.is_dual());
+                effective.push(leg.sector());
+            }
+            for coupled in reachable_coupled_sectors(rule, &effective) {
+                let trees = collect_fusion_trees_for_coupled(
+                    rule, &uncoupled, &is_dual, &effective, coupled,
+                );
+                match index.get(&coupled) {
+                    Some(&i) => grouped[i].trees.extend(trees),
+                    None => {
+                        index.insert(coupled, grouped.len());
+                        grouped.push(CoupledFusionTrees { coupled, trees });
+                    }
                 }
             }
-        }
+            Ok(())
+        });
+    match result {
+        Ok(()) => {}
+        Err(never) => match never {},
     }
     grouped.sort_by_key(|group| group.coupled);
     grouped
@@ -452,29 +465,43 @@ where
     let mut index: FxHashMap<SectorId, usize> = FxHashMap::default();
     let mut aggregate = CoupledSectorFold::default();
     let mut clean_set: Vec<SectorId> = Vec::new();
-    for tuple in space.selected_leg_tuples() {
-        // `effective_sectors` is the uncoupled sectors verbatim (it ignores the
-        // rule); inlined here to avoid its mult-free bound.
-        let uncoupled: Vec<SectorId> = tuple.iter().map(|leg| leg.sector()).collect();
-        let effective = uncoupled.clone();
-        let is_dual: Vec<bool> = tuple.iter().map(|leg| leg.is_dual()).collect();
-        let fold = rule.coupled_sector_fold(&effective);
-        for &coupled in &fold.clean {
-            let trees = collect_generic_fusion_trees_for_coupled(
-                rule, &uncoupled, &is_dual, &effective, coupled,
-            );
-            match index.get(&coupled) {
-                Some(&i) => grouped[i].trees.extend(trees),
-                None => {
-                    index.insert(coupled, grouped.len());
-                    grouped.push(CoupledFusionTrees { coupled, trees });
+    let mut uncoupled = Vec::with_capacity(space.len());
+    let mut is_dual = Vec::with_capacity(space.len());
+    let mut effective = Vec::with_capacity(space.len());
+    let result: Result<(), std::convert::Infallible> =
+        space.try_visit_selected_leg_tuples(&mut |tuple| {
+            // `effective_sectors` is the uncoupled sectors verbatim (it ignores the
+            // rule); inlined here to avoid its mult-free bound.
+            uncoupled.clear();
+            is_dual.clear();
+            effective.clear();
+            for leg in tuple {
+                uncoupled.push(leg.sector());
+                is_dual.push(leg.is_dual());
+                effective.push(leg.sector());
+            }
+            let fold = rule.coupled_sector_fold(&effective);
+            for &coupled in &fold.clean {
+                let trees = collect_generic_fusion_trees_for_coupled(
+                    rule, &uncoupled, &is_dual, &effective, coupled,
+                );
+                match index.get(&coupled) {
+                    Some(&i) => grouped[i].trees.extend(trees),
+                    None => {
+                        index.insert(coupled, grouped.len());
+                        grouped.push(CoupledFusionTrees { coupled, trees });
+                    }
                 }
             }
-        }
-        clean_set.extend(fold.clean);
-        aggregate.tainted.extend(fold.tainted);
-        aggregate.out_of_table.extend(fold.out_of_table);
-        aggregate.poisoned |= fold.poisoned;
+            clean_set.extend(fold.clean);
+            aggregate.tainted.extend(fold.tainted);
+            aggregate.out_of_table.extend(fold.out_of_table);
+            aggregate.poisoned |= fold.poisoned;
+            Ok(())
+        });
+    match result {
+        Ok(()) => {}
+        Err(never) => match never {},
     }
     aggregate.tainted.sort_unstable();
     aggregate.tainted.dedup();
