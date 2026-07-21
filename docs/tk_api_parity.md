@@ -172,8 +172,8 @@ Added this sweep: `Tensor::numout` / `numin` / `numind`, `Tensor::repartition`,
 | `@planar` / `@plansor` | design-gated | — | Planar-only diagram contraction; not exposed. |
 | `notrunc` | has-different-name | `Truncation::Full` | |
 | `truncrank` | has-different-name | `Truncation::rank` | |
-| `trunctol` | has-different-name | `Truncation::absolute_cutoff` / `relative_cutoff` / `relative_inf_cutoff` | `p=Inf` → `ToleranceInf`. |
-| `truncerror` | has-different-name | `Truncation::relative_error` | Bounds the discarded 2-norm tail. |
+| `trunctol` | has-different-name | `Truncation::absolute_cutoff` / `relative_cutoff` / `relative_inf_cutoff` | Checked constructors; `p=Inf` → `ToleranceInf`. |
+| `truncerror` | has-different-name | `Truncation::relative_error` | Checked constructor bounding the discarded 2-norm tail. |
 | (compose truncations) | has-different-name | `Truncation::and` | |
 | `truncfilter` / `truncspace` | design-gated | — | Non-prefix filters / space-target truncation; the prefix-only decision layer does not model them (see `truncation.rs` header). |
 

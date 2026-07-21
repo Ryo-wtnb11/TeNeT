@@ -155,7 +155,7 @@ pub fn run(chi: usize, schedule: &[(f64, usize)], verbose: bool) -> Result<f64, 
     let rt = Runtime::builder().build()?;
     let p = Space::u1([(1, 1), (-1, 1)]);
     let h = heisenberg_two_site(&rt, &p)?;
-    let trunc = Truncation::rank(chi).and(Truncation::relative_cutoff(BOND_RTOL));
+    let trunc = Truncation::rank(chi).and(Truncation::relative_cutoff(BOND_RTOL)?);
 
     let mut state = State::init(&rt, &p)?;
     let mut energy = f64::NAN;

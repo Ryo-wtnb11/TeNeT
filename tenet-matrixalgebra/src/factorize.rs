@@ -2081,7 +2081,7 @@ fn decide_bond_truncation<R, V>(
     spectra: &[SectorSpectrum<V>],
     truncation: &Truncation,
     values_are_nonnegative: bool,
-) -> crate::truncation::TruncationDecision
+) -> Result<crate::truncation::TruncationDecision, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     V: SpectrumMagnitude,
@@ -2119,7 +2119,7 @@ where
             values: values.as_slice(),
         })
         .collect();
-    select_truncation(&weighted, truncation)
+    select_truncation(&weighted, truncation).map_err(OperationError::from)
 }
 
 /// Applies a truncation policy to an untruncated compact factorization (the host
@@ -2212,7 +2212,8 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let decision = decide_bond_truncation(u.space().provider(), &singular_values, truncation, true);
+    let decision =
+        decide_bond_truncation(u.space().provider(), &singular_values, truncation, true)?;
     if singular_values
         .iter()
         .zip(&decision.kept)
@@ -2710,22 +2711,21 @@ where
                 D::dense_write(vectors_view),
             )
             .map_err(OperationError::Dense)?;
+        let real_values: Vec<f64> = values_workspace[..n]
+            .iter()
+            .map(|value| (*value).into())
+            .collect();
+        validate_real_eigenvalues(&real_values)?;
 
         let mut order: Vec<usize> = (0..n).collect();
         // Reorder bond states descending by |eigenvalue| (stable on ties).
         order.sort_by(|&a, &b| {
-            let a_value: f64 = values_workspace[a].into();
-            let b_value: f64 = values_workspace[b].into();
-            b_value
+            real_values[b]
                 .abs()
-                .partial_cmp(&a_value.abs())
-                .expect("finite eigenvalues")
+                .total_cmp(&real_values[a].abs())
                 .then(a.cmp(&b))
         });
-        let sorted_values: Vec<f64> = order
-            .iter()
-            .map(|&index| values_workspace[index].into())
-            .collect();
+        let sorted_values: Vec<f64> = order.iter().map(|&index| real_values[index]).collect();
         for (position, &index) in order.iter().enumerate() {
             let dst_start = position * n;
             let src_start = index * max_n;
@@ -2822,22 +2822,21 @@ where
                 D::dense_write(vectors_view),
             )
             .map_err(OperationError::Dense)?;
+        let real_values: Vec<f64> = values_workspace[..n]
+            .iter()
+            .map(|value| (*value).into())
+            .collect();
+        validate_real_eigenvalues(&real_values)?;
 
         order.clear();
         order.extend(0..n);
         order.sort_by(|&a, &b| {
-            let a_value: f64 = values_workspace[a].into();
-            let b_value: f64 = values_workspace[b].into();
-            b_value
+            real_values[b]
                 .abs()
-                .partial_cmp(&a_value.abs())
-                .expect("finite eigenvalues")
+                .total_cmp(&real_values[a].abs())
                 .then(a.cmp(&b))
         });
-        let sorted_values = order
-            .iter()
-            .map(|&index| values_workspace[index].into())
-            .collect();
+        let sorted_values = order.iter().map(|&index| real_values[index]).collect();
         reorder_columns_in_place(
             &mut v_data[left.range()],
             n,
@@ -2901,7 +2900,7 @@ where
             error: 0.0,
         });
     }
-    let decision = decide_bond_truncation(rule, &full.eigenvalues, truncation, false);
+    let decision = decide_bond_truncation(rule, &full.eigenvalues, truncation, false)?;
     if full
         .eigenvalues
         .iter()
@@ -3767,12 +3766,12 @@ where
 
         let complex_values: Vec<Complex64> =
             values.iter().map(|&value| value.widen_complex()).collect();
+        validate_complex_eigenvalues(&complex_values)?;
         let mut order: Vec<usize> = (0..n).collect();
         order.sort_by(|&a, &b| {
             complex_values[b]
                 .norm()
-                .partial_cmp(&complex_values[a].norm())
-                .expect("finite eigenvalues")
+                .total_cmp(&complex_values[a].norm())
                 .then(a.cmp(&b))
         });
         let sorted_values: Vec<Complex64> =
@@ -3869,7 +3868,7 @@ where
             error: 0.0,
         });
     }
-    let decision = decide_bond_truncation(rule, &full.eigenvalues, truncation, false);
+    let decision = decide_bond_truncation(rule, &full.eigenvalues, truncation, false)?;
     if full
         .eigenvalues
         .iter()
@@ -3959,7 +3958,8 @@ where
             .map_err(OperationError::Dense)?;
         let mut sorted = D::real_spectrum(&values_tensor).map_err(OperationError::Dense)?;
         sorted.truncate(n);
-        sorted.sort_by(|a, b| b.abs().partial_cmp(&a.abs()).expect("finite eigenvalues"));
+        validate_real_eigenvalues(&sorted)?;
+        sorted.sort_by(|a, b| b.abs().total_cmp(&a.abs()));
         eigenvalues.push(SectorSpectrum {
             sector: matrix.sector,
             values: sorted,
@@ -4020,7 +4020,8 @@ where
         let values =
             <D::Eig as FactorScalar>::dense_slice(&values_tensor).map_err(OperationError::Dense)?;
         let mut sorted: Vec<Complex64> = values[..n].iter().map(|&v| v.widen_complex()).collect();
-        sorted.sort_by(|a, b| b.norm().partial_cmp(&a.norm()).expect("finite eigenvalues"));
+        validate_complex_eigenvalues(&sorted)?;
+        sorted.sort_by(|a, b| b.norm().total_cmp(&a.norm()));
         eigenvalues.push(SectorSpectrum {
             sector: matrix.sector,
             values: sorted,
@@ -6222,12 +6223,37 @@ fn generic_truncation_weight(sqrt_dim: f64) -> f64 {
     sqrt_dim * sqrt_dim
 }
 
+fn invalid_eigenvalues() -> OperationError {
+    OperationError::InvalidArgument {
+        message: "eigenvalues must be finite",
+    }
+}
+
+fn validate_real_eigenvalues(values: &[f64]) -> Result<(), OperationError> {
+    if values.iter().all(|value| value.is_finite()) {
+        Ok(())
+    } else {
+        Err(invalid_eigenvalues())
+    }
+}
+
+fn validate_complex_eigenvalues(values: &[Complex64]) -> Result<(), OperationError> {
+    if values
+        .iter()
+        .all(|value| value.re.is_finite() && value.im.is_finite() && value.norm().is_finite())
+    {
+        Ok(())
+    } else {
+        Err(invalid_eigenvalues())
+    }
+}
+
 fn decide_bond_truncation_generic<R, V>(
     rule: &R,
     spectra: &[SectorSpectrum<V>],
     truncation: &Truncation,
     values_are_nonnegative: bool,
-) -> crate::truncation::TruncationDecision
+) -> Result<crate::truncation::TruncationDecision, OperationError>
 where
     R: GenericRigidSymbols<Scalar = f64>,
     V: SpectrumMagnitude,
@@ -6265,7 +6291,7 @@ where
             values: values.as_slice(),
         })
         .collect();
-    select_truncation(&weighted, truncation)
+    select_truncation(&weighted, truncation).map_err(OperationError::from)
 }
 
 #[cfg(test)]
@@ -6402,7 +6428,7 @@ where
     D: FactorScalar,
 {
     let rule = u.space().provider();
-    let decision = decide_bond_truncation_generic(rule, &singular_values, truncation, true);
+    let decision = decide_bond_truncation_generic(rule, &singular_values, truncation, true)?;
     if singular_values
         .iter()
         .zip(&decision.kept)

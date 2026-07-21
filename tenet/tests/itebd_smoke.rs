@@ -67,7 +67,7 @@ fn run_itebd(chi: usize, schedule: &[(f64, usize)]) -> f64 {
     let rt = Runtime::builder().build().unwrap();
     let p = Space::u1([(1, 1), (-1, 1)]);
     let h = heisenberg_two_site(&rt, &p);
-    let trunc = Truncation::rank(chi).and(Truncation::relative_cutoff(1e-8));
+    let trunc = Truncation::rank(chi).and(Truncation::relative_cutoff(1e-8).unwrap());
 
     // Charge-balanced entangled start (converges faster than a product
     // state; a strict Neel start also works, see the regression test below).

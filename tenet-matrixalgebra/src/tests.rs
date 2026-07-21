@@ -104,6 +104,8 @@ impl FailSecondValues {
 
 struct EqualMagnitudeEigh;
 
+struct NanEigh;
+
 #[derive(Clone)]
 struct IdentityQdimRule {
     identity: RuleIdentity,
@@ -595,6 +597,47 @@ impl DenseExecutor for EqualMagnitudeEigh {
             0.0, 1.0, 0.0, // second backend column
             0.0, 0.0, 1.0, // third backend column
         ]);
+        Ok(())
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("test only exercises EIGH")
+    }
+}
+
+impl DenseExecutor for NanEigh {
+    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises EIGH")
+    }
+
+    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises EIGH")
+    }
+
+    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("canonical EIGH must use the destination API")
+    }
+
+    fn eigh_into(
+        &mut self,
+        _: DenseRead<'_>,
+        values: DenseWrite<'_>,
+        vectors: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        let DenseWrite::F64(mut values) = values else {
+            panic!("test eigenvalues must be f64")
+        };
+        let DenseWrite::F64(mut vectors) = vectors else {
+            panic!("test eigenvectors must be f64")
+        };
+        values.data_mut().fill(f64::NAN);
+        vectors.data_mut().fill(0.0);
         Ok(())
     }
 
@@ -1284,6 +1327,27 @@ fn eigh_stably_orders_equal_magnitudes_and_reorders_vectors_in_place() {
     assert_eq!(
         eigh.v.data(),
         &[0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]
+    );
+}
+
+#[test]
+fn eigh_rejects_non_finite_backend_eigenvalues_before_sorting() {
+    // What: backend non-finite spectra become a typed operation error, not a comparator panic.
+    let tensor =
+        one_sector_rectangular_matrix(vec![1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0], 3, 3);
+    let mut dense = NanEigh;
+
+    let error = eigh_full(
+        &mut dense,
+        &bound_tensor_ref!(Arc::new(Z2FusionRule), &tensor),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        error,
+        OperationError::InvalidArgument {
+            message: "eigenvalues must be finite",
+        }
     );
 }
 
@@ -3094,10 +3158,11 @@ fn tsvd_truncbelow_drops_exactly_the_small_values() {
         (all[all.len() / 2] + all[all.len() / 2 - 1]) / 2.0
     };
 
+    let truncation = Truncation::absolute_cutoff(threshold).unwrap();
     let svd = svd_trunc(
         &mut dense_executor,
         &bound_tensor_ref!(Arc::new(rule), &tensor),
-        &Truncation::absolute_cutoff(threshold),
+        &truncation,
     )
     .unwrap();
     let error = svd.error;
@@ -3135,10 +3200,11 @@ fn tsvd_truncerr_respects_relative_tolerance() {
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
 
     let tolerance = 0.2;
+    let truncation = Truncation::relative_error(tolerance).unwrap();
     let svd = svd_trunc(
         &mut dense_executor,
         &bound_tensor_ref!(Arc::new(rule), &tensor),
-        &Truncation::relative_error(tolerance),
+        &truncation,
     )
     .unwrap();
     let error = svd.error;
@@ -3444,7 +3510,7 @@ fn svd_trunc_is_svd_compact_plus_host_truncation() {
             SU2Irrep::from_twice_spin(1).sector_id(),
         ],
     );
-    let truncation = Truncation::rank(9).and(Truncation::absolute_cutoff(1e-12));
+    let truncation = Truncation::rank(9).and(Truncation::absolute_cutoff(1e-12).unwrap());
 
     let mut dense_executor = tenet_dense::DefaultDenseExecutor::new();
     let composed = {
