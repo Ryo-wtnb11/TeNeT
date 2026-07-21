@@ -91,7 +91,7 @@ Added this sweep: `Tensor::numout` / `numin` / `numind`, `Tensor::repartition`,
 | `repartition` | added | `Tensor::repartition` | Single split-point arg (domain rank fixed by `rank`). |
 | `insertleftunit` / `insertrightunit` / `removeunit` | design-gated | — | Needs a trivial-unit `Space` constructor on the facade (see `unitspace` below). |
 | `catdomain` / `catcodomain` | has | `Tensor::catdomain` / `Tensor::catcodomain` | TensorKit names as Rust binary methods; concatenate the sole domain/codomain leg and place reduced blocks in adjacent column/row slabs. |
-| `absorb` | design-gated | — | Copies the shared prefix of every matching fusion-tree subblock from a source into a destination-shaped tensor; distinct from composition and diagonal absorption. |
+| `absorb` | has | `Tensor::absorb` | Immutable Rust form of TensorKit `absorb`: copies the shared prefix of every matching fusion-tree subblock from a source into a destination-shaped tensor; distinct from composition and diagonal absorption. Host only; device and mutable destination variants remain unsupported. |
 | `*!` bang forms | N/A | — | Immutable facade. |
 
 ## Factorizations & matrix functions
