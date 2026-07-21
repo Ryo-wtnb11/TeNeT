@@ -76,9 +76,10 @@ let c_c64 = c.to_c64();                          // c64 には明示 widening
 `permute`/`braid`/`transpose`/`twist`、構築系は
 `id`/`isomorphism`/`unitary`/`isometry`。repartition(脚の折り曲げ)は独立
 メソッドではなく `permute(codomain_axes, domain_axes)` に codomain↔domain を
-またぐ分割を渡す形で提供済み(名前付き wrapper は未実装)。未実装の TK export:
-catdomain / catcodomain / insertunit / removeunit / insertleg / ishermitian /
-project_*(roadmap.md 参照)。
+またぐ分割を渡す形で提供済み(名前付き wrapper は未実装)。`catdomain` /
+`catcodomain` / `absorb` は TensorKit 0.17 semantics の host owned facade
+として実装済み。未実装の TK export: insertunit / removeunit / insertleg /
+ishermitian / project_*(roadmap.md 参照)。
 
 ## 縮約適合性の契約(2026-07-04 合意)
 
