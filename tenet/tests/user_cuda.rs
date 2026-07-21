@@ -222,6 +222,7 @@ fn unsupported_ops_on_device_are_explicit_errors() {
         ("adjoint", t.adjoint().unwrap_err()),
         ("svd_vals", t.svd_vals().map(|_| ()).unwrap_err()),
         ("lq", t.lq_compact().map(|_| ()).unwrap_err()),
+        ("absorb", t.absorb(&t).unwrap_err()),
         ("catdomain", t.catdomain(&t).unwrap_err()),
         ("catcodomain", u.catcodomain(&u).unwrap_err()),
     ] {
@@ -245,6 +246,27 @@ fn mixed_placement_contract_is_placement_error() {
     assert!(matches!(err, Error::PlacementMismatch), "got {err:?}");
     let err = b_dev.compose(&a).unwrap_err();
     assert!(matches!(err, Error::PlacementMismatch), "got {err:?}");
+    let err = a.absorb(&b_dev).unwrap_err();
+    assert!(matches!(err, Error::PlacementMismatch), "got {err:?}");
+
+    // What: runtime validation wins when placement also differs.
+    let other_rt = Runtime::builder().cuda(0).build().unwrap();
+    let other_dev = Tensor::rand(&other_rt, Dtype::F64, [&v], [&v])
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    let err = a.absorb(&other_dev).unwrap_err();
+    assert!(matches!(err, Error::RuntimeMismatch), "got {err:?}");
+
+    // What: same-device rejection wins when corresponding legs also differ
+    // in duality.
+    let dual = v.dual();
+    let dual_dev = Tensor::rand(&rt, Dtype::F64, [&dual], [&dual])
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    let err = b_dev.absorb(&dual_dev).unwrap_err();
+    assert!(matches!(err, Error::UnsupportedOnDevice(_)), "got {err:?}");
 }
 
 #[test]
