@@ -776,6 +776,8 @@ where
 pub struct BoundDynamicFusionMapSpace<R> {
     space: DynamicFusionMapSpace,
     provider: Arc<R>,
+    /// Opaque layout-key strategy selected at admission and propagated to
+    /// derived outputs; product/rule authority remains in `provider`.
     layout_build: LayoutBuildCapability<R>,
 }
 
