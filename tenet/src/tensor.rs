@@ -18,7 +18,7 @@ use num_complex::Complex64;
 use smallvec::SmallVec;
 use tenet_core::{
     BlockKey, BlockStructure, BlockView, BlockViewMut, CheckedFusionAlgebra, CoupledSectorRegion,
-    FusionProductSpace, FusionRule, FusionTreeHomSpace, FusionTreePairKey,
+    FusionProductSpace, FusionRule, FusionTreeHomSpace, FusionTreePairKey, GenericRigidSymbols,
     LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols, Placement, SectorId,
     Su3FusionRule,
 };
@@ -48,7 +48,9 @@ use crate::runtime::{rule_lanes, Ctx, Ctxs, Runtime, RuntimeExecutionConfig, Run
 use crate::space::{Fz2U1Su2Rule, RuleKind, Space, U1Fz2Rule, UserRuleContext};
 
 mod diagonal;
-use diagonal::{axpby_dense_c64, axpby_dense_real, compact_inner, dense_inner};
+use diagonal::{
+    axpby_dense_c64, axpby_dense_real, compact_inner_with_weight, dense_inner_with_weight,
+};
 
 #[cfg(test)]
 thread_local! {
@@ -5989,30 +5991,49 @@ impl Tensor {
         if let Data::CudaF64(storage) = self.stored_data() {
             return Ok(self.weighted_inner_cuda(storage, storage)?.re.sqrt());
         }
-        if self.rule_kind() != RuleKind::Su3 {
-            if let Data::Diagonal(diagonal) = self.stored_data() {
-                let value = with_user_rule!(self.ordinary_body().space, rule, {
+        if let Data::Diagonal(diagonal) = self.stored_data() {
+            macro_rules! reduce {
+                ($weight:expr) => {
                     match diagonal {
-                        DiagonalData::RealF64(spectrum) => {
-                            compact_inner(rule, spectrum, spectrum, |value| value, |value| value)
-                        }
-                        DiagonalData::RealC64(spectrum) => compact_inner(
-                            rule,
+                        DiagonalData::RealF64(spectrum) => compact_inner_with_weight(
                             spectrum,
                             spectrum,
+                            $weight,
+                            |value| value,
+                            |value| value,
+                        ),
+                        DiagonalData::RealC64(spectrum) => compact_inner_with_weight(
+                            spectrum,
+                            spectrum,
+                            $weight,
                             |value| Complex64::new(value, 0.0),
                             |value| Complex64::new(value, 0.0),
                         ),
-                        DiagonalData::C64(spectrum) => {
-                            compact_inner(rule, spectrum, spectrum, |value| value, |value| value)
-                        }
+                        DiagonalData::C64(spectrum) => compact_inner_with_weight(
+                            spectrum,
+                            spectrum,
+                            $weight,
+                            |value| value,
+                            |value| value,
+                        ),
                     }
-                })
-                .ok_or_else(|| {
-                    internal_layout_error("a diagonal spectrum is incompatible with itself")
-                })?;
-                return Ok(value.re.sqrt());
+                };
             }
+            let value = if self.rule_kind() == RuleKind::Su3 {
+                let rule = self.su3_rule();
+                reduce!(|sector| {
+                    let sqrt = rule.sqrt_dim_scalar(sector);
+                    sqrt * sqrt
+                })
+            } else {
+                with_user_rule!(self.ordinary_body().space, rule, {
+                    reduce!(|sector| rule.dim_scalar(sector))
+                })
+            }
+            .ok_or_else(|| {
+                internal_layout_error("a diagonal spectrum is incompatible with itself")
+            })?;
+            return Ok(value.re.sqrt());
         }
         // SU(N) (Generic): dedicated non-macro path — the Frobenius norm is a
         // storage-level block sum weighted by dim(c) = sqrt_dim(c)², so it needs
@@ -6249,142 +6270,236 @@ impl Tensor {
                 .inner(&other.materialized_tensor()?);
         }
         self.check_same_space(other)?;
-        self.reject_unwired_su3("Tensor::inner")?;
         match (self.diagonal_data(), other.diagonal_data()) {
             (Some(lhs), Some(rhs)) => {
-                let value = with_user_rule!(self.ordinary_body().space, rule, {
-                    match (lhs, rhs) {
-                        (DiagonalData::RealF64(lhs), DiagonalData::RealF64(rhs)) => {
-                            compact_inner(rule, lhs, rhs, |value| value, |value| value)
+                macro_rules! reduce {
+                    ($weight:expr) => {
+                        match (lhs, rhs) {
+                            (DiagonalData::RealF64(lhs), DiagonalData::RealF64(rhs)) => {
+                                compact_inner_with_weight(
+                                    lhs,
+                                    rhs,
+                                    $weight,
+                                    |value| value,
+                                    |value| value,
+                                )
                                 .map(|value| Scalar::F64(value.re))
-                        }
-                        (DiagonalData::RealC64(lhs), DiagonalData::RealC64(rhs)) => compact_inner(
-                            rule,
-                            lhs,
-                            rhs,
-                            |value| Complex64::new(value, 0.0),
-                            |value| Complex64::new(value, 0.0),
-                        )
-                        .map(Scalar::C64),
-                        (DiagonalData::RealC64(lhs), DiagonalData::C64(rhs)) => compact_inner(
-                            rule,
-                            lhs,
-                            rhs,
-                            |value| Complex64::new(value, 0.0),
-                            |value| value,
-                        )
-                        .map(Scalar::C64),
-                        (DiagonalData::C64(lhs), DiagonalData::RealC64(rhs)) => compact_inner(
-                            rule,
-                            lhs,
-                            rhs,
-                            |value| value,
-                            |value| Complex64::new(value, 0.0),
-                        )
-                        .map(Scalar::C64),
-                        (DiagonalData::C64(lhs), DiagonalData::C64(rhs)) => {
-                            compact_inner(rule, lhs, rhs, |value| value, |value| value)
+                            }
+                            (DiagonalData::RealC64(lhs), DiagonalData::RealC64(rhs)) => {
+                                compact_inner_with_weight(
+                                    lhs,
+                                    rhs,
+                                    $weight,
+                                    |value| Complex64::new(value, 0.0),
+                                    |value| Complex64::new(value, 0.0),
+                                )
                                 .map(Scalar::C64)
+                            }
+                            (DiagonalData::RealC64(lhs), DiagonalData::C64(rhs)) => {
+                                compact_inner_with_weight(
+                                    lhs,
+                                    rhs,
+                                    $weight,
+                                    |value| Complex64::new(value, 0.0),
+                                    |value| value,
+                                )
+                                .map(Scalar::C64)
+                            }
+                            (DiagonalData::C64(lhs), DiagonalData::RealC64(rhs)) => {
+                                compact_inner_with_weight(
+                                    lhs,
+                                    rhs,
+                                    $weight,
+                                    |value| value,
+                                    |value| Complex64::new(value, 0.0),
+                                )
+                                .map(Scalar::C64)
+                            }
+                            (DiagonalData::C64(lhs), DiagonalData::C64(rhs)) => {
+                                compact_inner_with_weight(
+                                    lhs,
+                                    rhs,
+                                    $weight,
+                                    |value| value,
+                                    |value| value,
+                                )
+                                .map(Scalar::C64)
+                            }
+                            _ => None,
                         }
-                        _ => None,
-                    }
-                })
+                    };
+                }
+                let value = if self.rule_kind() == RuleKind::Su3 {
+                    let rule = self.su3_rule();
+                    reduce!(|sector| {
+                        let sqrt = rule.sqrt_dim_scalar(sector);
+                        sqrt * sqrt
+                    })
+                } else {
+                    with_user_rule!(self.ordinary_body().space, rule, {
+                        reduce!(|sector| rule.dim_scalar(sector))
+                    })
+                }
                 .ok_or(Error::DtypeMismatch)?;
                 return Ok(value);
             }
             (Some(diagonal), None) => {
-                let value = with_user_rule!(self.ordinary_body().space, rule, {
-                    match (diagonal, other.coupled_data()?) {
-                        (DiagonalData::RealF64(spectrum), Data::F64(dense)) => dense_inner(
-                            rule,
-                            &self.ordinary_body().space,
-                            spectrum,
-                            dense,
-                            true,
-                            |value| value,
-                        )
-                        .map(|value| Scalar::F64(value.re)),
-                        (DiagonalData::RealC64(spectrum), Data::C64(dense)) => dense_inner(
-                            rule,
-                            &self.ordinary_body().space,
-                            spectrum,
-                            dense,
-                            true,
-                            |value| Complex64::new(value, 0.0),
-                        )
-                        .map(Scalar::C64),
-                        (DiagonalData::C64(spectrum), Data::C64(dense)) => dense_inner(
-                            rule,
-                            &self.ordinary_body().space,
-                            spectrum,
-                            dense,
-                            true,
-                            |value| value,
-                        )
-                        .map(Scalar::C64),
-                        _ => Err(Error::DtypeMismatch),
-                    }
-                })?;
+                let dense_data = other.coupled_data()?;
+                macro_rules! reduce {
+                    ($weight:expr) => {
+                        match (diagonal, dense_data) {
+                            (DiagonalData::RealF64(spectrum), Data::F64(dense)) => {
+                                dense_inner_with_weight(
+                                    &self.ordinary_body().space,
+                                    spectrum,
+                                    dense,
+                                    true,
+                                    $weight,
+                                    |value| value,
+                                )
+                                .map(|value| Scalar::F64(value.re))
+                            }
+                            (DiagonalData::RealC64(spectrum), Data::C64(dense)) => {
+                                dense_inner_with_weight(
+                                    &self.ordinary_body().space,
+                                    spectrum,
+                                    dense,
+                                    true,
+                                    $weight,
+                                    |value| Complex64::new(value, 0.0),
+                                )
+                                .map(Scalar::C64)
+                            }
+                            (DiagonalData::C64(spectrum), Data::C64(dense)) => {
+                                dense_inner_with_weight(
+                                    &self.ordinary_body().space,
+                                    spectrum,
+                                    dense,
+                                    true,
+                                    $weight,
+                                    |value| value,
+                                )
+                                .map(Scalar::C64)
+                            }
+                            _ => Err(Error::DtypeMismatch),
+                        }
+                    };
+                }
+                let value = if self.rule_kind() == RuleKind::Su3 {
+                    let rule = self.su3_rule();
+                    reduce!(|sector| {
+                        let sqrt = rule.sqrt_dim_scalar(sector);
+                        sqrt * sqrt
+                    })
+                } else {
+                    with_user_rule!(self.ordinary_body().space, rule, {
+                        reduce!(|sector| rule.dim_scalar(sector))
+                    })
+                }?;
                 return Ok(value);
             }
             (None, Some(diagonal)) => {
-                let value = with_user_rule!(self.ordinary_body().space, rule, {
-                    match (self.coupled_data()?, diagonal) {
-                        (Data::F64(dense), DiagonalData::RealF64(spectrum)) => dense_inner(
-                            rule,
-                            &self.ordinary_body().space,
-                            spectrum,
-                            dense,
-                            false,
-                            |value| value,
-                        )
-                        .map(|value| Scalar::F64(value.re)),
-                        (Data::C64(dense), DiagonalData::RealC64(spectrum)) => dense_inner(
-                            rule,
-                            &self.ordinary_body().space,
-                            spectrum,
-                            dense,
-                            false,
-                            |value| Complex64::new(value, 0.0),
-                        )
-                        .map(Scalar::C64),
-                        (Data::C64(dense), DiagonalData::C64(spectrum)) => dense_inner(
-                            rule,
-                            &self.ordinary_body().space,
-                            spectrum,
-                            dense,
-                            false,
-                            |value| value,
-                        )
-                        .map(Scalar::C64),
-                        _ => Err(Error::DtypeMismatch),
-                    }
-                })?;
+                let dense_data = self.coupled_data()?;
+                macro_rules! reduce {
+                    ($weight:expr) => {
+                        match (dense_data, diagonal) {
+                            (Data::F64(dense), DiagonalData::RealF64(spectrum)) => {
+                                dense_inner_with_weight(
+                                    &self.ordinary_body().space,
+                                    spectrum,
+                                    dense,
+                                    false,
+                                    $weight,
+                                    |value| value,
+                                )
+                                .map(|value| Scalar::F64(value.re))
+                            }
+                            (Data::C64(dense), DiagonalData::RealC64(spectrum)) => {
+                                dense_inner_with_weight(
+                                    &self.ordinary_body().space,
+                                    spectrum,
+                                    dense,
+                                    false,
+                                    $weight,
+                                    |value| Complex64::new(value, 0.0),
+                                )
+                                .map(Scalar::C64)
+                            }
+                            (Data::C64(dense), DiagonalData::C64(spectrum)) => {
+                                dense_inner_with_weight(
+                                    &self.ordinary_body().space,
+                                    spectrum,
+                                    dense,
+                                    false,
+                                    $weight,
+                                    |value| value,
+                                )
+                                .map(Scalar::C64)
+                            }
+                            _ => Err(Error::DtypeMismatch),
+                        }
+                    };
+                }
+                let value = if self.rule_kind() == RuleKind::Su3 {
+                    let rule = self.su3_rule();
+                    reduce!(|sector| {
+                        let sqrt = rule.sqrt_dim_scalar(sector);
+                        sqrt * sqrt
+                    })
+                } else {
+                    with_user_rule!(self.ordinary_body().space, rule, {
+                        reduce!(|sector| rule.dim_scalar(sector))
+                    })
+                }?;
                 return Ok(value);
             }
             (None, None) => {}
         }
         match (self.coupled_data()?, other.coupled_data()?) {
-            (Data::F64(a), Data::F64(b)) => with_user_rule!(self.ordinary_body().space, rule, {
-                weighted_inner(
-                    rule,
+            (Data::F64(a), Data::F64(b)) if self.rule_kind() == RuleKind::Su3 => {
+                weighted_inner_generic(
+                    self.su3_rule(),
                     self.ordinary_body().space.structure(),
                     self.ordinary_body().space.nout(),
                     a,
                     b,
                 )
                 .map(|v| Scalar::F64(v.re))
-            }),
-            (Data::C64(a), Data::C64(b)) => with_user_rule!(self.ordinary_body().space, rule, {
-                weighted_inner(
-                    rule,
+            }
+            (Data::C64(a), Data::C64(b)) if self.rule_kind() == RuleKind::Su3 => {
+                weighted_inner_generic(
+                    self.su3_rule(),
                     self.ordinary_body().space.structure(),
                     self.ordinary_body().space.nout(),
                     a,
                     b,
                 )
                 .map(Scalar::C64)
-            }),
+            }
+            (Data::F64(a), Data::F64(b)) => {
+                with_user_rule!(self.ordinary_body().space, rule, {
+                    weighted_inner(
+                        rule,
+                        self.ordinary_body().space.structure(),
+                        self.ordinary_body().space.nout(),
+                        a,
+                        b,
+                    )
+                    .map(|v| Scalar::F64(v.re))
+                })
+            }
+            (Data::C64(a), Data::C64(b)) => {
+                with_user_rule!(self.ordinary_body().space, rule, {
+                    weighted_inner(
+                        rule,
+                        self.ordinary_body().space.structure(),
+                        self.ordinary_body().space.nout(),
+                        a,
+                        b,
+                    )
+                    .map(Scalar::C64)
+                })
+            }
             #[cfg(feature = "cuda")]
             (Data::CudaF64(a), Data::CudaF64(b)) => {
                 self.weighted_inner_cuda(a, b).map(|v| Scalar::F64(v.re))
