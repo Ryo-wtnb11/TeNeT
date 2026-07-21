@@ -598,7 +598,11 @@ macro_rules! define_tensor_execution_context {
                 let mut context = Self {
                     runtime: None,
                     runtime_identity: None,
-                    $($field: Ctxs::with_config(&config.shared_ctx, config.gemm_kind)?,)+
+                    $($field: Ctxs::with_config(
+                        &config.shared_ctx,
+                        config.gemm_kind,
+                        config.operation_cache_policy,
+                    )?,)+
                 };
                 if let Some(threads) = config.recoupling_threads {
                     context.set_recoupling_threads(threads);
@@ -644,6 +648,14 @@ macro_rules! define_tensor_execution_context {
             #[cfg(test)]
             fn shares_cpu_context(&mut self, shared: &tenet_dense::SharedCpuContext) -> bool {
                 true $(&& self.$field.shares_cpu_context(shared))+
+            }
+
+            #[cfg(test)]
+            pub(crate) fn tree_cache_policy_is(
+                &self,
+                expected: tenet_tensors::OperationCachePolicy,
+            ) -> bool {
+                true $(&& self.$field.tree_cache_policy_is(expected))+
             }
         }
     };
