@@ -144,6 +144,11 @@ pub enum OperationCachePolicy {
     TaskLocalLru { max_entries: usize },
 }
 
+// Why-not use `OperationCachePolicy::default()`: that intentionally remains the
+// explicit unbounded task-local policy for callers that ask for it, while default
+// execution contexts should not grow without a cap.
+pub(crate) const DEFAULT_CONTRACT_CONTEXT_CACHE_ENTRIES: usize = 256;
+
 impl Default for OperationCachePolicy {
     fn default() -> Self {
         Self::TaskLocal
@@ -414,7 +419,7 @@ impl<C, PlanKey> Default for TensorContractStructureCache<C, PlanKey> {
         Self {
             structures: FxHashMap::default(),
             lru_order: VecDeque::new(),
-            policy: OperationCachePolicy::default(),
+            policy: OperationCachePolicy::task_local_lru(DEFAULT_CONTRACT_CONTEXT_CACHE_ENTRIES),
         }
     }
 }
@@ -602,7 +607,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::reset_global_operation_caches;
+    use super::{
+        reset_global_operation_caches, OperationCachePolicy, TensorContractStructureCache,
+        DEFAULT_CONTRACT_CONTEXT_CACHE_ENTRIES,
+    };
     use crate::test_support::CACHE_TEST_LOCK;
     use rustc_hash::FxHashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -610,6 +618,25 @@ mod tests {
 
     #[derive(Default)]
     struct DownstreamCacheProbe;
+
+    #[test]
+    fn tensor_contract_structure_cache_default_is_bounded() {
+        let cache = TensorContractStructureCache::<f64, usize>::default();
+
+        assert_eq!(
+            cache.policy(),
+            OperationCachePolicy::task_local_lru(DEFAULT_CONTRACT_CONTEXT_CACHE_ENTRIES)
+        );
+    }
+
+    #[test]
+    fn tensor_contract_structure_cache_explicit_task_local_stays_unbounded() {
+        let mut cache = TensorContractStructureCache::<f64, usize>::default();
+
+        cache.set_policy(OperationCachePolicy::TaskLocal);
+
+        assert_eq!(cache.policy(), OperationCachePolicy::TaskLocal);
+    }
 
     #[test]
     fn downstream_cache_registration_tracks_global_reset_epoch() {

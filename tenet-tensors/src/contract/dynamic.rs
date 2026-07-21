@@ -9,7 +9,10 @@ use tenet_core::{
     MultiplicityFreeRigidSymbols, ScratchStorage, SimilarStorage, TensorMap, TensorStorage,
 };
 
-use crate::cache::{touch_lru_key, BlockStructureCacheKey, OperationCachePolicy};
+use crate::cache::{
+    touch_lru_key, BlockStructureCacheKey, OperationCachePolicy,
+    DEFAULT_CONTRACT_CONTEXT_CACHE_ENTRIES,
+};
 use crate::lowering::{
     adjoint_fusion_space_view, prelowered_storage_axis, prelowered_storage_block_index,
 };
@@ -1702,7 +1705,7 @@ impl<RuleKey> Default for DynamicFusionSpaceCache<RuleKey> {
             last_core_dst: None,
             fast_core_dsts: FxHashMap::default(),
             core_dsts: FxHashMap::default(),
-            policy: OperationCachePolicy::default(),
+            policy: OperationCachePolicy::task_local_lru(DEFAULT_CONTRACT_CONTEXT_CACHE_ENTRIES),
             stats: DynamicFusionSpaceCacheStats::default(),
         }
     }
@@ -1814,6 +1817,12 @@ where
     #[inline]
     pub(crate) fn stats(&self) -> DynamicFusionSpaceCacheStats {
         self.stats
+    }
+
+    #[inline]
+    #[cfg(test)]
+    pub(crate) fn policy(&self) -> OperationCachePolicy {
+        self.policy
     }
 
     pub(crate) fn set_policy(&mut self, policy: OperationCachePolicy) {
@@ -2784,6 +2793,26 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    #[test]
+    fn dynamic_fusion_space_cache_default_is_bounded() {
+        let cache = DynamicFusionSpaceCache::<crate::TreeTransformBuiltinRuleCacheKey>::default();
+
+        assert_eq!(
+            cache.policy(),
+            OperationCachePolicy::task_local_lru(DEFAULT_CONTRACT_CONTEXT_CACHE_ENTRIES)
+        );
+    }
+
+    #[test]
+    fn dynamic_fusion_space_cache_explicit_task_local_stays_unbounded() {
+        let mut cache =
+            DynamicFusionSpaceCache::<crate::TreeTransformBuiltinRuleCacheKey>::default();
+
+        cache.set_policy(OperationCachePolicy::TaskLocal);
+
+        assert_eq!(cache.policy(), OperationCachePolicy::TaskLocal);
     }
 
     #[test]
