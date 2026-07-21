@@ -3024,6 +3024,401 @@ where
     Ok((locals, next_columns))
 }
 
+fn compose_generic_block_terms<R, F, I>(
+    rule: &R,
+    basis: &[FusionTreePairKey],
+    columns: &DenseColumns<R::Scalar>,
+    mut transform: F,
+) -> Result<(Vec<FusionTreePairKey>, DenseColumns<R::Scalar>), CoreError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+    F: FnMut(&R, &FusionTreePairKey) -> Result<I, CoreError>,
+    I: IntoIterator<Item = (FusionTreePairKey, R::Scalar)>,
+{
+    let num_src = columns.num_src;
+    let mut index: FxHashMap<FusionTreePairKey, usize> = FxHashMap::default();
+    let mut next_columns = DenseColumns::with_capacity(num_src, basis.len());
+    for (source_row, source_key) in basis.iter().enumerate() {
+        for (destination_key, step_coefficient) in transform(rule, source_key)? {
+            let row = match index.get(&destination_key) {
+                Some(&row) => row,
+                None => {
+                    let row = next_columns.push_empty_row();
+                    index.insert(destination_key, row);
+                    row
+                }
+            };
+            let source_column = columns.row(source_row);
+            let destination_column = next_columns.row_mut(row);
+            for (source, source_coefficient) in source_column.iter().enumerate() {
+                let Some(source_coefficient) = source_coefficient else {
+                    continue;
+                };
+                let contribution = step_coefficient.clone() * source_coefficient.clone();
+                destination_column[source] = Some(match destination_column[source].take() {
+                    Some(existing) => existing + contribution,
+                    None => contribution,
+                });
+            }
+        }
+    }
+    let mut slots: Vec<Option<FusionTreePairKey>> = (0..index.len()).map(|_| None).collect();
+    for (key, row) in index {
+        slots[row] = Some(key);
+    }
+    let basis = slots
+        .into_iter()
+        .map(|key| key.expect("dense rows 0..len are all filled"))
+        .collect();
+    Ok((basis, next_columns))
+}
+
+fn seed_generic_tree_pair_block<R>(
+    rule: &R,
+    src_keys: &[FusionTreePairKey],
+) -> Result<(Vec<FusionTreePairKey>, DenseColumns<R::Scalar>), CoreError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    if rule.fusion_style() != FusionStyleKind::Generic {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Generic,
+            actual: rule.fusion_style(),
+        });
+    }
+    let mut basis = Vec::with_capacity(src_keys.len());
+    for source in src_keys {
+        validate_fusion_tree_pair_for_rule(rule, source)?;
+        basis.push(source.clone());
+    }
+    let mut columns = DenseColumns::with_capacity(src_keys.len(), src_keys.len());
+    for source in 0..src_keys.len() {
+        let row = columns.push_empty_row();
+        columns.row_mut(row)[source] = Some(R::Scalar::braid_one());
+    }
+    Ok((basis, columns))
+}
+
+fn order_generic_tree_pair_block<S: Clone>(
+    basis: Vec<FusionTreePairKey>,
+    columns: DenseColumns<S>,
+) -> OrderedBlockLinearMap<FusionTreePairKey, S> {
+    let source_count = columns.num_src;
+    let mut ordered_basis_rows = Vec::with_capacity(basis.len());
+    let mut ordered_row_for_basis = vec![usize::MAX; basis.len()];
+    let mut singleton_basis_rows = Vec::with_capacity(source_count);
+    let mut is_singleton = true;
+
+    for source in 0..source_count {
+        let mut only_basis_row = None;
+        for (basis_row, ordered_row) in ordered_row_for_basis.iter_mut().enumerate() {
+            if columns.row(basis_row)[source].is_none() {
+                continue;
+            }
+            if *ordered_row == usize::MAX {
+                *ordered_row = ordered_basis_rows.len();
+                ordered_basis_rows.push(basis_row);
+            }
+            if only_basis_row.replace(basis_row).is_some() {
+                is_singleton = false;
+            }
+        }
+        match only_basis_row {
+            Some(basis_row) => singleton_basis_rows.push(basis_row),
+            None => {
+                is_singleton = false;
+                singleton_basis_rows.push(usize::MAX);
+            }
+        }
+    }
+
+    let destinations = ordered_basis_rows
+        .iter()
+        .map(|&basis_row| basis[basis_row].clone())
+        .collect::<Vec<_>>();
+    let storage = if is_singleton {
+        let mut destination_rows = Vec::with_capacity(source_count);
+        let mut coefficients = Vec::with_capacity(source_count);
+        for (source, basis_row) in singleton_basis_rows.into_iter().enumerate() {
+            destination_rows.push(ordered_row_for_basis[basis_row]);
+            coefficients.push(
+                columns.data[basis_row * source_count + source]
+                    .clone()
+                    .expect("singleton source has one present coefficient"),
+            );
+        }
+        OrderedBlockLinearStorage::SingletonColumns {
+            destination_rows,
+            coefficients,
+        }
+    } else {
+        let mut coefficients =
+            Vec::with_capacity(ordered_basis_rows.len().saturating_mul(source_count));
+        for basis_row in ordered_basis_rows {
+            let row_start = basis_row * source_count;
+            coefficients.extend(columns.data[row_start..row_start + source_count].iter().cloned());
+        }
+        OrderedBlockLinearStorage::DenseDstSrc(coefficients)
+    };
+
+    OrderedBlockLinearMap {
+        destinations,
+        source_count: columns.num_src,
+        storage,
+    }
+}
+
+fn generic_repartition_tree_pair_block_terms<R>(
+    rule: &R,
+    mut basis: Vec<FusionTreePairKey>,
+    mut columns: DenseColumns<R::Scalar>,
+    target_codomain_rank: usize,
+) -> Result<(Vec<FusionTreePairKey>, DenseColumns<R::Scalar>), CoreError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    let Some(first) = basis.first() else {
+        return Ok((basis, columns));
+    };
+    let total_rank = first.codomain_tree().uncoupled().len() + first.domain_tree().uncoupled().len();
+    if target_codomain_rank > total_rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: total_rank,
+            actual: target_codomain_rank,
+        });
+    }
+    let mut current_codomain_rank = first.codomain_tree().uncoupled().len();
+    while current_codomain_rank < target_codomain_rank {
+        (basis, columns) = compose_generic_block_terms(rule, &basis, &columns, |rule, key| {
+            generic_bendleft_tree_pair(rule, key)
+        })?;
+        current_codomain_rank += 1;
+    }
+    while current_codomain_rank > target_codomain_rank {
+        (basis, columns) = compose_generic_block_terms(rule, &basis, &columns, |rule, key| {
+            generic_bendright_tree_pair(rule, key)
+        })?;
+        current_codomain_rank -= 1;
+    }
+    Ok((basis, columns))
+}
+
+#[doc(hidden)]
+pub fn generic_braid_tree_pair_block_ordered<R>(
+    rule: &R,
+    src_keys: &[FusionTreePairKey],
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+    codomain_levels: &[usize],
+    domain_levels: &[usize],
+) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    if src_keys.is_empty() {
+        return Ok(order_generic_tree_pair_block(
+            Vec::new(),
+            DenseColumns::with_capacity(0, 0),
+        ));
+    }
+    let codomain_rank = src_keys[0].codomain_tree().uncoupled().len();
+    let domain_rank = src_keys[0].domain_tree().uncoupled().len();
+    if codomain_levels.len() != codomain_rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: codomain_rank,
+            actual: codomain_levels.len(),
+        });
+    }
+    if domain_levels.len() != domain_rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: domain_rank,
+            actual: domain_levels.len(),
+        });
+    }
+    for source in src_keys {
+        if source.codomain_tree().uncoupled().len() != codomain_rank {
+            return Err(CoreError::DimensionMismatch {
+                expected: codomain_rank,
+                actual: source.codomain_tree().uncoupled().len(),
+            });
+        }
+        if source.domain_tree().uncoupled().len() != domain_rank {
+            return Err(CoreError::DimensionMismatch {
+                expected: domain_rank,
+                actual: source.domain_tree().uncoupled().len(),
+            });
+        }
+    }
+    let permutation = linearize_tree_pair_permutation(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    )?;
+    let swaps = permutation_to_adjacent_swaps(&permutation, codomain_rank + domain_rank)?;
+    let identity = tree_pair_axis_map_is_identity(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    );
+    let mut levels = Vec::with_capacity(codomain_rank + domain_rank);
+    levels.extend_from_slice(codomain_levels);
+    levels.extend(domain_levels.iter().rev().copied());
+
+    let (mut basis, mut columns) = seed_generic_tree_pair_block(rule, src_keys)?;
+    if identity {
+        return Ok(order_generic_tree_pair_block(basis, columns));
+    }
+    let all_rank = permutation.len();
+    (basis, columns) = generic_repartition_tree_pair_block_terms(rule, basis, columns, all_rank)?;
+    (basis, columns) = compose_generic_block_terms(rule, &basis, &columns, |rule, key| {
+        generic_braid_tree_unchecked(rule, key.codomain_tree(), &permutation, &levels, &swaps).map(
+            |terms| {
+                terms
+                    .into_iter()
+                    .map(|(codomain_tree, coefficient)| {
+                        (
+                            FusionTreePairKey::pair(codomain_tree, key.domain_tree().clone()),
+                            coefficient,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+    })?;
+    (basis, columns) = generic_repartition_tree_pair_block_terms(
+        rule,
+        basis,
+        columns,
+        codomain_permutation.len(),
+    )?;
+    Ok(order_generic_tree_pair_block(basis, columns))
+}
+
+#[doc(hidden)]
+pub fn generic_permute_tree_pair_block_ordered<R>(
+    rule: &R,
+    src_keys: &[FusionTreePairKey],
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    if !rule.braiding_style().is_symmetric() {
+        return Err(CoreError::UnsupportedBraidingStyle {
+            expected: "symmetric braiding",
+            actual: rule.braiding_style(),
+        });
+    }
+    let Some(first) = src_keys.first() else {
+        return Ok(order_generic_tree_pair_block(
+            Vec::new(),
+            DenseColumns::with_capacity(0, 0),
+        ));
+    };
+    let codomain_rank = first.codomain_tree().uncoupled().len();
+    let domain_rank = first.domain_tree().uncoupled().len();
+    let codomain_levels = (0..codomain_rank).collect::<Vec<_>>();
+    let domain_levels = (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
+    generic_braid_tree_pair_block_ordered(
+        rule,
+        src_keys,
+        codomain_permutation,
+        domain_permutation,
+        &codomain_levels,
+        &domain_levels,
+    )
+}
+
+#[doc(hidden)]
+pub fn generic_transpose_tree_pair_block_ordered<R>(
+    rule: &R,
+    src_keys: &[FusionTreePairKey],
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    if src_keys.is_empty() {
+        return Ok(order_generic_tree_pair_block(
+            Vec::new(),
+            DenseColumns::with_capacity(0, 0),
+        ));
+    }
+    let codomain_rank = src_keys[0].codomain_tree().uncoupled().len();
+    let domain_rank = src_keys[0].domain_tree().uncoupled().len();
+    let permutation = linearize_tree_pair_permutation(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    )?;
+    if !is_cyclic_permutation(&permutation) {
+        return Err(CoreError::InvalidPermutation {
+            permutation,
+            rank: codomain_rank + domain_rank,
+        });
+    }
+    for source in src_keys {
+        if source.codomain_tree().uncoupled().len() != codomain_rank {
+            return Err(CoreError::DimensionMismatch {
+                expected: codomain_rank,
+                actual: source.codomain_tree().uncoupled().len(),
+            });
+        }
+        if source.domain_tree().uncoupled().len() != domain_rank {
+            return Err(CoreError::DimensionMismatch {
+                expected: domain_rank,
+                actual: source.domain_tree().uncoupled().len(),
+            });
+        }
+    }
+    let mut position = match permutation.iter().position(|&axis| axis == 0) {
+        Some(position) => position,
+        None => {
+            let (basis, columns) = seed_generic_tree_pair_block(rule, src_keys)?;
+            return Ok(order_generic_tree_pair_block(basis, columns));
+        }
+    };
+    let total_rank = codomain_rank + domain_rank;
+    let (mut basis, mut columns) =
+        seed_generic_tree_pair_block(rule, src_keys)?;
+    (basis, columns) = generic_repartition_tree_pair_block_terms(
+        rule,
+        basis,
+        columns,
+        codomain_permutation.len(),
+    )?;
+    if total_rank == 0 || position == 0 {
+        return Ok(order_generic_tree_pair_block(basis, columns));
+    }
+
+    let half_rank = total_rank >> 1;
+    while position > 0 && position < half_rank {
+        (basis, columns) = compose_generic_block_terms(rule, &basis, &columns, |rule, key| {
+            generic_cycle_anticlockwise_tree_pair_unchecked(rule, key)
+        })?;
+        position -= 1;
+    }
+    while position >= half_rank && position > 0 {
+        (basis, columns) = compose_generic_block_terms(rule, &basis, &columns, |rule, key| {
+            generic_cycle_clockwise_tree_pair_unchecked(rule, key)
+        })?;
+        position = (position + 1) % total_rank;
+    }
+
+    Ok(order_generic_tree_pair_block(basis, columns))
+}
+
 fn apply_first_compact_block_terms<R, K, F, I>(
     rule: &R,
     basis: &[K],

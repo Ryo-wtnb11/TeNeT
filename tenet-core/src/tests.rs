@@ -15436,6 +15436,77 @@ mod tests {
         }
     }
 
+    #[test]
+    fn generic_full_key_block_composition_matches_per_source_replay() {
+        let rule = Su3BendRule;
+        let s42 = SectorId::new(1);
+        let s31 = SectorId::new(2);
+        let basis = (1..=2)
+            .map(|mu| {
+                FusionTreePairKey::pair(
+                    FusionTreeKey::new(
+                        [s42, s31],
+                        s31,
+                        [false, false],
+                        [],
+                        [MultiplicityIndex::new(mu)
+                            .expect("test multiplicity label is one-based")],
+                    ),
+                    FusionTreeKey::new([s31], s31, [false], [], []),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut columns = DenseColumns::with_capacity(basis.len(), basis.len());
+        for source in 0..basis.len() {
+            let row = columns.push_empty_row();
+            columns.row_mut(row)[source] = Some(1.0);
+        }
+
+        let (dst_basis, dst_columns) =
+            compose_generic_block_terms(&rule, &basis, &columns, |rule, key| {
+                generic_bendright_tree_pair(rule, key)
+            })
+            .unwrap();
+
+        let oracle = basis
+            .iter()
+            .map(|source| {
+                compose_generic_tree_pair_terms(
+                    &rule,
+                    vec![(source.clone(), 1.0)],
+                    |rule, key| generic_bendright_tree_pair(rule, key),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut expected_order = Vec::<FusionTreePairKey>::new();
+        for rows in &oracle {
+            for (key, _) in rows {
+                if !expected_order.iter().any(|existing| existing == key) {
+                    expected_order.push(key.clone());
+                }
+            }
+        }
+        assert_eq!(dst_basis, expected_order);
+        assert_eq!(dst_columns.num_src, basis.len());
+        assert_eq!(dst_columns.num_rows, dst_basis.len());
+        for destination_row in 0..dst_basis.len() {
+            let domain_vertices = dst_basis[destination_row].domain_tree().vertices();
+            assert_eq!(
+                domain_vertices.last().map(|index| index.get()),
+                Some(destination_row + 1)
+            );
+            for source in 0..basis.len() {
+                let got = dst_columns.row(destination_row)[source].unwrap_or(0.0);
+                let want = oracle[source]
+                    .iter()
+                    .find_map(|(key, coeff)| (key == &dst_basis[destination_row]).then_some(*coeff))
+                    .unwrap_or(0.0);
+                assert!((got - want).abs() < 1e-12);
+            }
+        }
+    }
+
     // Round-trip with a real non-diagonal SU(3) B: bendright∘bendleft == id
     // (B_fwd · B_ret = I₂), exercising the non-trivial off-diagonal mixing.
     #[test]
