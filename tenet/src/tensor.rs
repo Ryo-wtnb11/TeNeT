@@ -32,7 +32,8 @@ use tenet_dense::{
 #[cfg(feature = "cuda")]
 use tenet_matrixalgebra::{select_truncation, validate_hermitian_regions, WeightedSpectrum};
 use tenet_matrixalgebra::{
-    BoundDynFactor, BoundDynamicTensorRef, FactorScalar, SectorSpectrum, Truncation,
+    BoundDynFactor, BoundDynamicTensorRef, FactorScalar, SectorSpectrum, SvdTruncFactorsDyn,
+    Truncation,
 };
 #[cfg(feature = "cuda")]
 use tenet_tensors::cuda::{CudaStorage, CudaStorageGemm};
@@ -58,6 +59,8 @@ thread_local! {
     static SELECTED_RESULT_LAYOUT_BUILDS: std::cell::Cell<Option<usize>> =
         const { std::cell::Cell::new(None) };
     static CAT_RESULT_LAYOUT_BUILDS: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+    static DIAGONAL_RESULT_LAYOUT_BUILDS: std::cell::Cell<Option<usize>> =
         const { std::cell::Cell::new(None) };
 }
 
@@ -91,6 +94,15 @@ fn observe_selected_result_layout_build() {
 #[cfg(test)]
 fn observe_cat_result_layout_build() {
     CAT_RESULT_LAYOUT_BUILDS.with(|observation| {
+        if let Some(builds) = observation.get() {
+            observation.set(Some(builds + 1));
+        }
+    });
+}
+
+#[cfg(test)]
+fn observe_diagonal_result_layout_build() {
+    DIAGONAL_RESULT_LAYOUT_BUILDS.with(|observation| {
         if let Some(builds) = observation.get() {
             observation.set(Some(builds + 1));
         }
@@ -6556,16 +6568,16 @@ impl Tensor {
         ))
     }
 
-    fn from_svd_trunc_dyn<R, D>(
+    fn from_svd_trunc_factors<R, D>(
         &self,
-        output: tenet_matrixalgebra::SvdTruncDyn<R, D>,
+        output: SvdTruncFactorsDyn<R, D>,
         complex: bool,
     ) -> Result<SvdTrunc, Error>
     where
         R: IntoUserBoundDynamicSpace,
         D: UserScalar,
     {
-        let (u, _s, vh, singular_values, error) = output.into_parts();
+        let (u, vh, singular_values, error) = output;
         Ok(SvdTrunc {
             u: self.from_bound_factor(u)?,
             s: self.from_diagonal_real_spectrum(singular_values.clone(), complex)?,
@@ -6587,6 +6599,8 @@ impl Tensor {
         complex: bool,
     ) -> Result<Self, Error> {
         spectrum.sort_unstable_by_key(|entry| entry.sector);
+        #[cfg(test)]
+        observe_diagonal_result_layout_build();
         // SU(N) (Generic): the bond space is a rank-1/rank-1 hom whose trees
         // are trivial, but the key enumeration must still be the generic one.
         let space = if let UserBoundSpace::Su3(bound) = self.ordinary_body().space.as_ref() {
@@ -6884,20 +6898,20 @@ impl Tensor {
             // SU(N) (Generic): same engine and generic factor spaces; the
             // sqrt_dim² truncation weight remains a real quantum dimension.
             if let UserBoundSpace::Su3(bound) = self.ordinary_body().space.as_ref() {
-                let output = tenet_matrixalgebra::svd_trunc_dyn_generic(
+                let output = tenet_matrixalgebra::svd_trunc_factors_dyn_generic(
                     dense.dense(),
                     &BoundDynamicTensorRef::try_new(&bound, data)?,
                     truncation,
                 )?;
-                self.from_svd_trunc_dyn(output, complex)
+                self.from_svd_trunc_factors(output, complex)
             } else {
                 with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
-                    let output = tenet_matrixalgebra::svd_trunc_dyn(
+                    let output = tenet_matrixalgebra::svd_trunc_factors_dyn(
                         dense.dense(),
                         &BoundDynamicTensorRef::try_new(&bound, data)?,
                         truncation,
                     )?;
-                    self.from_svd_trunc_dyn(output, complex)
+                    self.from_svd_trunc_factors(output, complex)
                 })
             }
         })

@@ -42,6 +42,34 @@ fn real_c64_diagonal(rt: &Runtime, space: &Space, seed: u64) -> Tensor {
     source.svd_compact().unwrap().1
 }
 
+fn assert_svd_trunc_builds_one_compact_diagonal_layout(space: Space, dtype: Dtype, seed: u64) {
+    let rt = Runtime::builder().dense_threads(1).build().unwrap();
+    let tensor = Tensor::rand_with_seed(&rt, dtype, [&space], [&space], seed).unwrap();
+    DIAGONAL_RESULT_LAYOUT_BUILDS.with(|builds| builds.set(Some(0)));
+    let result = tensor.svd_trunc(&Truncation::rank(2)).unwrap();
+    assert_eq!(
+        DIAGONAL_RESULT_LAYOUT_BUILDS.with(|builds| builds.replace(None)),
+        Some(1)
+    );
+    assert!(matches!(result.s.stored_data(), Data::Diagonal(_)));
+}
+
+#[test]
+fn public_svd_trunc_builds_one_compact_diagonal_layout_for_both_rule_paths() {
+    // What: multiplicity-free and Generic truncation each assemble one compact
+    // diagonal result after their factor-only matrixalgebra call.
+    assert_svd_trunc_builds_one_compact_diagonal_layout(
+        Space::u1([(-1, 2), (0, 3), (1, 2)]),
+        Dtype::F64,
+        428_001,
+    );
+    assert_svd_trunc_builds_one_compact_diagonal_layout(
+        Space::su3([((1, 0), 2), ((0, 1), 2)]).unwrap(),
+        Dtype::C64,
+        428_002,
+    );
+}
+
 fn assert_tensor_close(actual: &Tensor, expected: &Tensor) {
     assert_eq!(
         actual.logical_space().unwrap(),

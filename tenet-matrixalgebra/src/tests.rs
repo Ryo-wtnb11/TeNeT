@@ -3516,6 +3516,45 @@ fn svd_trunc_builds_only_the_returned_diagonal_factor() {
 }
 
 #[test]
+fn svd_trunc_factor_only_core_skips_dense_s_and_dense_contract_wraps_once() {
+    // What: the factor-only entry returns the same truncated U/Vh, spectrum,
+    // and error without building S; the existing dense-S API wraps it once.
+    let rule = SU2FusionRule;
+    let tensor = tsvd_test_tensor(
+        &rule,
+        &[
+            SU2Irrep::from_twice_spin(0).sector_id(),
+            SU2Irrep::from_twice_spin(1).sector_id(),
+        ],
+    );
+    let input = bound_tensor(Arc::new(rule), &tensor);
+    let truncation = Truncation::rank(5);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    crate::factorize::reset_diagonal_bond_build_probe();
+    let (u, vh, singular_values, error) =
+        svd_trunc_factors_dyn(&mut dense, &input.as_ref().dynamic(), &truncation).unwrap();
+    assert_eq!(
+        crate::factorize::diagonal_bond_build_probe(),
+        crate::factorize::DiagonalBondBuildProbe::default()
+    );
+
+    crate::factorize::reset_diagonal_bond_build_probe();
+    let wrapped = svd_trunc_dyn(&mut dense, &input.as_ref().dynamic(), &truncation).unwrap();
+    assert_eq!(u.data(), wrapped.u().data());
+    assert_eq!(vh.data(), wrapped.vh().data());
+    assert_eq!(singular_values, wrapped.singular_values());
+    assert_eq!(error, wrapped.error());
+    assert_eq!(
+        crate::factorize::diagonal_bond_build_probe(),
+        crate::factorize::DiagonalBondBuildProbe {
+            calls: 1,
+            values: singular_values.iter().map(|entry| entry.values.len()).sum(),
+        }
+    );
+}
+
+#[test]
 fn svd_trunc_zero_rank_returns_empty_factors_and_the_full_error() {
     // What: an all-discard decision publishes rank-zero factors and reports the entire weighted norm.
     let rule = SU2FusionRule;

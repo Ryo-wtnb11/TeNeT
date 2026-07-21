@@ -184,8 +184,8 @@ fn su3_svd_random_om_reconstructs_and_isometric_and_vals_agree() {
     let iso_err = utu.add(&id, 1.0, -1.0).unwrap().norm().unwrap();
     assert!(iso_err <= 1e-10, "random OM U†U != id ({iso_err})");
 
-    // svd_vals (svd_vals_dyn_generic) must equal svd_trunc(Full)'s spectrum
-    // (svd_compact_dyn_generic) — two separate generic entry points.
+    // svd_vals must equal the factor-only svd_trunc(Full) spectrum across
+    // separate Generic entry points.
     let _ = &s;
     let vals = t.svd_vals().unwrap();
     let full = t.svd_trunc(&Truncation::Full).unwrap();

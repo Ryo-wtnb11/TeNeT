@@ -30,11 +30,12 @@ pub use factorize::{
     qr_compact_dyn_generic, qr_full, qr_full_dyn, right_null, right_null_dyn, right_orth,
     right_polar, right_polar_dyn, scale_axis_by_spectrum, scale_axis_by_spectrum_mapped,
     svd_compact, svd_compact_dyn, svd_compact_factors_dyn, svd_compact_factors_dyn_generic,
-    svd_full, svd_full_dyn, svd_trunc, svd_trunc_dyn, svd_trunc_dyn_generic, svd_vals,
-    svd_vals_dyn, svd_vals_dyn_generic, BoundDynFactor, BoundDynamicTensorRef, BoundTensorMap,
-    BoundTensorMapRef, EigFull, EigFullDyn, EigTrunc, EigTruncDyn, EighFull, EighFullDyn,
-    EighTrunc, EighTruncDyn, FactorScalar, SectorSpectrum, SpectrumMagnitude, SvdCompact,
-    SvdCompactDyn, SvdFactorsDyn, SvdFull, SvdFullDyn, SvdTrunc, SvdTruncDyn,
+    svd_full, svd_full_dyn, svd_trunc, svd_trunc_dyn, svd_trunc_dyn_generic, svd_trunc_factors_dyn,
+    svd_trunc_factors_dyn_generic, svd_vals, svd_vals_dyn, svd_vals_dyn_generic, BoundDynFactor,
+    BoundDynamicTensorRef, BoundTensorMap, BoundTensorMapRef, EigFull, EigFullDyn, EigTrunc,
+    EigTruncDyn, EighFull, EighFullDyn, EighTrunc, EighTruncDyn, FactorScalar, SectorSpectrum,
+    SpectrumMagnitude, SvdCompact, SvdCompactDyn, SvdFactorsDyn, SvdFull, SvdFullDyn, SvdTrunc,
+    SvdTruncDyn, SvdTruncFactorsDyn,
 };
 pub use matrix_functions::{exp, exp_dyn, inv, inv_dyn, pinv, pinv_dyn};
 pub use truncation::{select_truncation, Truncation, TruncationDecision, WeightedSpectrum};
