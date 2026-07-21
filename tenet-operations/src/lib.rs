@@ -79,8 +79,13 @@ pub use tree_profile::TreeTransformReplayProfile;
 // Why not retain crate-level `forbid`: Rust does not permit a narrower module
 // to override it. `deny` keeps every other module unsafe-free while this one
 // owns the audited Vec length transition.
+mod owned_cat;
 #[allow(unsafe_code)]
 mod owned_overwrite_buffer;
 mod owned_trace;
+#[doc(hidden)]
+pub use owned_cat::{
+    try_cat_owned_c64_raw, try_cat_owned_raw, OwnedCatC64Source, OwnedCatCopy, OwnedCatSide,
+};
 #[doc(hidden)]
 pub use owned_trace::{try_tensortrace_owned_raw, OwnedTraceTerm};

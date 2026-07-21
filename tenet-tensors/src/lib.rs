@@ -95,6 +95,10 @@ pub use tenet_operations::{
 pub(crate) use tenet_operations::{
     tensortrace_raw_strided_kernel, tensortrace_raw_strided_kernel_add_with_coefficient,
 };
+#[doc(hidden)]
+pub use tenet_operations::{
+    try_cat_owned_c64_raw, try_cat_owned_raw, OwnedCatC64Source, OwnedCatCopy, OwnedCatSide,
+};
 pub use tenet_operations::{
     ConjugateValue, DenseBlockScalar, DenseRecouplingScalar, RealStructuralCoefficient,
     RecouplingCoefficientAction, TreeTransformScalar,
