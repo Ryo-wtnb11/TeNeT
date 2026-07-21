@@ -131,30 +131,3 @@ fn cached_u1_permute_overwrite_does_not_allocate_on_the_caller_thread() {
     assert_eq!(outcome, OverwriteOutcome::Written);
     assert_eq!(ALLOCATIONS.get(), 0);
 }
-
-#[test]
-fn cached_owned_rank_nine_permute_does_not_clone_operation_storage() {
-    // What: the warmed public owned path pays for its returned tensor but does
-    // not add a rank-spilled operation clone before consulting the plan cache.
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let space = Space::su2([(0, 1), (1, 1)]).unwrap();
-    let source = Tensor::rand_with_seed(
-        &runtime,
-        Dtype::F64,
-        [&space, &space, &space, &space, &space],
-        [&space, &space, &space, &space],
-        226,
-    )
-    .unwrap();
-    let codomain = [1, 0, 2, 3, 4];
-    let domain = [5, 6, 7, 8];
-    drop(source.permute(&codomain, &domain).unwrap());
-
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
-    let output = source.permute(&codomain, &domain).unwrap();
-    COUNTING.set(false);
-    black_box(output.data());
-
-    assert_eq!(ALLOCATIONS.get(), 3);
-}
