@@ -626,10 +626,12 @@ fn inv_and_pinv_sanity() {
 
 #[test]
 fn inv_accepts_tensorkit_isomorphic_exact_unequal_spaces() {
-    // What: Abelian and fermionic non-Abelian fused/product isomorphisms are
-    // invertible and return the exact swapped external spaces.
+    // What: U1, SU2, fZ2, and their non-Abelian product invert isomorphisms
+    // through the same public API and return the exact swapped spaces.
     let rt = Runtime::builder().dense_threads(1).build().unwrap();
     assert_isomorphic_inverse(&rt, Dtype::F64, Space::u1([(0, 1), (1, 1)]));
+    assert_isomorphic_inverse(&rt, Dtype::F64, Space::su2([(0, 1), (1, 1)]).unwrap());
+    assert_isomorphic_inverse(&rt, Dtype::C64, Space::fz2([(0, 1), (1, 1)]).unwrap());
     assert_isomorphic_inverse(
         &rt,
         Dtype::C64,

@@ -7380,9 +7380,8 @@ impl Tensor {
         })
     }
 
-    /// True inverse of a full-rank map between isomorphic spaces
-    /// (MatrixAlgebraKit-style `inv`); fails when any coupled block is
-    /// rank-deficient at working precision.
+    /// True inverse of a nonsingular map between isomorphic spaces
+    /// (MatrixAlgebraKit-style `inv`).
     pub fn inv(&self) -> Result<Self, Error> {
         if self.is_adjoint_view() {
             return self.materialized_tensor()?.inv();
@@ -7398,12 +7397,9 @@ impl Tensor {
 
     fn inv_impl<D: UserScalar>(&self, data: &[D]) -> Result<Self, Error> {
         let mut dense = self.rt.lease_dense();
-        let mut lease = self.rt.lease_context()?;
-        let context = lease.context();
-        with_bound_ctx!(self.ordinary_body().space, context, bound, ctxs, {
-            let out = tenet_matrixalgebra::inv_dyn(
+        with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
+            let out = tenet_matrixalgebra::inv_direct_dyn(
                 dense.dense(),
-                D::ctx_of(ctxs),
                 &BoundDynamicTensorRef::try_new(bound, data)?,
             )?;
             self.from_bound_factor(out)
