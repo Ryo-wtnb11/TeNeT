@@ -40,7 +40,10 @@ use super::fusion::{
     EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST, SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
 };
 use super::fusion_block::FusionBlockContractWorkspace;
-use super::resolution::{ContractionResolutionCache, Resolution};
+use super::resolution::{
+    compile_composition_plan, compile_core_plan, compile_prelowered_resolution, compile_resolution,
+    Resolution,
+};
 use super::scratch::DynamicFusionScratchWorkspace;
 use super::structure::{TensorContractAxisPlan, TensorContractStructure};
 use tenet_operations::{TensorContractFusionProfile, TensorContractFusionRoute};
@@ -510,16 +513,14 @@ pub struct TensorContractFusionExecutionContext<
 {
     tree_context: TreeTransformExecutionContext<D, RuleKey, f64, BT>,
     dynamic_space_cache: DynamicFusionSpaceCache<RuleKey>,
-    // One cache entry per (rule, spaces, axes): route and plan resolve
-    // together (TensorKit keeps exactly one transformer entry per
-    // (spaces, permutation); it never caches a route separately).
-    resolution_cache: ContractionResolutionCache<RuleKey>,
     contract_backend: BC,
     contract_workspace: BC::Workspace,
     fusion_block_workspace: FusionBlockContractWorkspace<D>,
     fusion_scratch: DynamicFusionScratchWorkspace<D>,
     #[cfg(test)]
     last_top_level_resolution_was_core: bool,
+    #[cfg(test)]
+    last_top_level_resolution_orientation: Option<FusionContractOrientation>,
 }
 
 pub type HostTreeFusionExecutionContext<D, RuleKey> = TensorContractFusionExecutionContext<
@@ -544,13 +545,14 @@ where
         Self {
             tree_context,
             dynamic_space_cache: DynamicFusionSpaceCache::default(),
-            resolution_cache: ContractionResolutionCache::default(),
             contract_backend,
             contract_workspace,
             fusion_block_workspace: FusionBlockContractWorkspace::default(),
             fusion_scratch: DynamicFusionScratchWorkspace::default(),
             #[cfg(test)]
             last_top_level_resolution_was_core: false,
+            #[cfg(test)]
+            last_top_level_resolution_orientation: None,
         }
     }
 
@@ -599,28 +601,6 @@ where
         &self.contract_workspace
     }
 
-    /// Entries in the unified contraction resolution cache (route + plan
-    /// resolve together; one entry per (rule, spaces, axes)).
-    #[inline]
-    pub fn contraction_resolution_cache_len(&self) -> usize {
-        self.resolution_cache.len()
-    }
-
-    #[inline]
-    pub fn contraction_resolution_cache_hits(&self) -> usize {
-        self.resolution_cache.stats().hits
-    }
-
-    #[inline]
-    pub fn contraction_resolution_cache_fast_hits(&self) -> usize {
-        self.resolution_cache.stats().fast_hits
-    }
-
-    #[inline]
-    pub fn contraction_resolution_cache_misses(&self) -> usize {
-        self.resolution_cache.stats().misses
-    }
-
     #[cfg(test)]
     pub(crate) fn last_resolution_is_core(&self) -> bool {
         self.last_top_level_resolution_was_core
@@ -628,13 +608,21 @@ where
 
     #[cfg(test)]
     pub(crate) fn last_resolution_orientation(&self) -> Option<FusionContractOrientation> {
-        self.resolution_cache.last_orientation()
+        self.last_top_level_resolution_orientation
+    }
+
+    #[cfg(test)]
+    fn record_top_level_resolution(&mut self, resolution: &Resolution) {
+        self.last_top_level_resolution_was_core = matches!(resolution, Resolution::Core(_));
+        self.last_top_level_resolution_orientation = match resolution {
+            Resolution::DynamicTree(plan) => Some(plan.orientation()),
+            Resolution::Core(_) | Resolution::Structure(_) => None,
+        };
     }
 
     pub fn set_cache_policy(&mut self, policy: OperationCachePolicy) {
         self.tree_context.set_cache_policy(policy);
         self.dynamic_space_cache.set_policy(policy);
-        self.resolution_cache.set_policy(policy);
     }
 
     pub fn into_parts(
@@ -784,7 +772,7 @@ where
         let dst_dynamic = DynamicFusionMapSpace::from_typed(dst_fusion);
         let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs_fusion);
         let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_fusion);
-        let resolution = self.resolution_cache.get_or_resolve(
+        let resolution = compile_resolution(
             rule,
             &dst_dynamic,
             &lhs_dynamic,
@@ -808,11 +796,13 @@ where
                 .map(std::sync::Arc::new)
             },
         )?;
+        #[cfg(test)]
+        self.record_top_level_resolution(&resolution);
         self.execute_resolution(&resolution, rule, dst, lhs, rhs, alpha, beta)
     }
 
-    /// Dynamic-rank `tensorcontract!`: same resolution-cache path and route
-    /// gates as [`Self::tensorcontract_fusion_into`], operating on
+    /// Dynamic-rank `tensorcontract!`: same eager route selection and gates
+    /// as [`Self::tensorcontract_fusion_into`], operating on
     /// [`DynamicFusionMapSpace`] handles plus raw slices in the
     /// coupled-sector matrix layout. `dst_data` must be sized for
     /// `dst_space.required_len()`.
@@ -931,7 +921,7 @@ where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
     {
-        let resolution = self.resolution_cache.get_or_resolve(
+        let resolution = compile_resolution(
             rule,
             dst_space,
             lhs_space,
@@ -960,14 +950,11 @@ where
             },
         )?;
         #[cfg(test)]
-        {
-            self.last_top_level_resolution_was_core = matches!(resolution, Resolution::Core(_));
-        }
-        let dynamic_artifact = self.prepare_dynamic_execution_artifact::<_, false>(
+        self.record_top_level_resolution(&resolution);
+        let dynamic_artifact = self.compile_dynamic_execution_artifact::<_, false>(
             &resolution,
             rule,
             Some(dst_space),
-            dst_space.structure(),
             Some(lhs_space),
             None,
             lhs_space.structure(),
@@ -1107,10 +1094,10 @@ where
             || axes.rhs_conjugate() != rhs.storage_conjugate()
         {
             return Err(OperationError::InvalidArgument {
-                message: "prelowered operand flags must match the contraction cache key",
+                message: "prelowered operand flags must match the contraction request",
             });
         }
-        let resolution = self.resolution_cache.get_or_resolve_prelowered(
+        let resolution = compile_prelowered_resolution(
             rule,
             dst_space.space(),
             lhs.logical_space(),
@@ -1147,14 +1134,11 @@ where
             },
         )?;
         #[cfg(test)]
-        {
-            self.last_top_level_resolution_was_core = matches!(resolution, Resolution::Core(_));
-        }
-        let dynamic_artifact = self.prepare_dynamic_execution_artifact::<_, false>(
+        self.record_top_level_resolution(&resolution);
+        let dynamic_artifact = self.compile_dynamic_execution_artifact::<_, false>(
             &resolution,
             rule,
             Some(dst_space.space()),
-            dst_space.space().structure(),
             Some(lhs.logical_space()),
             Some(lhs.storage_space()),
             lhs.storage_space().structure(),
@@ -1221,9 +1205,8 @@ where
             lhs.storage_conjugate(),
             rhs.storage_conjugate(),
         );
-        // Why not give bosonic composition its own cache namespace: without a
-        // supertrace twist it is exactly the existing contract operation, so a
-        // second plan would duplicate cold layout work and retained state.
+        // Why not branch bosonic composition: without a supertrace twist it is
+        // exactly the ordinary contraction operation.
         if rule.braiding_style() != tenet_core::BraidingStyleKind::Fermionic {
             if !lhs.storage_conjugate() && !rhs.storage_conjugate() {
                 return self.tensorcontract_fusion_dyn_into_raw_with_primer(
@@ -1244,7 +1227,7 @@ where
                 dst_space, dst_data, lhs, lhs_data, rhs, rhs_data, axes, alpha, beta,
             );
         }
-        let plan = self.resolution_cache.get_or_compile_composition_plan(
+        let plan = compile_composition_plan(
             rule,
             dst_space.space(),
             lhs.logical_space(),
@@ -1256,6 +1239,7 @@ where
         #[cfg(test)]
         {
             self.last_top_level_resolution_was_core = true;
+            self.last_top_level_resolution_orientation = None;
         }
         self.execute_resolution_dyn(
             &Resolution::Core(plan),
@@ -1358,8 +1342,8 @@ where
     }
 
     /// Dynamic-rank contraction replayed directly on opaque storages (the
-    /// device path): resolves through the same resolution cache and route /
-    /// twist gates as [`Self::tensorcontract_fusion_dyn_into`], but only the
+    /// device path): resolves through the same eager route and twist gates
+    /// as [`Self::tensorcontract_fusion_dyn_into`], but only the
     /// canonical fully-direct coupled-layout route executes — one
     /// [`StorageGemm`](tenet_operations::fusion_replay::StorageGemm) call
     /// per coupled-sector matrix, `alpha = 1`, `beta = 0`. The caller must
@@ -1421,7 +1405,7 @@ where
         DLhs: TensorStorage<D>,
         DRhs: TensorStorage<D>,
     {
-        let resolution = self.resolution_cache.get_or_resolve(
+        let resolution = compile_resolution(
             rule,
             dst_space,
             lhs_space,
@@ -1449,6 +1433,8 @@ where
                 .map(Arc::new)
             },
         )?;
+        #[cfg(test)]
+        self.record_top_level_resolution(&resolution);
         match resolution {
             Resolution::Core(plan) if plan.is_fully_direct() => {
                 plan.execute_direct_on_storage_prezeroed(gemm, dst, lhs, rhs)
@@ -1464,12 +1450,11 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn prepare_dynamic_execution_artifact<R, const PROFILED: bool>(
+    fn compile_dynamic_execution_artifact<R, const PROFILED: bool>(
         &mut self,
         resolution: &Resolution,
         rule: &R,
         dst_space: Option<&DynamicFusionMapSpace>,
-        dst_structure: &Arc<BlockStructure>,
         lhs_space: Option<&DynamicFusionMapSpace>,
         lhs_storage_space: Option<&DynamicFusionMapSpace>,
         lhs_structure: &Arc<BlockStructure>,
@@ -1490,24 +1475,6 @@ where
         let dst_space = dst_space.ok_or_else(missing)?;
         let lhs_space = lhs_space.ok_or_else(missing)?;
         let rhs_space = rhs_space.ok_or_else(missing)?;
-        let lookup_start = PROFILED.then(std::time::Instant::now);
-        let cached = self.dynamic_space_cache.get_execution_artifact(
-            plan,
-            dst_structure,
-            lhs_structure,
-            lhs_storage_space,
-            rhs_structure,
-            rhs_storage_space,
-        );
-        if let Some(start) = lookup_start {
-            profile
-                .as_deref_mut()
-                .expect("profiled artifact preparation carries a profile")
-                .prepared_plan += start.elapsed();
-        }
-        if let Some(artifact) = cached {
-            return Ok(Some(artifact));
-        }
         let artifact = Arc::new(super::dynamic::compile_dynamic_tree_execution_artifact::<
             _,
             _,
@@ -1517,7 +1484,6 @@ where
         >(
             &mut self.tree_context,
             &mut self.dynamic_space_cache,
-            &mut self.resolution_cache,
             rule,
             layout_primer,
             plan.as_ref(),
@@ -1530,22 +1496,6 @@ where
             rhs_structure,
             profile.as_deref_mut(),
         )?);
-        let publish_start = PROFILED.then(std::time::Instant::now);
-        self.dynamic_space_cache.insert_execution_artifact(
-            Arc::clone(plan),
-            dst_structure,
-            lhs_structure,
-            lhs_storage_space,
-            rhs_structure,
-            rhs_storage_space,
-            Arc::clone(&artifact),
-        );
-        if let Some(start) = publish_start {
-            profile
-                .as_deref_mut()
-                .expect("profiled artifact preparation carries a profile")
-                .prepared_plan += start.elapsed();
-        }
         Ok(Some(artifact))
     }
 
@@ -1697,11 +1647,10 @@ where
         let dst_structure = Arc::clone(dst.structure());
         let lhs_structure = Arc::clone(lhs.structure());
         let rhs_structure = Arc::clone(rhs.structure());
-        let dynamic_artifact = self.prepare_dynamic_execution_artifact::<_, false>(
+        let dynamic_artifact = self.compile_dynamic_execution_artifact::<_, false>(
             resolution,
             rule,
             dst_space.as_ref(),
-            &dst_structure,
             lhs_space.as_ref(),
             None,
             &lhs_structure,
@@ -1770,7 +1719,7 @@ where
         let dst_dynamic = DynamicFusionMapSpace::from_typed(dst_fusion);
         let lhs_dynamic = DynamicFusionMapSpace::from_typed(lhs_fusion);
         let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_fusion);
-        let resolution = self.resolution_cache.get_or_resolve(
+        let resolution = compile_resolution(
             rule,
             &dst_dynamic,
             &lhs_dynamic,
@@ -1794,14 +1743,12 @@ where
                 .map(Arc::new)
             },
         )?;
-        let dst_structure = Arc::clone(dst.structure());
         let lhs_structure = Arc::clone(lhs.structure());
         let rhs_structure = Arc::clone(rhs.structure());
-        let dynamic_artifact = self.prepare_dynamic_execution_artifact::<_, false>(
+        let dynamic_artifact = self.compile_dynamic_execution_artifact::<_, false>(
             &resolution,
             rule,
             Some(&dst_dynamic),
-            &dst_structure,
             Some(&lhs_dynamic),
             None,
             &lhs_structure,
@@ -1955,7 +1902,7 @@ where
         profile.typed_space_setup += start.elapsed();
 
         let start = std::time::Instant::now();
-        let resolution = self.resolution_cache.get_or_resolve(
+        let resolution = compile_resolution(
             rule,
             &dst_dynamic,
             &lhs_dynamic,
@@ -1979,6 +1926,8 @@ where
                 .map(std::sync::Arc::new)
             },
         )?;
+        #[cfg(test)]
+        self.record_top_level_resolution(&resolution);
         profile.fusion_block_plan_lookup += start.elapsed();
 
         match &resolution {
@@ -2023,11 +1972,10 @@ where
                 let lhs_structure = Arc::clone(lhs.structure());
                 let rhs_structure = Arc::clone(rhs.structure());
                 let artifact = self
-                    .prepare_dynamic_execution_artifact::<_, true>(
+                    .compile_dynamic_execution_artifact::<_, true>(
                         &resolution,
                         rule,
                         Some(&dst_dynamic),
-                        &dst_structure,
                         Some(&lhs_dynamic),
                         None,
                         &lhs_structure,
@@ -2083,6 +2031,10 @@ where
         }
     }
 
+    /// Executes a caller-supplied source-transform plan and compiles its core
+    /// block plan eagerly. Use [`Self::prepare_tensorcontract_fusion`] and
+    /// [`PreparedTensorContractFusion`] when the complete contraction should
+    /// be compiled once and replayed without lookups.
     pub fn tensorcontract_fusion_prepared_into<
         R,
         const DST_NOUT: usize,
@@ -2130,6 +2082,9 @@ where
         )
     }
 
+    /// Executes a caller-supplied source/output-transform plan and compiles its
+    /// core block plan eagerly. Use [`Self::prepare_tensorcontract_fusion`] and
+    /// [`PreparedTensorContractFusion`] for complete compile-once replay.
     pub fn tensorcontract_fusion_prepared_into_core_dst<
         R,
         const DST_NOUT: usize,
@@ -2273,7 +2228,7 @@ where
                 .fusion_space()
                 .ok_or(OperationError::Core(CoreError::MissingFusionSpace))?,
         );
-        let block_plan = self.resolution_cache.get_or_compile_core_plan(
+        let block_plan = compile_core_plan(
             rule,
             &dst_space,
             &lhs_space,

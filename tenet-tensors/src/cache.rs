@@ -133,12 +133,10 @@ pub fn reset_global_operation_caches() {
     caches.clear();
 }
 
-/// Cache policy for TensorKit-style replay caches.
+/// Cache policy for reusable algebra and tree-transform components.
 ///
-/// `TaskLocal` and `TaskLocalLru` govern state retained by an explicit execution
-/// context. Cache-enabled contraction may also consult its bounded process-global
-/// immutable resolution owner after the context fronts miss. `NoCache` and a
-/// zero-entry local LRU bypass both tiers.
+/// Ordinary contraction routes resolve eagerly; complete replay is retained
+/// only by an explicit prepared handle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperationCachePolicy {
     NoCache,

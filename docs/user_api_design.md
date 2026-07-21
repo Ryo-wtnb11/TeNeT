@@ -116,7 +116,7 @@ project_*(roadmap.md 参照)。
 ```text
 ユーザー層   Tensor / Space / Runtime          (このメモ)
 expert 層    tensorcontract_into / permute_into / svd_compact ...(既存)
-内部実行層   Resolution cache / plan / replay / backend       (既存)
+内部実行層   eager resolution / explicit prepared / backend   (既存)
 ```
 
 ユーザー層は expert 層の呼び出しだけで実装し、内部実行層に直接触れない。

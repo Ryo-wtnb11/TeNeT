@@ -273,7 +273,7 @@ fn fusion_contract_bound_same_rule_matches_on_direct_and_fallback_routes() {
 }
 
 #[test]
-fn fusion_contract_context_rejects_unbound_space_before_warm_resolution_cache_hit() {
+fn fusion_contract_context_rejects_unbound_space_after_a_valid_call() {
     let rule = Z2FusionRule;
     let bound = bound_scalar_space(&rule);
     let axes = TensorContractSpec::with_default_output_order(&[], &[]);
@@ -286,9 +286,6 @@ fn fusion_contract_context_rejects_unbound_space_before_warm_resolution_cache_hi
     context
         .tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, 1.0, 0.0)
         .unwrap();
-    let hits = context.contraction_resolution_cache_hits();
-    let fast_hits = context.contraction_resolution_cache_fast_hits();
-    let misses = context.contraction_resolution_cache_misses();
     let mut unbound_dst = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(
         vec![0.0],
         unbound_scalar_space_like(&bound),
@@ -300,9 +297,6 @@ fn fusion_contract_context_rejects_unbound_space_before_warm_resolution_cache_hi
         .unwrap_err();
 
     assert_missing_rule_identity(error);
-    assert_eq!(context.contraction_resolution_cache_hits(), hits);
-    assert_eq!(context.contraction_resolution_cache_fast_hits(), fast_hits);
-    assert_eq!(context.contraction_resolution_cache_misses(), misses);
 }
 
 #[test]
