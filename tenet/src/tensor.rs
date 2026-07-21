@@ -8855,9 +8855,9 @@ fn decide_kept<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
     rule: &R,
     spectra: &[SectorSpectrum],
     truncation: Option<&Truncation>,
-) -> (Vec<SectorSpectrum>, f64) {
+) -> Result<(Vec<SectorSpectrum>, f64), Error> {
     let Some(truncation) = truncation else {
-        return (spectra.to_vec(), 0.0);
+        return Ok((spectra.to_vec(), 0.0));
     };
     let magnitudes: Vec<Vec<f64>> = spectra
         .iter()
@@ -8871,20 +8871,21 @@ fn decide_kept<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
             values,
         })
         .collect();
-    let decision = select_truncation(&weighted, truncation);
+    let decision = select_truncation(&weighted, truncation)
+        .map_err(|err| Error::InvalidArgument(err.to_string()))?;
     if spectra
         .iter()
         .zip(&decision.kept)
         .all(|(entry, &count)| entry.values.len() == count)
     {
-        return (spectra.to_vec(), 0.0);
+        return Ok((spectra.to_vec(), 0.0));
     }
     let mut kept = spectra.to_vec();
     for (entry, &count) in kept.iter_mut().zip(&decision.kept) {
         entry.values.truncate(count);
     }
     kept.retain(|entry| !entry.values.is_empty());
-    (kept, decision.error)
+    Ok((kept, decision.error))
 }
 
 /// Uploads a small host-built selector matrix (`rows x cols`, column-major,
@@ -9154,7 +9155,7 @@ impl Tensor {
                 spectra.push(SectorSpectrum { sector, values: s });
                 factors.push(Some((u, vt)));
             }
-            let (kept_spectra, error) = decide_kept(rule, &spectra, truncation);
+            let (kept_spectra, error) = decide_kept(rule, &spectra, truncation)?;
 
             let hom = self.ordinary_body().space.homspace();
             let bond_leg = SectorLeg::new(
@@ -9256,7 +9257,6 @@ impl Tensor {
         let state = &mut *guard;
         let cuda = require_cuda(state.cuda.as_mut())?;
         let out = with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
-            let rule = bound.provider();
             let mut factors: Vec<Option<(CudaDenseStorage, CudaDenseStorage, Vec<f64>)>> =
                 Vec::with_capacity(regions.len());
             let mut bond_pairs: Vec<(SectorId, usize)> = Vec::with_capacity(regions.len());
@@ -9411,16 +9411,15 @@ impl Tensor {
                 }
                 let (values, vectors) = cuda_eigh_region(cuda, &storage.0, region.range().start, n)
                     .map_err(dense_err)?;
+                if !values.iter().all(|value| value.is_finite()) {
+                    return Err(Error::InvalidArgument(
+                        "eigenvalues must be finite".to_string(),
+                    ));
+                }
                 // Host ordering contract: descending by |eigenvalue|,
                 // stable on ties (mirrors `eigh_full_dyn`).
                 let mut order: Vec<usize> = (0..n).collect();
-                order.sort_by(|&a, &b| {
-                    values[b]
-                        .abs()
-                        .partial_cmp(&values[a].abs())
-                        .expect("finite eigenvalues")
-                        .then(a.cmp(&b))
-                });
+                order.sort_by(|&a, &b| values[b].abs().total_cmp(&values[a].abs()).then(a.cmp(&b)));
                 let sorted: Vec<f64> = order.iter().map(|&index| values[index]).collect();
                 spectra.push(SectorSpectrum {
                     sector,
@@ -9428,7 +9427,7 @@ impl Tensor {
                 });
                 factors.push(Some((vectors, order)));
             }
-            let (kept_spectra, error) = decide_kept(rule, &spectra, truncation);
+            let (kept_spectra, error) = decide_kept(rule, &spectra, truncation)?;
 
             let hom = self.ordinary_body().space.homspace();
             let bond_leg = SectorLeg::new(

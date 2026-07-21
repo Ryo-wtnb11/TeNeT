@@ -38,7 +38,9 @@ pub use factorize::{
     SvdTruncDyn, SvdTruncFactorsDyn,
 };
 pub use matrix_functions::{exp, exp_dyn, inv, inv_direct_dyn, inv_dyn, pinv, pinv_dyn};
-pub use truncation::{select_truncation, Truncation, TruncationDecision, WeightedSpectrum};
+pub use truncation::{
+    select_truncation, Truncation, TruncationDecision, TruncationError, WeightedSpectrum,
+};
 
 #[doc(hidden)]
 pub use factorize::validate_hermitian_regions;

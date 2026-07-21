@@ -459,9 +459,10 @@ General `eig_*` is complex-valued by construction, so the returned
 diagonal/eigenvector tensors are always `c64`.
 
 Truncation is controlled by [`prelude::Truncation`]: `Full`,
-`Rank(n)` (`Truncation::rank(n)`), `Tolerance { atol, rtol }`
-(`absolute_cutoff` / `relative_cutoff`), `DiscardWeight { rtol }`, and
-`All(vec)` (intersection of rules). All bounds and reported errors are
+`Rank(n)` (`Truncation::rank(n)`), checked tolerance constructors
+(`absolute_cutoff` / `relative_cutoff` / `relative_inf_cutoff`),
+`relative_error`, and `and` (intersection of rules). All bounds and reported
+errors are
 **quantum-dimension weighted**: `Rank(n)` bounds the weighted kept bond
 dimension, and the `error` field of [`prelude::SvdTrunc`] /
 [`prelude::EighTrunc`] is the weighted 2-norm of everything discarded, so

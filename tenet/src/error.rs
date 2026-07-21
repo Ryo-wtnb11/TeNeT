@@ -3,6 +3,7 @@
 use std::fmt;
 
 use tenet_core::{CoreError, FusionAlgebraError};
+use tenet_matrixalgebra::TruncationError;
 use tenet_tensors::OperationError;
 
 use crate::tensor::Dtype;
@@ -116,6 +117,12 @@ impl From<OperationError> for Error {
             OperationError::FusionAlgebra(cause) => Self::FusionAlgebra(cause),
             other => Self::Operation(Box::new(other)),
         }
+    }
+}
+
+impl From<TruncationError> for Error {
+    fn from(err: TruncationError) -> Self {
+        OperationError::from(err).into()
     }
 }
 
