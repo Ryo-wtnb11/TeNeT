@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use num_traits::One;
 use tenet_core::{
-    BlockStructure, HostReadableStorage, HostWritableStorage, Placement, ScratchStorage, SectorId,
-    SimilarStorage, TensorStorage,
+    BlockStructure, CoupledSectorRegion, HostReadableStorage, HostWritableStorage, Placement,
+    ScratchStorage, SectorId, SimilarStorage, TensorStorage,
 };
 pub use tenet_dense::MatrixOp;
 use tenet_dense::{strided_batch_runs, DenseGemmBatchJob};
@@ -295,6 +295,130 @@ impl FusionBlockContractPlan {
         })
     }
 
+    /// Compiles canonical coupled-sector structures without synthesizing
+    /// per-tree fusion groups or subblock descriptors.
+    ///
+    /// Callers must first validate category identity and core composition.
+    /// `Some` certifies only an exact canonical structural replay; `None`
+    /// requests the general symmetry-aware compiler.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_canonical_coupled_regions_with_ops(
+        dst_structure: &Arc<BlockStructure>,
+        dst_nout: usize,
+        lhs_logical_structure: &Arc<BlockStructure>,
+        lhs_logical_nout: usize,
+        lhs_storage_structure: &Arc<BlockStructure>,
+        lhs_storage_nout: usize,
+        rhs_logical_structure: &Arc<BlockStructure>,
+        rhs_logical_nout: usize,
+        rhs_storage_structure: &Arc<BlockStructure>,
+        rhs_storage_nout: usize,
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+    ) -> Result<Option<Self>, OperationError> {
+        let Some(dst_regions) = sorted_coupled_regions(dst_structure, dst_nout)? else {
+            return Ok(None);
+        };
+        let Some(lhs_regions) = sorted_coupled_regions(lhs_logical_structure, lhs_logical_nout)?
+        else {
+            return Ok(None);
+        };
+        let Some(rhs_regions) = sorted_coupled_regions(rhs_logical_structure, rhs_logical_nout)?
+        else {
+            return Ok(None);
+        };
+        let Some(lhs_storage_regions) = canonical_storage_regions(
+            lhs_logical_structure,
+            lhs_logical_nout,
+            &lhs_regions,
+            lhs_storage_structure,
+            lhs_storage_nout,
+            lhs_op,
+        )?
+        else {
+            return Ok(None);
+        };
+        let Some(rhs_storage_regions) = canonical_storage_regions(
+            rhs_logical_structure,
+            rhs_logical_nout,
+            &rhs_regions,
+            rhs_storage_structure,
+            rhs_storage_nout,
+            rhs_op,
+        )?
+        else {
+            return Ok(None);
+        };
+
+        let mut direct_batch = Vec::with_capacity(dst_regions.len());
+        let mut inactive_dst_scale_blocks = Vec::new();
+        let mut lhs_index = 0usize;
+        let mut rhs_index = 0usize;
+        for dst in dst_regions.iter() {
+            while lhs_regions
+                .get(lhs_index)
+                .is_some_and(|region| region.coupled() < dst.coupled())
+            {
+                lhs_index += 1;
+            }
+            while rhs_regions
+                .get(rhs_index)
+                .is_some_and(|region| region.coupled() < dst.coupled())
+            {
+                rhs_index += 1;
+            }
+            let lhs = lhs_regions
+                .get(lhs_index)
+                .filter(|region| region.coupled() == dst.coupled());
+            let rhs = rhs_regions
+                .get(rhs_index)
+                .filter(|region| region.coupled() == dst.coupled());
+            let (Some(lhs), Some(rhs)) = (lhs, rhs) else {
+                inactive_dst_scale_blocks.push(contiguous_scale_layout(dst.range())?);
+                continue;
+            };
+            if lhs.cols() != rhs.rows()
+                || dst.rows() != lhs.rows()
+                || dst.cols() != rhs.cols()
+                || lhs.col_trees() != rhs.row_trees()
+                || dst.row_trees() != lhs.row_trees()
+                || dst.col_trees() != rhs.col_trees()
+            {
+                return Ok(None);
+            }
+            direct_batch.push(Rank2GemmBatchJob {
+                dst_offset: dst.range().start,
+                lhs_offset: lhs_storage_regions[lhs_index].range().start,
+                rhs_offset: rhs_storage_regions[rhs_index].range().start,
+                rows: lhs.rows(),
+                contracted: lhs.cols(),
+                cols: rhs.cols(),
+            });
+        }
+        validate_direct_plan_layouts(
+            dst_structure,
+            lhs_storage_structure,
+            rhs_storage_structure,
+            &inactive_dst_scale_blocks,
+            &direct_batch,
+        )?;
+        let direct_batch_runs = strided_batch_runs(&direct_batch);
+        Ok(Some(Self {
+            dst_structure: Arc::clone(dst_structure),
+            lhs_structure: Arc::clone(lhs_storage_structure),
+            rhs_structure: Arc::clone(rhs_storage_structure),
+            inactive_dst_scale_blocks,
+            groups: Vec::new(),
+            direct_batch,
+            direct_batch_runs,
+            irregular: Vec::new(),
+            max_irregular_scratch_len: 0,
+            lhs_op,
+            rhs_op,
+        }))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn execute_raw<A, G, D>(
         &self,
@@ -423,7 +547,7 @@ impl FusionBlockContractPlan {
 
         if PROFILED {
             if let Some(profile) = profile.as_deref_mut() {
-                profile.core_contract_groups += self.groups.len();
+                profile.core_contract_groups += self.direct_batch.len() + self.irregular.len();
             }
         }
         if !self.direct_batch.is_empty() {
@@ -932,40 +1056,22 @@ impl FusionBlockContractPlan {
     {
         self.require_fully_direct_storage()?;
         self.require_identity_storage_ops()?;
-        for group in &self.groups {
-            let (Some(lhs_base), Some(rhs_base), Some(dst_base)) = (
-                group.lhs.direct_offset,
-                group.rhs.direct_offset,
-                group.dst.direct_offset,
-            ) else {
-                return Err(OperationError::UnsupportedTensorContractScope {
-                    message: NON_COUPLED_OPERAND_MESSAGE,
-                });
-            };
-            validate_storage_range(lhs.len(), lhs_base, group.lhs.rows, group.lhs.cols)?;
-            validate_storage_range(rhs.len(), rhs_base, group.rhs.rows, group.rhs.cols)?;
-            validate_storage_range(dst.len(), dst_base, group.dst.rows, group.dst.cols)?;
+        for job in &self.direct_batch {
+            validate_storage_range(lhs.len(), job.lhs_offset, job.rows, job.contracted)?;
+            validate_storage_range(rhs.len(), job.rhs_offset, job.contracted, job.cols)?;
+            validate_storage_range(dst.len(), job.dst_offset, job.rows, job.cols)?;
         }
-        for group in &self.groups {
-            let (Some(lhs_base), Some(rhs_base), Some(dst_base)) = (
-                group.lhs.direct_offset,
-                group.rhs.direct_offset,
-                group.dst.direct_offset,
-            ) else {
-                return Err(OperationError::UnsupportedTensorContractScope {
-                    message: NON_COUPLED_OPERAND_MESSAGE,
-                });
-            };
+        for job in &self.direct_batch {
             gemm.matmul_range_into(
                 dst,
-                dst_base,
+                job.dst_offset,
                 lhs,
-                lhs_base,
+                job.lhs_offset,
                 rhs,
-                rhs_base,
-                group.lhs.rows,
-                group.lhs.cols,
-                group.rhs.cols,
+                job.rhs_offset,
+                job.rows,
+                job.contracted,
+                job.cols,
             )?;
         }
         Ok(())
@@ -1329,6 +1435,200 @@ fn validate_compiled_plan_layouts(
         });
     }
     Ok(())
+}
+
+fn validate_direct_plan_layouts(
+    dst_structure: &BlockStructure,
+    lhs_structure: &BlockStructure,
+    rhs_structure: &BlockStructure,
+    inactive_dst_scale_blocks: &[FusionScaleBlockLayout],
+    jobs: &[Rank2GemmBatchJob],
+) -> Result<(), OperationError> {
+    let dst_len = dst_structure
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let lhs_len = lhs_structure
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let rhs_len = rhs_structure
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+
+    let mut previous_job_offset = None;
+    for job in jobs {
+        validate_storage_range(lhs_len, job.lhs_offset, job.rows, job.contracted)?;
+        validate_storage_range(rhs_len, job.rhs_offset, job.contracted, job.cols)?;
+        validate_storage_range(dst_len, job.dst_offset, job.rows, job.cols)?;
+        if previous_job_offset.is_some_and(|previous| previous >= job.dst_offset) {
+            return Err(OperationError::StructureMismatch {
+                tensor: "canonical direct job order",
+            });
+        }
+        previous_job_offset = Some(job.dst_offset);
+    }
+    let mut previous_inactive_offset = None;
+    for layout in inactive_dst_scale_blocks {
+        let (start, _) = canonical_inactive_range(layout, dst_len)?;
+        if previous_inactive_offset.is_some_and(|previous| previous >= start) {
+            return Err(OperationError::StructureMismatch {
+                tensor: "canonical inactive range order",
+            });
+        }
+        previous_inactive_offset = Some(start);
+    }
+
+    let mut job_index = 0usize;
+    let mut inactive_index = 0usize;
+    let mut covered = 0usize;
+    while job_index < jobs.len() || inactive_index < inactive_dst_scale_blocks.len() {
+        let job_range = jobs.get(job_index).map(canonical_job_range).transpose()?;
+        let inactive_range = inactive_dst_scale_blocks
+            .get(inactive_index)
+            .map(|layout| canonical_inactive_range(layout, dst_len))
+            .transpose()?;
+        let (start, end) = match (job_range, inactive_range) {
+            (Some(job), Some(inactive)) if job.0 <= inactive.0 => {
+                job_index += 1;
+                job
+            }
+            (Some(_), Some(inactive)) => {
+                inactive_index += 1;
+                inactive
+            }
+            (Some(job), None) => {
+                job_index += 1;
+                job
+            }
+            (None, Some(inactive)) => {
+                inactive_index += 1;
+                inactive
+            }
+            (None, None) => break,
+        };
+        if start != covered {
+            return Err(OperationError::StructureMismatch {
+                tensor: "canonical dst coverage",
+            });
+        }
+        covered = end;
+    }
+    if covered != dst_len {
+        return Err(OperationError::StructureMismatch {
+            tensor: "canonical dst coverage",
+        });
+    }
+    Ok(())
+}
+
+fn sorted_coupled_regions(
+    structure: &Arc<BlockStructure>,
+    nout: usize,
+) -> Result<Option<Arc<[CoupledSectorRegion]>>, OperationError> {
+    let Some(regions) = structure
+        .coupled_sector_regions(nout)
+        .map_err(OperationError::from_core_preserving_context)?
+    else {
+        return Ok(None);
+    };
+    if regions
+        .windows(2)
+        .any(|pair| pair[0].coupled() >= pair[1].coupled())
+    {
+        return Ok(None);
+    }
+    Ok(Some(regions))
+}
+
+fn canonical_storage_regions(
+    logical_structure: &Arc<BlockStructure>,
+    logical_nout: usize,
+    logical_regions: &Arc<[CoupledSectorRegion]>,
+    storage_structure: &Arc<BlockStructure>,
+    storage_nout: usize,
+    op: MatrixOp,
+) -> Result<Option<Arc<[CoupledSectorRegion]>>, OperationError> {
+    if op == MatrixOp::Identity
+        && logical_nout == storage_nout
+        && (Arc::ptr_eq(logical_structure, storage_structure)
+            || logical_structure.content_id() == storage_structure.content_id())
+    {
+        return Ok(Some(Arc::clone(logical_regions)));
+    }
+    let Some(storage_regions) = sorted_coupled_regions(storage_structure, storage_nout)? else {
+        return Ok(None);
+    };
+    if !storage_regions_match(logical_regions, &storage_regions, op) {
+        return Ok(None);
+    }
+    Ok(Some(storage_regions))
+}
+
+fn storage_regions_match(
+    logical: &[CoupledSectorRegion],
+    storage: &[CoupledSectorRegion],
+    op: MatrixOp,
+) -> bool {
+    logical.len() == storage.len()
+        && logical.iter().zip(storage).all(|(logical, storage)| {
+            logical.coupled() == storage.coupled()
+                && match op {
+                    MatrixOp::Identity => {
+                        logical.row_trees() == storage.row_trees()
+                            && logical.col_trees() == storage.col_trees()
+                    }
+                    MatrixOp::Transpose | MatrixOp::Adjoint => {
+                        logical.row_trees() == storage.col_trees()
+                            && logical.col_trees() == storage.row_trees()
+                    }
+                }
+        })
+}
+
+fn contiguous_scale_layout(
+    range: std::ops::Range<usize>,
+) -> Result<FusionScaleBlockLayout, OperationError> {
+    Ok(FusionScaleBlockLayout {
+        block: FusionStridedBlockLayout {
+            shape: vec![range.len()],
+            strides: vec![1],
+            offset: offset_to_isize(range.start)?,
+        },
+    })
+}
+
+fn canonical_job_range(job: &Rank2GemmBatchJob) -> Result<(usize, usize), OperationError> {
+    let len = direct_matrix_len(job.rows, job.cols)?;
+    let end = job
+        .dst_offset
+        .checked_add(len)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    Ok((job.dst_offset, end))
+}
+
+fn canonical_inactive_range(
+    layout: &FusionScaleBlockLayout,
+    dst_len: usize,
+) -> Result<(usize, usize), OperationError> {
+    if layout.block.shape.len() != 1
+        || layout.block.strides.as_slice() != [1]
+        || layout.block.offset < 0
+    {
+        return Err(OperationError::StructureMismatch {
+            tensor: "inactive dst ranges",
+        });
+    }
+    let start = usize::try_from(layout.block.offset)
+        .map_err(|_| OperationError::OffsetOverflow { value: usize::MAX })?;
+    let end = start
+        .checked_add(layout.block.shape[0])
+        .ok_or(OperationError::ElementCountOverflow)?;
+    if end > dst_len {
+        return Err(OperationError::ElementCountMismatch {
+            expected: end,
+            actual: dst_len,
+        });
+    }
+    Ok((start, end))
 }
 
 fn validate_group_shape(group: &FusionBlockContractGroupPlan) -> Result<(), OperationError> {
@@ -1725,6 +2025,10 @@ mod tests {
 
     use num_complex::Complex64;
     use num_traits::Zero;
+    use tenet_core::{
+        FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace, SectorLeg, TensorMapSpace,
+        Z2FusionRule, Z2Irrep,
+    };
 
     fn direct_group(rows: usize, cols: usize, offset: Option<usize>) -> FusionBlockMatrixGroup {
         FusionBlockMatrixGroup {
@@ -2549,6 +2853,61 @@ mod tests {
     }
 
     #[test]
+    fn canonical_direct_plan_rejects_equal_dimension_tree_basis_mismatch() {
+        let rule = Z2FusionRule;
+        let leg = || SectorLeg::new([(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)], false);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg()]),
+            FusionProductSpace::new([leg(), leg()]),
+        );
+        let keys = homspace.fusion_tree_keys(&rule);
+        let shapes = vec![vec![1; 4]; keys.len()];
+        let canonical = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<2, 2>::from_dims([2, 2], [2, 2]).unwrap(),
+            homspace,
+            &rule,
+            shapes.clone(),
+        )
+        .unwrap();
+        let canonical = Arc::clone(canonical.subblock_structure());
+        let mut reordered = keys.iter().cloned().zip(shapes).collect::<Vec<_>>();
+        let mut start = 0usize;
+        while start < reordered.len() {
+            let coupled = reordered[start].0.codomain_tree().coupled();
+            let end = start
+                + reordered[start..]
+                    .iter()
+                    .take_while(|(key, _)| key.codomain_tree().coupled() == coupled)
+                    .count();
+            reordered[start..end].reverse();
+            start = end;
+        }
+        let reordered = Arc::new(
+            BlockStructure::coupled_sector_matrix_with_keys(&rule, 2, 4, reordered).unwrap(),
+        );
+
+        let plan = FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops(
+            &canonical,
+            2,
+            &canonical,
+            2,
+            &canonical,
+            2,
+            &reordered,
+            2,
+            &reordered,
+            2,
+            MatrixOp::Identity,
+            MatrixOp::Identity,
+        )
+        .unwrap();
+
+        // What: aggregate sector dimensions cannot substitute for exact
+        // contracted and output fusion-tree bases at the safe plan boundary.
+        assert!(plan.is_none());
+    }
+
+    #[test]
     fn non_direct_group_compiles_one_irregular_execution() {
         let plan = FusionBlockContractGroupPlan::new(
             direct_group(2, 3, None),
@@ -2656,25 +3015,33 @@ mod tests {
 
     #[test]
     fn profiled_direct_replay_uses_one_batched_gemm_call() {
-        let groups = (0usize..2)
-            .map(|block| {
-                FusionBlockContractGroupPlan::new(
-                    scalar_group(block, true, 1.0),
-                    scalar_group(block, true, 1.0),
-                    scalar_group(block, true, 1.0),
-                )
-                .unwrap()
-            })
-            .collect();
-        let structure =
-            Arc::new(BlockStructure::packed_column_major(1, [vec![1], vec![1]]).unwrap());
-        let plan = FusionBlockContractPlan::from_parts(
-            Arc::clone(&structure),
-            Arc::clone(&structure),
-            Arc::clone(&structure),
-            Vec::new(),
-            groups,
+        let leg = || SectorLeg::new([(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)], false);
+        let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg()]),
+                FusionProductSpace::new([leg()]),
+            ),
+            &Z2FusionRule,
+            [vec![1, 1], vec![1, 1]],
         )
+        .unwrap();
+        let structure = Arc::clone(space.subblock_structure());
+        let plan = FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops(
+            &structure,
+            1,
+            &structure,
+            1,
+            &structure,
+            1,
+            &structure,
+            1,
+            &structure,
+            1,
+            MatrixOp::Identity,
+            MatrixOp::Identity,
+        )
+        .unwrap()
         .unwrap();
         let mut kernels = crate::StridedHostKernelAdapter::default();
         let mut gemm = CountingBatchGemm::default();

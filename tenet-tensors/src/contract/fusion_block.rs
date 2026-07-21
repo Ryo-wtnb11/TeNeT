@@ -333,10 +333,10 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
     use tenet_core::{
-        BraidingStyleKind, CoreError, FusionProductSpace, FusionStyleKind, FusionTensorMapSpace,
-        FusionTreePairKey, HostReadableStorage, HostWritableStorage, MultiplicityIndex,
-        ProductFusionRule, SU2FusionRule, SU2Irrep, SectorLeg, SectorVec, TensorMap,
-        TensorMapSpace, TensorStorage, Trivial, U1FusionRule, U1Irrep, Z2FusionRule,
+        BlockStructure, BraidingStyleKind, CoreError, FusionProductSpace, FusionStyleKind,
+        FusionTensorMapSpace, FusionTreePairKey, HostReadableStorage, HostWritableStorage,
+        MultiplicityIndex, ProductFusionRule, SU2FusionRule, SU2Irrep, SectorLeg, SectorVec,
+        TensorMap, TensorMapSpace, TensorStorage, Trivial, U1FusionRule, U1Irrep, Z2FusionRule,
     };
     use tenet_core::{Placement, SimilarStorage};
     use tenet_operations::fusion_replay::HostFusionBlockContractWorkspace;
@@ -347,10 +347,15 @@ mod tests {
 
     fn reset_layout_lookups() {
         FUSION_LAYOUT_LOOKUPS.with(|lookups| lookups.set((0, 0)));
+        FUSION_LAYOUT_COMPILES.set(0);
     }
 
     fn layout_lookups() -> (usize, usize) {
         FUSION_LAYOUT_LOOKUPS.with(Cell::get)
+    }
+
+    fn layout_compiles() -> usize {
+        FUSION_LAYOUT_COMPILES.get()
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -709,6 +714,80 @@ mod tests {
         );
     }
 
+    #[test]
+    fn canonical_region_join_scales_missing_sector_without_layout_compile() {
+        let rule = Z2FusionRule;
+        let outer = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
+        let inner = || SectorLeg::new([(SectorId::new(0), 1)], false);
+        let space = |codomain: SectorLeg, domain: SectorLeg, dims, shapes| {
+            FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+                dims,
+                FusionTreeHomSpace::new(
+                    FusionProductSpace::new([codomain]),
+                    FusionProductSpace::new([domain]),
+                ),
+                &rule,
+                shapes,
+            )
+            .unwrap()
+        };
+        let lhs = DynamicFusionMapSpace::from_typed(&space(
+            outer(),
+            inner(),
+            TensorMapSpace::<1, 1>::from_dims([2], [1]).unwrap(),
+            vec![vec![1, 1]],
+        ));
+        let rhs = DynamicFusionMapSpace::from_typed(&space(
+            inner(),
+            outer(),
+            TensorMapSpace::<1, 1>::from_dims([1], [2]).unwrap(),
+            vec![vec![1, 1]],
+        ));
+        let dst = DynamicFusionMapSpace::from_typed(&space(
+            outer(),
+            outer(),
+            TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
+            vec![vec![1, 1], vec![1, 1]],
+        ));
+
+        reset_layout_lookups();
+        let plan = compile_fusion_block_contract_plan(
+            &rule,
+            &dst,
+            &lhs,
+            &rhs,
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
+        )
+        .unwrap();
+        assert_eq!(layout_compiles(), 0);
+
+        let mut output = vec![11.0, 7.0];
+        let mut dense = DenseTreeTransformOperations::default();
+        let mut dense_workspace = TensorContractWorkspace::default();
+        let mut fusion_workspace = FusionBlockContractWorkspace::<f64>::default();
+        plan.execute_raw(
+            &mut crate::StridedHostKernelAdapter::default(),
+            &mut BackendRank2Gemm {
+                backend: &mut dense,
+                workspace: &mut dense_workspace,
+            },
+            &mut fusion_workspace,
+            dst.structure(),
+            &mut output,
+            lhs.structure(),
+            &[3.0],
+            rhs.structure(),
+            &[5.0],
+            2.0,
+            3.0,
+        )
+        .unwrap();
+
+        // What: the matched sector applies alpha and beta, while the absent
+        // inner sector applies beta exactly once across its contiguous range.
+        assert_eq!(output, vec![63.0, 21.0]);
+    }
+
     #[derive(Clone, Copy)]
     struct LayoutToyGenericRule;
 
@@ -837,6 +916,69 @@ mod tests {
     }
 
     #[test]
+    fn generic_multiplicity_grid_uses_canonical_region_gemm() {
+        let rule = LayoutToyGenericRule;
+        let leg = || SectorLeg::new([(SectorId::new(1), 1)], false);
+        let homspace = || {
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg(), leg()]),
+                FusionProductSpace::new([leg(), leg()]),
+            )
+        };
+        let space = || {
+            let homspace = homspace();
+            let key_count = homspace.fusion_tree_keys_generic(&rule).unwrap().len();
+            assert_eq!(key_count, 4);
+            DynamicFusionMapSpace::from_degeneracy_shapes_generic(
+                &rule,
+                homspace,
+                vec![vec![1; 4]; key_count],
+            )
+            .unwrap()
+        };
+        let lhs = space();
+        let rhs = space();
+        let dst = space();
+
+        reset_layout_lookups();
+        let plan = compile_fusion_block_contract_plan_generic(
+            &rule,
+            &dst,
+            &lhs,
+            &rhs,
+            TensorContractSpec::with_default_output_order(&[2, 3], &[0, 1]),
+        )
+        .unwrap();
+        assert_eq!(layout_compiles(), 0);
+
+        let mut output = vec![0.0; 4];
+        let mut dense = DenseTreeTransformOperations::default();
+        let mut dense_workspace = TensorContractWorkspace::default();
+        let mut fusion_workspace = FusionBlockContractWorkspace::<f64>::default();
+        plan.execute_raw(
+            &mut crate::StridedHostKernelAdapter::default(),
+            &mut BackendRank2Gemm {
+                backend: &mut dense,
+                workspace: &mut dense_workspace,
+            },
+            &mut fusion_workspace,
+            dst.structure(),
+            &mut output,
+            lhs.structure(),
+            &[1.0, 2.0, 3.0, 4.0],
+            rhs.structure(),
+            &[5.0, 6.0, 7.0, 8.0],
+            1.0,
+            0.0,
+        )
+        .unwrap();
+
+        // What: outer-multiplicity vertices remain matrix rows/columns on the
+        // direct canonical route.
+        assert_eq!(output, vec![23.0, 34.0, 31.0, 46.0]);
+    }
+
+    #[test]
     fn storage_direct_replay_runs_without_host_slice_contract() {
         let rule = Z2FusionRule;
         let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
@@ -900,6 +1042,7 @@ mod tests {
         let len = space.required_len().unwrap();
         let lhs_data: Vec<f64> = (0..len).map(|i| 0.5 * i as f64 - 1.0).collect();
         let rhs_data: Vec<f64> = (0..len).map(|i| 1.5 - 0.25 * i as f64).collect();
+        reset_layout_lookups();
         let plan = compile_fusion_block_contract_plan(
             &rule,
             &DynamicFusionMapSpace::from_typed(&space),
@@ -908,6 +1051,8 @@ mod tests {
             TensorContractSpec::with_default_output_order(&[1], &[0]),
         )
         .unwrap();
+        // What: canonical tensor-owned regions bypass the per-tree layout compiler.
+        assert_eq!(layout_compiles(), 0);
 
         let mut backend = DenseTreeTransformOperations::default();
         let mut workspace = TensorContractWorkspace::default();
@@ -1071,6 +1216,84 @@ mod tests {
     }
 
     #[test]
+    fn prelowered_equal_dimensions_with_different_tree_order_uses_fallback() {
+        let rule = Z2FusionRule;
+        let leg = || SectorLeg::new([(SectorId::new(0), 1), (SectorId::new(1), 1)], false);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg()]),
+            FusionProductSpace::new([leg(), leg()]),
+        );
+        let keys = homspace.fusion_tree_keys(&rule);
+        let shapes = vec![vec![1; 4]; keys.len()];
+        let canonical = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<2, 2>::from_dims([2, 2], [2, 2]).unwrap(),
+            homspace.clone(),
+            &rule,
+            shapes.clone(),
+        )
+        .unwrap();
+        let mut reordered = keys.iter().cloned().zip(shapes).collect::<Vec<_>>();
+        let mut start = 0usize;
+        while start < reordered.len() {
+            let coupled = reordered[start].0.codomain_tree().coupled();
+            let end = start
+                + reordered[start..]
+                    .iter()
+                    .take_while(|(key, _)| key.codomain_tree().coupled() == coupled)
+                    .count();
+            reordered[start..end].reverse();
+            start = end;
+        }
+        let storage = FusionTensorMapSpace::new_unbound(
+            TensorMapSpace::<2, 2>::from_dims([2, 2], [2, 2]).unwrap(),
+            homspace,
+            BlockStructure::coupled_sector_matrix_with_keys(&rule, 2, 4, reordered).unwrap(),
+        )
+        .unwrap()
+        .try_bind_rule(&rule)
+        .unwrap();
+        let canonical = DynamicFusionMapSpace::from_typed(&canonical);
+        let storage = DynamicFusionMapSpace::from_typed(&storage);
+        let canonical_regions = canonical
+            .structure()
+            .coupled_sector_regions(canonical.nout())
+            .unwrap()
+            .unwrap();
+        let storage_regions = storage
+            .structure()
+            .coupled_sector_regions(storage.nout())
+            .unwrap()
+            .unwrap();
+        assert!(canonical_regions
+            .iter()
+            .zip(storage_regions.iter())
+            .all(|(lhs, rhs)| (lhs.rows(), lhs.cols()) == (rhs.rows(), rhs.cols())));
+        assert!(canonical_regions
+            .iter()
+            .zip(storage_regions.iter())
+            .any(|(lhs, rhs)| lhs.row_trees() != rhs.row_trees()
+                || lhs.col_trees() != rhs.col_trees()));
+
+        reset_layout_lookups();
+        let _plan = compile_fusion_block_contract_plan_prelowered(
+            &rule,
+            &canonical,
+            &canonical,
+            &storage,
+            &canonical,
+            &canonical,
+            TensorContractSpec::with_default_output_order(&[2, 3], &[0, 1]),
+            MatrixOp::Identity,
+            MatrixOp::Identity,
+        )
+        .unwrap();
+
+        // What: equal sector dimensions do not authorize direct replay when
+        // expert storage changes the exact tree order.
+        assert!(layout_compiles() > 0);
+    }
+
+    #[test]
     fn prelowered_non_direct_physical_layout_keeps_executable_plan() {
         let (logical, storage, logical_layout, mut storage_layout) = z2_adjoint_mapping_spaces();
         let logical_group = logical_layout.groups[0].clone();
@@ -1108,6 +1331,30 @@ mod tests {
         // What: a valid non-direct physical layout remains an executable core
         // plan instead of becoming a user-visible compilation error.
         assert!(!plan.is_fully_direct());
+    }
+
+    #[test]
+    fn prelowered_adjoint_without_canonical_regions_uses_exact_fallback() {
+        let rule = Z2FusionRule;
+        let (logical, storage, _, _) = z2_adjoint_mapping_spaces();
+
+        reset_layout_lookups();
+        let _plan = compile_fusion_block_contract_plan_prelowered(
+            &rule,
+            &logical,
+            &logical,
+            &storage,
+            &logical,
+            &storage,
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
+            MatrixOp::Adjoint,
+            MatrixOp::Adjoint,
+        )
+        .unwrap();
+
+        // What: a transposed logical structure without canonical coupled
+        // regions retains the exact tree-mapped implementation.
+        assert!(layout_compiles() > 0);
     }
 
     /// GPU vertical: the same core direct replay executed on CUDA
@@ -1252,6 +1499,31 @@ mod tests {
     }
 }
 
+fn compile_direct_coupled_region_plan(
+    dst_space: &DynamicFusionMapSpace,
+    lhs_logical: &DynamicFusionMapSpace,
+    lhs_storage: &DynamicFusionMapSpace,
+    rhs_logical: &DynamicFusionMapSpace,
+    rhs_storage: &DynamicFusionMapSpace,
+    lhs_op: MatrixOp,
+    rhs_op: MatrixOp,
+) -> Result<Option<FusionBlockContractPlan>, OperationError> {
+    FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops(
+        dst_space.structure(),
+        dst_space.nout(),
+        lhs_logical.structure(),
+        lhs_logical.nout(),
+        lhs_storage.structure(),
+        lhs_storage.nout(),
+        rhs_logical.structure(),
+        rhs_logical.nout(),
+        rhs_storage.structure(),
+        rhs_storage.nout(),
+        lhs_op,
+        rhs_op,
+    )
+}
+
 pub(crate) fn compile_fusion_block_contract_plan<R>(
     rule: &R,
     dst_space: &DynamicFusionMapSpace,
@@ -1279,6 +1551,18 @@ where
     reject_fusion_contract_conjugation(axes)?;
     // Axis validation happens inside validate_core_compose.
     validate_core_compose(rule, dst_space, lhs_space, rhs_space, axes)?;
+
+    if let Some(plan) = compile_direct_coupled_region_plan(
+        dst_space,
+        lhs_space,
+        lhs_space,
+        rhs_space,
+        rhs_space,
+        MatrixOp::Identity,
+        MatrixOp::Identity,
+    )? {
+        return Ok(plan);
+    }
 
     let lhs_layout = FusionBlockMatrixLayout::compile(rule, lhs_space)?;
     let rhs_layout = FusionBlockMatrixLayout::compile(rule, rhs_space)?;
@@ -1334,6 +1618,18 @@ where
     lhs_storage.validate_rule(rule)?;
     rhs_storage.validate_rule(rule)?;
     validate_core_compose(rule, dst_space, lhs_logical, rhs_logical, axes)?;
+
+    if let Some(plan) = compile_direct_coupled_region_plan(
+        dst_space,
+        lhs_logical,
+        lhs_storage,
+        rhs_logical,
+        rhs_storage,
+        lhs_op,
+        rhs_op,
+    )? {
+        return Ok(plan);
+    }
 
     let lhs_logical_layout = FusionBlockMatrixLayout::compile(rule, lhs_logical)?;
     let lhs_storage_layout = FusionBlockMatrixLayout::compile(rule, lhs_storage)?;
@@ -1569,6 +1865,18 @@ where
         });
     }
 
+    if let Some(plan) = compile_direct_coupled_region_plan(
+        dst_space,
+        lhs_space,
+        lhs_space,
+        rhs_space,
+        rhs_space,
+        MatrixOp::Identity,
+        MatrixOp::Identity,
+    )? {
+        return Ok(plan);
+    }
+
     let lhs_layout = FusionBlockMatrixLayout::compile_generic(lhs_space)?;
     let rhs_layout = FusionBlockMatrixLayout::compile_generic(rhs_space)?;
     let dst_layout = FusionBlockMatrixLayout::compile_generic(dst_space)?;
@@ -1667,6 +1975,8 @@ impl FusionBlockMatrixLayout {
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     {
+        #[cfg(test)]
+        FUSION_LAYOUT_COMPILES.set(FUSION_LAYOUT_COMPILES.get() + 1);
         let mut builders = Vec::<FusionBlockMatrixGroupBuilder>::new();
         let mut group_indices = FxHashMap::<SectorId, usize>::default();
         for block_index in 0..space.structure().block_count() {
@@ -1718,6 +2028,8 @@ impl FusionBlockMatrixLayout {
     /// labels ride in the fusion-tree keys, so multiplicity blocks land in the
     /// right coupled group automatically.
     fn compile_generic(space: &DynamicFusionMapSpace) -> Result<Self, OperationError> {
+        #[cfg(test)]
+        FUSION_LAYOUT_COMPILES.set(FUSION_LAYOUT_COMPILES.get() + 1);
         let mut builders = Vec::<FusionBlockMatrixGroupBuilder>::new();
         let mut group_indices = FxHashMap::<SectorId, usize>::default();
         for block_index in 0..space.structure().block_count() {
@@ -1838,6 +2150,7 @@ impl FusionBlockMatrixLocator {
 thread_local! {
     static FUSION_LAYOUT_LOOKUPS: std::cell::Cell<(usize, usize)> =
         const { std::cell::Cell::new((0, 0)) };
+    static FUSION_LAYOUT_COMPILES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
