@@ -6997,6 +6997,12 @@ impl Tensor {
     /// orthonormal rows per coupled sector.
     pub fn lq_compact(&self) -> Result<(Self, Self), Error> {
         if self.is_adjoint_view() {
+            #[cfg(feature = "cuda")]
+            if matches!(self.stored_data(), Data::CudaF64(_)) {
+                return self.materialized_tensor()?.lq_compact();
+            }
+            // Why not mirror this in QR: LQ is already QR-through-adjoint and
+            // would add an adjoint scratch plus output copies before returning.
             let (q, r) = self.adjoint()?.qr_compact()?;
             return Ok((r.adjoint()?, q.adjoint()?));
         }
