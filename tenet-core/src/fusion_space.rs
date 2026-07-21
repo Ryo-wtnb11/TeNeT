@@ -110,11 +110,12 @@ impl FusionProductSpace {
         Ok(dimensions)
     }
 
-    fn selected_leg_tuples(&self) -> Vec<Vec<FusionTreeLeg>> {
-        let mut tuples = Vec::new();
-        let mut current = vec![None; self.legs.len()];
-        collect_selected_leg_tuples(&self.legs, self.legs.len(), &mut current, &mut tuples);
-        tuples
+    fn try_visit_selected_leg_tuples<E, F>(&self, emit: &mut F) -> Result<(), E>
+    where
+        F: FnMut(&[FusionTreeLeg]) -> Result<(), E>,
+    {
+        let mut current = vec![FusionTreeLeg::new(SectorId::new(0), false); self.legs.len()];
+        try_visit_selected_leg_tuples(&self.legs, self.legs.len(), &mut current, emit)
     }
 }
 
