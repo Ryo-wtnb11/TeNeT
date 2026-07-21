@@ -6935,8 +6935,7 @@ impl Tensor {
     /// orthonormal columns per coupled sector.
     pub fn qr_compact(&self) -> Result<(Self, Self), Error> {
         if self.is_adjoint_view() {
-            let (l, q) = self.adjoint()?.lq_compact()?;
-            return Ok((q.adjoint()?, l.adjoint()?));
+            return self.materialized_tensor()?.qr_compact();
         }
         #[cfg(feature = "cuda")]
         if let Data::CudaF64(storage) = self.stored_data() {
@@ -9647,7 +9646,7 @@ mod adjoint_parent_view_tests {
         assert!((adjoint_trace - trace.conj()).norm() < 1e-12);
     }
 
-    fn assert_adjoint_compact_qr_lq_matches_eager_oracle(
+    fn assert_adjoint_compact_lq_matches_eager_oracle(
         left: Space,
         right: Space,
         dtype: Dtype,
@@ -9658,12 +9657,6 @@ mod adjoint_parent_view_tests {
         let lazy = source.adjoint().unwrap();
         let eager = source.adjoint().unwrap().materialized_tensor().unwrap();
 
-        let (lazy_q, lazy_r) = lazy.qr_compact().unwrap();
-        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
-        let (eager_q, eager_r) = eager.qr_compact().unwrap();
-        assert_close(&lazy_q, &eager_q);
-        assert_close(&lazy_r, &eager_r);
-
         let (lazy_l, lazy_q) = lazy.lq_compact().unwrap();
         assert_eq!(lazy.adjoint_build_counts(), (0, 0));
         let (eager_l, eager_q) = eager.lq_compact().unwrap();
@@ -9672,28 +9665,28 @@ mod adjoint_parent_view_tests {
     }
 
     #[test]
-    fn compact_qr_lq_adjoint_dispatch_preserves_canonical_factors() {
-        // What: rectangular adjoint QR/LQ reuse the parent decomposition while
+    fn compact_lq_adjoint_dispatch_preserves_canonical_factors() {
+        // What: rectangular adjoint LQ reuses the parent QR decomposition while
         // preserving direct-route factor spaces, gauge, dtype, and lazy input storage.
-        assert_adjoint_compact_qr_lq_matches_eager_oracle(
+        assert_adjoint_compact_lq_matches_eager_oracle(
             Space::u1([(-1, 2), (0, 3), (1, 2)]),
             Space::u1([(-1, 1), (0, 2), (1, 1)]),
             Dtype::F64,
             261_201,
         );
-        assert_adjoint_compact_qr_lq_matches_eager_oracle(
+        assert_adjoint_compact_lq_matches_eager_oracle(
             Space::u1([(-1, 1), (0, 2), (1, 1)]),
             Space::u1([(-1, 2), (0, 3), (1, 2)]),
             Dtype::C64,
             261_202,
         );
-        assert_adjoint_compact_qr_lq_matches_eager_oracle(
+        assert_adjoint_compact_lq_matches_eager_oracle(
             Space::su2([(0, 2), (1, 3), (2, 2)]).unwrap(),
             Space::su2([(0, 1), (1, 2), (2, 1)]).unwrap(),
             Dtype::C64,
             261_203,
         );
-        assert_adjoint_compact_qr_lq_matches_eager_oracle(
+        assert_adjoint_compact_lq_matches_eager_oracle(
             Space::product([((-1, 0), 1), ((0, 1), 2), ((1, 0), 1)]).unwrap(),
             Space::product([((-1, 0), 2), ((0, 1), 3), ((1, 0), 2)]).unwrap(),
             Dtype::C64,
