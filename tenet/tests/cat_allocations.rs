@@ -9,6 +9,8 @@ struct CountingAllocator;
 thread_local! {
     static ENABLED: Cell<bool> = const { Cell::new(false) };
     static ALLOCATED: Cell<u64> = const { Cell::new(0) };
+    static PAYLOAD_BYTES: Cell<usize> = const { Cell::new(0) };
+    static PAYLOAD_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
 unsafe impl GlobalAlloc for CountingAllocator {
@@ -16,6 +18,9 @@ unsafe impl GlobalAlloc for CountingAllocator {
         let pointer = unsafe { System.alloc(layout) };
         if !pointer.is_null() && ENABLED.get() {
             ALLOCATED.set(ALLOCATED.get() + layout.size() as u64);
+            if layout.size() == PAYLOAD_BYTES.get() {
+                PAYLOAD_ALLOCATIONS.set(PAYLOAD_ALLOCATIONS.get() + 1);
+            }
         }
         pointer
     }
@@ -28,6 +33,9 @@ unsafe impl GlobalAlloc for CountingAllocator {
         let pointer = unsafe { System.realloc(pointer, layout, new_size) };
         if !pointer.is_null() && ENABLED.get() {
             ALLOCATED.set(ALLOCATED.get() + new_size as u64);
+            if new_size == PAYLOAD_BYTES.get() {
+                PAYLOAD_ALLOCATIONS.set(PAYLOAD_ALLOCATIONS.get() + 1);
+            }
         }
         pointer
     }
@@ -36,13 +44,38 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-fn measured_bytes<T>(operation: impl FnOnce() -> T) -> u64 {
+fn measured_allocations<T>(payload_bytes: usize, operation: impl FnOnce() -> T) -> (u64, usize) {
     ALLOCATED.set(0);
+    PAYLOAD_BYTES.set(payload_bytes);
+    PAYLOAD_ALLOCATIONS.set(0);
     ENABLED.set(true);
     let output = black_box(operation());
     ENABLED.set(false);
     black_box(output);
-    ALLOCATED.get()
+    (ALLOCATED.get(), PAYLOAD_ALLOCATIONS.get())
+}
+
+#[test]
+fn ordinary_cat_uses_one_final_payload_without_output_scratch() {
+    // What: ordinary same-dtype cat owns one final payload and no second
+    // output-sized allocation.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let codomain = Space::u1([(0, 127)]);
+    let left = Space::u1([(0, 251)]);
+    let right = Space::u1([(0, 263)]);
+    let lhs = Tensor::rand_with_seed(&runtime, Dtype::F64, [&codomain], [&left], 394_001).unwrap();
+    let rhs = Tensor::rand_with_seed(&runtime, Dtype::F64, [&codomain], [&right], 394_002).unwrap();
+    let warm = lhs.catdomain(&rhs).unwrap();
+    let output_payload = warm.data().len() * std::mem::size_of::<f64>();
+
+    let (allocated, payload_allocations) =
+        measured_allocations(output_payload, || lhs.catdomain(&rhs).unwrap());
+
+    assert_eq!(payload_allocations, 1);
+    assert!(
+        allocated <= output_payload as u64 + 128 * 1024,
+        "ordinary cat allocated {allocated} B for a {output_payload} B output"
+    );
 }
 
 #[test]
@@ -61,13 +94,21 @@ fn mixed_cat_widens_into_the_final_c64_payload() {
     black_box(complex.catdomain(&real).unwrap());
     black_box(complex.catdomain(&real_c64).unwrap());
 
-    let mixed_first = measured_bytes(|| real.catdomain(&complex).unwrap());
-    let c64_first = measured_bytes(|| real_c64.catdomain(&complex).unwrap());
-    let mixed_second = measured_bytes(|| complex.catdomain(&real).unwrap());
-    let c64_second = measured_bytes(|| complex.catdomain(&real_c64).unwrap());
+    let output_payload =
+        real.catdomain(&complex).unwrap().data_c64().len() * std::mem::size_of::<Complex64>();
+    let (mixed_first, mixed_first_payloads) =
+        measured_allocations(output_payload, || real.catdomain(&complex).unwrap());
+    let (c64_first, _) =
+        measured_allocations(output_payload, || real_c64.catdomain(&complex).unwrap());
+    let (mixed_second, mixed_second_payloads) =
+        measured_allocations(output_payload, || complex.catdomain(&real).unwrap());
+    let (c64_second, _) =
+        measured_allocations(output_payload, || complex.catdomain(&real_c64).unwrap());
     let promoted_payload = real.data().len() as u64 * std::mem::size_of::<Complex64>() as u64;
     let fixed_allocation_tolerance = promoted_payload / 8;
 
+    assert_eq!(mixed_first_payloads, 1);
+    assert_eq!(mixed_second_payloads, 1);
     assert!(
         mixed_first <= c64_first + fixed_allocation_tolerance,
         "mixed lhs allocated {mixed_first} B versus {c64_first} B for c64; \
@@ -96,30 +137,31 @@ fn lazy_adjoint_cat_allocates_the_output_without_materializing_inputs() {
     let warm_lhs = lhs_parent.adjoint().unwrap();
     let warm_rhs = rhs_parent.adjoint().unwrap();
     let warm_output = warm_lhs.catdomain(&warm_rhs).unwrap();
-    let output_payload =
-        warm_output.data_c64().len() as u64 * std::mem::size_of::<Complex64>() as u64;
+    let output_payload = warm_output.data_c64().len() * std::mem::size_of::<Complex64>();
     let input_payload = (lhs_parent.data_c64().len() + rhs_parent.data_c64().len()) as u64
         * std::mem::size_of::<Complex64>() as u64;
 
     let fast_lhs = lhs_parent.adjoint().unwrap();
     let fast_rhs = rhs_parent.adjoint().unwrap();
-    let fast_bytes = measured_bytes(|| fast_lhs.catdomain(&fast_rhs).unwrap());
+    let (fast_bytes, payload_allocations) =
+        measured_allocations(output_payload, || fast_lhs.catdomain(&fast_rhs).unwrap());
 
     let eager_lhs = lhs_parent.adjoint().unwrap();
     let eager_rhs = rhs_parent.adjoint().unwrap();
-    let eager_bytes = measured_bytes(|| {
+    let (eager_bytes, _) = measured_allocations(output_payload, || {
         black_box(eager_lhs.data_c64());
         black_box(eager_rhs.data_c64());
         eager_lhs.catdomain(&eager_rhs).unwrap()
     });
     let structural_tolerance = 128 * 1024;
 
+    assert_eq!(payload_allocations, 1);
     assert!(
-        fast_bytes >= output_payload,
+        fast_bytes >= output_payload as u64,
         "lazy cat allocated {fast_bytes} B, below its {output_payload} B owned output"
     );
     assert!(
-        fast_bytes <= output_payload + structural_tolerance,
+        fast_bytes <= output_payload as u64 + structural_tolerance,
         "lazy cat allocated {fast_bytes} B for a {output_payload} B output, exceeding the \
          {structural_tolerance} B structural allowance"
     );

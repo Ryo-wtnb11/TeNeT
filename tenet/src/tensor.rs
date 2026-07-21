@@ -38,8 +38,8 @@ use tenet_matrixalgebra::{
 use tenet_tensors::cuda::{CudaStorage, CudaStorageGemm};
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, OperationError, OutputAxisOrder,
-    RecouplingCoefficientAction, TensorContractSpec, TreeTransformOperation,
-    TreeTransformRuleCacheKey,
+    OwnedCatC64Source as CatC64Source, OwnedCatCopy, OwnedCatSide, RecouplingCoefficientAction,
+    TensorContractSpec, TreeTransformOperation, TreeTransformRuleCacheKey,
 };
 
 use crate::error::Error;
@@ -836,28 +836,10 @@ enum CatSide {
     Codomain,
 }
 
-#[derive(Clone, Copy)]
-struct CatCopy {
-    source: usize,
-    source_offset: usize,
-    destination_offset: usize,
-    rows: usize,
-    cols: usize,
-    source_row_stride: usize,
-    source_column_stride: usize,
-    destination_leading_dimension: usize,
-    conjugate: bool,
-}
-
 struct CatDescriptor {
     space: UserBoundSpace,
-    copies: Vec<CatCopy>,
-}
-
-#[derive(Clone, Copy)]
-enum CatC64Source<'a> {
-    F64(&'a [f64]),
-    C64(&'a [Complex64]),
+    copies: Vec<OwnedCatCopy>,
+    side: CatSide,
 }
 
 impl CatDescriptor {
@@ -1068,20 +1050,19 @@ impl CatDescriptor {
                         )
                     }
                 };
-                copies.push(CatCopy {
+                copies.push(OwnedCatCopy::new(
                     source,
-                    source_offset: src.range().start,
+                    src.range().start,
                     destination_offset,
-                    rows,
-                    cols,
-                    source_row_stride,
-                    source_column_stride,
-                    destination_leading_dimension: destination.rows(),
-                    conjugate: matches!(
+                    [rows, cols],
+                    [source_row_stride, source_column_stride],
+                    destination.rows(),
+                    destination.range(),
+                    matches!(
                         source_metadata[source].orientation,
                         TensorOrientation::Adjoint
                     ),
-                });
+                ));
                 changed_axis_offset = changed_axis_offset
                     .checked_add(match side {
                         CatSide::Codomain => source_rows,
@@ -1099,16 +1080,23 @@ impl CatDescriptor {
                 ));
             }
         }
-        Ok(Some(Self { space, copies }))
+        Ok(Some(Self {
+            space,
+            copies,
+            side,
+        }))
     }
 
     fn preflight(&self, source_lengths: [usize; 2]) -> Result<(), Error> {
         let required_len = self.space.required_len()?;
         let mut copied_elements = 0usize;
         for copy in &self.copies {
-            preflight_cat_copy(copy, source_lengths[copy.source], required_len)?;
+            let source_len = source_lengths
+                .get(copy.source())
+                .ok_or_else(|| internal_layout_error("concatenated copy has an invalid source"))?;
+            preflight_cat_copy(copy, *source_len, required_len)?;
             copied_elements = copied_elements
-                .checked_add(copy.rows.checked_mul(copy.cols).ok_or_else(|| {
+                .checked_add(copy.rows().checked_mul(copy.cols()).ok_or_else(|| {
                     internal_layout_error("concatenated copy element count overflow")
                 })?)
                 .ok_or_else(|| {
@@ -1125,17 +1113,26 @@ impl CatDescriptor {
 
     fn execute<D: UserScalar>(&self, lhs: &[D], rhs: &[D]) -> Result<Vec<D>, Error> {
         let sources = [lhs, rhs];
-        // ponytail: safe zero-init until the checked strided copy accepts
-        // MaybeUninit destinations; every slot is overwritten below.
-        let mut output = vec![D::from_real(0.0); self.space.required_len()?];
+        let required_len = self.space.required_len()?;
+        let side = match self.side {
+            CatSide::Domain => OwnedCatSide::Domain,
+            CatSide::Codomain => OwnedCatSide::Codomain,
+        };
+        if let Some(output) =
+            tenet_tensors::try_cat_owned_raw(required_len, side, &self.copies, sources)
+        {
+            return Ok(output);
+        }
+        self.preflight([lhs.len(), rhs.len()])?;
+        let mut output = vec![D::from_real(0.0); required_len];
         for copy in &self.copies {
-            let shape = [copy.rows, copy.cols];
-            let source_strides = [copy.source_row_stride, copy.source_column_stride];
-            let destination_strides = [1, copy.destination_leading_dimension];
-            if copy.conjugate {
+            let shape = [copy.rows(), copy.cols()];
+            let source_strides = [copy.source_row_stride(), copy.source_column_stride()];
+            let destination_strides = [1, copy.destination_leading_dimension()];
+            if copy.conjugate() {
                 // Why not copy_into: the strided kernel transposes views but
                 // does not conjugate complex values.
-                copy_cat_mapped(&mut output, sources[copy.source], copy, |value| {
+                copy_cat_mapped(&mut output, sources[copy.source()], copy, |value| {
                     FactorScalar::adjoint(value)
                 });
             } else {
@@ -1144,13 +1141,13 @@ impl CatDescriptor {
                         &mut output,
                         &shape,
                         &destination_strides,
-                        copy.destination_offset,
+                        copy.destination_offset(),
                     )?,
                     BlockView::new(
-                        sources[copy.source],
+                        sources[copy.source()],
                         &shape,
                         &source_strides,
-                        copy.source_offset,
+                        copy.source_offset(),
                     )?,
                 )?;
             }
@@ -1164,52 +1161,68 @@ impl CatDescriptor {
         rhs: CatC64Source<'_>,
     ) -> Result<Vec<Complex64>, Error> {
         let sources = [lhs, rhs];
-        let mut output = vec![Complex64::new(0.0, 0.0); self.space.required_len()?];
+        let required_len = self.space.required_len()?;
+        let source_lengths = sources.map(|source| match source {
+            CatC64Source::F64(values) => values.len(),
+            CatC64Source::C64(values) => values.len(),
+        });
+        let side = match self.side {
+            CatSide::Domain => OwnedCatSide::Domain,
+            CatSide::Codomain => OwnedCatSide::Codomain,
+        };
+        if let Some(output) =
+            tenet_tensors::try_cat_owned_c64_raw(required_len, side, &self.copies, sources)
+        {
+            return Ok(output);
+        }
+        self.preflight(source_lengths)?;
+        let mut output = vec![Complex64::new(0.0, 0.0); required_len];
         for copy in &self.copies {
-            match sources[copy.source] {
+            match sources[copy.source()] {
                 CatC64Source::C64(source) => {
-                    if copy.conjugate {
+                    if copy.conjugate() {
                         copy_cat_mapped(&mut output, source, copy, |value| value.conj());
                     } else {
-                        let shape = [copy.rows, copy.cols];
-                        let source_strides = [copy.source_row_stride, copy.source_column_stride];
-                        let destination_strides = [1, copy.destination_leading_dimension];
+                        let shape = [copy.rows(), copy.cols()];
+                        let source_strides =
+                            [copy.source_row_stride(), copy.source_column_stride()];
+                        let destination_strides = [1, copy.destination_leading_dimension()];
                         tenet_tensors::copy_into(
                             BlockViewMut::new(
                                 &mut output,
                                 &shape,
                                 &destination_strides,
-                                copy.destination_offset,
+                                copy.destination_offset(),
                             )?,
-                            BlockView::new(source, &shape, &source_strides, copy.source_offset)?,
+                            BlockView::new(source, &shape, &source_strides, copy.source_offset())?,
                         )?;
                     }
                 }
                 CatC64Source::F64(source) => {
-                    if copy.conjugate {
+                    if copy.conjugate() {
                         copy_cat_mapped(&mut output, source, copy, |value| {
                             Complex64::new(value, 0.0)
                         });
                     } else {
-                        for column in 0..copy.cols {
+                        for column in 0..copy.cols() {
                             let source_start = column
-                                .checked_mul(copy.source_column_stride)
-                                .and_then(|offset| copy.source_offset.checked_add(offset))
+                                .checked_mul(copy.source_column_stride())
+                                .and_then(|offset| copy.source_offset().checked_add(offset))
                                 .ok_or_else(|| {
                                     internal_layout_error("mixed cat source offset overflow")
                                 })?;
                             let destination_start = column
-                                .checked_mul(copy.destination_leading_dimension)
-                                .and_then(|offset| copy.destination_offset.checked_add(offset))
+                                .checked_mul(copy.destination_leading_dimension())
+                                .and_then(|offset| copy.destination_offset().checked_add(offset))
                                 .ok_or_else(|| {
                                     internal_layout_error("mixed cat destination offset overflow")
                                 })?;
                             let source_end =
-                                source_start.checked_add(copy.rows).ok_or_else(|| {
+                                source_start.checked_add(copy.rows()).ok_or_else(|| {
                                     internal_layout_error("mixed cat source extent overflow")
                                 })?;
                             let destination_end =
-                                destination_start.checked_add(copy.rows).ok_or_else(|| {
+                                destination_start.checked_add(copy.rows()).ok_or_else(|| {
                                     internal_layout_error("mixed cat destination extent overflow")
                                 })?;
                             let source_column =
@@ -1260,25 +1273,25 @@ fn execute_cat_data(descriptor: &CatDescriptor, lhs: &Data, rhs: &Data) -> Resul
 fn copy_cat_mapped<D, S>(
     destination: &mut [D],
     source: &[S],
-    copy: &CatCopy,
+    copy: &OwnedCatCopy,
     mut map: impl FnMut(S) -> D,
 ) where
     S: Copy,
 {
-    for column in 0..copy.cols {
-        for row in 0..copy.rows {
-            let source_index = copy.source_offset
-                + row * copy.source_row_stride
-                + column * copy.source_column_stride;
+    for column in 0..copy.cols() {
+        for row in 0..copy.rows() {
+            let source_index = copy.source_offset()
+                + row * copy.source_row_stride()
+                + column * copy.source_column_stride();
             let destination_index =
-                copy.destination_offset + row + column * copy.destination_leading_dimension;
+                copy.destination_offset() + row + column * copy.destination_leading_dimension();
             destination[destination_index] = map(source[source_index]);
         }
     }
 }
 
 fn preflight_cat_copy(
-    copy: &CatCopy,
+    copy: &OwnedCatCopy,
     source_len: usize,
     destination_len: usize,
 ) -> Result<(), Error> {
@@ -1299,11 +1312,11 @@ fn preflight_cat_copy(
                 .ok_or_else(|| internal_layout_error("concatenated scalar offset overflow"))
         };
     if max_offset(
-        copy.source_offset,
-        copy.rows,
-        copy.cols,
-        copy.source_row_stride,
-        copy.source_column_stride,
+        copy.source_offset(),
+        copy.rows(),
+        copy.cols(),
+        copy.source_row_stride(),
+        copy.source_column_stride(),
     )?
     .is_some_and(|offset| offset >= source_len)
     {
@@ -1312,11 +1325,11 @@ fn preflight_cat_copy(
         ));
     }
     if max_offset(
-        copy.destination_offset,
-        copy.rows,
-        copy.cols,
+        copy.destination_offset(),
+        copy.rows(),
+        copy.cols(),
         1,
-        copy.destination_leading_dimension,
+        copy.destination_leading_dimension(),
     )?
     .is_some_and(|offset| offset >= destination_len)
     {
