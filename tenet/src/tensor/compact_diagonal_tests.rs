@@ -711,3 +711,25 @@ fn fermionic_adjoint_diagonal_contractions_match_dense_oracles() {
         }
     }
 }
+
+#[test]
+fn absorb_densifies_a_compact_destination_before_prefix_overwrite() {
+    // What: absorb returns ordinary dense storage because overwriting a block
+    // prefix need not preserve the destination's compact diagonal invariant.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = product_space();
+    let diagonal = real_diagonal(&runtime, &space, 395_010);
+    let codomain = diagonal.codomain_spaces();
+    let domain = diagonal.domain_spaces();
+    let source = Tensor::from_block_fn(&runtime, codomain.iter(), domain.iter(), |_, indices| {
+        (1 + indices.iter().sum::<usize>()) as f64
+    })
+    .unwrap();
+
+    assert_compact_unmaterialized(&diagonal);
+    let actual = diagonal.absorb(&source).unwrap();
+
+    assert!(!matches!(actual.stored_data(), Data::Diagonal(_)));
+    assert!(diagonal.has_cached_materialization());
+    assert_eq!(actual.data(), source.data());
+}

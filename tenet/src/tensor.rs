@@ -1270,6 +1270,440 @@ fn execute_cat_data(descriptor: &CatDescriptor, lhs: &Data, rhs: &Data) -> Resul
     }
 }
 
+fn validate_absorb_layout(structure: &BlockStructure, data: &Data) -> Result<(), Error> {
+    let actual = match data {
+        Data::F64(data) => data.len(),
+        Data::C64(data) => data.len(),
+        Data::Diagonal(_) => {
+            return Err(internal_layout_error(
+                "compact diagonal reached absorb execution",
+            ));
+        }
+        #[cfg(feature = "cuda")]
+        Data::CudaF64(_) => {
+            return Err(Error::UnsupportedOnDevice(
+                "Tensor::absorb has no device implementation yet".to_string(),
+            ));
+        }
+    };
+    if structure.required_len()? != actual {
+        return Err(internal_layout_error(
+            "absorb block layout does not cover scalar storage",
+        ));
+    }
+    Ok(())
+}
+
+fn execute_absorb_data(
+    destination_structure: &BlockStructure,
+    destination: &Data,
+    source_structure: &BlockStructure,
+    source: &Data,
+) -> Result<Data, Error> {
+    match (destination, source) {
+        (Data::F64(destination), Data::F64(source)) => {
+            let mut output = destination.clone();
+            absorb_mapped(
+                destination_structure,
+                &mut output,
+                source_structure,
+                source,
+                Ok,
+            )?;
+            Ok(Data::F64(output))
+        }
+        (Data::C64(destination), Data::C64(source)) => {
+            let mut output = destination.clone();
+            absorb_mapped(
+                destination_structure,
+                &mut output,
+                source_structure,
+                source,
+                Ok,
+            )?;
+            Ok(Data::C64(output))
+        }
+        (Data::C64(destination), Data::F64(source)) => {
+            let mut output = destination.clone();
+            absorb_mapped(
+                destination_structure,
+                &mut output,
+                source_structure,
+                source,
+                |value| Ok(Complex64::new(value, 0.0)),
+            )?;
+            Ok(Data::C64(output))
+        }
+        (Data::F64(destination), Data::C64(source)) => {
+            let mut output = destination.clone();
+            absorb_mapped(
+                destination_structure,
+                &mut output,
+                source_structure,
+                source,
+                |value| {
+                    if value.im == 0.0 {
+                        Ok(value.re)
+                    } else {
+                        Err(Error::InexactScalarConversion {
+                            operation: "Tensor::absorb",
+                            from: Dtype::C64,
+                            to: Dtype::F64,
+                        })
+                    }
+                },
+            )?;
+            Ok(Data::F64(output))
+        }
+        (Data::Diagonal(_), _) | (_, Data::Diagonal(_)) => Err(internal_layout_error(
+            "compact diagonal reached absorb execution",
+        )),
+        #[cfg(feature = "cuda")]
+        (Data::CudaF64(_), _) | (_, Data::CudaF64(_)) => Err(Error::UnsupportedOnDevice(
+            "Tensor::absorb has no device implementation yet".to_string(),
+        )),
+    }
+}
+
+fn absorb_mapped<D, S>(
+    destination_structure: &BlockStructure,
+    destination: &mut [D],
+    source_structure: &BlockStructure,
+    source: &[S],
+    mut map: impl FnMut(S) -> Result<D, Error>,
+) -> Result<(), Error>
+where
+    S: Copy,
+{
+    let destination_sector = destination_structure.sector_structure();
+    let source_sector = source_structure.sector_structure();
+    let mut destination_position = 0usize;
+    let mut source_position = 0usize;
+    while destination_position < destination_sector.sorted_indices().len()
+        && source_position < source_sector.sorted_indices().len()
+    {
+        let destination_index = destination_sector.sorted_indices()[destination_position];
+        let source_index = source_sector.sorted_indices()[source_position];
+        let destination_block = destination_structure.block(destination_index)?;
+        let source_block = source_structure.block(source_index)?;
+        match destination_block.key().cmp(source_block.key()) {
+            std::cmp::Ordering::Less => destination_position += 1,
+            std::cmp::Ordering::Greater => source_position += 1,
+            std::cmp::Ordering::Equal => {
+                if !matches!(destination_block.key(), BlockKey::FusionTree(_)) {
+                    return Err(internal_layout_error(
+                        "absorb reached a non-fusion-tree block key",
+                    ));
+                }
+                // Why not construct BlockViews or a minimum-shape vector per
+                // block: the validated layouts already provide every borrowed
+                // stride, and absorb needs only this operation-local walk.
+                copy_absorb_prefix(
+                    destination,
+                    destination_block.shape(),
+                    destination_block.strides(),
+                    destination_block.offset(),
+                    source,
+                    source_block.shape(),
+                    source_block.strides(),
+                    source_block.offset(),
+                    &mut map,
+                )?;
+                destination_position += 1;
+                source_position += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod absorb_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use tenet_core::{BlockSpec, FusionTreeKey, SU2FusionRule};
+
+    fn scalar_structure(keys: &[FusionTreePairKey]) -> BlockStructure {
+        BlockStructure::from_blocks(
+            keys.iter()
+                .cloned()
+                .enumerate()
+                .map(|(offset, key)| {
+                    let rank = key.codomain_uncoupled().len() + key.domain_uncoupled().len();
+                    BlockSpec::column_major_with_key(key.into(), vec![1; rank], offset).unwrap()
+                })
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    fn assert_exact_key_oracle(
+        mut destination_keys: Vec<FusionTreePairKey>,
+        mut source_keys: Vec<FusionTreePairKey>,
+    ) {
+        destination_keys.sort();
+        source_keys.sort();
+        let destination_structure = scalar_structure(&destination_keys);
+        let source_structure = scalar_structure(&source_keys);
+        let mut destination = (0..destination_keys.len())
+            .map(|index| 100.0 + index as f64)
+            .collect::<Vec<_>>();
+        let before = destination.clone();
+        let source = (0..source_keys.len())
+            .map(|index| 10.0 + index as f64)
+            .collect::<Vec<_>>();
+        let source_values = source_keys
+            .iter()
+            .cloned()
+            .zip(source.iter().copied())
+            .collect::<HashMap<_, _>>();
+
+        absorb_mapped(
+            &destination_structure,
+            &mut destination,
+            &source_structure,
+            &source,
+            Ok,
+        )
+        .unwrap();
+
+        for index in 0..destination_structure.block_count() {
+            let block = destination_structure.block(index).unwrap();
+            let BlockKey::FusionTree(key) = block.key() else {
+                unreachable!()
+            };
+            assert_eq!(
+                destination[block.offset()],
+                source_values
+                    .get(key)
+                    .copied()
+                    .unwrap_or(before[block.offset()])
+            );
+        }
+    }
+
+    #[test]
+    fn absorb_merge_matches_only_complete_asymmetric_interleaved_keys() {
+        // What: equal external sectors do not alias distinct coupled sectors
+        // or inner lines when destination/source key sets interleave.
+        let rule = SU2FusionRule;
+        let pair = |coupled, innerline| {
+            let tree = FusionTreeKey::try_from_sector_ids_for_rule(
+                &rule,
+                [1, 1, 1],
+                coupled,
+                [false; 3],
+                [innerline],
+                [1, 1],
+            )
+            .unwrap();
+            FusionTreePairKey::pair(tree.clone(), tree)
+        };
+        let inner_zero = pair(1, 0);
+        let inner_two = pair(1, 2);
+        let coupled_three = pair(3, 2);
+        let destination_keys = vec![inner_zero.clone(), inner_two.clone(), coupled_three.clone()];
+        assert_exact_key_oracle(destination_keys.clone(), vec![inner_two]);
+        assert_exact_key_oracle(destination_keys, vec![inner_zero, coupled_three]);
+
+        // What: GenericFusion outer-multiplicity vertices remain part of exact
+        // identity on the smallest SU(3) N(8,8,8)=2 route.
+        let rule = Su3FusionRule::new();
+        let eight = rule.sector_of_label(&[1, 1]).unwrap().id();
+        let pair = |vertex| {
+            let codomain = FusionTreeKey::try_from_sector_ids_for_rule(
+                &rule,
+                [eight, eight],
+                eight,
+                [false; 2],
+                [],
+                [vertex],
+            )
+            .unwrap();
+            let domain =
+                FusionTreeKey::try_from_sector_ids_for_rule(&rule, [eight], eight, [false], [], [])
+                    .unwrap();
+            FusionTreePairKey::pair(codomain, domain)
+        };
+        let mut vertices = vec![pair(1), pair(2)];
+        vertices.sort();
+        let destination_structure = scalar_structure(&vertices);
+        let source_structure = scalar_structure(&vertices[1..]);
+        let mut destination = vec![100.0, 101.0];
+        absorb_mapped(
+            &destination_structure,
+            &mut destination,
+            &source_structure,
+            &[20.0],
+            Ok,
+        )
+        .unwrap();
+        assert_eq!(destination, [100.0, 20.0]);
+    }
+
+    #[test]
+    fn absorb_duality_precedes_layout_and_layout_precedes_conversion() {
+        // What: malformed materialized storage is reported before a nonreal
+        // overlapping C64 value can reach scalar conversion.
+        let runtime = Runtime::builder().build().unwrap();
+        let space = Space::u1([(0, 1)]);
+        let mut destination = Tensor::zeros(&runtime, Dtype::F64, [&space], [&space]).unwrap();
+        let dual = space.dual();
+        let dual_source = Tensor::zeros(&runtime, Dtype::F64, [&dual], [&dual]).unwrap();
+        let source = Tensor::from_block_fn(&runtime, [&space], [&space], |_, _| {
+            Complex64::new(1.0, 2.0)
+        })
+        .unwrap();
+        let body = destination.owned_body_mut().unwrap();
+        let Data::F64(data) = Arc::make_mut(&mut body.data) else {
+            unreachable!()
+        };
+        data.clear();
+
+        // What: duality validation wins when the materialized block layout is
+        // also malformed.
+        assert!(matches!(
+            destination.absorb(&dual_source),
+            Err(Error::InvalidArgument(message)) if message.contains("duality")
+        ));
+        assert!(matches!(
+            destination.absorb(&source),
+            Err(Error::InvalidArgument(message)) if message.contains("block layout")
+        ));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_absorb_prefix<D, S>(
+    destination: &mut [D],
+    destination_shape: &[usize],
+    destination_strides: &[usize],
+    destination_offset: usize,
+    source: &[S],
+    source_shape: &[usize],
+    source_strides: &[usize],
+    source_offset: usize,
+    map: &mut impl FnMut(S) -> Result<D, Error>,
+) -> Result<(), Error>
+where
+    S: Copy,
+{
+    if destination_shape.len() != source_shape.len()
+        || destination_shape.len() != destination_strides.len()
+        || source_shape.len() != source_strides.len()
+    {
+        return Err(internal_layout_error("absorb block ranks differ"));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn walk<D, S>(
+        remaining_axes: usize,
+        destination: &mut [D],
+        destination_shape: &[usize],
+        destination_strides: &[usize],
+        destination_offset: usize,
+        source: &[S],
+        source_shape: &[usize],
+        source_strides: &[usize],
+        source_offset: usize,
+        map: &mut impl FnMut(S) -> Result<D, Error>,
+    ) -> Result<(), Error>
+    where
+        S: Copy,
+    {
+        if remaining_axes == 0 {
+            let value = source
+                .get(source_offset)
+                .copied()
+                .ok_or_else(|| internal_layout_error("absorb source offset out of bounds"))?;
+            let value = map(value)?;
+            *destination.get_mut(destination_offset).ok_or_else(|| {
+                internal_layout_error("absorb destination offset out of bounds")
+            })? = value;
+            return Ok(());
+        }
+
+        let axis = remaining_axes - 1;
+        let extent = destination_shape[axis].min(source_shape[axis]);
+        if remaining_axes == 1 {
+            if destination_strides[axis] == 1 && source_strides[axis] == 1 {
+                let destination_end = destination_offset
+                    .checked_add(extent)
+                    .ok_or_else(|| internal_layout_error("absorb destination offset overflow"))?;
+                let source_end = source_offset
+                    .checked_add(extent)
+                    .ok_or_else(|| internal_layout_error("absorb source offset overflow"))?;
+                let destination = destination
+                    .get_mut(destination_offset..destination_end)
+                    .ok_or_else(|| {
+                        internal_layout_error("absorb destination offset out of bounds")
+                    })?;
+                let source = source
+                    .get(source_offset..source_end)
+                    .ok_or_else(|| internal_layout_error("absorb source offset out of bounds"))?;
+                for (destination, &source) in destination.iter_mut().zip(source) {
+                    *destination = map(source)?;
+                }
+                return Ok(());
+            }
+            for coordinate in 0..extent {
+                let destination_index = coordinate
+                    .checked_mul(destination_strides[axis])
+                    .and_then(|offset| destination_offset.checked_add(offset))
+                    .ok_or_else(|| internal_layout_error("absorb destination offset overflow"))?;
+                let source_index = coordinate
+                    .checked_mul(source_strides[axis])
+                    .and_then(|offset| source_offset.checked_add(offset))
+                    .ok_or_else(|| internal_layout_error("absorb source offset overflow"))?;
+                let value = source
+                    .get(source_index)
+                    .copied()
+                    .ok_or_else(|| internal_layout_error("absorb source offset out of bounds"))?;
+                *destination.get_mut(destination_index).ok_or_else(|| {
+                    internal_layout_error("absorb destination offset out of bounds")
+                })? = map(value)?;
+            }
+            return Ok(());
+        }
+        for coordinate in 0..extent {
+            let destination_offset = coordinate
+                .checked_mul(destination_strides[axis])
+                .and_then(|offset| destination_offset.checked_add(offset))
+                .ok_or_else(|| internal_layout_error("absorb destination offset overflow"))?;
+            let source_offset = coordinate
+                .checked_mul(source_strides[axis])
+                .and_then(|offset| source_offset.checked_add(offset))
+                .ok_or_else(|| internal_layout_error("absorb source offset overflow"))?;
+            walk(
+                axis,
+                destination,
+                destination_shape,
+                destination_strides,
+                destination_offset,
+                source,
+                source_shape,
+                source_strides,
+                source_offset,
+                map,
+            )?;
+        }
+        Ok(())
+    }
+
+    walk(
+        destination_shape.len(),
+        destination,
+        destination_shape,
+        destination_strides,
+        destination_offset,
+        source,
+        source_shape,
+        source_strides,
+        source_offset,
+        map,
+    )
+}
+
 fn copy_cat_mapped<D, S>(
     destination: &mut [D],
     source: &[S],
@@ -2911,6 +3345,83 @@ impl Tensor {
         F: FnMut(&BlockKey, &[usize]) -> S,
     {
         Self::build(rt, codomain, domain, Fill::BlockFn(&mut fill))
+    }
+
+    /// TensorKit-compatible immutable `absorb`: copies the common per-axis
+    /// prefix of every exact shared fusion-tree block from `source` into a
+    /// deep copy of `self`.
+    ///
+    /// The result keeps `self`'s HomSpace and dtype. Coordinates outside the
+    /// common prefix are unchanged. Real source values widen exactly into a
+    /// complex destination; complex values require a zero imaginary part when
+    /// copied into a real destination.
+    pub fn absorb(&self, source: &Self) -> Result<Self, Error> {
+        let destination_metadata = self.metadata();
+        let source_metadata = source.metadata();
+        if destination_metadata.nout() != source_metadata.nout()
+            || destination_metadata.nin() != source_metadata.nin()
+        {
+            return Err(Error::InvalidArgument(format!(
+                "Tensor::absorb requires equal codomain/domain ranks, got {}|{} and {}|{}",
+                destination_metadata.nout(),
+                destination_metadata.nin(),
+                source_metadata.nout(),
+                source_metadata.nin()
+            )));
+        }
+        if self.rule_authority_space().identity() != source.rule_authority_space().identity() {
+            return Err(Error::RuleMismatch);
+        }
+        if !self.rt.same_runtime(&source.rt) {
+            return Err(Error::RuntimeMismatch);
+        }
+        if self.placement() != source.placement() {
+            return Err(Error::PlacementMismatch);
+        }
+        if self.placement() != Placement::Host {
+            return Err(Error::UnsupportedOnDevice(
+                "Tensor::absorb has no device implementation yet; move both tensors to the host \
+                 explicitly with to_host()"
+                    .to_string(),
+            ));
+        }
+        for (destination, source) in destination_metadata
+            .codomain()
+            .legs()
+            .iter()
+            .chain(destination_metadata.domain().legs())
+            .zip(
+                source_metadata
+                    .codomain()
+                    .legs()
+                    .iter()
+                    .chain(source_metadata.domain().legs()),
+            )
+        {
+            if destination.is_dual() != source.is_dual() {
+                return Err(Error::InvalidArgument(
+                    "Tensor::absorb requires corresponding legs to have equal duality".to_string(),
+                ));
+            }
+        }
+
+        let destination_body = self.materialized_body()?;
+        let source_body = source.materialized_body()?;
+        let destination_data = self.coupled_data()?;
+        let source_data = source.coupled_data()?;
+        validate_absorb_layout(destination_body.space.structure(), destination_data)?;
+        validate_absorb_layout(source_body.space.structure(), source_data)?;
+        let data = execute_absorb_data(
+            destination_body.space.structure(),
+            destination_data,
+            source_body.space.structure(),
+            source_data,
+        )?;
+        Ok(Self::owned(
+            self.rt.clone(),
+            Arc::clone(&destination_body.space),
+            Arc::new(data),
+        ))
     }
 
     /// TensorKit `catdomain(t1, t2)`: concatenate two `Nout | 1` tensor maps
