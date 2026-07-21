@@ -569,6 +569,35 @@ impl Space {
         Arc::ptr_eq(&self.context, &other.context) || self.context == other.context
     }
 
+    /// Unit object for this space's fusion rule: exactly one vacuum sector
+    /// with degeneracy 1 and non-dual orientation.
+    pub fn unitspace(&self) -> Result<Space, Error> {
+        if self.rule_kind() == RuleKind::Su3 {
+            return Err(Error::UnsupportedForRule {
+                operation: "Space::unitspace",
+                rule: "SU(3)",
+            });
+        }
+        let vacuum = with_rule!(self.context.as_ref(), rule, rule.vacuum());
+        Ok(Self {
+            context: Arc::clone(&self.context),
+            sectors: vec![(vacuum, 1)],
+            dual: false,
+        })
+    }
+
+    /// Whether this space is exactly the unit object for its fusion rule.
+    ///
+    /// The dual flag is ignored, matching TensorKit's unit-space predicate on
+    /// sector content.
+    pub fn isunitspace(&self) -> bool {
+        if self.rule_kind() == RuleKind::Su3 {
+            return false;
+        }
+        let vacuum = with_rule!(self.context.as_ref(), rule, rule.vacuum());
+        self.sectors.len() == 1 && self.sectors[0] == (vacuum, 1)
+    }
+
     /// Decodes an internal sector id into the user-facing label for this
     /// space's rule. Inverse of the encoding done by the constructors.
     fn decode_sector(&self, sector: SectorId) -> SectorLabel {
@@ -965,6 +994,81 @@ mod tk_space_api_tests {
         assert!(!v.has_sector(SectorLabel::U1(5)));
         // A label from a different rule never matches.
         assert!(!v.has_sector(SectorLabel::Z2(0)));
+    }
+
+    #[test]
+    fn unitspace_builds_vacuum_space_for_builtin_rules() {
+        // What: unitspace keeps the source rule authority and uses that rule's vacuum.
+        let u1 = Space::u1([(3, 2)]);
+        let z2 = Space::z2([(1, 2)]);
+        let fz2 = Space::fz2([(1, 2)]).unwrap();
+        let su2 = Space::su2([(2, 2)]).unwrap();
+        let product = Space::product([((2, 1), 2)]).unwrap();
+        let triple = Space::fz2_u1_su2([((1, 2, 2), 2)]).unwrap();
+
+        let u1_unit = u1.unitspace().unwrap();
+        assert!(Arc::ptr_eq(&u1.context, &u1_unit.context));
+        assert_eq!(u1_unit.sectors(), vec![(SectorLabel::U1(0), 1)]);
+        assert!(!u1_unit.is_dual());
+        assert!(u1_unit.isunitspace());
+
+        assert_eq!(
+            z2.unitspace().unwrap().sectors(),
+            vec![(SectorLabel::Z2(0), 1)]
+        );
+        assert_eq!(
+            fz2.unitspace().unwrap().sectors(),
+            vec![(SectorLabel::FZ2(0), 1)]
+        );
+        assert_eq!(
+            su2.unitspace().unwrap().sectors(),
+            vec![(SectorLabel::SU2 { twice_spin: 0 }, 1)]
+        );
+        assert_eq!(
+            product.unitspace().unwrap().sectors(),
+            vec![(
+                SectorLabel::U1FZ2 {
+                    charge: 0,
+                    parity: 0
+                },
+                1
+            )]
+        );
+        assert_eq!(
+            triple.unitspace().unwrap().sectors(),
+            vec![(
+                SectorLabel::FZ2U1SU2 {
+                    parity: 0,
+                    charge: 0,
+                    twice_spin: 0
+                },
+                1
+            )]
+        );
+    }
+
+    #[test]
+    fn isunitspace_accepts_dual_unit_but_rejects_other_content() {
+        // What: isunitspace is a sector-content predicate; duality is ignored.
+        assert!(Space::u1([(0, 1)]).dual().isunitspace());
+        assert!(!Space::u1([(1, 1)]).isunitspace());
+        assert!(!Space::u1([(0, 2)]).isunitspace());
+        assert!(!Space::u1([(0, 1), (1, 1)]).isunitspace());
+    }
+
+    #[test]
+    fn unitspace_reports_su3_unsupported_and_su3_is_never_unitspace() {
+        // What: SU(3) has no user-layer unitspace helper until generic support is wired.
+        let su3_unit_content = Space::su3([((0, 0), 1)]).unwrap();
+
+        assert!(matches!(
+            su3_unit_content.unitspace(),
+            Err(Error::UnsupportedForRule {
+                operation: "Space::unitspace",
+                rule: "SU(3)"
+            })
+        ));
+        assert!(!su3_unit_content.isunitspace());
     }
 
     #[test]
