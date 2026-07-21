@@ -527,8 +527,8 @@ pub(crate) fn scratch_publication_observations() -> (usize, usize, usize, usize)
 ///
 /// Why-not (`type_name::<R>()`): the trait permits two instances of one Rust
 /// type to carry different fusion tables. [`RuleIdentity`] is the semantic
-/// provenance boundary already used by the sibling transformed/contracted
-/// caches, and prevents those instances from sharing a layout.
+/// provenance boundary used by tree-transform and coupled-layout identities,
+/// and prevents those instances from sharing a layout.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 struct LayoutId {
     rule: RuleIdentity,

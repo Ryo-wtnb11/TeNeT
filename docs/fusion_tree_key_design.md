@@ -1618,7 +1618,7 @@ block structure parity
 cold time no regression
 warm time no regression
 allocation count decreases
-persistent cache replay correctness
+explicit cache/context replay correctness
 parallel compile reproducibility
 ```
 
@@ -1627,7 +1627,7 @@ parallel compile reproducibility
 ```text
 same input repeated 100 times -> identical row order
 same input with recoupling_threads=1 and >1 -> identical plan output
-same cache loaded from disk -> identical plan output
+same explicit cache/context replay -> identical plan output
 ```
 
 floating-point bit 一致を目標にするなら、特に
