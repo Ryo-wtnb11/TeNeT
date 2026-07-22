@@ -4889,71 +4889,13 @@ impl Tensor {
         // SU(N) (Generic) is bosonic and cannot ride the mult-free `with_rule!`
         // binding; short-circuit the twist probe (the diagonal fast path below
         // never fires for it — SU(N) has no `Data::Diagonal` factors yet).
-        let fermionic = self.rule_kind() != RuleKind::Su3
-            && with_user_rule!(self.rule_authority_space(), rule, {
-                rule.braiding_style() == tenet_core::BraidingStyleKind::Fermionic
-            });
-        if lhs_axes.len() == 1 && rhs_axes.len() == 1 {
-            let twist_rhs_leg = fermionic && rhs.external_axis_is_dual(rhs_axes[0])?;
-            let diagonal_dst = if self.diagonal_data().is_some() || rhs.diagonal_data().is_some() {
-                Some(self.contraction_output_space(rhs, lhs_axes, rhs_axes)?)
-            } else {
-                None
-            };
-            // Why not scale a noncanonical diagonal axis: crossing the
-            // codomain/domain partition can dualize its sector label, while
-            // block-local scaling indexes the compact spectrum by raw labels.
-            // Keep those routes dense until scaling carries an explicit relabel.
-            match (self.diagonal_data(), rhs.diagonal_data()) {
-                (Some(lhs), Some(rhs_diagonal))
-                    if self.rule_kind() != RuleKind::Su3 && lhs_axes == [1] && rhs_axes == [0] =>
-                {
-                    let folded_rhs = self.twist_folded_diagonal(rhs_diagonal, twist_rhs_leg);
-                    let dst_space = diagonal_dst
-                        .expect("diagonal destination prepared when both operands are diagonal");
-                    if Self::is_diagonal_bond_space(dst_space.raw()) {
-                        if let Some(product) = lhs.elementwise_product(&folded_rhs) {
-                            return self.with_bound(dst_space, Data::Diagonal(product));
-                        }
-                    }
-                }
-                // A * D: scale A's contracted leg by the (twist-folded) spectrum,
-                // then repartition to the output arrangement (A's open axes ->
-                // codomain, the scaled leg -> domain).
-                (None, Some(diagonal))
-                    if lhs_axes[0] >= self.codomain_rank() && rhs_axes[0] == 0 =>
-                {
-                    let leg = lhs_axes[0];
-                    let folded = self.twist_folded_diagonal(diagonal, twist_rhs_leg);
-                    let scaled = self.scaled_axis_copy_diagonal(Some(leg), &folded)?;
-                    let codomain: Vec<usize> = (0..self.rank()).filter(|&a| a != leg).collect();
-                    let output = scaled.permute(&codomain, &[leg])?;
-                    debug_assert_eq!(
-                        Some(output.ordinary_body().space.raw()),
-                        diagonal_dst.as_ref().map(UserBoundSpace::raw)
-                    );
-                    return Ok(output);
-                }
-                // D * A: pre-twist A's dual contracted leg, scale it, then
-                // repartition (the scaled leg -> codomain 0, A's open -> domain).
-                (Some(diagonal), None) if lhs_axes[0] == 1 && rhs_axes[0] < rhs.codomain_rank() => {
-                    let leg = rhs_axes[0];
-                    let pretwisted = if twist_rhs_leg {
-                        rhs.twist(&[leg])?
-                    } else {
-                        rhs.clone()
-                    };
-                    let scaled = pretwisted.scaled_axis_copy_diagonal(Some(leg), diagonal)?;
-                    let domain: Vec<usize> = (0..rhs.rank()).filter(|&a| a != leg).collect();
-                    let output = scaled.permute(&[leg], &domain)?;
-                    debug_assert_eq!(
-                        Some(output.ordinary_body().space.raw()),
-                        diagonal_dst.as_ref().map(UserBoundSpace::raw)
-                    );
-                    return Ok(output);
-                }
-                _ => {}
-            }
+        if let Some(output) = self.try_contract_diagonal_fast_path(
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            OutputAxisOrder::identity(),
+        )? {
+            return Ok(output);
         }
         // Why not generalize compact storage to every diagonal contraction: a
         // zero-axis outer product is rank 4 and a two-axis contraction is scalar,
@@ -5467,6 +5409,21 @@ impl Tensor {
             && self.placement() == Placement::Host
             && !matches!(self.stored_data(), Data::Diagonal(_))
             && !matches!(rhs.stored_data(), Data::Diagonal(_));
+        if !host_mult_free_dense
+            && (matches!(self.stored_data(), Data::Diagonal(_))
+                || matches!(rhs.stored_data(), Data::Diagonal(_)))
+            && output_axes.len() == open_rank
+            && validate_axis_permutation(output_axes, open_rank).is_ok()
+        {
+            if let Some(output) = self.try_contract_diagonal_fast_path(
+                rhs,
+                lhs_axes,
+                rhs_axes,
+                OutputAxisOrder::from_axes(output_axes),
+            )? {
+                return Ok(output);
+            }
+        }
         if !host_mult_free_dense {
             // Why not force generic fusion, compact diagonal, or device storage
             // through the multiplicity-free host plan: those routes have distinct
@@ -6808,6 +6765,119 @@ impl Tensor {
     ) -> Result<UserBoundSpace, Error> {
         self.logical_space()?
             .contracted(rhs.logical_space()?, lhs_axes, rhs_axes)
+    }
+
+    fn contraction_output_space_ordered(
+        &self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_order: OutputAxisOrder<'_>,
+    ) -> Result<UserBoundSpace, Error> {
+        match output_order {
+            OutputAxisOrder::Identity => self.contraction_output_space(rhs, lhs_axes, rhs_axes),
+            OutputAxisOrder::Axes(_) => self.logical_space()?.contracted_with_output_order(
+                rhs.logical_space()?,
+                lhs_axes,
+                rhs_axes,
+                output_order,
+            ),
+        }
+    }
+
+    fn output_source_axes_for_order(
+        default_source_axes: &[usize],
+        output_order: OutputAxisOrder<'_>,
+    ) -> Result<Vec<usize>, Error> {
+        match output_order {
+            OutputAxisOrder::Identity => Ok(default_source_axes.to_vec()),
+            OutputAxisOrder::Axes(output_axes) => {
+                validate_axis_permutation(output_axes, default_source_axes.len())?;
+                Ok(output_axes
+                    .iter()
+                    .map(|&axis| default_source_axes[axis])
+                    .collect())
+            }
+        }
+    }
+
+    fn try_contract_diagonal_fast_path(
+        &self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_order: OutputAxisOrder<'_>,
+    ) -> Result<Option<Self>, Error> {
+        if self.rule_kind() == RuleKind::Su3
+            || lhs_axes.len() != 1
+            || rhs_axes.len() != 1
+            || (self.diagonal_data().is_none() && rhs.diagonal_data().is_none())
+        {
+            return Ok(None);
+        }
+
+        let fermionic = with_user_rule!(self.rule_authority_space(), rule, {
+            rule.braiding_style() == tenet_core::BraidingStyleKind::Fermionic
+        });
+        let twist_rhs_leg = fermionic && rhs.external_axis_is_dual(rhs_axes[0])?;
+        let dst_space =
+            self.contraction_output_space_ordered(rhs, lhs_axes, rhs_axes, output_order)?;
+
+        match (self.diagonal_data(), rhs.diagonal_data()) {
+            (Some(lhs), Some(rhs_diagonal)) if lhs_axes == [1] && rhs_axes == [0] => {
+                let identity_order = match output_order {
+                    OutputAxisOrder::Identity => true,
+                    OutputAxisOrder::Axes(output_axes) => output_axes.iter().copied().eq(0..2),
+                };
+                if !identity_order {
+                    // Why not bind the product spectrum to a reordered output:
+                    // pAB can move the surviving diagonal leg across the
+                    // codomain/domain split, and #453 oracle checks showed
+                    // raw-label rebinding is not equivalent to permute.
+                    return Ok(None);
+                }
+                let folded_rhs = self.twist_folded_diagonal(rhs_diagonal, twist_rhs_leg);
+                if Self::is_diagonal_bond_space(dst_space.raw()) {
+                    if let Some(product) = lhs.elementwise_product(&folded_rhs) {
+                        return Ok(Some(self.with_bound(dst_space, Data::Diagonal(product))?));
+                    }
+                }
+            }
+            (None, Some(diagonal)) if lhs_axes[0] >= self.codomain_rank() && rhs_axes[0] == 0 => {
+                let leg = lhs_axes[0];
+                let folded = self.twist_folded_diagonal(diagonal, twist_rhs_leg);
+                let scaled = self.scaled_axis_copy_diagonal(Some(leg), &folded)?;
+                let mut default_source_axes: Vec<usize> =
+                    (0..self.rank()).filter(|&axis| axis != leg).collect();
+                default_source_axes.push(leg);
+                let ordered_axes =
+                    Self::output_source_axes_for_order(&default_source_axes, output_order)?;
+                let split = dst_space.raw().nout();
+                let output = scaled.permute(&ordered_axes[..split], &ordered_axes[split..])?;
+                debug_assert_eq!(output.ordinary_body().space.raw(), dst_space.raw());
+                return Ok(Some(output));
+            }
+            (Some(diagonal), None) if lhs_axes[0] == 1 && rhs_axes[0] < rhs.codomain_rank() => {
+                let leg = rhs_axes[0];
+                let pretwisted = if twist_rhs_leg {
+                    rhs.twist(&[leg])?
+                } else {
+                    rhs.clone()
+                };
+                let scaled = pretwisted.scaled_axis_copy_diagonal(Some(leg), diagonal)?;
+                let mut default_source_axes = Vec::with_capacity(rhs.rank());
+                default_source_axes.push(leg);
+                default_source_axes.extend((0..rhs.rank()).filter(|&axis| axis != leg));
+                let ordered_axes =
+                    Self::output_source_axes_for_order(&default_source_axes, output_order)?;
+                let split = dst_space.raw().nout();
+                let output = scaled.permute(&ordered_axes[..split], &ordered_axes[split..])?;
+                debug_assert_eq!(output.ordinary_body().space.raw(), dst_space.raw());
+                return Ok(Some(output));
+            }
+            _ => {}
+        }
+        Ok(None)
     }
 
     fn external_axis_is_dual(&self, axis: usize) -> Result<bool, Error> {
@@ -12918,6 +12988,83 @@ mod ordered_contract_route_tests {
         let observed = ORDERED_CONTRACT_FUSED_ROUTE.with(|observation| observation.replace(None));
 
         assert_eq!(observed, Some(false));
+    }
+
+    #[test]
+    fn u1_dense_diagonal_ordered_contract_matches_sequential_oracle() {
+        // What: pAB is folded into the single output transform after compact
+        // diagonal scaling.
+        let runtime = Runtime::builder().build().unwrap();
+        let space = Space::u1([(0, 2), (1, 2)]);
+        let dense =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 224_506).unwrap();
+        let diagonal = dense.svd_compact().unwrap().1;
+
+        let actual = dense
+            .contract_ordered(&diagonal, &[1], &[0], &[1, 0])
+            .unwrap();
+        let expected = dense
+            .contract(&diagonal, &[1], &[0])
+            .unwrap()
+            .permute(&[1], &[0])
+            .unwrap();
+
+        assert_eq!(actual.data().len(), expected.data().len());
+        for (&actual, &expected) in actual.data().iter().zip(expected.data()) {
+            assert!((actual - expected).abs() < 1.0e-11);
+        }
+
+        let actual = diagonal
+            .contract_ordered(&dense, &[1], &[0], &[1, 0])
+            .unwrap();
+        let expected = diagonal
+            .contract(&dense, &[1], &[0])
+            .unwrap()
+            .permute(&[1], &[0])
+            .unwrap();
+
+        assert_eq!(actual.data().len(), expected.data().len());
+        for (&actual, &expected) in actual.data().iter().zip(expected.data()) {
+            assert!((actual - expected).abs() < 1.0e-11);
+        }
+    }
+
+    #[test]
+    fn fz2_dense_diagonal_ordered_contract_matches_sequential_oracle() {
+        // What: folded pAB preserves the existing fermionic contract signs.
+        let runtime = Runtime::builder().build().unwrap();
+        let space = Space::fz2([(0, 2), (1, 2)]).unwrap();
+        let dense =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 224_507).unwrap();
+        let diagonal = dense.svd_compact().unwrap().1;
+
+        let actual = dense
+            .contract_ordered(&diagonal, &[1], &[0], &[1, 0])
+            .unwrap();
+        let expected = dense
+            .contract(&diagonal, &[1], &[0])
+            .unwrap()
+            .permute(&[1], &[0])
+            .unwrap();
+
+        assert_eq!(actual.data().len(), expected.data().len());
+        for (&actual, &expected) in actual.data().iter().zip(expected.data()) {
+            assert!((actual - expected).abs() < 1.0e-11);
+        }
+
+        let actual = diagonal
+            .contract_ordered(&dense, &[1], &[0], &[1, 0])
+            .unwrap();
+        let expected = diagonal
+            .contract(&dense, &[1], &[0])
+            .unwrap()
+            .permute(&[1], &[0])
+            .unwrap();
+
+        assert_eq!(actual.data().len(), expected.data().len());
+        for (&actual, &expected) in actual.data().iter().zip(expected.data()) {
+            assert!((actual - expected).abs() < 1.0e-11);
+        }
     }
 
     #[test]
