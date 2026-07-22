@@ -11,15 +11,14 @@ use tenet_core::{FusionTreeHomSpace, MultiplicityFreeRigidSymbols};
 use super::structure::TensorContractStructure;
 use crate::OperationError;
 use tenet_operations::axis::TensorContractSpec;
-use tenet_operations::fusion_replay::{FusionBlockContractPlan, MatrixOp};
+use tenet_operations::fusion_replay::FusionBlockContractPlan;
 
 use super::dynamic_space::DynamicFusionMapSpace;
 use super::fusion::{external_axis_is_dual, FusionContractPlan};
 use super::fusion_block::{
-    compile_fusion_block_contract_plan_prelowered, compile_fusion_block_contract_plan_validated,
-    is_core_form_fusion_block_contract, validate_fusion_contract_rule,
+    compile_fusion_block_contract_plan_prelowered_validated,
+    compile_fusion_block_contract_plan_validated, CoreContractPreflight, ValidatedCoreContract,
 };
-use super::structure::TensorContractAxisPlan;
 
 /// Resolved execution artifact for one contraction key: the route decision
 /// and its compiled plan are one value, never cached separately.
@@ -49,14 +48,13 @@ pub(crate) fn compile_resolution<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    validate_fusion_contract_rule(rule, dst, lhs, rhs)?;
-    TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), dst.rank(), axes)?;
-    if !axes.lhs_conjugate() && !axes.rhs_conjugate() {
-        if is_core_form_fusion_block_contract(rule, dst, lhs, rhs, axes)?
-            && !rhs_contract_requires_twist(rule, rhs, axes)?
-        {
-            let plan = compile_fusion_block_contract_plan_validated(rule, dst, lhs, rhs, axes)?;
-            return Ok(Resolution::Core(Arc::new(plan)));
+    let preflight = CoreContractPreflight::compile(rule, dst, lhs, rhs, axes)?;
+    if !preflight.has_conjugation() {
+        if let Some(validated) = preflight.validate_core_geometry()? {
+            if !rhs_contract_requires_twist(&validated)? {
+                let plan = compile_fusion_block_contract_plan_validated(validated)?;
+                return Ok(Resolution::Core(Arc::new(plan)));
+            }
         }
         return Ok(Resolution::DynamicTree(compile_dynamic()?));
     }
@@ -86,36 +84,19 @@ where
 {
     lhs_storage.validate_rule(rule)?;
     rhs_storage.validate_rule(rule)?;
-    validate_fusion_contract_rule(rule, dst, lhs_logical, rhs_logical)?;
-    TensorContractAxisPlan::compile(lhs_logical.rank(), rhs_logical.rank(), dst.rank(), axes)?;
-    let logical_axes = TensorContractSpec::new(
-        axes.lhs_contracting_axes(),
-        axes.rhs_contracting_axes(),
-        axes.output_permutation(),
-    );
-    if is_core_form_fusion_block_contract(rule, dst, lhs_logical, rhs_logical, logical_axes)?
-        && !rhs_contract_requires_twist(rule, rhs_logical, logical_axes)?
-    {
-        let plan = compile_fusion_block_contract_plan_prelowered(
-            rule,
-            dst,
-            lhs_logical,
-            lhs_storage,
-            rhs_logical,
-            rhs_storage,
-            logical_axes,
-            if axes.lhs_conjugate() {
-                MatrixOp::Adjoint
-            } else {
-                MatrixOp::Identity
-            },
-            if axes.rhs_conjugate() {
-                MatrixOp::Adjoint
-            } else {
-                MatrixOp::Identity
-            },
-        )?;
-        return Ok(Resolution::Core(Arc::new(plan)));
+    let preflight = CoreContractPreflight::compile(rule, dst, lhs_logical, rhs_logical, axes)?;
+    if let Some(validated) = preflight.validate_core_geometry()? {
+        if !rhs_contract_requires_twist(&validated)? {
+            let (lhs_op, rhs_op) = validated.storage_ops();
+            let plan = compile_fusion_block_contract_plan_prelowered_validated(
+                validated,
+                lhs_storage,
+                rhs_storage,
+                lhs_op,
+                rhs_op,
+            )?;
+            return Ok(Resolution::Core(Arc::new(plan)));
+        }
     }
     if let Some(structure) = compile_structure()? {
         return Ok(Resolution::Structure(structure));
@@ -134,9 +115,10 @@ pub(crate) fn compile_core_plan<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    validate_fusion_contract_rule(rule, dst, lhs, rhs)?;
-    TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), dst.rank(), axes)?;
-    compile_fusion_block_contract_plan_validated(rule, dst, lhs, rhs, axes).map(Arc::new)
+    let preflight = CoreContractPreflight::compile(rule, dst, lhs, rhs, axes)?;
+    super::fusion::reject_fusion_contract_conjugation(axes)?;
+    let validated = preflight.require_core_geometry()?;
+    compile_fusion_block_contract_plan_validated(validated).map(Arc::new)
 }
 
 /// Compiles TensorKit `mul!` composition without inserting a fermionic
@@ -156,31 +138,15 @@ where
 {
     lhs_storage.validate_rule(rule)?;
     rhs_storage.validate_rule(rule)?;
-    validate_fusion_contract_rule(rule, dst, lhs_logical, rhs_logical)?;
-    TensorContractAxisPlan::compile(lhs_logical.rank(), rhs_logical.rank(), dst.rank(), axes)?;
-    let logical_axes = TensorContractSpec::new(
-        axes.lhs_contracting_axes(),
-        axes.rhs_contracting_axes(),
-        axes.output_permutation(),
-    );
-    compile_fusion_block_contract_plan_prelowered(
-        rule,
-        dst,
-        lhs_logical,
+    let validated = CoreContractPreflight::compile(rule, dst, lhs_logical, rhs_logical, axes)?
+        .require_core_geometry()?;
+    let (lhs_op, rhs_op) = validated.storage_ops();
+    compile_fusion_block_contract_plan_prelowered_validated(
+        validated,
         lhs_storage,
-        rhs_logical,
         rhs_storage,
-        logical_axes,
-        if axes.lhs_conjugate() {
-            MatrixOp::Adjoint
-        } else {
-            MatrixOp::Identity
-        },
-        if axes.rhs_conjugate() {
-            MatrixOp::Adjoint
-        } else {
-            MatrixOp::Identity
-        },
+        lhs_op,
+        rhs_op,
     )
     .map(Arc::new)
 }
@@ -190,20 +156,22 @@ where
 /// rhs materialization; the core direct-GEMM route stays
 /// coefficient-free (TensorKit mul! parity).
 pub(crate) fn rhs_contract_requires_twist<R>(
-    rule: &R,
-    rhs: &DynamicFusionMapSpace,
-    axes: TensorContractSpec<'_>,
+    validated: &ValidatedCoreContract<'_, R>,
 ) -> Result<bool, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    rhs_contract_homspace_requires_twist(rule, rhs.homspace(), axes)
+    rhs_contract_homspace_requires_twist(
+        validated.rule(),
+        validated.rhs().homspace(),
+        validated.axis_plan().rhs_contracting_axes.as_slice(),
+    )
 }
 
 pub(crate) fn rhs_contract_homspace_requires_twist<R>(
     rule: &R,
     rhs: &FusionTreeHomSpace,
-    axes: TensorContractSpec<'_>,
+    rhs_contracting_axes: &[usize],
 ) -> Result<bool, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -211,7 +179,7 @@ where
     if rule.braiding_style() != tenet_core::BraidingStyleKind::Fermionic {
         return Ok(false);
     }
-    for &axis in axes.rhs_contracting_axes() {
+    for &axis in rhs_contracting_axes {
         if external_axis_is_dual(rhs, axis)? {
             return Ok(true);
         }
@@ -261,7 +229,12 @@ mod tests {
             // What: codomain uses its stored dual flag, while domain external
             // duality is the inverse of its stored flag.
             assert_eq!(
-                rhs_contract_requires_twist(&fermion, &rhs, axes).unwrap(),
+                rhs_contract_homspace_requires_twist(
+                    &fermion,
+                    rhs.homspace(),
+                    axes.rhs_contracting_axes(),
+                )
+                .unwrap(),
                 expected
             );
         }
@@ -274,11 +247,40 @@ mod tests {
         let rhs = single_sector_matrix_space(&product, odd_product, true, false);
         // What: a bosonic U(1) x SU(2) component does not erase the odd fZ2
         // twist on an externally dual product-sector axis.
-        assert!(rhs_contract_requires_twist(
+        assert!(rhs_contract_homspace_requires_twist(
             &product,
-            &rhs,
-            TensorContractSpec::with_default_output_order(&[0], &[0]),
+            rhs.homspace(),
+            TensorContractSpec::with_default_output_order(&[0], &[0]).rhs_contracting_axes(),
         )
         .unwrap());
+    }
+
+    #[test]
+    fn core_resolution_derives_axis_plan_and_expected_homspace_once() {
+        let rule = U1FusionRule;
+        let zero = U1Irrep::new(0).sector_id();
+        let lhs = single_sector_matrix_space(&rule, zero, false, false);
+        let rhs = single_sector_matrix_space(&rule, zero, false, false);
+        let dst = single_sector_matrix_space(&rule, zero, false, false);
+        super::super::fusion_block::reset_core_contract_derivations();
+
+        let resolution = compile_resolution(
+            &rule,
+            &dst,
+            &lhs,
+            &rhs,
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
+            || panic!("core contraction must not compile a dense structure"),
+            || panic!("core contraction must not compile tree transforms"),
+        )
+        .unwrap();
+
+        // What: one core execution compile derives each structural authority
+        // exactly once before block-layout compilation.
+        assert!(matches!(resolution, Resolution::Core(_)));
+        assert_eq!(
+            super::super::fusion_block::core_contract_derivations(),
+            (1, 1)
+        );
     }
 }

@@ -6,7 +6,7 @@ use tenet_core::{
 
 use crate::lowering::lower_tensorcontract_adjoint_axes;
 use crate::{OperationError, TreeTransformOperation};
-use tenet_operations::{OutputAxisOrder, TensorContractSpec, TensorContractSpecOwned};
+use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
 
 use super::super::dynamic_space::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, LayoutKeyBuilder, TransformedLayoutProbe,
@@ -1188,7 +1188,7 @@ where
     super::super::resolution::rhs_contract_homspace_requires_twist(
         rule,
         source.homspace(),
-        TensorContractSpec::new(&[], contracting_axes, OutputAxisOrder::identity()),
+        contracting_axes,
     )
 }
 
@@ -1360,7 +1360,7 @@ where
     let core_right_requires_twist = super::super::resolution::rhs_contract_homspace_requires_twist(
         rule,
         &core_right.homspace,
-        plan.core_axes().as_spec(),
+        plan.core_axes().rhs_contracting_axes(),
     )?;
     let facts = fusion_contract_candidate_facts(
         axis_order,

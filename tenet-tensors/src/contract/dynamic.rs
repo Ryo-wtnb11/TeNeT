@@ -35,7 +35,7 @@ use super::fusion::{FusionContractOrientation, FusionContractPlan};
 use super::fusion_block::{
     tensorcontract_core_fusion_blocks_into_raw, FusionBlockContractWorkspace,
 };
-use super::resolution::rhs_contract_requires_twist;
+use super::resolution::rhs_contract_homspace_requires_twist;
 use super::scratch::{
     DynamicFusionScratch, DynamicFusionScratchWorkspace, StorageDynamicFusionScratch,
     StorageDynamicFusionScratchWorkspace,
@@ -229,7 +229,11 @@ where
     ) {
         return Ok(false);
     }
-    Ok(!rhs_contract_requires_twist(rule, core_space, core_axes)?)
+    Ok(!rhs_contract_homspace_requires_twist(
+        rule,
+        core_space.homspace(),
+        core_axes.rhs_contracting_axes(),
+    )?)
 }
 
 #[allow(clippy::too_many_arguments)]
