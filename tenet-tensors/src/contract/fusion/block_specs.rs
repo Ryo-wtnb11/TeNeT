@@ -487,6 +487,22 @@ where
 {
     let output_codomain_axes = &axis_plan.output_axes[..dst_codomain_rank];
     let output_domain_axes = &axis_plan.output_axes[dst_codomain_rank..];
+    let mut rhs_prepared = Vec::new();
+    for rhs_index in 0..rhs.structure().block_count() {
+        let rhs_block = rhs.structure().block(rhs_index)?;
+        let BlockKey::FusionTree(rhs_key) = rhs_block.key() else {
+            continue;
+        };
+        let rhs_terms = multiplicity_free_permute_tree_pair(
+            rule,
+            rhs_key,
+            axis_plan.rhs_contracting_axes.as_slice(),
+            axis_plan.rhs_open_axes.as_slice(),
+        )
+        .map_err(OperationError::from_core_preserving_context)?;
+        rhs_prepared.push((rhs_index, rhs_key.external_sectors(rule), rhs_terms));
+    }
+
     let mut specs = Vec::new();
     for lhs_index in 0..lhs.structure().block_count() {
         let lhs_block = lhs.structure().block(lhs_index)?;
@@ -500,21 +516,19 @@ where
             axis_plan.lhs_contracting_axes.as_slice(),
         )
         .map_err(OperationError::from_core_preserving_context)?;
-        for rhs_index in 0..rhs.structure().block_count() {
-            let rhs_block = rhs.structure().block(rhs_index)?;
-            let BlockKey::FusionTree(rhs_key) = rhs_block.key() else {
-                continue;
-            };
-            let rhs_terms = multiplicity_free_permute_tree_pair(
-                rule,
-                rhs_key,
+        let lhs_external = lhs_key.external_sectors(rule);
+        for (rhs_index, rhs_external, rhs_terms) in &rhs_prepared {
+            if !contracted_external_sectors_match(
+                &lhs_external,
+                rhs_external,
+                axis_plan.lhs_contracting_axes.as_slice(),
                 axis_plan.rhs_contracting_axes.as_slice(),
-                axis_plan.rhs_open_axes.as_slice(),
-            )
-            .map_err(OperationError::from_core_preserving_context)?;
+            ) {
+                continue;
+            }
 
             for (lhs_core, lhs_coeff) in &lhs_terms {
-                for (rhs_core, rhs_coeff) in &rhs_terms {
+                for (rhs_core, rhs_coeff) in rhs_terms {
                     if !contracted_fusion_tree_basis_matches(
                         rule,
                         lhs_core.domain_tree(),
@@ -549,7 +563,7 @@ where
                         specs.push(TensorContractBlockSpec::with_coefficient(
                             dst_index,
                             lhs_index,
-                            rhs_index,
+                            *rhs_index,
                             *lhs_coeff * *rhs_coeff * dst_coeff * rhs_twist,
                         ));
                     }
