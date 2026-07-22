@@ -5,7 +5,7 @@ use tenet_core::{
 };
 
 use crate::lowering::lower_tensorcontract_adjoint_axes;
-use crate::{OperationError, TreeTransformOperation};
+use crate::{OperationError, TreeTransformOperation, TreeTransformOperationKind};
 use tenet_operations::{OutputAxisOrder, TensorContractSpec, TensorContractSpecOwned};
 
 use super::super::dynamic_space::{
@@ -342,22 +342,19 @@ impl FusionContractPlan {
 
     pub(crate) fn output_transform_is_identity(&self) -> bool {
         let core_rank = self.core_dst_open_lhs_rank + self.core_dst_open_rhs_rank;
-        match &self.output_transform {
-            TreeTransformOperation::Permute {
-                codomain_permutation,
-                domain_permutation,
-            } => {
-                codomain_permutation
-                    .iter()
-                    .copied()
-                    .eq(0..self.core_dst_open_lhs_rank)
-                    && domain_permutation
-                        .iter()
-                        .copied()
-                        .eq(self.core_dst_open_lhs_rank..core_rank)
-            }
-            _ => false,
-        }
+        self.output_transform.kind() == TreeTransformOperationKind::Permute
+            && self
+                .output_transform
+                .codomain_permutation()
+                .iter()
+                .copied()
+                .eq(0..self.core_dst_open_lhs_rank)
+            && self
+                .output_transform
+                .domain_permutation()
+                .iter()
+                .copied()
+                .eq(self.core_dst_open_lhs_rank..core_rank)
     }
 
     #[inline]
@@ -717,35 +714,28 @@ fn orient_fusion_contract_plan(
                 axis - lhs_open_rank
             }
         };
-        let (output_axes, dst_nout) = match &plan.output_transform {
-            TreeTransformOperation::Permute {
-                codomain_permutation,
-                domain_permutation,
-            } => (
-                codomain_permutation
-                    .iter()
-                    .chain(domain_permutation)
-                    .copied()
-                    .map(semantic_to_core)
-                    .collect::<Vec<_>>(),
-                codomain_permutation.len(),
-            ),
-            _ => unreachable!("fusion contraction output lowering uses a permutation"),
-        };
-        let (lhs_open_axes, lhs_contracting_axes) = match &plan.lhs_transform {
-            TreeTransformOperation::Permute {
-                codomain_permutation,
-                domain_permutation,
-            } => (codomain_permutation.clone(), domain_permutation.clone()),
-            _ => unreachable!("fusion contraction source lowering uses a permutation"),
-        };
-        let (rhs_contracting_axes, rhs_open_axes) = match &plan.rhs_transform {
-            TreeTransformOperation::Permute {
-                codomain_permutation,
-                domain_permutation,
-            } => (codomain_permutation.clone(), domain_permutation.clone()),
-            _ => unreachable!("fusion contraction source lowering uses a permutation"),
-        };
+        if plan.output_transform.kind() != TreeTransformOperationKind::Permute {
+            unreachable!("fusion contraction output lowering uses a permutation");
+        }
+        let output_axes = plan
+            .output_transform
+            .codomain_permutation()
+            .iter()
+            .chain(plan.output_transform.domain_permutation())
+            .copied()
+            .map(semantic_to_core)
+            .collect::<Vec<_>>();
+        let dst_nout = plan.output_transform.codomain_permutation().len();
+        if plan.lhs_transform.kind() != TreeTransformOperationKind::Permute {
+            unreachable!("fusion contraction source lowering uses a permutation");
+        }
+        let lhs_open_axes = plan.lhs_transform.codomain_permutation().to_vec();
+        let lhs_contracting_axes = plan.lhs_transform.domain_permutation().to_vec();
+        if plan.rhs_transform.kind() != TreeTransformOperationKind::Permute {
+            unreachable!("fusion contraction source lowering uses a permutation");
+        }
+        let rhs_contracting_axes = plan.rhs_transform.codomain_permutation().to_vec();
+        let rhs_open_axes = plan.rhs_transform.domain_permutation().to_vec();
         plan.orientation = orientation;
         plan.lhs_transform = TreeTransformOperation::permute(lhs_contracting_axes, lhs_open_axes);
         plan.rhs_transform = TreeTransformOperation::permute(rhs_open_axes, rhs_contracting_axes);
@@ -1465,7 +1455,7 @@ mod tests {
         reset_candidate_build_calls, reset_candidate_score_calls, FusionContractOrientation,
     };
     use crate::contract::DynamicFusionMapSpace;
-    use crate::TreeTransformOperation;
+    use crate::{TreeTransformOperation, TreeTransformOperationKind};
     use std::sync::Arc;
     use tenet_core::{
         BlockKey, FermionParityFusionRule, FusionProductSpace, FusionTensorMapSpace,
@@ -1556,21 +1546,20 @@ mod tests {
             TensorContractSpec::with_default_output_order(&[2, 3], &[1, 0]),
         )
         .unwrap();
-        let TreeTransformOperation::Permute {
-            domain_permutation: lhs_contract,
-            ..
-        } = plan.lhs_transform()
-        else {
-            panic!("lhs lowering must be a permutation");
-        };
-        let TreeTransformOperation::Permute {
-            codomain_permutation: rhs_contract,
-            ..
-        } = plan.rhs_transform()
-        else {
-            panic!("rhs lowering must be a permutation");
-        };
-        (lhs_contract.to_vec(), rhs_contract.to_vec())
+        assert_eq!(
+            plan.lhs_transform().kind(),
+            TreeTransformOperationKind::Permute,
+            "lhs lowering must be a permutation"
+        );
+        assert_eq!(
+            plan.rhs_transform().kind(),
+            TreeTransformOperationKind::Permute,
+            "rhs lowering must be a permutation"
+        );
+        (
+            plan.lhs_transform().domain_permutation().to_vec(),
+            plan.rhs_transform().codomain_permutation().to_vec(),
+        )
     }
 
     #[test]

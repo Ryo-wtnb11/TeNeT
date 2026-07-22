@@ -15,7 +15,9 @@ use tenet_core::{
 
 use crate::{OperationError, TreeTransformStructure};
 
-use super::operation::{TreeTransformOperation, ValidateBraidingSupport};
+use super::operation::{
+    TreeTransformOperation, TreeTransformOperationKind, ValidateBraidingSupport,
+};
 
 pub use tenet_operations::transform_plan::{
     TreeTransformBlockSpec, TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
@@ -73,28 +75,10 @@ pub(crate) fn validate_tree_transform_rank_syntax(
     operation: &TreeTransformOperation,
     total_rank: usize,
 ) -> Result<(), OperationError> {
-    let (codomain_permutation, domain_permutation) = match operation {
-        TreeTransformOperation::Permute {
-            codomain_permutation,
-            domain_permutation,
-        }
-        | TreeTransformOperation::Transpose {
-            codomain_permutation,
-            domain_permutation,
-        }
-        | TreeTransformOperation::Braid {
-            codomain_permutation,
-            domain_permutation,
-            ..
-        } => (
-            codomain_permutation.as_slice(),
-            domain_permutation.as_slice(),
-        ),
-    };
     PreparedTreePairOperation::validate_rank_syntax(
         total_rank,
-        codomain_permutation,
-        domain_permutation,
+        operation.codomain_permutation(),
+        operation.domain_permutation(),
     )
     .map_err(OperationError::from_core_preserving_context)
 }
@@ -697,21 +681,16 @@ where
         let Some(src_key) = proof.fusion_tree_pair_key(index)? else {
             continue;
         };
-        let mut rows = match &operation {
-            TreeTransformOperation::Permute {
-                codomain_permutation,
-                ..
-            } => proof.permute_codomain_rows_for_block_index(index, codomain_permutation),
-            TreeTransformOperation::Braid {
-                codomain_permutation,
-                codomain_levels,
-                ..
-            } => proof.braid_codomain_rows_for_block_index(
+        let mut rows = match operation.kind() {
+            TreeTransformOperationKind::Permute => {
+                proof.permute_codomain_rows_for_block_index(index, operation.codomain_permutation())
+            }
+            TreeTransformOperationKind::Braid => proof.braid_codomain_rows_for_block_index(
                 index,
-                codomain_permutation,
-                codomain_levels,
+                operation.codomain_permutation(),
+                operation.codomain_levels(),
             ),
-            TreeTransformOperation::Transpose { .. } => {
+            TreeTransformOperationKind::Transpose => {
                 unreachable!("all-codomain admission rejected transpose")
             }
         }
@@ -1119,23 +1098,16 @@ where
         return Ok(Vec::new());
     };
     let indices = std::iter::once(first_index).chain(block_indices);
-    let transformed = match operation {
-        TreeTransformOperation::Permute {
-            codomain_permutation,
-            ..
-        } => proof
+    let transformed = match operation.kind() {
+        TreeTransformOperationKind::Permute => proof
             .proof()
-            .permute_codomain_rows_for_block_indices(indices, codomain_permutation),
-        TreeTransformOperation::Braid {
-            codomain_permutation,
-            codomain_levels,
-            ..
-        } => proof.proof().braid_codomain_rows_for_block_indices(
+            .permute_codomain_rows_for_block_indices(indices, operation.codomain_permutation()),
+        TreeTransformOperationKind::Braid => proof.proof().braid_codomain_rows_for_block_indices(
             indices,
-            codomain_permutation,
-            codomain_levels,
+            operation.codomain_permutation(),
+            operation.codomain_levels(),
         ),
-        TreeTransformOperation::Transpose { .. } => {
+        TreeTransformOperationKind::Transpose => {
             unreachable!("all-codomain operation scope validation rejected transpose")
         }
     };
@@ -1376,16 +1348,13 @@ where
         },
     )?;
     let indices = group.block_indices().iter().copied();
-    let ordered = match operation {
-        TreeTransformOperation::Transpose { .. } => source_proof
+    let ordered = match operation.kind() {
+        TreeTransformOperationKind::Transpose => source_proof
             .execute_multiplicity_free_transpose_ordered_for_block_indices_borrowed(
                 indices, prepared,
             ),
-        TreeTransformOperation::Permute { .. } | TreeTransformOperation::Braid { .. } => {
-            source_proof.execute_multiplicity_free_braid_ordered_for_block_indices_borrowed(
-                indices, prepared,
-            )
-        }
+        TreeTransformOperationKind::Permute | TreeTransformOperationKind::Braid => source_proof
+            .execute_multiplicity_free_braid_ordered_for_block_indices_borrowed(indices, prepared),
     }
     .map_err(OperationError::from_core_preserving_context)?;
     assemble_ordered_tree_pair_group_specs(source_proof.structure(), group, source_axes, ordered)
@@ -1648,35 +1617,27 @@ where
             group.group_key().domain_uncoupled().len(),
         ) {
             let mut rows_for = |index: usize, _: &FusionTreePairKey| {
-                let rows = match &operation {
-                    TreeTransformOperation::Permute {
-                        codomain_permutation,
-                        domain_permutation,
-                    } => source_proof.generic_permute_tree_pair_for_block_index(
-                        index,
-                        codomain_permutation,
-                        domain_permutation,
-                    ),
-                    TreeTransformOperation::Braid {
-                        codomain_permutation,
-                        domain_permutation,
-                        codomain_levels,
-                        domain_levels,
-                    } => source_proof.generic_braid_tree_pair_for_block_index(
-                        index,
-                        codomain_permutation,
-                        domain_permutation,
-                        codomain_levels,
-                        domain_levels,
-                    ),
-                    TreeTransformOperation::Transpose {
-                        codomain_permutation,
-                        domain_permutation,
-                    } => source_proof.generic_transpose_tree_pair_for_block_index(
-                        index,
-                        codomain_permutation,
-                        domain_permutation,
-                    ),
+                let rows = match operation.kind() {
+                    TreeTransformOperationKind::Permute => source_proof
+                        .generic_permute_tree_pair_for_block_index(
+                            index,
+                            operation.codomain_permutation(),
+                            operation.domain_permutation(),
+                        ),
+                    TreeTransformOperationKind::Braid => source_proof
+                        .generic_braid_tree_pair_for_block_index(
+                            index,
+                            operation.codomain_permutation(),
+                            operation.domain_permutation(),
+                            operation.codomain_levels(),
+                            operation.domain_levels(),
+                        ),
+                    TreeTransformOperationKind::Transpose => source_proof
+                        .generic_transpose_tree_pair_for_block_index(
+                            index,
+                            operation.codomain_permutation(),
+                            operation.domain_permutation(),
+                        ),
                 }
                 .map_err(OperationError::from_core_preserving_context)?;
                 Ok(Arc::new(rows))
@@ -1699,37 +1660,26 @@ where
                 };
                 src_keys.push(src_key.clone());
             }
-            let ordered = match &operation {
-                TreeTransformOperation::Permute {
-                    codomain_permutation,
-                    domain_permutation,
-                } => generic_permute_tree_pair_block_ordered(
+            let ordered = match operation.kind() {
+                TreeTransformOperationKind::Permute => generic_permute_tree_pair_block_ordered(
                     source_proof.rule(),
                     &src_keys,
-                    codomain_permutation,
-                    domain_permutation,
+                    operation.codomain_permutation(),
+                    operation.domain_permutation(),
                 ),
-                TreeTransformOperation::Braid {
-                    codomain_permutation,
-                    domain_permutation,
-                    codomain_levels,
-                    domain_levels,
-                } => generic_braid_tree_pair_block_ordered(
+                TreeTransformOperationKind::Braid => generic_braid_tree_pair_block_ordered(
                     source_proof.rule(),
                     &src_keys,
-                    codomain_permutation,
-                    domain_permutation,
-                    codomain_levels,
-                    domain_levels,
+                    operation.codomain_permutation(),
+                    operation.domain_permutation(),
+                    operation.codomain_levels(),
+                    operation.domain_levels(),
                 ),
-                TreeTransformOperation::Transpose {
-                    codomain_permutation,
-                    domain_permutation,
-                } => generic_transpose_tree_pair_block_ordered(
+                TreeTransformOperationKind::Transpose => generic_transpose_tree_pair_block_ordered(
                     source_proof.rule(),
                     &src_keys,
-                    codomain_permutation,
-                    domain_permutation,
+                    operation.codomain_permutation(),
+                    operation.domain_permutation(),
                 ),
             }
             .map_err(OperationError::from_core_preserving_context)?;
@@ -1991,39 +1941,28 @@ where
 {
     #[cfg(test)]
     TREE_PAIR_OPERATION_PREPARATIONS.set(TREE_PAIR_OPERATION_PREPARATIONS.get() + 1);
-    match operation {
-        TreeTransformOperation::Permute {
-            codomain_permutation,
-            domain_permutation,
-        } => PreparedTreePairOperation::prepare_permute(
+    match operation.kind() {
+        TreeTransformOperationKind::Permute => PreparedTreePairOperation::prepare_permute(
             rule,
             source_codomain_rank,
             source_domain_rank,
-            codomain_permutation,
-            domain_permutation,
+            operation.codomain_permutation(),
+            operation.domain_permutation(),
         ),
-        TreeTransformOperation::Braid {
-            codomain_permutation,
-            domain_permutation,
-            codomain_levels,
-            domain_levels,
-        } => PreparedTreePairOperation::prepare_braid(
+        TreeTransformOperationKind::Braid => PreparedTreePairOperation::prepare_braid(
             rule,
             source_codomain_rank,
             source_domain_rank,
-            codomain_permutation,
-            domain_permutation,
-            codomain_levels,
-            domain_levels,
+            operation.codomain_permutation(),
+            operation.domain_permutation(),
+            operation.codomain_levels(),
+            operation.domain_levels(),
         ),
-        TreeTransformOperation::Transpose {
-            codomain_permutation,
-            domain_permutation,
-        } => PreparedTreePairOperation::prepare_transpose(
+        TreeTransformOperationKind::Transpose => PreparedTreePairOperation::prepare_transpose(
             source_codomain_rank,
             source_domain_rank,
-            codomain_permutation,
-            domain_permutation,
+            operation.codomain_permutation(),
+            operation.domain_permutation(),
         ),
     }
     .map_err(OperationError::from_core_preserving_context)
@@ -2033,38 +1972,29 @@ fn prepare_tree_pair_operation_syntax(
     operation: &TreeTransformOperation,
     (source_codomain_rank, source_domain_rank): (usize, usize),
 ) -> Result<(), OperationError> {
-    match operation {
-        TreeTransformOperation::Permute {
-            codomain_permutation,
-            domain_permutation,
-        } => PreparedTreePairOperation::validate_permute_syntax(
+    match operation.kind() {
+        TreeTransformOperationKind::Permute => PreparedTreePairOperation::validate_permute_syntax(
             source_codomain_rank,
             source_domain_rank,
-            codomain_permutation,
-            domain_permutation,
+            operation.codomain_permutation(),
+            operation.domain_permutation(),
         ),
-        TreeTransformOperation::Braid {
-            codomain_permutation,
-            domain_permutation,
-            codomain_levels,
-            domain_levels,
-        } => PreparedTreePairOperation::validate_braid_syntax(
+        TreeTransformOperationKind::Braid => PreparedTreePairOperation::validate_braid_syntax(
             source_codomain_rank,
             source_domain_rank,
-            codomain_permutation,
-            domain_permutation,
-            codomain_levels,
-            domain_levels,
+            operation.codomain_permutation(),
+            operation.domain_permutation(),
+            operation.codomain_levels(),
+            operation.domain_levels(),
         ),
-        TreeTransformOperation::Transpose {
-            codomain_permutation,
-            domain_permutation,
-        } => PreparedTreePairOperation::validate_transpose_syntax(
-            source_codomain_rank,
-            source_domain_rank,
-            codomain_permutation,
-            domain_permutation,
-        ),
+        TreeTransformOperationKind::Transpose => {
+            PreparedTreePairOperation::validate_transpose_syntax(
+                source_codomain_rank,
+                source_domain_rank,
+                operation.codomain_permutation(),
+                operation.domain_permutation(),
+            )
+        }
     }
     .map_err(OperationError::from_core_preserving_context)
 }
@@ -2077,20 +2007,17 @@ fn validate_all_codomain_operation_scope(
         message: "all-codomain UniqueFusion lowering requires an empty domain operation",
     };
 
-    match operation {
-        TreeTransformOperation::Permute {
-            domain_permutation,
-            ..
-        } if domain_permutation.is_empty() => Ok(()),
-        TreeTransformOperation::Braid {
-            domain_permutation,
-            domain_levels,
-            ..
-        } if domain_permutation.is_empty() && domain_levels.is_empty() => Ok(()),
-        TreeTransformOperation::Permute { .. } | TreeTransformOperation::Braid { .. } => {
+    match operation.kind() {
+        TreeTransformOperationKind::Permute if operation.domain_permutation().is_empty() => Ok(()),
+        TreeTransformOperationKind::Braid
+            if operation.domain_permutation().is_empty() && operation.domain_levels().is_empty() =>
+        {
+            Ok(())
+        }
+        TreeTransformOperationKind::Permute | TreeTransformOperationKind::Braid => {
             Err(scope_error())
         }
-        TreeTransformOperation::Transpose { .. } => Err(OperationError::UnsupportedTreeTransformScope {
+        TreeTransformOperationKind::Transpose => Err(OperationError::UnsupportedTreeTransformScope {
             operation: Box::new(operation.clone()),
             message: "all-codomain UniqueFusion lowering supports explicit Permute or Braid operations",
         }),
@@ -2098,25 +2025,12 @@ fn validate_all_codomain_operation_scope(
 }
 
 fn operation_source_axes(operation: &TreeTransformOperation) -> Arc<[usize]> {
-    match operation {
-        TreeTransformOperation::Permute {
-            codomain_permutation,
-            domain_permutation,
-        }
-        | TreeTransformOperation::Braid {
-            codomain_permutation,
-            domain_permutation,
-            ..
-        }
-        | TreeTransformOperation::Transpose {
-            codomain_permutation,
-            domain_permutation,
-        } => codomain_permutation
-            .iter()
-            .chain(domain_permutation)
-            .copied()
-            .collect(),
-    }
+    operation
+        .codomain_permutation()
+        .iter()
+        .chain(operation.domain_permutation())
+        .copied()
+        .collect()
 }
 
 fn validate_all_codomain_fusion_tree_block<R>(

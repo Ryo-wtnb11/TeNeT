@@ -66,7 +66,7 @@ pub use scalar::{
     RecouplingCoefficientAction, TreeTransformScalar,
 };
 pub use tensoradd::*;
-pub use transform_key::TreeTransformOperation;
+pub use transform_key::{TreeTransformOperation, TreeTransformOperationKind};
 pub use transform_plan::{
     TreeTransformBlockSpec, TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
     TreeTransformKeyBlockSpec,

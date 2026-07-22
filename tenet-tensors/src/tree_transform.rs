@@ -4,8 +4,8 @@ mod plan;
 
 pub use cache::{TreePairTransformCache, TreeTransformCache, TreeTransformCacheStats};
 pub use operation::{
-    TreeTransformBuiltinRuleCacheKey, TreeTransformOperation, TreeTransformProductRuleCacheKey,
-    TreeTransformRuleCacheKey, TreeTransformSu3RuleCacheKey,
+    TreeTransformBuiltinRuleCacheKey, TreeTransformOperation, TreeTransformOperationKind,
+    TreeTransformProductRuleCacheKey, TreeTransformRuleCacheKey, TreeTransformSu3RuleCacheKey,
 };
 pub use plan::{
     build_all_codomain_tree_transform_group_plan, build_generic_tree_pair_transform_group_plan,

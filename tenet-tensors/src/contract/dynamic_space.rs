@@ -2248,24 +2248,10 @@ impl DynamicFusionMapSpace {
 }
 
 fn tree_transform_operation_axes(operation: &TreeTransformOperation) -> (&[usize], &[usize]) {
-    match operation {
-        TreeTransformOperation::Transpose {
-            codomain_permutation,
-            domain_permutation,
-        }
-        | TreeTransformOperation::Permute {
-            codomain_permutation,
-            domain_permutation,
-        }
-        | TreeTransformOperation::Braid {
-            codomain_permutation,
-            domain_permutation,
-            ..
-        } => (
-            codomain_permutation.as_slice(),
-            domain_permutation.as_slice(),
-        ),
-    }
+    (
+        operation.codomain_permutation(),
+        operation.domain_permutation(),
+    )
 }
 
 #[cfg(test)]

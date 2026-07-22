@@ -2906,26 +2906,32 @@ fn su2_two_by_two_f_move_uses_one_completed_structure_miss_compiler() {
     let dst =
         TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], dst_space, block_structure)
             .unwrap();
-    let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let direct_operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    let miss_operation = TreeTransformOperation::braid(vec![0, 2, 1, 3], [], vec![0, 1, 2, 3], []);
+    let hit_operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
+    assert_eq!(direct_operation, miss_operation);
+    assert_eq!(miss_operation, hit_operation);
     let group_count = src.structure().fusion_tree_groups().len();
     let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
 
     reset_tree_pair_lowering_calls();
-    let direct = tree_transform_structure(&SU2FusionRule, operation.clone(), &dst, &src).unwrap();
+    let direct = tree_transform_structure(&SU2FusionRule, direct_operation, &dst, &src).unwrap();
     assert_eq!(tree_pair_lowering_calls(), (group_count, 0));
 
     reset_tree_pair_lowering_calls();
     let miss = cache
-        .get_or_compile_tree_pair(&SU2FusionRule, operation.clone(), &dst, &src)
+        .get_or_compile_tree_pair(&SU2FusionRule, miss_operation, &dst, &src)
         .unwrap();
     assert_eq!(tree_pair_lowering_calls(), (group_count, 0));
 
     reset_tree_pair_lowering_calls();
     let hit = cache
-        .get_or_compile_tree_pair(&SU2FusionRule, operation, &dst, &src)
+        .get_or_compile_tree_pair(&SU2FusionRule, hit_operation, &dst, &src)
         .unwrap();
     assert_eq!(tree_pair_lowering_calls(), (0, 0));
 
+    // What: independently constructed content-equal operations identify the
+    // same completed structure without relying on Arc pointer identity.
     assert!(Arc::ptr_eq(&miss, &hit));
     assert_eq!(cache.structure_len(), 1);
     assert_eq!(cache.stats().structure_misses(), 1);

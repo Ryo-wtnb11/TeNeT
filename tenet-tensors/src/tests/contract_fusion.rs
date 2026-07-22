@@ -507,20 +507,16 @@ fn forced_axis_order_candidates_have_identical_u1_result() {
         selected.orientation(),
         crate::contract::FusionContractOrientation::LhsRhs
     );
-    assert!(matches!(
-        selected.lhs_transform(),
-        TreeTransformOperation::Permute {
-            domain_permutation,
-            ..
-        } if domain_permutation.as_slice() == [2, 3]
-    ));
-    assert!(matches!(
-        selected.rhs_transform(),
-        TreeTransformOperation::Permute {
-            codomain_permutation,
-            ..
-        } if codomain_permutation.as_slice() == [1, 0]
-    ));
+    assert_eq!(
+        selected.lhs_transform().kind(),
+        TreeTransformOperationKind::Permute
+    );
+    assert_eq!(selected.lhs_transform().domain_permutation(), &[2, 3]);
+    assert_eq!(
+        selected.rhs_transform().kind(),
+        TreeTransformOperationKind::Permute
+    );
+    assert_eq!(selected.rhs_transform().codomain_permutation(), &[1, 0]);
     let mut rhs_permuted =
         TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; len], space.clone()).unwrap();
     tree_transform_into(
@@ -1429,20 +1425,16 @@ fn crossed_axis_selection_preserves_real_fermion_parity_complex_result() {
         TensorContractSpec::new(&[3, 2], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3])),
     )
     .unwrap();
-    assert!(matches!(
-        selected.lhs_transform(),
-        TreeTransformOperation::Permute {
-            domain_permutation,
-            ..
-        } if domain_permutation.as_slice() == [2, 3]
-    ));
-    assert!(matches!(
-        selected.rhs_transform(),
-        TreeTransformOperation::Permute {
-            codomain_permutation,
-            ..
-        } if codomain_permutation.as_slice() == [1, 0]
-    ));
+    assert_eq!(
+        selected.lhs_transform().kind(),
+        TreeTransformOperationKind::Permute
+    );
+    assert_eq!(selected.lhs_transform().domain_permutation(), &[2, 3]);
+    assert_eq!(
+        selected.rhs_transform().kind(),
+        TreeTransformOperationKind::Permute
+    );
+    assert_eq!(selected.rhs_transform().codomain_permutation(), &[1, 0]);
     let mut rhs_permuted = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
         vec![Complex64::zero(); len],
         space.clone(),
@@ -1634,20 +1626,16 @@ fn crossed_axis_selection_preserves_asymmetric_fz2_u1_su2_result() {
         TensorContractSpec::with_default_output_order(&[3, 2], &[0, 1]),
     )
     .unwrap();
-    assert!(matches!(
-        selected.lhs_transform(),
-        TreeTransformOperation::Permute {
-            domain_permutation,
-            ..
-        } if domain_permutation.as_slice() == [3, 2]
-    ));
-    assert!(matches!(
-        selected.rhs_transform(),
-        TreeTransformOperation::Permute {
-            codomain_permutation,
-            ..
-        } if codomain_permutation.as_slice() == [0, 1]
-    ));
+    assert_eq!(
+        selected.lhs_transform().kind(),
+        TreeTransformOperationKind::Permute
+    );
+    assert_eq!(selected.lhs_transform().domain_permutation(), &[3, 2]);
+    assert_eq!(
+        selected.rhs_transform().kind(),
+        TreeTransformOperationKind::Permute
+    );
+    assert_eq!(selected.rhs_transform().codomain_permutation(), &[0, 1]);
     let mut lhs_permuted = TensorMap::<Complex64, 2, 2>::from_vec_with_fusion_space(
         vec![Complex64::zero(); lhs_len],
         build_space([1, 1, 3, 2]),

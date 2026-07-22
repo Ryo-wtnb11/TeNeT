@@ -3,7 +3,7 @@ use tenet_core::{
 };
 
 use crate::DynamicFusionMapSpace;
-use crate::{OperationError, TreeTransformOperation};
+use crate::{OperationError, TreeTransformOperation, TreeTransformOperationKind};
 use tenet_operations::{
     permutation_axes, OutputAxisOrder, TensorContractSpec, TensorTraceAxisSpec,
 };
@@ -52,36 +52,27 @@ pub(crate) fn lower_tensoradd_source_operation<const SRC_NOUT: usize, const SRC_
         });
     }
 
-    let operation = match operation {
-        TreeTransformOperation::Permute {
-            codomain_permutation,
-            domain_permutation,
-        } => TreeTransformOperation::permute(
-            adjoint_tensor_axes(SRC_NOUT, SRC_NIN, &codomain_permutation)?,
-            adjoint_tensor_axes(SRC_NOUT, SRC_NIN, &domain_permutation)?,
+    let operation = match operation.kind() {
+        TreeTransformOperationKind::Permute => TreeTransformOperation::permute(
+            adjoint_tensor_axes(SRC_NOUT, SRC_NIN, operation.codomain_permutation())?,
+            adjoint_tensor_axes(SRC_NOUT, SRC_NIN, operation.domain_permutation())?,
         ),
-        TreeTransformOperation::Transpose {
-            codomain_permutation,
-            domain_permutation,
-        } => TreeTransformOperation::transpose(
-            adjoint_tensor_axes(SRC_NOUT, SRC_NIN, &codomain_permutation)?,
-            adjoint_tensor_axes(SRC_NOUT, SRC_NIN, &domain_permutation)?,
+        TreeTransformOperationKind::Transpose => TreeTransformOperation::transpose(
+            adjoint_tensor_axes(SRC_NOUT, SRC_NIN, operation.codomain_permutation())?,
+            adjoint_tensor_axes(SRC_NOUT, SRC_NIN, operation.domain_permutation())?,
         ),
-        TreeTransformOperation::Braid {
-            codomain_permutation,
-            domain_permutation,
-            codomain_levels,
-            domain_levels,
-        } => {
+        TreeTransformOperationKind::Braid => {
             validate_braid_source_axes::<SRC_NOUT, SRC_NIN>(
-                &codomain_permutation,
-                &domain_permutation,
+                operation.codomain_permutation(),
+                operation.domain_permutation(),
             )?;
-            let (codomain_levels, domain_levels) =
-                lower_adjoint_braid_levels::<SRC_NOUT, SRC_NIN>(&codomain_levels, &domain_levels)?;
+            let (codomain_levels, domain_levels) = lower_adjoint_braid_levels::<SRC_NOUT, SRC_NIN>(
+                operation.codomain_levels(),
+                operation.domain_levels(),
+            )?;
             TreeTransformOperation::braid(
-                adjoint_tensor_axes(SRC_NOUT, SRC_NIN, &codomain_permutation)?,
-                adjoint_tensor_axes(SRC_NOUT, SRC_NIN, &domain_permutation)?,
+                adjoint_tensor_axes(SRC_NOUT, SRC_NIN, operation.codomain_permutation())?,
+                adjoint_tensor_axes(SRC_NOUT, SRC_NIN, operation.domain_permutation())?,
                 codomain_levels,
                 domain_levels,
             )
