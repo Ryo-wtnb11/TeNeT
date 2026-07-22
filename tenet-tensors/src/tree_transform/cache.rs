@@ -295,8 +295,7 @@ where
         RuleKey: 'static + Send + Sync,
     {
         if !self.policy.stores_entries() {
-            self.stats.structure_misses += 1;
-            return compile_multiplicity_free_tree_pair_structure_with_threads(
+            let structure = compile_multiplicity_free_tree_pair_structure_with_threads(
                 rule,
                 operation,
                 Arc::clone(dst_structure),
@@ -304,7 +303,9 @@ where
                 storage_conjugate,
                 self.recoupling_threads,
             )
-            .map(Arc::new);
+            .map(Arc::new)?;
+            self.stats.structure_misses += 1;
+            return Ok(structure);
         }
 
         validate_multiplicity_free_tree_transform_capability(rule, operation)?;
@@ -321,7 +322,6 @@ where
             return Ok(structure);
         }
 
-        self.stats.structure_misses += 1;
         let structure = Arc::new(compile_multiplicity_free_tree_pair_structure_with_threads(
             rule,
             operation,
@@ -330,6 +330,7 @@ where
             storage_conjugate,
             self.recoupling_threads,
         )?);
+        self.stats.structure_misses += 1;
         self.retain_structure(key, Arc::clone(&structure));
         Ok(structure)
     }
