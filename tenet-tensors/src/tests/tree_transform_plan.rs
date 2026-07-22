@@ -2028,6 +2028,44 @@ fn exact_warm_structure_reuses_prior_local_admission_proof() {
 }
 
 #[test]
+fn completed_structure_miss_and_hit_validate_capability_once() {
+    use crate::tree_transform::{
+        multiplicity_free_capability_validations, reset_multiplicity_free_capability_validations,
+    };
+
+    let structure = simple_su2_vertex_structure(1);
+    let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
+    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+
+    reset_multiplicity_free_capability_validations();
+    cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &SU2FusionRule,
+            &operation,
+            &structure,
+            &structure,
+            false,
+        )
+        .unwrap();
+    assert_eq!(multiplicity_free_capability_validations(), 1);
+
+    reset_multiplicity_free_capability_validations();
+    cache
+        .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+            &SU2FusionRule,
+            &operation,
+            &structure,
+            &structure,
+            false,
+        )
+        .unwrap();
+
+    // What: misses hand the prior capability proof to the whole-HomSpace
+    // compiler, while hits still perform their one admission check.
+    assert_eq!(multiplicity_free_capability_validations(), 1);
+}
+
+#[test]
 fn prelowered_same_content_roles_share_one_local_admission() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()

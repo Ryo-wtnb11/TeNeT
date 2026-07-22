@@ -18,6 +18,7 @@ use super::plan::{
     build_all_codomain_tree_transform_group_plan_validated_with_threads,
     build_generic_tree_pair_transform_group_plan_validated,
     build_tree_pair_transform_group_plan_validated_with_threads,
+    compile_multiplicity_free_tree_pair_structure_after_capability_with_threads,
     compile_multiplicity_free_tree_pair_structure_with_threads,
     validate_all_codomain_namespace_before_cache, validate_generic_tree_pair_preflight,
     validate_multiplicity_free_all_codomain_preflight_after_capability,
@@ -322,14 +323,16 @@ where
             return Ok(structure);
         }
 
-        let structure = Arc::new(compile_multiplicity_free_tree_pair_structure_with_threads(
-            rule,
-            operation,
-            Arc::clone(dst_structure),
-            Arc::clone(src_structure),
-            storage_conjugate,
-            self.recoupling_threads,
-        )?);
+        let structure = Arc::new(
+            compile_multiplicity_free_tree_pair_structure_after_capability_with_threads(
+                rule,
+                operation,
+                Arc::clone(dst_structure),
+                Arc::clone(src_structure),
+                storage_conjugate,
+                self.recoupling_threads,
+            )?,
+        );
         self.stats.structure_misses += 1;
         self.retain_structure(key, Arc::clone(&structure));
         Ok(structure)
