@@ -15,8 +15,8 @@ use tenet_tensors::{
 };
 
 /// Re-exported for the prelude: explicit policy for per-runtime operation
-/// artifact caches. This is an expert knob; leaving it unset keeps the ordinary
-/// bounded context defaults.
+/// artifact caches. RuntimeBuilder defaults to `NoCache`; this expert knob opts
+/// into task-local cache policies when the caller wants them.
 pub use tenet_tensors::OperationCachePolicy;
 /// Re-exported for the prelude: the transpose-kernel selection consumed by
 /// [`RuntimeBuilder::transpose_backend`] (defined next to the kernel adapter
@@ -679,7 +679,6 @@ impl LinalgBackend {
 /// ([`Self::with_dense_executor`]) is a `Box<dyn DenseExecutor>`, which is
 /// neither cloneable nor `Debug`. A manual [`std::fmt::Debug`] is provided that
 /// reports the executor's presence without touching it.
-#[derive(Default)]
 pub struct RuntimeBuilder {
     #[cfg(feature = "cuda")]
     cuda_device: Option<usize>,
@@ -697,9 +696,26 @@ pub struct RuntimeBuilder {
     /// Selected transpose kernel for pure permuted copies; `None` keeps the
     /// fused-loop default (dispatch-identical to not having the knob).
     transpose_backend: Option<TransposeBackend>,
-    /// Per-operation tree/dynamic artifact cache policy. `None` keeps the
-    /// context defaults, including the bounded ordinary context caches.
+    /// Per-operation tree/dynamic artifact cache policy. Builder default is
+    /// `NoCache`; explicit policies opt into task-local caches.
     operation_cache_policy: Option<OperationCachePolicy>,
+}
+
+impl Default for RuntimeBuilder {
+    fn default() -> Self {
+        Self {
+            #[cfg(feature = "cuda")]
+            cuda_device: None,
+            plan_cache: PlanCacheConfig::default(),
+            dense_threads: None,
+            recoupling_threads: None,
+            dense_executor: None,
+            linalg_backend: None,
+            gemm_backend: None,
+            transpose_backend: None,
+            operation_cache_policy: Some(OperationCachePolicy::NoCache),
+        }
+    }
 }
 
 impl std::fmt::Debug for RuntimeBuilder {
@@ -869,8 +885,8 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Sets the operation-artifact cache policy for execution contexts minted
-    /// by this runtime. Unset keeps each context's default policy.
+    /// Overrides the default `NoCache` operation-artifact policy for execution
+    /// contexts minted by this runtime.
     pub fn operation_cache_policy(mut self, policy: OperationCachePolicy) -> Self {
         self.operation_cache_policy = Some(policy);
         self
@@ -1112,12 +1128,9 @@ mod tests {
             assert!(state.tree_cache_policy_is(expected));
         }
 
-        let selected = Runtime::builder()
-            .operation_cache_policy(OperationCachePolicy::NoCache)
-            .build()
-            .unwrap();
-        assert_state(&selected, OperationCachePolicy::NoCache);
-        let context = crate::tensor::TensorExecutionContext::for_runtime(&selected).unwrap();
+        let default = Runtime::builder().build().unwrap();
+        assert_state(&default, OperationCachePolicy::NoCache);
+        let context = crate::tensor::TensorExecutionContext::for_runtime(&default).unwrap();
         assert!(context.tree_cache_policy_is(OperationCachePolicy::NoCache));
 
         let lru = Runtime::builder()

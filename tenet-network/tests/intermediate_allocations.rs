@@ -1045,7 +1045,10 @@ fn registry_rejects_zero_sentinels_and_deduplicates_pointers() {
 #[test]
 fn rank_nine_cached_permutation_has_no_caller_thread_operation_allocation() {
     let _test_guard = lock_unpoisoned(&TEST_LOCK);
-    let runtime = Runtime::builder().build().unwrap();
+    let runtime = Runtime::builder()
+        .operation_cache_policy(OperationCachePolicy::TaskLocal)
+        .build()
+        .unwrap();
     // Keep this cache-reuse probe on a non-Unique fusion rule. Unique fusion
     // intentionally bypasses the global plan cache and therefore cannot
     // satisfy the warmed-cache contract exercised below.

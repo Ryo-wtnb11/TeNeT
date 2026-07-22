@@ -40,7 +40,11 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 fn cached_permute_overwrite_does_not_allocate_on_the_caller_thread() {
     // What: a warmed multiplicity-free non-Abelian permutation reuses its
     // compiled plan and replay workspace without allocating on the caller.
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .operation_cache_policy(OperationCachePolicy::TaskLocal)
+        .build()
+        .unwrap();
     let space = Space::fz2_u1_su2([
         ((0, 0, 0), 8),
         ((0, 1, 1), 6),
@@ -91,7 +95,11 @@ fn cached_permute_overwrite_does_not_allocate_on_the_caller_thread() {
 fn cached_u1_permute_overwrite_does_not_allocate_on_the_caller_thread() {
     // What: a warmed UniqueFusion permutation reuses its completed transformer
     // and replay workspace without allocating on the caller.
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .operation_cache_policy(OperationCachePolicy::TaskLocal)
+        .build()
+        .unwrap();
     let space = Space::u1([(-1, 4), (0, 8), (1, 4)]);
     let source =
         Tensor::rand_with_seed(&runtime, Dtype::F64, [&space, &space], [&space], 418).unwrap();
