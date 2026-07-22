@@ -5714,6 +5714,9 @@ impl Tensor {
         if matches!(self.stored_data(), Data::CudaF64(_)) {
             return Err(device_unsupported("Tensor::trace_pairs"));
         }
+        if pairs.is_empty() {
+            return Ok(self.clone());
+        }
         let output_axes: Vec<usize> = (0..rank).filter(|&axis| !seen[axis]).collect();
         let dst_codomain_rank = output_axes
             .iter()
@@ -10217,6 +10220,36 @@ mod adjoint_parent_view_tests {
         let su3_tensor = Tensor::zeros(&runtime, Dtype::F64, [&su3], [&su3]).unwrap();
         assert_eq!(
             su3_tensor.trace_pairs(&[(0, 2)]).unwrap_err(),
+            Error::UnsupportedForRule {
+                operation: "Tensor::trace_pairs",
+                rule: "SU(3)",
+            }
+        );
+    }
+
+    #[test]
+    fn empty_trace_pairs_is_metadata_noop_after_supported_boundary() {
+        // What: an explicit empty trace pair list is a no-op for supported
+        // rules, while unsupported rules keep their existing public boundary.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let space = Space::u1([(0, 2), (1, 1)]);
+        let tensor =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 224_508).unwrap();
+        let traced = tensor.trace_pairs(&[]).unwrap();
+
+        assert!(Arc::ptr_eq(
+            &traced.ordinary_body().space,
+            &tensor.ordinary_body().space
+        ));
+        assert!(Arc::ptr_eq(
+            &traced.ordinary_body().data,
+            &tensor.ordinary_body().data
+        ));
+
+        let su3 = Space::su3([((1, 0), 1), ((0, 1), 1)]).unwrap();
+        let su3_tensor = Tensor::zeros(&runtime, Dtype::F64, [&su3], [&su3]).unwrap();
+        assert_eq!(
+            su3_tensor.trace_pairs(&[]).unwrap_err(),
             Error::UnsupportedForRule {
                 operation: "Tensor::trace_pairs",
                 rule: "SU(3)",
