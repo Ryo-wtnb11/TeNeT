@@ -121,9 +121,8 @@ pub use tree_transform::{
     build_tree_pair_transform_group_plan, build_tree_transform_group_plan, TreePairTransformCache,
     TreeTransformBlockSpec, TreeTransformBuiltinRuleCacheKey, TreeTransformCache,
     TreeTransformCacheStats, TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
-    TreeTransformKeyBlockSpec, TreeTransformOperation, TreeTransformPlanScope,
-    TreeTransformProductRuleCacheKey, TreeTransformRuleCacheKey, TreeTransformSectorPlanKey,
-    TreeTransformSourceGroupKey, TreeTransformSu3RuleCacheKey,
+    TreeTransformKeyBlockSpec, TreeTransformOperation, TreeTransformProductRuleCacheKey,
+    TreeTransformRuleCacheKey, TreeTransformSu3RuleCacheKey,
 };
 #[cfg(test)]
 pub(crate) use tree_transform::{
@@ -131,7 +130,6 @@ pub(crate) use tree_transform::{
     build_multiplicity_free_tree_pair_transform_group_plan,
     build_unique_all_codomain_tree_transform_group_plan,
     build_unique_tree_pair_transform_group_plan, build_unique_tree_transform_group_plan,
-    TreeTransformGroupPlanCache, TreeTransformGroupPlanKey,
 };
 
 #[cfg(test)]

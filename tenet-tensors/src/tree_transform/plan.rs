@@ -13,7 +13,7 @@ use tenet_core::{
     OrderedBlockLinearStorage, PreparedTreePairOperation,
 };
 
-use crate::OperationError;
+use crate::{OperationError, TreeTransformStructure};
 
 use super::operation::{TreeTransformOperation, ValidateBraidingSupport};
 
@@ -394,24 +394,6 @@ where
     }
 }
 
-pub(crate) fn build_all_codomain_tree_transform_group_plan_validated<R>(
-    source_proof: &LocallyValidatedAllCodomainFusionTreeBlockStructure<'_, '_, R>,
-    operation: TreeTransformOperation,
-) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
-where
-    R: MultiplicityFreeFusionSymbols,
-    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
-{
-    if source_proof.rule().fusion_style() == FusionStyleKind::Unique {
-        build_unique_all_codomain_tree_transform_group_plan_validated(source_proof, operation)
-    } else {
-        build_multiplicity_free_all_codomain_tree_transform_group_plan_validated(
-            source_proof,
-            operation,
-        )
-    }
-}
-
 /// Standard full tree-pair transform builder for Unique and Simple
 /// multiplicity-free rules.
 ///
@@ -436,7 +418,7 @@ where
     }
 }
 
-pub(crate) fn build_tree_pair_transform_group_plan_validated<R>(
+fn build_tree_pair_transform_group_plan_validated<R>(
     source_proof: &LocallyValidatedFusionTreeBlockStructure<'_, '_, R>,
     operation: TreeTransformOperation,
 ) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
@@ -444,7 +426,91 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
 {
-    build_tree_pair_transform_group_plan_validated_with_threads(source_proof, operation, 1)
+    if source_proof.rule().fusion_style() == FusionStyleKind::Unique {
+        build_unique_tree_pair_transform_group_plan_validated(source_proof, operation)
+    } else {
+        build_multiplicity_free_tree_pair_transform_group_plan_validated(source_proof, operation)
+    }
+}
+
+pub(crate) fn compile_multiplicity_free_tree_pair_structure<R>(
+    rule: &R,
+    operation: &TreeTransformOperation,
+    dst_structure: Arc<BlockStructure>,
+    src_structure: Arc<BlockStructure>,
+    storage_conjugate: bool,
+) -> Result<TreeTransformStructure<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+{
+    compile_multiplicity_free_tree_pair_structure_with(
+        rule,
+        operation,
+        dst_structure,
+        src_structure,
+        storage_conjugate,
+        |source_proof, operation| {
+            build_tree_pair_transform_group_plan_validated(source_proof, operation.clone())
+        },
+    )
+}
+
+pub(crate) fn compile_multiplicity_free_tree_pair_structure_with_threads<R>(
+    rule: &R,
+    operation: &TreeTransformOperation,
+    dst_structure: Arc<BlockStructure>,
+    src_structure: Arc<BlockStructure>,
+    storage_conjugate: bool,
+    threads: usize,
+) -> Result<TreeTransformStructure<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar:
+        Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
+{
+    compile_multiplicity_free_tree_pair_structure_with(
+        rule,
+        operation,
+        dst_structure,
+        src_structure,
+        storage_conjugate,
+        |source_proof, operation| {
+            build_tree_pair_transform_group_plan_validated_with_threads(
+                source_proof,
+                operation.clone(),
+                threads,
+            )
+        },
+    )
+}
+
+fn compile_multiplicity_free_tree_pair_structure_with<R, F>(
+    rule: &R,
+    operation: &TreeTransformOperation,
+    dst_structure: Arc<BlockStructure>,
+    src_structure: Arc<BlockStructure>,
+    storage_conjugate: bool,
+    build_plan: F,
+) -> Result<TreeTransformStructure<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Copy,
+    F: FnOnce(
+        &LocallyValidatedFusionTreeBlockStructure<'_, '_, R>,
+        &TreeTransformOperation,
+    ) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>,
+{
+    let source_proof =
+        validate_multiplicity_free_tree_pair_preflight(rule, operation, &src_structure)?;
+    LocallyValidatedFusionTreeBlockStructure::try_new(rule, &dst_structure)
+        .map_err(OperationError::from_core_preserving_context)?;
+    let plan = build_plan(&source_proof, operation)?;
+    plan.compile_shared_structures_with_storage_conjugation(
+        dst_structure,
+        src_structure,
+        storage_conjugate,
+    )
 }
 
 pub(crate) fn build_all_codomain_tree_transform_group_plan_validated_with_threads<R>(

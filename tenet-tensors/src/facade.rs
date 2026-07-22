@@ -17,9 +17,8 @@ use crate::tensortrace::{
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::{
     build_generic_tree_pair_transform_group_plan_validated, build_tree_pair_transform_group_plan,
-    build_tree_pair_transform_group_plan_validated, validate_generic_tree_pair_preflight,
-    validate_multiplicity_free_tree_pair_preflight, TreeTransformOperation,
-    TreeTransformRuleCacheKey,
+    compile_multiplicity_free_tree_pair_structure, validate_generic_tree_pair_preflight,
+    TreeTransformOperation, TreeTransformRuleCacheKey,
 };
 use tenet_operations::OperationError;
 use tenet_operations::TreeTransformStructure;
@@ -242,7 +241,7 @@ pub fn tensoradd_fusion_into<
 ) -> Result<(), OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
     DDst: HostWritableStorage<D>,
     DSrc: HostReadableStorage<D>,
@@ -812,17 +811,17 @@ pub fn tree_transform_structure<
 ) -> Result<TreeTransformStructure<R::Scalar>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
-    R::Scalar: Copy + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
+    R::Scalar: Copy + Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
     DDst: TensorStorage<TDst>,
     DSrc: TensorStorage<TSrc>,
 {
-    let source_proof =
-        validate_multiplicity_free_tree_pair_preflight(rule, &operation, src.structure())?;
-    let _destination_proof =
-        LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst.structure())
-            .map_err(OperationError::from_core_preserving_context)?;
-    let plan = build_tree_pair_transform_group_plan_validated(&source_proof, operation)?;
-    plan.compile(dst, src)
+    compile_multiplicity_free_tree_pair_structure(
+        rule,
+        &operation,
+        Arc::clone(dst.structure()),
+        Arc::clone(src.structure()),
+        false,
+    )
 }
 
 /// Compile and execute a tree-pair transform in one call.
