@@ -92,6 +92,95 @@ pub struct TreeTransformStructure<T> {
     src_structure: Arc<BlockStructure>,
 }
 
+impl<T> TreeTransformStructure<T> {
+    /// Conservative retained-byte charge for this immutable replay payload.
+    ///
+    /// This counts owned capacities and the structure identity control block.
+    /// The source and destination structures are separate canonical owners, so
+    /// only their inline `Arc` handles are included through `size_of::<Self>()`.
+    #[doc(hidden)]
+    pub fn charged_payload_bytes(&self) -> usize {
+        const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
+
+        let vector_bytes =
+            |capacity: usize, element_size: usize| capacity.saturating_mul(element_size);
+        core::mem::size_of::<Self>()
+            .saturating_add(ARC_CONTROL_BYTES)
+            .saturating_add(vector_bytes(
+                self.blocks.capacity(),
+                core::mem::size_of::<TreeTransformBlock>(),
+            ))
+            .saturating_add(vector_bytes(
+                self.layouts.entries.capacity(),
+                core::mem::size_of::<TreeTransformLayout>(),
+            ))
+            .saturating_add(vector_bytes(
+                self.layouts.shapes.capacity(),
+                core::mem::size_of::<usize>(),
+            ))
+            .saturating_add(vector_bytes(
+                self.layouts.strides.capacity(),
+                core::mem::size_of::<isize>(),
+            ))
+            .saturating_add(vector_bytes(
+                self.layouts.packed_strides.capacity(),
+                core::mem::size_of::<isize>(),
+            ))
+            .saturating_add(vector_bytes(
+                self.layouts.fused_dims.capacity(),
+                core::mem::size_of::<usize>(),
+            ))
+            .saturating_add(vector_bytes(
+                self.layouts.fused_dst_strides.capacity(),
+                core::mem::size_of::<isize>(),
+            ))
+            .saturating_add(vector_bytes(
+                self.layouts.fused_src_strides.capacity(),
+                core::mem::size_of::<isize>(),
+            ))
+            .saturating_add(vector_bytes(
+                self.layouts.fused_slots.capacity(),
+                core::mem::size_of::<FusedSlot>(),
+            ))
+            .saturating_add(vector_bytes(
+                self.recoupling_coefficients_dst_src.capacity(),
+                core::mem::size_of::<T>(),
+            ))
+            .saturating_add(vector_bytes(
+                self.inactive_dst_layouts.capacity(),
+                core::mem::size_of::<usize>(),
+            ))
+            .saturating_add(vector_bytes(
+                self.recoupling_plan.block_indices.capacity(),
+                core::mem::size_of::<usize>(),
+            ))
+            .saturating_add(vector_bytes(
+                self.recoupling_plan.jobs.capacity(),
+                core::mem::size_of::<DenseGemmBatchJob>(),
+            ))
+            .saturating_add(vector_bytes(
+                self.recoupling_plan.runs.capacity(),
+                core::mem::size_of::<usize>(),
+            ))
+            .saturating_add(vector_bytes(
+                self.parallel_schedule.singles.capacity(),
+                core::mem::size_of::<TreeTransformSingleReplay>(),
+            ))
+            .saturating_add(vector_bytes(
+                self.parallel_schedule.pack_columns.capacity(),
+                core::mem::size_of::<TreeTransformPackReplay>(),
+            ))
+            .saturating_add(vector_bytes(
+                self.parallel_schedule.scatter_columns.capacity(),
+                core::mem::size_of::<TreeTransformScatterReplay>(),
+            ))
+            .saturating_add(vector_bytes(
+                self.parallel_schedule.scatter_groups.capacity(),
+                core::mem::size_of::<TreeTransformScatterGroupReplay>(),
+            ))
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TreeTransformRecouplingPlan {
     source_len: usize,
@@ -1552,6 +1641,27 @@ mod tests {
         assert!(compiled.layouts().fused_baked(0).is_some());
         assert_eq!(compiled.layouts().max_fused_rank(), 9);
         assert!(compiled.baked_layouts_match_recomputed());
+    }
+
+    #[test]
+    fn retained_payload_charge_tracks_capacity_not_diagnostic_lengths() {
+        // What: admission accounting sees retained spare capacity that the
+        // existing len-based layout diagnostics intentionally omit.
+        let block = BlockSpec::with_key(BlockKey::ordinal(0), vec![2], vec![1], 0).unwrap();
+        let structure = BlockStructure::from_blocks_with_rank(1, vec![block]).unwrap();
+        let mut compiled = TreeTransformStructure::compile_structures(
+            &structure,
+            &structure,
+            &[TreeTransformBlockSpec::single(0, 0, 1.0_f64)],
+        )
+        .unwrap();
+        let diagnostic = compiled.layouts().layout_table_bytes();
+        let charged = compiled.charged_payload_bytes();
+
+        compiled.layouts.shapes.reserve_exact(128);
+
+        assert_eq!(compiled.layouts().layout_table_bytes(), diagnostic);
+        assert!(compiled.charged_payload_bytes() > charged);
     }
 
     #[test]

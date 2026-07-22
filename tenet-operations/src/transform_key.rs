@@ -27,6 +27,17 @@ pub struct TreeTransformOperation {
 }
 
 impl TreeTransformOperation {
+    /// Heap storage retained by this operation beyond its inline value.
+    #[doc(hidden)]
+    pub fn charged_retained_bytes(&self) -> usize {
+        const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
+        ARC_CONTROL_BYTES.saturating_add(
+            self.data
+                .len()
+                .saturating_mul(core::mem::size_of::<usize>()),
+        )
+    }
+
     /// Build a planar transpose operation.
     ///
     /// The two permutations follow TensorKit's `Index2Tuple` convention:

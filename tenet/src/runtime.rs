@@ -8,19 +8,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use num_complex::Complex64;
+pub use tenet_tensors::RuntimeTreeTransformCacheInfo;
 use tenet_tensors::{
-    DenseTreeTransformOperations, TensorContractFusionExecutionContext,
-    TreeTransformBuiltinRuleCacheKey, TreeTransformProductRuleCacheKey,
-    TreeTransformSu3RuleCacheKey,
+    DenseTreeTransformOperations, OperationCachePolicy, RuntimeTreeTransformStore,
+    TensorContractFusionExecutionContext, TreeTransformBuiltinRuleCacheKey,
+    TreeTransformProductRuleCacheKey, TreeTransformSu3RuleCacheKey,
 };
 
 use crate::error::Error;
 use crate::plancache::{Optimizer, PlanCacheConfig};
-/// Re-exported for the prelude: explicit policy for per-runtime operation
-/// artifact caches. RuntimeBuilder defaults to `NoCache`; this expert knob opts
-/// into task-local cache policies when the caller wants them.
-pub use tenet_tensors::OperationCachePolicy;
-
 pub type Ctx<D, Key> = TensorContractFusionExecutionContext<D, Key>;
 pub(crate) type BuiltinKey = TreeTransformBuiltinRuleCacheKey;
 pub(crate) type ProductKey = TreeTransformProductRuleCacheKey<BuiltinKey, BuiltinKey>;
@@ -65,7 +61,7 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
     pub(crate) fn with_config(
         ctx: &tenet_dense::SharedCpuContext,
         gemm_kind: Option<tenet_dense::CpuBackendKind>,
-        operation_cache_policy: Option<OperationCachePolicy>,
+        tree_transform_store: Weak<RuntimeTreeTransformStore<f64>>,
     ) -> Result<Self, Error> {
         let mut ctxs = Self {
             f64:
@@ -90,13 +86,19 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
                 >>::Workspace::default(),
             ),
         };
-        if let Some(policy) = operation_cache_policy {
-            ctxs.set_cache_policy(policy);
-        }
+        ctxs.set_cache_policy(OperationCachePolicy::NoCache);
+        ctxs.f64
+            .tree_context_mut()
+            .cache_mut()
+            .bind_runtime_store(tree_transform_store.clone());
+        ctxs.c64
+            .tree_context_mut()
+            .cache_mut()
+            .bind_runtime_store(tree_transform_store);
         Ok(ctxs)
     }
 
-    pub(crate) fn set_cache_policy(&mut self, policy: OperationCachePolicy) {
+    fn set_cache_policy(&mut self, policy: OperationCachePolicy) {
         self.f64.set_cache_policy(policy);
         self.c64.set_cache_policy(policy);
     }
@@ -128,9 +130,8 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
     }
 
     #[cfg(test)]
-    pub(crate) fn tree_cache_policy_is(&self, expected: OperationCachePolicy) -> bool {
-        self.f64.tree_context().cache().policy() == expected
-            && self.c64.tree_context().cache().policy() == expected
+    pub(crate) fn local_cache_policy_is(&self, expected: OperationCachePolicy) -> bool {
+        self.f64.local_cache_policy_is(expected) && self.c64.local_cache_policy_is(expected)
     }
 
     #[cfg(test)]
@@ -196,10 +197,10 @@ macro_rules! define_runtime_state {
                 dense: Box<dyn tenet_dense::DenseExecutor + Send>,
                 ctx: &tenet_dense::SharedCpuContext,
                 gemm_kind: Option<tenet_dense::CpuBackendKind>,
-                operation_cache_policy: Option<OperationCachePolicy>,
+                tree_transform_store: Weak<RuntimeTreeTransformStore<f64>>,
             ) -> Result<Self, Error> {
                 Ok(Self {
-                    $($field: Ctxs::with_config(ctx, gemm_kind, operation_cache_policy)?,)+
+                    $($field: Ctxs::with_config(ctx, gemm_kind, tree_transform_store.clone())?,)+
                     dense,
                     #[cfg(feature = "cuda")]
                     cuda: None,
@@ -216,8 +217,8 @@ macro_rules! define_runtime_state {
             }
 
             #[cfg(test)]
-            fn tree_cache_policy_is(&self, expected: OperationCachePolicy) -> bool {
-                true $(&& self.$field.tree_cache_policy_is(expected))+
+            fn local_cache_policy_is(&self, expected: OperationCachePolicy) -> bool {
+                true $(&& self.$field.local_cache_policy_is(expected))+
             }
 
             #[cfg(test)]
@@ -257,6 +258,7 @@ struct RuntimeInner {
     state: Mutex<RuntimeState>,
     rand_counter: AtomicU64,
     execution_config: RuntimeExecutionConfig,
+    tree_transform_store: Arc<RuntimeTreeTransformStore<f64>>,
     /// Standalone-op parallelism (#155): rather than hold the coarse `state`
     /// mutex for a whole `contract`/`permute`/factorization, each op leases a
     /// per-rule execution context (and, for factorizations, a dense executor)
@@ -396,7 +398,7 @@ pub(crate) struct RuntimeExecutionConfig {
     /// standalone-op executor pool can re-mint an executor identical to the one
     /// `RuntimeBuilder::build` created (issue #155). `None` uses faer.
     pub(crate) linalg_kind: Option<tenet_dense::CpuBackendKind>,
-    pub(crate) operation_cache_policy: Option<OperationCachePolicy>,
+    pub(crate) tree_transform_store: Weak<RuntimeTreeTransformStore<f64>>,
     /// THE runtime's CPU context: one rayon pool shared by every executor this
     /// runtime mints — the state's, the executor pool's, and all 28 transform
     /// backends of every pooled `TensorExecutionContext`. Without it each
@@ -410,9 +412,9 @@ pub(crate) struct RuntimeExecutionConfig {
 ///
 /// A `Runtime` is built once via [`Runtime::builder`] and then carried
 /// implicitly by every tensor created from it; operations reuse the
-/// runtime's expert-layer caches (contraction plans, tree-transform replays,
-/// dense workspaces) without explicit context arguments. Cloning a `Runtime`
-/// clones a shared handle, not the state.
+/// Runtime-owned completed tree-transform store without explicit context
+/// arguments. Context-local operation caches stay disabled; cloning a
+/// `Runtime` clones a shared handle, not the state.
 ///
 /// Concurrency: the internal state sits behind one coarse `Mutex`, locked
 /// once per tensor operation. The user layer is designed for
@@ -493,12 +495,23 @@ impl Runtime {
         &self.inner.execution_config
     }
 
-    /// Leases a per-rule execution context for one standalone op (#155): pop a
-    /// warm one or mint a fresh config-bound one. The op runs on the leased
+    /// Returns this Runtime's completed tree-transform cache activity.
+    pub fn tree_transform_cache_info(&self) -> RuntimeTreeTransformCacheInfo {
+        self.inner.tree_transform_store.info()
+    }
+
+    /// Clears this Runtime's completed tree-transform cache.
+    pub fn clear_tree_transform_cache(&self) {
+        self.inner.tree_transform_store.clear();
+    }
+
+    /// Leases a per-rule execution context for one standalone op (#155): pop an
+    /// idle one or mint a fresh config-bound one. The op runs on the leased
     /// context, not under the coarse `state` lock, so ops on a shared runtime
     /// run concurrently. Byte-identical to the old locked path: the per-rule
-    /// machinery is the same `Ctxs`, and single-threaded use reuses one pooled
-    /// context (its caches warm exactly as the runtime state's did).
+    /// machinery is the same `Ctxs`. Completed tree transforms are shared by
+    /// the Runtime store regardless of which context is leased; unrelated
+    /// context-local caches remain disabled.
     pub(crate) fn lease_context(&self) -> Result<ContextLease<'_>, Error> {
         let pooled = self
             .inner
@@ -644,9 +657,7 @@ pub struct RuntimeBuilder {
     /// Selected built-in CPU provider for the contraction/recoupling GEMM;
     /// `None` uses faer. Independent of [`Self::linalg_backend`].
     gemm_backend: Option<LinalgBackend>,
-    /// Per-operation tree/dynamic artifact cache policy. Builder default is
-    /// `NoCache`; explicit policies opt into task-local caches.
-    operation_cache_policy: Option<OperationCachePolicy>,
+    tree_transform_cache_byte_budget: usize,
 }
 
 impl Default for RuntimeBuilder {
@@ -660,7 +671,7 @@ impl Default for RuntimeBuilder {
             dense_executor: None,
             linalg_backend: None,
             gemm_backend: None,
-            operation_cache_policy: Some(OperationCachePolicy::NoCache),
+            tree_transform_cache_byte_budget: RuntimeTreeTransformStore::<f64>::DEFAULT_BYTE_BUDGET,
         }
     }
 }
@@ -676,7 +687,10 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("dense_executor", &self.dense_executor.is_some())
             .field("linalg_backend", &self.linalg_backend)
             .field("gemm_backend", &self.gemm_backend)
-            .field("operation_cache_policy", &self.operation_cache_policy)
+            .field(
+                "tree_transform_cache_byte_budget",
+                &self.tree_transform_cache_byte_budget,
+            )
             .finish()
     }
 }
@@ -803,10 +817,10 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Overrides the default `NoCache` operation-artifact policy for execution
-    /// contexts minted by this runtime.
-    pub fn operation_cache_policy(mut self, policy: OperationCachePolicy) -> Self {
-        self.operation_cache_policy = Some(policy);
+    /// Sets the retained-byte budget for completed tree-transform structures.
+    /// A zero budget disables admission.
+    pub fn tree_transform_cache_byte_budget(mut self, bytes: usize) -> Self {
+        self.tree_transform_cache_byte_budget = bytes;
         self
     }
 
@@ -856,8 +870,16 @@ impl RuntimeBuilder {
             ),
         };
         let gemm_kind = self.gemm_backend.map(LinalgBackend::to_kind);
-        let mut state =
-            RuntimeState::with_config(dense, &shared_ctx, gemm_kind, self.operation_cache_policy)?;
+        let tree_transform_store = Arc::new(RuntimeTreeTransformStore::new(
+            self.tree_transform_cache_byte_budget,
+        ));
+        let tree_transform_store_weak = Arc::downgrade(&tree_transform_store);
+        let mut state = RuntimeState::with_config(
+            dense,
+            &shared_ctx,
+            gemm_kind,
+            tree_transform_store_weak.clone(),
+        )?;
         let plan_cache = PlanCacheHome {
             config: self.plan_cache,
             slot: None,
@@ -886,9 +908,10 @@ impl RuntimeBuilder {
                     gemm_kind,
                     recoupling_threads: self.recoupling_threads,
                     linalg_kind,
-                    operation_cache_policy: self.operation_cache_policy,
+                    tree_transform_store: tree_transform_store_weak,
                     shared_ctx,
                 },
+                tree_transform_store,
                 context_pool: Mutex::new(Vec::new()),
                 executor_pool: Mutex::new(Vec::new()),
                 executor_mintable,
@@ -1009,26 +1032,16 @@ mod tests {
         }
     }
 
-    // What: a runtime-level cache policy must configure both the legacy
-    // state-owned contexts and contexts minted later from the runtime config.
+    // What: removing the user cache-policy knob does not activate unrelated
+    // context-local retention inside Runtime-owned execution contexts.
     #[test]
-    fn builder_operation_cache_policy_reaches_state_and_runtime_context() {
-        fn assert_state(runtime: &Runtime, expected: OperationCachePolicy) {
-            let state = runtime.inner.state.lock().unwrap();
-            assert!(state.tree_cache_policy_is(expected));
-        }
+    fn runtime_contexts_keep_local_caches_disabled() {
+        let runtime = Runtime::builder().build().unwrap();
+        let state = runtime.inner.state.lock().unwrap();
+        assert!(state.local_cache_policy_is(OperationCachePolicy::NoCache));
+        drop(state);
 
-        let default = Runtime::builder().build().unwrap();
-        assert_state(&default, OperationCachePolicy::NoCache);
-        let context = crate::tensor::TensorExecutionContext::for_runtime(&default).unwrap();
-        assert!(context.tree_cache_policy_is(OperationCachePolicy::NoCache));
-
-        let lru = Runtime::builder()
-            .operation_cache_policy(OperationCachePolicy::task_local_lru(7))
-            .build()
-            .unwrap();
-        assert_state(&lru, OperationCachePolicy::task_local_lru(7));
-        let context = crate::tensor::TensorExecutionContext::for_runtime(&lru).unwrap();
-        assert!(context.tree_cache_policy_is(OperationCachePolicy::task_local_lru(7)));
+        let context = crate::tensor::TensorExecutionContext::for_runtime(&runtime).unwrap();
+        assert!(context.local_cache_policy_is(OperationCachePolicy::NoCache));
     }
 }

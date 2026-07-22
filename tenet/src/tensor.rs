@@ -601,7 +601,7 @@ macro_rules! define_tensor_execution_context {
                     $($field: Ctxs::with_config(
                         &config.shared_ctx,
                         config.gemm_kind,
-                        config.operation_cache_policy,
+                        config.tree_transform_store.clone(),
                     )?,)+
                 };
                 if let Some(threads) = config.recoupling_threads {
@@ -644,12 +644,13 @@ macro_rules! define_tensor_execution_context {
             }
 
             #[cfg(test)]
-            pub(crate) fn tree_cache_policy_is(
+            pub(crate) fn local_cache_policy_is(
                 &self,
                 expected: tenet_tensors::OperationCachePolicy,
             ) -> bool {
-                true $(&& self.$field.tree_cache_policy_is(expected))+
+                true $(&& self.$field.local_cache_policy_is(expected))+
             }
+
         }
     };
 }
@@ -10880,12 +10881,122 @@ mod shared_context_tests {
         let default = Runtime::builder().build().expect("default runtime");
         assert_runtime_and_context(&default, 1);
     }
+
+    #[test]
+    fn runtime_contexts_share_one_content_keyed_completed_transform() {
+        // What: independently minted contexts and a Runtime clone reuse one
+        // SU(2) completed transform while replay remains bit-identical.
+        let runtime = Runtime::builder().build().unwrap();
+        let runtime_clone = runtime.clone();
+        let space = Space::su2([(0, 2), (1, 2), (2, 1)]).unwrap();
+        let source =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&space, &space], [&space], 475_001)
+                .unwrap();
+        let expected = source.permute(&[1], &[2, 0]).unwrap();
+        let complex_source = source.to_c64();
+        let complex_expected = expected.to_c64();
+        let mut first = expected.scale(f64::NAN).unwrap();
+        let mut second = complex_expected
+            .scale_c64(Complex64::new(f64::NAN, f64::NAN))
+            .unwrap();
+        let mut first_context = TensorExecutionContext::for_runtime(&runtime).unwrap();
+        let mut second_context = TensorExecutionContext::for_runtime(&runtime_clone).unwrap();
+
+        first_context
+            .permute_overwrite_into(&mut first, &source, &[1], &[2, 0], Scalar::F64(1.0))
+            .unwrap();
+        second_context
+            .permute_overwrite_into(
+                &mut second,
+                &complex_source,
+                &[1],
+                &[2, 0],
+                Scalar::C64(Complex64::new(1.0, 0.0)),
+            )
+            .unwrap();
+
+        assert_eq!(
+            first.ordinary_body().space.raw().structure(),
+            expected.ordinary_body().space.raw().structure()
+        );
+        assert_eq!(
+            second.ordinary_body().space.raw().structure(),
+            complex_expected.ordinary_body().space.raw().structure()
+        );
+        assert_eq!(first.data(), expected.data());
+        assert_eq!(second.data_c64(), complex_expected.data_c64());
+        let info = runtime.tree_transform_cache_info();
+        assert_eq!(info.entries(), 1);
+        assert_eq!(info.misses(), 1);
+        assert_eq!(info.hits(), 2);
+    }
+
+    #[test]
+    fn runtime_transform_stores_are_isolated_and_expired_weak_handles_run_eagerly() {
+        // What: Runtime stores are isolated, clear is local, and a detached
+        // context keeps executing after its Runtime store owner is gone.
+        let runtime_a = Runtime::builder().build().unwrap();
+        let runtime_b = Runtime::builder().build().unwrap();
+        let space = Space::su2([(0, 2), (1, 2), (2, 1)]).unwrap();
+        let source_a =
+            Tensor::rand_with_seed(&runtime_a, Dtype::F64, [&space, &space], [&space], 475_002)
+                .unwrap();
+        let source_b =
+            Tensor::rand_with_seed(&runtime_b, Dtype::F64, [&space, &space], [&space], 475_002)
+                .unwrap();
+        let expected_a = source_a.permute(&[1], &[2, 0]).unwrap();
+        let expected_b = source_b.permute(&[1], &[2, 0]).unwrap();
+        assert_eq!(runtime_a.tree_transform_cache_info().entries(), 1);
+        assert_eq!(runtime_b.tree_transform_cache_info().entries(), 1);
+
+        runtime_a.clear_tree_transform_cache();
+        assert_eq!(runtime_a.tree_transform_cache_info().entries(), 0);
+        assert_eq!(runtime_a.tree_transform_cache_info().misses(), 0);
+        assert_eq!(runtime_b.tree_transform_cache_info().entries(), 1);
+        assert_eq!(runtime_b.tree_transform_cache_info().misses(), 1);
+
+        let mut context = TensorExecutionContext::for_runtime(&runtime_b).unwrap();
+        let store = runtime_b.execution_config().tree_transform_store.clone();
+        let UserBoundSpace::SU2(source_space) = source_b.ordinary_body().space.as_ref() else {
+            unreachable!()
+        };
+        let rule = Arc::clone(source_space.provider_arc());
+        let source_structure = Arc::clone(source_space.space().structure());
+        let destination_structure = Arc::clone(expected_b.ordinary_body().space.raw().structure());
+        let source_data = source_b.data().to_vec();
+        let expected_data = expected_b.data().to_vec();
+        let operation = TreeTransformOperation::permute([1], [2, 0]);
+        context.release_runtime_binding();
+        drop(source_a);
+        drop(source_b);
+        drop(expected_a);
+        drop(expected_b);
+        drop(runtime_a);
+        drop(runtime_b);
+        assert!(store.upgrade().is_none());
+
+        let mut actual = vec![f64::NAN; expected_data.len()];
+        context
+            .su2
+            .f64
+            .tree_context_mut()
+            .tree_transform_dyn_overwrite_into_ref(
+                rule.as_ref(),
+                &operation,
+                &destination_structure,
+                &source_structure,
+                &mut actual,
+                &source_data,
+                1.0,
+            )
+            .unwrap();
+        assert_eq!(actual, expected_data);
+    }
 }
 
 #[cfg(test)]
 mod bound_provider_tests {
     use super::*;
-    use crate::runtime::OperationCachePolicy;
 
     #[test]
     fn construction_and_svd_factors_share_one_provider_allocation() {
@@ -10954,10 +11065,7 @@ mod bound_provider_tests {
     #[test]
     fn checked_identity_permute_overwrite_writes_without_preparing_tree_transform() {
         // What: exact identity axes are a direct scaled overwrite, not a cached tree transform.
-        let runtime = Runtime::builder()
-            .operation_cache_policy(OperationCachePolicy::TaskLocal)
-            .build()
-            .unwrap();
+        let runtime = Runtime::builder().build().unwrap();
         let space = Space::z2([(0, 3), (1, 2)]);
         let source =
             Tensor::rand_with_seed(&runtime, Dtype::F64, [&space, &space], [&space], 41).unwrap();
@@ -10988,10 +11096,7 @@ mod bound_provider_tests {
     #[test]
     fn identity_permute_overwrite_writes_without_compiling_tree_transform() {
         // What: the non-checked overwrite API takes the same exact-identity direct write.
-        let runtime = Runtime::builder()
-            .operation_cache_policy(OperationCachePolicy::TaskLocal)
-            .build()
-            .unwrap();
+        let runtime = Runtime::builder().build().unwrap();
         let space = Space::z2([(0, 3), (1, 2)]);
         let source =
             Tensor::rand_with_seed(&runtime, Dtype::F64, [&space, &space], [&space], 43).unwrap();

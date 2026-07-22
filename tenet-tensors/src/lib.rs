@@ -118,7 +118,8 @@ pub use tensortrace::{
 pub use tree_context::TreeTransformExecutionContext;
 pub use tree_transform::{
     build_all_codomain_tree_transform_group_plan, build_generic_tree_pair_transform_group_plan,
-    build_tree_pair_transform_group_plan, build_tree_transform_group_plan, TreePairTransformCache,
+    build_tree_pair_transform_group_plan, build_tree_transform_group_plan,
+    RuntimeTreeTransformCacheInfo, RuntimeTreeTransformStore, TreePairTransformCache,
     TreeTransformBlockSpec, TreeTransformBuiltinRuleCacheKey, TreeTransformCache,
     TreeTransformCacheStats, TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
     TreeTransformKeyBlockSpec, TreeTransformOperation, TreeTransformOperationKind,

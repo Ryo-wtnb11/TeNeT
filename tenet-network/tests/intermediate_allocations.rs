@@ -1045,12 +1045,9 @@ fn registry_rejects_zero_sentinels_and_deduplicates_pointers() {
 #[test]
 fn rank_nine_cached_permutation_has_no_caller_thread_operation_key_allocation() {
     let _test_guard = lock_unpoisoned(&TEST_LOCK);
-    let runtime = Runtime::builder()
-        .operation_cache_policy(OperationCachePolicy::TaskLocal)
-        .build()
-        .unwrap();
+    let runtime = Runtime::builder().build().unwrap();
     // What: SU(2) covers the non-Unique recoupling path through a
-    // context-owned completed structure.
+    // Runtime-owned completed structure.
     let space = Space::su2([(0, 1)]).unwrap();
     let source = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space; 9], [], 31_901).unwrap();
     let axes = [8, 7, 6, 5, 4, 3, 2, 1, 0];

@@ -2,7 +2,10 @@ mod cache;
 mod operation;
 mod plan;
 
-pub use cache::{TreePairTransformCache, TreeTransformCache, TreeTransformCacheStats};
+pub use cache::{
+    RuntimeTreeTransformCacheInfo, RuntimeTreeTransformStore, TreePairTransformCache,
+    TreeTransformCache, TreeTransformCacheStats,
+};
 pub use operation::{
     TreeTransformBuiltinRuleCacheKey, TreeTransformOperation, TreeTransformOperationKind,
     TreeTransformProductRuleCacheKey, TreeTransformRuleCacheKey, TreeTransformSu3RuleCacheKey,
