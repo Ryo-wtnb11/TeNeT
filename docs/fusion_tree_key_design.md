@@ -1,9 +1,9 @@
-> **Current implementation boundary (issues #249 and #322):** complete
-> tree-transform plans and structures are reused only in the owning execution
-> context. Source-column recoupling rows are compile-local: an exact plan hit
-> already owns the whole transform, and measured partial-row reuse was slower
-> than ordered whole-block eager compilation. Cache bounds remain explicit
-> policy work. The former automatic v1/v2 disk
+> **Current implementation boundary (issues #249, #322, and #472):** completed
+> tree-transform structures are reused only in the owning execution context.
+> Semantic group plans and source-column recoupling rows are compile-local: an
+> exact structure hit already owns the whole transform, and measured partial
+> reuse was slower than ordered whole-block eager compilation. A Runtime-owned
+> store remains deferred. The former automatic v1/v2 disk
 > execution-plan cache has been retired, so stale `tree_transform_plans_v1.bin` and
 > `tree_transform_plans_v2.bin` files are ignored and may be deleted manually.
 > The persistent-cache sections below are historical design exploration, not
@@ -75,8 +75,9 @@ Migration from the pre-N3b API:
   the same non-aliasing requirement. The mandatory coupled tree sector has no
   direct QSpace-tree counterpart because QSpace stores block quantum-number
   records rather than fusion trees.
-- TeNeT therefore keeps validated complete tree-transform plans and structures
-  in an explicit execution context, while recoupling rows remain compile-local.
+- TeNeT therefore keeps only validated completed tree-transform structures in
+  an explicit execution context, while semantic group plans and recoupling
+  rows remain compile-local. A Runtime-owned store remains deferred.
   This preserves TensorKit's complete-transform reuse boundary and QSpace's
   distinction between reusable category data and workload-specific lowered
   execution state without a second partial representation.
@@ -478,9 +479,10 @@ rank は dynamic のままです。
 
 ## 3.7 Runtime cache key
 
-> **Superseded by issue #249:** this section records the rejected retained-row
-> design. Production now keeps rows compile-local and caches only complete
-> transform plans and structures in the explicit execution context.
+> **Superseded by issues #249 and #472:** this section records the rejected
+> retained-row design. Production keeps rows and semantic group plans
+> compile-local and caches only completed structures in the explicit execution
+> context. A Runtime-owned store remains deferred.
 
 recoupling row memo の最終 key は、概念的にはこうです。
 
