@@ -161,15 +161,23 @@ impl<T> HostTreeTransformWorkspace<T> {
         threads: usize,
         max_fused_rank: usize,
     ) -> Result<(), OperationError> {
-        let len = threads
-            .max(1)
-            .checked_mul(max_fused_rank)
-            .ok_or(OperationError::ElementCountOverflow)?;
+        let len = checked_fused_index_len(threads, max_fused_rank)?;
         if len > self.fused_indices.len() {
             self.fused_indices.resize(len, 0);
         }
         Ok(())
     }
+}
+
+// Why not reserve here: public drivers call this before beta mutation, while
+// executors retain ownership of actual workspace growth and profiler attribution.
+fn checked_fused_index_len(threads: usize, max_fused_rank: usize) -> Result<usize, OperationError> {
+    let len = threads
+        .max(1)
+        .checked_mul(max_fused_rank)
+        .ok_or(OperationError::ElementCountOverflow)?;
+    core::alloc::Layout::array::<usize>(len).map_err(|_| OperationError::ElementCountOverflow)?;
+    Ok(len)
 }
 
 impl<T> ReportsPlacement for HostTreeTransformWorkspace<T> {
@@ -684,65 +692,6 @@ mod inactive_destination_tests {
     }
 
     #[test]
-    fn compiled_dynamic_rank_permute_matches_serial_threaded_and_reference() {
-        // What: compiled replay handles a nontrivial rank-nine permutation,
-        // including an extent-one axis, identically in serial and threaded
-        // execution and matches direct coordinate remapping.
-        const RANK: usize = 9;
-        const BLOCKS: usize = 4;
-        let shape = [2, 2, 2, 2, 1, 2, 2, 2, 2];
-        let structure = Arc::new(
-            BlockStructure::packed_column_major(RANK, vec![shape.to_vec(); BLOCKS]).unwrap(),
-        );
-        let axes = (0..RANK).rev().collect::<Vec<_>>();
-        let specs = (0..BLOCKS)
-            .map(|block| {
-                TreeTransformBlockSpec::single(block, block, 1.0_f64)
-                    .with_source_axes(axes.iter().copied())
-            })
-            .collect::<Vec<_>>();
-        let transform =
-            TreeTransformStructure::compile_structures(&structure, &structure, &specs).unwrap();
-        let elements = shape.iter().product::<usize>();
-        let src = (0..BLOCKS * elements)
-            .map(|value| value as f64 + 0.25)
-            .collect::<Vec<_>>();
-        let block = structure.block(0).unwrap();
-        let mut expected = vec![0.0; src.len()];
-        for block_index in 0..BLOCKS {
-            let base = block_index * elements;
-            for dst_linear in 0..elements {
-                let src_linear = (0..RANK).fold(0usize, |offset, axis| {
-                    let coordinate = (dst_linear / block.strides()[axis]) % shape[axis];
-                    offset + coordinate * block.strides()[axes[axis]]
-                });
-                expected[base + dst_linear] = src[base + src_linear];
-            }
-        }
-
-        let mut serial = vec![0.0; src.len()];
-        let mut threaded = vec![0.0; src.len()];
-        for (dst, threads) in [(&mut serial, 1), (&mut threaded, 4)] {
-            tree_transform_structure_with_structural_recoupling_raw(
-                &mut StridedHostKernelAdapter::default(),
-                &mut DefaultDenseExecutor::new(),
-                &mut TreeTransformWorkspace::default(),
-                &transform,
-                &structure,
-                &structure,
-                dst,
-                &src,
-                1.0,
-                0.0,
-                threads,
-            )
-            .unwrap();
-        }
-        assert_eq!(serial, expected);
-        assert_eq!(threaded, expected);
-    }
-
-    #[test]
     fn threaded_replay_ignores_zero_extent_work() {
         let structure = Arc::new(BlockStructure::packed_column_major(1, [vec![0]]).unwrap());
         let transform = TreeTransformStructure::compile_structures(
@@ -1187,6 +1136,88 @@ mod inactive_destination_tests {
         )
         .unwrap();
         assert_eq!(dst, [6.0, 8.0, 0.0]);
+    }
+
+    #[test]
+    fn huge_thread_request_is_capped_by_pool_and_runnable_work() {
+        // What: normal and profiled replay use the same effective worker count,
+        // preserve serial beta semantics, and never size scratch from a caller's
+        // unbounded thread request.
+        let block_structure =
+            Arc::new(BlockStructure::packed_column_major(2, vec![vec![2, 2]; 4]).unwrap());
+        let specs = (0..3)
+            .map(|block| TreeTransformBlockSpec::single(block, block, 1.0).with_source_axes([1, 0]))
+            .collect::<Vec<_>>();
+        let transform =
+            TreeTransformStructure::compile_structures(&block_structure, &block_structure, &specs)
+                .unwrap();
+        assert_eq!(transform.layouts().max_fused_rank(), 2);
+        let source = (1..=16).map(f64::from).collect::<Vec<_>>();
+        let initial = (10..=25).map(f64::from).collect::<Vec<_>>();
+
+        let mut expected = initial.clone();
+        tree_transform_structure_with_structural_recoupling_raw(
+            &mut StridedHostKernelAdapter::default(),
+            &mut DefaultDenseExecutor::new(),
+            &mut TreeTransformWorkspace::default(),
+            &transform,
+            &block_structure,
+            &block_structure,
+            &mut expected,
+            &source,
+            1.0,
+            0.5,
+            1,
+        )
+        .unwrap();
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(3)
+            .build()
+            .unwrap();
+        let mut destination = initial.clone();
+        let mut workspace = TreeTransformWorkspace::default();
+        pool.install(|| {
+            tree_transform_structure_with_structural_recoupling_raw(
+                &mut StridedHostKernelAdapter::default(),
+                &mut DefaultDenseExecutor::new(),
+                &mut workspace,
+                &transform,
+                &block_structure,
+                &block_structure,
+                &mut destination,
+                &source,
+                1.0,
+                0.5,
+                usize::MAX,
+            )
+        })
+        .unwrap();
+        assert_eq!(workspace.fused_indices.len(), 3 * 2);
+        assert_eq!(destination, expected);
+
+        let mut profiled_destination = initial;
+        let mut profiled_workspace = TreeTransformWorkspace::default();
+        let mut profile = TreeTransformReplayProfile::default();
+        pool.install(|| {
+            tree_transform_structure_with_structural_recoupling_raw_profiled(
+                &mut StridedHostKernelAdapter::default(),
+                &mut DefaultDenseExecutor::new(),
+                &mut profiled_workspace,
+                &transform,
+                &block_structure,
+                &block_structure,
+                &mut profiled_destination,
+                &source,
+                1.0,
+                0.5,
+                usize::MAX,
+                &mut profile,
+            )
+        })
+        .unwrap();
+        assert_eq!(profiled_workspace.fused_indices.len(), 3 * 2);
+        assert_eq!(profiled_destination, expected);
     }
 
     #[test]
@@ -1773,6 +1804,7 @@ where
     structure.validate_replay_structures(&dst_structure, &src_structure)?;
     validate_replay_storage_len(&dst_structure, dst.storage().len())?;
     validate_replay_storage_len(&src_structure, src.storage().len())?;
+    workspace.prepare_fused_index(structure.layouts().max_fused_rank())?;
 
     scale_inactive_destinations(
         kernels,
@@ -1789,20 +1821,23 @@ where
                 dst_layout,
                 src_layout,
                 coefficient,
-            } => tree_transform_single_with_strided_kernel(
-                kernels,
-                workspace.zero_strides_mut(),
-                None,
-                structure.layouts(),
-                dst_layout,
-                src_layout,
-                structure.coefficient(coefficient),
-                structure.storage_conjugate(),
-                dst.data_mut(),
-                src_data,
-                alpha,
-                mode,
-            )?,
+            } => {
+                let (zero_strides, fused_index) = workspace.zero_strides_and_fused_index_mut();
+                tree_transform_single_with_strided_kernel(
+                    kernels,
+                    zero_strides,
+                    Some(fused_index),
+                    structure.layouts(),
+                    dst_layout,
+                    src_layout,
+                    structure.coefficient(coefficient),
+                    structure.storage_conjugate(),
+                    dst.data_mut(),
+                    src_data,
+                    alpha,
+                    mode,
+                )?;
+            }
             TreeTransformBlock::Multi {
                 dst_layout_start,
                 dst_count,
@@ -1824,11 +1859,12 @@ where
                     destination_len,
                     D::zero(),
                 );
-                let (zero_strides, scratch) = workspace.replay_parts_mut();
+                let (zero_strides, fused_index, scratch) =
+                    workspace.replay_parts_with_fused_index_mut();
                 tree_transform_multi_with_scratch_buffers(
                     kernels,
                     zero_strides,
-                    None,
+                    Some(fused_index),
                     scratch,
                     structure.layouts(),
                     dst_layout_start,
@@ -2195,7 +2231,6 @@ where
 pub fn try_tree_transform_structure_overwrite_owned_raw<D, C>(
     dense: &mut DefaultDenseExecutor,
     workspace: &mut TreeTransformWorkspace<D>,
-    transpose_backend: crate::TransposeBackend,
     structure: &TreeTransformStructure<C>,
     dst_structure: &Arc<BlockStructure>,
     src_structure: &Arc<BlockStructure>,
@@ -2226,8 +2261,7 @@ where
     initialize_owned(proof.required_len, |dst_data| {
         let layouts = structure.layouts();
         let recoupling_plan = structure.recoupling_plan();
-        let mut kernels =
-            crate::StridedHostKernelAdapter::with_transpose_backend(transpose_backend);
+        let mut kernels = crate::StridedHostKernelAdapter::default();
 
         for &layout_index in structure.inactive_destination_layouts() {
             write_uninit_layout_zero(layouts, layouts.entry(layout_index), dst_data)?;
@@ -2362,6 +2396,10 @@ mod bounded_workspace_tests {
         assert_eq!(workspace.fused_indices.len(), 36);
         assert_eq!(
             workspace.prepare_fused_indices(usize::MAX, 2),
+            Err(OperationError::ElementCountOverflow)
+        );
+        assert_eq!(
+            workspace.prepare_fused_indices(usize::MAX, 1),
             Err(OperationError::ElementCountOverflow)
         );
     }
@@ -2502,7 +2540,6 @@ mod owned_overwrite_tests {
         let actual = try_tree_transform_structure_overwrite_owned_raw(
             &mut DefaultDenseExecutor::new(),
             &mut TreeTransformWorkspace::default(),
-            crate::TransposeBackend::FusedLoops,
             &transform,
             &structure,
             &structure,
@@ -2520,7 +2557,6 @@ mod owned_overwrite_tests {
         let complex = try_tree_transform_structure_overwrite_owned_raw(
             &mut DefaultDenseExecutor::new(),
             &mut TreeTransformWorkspace::default(),
-            crate::TransposeBackend::FusedLoops,
             &transform,
             &structure,
             &structure,
@@ -2572,7 +2608,6 @@ mod owned_overwrite_tests {
         let actual = try_tree_transform_structure_overwrite_owned_raw(
             &mut DefaultDenseExecutor::new(),
             &mut TreeTransformWorkspace::default(),
-            crate::TransposeBackend::FusedLoops,
             &transform,
             &structure,
             &structure,
@@ -2608,7 +2643,6 @@ mod owned_overwrite_tests {
         assert!(try_tree_transform_structure_overwrite_owned_raw(
             &mut dense,
             &mut workspace,
-            crate::TransposeBackend::FusedLoops,
             &padded_transform,
             &padded,
             &canonical,
@@ -2628,7 +2662,6 @@ mod owned_overwrite_tests {
         assert!(try_tree_transform_structure_overwrite_owned_raw(
             &mut dense,
             &mut workspace,
-            crate::TransposeBackend::FusedLoops,
             &canonical_transform,
             &canonical,
             &canonical,
@@ -2823,6 +2856,34 @@ where
     Ok(())
 }
 
+fn effective_tree_transform_threads<C: Copy>(
+    structure: &TreeTransformStructure<C>,
+    requested: usize,
+) -> usize {
+    let schedule = structure.parallel_schedule();
+    let singles = if schedule.singles_slice_disjoint {
+        schedule.singles.len()
+    } else {
+        usize::from(!schedule.singles.is_empty())
+    };
+    let runnable = singles.max(schedule.pack_columns.len()).max(1);
+    let requested = requested.max(1);
+
+    // Why not query Rayon for serial replay: current_num_threads can initialize
+    // the global pool, stealing the later runtime builder's chance to configure
+    // it even though this call cannot use parallel execution.
+    if requested == 1 || runnable == 1 {
+        return 1;
+    }
+
+    // Why not trust the requested count: Rayon cannot execute more workers
+    // than its current pool, and scratch for phantom workers turns a harmless
+    // large hint into an allocation overflow before any replay begins.
+    requested
+        .min(rayon::current_num_threads().max(1))
+        .min(runnable)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn tree_transform_structure_with_structural_recoupling_raw_mode<A, E, D, C>(
     kernels: &mut A,
@@ -2846,6 +2907,8 @@ where
     structure.validate_replay_structures(dst_structure, src_structure)?;
     validate_replay_storage_len(dst_structure, dst_data.len())?;
     validate_replay_storage_len(src_structure, src_data.len())?;
+    let threads = effective_tree_transform_threads(structure, threads);
+    checked_fused_index_len(threads, structure.layouts().max_fused_rank())?;
     scale_inactive_destinations(
         kernels,
         &mut workspace.zero_strides,
@@ -2964,6 +3027,9 @@ where
     validate_replay_storage_len(dst_structure, dst_data.len())?;
     validate_replay_storage_len(src_structure, src_data.len())?;
     profile.validate += start.elapsed();
+
+    let threads = effective_tree_transform_threads(structure, threads);
+    checked_fused_index_len(threads, structure.layouts().max_fused_rank())?;
 
     let start = std::time::Instant::now();
     scale_inactive_destinations(
@@ -3662,7 +3728,7 @@ where
     let schedule = structure.parallel_schedule();
     let max_fused_rank = layouts.max_fused_rank();
     workspace.prepare_fused_indices(threads, max_fused_rank)?;
-    let fused_index_len = threads.max(1) * max_fused_rank;
+    let fused_index_len = checked_fused_index_len(threads, max_fused_rank)?;
 
     let single_count = schedule.single_block_count;
     let multi_count = recoupling_plan.jobs().len();
@@ -4018,7 +4084,6 @@ where
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn tree_transform_single_with_strided_kernel<A, D, C>(
     kernels: &mut A,

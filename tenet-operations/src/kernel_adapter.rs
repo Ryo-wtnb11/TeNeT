@@ -8,89 +8,6 @@ use crate::{
     RecouplingCoefficientAction,
 };
 
-/// Transpose kernel selection for pure permuted copies (pack / assign-scatter)
-/// in [`StridedHostKernelAdapter`], chosen per-runtime via
-/// `Runtime::builder().transpose_backend(...)` (see `docs/backend_policy.md`).
-/// Backend choice is a performance knob only — routed copies are byte-identical
-/// across backends (checksum-verified in the #114 A/B).
-///
-/// `StridedPerm` is **opt-in, not the default**, on measured numbers (issue
-/// #114, ported from prototype commit b3ca6e5): its per-call plan build loses
-/// badly on the many tiny blocks of small-degeneracy SU(2) replay (d=4 swap
-/// +92%, swap+out +95%; profile: pack x6.8, scatter x6.1) and only wins above
-/// noise on large-block abelian transposes (fZ2 swap+out d=16 -6.5%). The name
-/// says `strided_perm` rather than HPTT because the kernel is `strided_perm`'s
-/// HPTT-*inspired* col-major copy reached through `strided-kernel` (already a
-/// dependency), not a literal HPTT (Springer et al.) binding.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum TransposeBackend {
-    /// The zero-alloc fused loop nest (the default; byte- and
-    /// dispatch-identical to the pre-#114 behavior).
-    #[default]
-    FusedLoops,
-    /// `strided_perm`'s HPTT-style blocked micro-kernel transpose, applied to
-    /// eligible pure permuted copies; ineligible layouts fall back to the
-    /// fused loop.
-    StridedPerm,
-}
-
-/// strided-perm-backed permuted copy `dst = src` over strided views (no scale,
-/// no conjugate). Returns `Ok(true)` when the strided-perm route handled the
-/// copy, `Ok(false)` when the layout is outside its supported class and the
-/// caller must fall back to the fused loop.
-///
-/// The transpose micro-kernel assumes each side has a genuine stride-1 axis
-/// (the classic row-major↔transpose case). A pack that gathers a strided
-/// *slice* of a larger storage can have no stride-1 axis once extent-1 axes
-/// are dropped (its contiguous axis was a singleton) — the kernel would then
-/// treat the smallest-stride axis as if it were stride-1 and silently corrupt.
-/// We detect that and decline. (Guard rationale from prototype b3ca6e5: this
-/// exact pattern corrupted the energy -1.803 vs -1.772 before the guard.)
-#[allow(clippy::too_many_arguments)]
-fn strided_perm_copy<T: Copy + strided_kernel::MaybeSendSync>(
-    dst_data: &mut [T],
-    src_data: &[T],
-    shape: &[usize],
-    dst_strides: &[isize],
-    src_strides: &[isize],
-    dst_offset: isize,
-    src_offset: isize,
-) -> Result<bool, OperationError> {
-    // Drop extent-1 axes (their strides are irrelevant, and the planner is not
-    // robust to extent-1 axes carrying colliding strides). `fused_pair` does the
-    // same normalization.
-    use smallvec::SmallVec;
-    let mut rshape: SmallVec<[usize; 8]> = SmallVec::new();
-    let mut rdst: SmallVec<[isize; 8]> = SmallVec::new();
-    let mut rsrc: SmallVec<[isize; 8]> = SmallVec::new();
-    for axis in 0..shape.len() {
-        if shape[axis] != 1 {
-            rshape.push(shape[axis]);
-            rdst.push(dst_strides[axis]);
-            rsrc.push(src_strides[axis]);
-        }
-    }
-    if rshape.is_empty() {
-        // single element (all axes extent 1)
-        dst_data[dst_offset as usize] = src_data[src_offset as usize];
-        return Ok(true);
-    }
-    // Eligibility: each side needs a real stride-1 axis for the micro-kernel.
-    if !rsrc.contains(&1) || !rdst.contains(&1) {
-        return Ok(false);
-    }
-    // View construction validates the same bounding box fused_pair accesses
-    // (max index = offset + Σ(dim-1)·stride < len), so with the positive-stride
-    // guard it only errors on a genuine out-of-bounds layout — an upstream bug.
-    // Propagating that as a clean error beats declining into a fused panic.
-    let src = strided_kernel::StridedView::new(src_data, &rshape, &rsrc, src_offset)
-        .map_err(crate::strided::error)?;
-    let mut dst = strided_kernel::StridedViewMut::new(dst_data, &rshape, &rdst, dst_offset)
-        .map_err(crate::strided::error)?;
-    strided_kernel::copy_into_col_major(&mut dst, &src).map_err(crate::strided::error)?;
-    Ok(true)
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct FusedLayoutScratch {
     dims: Vec<usize>,
@@ -218,6 +135,22 @@ impl<'a> BakedFusedLayout<'a> {
     }
 
     #[inline]
+    pub(crate) fn from_compiled_normalized_slices(
+        dims: &'a [usize],
+        dst_strides: &'a [isize],
+        src_strides: &'a [isize],
+    ) -> Self {
+        // Why not revalidate here: the compiler validates these exact arena
+        // slices before publishing the immutable layout table.
+        Self {
+            dims,
+            dst_strides,
+            src_strides,
+            _sealed: (),
+        }
+    }
+
+    #[inline]
     pub fn dims(&self) -> &'a [usize] {
         self.dims
     }
@@ -297,8 +230,8 @@ pub(crate) fn normalize_fused_layout(
     let mut fused = 0usize;
     for axis in 1..scratch.dims.len() {
         let extent = scratch.dims[fused] as isize;
-        if scratch.dst_strides[fused] * extent == scratch.dst_strides[axis]
-            && scratch.src_strides[fused] * extent == scratch.src_strides[axis]
+        if scratch.dst_strides[fused].checked_mul(extent) == Some(scratch.dst_strides[axis])
+            && scratch.src_strides[fused].checked_mul(extent) == Some(scratch.src_strides[axis])
         {
             scratch.dims[fused] = scratch.dims[fused]
                 .checked_mul(scratch.dims[axis])
@@ -870,29 +803,16 @@ pub trait HostKernelAdapter<T> {
 /// configuration but never share either scratch source.
 #[derive(Debug, Default)]
 pub struct StridedHostKernelAdapter {
-    /// Selected transpose kernel for pure permuted copies (pack /
-    /// assign-scatter); [`TransposeBackend::FusedLoops`] by default. See
-    /// [`TransposeBackend`] for why `StridedPerm` is opt-in.
-    pub transpose_backend: TransposeBackend,
     scratch: StridedKernelScratch,
 }
 
 impl Clone for StridedHostKernelAdapter {
     fn clone(&self) -> Self {
-        Self::with_transpose_backend(self.transpose_backend)
+        Self::default()
     }
 }
 
 impl StridedHostKernelAdapter {
-    /// Adapter with an explicit transpose kernel; `Default` is `FusedLoops`.
-    #[inline]
-    pub fn with_transpose_backend(transpose_backend: TransposeBackend) -> Self {
-        Self {
-            transpose_backend,
-            scratch: StridedKernelScratch::default(),
-        }
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn fused_pair_baked_dispatch<T, Apply, ElementOp>(
         &mut self,
@@ -1037,23 +957,6 @@ impl StridedHostKernelAdapter {
             + strided_kernel::MaybeSendSync,
     {
         validate_strided_ranks(shape, dst_strides, src_strides)?;
-        if self.transpose_backend == TransposeBackend::StridedPerm
-            && beta.is_zero()
-            && alpha.is_one()
-            && src_strides.iter().all(|&s| s >= 0)
-            && dst_strides.iter().all(|&s| s >= 0)
-            && strided_perm_copy(
-                dst_data,
-                src_data,
-                shape,
-                dst_strides,
-                src_strides,
-                dst_offset,
-                src_offset,
-            )?
-        {
-            return Ok(());
-        }
         if beta.is_zero() || beta.is_one() {
             let assign = beta.is_zero();
             return self.fused_pair_baked_dispatch(
@@ -1115,23 +1018,6 @@ impl StridedHostKernelAdapter {
             + strided_kernel::MaybeSendSync,
     {
         validate_strided_ranks(shape, dst_strides, src_strides)?;
-        if self.transpose_backend == TransposeBackend::StridedPerm
-            && alpha.is_one()
-            && !source_conjugate
-            && src_strides.iter().all(|&s| s >= 0)
-            && dst_strides.iter().all(|&s| s >= 0)
-            && strided_perm_copy(
-                dst_data,
-                src_data,
-                shape,
-                dst_strides,
-                src_strides,
-                dst_offset,
-                src_offset,
-            )?
-        {
-            return Ok(());
-        }
         self.fused_pair_baked_dispatch(
             index,
             baked,
@@ -2111,312 +1997,5 @@ mod tests {
         // scale_strided scales in place.
         adapter.scale_strided(&mut dst, &[2], &[1], 0, 2.0).unwrap();
         assert_eq!(dst, [-4.0, -6.0]);
-    }
-}
-
-/// Parity tests for the strided-perm transpose route (ported from prototype
-/// commit b3ca6e5). These call `strided_perm_copy` and `fused_pair` directly
-/// and assert byte-equality, independent of any runtime backend selection —
-/// the routing contract (routing never changes results) holds for every
-/// [`TransposeBackend`] value.
-#[cfg(test)]
-mod strided_perm_probe {
-    use super::{
-        fused_pair, strided_perm_copy, StridedHostKernelAdapter, StridedKernelScratch,
-        TransposeBackend,
-    };
-    use crate::kernel_adapter::HostKernelAdapter;
-
-    /// Inclusive max linear index a positive-stride layout reaches.
-    fn span(shape: &[usize], strides: &[isize], offset: isize) -> usize {
-        let mut hi = offset;
-        for (&d, &s) in shape.iter().zip(strides) {
-            hi += (d as isize - 1).max(0) * s;
-        }
-        (hi + 1) as usize
-    }
-
-    /// strided-perm-path output must equal the fused-loop output for every
-    /// layout it accepts (the routing contract: routing never changes results).
-    fn assert_strided_perm_matches_fused(
-        shape: &[usize],
-        dst_strides: &[isize],
-        src_strides: &[isize],
-        dst_off: isize,
-        src_off: isize,
-    ) {
-        let src: Vec<f64> = (0..span(shape, src_strides, src_off))
-            .map(|i| (i as f64) * 0.5 - 3.0)
-            .collect();
-        let dlen = span(shape, dst_strides, dst_off);
-        let mut route = vec![0.0f64; dlen];
-        let mut fused = vec![0.0f64; dlen];
-        let handled = strided_perm_copy(
-            &mut route,
-            &src,
-            shape,
-            dst_strides,
-            src_strides,
-            dst_off,
-            src_off,
-        )
-        .unwrap();
-        assert!(
-            handled,
-            "expected strided-perm to handle shape={shape:?} ds={dst_strides:?} ss={src_strides:?}"
-        );
-        let mut scratch = StridedKernelScratch::default();
-        fused_pair(
-            &mut scratch,
-            &mut fused,
-            &src,
-            shape,
-            dst_strides,
-            src_strides,
-            dst_off,
-            src_off,
-            |d, v| *d = v,
-            |v: f64| v,
-        )
-        .unwrap();
-        assert_eq!(
-            route, fused,
-            "strided-perm != fused for shape={shape:?} ds={dst_strides:?} ss={src_strides:?} \
-             doff={dst_off} soff={src_off}"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::type_complexity)] // fixed-shape test-case table, not a public type
-    fn strided_perm_matches_fused_across_layouts() {
-        // (shape, dst_strides, src_strides, dst_off, src_off) — every case has a
-        // genuine stride-1 axis on each side and positive strides.
-        let cases: &[(&[usize], &[isize], &[isize], isize, isize)] = &[
-            (&[4, 4], &[1, 4], &[4, 1], 0, 0), // 2D square transpose
-            (&[3, 5], &[1, 3], &[5, 1], 0, 0), // 2D rectangular transpose
-            (&[3, 3], &[1, 3], &[3, 1], 5, 7), // 2D with offsets
-            (&[3, 4, 2], &[1, 3, 12], &[1, 10, 40], 0, 0), // 3D gapped sub-block, stride-1 axis0
-            (&[3, 4, 2], &[1, 3, 12], &[4, 1, 16], 0, 0), // 3D, src stride-1 on axis1
-            (&[2, 3, 2, 2], &[1, 2, 6, 12], &[24, 8, 1, 4], 0, 0), // 4D permuted
-            (&[1, 4, 1, 4], &[1, 1, 4, 4], &[9, 1, 9, 8], 0, 0), // extent-1 mixed, reduces to [4,4]
-            (&[6, 6], &[1, 6], &[6, 1], 0, 0), // larger transpose (hits blocking)
-        ];
-        for &(shape, ds, ss, doff, soff) in cases {
-            assert_strided_perm_matches_fused(shape, ds, ss, doff, soff);
-        }
-    }
-
-    #[test]
-    fn declines_strided_slice_without_stride1_axis() {
-        // Strided slice of a larger buffer: reduced strides [168,42] have no
-        // stride-1 axis (its contiguous axis was a singleton). The kernel cannot
-        // do this correctly, so the wrapper must decline (return false) and leave
-        // dst untouched. This is the exact pattern that corrupted the energy
-        // (-1.803 vs -1.772) before the guard existed.
-        let src = vec![0.0f64; 4096];
-        let shape = [4usize, 4];
-        let mut dst = [7.0f64; 16];
-        let handled = strided_perm_copy(&mut dst, &src, &shape, &[1, 4], &[168, 42], 0, 0).unwrap();
-        assert!(!handled, "must decline the no-stride-1 strided slice");
-        assert!(
-            dst.iter().all(|&x| x == 7.0),
-            "dst must be untouched when declined"
-        );
-    }
-
-    #[test]
-    fn declines_when_only_dst_has_stride1() {
-        // dst has a stride-1 axis but src does not (both sides are required).
-        let src = vec![1.0f64; 4096];
-        let handled =
-            strided_perm_copy(&mut [0.0f64; 16], &src, &[4, 4], &[1, 4], &[10, 40], 0, 0).unwrap();
-        assert!(!handled, "must decline when src lacks a stride-1 axis");
-    }
-
-    #[test]
-    fn all_extent1_copies_single_element() {
-        let src = [42.0f64, 99.0];
-        let mut dst = [0.0f64, 0.0];
-        let handled = strided_perm_copy(&mut dst, &src, &[1, 1], &[1, 1], &[1, 1], 1, 1).unwrap();
-        assert!(handled);
-        assert_eq!(
-            dst[1], src[1],
-            "single-element copy must move src[off] to dst[off]"
-        );
-    }
-
-    #[test]
-    fn transposes_genuine_case_correctly() {
-        // Genuine transpose against a hand-computed reference (not just fused):
-        // src row-major [3,1], dst col-major [1,2]. dst[i+2j] == src[3i+j].
-        let src = [1.0f64, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let mut dst = [0.0f64; 6];
-        let handled = strided_perm_copy(&mut dst, &src, &[2, 3], &[1, 2], &[3, 1], 0, 0).unwrap();
-        assert!(handled, "genuine transpose must be handled by strided-perm");
-        let mut expect = [0.0f64; 6];
-        for i in 0..2 {
-            for j in 0..3 {
-                expect[i + 2 * j] = src[3 * i + j];
-            }
-        }
-        assert_eq!(
-            dst, expect,
-            "strided-perm transpose disagrees with manual copy"
-        );
-    }
-
-    /// #104-style differential test through the PUBLIC adapter: the default
-    /// (`FusedLoops`) adapter and a `StridedPerm` adapter must byte-match on an
-    /// eligible transpose layout, for both `copy_scale_strided` (pack) and
-    /// `axpby_strided` (assign-scatter) — pins that selecting the backend
-    /// changes nothing but which kernel runs.
-    #[test]
-    fn adapter_backends_byte_match_on_eligible_transpose() {
-        let shape = [6usize, 5];
-        let ss = [5isize, 1]; // src row-major
-        let ds = [1isize, 6]; // dst col-major => transpose, both sides stride-1
-        let src: Vec<f64> = (0..30).map(|i| i as f64 * 0.25 - 2.0).collect();
-
-        // Reference: the raw route (also asserts the layout is eligible).
-        let mut route = vec![0.0f64; 30];
-        assert!(
-            strided_perm_copy(&mut route, &src, &shape, &ds, &ss, 0, 0).unwrap(),
-            "layout must be route-eligible"
-        );
-
-        let mut fused_adapter = StridedHostKernelAdapter::default();
-        let mut perm_adapter =
-            StridedHostKernelAdapter::with_transpose_backend(TransposeBackend::StridedPerm);
-        for adapter in [&mut fused_adapter, &mut perm_adapter] {
-            let backend = adapter.transpose_backend;
-            let mut pack = vec![0.0f64; 30];
-            adapter
-                .copy_scale_strided(&mut pack, &src, &shape, &ds, &ss, 0, 0, false, 1.0)
-                .unwrap();
-            assert_eq!(pack, route, "copy_scale_strided mismatch for {backend:?}");
-
-            let mut scatter = vec![0.0f64; 30];
-            adapter
-                .axpby_strided(&mut scatter, &src, &shape, &ds, &ss, 0, 0, 1.0, 0.0)
-                .unwrap();
-            assert_eq!(scatter, route, "axpby_strided mismatch for {backend:?}");
-        }
-    }
-
-    /// Observes which route the adapter's `transpose_backend` field actually
-    /// selects. Routed copies are byte-identical by design, so the routes are
-    /// distinguished at the error boundary instead: on an eligible layout whose
-    /// destination is one element too short, the strided-perm route returns a
-    /// clean `Err` (StridedView bounding-box validation) while the fused loop
-    /// panics on its safe indexing. Each behavior is unique to its route, so
-    /// this pins that the adapter field — not an env var, not a global —
-    /// switches the dispatch.
-    #[test]
-    fn transpose_backend_field_switches_the_route() {
-        let shape = [4usize, 4];
-        let ss = [4isize, 1];
-        let ds = [1isize, 4]; // eligible transpose layout
-        let src: Vec<f64> = (0..16).map(|i| i as f64).collect();
-
-        // StridedPerm: view validation rejects the short destination cleanly.
-        let mut perm_adapter =
-            StridedHostKernelAdapter::with_transpose_backend(TransposeBackend::StridedPerm);
-        let mut short_dst = vec![0.0f64; 15];
-        assert!(
-            perm_adapter
-                .copy_scale_strided(&mut short_dst, &src, &shape, &ds, &ss, 0, 0, false, 1.0)
-                .is_err(),
-            "StridedPerm route must reject the out-of-bounds layout as an error"
-        );
-
-        // FusedLoops (default): the same call reaches the fused loop, whose
-        // safe indexing panics on the out-of-bounds destination instead.
-        let panicked = std::panic::catch_unwind(move || {
-            let mut fused_adapter = StridedHostKernelAdapter::default();
-            let mut short_dst = vec![0.0f64; 15];
-            let _ = fused_adapter.copy_scale_strided(
-                &mut short_dst,
-                &src,
-                &shape,
-                &ds,
-                &ss,
-                0,
-                0,
-                false,
-                1.0,
-            );
-        })
-        .is_err();
-        assert!(
-            panicked,
-            "FusedLoops route must take the fused (panicking) path"
-        );
-    }
-
-    // Crossover micro-bench (ignored; run explicitly):
-    //   cargo test --release -p tenet-operations -- --ignored --nocapture strided_perm_crossover
-    // Prints fused vs strided-perm per-call ns over square transposes of growing
-    // N so the block size where the blocked micro-kernel overtakes the fused loop
-    // (amortizing its per-call plan build) is visible.
-    #[test]
-    #[ignore]
-    fn strided_perm_crossover_bench() {
-        use std::time::Instant;
-        println!("\n  N     fused(ns)   strided-perm(ns)   speedup");
-        for &n in &[4usize, 8, 16, 32, 64, 128, 256, 512] {
-            let src: Vec<f64> = (0..n * n).map(|i| i as f64).collect();
-            let shape = [n, n];
-            let ss = [n as isize, 1]; // src row-major (stride-1 axis1)
-            let ds = [1, n as isize]; // dst col-major (stride-1 axis0) => transpose
-            let mut dst = vec![0.0f64; n * n];
-            let mut scratch = StridedKernelScratch::default();
-            let iters = (1usize << 24 >> (2 * (n as f64).log2() as usize)).max(50);
-            // warm caches
-            fused_pair(
-                &mut scratch,
-                &mut dst,
-                &src,
-                &shape,
-                &ds,
-                &ss,
-                0,
-                0,
-                |d, v| *d = v,
-                |v: f64| v,
-            )
-            .unwrap();
-            let _ = strided_perm_copy(&mut dst, &src, &shape, &ds, &ss, 0, 0);
-            let t = Instant::now();
-            for _ in 0..iters {
-                fused_pair(
-                    &mut scratch,
-                    &mut dst,
-                    &src,
-                    &shape,
-                    &ds,
-                    &ss,
-                    0,
-                    0,
-                    |d, v| *d = v,
-                    |v: f64| v,
-                )
-                .unwrap();
-            }
-            let fused_ns = t.elapsed().as_nanos() as f64 / iters as f64;
-            let t = Instant::now();
-            for _ in 0..iters {
-                let _ = strided_perm_copy(&mut dst, &src, &shape, &ds, &ss, 0, 0);
-            }
-            let route_ns = t.elapsed().as_nanos() as f64 / iters as f64;
-            println!(
-                "{n:4}  {fused_ns:11.1}  {route_ns:15.1}   {:.2}x {}",
-                fused_ns / route_ns,
-                if route_ns < fused_ns {
-                    "<- route wins"
-                } else {
-                    ""
-                }
-            );
-        }
     }
 }

@@ -744,9 +744,8 @@ execution policy — none of it appears in everyday op code:
 - **Device.** `Runtime::builder().cuda(device)` selects CUDA storage (phase 1;
   see the limitations below). The default is the host CPU backend.
 - **Dense backends.** [`prelude::RuntimeBuilder::linalg_backend`] /
-  `gemm_backend` ([`prelude::LinalgBackend`]) and `transpose_backend`
-  ([`prelude::TransposeBackend`]) choose the dense GEMM / transpose kernels.
-  Backends are first-class and selectable, never hardcoded — see
+  `gemm_backend` ([`prelude::LinalgBackend`]) choose the dense factorization /
+  GEMM providers. Backends are first-class and selectable — see
   `docs/backend_policy.md`.
 - **Threads.** `dense_threads` sizes the dense executor pool and
   `recoupling_threads` the tree-transform recoupling. Ops on a shared

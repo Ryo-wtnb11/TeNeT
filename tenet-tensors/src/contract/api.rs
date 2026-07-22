@@ -908,9 +908,7 @@ where
     )?;
     match resolution {
         Resolution::Core(plan) => tensorcontract_core_fusion_blocks_with_plan_into_raw(
-            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                backend.transpose_backend(),
-            ),
+            &mut crate::StridedHostKernelAdapter::default(),
             backend,
             workspace,
             &plan,
@@ -1024,9 +1022,7 @@ where
     )?;
     match resolution {
         Resolution::Core(plan) => tensorcontract_core_fusion_blocks_with_plan_into_raw(
-            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                contract_backend.transpose_backend(),
-            ),
+            &mut crate::StridedHostKernelAdapter::default(),
             contract_backend,
             contract_workspace,
             &plan,

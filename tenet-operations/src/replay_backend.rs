@@ -40,15 +40,6 @@ where
         1
     }
 
-    /// Transpose kernel this backend is configured to run pure permuted
-    /// copies (pack / assign-scatter) with; every replay driver builds its
-    /// [`crate::StridedHostKernelAdapter`] from this value. Defaulted like
-    /// [`Self::recoupling_threads`] so backends without the knob keep the
-    /// fused-loop default.
-    fn transpose_backend(&self) -> crate::TransposeBackend {
-        crate::TransposeBackend::FusedLoops
-    }
-
     fn tree_transform_structure_into<
         const DST_NOUT: usize,
         const DST_NIN: usize,
@@ -95,8 +86,7 @@ where
     ) -> Result<(), OperationError> {
         structure.validate_replay_structures(dst_structure, src_structure)?;
         crate::transform_replay::validate_replay_storage_len(src_structure, src_data.len())?;
-        let mut kernels =
-            StridedHostKernelAdapter::with_transpose_backend(self.transpose_backend());
+        let mut kernels = StridedHostKernelAdapter::default();
         let mut zero_strides = Vec::new();
         crate::transform_replay::zero_tree_transform_destination(
             &mut kernels,
@@ -291,10 +281,6 @@ pub struct DenseTreeTransformOperations<E = DefaultDenseExecutor> {
     recoupling_threads: usize,
     // Size gate paired with recoupling_threads; see TRANSFORM_PARALLEL_MIN_LEN.
     transform_parallel_min_len: usize,
-    // Transpose kernel for pure permuted copies, plumbed from
-    // `Runtime::builder().transpose_backend(...)`; FusedLoops = the default
-    // dispatch, byte- and route-identical to pre-#114 behavior.
-    transpose_backend: crate::TransposeBackend,
 }
 
 impl DenseTreeTransformOperations<DefaultDenseExecutor> {
@@ -335,7 +321,6 @@ impl<E> DenseTreeTransformOperations<E> {
             dense,
             recoupling_threads: 1,
             transform_parallel_min_len: TRANSFORM_PARALLEL_MIN_LEN,
-            transpose_backend: crate::TransposeBackend::FusedLoops,
         }
     }
 
@@ -365,25 +350,9 @@ impl<E> DenseTreeTransformOperations<E> {
         self.recoupling_threads = threads.max(1);
     }
 
-    /// Transpose kernel for pure permuted copies (default
-    /// [`crate::TransposeBackend::FusedLoops`]).
-    #[inline]
-    pub fn transpose_backend(&self) -> crate::TransposeBackend {
-        self.transpose_backend
-    }
-
-    /// Selects the transpose kernel for pure permuted copies. Performance
-    /// knob only — routed copies stay byte-identical; see
-    /// [`crate::TransposeBackend`] for the measured regimes.
-    pub fn set_transpose_backend(&mut self, backend: crate::TransposeBackend) {
-        self.transpose_backend = backend;
-    }
-
-    /// The kernel adapter this backend hands to replay drivers, carrying the
-    /// selected transpose kernel.
     #[inline]
     fn kernel_adapter(&self) -> StridedHostKernelAdapter {
-        StridedHostKernelAdapter::with_transpose_backend(self.transpose_backend)
+        StridedHostKernelAdapter::default()
     }
 
     /// Minimum destination length before `recoupling_threads > 1` goes
@@ -578,11 +547,6 @@ where
     #[inline]
     fn recoupling_threads(&self) -> usize {
         DenseTreeTransformOperations::recoupling_threads(self)
-    }
-
-    #[inline]
-    fn transpose_backend(&self) -> crate::TransposeBackend {
-        DenseTreeTransformOperations::transpose_backend(self)
     }
 
     fn tree_transform_structure_into<

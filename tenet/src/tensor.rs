@@ -607,18 +607,11 @@ macro_rules! define_tensor_execution_context {
                 if let Some(threads) = config.recoupling_threads {
                     context.set_recoupling_threads(threads);
                 }
-                if let Some(backend) = config.transpose_backend {
-                    context.set_transpose_backend(backend);
-                }
                 Ok(context)
             }
 
             fn set_recoupling_threads(&mut self, threads: usize) {
                 $(self.$field.set_recoupling_threads(threads);)+
-            }
-
-            fn set_transpose_backend(&mut self, backend: tenet_tensors::TransposeBackend) {
-                $(self.$field.set_transpose_backend(backend);)+
             }
 
             #[doc(hidden)]

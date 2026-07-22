@@ -1318,9 +1318,7 @@ where
             fusion_block_workspace,
             ..
         } = self;
-        let mut kernels = crate::StridedHostKernelAdapter::with_transpose_backend(
-            contract_backend.transpose_backend(),
-        );
+        let mut kernels = crate::StridedHostKernelAdapter::default();
         let mut gemm = super::fusion_block::BackendRank2Gemm {
             backend: contract_backend,
             workspace: contract_workspace,
@@ -1534,9 +1532,7 @@ where
                     fusion_block_workspace,
                     ..
                 } = self;
-                let mut kernels = crate::StridedHostKernelAdapter::with_transpose_backend(
-                    contract_backend.transpose_backend(),
-                );
+                let mut kernels = crate::StridedHostKernelAdapter::default();
                 let mut gemm = super::fusion_block::BackendRank2Gemm {
                     backend: contract_backend,
                     workspace: contract_workspace,
@@ -1940,9 +1936,7 @@ where
                 let dst_structure = std::sync::Arc::clone(dst.structure());
                 let lhs_structure = std::sync::Arc::clone(lhs.structure());
                 let rhs_structure = std::sync::Arc::clone(rhs.structure());
-                let mut kernels = crate::StridedHostKernelAdapter::with_transpose_backend(
-                    contract_backend.transpose_backend(),
-                );
+                let mut kernels = crate::StridedHostKernelAdapter::default();
                 let mut gemm = super::fusion_block::BackendRank2Gemm {
                     backend: contract_backend,
                     workspace: contract_workspace,
@@ -2238,9 +2232,7 @@ where
         let lhs_structure = std::sync::Arc::clone(lhs_core.structure());
         let rhs_structure = std::sync::Arc::clone(rhs_core.structure());
         block_plan.execute_raw(
-            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                self.contract_backend.transpose_backend(),
-            ),
+            &mut crate::StridedHostKernelAdapter::default(),
             &mut super::fusion_block::BackendRank2Gemm {
                 backend: &mut self.contract_backend,
                 workspace: &mut self.contract_workspace,

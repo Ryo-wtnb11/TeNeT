@@ -1,5 +1,7 @@
 use tenet_core::{ScratchStorage, SimilarStorage};
 
+use crate::OperationError;
+
 /// Crate-internal same-placement scratch allocator.
 ///
 /// This is the operations-layer adapter around `SimilarStorage`; it allocates
@@ -87,6 +89,7 @@ impl<Source, Destination> TreeTransformScratchBuffers<Source, Destination> {
 #[derive(Clone, Debug)]
 pub struct StorageTreeTransformWorkspace<SourceScratch, DestinationScratch> {
     zero_strides: Vec<isize>,
+    fused_index: Vec<usize>,
     packed: Option<TreeTransformScratchBuffers<SourceScratch, DestinationScratch>>,
 }
 
@@ -96,6 +99,7 @@ impl<SourceScratch, DestinationScratch> Default
     fn default() -> Self {
         Self {
             zero_strides: Vec::new(),
+            fused_index: Vec::new(),
             packed: None,
         }
     }
@@ -140,6 +144,35 @@ impl<SourceScratch, DestinationScratch>
     #[inline]
     pub fn zero_strides_mut(&mut self) -> &mut Vec<isize> {
         &mut self.zero_strides
+    }
+
+    pub(crate) fn prepare_fused_index(&mut self, rank: usize) -> Result<(), OperationError> {
+        core::alloc::Layout::array::<usize>(rank)
+            .map_err(|_| OperationError::ElementCountOverflow)?;
+        self.fused_index.resize(rank, 0);
+        Ok(())
+    }
+
+    #[inline]
+    pub(crate) fn zero_strides_and_fused_index_mut(&mut self) -> (&mut Vec<isize>, &mut [usize]) {
+        (&mut self.zero_strides, self.fused_index.as_mut_slice())
+    }
+
+    #[inline]
+    pub(crate) fn replay_parts_with_fused_index_mut(
+        &mut self,
+    ) -> (
+        &mut Vec<isize>,
+        &mut [usize],
+        &mut TreeTransformScratchBuffers<SourceScratch, DestinationScratch>,
+    ) {
+        (
+            &mut self.zero_strides,
+            self.fused_index.as_mut_slice(),
+            self.packed
+                .as_mut()
+                .expect("storage tree-transform scratch prepared before replay"),
+        )
     }
 
     #[inline]
@@ -430,5 +463,23 @@ mod tests {
         assert_eq!(buffers.destination().data, vec![3, 4, 5]);
         assert_eq!(buffers.source().len(), 2);
         assert_eq!(buffers.destination().len(), 3);
+    }
+
+    #[test]
+    fn storage_tree_transform_index_tracks_current_rank_without_losing_capacity() {
+        // What: reusing storage replay workspace for a smaller compiled rank
+        // supplies an exact-length traversal slice while retaining its arena,
+        // and rejects an unrepresentable allocation layout.
+        let mut workspace = StorageTreeTransformWorkspace::<Vec<f64>, Vec<f64>>::default();
+        workspace.prepare_fused_index(9).unwrap();
+        let capacity = workspace.fused_index.capacity();
+        workspace.prepare_fused_index(3).unwrap();
+
+        assert_eq!(workspace.fused_index.len(), 3);
+        assert_eq!(workspace.fused_index.capacity(), capacity);
+        assert_eq!(
+            workspace.prepare_fused_index(usize::MAX),
+            Err(OperationError::ElementCountOverflow)
+        );
     }
 }

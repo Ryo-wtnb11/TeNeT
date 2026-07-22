@@ -1124,11 +1124,12 @@ pub enum TreeTransformBlock {
 /// `rank == 0` is the "absent" sentinel: normalized layouts always have
 /// rank >= 1, so a zero-rank slot means the entry was never baked (a
 /// Single-block source layout, looked up only via its destination twin, or an
-/// inactive destination).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// inactive destination). The compact 32-bit fields match QSpace's runtime-rank
+/// metadata without making a small-rank execution split.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct FusedSlot {
-    start: usize,
-    rank: usize,
+    start: u32,
+    rank: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -1161,14 +1162,30 @@ impl TreeTransformLayoutTable {
         if slot.rank == 0 {
             return None;
         }
-        let start = slot.start;
-        let end = start + slot.rank;
-        BakedFusedLayout::try_from_normalized_slices(
+        let start = slot.start as usize;
+        let end = start + slot.rank as usize;
+        Some(BakedFusedLayout::from_compiled_normalized_slices(
             &self.fused_dims[start..end],
             &self.fused_dst_strides[start..end],
             &self.fused_src_strides[start..end],
-        )
-        .ok()
+        ))
+    }
+
+    /// Heap bytes of the base layout metadata. Test/diagnostic API.
+    #[doc(hidden)]
+    pub fn layout_table_bytes(&self) -> usize {
+        self.entries.len() * core::mem::size_of::<TreeTransformLayout>()
+            + self.shapes.len() * core::mem::size_of::<usize>()
+            + (self.strides.len() + self.packed_strides.len()) * core::mem::size_of::<isize>()
+    }
+
+    /// Heap bytes of the compiled fused-layout arena. Test/diagnostic API.
+    #[doc(hidden)]
+    pub fn baked_arena_bytes(&self) -> usize {
+        self.fused_dims.len() * core::mem::size_of::<usize>()
+            + (self.fused_dst_strides.len() + self.fused_src_strides.len())
+                * core::mem::size_of::<isize>()
+            + self.fused_slots.len() * core::mem::size_of::<FusedSlot>()
     }
 
     pub(crate) fn max_fused_rank(&self) -> usize {
@@ -1198,8 +1215,7 @@ impl TreeTransformLayoutTable {
             &self.strides[range.clone()]
         };
         normalize_fused_layout(&self.shapes[range], dst_strides, src_strides, scratch)?;
-        self.push_baked(entry_index, scratch);
-        Ok(())
+        self.push_baked(entry_index, scratch)
     }
 
     /// Bakes a Single block's fused layout at its destination entry, combining
@@ -1222,14 +1238,27 @@ impl TreeTransformLayoutTable {
             &self.strides[ss..ss + dr],
             scratch,
         )?;
-        self.push_baked(dst_entry, scratch);
-        Ok(())
+        self.push_baked(dst_entry, scratch)
     }
 
-    fn push_baked(&mut self, entry_index: usize, fused: &FusedLayoutScratch) {
-        let start = self.fused_dims.len();
-        let rank = fused.dims().len();
-        self.max_fused_rank = self.max_fused_rank.max(rank);
+    fn push_baked(
+        &mut self,
+        entry_index: usize,
+        fused: &FusedLayoutScratch,
+    ) -> Result<(), OperationError> {
+        BakedFusedLayout::try_from_normalized_slices(
+            fused.dims(),
+            fused.dst_strides(),
+            fused.src_strides(),
+        )?;
+        let start = u32::try_from(self.fused_dims.len())
+            .map_err(|_| OperationError::ElementCountOverflow)?;
+        let rank =
+            u32::try_from(fused.dims().len()).map_err(|_| OperationError::ElementCountOverflow)?;
+        start
+            .checked_add(rank)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        self.max_fused_rank = self.max_fused_rank.max(rank as usize);
         self.fused_dims.extend_from_slice(fused.dims());
         self.fused_dst_strides
             .extend_from_slice(fused.dst_strides());
@@ -1240,6 +1269,7 @@ impl TreeTransformLayoutTable {
                 .resize(entry_index + 1, FusedSlot::default());
         }
         self.fused_slots[entry_index] = FusedSlot { start, rank };
+        Ok(())
     }
 
     /// Differential self-check: every baked role equals the single production
@@ -1522,6 +1552,24 @@ mod tests {
         assert!(compiled.layouts().fused_baked(0).is_some());
         assert_eq!(compiled.layouts().max_fused_rank(), 9);
         assert!(compiled.baked_layouts_match_recomputed());
+    }
+
+    #[test]
+    fn layout_normalization_overflow_returns_a_typed_compile_error() {
+        // What: legal layout metadata whose signed span cannot be represented
+        // is rejected as an overflow instead of panicking during normalization.
+        let max = isize::MAX as usize;
+        let block =
+            BlockSpec::with_key(BlockKey::ordinal(0), vec![2, 2], vec![max - 1, max], 0).unwrap();
+        let structure = BlockStructure::from_blocks_with_rank(2, vec![block]).unwrap();
+        let error = TreeTransformStructure::compile_structures(
+            &structure,
+            &structure,
+            &[TreeTransformBlockSpec::single(0, 0, 1.0_f64)],
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, OperationError::ElementCountOverflow));
     }
 
     #[test]
