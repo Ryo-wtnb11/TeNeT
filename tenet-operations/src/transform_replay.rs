@@ -12,6 +12,7 @@ use tenet_dense::{
 };
 
 use crate::host_scratch::HostScratchBuffer;
+use crate::kernel_adapter::for_each_fused_span;
 use crate::owned_overwrite_buffer::initialize_owned;
 use crate::storage_scratch::{StorageTreeTransformWorkspace, TreeTransformScratchBuffers};
 use crate::strided::offset_to_isize;
@@ -96,6 +97,7 @@ pub struct HostTreeTransformWorkspace<T> {
     chunk_jobs: Vec<DenseGemmBatchJob>,
     chunk_runs: Vec<usize>,
     chunk_scatter_groups: Vec<usize>,
+    fused_indices: Vec<usize>,
 }
 
 pub type TreeTransformWorkspace<T> = HostTreeTransformWorkspace<T>;
@@ -110,6 +112,7 @@ impl<T> Default for HostTreeTransformWorkspace<T> {
             chunk_jobs: Vec::new(),
             chunk_runs: Vec::new(),
             chunk_scatter_groups: Vec::new(),
+            fused_indices: Vec::new(),
         }
     }
 }
@@ -151,6 +154,21 @@ impl<T> HostTreeTransformWorkspace<T> {
         self.packed
             .destination_mut()
             .resize_filled(destination_len, zero);
+    }
+
+    fn prepare_fused_indices(
+        &mut self,
+        threads: usize,
+        max_fused_rank: usize,
+    ) -> Result<(), OperationError> {
+        let len = threads
+            .max(1)
+            .checked_mul(max_fused_rank)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        if len > self.fused_indices.len() {
+            self.fused_indices.resize(len, 0);
+        }
+        Ok(())
     }
 }
 
@@ -663,6 +681,65 @@ mod inactive_destination_tests {
         }
         assert_eq!(threaded, serial);
         assert_eq!(threaded, [11.0, 5.0]);
+    }
+
+    #[test]
+    fn compiled_dynamic_rank_permute_matches_serial_threaded_and_reference() {
+        // What: compiled replay handles a nontrivial rank-nine permutation,
+        // including an extent-one axis, identically in serial and threaded
+        // execution and matches direct coordinate remapping.
+        const RANK: usize = 9;
+        const BLOCKS: usize = 4;
+        let shape = [2, 2, 2, 2, 1, 2, 2, 2, 2];
+        let structure = Arc::new(
+            BlockStructure::packed_column_major(RANK, vec![shape.to_vec(); BLOCKS]).unwrap(),
+        );
+        let axes = (0..RANK).rev().collect::<Vec<_>>();
+        let specs = (0..BLOCKS)
+            .map(|block| {
+                TreeTransformBlockSpec::single(block, block, 1.0_f64)
+                    .with_source_axes(axes.iter().copied())
+            })
+            .collect::<Vec<_>>();
+        let transform =
+            TreeTransformStructure::compile_structures(&structure, &structure, &specs).unwrap();
+        let elements = shape.iter().product::<usize>();
+        let src = (0..BLOCKS * elements)
+            .map(|value| value as f64 + 0.25)
+            .collect::<Vec<_>>();
+        let block = structure.block(0).unwrap();
+        let mut expected = vec![0.0; src.len()];
+        for block_index in 0..BLOCKS {
+            let base = block_index * elements;
+            for dst_linear in 0..elements {
+                let src_linear = (0..RANK).fold(0usize, |offset, axis| {
+                    let coordinate = (dst_linear / block.strides()[axis]) % shape[axis];
+                    offset + coordinate * block.strides()[axes[axis]]
+                });
+                expected[base + dst_linear] = src[base + src_linear];
+            }
+        }
+
+        let mut serial = vec![0.0; src.len()];
+        let mut threaded = vec![0.0; src.len()];
+        for (dst, threads) in [(&mut serial, 1), (&mut threaded, 4)] {
+            tree_transform_structure_with_structural_recoupling_raw(
+                &mut StridedHostKernelAdapter::default(),
+                &mut DefaultDenseExecutor::new(),
+                &mut TreeTransformWorkspace::default(),
+                &transform,
+                &structure,
+                &structure,
+                dst,
+                &src,
+                1.0,
+                0.0,
+                threads,
+            )
+            .unwrap();
+        }
+        assert_eq!(serial, expected);
+        assert_eq!(threaded, expected);
     }
 
     #[test]
@@ -1715,6 +1792,7 @@ where
             } => tree_transform_single_with_strided_kernel(
                 kernels,
                 workspace.zero_strides_mut(),
+                None,
                 structure.layouts(),
                 dst_layout,
                 src_layout,
@@ -1750,6 +1828,7 @@ where
                 tree_transform_multi_with_scratch_buffers(
                     kernels,
                     zero_strides,
+                    None,
                     scratch,
                     structure.layouts(),
                     dst_layout_start,
@@ -1872,6 +1951,7 @@ where
     structure.validate_replay_structures(dst_structure, src_structure)?;
     validate_replay_storage_len(dst_structure, dst_data.len())?;
     validate_replay_storage_len(src_structure, src_data.len())?;
+    workspace.prepare_fused_indices(1, structure.layouts().max_fused_rank())?;
     scale_inactive_destinations(
         kernels,
         &mut workspace.zero_strides,
@@ -1888,6 +1968,7 @@ where
             } => tree_transform_single_with_strided_kernel(
                 kernels,
                 &mut workspace.zero_strides,
+                Some(workspace.fused_indices.as_mut_slice()),
                 structure.layouts(),
                 dst_layout,
                 src_layout,
@@ -2140,6 +2221,7 @@ where
     debug_assert_eq!(proof.nout, nout);
     debug_assert!(Arc::ptr_eq(proof.dst_structure, dst_structure));
     debug_assert!(core::ptr::eq(proof.structure, structure));
+    workspace.prepare_fused_indices(1, structure.layouts().max_fused_rank())?;
 
     initialize_owned(proof.required_len, |dst_data| {
         let layouts = structure.layouts();
@@ -2167,6 +2249,7 @@ where
                 src_data,
                 structure.storage_conjugate(),
                 alpha.scale_by_coefficient(structure.coefficient(coefficient)),
+                &mut workspace.fused_indices,
             )?;
         }
 
@@ -2196,6 +2279,7 @@ where
             for src_index in 0..src_count {
                 pack_layout_into_column(
                     &mut kernels,
+                    Some(workspace.fused_indices.as_mut_slice()),
                     layouts,
                     src_layout_start + src_index,
                     src_data,
@@ -2228,6 +2312,7 @@ where
                     workspace.packed.destination().as_slice(),
                     dst_index * element_count,
                     alpha,
+                    &mut workspace.fused_indices,
                 )?;
             }
         }
@@ -2264,6 +2349,21 @@ mod bounded_workspace_tests {
         let transform =
             TreeTransformStructure::compile_structures(&structure, &structure, &specs).unwrap();
         (structure, transform, source)
+    }
+
+    #[test]
+    fn fused_index_arena_is_grow_only_and_reports_overflow() {
+        // What: execution scratch retains its largest checked worker/rank arena
+        // and reports impossible products without allocating or panicking.
+        let mut workspace = TreeTransformWorkspace::<f64>::default();
+        workspace.prepare_fused_indices(4, 9).unwrap();
+        assert_eq!(workspace.fused_indices.len(), 36);
+        workspace.prepare_fused_indices(1, 2).unwrap();
+        assert_eq!(workspace.fused_indices.len(), 36);
+        assert_eq!(
+            workspace.prepare_fused_indices(usize::MAX, 2),
+            Err(OperationError::ElementCountOverflow)
+        );
     }
 
     #[test]
@@ -2574,54 +2674,44 @@ fn layout_linear_offset(
 /// preserved: the normalization only drops extent-1 axes, reorders, and fuses
 /// contiguous runs — the *set* of visited (dst, src) offsets is unchanged, and
 /// there is no read-after-write within a single writer (`src` is a disjoint,
-/// fully-initialized slice). Rank is bounded by the fusion limit.
+/// fully-initialized slice). The caller supplies runtime-length traversal scratch.
 fn write_fused_uninit<D, F>(
     baked: BakedFusedLayout<'_>,
     dst: &mut [MaybeUninit<D>],
     src: &[D],
     dst_offset: isize,
     src_offset: isize,
+    index: &mut [usize],
     map: F,
-) where
+) -> Result<(), OperationError>
+where
     D: Copy,
     F: Fn(D) -> D,
 {
     let dims = baked.dims();
     let dst_strides = baked.dst_strides();
     let src_strides = baked.src_strides();
-    let rank = dims.len();
-    if rank == 0 || dims.iter().any(|&dim| dim == 0) {
-        return;
-    }
-    let inner_len = dims[0];
-    let inner_dst = dst_strides[0];
-    let inner_src = src_strides[0];
-    let mut index = [0usize; 8];
-    let mut dst_base = dst_offset;
-    let mut src_base = src_offset;
-    loop {
-        for position in 0..inner_len {
-            let dst_position = (dst_base + position as isize * inner_dst) as usize;
-            let src_position = (src_base + position as isize * inner_src) as usize;
-            dst[dst_position].write(map(src[src_position]));
-        }
-        let mut axis = 1;
-        loop {
-            if axis >= rank {
-                return;
+    let Some(index) = index.get_mut(..dims.len()) else {
+        return Err(OperationError::InvalidArgument {
+            message: "fused traversal scratch is shorter than the normalized rank",
+        });
+    };
+    for_each_fused_span(
+        dims,
+        dst_strides,
+        src_strides,
+        dst_offset,
+        src_offset,
+        index,
+        |dst_base, src_base, inner_len, inner_dst, inner_src| {
+            for position in 0..inner_len {
+                let dst_position = (dst_base + position as isize * inner_dst) as usize;
+                let src_position = (src_base + position as isize * inner_src) as usize;
+                dst[dst_position].write(map(src[src_position]));
             }
-            index[axis] += 1;
-            dst_base += dst_strides[axis];
-            src_base += src_strides[axis];
-            if index[axis] < dims[axis] {
-                break;
-            }
-            dst_base -= dims[axis] as isize * dst_strides[axis];
-            src_base -= dims[axis] as isize * src_strides[axis];
-            index[axis] = 0;
-            axis += 1;
-        }
-    }
+        },
+    );
+    Ok(())
 }
 
 // Why-not fuse the zero writer: it has no paired source view, and a pure
@@ -2656,6 +2746,7 @@ fn write_uninit_layout_from_source<D>(
     src: &[D],
     conjugate: bool,
     scale: D,
+    fused_index: &mut [usize],
 ) -> Result<(), OperationError>
 where
     D: Copy + Mul<D, Output = D> + ConjugateValue,
@@ -2669,8 +2760,9 @@ where
             src,
             dst_layout.offset,
             src_layout.offset,
+            fused_index,
             move |value| scale * value.maybe_conj(conjugate),
-        );
+        )?;
         return Ok(());
     }
     for linear in 0..dst_layout.element_count {
@@ -2698,6 +2790,7 @@ fn write_uninit_layout_from_packed<D>(
     packed: &[D],
     packed_offset: usize,
     alpha: D,
+    fused_index: &mut [usize],
 ) -> Result<(), OperationError>
 where
     D: Copy + Mul<D, Output = D>,
@@ -2713,8 +2806,9 @@ where
             packed,
             layout.offset,
             offset_to_isize(packed_offset)?,
+            fused_index,
             move |value| alpha * value,
-        );
+        )?;
         return Ok(());
     }
     for linear in 0..layout.element_count {
@@ -2939,6 +3033,7 @@ where
 {
     let layouts = structure.layouts();
     let recoupling_plan = structure.recoupling_plan();
+    workspace.prepare_fused_indices(1, layouts.max_fused_rank())?;
 
     // All-Single structures (abelian recoupling is diagonal) skip the batch
     // machinery entirely: no pack scratch, no job list, no scatter pass.
@@ -2956,6 +3051,7 @@ where
             tree_transform_single_with_strided_kernel(
                 kernels,
                 &mut workspace.zero_strides,
+                Some(workspace.fused_indices.as_mut_slice()),
                 layouts,
                 dst_layout,
                 src_layout,
@@ -3002,6 +3098,7 @@ where
         tree_transform_single_with_strided_kernel(
             kernels,
             &mut workspace.zero_strides,
+            Some(workspace.fused_indices.as_mut_slice()),
             layouts,
             dst_layout,
             src_layout,
@@ -3050,6 +3147,7 @@ where
         for src_index in 0..src_count {
             pack_layout_into_column(
                 kernels,
+                Some(workspace.fused_indices.as_mut_slice()),
                 layouts,
                 src_layout_start + src_index,
                 src_data,
@@ -3092,6 +3190,7 @@ where
             scatter_column_into_layout(
                 kernels,
                 &mut workspace.zero_strides,
+                Some(workspace.fused_indices.as_mut_slice()),
                 layouts,
                 dst_layout_start + dst_index,
                 workspace.packed.destination().as_slice(),
@@ -3120,6 +3219,8 @@ fn parallel_split(items: usize, threads: usize) -> usize {
 #[allow(clippy::too_many_arguments)]
 fn replay_pack_columns<A, D>(
     mut kernels: A,
+    fused_indices: &mut [usize],
+    max_fused_rank: usize,
     layouts: &TreeTransformLayoutTable,
     items: &[TreeTransformPackReplay],
     packed_source: &mut [D],
@@ -3136,9 +3237,11 @@ where
         return Ok(());
     }
     if threads <= 1 || items.len() == 1 {
+        let fused_index = &mut fused_indices[..max_fused_rank];
         for item in items {
             pack_layout_into_column(
                 &mut kernels,
+                Some(&mut *fused_index),
                 layouts,
                 item.src_layout,
                 src_data,
@@ -3156,11 +3259,14 @@ where
     let (left_items, right_items) = items.split_at(middle);
     let left_threads = threads / 2;
     let right_threads = threads - left_threads;
+    let (left_indices, right_indices) = fused_indices.split_at_mut(left_threads * max_fused_rank);
     let right_kernels = kernels.clone();
     let (left, right) = rayon::join(
         || {
             replay_pack_columns(
                 kernels,
+                left_indices,
+                max_fused_rank,
                 layouts,
                 left_items,
                 left_data,
@@ -3173,6 +3279,8 @@ where
         || {
             replay_pack_columns(
                 right_kernels,
+                right_indices,
+                max_fused_rank,
                 layouts,
                 right_items,
                 right_data,
@@ -3190,6 +3298,8 @@ where
 #[allow(clippy::too_many_arguments)]
 fn replay_single_blocks<A, D, C>(
     mut kernels: A,
+    fused_indices: &mut [usize],
+    max_fused_rank: usize,
     structure: &TreeTransformStructure<C>,
     items: &[TreeTransformSingleReplay],
     dst_data: &mut [D],
@@ -3209,13 +3319,14 @@ where
     }
     if threads <= 1 || items.len() == 1 {
         let mut zero_strides = Vec::new();
+        let fused_index = &mut fused_indices[..max_fused_rank];
         for item in items {
             let dst_layout = structure.layouts().entry(item.dst_layout);
             let src_layout = structure.layouts().entry(item.src_layout);
             let baked = structure.layouts().fused_baked(item.dst_layout);
             let scale = alpha.scale_by_coefficient(structure.coefficient(item.coefficient));
             match mode {
-                DestinationMode::Axpby(beta) => kernels.add_strided_baked(
+                DestinationMode::Axpby(beta) => kernels.add_strided_baked_with_index(
                     &mut zero_strides,
                     dst_data,
                     src_data,
@@ -3228,8 +3339,9 @@ where
                     scale,
                     beta,
                     baked,
+                    &mut *fused_index,
                 )?,
-                DestinationMode::Overwrite => kernels.copy_scale_strided_baked(
+                DestinationMode::Overwrite => kernels.copy_scale_strided_baked_with_index(
                     dst_data,
                     src_data,
                     structure.layouts().shape(dst_layout),
@@ -3240,6 +3352,7 @@ where
                     structure.storage_conjugate(),
                     scale,
                     baked,
+                    &mut *fused_index,
                 )?,
             }
         }
@@ -3254,11 +3367,14 @@ where
     let (left_items, right_items) = items.split_at(middle);
     let left_threads = threads / 2;
     let right_threads = threads - left_threads;
+    let (left_indices, right_indices) = fused_indices.split_at_mut(left_threads * max_fused_rank);
     let right_kernels = kernels.clone();
     let (left, right) = rayon::join(
         || {
             replay_single_blocks(
                 kernels,
+                left_indices,
+                max_fused_rank,
                 structure,
                 left_items,
                 left_data,
@@ -3272,6 +3388,8 @@ where
         || {
             replay_single_blocks(
                 right_kernels,
+                right_indices,
+                max_fused_rank,
                 structure,
                 right_items,
                 right_data,
@@ -3290,6 +3408,8 @@ where
 #[allow(clippy::too_many_arguments)]
 fn replay_scatter_columns<A, D>(
     mut kernels: A,
+    fused_indices: &mut [usize],
+    max_fused_rank: usize,
     layouts: &TreeTransformLayoutTable,
     items: &[TreeTransformScatterReplay],
     dst_data: &mut [D],
@@ -3308,11 +3428,12 @@ where
         return Ok(());
     }
     if threads <= 1 || items.len() == 1 {
+        let fused_index = &mut fused_indices[..max_fused_rank];
         for item in items {
             let layout = layouts.entry(item.dst_layout);
             let baked = layouts.fused_baked(item.dst_layout);
             match mode {
-                DestinationMode::Axpby(beta) => kernels.axpby_strided_baked(
+                DestinationMode::Axpby(beta) => kernels.axpby_strided_baked_with_index(
                     dst_data,
                     packed_destination,
                     layouts.shape(layout),
@@ -3323,8 +3444,9 @@ where
                     alpha,
                     beta,
                     baked,
+                    &mut *fused_index,
                 )?,
-                DestinationMode::Overwrite => kernels.copy_scale_strided_baked(
+                DestinationMode::Overwrite => kernels.copy_scale_strided_baked_with_index(
                     dst_data,
                     packed_destination,
                     layouts.shape(layout),
@@ -3335,6 +3457,7 @@ where
                     false,
                     alpha,
                     baked,
+                    &mut *fused_index,
                 )?,
             }
         }
@@ -3349,11 +3472,14 @@ where
     let (left_items, right_items) = items.split_at(middle);
     let left_threads = threads / 2;
     let right_threads = threads - left_threads;
+    let (left_indices, right_indices) = fused_indices.split_at_mut(left_threads * max_fused_rank);
     let right_kernels = kernels.clone();
     let (left, right) = rayon::join(
         || {
             replay_scatter_columns(
                 kernels,
+                left_indices,
+                max_fused_rank,
                 layouts,
                 left_items,
                 left_data,
@@ -3368,6 +3494,8 @@ where
         || {
             replay_scatter_columns(
                 right_kernels,
+                right_indices,
+                max_fused_rank,
                 layouts,
                 right_items,
                 right_data,
@@ -3387,6 +3515,8 @@ where
 #[allow(clippy::too_many_arguments)]
 fn replay_scatter_groups<A, D>(
     kernels: A,
+    fused_indices: &mut [usize],
+    max_fused_rank: usize,
     layouts: &TreeTransformLayoutTable,
     scatter_columns: &[TreeTransformScatterReplay],
     scatter_groups: &[TreeTransformScatterGroupReplay],
@@ -3411,6 +3541,8 @@ where
             let columns = scatter_groups[group].columns.clone();
             replay_scatter_columns(
                 kernels.clone(),
+                fused_indices,
+                max_fused_rank,
                 layouts,
                 &scatter_columns[columns],
                 dst_data,
@@ -3433,11 +3565,14 @@ where
     let (left_groups, right_groups) = groups.split_at(middle);
     let left_threads = threads / 2;
     let right_threads = threads - left_threads;
+    let (left_indices, right_indices) = fused_indices.split_at_mut(left_threads * max_fused_rank);
     let right_kernels = kernels.clone();
     let (left, right) = rayon::join(
         || {
             replay_scatter_groups(
                 kernels,
+                left_indices,
+                max_fused_rank,
                 layouts,
                 scatter_columns,
                 scatter_groups,
@@ -3454,6 +3589,8 @@ where
         || {
             replay_scatter_groups(
                 right_kernels,
+                right_indices,
+                max_fused_rank,
                 layouts,
                 scatter_columns,
                 scatter_groups,
@@ -3494,9 +3631,10 @@ where
 /// capped by the configured worker count. Replay descriptors and safe split
 /// boundaries are compiled into the structure.
 ///
-/// Per-task state is one cloned kernel adapter (a ZST for the strided adapter)
-/// and one `Vec::new()` zero-strides scratch. Numerical and chunk-descriptor
-/// storage stays in the reused workspace.
+/// Per-task traversal indices are disjoint slices of one workspace arena, split
+/// by the same worker budget as the data. Kernel-adapter clones therefore carry
+/// configuration only on compiled replay; numerical and chunk-descriptor
+/// storage also stays in the reused workspace.
 ///
 /// Profiling attribution is phase-level; per-item clocks across workers would
 /// measure contention, not work.
@@ -3522,6 +3660,9 @@ where
     let layouts = structure.layouts();
     let recoupling_plan = structure.recoupling_plan();
     let schedule = structure.parallel_schedule();
+    let max_fused_rank = layouts.max_fused_rank();
+    workspace.prepare_fused_indices(threads, max_fused_rank)?;
+    let fused_index_len = threads.max(1) * max_fused_rank;
 
     let single_count = schedule.single_block_count;
     let multi_count = recoupling_plan.jobs().len();
@@ -3545,6 +3686,8 @@ where
         if schedule.singles_slice_disjoint {
             replay_single_blocks(
                 kernels.clone(),
+                &mut workspace.fused_indices[..fused_index_len],
+                max_fused_rank,
                 structure,
                 &schedule.singles,
                 dst_data,
@@ -3560,6 +3703,7 @@ where
                 tree_transform_single_with_strided_kernel(
                     kernels,
                     &mut zero_strides,
+                    Some(&mut workspace.fused_indices[..max_fused_rank]),
                     layouts,
                     item.dst_layout,
                     item.src_layout,
@@ -3636,6 +3780,8 @@ where
         let start = profile.as_ref().map(|_| std::time::Instant::now());
         replay_pack_columns(
             kernels.clone(),
+            &mut workspace.fused_indices[..fused_index_len],
+            max_fused_rank,
             layouts,
             &schedule.pack_columns[pack_start..pack_cursor],
             workspace.packed.source_mut().as_mut_slice(),
@@ -3693,6 +3839,8 @@ where
         if scatter_slice_disjoint {
             replay_scatter_groups(
                 kernels.clone(),
+                &mut workspace.fused_indices[..fused_index_len],
+                max_fused_rank,
                 layouts,
                 &schedule.scatter_columns,
                 &schedule.scatter_groups,
@@ -3714,6 +3862,7 @@ where
                     scatter_column_into_layout(
                         kernels,
                         &mut zero_strides,
+                        Some(&mut workspace.fused_indices[..max_fused_rank]),
                         layouts,
                         item.dst_layout,
                         packed_destination,
@@ -3874,6 +4023,7 @@ where
 fn tree_transform_single_with_strided_kernel<A, D, C>(
     kernels: &mut A,
     zero_strides: &mut Vec<isize>,
+    fused_index: Option<&mut [usize]>,
     layouts: &TreeTransformLayoutTable,
     dst_index: usize,
     src_index: usize,
@@ -3894,8 +4044,36 @@ where
     let shape = layouts.shape(dst_layout);
     let baked = layouts.fused_baked(dst_index);
     let scale = alpha.scale_by_coefficient(coefficient);
-    match mode {
-        DestinationMode::Axpby(beta) => kernels.add_strided_baked(
+    match (mode, fused_index) {
+        (DestinationMode::Axpby(beta), Some(index)) => kernels.add_strided_baked_with_index(
+            zero_strides,
+            dst_data,
+            src_data,
+            shape,
+            layouts.strides(dst_layout),
+            layouts.strides(src_layout),
+            dst_layout.offset,
+            src_layout.offset,
+            source_conjugate,
+            scale,
+            beta,
+            baked,
+            index,
+        ),
+        (DestinationMode::Overwrite, Some(index)) => kernels.copy_scale_strided_baked_with_index(
+            dst_data,
+            src_data,
+            shape,
+            layouts.strides(dst_layout),
+            layouts.strides(src_layout),
+            dst_layout.offset,
+            src_layout.offset,
+            source_conjugate,
+            scale,
+            baked,
+            index,
+        ),
+        (DestinationMode::Axpby(beta), None) => kernels.add_strided_baked(
             zero_strides,
             dst_data,
             src_data,
@@ -3909,7 +4087,7 @@ where
             beta,
             baked,
         ),
-        DestinationMode::Overwrite => kernels.copy_scale_strided_baked(
+        (DestinationMode::Overwrite, None) => kernels.copy_scale_strided_baked(
             dst_data,
             src_data,
             shape,
@@ -4010,10 +4188,17 @@ where
         .checked_mul(dst_count)
         .ok_or(OperationError::ElementCountOverflow)?;
     workspace.prepare_packed_buffers(source_len, destination_len, D::zero());
+    let HostTreeTransformWorkspace {
+        zero_strides,
+        packed,
+        fused_indices,
+        ..
+    } = workspace;
     tree_transform_multi_with_scratch_buffers(
         kernels,
-        &mut workspace.zero_strides,
-        &mut workspace.packed,
+        zero_strides,
+        Some(fused_indices.as_mut_slice()),
+        packed,
         layouts,
         dst_layout_start,
         dst_count,
@@ -4034,6 +4219,7 @@ where
 fn tree_transform_multi_with_scratch_buffers<A, D, C, SourceScratch, DestinationScratch>(
     kernels: &mut A,
     zero_strides: &mut Vec<isize>,
+    mut fused_index: Option<&mut [usize]>,
     scratch: &mut TreeTransformScratchBuffers<SourceScratch, DestinationScratch>,
     layouts: &TreeTransformLayoutTable,
     dst_layout_start: usize,
@@ -4059,6 +4245,7 @@ where
     for src_index in 0..src_count {
         pack_layout_into_column(
             kernels,
+            fused_index.as_deref_mut(),
             layouts,
             src_layout_start + src_index,
             src_data,
@@ -4085,6 +4272,7 @@ where
         scatter_column_into_layout(
             kernels,
             zero_strides,
+            fused_index.as_deref_mut(),
             layouts,
             dst_layout_start + dst_index,
             scratch.destination().as_slice(),
@@ -4099,6 +4287,7 @@ where
 
 fn pack_layout_into_column<A, T>(
     kernels: &mut A,
+    fused_index: Option<&mut [usize]>,
     layouts: &TreeTransformLayoutTable,
     entry_index: usize,
     src_data: &[T],
@@ -4114,24 +4303,40 @@ where
     let shape = layouts.shape(layout);
     let baked = layouts.fused_baked(entry_index);
     let packed_offset = offset_to_isize(packed_offset)?;
-    kernels.copy_scale_strided_baked(
-        packed,
-        src_data,
-        shape,
-        layouts.packed_strides(layout),
-        layouts.strides(layout),
-        packed_offset,
-        layout.offset,
-        source_conjugate,
-        T::one(),
-        baked,
-    )
+    match fused_index {
+        Some(index) => kernels.copy_scale_strided_baked_with_index(
+            packed,
+            src_data,
+            shape,
+            layouts.packed_strides(layout),
+            layouts.strides(layout),
+            packed_offset,
+            layout.offset,
+            source_conjugate,
+            T::one(),
+            baked,
+            index,
+        ),
+        None => kernels.copy_scale_strided_baked(
+            packed,
+            src_data,
+            shape,
+            layouts.packed_strides(layout),
+            layouts.strides(layout),
+            packed_offset,
+            layout.offset,
+            source_conjugate,
+            T::one(),
+            baked,
+        ),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn scatter_column_into_layout<A, T>(
     kernels: &mut A,
     zero_strides: &mut Vec<isize>,
+    fused_index: Option<&mut [usize]>,
     layouts: &TreeTransformLayoutTable,
     entry_index: usize,
     packed: &[T],
@@ -4147,8 +4352,37 @@ where
     let layout = layouts.entry(entry_index);
     let shape = layouts.shape(layout);
     let baked = layouts.fused_baked(entry_index);
-    match mode {
-        DestinationMode::Axpby(beta) => {
+    match (mode, fused_index) {
+        (DestinationMode::Axpby(beta), Some(index)) => {
+            zero_strides.clear();
+            kernels.axpby_strided_baked_with_index(
+                dst_data,
+                packed,
+                shape,
+                layouts.strides(layout),
+                layouts.packed_strides(layout),
+                layout.offset,
+                offset_to_isize(packed_offset)?,
+                alpha,
+                beta,
+                baked,
+                index,
+            )
+        }
+        (DestinationMode::Overwrite, Some(index)) => kernels.copy_scale_strided_baked_with_index(
+            dst_data,
+            packed,
+            shape,
+            layouts.strides(layout),
+            layouts.packed_strides(layout),
+            layout.offset,
+            offset_to_isize(packed_offset)?,
+            false,
+            alpha,
+            baked,
+            index,
+        ),
+        (DestinationMode::Axpby(beta), None) => {
             zero_strides.clear();
             kernels.axpby_strided_baked(
                 dst_data,
@@ -4163,7 +4397,7 @@ where
                 baked,
             )
         }
-        DestinationMode::Overwrite => kernels.copy_scale_strided_baked(
+        (DestinationMode::Overwrite, None) => kernels.copy_scale_strided_baked(
             dst_data,
             packed,
             shape,
