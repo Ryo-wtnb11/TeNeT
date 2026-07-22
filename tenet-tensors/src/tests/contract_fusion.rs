@@ -764,7 +764,6 @@ fn paired_axis_selector_scores_once_and_publishes_only_winner_replay() {
     // What: eager resolution scores four candidates and retains only reusable
     // transform/core-destination components.
     assert_eq!(crate::contract::candidate_score_calls(), 4);
-    assert_eq!(context.tree_context().cache().plan_len(), 2);
     assert_eq!(context.tree_context().cache().structure_len(), 2);
     assert_eq!(context.dynamic_fusion_space_cache_len(), 2);
     let cache_len = context.dynamic_fusion_space_cache_len();
@@ -4495,7 +4494,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
             "actual {actual} expected {expected}"
         );
     }
-    assert_eq!(context.tree_context().cache().plan_len(), 2);
     assert_eq!(context.tree_context().cache().structure_len(), 2);
 
     let pinned = context
@@ -4548,7 +4546,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
             "actual {actual} expected {expected}"
         );
     }
-    assert_eq!(context.tree_context().cache().plan_len(), 2);
     assert_eq!(context.tree_context().cache().structure_len(), 2);
 
     let mut automatic_context_dst = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
@@ -4575,19 +4572,10 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
             "actual {actual} expected {expected}"
         );
     }
-    assert!(automatic_context.tree_context().cache().plan_len() > 0);
     assert!(automatic_context.tree_context().cache().structure_len() > 0);
     assert!(automatic_context.dynamic_fusion_space_cache_len() > 0);
     assert!(automatic_context.dynamic_fusion_space_cache_misses() > 0);
     assert_eq!(automatic_context.dynamic_fusion_space_cache_hits(), 0);
-    assert!(
-        automatic_context
-            .tree_context()
-            .cache()
-            .stats()
-            .plan_misses()
-            > 0
-    );
     assert!(
         automatic_context
             .tree_context()
@@ -4617,7 +4605,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
                 "actual {actual} expected {expected}"
             );
         }
-        assert_eq!(no_cache_context.tree_context().cache().plan_len(), 0);
         assert_eq!(no_cache_context.tree_context().cache().structure_len(), 0);
         assert_eq!(no_cache_context.dynamic_fusion_space_cache_len(), 0);
         assert_eq!(no_cache_context.dynamic_fusion_space_cache_hits(), 0);
@@ -4649,7 +4636,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
         .unwrap();
     assert!(warm_policy_context.dynamic_fusion_space_cache_len() > 1);
     warm_policy_context.set_cache_policy(OperationCachePolicy::task_local_lru(1));
-    assert!(warm_policy_context.tree_context().cache().plan_len() <= 1);
     assert!(warm_policy_context.tree_context().cache().structure_len() <= 1);
     assert!(warm_policy_context.dynamic_fusion_space_cache_len() <= 1);
 
@@ -4670,7 +4656,6 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
             "actual {actual} expected {expected}"
         );
     }
-    assert!(lru_context.tree_context().cache().plan_len() <= 1);
     assert!(lru_context.tree_context().cache().structure_len() <= 1);
     assert!(lru_context.dynamic_fusion_space_cache_len() <= 1);
 

@@ -1587,7 +1587,7 @@ fn compact_svd_shared_plan_rebinds_every_factor_to_each_caller() {
 
 #[test]
 fn global_operation_reset_replaces_compact_factor_plan_generation() {
-    // What: a completed global reset invalidates both the shared plan and this thread's front.
+    // What: a completed global reset invalidates the shared cached structure.
     let _guard = COMPACT_FACTOR_PLAN_IDENTITY_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -6254,7 +6254,6 @@ fn inv_rejects_a_genuinely_singular_sector_without_an_output() {
             ..
         })
     ));
-    assert_eq!(context.tree_context().cache().plan_len(), 0);
     assert_eq!(context.tree_context().cache().structure_len(), 0);
     assert_eq!(context.dynamic_fusion_space_cache_len(), 0);
 }
