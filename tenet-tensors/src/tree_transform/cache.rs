@@ -3,6 +3,8 @@ use core::ops::{Add, Mul};
 use rustc_hash::FxHashMap;
 use std::fmt;
 use std::hash::Hash;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use num_traits::Zero;
@@ -56,6 +58,19 @@ pub struct TreeTransformSectorPlanKey<RuleKey> {
     source_groups: Vec<TreeTransformSourceGroupKey>,
 }
 
+#[cfg(test)]
+static TREE_TRANSFORM_SECTOR_PLAN_KEY_CONSTRUCTIONS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn reset_tree_transform_sector_plan_key_constructions() {
+    TREE_TRANSFORM_SECTOR_PLAN_KEY_CONSTRUCTIONS.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn tree_transform_sector_plan_key_constructions() -> usize {
+    TREE_TRANSFORM_SECTOR_PLAN_KEY_CONSTRUCTIONS.load(Ordering::Relaxed)
+}
+
 impl<RuleKey> TreeTransformSectorPlanKey<RuleKey>
 where
     RuleKey: Clone + Eq + Hash,
@@ -98,6 +113,8 @@ where
         operation: TreeTransformOperation,
         src_structure: &BlockStructure,
     ) -> Result<Self, OperationError> {
+        #[cfg(test)]
+        TREE_TRANSFORM_SECTOR_PLAN_KEY_CONSTRUCTIONS.fetch_add(1, Ordering::Relaxed);
         let source_groups = src_structure
             .fusion_tree_group_slice()
             .into_iter()
@@ -694,12 +711,6 @@ where
         )?;
         LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst.structure())
             .map_err(OperationError::from_core_preserving_context)?;
-        let plan_key = TreeTransformSectorPlanKey::new(
-            rule_key.clone(),
-            TreeTransformPlanScope::TreePair,
-            operation.clone(),
-            src.structure(),
-        )?;
         if !self.policy.stores_entries() {
             self.stats.plan_misses += 1;
             self.stats.structure_misses += 1;
@@ -707,6 +718,12 @@ where
                 build_tree_pair_transform_group_plan_validated(&source_proof, operation.clone())?;
             return Ok(Arc::new(plan.compile(dst, src)?));
         }
+        let plan_key = TreeTransformSectorPlanKey::new(
+            rule_key.clone(),
+            TreeTransformPlanScope::TreePair,
+            operation.clone(),
+            src.structure(),
+        )?;
         self.begin_lru_activity();
         if self.plans.contains(&plan_key) {
             self.stats.plan_hits += 1;
@@ -786,12 +803,6 @@ where
         )?;
         LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst_structure)
             .map_err(OperationError::from_core_preserving_context)?;
-        let plan_key = TreeTransformSectorPlanKey::new(
-            rule_key.clone(),
-            TreeTransformPlanScope::TreePair,
-            operation.clone(),
-            src_structure,
-        )?;
         if !self.policy.stores_entries() {
             self.stats.plan_misses += 1;
             self.stats.structure_misses += 1;
@@ -805,6 +816,12 @@ where
                 )?,
             ));
         }
+        let plan_key = TreeTransformSectorPlanKey::new(
+            rule_key.clone(),
+            TreeTransformPlanScope::TreePair,
+            operation.clone(),
+            src_structure,
+        )?;
         self.begin_lru_activity();
         if self.plans.contains(&plan_key) {
             self.stats.plan_hits += 1;
@@ -857,12 +874,6 @@ where
                 .map_err(OperationError::from_core_preserving_context)?;
         }
         let rule_key = rule.tree_transform_rule_cache_key();
-        let plan_key = TreeTransformSectorPlanKey::new(
-            rule_key.clone(),
-            TreeTransformPlanScope::TreePair,
-            operation.clone(),
-            logical_src_structure,
-        )?;
         if !self.policy.stores_entries() {
             self.stats.plan_misses += 1;
             self.stats.structure_misses += 1;
@@ -879,6 +890,12 @@ where
                 )?,
             ));
         }
+        let plan_key = TreeTransformSectorPlanKey::new(
+            rule_key.clone(),
+            TreeTransformPlanScope::TreePair,
+            operation.clone(),
+            logical_src_structure,
+        )?;
         self.begin_lru_activity();
         if self.plans.contains(&plan_key) {
             self.stats.plan_hits += 1;
@@ -1058,12 +1075,6 @@ where
         )?;
         LocallyValidatedFusionTreeBlockStructure::try_new(rule, dst.structure())
             .map_err(OperationError::from_core_preserving_context)?;
-        let plan_key = TreeTransformSectorPlanKey::new(
-            rule_key.clone(),
-            TreeTransformPlanScope::AllCodomain,
-            operation.clone(),
-            src.structure(),
-        )?;
         if !self.policy.stores_entries() {
             self.stats.plan_misses += 1;
             self.stats.structure_misses += 1;
@@ -1073,6 +1084,12 @@ where
             )?;
             return Ok(Arc::new(plan.compile(dst, src)?));
         }
+        let plan_key = TreeTransformSectorPlanKey::new(
+            rule_key.clone(),
+            TreeTransformPlanScope::AllCodomain,
+            operation.clone(),
+            src.structure(),
+        )?;
         self.begin_lru_activity();
         if self.plans.contains(&plan_key) {
             self.stats.plan_hits += 1;

@@ -1,4 +1,8 @@
 use super::*;
+use crate::tree_transform::{
+    reset_tree_transform_sector_plan_key_constructions,
+    tree_transform_sector_plan_key_constructions,
+};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -2140,6 +2144,78 @@ fn prelowered_same_content_roles_share_one_local_admission() {
     // What: logical, storage, and destination roles sharing immutable content
     // perform one LOCAL categorical admission, even through distinct Arcs.
     assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn no_cache_tree_transform_paths_do_not_construct_sector_plan_keys() {
+    let structure = simple_su2_vertex_structure(1);
+    let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
+    let src = TensorMap::<f64, 2, 0>::from_vec_with_structure(
+        vec![1.0],
+        space.clone(),
+        (*structure).clone(),
+    )
+    .unwrap();
+    let dst =
+        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0], space, (*structure).clone())
+            .unwrap();
+    let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
+
+    reset_tree_transform_sector_plan_key_constructions();
+    TreeTransformSectorPlanKey::tree_pair(&SU2FusionRule, operation.clone(), &structure).unwrap();
+    assert_eq!(tree_transform_sector_plan_key_constructions(), 1);
+
+    let assert_uncached =
+        |f: &mut dyn FnMut(&mut TreeTransformCache<f64, TreeTransformBuiltinRuleCacheKey>)| {
+            let mut cache =
+                TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::with_policy(
+                    OperationCachePolicy::NoCache,
+                );
+            reset_tree_transform_sector_plan_key_constructions();
+            f(&mut cache);
+
+            // What: NoCache preserves eager compile semantics without building a
+            // reusable sector-plan cache key.
+            assert_eq!(tree_transform_sector_plan_key_constructions(), 0);
+            assert_eq!(cache.stats().plan_misses(), 1);
+            assert_eq!(cache.stats().structure_misses(), 1);
+        };
+
+    assert_uncached(&mut |cache| {
+        cache
+            .get_or_compile_tree_pair(&SU2FusionRule, operation.clone(), &dst, &src)
+            .unwrap();
+    });
+    assert_uncached(&mut |cache| {
+        cache
+            .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
+                &SU2FusionRule,
+                &operation,
+                &structure,
+                &structure,
+                false,
+            )
+            .unwrap();
+    });
+    assert_uncached(&mut |cache| {
+        cache
+            .get_or_compile_tree_pair_prelowered(
+                &SU2FusionRule,
+                &operation,
+                &structure,
+                &structure,
+                &structure,
+                false,
+                Ok,
+                Ok,
+            )
+            .unwrap();
+    });
+    assert_uncached(&mut |cache| {
+        cache
+            .get_or_compile_all_codomain(&SU2FusionRule, operation.clone(), &dst, &src)
+            .unwrap();
+    });
 }
 
 #[test]

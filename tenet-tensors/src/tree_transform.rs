@@ -23,7 +23,11 @@ pub(crate) use plan::{
 };
 
 #[cfg(test)]
-pub(crate) use cache::{TreeTransformGroupPlanCache, TreeTransformGroupPlanKey};
+pub(crate) use cache::{
+    reset_tree_transform_sector_plan_key_constructions,
+    tree_transform_sector_plan_key_constructions, TreeTransformGroupPlanCache,
+    TreeTransformGroupPlanKey,
+};
 #[cfg(test)]
 pub(crate) use plan::{
     build_all_codomain_tree_transform_group_plan_validated_with_threads,
