@@ -728,6 +728,19 @@ fn same_dynamic_space_counted(
     }
 }
 
+fn permute_axes_are_identity(
+    codomain_axes: &[usize],
+    domain_axes: &[usize],
+    codomain_rank: usize,
+    domain_rank: usize,
+) -> bool {
+    codomain_axes.iter().copied().eq(0..codomain_rank)
+        && domain_axes
+            .iter()
+            .copied()
+            .eq(codomain_rank..codomain_rank + domain_rank)
+}
+
 impl ContractOverwriteCache {
     #[doc(hidden)]
     pub fn preparations(&self) -> u64 {
@@ -7892,6 +7905,29 @@ impl TensorExecutionContext {
         }
     }
 
+    fn write_identity_permute_prepared(
+        &mut self,
+        dst: &mut Tensor,
+        src: &Tensor,
+        alpha: Scalar,
+    ) -> Result<(), Error> {
+        let dst_data = dst
+            .owned_body_mut()
+            .and_then(|body| Arc::get_mut(&mut body.data));
+        match (dst_data, src.stored_data(), alpha) {
+            (Some(Data::F64(dst_data)), Data::F64(src_data), Scalar::F64(alpha)) => {
+                scaled_assign_flat(dst_data, src_data, alpha)
+            }
+            (Some(Data::C64(dst_data)), Data::C64(src_data), Scalar::C64(alpha)) => {
+                scaled_assign_flat(dst_data, src_data, alpha)
+            }
+            (None, _, _) => Err(Error::InvalidArgument(
+                "destination storage must be uniquely owned".to_string(),
+            )),
+            _ => Err(Error::DtypeMismatch),
+        }
+    }
+
     /// Attempts to overwrite `dst` in place with `alpha * contract(lhs, rhs)`,
     /// reusing the destination-space check cached in `cache` across repeated
     /// calls with the same shapes. Returns `OverwriteOutcome::Incompatible`
@@ -8109,6 +8145,22 @@ impl TensorExecutionContext {
         {
             return Ok(OverwriteOutcome::Incompatible);
         }
+        if permute_axes_are_identity(
+            codomain_axes,
+            domain_axes,
+            src.codomain_rank(),
+            src.domain_rank(),
+        ) {
+            if dst
+                .validate_exact_destination_space_arc(&src.ordinary_body().space)
+                .is_err()
+                || Arc::strong_count(&dst.ordinary_body().data) != 1
+            {
+                return Ok(OverwriteOutcome::Incompatible);
+            }
+            self.write_identity_permute_prepared(dst, src, alpha)?;
+            return Ok(OverwriteOutcome::Written);
+        }
         let cache_matches = cache.prepared.as_ref().is_some_and(|prepared| {
             same_dynamic_space_counted(
                 &prepared.source_space,
@@ -8239,6 +8291,15 @@ impl TensorExecutionContext {
             return Err(Error::InvalidArgument(
                 "dynamic destination permutation requires an ordinary dense input".to_string(),
             ));
+        }
+        if permute_axes_are_identity(
+            codomain_axes,
+            domain_axes,
+            src.codomain_rank(),
+            src.domain_rank(),
+        ) {
+            dst.validate_exact_destination_space(src.ordinary_body().space.raw())?;
+            return self.write_identity_permute_prepared(dst, src, alpha);
         }
         let operation = TreeTransformOperation::permute(
             codomain_axes.iter().copied(),
@@ -8502,6 +8563,22 @@ fn dispatch_prepared_permute_into<D: UserScalar>(
             context, authority, operation, dst_space, dst_data, src, src_data, alpha,
         ),
     }
+}
+
+fn scaled_assign_flat<D: UserScalar>(dst: &mut [D], src: &[D], alpha: D) -> Result<(), Error> {
+    if dst.len() != src.len() {
+        return Err(internal_layout_error(
+            "identity permutation storage lengths differ",
+        ));
+    }
+    let shape = [dst.len()];
+    let strides = [1];
+    tenet_tensors::scaled_assign_into(
+        BlockViewMut::new(dst, &shape, &strides, 0)?,
+        BlockView::new(src, &shape, &strides, 0)?,
+        alpha,
+    )
+    .map_err(Into::into)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -10815,6 +10892,7 @@ mod shared_context_tests {
 #[cfg(test)]
 mod bound_provider_tests {
     use super::*;
+    use crate::runtime::OperationCachePolicy;
 
     #[test]
     fn construction_and_svd_factors_share_one_provider_allocation() {
@@ -10878,6 +10956,64 @@ mod bound_provider_tests {
 
         assert_eq!(observed, Some(true));
         assert_eq!(destination.data(), expected.data());
+    }
+
+    #[test]
+    fn checked_identity_permute_overwrite_writes_without_preparing_tree_transform() {
+        // What: exact identity axes are a direct scaled overwrite, not a cached tree transform.
+        let runtime = Runtime::builder()
+            .operation_cache_policy(OperationCachePolicy::TaskLocal)
+            .build()
+            .unwrap();
+        let space = Space::z2([(0, 3), (1, 2)]);
+        let source =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&space, &space], [&space], 41).unwrap();
+        let expected = source.scale(2.5).unwrap();
+        let mut destination =
+            Tensor::zeros(&runtime, Dtype::F64, [&space, &space], [&space]).unwrap();
+        let mut execution = TensorExecutionContext::for_runtime(&runtime).unwrap();
+        let mut cache = PermuteOverwriteCache::default();
+        let before = execution.z2.f64.tree_context().cache().stats();
+
+        let outcome = execution
+            .try_permute_overwrite_into(
+                &mut cache,
+                &mut destination,
+                &source,
+                &[0, 1],
+                &[2],
+                Scalar::F64(2.5),
+            )
+            .unwrap();
+
+        assert_eq!(outcome, OverwriteOutcome::Written);
+        assert_eq!(destination.data(), expected.data());
+        assert_eq!(cache.preparations(), 0);
+        assert_eq!(execution.z2.f64.tree_context().cache().stats(), before);
+    }
+
+    #[test]
+    fn identity_permute_overwrite_writes_without_compiling_tree_transform() {
+        // What: the non-checked overwrite API takes the same exact-identity direct write.
+        let runtime = Runtime::builder()
+            .operation_cache_policy(OperationCachePolicy::TaskLocal)
+            .build()
+            .unwrap();
+        let space = Space::z2([(0, 3), (1, 2)]);
+        let source =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&space, &space], [&space], 43).unwrap();
+        let expected = source.scale(-1.5).unwrap();
+        let mut destination =
+            Tensor::zeros(&runtime, Dtype::F64, [&space, &space], [&space]).unwrap();
+        let mut execution = TensorExecutionContext::for_runtime(&runtime).unwrap();
+        let before = execution.z2.f64.tree_context().cache().stats();
+
+        execution
+            .permute_overwrite_into(&mut destination, &source, &[0, 1], &[2], Scalar::F64(-1.5))
+            .unwrap();
+
+        assert_eq!(destination.data(), expected.data());
+        assert_eq!(execution.z2.f64.tree_context().cache().stats(), before);
     }
 
     #[test]
