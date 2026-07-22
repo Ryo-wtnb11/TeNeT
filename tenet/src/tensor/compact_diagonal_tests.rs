@@ -166,6 +166,138 @@ fn assert_compact_unmaterialized(tensor: &Tensor) {
 }
 
 #[test]
+fn asymmetric_odd_product_swap_preserves_compact_c64_storage_and_dense_values() {
+    // What: ordinary permutation and planar transpose keep a non-self-dual,
+    // fermionic diagonal compact while matching the dense route's stored
+    // diagonal values and numerical structural zeros.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = Space::product([((-2, 1), 2), ((1, 1), 3)]).unwrap();
+
+    let compact_spectrum_bits = |tensor: &Tensor| {
+        let Data::Diagonal(DiagonalData::C64(spectrum)) = tensor.stored_data() else {
+            panic!("expected compact c64 spectrum")
+        };
+        spectrum
+            .iter()
+            .map(|entry| {
+                (
+                    entry.sector,
+                    entry
+                        .values
+                        .iter()
+                        .map(|value| (value.re.to_bits(), value.im.to_bits()))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let dense_diagonal_values = |tensor: &Tensor| {
+        let data = tensor.try_data_c64().unwrap();
+        let structure = tensor.ordinary_body().space.structure();
+        (0..structure.block_count())
+            .map(|index| {
+                let block = structure.block(index).unwrap();
+                let BlockKey::FusionTree(key) = block.key() else {
+                    panic!("expected fusion-tree block")
+                };
+                let [rows, columns] = block.shape() else {
+                    panic!("expected matrix block")
+                };
+                let [row_stride, column_stride] = block.strides() else {
+                    panic!("expected matrix strides")
+                };
+                for column in 0..*columns {
+                    for row in 0..*rows {
+                        if row != column {
+                            assert_eq!(
+                                data[block.offset() + row * row_stride + column * column_stride],
+                                Complex64::new(0.0, 0.0)
+                            );
+                        }
+                    }
+                }
+                (
+                    key.codomain_tree().coupled(),
+                    (0..(*rows).min(*columns))
+                        .map(|diagonal| {
+                            data[block.offset() + diagonal * (row_stride + column_stride)]
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let assert_matches_dense = |source: &Tensor, actual: &Tensor, expected: &Tensor| {
+        assert_compact_unmaterialized(actual);
+        assert_eq!(
+            actual.logical_space().unwrap(),
+            expected.logical_space().unwrap()
+        );
+        assert_eq!(
+            actual.ordinary_body().space.structure(),
+            expected.ordinary_body().space.structure()
+        );
+        let Data::Diagonal(DiagonalData::C64(actual_values)) = actual.stored_data() else {
+            panic!("expected compact c64 spectrum")
+        };
+        let expected_values = dense_diagonal_values(expected);
+        assert_eq!(actual_values.len(), expected_values.len());
+        for (actual, (expected_sector, expected)) in actual_values.iter().zip(&expected_values) {
+            assert_eq!(actual.sector, *expected_sector);
+            assert_eq!(actual.values.len(), expected.len());
+            for (actual, expected) in actual.values.iter().zip(expected) {
+                // Why not compare signed-zero bits: they are not part of compact
+                // operation equivalence, and dense coefficient multiplication
+                // can produce a different zero sign during replay.
+                if *actual == Complex64::new(0.0, 0.0) && *expected == Complex64::new(0.0, 0.0) {
+                    continue;
+                }
+                assert_eq!(actual.re.to_bits(), expected.re.to_bits());
+                assert_eq!(actual.im.to_bits(), expected.im.to_bits());
+            }
+        }
+        assert_compact_unmaterialized(source);
+    };
+
+    let permute_source = complex_diagonal(&runtime, &space, 484_001);
+    let permute_oracle = complex_diagonal(&runtime, &space, 484_001)
+        .densified_if_diagonal()
+        .permute(&[1], &[0])
+        .unwrap();
+    let permuted = permute_source.permute(&[1], &[0]).unwrap();
+    assert_matches_dense(&permute_source, &permuted, &permute_oracle);
+    let restored = permuted.permute(&[1], &[0]).unwrap();
+    assert!(matches!(restored.stored_data(), Data::Diagonal(_)));
+    assert_eq!(
+        restored.logical_space().unwrap(),
+        permute_source.logical_space().unwrap()
+    );
+    assert_eq!(
+        compact_spectrum_bits(&restored),
+        compact_spectrum_bits(&permute_source)
+    );
+
+    let transpose_source = complex_diagonal(&runtime, &space, 484_002);
+    let transpose_oracle = complex_diagonal(&runtime, &space, 484_002)
+        .densified_if_diagonal()
+        .transpose()
+        .unwrap();
+    let transposed = transpose_source.transpose().unwrap();
+    assert_matches_dense(&transpose_source, &transposed, &transpose_oracle);
+    let restored = transposed.transpose().unwrap();
+    assert!(matches!(restored.stored_data(), Data::Diagonal(_)));
+    assert_eq!(
+        restored.logical_space().unwrap(),
+        transpose_source.logical_space().unwrap()
+    );
+    assert_eq!(
+        compact_spectrum_bits(&restored),
+        compact_spectrum_bits(&transpose_source)
+    );
+}
+
+#[test]
 fn nonempty_trace_pairs_keeps_the_existing_diagonal_densification_boundary() {
     // What: partial trace of compact storage remains the established dense
     // fallback and agrees with an explicitly densified tensor.

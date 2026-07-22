@@ -1,9 +1,11 @@
-use num_complex::Complex64;
-use tenet_core::{BlockKey, SectorId};
-use tenet_matrixalgebra::{FactorScalar, SectorSpectrum};
-use tenet_tensors::DynamicFusionMapSpace;
+use std::collections::HashMap;
 
-use super::{Data, DiagonalData, Error, UserScalar};
+use num_complex::Complex64;
+use tenet_core::{BlockKey, MultiplicityFreeRigidSymbols, PreparedTreePairOperation, SectorId};
+use tenet_matrixalgebra::{FactorScalar, SectorSpectrum};
+use tenet_tensors::{DynamicFusionMapSpace, TreeTransformOperation, TreeTransformOperationKind};
+
+use super::{internal_layout_error, Data, DiagonalData, Error, UserScalar};
 
 fn map_spectra<I: Copy, O>(
     spectra: &[SectorSpectrum<I>],
@@ -47,6 +49,161 @@ fn zip_spectra<L: Copy, R: Copy, O>(
 }
 
 impl DiagonalData {
+    pub(super) fn transformed_rank_one_swap<R>(
+        &self,
+        rule: &R,
+        source_space: &DynamicFusionMapSpace,
+        destination_space: &DynamicFusionMapSpace,
+        operation: &TreeTransformOperation,
+    ) -> Result<Self, Error>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        fn transform<V, R>(
+            spectrum: &[SectorSpectrum<V>],
+            rule: &R,
+            source_space: &DynamicFusionMapSpace,
+            destination_space: &DynamicFusionMapSpace,
+            operation: &TreeTransformOperation,
+        ) -> Result<Vec<SectorSpectrum<V>>, Error>
+        where
+            V: Copy + std::ops::Mul<f64, Output = V>,
+            R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+        {
+            let source_structure = source_space.structure();
+            if source_structure.block_count() != spectrum.len() {
+                return Err(internal_layout_error(
+                    "compact diagonal spectrum does not cover its rank-one block structure",
+                ));
+            }
+            let spectrum_by_sector = spectrum
+                .iter()
+                .map(|entry| (entry.sector, entry))
+                .collect::<HashMap<_, _>>();
+            let mut output_by_sector = HashMap::with_capacity(spectrum.len());
+            let prepared = match operation.kind() {
+                TreeTransformOperationKind::Permute => PreparedTreePairOperation::prepare_permute(
+                    rule,
+                    1,
+                    1,
+                    operation.codomain_permutation(),
+                    operation.domain_permutation(),
+                )?,
+                TreeTransformOperationKind::Transpose => {
+                    PreparedTreePairOperation::prepare_transpose(
+                        1,
+                        1,
+                        operation.codomain_permutation(),
+                        operation.domain_permutation(),
+                    )?
+                }
+                TreeTransformOperationKind::Braid => {
+                    return Err(internal_layout_error(
+                        "compact diagonal swap does not accept an explicit braid",
+                    ));
+                }
+            };
+
+            for index in 0..source_structure.block_count() {
+                let block = source_structure.block(index)?;
+                let BlockKey::FusionTree(source) = block.key() else {
+                    return Err(internal_layout_error(
+                        "compact diagonal storage requires fusion-tree blocks",
+                    ));
+                };
+                let source_sector = source.codomain_tree().coupled();
+                let entry = spectrum_by_sector.get(&source_sector).ok_or_else(|| {
+                    internal_layout_error(
+                        "compact diagonal spectrum is missing a rank-one block sector",
+                    )
+                })?;
+                let rows = prepared.execute_multiplicity_free(rule, source)?;
+                let mut rows = rows.into_iter();
+                let (destination, coefficient) = rows.next().ok_or_else(|| {
+                    internal_layout_error("rank-one diagonal swap produced no destination term")
+                })?;
+                if rows.next().is_some() {
+                    return Err(internal_layout_error(
+                        "rank-one diagonal swap produced multiple destination terms",
+                    ));
+                }
+                let entry = SectorSpectrum {
+                    sector: destination.codomain_tree().coupled(),
+                    values: entry
+                        .values
+                        .iter()
+                        .copied()
+                        .map(|value| value * coefficient)
+                        .collect(),
+                };
+                if output_by_sector.insert(entry.sector, entry).is_some() {
+                    return Err(internal_layout_error(
+                        "rank-one diagonal swap produced duplicate destination sectors",
+                    ));
+                }
+            }
+
+            let destination_structure = destination_space.structure();
+            let mut output = Vec::with_capacity(spectrum.len());
+            for index in 0..destination_structure.block_count() {
+                let block = destination_structure.block(index)?;
+                let BlockKey::FusionTree(destination) = block.key() else {
+                    return Err(internal_layout_error(
+                        "compact diagonal destination requires fusion-tree blocks",
+                    ));
+                };
+                let sector = destination.codomain_tree().coupled();
+                let entry = output_by_sector.remove(&sector).ok_or_else(|| {
+                    internal_layout_error(
+                        "rank-one diagonal swap is missing a destination block sector",
+                    )
+                })?;
+                let [rows, columns] = block.shape() else {
+                    return Err(internal_layout_error(
+                        "compact diagonal destination block is not a matrix",
+                    ));
+                };
+                if rows != columns || entry.values.len() != *rows {
+                    return Err(internal_layout_error(
+                        "rank-one diagonal spectrum does not match its destination block shape",
+                    ));
+                }
+                output.push(entry);
+            }
+            if !output_by_sector.is_empty() || output.len() != spectrum.len() {
+                return Err(internal_layout_error(
+                    "rank-one diagonal swap destination does not cover its compact spectrum",
+                ));
+            }
+            Ok(output)
+        }
+
+        let output = match self {
+            Self::RealF64(spectrum) => Self::RealF64(transform(
+                spectrum,
+                rule,
+                source_space,
+                destination_space,
+                operation,
+            )?),
+            Self::RealC64(spectrum) => Self::RealC64(transform(
+                spectrum,
+                rule,
+                source_space,
+                destination_space,
+                operation,
+            )?),
+            Self::C64(spectrum) => Self::C64(transform(
+                spectrum,
+                rule,
+                source_space,
+                destination_space,
+                operation,
+            )?),
+        };
+        Ok(output)
+    }
+
     pub(super) fn conjugated_complex(&self) -> Result<Self, Error> {
         match self {
             Self::C64(spectra) => Ok(Self::C64(map_spectra(spectra, |value| value.conj()))),
