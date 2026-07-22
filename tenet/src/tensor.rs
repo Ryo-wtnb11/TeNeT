@@ -5590,15 +5590,14 @@ impl Tensor {
                 )));
             }
         }
-        // Identity permutes and braids have no axis motion or adjacent braid
-        // swaps, so return the tensor unchanged and share its owned storage.
-        // Levels cannot contribute a phase when there is no crossing. Why not
-        // include Transpose: its planar boundary/cycle semantics stay on the
-        // general path; same-split repartition already has its own no-op.
-        let shares_identity_storage =
-            matches!(&kind, TransformKind::Permute | TransformKind::Braid { .. })
-                && codomain_axes.iter().copied().eq(0..nout)
-                && domain_axes.iter().copied().eq(nout..rank);
+        // Identity tree transforms have no axis motion or adjacent braid swaps,
+        // so return the tensor unchanged and share its owned storage. Levels
+        // cannot contribute a phase when there is no crossing.
+        let shares_identity_storage = matches!(
+            &kind,
+            TransformKind::Permute | TransformKind::Braid { .. } | TransformKind::Transpose
+        ) && codomain_axes.iter().copied().eq(0..nout)
+            && domain_axes.iter().copied().eq(nout..rank);
         if shares_identity_storage {
             return Ok(self.clone());
         }
@@ -11385,6 +11384,32 @@ mod tk_user_api_tests {
 
         let output = scalar.braid(&[], &[], &[]).unwrap();
 
+        assert!(Arc::ptr_eq(
+            &output.ordinary_body().space,
+            &scalar.ordinary_body().space
+        ));
+        assert!(Arc::ptr_eq(
+            &output.ordinary_body().data,
+            &scalar.ordinary_body().data
+        ));
+    }
+
+    #[test]
+    fn identity_transpose_shares_rank_zero_storage() {
+        // What: TensorKit-style scalar transpose is a zero-copy identity tree
+        // transform, not a replay through the general transform path.
+        let rt = Runtime::builder().build().unwrap();
+        let space = Space::u1([(0, 1)]);
+        let vector =
+            Tensor::rand_with_seed(&rt, Dtype::F64, [&space], std::iter::empty::<&Space>(), 205)
+                .unwrap();
+        let scalar = vector
+            .contract(&vector.adjoint().unwrap(), &[0], &[0])
+            .unwrap();
+
+        let output = scalar.transpose().unwrap();
+
+        assert_eq!(output.rank(), 0);
         assert!(Arc::ptr_eq(
             &output.ordinary_body().space,
             &scalar.ordinary_body().space
