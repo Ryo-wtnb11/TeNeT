@@ -5,10 +5,9 @@
 use smallvec::SmallVec;
 
 /// Axis permutation / level list, inline up to rank 8 (the common tensor
-/// rank). This type is a hot HashMap-key component in the recoupling plan
-/// memo — keeping it stack-allocated makes the per-lookup key clone
-/// allocation-free (matching TensorKit's stack-allocated `NTuple`), which was
-/// ~35% of all cold-path allocations when it was a `Vec`.
+/// rank). This is a hot component of completed tree-transform structure keys,
+/// so common-rank lookup clones remain stack-allocated. Runtime-rank operation
+/// representation, including the rank-nine spill, is deferred to issue #470.
 pub type AxisVec = SmallVec<[usize; 8]>;
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]

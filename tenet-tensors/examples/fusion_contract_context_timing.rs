@@ -99,12 +99,6 @@ fn bench_su2_non_core_form_source() {
     println!("result_checksum,{:.12}", checksum(&warm_data));
     println!("source_transform_checksum,{source_checksum:.12}");
     println!(
-        "tree_plan_cache,hits={},misses={},len={}",
-        context.tree_context().cache().stats().plan_hits(),
-        context.tree_context().cache().stats().plan_misses(),
-        context.tree_context().cache().plan_len()
-    );
-    println!(
         "tree_structure_cache,hits={},misses={},len={}",
         context.tree_context().cache().stats().structure_hits(),
         context.tree_context().cache().stats().structure_misses(),
@@ -151,12 +145,6 @@ fn bench_su2_output_scratch() {
     print_profile_breakdown(&profile, PROFILE_ITERS);
     println!("result_checksum,{:.12}", checksum(&warm_data));
     println!(
-        "tree_plan_cache,hits={},misses={},len={}",
-        context.tree_context().cache().stats().plan_hits(),
-        context.tree_context().cache().stats().plan_misses(),
-        context.tree_context().cache().plan_len()
-    );
-    println!(
         "tree_structure_cache,hits={},misses={},len={}",
         context.tree_context().cache().stats().structure_hits(),
         context.tree_context().cache().stats().structure_misses(),
@@ -201,12 +189,6 @@ fn bench_product_complex() {
     println!("context_warm_ns,{:.3}", nanos_per(warm, WARM_CONTEXT_ITERS));
     print_profile_breakdown(&profile, PROFILE_ITERS);
     println!("result_checksum,{:.12}", checksum_complex(&warm_data));
-    println!(
-        "tree_plan_cache,hits={},misses={},len={}",
-        context.tree_context().cache().stats().plan_hits(),
-        context.tree_context().cache().stats().plan_misses(),
-        context.tree_context().cache().plan_len()
-    );
     println!(
         "tree_structure_cache,hits={},misses={},len={}",
         context.tree_context().cache().stats().structure_hits(),

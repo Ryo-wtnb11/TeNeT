@@ -830,8 +830,6 @@ fn tensoradd_fusion_conjugation_context_replays_without_recompiling() {
         Complex64::new(0.0, 0.0),
     )
     .unwrap();
-    assert_eq!(context.cache().stats().plan_hits(), 0);
-    assert_eq!(context.cache().stats().plan_misses(), 1);
     assert_eq!(context.cache().stats().structure_hits(), 0);
     assert_eq!(context.cache().stats().structure_misses(), 1);
     assert_eq!(dst.data(), expected.as_slice());
@@ -847,8 +845,6 @@ fn tensoradd_fusion_conjugation_context_replays_without_recompiling() {
         Complex64::new(0.0, 0.0),
     )
     .unwrap();
-    assert_eq!(context.cache().stats().plan_hits(), 1);
-    assert_eq!(context.cache().stats().plan_misses(), 1);
     assert_eq!(context.cache().stats().structure_hits(), 1);
     assert_eq!(context.cache().stats().structure_misses(), 1);
     assert_eq!(dst.data(), expected.as_slice());
