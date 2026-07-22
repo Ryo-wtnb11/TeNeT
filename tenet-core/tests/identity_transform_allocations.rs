@@ -538,8 +538,8 @@ fn prepared_nonidentity_unique_operations_have_zero_prepare_and_stable_execute_a
     ];
     for prepare in preparations {
         let (_, calls, bytes) = measured_allocation_stats(prepare);
-        // What: valid rank<=8 operation validation and lowering fit entirely
-        // in the prepared representation's inline storage.
+        // What: valid inline-axis-capacity operation validation and lowering
+        // fit entirely in the prepared representation's inline storage.
         assert_eq!((calls, bytes), (0, 0));
     }
 
@@ -571,7 +571,7 @@ fn prepared_nonidentity_unique_operations_have_zero_prepare_and_stable_execute_a
 }
 
 #[test]
-fn rank_eight_or_less_same_side_homspace_derivation_is_heap_free() {
+fn inline_axis_capacity_same_side_homspace_derivation_is_heap_free() {
     let rule = U1FusionRule;
     for rank in [2usize, 4, 6, 8] {
         let homspace = u1_homspace(rank);
@@ -636,7 +636,7 @@ fn rank_eight_or_less_same_side_homspace_derivation_is_heap_free() {
 }
 
 #[test]
-fn rank_eight_or_less_crossing_derivation_allocates_only_final_dual_legs() {
+fn inline_axis_capacity_crossing_derivation_allocates_only_final_dual_legs() {
     let rule = U1FusionRule;
     for rank in [2usize, 4, 6, 8] {
         let homspace = u1_homspace(rank);
@@ -662,8 +662,8 @@ fn rank_eight_or_less_crossing_derivation_allocates_only_final_dual_legs() {
                     .unwrap(),
             )
         });
-        // What: checked orientation keeps its transactional staging inline for
-        // the common rank<=8 case and allocates only the final dual LegData.
+        // What: checked orientation keeps its transactional staging inline
+        // within inline axis capacity and allocates only the final dual LegData.
         assert_eq!(
             checked_permute_allocations, rank,
             "rank-{rank} checked crossing permute added transient storage"

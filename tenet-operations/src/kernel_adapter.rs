@@ -95,11 +95,11 @@ fn strided_perm_copy<T: Copy + strided_kernel::MaybeSendSync>(
 }
 
 thread_local! {
-    /// Reused fused-loop scratch for the rank > FUSED_RANK_LIMIT tail only.
-    /// Those high-rank contraction intermediates dominate warm replay, and
+    /// Reused fused-loop scratch for shapes above inline rank capacity only.
+    /// Those spill-to-scratch contraction intermediates dominate warm replay, and
     /// reusing one buffer per thread keeps them alloc-free after warmup (warm
-    /// chi16 -58%, chi32 -64%; commit 12748cf), beating the old rank>8
-    /// per-call StridedView allocation. Low-rank (<= FUSED_RANK_LIMIT) copies
+    /// chi16 -58%, chi32 -64%; commit 12748cf), beating the old per-call
+    /// StridedView allocation above inline capacity. Inline-capacity copies
     /// never reach this path — they use the stack-array layout below, which is
     /// faster per call and dominates the d=4 microbench (see issue #103).
     static FUSE_SCRATCH: RefCell<FuseScratch> = const { RefCell::new(FuseScratch::new()) };
@@ -316,7 +316,7 @@ pub(crate) fn fuse_pair_layout(
 /// Applies `dst = apply(dst, op(src))` over a fixed-capacity stack layout with a
 /// plain loop nest; safe indexing keeps out-of-bounds layouts a panic rather
 /// than undefined behavior. Zero heap, zero indirection — the fast path for
-/// rank <= FUSED_RANK_LIMIT.
+/// shapes within inline rank capacity.
 #[allow(clippy::too_many_arguments)]
 fn apply_fused_pair<T, Apply, ElementOp>(
     dst_data: &mut [T],
@@ -415,15 +415,15 @@ fn apply_fused_pair_slices<T, Apply, ElementOp>(
 /// Runs `dst = apply(dst, op(src))` over one (destination, source) strided view
 /// pair with a plain loop nest and NO per-call allocation, for any rank.
 ///
-/// Hybrid dispatch (see issue #103): rank <= FUSED_RANK_LIMIT takes the
-/// stack-array layout (`apply_fused_pair`), which has zero heap and zero
+/// Hybrid dispatch (see issue #103): shapes within inline rank capacity take
+/// the stack-array layout (`apply_fused_pair`), which has zero heap and zero
 /// indirection and recovers the d=4 per-call regression that commit 12748cf
-/// introduced when it routed every rank through the thread_local scratch. Rank
-/// > FUSED_RANK_LIMIT keeps 12748cf's reused thread_local scratch, preserving
-/// its large-chi warm-alloc win. Both paths run the identical layout algorithm
-/// (extent-1 axes dropped, axes ordered by destination stride, adjacent
-/// contiguous axes fused), so the produced values are byte-identical; only the
-/// dispatch differs.
+/// introduced when it routed every shape through the thread_local scratch.
+/// Shapes above inline capacity keep 12748cf's reused thread_local scratch,
+/// preserving its large-chi warm-alloc win. Both paths run the identical layout
+/// algorithm (extent-1 axes dropped, axes ordered by destination stride,
+/// adjacent contiguous axes fused), so the produced values are byte-identical;
+/// only the dispatch differs.
 #[allow(clippy::too_many_arguments)]
 fn fused_pair<T, Apply, ElementOp>(
     dst_data: &mut [T],
@@ -1598,10 +1598,9 @@ mod tests {
     #[test]
     fn fused_pair_stack_and_scratch_paths_produce_identical_values() {
         // Differential pin for the hybrid dispatch: the same logical copy
-        // expressed at rank 8 (stack-array path) and at rank 9 via an inserted
-        // extent-1 axis (fuse_pair_layout bails on shape.len() > 8, forcing the
-        // thread_local scratch path) must produce identical values, and both
-        // must match a naive reference loop.
+        // expressed within inline rank capacity (stack-array path) and above it
+        // via an inserted extent-1 axis (forcing thread_local scratch) must
+        // produce identical values, and both must match a naive reference loop.
         let shape8 = [2usize; 8];
         let src_strides8 = row_major(&shape8);
         let dst_strides8: Vec<isize> = src_strides8.iter().rev().copied().collect();
@@ -1621,7 +1620,7 @@ mod tests {
             |value| value,
         );
 
-        // Same copy with an extent-1 axis spliced into the middle: rank 9.
+        // Same copy with one extent-1 axis spliced above inline capacity.
         let mut shape9 = shape8.to_vec();
         let mut dst_strides9 = dst_strides8.clone();
         let mut src_strides9 = src_strides8.clone();
@@ -1656,9 +1655,10 @@ mod tests {
     }
 
     #[test]
-    fn fused_pair_scratch_path_matches_reference_for_genuine_rank_nine() {
-        // All nine axes have extent 2, so this can only run through the
-        // thread_local scratch path; compare against the naive reference.
+    fn fused_pair_scratch_path_matches_reference_above_inline_capacity() {
+        // All axes exceed inline rank capacity and have extent 2, so this can
+        // only run through the thread_local scratch path; compare against the
+        // naive reference.
         let shape = [2usize; 9];
         let src_strides = row_major(&shape);
         let dst_strides: Vec<isize> = src_strides.iter().rev().copied().collect();
