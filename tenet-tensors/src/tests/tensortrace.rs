@@ -1790,9 +1790,15 @@ fn dynamic_u1_conjugating_trace_matches_hand_indexed_logical_adjoint() {
     )
     .unwrap();
     assert_eq!(checked, expected);
+    let _ = crate::tensortrace::take_trace_compiler_geometry_derivations();
     let owned =
         tensortrace_fusion_dyn_owned_checked(&dynamic_dst, &dynamic_src, &src_data, axes, alpha)
             .unwrap();
+    // What: one checked compile derives one axis plan and one selected HomSpace.
+    assert_eq!(
+        crate::tensortrace::take_trace_compiler_geometry_derivations(),
+        (1, 1)
+    );
     assert_eq!(
         owned,
         hand_trace
@@ -1886,6 +1892,19 @@ fn dynamic_u1_nonconjugating_trace_keeps_parent_axis_geometry() {
 
     // What: disabling conjugation retains the source HomSpace and values.
     assert_eq!(actual, expected);
+    // What: checked algebra can also detect the neutral/charged trace mismatch,
+    // but the incompatible selected destination remains the earlier error.
+    assert_eq!(
+        tensortrace_fusion_dyn_owned_checked(
+            &dst,
+            &src,
+            &src_data,
+            TensorTraceAxisSpec::new(&[0], &[1], &[2]),
+            Complex64::new(1.0, 0.0),
+        )
+        .unwrap_err(),
+        OperationError::StructureMismatch { tensor: "dst" }
+    );
 }
 
 #[test]
