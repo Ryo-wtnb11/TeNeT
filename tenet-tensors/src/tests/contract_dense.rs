@@ -725,6 +725,7 @@ fn tensorcontract_structure_caches_do_not_promote_across_contexts() {
 
 #[test]
 fn tensorcontract_execution_context_no_cache_recompiles_without_retaining_structure() {
+    crate::cache::reset_tensor_contract_structure_cache_key_build_count();
     let lhs_space = TensorMapSpace::<2, 0>::from_dims([2, 3], []).unwrap();
     let rhs_space = TensorMapSpace::<2, 0>::from_dims([3, 2], []).unwrap();
     let dst_space = TensorMapSpace::<2, 0>::from_dims([2, 2], []).unwrap();
@@ -753,6 +754,23 @@ fn tensorcontract_execution_context_no_cache_recompiles_without_retaining_struct
         assert_eq!(context.cache().stats().structure_hits(), 0);
         assert_eq!(context.cache().stats().structure_misses(), expected_misses);
     }
+    assert_eq!(
+        crate::cache::tensor_contract_structure_cache_key_build_count(),
+        0
+    );
+    // What: the counter observes real structure-key construction while the
+    // eager NoCache calls above leave it untouched.
+    TensorContractStructureCacheKey::from_structures(
+        (),
+        dst.structure(),
+        lhs.structure(),
+        rhs.structure(),
+    )
+    .unwrap();
+    assert_eq!(
+        crate::cache::tensor_contract_structure_cache_key_build_count(),
+        1
+    );
 }
 
 #[test]

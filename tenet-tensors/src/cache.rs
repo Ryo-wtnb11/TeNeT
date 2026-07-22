@@ -367,6 +367,22 @@ pub struct TensorContractStructureCacheKey<PlanKey> {
     rhs: BlockStructureCacheKey,
 }
 
+#[cfg(test)]
+thread_local! {
+    static TENSOR_CONTRACT_STRUCTURE_CACHE_KEY_BUILDS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_tensor_contract_structure_cache_key_build_count() {
+    TENSOR_CONTRACT_STRUCTURE_CACHE_KEY_BUILDS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn tensor_contract_structure_cache_key_build_count() -> usize {
+    TENSOR_CONTRACT_STRUCTURE_CACHE_KEY_BUILDS.get()
+}
+
 impl<PlanKey> TensorContractStructureCacheKey<PlanKey>
 where
     PlanKey: Clone,
@@ -377,6 +393,9 @@ where
         lhs_structure: &BlockStructure,
         rhs_structure: &BlockStructure,
     ) -> Result<Self, OperationError> {
+        #[cfg(test)]
+        TENSOR_CONTRACT_STRUCTURE_CACHE_KEY_BUILDS
+            .set(TENSOR_CONTRACT_STRUCTURE_CACHE_KEY_BUILDS.get() + 1);
         Ok(Self {
             plan,
             dst: BlockStructureCacheKey::from_structure(dst_structure)?,
