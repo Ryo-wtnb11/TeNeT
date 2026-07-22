@@ -2148,6 +2148,9 @@ fn prelowered_same_content_roles_share_one_local_admission() {
 
 #[test]
 fn no_cache_tree_transform_paths_do_not_construct_sector_plan_keys() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let structure = simple_su2_vertex_structure(1);
     let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
     let src = TensorMap::<f64, 2, 0>::from_vec_with_structure(
