@@ -15,7 +15,7 @@
 //!
 //! A [`prelude::Runtime`] owns the shared execution state: the per-rule
 //! contraction/tree-transform contexts, the dense backend (selectable per
-//! [`prelude::LinalgBackend`] / [`prelude::TransposeBackend`]), and the
+//! [`prelude::LinalgBackend`]), and the
 //! contraction-plan cache the `tensor!` frontend keys by network topology.
 //!
 //! **Parallelism.** Ops on a shared `Runtime` scale with outer threads: each
@@ -58,7 +58,7 @@ pub mod prelude {
     pub use crate::plancache::{Optimizer, PlanCacheConfig, ReplanPolicy};
     pub use crate::runtime::{
         clear_default_runtime, default_runtime, set_default_runtime, LinalgBackend,
-        OperationCachePolicy, Runtime, RuntimeBuilder, TransposeBackend,
+        OperationCachePolicy, Runtime, RuntimeBuilder,
     };
     pub use crate::space::{SectorLabel, Space};
     pub use crate::tensor::{

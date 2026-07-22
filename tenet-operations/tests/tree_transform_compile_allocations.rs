@@ -63,23 +63,53 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 #[test]
 fn permuted_layout_compile_avoids_per_block_metadata_scratch() {
-    let shapes = (0..8).map(|_| vec![2, 2, 1, 1]).collect::<Vec<_>>();
-    let structure = BlockStructure::packed_column_major(4, shapes).unwrap();
-    let specs = (0..8)
-        .map(|block| {
-            TreeTransformBlockSpec::single(block, block, 1.0_f64).with_source_axes([1, 0, 2, 3])
-        })
-        .collect::<Vec<_>>();
-    let _ = TreeTransformStructure::compile_structures(&structure, &structure, &specs).unwrap();
+    let fixture = |blocks| {
+        let shapes = (0..blocks).map(|_| vec![2, 2, 1, 1]).collect::<Vec<_>>();
+        let structure = BlockStructure::packed_column_major(4, shapes).unwrap();
+        let specs = (0..blocks)
+            .map(|block| {
+                TreeTransformBlockSpec::single(block, block, 1.0_f64).with_source_axes([1, 0, 2, 3])
+            })
+            .collect::<Vec<_>>();
+        (structure, specs)
+    };
+    let (small_structure, small_specs) = fixture(8);
+    let (large_structure, large_specs) = fixture(64);
+    let _ = TreeTransformStructure::compile_structures(
+        &large_structure,
+        &large_structure,
+        &large_specs,
+    )
+    .unwrap();
 
     ALLOCATIONS.set(0);
     COUNTING.set(true);
-    let compiled =
-        TreeTransformStructure::compile_structures(&structure, &structure, &specs).unwrap();
+    let small = TreeTransformStructure::compile_structures(
+        &small_structure,
+        &small_structure,
+        &small_specs,
+    )
+    .unwrap();
     COUNTING.set(false);
+    let small_allocations = ALLOCATIONS.get();
 
-    // What: compiling eight permuted rank-four layouts stores metadata in the
-    // final table without allocating shape/stride/seen scratch per block.
-    assert_eq!(compiled.block_count(), 8);
-    assert!(ALLOCATIONS.get() <= 40, "allocations={}", ALLOCATIONS.get());
+    ALLOCATIONS.set(0);
+    COUNTING.set(true);
+    let large = TreeTransformStructure::compile_structures(
+        &large_structure,
+        &large_structure,
+        &large_specs,
+    )
+    .unwrap();
+    COUNTING.set(false);
+    let large_allocations = ALLOCATIONS.get();
+
+    // What: increasing block count eightfold grows final metadata but does not
+    // introduce one scratch allocation per block.
+    assert_eq!(small.block_count(), 8);
+    assert_eq!(large.block_count(), 64);
+    assert!(
+        large_allocations < small_allocations * 2,
+        "small={small_allocations} large={large_allocations}"
+    );
 }

@@ -1,10 +1,10 @@
 use core::ops::{Add, Mul};
 #[cfg(test)]
 use rustc_hash::FxHashMap;
+#[cfg(test)]
+use std::cell::Cell;
 use std::fmt;
 use std::hash::Hash;
-#[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use num_traits::Zero;
@@ -59,16 +59,19 @@ pub struct TreeTransformSectorPlanKey<RuleKey> {
 }
 
 #[cfg(test)]
-static TREE_TRANSFORM_SECTOR_PLAN_KEY_CONSTRUCTIONS: AtomicUsize = AtomicUsize::new(0);
+std::thread_local! {
+    // Why not process-global: unrelated parallel tests also construct keys.
+    static TREE_TRANSFORM_SECTOR_PLAN_KEY_CONSTRUCTIONS: Cell<usize> = const { Cell::new(0) };
+}
 
 #[cfg(test)]
 pub(crate) fn reset_tree_transform_sector_plan_key_constructions() {
-    TREE_TRANSFORM_SECTOR_PLAN_KEY_CONSTRUCTIONS.store(0, Ordering::Relaxed);
+    TREE_TRANSFORM_SECTOR_PLAN_KEY_CONSTRUCTIONS.set(0);
 }
 
 #[cfg(test)]
 pub(crate) fn tree_transform_sector_plan_key_constructions() -> usize {
-    TREE_TRANSFORM_SECTOR_PLAN_KEY_CONSTRUCTIONS.load(Ordering::Relaxed)
+    TREE_TRANSFORM_SECTOR_PLAN_KEY_CONSTRUCTIONS.get()
 }
 
 impl<RuleKey> TreeTransformSectorPlanKey<RuleKey>
@@ -114,7 +117,8 @@ where
         src_structure: &BlockStructure,
     ) -> Result<Self, OperationError> {
         #[cfg(test)]
-        TREE_TRANSFORM_SECTOR_PLAN_KEY_CONSTRUCTIONS.fetch_add(1, Ordering::Relaxed);
+        TREE_TRANSFORM_SECTOR_PLAN_KEY_CONSTRUCTIONS
+            .set(TREE_TRANSFORM_SECTOR_PLAN_KEY_CONSTRUCTIONS.get() + 1);
         let source_groups = src_structure
             .fusion_tree_group_slice()
             .into_iter()

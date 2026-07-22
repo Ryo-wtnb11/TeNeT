@@ -353,9 +353,7 @@ where
         if reverse {
             let lhs_scratch_space = lhs_core.space().clone();
             apply_rhs_contract_twist(
-                &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                    tree_backend.transpose_backend(),
-                ),
+                &mut crate::StridedHostKernelAdapter::default(),
                 rule,
                 &lhs_scratch_space,
                 lhs_core.data_mut(),
@@ -378,9 +376,7 @@ where
         if !reverse {
             let rhs_scratch_space = rhs_core.space().clone();
             apply_rhs_contract_twist(
-                &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                    tree_backend.transpose_backend(),
-                ),
+                &mut crate::StridedHostKernelAdapter::default(),
                 rule,
                 &rhs_scratch_space,
                 rhs_core.data_mut(),
@@ -1149,9 +1145,7 @@ where
         }
         if reverse {
             execute_rhs_contract_twist(
-                &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                    tree_context.backend().transpose_backend(),
-                ),
+                &mut crate::StridedHostKernelAdapter::default(),
                 lhs_scratch.data_mut(),
                 &artifact.core_right_twist,
             )?;
@@ -1200,9 +1194,7 @@ where
         }
         if !reverse {
             execute_rhs_contract_twist(
-                &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                    tree_context.backend().transpose_backend(),
-                ),
+                &mut crate::StridedHostKernelAdapter::default(),
                 rhs_scratch.data_mut(),
                 &artifact.core_right_twist,
             )?;
@@ -1228,9 +1220,7 @@ where
         } else {
             (physical_lhs_core, physical_rhs_core)
         };
-        let mut kernels = crate::StridedHostKernelAdapter::with_transpose_backend(
-            tree_context.backend().transpose_backend(),
-        );
+        let mut kernels = crate::StridedHostKernelAdapter::default();
         let mut gemm = super::fusion_block::BackendRank2Gemm {
             backend: contract_backend,
             workspace: contract_workspace,
@@ -1287,9 +1277,7 @@ where
         let mut execute = |lhs_core: CoreSource<'_, D>,
                            rhs_core: CoreSource<'_, D>,
                            core_dst: &mut DynamicFusionScratch<D>| {
-            let mut kernels = crate::StridedHostKernelAdapter::with_transpose_backend(
-                tree_context.backend().transpose_backend(),
-            );
+            let mut kernels = crate::StridedHostKernelAdapter::default();
             let mut gemm = super::fusion_block::BackendRank2Gemm {
                 backend: contract_backend,
                 workspace: contract_workspace,
@@ -1513,9 +1501,7 @@ where
             D::one(),
         )?;
         apply_rhs_contract_twist(
-            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                tree_context.backend().transpose_backend(),
-            ),
+            &mut crate::StridedHostKernelAdapter::default(),
             rule,
             &rhs_space,
             rhs_scratch.buffer_mut().as_mut_slice(),
@@ -1544,9 +1530,7 @@ where
             CoreSource::materialized(rhs_core.space(), rhs_core.buffer().as_slice())
         });
         return block_plan.execute_storage_raw_sources(
-            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                tree_context.backend().transpose_backend(),
-            ),
+            &mut crate::StridedHostKernelAdapter::default(),
             &mut super::fusion_block::BackendRank2Gemm {
                 backend: contract_backend,
                 workspace: contract_workspace,
@@ -1593,9 +1577,7 @@ where
              rhs_core: CoreSource<'_, D>,
              core_dst: &mut StorageDynamicFusionScratch<DDst::Similar>| {
                 block_plan.execute_storage_raw(
-                    &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                        tree_context.backend().transpose_backend(),
-                    ),
+                    &mut crate::StridedHostKernelAdapter::default(),
                     &mut super::fusion_block::BackendRank2Gemm {
                         backend: contract_backend,
                         workspace: contract_workspace,
@@ -2728,7 +2710,7 @@ where
 {
     let _ = dst_structure;
     tensorcontract_core_fusion_blocks_into_raw(
-        &mut crate::StridedHostKernelAdapter::with_transpose_backend(backend.transpose_backend()),
+        &mut crate::StridedHostKernelAdapter::default(),
         backend,
         workspace,
         rule,

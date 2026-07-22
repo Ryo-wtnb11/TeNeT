@@ -208,10 +208,14 @@ fn warm_threaded_overwrite_replay_does_not_allocate_on_the_caller_thread() {
 }
 
 #[test]
-fn warm_many_group_chunks_do_not_allocate_on_the_caller_thread() {
-    const GROUPS: usize = 32;
+fn all_rank_multi_replay_matches_reference_and_reuses_threaded_workspace() {
+    const RANK: usize = 10;
+    const GROUPS: usize = 4;
+    const BLOCKS: usize = 2 * GROUPS;
+    let shape = [2, 2, 2, 2, 2, 2, 2, 2, 2, 1];
+    let axes = [8, 7, 6, 5, 4, 3, 2, 1, 0, 9];
     let block_structure =
-        Arc::new(BlockStructure::packed_column_major(1, vec![vec![4]; 2 * GROUPS]).unwrap());
+        Arc::new(BlockStructure::packed_column_major(RANK, vec![shape.to_vec(); BLOCKS]).unwrap());
     let specs = (0..GROUPS)
         .map(|group| {
             let first = 2 * group;
@@ -220,20 +224,58 @@ fn warm_many_group_chunks_do_not_allocate_on_the_caller_thread() {
                 vec![first, first + 1],
                 vec![1.0, 0.0, 0.0, 1.0],
             )
+            .with_source_axes(axes)
         })
         .collect::<Vec<_>>();
     let structure =
         TreeTransformStructure::compile_structures(&block_structure, &block_structure, &specs)
             .unwrap();
-    let src = (0..8 * GROUPS)
-        .map(|value| value as f64 + 1.0)
+    assert!(structure.has_pack_gemm_scatter_blocks());
+    assert_eq!(structure.recoupling_plan().jobs().len(), GROUPS);
+
+    let elements = shape.iter().product::<usize>();
+    let src = (0..BLOCKS * elements)
+        .map(|value| value as f64 + 0.25)
         .collect::<Vec<_>>();
-    let mut dst = vec![0.0; src.len()];
+    let strides = block_structure.block(0).unwrap().strides();
+    let mut expected = vec![0.0; src.len()];
+    for block in 0..BLOCKS {
+        let base = block * elements;
+        for dst_linear in 0..elements {
+            let src_linear = (0..RANK).fold(0usize, |offset, axis| {
+                let coordinate = (dst_linear / strides[axis]) % shape[axis];
+                offset + coordinate * strides[axes[axis]]
+            });
+            expected[base + dst_linear] = src[base + src_linear];
+        }
+    }
+
+    let mut serial = vec![0.0; src.len()];
+    tree_transform_structure_with_structural_recoupling_raw(
+        &mut StridedHostKernelAdapter::default(),
+        &mut NoAllocDenseExecutor,
+        &mut TreeTransformWorkspace::default(),
+        &structure,
+        &block_structure,
+        &block_structure,
+        &mut serial,
+        &src,
+        1.0,
+        0.0,
+        1,
+    )
+    .unwrap();
+    assert_eq!(serial, expected);
+
+    let mut threaded = vec![0.0; src.len()];
     let mut kernels = StridedHostKernelAdapter::default();
     let mut dense = NoAllocDenseExecutor;
     let mut workspace = TreeTransformWorkspace::default();
-
-    let mut replay = || {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(3)
+        .build()
+        .unwrap();
+    pool.install(|| {
         tree_transform_structure_with_structural_recoupling_raw(
             &mut kernels,
             &mut dense,
@@ -241,27 +283,43 @@ fn warm_many_group_chunks_do_not_allocate_on_the_caller_thread() {
             &structure,
             &block_structure,
             &block_structure,
-            &mut dst,
+            &mut threaded,
             &src,
             1.0,
             0.0,
             3,
         )
-        .unwrap();
-    };
+    })
+    .unwrap();
+    assert_eq!(threaded, expected);
+    threaded.fill(0.0);
+    let caller_worker_allocations = pool.install(|| {
+        ALLOCATIONS.set(0);
+        COUNTING.set(true);
+        let result = tree_transform_structure_with_structural_recoupling_raw(
+            &mut kernels,
+            &mut dense,
+            &mut workspace,
+            &structure,
+            &block_structure,
+            &block_structure,
+            &mut threaded,
+            &src,
+            1.0,
+            0.0,
+            3,
+        );
+        COUNTING.set(false);
+        result.unwrap();
+        ALLOCATIONS.get()
+    });
 
-    replay();
-    ALLOCATIONS.set(0);
-    COUNTING.set(true);
-    replay();
-    COUNTING.set(false);
-
-    // What: reusable chunk metadata and numerical scratch allocate only during
-    // warmup, even when the plan has more groups than the concurrency bound.
+    // What: public rank ten (normalized rank nine) Multi pack/GEMM/scatter
+    // replay spans two T=3 chunks, matches direct remapping in serial/threaded
+    // modes, and reuses caller-worker workspace on the second real replay.
     assert_eq!(
-        ALLOCATIONS.get(),
-        0,
-        "warm many-group replay allocated on the caller thread"
+        caller_worker_allocations, 0,
+        "second threaded all-rank replay allocated on the caller worker"
     );
-    assert_eq!(dst, src);
+    assert_eq!(threaded, expected);
 }

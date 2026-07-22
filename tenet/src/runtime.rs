@@ -14,17 +14,12 @@ use tenet_tensors::{
     TreeTransformSu3RuleCacheKey,
 };
 
+use crate::error::Error;
+use crate::plancache::{Optimizer, PlanCacheConfig};
 /// Re-exported for the prelude: explicit policy for per-runtime operation
 /// artifact caches. RuntimeBuilder defaults to `NoCache`; this expert knob opts
 /// into task-local cache policies when the caller wants them.
 pub use tenet_tensors::OperationCachePolicy;
-/// Re-exported for the prelude: the transpose-kernel selection consumed by
-/// [`RuntimeBuilder::transpose_backend`] (defined next to the kernel adapter
-/// it configures; see its docs for the opt-in rationale).
-pub use tenet_tensors::TransposeBackend;
-
-use crate::error::Error;
-use crate::plancache::{Optimizer, PlanCacheConfig};
 
 pub type Ctx<D, Key> = TensorContractFusionExecutionContext<D, Key>;
 pub(crate) type BuiltinKey = TreeTransformBuiltinRuleCacheKey;
@@ -117,23 +112,6 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
             .set_recoupling_threads(threads);
     }
 
-    pub(crate) fn set_transpose_backend(&mut self, backend: TransposeBackend) {
-        self.f64
-            .tree_context_mut()
-            .backend_mut()
-            .set_transpose_backend(backend);
-        self.f64
-            .contract_backend_mut()
-            .set_transpose_backend(backend);
-        self.c64
-            .tree_context_mut()
-            .backend_mut()
-            .set_transpose_backend(backend);
-        self.c64
-            .contract_backend_mut()
-            .set_transpose_backend(backend);
-    }
-
     #[cfg(test)]
     pub(crate) fn recoupling_threads_are(&mut self, expected: usize) -> bool {
         self.f64
@@ -147,23 +125,6 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
                 .backend_mut()
                 .recoupling_threads()
                 == expected
-    }
-
-    #[cfg(test)]
-    fn transpose_backend_is(&mut self, expected: TransposeBackend) -> bool {
-        self.f64
-            .tree_context_mut()
-            .backend_mut()
-            .transpose_backend()
-            == expected
-            && self.f64.contract_backend().transpose_backend() == expected
-            && self
-                .c64
-                .tree_context_mut()
-                .backend_mut()
-                .transpose_backend()
-                == expected
-            && self.c64.contract_backend().transpose_backend() == expected
     }
 
     #[cfg(test)]
@@ -249,18 +210,9 @@ macro_rules! define_runtime_state {
                 $(self.$field.set_recoupling_threads(threads);)+
             }
 
-            fn set_transpose_backend(&mut self, backend: TransposeBackend) {
-                $(self.$field.set_transpose_backend(backend);)+
-            }
-
             #[cfg(test)]
             pub(crate) fn recoupling_threads_are(&mut self, expected: usize) -> bool {
                 true $(&& self.$field.recoupling_threads_are(expected))+
-            }
-
-            #[cfg(test)]
-            fn transpose_backend_is(&mut self, expected: TransposeBackend) -> bool {
-                true $(&& self.$field.transpose_backend_is(expected))+
             }
 
             #[cfg(test)]
@@ -440,7 +392,6 @@ impl Drop for DenseLease<'_> {
 pub(crate) struct RuntimeExecutionConfig {
     pub(crate) gemm_kind: Option<tenet_dense::CpuBackendKind>,
     pub(crate) recoupling_threads: Option<usize>,
-    pub(crate) transpose_backend: Option<TransposeBackend>,
     /// CPU provider for dense factorizations (SVD/QR/eigh). Kept here so the
     /// standalone-op executor pool can re-mint an executor identical to the one
     /// `RuntimeBuilder::build` created (issue #155). `None` uses faer.
@@ -693,9 +644,6 @@ pub struct RuntimeBuilder {
     /// Selected built-in CPU provider for the contraction/recoupling GEMM;
     /// `None` uses faer. Independent of [`Self::linalg_backend`].
     gemm_backend: Option<LinalgBackend>,
-    /// Selected transpose kernel for pure permuted copies; `None` keeps the
-    /// fused-loop default (dispatch-identical to not having the knob).
-    transpose_backend: Option<TransposeBackend>,
     /// Per-operation tree/dynamic artifact cache policy. Builder default is
     /// `NoCache`; explicit policies opt into task-local caches.
     operation_cache_policy: Option<OperationCachePolicy>,
@@ -712,7 +660,6 @@ impl Default for RuntimeBuilder {
             dense_executor: None,
             linalg_backend: None,
             gemm_backend: None,
-            transpose_backend: None,
             operation_cache_policy: Some(OperationCachePolicy::NoCache),
         }
     }
@@ -729,7 +676,6 @@ impl std::fmt::Debug for RuntimeBuilder {
             .field("dense_executor", &self.dense_executor.is_some())
             .field("linalg_backend", &self.linalg_backend)
             .field("gemm_backend", &self.gemm_backend)
-            .field("transpose_backend", &self.transpose_backend)
             .field("operation_cache_policy", &self.operation_cache_policy)
             .finish()
     }
@@ -857,34 +803,6 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Selects the CPU **transpose kernel** for pure permuted copies (the
-    /// pack / assign-scatter of tree-transform replay and fusion-block
-    /// contraction). Unset keeps [`TransposeBackend::FusedLoops`], which is
-    /// byte- and dispatch-identical to not having the knob at all.
-    ///
-    /// [`TransposeBackend::StridedPerm`] is **opt-in on measured numbers**
-    /// (issue #114): it loses badly on small-degeneracy SU(2) replay (d=4
-    /// transposes ~2x slower — its per-call plan build cannot amortize over
-    /// many tiny blocks) and only wins on large-block abelian
-    /// transpose-heavy workloads. Backend choice never changes results; see
-    /// `docs/backend_policy.md` for the regime table.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use tenet::prelude::*;
-    ///
-    /// let rt = Runtime::builder()
-    ///     .transpose_backend(TransposeBackend::StridedPerm)
-    ///     .build()?;
-    /// # let _ = rt;
-    /// # Ok::<(), tenet::prelude::Error>(())
-    /// ```
-    pub fn transpose_backend(mut self, backend: TransposeBackend) -> Self {
-        self.transpose_backend = Some(backend);
-        self
-    }
-
     /// Overrides the default `NoCache` operation-artifact policy for execution
     /// contexts minted by this runtime.
     pub fn operation_cache_policy(mut self, policy: OperationCachePolicy) -> Self {
@@ -947,9 +865,6 @@ impl RuntimeBuilder {
         if let Some(threads) = self.recoupling_threads {
             state.set_recoupling_threads(threads);
         }
-        if let Some(transpose) = self.transpose_backend {
-            state.set_transpose_backend(transpose);
-        }
         #[cfg(feature = "cuda")]
         if let Some(device) = self.cuda_device {
             state.cuda = Some(
@@ -970,7 +885,6 @@ impl RuntimeBuilder {
                 execution_config: RuntimeExecutionConfig {
                     gemm_kind,
                     recoupling_threads: self.recoupling_threads,
-                    transpose_backend: self.transpose_backend,
                     linalg_kind,
                     operation_cache_policy: self.operation_cache_policy,
                     shared_ctx,
@@ -1093,30 +1007,6 @@ mod tests {
             let ops = make_transform_ops(ctx, Some(faer)).expect("faer transform ops");
             drop(ops);
         }
-    }
-
-    /// `RuntimeBuilder::transpose_backend(StridedPerm)` must reach BOTH
-    /// backends (tree-transform and contraction) of every per-rule context —
-    /// the backends whose getters feed every kernel-adapter construction in
-    /// the replay/contraction drivers. Unset must stay FusedLoops. This is
-    /// the builder→backend leg of the route-selection chain; the
-    /// backend→dispatch leg is pinned by tenet-operations'
-    /// `transpose_backend_field_switches_the_route`.
-    #[test]
-    fn builder_transpose_backend_reaches_every_context_backend() {
-        fn assert_state(runtime: &Runtime, expected: TransposeBackend) {
-            let mut state = runtime.inner.state.lock().unwrap();
-            assert!(state.transpose_backend_is(expected));
-        }
-
-        let selected = Runtime::builder()
-            .transpose_backend(TransposeBackend::StridedPerm)
-            .build()
-            .unwrap();
-        assert_state(&selected, TransposeBackend::StridedPerm);
-
-        let default = Runtime::builder().build().unwrap();
-        assert_state(&default, TransposeBackend::FusedLoops);
     }
 
     // What: a runtime-level cache policy must configure both the legacy

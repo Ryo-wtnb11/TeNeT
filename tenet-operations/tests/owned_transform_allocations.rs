@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tenet_core::{BlockKey, BlockSpec, BlockStructure, FusionTreePairKey};
 use tenet_dense::DefaultDenseExecutor;
 use tenet_operations::{
-    try_tree_transform_structure_overwrite_owned_raw, TransposeBackend, TreeTransformBlockSpec,
+    try_tree_transform_structure_overwrite_owned_raw, TreeTransformBlockSpec,
     TreeTransformStructure, TreeTransformWorkspace,
 };
 
@@ -72,7 +72,6 @@ fn warm_owned_transform_allocates_only_the_output_payload() {
     let warm = try_tree_transform_structure_overwrite_owned_raw(
         &mut dense,
         &mut workspace,
-        TransposeBackend::FusedLoops,
         &transform,
         &structure,
         &structure,
@@ -89,7 +88,6 @@ fn warm_owned_transform_allocates_only_the_output_payload() {
     let output = try_tree_transform_structure_overwrite_owned_raw(
         &mut dense,
         &mut workspace,
-        TransposeBackend::FusedLoops,
         &transform,
         &structure,
         &structure,

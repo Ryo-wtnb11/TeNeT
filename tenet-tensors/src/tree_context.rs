@@ -175,11 +175,9 @@ where
                 src_structure,
                 false,
             )?;
-        let transpose_backend = self.backend.transpose_backend();
         tenet_operations::try_tree_transform_structure_overwrite_owned_raw(
             self.backend.dense_mut(),
             &mut self.workspace,
-            transpose_backend,
             &structure,
             dst_structure,
             src_structure,
@@ -460,9 +458,7 @@ where
             .cache
             .get_or_compile_tree_pair(rule, operation, dst, src)?;
         tree_transform_structure_with_storage_workspace_strided_kernel(
-            &mut crate::StridedHostKernelAdapter::with_transpose_backend(
-                self.backend.transpose_backend(),
-            ),
+            &mut crate::StridedHostKernelAdapter::default(),
             storage_workspace,
             &structure,
             dst,
