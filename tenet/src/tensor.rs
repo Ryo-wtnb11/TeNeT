@@ -6050,6 +6050,14 @@ impl Tensor {
     /// storage equivalent is the maximum absolute stored entry. Unlike
     /// [`Self::norm`], this is not quantum-dimension weighted.
     pub fn norm_inf(&self) -> Result<f64, Error> {
+        if let TensorRepr::Adjoint(view) = &self.repr {
+            return Self::owned(
+                self.rt.clone(),
+                Arc::clone(&view.parent.space),
+                Arc::clone(&view.parent.data),
+            )
+            .norm_inf();
+        }
         #[cfg(feature = "cuda")]
         if let Data::CudaF64(_) = self.stored_data() {
             return Err(device_unsupported("norm_inf()"));
@@ -9950,6 +9958,22 @@ mod adjoint_parent_view_tests {
             ))
         );
         assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+    }
+
+    #[test]
+    fn norm_inf_reads_the_adjoint_parent() {
+        // What: an adjoint view preserves the entrywise maximum without building its layout.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let left = Space::u1([(-2, 1), (-1, 2), (0, 1), (1, 2)]);
+        let right = Space::u1([(-1, 1), (0, 3), (2, 1)]);
+
+        for (dtype, seed) in [(Dtype::F64, 482_001), (Dtype::C64, 482_002)] {
+            let source = Tensor::rand_with_seed(&runtime, dtype, [&left], [&right], seed).unwrap();
+            let lazy = source.adjoint().unwrap();
+
+            assert_eq!(lazy.norm_inf().unwrap(), source.norm_inf().unwrap());
+            assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+        }
     }
 
     #[test]
