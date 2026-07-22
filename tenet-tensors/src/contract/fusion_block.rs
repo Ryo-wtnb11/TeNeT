@@ -50,6 +50,160 @@ use super::dynamic_space::DynamicFusionMapSpace;
 use super::fusion::reject_fusion_contract_conjugation;
 use super::structure::TensorContractAxisPlan;
 
+pub(super) struct CoreContractPreflight<'a, R> {
+    rule: &'a R,
+    dst: &'a DynamicFusionMapSpace,
+    lhs: &'a DynamicFusionMapSpace,
+    rhs: &'a DynamicFusionMapSpace,
+    axis_plan: TensorContractAxisPlan,
+}
+
+pub(super) struct ValidatedCoreContract<'a, R> {
+    preflight: CoreContractPreflight<'a, R>,
+}
+
+impl<'a, R> CoreContractPreflight<'a, R>
+where
+    R: FusionRule,
+{
+    pub(super) fn compile(
+        rule: &'a R,
+        dst: &'a DynamicFusionMapSpace,
+        lhs: &'a DynamicFusionMapSpace,
+        rhs: &'a DynamicFusionMapSpace,
+        axes: TensorContractSpec<'_>,
+    ) -> Result<Self, OperationError> {
+        validate_fusion_contract_rule(rule, dst, lhs, rhs)?;
+        Self::compile_after_rule_validation(rule, dst, lhs, rhs, axes)
+    }
+
+    fn compile_after_rule_validation(
+        rule: &'a R,
+        dst: &'a DynamicFusionMapSpace,
+        lhs: &'a DynamicFusionMapSpace,
+        rhs: &'a DynamicFusionMapSpace,
+        axes: TensorContractSpec<'_>,
+    ) -> Result<Self, OperationError> {
+        let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), dst.rank(), axes)?;
+        Ok(Self {
+            rule,
+            dst,
+            lhs,
+            rhs,
+            axis_plan,
+        })
+    }
+
+    pub(super) fn has_conjugation(&self) -> bool {
+        self.axis_plan.lhs_conjugate || self.axis_plan.rhs_conjugate
+    }
+
+    pub(super) fn validate_core_geometry(
+        self,
+    ) -> Result<Option<ValidatedCoreContract<'a, R>>, OperationError> {
+        if !is_core_form_source(self.lhs, self.rhs, &self.axis_plan)
+            || !is_core_form_output(self.dst, self.lhs, self.rhs, &self.axis_plan)
+        {
+            return Ok(None);
+        }
+        let expected_homspace = derive_expected_core_homspace(
+            self.rule,
+            self.lhs.homspace(),
+            self.rhs.homspace(),
+            self.axis_plan.lhs_contracting_axes.as_slice(),
+            self.axis_plan.rhs_contracting_axes.as_slice(),
+            self.axis_plan.output_axes.as_slice(),
+            self.dst.nout(),
+        )?;
+        if expected_homspace != *self.dst.homspace() {
+            return Err(OperationError::StructureMismatch { tensor: "dst" });
+        }
+        Ok(Some(ValidatedCoreContract { preflight: self }))
+    }
+
+    pub(super) fn require_core_geometry(
+        self,
+    ) -> Result<ValidatedCoreContract<'a, R>, OperationError> {
+        self.validate_core_geometry()?
+            .ok_or(OperationError::UnsupportedTensorContractScope {
+                message: "core fusion-block contraction requires core source and output axes",
+            })
+    }
+}
+
+impl<'a, R> ValidatedCoreContract<'a, R> {
+    pub(super) fn rule(&self) -> &'a R {
+        self.preflight.rule
+    }
+
+    pub(super) fn rhs(&self) -> &'a DynamicFusionMapSpace {
+        self.preflight.rhs
+    }
+
+    pub(super) fn rhs_contracting_axes(&self) -> &[usize] {
+        &self.preflight.axis_plan.rhs_contracting_axes
+    }
+
+    pub(super) fn storage_ops(&self) -> (MatrixOp, MatrixOp) {
+        let operation = |conjugate| {
+            if conjugate {
+                MatrixOp::Adjoint
+            } else {
+                MatrixOp::Identity
+            }
+        };
+        (
+            operation(self.preflight.axis_plan.lhs_conjugate),
+            operation(self.preflight.axis_plan.rhs_conjugate),
+        )
+    }
+}
+
+fn derive_expected_core_homspace<R>(
+    rule: &R,
+    lhs: &FusionTreeHomSpace,
+    rhs: &FusionTreeHomSpace,
+    lhs_contracting_axes: &[usize],
+    rhs_contracting_axes: &[usize],
+    output_axes: &[usize],
+    dst_nout: usize,
+) -> Result<FusionTreeHomSpace, OperationError>
+where
+    R: FusionRule,
+{
+    #[cfg(test)]
+    EXPECTED_CORE_HOMSPACE_DERIVATIONS.set(EXPECTED_CORE_HOMSPACE_DERIVATIONS.get() + 1);
+    FusionTreeHomSpace::tensorcontract_homspace(
+        rule,
+        lhs,
+        rhs,
+        lhs_contracting_axes,
+        rhs_contracting_axes,
+        output_axes,
+        dst_nout,
+    )
+    .map_err(OperationError::from_core_preserving_context)
+}
+
+#[cfg(test)]
+thread_local! {
+    static EXPECTED_CORE_HOMSPACE_DERIVATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_core_contract_derivations() {
+    super::structure::reset_tensor_contract_axis_plan_compiles();
+    EXPECTED_CORE_HOMSPACE_DERIVATIONS.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn core_contract_derivations() -> (usize, usize) {
+    (
+        super::structure::tensor_contract_axis_plan_compiles(),
+        EXPECTED_CORE_HOMSPACE_DERIVATIONS.get(),
+    )
+}
+
 /// Adapts a [`TensorContractBackend`] + workspace pair onto the replay
 /// layer's [`Rank2Gemm`] seam.
 pub(crate) struct BackendRank2Gemm<'a, B, W> {
@@ -206,64 +360,7 @@ where
     )
 }
 
-pub(crate) fn is_core_form_fusion_block_contract<R>(
-    rule: &R,
-    dst_space: &DynamicFusionMapSpace,
-    lhs_space: &DynamicFusionMapSpace,
-    rhs_space: &DynamicFusionMapSpace,
-    axes: TensorContractSpec<'_>,
-) -> Result<bool, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-{
-    reject_fusion_contract_conjugation(axes)?;
-    let axis_plan = TensorContractAxisPlan::compile(
-        lhs_space.rank(),
-        rhs_space.rank(),
-        dst_space.rank(),
-        axes,
-    )?;
-    if !is_core_form_source(lhs_space, rhs_space, &axis_plan)
-        || !is_core_form_output(dst_space, lhs_space, rhs_space, &axis_plan)
-    {
-        return Ok(false);
-    }
-    let expected_homspace = FusionTreeHomSpace::tensorcontract_homspace(
-        rule,
-        lhs_space.homspace(),
-        rhs_space.homspace(),
-        axes.lhs_contracting_axes(),
-        axes.rhs_contracting_axes(),
-        axis_plan.output_axes.as_slice(),
-        dst_space.nout(),
-    )
-    .map_err(OperationError::from_core_preserving_context)?;
-    if expected_homspace != *dst_space.homspace() {
-        return Err(OperationError::StructureMismatch { tensor: "dst" });
-    }
-    Ok(true)
-}
-
-fn validate_core_compose<R>(
-    rule: &R,
-    dst_space: &DynamicFusionMapSpace,
-    lhs_space: &DynamicFusionMapSpace,
-    rhs_space: &DynamicFusionMapSpace,
-    axes: TensorContractSpec<'_>,
-) -> Result<(), OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-{
-    if is_core_form_fusion_block_contract(rule, dst_space, lhs_space, rhs_space, axes)? {
-        Ok(())
-    } else {
-        Err(OperationError::UnsupportedTensorContractScope {
-            message: "core fusion-block contraction requires core source and output axes",
-        })
-    }
-}
-
-/// Generic-fusion (Stage B3c-1) sibling of [`is_core_form_fusion_block_contract`]:
+/// Generic-fusion (Stage B3c-1) sibling of the multiplicity-free core classifier:
 /// identical predicate, relaxed to any [`FusionRule`]. The homspace-shape check
 /// (`tensorcontract_homspace`) and the axis-form checks are already fully
 /// symmetry-agnostic — only the mult-free trait bound differed.
@@ -310,10 +407,16 @@ fn is_core_form_source(
     rhs_space: &DynamicFusionMapSpace,
     axis_plan: &TensorContractAxisPlan,
 ) -> bool {
-    let lhs_domain_axes = (lhs_space.nout()..lhs_space.rank()).collect::<Vec<_>>();
-    let rhs_codomain_axes = (0..rhs_space.nout()).collect::<Vec<_>>();
-    axis_plan.lhs_contracting_axes == lhs_domain_axes
-        && axis_plan.rhs_contracting_axes == rhs_codomain_axes
+    axis_plan
+        .lhs_contracting_axes
+        .iter()
+        .copied()
+        .eq(lhs_space.nout()..lhs_space.rank())
+        && axis_plan
+            .rhs_contracting_axes
+            .iter()
+            .copied()
+            .eq(0..rhs_space.nout())
 }
 
 fn is_core_form_output(
@@ -323,8 +426,7 @@ fn is_core_form_output(
     axis_plan: &TensorContractAxisPlan,
 ) -> bool {
     let output_rank = lhs_space.nout() + (rhs_space.rank() - rhs_space.nout());
-    let core_output_axes = (0..output_rank).collect::<Vec<_>>();
-    dst_space.nout() == lhs_space.nout() && axis_plan.output_axes == core_output_axes
+    dst_space.nout() == lhs_space.nout() && axis_plan.output_axes.iter().copied().eq(0..output_rank)
 }
 
 #[cfg(test)]
@@ -1275,7 +1377,7 @@ mod tests {
                 || lhs.col_trees() != rhs.col_trees()));
 
         reset_layout_lookups();
-        let _plan = compile_fusion_block_contract_plan_prelowered(
+        let _plan = super::super::resolution::compile_composition_plan(
             &rule,
             &canonical,
             &canonical,
@@ -1283,8 +1385,6 @@ mod tests {
             &canonical,
             &canonical,
             TensorContractSpec::with_default_output_order(&[2, 3], &[0, 1]),
-            MatrixOp::Identity,
-            MatrixOp::Identity,
         )
         .unwrap();
 
@@ -1339,16 +1439,14 @@ mod tests {
         let (logical, storage, _, _) = z2_adjoint_mapping_spaces();
 
         reset_layout_lookups();
-        let _plan = compile_fusion_block_contract_plan_prelowered(
+        let _plan = super::super::resolution::compile_composition_plan(
             &rule,
             &logical,
             &logical,
             &storage,
             &logical,
             &storage,
-            TensorContractSpec::with_default_output_order(&[1], &[0]),
-            MatrixOp::Adjoint,
-            MatrixOp::Adjoint,
+            TensorContractSpec::with_default_output_order_and_conjugation(&[1], &[0], true, true),
         )
         .unwrap();
 
@@ -1535,22 +1633,24 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     validate_fusion_contract_rule(rule, dst_space, lhs_space, rhs_space)?;
-    compile_fusion_block_contract_plan_validated(rule, dst_space, lhs_space, rhs_space, axes)
+    reject_fusion_contract_conjugation(axes)?;
+    let validated = CoreContractPreflight::compile_after_rule_validation(
+        rule, dst_space, lhs_space, rhs_space, axes,
+    )?
+    .require_core_geometry()?;
+    compile_fusion_block_contract_plan_validated(validated)
 }
 
 pub(crate) fn compile_fusion_block_contract_plan_validated<R>(
-    rule: &R,
-    dst_space: &DynamicFusionMapSpace,
-    lhs_space: &DynamicFusionMapSpace,
-    rhs_space: &DynamicFusionMapSpace,
-    axes: TensorContractSpec<'_>,
+    validated: ValidatedCoreContract<'_, R>,
 ) -> Result<FusionBlockContractPlan, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    reject_fusion_contract_conjugation(axes)?;
-    // Axis validation happens inside validate_core_compose.
-    validate_core_compose(rule, dst_space, lhs_space, rhs_space, axes)?;
+    let rule = validated.preflight.rule;
+    let dst_space = validated.preflight.dst;
+    let lhs_space = validated.preflight.lhs;
+    let rhs_space = validated.preflight.rhs;
 
     if let Some(plan) = compile_direct_coupled_region_plan(
         dst_space,
@@ -1599,25 +1699,20 @@ where
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn compile_fusion_block_contract_plan_prelowered<R>(
-    rule: &R,
-    dst_space: &DynamicFusionMapSpace,
-    lhs_logical: &DynamicFusionMapSpace,
+pub(crate) fn compile_fusion_block_contract_plan_prelowered_validated<R>(
+    validated: ValidatedCoreContract<'_, R>,
     lhs_storage: &DynamicFusionMapSpace,
-    rhs_logical: &DynamicFusionMapSpace,
     rhs_storage: &DynamicFusionMapSpace,
-    axes: TensorContractSpec<'_>,
     lhs_op: MatrixOp,
     rhs_op: MatrixOp,
 ) -> Result<FusionBlockContractPlan, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    validate_fusion_contract_rule(rule, dst_space, lhs_logical, rhs_logical)?;
-    lhs_storage.validate_rule(rule)?;
-    rhs_storage.validate_rule(rule)?;
-    validate_core_compose(rule, dst_space, lhs_logical, rhs_logical, axes)?;
+    let rule = validated.preflight.rule;
+    let dst_space = validated.preflight.dst;
+    let lhs_logical = validated.preflight.lhs;
+    let rhs_logical = validated.preflight.rhs;
 
     if let Some(plan) = compile_direct_coupled_region_plan(
         dst_space,
