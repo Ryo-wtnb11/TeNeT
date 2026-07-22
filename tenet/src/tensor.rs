@@ -18,9 +18,9 @@ use num_complex::Complex64;
 use smallvec::SmallVec;
 use tenet_core::{
     BlockKey, BlockStructure, BlockView, BlockViewMut, CheckedFusionAlgebra, CoupledSectorRegion,
-    FusionProductSpace, FusionRule, FusionTreeHomSpace, FusionTreePairKey, GenericRigidSymbols,
-    LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols, Placement, SectorId,
-    Su3FusionRule,
+    FusionProductSpace, FusionRule, FusionTreeHomSpace, FusionTreePairKey,
+    FusionTreePairOrientation, GenericRigidSymbols, LoweredMultiplicityFreeAlgebra,
+    MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace, Placement, SectorId, Su3FusionRule,
 };
 #[cfg(feature = "cuda")]
 use tenet_core::{SectorLeg, TensorStorage};
@@ -6891,8 +6891,12 @@ impl Tensor {
     }
 
     fn external_axis_is_dual(&self, axis: usize) -> Result<bool, Error> {
-        self.logical_space()?
-            .homspace()
+        let metadata = self.metadata();
+        let orientation = match metadata.orientation {
+            TensorOrientation::Owned => FusionTreePairOrientation::Direct,
+            TensorOrientation::Adjoint => FusionTreePairOrientation::Adjoint,
+        };
+        OrientedFusionTreeHomSpace::new(metadata.body.space.homspace(), orientation)
             .external_axis_is_dual(axis)
             .ok_or_else(|| {
                 Error::InvalidArgument(format!(
@@ -9901,6 +9905,51 @@ mod adjoint_parent_view_tests {
             Space::su3([((1, 0), 1), ((0, 1), 1)]).unwrap(),
             261_005,
         );
+    }
+
+    #[test]
+    fn external_axis_duality_reads_the_parent_orientation() {
+        // What: direct and lazy-adjoint leg duality matches the materialized
+        // logical space, preserves the invalid-axis error, and builds no adjoint layout.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let space = Space::u1([(-1, 1), (0, 2), (2, 1)]);
+        let dual = space.dual();
+        let source =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&space, &dual], [&space], 477_001)
+                .unwrap();
+        let lazy = source.adjoint().unwrap();
+        let oracle = source.adjoint().unwrap().materialized_tensor().unwrap();
+
+        for axis in 0..source.rank() {
+            assert_eq!(
+                source.external_axis_is_dual(axis).unwrap(),
+                source
+                    .logical_space()
+                    .unwrap()
+                    .homspace()
+                    .external_axis_is_dual(axis)
+                    .unwrap()
+            );
+            assert_eq!(
+                lazy.external_axis_is_dual(axis).unwrap(),
+                oracle
+                    .logical_space()
+                    .unwrap()
+                    .homspace()
+                    .external_axis_is_dual(axis)
+                    .unwrap()
+            );
+        }
+        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+        assert_eq!(
+            lazy.external_axis_is_dual(lazy.rank()).unwrap_err(),
+            Error::InvalidArgument(format!(
+                "axis {} is out of range for rank {}",
+                lazy.rank(),
+                lazy.rank()
+            ))
+        );
+        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
     }
 
     #[test]

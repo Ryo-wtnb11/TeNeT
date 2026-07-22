@@ -1134,6 +1134,11 @@ impl<'a> OrientedFusionTreeHomSpace<'a> {
             .transpose()
     }
 
+    #[doc(hidden)]
+    pub fn external_axis_is_dual(self, axis: usize) -> Option<bool> {
+        self.external_axis_leg_view(axis).map(OrientedLegView::is_dual)
+    }
+
     fn select_descriptor(
         self,
         codomain_axes: &[usize],

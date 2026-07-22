@@ -875,6 +875,24 @@ fn fermionic_adjoint_diagonal_contractions_match_dense_oracles() {
 }
 
 #[test]
+fn fermionic_odd_diagonal_contraction_matches_materialized_adjoint() {
+    // What: compact contraction makes the same fZ2 odd-sector twist decision
+    // for a lazy adjoint and its materialized form.
+    let rt = Runtime::builder().dense_threads(1).build().unwrap();
+    let odd = Space::fz2([(1, 2)]).unwrap();
+    let diagonal = real_diagonal(&rt, &odd, 477_101);
+    let parent = Tensor::rand_with_seed(&rt, Dtype::F64, [&odd], [&odd], 477_102).unwrap();
+    let lazy = parent.adjoint().unwrap();
+
+    let actual = diagonal.contract(&lazy, &[1], &[0]).unwrap();
+    let expected = dense_oracle(&diagonal)
+        .contract(&lazy.materialized_tensor().unwrap(), &[1], &[0])
+        .unwrap();
+
+    assert_tensor_close(&actual, &expected);
+}
+
+#[test]
 fn absorb_densifies_a_compact_destination_before_prefix_overwrite() {
     // What: absorb returns ordinary dense storage because overwriting a block
     // prefix need not preserve the destination's compact diagonal invariant.
