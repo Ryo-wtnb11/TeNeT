@@ -236,7 +236,7 @@ fn rank_129_su2_vacuum_structure() -> Arc<BlockStructure> {
 }
 
 #[test]
-fn rank_129_second_exact_warm_structure_hit_has_bounded_key_allocation_and_no_provider_work() {
+fn rank_129_second_exact_warm_structure_hit_has_no_operation_key_allocation_or_provider_work() {
     let _global_cache_guard = GLOBAL_CACHE_RESET_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -266,11 +266,10 @@ fn rank_129_second_exact_warm_structure_hit_has_bounded_key_allocation_and_no_pr
         .unwrap();
     COUNTING.set(false);
 
-    // What: a dynamic-rank categorical replay reuses the exact completed
-    // structure. Rebuilding its content key may allocate once, but warm replay
-    // performs no rank-dependent scratch allocation or provider work.
+    // What: cloning the runtime-rank operation into the completed-structure
+    // lookup key performs no allocation or provider work on an exact warm hit.
     assert!(Arc::ptr_eq(&cold, &warm));
-    assert!(ALLOCATIONS.get() <= 1);
+    assert_eq!(ALLOCATIONS.get(), 0);
     assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
 

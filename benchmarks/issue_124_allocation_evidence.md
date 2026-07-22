@@ -50,17 +50,19 @@ The common replay compares interned `Arc` identities. A semantically equal
 space arriving through a distinct `Arc` takes one structural fallback, then
 the cache adopts that current identity. Tests cover every production facade
 rule: U(1), Z2, fermion parity, SU(2), U(1) x fermion parity, fermion parity x
-U(1) x SU(2), and the separate generic SU(3) route. The borrowed operation
-path remains generic over `MultiplicityFreeRigidSymbols`; generic outer-
+U(1) x SU(2), and the separate generic SU(3) route. The operation path remains
+generic over `MultiplicityFreeRigidSymbols`; generic outer-
 multiplicity cache completion remains outside this slice.
 
-A rank-nine U(1) permutation exceeds the inline `AxisVec` capacity. After
-three prepared writes, its measured replay performs zero allocator and
+A rank-nine U(1) permutation uses the same flat `Arc<[usize]>`-backed
+runtime-rank operation value as every other rank. After construction, cloning
+that value into a completed-structure cache key is allocation-free. Three
+prepared writes followed by a measured replay perform zero allocator and
 reallocator calls on the calling thread, where operation-key construction and
-cache lookup execute. This proves that the cached operation is borrowed
-through the multiplicity-free transform cache rather than cloned into a
-heap-backed key. It does not classify allocations on concurrent foreign
-threads: the intermittent foreign-thread events were not stack-attributed.
+cache lookup execute. This does not prescribe or measure the constructor's
+allocation-call count, and it does not classify allocations on concurrent
+foreign threads: the intermittent foreign-thread events were not
+stack-attributed.
 Process-wide arena probes therefore remain isolated three-sample measurements.
 
 On the issue-124 `chi = 16` fixtures, repeatable steady probes after backend

@@ -1043,7 +1043,7 @@ fn registry_rejects_zero_sentinels_and_deduplicates_pointers() {
 }
 
 #[test]
-fn rank_nine_cached_permutation_has_bounded_caller_thread_operation_key_allocation() {
+fn rank_nine_cached_permutation_has_no_caller_thread_operation_key_allocation() {
     let _test_guard = lock_unpoisoned(&TEST_LOCK);
     let runtime = Runtime::builder()
         .operation_cache_policy(OperationCachePolicy::TaskLocal)
@@ -1099,10 +1099,10 @@ fn rank_nine_cached_permutation_has_bounded_caller_thread_operation_key_allocati
     assert_eq!(cache.structural_comparisons(), structural_comparisons);
     let operation_alloc_calls = PROBE_THREAD_ALLOC_CALLS.load(Ordering::Relaxed);
     let operation_allocated_bytes = PROBE_THREAD_ALLOCATED_BYTES.load(Ordering::Relaxed);
-    // What: a warm rank-nine lookup has at most one bounded operation-key
-    // allocation and no reallocations.
-    assert!(operation_alloc_calls <= 1);
-    assert!(operation_allocated_bytes <= 128);
+    // What: cloning the flat runtime-rank operation into a warm completed-
+    // structure key performs no caller-thread allocation or reallocation.
+    assert_eq!(operation_alloc_calls, 0);
+    assert_eq!(operation_allocated_bytes, 0);
     assert_eq!(PROBE_THREAD_REALLOC_CALLS.load(Ordering::Relaxed), 0);
     assert_eq!(destination.data(), expected.data());
 }

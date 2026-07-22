@@ -18,7 +18,7 @@ use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::{
     build_generic_tree_pair_transform_group_plan_validated, build_tree_pair_transform_group_plan,
     compile_multiplicity_free_tree_pair_structure, validate_generic_tree_pair_preflight,
-    TreeTransformOperation, TreeTransformRuleCacheKey,
+    TreeTransformOperation, TreeTransformOperationKind, TreeTransformRuleCacheKey,
 };
 use tenet_operations::OperationError;
 use tenet_operations::TreeTransformStructure;
@@ -306,7 +306,7 @@ where
         .validate_rule(rule)
         .map_err(OperationError::Core)?;
     if source_conjugate
-        && matches!(&operation, TreeTransformOperation::Braid { .. })
+        && operation.kind() == TreeTransformOperationKind::Braid
         && !rule.supports_unitary_braid_dagger()
     {
         return Err(OperationError::UnsupportedTreeTransformScope {
@@ -408,7 +408,7 @@ where
         .validate_rule(rule)
         .map_err(OperationError::Core)?;
     if source_conjugate
-        && matches!(&operation, TreeTransformOperation::Braid { .. })
+        && operation.kind() == TreeTransformOperationKind::Braid
         && !rule.supports_unitary_braid_dagger()
     {
         return Err(OperationError::UnsupportedTreeTransformScope {

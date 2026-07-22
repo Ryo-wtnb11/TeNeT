@@ -22,7 +22,8 @@ use crate::tree_transform::build_tree_pair_transform_group_plan;
 use crate::DenseTreeTransformOperations;
 use crate::{
     DenseRecouplingScalar, OperationError, RecouplingCoefficientAction, TreeTransformBackend,
-    TreeTransformOperation, TreeTransformRuleCacheKey, TreeTransformStructure,
+    TreeTransformOperation, TreeTransformOperationKind, TreeTransformRuleCacheKey,
+    TreeTransformStructure,
 };
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
 use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
@@ -132,18 +133,16 @@ where
     if source_conjugate {
         return false;
     }
-    let TreeTransformOperation::Permute {
-        codomain_permutation,
-        domain_permutation,
-    } = operation
-    else {
+    if operation.kind() != TreeTransformOperationKind::Permute {
         return false;
-    };
-    if !codomain_permutation
+    }
+    if !operation
+        .codomain_permutation()
         .iter()
         .copied()
         .eq(0..source_space.nout())
-        || !domain_permutation
+        || !operation
+            .domain_permutation()
             .iter()
             .copied()
             .eq(source_space.nout()..source_space.rank())

@@ -2,30 +2,28 @@
 //! no symmetry knowledge (the rule-aware cache keys stay in the symmetric
 //! execution crate).
 
-use smallvec::SmallVec;
+use std::fmt;
+use std::sync::Arc;
 
-/// Axis permutation / level list, inline up to rank 8 (the common tensor
-/// rank). This is a hot component of completed tree-transform structure keys,
-/// so common-rank lookup clones remain stack-allocated. Runtime-rank operation
-/// representation, including the rank-nine spill, is deferred to issue #470.
-pub type AxisVec = SmallVec<[usize; 8]>;
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum TreeTransformOperationKind {
+    /// Planar transpose, including codomain/domain repartitioning.
+    Transpose,
+    /// Permutation using the rule's symmetric braiding.
+    Permute,
+    /// Explicit braid with one level per source axis.
+    Braid,
+}
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub enum TreeTransformOperation {
-    Transpose {
-        codomain_permutation: AxisVec,
-        domain_permutation: AxisVec,
-    },
-    Permute {
-        codomain_permutation: AxisVec,
-        domain_permutation: AxisVec,
-    },
-    Braid {
-        codomain_permutation: AxisVec,
-        domain_permutation: AxisVec,
-        codomain_levels: AxisVec,
-        domain_levels: AxisVec,
-    },
+/// Immutable runtime-rank description of a tree-transform operation.
+///
+/// Accessors expose the TensorKit-compatible logical operation while keeping
+/// its Rust storage independent of tensor rank and free to evolve.
+#[derive(Clone, Eq, PartialEq, Hash)]
+pub struct TreeTransformOperation {
+    kind: TreeTransformOperationKind,
+    data: Arc<[usize]>,
+    ends: [usize; 3],
 }
 
 impl TreeTransformOperation {
@@ -45,10 +43,13 @@ impl TreeTransformOperation {
         Codomain: IntoIterator<Item = usize>,
         Domain: IntoIterator<Item = usize>,
     {
-        Self::Transpose {
-            codomain_permutation: codomain_permutation.into_iter().collect(),
-            domain_permutation: domain_permutation.into_iter().collect(),
-        }
+        Self::from_parts(
+            TreeTransformOperationKind::Transpose,
+            codomain_permutation,
+            domain_permutation,
+            std::iter::empty(),
+            std::iter::empty(),
+        )
     }
 
     /// Build a symmetric-braiding permutation operation.
@@ -63,10 +64,13 @@ impl TreeTransformOperation {
         Codomain: IntoIterator<Item = usize>,
         Domain: IntoIterator<Item = usize>,
     {
-        Self::Permute {
-            codomain_permutation: codomain_permutation.into_iter().collect(),
-            domain_permutation: domain_permutation.into_iter().collect(),
-        }
+        Self::from_parts(
+            TreeTransformOperationKind::Permute,
+            codomain_permutation,
+            domain_permutation,
+            std::iter::empty(),
+            std::iter::empty(),
+        )
     }
 
     /// Build an explicit braid operation with source-axis permutations and levels.
@@ -90,16 +94,79 @@ impl TreeTransformOperation {
         CodomainLevels: IntoIterator<Item = usize>,
         DomainLevels: IntoIterator<Item = usize>,
     {
-        Self::Braid {
-            codomain_permutation: codomain_permutation.into_iter().collect(),
-            domain_permutation: domain_permutation.into_iter().collect(),
-            codomain_levels: codomain_levels.into_iter().collect(),
-            domain_levels: domain_levels.into_iter().collect(),
+        Self::from_parts(
+            TreeTransformOperationKind::Braid,
+            codomain_permutation,
+            domain_permutation,
+            codomain_levels,
+            domain_levels,
+        )
+    }
+
+    fn from_parts<Codomain, Domain, CodomainLevels, DomainLevels>(
+        kind: TreeTransformOperationKind,
+        codomain_permutation: Codomain,
+        domain_permutation: Domain,
+        codomain_levels: CodomainLevels,
+        domain_levels: DomainLevels,
+    ) -> Self
+    where
+        Codomain: IntoIterator<Item = usize>,
+        Domain: IntoIterator<Item = usize>,
+        CodomainLevels: IntoIterator<Item = usize>,
+        DomainLevels: IntoIterator<Item = usize>,
+    {
+        let mut data = Vec::new();
+        data.extend(codomain_permutation);
+        let codomain_permutation_end = data.len();
+        data.extend(domain_permutation);
+        let domain_permutation_end = data.len();
+        data.extend(codomain_levels);
+        let codomain_levels_end = data.len();
+        data.extend(domain_levels);
+        Self {
+            kind,
+            data: data.into(),
+            ends: [
+                codomain_permutation_end,
+                domain_permutation_end,
+                codomain_levels_end,
+            ],
         }
     }
 
+    /// Return the operation kind.
+    #[inline]
+    pub fn kind(&self) -> TreeTransformOperationKind {
+        self.kind
+    }
+
+    /// Return source axes selected for the destination codomain.
+    #[inline]
+    pub fn codomain_permutation(&self) -> &[usize] {
+        &self.data[..self.ends[0]]
+    }
+
+    /// Return source axes selected for the destination domain.
+    #[inline]
+    pub fn domain_permutation(&self) -> &[usize] {
+        &self.data[self.ends[0]..self.ends[1]]
+    }
+
+    /// Return explicit braid levels for source codomain axes.
+    #[inline]
+    pub fn codomain_levels(&self) -> &[usize] {
+        &self.data[self.ends[1]..self.ends[2]]
+    }
+
+    /// Return explicit braid levels for source domain axes.
+    #[inline]
+    pub fn domain_levels(&self) -> &[usize] {
+        &self.data[self.ends[2]..]
+    }
+
     pub fn requires_symmetric_braiding(&self) -> bool {
-        matches!(self, Self::Permute { .. })
+        self.kind == TreeTransformOperationKind::Permute
     }
 
     /// Whether this operation describes the exact current axis order and
@@ -118,32 +185,109 @@ impl TreeTransformOperation {
                     .copied()
                     .eq(codomain_rank..codomain_rank + domain_rank)
         };
-        match self {
-            Self::Permute {
-                codomain_permutation,
-                domain_permutation,
-            } => axes_are_identity(codomain_permutation, domain_permutation),
-            Self::Braid {
-                codomain_permutation,
-                domain_permutation,
-                codomain_levels,
-                domain_levels,
-            } => {
-                codomain_levels.len() == codomain_rank
-                    && domain_levels.len() == domain_rank
-                    && axes_are_identity(codomain_permutation, domain_permutation)
+        match self.kind {
+            TreeTransformOperationKind::Braid => {
+                self.codomain_levels().len() == codomain_rank
+                    && self.domain_levels().len() == domain_rank
+                    && axes_are_identity(self.codomain_permutation(), self.domain_permutation())
             }
-            Self::Transpose {
-                codomain_permutation,
-                domain_permutation,
-            } => axes_are_identity(codomain_permutation, domain_permutation),
+            TreeTransformOperationKind::Permute | TreeTransformOperationKind::Transpose => {
+                axes_are_identity(self.codomain_permutation(), self.domain_permutation())
+            }
         }
+    }
+}
+
+impl fmt::Debug for TreeTransformOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct(match self.kind {
+            TreeTransformOperationKind::Transpose => "Transpose",
+            TreeTransformOperationKind::Permute => "Permute",
+            TreeTransformOperationKind::Braid => "Braid",
+        });
+        debug
+            .field("codomain_permutation", &self.codomain_permutation())
+            .field("domain_permutation", &self.domain_permutation());
+        if self.kind == TreeTransformOperationKind::Braid {
+            debug
+                .field("codomain_levels", &self.codomain_levels())
+                .field("domain_levels", &self.domain_levels());
+        }
+        debug.finish()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::TreeTransformOperation;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::sync::Arc;
+
+    use super::{TreeTransformOperation, TreeTransformOperationKind};
+
+    #[test]
+    fn operation_values_expose_all_logical_segments_at_runtime_rank() {
+        // What: every operation kind preserves its logical segments, including
+        // values above the former inline-rank boundary.
+        let transpose = TreeTransformOperation::transpose(0..9, [9]);
+        assert_eq!(transpose.kind(), TreeTransformOperationKind::Transpose);
+        assert_eq!(
+            transpose.codomain_permutation(),
+            &(0..9).collect::<Vec<_>>()
+        );
+        assert_eq!(transpose.domain_permutation(), &[9]);
+        assert!(transpose.codomain_levels().is_empty());
+        assert!(transpose.domain_levels().is_empty());
+
+        let permute = TreeTransformOperation::permute([1, 0], [2]);
+        assert_eq!(permute.kind(), TreeTransformOperationKind::Permute);
+        assert_eq!(permute.codomain_permutation(), &[1, 0]);
+        assert_eq!(permute.domain_permutation(), &[2]);
+        assert!(permute.codomain_levels().is_empty());
+        assert!(permute.domain_levels().is_empty());
+
+        let braid = TreeTransformOperation::braid([1, 0], [2], [7, 3], [5]);
+        assert_eq!(braid.kind(), TreeTransformOperationKind::Braid);
+        assert_eq!(braid.codomain_permutation(), &[1, 0]);
+        assert_eq!(braid.domain_permutation(), &[2]);
+        assert_eq!(braid.codomain_levels(), &[7, 3]);
+        assert_eq!(braid.domain_levels(), &[5]);
+
+        let equal = TreeTransformOperation::braid(vec![1, 0], vec![2], vec![7, 3], vec![5]);
+        let mut left_hash = DefaultHasher::new();
+        let mut right_hash = DefaultHasher::new();
+        braid.hash(&mut left_hash);
+        equal.hash(&mut right_hash);
+        assert!(!Arc::ptr_eq(&braid.data, &equal.data));
+        assert_eq!(braid, equal);
+        assert_eq!(left_hash.finish(), right_hash.finish());
+    }
+
+    #[test]
+    fn debug_preserves_the_public_variant_shaped_text() {
+        // What: opaque storage leaves the public operation text unchanged.
+        assert_eq!(
+            format!("{:?}", TreeTransformOperation::transpose([2, 0], [1])),
+            "Transpose { codomain_permutation: [2, 0], domain_permutation: [1] }"
+        );
+        assert_eq!(
+            format!("{:?}", TreeTransformOperation::permute([1, 0], [2])),
+            "Permute { codomain_permutation: [1, 0], domain_permutation: [2] }"
+        );
+        assert_eq!(
+            format!("{:?}", TreeTransformOperation::braid([1, 0], [2], [0, 1], [2])),
+            "Braid { codomain_permutation: [1, 0], domain_permutation: [2], codomain_levels: [0, 1], domain_levels: [2] }"
+        );
+
+        let error = crate::OperationError::UnsupportedTreeTransformScope {
+            operation: Box::new(TreeTransformOperation::permute([1, 0], [2])),
+            message: "representative scope",
+        };
+        assert_eq!(
+            error.to_string(),
+            "unsupported tree transform scope for operation Permute { codomain_permutation: [1, 0], domain_permutation: [2] }: representative scope"
+        );
+    }
 
     #[test]
     fn identity_axis_map_requires_the_current_split_and_valid_braid_levels() {

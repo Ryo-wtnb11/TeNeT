@@ -8,7 +8,7 @@ use tenet_core::{
 
 use crate::OperationError;
 
-pub use tenet_operations::TreeTransformOperation;
+pub use tenet_operations::{TreeTransformOperation, TreeTransformOperationKind};
 
 /// Rule-aware validation for [`TreeTransformOperation`]; lives in the
 /// symmetric layer because it consumes the fusion rule's braiding style.
