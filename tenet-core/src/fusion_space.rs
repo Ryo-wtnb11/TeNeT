@@ -1139,6 +1139,76 @@ impl<'a> OrientedFusionTreeHomSpace<'a> {
         self.external_axis_leg_view(axis).map(OrientedLegView::is_dual)
     }
 
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn tensorcontract_homspace<R>(
+        rule: &R,
+        lhs: Self,
+        rhs: Self,
+        lhs_contracting_axes: &[usize],
+        rhs_contracting_axes: &[usize],
+        output_axes: &[usize],
+        dst_codomain_rank: usize,
+    ) -> Result<FusionTreeHomSpace, CoreError>
+    where
+        R: FusionRule,
+    {
+        let descriptor = tensorcontract_descriptor(
+            lhs,
+            rhs,
+            lhs_contracting_axes,
+            rhs_contracting_axes,
+            output_axes,
+            dst_codomain_rank,
+        )?;
+        for (&lhs_axis, &rhs_axis) in lhs_contracting_axes.iter().zip(rhs_contracting_axes) {
+            validate_oriented_composed_leg(
+                rule,
+                lhs.external_axis_leg_view(lhs_axis)
+                    .expect("validated axis belongs to the lhs")
+                    .toggled(),
+                rhs.external_axis_leg_view(rhs_axis)
+                    .expect("validated axis belongs to the rhs"),
+            )?;
+        }
+        Ok(descriptor.materialize(rule))
+    }
+
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_tensorcontract_homspace_checked<R>(
+        rule: &R,
+        lhs: Self,
+        rhs: Self,
+        lhs_contracting_axes: &[usize],
+        rhs_contracting_axes: &[usize],
+        output_axes: &[usize],
+        dst_codomain_rank: usize,
+    ) -> Result<FusionTreeHomSpace, CheckedFusionSpaceError>
+    where
+        R: CheckedFusionAlgebra,
+    {
+        let descriptor = tensorcontract_descriptor(
+            lhs,
+            rhs,
+            lhs_contracting_axes,
+            rhs_contracting_axes,
+            output_axes,
+            dst_codomain_rank,
+        )?;
+        for (&lhs_axis, &rhs_axis) in lhs_contracting_axes.iter().zip(rhs_contracting_axes) {
+            validate_oriented_composed_leg_checked(
+                rule,
+                lhs.external_axis_leg_view(lhs_axis)
+                    .expect("validated axis belongs to the lhs")
+                    .toggled(),
+                rhs.external_axis_leg_view(rhs_axis)
+                    .expect("validated axis belongs to the rhs"),
+            )?;
+        }
+        descriptor.try_materialize(rule).map_err(Into::into)
+    }
+
     fn select_descriptor(
         self,
         codomain_axes: &[usize],
@@ -1659,22 +1729,15 @@ impl FusionTreeHomSpace {
     where
         R: FusionRule,
     {
-        let descriptor = tensorcontract_descriptor(
-            lhs,
-            rhs,
+        OrientedFusionTreeHomSpace::tensorcontract_homspace(
+            rule,
+            OrientedFusionTreeHomSpace::new(lhs, FusionTreePairOrientation::Direct),
+            OrientedFusionTreeHomSpace::new(rhs, FusionTreePairOrientation::Direct),
             lhs_contracting_axes,
             rhs_contracting_axes,
             output_axes,
             dst_codomain_rank,
-        )?;
-        for (&lhs_axis, &rhs_axis) in lhs_contracting_axes.iter().zip(rhs_contracting_axes) {
-            validate_oriented_composed_leg(
-                rule,
-                lhs.external_axis_leg_view(lhs_axis).toggled(),
-                rhs.external_axis_leg_view(rhs_axis),
-            )?;
-        }
-        Ok(descriptor.materialize(rule))
+        )
     }
 
     /// Checked sibling of [`Self::tensorcontract_homspace`] for finite or
@@ -1692,22 +1755,15 @@ impl FusionTreeHomSpace {
     where
         R: CheckedFusionAlgebra,
     {
-        let descriptor = tensorcontract_descriptor(
-            lhs,
-            rhs,
+        OrientedFusionTreeHomSpace::try_tensorcontract_homspace_checked(
+            rule,
+            OrientedFusionTreeHomSpace::new(lhs, FusionTreePairOrientation::Direct),
+            OrientedFusionTreeHomSpace::new(rhs, FusionTreePairOrientation::Direct),
             lhs_contracting_axes,
             rhs_contracting_axes,
             output_axes,
             dst_codomain_rank,
-        )?;
-        for (&lhs_axis, &rhs_axis) in lhs_contracting_axes.iter().zip(rhs_contracting_axes) {
-            validate_oriented_composed_leg_checked(
-                rule,
-                lhs.external_axis_leg_view(lhs_axis).toggled(),
-                rhs.external_axis_leg_view(rhs_axis),
-            )?;
-        }
-        descriptor.try_materialize(rule).map_err(Into::into)
+        )
     }
 
     /// The cached fusion-tree block keys, shared in O(1) (`Arc::clone`): the
@@ -2380,8 +2436,8 @@ where
 
 #[allow(clippy::too_many_arguments)]
 fn tensorcontract_descriptor<'a>(
-    lhs: &'a FusionTreeHomSpace,
-    rhs: &'a FusionTreeHomSpace,
+    lhs: OrientedFusionTreeHomSpace<'a>,
+    rhs: OrientedFusionTreeHomSpace<'a>,
     lhs_contracting_axes: &[usize],
     rhs_contracting_axes: &[usize],
     output_axes: &[usize],
@@ -2415,12 +2471,18 @@ fn tensorcontract_descriptor<'a>(
     open_legs.extend(
         lhs_open_axes
             .iter()
-            .map(|&axis| lhs.external_axis_leg_view(axis)),
+        .map(|&axis| {
+            lhs.external_axis_leg_view(axis)
+                .expect("validated axis belongs to the lhs")
+        }),
     );
     open_legs.extend(
         rhs_open_axes
             .iter()
-            .map(|&axis| rhs.external_axis_leg_view(axis)),
+        .map(|&axis| {
+            rhs.external_axis_leg_view(axis)
+                .expect("validated axis belongs to the rhs")
+        }),
     );
     // Why not materialize two permuted operands and their composition: output
     // ordering observes only these final external views, and doing so would
