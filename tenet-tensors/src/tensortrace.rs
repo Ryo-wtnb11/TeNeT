@@ -203,6 +203,9 @@ thread_local! {
     static TRACE_TRANSFORM_SOURCES: std::cell::RefCell<Vec<usize>> = const {
         std::cell::RefCell::new(Vec::new())
     };
+    static TRACE_COMPILER_GEOMETRY_DERIVATIONS: std::cell::Cell<(usize, usize)> = const {
+        std::cell::Cell::new((0, 0))
+    };
 }
 
 #[cfg(test)]
@@ -220,10 +223,33 @@ pub(crate) fn take_trace_transform_sources() -> Vec<usize> {
     TRACE_TRANSFORM_SOURCES.take()
 }
 
+#[cfg(test)]
+pub(crate) fn take_trace_compiler_geometry_derivations() -> (usize, usize) {
+    TRACE_COMPILER_GEOMETRY_DERIVATIONS.replace((0, 0))
+}
+
 #[inline]
 fn record_trace_transform_invocation(_src_block_index: usize) {
     #[cfg(test)]
     TRACE_TRANSFORM_SOURCES.with_borrow_mut(|sources| sources.push(_src_block_index));
+}
+
+#[inline]
+fn record_trace_axis_plan_derivation() {
+    #[cfg(test)]
+    TRACE_COMPILER_GEOMETRY_DERIVATIONS.with(|counts| {
+        let (axis_plans, selected_homspaces) = counts.get();
+        counts.set((axis_plans.saturating_add(1), selected_homspaces));
+    });
+}
+
+#[inline]
+fn record_trace_selected_homspace_derivation() {
+    #[cfg(test)]
+    TRACE_COMPILER_GEOMETRY_DERIVATIONS.with(|counts| {
+        let (axis_plans, selected_homspaces) = counts.get();
+        counts.set((axis_plans, selected_homspaces.saturating_add(1)));
+    });
 }
 
 /// A compiled fusion-aware trace whose valid terms retain global source order.
@@ -317,7 +343,7 @@ impl<C> TensorTraceFusionStructure<C> {
         R: MultiplicityFreeRigidSymbols<Scalar = C>,
         C: Clone + Add<Output = C> + Mul<Output = C> + Zero + RealStructuralCoefficient,
     {
-        Self::compile_fusion_dyn_raw_with_preflight(rule, dst, src, axes, |_, _| Ok(()))
+        Self::compile_fusion_dyn_raw_with_preflight(rule, dst, src, axes, |_, _| Ok(None))
     }
 
     fn compile_fusion_dyn_checked_raw<R>(
@@ -336,7 +362,7 @@ impl<C> TensorTraceFusionStructure<C> {
             src,
             axes,
             |logical_src, axis_plan| {
-                checked_fusion_trace_homspace(rule, logical_src, axis_plan, dst.nout()).map(|_| ())
+                checked_fusion_trace_geometry(rule, logical_src, axis_plan, dst.nout()).map(Some)
             },
         )
     }
@@ -354,7 +380,7 @@ impl<C> TensorTraceFusionStructure<C> {
         F: FnOnce(
             OrientedFusionTreeHomSpace<'_>,
             &TensorTraceAxisPlan,
-        ) -> Result<(), OperationError>,
+        ) -> Result<Option<CheckedTraceGeometry>, OperationError>,
     {
         dst.validate_rule(rule)?;
         src.validate_rule(rule)?;
@@ -403,7 +429,7 @@ impl<C> TensorTraceFusionStructure<C> {
             src,
             dst_codomain_rank,
             axes,
-            |_, _| Ok(()),
+            |_, _| Ok(None),
         )
     }
 
@@ -423,7 +449,7 @@ impl<C> TensorTraceFusionStructure<C> {
         F: FnOnce(
             OrientedFusionTreeHomSpace<'_>,
             &TensorTraceAxisPlan,
-        ) -> Result<(), OperationError>,
+        ) -> Result<Option<CheckedTraceGeometry>, OperationError>,
     {
         if !rule.braiding_style().is_symmetric() {
             return Err(OperationError::UnsupportedTensorContractScope {
@@ -432,13 +458,16 @@ impl<C> TensorTraceFusionStructure<C> {
         }
         let axis_plan =
             TensorTraceAxisPlan::compile(src.structure.rank(), dst_structure.rank(), axes)?;
-        preflight(src.homspace, &axis_plan)?;
+        let checked_geometry = preflight(src.homspace, &axis_plan)?;
+        // Why not cache this per-call result: eager compilation only needs to
+        // pass the checked selection forward instead of deriving it again.
         validate_fusion_trace_homspace(
             rule,
             dst_homspace,
             src.homspace,
             &axis_plan,
             dst_codomain_rank,
+            checked_geometry,
         )?;
         let terms =
             build_fusion_trace_terms(rule, &dst_structure, src, &axis_plan, dst_codomain_rank)?;
@@ -1077,6 +1106,7 @@ impl TensorTraceAxisPlan {
         dst_rank: usize,
         axes: TensorTraceAxisSpec<'_>,
     ) -> Result<Self, OperationError> {
+        record_trace_axis_plan_derivation();
         if axes.trace_lhs_axes().len() != axes.trace_rhs_axes().len() {
             return Err(OperationError::TraceAxisCountMismatch {
                 lhs: axes.trace_lhs_axes().len(),
@@ -1117,6 +1147,11 @@ impl TensorTraceAxisPlan {
             source_conjugate: axes.source_conjugate(),
         })
     }
+}
+
+struct CheckedTraceGeometry {
+    selected_homspace: FusionTreeHomSpace,
+    trace_pairs_match: bool,
 }
 
 fn build_fusion_trace_terms<R>(
@@ -1340,26 +1375,46 @@ fn validate_fusion_trace_homspace<R>(
     src: OrientedFusionTreeHomSpace<'_>,
     axis_plan: &TensorTraceAxisPlan,
     dst_codomain_rank: usize,
+    checked_geometry: Option<CheckedTraceGeometry>,
 ) -> Result<(), OperationError>
 where
     R: FusionRule,
 {
-    let dst_domain_rank = axis_plan.output_axes.len() - dst_codomain_rank;
-    let expected = src
-        .select(
-            rule,
-            &axis_plan.output_axes[..dst_codomain_rank],
-            &axis_plan.output_axes[dst_codomain_rank..],
-        )
-        .map_err(OperationError::from_core_preserving_context)?;
-    if expected != *dst {
+    let (selected, checked_trace_pairs_match) = match checked_geometry {
+        Some(CheckedTraceGeometry {
+            selected_homspace,
+            trace_pairs_match,
+        }) => (selected_homspace, Some(trace_pairs_match)),
+        None => {
+            record_trace_selected_homspace_derivation();
+            (
+                src.select(
+                    rule,
+                    &axis_plan.output_axes[..dst_codomain_rank],
+                    &axis_plan.output_axes[dst_codomain_rank..],
+                )
+                .map_err(OperationError::from_core_preserving_context)?,
+                None,
+            )
+        }
+    };
+    if selected != *dst {
         return Err(OperationError::StructureMismatch { tensor: "dst" });
     }
+    let dst_domain_rank = axis_plan.output_axes.len() - dst_codomain_rank;
     if dst.domain().len() != dst_domain_rank {
         return Err(OperationError::StructureRankMismatch {
             expected: dst_domain_rank,
             actual: dst.domain().len(),
         });
+    }
+    if let Some(trace_pairs_match) = checked_trace_pairs_match {
+        if !trace_pairs_match {
+            return Err(OperationError::StructureMismatch {
+                tensor: "trace axes",
+            });
+        }
+        return Ok(());
     }
     for (&lhs_axis, &rhs_axis) in axis_plan
         .trace_lhs_axes
@@ -1882,12 +1937,13 @@ where
         lowered_spec.output_axes().len(),
         lowered_spec,
     )?;
-    checked_fusion_trace_homspace(
+    checked_fusion_trace_geometry(
         src.provider(),
         OrientedFusionTreeHomSpace::new(src.space().homspace(), orientation),
         &axis_plan,
         dst_nout,
     )
+    .map(|geometry| geometry.selected_homspace)
 }
 
 /// Checked lowered trace entry point. The legacy dynamic API intentionally
@@ -1926,12 +1982,12 @@ where
     )
 }
 
-fn checked_fusion_trace_homspace<R>(
+fn checked_fusion_trace_geometry<R>(
     rule: &R,
     src_homspace: OrientedFusionTreeHomSpace<'_>,
     axis_plan: &TensorTraceAxisPlan,
     dst_nout: usize,
-) -> Result<FusionTreeHomSpace, OperationError>
+) -> Result<CheckedTraceGeometry, OperationError>
 where
     R: FusionRule + CheckedFusionAlgebra,
 {
@@ -1943,6 +1999,7 @@ where
     }
     // Why not widen the public rule bound: custom encoded rules retain their
     // established infallible contract while lowered built-ins close overflow.
+    record_trace_selected_homspace_derivation();
     let selected = src_homspace
         .try_select_checked(
             rule,
@@ -1956,6 +2013,7 @@ where
                 message: "checked trace metadata error",
             },
         })?;
+    let mut trace_pairs_match = true;
     for (&lhs_axis, &rhs_axis) in axis_plan
         .trace_lhs_axes
         .iter()
@@ -1963,12 +2021,17 @@ where
     {
         let lhs = outward_axis_leg_checked(rule, src_homspace, lhs_axis)?;
         let rhs = outward_axis_leg_checked(rule, src_homspace, rhs_axis)?;
-        rhs.try_dual(rule)
+        let rhs_dual = rhs
+            .try_dual(rule)
             .map_err(|error| OperationError::FusionAlgebra(Box::new(error)))?;
         lhs.try_dual(rule)
             .map_err(|error| OperationError::FusionAlgebra(Box::new(error)))?;
+        trace_pairs_match &= lhs == rhs_dual;
     }
-    Ok(selected)
+    Ok(CheckedTraceGeometry {
+        selected_homspace: selected,
+        trace_pairs_match,
+    })
 }
 
 fn validate_trace_data_extents(
