@@ -4117,8 +4117,8 @@ fn eager_simple_plan_prepares_once_per_distinct_source_split() {
 
 #[test]
 fn rank_nine_same_split_groups_prepare_once_and_lower_once_each() {
-    // What: rank beyond the prepared operation's inline capacity does not
-    // clone spilled step storage for each same-split fusion group.
+    // What: runtime-rank operation storage preserves the per-source tree,
+    // coefficient, compiled-layout, and replay oracle above the old boundary.
     use crate::tree_transform::{
         build_tree_pair_transform_group_plan_validated_with_threads,
         reset_tree_pair_lowering_calls, reset_tree_pair_operation_preparations,
@@ -4147,6 +4147,19 @@ fn rank_nine_same_split_groups_prepare_once_and_lower_once_each() {
     let structure =
         packed_fixture_structure(9, keys.into_iter().map(|key| (key, vec![1usize; 9]))).unwrap();
     let operation = TreeTransformOperation::braid([1, 0, 2, 3, 4, 5, 6, 7, 8], [], 0..9, []);
+    let oracle =
+        build_tree_transform_group_plan(&SU2FusionRule, operation.clone(), &structure, |source| {
+            tenet_core::multiplicity_free_braid_tree_pair(
+                &SU2FusionRule,
+                source,
+                &[1, 0, 2, 3, 4, 5, 6, 7, 8],
+                &[],
+                &[0, 1, 2, 3, 4, 5, 6, 7, 8],
+                &[],
+            )
+            .map_err(OperationError::from_core_preserving_context)
+        })
+        .unwrap();
     let proof =
         validate_multiplicity_free_tree_pair_preflight(&SU2FusionRule, &operation, &structure)
             .unwrap();
@@ -4160,6 +4173,92 @@ fn rank_nine_same_split_groups_prepare_once_and_lower_once_each() {
     assert_eq!(tree_pair_operation_preparations(), 1);
     assert_eq!(tree_pair_lowering_calls(), (3, 0));
     assert_eq!(plan.specs().len(), 3);
+    assert_eq!(plan.specs().len(), oracle.specs().len());
+    for (actual, expected) in plan.specs().iter().zip(oracle.specs()) {
+        assert_eq!(actual.group_key(), expected.group_key());
+        assert_eq!(actual.src_keys(), expected.src_keys());
+        assert_eq!(actual.dst_keys(), expected.dst_keys());
+        assert_eq!(actual.source_axes(), expected.source_axes());
+        assert_eq!(
+            actual
+                .recoupling_coefficients_dst_src()
+                .iter()
+                .map(|coefficient| coefficient.to_bits())
+                .collect::<Vec<_>>(),
+            expected
+                .recoupling_coefficients_dst_src()
+                .iter()
+                .map(|coefficient| coefficient.to_bits())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    let compiled = plan.compile_structures(&structure, &structure).unwrap();
+    let oracle_compiled = oracle.compile_structures(&structure, &structure).unwrap();
+    assert_eq!(compiled.blocks(), oracle_compiled.blocks());
+    assert_eq!(compiled.layouts(), oracle_compiled.layouts());
+    assert_eq!(
+        compiled
+            .recoupling_coefficients_dst_src()
+            .iter()
+            .map(|coefficient| coefficient.to_bits())
+            .collect::<Vec<_>>(),
+        oracle_compiled
+            .recoupling_coefficients_dst_src()
+            .iter()
+            .map(|coefficient| coefficient.to_bits())
+            .collect::<Vec<_>>()
+    );
+
+    let space = TensorMapSpace::<9, 0>::from_dims([1; 9], []).unwrap();
+    let source = TensorMap::<f64, 9, 0>::from_vec_with_structure(
+        vec![1.0, 2.0, 3.0],
+        space.clone(),
+        structure.clone(),
+    )
+    .unwrap();
+    let mut output = TensorMap::<f64, 9, 0>::from_vec_with_structure(
+        vec![0.0; 3],
+        space.clone(),
+        structure.clone(),
+    )
+    .unwrap();
+    let mut oracle_output =
+        TensorMap::<f64, 9, 0>::from_vec_with_structure(vec![0.0; 3], space, structure).unwrap();
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = TreeTransformWorkspace::default();
+    tree_transform_execute_with(
+        &mut backend,
+        &mut workspace,
+        &compiled,
+        &mut output,
+        &source,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+    tree_transform_execute_with(
+        &mut backend,
+        &mut workspace,
+        &oracle_compiled,
+        &mut oracle_output,
+        &source,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+    assert_eq!(
+        output
+            .data()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        oracle_output
+            .data()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
