@@ -1801,7 +1801,6 @@ where
     }
 
     #[inline]
-    #[cfg(test)]
     pub(crate) fn policy(&self) -> OperationCachePolicy {
         self.policy
     }

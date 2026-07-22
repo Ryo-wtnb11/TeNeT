@@ -624,6 +624,12 @@ where
         self.dynamic_space_cache.set_policy(policy);
     }
 
+    #[doc(hidden)]
+    pub fn local_cache_policy_is(&self, expected: OperationCachePolicy) -> bool {
+        self.tree_context.cache().policy() == expected
+            && self.dynamic_space_cache.policy() == expected
+    }
+
     pub fn into_parts(
         self,
     ) -> (

@@ -57,8 +57,8 @@ pub mod prelude {
     pub use crate::plancache::{CotengraMinimize, CotengraPythonConfig, CotengraPythonMethod};
     pub use crate::plancache::{Optimizer, PlanCacheConfig, ReplanPolicy};
     pub use crate::runtime::{
-        clear_default_runtime, default_runtime, set_default_runtime, LinalgBackend,
-        OperationCachePolicy, Runtime, RuntimeBuilder,
+        clear_default_runtime, default_runtime, set_default_runtime, LinalgBackend, Runtime,
+        RuntimeBuilder, RuntimeTreeTransformCacheInfo,
     };
     pub use crate::space::{SectorLabel, Space};
     pub use crate::tensor::{

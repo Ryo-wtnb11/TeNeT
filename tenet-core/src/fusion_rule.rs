@@ -141,7 +141,8 @@ impl RuleIdentity {
         })))
     }
 
-    pub(crate) fn charged_retained_bytes(&self) -> usize {
+    #[doc(hidden)]
+    pub fn charged_retained_bytes(&self) -> usize {
         const ARC_HEADER_BYTES: usize = 2 * std::mem::size_of::<usize>();
 
         // Why-not charge only `size_of::<RuleIdentity>()`: content and product
