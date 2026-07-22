@@ -152,10 +152,7 @@ impl TensorContractCacheStats {
 #[derive(Clone, Debug)]
 pub struct TensorContractCache<PlanKey = TensorContractPlanKey> {
     structures: TensorContractStructureCache<f64, PlanKey>,
-    ephemeral_structure: Option<(
-        TensorContractStructureCacheKey<PlanKey>,
-        TensorContractStructure<f64>,
-    )>,
+    ephemeral_structure: Option<TensorContractStructure<f64>>,
     stats: TensorContractCacheStats,
 }
 
@@ -250,23 +247,25 @@ impl TensorContractCache<TensorContractPlanKey> {
             dst.structure().rank(),
             axes,
         )?;
+        if !self.structures.policy().stores_entries() {
+            self.stats.structure_misses += 1;
+            self.ephemeral_structure = Some(TensorContractStructure::compile(
+                dst,
+                lhs,
+                rhs,
+                plan_key.axes().as_spec(),
+            )?);
+            return Ok(self
+                .ephemeral_structure
+                .as_ref()
+                .expect("ephemeral tensor contract structure inserted before replay"));
+        }
         let structure_key = TensorContractStructureCacheKey::from_structures(
             plan_key.clone(),
             dst.structure(),
             lhs.structure(),
             rhs.structure(),
         )?;
-        if !self.structures.policy().stores_entries() {
-            self.stats.structure_misses += 1;
-            let structure =
-                TensorContractStructure::compile(dst, lhs, rhs, plan_key.axes().as_spec())?;
-            self.ephemeral_structure = Some((structure_key, structure));
-            return Ok(&self
-                .ephemeral_structure
-                .as_ref()
-                .expect("ephemeral tensor contract structure inserted before replay")
-                .1);
-        }
         if self.structures.get(&structure_key).is_some() {
             self.stats.structure_hits += 1;
             self.structures.touch(&structure_key);
