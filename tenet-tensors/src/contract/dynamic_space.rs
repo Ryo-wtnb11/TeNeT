@@ -4132,6 +4132,11 @@ mod lowered_metadata_tests {
     fn fz2_lowered_transform_contract_and_mixed_plan_match_encoded_oracle() {
         // What: the closed fZ2 algebra produces the exact encoded structure for
         // transform and contract, and mixed strategy planning is operand-order safe.
+        let _guard = crate::test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
         let provider = Arc::new(FermionParityFusionRule);
         let odd = Z2Irrep::ODD.sector_id();
         let leg = || FusionProductSpace::new([SectorLeg::new([(odd, 1)], false)]);
@@ -4144,6 +4149,8 @@ mod lowered_metadata_tests {
             shapes.clone(),
         )
         .unwrap();
+        let hits_before_repeated_lowered =
+            tenet_core::complete_hom_space_structure_cache_info().hits();
         let repeated_lowered = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
             Arc::clone(&provider),
             homspace.clone(),
@@ -4154,13 +4161,17 @@ mod lowered_metadata_tests {
             lowered.space().structure().content_id(),
             repeated_lowered.space().structure().content_id()
         );
+        assert!(
+            tenet_core::complete_hom_space_structure_cache_info().hits()
+                > hits_before_repeated_lowered,
+            "same-content lowered construction must reuse the complete layout"
+        );
         let encoded = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
             Arc::clone(&provider),
             homspace,
             shapes,
         )
         .unwrap();
-        assert!(tenet_core::complete_hom_space_structure_cache_info().hits() >= 1);
         let operation = TreeTransformOperation::permute([1], [0]);
         let lowered_transform = lowered
             .transformed_multiplicity_free_lowered(&operation)
