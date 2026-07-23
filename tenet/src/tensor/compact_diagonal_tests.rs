@@ -133,10 +133,9 @@ fn public_svd_trunc_builds_one_compact_diagonal_layout_for_both_rule_paths() {
 }
 
 fn assert_tensor_close(actual: &Tensor, expected: &Tensor) {
-    assert_eq!(
-        actual.logical_space().unwrap(),
-        expected.logical_space().unwrap()
-    );
+    let actual = actual.materialized_tensor().unwrap();
+    let expected = expected.materialized_tensor().unwrap();
+    assert_eq!(actual.ordinary_body().space, expected.ordinary_body().space);
     assert_eq!(actual.dtype(), expected.dtype());
     match (
         actual.coupled_data().unwrap(),
@@ -230,10 +229,7 @@ fn asymmetric_odd_product_swap_preserves_compact_c64_storage_and_dense_values() 
 
     let assert_matches_dense = |source: &Tensor, actual: &Tensor, expected: &Tensor| {
         assert_compact_unmaterialized(actual);
-        assert_eq!(
-            actual.logical_space().unwrap(),
-            expected.logical_space().unwrap()
-        );
+        assert_eq!(actual.ordinary_body().space, expected.ordinary_body().space);
         assert_eq!(
             actual.ordinary_body().space.structure(),
             expected.ordinary_body().space.structure()
@@ -270,8 +266,8 @@ fn asymmetric_odd_product_swap_preserves_compact_c64_storage_and_dense_values() 
     let restored = permuted.permute(&[1], &[0]).unwrap();
     assert!(matches!(restored.stored_data(), Data::Diagonal(_)));
     assert_eq!(
-        restored.logical_space().unwrap(),
-        permute_source.logical_space().unwrap()
+        restored.ordinary_body().space,
+        permute_source.ordinary_body().space
     );
     assert_eq!(
         compact_spectrum_bits(&restored),
@@ -288,8 +284,8 @@ fn asymmetric_odd_product_swap_preserves_compact_c64_storage_and_dense_values() 
     let restored = transposed.transpose().unwrap();
     assert!(matches!(restored.stored_data(), Data::Diagonal(_)));
     assert_eq!(
-        restored.logical_space().unwrap(),
-        transpose_source.logical_space().unwrap()
+        restored.ordinary_body().space,
+        transpose_source.ordinary_body().space
     );
     assert_eq!(
         compact_spectrum_bits(&restored),
@@ -460,6 +456,51 @@ fn complex_diagonal_scales_dense_and_lazy_operands() {
             "fixture must exercise a successful compact route"
         );
     }
+}
+
+#[test]
+fn diagonal_compose_materializes_an_accepted_lazy_operand_once() {
+    // What: both canonical composition orders decide eligibility from lazy
+    // metadata, then publish one owned adjoint body; an invalid bond leaves the
+    // rejected lazy operand untouched.
+    let rt = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = Space::u1([(-1, 2), (0, 3), (2, 1)]);
+    let diagonal = complex_diagonal(&rt, &space, 715);
+
+    for diagonal_on_left in [false, true] {
+        let parent = Tensor::rand_with_seed(&rt, Dtype::C64, [&space], [&space], 716).unwrap();
+        let lazy = parent.adjoint().unwrap();
+        let eager = Tensor::rand_with_seed(&rt, Dtype::C64, [&space], [&space], 716)
+            .unwrap()
+            .adjoint()
+            .unwrap()
+            .materialized_tensor()
+            .unwrap();
+        let (actual, expected) = if diagonal_on_left {
+            (
+                diagonal.compose(&lazy).unwrap(),
+                dense_oracle(&diagonal).compose(&eager).unwrap(),
+            )
+        } else {
+            (
+                lazy.compose(&diagonal).unwrap(),
+                eager.compose(&dense_oracle(&diagonal)).unwrap(),
+            )
+        };
+
+        assert_tensor_close(&actual, &expected);
+        assert_eq!(lazy.adjoint_body_builds(), 1);
+    }
+
+    let incompatible = Space::u1([(-1, 2), (0, 4), (2, 1)]);
+    let parent = Tensor::zeros(&rt, Dtype::C64, [&incompatible], [&incompatible]).unwrap();
+    let lazy = parent.adjoint().unwrap();
+    let eager = parent.adjoint().unwrap().materialized_tensor().unwrap();
+    assert_eq!(
+        diagonal.compose(&lazy).unwrap_err(),
+        dense_oracle(&diagonal).compose(&eager).unwrap_err()
+    );
+    assert_eq!(lazy.adjoint_body_builds(), 0);
 }
 
 #[test]

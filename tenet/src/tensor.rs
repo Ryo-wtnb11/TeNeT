@@ -909,8 +909,8 @@ impl CatDescriptor {
         side: CatSide,
         homspace: FusionTreeHomSpace,
     ) -> Result<Option<Self>, Error> {
-        // Why not use logical_space/materialized_body: either constructs the
-        // complete adjoint block grid that this borrowed cat route avoids.
+        // Why not use materialized_body: it constructs the complete adjoint
+        // block grid that this borrowed cat route avoids.
         let source_regions = [
             lhs.body
                 .space
@@ -2725,25 +2725,6 @@ impl UserBoundSpace {
         }
     }
 
-    fn adjoint_space(&self) -> Result<Self, Error> {
-        macro_rules! adjoint {
-            ($space:expr, $variant:ident, $function:ident) => {
-                Ok(UserBoundSpace::$variant(tenet_tensors::$function($space)?))
-            };
-        }
-        match self {
-            Self::U1(space) => adjoint!(space, U1, adjoint_bound_space_dyn_lowered),
-            Self::Z2(space) => adjoint!(space, Z2, adjoint_bound_space_dyn_lowered),
-            Self::FZ2(space) => adjoint!(space, FZ2, adjoint_bound_space_dyn_lowered),
-            Self::SU2(space) => adjoint!(space, SU2, adjoint_bound_space_dyn_lowered),
-            Self::U1FZ2(space) => adjoint!(space, U1FZ2, adjoint_bound_space_dyn_lowered),
-            Self::FZ2U1SU2(space) => {
-                adjoint!(space, FZ2U1SU2, adjoint_bound_space_dyn_lowered)
-            }
-            Self::Su3(space) => adjoint!(space, Su3, adjoint_bound_space_dyn_generic),
-        }
-    }
-
     fn from_homspace(&self, homspace: FusionTreeHomSpace) -> Result<Self, Error> {
         macro_rules! build {
             ($space:expr, $variant:ident) => {
@@ -3015,17 +2996,11 @@ struct TensorBody {
 
 #[derive(Debug)]
 struct AdjointView {
-    // Why not retain an adjoint space here: deriving its block grid is the
-    // O(blocks) work this view exists to defer. The parent remains the sole
-    // semantic authority; logical_space is only its reproducible derived view.
     parent: TensorBody,
-    logical_space: OnceLock<Arc<UserBoundSpace>>,
     materialized: OnceLock<Arc<TensorBody>>,
     // Why not rely on OnceLock::set races: losing builders would still repeat
     // the expensive block-grid/data work before publication.
     init: Mutex<()>,
-    #[cfg(test)]
-    logical_space_builds: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     materialized_body_builds: std::sync::atomic::AtomicUsize,
 }
@@ -3180,7 +3155,7 @@ impl Tensor {
 
     fn rule_authority_space(&self) -> &Arc<UserBoundSpace> {
         // Fusion-rule/provider identity is adjoint-invariant. Why not use this
-        // for layouts: only logical_space/materialized_body may supply those.
+        // for an owned layout: only materialized_body may supply that.
         &self.parent_body_for_lowering().space
     }
 
@@ -3204,16 +3179,12 @@ impl Tensor {
     }
 
     #[cfg(test)]
-    fn adjoint_build_counts(&self) -> (usize, usize) {
+    fn adjoint_body_builds(&self) -> usize {
         let TensorRepr::Adjoint(view) = &self.repr else {
-            return (0, 0);
+            return 0;
         };
-        (
-            view.logical_space_builds
-                .load(std::sync::atomic::Ordering::Relaxed),
-            view.materialized_body_builds
-                .load(std::sync::atomic::Ordering::Relaxed),
-        )
+        view.materialized_body_builds
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[doc(hidden)]
@@ -4068,8 +4039,7 @@ impl Tensor {
         if let Some(body) = view.materialized.get() {
             return Ok(body);
         }
-        let logical_space = Self::initialize_logical_space(view)?;
-        let built = Self::build_adjoint_body(&view.parent, logical_space)?;
+        let built = Self::build_adjoint_body(&view.parent)?;
         #[cfg(test)]
         view.materialized_body_builds
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -4090,51 +4060,12 @@ impl Tensor {
         ))
     }
 
-    fn logical_space(&self) -> Result<&UserBoundSpace, Error> {
-        let TensorRepr::Adjoint(view) = &self.repr else {
-            return Ok(self.ordinary_body().space.as_ref());
-        };
-        if let Some(space) = view.logical_space.get() {
-            return Ok(space);
-        }
-        let _guard = view
-            .init
-            .lock()
-            .map_err(|_| Error::InvalidArgument("adjoint initializer was poisoned".to_string()))?;
-        Self::initialize_logical_space(view).map(Arc::as_ref)
-    }
-
-    fn initialize_logical_space(view: &AdjointView) -> Result<&Arc<UserBoundSpace>, Error> {
-        if let Some(space) = view.logical_space.get() {
-            return Ok(space);
-        }
-        let space = Arc::new(view.parent.space.adjoint_space()?);
-        #[cfg(test)]
-        view.logical_space_builds
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let _ = view.logical_space.set(space);
-        view.logical_space.get().ok_or_else(|| {
-            Error::InvalidArgument(
-                "adjoint logical-space initialization completed without publishing it".to_string(),
-            )
-        })
-    }
-
-    fn build_adjoint_body(
-        parent: &TensorBody,
-        logical_space: &Arc<UserBoundSpace>,
-    ) -> Result<Arc<TensorBody>, Error> {
+    fn build_adjoint_body(parent: &TensorBody) -> Result<Arc<TensorBody>, Error> {
         macro_rules! materialize {
             ($space:expr, $variant:ident, $function:ident, $data:expr, $lift:ident) => {{
-                let (derived_space, data) = tenet_tensors::$function($space, $data)?;
-                let derived_space = UserBoundSpace::$variant(derived_space);
-                if derived_space != **logical_space {
-                    return Err(internal_layout_error(
-                        "adjoint data materialization disagrees with cached logical space",
-                    ));
-                }
+                let (space, data) = tenet_tensors::$function($space, $data)?;
                 Ok::<_, Error>(Arc::new(TensorBody {
-                    space: Arc::clone(logical_space),
+                    space: Arc::new(UserBoundSpace::$variant(space)),
                     data: Arc::new(Data::$lift(data)),
                 }))
             }};
@@ -4808,16 +4739,18 @@ impl Tensor {
             // `t * D`: scale `self`'s trailing bond axis (columns). `self.domain`
             // is the single bond leg == `D.codomain`, so the space is `self`'s.
             (None, Some(diagonal))
-                if diagonal_dst.as_ref().map(UserBoundSpace::raw)
-                    == Some(self.logical_space()?.raw()) =>
+                if diagonal_dst
+                    .as_ref()
+                    .is_some_and(|candidate| Self::space_matches_metadata(candidate, self)) =>
             {
                 return self.scaled_axis_copy_diagonal(None, diagonal);
             }
             // `D * t`: scale `rhs`'s leading bond axis (rows). `rhs.codomain` is
             // the single bond leg == `D.domain`, so the space is `rhs`'s.
             (Some(diagonal), None)
-                if diagonal_dst.as_ref().map(UserBoundSpace::raw)
-                    == Some(rhs.logical_space()?.raw()) =>
+                if diagonal_dst
+                    .as_ref()
+                    .is_some_and(|candidate| Self::space_matches_metadata(candidate, rhs)) =>
             {
                 return rhs.scaled_axis_copy_diagonal(Some(0), diagonal);
             }
@@ -5087,12 +5020,14 @@ impl Tensor {
         let mut lease = self.rt.lease_context()?;
         let context = lease.context();
         let dst_bound = if self.rule_kind() == RuleKind::Su3 {
-            self.logical_space()?.contracted_with_output_order(
-                rhs.logical_space()?,
-                lhs_axes,
-                rhs_axes,
-                output_order,
-            )?
+            self.materialized_body()?
+                .space
+                .contracted_with_output_order(
+                    &rhs.materialized_body()?.space,
+                    lhs_axes,
+                    rhs_axes,
+                    output_order,
+                )?
         } else {
             self.contraction_output_space_oriented(rhs, lhs_axes, rhs_axes, output_order)?
         };
@@ -5257,9 +5192,11 @@ impl Tensor {
                 "contracting a lazy adjoint device tensor",
             ));
         }
-        let dst_bound =
-            self.logical_space()?
-                .contracted(rhs.logical_space()?, lhs_axes, rhs_axes)?;
+        let dst_bound = self.ordinary_body().space.contracted(
+            &rhs.ordinary_body().space,
+            lhs_axes,
+            rhs_axes,
+        )?;
         // ponytail: destination allocated by uploading host zeros; a
         // device-side alloc/memset seam replaces this if upload cost
         // ever matters (the direct route overwrites every element).
@@ -5892,11 +5829,8 @@ impl Tensor {
                 rt: self.rt.clone(),
                 repr: TensorRepr::Adjoint(Arc::new(AdjointView {
                     parent: parent.clone(),
-                    logical_space: OnceLock::new(),
                     materialized: OnceLock::new(),
                     init: Mutex::new(()),
-                    #[cfg(test)]
-                    logical_space_builds: std::sync::atomic::AtomicUsize::new(0),
                     #[cfg(test)]
                     materialized_body_builds: std::sync::atomic::AtomicUsize::new(0),
                 })),
@@ -6565,7 +6499,7 @@ impl Tensor {
 
     fn check_same_space(&self, other: &Self) -> Result<(), Error> {
         self.check_same_world(other)?;
-        if self.logical_space()? != other.logical_space()? {
+        if self.ordinary_body().space != other.ordinary_body().space {
             return Err(Error::InvalidArgument(
                 "tensors live on different spaces or block layouts".to_string(),
             ));
@@ -6739,8 +6673,11 @@ impl Tensor {
         rhs_axes: &[usize],
     ) -> Result<UserBoundSpace, Error> {
         if self.rule_kind() == RuleKind::Su3 {
-            self.logical_space()?
-                .contracted(rhs.logical_space()?, lhs_axes, rhs_axes)
+            self.materialized_body()?.space.contracted(
+                &rhs.materialized_body()?.space,
+                lhs_axes,
+                rhs_axes,
+            )
         } else {
             self.contraction_output_space_oriented(
                 rhs,
@@ -6760,16 +6697,20 @@ impl Tensor {
     ) -> Result<UserBoundSpace, Error> {
         if self.rule_kind() == RuleKind::Su3 {
             match output_order {
-                OutputAxisOrder::Identity => {
-                    self.logical_space()?
-                        .contracted(rhs.logical_space()?, lhs_axes, rhs_axes)
-                }
-                OutputAxisOrder::Axes(_) => self.logical_space()?.contracted_with_output_order(
-                    rhs.logical_space()?,
+                OutputAxisOrder::Identity => self.materialized_body()?.space.contracted(
+                    &rhs.materialized_body()?.space,
                     lhs_axes,
                     rhs_axes,
-                    output_order,
                 ),
+                OutputAxisOrder::Axes(_) => self
+                    .materialized_body()?
+                    .space
+                    .contracted_with_output_order(
+                        &rhs.materialized_body()?.space,
+                        lhs_axes,
+                        rhs_axes,
+                        output_order,
+                    ),
             }
         } else {
             self.contraction_output_space_oriented(rhs, lhs_axes, rhs_axes, output_order)
@@ -6785,6 +6726,16 @@ impl Tensor {
     ) -> Result<UserBoundSpace, Error> {
         let homspace = self.oriented_contraction_homspace(rhs, lhs_axes, rhs_axes, output_order)?;
         self.metadata().body.space.from_selected_homspace(homspace)
+    }
+
+    fn space_matches_metadata(candidate: &UserBoundSpace, operand: &Self) -> bool {
+        let metadata = operand.metadata();
+        // Why not build and compare an adjoint layout: canonical rule identity
+        // plus the final HomSpace fully determine eligibility and leave a
+        // rejected operand lazy.
+        candidate.identity() == metadata.body.space.identity()
+            && candidate.raw().homspace().codomain() == metadata.codomain()
+            && candidate.raw().homspace().domain() == metadata.domain()
     }
 
     fn validate_oriented_contracted_homspace(
@@ -9921,18 +9872,24 @@ mod adjoint_parent_view_tests {
         assert!(adjoint.runtime().same_runtime(source.runtime()));
         assert_eq!(adjoint.codomain_spaces(), source.domain_spaces());
         assert_eq!(adjoint.domain_spaces(), source.codomain_spaces());
-        assert_eq!(adjoint.adjoint_build_counts(), (0, 0));
+        assert_eq!(adjoint.adjoint_body_builds(), 0);
 
         tenet_tensors::reset_global_operation_caches();
         assert_eq!(adjoint.space(0).unwrap(), source.domain_spaces()[0]);
         assert_eq!(adjoint.leg_dims().unwrap().len(), 3);
-        assert_eq!(adjoint.adjoint_build_counts(), (0, 0));
+        assert_eq!(adjoint.adjoint_body_builds(), 0);
 
         let clone = adjoint.clone();
         let expected = clone.try_data_c64().unwrap().to_vec();
-        assert_eq!(adjoint.adjoint_build_counts(), (1, 1));
+        assert_eq!(adjoint.adjoint_body_builds(), 1);
+        let published_space = Arc::clone(&adjoint.materialized_body().unwrap().space);
+        tenet_tensors::reset_global_operation_caches();
         assert_eq!(adjoint.try_data_c64().unwrap(), expected);
-        assert_eq!(adjoint.adjoint_build_counts(), (1, 1));
+        assert_eq!(adjoint.adjoint_body_builds(), 1);
+        assert!(Arc::ptr_eq(
+            &published_space,
+            &adjoint.materialized_body().unwrap().space
+        ));
 
         let round_trip = adjoint.adjoint().unwrap();
         assert!(!round_trip.is_adjoint_view());
@@ -9979,8 +9936,8 @@ mod adjoint_parent_view_tests {
             assert_eq!(
                 source.external_axis_is_dual(axis).unwrap(),
                 source
-                    .logical_space()
-                    .unwrap()
+                    .ordinary_body()
+                    .space
                     .homspace()
                     .external_axis_is_dual(axis)
                     .unwrap()
@@ -9988,14 +9945,14 @@ mod adjoint_parent_view_tests {
             assert_eq!(
                 lazy.external_axis_is_dual(axis).unwrap(),
                 oracle
-                    .logical_space()
-                    .unwrap()
+                    .ordinary_body()
+                    .space
                     .homspace()
                     .external_axis_is_dual(axis)
                     .unwrap()
             );
         }
-        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+        assert_eq!(lazy.adjoint_body_builds(), 0);
         assert_eq!(
             lazy.external_axis_is_dual(lazy.rank()).unwrap_err(),
             Error::InvalidArgument(format!(
@@ -10004,7 +9961,7 @@ mod adjoint_parent_view_tests {
                 lazy.rank()
             ))
         );
-        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+        assert_eq!(lazy.adjoint_body_builds(), 0);
     }
 
     #[test]
@@ -10019,7 +9976,7 @@ mod adjoint_parent_view_tests {
             let lazy = source.adjoint().unwrap();
 
             assert_eq!(lazy.norm_inf().unwrap(), source.norm_inf().unwrap());
-            assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+            assert_eq!(lazy.adjoint_body_builds(), 0);
         }
     }
 
@@ -10063,7 +10020,7 @@ mod adjoint_parent_view_tests {
         let eager = source.adjoint().unwrap().materialized_tensor().unwrap();
 
         let (lazy_l, lazy_q) = lazy.lq_compact().unwrap();
-        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+        assert_eq!(lazy.adjoint_body_builds(), 0);
         let (eager_l, eager_q) = eager.lq_compact().unwrap();
         assert_close(&lazy_l, &eager_l);
         assert_close(&lazy_q, &eager_q);
@@ -10129,7 +10086,7 @@ mod adjoint_parent_view_tests {
         let expected = eager.trace_pairs(pairs).unwrap();
 
         assert_close(&actual, &expected);
-        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+        assert_eq!(lazy.adjoint_body_builds(), 0);
         match parent_data.as_ref() {
             Data::F64(data) => assert_eq!(data, parent_f64.as_ref().unwrap()),
             Data::C64(data) => assert_eq!(data, parent_c64.as_ref().unwrap()),
@@ -10205,7 +10162,7 @@ mod adjoint_parent_view_tests {
         assert_close(&actual, &expected);
         assert_eq!(actual.codomain_rank(), 0);
         assert_eq!(actual.domain_rank(), 2);
-        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+        assert_eq!(lazy.adjoint_body_builds(), 0);
     }
 
     #[test]
@@ -10297,7 +10254,7 @@ mod adjoint_parent_view_tests {
 
         assert_close(&actual, &expected);
         assert_eq!(parent.data_c64(), source);
-        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+        assert_eq!(lazy.adjoint_body_builds(), 0);
     }
 
     #[test]
@@ -10324,7 +10281,7 @@ mod adjoint_parent_view_tests {
                 Err(Error::InvalidArgument(_))
             ));
         }
-        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+        assert_eq!(lazy.adjoint_body_builds(), 0);
         SELECTED_RESULT_LAYOUT_BUILDS.with(|builds| assert_eq!(builds.get(), Some(0)));
         SELECTED_RESULT_LAYOUT_BUILDS.with(|builds| builds.set(None));
     }
@@ -10369,7 +10326,7 @@ mod adjoint_parent_view_tests {
 
         assert!(Arc::ptr_eq(&parent.ordinary_body().data, &parent_data));
         assert_eq!(parent.data(), parent_bytes);
-        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+        assert_eq!(lazy.adjoint_body_builds(), 0);
         assert!(!lazy.has_cached_materialization());
         SELECTED_RESULT_LAYOUT_BUILDS.with(|builds| assert_eq!(builds.get(), Some(0)));
         SELECTED_RESULT_LAYOUT_BUILDS.with(|builds| builds.set(None));
@@ -10492,15 +10449,15 @@ mod adjoint_parent_view_tests {
         assert_eq!(actual.domain_spaces(), expected.domain_spaces());
         assert_eq!(actual.dtype(), expected.dtype());
         assert!(actual.is_adjoint_view());
-        assert_eq!(actual.adjoint_build_counts(), (0, 0));
-        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+        assert_eq!(actual.adjoint_body_builds(), 0);
+        assert_eq!(lazy.adjoint_body_builds(), 0);
 
         let expected_parent = expected.adjoint().unwrap().materialized_tensor().unwrap();
         let actual_parent = actual.adjoint().unwrap();
         assert_close(&actual_parent, &expected_parent);
 
-        assert_eq!(actual.adjoint_build_counts(), (0, 0));
-        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+        assert_eq!(actual.adjoint_body_builds(), 0);
+        assert_eq!(lazy.adjoint_body_builds(), 0);
     }
 
     fn assert_adjoint_transforms_stay_parent_lowered(space: Space, dtype: Dtype, seed: u64) {
@@ -10555,7 +10512,7 @@ mod adjoint_parent_view_tests {
             &involution.ordinary_body().data,
             &parent.ordinary_body().data
         ));
-        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+        assert_eq!(lazy.adjoint_body_builds(), 0);
     }
 
     fn nested_product_space(degeneracies: [usize; 4]) -> Space {
@@ -10663,8 +10620,8 @@ mod adjoint_parent_view_tests {
         let transformed_parent = transformed.adjoint().unwrap();
 
         assert!(transformed_parent.data().iter().all(|&value| value == -1.0));
-        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
-        assert_eq!(transformed.adjoint_build_counts(), (0, 0));
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert_eq!(transformed.adjoint_body_builds(), 0);
     }
 
     #[test]
@@ -10686,7 +10643,7 @@ mod adjoint_parent_view_tests {
 
         let bad_levels_and_axes = lazy.braid(&[4, 0, 2], &[1], &[17, 3, 11]).unwrap_err();
         assert!(matches!(bad_levels_and_axes, Error::InvalidArgument(_)));
-        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+        assert_eq!(lazy.adjoint_body_builds(), 0);
 
         let bad_axes = lazy.permute(&[4, 0, 2], &[1]).unwrap_err();
         let Error::Operation(error) = bad_axes else {
@@ -10696,13 +10653,13 @@ mod adjoint_parent_view_tests {
             error.as_ref(),
             OperationError::Core(tenet_core::CoreError::InvalidPermutation { .. })
         ));
-        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+        assert_eq!(lazy.adjoint_body_builds(), 0);
 
         assert!(matches!(
             lazy.repartition(5),
             Err(Error::InvalidArgument(_))
         ));
-        assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+        assert_eq!(lazy.adjoint_body_builds(), 0);
     }
 
     fn assert_concurrent_raw_reads_initialize_one_shared_body(dtype: Dtype, seed: u64) {
@@ -10726,13 +10683,13 @@ mod adjoint_parent_view_tests {
                 });
             }
         });
-        assert_eq!(adjoint.adjoint_build_counts(), (1, 1));
+        assert_eq!(adjoint.adjoint_body_builds(), 1);
     }
 
     #[test]
     fn concurrent_raw_reads_initialize_one_shared_body() {
-        // What: f64 and c64 clones racing on their first raw read publish each
-        // derived logical space and materialized body exactly once.
+        // What: f64 and c64 clones racing on their first raw read each publish
+        // one coherent materialized body exactly once.
         assert_concurrent_raw_reads_initialize_one_shared_body(Dtype::F64, 261_103);
         assert_concurrent_raw_reads_initialize_one_shared_body(Dtype::C64, 261_105);
     }
@@ -10761,13 +10718,13 @@ mod adjoint_parent_view_tests {
         });
         // What: contraction consumes the parent plus orientation directly;
         // neither a duplicate logical grid nor owned adjoint data is built.
-        assert_eq!(lhs.adjoint_build_counts(), (0, 0));
+        assert_eq!(lhs.adjoint_body_builds(), 0);
 
         for _ in 0..3 {
             let output = lhs.compose(&rhs).unwrap();
             assert_eq!(output.rank(), 2);
         }
-        assert_eq!(lhs.adjoint_build_counts(), (0, 0));
+        assert_eq!(lhs.adjoint_body_builds(), 0);
     }
 
     #[test]
@@ -10789,10 +10746,10 @@ mod adjoint_parent_view_tests {
         let rhs_lazy = rhs_parent.adjoint().unwrap();
 
         let lhs_result = lhs.compose(&rhs).unwrap();
-        assert_eq!(lhs.adjoint_build_counts(), (0, 0));
+        assert_eq!(lhs.adjoint_body_builds(), 0);
         let both_result = lhs.compose(&rhs_lazy).unwrap();
-        assert_eq!(lhs.adjoint_build_counts(), (0, 0));
-        assert_eq!(rhs_lazy.adjoint_build_counts(), (0, 0));
+        assert_eq!(lhs.adjoint_body_builds(), 0);
+        assert_eq!(rhs_lazy.adjoint_body_builds(), 0);
 
         let eager_lhs = lhs_parent.adjoint().unwrap().materialized_tensor().unwrap();
         let eager_rhs = rhs_parent.adjoint().unwrap().materialized_tensor().unwrap();
@@ -10845,8 +10802,8 @@ mod adjoint_parent_view_tests {
                 .contract_ordered(&rhs, &[2], &[0], &output_axes)
                 .unwrap();
             assert_close(&actual, &expected);
-            assert_eq!(lhs.adjoint_build_counts().1, 0);
-            assert_eq!(rhs.adjoint_build_counts().1, 0);
+            assert_eq!(lhs.adjoint_body_builds(), 0);
+            assert_eq!(rhs.adjoint_body_builds(), 0);
         }
     }
 
@@ -10903,7 +10860,7 @@ mod adjoint_parent_view_tests {
                 )
                 .unwrap();
             assert_eq!(actual, expected);
-            assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+            assert_eq!(lazy.adjoint_body_builds(), 0);
             assert_eq!(
                 SELECTED_RESULT_LAYOUT_BUILDS.with(|observation| observation.replace(None)),
                 Some(1)
@@ -10918,7 +10875,7 @@ mod adjoint_parent_view_tests {
                 .contract_ordered(&bad_rhs, &[2], &[0], &[0, 0, 2, 3])
                 .unwrap_err();
             assert_eq!(actual_error, expected_error);
-            assert_eq!(invalid_lazy.adjoint_build_counts(), (0, 0));
+            assert_eq!(invalid_lazy.adjoint_body_builds(), 0);
             assert_eq!(
                 SELECTED_RESULT_LAYOUT_BUILDS.with(|observation| observation.replace(None)),
                 Some(0)
@@ -12610,8 +12567,8 @@ mod cat_tests {
         assert_dense_storage_eq(actual.stored_data(), expected.stored_data());
         assert_dense_storage_eq(lhs.stored_data(), &lhs_before);
         assert_dense_storage_eq(rhs.stored_data(), &rhs_before);
-        assert_eq!(lhs.adjoint_build_counts(), (0, 0));
-        assert_eq!(rhs.adjoint_build_counts(), (0, 0));
+        assert_eq!(lhs.adjoint_body_builds(), 0);
+        assert_eq!(rhs.adjoint_body_builds(), 0);
         actual
     }
 
@@ -13133,7 +13090,7 @@ mod cat_tests {
             .is_none(),
             "reordered unchanged-side tree extents must decline the whole-region copy"
         );
-        assert_eq!(lhs.adjoint_build_counts(), (0, 0));
+        assert_eq!(lhs.adjoint_body_builds(), 0);
 
         let eager_lhs = Tensor::owned(
             lhs.rt.clone(),
@@ -13146,7 +13103,7 @@ mod cat_tests {
         let actual_error = lhs.catdomain(&rhs).unwrap_err();
 
         assert_eq!(actual_error, expected_error);
-        assert_eq!(lhs.adjoint_build_counts(), (0, 0));
+        assert_eq!(lhs.adjoint_body_builds(), 0);
     }
 
     #[test]
@@ -13347,7 +13304,7 @@ mod cat_tests {
             &bad_unchanged,
             &bad_dual,
         ] {
-            assert_eq!(tensor.adjoint_build_counts(), (0, 0));
+            assert_eq!(tensor.adjoint_body_builds(), 0);
         }
     }
 
