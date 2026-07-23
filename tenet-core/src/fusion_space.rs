@@ -119,10 +119,30 @@ impl FusionProductSpace {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 struct FusionTreeHomSpaceContent {
     codomain: FusionProductSpace,
     domain: FusionProductSpace,
+}
+
+impl FusionTreeHomSpaceContent {
+    fn charged_retained_bytes(&self) -> usize {
+        fn product_space_bytes(space: &FusionProductSpace) -> usize {
+            std::mem::size_of::<FusionProductSpace>()
+                .saturating_add(spilled_smallvec_heap_bytes(&space.legs))
+                .saturating_add(space.legs.iter().fold(0usize, |bytes, leg| {
+                    bytes
+                        .saturating_add(std::mem::size_of::<SectorLegData>())
+                        .saturating_add(spilled_smallvec_heap_bytes(&leg.data.sectors))
+                        .saturating_add(spilled_smallvec_heap_bytes(&leg.data.degeneracies))
+                        .saturating_add(2 * std::mem::size_of::<usize>())
+                }))
+        }
+
+        product_space_bytes(&self.codomain)
+            .saturating_add(product_space_bytes(&self.domain))
+            .saturating_add(2 * std::mem::size_of::<usize>())
+    }
 }
 
 pub struct FusionTreeHomSpace {
@@ -330,6 +350,43 @@ struct FusionTreeHomSpaceCacheKey {
     rule: RuleIdentity,
     codomain: Vec<FusionTreeLegSetSignature>,
     domain: Vec<FusionTreeLegSetSignature>,
+}
+
+/// Semantic identity of one complete multiplicity-free block layout.
+///
+/// This deliberately owns neither a lazy `HomSpaceId` nor a layout id: both
+/// are process-local accelerators and are not part of the represented space.
+#[derive(Clone)]
+struct CompleteHomSpaceStructureCacheKey {
+    rule: RuleIdentity,
+    homspace: Arc<FusionTreeHomSpaceContent>,
+}
+
+impl CompleteHomSpaceStructureCacheKey {
+    fn new<R>(rule: &R, homspace: &FusionTreeHomSpace) -> Self
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        Self {
+            rule: rule.rule_identity(),
+            homspace: Arc::clone(&homspace.content),
+        }
+    }
+}
+
+impl PartialEq for CompleteHomSpaceStructureCacheKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.rule == other.rule && self.homspace == other.homspace
+    }
+}
+
+impl Eq for CompleteHomSpaceStructureCacheKey {}
+
+impl std::hash::Hash for CompleteHomSpaceStructureCacheKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.rule.hash(state);
+        self.homspace.hash(state);
+    }
 }
 
 impl FusionTreeHomSpaceCacheKey {
@@ -865,6 +922,203 @@ fn charged_fusion_tree_layout_bytes(
         .saturating_add(tree_bytes)
         .saturating_add(sector_bytes)
         .saturating_add(8 * std::mem::size_of::<usize>())
+}
+
+struct CompleteHomSpaceStructureCacheEntry {
+    content: Arc<BlockStructureContent>,
+    charged_bytes: usize,
+}
+
+/// Bounded FIFO owner for complete immutable multiplicity-free layouts.
+///
+/// Why not reuse `coupled_block_structure_cache`: that weak table accepts
+/// arbitrary `nout` and caller shapes, so it cannot avoid the final-HomSpace
+/// construction work and would retain a live wrapper if made strong.
+struct CompleteHomSpaceStructureCache {
+    entries: lru::LruCache<
+        Arc<CompleteHomSpaceStructureCacheKey>,
+        CompleteHomSpaceStructureCacheEntry,
+        rustc_hash::FxBuildHasher,
+    >,
+    entry_capacity: usize,
+    byte_budget: usize,
+    max_entry_bytes: usize,
+    charged_bytes: usize,
+    hits: AtomicUsize,
+    misses: AtomicUsize,
+    admissions: AtomicUsize,
+    evictions: AtomicUsize,
+    bypasses: AtomicUsize,
+}
+
+const COMPLETE_HOM_SPACE_STRUCTURE_CACHE_CAP: usize = 5;
+const COMPLETE_HOM_SPACE_STRUCTURE_CACHE_BYTE_BUDGET: usize = 1_764_237;
+const COMPLETE_HOM_SPACE_STRUCTURE_CACHE_MAX_ENTRY_BYTES: usize = 1_650_641;
+
+impl CompleteHomSpaceStructureCache {
+    fn new(entry_capacity: usize, byte_budget: usize, max_entry_bytes: usize) -> Self {
+        assert!(entry_capacity > 0, "complete HomSpace cache capacity must be positive");
+        Self {
+            entries: lru::LruCache::with_hasher(
+                std::num::NonZeroUsize::new(entry_capacity).unwrap(),
+                rustc_hash::FxBuildHasher,
+            ),
+            entry_capacity,
+            byte_budget,
+            max_entry_bytes,
+            charged_bytes: 0,
+            hits: AtomicUsize::new(0),
+            misses: AtomicUsize::new(0),
+            admissions: AtomicUsize::new(0),
+            evictions: AtomicUsize::new(0),
+            bypasses: AtomicUsize::new(0),
+        }
+    }
+
+    fn lookup(
+        &self,
+        key: &CompleteHomSpaceStructureCacheKey,
+    ) -> Option<Arc<BlockStructureContent>> {
+        let content = self.peek(key);
+        let counter = if content.is_some() { &self.hits } else { &self.misses };
+        counter.fetch_add(1, Ordering::Relaxed);
+        content
+    }
+
+    fn peek(&self, key: &CompleteHomSpaceStructureCacheKey) -> Option<Arc<BlockStructureContent>> {
+        self.entries.peek(key).map(|entry| Arc::clone(&entry.content))
+    }
+
+    fn admit(
+        &mut self,
+        key: Arc<CompleteHomSpaceStructureCacheKey>,
+        content: Arc<BlockStructureContent>,
+        charged_bytes: usize,
+    ) -> Arc<BlockStructureContent> {
+        if let Some(existing) = self.peek(&key) {
+            return existing;
+        }
+        if charged_bytes == usize::MAX
+            || charged_bytes > self.max_entry_bytes
+            || charged_bytes > self.byte_budget
+        {
+            self.bypasses.fetch_add(1, Ordering::Relaxed);
+            return content;
+        }
+
+        while self.entries.len() >= self.entry_capacity
+            || self.charged_bytes.saturating_add(charged_bytes) > self.byte_budget
+        {
+            let Some((_, evicted)) = self.entries.pop_lru() else {
+                break;
+            };
+            self.charged_bytes = self.charged_bytes.saturating_sub(evicted.charged_bytes);
+            self.evictions.fetch_add(1, Ordering::Relaxed);
+        }
+
+        self.charged_bytes = self.charged_bytes.saturating_add(charged_bytes);
+        self.entries.put(
+            key,
+            CompleteHomSpaceStructureCacheEntry {
+                content: Arc::clone(&content),
+                charged_bytes,
+            },
+        );
+        self.admissions.fetch_add(1, Ordering::Relaxed);
+        content
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.charged_bytes = 0;
+        self.hits.store(0, Ordering::Relaxed);
+        self.misses.store(0, Ordering::Relaxed);
+        self.admissions.store(0, Ordering::Relaxed);
+        self.evictions.store(0, Ordering::Relaxed);
+        self.bypasses.store(0, Ordering::Relaxed);
+    }
+
+    fn info(&self) -> CompleteHomSpaceStructureCacheInfo {
+        CompleteHomSpaceStructureCacheInfo {
+            entries: self.entries.len(),
+            charged_bytes: self.charged_bytes,
+            entry_capacity: self.entry_capacity,
+            byte_budget: self.byte_budget,
+            max_entry_bytes: self.max_entry_bytes,
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+            admissions: self.admissions.load(Ordering::Relaxed),
+            evictions: self.evictions.load(Ordering::Relaxed),
+            bypasses: self.bypasses.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Snapshot of the complete immutable HomSpace layout cache resource state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompleteHomSpaceStructureCacheInfo {
+    entries: usize,
+    charged_bytes: usize,
+    entry_capacity: usize,
+    byte_budget: usize,
+    max_entry_bytes: usize,
+    hits: usize,
+    misses: usize,
+    admissions: usize,
+    evictions: usize,
+    bypasses: usize,
+}
+
+impl CompleteHomSpaceStructureCacheInfo {
+    pub fn entries(self) -> usize { self.entries }
+    pub fn charged_bytes(self) -> usize { self.charged_bytes }
+    pub fn entry_capacity(self) -> usize { self.entry_capacity }
+    pub fn byte_budget(self) -> usize { self.byte_budget }
+    pub fn max_entry_bytes(self) -> usize { self.max_entry_bytes }
+    pub fn hits(self) -> usize { self.hits }
+    pub fn misses(self) -> usize { self.misses }
+    pub fn admissions(self) -> usize { self.admissions }
+    pub fn evictions(self) -> usize { self.evictions }
+    pub fn bypasses(self) -> usize { self.bypasses }
+}
+
+fn complete_hom_space_structure_cache() -> &'static RwLock<CompleteHomSpaceStructureCache> {
+    static CACHE: OnceLock<RwLock<CompleteHomSpaceStructureCache>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        RwLock::new(CompleteHomSpaceStructureCache::new(
+            COMPLETE_HOM_SPACE_STRUCTURE_CACHE_CAP,
+            COMPLETE_HOM_SPACE_STRUCTURE_CACHE_BYTE_BUDGET,
+            COMPLETE_HOM_SPACE_STRUCTURE_CACHE_MAX_ENTRY_BYTES,
+        ))
+    })
+}
+
+/// Returns bounds and activity for the complete immutable HomSpace layout cache.
+pub fn complete_hom_space_structure_cache_info() -> CompleteHomSpaceStructureCacheInfo {
+    complete_hom_space_structure_cache()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .info()
+}
+
+fn reset_complete_hom_space_structure_cache() {
+    complete_hom_space_structure_cache()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
+fn charged_complete_hom_space_structure_bytes(
+    key: &CompleteHomSpaceStructureCacheKey,
+    content: &BlockStructureContent,
+) -> usize {
+    std::mem::size_of::<CompleteHomSpaceStructureCacheKey>()
+        .saturating_add(std::mem::size_of::<CompleteHomSpaceStructureCacheEntry>())
+        .saturating_add(key.rule.charged_retained_bytes())
+        .saturating_add(key.homspace.charged_retained_bytes())
+        .saturating_add(content.charged_retained_bytes())
+        // Hash/FIFO nodes and both retained Arc control allocations.
+        .saturating_add(10 * std::mem::size_of::<usize>())
 }
 
 type CoupledBlockStructureCache =
@@ -2028,10 +2282,29 @@ impl FusionTreeHomSpace {
     where
         R: MultiplicityFreeFusionRule,
     {
+        let key = Arc::new(CompleteHomSpaceStructureCacheKey::new(rule, self));
+        let cache = complete_hom_space_structure_cache();
+        let read = cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(content) = read.lookup(&key) {
+            return Ok(BlockStructure::from_content(content).into_shared());
+        }
+        drop(read);
+
         let layout = self.cached_fusion_tree_layout(rule);
         let (sector, degeneracy) =
             coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
-        BlockStructure::from_parts(sector, degeneracy).map(BlockStructure::into_shared)
+        let built = BlockStructure::from_parts(sector, degeneracy)?;
+        let content = built.content_key();
+        let charged_bytes = charged_complete_hom_space_structure_bytes(&key, &content);
+        drop(built);
+
+        let mut write = cache
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let content = write.admit(key, content, charged_bytes);
+        Ok(BlockStructure::from_content(content).into_shared())
     }
 
     #[doc(hidden)]
