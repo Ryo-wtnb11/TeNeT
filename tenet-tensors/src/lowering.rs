@@ -2,7 +2,6 @@ use tenet_core::{
     BlockKey, BlockSpec, BlockStructure, FusionRule, FusionTensorMapSpace, FusionTreePairKey,
 };
 
-use crate::DynamicFusionMapSpace;
 use crate::{OperationError, TreeTransformOperation, TreeTransformOperationKind};
 use tenet_operations::{
     permutation_axes, OutputAxisOrder, TensorContractSpec, TensorTraceAxisSpec,
@@ -409,51 +408,5 @@ fn adjoint_block_key(key: &BlockKey) -> Result<BlockKey, OperationError> {
         _ => Err(OperationError::InvalidArgument {
             message: "unsupported block key kind in adjoint lowering",
         }),
-    }
-}
-
-pub(crate) fn prelowered_storage_block_index<'a>(
-    logical_space: &'a DynamicFusionMapSpace,
-    storage_space: &'a DynamicFusionMapSpace,
-    storage_conjugate: bool,
-) -> impl Fn(usize) -> Result<usize, OperationError> + 'a {
-    move |index| {
-        if !storage_conjugate {
-            return Ok(index);
-        }
-        let logical = logical_space.structure().block(index)?;
-        let storage_key = adjoint_block_key(logical.key())?;
-        storage_space
-            .structure()
-            .find_block_index_by_key(&storage_key)
-            .ok_or_else(|| {
-                OperationError::Core(tenet_core::CoreError::MissingBlockKey {
-                    key: Box::new(storage_key),
-                })
-            })
-    }
-}
-
-pub(crate) fn prelowered_storage_axis<'a>(
-    logical_space: &'a DynamicFusionMapSpace,
-    storage_space: &'a DynamicFusionMapSpace,
-    storage_conjugate: bool,
-) -> impl Fn(usize) -> Result<usize, OperationError> + 'a {
-    move |axis| {
-        if axis >= logical_space.rank() {
-            return Err(OperationError::InvalidAxisSet {
-                tensor: "logical src",
-                axes: vec![axis],
-                rank: logical_space.rank(),
-            });
-        }
-        if !storage_conjugate {
-            return Ok(axis);
-        }
-        Ok(if axis < storage_space.nin() {
-            storage_space.nout() + axis
-        } else {
-            axis - storage_space.nin()
-        })
     }
 }

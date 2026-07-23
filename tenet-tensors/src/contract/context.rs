@@ -28,7 +28,7 @@ use super::backend::{
 use super::dynamic::DynamicFusionSpaceCache;
 use super::dynamic_space::{
     encoded_layout_primer, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
-    LayoutKeyBuilder,
+    FusionOperandLayout, LayoutKeyBuilder,
 };
 #[cfg(test)]
 use super::fusion::FusionContractOrientation;
@@ -39,10 +39,10 @@ use super::fusion::{
     tensorcontract_fusion_structure_dyn_prelowered, FusionContractPlan,
     EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST, SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
 };
-use super::fusion_block::FusionBlockContractWorkspace;
+use super::fusion_block::{validate_fusion_contract_rule, FusionBlockContractWorkspace};
 use super::resolution::{
     compile_composition_plan, compile_core_plan, compile_prelowered_resolution, compile_resolution,
-    Resolution,
+    try_compile_oriented_canonical_core_resolution, Resolution,
 };
 use super::scratch::DynamicFusionScratchWorkspace;
 use super::structure::{TensorContractAxisPlan, TensorContractStructure};
@@ -51,36 +51,24 @@ use tenet_operations::{TensorContractFusionProfile, TensorContractFusionRoute};
 fn prelowered_plan_builder<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
-    lhs: &DynamicFusionMapSpace,
-    rhs: &DynamicFusionMapSpace,
+    lhs: &FusionOperandLayout<'_>,
+    rhs: &FusionOperandLayout<'_>,
     axes: TensorContractSpec<'_>,
-    lhs_conjugate: bool,
-    rhs_conjugate: bool,
-    _primer: LayoutKeyBuilder<R>,
+    primer: LayoutKeyBuilder<R>,
 ) -> Result<Arc<FusionContractPlan>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical(
-        rule,
-        dst,
-        lhs,
-        rhs,
-        axes,
-        lhs_conjugate,
-        rhs_conjugate,
-    )
-    .map(Arc::new)
+    prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical(rule, dst, lhs, rhs, axes, primer)
+        .map(Arc::new)
 }
 
 fn lowered_prelowered_plan_builder<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
-    lhs: &DynamicFusionMapSpace,
-    rhs: &DynamicFusionMapSpace,
+    lhs: &FusionOperandLayout<'_>,
+    rhs: &FusionOperandLayout<'_>,
     axes: TensorContractSpec<'_>,
-    lhs_conjugate: bool,
-    rhs_conjugate: bool,
     primer: LayoutKeyBuilder<R>,
 ) -> Result<Arc<FusionContractPlan>, OperationError>
 where
@@ -89,14 +77,7 @@ where
         + CheckedFusionAlgebra,
 {
     prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer_canonical(
-        rule,
-        dst,
-        lhs,
-        rhs,
-        axes,
-        lhs_conjugate,
-        rhs_conjugate,
-        primer,
+        rule, dst, lhs, rhs, axes, primer,
     )
     .map(Arc::new)
 }
@@ -961,10 +942,8 @@ where
             rule,
             Some(dst_space),
             Some(lhs_space),
-            None,
             lhs_space.structure(),
             Some(rhs_space),
-            None,
             rhs_space.structure(),
             layout_primer,
             None,
@@ -1074,11 +1053,9 @@ where
         plan_builder: fn(
             &R,
             &DynamicFusionMapSpace,
-            &DynamicFusionMapSpace,
-            &DynamicFusionMapSpace,
+            &FusionOperandLayout<'_>,
+            &FusionOperandLayout<'_>,
             TensorContractSpec<'_>,
-            bool,
-            bool,
             LayoutKeyBuilder<R>,
         ) -> Result<Arc<FusionContractPlan>, OperationError>,
     ) -> Result<(), OperationError>
@@ -1087,14 +1064,12 @@ where
         D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
     {
         let rule = dst_space.provider();
-        for space in [
-            lhs.logical_space(),
+        validate_fusion_contract_rule(
+            rule,
+            dst_space.space(),
             lhs.storage_space(),
-            rhs.logical_space(),
             rhs.storage_space(),
-        ] {
-            space.validate_rule(rule)?;
-        }
+        )?;
         if axes.lhs_conjugate() != lhs.storage_conjugate()
             || axes.rhs_conjugate() != rhs.storage_conjugate()
         {
@@ -1102,21 +1077,37 @@ where
                 message: "prelowered operand flags must match the contraction request",
             });
         }
+        if let Some(resolution) =
+            try_compile_oriented_canonical_core_resolution(rule, dst_space.space(), lhs, rhs, axes)?
+        {
+            #[cfg(test)]
+            self.record_top_level_resolution(&resolution);
+            return self.execute_resolution_dyn(
+                &resolution,
+                None,
+                dst_space.space().structure(),
+                dst_data,
+                lhs.storage_space().structure(),
+                lhs_data,
+                rhs.storage_space().structure(),
+                rhs_data,
+                alpha,
+                beta,
+            );
+        }
+        let lhs_layout = lhs.prepare(rule, layout_primer)?;
+        let rhs_layout = rhs.prepare(rule, layout_primer)?;
         let resolution = compile_prelowered_resolution(
             rule,
             dst_space.space(),
-            lhs.logical_space(),
-            lhs.storage_space(),
-            rhs.logical_space(),
-            rhs.storage_space(),
+            &lhs_layout,
+            &rhs_layout,
             axes,
             || match tensorcontract_fusion_structure_dyn_prelowered(
                 rule,
                 dst_space.space(),
-                lhs.logical_space(),
-                lhs.storage_space(),
-                rhs.logical_space(),
-                rhs.storage_space(),
+                &lhs_layout,
+                &rhs_layout,
                 axes,
             ) {
                 Ok(structure) => Ok(Some(Arc::new(structure))),
@@ -1129,30 +1120,37 @@ where
                 plan_builder(
                     rule,
                     dst_space.space(),
-                    lhs.logical_space(),
-                    rhs.logical_space(),
+                    &lhs_layout,
+                    &rhs_layout,
                     axes,
-                    lhs.storage_conjugate(),
-                    rhs.storage_conjugate(),
                     layout_primer,
                 )
             },
         )?;
         #[cfg(test)]
         self.record_top_level_resolution(&resolution);
-        let dynamic_artifact = self.compile_dynamic_execution_artifact::<_, false>(
-            &resolution,
-            rule,
-            Some(dst_space.space()),
-            Some(lhs.logical_space()),
-            Some(lhs.storage_space()),
-            lhs.storage_space().structure(),
-            Some(rhs.logical_space()),
-            Some(rhs.storage_space()),
-            rhs.storage_space().structure(),
-            layout_primer,
-            None,
-        )?;
+        let dynamic_artifact = match &resolution {
+            Resolution::DynamicTree(plan) => Some(Arc::new(
+                super::dynamic::compile_prelowered_dynamic_tree_execution_artifact::<
+                    _,
+                    _,
+                    _,
+                    _,
+                    false,
+                >(
+                    &mut self.tree_context,
+                    &mut self.dynamic_space_cache,
+                    rule,
+                    layout_primer,
+                    plan,
+                    dst_space.space(),
+                    &lhs_layout,
+                    &rhs_layout,
+                    None,
+                )?,
+            )),
+            _ => None,
+        };
         self.execute_resolution_dyn(
             &resolution,
             dynamic_artifact.as_ref(),
@@ -1195,14 +1193,6 @@ where
         D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
     {
         let rule = dst_space.provider();
-        for space in [
-            lhs.logical_space(),
-            lhs.storage_space(),
-            rhs.logical_space(),
-            rhs.storage_space(),
-        ] {
-            space.validate_rule(rule)?;
-        }
         let axes = TensorContractSpec::new_with_conjugation(
             lhs_axes,
             rhs_axes,
@@ -1218,9 +1208,9 @@ where
                     rule,
                     dst_space.space(),
                     dst_data,
-                    lhs.logical_space(),
+                    lhs.storage_space(),
                     lhs_data,
-                    rhs.logical_space(),
+                    rhs.storage_space(),
                     rhs_data,
                     axes,
                     alpha,
@@ -1232,15 +1222,10 @@ where
                 dst_space, dst_data, lhs, lhs_data, rhs, rhs_data, axes, alpha, beta,
             );
         }
-        let plan = compile_composition_plan(
-            rule,
-            dst_space.space(),
-            lhs.logical_space(),
-            lhs.storage_space(),
-            rhs.logical_space(),
-            rhs.storage_space(),
-            axes,
-        )?;
+        let lhs_layout = lhs.prepare(rule, dst_space.layout_primer())?;
+        let rhs_layout = rhs.prepare(rule, dst_space.layout_primer())?;
+        let plan =
+            compile_composition_plan(rule, dst_space.space(), &lhs_layout, &rhs_layout, axes)?;
         #[cfg(test)]
         {
             self.last_top_level_resolution_was_core = true;
@@ -1459,10 +1444,8 @@ where
         rule: &R,
         dst_space: Option<&DynamicFusionMapSpace>,
         lhs_space: Option<&DynamicFusionMapSpace>,
-        lhs_storage_space: Option<&DynamicFusionMapSpace>,
         lhs_structure: &Arc<BlockStructure>,
         rhs_space: Option<&DynamicFusionMapSpace>,
-        rhs_storage_space: Option<&DynamicFusionMapSpace>,
         rhs_structure: &Arc<BlockStructure>,
         layout_primer: LayoutKeyBuilder<R>,
         mut profile: Option<&mut TensorContractFusionProfile>,
@@ -1492,10 +1475,8 @@ where
             plan.as_ref(),
             dst_space,
             lhs_space,
-            lhs_storage_space,
             lhs_structure,
             rhs_space,
-            rhs_storage_space,
             rhs_structure,
             profile.as_deref_mut(),
         )?);
@@ -1653,10 +1634,8 @@ where
             rule,
             dst_space.as_ref(),
             lhs_space.as_ref(),
-            None,
             &lhs_structure,
             rhs_space.as_ref(),
-            None,
             &rhs_structure,
             encoded_layout_primer::<R>,
             None,
@@ -1751,10 +1730,8 @@ where
             rule,
             Some(&dst_dynamic),
             Some(&lhs_dynamic),
-            None,
             &lhs_structure,
             Some(&rhs_dynamic),
-            None,
             &rhs_structure,
             encoded_layout_primer::<R>,
             None,
@@ -1976,10 +1953,8 @@ where
                         rule,
                         Some(&dst_dynamic),
                         Some(&lhs_dynamic),
-                        None,
                         &lhs_structure,
                         Some(&rhs_dynamic),
-                        None,
                         &rhs_structure,
                         encoded_layout_primer::<R>,
                         Some(profile),

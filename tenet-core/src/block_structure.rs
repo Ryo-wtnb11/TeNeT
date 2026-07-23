@@ -713,6 +713,30 @@ impl SectorStructure {
             .map(|position| self.sorted_indices[position])
     }
 
+    #[doc(hidden)]
+    pub fn find_adjoint_fusion_tree_pair_index(
+        &self,
+        logical_key: &FusionTreePairKey,
+    ) -> Option<usize> {
+        if self.key_kind != Some(BlockKeyKind::FusionTree) {
+            return None;
+        }
+        self.sorted_indices
+            .binary_search_by(|&index| match self.blocks[index].key() {
+                BlockKey::FusionTree(storage_key) => storage_key
+                    .codomain_tree()
+                    .cmp(logical_key.domain_tree())
+                    .then_with(|| {
+                        storage_key
+                            .domain_tree()
+                            .cmp(logical_key.codomain_tree())
+                    }),
+                _ => std::cmp::Ordering::Less,
+            })
+            .ok()
+            .map(|position| self.sorted_indices[position])
+    }
+
     #[deprecated(
         since = "0.1.0",
         note = "renamed to find_fusion_tree_pair_index to match FusionTreePairKey"
@@ -2099,6 +2123,15 @@ impl BlockStructure {
                 key: Box::new(BlockKey::FusionTree(key.clone())),
             })?;
         self.block(index)
+    }
+
+    #[doc(hidden)]
+    pub fn find_block_index_by_adjoint_fusion_tree_pair(
+        &self,
+        logical_key: &FusionTreePairKey,
+    ) -> Option<usize> {
+        self.sector
+            .find_adjoint_fusion_tree_pair_index(logical_key)
     }
 
     #[deprecated(

@@ -5,9 +5,10 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, Weak};
 
 use num_traits::Zero;
+use rustc_hash::FxHashMap;
 use tenet_core::{
-    BlockStructure, GenericBraidScalar, GenericRigidSymbols,
-    LocallyValidatedFusionTreeBlockStructure, MultiplicityFreeFusionSymbols,
+    BlockStructure, FusionTreePairKey, FusionTreePairOrientation, GenericBraidScalar,
+    GenericRigidSymbols, LocallyValidatedFusionTreeBlockStructure, MultiplicityFreeFusionSymbols,
     MultiplicityFreeRigidSymbols, RuleIdentity, TensorMap, TensorStorage,
 };
 
@@ -18,14 +19,18 @@ use super::operation::{TreeTransformOperation, TreeTransformRuleCacheKey};
 use super::plan::{
     build_all_codomain_tree_transform_group_plan_validated_with_threads,
     build_generic_tree_pair_transform_group_plan_validated,
-    build_tree_pair_transform_group_plan_validated_with_threads,
+    build_oriented_tree_pair_transform_group_plan_with_threads,
     compile_multiplicity_free_tree_pair_structure_after_capability_with_threads,
     compile_multiplicity_free_tree_pair_structure_with_threads,
     validate_all_codomain_namespace_before_cache, validate_generic_tree_pair_preflight,
     validate_multiplicity_free_all_codomain_preflight_after_capability,
-    validate_multiplicity_free_tree_pair_preflight,
     validate_multiplicity_free_tree_transform_capability,
     validate_tree_pair_namespace_before_cache,
+};
+#[cfg(test)]
+use super::plan::{
+    build_tree_pair_transform_group_plan_validated_with_threads,
+    validate_multiplicity_free_tree_pair_preflight,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -628,6 +633,8 @@ where
         Ok(structure)
     }
 
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn get_or_compile_tree_pair_prelowered<R, FBlock, FAxis>(
         &mut self,
         rule: &R,
@@ -673,6 +680,82 @@ where
                 logical_to_storage_block,
                 logical_to_storage_axis,
                 storage_conjugate,
+            )?,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn get_or_compile_tree_pair_oriented<R, FAxis>(
+        &mut self,
+        rule: &R,
+        operation: &TreeTransformOperation,
+        dst_structure: &Arc<BlockStructure>,
+        logical_keys: &[FusionTreePairKey],
+        storage_indices: &[usize],
+        storage_src_structure: &Arc<BlockStructure>,
+        orientation: FusionTreePairOrientation,
+        logical_rank: usize,
+        logical_to_storage_axis: FAxis,
+    ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
+        RuleKey: 'static + Send + Sync,
+        FAxis: Fn(usize) -> Result<usize, OperationError>,
+    {
+        if logical_keys.len() != storage_indices.len() {
+            return Err(OperationError::StructureMismatch {
+                tensor: "oriented source projection",
+            });
+        }
+        let mut projection =
+            FxHashMap::with_capacity_and_hasher(logical_keys.len(), rustc_hash::FxBuildHasher);
+        // Why not track storage-index uniqueness here: FusionOperandLayout
+        // already proves this projection is a bijection onto parent blocks.
+        for (position, (key, &storage_index)) in
+            logical_keys.iter().zip(storage_indices).enumerate()
+        {
+            if storage_index >= storage_src_structure.block_count() {
+                return Err(OperationError::BlockIndexOutOfBounds {
+                    tensor: "oriented src",
+                    index: storage_index,
+                    count: storage_src_structure.block_count(),
+                });
+            }
+            if projection.insert(key, storage_index).is_some() {
+                return Err(OperationError::DuplicateTreeTransformKey {
+                    tensor: "src",
+                    index: position,
+                });
+            }
+        }
+        self.stats.structure_misses += 1;
+        let plan = build_oriented_tree_pair_transform_group_plan_with_threads(
+            rule,
+            operation.clone(),
+            logical_keys,
+            storage_src_structure,
+            orientation,
+            logical_rank,
+            &projection,
+            self.recoupling_threads,
+        )?;
+        let source_index = |key: &FusionTreePairKey| {
+            projection
+                .get(key)
+                .copied()
+                .ok_or_else(|| OperationError::MissingBlockKey {
+                    key: Box::new(tenet_core::BlockKey::FusionTree(key.clone())),
+                })
+        };
+        Ok(Arc::new(
+            plan.compile_shared_structures_with_source_projection(
+                Arc::clone(dst_structure),
+                Arc::clone(storage_src_structure),
+                logical_rank,
+                source_index,
+                logical_to_storage_axis,
+                orientation == FusionTreePairOrientation::Adjoint,
             )?,
         ))
     }

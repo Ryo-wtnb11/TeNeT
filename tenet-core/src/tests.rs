@@ -5351,6 +5351,54 @@ mod tests {
                     .map(|&index| vec![(eager_adjoint_keys[index].clone(), 1.0)])
                     .collect::<Vec<_>>()
             );
+
+            let prepared = PreparedTreePairOperation::prepare_permute(
+                &SU2FusionRule,
+                2,
+                2,
+                &[0, 1],
+                &[2, 3],
+            )
+            .unwrap();
+            let ordered = multiplicity_free_braid_tree_pair_block_ordered_indexed(
+                &SU2FusionRule,
+                &structure,
+                group.block_indices(),
+                FusionTreePairOrientation::Adjoint,
+                &prepared,
+            )
+            .unwrap();
+            // What: the ordered indexed kernel exposes the same logical
+            // adjoint columns while retaining parent block-index order.
+            assert_eq!(ordered.source_count(), group.block_indices().len());
+            assert_eq!(
+                ordered.destinations(),
+                group
+                    .block_indices()
+                    .iter()
+                    .map(|&index| eager_adjoint_keys[index].clone())
+                    .collect::<Vec<_>>()
+            );
+
+            let prepared = PreparedTreePairOperation::prepare_transpose(
+                2,
+                2,
+                &[0, 1],
+                &[2, 3],
+            )
+            .unwrap();
+            let transposed = multiplicity_free_transpose_tree_pair_block_ordered_indexed(
+                &SU2FusionRule,
+                &structure,
+                group.block_indices(),
+                FusionTreePairOrientation::Adjoint,
+                &prepared,
+            )
+            .unwrap();
+            // What: transpose uses the same oriented parent projection and
+            // preserves the canonical logical source-column count.
+            assert_eq!(transposed.source_count(), group.block_indices().len());
+            assert_eq!(transposed.destinations(), ordered.destinations());
         }
     }
 

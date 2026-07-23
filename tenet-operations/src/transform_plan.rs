@@ -137,14 +137,32 @@ impl<'a, T> ResolvedTreeTransformBlockSpec<'a, T> {
                 key: Box::new(erase_key(key)),
             })
         };
+        Self::from_entries_with_resolvers(
+            entries,
+            source_axes,
+            |key| resolve(dst_structure, key),
+            |key| resolve(src_structure, key),
+        )
+    }
+
+    fn from_entries_with_resolvers<K, ResolveDst, ResolveSrc>(
+        entries: &'a SpecEntries<K, T>,
+        source_axes: Option<&'a [usize]>,
+        resolve_dst: ResolveDst,
+        resolve_src: ResolveSrc,
+    ) -> Result<Self, OperationError>
+    where
+        ResolveDst: Fn(&K) -> Result<usize, OperationError>,
+        ResolveSrc: Fn(&K) -> Result<usize, OperationError>,
+    {
         let entries = match entries {
             SpecEntries::Single {
                 dst,
                 src,
                 coefficient,
             } => ResolvedSpecEntries::Single {
-                dst: resolve(dst_structure, dst)?,
-                src: resolve(src_structure, src)?,
+                dst: resolve_dst(dst)?,
+                src: resolve_src(src)?,
                 coefficient,
             },
             SpecEntries::Multi {
@@ -152,14 +170,8 @@ impl<'a, T> ResolvedTreeTransformBlockSpec<'a, T> {
                 src,
                 coefficients,
             } => ResolvedSpecEntries::Multi {
-                dst: dst
-                    .iter()
-                    .map(|key| resolve(dst_structure, key))
-                    .collect::<Result<_, _>>()?,
-                src: src
-                    .iter()
-                    .map(|key| resolve(src_structure, key))
-                    .collect::<Result<_, _>>()?,
+                dst: dst.iter().map(&resolve_dst).collect::<Result<_, _>>()?,
+                src: src.iter().map(resolve_src).collect::<Result<_, _>>()?,
                 coefficients,
             },
         };
@@ -597,6 +609,29 @@ impl<T> TreeTransformGroupBlockSpec<T> {
             |key| BlockKey::FusionTree(key.clone()),
         )
     }
+
+    fn resolve_with_source_projection<F>(
+        &self,
+        dst_structure: &BlockStructure,
+        source_index: &F,
+    ) -> Result<ResolvedTreeTransformBlockSpec<'_, T>, OperationError>
+    where
+        F: Fn(&FusionTreePairKey) -> Result<usize, OperationError>,
+    {
+        let resolve_dst = |key: &FusionTreePairKey| {
+            dst_structure
+                .find_block_index_by_fusion_tree_pair(key)
+                .ok_or_else(|| OperationError::MissingBlockKey {
+                    key: Box::new(BlockKey::FusionTree(key.clone())),
+                })
+        };
+        ResolvedTreeTransformBlockSpec::from_entries_with_resolvers(
+            &self.entries,
+            self.source_axes(),
+            resolve_dst,
+            source_index,
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -710,6 +745,36 @@ impl<T: Copy> TreeTransformGroupPlan<T> {
                         &logical_to_storage_block,
                         &logical_to_storage_axis,
                     )?,
+            );
+        }
+        TreeTransformStructure::compile_resolved_shared_structures(
+            dst_structure,
+            storage_src_structure,
+            &specs,
+            storage_conjugate,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn compile_shared_structures_with_source_projection<FSource, FAxis>(
+        &self,
+        dst_structure: Arc<BlockStructure>,
+        storage_src_structure: Arc<BlockStructure>,
+        logical_rank: usize,
+        source_index: FSource,
+        logical_to_storage_axis: FAxis,
+        storage_conjugate: bool,
+    ) -> Result<TreeTransformStructure<T>, OperationError>
+    where
+        FSource: Fn(&FusionTreePairKey) -> Result<usize, OperationError>,
+        FAxis: Fn(usize) -> Result<usize, OperationError>,
+    {
+        let identity_block = |index| Ok(index);
+        let mut specs = Vec::with_capacity(self.specs.len());
+        for spec in &self.specs {
+            specs.push(
+                spec.resolve_with_source_projection(&dst_structure, &source_index)?
+                    .map_storage(logical_rank, &identity_block, &logical_to_storage_axis)?,
             );
         }
         TreeTransformStructure::compile_resolved_shared_structures(

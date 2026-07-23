@@ -5020,21 +5020,19 @@ impl Tensor {
         output_order: OutputAxisOrder<'_>,
         semantics: ContractionSemantics,
     ) -> Result<Self, Error> {
-        let (lhs_logical, lhs_storage, lhs_conj) = self.seam_operand()?;
-        let (rhs_logical, rhs_storage, rhs_conj) = rhs.seam_operand()?;
+        let (lhs_storage, lhs_orientation) = self.seam_operand();
+        let (rhs_storage, rhs_orientation) = rhs.seam_operand();
         // The seam always consumes the raw stored buffer (it never materializes):
         // for a lazy adjoint that buffer is the shared parent, conjugated by the
         // flag; for an ordinary tensor it is just the stored data.
         match (self.stored_data(), rhs.stored_data()) {
             (Data::F64(a), Data::F64(b)) => self.contract_impl(
-                lhs_logical,
                 lhs_storage,
                 a,
-                lhs_conj,
-                rhs_logical,
+                lhs_orientation,
                 rhs_storage,
                 b,
-                rhs_conj,
+                rhs_orientation,
                 rhs,
                 lhs_axes,
                 rhs_axes,
@@ -5042,14 +5040,12 @@ impl Tensor {
                 semantics,
             ),
             (Data::C64(a), Data::C64(b)) => self.contract_impl(
-                lhs_logical,
                 lhs_storage,
                 a,
-                lhs_conj,
-                rhs_logical,
+                lhs_orientation,
                 rhs_storage,
                 b,
-                rhs_conj,
+                rhs_orientation,
                 rhs,
                 lhs_axes,
                 rhs_axes,
@@ -5060,30 +5056,26 @@ impl Tensor {
         }
     }
 
-    /// Returns categorical layout, physical storage layout, and numeric
-    /// conjugation separately. Why not remap user axes here: lower planning
-    /// must enumerate the logical adjoint geometry before mapping only the
-    /// referenced storage blocks and strides.
-    fn seam_operand(&self) -> Result<(&UserBoundSpace, &UserBoundSpace, bool), Error> {
+    /// Returns parent storage layout and its logical orientation.
+    fn seam_operand(&self) -> (&UserBoundSpace, FusionTreePairOrientation) {
         match &self.repr {
-            TensorRepr::Owned(body) => Ok((body.space.as_ref(), body.space.as_ref(), false)),
-            TensorRepr::Adjoint(view) => {
-                Ok((self.logical_space()?, view.parent.space.as_ref(), true))
-            }
+            TensorRepr::Owned(body) => (body.space.as_ref(), FusionTreePairOrientation::Direct),
+            TensorRepr::Adjoint(view) => (
+                view.parent.space.as_ref(),
+                FusionTreePairOrientation::Adjoint,
+            ),
         }
     }
 
     #[allow(clippy::too_many_arguments)]
     fn contract_impl<D: UserScalar>(
         &self,
-        lhs_logical: &UserBoundSpace,
         lhs_storage: &UserBoundSpace,
         lhs_data: &[D],
-        lhs_conj: bool,
-        rhs_logical: &UserBoundSpace,
+        lhs_orientation: FusionTreePairOrientation,
         rhs_storage: &UserBoundSpace,
         rhs_data: &[D],
-        rhs_conj: bool,
+        rhs_orientation: FusionTreePairOrientation,
         rhs: &Self,
         lhs_axes: &[usize],
         rhs_axes: &[usize],
@@ -5105,35 +5097,31 @@ impl Tensor {
             self.contraction_output_space_oriented(rhs, lhs_axes, rhs_axes, output_order)?
         };
         let mut data = vec![D::from_real(0.0); dst_bound.raw().required_len()?];
+        let lhs_is_adjoint = lhs_orientation == FusionTreePairOrientation::Adjoint;
+        let rhs_is_adjoint = rhs_orientation == FusionTreePairOrientation::Adjoint;
         let spec = TensorContractSpec::new_with_conjugation(
             lhs_axes,
             rhs_axes,
             output_order,
-            lhs_conj,
-            rhs_conj,
+            lhs_is_adjoint,
+            rhs_is_adjoint,
         );
         macro_rules! contract_bound {
-            ($contexts:expr, $dst:expr, $lhs_logical:expr, $lhs_storage:expr, $rhs_logical:expr, $rhs_storage:expr) => {{
+            ($contexts:expr, $dst:expr, $lhs_storage:expr, $rhs_storage:expr) => {{
                 // Why not use the generalized prelowered route unconditionally:
                 // ordinary operands must retain the established accumulation
                 // order and bitwise output; only lazy operands need categorical
                 // geometry separated from their parent storage.
                 if semantics == ContractionSemantics::Composition {
-                    let lhs = if lhs_conj {
-                        tenet_tensors::FusionOperand::prelowered_adjoint(
-                            $lhs_logical.space(),
-                            $lhs_storage.space(),
-                        )?
+                    let lhs = if lhs_is_adjoint {
+                        tenet_tensors::FusionOperand::adjoint($lhs_storage.space())
                     } else {
-                        tenet_tensors::FusionOperand::direct($lhs_logical.space())
+                        tenet_tensors::FusionOperand::direct($lhs_storage.space())
                     };
-                    let rhs = if rhs_conj {
-                        tenet_tensors::FusionOperand::prelowered_adjoint(
-                            $rhs_logical.space(),
-                            $rhs_storage.space(),
-                        )?
+                    let rhs = if rhs_is_adjoint {
+                        tenet_tensors::FusionOperand::adjoint($rhs_storage.space())
                     } else {
-                        tenet_tensors::FusionOperand::direct($rhs_logical.space())
+                        tenet_tensors::FusionOperand::direct($rhs_storage.space())
                     };
                     D::ctx_of($contexts).tensorcompose_fusion_dyn_into_lowered(
                         $dst,
@@ -5147,34 +5135,28 @@ impl Tensor {
                         D::from_real(1.0),
                         D::from_real(0.0),
                     )
-                } else if !lhs_conj && !rhs_conj {
+                } else if !lhs_is_adjoint && !rhs_is_adjoint {
                     D::ctx_of($contexts).tensorcontract_fusion_dyn_into_lowered(
                         $dst,
                         &mut data,
-                        $lhs_logical,
+                        $lhs_storage,
                         lhs_data,
-                        $rhs_logical,
+                        $rhs_storage,
                         rhs_data,
                         TensorContractSpec::new(lhs_axes, rhs_axes, output_order),
                         D::from_real(1.0),
                         D::from_real(0.0),
                     )
                 } else {
-                    let lhs = if lhs_conj {
-                        tenet_tensors::FusionOperand::prelowered_adjoint(
-                            $lhs_logical.space(),
-                            $lhs_storage.space(),
-                        )?
+                    let lhs = if lhs_is_adjoint {
+                        tenet_tensors::FusionOperand::adjoint($lhs_storage.space())
                     } else {
-                        tenet_tensors::FusionOperand::direct($lhs_logical.space())
+                        tenet_tensors::FusionOperand::direct($lhs_storage.space())
                     };
-                    let rhs = if rhs_conj {
-                        tenet_tensors::FusionOperand::prelowered_adjoint(
-                            $rhs_logical.space(),
-                            $rhs_storage.space(),
-                        )?
+                    let rhs = if rhs_is_adjoint {
+                        tenet_tensors::FusionOperand::adjoint($rhs_storage.space())
                     } else {
-                        tenet_tensors::FusionOperand::direct($rhs_logical.space())
+                        tenet_tensors::FusionOperand::direct($rhs_storage.space())
                     };
                     D::ctx_of($contexts).tensorcontract_fusion_dyn_prelowered_into_lowered(
                         $dst,
@@ -5190,105 +5172,39 @@ impl Tensor {
                 }
             }};
         }
-        match (
-            &dst_bound,
-            lhs_logical,
-            lhs_storage,
-            rhs_logical,
-            rhs_storage,
-        ) {
+        match (&dst_bound, lhs_storage, rhs_storage) {
             (
                 UserBoundSpace::U1(dst),
-                UserBoundSpace::U1(lhs_logical),
                 UserBoundSpace::U1(lhs_storage),
-                UserBoundSpace::U1(rhs_logical),
                 UserBoundSpace::U1(rhs_storage),
-            ) => contract_bound!(
-                &mut context.u1,
-                dst,
-                lhs_logical,
-                lhs_storage,
-                rhs_logical,
-                rhs_storage
-            ),
+            ) => contract_bound!(&mut context.u1, dst, lhs_storage, rhs_storage),
             (
                 UserBoundSpace::Z2(dst),
-                UserBoundSpace::Z2(lhs_logical),
                 UserBoundSpace::Z2(lhs_storage),
-                UserBoundSpace::Z2(rhs_logical),
                 UserBoundSpace::Z2(rhs_storage),
-            ) => contract_bound!(
-                &mut context.z2,
-                dst,
-                lhs_logical,
-                lhs_storage,
-                rhs_logical,
-                rhs_storage
-            ),
+            ) => contract_bound!(&mut context.z2, dst, lhs_storage, rhs_storage),
             (
                 UserBoundSpace::FZ2(dst),
-                UserBoundSpace::FZ2(lhs_logical),
                 UserBoundSpace::FZ2(lhs_storage),
-                UserBoundSpace::FZ2(rhs_logical),
                 UserBoundSpace::FZ2(rhs_storage),
-            ) => contract_bound!(
-                &mut context.fz2,
-                dst,
-                lhs_logical,
-                lhs_storage,
-                rhs_logical,
-                rhs_storage
-            ),
+            ) => contract_bound!(&mut context.fz2, dst, lhs_storage, rhs_storage),
             (
                 UserBoundSpace::SU2(dst),
-                UserBoundSpace::SU2(lhs_logical),
                 UserBoundSpace::SU2(lhs_storage),
-                UserBoundSpace::SU2(rhs_logical),
                 UserBoundSpace::SU2(rhs_storage),
-            ) => contract_bound!(
-                &mut context.su2,
-                dst,
-                lhs_logical,
-                lhs_storage,
-                rhs_logical,
-                rhs_storage
-            ),
+            ) => contract_bound!(&mut context.su2, dst, lhs_storage, rhs_storage),
             (
                 UserBoundSpace::U1FZ2(dst),
-                UserBoundSpace::U1FZ2(lhs_logical),
                 UserBoundSpace::U1FZ2(lhs_storage),
-                UserBoundSpace::U1FZ2(rhs_logical),
                 UserBoundSpace::U1FZ2(rhs_storage),
-            ) => contract_bound!(
-                &mut context.u1_fz2,
-                dst,
-                lhs_logical,
-                lhs_storage,
-                rhs_logical,
-                rhs_storage
-            ),
+            ) => contract_bound!(&mut context.u1_fz2, dst, lhs_storage, rhs_storage),
             (
                 UserBoundSpace::FZ2U1SU2(dst),
-                UserBoundSpace::FZ2U1SU2(lhs_logical),
                 UserBoundSpace::FZ2U1SU2(lhs_storage),
-                UserBoundSpace::FZ2U1SU2(rhs_logical),
                 UserBoundSpace::FZ2U1SU2(rhs_storage),
-            ) => contract_bound!(
-                &mut context.fz2_u1_su2,
-                dst,
-                lhs_logical,
-                lhs_storage,
-                rhs_logical,
-                rhs_storage
-            ),
-            (
-                UserBoundSpace::Su3(dst),
-                UserBoundSpace::Su3(lhs),
-                UserBoundSpace::Su3(_),
-                UserBoundSpace::Su3(rhs),
-                UserBoundSpace::Su3(_),
-            ) => {
-                if lhs_conj || rhs_conj {
+            ) => contract_bound!(&mut context.fz2_u1_su2, dst, lhs_storage, rhs_storage),
+            (UserBoundSpace::Su3(dst), UserBoundSpace::Su3(lhs), UserBoundSpace::Su3(rhs)) => {
+                if lhs_is_adjoint || rhs_is_adjoint {
                     return Err(Error::InvalidArgument(
                         "internal: SU(N) contraction reached the seam with a conjugate flag"
                             .to_string(),
@@ -10843,19 +10759,22 @@ mod adjoint_parent_view_tests {
                 });
             }
         });
-        assert_eq!(lhs.adjoint_build_counts(), (1, 0));
+        // What: contraction consumes the parent plus orientation directly;
+        // neither a duplicate logical grid nor owned adjoint data is built.
+        assert_eq!(lhs.adjoint_build_counts(), (0, 0));
 
         for _ in 0..3 {
             let output = lhs.compose(&rhs).unwrap();
             assert_eq!(output.rank(), 2);
         }
-        assert_eq!(lhs.adjoint_build_counts(), (1, 0));
+        assert_eq!(lhs.adjoint_build_counts(), (0, 0));
     }
 
     #[test]
     fn fermionic_compose_keeps_lazy_lhs_and_rhs_parent_native() {
         // What: A† * B and A† * B† over the non-Abelian product read both
-        // parent buffers through the Core batch without building owned adjoints.
+        // parent buffers through the Core batch without building logical grids
+        // or owned adjoints.
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let space = Space::fz2_u1_su2([((0, 0, 0), 2), ((1, 0, 1), 2), ((1, 1, 2), 1)]).unwrap();
         let lhs_parent =
@@ -10870,10 +10789,10 @@ mod adjoint_parent_view_tests {
         let rhs_lazy = rhs_parent.adjoint().unwrap();
 
         let lhs_result = lhs.compose(&rhs).unwrap();
-        assert_eq!(lhs.adjoint_build_counts(), (1, 0));
+        assert_eq!(lhs.adjoint_build_counts(), (0, 0));
         let both_result = lhs.compose(&rhs_lazy).unwrap();
-        assert_eq!(lhs.adjoint_build_counts(), (1, 0));
-        assert_eq!(rhs_lazy.adjoint_build_counts(), (1, 0));
+        assert_eq!(lhs.adjoint_build_counts(), (0, 0));
+        assert_eq!(rhs_lazy.adjoint_build_counts(), (0, 0));
 
         let eager_lhs = lhs_parent.adjoint().unwrap().materialized_tensor().unwrap();
         let eager_rhs = rhs_parent.adjoint().unwrap().materialized_tensor().unwrap();

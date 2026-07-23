@@ -6,11 +6,14 @@ use std::{collections::hash_map::Entry, sync::Arc};
 use num_traits::Zero;
 use tenet_core::{
     generic_braid_tree_pair_block_ordered, generic_permute_tree_pair_block_ordered,
-    generic_transpose_tree_pair_block_ordered, BlockKey, BlockKeyKind, BlockStructure, CoreError,
-    FusionRule, FusionStyleKind, FusionTreeBlockGroup, FusionTreeKey, FusionTreePairKey,
-    GenericBraidScalar, GenericRigidSymbols, LocallyValidatedFusionTreeBlockStructure,
-    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, OrderedBlockLinearMap,
-    OrderedBlockLinearStorage, PreparedTreePairOperation,
+    generic_transpose_tree_pair_block_ordered,
+    multiplicity_free_braid_tree_pair_block_ordered_indexed,
+    multiplicity_free_transpose_tree_pair_block_ordered_indexed, BlockKey, BlockKeyKind,
+    BlockStructure, CoreError, FusionRule, FusionStyleKind, FusionTreeBlockGroup, FusionTreeKey,
+    FusionTreePairKey, FusionTreePairOrientation, GenericBraidScalar, GenericRigidSymbols,
+    LocallyValidatedFusionTreeBlockStructure, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, OrderedBlockLinearMap, OrderedBlockLinearStorage,
+    PreparedTreePairOperation,
 };
 
 use crate::{OperationError, TreeTransformStructure};
@@ -1418,6 +1421,108 @@ where
     Ok(TreeTransformGroupPlan::new(specs))
 }
 
+pub(crate) fn build_oriented_tree_pair_transform_group_plan_with_threads<R>(
+    rule: &R,
+    operation: TreeTransformOperation,
+    logical_keys: &[FusionTreePairKey],
+    storage_structure: &BlockStructure,
+    orientation: FusionTreePairOrientation,
+    logical_rank: usize,
+    storage_projection: &FxHashMap<&FusionTreePairKey, usize>,
+    threads: usize,
+) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero + Send + Sync,
+{
+    validate_multiplicity_free_tree_transform_capability(rule, &operation)?;
+    validate_tree_transform_rank_syntax(&operation, logical_rank)?;
+    let source_axes = operation_source_axes(&operation);
+    let mut group_indices = FxHashMap::default();
+    let mut staged_groups = Vec::<(Vec<FusionTreePairKey>, Vec<usize>, (usize, usize))>::new();
+    for key in logical_keys {
+        let group_key = key.group_key();
+        let group_index = match group_indices.entry(group_key) {
+            Entry::Occupied(entry) => *entry.get(),
+            Entry::Vacant(entry) => {
+                let group_index = staged_groups.len();
+                entry.insert(group_index);
+                staged_groups.push((
+                    Vec::new(),
+                    Vec::new(),
+                    (
+                        key.codomain_tree().uncoupled().len(),
+                        key.domain_tree().uncoupled().len(),
+                    ),
+                ));
+                group_index
+            }
+        };
+        staged_groups[group_index].0.push(key.clone());
+        staged_groups[group_index]
+            .1
+            .push(
+                *storage_projection
+                    .get(key)
+                    .ok_or(OperationError::StructureMismatch {
+                        tensor: "oriented source projection",
+                    })?,
+            );
+    }
+
+    let mut primary_prepared = None;
+    let mut additional_prepared = None::<FxHashMap<(usize, usize), PreparedTreePairOperation>>;
+    for (_, _, source_split) in &staged_groups {
+        prepared_tree_pair_operation_for_split(
+            &mut primary_prepared,
+            &mut additional_prepared,
+            rule,
+            &operation,
+            *source_split,
+        )?;
+    }
+
+    let completed = execute_staged_groups(staged_groups, threads, |group| {
+        let (src_keys, storage_indices, source_split) = group;
+        let prepared = primary_prepared
+            .as_ref()
+            .filter(|(split, _)| *split == source_split)
+            .map(|(_, prepared)| prepared)
+            .or_else(|| {
+                additional_prepared
+                    .as_ref()
+                    .and_then(|prepared| prepared.get(&source_split))
+            })
+            .expect("every oriented source split was prepared");
+        let ordered = match operation.kind() {
+            TreeTransformOperationKind::Transpose => {
+                multiplicity_free_transpose_tree_pair_block_ordered_indexed(
+                    rule,
+                    storage_structure,
+                    &storage_indices,
+                    orientation,
+                    prepared,
+                )
+            }
+            TreeTransformOperationKind::Permute | TreeTransformOperationKind::Braid => {
+                multiplicity_free_braid_tree_pair_block_ordered_indexed(
+                    rule,
+                    storage_structure,
+                    &storage_indices,
+                    orientation,
+                    prepared,
+                )
+            }
+        }
+        .map_err(OperationError::from_core_preserving_context)?;
+        assemble_ordered_tree_pair_group_specs_from_keys(src_keys, &source_axes, ordered)
+    })?;
+
+    Ok(TreeTransformGroupPlan::from_specs(
+        completed.into_iter().flatten(),
+    ))
+}
+
 #[cfg(test)]
 std::thread_local! {
     static ORDERED_TREE_PAIR_LOWERING_CALLS: std::cell::Cell<usize> =
@@ -1476,6 +1581,17 @@ where
         src_keys.push(src_key.clone());
     }
 
+    assemble_ordered_tree_pair_group_specs_from_keys(src_keys, source_axes, ordered)
+}
+
+fn assemble_ordered_tree_pair_group_specs_from_keys<T>(
+    src_keys: Vec<FusionTreePairKey>,
+    source_axes: &Arc<[usize]>,
+    ordered: OrderedBlockLinearMap<FusionTreePairKey, T>,
+) -> Result<Vec<TreeTransformGroupBlockSpec<T>>, OperationError>
+where
+    T: Clone + Zero,
+{
     let (destinations, source_count, storage) = ordered.into_parts();
     if source_count != src_keys.len() {
         return Err(OperationError::StructureMismatch {

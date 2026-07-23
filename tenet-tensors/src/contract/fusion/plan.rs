@@ -9,7 +9,8 @@ use crate::{OperationError, TreeTransformOperation, TreeTransformOperationKind};
 use tenet_operations::{OutputAxisOrder, TensorContractSpec, TensorContractSpecOwned};
 
 use super::super::dynamic_space::{
-    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, LayoutKeyBuilder, TransformedLayoutProbe,
+    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperandLayout, LayoutKeyBuilder,
+    TransformedLayoutProbe,
 };
 use super::super::structure::TensorContractAxisPlan;
 
@@ -577,65 +578,33 @@ where
 pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
-    lhs: &DynamicFusionMapSpace,
-    rhs: &DynamicFusionMapSpace,
+    lhs: &FusionOperandLayout<'_>,
+    rhs: &FusionOperandLayout<'_>,
     axes: TensorContractSpec<'_>,
-    lhs_storage_conjugate: bool,
-    rhs_storage_conjugate: bool,
+    primer: LayoutKeyBuilder<R>,
 ) -> Result<FusionContractPlan, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    prepare_tensorcontract_fusion_plan_dyn_prelowered_with_orientations(
+    prepare_tensorcontract_fusion_plan_from_operands(
         rule,
         dst,
         lhs,
         rhs,
         axes,
-        lhs_storage_conjugate,
-        rhs_storage_conjugate,
-        &CACHED_ORIENTATIONS,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn prepare_tensorcontract_fusion_plan_dyn_prelowered_with_orientations<R>(
-    rule: &R,
-    dst: &DynamicFusionMapSpace,
-    lhs: &DynamicFusionMapSpace,
-    rhs: &DynamicFusionMapSpace,
-    axes: TensorContractSpec<'_>,
-    lhs_storage_conjugate: bool,
-    rhs_storage_conjugate: bool,
-    orientations: &[FusionContractOrientation],
-) -> Result<FusionContractPlan, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-{
-    dst.validate_rule(rule)?;
-    lhs.validate_rule(rule)?;
-    rhs.validate_rule(rule)?;
-    if axes.lhs_conjugate() != lhs_storage_conjugate
-        || axes.rhs_conjugate() != rhs_storage_conjugate
-    {
-        return Err(OperationError::InvalidArgument {
-            message: "prelowered operand flags must match the contraction cache key",
-        });
-    }
-    let logical_axes = TensorContractSpec::new(
-        axes.lhs_contracting_axes(),
-        axes.rhs_contracting_axes(),
-        axes.output_permutation(),
-    );
-    select_tensorcontract_fusion_plan_from_spaces_with_orientations(
-        rule,
-        dst,
-        lhs,
-        rhs,
-        logical_axes,
-        lhs_storage_conjugate,
-        rhs_storage_conjugate,
-        orientations,
+        |rule, source: &FusionOperandLayout<'_>, operation, _| {
+            if source.is_direct() {
+                encoded_layout_probe(rule, source.storage_space(), operation, None)
+            } else {
+                source.transformed_layout_probe(
+                    rule,
+                    operation,
+                    super::super::dynamic_space::encoded_layout_primer::<R>,
+                )
+            }
+        },
+        encoded_homspace_builder::<R>,
+        primer,
     )
 }
 
@@ -928,12 +897,65 @@ where
         .collect()
 }
 
+#[cfg(test)]
 type LayoutProbeBuilder<R> = for<'a> fn(
     &'a R,
     &'a DynamicFusionMapSpace,
     &'a TreeTransformOperation,
     Option<LayoutKeyBuilder<R>>,
 ) -> Result<TransformedLayoutProbe, OperationError>;
+
+trait ContractPlanSource {
+    fn homspace(&self) -> &FusionTreeHomSpace;
+    fn nout(&self) -> usize;
+    fn rank(&self) -> usize;
+    fn admission(&self) -> &FusionSpaceAdmission;
+    fn storage_space(&self) -> &DynamicFusionMapSpace;
+}
+
+impl ContractPlanSource for DynamicFusionMapSpace {
+    fn homspace(&self) -> &FusionTreeHomSpace {
+        self.homspace()
+    }
+
+    fn nout(&self) -> usize {
+        self.nout()
+    }
+
+    fn rank(&self) -> usize {
+        self.rank()
+    }
+
+    fn admission(&self) -> &FusionSpaceAdmission {
+        self.admission()
+    }
+
+    fn storage_space(&self) -> &DynamicFusionMapSpace {
+        self
+    }
+}
+
+impl ContractPlanSource for FusionOperandLayout<'_> {
+    fn homspace(&self) -> &FusionTreeHomSpace {
+        self.homspace()
+    }
+
+    fn nout(&self) -> usize {
+        self.nout()
+    }
+
+    fn rank(&self) -> usize {
+        self.rank()
+    }
+
+    fn admission(&self) -> &FusionSpaceAdmission {
+        self.admission()
+    }
+
+    fn storage_space(&self) -> &DynamicFusionMapSpace {
+        self.storage_space()
+    }
+}
 
 fn encoded_layout_probe<R>(
     rule: &R,
@@ -995,28 +1017,36 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn select_tensorcontract_fusion_plan_from_spaces_with_probe_and_orientations<R>(
+fn select_tensorcontract_fusion_plan_from_spaces_with_probe_and_orientations<R, S, P>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
-    lhs: &DynamicFusionMapSpace,
-    rhs: &DynamicFusionMapSpace,
+    lhs: &S,
+    rhs: &S,
     axes: TensorContractSpec<'_>,
     lhs_source_conjugate: bool,
     rhs_source_conjugate: bool,
-    probe: LayoutProbeBuilder<R>,
+    probe: P,
     homspace_builder: HomSpaceBuilder<R>,
     primer: Option<LayoutKeyBuilder<R>>,
     orientations: &[FusionContractOrientation],
 ) -> Result<FusionContractPlan, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    S: ContractPlanSource,
+    P: for<'a> Fn(
+            &'a R,
+            &'a S,
+            &'a TreeTransformOperation,
+            Option<LayoutKeyBuilder<R>>,
+        ) -> Result<TransformedLayoutProbe, OperationError>
+        + Copy,
 {
     validate_tensorcontract_fusion_plan_inputs(rule, dst, lhs, rhs, axes, homspace_builder)?;
     let candidates =
         contracted_axis_order_candidates(axes.lhs_contracting_axes(), axes.rhs_contracting_axes());
-    let complete = [dst, lhs, rhs]
-        .iter()
-        .all(|space| matches!(space.admission(), FusionSpaceAdmission::Complete(_)));
+    let complete = matches!(dst.admission(), FusionSpaceAdmission::Complete(_))
+        && matches!(lhs.admission(), FusionSpaceAdmission::Complete(_))
+        && matches!(rhs.admission(), FusionSpaceAdmission::Complete(_));
 
     let mut best = None;
     let mut first_candidate_error = None;
@@ -1029,10 +1059,11 @@ where
                     axes.output_permutation(),
                 );
                 let plan = orient_fusion_contract_plan(
-                    compile_tensorcontract_fusion_plan_from_spaces(
-                        dst,
-                        lhs,
-                        rhs,
+                    compile_tensorcontract_fusion_plan_from_ranks(
+                        dst.nout(),
+                        dst.rank(),
+                        lhs.rank(),
+                        rhs.rank(),
                         candidate_axes,
                         lhs_source_conjugate,
                         rhs_source_conjugate,
@@ -1093,11 +1124,9 @@ where
 pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer_canonical<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
-    lhs: &DynamicFusionMapSpace,
-    rhs: &DynamicFusionMapSpace,
+    lhs: &FusionOperandLayout<'_>,
+    rhs: &FusionOperandLayout<'_>,
     axes: TensorContractSpec<'_>,
-    lhs_storage_conjugate: bool,
-    rhs_storage_conjugate: bool,
     primer: LayoutKeyBuilder<R>,
 ) -> Result<FusionContractPlan, OperationError>
 where
@@ -1105,41 +1134,51 @@ where
         + LoweredMultiplicityFreeAlgebra
         + CheckedFusionAlgebra,
 {
-    prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer_and_orientations(
+    prepare_tensorcontract_fusion_plan_from_operands(
         rule,
         dst,
         lhs,
         rhs,
         axes,
-        lhs_storage_conjugate,
-        rhs_storage_conjugate,
+        |rule, source: &FusionOperandLayout<'_>, operation, primer| {
+            let primer = primer.ok_or(OperationError::InvalidArgument {
+                message: "lowered prelowered plan requires a layout primer",
+            })?;
+            if source.is_direct() {
+                lowered_layout_probe(rule, source.storage_space(), operation, Some(primer))
+            } else {
+                source.transformed_layout_probe(rule, operation, primer)
+            }
+        },
+        lowered_homspace_builder::<R>,
         primer,
-        &CACHED_ORIENTATIONS,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer_and_orientations<R>(
+fn prepare_tensorcontract_fusion_plan_from_operands<R, P>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
-    lhs: &DynamicFusionMapSpace,
-    rhs: &DynamicFusionMapSpace,
+    lhs: &FusionOperandLayout<'_>,
+    rhs: &FusionOperandLayout<'_>,
     axes: TensorContractSpec<'_>,
-    lhs_storage_conjugate: bool,
-    rhs_storage_conjugate: bool,
+    probe: P,
+    homspace_builder: HomSpaceBuilder<R>,
     primer: LayoutKeyBuilder<R>,
-    orientations: &[FusionContractOrientation],
 ) -> Result<FusionContractPlan, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + LoweredMultiplicityFreeAlgebra
-        + CheckedFusionAlgebra,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    P: for<'a> Fn(
+            &'a R,
+            &'a FusionOperandLayout<'_>,
+            &'a TreeTransformOperation,
+            Option<LayoutKeyBuilder<R>>,
+        ) -> Result<TransformedLayoutProbe, OperationError>
+        + Copy,
 {
     dst.validate_rule(rule)?;
-    lhs.validate_rule(rule)?;
-    rhs.validate_rule(rule)?;
-    if axes.lhs_conjugate() != lhs_storage_conjugate
-        || axes.rhs_conjugate() != rhs_storage_conjugate
+    if axes.lhs_conjugate() != lhs.storage_conjugate()
+        || axes.rhs_conjugate() != rhs.storage_conjugate()
     {
         return Err(OperationError::InvalidArgument {
             message: "prelowered operand flags must match the contraction cache key",
@@ -1156,18 +1195,18 @@ where
         lhs,
         rhs,
         logical_axes,
-        lhs_storage_conjugate,
-        rhs_storage_conjugate,
-        lowered_layout_probe::<R>,
-        lowered_homspace_builder::<R>,
+        lhs.storage_conjugate(),
+        rhs.storage_conjugate(),
+        probe,
+        homspace_builder,
         Some(primer),
-        orientations,
+        &CACHED_ORIENTATIONS,
     )
 }
 
-fn source_contract_axes_require_twist<R>(
+fn source_contract_homspace_requires_twist<R>(
     rule: &R,
-    source: &DynamicFusionMapSpace,
+    source: &FusionTreeHomSpace,
     contracting_axes: &[usize],
 ) -> Result<bool, OperationError>
 where
@@ -1177,7 +1216,7 @@ where
     // the candidate permutation, so core-right twist can be read at its source axes.
     super::super::resolution::rhs_contract_homspace_requires_twist(
         rule,
-        source.homspace(),
+        source,
         TensorContractSpec::new(&[], contracting_axes, OutputAxisOrder::identity()),
     )
 }
@@ -1257,16 +1296,17 @@ fn fusion_contract_candidate_facts(
     })
 }
 
-fn score_complete_fusion_contract_candidate<R>(
+fn score_complete_fusion_contract_candidate<R, S>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
-    lhs: &DynamicFusionMapSpace,
-    rhs: &DynamicFusionMapSpace,
+    lhs: &S,
+    rhs: &S,
     axis_order: ContractAxisOrderCandidate,
     plan: &FusionContractPlan,
 ) -> Result<FusionContractCandidateFacts, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    S: ContractPlanSource,
 {
     #[cfg(test)]
     CANDIDATE_SCORE_CALLS.set(CANDIDATE_SCORE_CALLS.get() + 1);
@@ -1274,7 +1314,7 @@ where
     // canonical full basis, so permutation preserves reduced element count and
     // an exact identity operation preserves the source structure.
     let lhs_exact_identity_borrowable = super::super::dynamic::source_layout_metadata_is_borrowable(
-        lhs,
+        lhs.storage_space(),
         lhs.nout(),
         lhs.rank(),
         || true,
@@ -1282,7 +1322,7 @@ where
         plan.lhs_source_conjugate(),
     );
     let rhs_exact_identity_borrowable = super::super::dynamic::source_layout_metadata_is_borrowable(
-        rhs,
+        rhs.storage_space(),
         rhs.nout(),
         rhs.rank(),
         || true,
@@ -1294,7 +1334,7 @@ where
         FusionContractOrientation::RhsLhs => (lhs, axis_order.lhs()),
     };
     let core_right_requires_twist =
-        source_contract_axes_require_twist(rule, core_right, core_right_axes)?;
+        source_contract_homspace_requires_twist(rule, core_right.homspace(), core_right_axes)?;
     fusion_contract_candidate_facts(
         axis_order,
         plan,
@@ -1302,25 +1342,33 @@ where
             lhs_exact_identity_borrowable,
             rhs_exact_identity_borrowable,
             core_right_requires_twist,
-            lhs_required_len: CandidateRequiredLen::Space(lhs),
-            rhs_required_len: CandidateRequiredLen::Space(rhs),
+            lhs_required_len: CandidateRequiredLen::Space(lhs.storage_space()),
+            rhs_required_len: CandidateRequiredLen::Space(rhs.storage_space()),
             output_required_len: CandidateRequiredLen::Space(dst),
         },
     )
 }
 
-fn score_fusion_contract_candidate<R>(
+fn score_fusion_contract_candidate<R, S, P>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
-    lhs: &DynamicFusionMapSpace,
-    rhs: &DynamicFusionMapSpace,
+    lhs: &S,
+    rhs: &S,
     axis_order: ContractAxisOrderCandidate,
     plan: FusionContractPlan,
-    probe: LayoutProbeBuilder<R>,
+    probe: P,
     primer: Option<LayoutKeyBuilder<R>>,
 ) -> Result<ScoredFusionContractCandidate, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    S: ContractPlanSource,
+    P: for<'a> Fn(
+            &'a R,
+            &'a S,
+            &'a TreeTransformOperation,
+            Option<LayoutKeyBuilder<R>>,
+        ) -> Result<TransformedLayoutProbe, OperationError>
+        + Copy,
 {
     #[cfg(test)]
     {
@@ -1330,7 +1378,7 @@ where
     let lhs_core = probe(rule, lhs, plan.lhs_transform(), primer)?;
     let rhs_core = probe(rule, rhs, plan.rhs_transform(), primer)?;
     let lhs_exact_identity_borrowable = super::super::dynamic::source_layout_metadata_is_borrowable(
-        lhs,
+        lhs.storage_space(),
         lhs_core.nout,
         lhs_core.homspace.rank(),
         || lhs_core.homspace == *lhs.homspace(),
@@ -1338,7 +1386,7 @@ where
         plan.lhs_source_conjugate(),
     ) && lhs_core.source_structure_matches;
     let rhs_exact_identity_borrowable = super::super::dynamic::source_layout_metadata_is_borrowable(
-        rhs,
+        rhs.storage_space(),
         rhs_core.nout,
         rhs_core.homspace.rank(),
         || rhs_core.homspace == *rhs.homspace(),
@@ -1367,16 +1415,17 @@ where
     Ok(ScoredFusionContractCandidate { plan, facts })
 }
 
-fn validate_tensorcontract_fusion_plan_inputs<R>(
+fn validate_tensorcontract_fusion_plan_inputs<R, S>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
-    lhs: &DynamicFusionMapSpace,
-    rhs: &DynamicFusionMapSpace,
+    lhs: &S,
+    rhs: &S,
     axes: TensorContractSpec<'_>,
     homspace_builder: HomSpaceBuilder<R>,
 ) -> Result<(), OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    S: ContractPlanSource,
 {
     #[cfg(test)]
     CONTRACT_PREFLIGHT_CALLS.set(CONTRACT_PREFLIGHT_CALLS.get() + 1);
@@ -1396,6 +1445,7 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 fn compile_tensorcontract_fusion_plan_from_spaces(
     dst: &DynamicFusionMapSpace,
     lhs: &DynamicFusionMapSpace,
@@ -1404,8 +1454,28 @@ fn compile_tensorcontract_fusion_plan_from_spaces(
     lhs_source_conjugate: bool,
     rhs_source_conjugate: bool,
 ) -> Result<FusionContractPlan, OperationError> {
-    let dst_nout = dst.nout();
-    let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), dst.rank(), axes)?;
+    compile_tensorcontract_fusion_plan_from_ranks(
+        dst.nout(),
+        dst.rank(),
+        lhs.rank(),
+        rhs.rank(),
+        axes,
+        lhs_source_conjugate,
+        rhs_source_conjugate,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_tensorcontract_fusion_plan_from_ranks(
+    dst_nout: usize,
+    dst_rank: usize,
+    lhs_rank: usize,
+    rhs_rank: usize,
+    axes: TensorContractSpec<'_>,
+    lhs_source_conjugate: bool,
+    rhs_source_conjugate: bool,
+) -> Result<FusionContractPlan, OperationError> {
+    let axis_plan = TensorContractAxisPlan::compile(lhs_rank, rhs_rank, dst_rank, axes)?;
     let lhs_open_rank = axis_plan.lhs_open_axes.len();
     let lhs_contract_rank = axis_plan.lhs_contracting_axes.len();
     let rhs_contract_rank = axis_plan.rhs_contracting_axes.len();
@@ -1449,12 +1519,17 @@ mod tests {
     use super::{
         candidate_build_calls, contracted_axis_order_candidates,
         prepare_tensorcontract_fusion_candidate_facts_dyn_raw,
+        prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical,
+        prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer_canonical,
         prepare_tensorcontract_fusion_plan_dyn_raw,
         prepare_tensorcontract_fusion_plan_dyn_raw_canonical,
         prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation,
         reset_candidate_build_calls, reset_candidate_score_calls, FusionContractOrientation,
     };
-    use crate::contract::DynamicFusionMapSpace;
+    use crate::contract::dynamic_space::{
+        encoded_layout_primer, lowered_metadata_dispatcher, MetadataOutput, MetadataRequest,
+    };
+    use crate::contract::{DynamicFusionMapSpace, FusionOperand};
     use crate::{TreeTransformOperation, TreeTransformOperationKind};
     use std::sync::Arc;
     use tenet_core::{
@@ -1465,6 +1540,25 @@ mod tests {
 
     std::thread_local! {
         static REJECT_NEXT_PROBE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static OPERAND_PRIMER_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn rejecting_operand_primer(
+        _rule: &U1FusionRule,
+        _request: MetadataRequest<'_>,
+    ) -> Result<MetadataOutput, crate::OperationError> {
+        OPERAND_PRIMER_CALLS.set(OPERAND_PRIMER_CALLS.get() + 1);
+        Err(crate::OperationError::InvalidArgument {
+            message: "encoded operand plan called supplied primer",
+        })
+    }
+
+    fn counting_lowered_operand_primer(
+        rule: &U1FusionRule,
+        request: MetadataRequest<'_>,
+    ) -> Result<MetadataOutput, crate::OperationError> {
+        OPERAND_PRIMER_CALLS.set(OPERAND_PRIMER_CALLS.get() + 1);
+        lowered_metadata_dispatcher(rule, request)
     }
 
     fn reject_next_probe(
@@ -1560,6 +1654,46 @@ mod tests {
             plan.lhs_transform().domain_permutation().to_vec(),
             plan.rhs_transform().codomain_permutation().to_vec(),
         )
+    }
+
+    #[test]
+    fn operand_plan_uses_the_route_specific_layout_primer() {
+        let rule = U1FusionRule;
+        let lhs_typed = single_sector_typed_space(&rule, [2, 3, 4, 5]);
+        let rhs_typed = single_sector_typed_space(&rule, [5, 4, 6, 7]);
+        let lhs = subset_copy(&rule, &lhs_typed);
+        let rhs = subset_copy(&rule, &rhs_typed);
+        let dst = single_sector_space(&rule, [2, 3, 6, 7]);
+        let lhs_layout = FusionOperand::direct(&lhs)
+            .prepare(&rule, encoded_layout_primer::<U1FusionRule>)
+            .unwrap();
+        let rhs_layout = FusionOperand::direct(&rhs)
+            .prepare(&rule, encoded_layout_primer::<U1FusionRule>)
+            .unwrap();
+        let axes = || TensorContractSpec::with_default_output_order(&[2, 3], &[1, 0]);
+
+        OPERAND_PRIMER_CALLS.set(0);
+        prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical(
+            &rule,
+            &dst,
+            &lhs_layout,
+            &rhs_layout,
+            axes(),
+            rejecting_operand_primer,
+        )
+        .unwrap();
+        assert_eq!(OPERAND_PRIMER_CALLS.get(), 0);
+
+        prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer_canonical(
+            &rule,
+            &dst,
+            &lhs_layout,
+            &rhs_layout,
+            axes(),
+            counting_lowered_operand_primer,
+        )
+        .unwrap();
+        assert!(OPERAND_PRIMER_CALLS.get() > 0);
     }
 
     #[test]

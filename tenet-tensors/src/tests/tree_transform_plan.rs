@@ -2161,10 +2161,164 @@ fn no_cache_tree_transform_paths_compile_without_retaining_structures() {
             .unwrap();
     });
     assert_uncached(&mut |cache| {
+        let logical_keys = (0..structure.block_count())
+            .map(|index| match structure.block(index).unwrap().key() {
+                BlockKey::FusionTree(key) => key.clone(),
+                _ => unreachable!("SU2 fixture uses fusion-tree keys"),
+            })
+            .collect::<Vec<_>>();
+        let storage_indices = (0..logical_keys.len()).collect::<Vec<_>>();
+        cache
+            .get_or_compile_tree_pair_oriented(
+                &SU2FusionRule,
+                &operation,
+                &structure,
+                &logical_keys,
+                &storage_indices,
+                &structure,
+                tenet_core::FusionTreePairOrientation::Direct,
+                structure.rank(),
+                Ok,
+            )
+            .unwrap();
+    });
+    assert_uncached(&mut |cache| {
         cache
             .get_or_compile_all_codomain(&SU2FusionRule, operation.clone(), &dst, &src)
             .unwrap();
     });
+}
+
+#[test]
+fn oriented_adjoint_projection_matches_materialized_logical_oracle() {
+    let make_key = |coupled: usize| {
+        let coupled = SectorId::new(coupled);
+        FusionTreePairKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                &SU2FusionRule,
+                [SectorId::new(1), SectorId::new(1)],
+                coupled,
+                [false, false],
+                [],
+                [MultiplicityIndex::ONE],
+            )
+            .unwrap(),
+            FusionTreeKey::try_new_for_rule(
+                &SU2FusionRule,
+                [SectorId::new(2), SectorId::new(2)],
+                coupled,
+                [false, false],
+                [],
+                [MultiplicityIndex::ONE],
+            )
+            .unwrap(),
+        )
+    };
+    let storage_keys = [make_key(2), make_key(0)];
+    let adjoint_key = |key: &FusionTreePairKey| {
+        FusionTreePairKey::pair(key.domain_tree().clone(), key.codomain_tree().clone())
+    };
+    let logical_keys = [adjoint_key(&storage_keys[1]), adjoint_key(&storage_keys[0])];
+    let storage = Arc::new(
+        packed_fixture_structure(
+            4,
+            storage_keys
+                .iter()
+                .cloned()
+                .map(|key| (key, vec![1usize; 4])),
+        )
+        .unwrap(),
+    );
+    let logical = Arc::new(
+        packed_fixture_structure(
+            4,
+            logical_keys
+                .iter()
+                .cloned()
+                .map(|key| (key, vec![1usize; 4])),
+        )
+        .unwrap(),
+    );
+    let operation = TreeTransformOperation::braid([1, 0], [3, 2], [0, 1], [2, 3]);
+    let storage_indices = [1, 0];
+    let storage_axes = [2, 3, 0, 1];
+
+    let mut old_cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::with_policy(
+        OperationCachePolicy::NoCache,
+    );
+    let old = old_cache
+        .get_or_compile_tree_pair_prelowered(
+            &SU2FusionRule,
+            &operation,
+            &logical,
+            &logical,
+            &storage,
+            true,
+            |index| Ok(storage_indices[index]),
+            |axis| Ok(storage_axes[axis]),
+        )
+        .unwrap();
+    let mut oriented_cache =
+        TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::with_policy(
+            OperationCachePolicy::NoCache,
+        );
+    let oriented = oriented_cache
+        .get_or_compile_tree_pair_oriented(
+            &SU2FusionRule,
+            &operation,
+            &logical,
+            &logical_keys,
+            &storage_indices,
+            &storage,
+            tenet_core::FusionTreePairOrientation::Adjoint,
+            4,
+            |axis| Ok(storage_axes[axis]),
+        )
+        .unwrap();
+
+    // What: an adjoint operand with noncanonical parent block order compiles
+    // and replays exactly like the former materialized logical structure.
+    assert_eq!(oriented.as_ref(), old.as_ref());
+    let space = TensorMapSpace::<2, 2>::from_dims([1, 1], [1, 1]).unwrap();
+    let src = TensorMap::<f64, 2, 2>::from_vec_with_structure(
+        vec![10.0, 20.0],
+        space.clone(),
+        (*storage).clone(),
+    )
+    .unwrap();
+    let make_dst = || {
+        TensorMap::<f64, 2, 2>::from_vec_with_structure(
+            vec![0.0, 0.0],
+            space.clone(),
+            (*logical).clone(),
+        )
+        .unwrap()
+    };
+    let mut old_dst = make_dst();
+    let mut oriented_dst = make_dst();
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = TreeTransformWorkspace::default();
+    tree_transform_execute_with(
+        &mut backend,
+        &mut workspace,
+        &old,
+        &mut old_dst,
+        &src,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+    tree_transform_execute_with(
+        &mut backend,
+        &mut workspace,
+        &oriented,
+        &mut oriented_dst,
+        &src,
+        1.0,
+        0.0,
+    )
+    .unwrap();
+    assert_eq!(oriented_dst.data(), old_dst.data());
 }
 
 #[test]
