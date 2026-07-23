@@ -1152,9 +1152,10 @@ type CoupledRegionCache = Arc<[OnceLock<CoupledRegionResult>]>;
 #[derive(Clone, Eq)]
 pub struct BlockStructureContent {
     id: usize,
-    rank: usize,
+    sector: SectorStructure,
+    degeneracy: DegeneracyStructure,
     blocks: Arc<[BlockStructureContentBlock]>,
-    coupled_region_cache: OnceLock<CoupledRegionCache>,
+    required_len: usize,
 }
 
 impl core::fmt::Debug for BlockStructureContent {
@@ -1162,7 +1163,7 @@ impl core::fmt::Debug for BlockStructureContent {
         formatter
             .debug_struct("BlockStructureContent")
             .field("id", &self.id)
-            .field("rank", &self.rank)
+            .field("rank", &self.sector.rank())
             .field("blocks", &self.blocks)
             .finish()
     }
@@ -1178,7 +1179,10 @@ impl core::fmt::Debug for BlockStructureContent {
 // monotonicity, not on equality of the full content struct.
 impl PartialEq for BlockStructureContent {
     fn eq(&self, other: &Self) -> bool {
-        self.rank == other.rank && self.blocks == other.blocks
+        self.sector == other.sector
+            && self.degeneracy == other.degeneracy
+            && self.blocks == other.blocks
+            && self.required_len == other.required_len
     }
 }
 
@@ -1195,13 +1199,18 @@ impl BlockStructureContent {
 
     #[inline]
     pub fn rank(&self) -> usize {
-        self.rank
+        self.sector.rank()
     }
 
     #[inline]
     pub fn blocks(&self) -> &[BlockStructureContentBlock] {
         &self.blocks
     }
+}
+
+#[derive(Default)]
+struct BlockStructureRegionState {
+    coupled_region_cache: OnceLock<CoupledRegionCache>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -1495,8 +1504,9 @@ pub(crate) fn block_structure_intern_calls() -> usize {
 }
 
 fn intern_block_structure_content(
-    sector: &SectorStructure,
-    degeneracy: &DegeneracyStructure,
+    sector: SectorStructure,
+    degeneracy: DegeneracyStructure,
+    required_len: usize,
 ) -> Arc<BlockStructureContent> {
     #[cfg(test)]
     BLOCK_STRUCTURE_INTERN_CALLS.set(BLOCK_STRUCTURE_INTERN_CALLS.get() + 1);
@@ -1535,9 +1545,10 @@ fn intern_block_structure_content(
     write.intern_with(key, charged_block_structure_intern_key_bytes, || {
         Arc::new(BlockStructureContent {
             id: BLOCK_STRUCTURE_CONTENT_ID.fetch_add(1, Ordering::Relaxed),
-            rank: sector.rank(),
+            sector,
+            degeneracy,
             blocks,
-            coupled_region_cache: OnceLock::new(),
+            required_len,
         })
     })
 }
@@ -1596,14 +1607,47 @@ pub fn reset_core_intern_tables() {
     crate::su2_exact::reset_publication_cache();
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlockStructure {
-    sector: SectorStructure,
-    degeneracy: DegeneracyStructure,
     content: Arc<BlockStructureContent>,
-    // Cached at construction; replay validation checks this against storage
-    // lengths on every call and must not re-scan all blocks.
-    required_len: usize,
+    regions: Arc<BlockStructureRegionState>,
+}
+
+impl Clone for BlockStructure {
+    fn clone(&self) -> Self {
+        Self {
+            content: Arc::clone(&self.content),
+            regions: Arc::clone(&self.regions),
+        }
+    }
+}
+
+impl core::fmt::Debug for BlockStructure {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("BlockStructure")
+            .field("sector", &self.content.sector)
+            .field("degeneracy", &self.content.degeneracy)
+            .field("content", &self.content)
+            .field("required_len", &self.content.required_len)
+            .finish()
+    }
+}
+
+impl PartialEq for BlockStructure {
+    fn eq(&self, other: &Self) -> bool {
+        self.content == other.content
+    }
+}
+
+impl Eq for BlockStructure {}
+
+impl BlockStructure {
+    fn from_content(content: Arc<BlockStructureContent>) -> Self {
+        Self {
+            content,
+            regions: Arc::new(BlockStructureRegionState::default()),
+        }
+    }
 }
 
 struct PreparedBlockStructure {
@@ -1652,13 +1696,11 @@ impl PreparedBlockStructure {
     }
 
     fn commit(self) -> BlockStructure {
-        let content = intern_block_structure_content(&self.sector, &self.degeneracy);
-        BlockStructure {
-            sector: self.sector,
-            degeneracy: self.degeneracy,
-            content,
-            required_len: self.required_len,
-        }
+        BlockStructure::from_content(intern_block_structure_content(
+            self.sector,
+            self.degeneracy,
+            self.required_len,
+        ))
     }
 }
 
@@ -2120,13 +2162,7 @@ impl BlockStructure {
             rank,
             blocks: Vec::new(),
         };
-        let content = intern_block_structure_content(&sector, &degeneracy);
-        Self {
-            sector,
-            degeneracy,
-            content,
-            required_len: 0,
-        }
+        Self::from_content(intern_block_structure_content(sector, degeneracy, 0))
     }
 
     pub fn from_blocks(blocks: Vec<BlockSpec>) -> Result<Self, CoreError> {
@@ -2253,22 +2289,22 @@ impl BlockStructure {
 
     #[inline]
     pub fn rank(&self) -> usize {
-        self.sector.rank()
+        self.content.sector.rank()
     }
 
     #[inline]
     pub fn block_count(&self) -> usize {
-        self.sector.block_count()
+        self.content.sector.block_count()
     }
 
     #[inline]
     pub fn sector_structure(&self) -> &SectorStructure {
-        &self.sector
+        &self.content.sector
     }
 
     #[inline]
     pub fn degeneracy_structure(&self) -> &DegeneracyStructure {
-        &self.degeneracy
+        &self.content.degeneracy
     }
 
     #[inline]
@@ -2282,21 +2318,21 @@ impl BlockStructure {
     }
 
     pub fn fusion_tree_groups(&self) -> Vec<FusionTreeBlockGroup> {
-        self.sector.fusion_tree_groups()
+        self.content.sector.fusion_tree_groups()
     }
 
     /// Borrow construction-time fusion-tree groups without rebuilding them.
     #[inline]
     pub fn fusion_tree_group_slice(&self) -> &[FusionTreeBlockGroup] {
-        self.sector.fusion_tree_group_slice()
+        self.content.sector.fusion_tree_group_slice()
     }
 
     pub fn find_block_index_by_key(&self, key: &BlockKey) -> Option<usize> {
-        self.sector.find_index(key)
+        self.content.sector.find_index(key)
     }
 
     pub fn find_block_index_by_fusion_tree_pair(&self, key: &FusionTreePairKey) -> Option<usize> {
-        self.sector.find_fusion_tree_pair_index(key)
+        self.content.sector.find_fusion_tree_pair_index(key)
     }
 
     #[deprecated(
@@ -2308,7 +2344,9 @@ impl BlockStructure {
     }
 
     pub fn pair_block_indices_from(&self, src: &BlockStructure) -> Result<Vec<usize>, CoreError> {
-        self.sector.pair_indices_from(&src.sector)
+        self.content
+            .sector
+            .pair_indices_from(&src.content.sector)
     }
 
     pub fn only_block(&self) -> Result<BlockRef<'_>, CoreError> {
@@ -2324,8 +2362,8 @@ impl BlockStructure {
 
     pub fn block(&self, index: usize) -> Result<BlockRef<'_>, CoreError> {
         Ok(BlockRef {
-            key: self.sector.key(index)?,
-            degeneracy: self.degeneracy.block(index)?,
+            key: self.content.sector.key(index)?,
+            degeneracy: self.content.degeneracy.block(index)?,
         })
     }
 
@@ -2355,7 +2393,8 @@ impl BlockStructure {
         &self,
         logical_key: &FusionTreePairKey,
     ) -> Option<usize> {
-        self.sector
+        self.content
+            .sector
             .find_adjoint_fusion_tree_pair_index(logical_key)
     }
 
@@ -2368,7 +2407,7 @@ impl BlockStructure {
     }
 
     pub fn required_len(&self) -> Result<usize, CoreError> {
-        Ok(self.required_len)
+        Ok(self.content.required_len)
     }
 
     /// Compiles the canonical coupled-sector matrix layout of this structure.
@@ -2383,7 +2422,7 @@ impl BlockStructure {
         if nout > self.rank() {
             return Ok(None);
         }
-        self.content
+        self.regions
             .coupled_region_cache
             .get_or_init(|| new_coupled_region_cache(self.rank()))[nout]
             .get_or_init(|| {
@@ -2395,7 +2434,12 @@ impl BlockStructure {
 
     #[cfg(test)]
     pub(crate) fn coupled_region_cache_is_initialized(&self) -> bool {
-        self.content.coupled_region_cache.get().is_some()
+        self.regions.coupled_region_cache.get().is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn weak_region_state(&self) -> Weak<BlockStructureRegionState> {
+        Arc::downgrade(&self.regions)
     }
 }
 
@@ -2715,7 +2759,7 @@ fn compile_coupled_sector_regions(
             let end_offset = next_offset
                 .checked_add(elements)
                 .ok_or(CoreError::ElementCountOverflow)?;
-            if end_offset > structure.required_len {
+            if end_offset > structure.content.required_len {
                 return Ok(None);
             }
             regions.push(CoupledSectorRegion {
@@ -2729,7 +2773,7 @@ fn compile_coupled_sector_regions(
             next_offset = end_offset;
             block_index = end;
         }
-        if next_offset != structure.required_len {
+        if next_offset != structure.content.required_len {
             return Ok(None);
         }
         Ok(Some(regions))

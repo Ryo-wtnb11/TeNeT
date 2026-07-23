@@ -17404,12 +17404,34 @@ mod tests {
     ) -> Arc<BlockStructureContent> {
         let rank = key.rank;
         let blocks = Arc::clone(&key.blocks);
+        let sector = SectorStructure::from_keys(
+            rank,
+            blocks.iter().map(|block| block.key.clone()).collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let degeneracy = DegeneracyStructure::from_blocks_with_rank(
+            rank,
+            blocks
+                .iter()
+                .map(|block| {
+                    DegeneracyBlock::new(
+                        block.shape.clone(),
+                        block.strides.clone(),
+                        block.offset,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+        )
+        .unwrap();
+        let required_len = degeneracy.required_len().unwrap();
         table.intern_with(key, |_| charged_key_bytes, || {
             Arc::new(BlockStructureContent {
                 id: BLOCK_STRUCTURE_CONTENT_ID.fetch_add(1, Ordering::Relaxed),
-                rank,
+                sector,
+                degeneracy,
                 blocks,
-                coupled_region_cache: OnceLock::new(),
+                required_len,
             })
         })
     }
@@ -17595,21 +17617,20 @@ mod tests {
     }
 
     #[test]
-    fn live_then_dead_content_uses_one_weak_canonicalization_epoch() {
-        // What: equal live structures and their lazy region result share one
-        // content epoch, while rebuilding after every owner dies preserves the
-        // complete structure and region semantics under a fresh monotonic id.
+    fn frozen_content_outlives_wrapper_local_coupled_regions() {
+        // What: equal live wrappers canonicalized through the weak table share
+        // coupled-region state, while retained immutable content cannot retain it.
         let _guard = test_support::CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_core_intern_tables();
 
-        let first = coupled_z2_matrix_structure();
-        let second = coupled_z2_matrix_structure();
+        let first = coupled_z2_matrix_structure().into_shared();
+        let second = coupled_z2_matrix_structure().into_shared();
+        assert!(Arc::ptr_eq(&first, &second));
         let first_content = first.content_key();
         let second_content = second.content_key();
         assert!(Arc::ptr_eq(&first_content, &second_content));
-        let id_before = first.content_id();
 
         let first_regions = first.coupled_sector_regions(1).unwrap().unwrap();
         let second_regions = second.coupled_sector_regions(1).unwrap().unwrap();
@@ -17619,21 +17640,44 @@ mod tests {
         let expected_degeneracy = first.degeneracy_structure().clone();
         let expected_len = first.required_len().unwrap();
         let expected_regions = first_regions.as_ref().to_vec();
-        let weak_content = Arc::downgrade(&first_content);
+        let expected_blocks = (0..first.block_count())
+            .map(|index| {
+                let block = first.block(index).unwrap();
+                (
+                    block.key().clone(),
+                    block.shape().to_vec(),
+                    block.strides().to_vec(),
+                    block.offset(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let weak_regions = first.weak_region_state();
 
         drop(first_regions);
         drop(second_regions);
-        drop(first_content);
         drop(second_content);
         drop(first);
         drop(second);
-        assert!(weak_content.upgrade().is_none());
+        assert!(weak_regions.upgrade().is_none());
 
         let rebuilt = coupled_z2_matrix_structure();
-        assert!(rebuilt.content_id() > id_before);
         assert_eq!(rebuilt.sector_structure(), &expected_sector);
         assert_eq!(rebuilt.degeneracy_structure(), &expected_degeneracy);
         assert_eq!(rebuilt.required_len().unwrap(), expected_len);
+        assert_eq!(
+            (0..rebuilt.block_count())
+                .map(|index| {
+                    let block = rebuilt.block(index).unwrap();
+                    (
+                        block.key().clone(),
+                        block.shape().to_vec(),
+                        block.strides().to_vec(),
+                        block.offset(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            expected_blocks
+        );
         assert_eq!(
             rebuilt
                 .coupled_sector_regions(1)
@@ -17642,6 +17686,7 @@ mod tests {
                 .as_ref(),
             expected_regions
         );
+        drop(first_content);
     }
 
     #[test]
