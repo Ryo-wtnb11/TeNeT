@@ -4889,14 +4889,13 @@ impl Tensor {
             }
         }
         // Fold a lazy adjoint into contraction without copying its blocks.
-        // Planning keeps the logical adjoint space for categorical geometry,
-        // while execution maps only referenced blocks and strides onto the
-        // shared parent storage and conjugates their numerical values.
+        // Planning derives logical HomSpace geometry from parent storage plus
+        // orientation, while execution maps only referenced blocks and strides
+        // onto that storage and conjugates their numerical values.
         //
-        // Why not pass only the parent space and remap user axes here: doing so
-        // loses non-self-dual sector relabeling before the fusion-tree plan is
-        // built. Keeping logical and storage layouts separate matches
-        // TensorKit's AdjointTensorMap boundary.
+        // Why not retain a second owned adjoint layout: oriented metadata carries
+        // the non-self-dual relabeling needed before the fusion-tree plan is
+        // built, while the completed plan can still reference parent storage.
         match (self.stored_data(), rhs.stored_data()) {
             (Data::F64(_), Data::F64(_)) | (Data::C64(_), Data::C64(_)) => {
                 self.contract_host_fusion_impl(rhs, lhs_axes, rhs_axes, OutputAxisOrder::identity())
@@ -10932,7 +10931,8 @@ mod adjoint_parent_view_tests {
 
     #[test]
     fn repeated_and_parallel_host_contractions_do_not_materialize_adjoint_data() {
-        // What: f64 and c64 contraction reuse one logical space and parent storage.
+        // What: f64 and c64 contraction derive logical geometry from parent
+        // orientation and reuse parent storage.
         assert_host_contract_stays_view_native(Dtype::F64, 261_104);
         assert_host_contract_stays_view_native(Dtype::C64, 261_106);
     }
