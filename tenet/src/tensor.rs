@@ -66,6 +66,8 @@ thread_local! {
         const { std::cell::Cell::new(None) };
     static DIAGONAL_RESULT_LAYOUT_BUILDS: std::cell::Cell<Option<usize>> =
         const { std::cell::Cell::new(None) };
+    static TWIST_CALLS: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -109,6 +111,15 @@ fn observe_diagonal_result_layout_build() {
     DIAGONAL_RESULT_LAYOUT_BUILDS.with(|observation| {
         if let Some(builds) = observation.get() {
             observation.set(Some(builds + 1));
+        }
+    });
+}
+
+#[cfg(test)]
+fn observe_twist_call() {
+    TWIST_CALLS.with(|observation| {
+        if let Some(calls) = observation.get() {
+            observation.set(Some(calls + 1));
         }
     });
 }
@@ -3755,6 +3766,8 @@ impl Tensor {
     /// # Ok::<(), tenet::prelude::Error>(())
     /// ```
     pub fn twist(&self, legs: &[usize]) -> Result<Self, Error> {
+        #[cfg(test)]
+        observe_twist_call();
         if self.is_adjoint_view() {
             return self.materialized_tensor()?.twist(legs);
         }
@@ -13348,6 +13361,31 @@ mod cat_tests {
             CAT_RESULT_LAYOUT_BUILDS.with(|observation| observation.replace(None)),
             Some(1)
         );
+    }
+}
+
+#[cfg(test)]
+mod compose_direct_tests {
+    use super::*;
+
+    #[test]
+    fn direct_compose_does_not_invoke_tensor_twist() {
+        // What: fermionic map composition takes the direct `mul!` route,
+        // while the retained integration oracle exercises twist-then-contract.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let space = Space::fz2([(0, 24), (1, 24)]).unwrap();
+        let lhs = Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space.dual()], 353_524)
+            .unwrap();
+        let rhs = Tensor::rand_with_seed(&runtime, Dtype::C64, [&space.dual()], [&space], 353_624)
+            .unwrap();
+
+        TWIST_CALLS.with(|observation| observation.set(Some(0)));
+        let composed = lhs.compose(&rhs).unwrap();
+        let calls = TWIST_CALLS.with(|observation| observation.replace(None));
+
+        assert_eq!(calls, Some(0));
+        assert_eq!(composed.codomain_rank(), 1);
+        assert_eq!(composed.domain_rank(), 1);
     }
 }
 
