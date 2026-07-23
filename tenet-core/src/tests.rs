@@ -10721,6 +10721,176 @@ mod tests {
     }
 
     #[test]
+    fn complete_homspace_layout_cache_is_fifo_bounded_and_bypasses_one_over_limit() {
+        // What: complete immutable layouts retain at most the configured
+        // charge, evict the oldest admission without read promotion, and
+        // return oversized eager content without retaining it.
+        let hom = FusionTreeHomSpace::from_sectors(
+            [(u1(0), 1)],
+            Vec::<(SectorId, usize)>::new(),
+        );
+        let content = BlockStructure::trivial(&[1]).unwrap().content_key();
+        let key = || {
+            Arc::new(CompleteHomSpaceStructureCacheKey {
+                rule: RuleIdentity::new_unique::<usize>(),
+                homspace: Arc::clone(&hom.content),
+            })
+        };
+        let key0 = key();
+        let key1 = key();
+        let key2 = key();
+        let mut cache = CompleteHomSpaceStructureCache::new(2, 20, 10);
+
+        cache.admit(Arc::clone(&key0), Arc::clone(&content), 10);
+        cache.admit(Arc::clone(&key1), Arc::clone(&content), 10);
+        assert!(cache.lookup(&key0).is_some());
+        cache.admit(Arc::clone(&key2), Arc::clone(&content), 10);
+        assert!(cache.lookup(&key0).is_none());
+        assert!(cache.lookup(&key1).is_some());
+        assert!(cache.lookup(&key2).is_some());
+        assert_eq!(cache.info().entries(), 2);
+        assert_eq!(cache.info().charged_bytes(), 20);
+        assert_eq!(cache.info().evictions(), 1);
+
+        let oversize = key();
+        let returned = cache.admit(Arc::clone(&oversize), Arc::clone(&content), 11);
+        assert!(Arc::ptr_eq(&returned, &content));
+        assert!(cache.lookup(&oversize).is_none());
+        assert_eq!(cache.info().entries(), 2);
+        assert_eq!(cache.info().bypasses(), 1);
+        assert_eq!(cache.info().hits(), 3);
+        assert_eq!(cache.info().misses(), 2);
+        assert_eq!(cache.info().admissions(), 3);
+
+        cache.clear();
+        let cleared = cache.info();
+        assert_eq!(cleared.entries(), 0);
+        assert_eq!(cleared.charged_bytes(), 0);
+        assert_eq!(cleared.hits(), 0);
+        assert_eq!(cleared.misses(), 0);
+        assert_eq!(cleared.admissions(), 0);
+        assert_eq!(cleared.evictions(), 0);
+        assert_eq!(cleared.bypasses(), 0);
+    }
+
+    #[test]
+    fn complete_homspace_layout_cache_reuses_semantic_content_and_excludes_regions() {
+        // What: independently constructed complete multiplicity-free U1,
+        // SU2, and product HomSpaces share frozen content by value; cached
+        // content never owns a wrapper-local coupled-region state.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+
+        fn assert_reused<R>(rule: &R, first_hom: FusionTreeHomSpace, second_hom: FusionTreeHomSpace)
+        where
+            R: MultiplicityFreeFusionRule,
+        {
+            let first = first_hom
+                .coupled_subblock_structure_from_leg_degeneracies(rule)
+                .unwrap();
+            block_structure_arc_table().write().unwrap().clear();
+            let second = second_hom
+                .coupled_subblock_structure_from_leg_degeneracies(rule)
+                .unwrap();
+            assert!(Arc::ptr_eq(&first.content_key(), &second.content_key()));
+            assert!(!Arc::ptr_eq(&first.regions, &second.regions));
+            let region = Arc::downgrade(&second.regions);
+            drop(first);
+            drop(second);
+            assert!(region.upgrade().is_none());
+        }
+
+        let u1_hom = || FusionTreeHomSpace::from_sectors([(u1(1), 2)], [(u1(1), 3)]);
+        assert_reused(&U1FusionRule, u1_hom(), u1_hom());
+        let su2_hom = || FusionTreeHomSpace::from_sectors([(su2(1), 2)], [(su2(1), 3)]);
+        assert_reused(&SU2FusionRule, su2_hom(), su2_hom());
+
+        type Fz2U1 = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
+        type Product = ProductFusionRule<Fz2U1, SU2FusionRule>;
+        let pair = Fz2U1::new(FermionParityFusionRule, U1FusionRule);
+        let sector = pair.encode_sector(z2_odd(), u1(1));
+        let rule = Product::new(pair, SU2FusionRule);
+        let product_hom = || {
+            FusionTreeHomSpace::from_sectors(
+                [(rule.encode_sector(sector, su2(1)), 2)],
+                [(rule.encode_sector(sector, su2(1)), 3)],
+            )
+        };
+        assert_reused(&rule, product_hom(), product_hom());
+
+        let info = complete_hom_space_structure_cache_info();
+        assert_eq!(info.entries(), 3);
+        assert_eq!(info.admissions(), 3);
+        assert!(info.hits() >= 3);
+    }
+
+    #[test]
+    fn complete_homspace_layout_cache_keys_semantics_and_preserves_direct_layout() {
+        // What: rule identity, degeneracies, and dual flags are distinct
+        // complete-layout keys, while cache admission preserves the direct
+        // builder's ordered block tuples and required storage length.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+
+        let base = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(u1(0), 2), (u1(1), 3)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(0), 2), (u1(1), 3)], false)]),
+        );
+        let cached = base
+            .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+            .unwrap();
+        let layout = base.fusion_tree_layout_data_uncached(&U1FusionRule);
+        let (sector, degeneracy) = coupled_subblock_parts_from_leg_degeneracies(&base, &layout).unwrap();
+        let direct = BlockStructure::from_parts(sector, degeneracy).unwrap();
+        let signature = |structure: &BlockStructure| {
+            (0..structure.block_count())
+                .map(|index| {
+                    let block = structure.block(index).unwrap();
+                    (
+                        block.key().clone(),
+                        block.shape().to_vec(),
+                        block.strides().to_vec(),
+                        block.offset(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(signature(&cached), signature(&direct));
+        assert_eq!(cached.required_len(), direct.required_len());
+
+        let different_degeneracy = FusionTreeHomSpace::from_sectors(
+            [(u1(0), 4)],
+            [(u1(0), 2)],
+        );
+        let dual = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(u1(0), 2), (u1(1), 3)], true)]),
+            FusionProductSpace::new([SectorLeg::new([(u1(0), 2), (u1(1), 3)], false)]),
+        );
+        let rule_changed = FusionTreeHomSpace::from_sectors(
+            [(z2_even(), 2)],
+            [(z2_even(), 2)],
+        );
+        different_degeneracy
+            .coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+            .unwrap();
+        dual.coupled_subblock_structure_from_leg_degeneracies(&U1FusionRule)
+            .unwrap();
+        rule_changed
+            .coupled_subblock_structure_from_leg_degeneracies(&Z2FusionRule)
+            .unwrap();
+        assert_eq!(complete_hom_space_structure_cache_info().entries(), 4);
+
+        let live = Arc::clone(&cached);
+        reset_core_intern_tables();
+        assert_eq!(live.required_len(), cached.required_len());
+        assert_eq!(complete_hom_space_structure_cache_info().entries(), 0);
+    }
+
+    #[test]
     fn fusion_layout_shape_and_fermionic_rule_provenance_do_not_alias() {
         // What: one sector layout may be shared across degeneracies, but concrete
         // shapes and bosonic/fermionic rule provenance select distinct structures/layouts.

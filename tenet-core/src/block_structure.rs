@@ -1206,6 +1206,83 @@ impl BlockStructureContent {
     pub fn blocks(&self) -> &[BlockStructureContentBlock] {
         &self.blocks
     }
+
+    pub(crate) fn charged_retained_bytes(&self) -> usize {
+        fn key_bytes(key: &BlockKey) -> usize {
+            match key {
+                BlockKey::Dense => 0,
+                BlockKey::Opaque(key) => spilled_smallvec_heap_bytes(&key.words),
+                BlockKey::FusionTree(pair) => {
+                    charged_fusion_tree_key_heap_bytes(pair.codomain_tree())
+                        .saturating_add(charged_fusion_tree_key_heap_bytes(pair.domain_tree()))
+                }
+            }
+        }
+
+        let sector_blocks = self.sector.blocks.iter().fold(0usize, |bytes, block| {
+            bytes.saturating_add(key_bytes(block.key()))
+        });
+        let groups = self
+            .sector
+            .fusion_tree_groups
+            .iter()
+            .fold(0usize, |bytes, group| {
+                bytes
+                    .saturating_add(spilled_smallvec_heap_bytes(&group.block_indices))
+                    .saturating_add(spilled_smallvec_heap_bytes(
+                        &group.group_key.codomain_uncoupled,
+                    ))
+                    .saturating_add(spilled_smallvec_heap_bytes(
+                        &group.group_key.domain_uncoupled,
+                    ))
+                    .saturating_add(spilled_smallvec_heap_bytes(
+                        &group.group_key.codomain_is_dual,
+                    ))
+                    .saturating_add(spilled_smallvec_heap_bytes(
+                        &group.group_key.domain_is_dual,
+                    ))
+            });
+        let compact_lookup = self.sector.compact_lookup.as_ref().map_or(0, |lookup| {
+            spilled_smallvec_heap_bytes(&lookup.indices)
+        });
+        let degeneracy = self.degeneracy.blocks.iter().fold(0usize, |bytes, block| {
+            bytes
+                .saturating_add(spilled_smallvec_heap_bytes(&block.shape))
+                .saturating_add(spilled_smallvec_heap_bytes(&block.strides))
+        });
+        let copied_blocks = self.blocks.iter().fold(0usize, |bytes, block| {
+            bytes
+                .saturating_add(key_bytes(&block.key))
+                .saturating_add(spilled_smallvec_heap_bytes(&block.shape))
+                .saturating_add(spilled_smallvec_heap_bytes(&block.strides))
+        });
+
+        std::mem::size_of::<BlockStructureContent>()
+            .saturating_add(self.sector.blocks.capacity().saturating_mul(std::mem::size_of::<SectorBlock>()))
+            .saturating_add(sector_blocks)
+            .saturating_add(
+                self.sector
+                    .fusion_tree_groups
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<FusionTreeBlockGroup>()),
+            )
+            .saturating_add(groups)
+            .saturating_add(spilled_smallvec_heap_bytes(&self.sector.sorted_indices))
+            .saturating_add(compact_lookup)
+            .saturating_add(
+                self.degeneracy
+                    .blocks
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<DegeneracyBlock>()),
+            )
+            .saturating_add(degeneracy)
+            .saturating_add(
+                self.blocks
+                    .len()
+                    .saturating_mul(std::mem::size_of::<BlockStructureContentBlock>()),
+            )
+            .saturating_add(copied_blocks)
+    }
 }
 
 #[derive(Default)]
@@ -1596,6 +1673,9 @@ fn canonicalize_block_structure_arc(structure: Arc<BlockStructure>) -> Arc<Block
 /// minted it; content re-interned after this reset gets a fresh id and misses
 /// cleanly. Reset is thus safe to call on its own — no "all layers at once" API
 pub fn reset_core_intern_tables() {
+    // Clear the sole strong complete-layout owner before weak canonicalizers.
+    // Live wrappers keep their own content and region state through reset.
+    reset_complete_hom_space_structure_cache();
     reset_hom_space_intern_table();
     if let Ok(mut table) = block_structure_intern_table().write() {
         table.clear();
@@ -1642,7 +1722,7 @@ impl PartialEq for BlockStructure {
 impl Eq for BlockStructure {}
 
 impl BlockStructure {
-    fn from_content(content: Arc<BlockStructureContent>) -> Self {
+    pub(crate) fn from_content(content: Arc<BlockStructureContent>) -> Self {
         Self {
             content,
             regions: Arc::new(BlockStructureRegionState::default()),
