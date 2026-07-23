@@ -5157,6 +5157,58 @@ where
     multiplicity_free_braid_tree_pair_block_validated(group, &prepared)
 }
 
+#[doc(hidden)]
+pub fn multiplicity_free_braid_tree_pair_block_ordered_indexed<R>(
+    rule: &R,
+    structure: &BlockStructure,
+    src_indices: &[usize],
+    orientation: FusionTreePairOrientation,
+    prepared: &PreparedTreePairOperation,
+) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    validate_multiplicity_free_execution_style(rule)?;
+    prepared.validate_block_preflight(rule, PreparedTreePairFamily::BraidLike)?;
+    let Some(group) =
+        validate_tree_pair_block_group_structure(rule, structure, src_indices, orientation)?
+    else {
+        return Ok(OrderedBlockLinearMap {
+            destinations: Vec::new(),
+            source_count: 0,
+            storage: OrderedBlockLinearStorage::DenseDstSrc(Vec::new()),
+        });
+    };
+    multiplicity_free_braid_tree_pair_block_ordered_validated(group, prepared)
+}
+
+#[doc(hidden)]
+pub fn multiplicity_free_transpose_tree_pair_block_ordered_indexed<R>(
+    rule: &R,
+    structure: &BlockStructure,
+    src_indices: &[usize],
+    orientation: FusionTreePairOrientation,
+    prepared: &PreparedTreePairOperation,
+) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
+{
+    validate_multiplicity_free_execution_style(rule)?;
+    prepared.validate_block_preflight(rule, PreparedTreePairFamily::Transpose)?;
+    let Some(group) =
+        validate_tree_pair_block_group_structure(rule, structure, src_indices, orientation)?
+    else {
+        return Ok(OrderedBlockLinearMap {
+            destinations: Vec::new(),
+            source_count: 0,
+            storage: OrderedBlockLinearStorage::DenseDstSrc(Vec::new()),
+        });
+    };
+    multiplicity_free_transpose_tree_pair_block_ordered_validated(group, prepared)
+}
+
 /// Batched [`multiplicity_free_transpose_tree_pair`] over every source
 /// tree-pair of a block (all sharing uncoupled sectors / duality). The planar
 /// cyclic-transpose step sequence — repartition to the target codomain rank,

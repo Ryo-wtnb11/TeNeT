@@ -52,7 +52,8 @@ pub use context::{
 pub(crate) use dynamic_space::{dispatch_prepare, LayoutKeyBuilder};
 #[cfg(test)]
 pub(crate) use dynamic_space::{
-    encoded_layout_primer, lowered_layout_primer, lowered_metadata_dispatcher,
+    encoded_layout_primer, fusion_operand_projection_prepares, lowered_layout_primer,
+    lowered_metadata_dispatcher, reset_fusion_operand_projection_prepares,
     reset_scratch_publication_observations, scratch_publication_observations, MetadataOutput,
     MetadataRequest,
 };

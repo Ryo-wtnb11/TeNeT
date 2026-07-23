@@ -5,17 +5,16 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use tenet_core::{
-    BlockStructure, CoreError, FusionTreeHomSpace, HostReadableStorage, HostWritableStorage,
-    MultiplicityFreeRigidSymbols, ScratchStorage, SimilarStorage, TensorMap, TensorStorage,
+    BlockStructure, CoreError, FusionTreeHomSpace, FusionTreePairOrientation, HostReadableStorage,
+    HostWritableStorage, MultiplicityFreeRigidSymbols, ScratchStorage, SimilarStorage, TensorMap,
+    TensorStorage,
 };
 
 use crate::cache::{
     touch_lru_key, BlockStructureCacheKey, OperationCachePolicy,
     DEFAULT_CONTRACT_CONTEXT_CACHE_ENTRIES,
 };
-use crate::lowering::{
-    adjoint_fusion_space_view, prelowered_storage_axis, prelowered_storage_block_index,
-};
+use crate::lowering::adjoint_fusion_space_view;
 use crate::tree_context::TreeTransformExecutionContext;
 use crate::tree_transform::build_tree_pair_transform_group_plan;
 #[cfg(test)]
@@ -29,7 +28,9 @@ use tenet_operations::fusion_replay::FusionBlockContractPlan;
 use tenet_operations::{TensorContractSpec, TensorContractSpecOwned};
 
 use super::backend::TensorContractBackend;
-use super::dynamic_space::{encoded_layout_primer, DynamicFusionMapSpace, LayoutKeyBuilder};
+use super::dynamic_space::{
+    encoded_layout_primer, DynamicFusionMapSpace, FusionOperandLayout, LayoutKeyBuilder,
+};
 #[cfg(test)]
 use super::fusion::prepare_tensorcontract_fusion_plan;
 use super::fusion::{FusionContractOrientation, FusionContractPlan};
@@ -531,11 +532,9 @@ where
         &dst_structure,
         dst.data_mut(),
         &lhs_space,
-        None,
         &lhs_structure,
         lhs.data(),
         &rhs_space,
-        None,
         &rhs_structure,
         rhs.data(),
         alpha,
@@ -643,10 +642,8 @@ where
         plan,
         &dst_space,
         &lhs_space,
-        None,
         lhs.structure(),
         &rhs_space,
-        None,
         rhs.structure(),
         None,
     )?;
@@ -713,26 +710,30 @@ where
     let mut dynamic_space_cache = DynamicFusionSpaceCache::default();
     let mut fusion_block_workspace = FusionBlockContractWorkspace::default();
     let mut scratch = DynamicFusionScratchWorkspace::default();
-    tensorcontract_fusion_dynamic_plan_dyn_into_context(
+    let layout_primer = encoded_layout_primer::<R>;
+    let lhs_layout = lhs.prepare(rule, layout_primer)?;
+    let rhs_layout = rhs.prepare(rule, layout_primer)?;
+    let artifact = compile_prelowered_dynamic_tree_execution_artifact::<_, _, _, _, false>(
+        &mut tree_context,
+        &mut dynamic_space_cache,
+        rule,
+        layout_primer,
+        plan,
+        dst_space,
+        &lhs_layout,
+        &rhs_layout,
+        None,
+    )?;
+    execute_dynamic_tree_execution_artifact(
         &mut tree_context,
         &mut contract_backend,
         &mut contract_workspace,
-        &mut dynamic_space_cache,
         &mut fusion_block_workspace,
         &mut scratch,
-        rule,
-        encoded_layout_primer::<R>,
-        plan,
-        dst_space,
+        &artifact,
         dst_space.structure(),
         dst_data,
-        lhs.logical_space(),
-        Some(lhs.storage_space()),
-        lhs.storage_space().structure(),
         lhs_data,
-        rhs.logical_space(),
-        Some(rhs.storage_space()),
-        rhs.storage_space().structure(),
         rhs_data,
         alpha,
         beta,
@@ -758,11 +759,9 @@ pub(crate) fn tensorcontract_fusion_dynamic_plan_dyn_into_context<RuleKey, BT, B
     dst_structure: &Arc<BlockStructure>,
     dst_data: &mut [D],
     lhs_space: &DynamicFusionMapSpace,
-    lhs_storage_space: Option<&DynamicFusionMapSpace>,
     lhs_structure: &Arc<BlockStructure>,
     lhs_data: &[D],
     rhs_space: &DynamicFusionMapSpace,
-    rhs_storage_space: Option<&DynamicFusionMapSpace>,
     rhs_structure: &Arc<BlockStructure>,
     rhs_data: &[D],
     alpha: D,
@@ -783,10 +782,8 @@ where
         plan,
         dst_space,
         lhs_space,
-        lhs_storage_space,
         lhs_structure,
         rhs_space,
-        rhs_storage_space,
         rhs_structure,
         None,
     )?;
@@ -827,12 +824,10 @@ pub(crate) fn compile_dynamic_tree_execution_artifact<RuleKey, BT, R, D, const P
     plan: &FusionContractPlan,
     dst_space: &DynamicFusionMapSpace,
     lhs_space: &DynamicFusionMapSpace,
-    lhs_storage_space: Option<&DynamicFusionMapSpace>,
     lhs_structure: &Arc<BlockStructure>,
     rhs_space: &DynamicFusionMapSpace,
-    rhs_storage_space: Option<&DynamicFusionMapSpace>,
     rhs_structure: &Arc<BlockStructure>,
-    mut profile: Option<&mut TensorContractFusionProfile>,
+    profile: Option<&mut TensorContractFusionProfile>,
 ) -> Result<DynamicTreeExecutionArtifact, OperationError>
 where
     RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
@@ -842,27 +837,15 @@ where
 {
     let source_start = PROFILED.then(std::time::Instant::now);
     let reverse = plan.orientation() == FusionContractOrientation::RhsLhs;
-    let lhs_transform = match lhs_storage_space {
-        Some(storage_space) => dynamic_space_cache.get_or_compile_transformed_source_prelowered(
-            tree_context,
-            rule,
-            lhs_space,
-            storage_space,
-            lhs_structure,
-            plan.lhs_transform(),
-            plan.lhs_source_conjugate(),
-            layout_primer,
-        )?,
-        None => dynamic_space_cache.get_or_compile_transformed_source(
-            tree_context,
-            rule,
-            lhs_space,
-            lhs_structure,
-            plan.lhs_transform(),
-            plan.lhs_source_conjugate(),
-            layout_primer,
-        )?,
-    };
+    let lhs_transform = dynamic_space_cache.get_or_compile_transformed_source(
+        tree_context,
+        rule,
+        lhs_space,
+        lhs_structure,
+        plan.lhs_transform(),
+        plan.lhs_source_conjugate(),
+        layout_primer,
+    )?;
     let lhs_borrowed = if reverse {
         rhs_source_is_borrowable(
             rule,
@@ -882,34 +865,20 @@ where
             plan.lhs_source_conjugate(),
         )
     };
-    let rhs_transform = match rhs_storage_space {
-        Some(storage_space) => dynamic_space_cache.get_or_compile_transformed_source_prelowered(
-            tree_context,
-            rule,
-            rhs_space,
-            storage_space,
-            rhs_structure,
-            plan.rhs_transform(),
-            plan.rhs_source_conjugate(),
-            layout_primer,
-        )?,
-        None => dynamic_space_cache.get_or_compile_transformed_source(
-            tree_context,
-            rule,
-            rhs_space,
-            rhs_structure,
-            plan.rhs_transform(),
-            plan.rhs_source_conjugate(),
-            layout_primer,
-        )?,
-    };
-    let physical_lhs_core_space = lhs_transform.space.clone();
-    let physical_rhs_core_space = rhs_transform.space.clone();
+    let rhs_transform = dynamic_space_cache.get_or_compile_transformed_source(
+        tree_context,
+        rule,
+        rhs_space,
+        rhs_structure,
+        plan.rhs_transform(),
+        plan.rhs_source_conjugate(),
+        layout_primer,
+    )?;
     let rhs_borrowed = if reverse {
         source_is_borrowable_core_layout(
             rhs_space,
             rhs_structure,
-            &physical_rhs_core_space,
+            &rhs_transform.space,
             plan.rhs_transform(),
             plan.rhs_source_conjugate(),
         )
@@ -918,12 +887,196 @@ where
             rule,
             rhs_space,
             rhs_structure,
-            &physical_rhs_core_space,
+            &rhs_transform.space,
             plan.rhs_transform(),
             plan.rhs_source_conjugate(),
             plan.core_axes().as_spec(),
         )?
     };
+    finish_dynamic_tree_execution_artifact::<_, _, _, _, PROFILED>(
+        tree_context,
+        dynamic_space_cache,
+        rule,
+        layout_primer,
+        plan,
+        dst_space,
+        lhs_transform,
+        rhs_transform,
+        lhs_borrowed,
+        rhs_borrowed,
+        source_start,
+        profile,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compile_prelowered_dynamic_tree_execution_artifact<
+    RuleKey,
+    BT,
+    R,
+    D,
+    const PROFILED: bool,
+>(
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
+    rule: &R,
+    layout_primer: LayoutKeyBuilder<R>,
+    plan: &FusionContractPlan,
+    dst_space: &DynamicFusionMapSpace,
+    lhs: &FusionOperandLayout<'_>,
+    rhs: &FusionOperandLayout<'_>,
+    profile: Option<&mut TensorContractFusionProfile>,
+) -> Result<DynamicTreeExecutionArtifact, OperationError>
+where
+    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
+    BT: TreeTransformBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: DenseRecouplingScalar,
+{
+    let source_start = PROFILED.then(std::time::Instant::now);
+    let reverse = plan.orientation() == FusionContractOrientation::RhsLhs;
+    debug_assert_eq!(
+        plan.lhs_source_conjugate(),
+        lhs.orientation() == FusionTreePairOrientation::Adjoint
+    );
+    debug_assert_eq!(
+        plan.rhs_source_conjugate(),
+        rhs.orientation() == FusionTreePairOrientation::Adjoint
+    );
+    let lhs_direct = lhs.is_direct();
+    let lhs_transform = compile_prelowered_source_transform(
+        tree_context,
+        dynamic_space_cache,
+        rule,
+        lhs,
+        plan.lhs_transform(),
+        layout_primer,
+    )?;
+    let lhs_borrowed = lhs_direct
+        && if reverse {
+            rhs_source_is_borrowable(
+                rule,
+                lhs.storage_space(),
+                lhs.storage_space().structure(),
+                &lhs_transform.space,
+                plan.lhs_transform(),
+                false,
+                plan.core_axes().as_spec(),
+            )?
+        } else {
+            source_is_borrowable_core_layout(
+                lhs.storage_space(),
+                lhs.storage_space().structure(),
+                &lhs_transform.space,
+                plan.lhs_transform(),
+                false,
+            )
+        };
+    let rhs_direct = rhs.is_direct();
+    let rhs_transform = compile_prelowered_source_transform(
+        tree_context,
+        dynamic_space_cache,
+        rule,
+        rhs,
+        plan.rhs_transform(),
+        layout_primer,
+    )?;
+    let rhs_borrowed = rhs_direct
+        && if reverse {
+            source_is_borrowable_core_layout(
+                rhs.storage_space(),
+                rhs.storage_space().structure(),
+                &rhs_transform.space,
+                plan.rhs_transform(),
+                false,
+            )
+        } else {
+            rhs_source_is_borrowable(
+                rule,
+                rhs.storage_space(),
+                rhs.storage_space().structure(),
+                &rhs_transform.space,
+                plan.rhs_transform(),
+                false,
+                plan.core_axes().as_spec(),
+            )?
+        };
+    let artifact = finish_dynamic_tree_execution_artifact::<_, _, _, _, PROFILED>(
+        tree_context,
+        dynamic_space_cache,
+        rule,
+        layout_primer,
+        plan,
+        dst_space,
+        lhs_transform,
+        rhs_transform,
+        lhs_borrowed,
+        rhs_borrowed,
+        source_start,
+        profile,
+    )?;
+    Ok(artifact)
+}
+
+fn compile_prelowered_source_transform<RuleKey, BT, R, D>(
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
+    rule: &R,
+    source: &FusionOperandLayout<'_>,
+    operation: &TreeTransformOperation,
+    layout_primer: LayoutKeyBuilder<R>,
+) -> Result<DynamicFusionTransformedSourceEntry, OperationError>
+where
+    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
+    BT: TreeTransformBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: DenseRecouplingScalar,
+{
+    if source.is_direct() {
+        dynamic_space_cache.get_or_compile_transformed_source(
+            tree_context,
+            rule,
+            source.storage_space(),
+            source.storage_space().structure(),
+            operation,
+            false,
+            layout_primer,
+        )
+    } else {
+        dynamic_space_cache.get_or_compile_transformed_source_oriented(
+            tree_context,
+            rule,
+            source,
+            operation,
+            layout_primer,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_dynamic_tree_execution_artifact<RuleKey, BT, R, D, const PROFILED: bool>(
+    tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
+    dynamic_space_cache: &mut DynamicFusionSpaceCache<RuleKey>,
+    rule: &R,
+    layout_primer: LayoutKeyBuilder<R>,
+    plan: &FusionContractPlan,
+    dst_space: &DynamicFusionMapSpace,
+    lhs_transform: DynamicFusionTransformedSourceEntry,
+    rhs_transform: DynamicFusionTransformedSourceEntry,
+    lhs_borrowed: bool,
+    rhs_borrowed: bool,
+    source_start: Option<std::time::Instant>,
+    mut profile: Option<&mut TensorContractFusionProfile>,
+) -> Result<DynamicTreeExecutionArtifact, OperationError>
+where
+    RuleKey: 'static + Clone + Eq + std::hash::Hash + Send + Sync,
+    BT: TreeTransformBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: DenseRecouplingScalar,
+{
+    let physical_lhs_core_space = lhs_transform.space.clone();
+    let physical_rhs_core_space = rhs_transform.space.clone();
+    let reverse = plan.orientation() == FusionContractOrientation::RhsLhs;
     let (core_left_space, core_right_space) = if reverse {
         (&physical_rhs_core_space, &physical_lhs_core_space)
     } else {
@@ -2160,15 +2313,12 @@ where
         Ok(entry)
     }
 
-    fn get_or_compile_transformed_source_prelowered<R, D, BT>(
+    fn get_or_compile_transformed_source_oriented<R, D, BT>(
         &mut self,
         tree_context: &mut TreeTransformExecutionContext<D, RuleKey, f64, BT>,
         rule: &R,
-        logical_space: &DynamicFusionMapSpace,
-        storage_space: &DynamicFusionMapSpace,
-        storage_structure: &Arc<BlockStructure>,
+        source: &FusionOperandLayout<'_>,
         operation: &TreeTransformOperation,
-        storage_conjugate: bool,
         layout_primer: LayoutKeyBuilder<R>,
     ) -> Result<DynamicFusionTransformedSourceEntry, OperationError>
     where
@@ -2177,16 +2327,17 @@ where
         BT: TreeTransformBackend<D, f64>,
     {
         let rule_key = rule.tree_transform_rule_cache_key();
-        let nout = logical_space.nout();
-        let homspace = logical_space.homspace().clone();
-        let replay_structure = Arc::clone(storage_structure);
+        let nout = source.nout();
+        let homspace = source.homspace().clone();
+        let replay_structure = Arc::clone(source.storage_space().structure());
+        let source_conjugate = source.orientation() == FusionTreePairOrientation::Adjoint;
         let fast_key = DynamicFusionTransformedSourceFastKey {
             rule: rule_key.clone(),
             nout,
             homspace: homspace.clone(),
             replay_structure_id: replay_structure.content_id(),
             operation: operation.clone(),
-            source_conjugate: storage_conjugate,
+            source_conjugate,
         };
         let key = DynamicFusionTransformedSourceSpaceKey {
             rule: rule_key.clone(),
@@ -2194,7 +2345,7 @@ where
             homspace: homspace.clone(),
             structure: BlockStructureCacheKey::from_structure(&replay_structure)?,
             operation: operation.clone(),
-            source_conjugate: storage_conjugate,
+            source_conjugate,
         };
         if self.policy.stores_entries() {
             if let Some(entry) = self.fast_transformed_sources.get(&fast_key).cloned() {
@@ -2213,17 +2364,21 @@ where
         }
 
         self.stats.misses += 1;
-        let space = logical_space.transformed_with_primer(rule, operation, layout_primer)?;
+        let space = source.transformed_space(rule, operation, layout_primer)?;
         let dst_structure = Arc::clone(space.structure());
-        let transform_structure = tree_context.get_or_compile_tree_pair_structure_prelowered(
+        let (logical_keys, storage_indices) = source
+            .adjoint_projection()
+            .expect("only adjoint sources use the oriented transform compiler");
+        let transform_structure = tree_context.get_or_compile_tree_pair_structure_oriented(
             rule,
             operation,
             &dst_structure,
-            logical_space.structure(),
-            storage_structure,
-            storage_conjugate,
-            prelowered_storage_block_index(logical_space, storage_space, storage_conjugate),
-            prelowered_storage_axis(logical_space, storage_space, storage_conjugate),
+            logical_keys,
+            storage_indices,
+            source.storage_space().structure(),
+            source.orientation(),
+            source.rank(),
+            |axis| source.storage_axis(axis),
         )?;
         let entry = DynamicFusionTransformedSourceEntry {
             space: Arc::new(space),
@@ -2730,8 +2885,9 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
     use tenet_core::{
-        BlockKey, BlockSpec, FusionProductSpace, FusionTensorMapSpace, Placement, SU2FusionRule,
-        SectorId, SectorLeg, TensorMapSpace, Trivial, Z2FusionRule,
+        BlockKey, BlockSpec, FusionProductSpace, FusionRule, FusionTensorMapSpace, Placement,
+        SU2FusionRule, SectorId, SectorLeg, TensorMapSpace, Trivial, U1FusionRule, U1Irrep,
+        Z2FusionRule,
     };
 
     use crate::storage_scratch::StorageFusionBlockContractWorkspace;
@@ -2793,6 +2949,88 @@ mod tests {
         cache.set_policy(OperationCachePolicy::TaskLocal);
 
         assert_eq!(cache.policy(), OperationCachePolicy::TaskLocal);
+    }
+
+    #[test]
+    fn direct_prelowered_source_reuses_ordinary_transform_entry() {
+        let rule = U1FusionRule;
+        let charges = [-1, 0, 1].map(|charge| U1Irrep::new(charge).sector_id());
+        let codomain = SectorLeg::new(charges.map(|sector| (sector, 1)), false);
+        let domain = SectorLeg::new(charges.map(|sector| (rule.dual(sector), 1)), false);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([codomain]),
+            FusionProductSpace::new([domain]),
+        );
+        let canonical = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
+            homspace.clone(),
+            &rule,
+            vec![vec![1, 1]; 3],
+        )
+        .unwrap();
+        let reversed_keys = (0..canonical.subblock_structure().block_count())
+            .rev()
+            .map(|index| {
+                canonical
+                    .subblock_structure()
+                    .block(index)
+                    .unwrap()
+                    .key()
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        let reordered = FusionTensorMapSpace::new_unbound(
+            TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
+            homspace,
+            crate::tests::packed_fixture_structure(
+                2,
+                reversed_keys.into_iter().map(|key| (key, vec![1, 1])),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .try_bind_rule(&rule)
+        .unwrap();
+        let source = DynamicFusionMapSpace::from_typed(&reordered);
+        let layout = super::super::dynamic_space::FusionOperand::direct(&source)
+            .prepare(
+                &rule,
+                super::super::dynamic_space::encoded_layout_primer::<U1FusionRule>,
+            )
+            .unwrap();
+        assert!(layout.is_direct());
+        let operation = TreeTransformOperation::transpose([1], [0]);
+        let mut tree_context =
+            TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());
+        let mut cache = DynamicFusionSpaceCache::default();
+        let ordinary_cold = cache
+            .get_or_compile_transformed_source::<_, f64, _>(
+                &mut tree_context,
+                &rule,
+                &source,
+                source.structure(),
+                &operation,
+                false,
+                super::super::dynamic_space::encoded_layout_primer::<U1FusionRule>,
+            )
+            .unwrap();
+        let direct_hit = compile_prelowered_source_transform(
+            &mut tree_context,
+            &mut cache,
+            &rule,
+            &layout,
+            &operation,
+            super::super::dynamic_space::encoded_layout_primer::<U1FusionRule>,
+        )
+        .unwrap();
+
+        // What: the Direct side of a mixed prelowered contraction uses the
+        // ordinary parent-storage compiler and therefore the exact same entry.
+        assert!(Arc::ptr_eq(
+            &ordinary_cold.transform_structure,
+            &direct_hit.transform_structure
+        ));
+        assert!(Arc::ptr_eq(&ordinary_cold.space, &direct_hit.space));
     }
 
     #[test]

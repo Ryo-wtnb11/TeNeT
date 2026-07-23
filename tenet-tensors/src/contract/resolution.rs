@@ -13,11 +13,12 @@ use crate::OperationError;
 use tenet_operations::axis::TensorContractSpec;
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
 
-use super::dynamic_space::DynamicFusionMapSpace;
+use super::dynamic_space::{DynamicFusionMapSpace, FusionOperand, FusionOperandLayout};
 use super::fusion::{external_axis_is_dual, FusionContractPlan};
 use super::fusion_block::{
     compile_fusion_block_contract_plan_prelowered_validated,
-    compile_fusion_block_contract_plan_validated, CoreContractPreflight, ValidatedCoreContract,
+    compile_fusion_block_contract_plan_validated, try_compile_oriented_canonical_core_plan,
+    CoreContractPreflight, ValidatedCoreContract,
 };
 
 /// Resolved execution artifact for one contraction key: the route decision
@@ -52,7 +53,7 @@ where
     if !preflight.has_conjugation() {
         if let Some(validated) = preflight.validate_core_geometry()? {
             if !validated_rhs_contract_requires_twist(&validated)? {
-                let plan = compile_fusion_block_contract_plan_validated(validated)?;
+                let plan = compile_fusion_block_contract_plan_validated(validated, dst, lhs, rhs)?;
                 return Ok(Resolution::Core(Arc::new(plan)));
             }
         }
@@ -70,10 +71,8 @@ where
 pub(crate) fn compile_prelowered_resolution<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
-    lhs_logical: &DynamicFusionMapSpace,
-    lhs_storage: &DynamicFusionMapSpace,
-    rhs_logical: &DynamicFusionMapSpace,
-    rhs_storage: &DynamicFusionMapSpace,
+    lhs: &FusionOperandLayout<'_>,
+    rhs: &FusionOperandLayout<'_>,
     axes: TensorContractSpec<'_>,
     compile_structure: impl FnOnce()
         -> Result<Option<Arc<TensorContractStructure<f64>>>, OperationError>,
@@ -82,19 +81,17 @@ pub(crate) fn compile_prelowered_resolution<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    lhs_storage.validate_rule(rule)?;
-    rhs_storage.validate_rule(rule)?;
-    let preflight = CoreContractPreflight::compile(rule, dst, lhs_logical, rhs_logical, axes)?;
+    let preflight = CoreContractPreflight::compile_oriented(
+        rule,
+        dst.homspace(),
+        lhs.oriented_homspace(),
+        rhs.oriented_homspace(),
+        axes,
+    )?;
     if let Some(validated) = preflight.validate_core_geometry()? {
         if !validated_rhs_contract_requires_twist(&validated)? {
-            let (lhs_op, rhs_op) = validated.storage_ops();
-            let plan = compile_fusion_block_contract_plan_prelowered_validated(
-                validated,
-                lhs_storage,
-                rhs_storage,
-                lhs_op,
-                rhs_op,
-            )?;
+            let plan =
+                compile_fusion_block_contract_plan_prelowered_validated(validated, dst, lhs, rhs)?;
             return Ok(Resolution::Core(Arc::new(plan)));
         }
     }
@@ -102,6 +99,41 @@ where
         return Ok(Resolution::Structure(structure));
     }
     Ok(Resolution::DynamicTree(compile_dynamic()?))
+}
+
+/// Tries the parent-owned coupled-region route before an adjoint operand
+/// derives logical block keys. A miss is not an error: the exact projection is
+/// then prepared by the general prelowered lowering path.
+pub(crate) fn try_compile_oriented_canonical_core_resolution<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: FusionOperand<'_>,
+    rhs: FusionOperand<'_>,
+    axes: TensorContractSpec<'_>,
+) -> Result<Option<Resolution>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let preflight = CoreContractPreflight::compile_oriented(
+        rule,
+        dst.homspace(),
+        lhs.oriented_homspace(),
+        rhs.oriented_homspace(),
+        axes,
+    )?;
+    let Some(validated) = preflight.validate_core_geometry()? else {
+        return Ok(None);
+    };
+    if validated_rhs_contract_requires_twist(&validated)? {
+        return Ok(None);
+    }
+    let plan = try_compile_oriented_canonical_core_plan(
+        &validated,
+        dst,
+        lhs.storage_space(),
+        rhs.storage_space(),
+    )?;
+    Ok(plan.map(|plan| Resolution::Core(Arc::new(plan))))
 }
 
 /// Compiles the coupled block plan for already-materialized core operands.
@@ -118,7 +150,7 @@ where
     let preflight = CoreContractPreflight::compile(rule, dst, lhs, rhs, axes)?;
     super::fusion::reject_fusion_contract_conjugation(axes)?;
     let validated = preflight.require_core_geometry()?;
-    compile_fusion_block_contract_plan_validated(validated).map(Arc::new)
+    compile_fusion_block_contract_plan_validated(validated, dst, lhs, rhs).map(Arc::new)
 }
 
 /// Compiles TensorKit `mul!` composition without inserting a fermionic
@@ -127,28 +159,22 @@ where
 pub(crate) fn compile_composition_plan<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
-    lhs_logical: &DynamicFusionMapSpace,
-    lhs_storage: &DynamicFusionMapSpace,
-    rhs_logical: &DynamicFusionMapSpace,
-    rhs_storage: &DynamicFusionMapSpace,
+    lhs: &FusionOperandLayout<'_>,
+    rhs: &FusionOperandLayout<'_>,
     axes: TensorContractSpec<'_>,
 ) -> Result<Arc<FusionBlockContractPlan>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    lhs_storage.validate_rule(rule)?;
-    rhs_storage.validate_rule(rule)?;
-    let validated = CoreContractPreflight::compile(rule, dst, lhs_logical, rhs_logical, axes)?
-        .require_core_geometry()?;
-    let (lhs_op, rhs_op) = validated.storage_ops();
-    compile_fusion_block_contract_plan_prelowered_validated(
-        validated,
-        lhs_storage,
-        rhs_storage,
-        lhs_op,
-        rhs_op,
-    )
-    .map(Arc::new)
+    let validated = CoreContractPreflight::compile_oriented(
+        rule,
+        dst.homspace(),
+        lhs.oriented_homspace(),
+        rhs.oriented_homspace(),
+        axes,
+    )?
+    .require_core_geometry()?;
+    compile_fusion_block_contract_plan_prelowered_validated(validated, dst, lhs, rhs).map(Arc::new)
 }
 
 /// True when the fermionic supertrace twist can be nontrivial: such
@@ -172,11 +198,19 @@ fn validated_rhs_contract_requires_twist<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    rhs_contract_axes_require_twist(
-        validated.rule(),
-        validated.rhs().homspace(),
-        validated.rhs_contracting_axes(),
-    )
+    if validated.rule().braiding_style() != tenet_core::BraidingStyleKind::Fermionic {
+        return Ok(false);
+    }
+    Ok(validated
+        .rhs_contracting_axes()
+        .iter()
+        .copied()
+        .any(|axis| {
+            validated
+                .rhs_homspace()
+                .external_axis_is_dual(axis)
+                .expect("core preflight validated every rhs contraction axis")
+        }))
 }
 
 pub(crate) fn rhs_contract_homspace_requires_twist<R>(

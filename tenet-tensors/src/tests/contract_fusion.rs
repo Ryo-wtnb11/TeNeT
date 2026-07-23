@@ -6732,8 +6732,7 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
     )
     .unwrap();
 
-    let lhs_operand =
-        crate::FusionOperand::prelowered_adjoint(adj_bound.space(), lhs_bound.space()).unwrap();
+    let lhs_operand = crate::FusionOperand::adjoint(lhs_bound.space());
     let rhs_operand = crate::FusionOperand::direct(rhs_bound.space());
     let axes = || {
         TensorContractSpec::new_with_conjugation(
@@ -6751,6 +6750,7 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
         let mut ctx = crate::TensorContractFusionExecutionContext::<Complex64, _>::default();
         ctx.set_cache_policy(policy);
         crate::lowering::reset_adjoint_view_build_count();
+        crate::contract::reset_fusion_operand_projection_prepares();
         for _ in 0..2 {
             let mut fold = vec![Complex64::new(0.0, 0.0); dst_space.required_len().unwrap()];
             ctx.tensorcontract_fusion_dyn_prelowered_into(
@@ -6821,8 +6821,10 @@ fn tensorcontract_fusion_u1_lhs_adjoint_matches_eager_conjugate_transpose() {
             assert!(ctx.last_resolution_is_core());
         }
         // What: neither cold/reset execution nor NoCache may reconstruct the
-        // full categorical adjoint view hidden behind the prelowered operand.
+        // full categorical adjoint view or prepare a logical block projection
+        // for a canonical parent-owned coupled-region contraction.
         assert_eq!(crate::lowering::adjoint_view_build_count(), 0);
+        assert_eq!(crate::contract::fusion_operand_projection_prepares(), 0);
     }
 
     let typed_dst_hom = dst_space.homspace().clone();
@@ -6976,9 +6978,8 @@ fn prelowered_storage_layouts_and_execution_paths_match_oracle() {
         Arc::clone(&provider),
     )
     .unwrap();
-    let canonical_operand =
-        crate::FusionOperand::prelowered_adjoint(&logical_lhs, &canonical).unwrap();
-    let padded_operand = crate::FusionOperand::prelowered_adjoint(&logical_lhs, &padded).unwrap();
+    let canonical_operand = crate::FusionOperand::adjoint(&canonical);
+    let padded_operand = crate::FusionOperand::adjoint(&padded);
     let rhs_operand = crate::FusionOperand::direct(&rhs);
     let prelowered_axes = || {
         TensorContractSpec::new_with_conjugation(
@@ -7226,7 +7227,7 @@ fn tensorcontract_fusion_prelowered_fermion_twist_declines_core_and_matches_eage
         .tensorcontract_fusion_dyn_prelowered_into(
             &dst_bound,
             &mut lazy,
-            crate::FusionOperand::prelowered_adjoint(adj_bound.space(), lhs_bound.space()).unwrap(),
+            crate::FusionOperand::adjoint(lhs_bound.space()),
             &lhs_data,
             crate::FusionOperand::direct(rhs_bound.space()),
             &rhs_data,
@@ -7252,7 +7253,7 @@ fn tensorcontract_fusion_prelowered_fermion_twist_declines_core_and_matches_eage
         .tensorcontract_fusion_dyn_prelowered_into(
             &dst_bound,
             &mut no_cache_lazy,
-            crate::FusionOperand::prelowered_adjoint(adj_bound.space(), lhs_bound.space()).unwrap(),
+            crate::FusionOperand::adjoint(lhs_bound.space()),
             &lhs_data,
             crate::FusionOperand::direct(rhs_bound.space()),
             &rhs_data,
@@ -7543,7 +7544,7 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
             .tensorcontract_fusion_dyn_prelowered_into(
                 &encoded_lazy_dst,
                 &mut encoded_lazy,
-                FusionOperand::prelowered_adjoint(eager_lhs.space(), encoded_lhs.space()).unwrap(),
+                FusionOperand::adjoint(encoded_lhs.space()),
                 &lhs_data,
                 FusionOperand::direct(encoded_rhs.space()),
                 &rhs_data,
@@ -7566,8 +7567,7 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
                 context.tensorcontract_fusion_dyn_prelowered_into_lowered(
                     &lazy_dst,
                     output,
-                    FusionOperand::prelowered_adjoint(lazy_lhs.space(), lowered_lhs.space())
-                        .unwrap(),
+                    FusionOperand::adjoint(lowered_lhs.space()),
                     &lhs_data,
                     FusionOperand::direct(lowered_rhs.space()),
                     &rhs_data,

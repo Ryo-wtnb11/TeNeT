@@ -306,12 +306,8 @@ impl FusionBlockContractPlan {
     pub fn try_from_canonical_coupled_regions_with_ops(
         dst_structure: &Arc<BlockStructure>,
         dst_nout: usize,
-        lhs_logical_structure: &Arc<BlockStructure>,
-        lhs_logical_nout: usize,
         lhs_storage_structure: &Arc<BlockStructure>,
         lhs_storage_nout: usize,
-        rhs_logical_structure: &Arc<BlockStructure>,
-        rhs_logical_nout: usize,
         rhs_storage_structure: &Arc<BlockStructure>,
         rhs_storage_nout: usize,
         lhs_op: MatrixOp,
@@ -320,33 +316,11 @@ impl FusionBlockContractPlan {
         let Some(dst_regions) = sorted_coupled_regions(dst_structure, dst_nout)? else {
             return Ok(None);
         };
-        let Some(lhs_regions) = sorted_coupled_regions(lhs_logical_structure, lhs_logical_nout)?
+        let Some(lhs_regions) = sorted_coupled_regions(lhs_storage_structure, lhs_storage_nout)?
         else {
             return Ok(None);
         };
-        let Some(rhs_regions) = sorted_coupled_regions(rhs_logical_structure, rhs_logical_nout)?
-        else {
-            return Ok(None);
-        };
-        let Some(lhs_storage_regions) = canonical_storage_regions(
-            lhs_logical_structure,
-            lhs_logical_nout,
-            &lhs_regions,
-            lhs_storage_structure,
-            lhs_storage_nout,
-            lhs_op,
-        )?
-        else {
-            return Ok(None);
-        };
-        let Some(rhs_storage_regions) = canonical_storage_regions(
-            rhs_logical_structure,
-            rhs_logical_nout,
-            &rhs_regions,
-            rhs_storage_structure,
-            rhs_storage_nout,
-            rhs_op,
-        )?
+        let Some(rhs_regions) = sorted_coupled_regions(rhs_storage_structure, rhs_storage_nout)?
         else {
             return Ok(None);
         };
@@ -370,9 +344,11 @@ impl FusionBlockContractPlan {
             }
             let lhs = lhs_regions
                 .get(lhs_index)
+                .map(|region| OrientedCoupledRegion::new(region, lhs_op))
                 .filter(|region| region.coupled() == dst.coupled());
             let rhs = rhs_regions
                 .get(rhs_index)
+                .map(|region| OrientedCoupledRegion::new(region, rhs_op))
                 .filter(|region| region.coupled() == dst.coupled());
             let (Some(lhs), Some(rhs)) = (lhs, rhs) else {
                 inactive_dst_scale_blocks.push(contiguous_scale_layout(dst.range())?);
@@ -389,8 +365,8 @@ impl FusionBlockContractPlan {
             }
             direct_batch.push(Rank2GemmBatchJob {
                 dst_offset: dst.range().start,
-                lhs_offset: lhs_storage_regions[lhs_index].range().start,
-                rhs_offset: rhs_storage_regions[rhs_index].range().start,
+                lhs_offset: lhs.storage_range().start,
+                rhs_offset: rhs.storage_range().start,
                 rows: lhs.rows(),
                 contracted: lhs.cols(),
                 cols: rhs.cols(),
@@ -1539,49 +1515,52 @@ fn sorted_coupled_regions(
     Ok(Some(regions))
 }
 
-fn canonical_storage_regions(
-    logical_structure: &Arc<BlockStructure>,
-    logical_nout: usize,
-    logical_regions: &Arc<[CoupledSectorRegion]>,
-    storage_structure: &Arc<BlockStructure>,
-    storage_nout: usize,
+#[derive(Clone, Copy)]
+struct OrientedCoupledRegion<'a> {
+    storage: &'a CoupledSectorRegion,
     op: MatrixOp,
-) -> Result<Option<Arc<[CoupledSectorRegion]>>, OperationError> {
-    if op == MatrixOp::Identity
-        && logical_nout == storage_nout
-        && (Arc::ptr_eq(logical_structure, storage_structure)
-            || logical_structure.content_id() == storage_structure.content_id())
-    {
-        return Ok(Some(Arc::clone(logical_regions)));
-    }
-    let Some(storage_regions) = sorted_coupled_regions(storage_structure, storage_nout)? else {
-        return Ok(None);
-    };
-    if !storage_regions_match(logical_regions, &storage_regions, op) {
-        return Ok(None);
-    }
-    Ok(Some(storage_regions))
 }
 
-fn storage_regions_match(
-    logical: &[CoupledSectorRegion],
-    storage: &[CoupledSectorRegion],
-    op: MatrixOp,
-) -> bool {
-    logical.len() == storage.len()
-        && logical.iter().zip(storage).all(|(logical, storage)| {
-            logical.coupled() == storage.coupled()
-                && match op {
-                    MatrixOp::Identity => {
-                        logical.row_trees() == storage.row_trees()
-                            && logical.col_trees() == storage.col_trees()
-                    }
-                    MatrixOp::Transpose | MatrixOp::Adjoint => {
-                        logical.row_trees() == storage.col_trees()
-                            && logical.col_trees() == storage.row_trees()
-                    }
-                }
-        })
+impl<'a> OrientedCoupledRegion<'a> {
+    fn new(storage: &'a CoupledSectorRegion, op: MatrixOp) -> Self {
+        Self { storage, op }
+    }
+
+    fn coupled(self) -> tenet_core::SectorId {
+        self.storage.coupled()
+    }
+
+    fn rows(self) -> usize {
+        match self.op {
+            MatrixOp::Identity => self.storage.rows(),
+            MatrixOp::Transpose | MatrixOp::Adjoint => self.storage.cols(),
+        }
+    }
+
+    fn cols(self) -> usize {
+        match self.op {
+            MatrixOp::Identity => self.storage.cols(),
+            MatrixOp::Transpose | MatrixOp::Adjoint => self.storage.rows(),
+        }
+    }
+
+    fn row_trees(self) -> &'a [tenet_core::CoupledTreeExtent] {
+        match self.op {
+            MatrixOp::Identity => self.storage.row_trees(),
+            MatrixOp::Transpose | MatrixOp::Adjoint => self.storage.col_trees(),
+        }
+    }
+
+    fn col_trees(self) -> &'a [tenet_core::CoupledTreeExtent] {
+        match self.op {
+            MatrixOp::Identity => self.storage.col_trees(),
+            MatrixOp::Transpose | MatrixOp::Adjoint => self.storage.row_trees(),
+        }
+    }
+
+    fn storage_range(self) -> std::ops::Range<usize> {
+        self.storage.range()
+    }
 }
 
 fn contiguous_scale_layout(
@@ -2891,10 +2870,6 @@ mod tests {
             2,
             &canonical,
             2,
-            &canonical,
-            2,
-            &reordered,
-            2,
             &reordered,
             2,
             MatrixOp::Identity,
@@ -2905,6 +2880,22 @@ mod tests {
         // What: aggregate sector dimensions cannot substitute for exact
         // contracted and output fusion-tree bases at the safe plan boundary.
         assert!(plan.is_none());
+
+        let oriented_plan = FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops(
+            &canonical,
+            2,
+            &reordered,
+            2,
+            &canonical,
+            2,
+            MatrixOp::Adjoint,
+            MatrixOp::Identity,
+        )
+        .unwrap();
+
+        // What: swapping the physical row/column view for an adjoint cannot
+        // turn a reordered physical fusion-tree basis into a canonical match.
+        assert!(oriented_plan.is_none());
     }
 
     #[test]
@@ -3028,10 +3019,6 @@ mod tests {
         .unwrap();
         let structure = Arc::clone(space.subblock_structure());
         let plan = FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops(
-            &structure,
-            1,
-            &structure,
-            1,
             &structure,
             1,
             &structure,

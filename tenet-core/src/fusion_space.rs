@@ -1084,6 +1084,35 @@ impl<'a> OrientedFusionTreeHomSpace<'a> {
     }
 
     #[doc(hidden)]
+    pub fn nout(self) -> usize {
+        match self.orientation {
+            FusionTreePairOrientation::Direct => self.source.codomain().len(),
+            FusionTreePairOrientation::Adjoint => self.source.domain().len(),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn nin(self) -> usize {
+        self.rank() - self.nout()
+    }
+
+    #[doc(hidden)]
+    pub fn orientation(self) -> FusionTreePairOrientation {
+        self.orientation
+    }
+
+    #[doc(hidden)]
+    pub fn materialize(self) -> FusionTreeHomSpace {
+        match self.orientation {
+            FusionTreePairOrientation::Direct => self.source.clone(),
+            FusionTreePairOrientation::Adjoint => FusionTreeHomSpace::new(
+                self.source.domain().clone(),
+                self.source.codomain().clone(),
+            ),
+        }
+    }
+
+    #[doc(hidden)]
     pub fn select<R>(
         self,
         rule: &R,

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
@@ -5,9 +6,10 @@ use std::sync::{Arc, RwLock};
 use tenet_core::{
     BlockKey, BlockStructure, CheckedFusionAlgebra, CheckedFusionSpaceError, CoreError, DimVec,
     FusionRule, FusionSpaceAdmission, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
-    FusionTreePairKey, HomSpaceId, LoweredFusionTreeBuildError, LoweredMultiplicityFreeAlgebra,
-    MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols, PreparedLoweredFusionTreeLayout,
-    RuleIdentity, SectorLeg, StructurallyValidatedFusionTreeSubset,
+    FusionTreePairKey, FusionTreePairOrientation, HomSpaceId, LoweredFusionTreeBuildError,
+    LoweredMultiplicityFreeAlgebra, MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols,
+    OrientedFusionTreeHomSpace, PreparedLoweredFusionTreeLayout, RuleIdentity, SectorLeg,
+    StructurallyValidatedFusionTreeSubset,
 };
 
 use crate::cache::registered_operation_cache;
@@ -654,52 +656,223 @@ impl Eq for DynamicFusionMapSpace {}
 
 /// Internal contraction operand separating categorical and storage authority.
 ///
-/// `logical_space` defines sectors, trees, and user axes; `storage_space`
-/// defines the physical block buffer. Why not expose this as a general public
-/// API: only TeNeT's validated lazy-adjoint representation can prove that the
-/// two spaces describe the same tensor.
+/// The parent space defines physical storage; orientation derives the logical
+/// HomSpace and user-axis view. Why not retain a logical adjoint space: it is
+/// duplicate authority that can drift from the parent representation.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug)]
 pub struct FusionOperand<'a> {
-    logical_space: &'a DynamicFusionMapSpace,
     storage_space: &'a DynamicFusionMapSpace,
-    storage_conjugate: bool,
+    orientation: FusionTreePairOrientation,
+}
+
+pub(crate) struct FusionOperandLayout<'a> {
+    operand: FusionOperand<'a>,
+    homspace: Cow<'a, FusionTreeHomSpace>,
+    projection: FusionOperandProjection,
+}
+
+enum FusionOperandProjection {
+    Direct,
+    Adjoint {
+        logical_keys: Arc<[FusionTreePairKey]>,
+        storage_indices: Vec<usize>,
+    },
+}
+
+#[cfg(test)]
+thread_local! {
+    static FUSION_OPERAND_PROJECTION_PREPARES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_fusion_operand_projection_prepares() {
+    FUSION_OPERAND_PROJECTION_PREPARES.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn fusion_operand_projection_prepares() -> usize {
+    FUSION_OPERAND_PROJECTION_PREPARES.get()
+}
+
+impl<'a> FusionOperandLayout<'a> {
+    #[inline]
+    pub(crate) fn homspace(&self) -> &FusionTreeHomSpace {
+        self.homspace.as_ref()
+    }
+
+    #[inline]
+    pub(crate) fn oriented_homspace(&self) -> OrientedFusionTreeHomSpace<'a> {
+        self.operand.oriented_homspace()
+    }
+
+    #[inline]
+    pub(crate) fn nout(&self) -> usize {
+        self.operand.oriented_homspace().nout()
+    }
+
+    #[inline]
+    pub(crate) fn rank(&self) -> usize {
+        self.operand.storage_space().rank()
+    }
+
+    #[inline]
+    pub(crate) fn logical_block_count(&self) -> usize {
+        match &self.projection {
+            FusionOperandProjection::Direct => self.storage_space().structure().block_count(),
+            FusionOperandProjection::Adjoint { logical_keys, .. } => logical_keys.len(),
+        }
+    }
+
+    pub(crate) fn logical_key(
+        &self,
+        logical_index: usize,
+    ) -> Result<&FusionTreePairKey, OperationError> {
+        match &self.projection {
+            FusionOperandProjection::Direct => {
+                match self.storage_space().structure().block(logical_index)?.key() {
+                    BlockKey::FusionTree(key) => Ok(key),
+                    _ => Err(OperationError::StructureMismatch {
+                        tensor: "direct fusion operand",
+                    }),
+                }
+            }
+            FusionOperandProjection::Adjoint { logical_keys, .. } => logical_keys
+                .get(logical_index)
+                .ok_or(OperationError::BlockIndexOutOfBounds {
+                    tensor: "logical src",
+                    index: logical_index,
+                    count: logical_keys.len(),
+                }),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn storage_index(&self, logical_index: usize) -> Result<usize, OperationError> {
+        match &self.projection {
+            FusionOperandProjection::Direct => {
+                self.storage_space().structure().block(logical_index)?;
+                Ok(logical_index)
+            }
+            FusionOperandProjection::Adjoint {
+                logical_keys,
+                storage_indices,
+            } => storage_indices.get(logical_index).copied().ok_or(
+                OperationError::BlockIndexOutOfBounds {
+                    tensor: "logical src",
+                    index: logical_index,
+                    count: logical_keys.len(),
+                },
+            ),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn is_direct(&self) -> bool {
+        matches!(self.projection, FusionOperandProjection::Direct)
+    }
+
+    #[inline]
+    pub(crate) fn adjoint_projection(&self) -> Option<(&[FusionTreePairKey], &[usize])> {
+        match &self.projection {
+            FusionOperandProjection::Direct => None,
+            FusionOperandProjection::Adjoint {
+                logical_keys,
+                storage_indices,
+            } => Some((logical_keys, storage_indices)),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn storage_space(&self) -> &'a DynamicFusionMapSpace {
+        self.operand.storage_space()
+    }
+
+    #[inline]
+    pub(crate) fn storage_conjugate(&self) -> bool {
+        self.operand.storage_conjugate()
+    }
+
+    #[inline]
+    pub(crate) fn orientation(&self) -> FusionTreePairOrientation {
+        self.operand.orientation()
+    }
+
+    #[inline]
+    pub(crate) fn storage_axis(&self, logical_axis: usize) -> Result<usize, OperationError> {
+        self.operand.storage_axis(logical_axis)
+    }
+
+    #[inline]
+    pub(crate) fn admission(&self) -> &FusionSpaceAdmission {
+        self.storage_space().admission()
+    }
+
+    pub(crate) fn transformed_layout_probe<R>(
+        &self,
+        rule: &R,
+        operation: &TreeTransformOperation,
+        primer: LayoutKeyBuilder<R>,
+    ) -> Result<TransformedLayoutProbe, OperationError>
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
+        let homspace = match primer(
+            rule,
+            MetadataRequest::Permute {
+                homspace: self.homspace(),
+                codomain_axes,
+                domain_axes,
+            },
+        )? {
+            MetadataOutput::HomSpace { homspace, .. } => homspace,
+            _ => unreachable!("metadata dispatcher returned a non-HomSpace response"),
+        };
+        // Why not build an oriented BlockStructure: conjugated sources cannot
+        // borrow their numeric storage, so this equality is only observed for
+        // the direct orientation where the parent structure is authoritative.
+        let (required_len, source_structure_matches) = homspace
+            .coupled_subblock_layout_probe_uncached(rule, self.storage_space().structure())
+            .map_err(OperationError::from_core_preserving_context)?;
+        Ok(TransformedLayoutProbe {
+            nout: codomain_axes.len(),
+            homspace,
+            required_len,
+            source_structure_matches,
+        })
+    }
+
+    pub(crate) fn transformed_space<R>(
+        &self,
+        rule: &R,
+        operation: &TreeTransformOperation,
+        primer: LayoutKeyBuilder<R>,
+    ) -> Result<DynamicFusionMapSpace, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
+        let capability = LayoutBuildCapability { dispatch: primer };
+        let (homspace, prepared) =
+            capability.permute(rule, self.homspace(), codomain_axes, domain_axes)?;
+        DynamicFusionMapSpace::from_final_homspace_with_prepared(rule, homspace, prepared)
+    }
 }
 
 impl<'a> FusionOperand<'a> {
     pub fn direct(space: &'a DynamicFusionMapSpace) -> Self {
         Self {
-            logical_space: space,
             storage_space: space,
-            storage_conjugate: false,
+            orientation: FusionTreePairOrientation::Direct,
         }
     }
 
-    pub fn prelowered_adjoint(
-        logical_space: &'a DynamicFusionMapSpace,
-        storage_space: &'a DynamicFusionMapSpace,
-    ) -> Result<Self, OperationError> {
-        if logical_space.rank() != storage_space.rank()
-            || logical_space.nout() != storage_space.nin()
-            || logical_space.nin() != storage_space.nout()
-            || logical_space.homspace().codomain() != storage_space.homspace().domain()
-            || logical_space.homspace().domain() != storage_space.homspace().codomain()
-            || logical_space.admission.rule_identity() != storage_space.admission.rule_identity()
-        {
-            return Err(OperationError::StructureMismatch {
-                tensor: "prelowered adjoint operand",
-            });
-        }
-        Ok(Self {
-            logical_space,
+    pub fn adjoint(storage_space: &'a DynamicFusionMapSpace) -> Self {
+        Self {
             storage_space,
-            storage_conjugate: true,
-        })
-    }
-
-    #[inline]
-    pub fn logical_space(self) -> &'a DynamicFusionMapSpace {
-        self.logical_space
+            orientation: FusionTreePairOrientation::Adjoint,
+        }
     }
 
     #[inline]
@@ -709,7 +882,107 @@ impl<'a> FusionOperand<'a> {
 
     #[inline]
     pub fn storage_conjugate(self) -> bool {
-        self.storage_conjugate
+        self.orientation == FusionTreePairOrientation::Adjoint
+    }
+
+    #[inline]
+    pub(crate) fn orientation(self) -> FusionTreePairOrientation {
+        self.orientation
+    }
+
+    #[inline]
+    pub(crate) fn oriented_homspace(self) -> OrientedFusionTreeHomSpace<'a> {
+        OrientedFusionTreeHomSpace::new(self.storage_space.homspace(), self.orientation())
+    }
+
+    pub(crate) fn prepare<R>(
+        self,
+        rule: &R,
+        layout_primer: LayoutKeyBuilder<R>,
+    ) -> Result<FusionOperandLayout<'a>, OperationError>
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        self.storage_space.validate_rule(rule)?;
+        if self.orientation() == FusionTreePairOrientation::Direct {
+            return Ok(FusionOperandLayout {
+                operand: self,
+                homspace: Cow::Borrowed(self.storage_space.homspace()),
+                projection: FusionOperandProjection::Direct,
+            });
+        }
+
+        #[cfg(test)]
+        FUSION_OPERAND_PROJECTION_PREPARES.set(FUSION_OPERAND_PROJECTION_PREPARES.get() + 1);
+
+        let homspace: Cow<'a, FusionTreeHomSpace> =
+            Cow::Owned(self.oriented_homspace().materialize());
+        let prepared = dispatch_prepare(layout_primer, rule, homspace.as_ref())?;
+        let complete = matches!(
+            self.storage_space.admission(),
+            FusionSpaceAdmission::Complete(_)
+        );
+        let all_logical_keys = prepared.keys(rule, homspace.as_ref());
+        let mut selected_keys =
+            (!complete).then(|| Vec::with_capacity(self.storage_space.structure().block_count()));
+        let mut selected_count = 0usize;
+        let mut storage_indices = Vec::with_capacity(self.storage_space.structure().block_count());
+        for logical_key in all_logical_keys.iter() {
+            let storage_index = self
+                .storage_space
+                .structure()
+                .find_block_index_by_adjoint_fusion_tree_pair(logical_key);
+            if let Some(storage_index) = storage_index {
+                if let Some(selected_keys) = selected_keys.as_mut() {
+                    selected_keys.push(logical_key.clone());
+                }
+                storage_indices.push(storage_index);
+                selected_count += 1;
+            } else if complete {
+                return Err(OperationError::MissingBlockKey {
+                    key: Box::new(BlockKey::from(logical_key.clone())),
+                });
+            }
+        }
+        if selected_count != self.storage_space.structure().block_count() {
+            return Err(OperationError::StructureMismatch {
+                tensor: "operand block projection",
+            });
+        }
+        let logical_keys = if complete {
+            all_logical_keys
+        } else {
+            Arc::from(selected_keys.expect("subset projection collects logical keys"))
+        };
+        prepared.commit();
+        Ok(FusionOperandLayout {
+            operand: self,
+            homspace,
+            projection: FusionOperandProjection::Adjoint {
+                logical_keys,
+                storage_indices,
+            },
+        })
+    }
+
+    pub(crate) fn storage_axis(self, logical_axis: usize) -> Result<usize, OperationError> {
+        if logical_axis >= self.storage_space.rank() {
+            return Err(OperationError::InvalidAxisSet {
+                tensor: "logical src",
+                axes: vec![logical_axis],
+                rank: self.storage_space.rank(),
+            });
+        }
+        Ok(match self.orientation() {
+            FusionTreePairOrientation::Direct => logical_axis,
+            FusionTreePairOrientation::Adjoint => {
+                if logical_axis < self.storage_space.nin() {
+                    self.storage_space.nout() + logical_axis
+                } else {
+                    logical_axis - self.storage_space.nin()
+                }
+            }
+        })
     }
 }
 
@@ -2348,6 +2621,47 @@ mod bound_invariant_tests {
             DynamicFusionMapSpace::from_typed(&subset).admission(),
             subset.admission()
         );
+    }
+
+    #[test]
+    fn sparse_subset_operands_keep_only_present_canonical_keys() {
+        let complete = typed_z2_matrix_space();
+        let first = complete.subblock_structure().block(0).unwrap();
+        let structure = BlockStructure::from_blocks_with_rank(
+            2,
+            vec![BlockSpec::with_key(
+                first.key().clone(),
+                first.shape().to_vec(),
+                first.strides().to_vec(),
+                first.offset(),
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let subset = FusionTensorMapSpace::new_unbound(
+            complete.dense_space().clone(),
+            complete.homspace().clone(),
+            structure,
+        )
+        .unwrap()
+        .try_bind_rule(&Z2FusionRule)
+        .unwrap();
+        let storage = DynamicFusionMapSpace::from_typed(&subset);
+        let direct = FusionOperand::direct(&storage)
+            .prepare(&Z2FusionRule, encoded_layout_primer::<Z2FusionRule>)
+            .unwrap();
+        let adjoint = FusionOperand::adjoint(&storage)
+            .prepare(&Z2FusionRule, encoded_layout_primer::<Z2FusionRule>)
+            .unwrap();
+
+        // What: Direct retains the parent-owned order, while Adjoint retains
+        // only parent-present keys in canonical logical order.
+        assert_eq!(direct.logical_block_count(), 1);
+        assert_eq!(adjoint.logical_block_count(), 1);
+        assert_eq!(direct.storage_index(0).unwrap(), 0);
+        assert_eq!(adjoint.storage_index(0).unwrap(), 0);
+        assert!(direct.is_direct());
+        assert_eq!(adjoint.adjoint_projection().unwrap().1, [0].as_slice());
     }
 
     #[test]
