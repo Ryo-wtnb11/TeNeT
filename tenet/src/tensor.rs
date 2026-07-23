@@ -17,10 +17,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use num_complex::Complex64;
 use smallvec::SmallVec;
 use tenet_core::{
-    BlockKey, BlockStructure, BlockView, BlockViewMut, CheckedFusionAlgebra, CoupledSectorRegion,
-    FusionProductSpace, FusionRule, FusionTreeHomSpace, FusionTreePairKey,
-    FusionTreePairOrientation, GenericRigidSymbols, LoweredMultiplicityFreeAlgebra,
-    MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace, Placement, SectorId, Su3FusionRule,
+    BlockKey, BlockStructure, BlockView, BlockViewMut, CheckedFusionAlgebra,
+    CheckedFusionSpaceError, CoupledSectorRegion, FusionProductSpace, FusionRule,
+    FusionTreeHomSpace, FusionTreePairKey, FusionTreePairOrientation, GenericRigidSymbols,
+    LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace,
+    Placement, SectorId, Su3FusionRule,
 };
 #[cfg(feature = "cuda")]
 use tenet_core::{SectorLeg, TensorStorage};
@@ -3078,6 +3079,14 @@ impl TensorMetadataView<'_> {
     fn rank(&self) -> usize {
         self.nout() + self.nin()
     }
+
+    fn oriented_homspace(&self) -> OrientedFusionTreeHomSpace<'_> {
+        let orientation = match self.orientation {
+            TensorOrientation::Owned => FusionTreePairOrientation::Direct,
+            TensorOrientation::Adjoint => FusionTreePairOrientation::Adjoint,
+        };
+        OrientedFusionTreeHomSpace::new(self.body.space.homspace(), orientation)
+    }
 }
 
 /// A block-sparse symmetric tensor map `codomain <- domain` with dynamic rank,
@@ -5085,12 +5094,16 @@ impl Tensor {
         // not serialize while bound spaces remain the fusion authority.
         let mut lease = self.rt.lease_context()?;
         let context = lease.context();
-        let dst_bound = self.logical_space()?.contracted_with_output_order(
-            rhs.logical_space()?,
-            lhs_axes,
-            rhs_axes,
-            output_order,
-        )?;
+        let dst_bound = if self.rule_kind() == RuleKind::Su3 {
+            self.logical_space()?.contracted_with_output_order(
+                rhs.logical_space()?,
+                lhs_axes,
+                rhs_axes,
+                output_order,
+            )?
+        } else {
+            self.contraction_output_space_oriented(rhs, lhs_axes, rhs_axes, output_order)?
+        };
         let mut data = vec![D::from_real(0.0); dst_bound.raw().required_len()?];
         let spec = TensorContractSpec::new_with_conjugation(
             lhs_axes,
@@ -5417,6 +5430,23 @@ impl Tensor {
             && self.placement() == Placement::Host
             && !matches!(self.stored_data(), Data::Diagonal(_))
             && !matches!(rhs.stored_data(), Data::Diagonal(_));
+        if host_mult_free_dense {
+            let output_error = if output_axes.len() != open_rank {
+                Some(Error::InvalidArgument(format!(
+                    "output axis list length {} does not match open rank {}",
+                    output_axes.len(),
+                    open_rank
+                )))
+            } else {
+                validate_axis_permutation(output_axes, open_rank).err()
+            };
+            if let Some(output_error) = output_error {
+                // Why not report pAB first: the public contract historically
+                // validates contracted spaces before inspecting output order.
+                self.validate_oriented_contracted_homspace(rhs, lhs_axes, rhs_axes)?;
+                return Err(output_error);
+            }
+        }
         if !host_mult_free_dense
             && (matches!(self.stored_data(), Data::Diagonal(_))
                 || matches!(rhs.stored_data(), Data::Diagonal(_)))
@@ -5453,22 +5483,6 @@ impl Tensor {
             return contracted.permute(&output_axes[..split], &output_axes[split..]);
         }
 
-        if output_axes.len() != open_rank {
-            // Why not report pAB first: historically `contract_ordered` ran the
-            // contraction before inspecting pAB, so an incompatible contracted
-            // pair must retain precedence when both inputs are invalid. This
-            // compatibility-only path is cold because valid pAB skips it.
-            self.logical_space()?.validate_contracted_homspace(
-                rhs.logical_space()?,
-                lhs_axes,
-                rhs_axes,
-            )?;
-            return Err(Error::InvalidArgument(format!(
-                "output axis list length {} does not match open rank {}",
-                output_axes.len(),
-                open_rank
-            )));
-        }
         if output_axes.iter().copied().eq(0..open_rank) {
             return self.contract(rhs, lhs_axes, rhs_axes);
         }
@@ -6808,8 +6822,17 @@ impl Tensor {
         lhs_axes: &[usize],
         rhs_axes: &[usize],
     ) -> Result<UserBoundSpace, Error> {
-        self.logical_space()?
-            .contracted(rhs.logical_space()?, lhs_axes, rhs_axes)
+        if self.rule_kind() == RuleKind::Su3 {
+            self.logical_space()?
+                .contracted(rhs.logical_space()?, lhs_axes, rhs_axes)
+        } else {
+            self.contraction_output_space_oriented(
+                rhs,
+                lhs_axes,
+                rhs_axes,
+                OutputAxisOrder::identity(),
+            )
+        }
     }
 
     fn contraction_output_space_ordered(
@@ -6819,15 +6842,99 @@ impl Tensor {
         rhs_axes: &[usize],
         output_order: OutputAxisOrder<'_>,
     ) -> Result<UserBoundSpace, Error> {
-        match output_order {
-            OutputAxisOrder::Identity => self.contraction_output_space(rhs, lhs_axes, rhs_axes),
-            OutputAxisOrder::Axes(_) => self.logical_space()?.contracted_with_output_order(
-                rhs.logical_space()?,
+        if self.rule_kind() == RuleKind::Su3 {
+            match output_order {
+                OutputAxisOrder::Identity => {
+                    self.logical_space()?
+                        .contracted(rhs.logical_space()?, lhs_axes, rhs_axes)
+                }
+                OutputAxisOrder::Axes(_) => self.logical_space()?.contracted_with_output_order(
+                    rhs.logical_space()?,
+                    lhs_axes,
+                    rhs_axes,
+                    output_order,
+                ),
+            }
+        } else {
+            self.contraction_output_space_oriented(rhs, lhs_axes, rhs_axes, output_order)
+        }
+    }
+
+    fn contraction_output_space_oriented(
+        &self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_order: OutputAxisOrder<'_>,
+    ) -> Result<UserBoundSpace, Error> {
+        let homspace = self.oriented_contraction_homspace(rhs, lhs_axes, rhs_axes, output_order)?;
+        self.metadata().body.space.from_selected_homspace(homspace)
+    }
+
+    fn validate_oriented_contracted_homspace(
+        &self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+    ) -> Result<(), Error> {
+        self.oriented_contraction_homspace(rhs, lhs_axes, rhs_axes, OutputAxisOrder::identity())?;
+        Ok(())
+    }
+
+    fn oriented_contraction_homspace(
+        &self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_order: OutputAxisOrder<'_>,
+    ) -> Result<FusionTreeHomSpace, Error> {
+        let lhs_metadata = self.metadata();
+        let rhs_metadata = rhs.metadata();
+        let lhs_open_rank = lhs_metadata
+            .rank()
+            .checked_sub(lhs_axes.len())
+            .ok_or_else(|| {
+                Error::InvalidArgument("contracted axis count exceeds tensor rank".to_string())
+            })?;
+        let rhs_open_rank = rhs_metadata
+            .rank()
+            .checked_sub(rhs_axes.len())
+            .ok_or_else(|| {
+                Error::InvalidArgument("contracted axis count exceeds tensor rank".to_string())
+            })?;
+        let output_rank = lhs_open_rank + rhs_open_rank;
+        let identity_axes;
+        let output_axes = match output_order {
+            OutputAxisOrder::Identity => {
+                identity_axes = (0..output_rank).collect::<SmallVec<[usize; 8]>>();
+                identity_axes.as_slice()
+            }
+            OutputAxisOrder::Axes(output_axes) => {
+                if let Err(output_error) = validate_axis_permutation(output_axes, output_rank) {
+                    self.validate_oriented_contracted_homspace(rhs, lhs_axes, rhs_axes)?;
+                    return Err(output_error);
+                }
+                output_axes
+            }
+        };
+        with_user_rule!(self.rule_authority_space(), rule, {
+            OrientedFusionTreeHomSpace::try_tensorcontract_homspace_checked(
+                rule,
+                lhs_metadata.oriented_homspace(),
+                rhs_metadata.oriented_homspace(),
                 lhs_axes,
                 rhs_axes,
-                output_order,
-            ),
-        }
+                output_axes,
+                lhs_open_rank,
+            )
+            .map_err(|error| match error {
+                CheckedFusionSpaceError::Core(error) => {
+                    OperationError::from_core_preserving_context(*error).into()
+                }
+                CheckedFusionSpaceError::FusionAlgebra(error) => Error::FusionAlgebra(error),
+                _ => Error::InvalidArgument("unknown checked fusion metadata error".to_string()),
+            })
+        })
     }
 
     fn output_source_axes_for_order(
@@ -6927,11 +7034,8 @@ impl Tensor {
 
     fn external_axis_is_dual(&self, axis: usize) -> Result<bool, Error> {
         let metadata = self.metadata();
-        let orientation = match metadata.orientation {
-            TensorOrientation::Owned => FusionTreePairOrientation::Direct,
-            TensorOrientation::Adjoint => FusionTreePairOrientation::Adjoint,
-        };
-        OrientedFusionTreeHomSpace::new(metadata.body.space.homspace(), orientation)
+        metadata
+            .oriented_homspace()
             .external_axis_is_dual(axis)
             .ok_or_else(|| {
                 Error::InvalidArgument(format!(
@@ -10824,6 +10928,87 @@ mod adjoint_parent_view_tests {
             assert_close(&actual, &expected);
             assert_eq!(lhs.adjoint_build_counts().1, 0);
             assert_eq!(rhs.adjoint_build_counts().1, 0);
+        }
+    }
+
+    #[test]
+    fn oriented_u1_contraction_metadata_matches_materialized_adjoint() {
+        // What: F64/C64 lazy adjoints derive ordered destinations and invalid
+        // contraction errors from parent metadata before building either view.
+        for dtype in [Dtype::F64, Dtype::C64] {
+            let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+            let bond = Space::u1([(-2, 1), (0, 2), (1, 1)]);
+            let bad_bond = Space::u1([(-2, 1), (0, 3), (1, 1)]);
+            let lhs_a = Space::u1([(-1, 2), (0, 1), (2, 1)]);
+            let lhs_b = Space::u1([(-3, 1), (0, 2), (1, 1)]);
+            let rhs_a = Space::u1([(-2, 1), (0, 1), (3, 2)]);
+            let rhs_b = Space::u1([(-1, 1), (0, 3), (2, 1)]);
+            let parent = Tensor::rand_with_seed(
+                &runtime,
+                dtype,
+                [&bond],
+                [&lhs_a, &lhs_b],
+                485_000 + dtype as u64,
+            )
+            .unwrap();
+            let rhs = Tensor::rand_with_seed(
+                &runtime,
+                dtype,
+                [&bond],
+                [&rhs_a, &rhs_b],
+                485_010 + dtype as u64,
+            )
+            .unwrap();
+            let bad_rhs = Tensor::zeros(&runtime, dtype, [&bad_bond], [&rhs_a, &rhs_b]).unwrap();
+            let lazy = parent.adjoint().unwrap();
+            let eager = parent.adjoint().unwrap().materialized_tensor().unwrap();
+            let output_axes = [2, 0, 3, 1];
+            let expected = eager
+                .ordinary_body()
+                .space
+                .contracted_with_output_order(
+                    rhs.ordinary_body().space.as_ref(),
+                    &[2],
+                    &[0],
+                    OutputAxisOrder::from_axes(&output_axes),
+                )
+                .unwrap();
+
+            SELECTED_RESULT_LAYOUT_BUILDS.with(|observation| observation.set(Some(0)));
+            let actual = lazy
+                .contraction_output_space_oriented(
+                    &rhs,
+                    &[2],
+                    &[0],
+                    OutputAxisOrder::from_axes(&output_axes),
+                )
+                .unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(lazy.adjoint_build_counts(), (0, 0));
+            assert_eq!(
+                SELECTED_RESULT_LAYOUT_BUILDS.with(|observation| observation.replace(None)),
+                Some(1)
+            );
+
+            let invalid_lazy = parent.adjoint().unwrap();
+            SELECTED_RESULT_LAYOUT_BUILDS.with(|observation| observation.set(Some(0)));
+            let expected_error = eager
+                .contract_ordered(&bad_rhs, &[2], &[0], &[0, 0, 2, 3])
+                .unwrap_err();
+            let actual_error = invalid_lazy
+                .contract_ordered(&bad_rhs, &[2], &[0], &[0, 0, 2, 3])
+                .unwrap_err();
+            assert_eq!(actual_error, expected_error);
+            assert_eq!(invalid_lazy.adjoint_build_counts(), (0, 0));
+            assert_eq!(
+                SELECTED_RESULT_LAYOUT_BUILDS.with(|observation| observation.replace(None)),
+                Some(0)
+            );
+
+            let output = lazy
+                .contract_ordered(&rhs, &[2], &[0], &output_axes)
+                .unwrap();
+            assert_eq!(output.ordinary_body().space.as_ref(), &expected);
         }
     }
 
