@@ -848,8 +848,10 @@ mod tests {
         // stay interned and re-yield the same id (a stale key could then alias).
         // The monotonic counter + cleared table give a strictly greater id.
         let base = 700_000_000usize;
-        let id_before = BlockStructure::trivial(&[base]).unwrap().content_id();
+        let before = BlockStructure::trivial(&[base]).unwrap();
+        let id_before = before.content_id();
         reset_global_operation_caches();
+        assert_eq!(before.required_len().unwrap(), base);
         let id_after = BlockStructure::trivial(&[base]).unwrap().content_id();
         assert!(
             id_after > id_before,

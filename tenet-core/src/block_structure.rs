@@ -1184,10 +1184,10 @@ impl PartialEq for BlockStructureContent {
 
 impl BlockStructureContent {
     /// Process-local intern id (insertion-order counter into the block-structure
-    /// intern table). Content-stable within one process — identical content
-    /// interns to one `Arc` and thus one id — so it is a sound O(1) cache key.
-    /// It is NOT semantically stable across processes or runs and must never be
-    /// serialized; process-resident caches reconstruct identity from content.
+    /// intern table). Identical content shares one `Arc` and id while its
+    /// interner key remains resident and at least one strong owner is live.
+    /// Rebuilding after owner death, eviction, or reset issues a fresh id.
+    /// It is not semantic identity and must never be serialized.
     #[inline]
     pub fn id(&self) -> usize {
         self.id
@@ -1211,7 +1211,7 @@ struct BlockStructureInternKey {
 }
 
 type BlockStructureInternTable =
-    lru::LruCache<BlockStructureInternKey, Arc<BlockStructureContent>, rustc_hash::FxBuildHasher>;
+    lru::LruCache<BlockStructureInternKey, Weak<BlockStructureContent>, rustc_hash::FxBuildHasher>;
 
 /// LRU cap for the block-structure content intern table (and, reusing the same
 /// bound, the arc dedup and coupled-subblock caches). Mirrors
@@ -1296,16 +1296,16 @@ fn intern_block_structure_content(
     let table = block_structure_intern_table();
     // Read-lock fast path uses `peek` (does not bump recency; `get` needs `&mut`).
     if let Ok(read) = table.read() {
-        if let Some(content) = read.peek(&key) {
-            return Arc::clone(content);
+        if let Some(content) = read.peek(&key).and_then(Weak::upgrade) {
+            return content;
         }
     }
 
     let mut write = table
         .write()
         .expect("block structure intern table poisoned");
-    if let Some(content) = write.get(&key) {
-        return Arc::clone(content);
+    if let Some(content) = write.get(&key).and_then(Weak::upgrade) {
+        return content;
     }
     let content = Arc::new(BlockStructureContent {
         id: BLOCK_STRUCTURE_CONTENT_ID.fetch_add(1, Ordering::Relaxed),
@@ -1313,7 +1313,7 @@ fn intern_block_structure_content(
         blocks,
         coupled_region_cache: OnceLock::new(),
     });
-    write.put(key, Arc::clone(&content));
+    write.put(key, Arc::downgrade(&content));
     content
 }
 

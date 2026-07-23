@@ -17392,47 +17392,124 @@ mod tests {
         assert!(arc_len <= BLOCK_STRUCTURE_INTERN_CAP);
     }
 
+    fn coupled_z2_matrix_structure() -> BlockStructure {
+        let rule = Z2FusionRule;
+        let leg = || SectorLeg::new([(z2_even(), 2), (z2_odd(), 3)], false);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg()]),
+            FusionProductSpace::new([leg()]),
+        );
+        let blocks = homspace
+            .fusion_tree_keys(&rule)
+            .iter()
+            .cloned()
+            .map(|key| (key, vec![2, 3]))
+            .collect();
+        BlockStructure::coupled_sector_matrix_with_keys(&rule, 1, 2, blocks).unwrap()
+    }
+
     #[test]
-    fn evicted_block_structure_content_reinterns_with_fresh_id() {
-        // What: floods the shared block-structure intern table to force an
-        // eviction. Takes the lock alongside the table's other flooder/resetter
-        // for the same reason as the plateau test above.
+    fn live_then_dead_content_uses_one_weak_canonicalization_epoch() {
+        // What: equal live structures and their lazy region result share one
+        // content epoch, while rebuilding after every owner dies preserves the
+        // complete structure and region semantics under a fresh monotonic id.
         let _guard = test_support::CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Pinned invariant: an id is NEVER reused. An evicted content that is
-        // re-interned gets a strictly greater id (monotonic counter), so a
-        // downstream cache keyed by the old id can never be aliased by it.
-        let base = 900_000_000usize; // Outside the range other tests intern.
-        let id_before = BlockStructure::trivial(&[base]).unwrap().content_id();
-        // Flood past the cap with distinct contents to evict the probe entry
-        // (never touched again, so it ages to the LRU tail and is dropped).
-        for i in 0..(BLOCK_STRUCTURE_INTERN_CAP + 64) {
-            let _ = BlockStructure::trivial(&[base + 1 + i]).unwrap();
-        }
-        let id_after = BlockStructure::trivial(&[base]).unwrap().content_id();
-        assert!(
-            id_after > id_before,
-            "evicted content must re-intern with a strictly greater id, \
-             got before={id_before} after={id_after}"
+        reset_core_intern_tables();
+
+        let first = coupled_z2_matrix_structure();
+        let second = coupled_z2_matrix_structure();
+        let first_content = first.content_key();
+        let second_content = second.content_key();
+        assert!(Arc::ptr_eq(&first_content, &second_content));
+        let id_before = first.content_id();
+
+        let first_regions = first.coupled_sector_regions(1).unwrap().unwrap();
+        let second_regions = second.coupled_sector_regions(1).unwrap().unwrap();
+        assert!(Arc::ptr_eq(&first_regions, &second_regions));
+
+        let expected_sector = first.sector_structure().clone();
+        let expected_degeneracy = first.degeneracy_structure().clone();
+        let expected_len = first.required_len().unwrap();
+        let expected_regions = first_regions.as_ref().to_vec();
+        let weak_content = Arc::downgrade(&first_content);
+
+        drop(first_regions);
+        drop(second_regions);
+        drop(first_content);
+        drop(second_content);
+        drop(first);
+        drop(second);
+        assert!(weak_content.upgrade().is_none());
+
+        let rebuilt = coupled_z2_matrix_structure();
+        assert!(rebuilt.content_id() > id_before);
+        assert_eq!(rebuilt.sector_structure(), &expected_sector);
+        assert_eq!(rebuilt.degeneracy_structure(), &expected_degeneracy);
+        assert_eq!(rebuilt.required_len().unwrap(), expected_len);
+        assert_eq!(
+            rebuilt
+                .coupled_sector_regions(1)
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            expected_regions
         );
     }
 
     #[test]
-    fn reset_core_intern_tables_clears_without_reusing_ids() {
-        // What: calls `reset_core_intern_tables` directly — the resetter half
-        // of this species. Takes the shared lock so it can't wipe the table
-        // out from under the flood/plateau tests above mid-run.
+    fn concurrent_equal_live_content_canonicalizes_once() {
+        // What: concurrent equal construction shares one content Arc and id
+        // while every returned structure remains live.
         let _guard = test_support::CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Reset coherence: content ids issued after a reset must exceed any
-        // issued before it (the counter is not reset), so a tensors-layer key
-        // still holding a pre-reset id can never alias post-reset content.
-        let base = 800_000_000usize;
-        let id_before = BlockStructure::trivial(&[base]).unwrap().content_id();
         reset_core_intern_tables();
-        let id_after = BlockStructure::trivial(&[base]).unwrap().content_id();
+        let barrier = std::sync::Barrier::new(8);
+        let structures = std::thread::scope(|scope| {
+            let barrier = &barrier;
+            let threads = (0..8)
+                .map(|_| {
+                    scope.spawn(move || {
+                        barrier.wait();
+                        BlockStructure::trivial(&[17, 19]).unwrap()
+                    })
+                })
+                .collect::<Vec<_>>();
+            threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let content = structures[0].content_key();
+        let id = content.id();
+        for structure in &structures[1..] {
+            let candidate = structure.content_key();
+            assert!(Arc::ptr_eq(&content, &candidate));
+            assert_eq!(candidate.id(), id);
+        }
+    }
+
+    #[test]
+    fn reset_core_intern_tables_clears_without_reusing_ids() {
+        // What: reset preserves a surviving structure and its published region
+        // while equal content rebuilt afterward receives a fresh monotonic id.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = coupled_z2_matrix_structure();
+        let id_before = before.content_id();
+        let regions_before = before.coupled_sector_regions(1).unwrap().unwrap();
+
+        reset_core_intern_tables();
+
+        let surviving_regions = before.coupled_sector_regions(1).unwrap().unwrap();
+        assert!(Arc::ptr_eq(&regions_before, &surviving_regions));
+        assert_eq!(before.content_id(), id_before);
+
+        let after = coupled_z2_matrix_structure();
+        let id_after = after.content_id();
         assert!(
             id_after > id_before,
             "reset must not reuse content ids, got before={id_before} after={id_after}"
