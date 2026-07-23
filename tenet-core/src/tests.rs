@@ -17364,32 +17364,197 @@ mod tests {
         assert_eq!(exact_storage_fallback_count(), 0);
     }
 
-    #[test]
-    fn block_structure_intern_tables_plateau_under_distinct_growth() {
-        // What: floods the shared block-structure intern/arc tables. Bounded
-        // (`<=`) rather than exact-cap assertion below, so this no longer
-        // needs the lock to pass — but it takes it anyway (uniform with the
-        // other resetters/flooders below) since it's still a large flood of
-        // shared state that could otherwise perturb a stricter sibling test.
-        let _guard = test_support::CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Interning far more distinct structures than the cap must leave the
-        // capped tables pinned at the cap. Before the LRU cap they grew linearly.
-        let overflow = BLOCK_STRUCTURE_INTERN_CAP + 256;
-        for i in 0..overflow {
-            // Distinct shape per iteration => distinct interned content and a
-            // distinct arc-dedup entry (shape dims are metadata, not allocated).
-            let _ = BlockStructure::trivial(&[i + 1]).unwrap().into_shared();
+    fn local_block_structure_intern_key(index: usize) -> BlockStructureInternKey {
+        BlockStructureInternKey {
+            rank: 1,
+            blocks: Arc::from([BlockStructureContentBlock {
+                key: BlockKey::ordinal(index),
+                shape: smallvec![1],
+                strides: smallvec![1],
+                offset: 0,
+            }]),
         }
-        let intern_len = block_structure_intern_table().read().unwrap().len();
-        let arc_len = block_structure_arc_table().read().unwrap().len();
-        // Other tests share these global tables and may reset or evict
-        // concurrently, so exact saturation (== cap) is racy — asserting it
-        // made this test flaky in CI. Boundedness alone proves the plateau:
-        // uncapped tables would exceed the cap after cap+256 distinct inserts.
-        assert!(intern_len <= BLOCK_STRUCTURE_INTERN_CAP);
-        assert!(arc_len <= BLOCK_STRUCTURE_INTERN_CAP);
+    }
+
+    fn local_block_structure_intern(
+        table: &mut BlockStructureInternTable,
+        key: BlockStructureInternKey,
+        charged_key_bytes: usize,
+    ) -> Arc<BlockStructureContent> {
+        let rank = key.rank;
+        let blocks = Arc::clone(&key.blocks);
+        table.intern_with(key, |_| charged_key_bytes, || {
+            Arc::new(BlockStructureContent {
+                id: BLOCK_STRUCTURE_CONTENT_ID.fetch_add(1, Ordering::Relaxed),
+                rank,
+                blocks,
+                coupled_region_cache: OnceLock::new(),
+            })
+        })
+    }
+
+    #[test]
+    fn block_structure_intern_charge_counts_only_spilled_smallvec_storage() {
+        // What: inline SmallVec storage adds no heap charge, while spilled
+        // storage contributes its full heap capacity in item bytes.
+        let inline: SmallVec<[u64; 2]> = smallvec::smallvec![1_u64, 2];
+        let spilled: SmallVec<[u64; 2]> = smallvec::smallvec![1_u64, 2, 3];
+        assert!(!inline.spilled());
+        assert!(spilled.spilled());
+        assert_eq!(spilled_smallvec_heap_bytes(&inline), 0);
+        assert_eq!(
+            spilled_smallvec_heap_bytes(&spilled),
+            spilled.capacity() * std::mem::size_of::<u64>()
+        );
+    }
+
+    #[test]
+    fn block_structure_intern_entry_pressure_evicts_oldest() {
+        // What: entry pressure removes the oldest admitted key, and a read hit
+        // does not promote it in the FIFO order.
+        let key0 = local_block_structure_intern_key(0);
+        let key1 = local_block_structure_intern_key(1);
+        let key2 = local_block_structure_intern_key(2);
+        let charge = charged_block_structure_intern_key_bytes(&key0);
+        assert_eq!(charged_block_structure_intern_key_bytes(&key1), charge);
+        assert_eq!(charged_block_structure_intern_key_bytes(&key2), charge);
+        let mut table = BlockStructureInternTable::new(
+            2,
+            charge.saturating_mul(3),
+            charge,
+        );
+
+        let _content0 = local_block_structure_intern(&mut table, key0.clone(), charge);
+        let _content1 = local_block_structure_intern(&mut table, key1.clone(), charge);
+        assert!(table.lookup(&key0).is_some());
+        let _content2 = local_block_structure_intern(&mut table, key2.clone(), charge);
+
+        assert!(table.lookup(&key0).is_none());
+        assert!(table.lookup(&key1).is_some());
+        assert!(table.lookup(&key2).is_some());
+        let info = table.info();
+        assert_eq!(info.entries(), 2);
+        assert_eq!(info.pressure_evictions(), 1);
+    }
+
+    #[test]
+    fn block_structure_intern_byte_pressure_subtracts_exact_charge() {
+        // What: byte pressure subtracts the evicted entry's unequal stored
+        // charge exactly before admitting the incoming key.
+        let key0 = local_block_structure_intern_key(10);
+        let key1 = local_block_structure_intern_key(11);
+        let key2 = local_block_structure_intern_key(12);
+        let base_charge = charged_block_structure_intern_key_bytes(&key0);
+        let charges = [base_charge, base_charge + 1, base_charge + 2];
+        let budget = charges[1].saturating_add(charges[2]);
+        let mut table = BlockStructureInternTable::new(3, budget, charges[2]);
+
+        let _content0 = local_block_structure_intern(&mut table, key0.clone(), charges[0]);
+        let _content1 = local_block_structure_intern(&mut table, key1.clone(), charges[1]);
+        assert_eq!(
+            table.info().charged_key_bytes(),
+            charges[0].saturating_add(charges[1])
+        );
+        assert_eq!(table.info().pressure_evictions(), 0);
+        assert!(table.lookup(&key0).is_some());
+
+        let _content2 = local_block_structure_intern(&mut table, key2.clone(), charges[2]);
+        assert!(table.lookup(&key0).is_none());
+        assert!(table.lookup(&key1).is_some());
+        assert!(table.lookup(&key2).is_some());
+        assert_eq!(table.info().charged_key_bytes(), budget);
+        assert_eq!(table.info().pressure_evictions(), 1);
+    }
+
+    #[test]
+    fn block_structure_intern_bypasses_oversized_and_saturated_charges() {
+        // What: oversized and saturated charges return complete content but
+        // never consume an entry or charged-byte budget.
+        let oversized_key = local_block_structure_intern_key(20);
+        let saturated_key = local_block_structure_intern_key(21);
+        let charge = charged_block_structure_intern_key_bytes(&oversized_key);
+        let mut oversized_table = BlockStructureInternTable::new(2, charge, charge - 1);
+
+        let oversized =
+            local_block_structure_intern(&mut oversized_table, oversized_key.clone(), charge);
+        assert_eq!(oversized.rank(), oversized_key.rank);
+        assert_eq!(oversized.blocks(), oversized_key.blocks.as_ref());
+        assert!(oversized_table.lookup(&oversized_key).is_none());
+        assert_eq!(oversized_table.info().oversized_admission_bypasses(), 1);
+
+        let mut saturated_table = BlockStructureInternTable::new(2, usize::MAX, usize::MAX);
+        let saturated = local_block_structure_intern(
+            &mut saturated_table,
+            saturated_key.clone(),
+            usize::MAX,
+        );
+        assert_eq!(saturated.rank(), saturated_key.rank);
+        assert_eq!(saturated.blocks(), saturated_key.blocks.as_ref());
+        assert!(saturated_table.lookup(&saturated_key).is_none());
+
+        let info = saturated_table.info();
+        assert_eq!(info.entries(), 0);
+        assert_eq!(info.charged_key_bytes(), 0);
+        assert_eq!(info.oversized_admission_bypasses(), 1);
+    }
+
+    #[test]
+    fn block_structure_intern_dead_replacement_preserves_fifo_accounting() {
+        // What: replacing a dead Weak changes only its content epoch; entry
+        // count, charge, counters, and oldest-first eviction order stay fixed.
+        let key0 = local_block_structure_intern_key(30);
+        let key1 = local_block_structure_intern_key(31);
+        let key2 = local_block_structure_intern_key(32);
+        let charge = charged_block_structure_intern_key_bytes(&key0);
+        let mut table = BlockStructureInternTable::new(
+            2,
+            charge.saturating_mul(2),
+            charge,
+        );
+
+        let content0 = local_block_structure_intern(&mut table, key0.clone(), charge);
+        let id0 = content0.id();
+        let _content1 = local_block_structure_intern(&mut table, key1.clone(), charge);
+        let before = table.info();
+        drop(content0);
+        assert!(table.lookup(&key0).is_none());
+
+        let replacement = local_block_structure_intern(&mut table, key0.clone(), charge);
+        assert!(replacement.id() > id0);
+        assert_eq!(table.info(), before);
+
+        let _content2 = local_block_structure_intern(&mut table, key2.clone(), charge);
+        assert!(table.lookup(&key0).is_none());
+        assert!(table.lookup(&key1).is_some());
+        assert!(table.lookup(&key2).is_some());
+        assert_eq!(table.info().pressure_evictions(), 1);
+    }
+
+    #[test]
+    fn block_structure_intern_clear_resets_resources_and_counters() {
+        // What: clear releases every admitted key and resets byte, eviction,
+        // and bypass accounting while preserving configured limits.
+        let key0 = local_block_structure_intern_key(40);
+        let key1 = local_block_structure_intern_key(41);
+        let key2 = local_block_structure_intern_key(42);
+        let charge = charged_block_structure_intern_key_bytes(&key0);
+        let mut table = BlockStructureInternTable::new(1, charge, charge);
+        let _content0 = local_block_structure_intern(&mut table, key0, charge);
+        let _content1 = local_block_structure_intern(&mut table, key1, charge);
+        let _content2 = local_block_structure_intern(&mut table, key2, usize::MAX);
+        assert_eq!(table.info().pressure_evictions(), 1);
+        assert_eq!(table.info().oversized_admission_bypasses(), 1);
+
+        table.clear();
+
+        let info = table.info();
+        assert_eq!(info.entries(), 0);
+        assert_eq!(info.entry_capacity(), 1);
+        assert_eq!(info.charged_key_bytes(), 0);
+        assert_eq!(info.byte_budget(), charge);
+        assert_eq!(info.max_admitted_entry_bytes(), charge);
+        assert_eq!(info.pressure_evictions(), 0);
+        assert_eq!(info.oversized_admission_bypasses(), 0);
     }
 
     fn coupled_z2_matrix_structure() -> BlockStructure {
