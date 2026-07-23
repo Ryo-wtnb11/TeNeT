@@ -471,16 +471,12 @@ impl<C> TensorTraceFusionStructure<C> {
         )?;
         let terms =
             build_fusion_trace_terms(rule, &dst_structure, src, &axis_plan, dst_codomain_rank)?;
-        let dense_terms = terms
-            .iter()
-            .map(|term| TensorTraceStructureTerm {
-                key: BlockKey::from(term.dst_key.clone()),
-                dst_block: term.dst_block,
-                src_block: term.src_block,
-            })
-            .collect::<Vec<_>>();
-        let descriptor =
-            TensorTraceDescriptor::compile_oriented(&axis_plan, &dense_terms, &dst_structure, src)?;
+        let descriptor = TensorTraceDescriptor::compile_oriented(
+            &axis_plan,
+            terms.iter().map(|term| (term.dst_block, term.src_block)),
+            &dst_structure,
+            src,
+        )?;
         validate_destination_layouts_injective(
             &dst_structure,
             "tensor trace destination layouts overlap",
@@ -886,31 +882,41 @@ impl TensorTraceDescriptor {
         dst_structure: &BlockStructure,
         src_structure: &BlockStructure,
     ) -> Result<Self, OperationError> {
-        Self::compile_with_source_axis_map(axis_plan, terms, dst_structure, src_structure, |axis| {
-            axis
-        })
+        Self::compile_with_source_axis_map(
+            axis_plan,
+            terms
+                .iter()
+                .map(|term| (term.dst_block(), term.src_block())),
+            dst_structure,
+            src_structure,
+            |axis| axis,
+        )
     }
 
-    fn compile_oriented(
+    fn compile_oriented<I>(
         axis_plan: &TensorTraceAxisPlan,
-        terms: &[TensorTraceStructureTerm],
+        terms: I,
         dst_structure: &BlockStructure,
         src: OrientedTraceSource<'_>,
-    ) -> Result<Self, OperationError> {
+    ) -> Result<Self, OperationError>
+    where
+        I: ExactSizeIterator<Item = (usize, usize)>,
+    {
         Self::compile_with_source_axis_map(axis_plan, terms, dst_structure, src.structure, |axis| {
             src.logical_axis_to_storage(axis)
         })
     }
 
-    fn compile_with_source_axis_map<F>(
+    fn compile_with_source_axis_map<F, I>(
         axis_plan: &TensorTraceAxisPlan,
-        terms: &[TensorTraceStructureTerm],
+        terms: I,
         dst_structure: &BlockStructure,
         src_structure: &BlockStructure,
         source_axis: F,
     ) -> Result<Self, OperationError>
     where
         F: Fn(usize) -> usize,
+        I: ExactSizeIterator<Item = (usize, usize)>,
     {
         let mut descriptor = Self {
             source_conjugate: axis_plan.source_conjugate,
@@ -939,9 +945,9 @@ impl TensorTraceDescriptor {
             .destination_zero_strides
             .resize(dst_structure.rank(), 0);
 
-        for term in terms {
-            let dst_block = dst_structure.block(term.dst_block())?;
-            let src_block = src_structure.block(term.src_block())?;
+        for (dst_block_index, src_block_index) in terms {
+            let dst_block = dst_structure.block(dst_block_index)?;
+            let src_block = src_structure.block(src_block_index)?;
             let output_layout_start = descriptor.output_shape.len();
             for (dst_axis, &src_axis) in axis_plan.output_axes.iter().enumerate() {
                 let src_axis = source_axis(src_axis);
@@ -993,8 +999,8 @@ impl TensorTraceDescriptor {
             }
 
             descriptor.terms.push(TensorTraceDescriptorTerm {
-                dst_block: term.dst_block(),
-                src_block: term.src_block(),
+                dst_block: dst_block_index,
+                src_block: src_block_index,
                 output_layout_start,
                 trace_layout_start,
                 output_rank: axis_plan.output_axes.len(),

@@ -2390,11 +2390,17 @@ fn assert_trace_terms_match_scalar_oracle<R, C>(
         structure.terms().iter().zip(oracle)
     {
         // What: block lowering preserves scalar-path term identity and global
-        // source/destination order; only floating reduction may round differently.
+        // source/destination order, and the retained public destination key
+        // agrees with its destination block; only floating reduction may round differently.
         assert_eq!(actual.dst_key(), &dst_key);
         assert_eq!(actual.src_key(), &src_key);
         assert_eq!(actual.dst_block(), dst_block);
         assert_eq!(actual.src_block(), src_block);
+        let BlockKey::FusionTree(block_key) = dst.structure().block(dst_block).unwrap().key()
+        else {
+            panic!("fusion trace destination must use a fusion-tree block key");
+        };
+        assert_eq!(actual.dst_key(), block_key);
         assert!((actual.coefficient() - coefficient).abs() <= 1.0e-12 * (1.0 + coefficient.abs()));
     }
 }
