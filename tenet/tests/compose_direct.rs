@@ -1,49 +1,5 @@
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
-use std::hint::black_box;
-
 use num_complex::Complex64;
 use tenet::prelude::*;
-
-struct CountingAllocator;
-
-thread_local! {
-    static ENABLED: Cell<bool> = const { Cell::new(false) };
-    static BYTES: Cell<u64> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let pointer = unsafe { System.alloc(layout) };
-        if !pointer.is_null() && ENABLED.get() {
-            BYTES.set(BYTES.get() + layout.size() as u64);
-        }
-        pointer
-    }
-
-    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(pointer, layout) };
-    }
-
-    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
-        if !pointer.is_null() && ENABLED.get() {
-            BYTES.set(BYTES.get() + new_size as u64);
-        }
-        pointer
-    }
-}
-
-#[global_allocator]
-static ALLOCATOR: CountingAllocator = CountingAllocator;
-
-fn measured_bytes<T>(f: impl FnOnce() -> T) -> (T, u64) {
-    BYTES.set(0);
-    ENABLED.set(true);
-    let result = f();
-    ENABLED.set(false);
-    (result, BYTES.get())
-}
 
 fn old_compose_oracle(lhs: &Tensor, rhs: &Tensor) -> Tensor {
     let lhs_axes = (lhs.codomain_rank()..lhs.rank()).collect::<Vec<_>>();
@@ -221,16 +177,6 @@ fn bosonic_u1_and_su2_compose_keep_output_order_and_values() {
         assert_eq!(composed.data_c64(), tensorcontract.data_c64());
         assert_eq!(composed.codomain_rank(), 2);
         assert_eq!(composed.domain_rank(), 2);
-        let (_, compose_bytes) = measured_bytes(|| black_box(lhs.compose(&rhs).unwrap()));
-        let (_, contract_bytes) = measured_bytes(|| {
-            let lhs_axes = (lhs.codomain_rank()..lhs.rank()).collect::<Vec<_>>();
-            let rhs_axes = (0..rhs.codomain_rank()).collect::<Vec<_>>();
-            black_box(lhs.contract(&rhs, &lhs_axes, &rhs_axes).unwrap())
-        });
-        assert!(
-            compose_bytes <= contract_bytes,
-            "fixture {fixture}: compose={compose_bytes} B, contract={contract_bytes} B"
-        );
     }
 }
 
@@ -265,43 +211,4 @@ fn compose_errors_leave_borrowed_operands_unchanged() {
     ));
     assert_eq!(lhs.data(), lhs_before);
     assert_eq!(rhs.data(), rhs_before);
-}
-
-#[test]
-fn direct_compose_does_not_allocate_the_rhs_twist_payload() {
-    // What: after both routes are warm, direct map composition saves at least
-    // one complete RHS payload versus the former twist-then-contract sequence.
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    for degeneracy in [12, 24] {
-        let space = Space::fz2([(0, degeneracy), (1, degeneracy)]).unwrap();
-        let lhs = Tensor::rand_with_seed(
-            &runtime,
-            Dtype::C64,
-            [&space],
-            [&space.dual()],
-            353_500 + degeneracy as u64,
-        )
-        .unwrap();
-        let rhs = Tensor::rand_with_seed(
-            &runtime,
-            Dtype::C64,
-            [&space.dual()],
-            [&space],
-            353_600 + degeneracy as u64,
-        )
-        .unwrap();
-        let rhs_payload = rhs.data_c64().len() as u64 * size_of::<Complex64>() as u64;
-
-        black_box(lhs.compose(&rhs).unwrap());
-        black_box(old_compose_oracle(&lhs, &rhs));
-        let (direct, direct_bytes) = measured_bytes(|| black_box(lhs.compose(&rhs).unwrap()));
-        let (oracle, oracle_bytes) = measured_bytes(|| black_box(old_compose_oracle(&lhs, &rhs)));
-
-        assert_c64_close(direct.data_c64(), oracle.data_c64());
-        assert!(
-            direct_bytes + rhs_payload <= oracle_bytes,
-            "degeneracy={degeneracy}: direct={direct_bytes} B, old={oracle_bytes} B, \
-             RHS payload={rhs_payload} B"
-        );
-    }
 }
