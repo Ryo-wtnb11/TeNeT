@@ -8,7 +8,7 @@ use tenet_core::{
     FusionSpaceAdmission, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
     FusionTreePairKey, FusionTreePairOrientation, LoweredFusionTreeBuildError,
     LoweredMultiplicityFreeAlgebra, MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols,
-    OrientedFusionTreeHomSpace, PreparedLoweredFusionTreeLayout, SectorLeg,
+    OrientedFusionTreeHomSpace, PreparedFusionTreeLayout, SectorLeg,
     StructurallyValidatedFusionTreeSubset,
 };
 
@@ -18,7 +18,8 @@ use tenet_operations::{OutputAxisOrder, TensorContractSpec};
 #[derive(Debug)]
 pub(crate) enum PreparedLayoutKeys {
     Encoded,
-    Lowered(PreparedLoweredFusionTreeLayout),
+    Staged(PreparedFusionTreeLayout),
+    Lowered(PreparedFusionTreeLayout),
 }
 
 impl PreparedLayoutKeys {
@@ -31,17 +32,22 @@ impl PreparedLayoutKeys {
         R: MultiplicityFreeFusionRule,
     {
         match self {
+            Self::Staged(prepared) | Self::Lowered(prepared) => prepared.keys_arc(),
             Self::Encoded => homspace.fusion_tree_keys(rule),
-            Self::Lowered(prepared) => prepared.keys_arc(),
         }
     }
 
     fn commit(self) {
-        if let Self::Lowered(prepared) = self {
-            #[cfg(test)]
-            LOWERED_LAYOUT_COMMITS.set(LOWERED_LAYOUT_COMMITS.get() + 1);
-            prepared.commit();
-        }
+        let prepared = match self {
+            Self::Staged(prepared) => prepared,
+            Self::Lowered(prepared) => {
+                #[cfg(test)]
+                LOWERED_LAYOUT_COMMITS.set(LOWERED_LAYOUT_COMMITS.get() + 1);
+                prepared
+            }
+            Self::Encoded => return,
+        };
+        prepared.commit();
     }
 }
 
@@ -1794,8 +1800,10 @@ impl DynamicFusionMapSpace {
         Shapes: IntoIterator,
         Shapes::Item: Into<Vec<usize>>,
     {
-        Self::from_degeneracy_shapes_with_key_builder(rule, homspace, shapes, |_, _| {
-            Ok(PreparedLayoutKeys::Encoded)
+        Self::from_degeneracy_shapes_with_key_builder(rule, homspace, shapes, |rule, homspace| {
+            Ok(PreparedLayoutKeys::Staged(
+                homspace.prepare_fusion_tree_layout(rule),
+            ))
         })
     }
 
@@ -1833,7 +1841,7 @@ impl DynamicFusionMapSpace {
             .validate_degeneracy_shapes(&keys, &shapes)
             .map_err(OperationError::from_core_preserving_context)?;
         let subblock_structure = match prepared {
-            PreparedLayoutKeys::Lowered(prepared) => {
+            PreparedLayoutKeys::Staged(prepared) | PreparedLayoutKeys::Lowered(prepared) => {
                 let structure = prepared
                     .build_complete_from_leg_degeneracies(&homspace)
                     .map_err(OperationError::from_core_preserving_context)?;
@@ -3035,6 +3043,7 @@ mod lowered_metadata_tests {
     use crate::test_support::CACHE_TEST_LOCK;
     use std::cell::Cell;
     use tenet_core::{
+        complete_hom_space_structure_cache_info, fusion_tree_layout_cache_info,
         FermionParityFusionRule, FusionAlgebraError, FusionProductSpace, Fz2SectorLayout,
         PackedProductCodec, ProductFusionRule, ProductSectorCodec, ProductSectorLayout,
         SU2FusionRule, SU2Irrep, SectorId, SectorLeg, Su2SectorLayout, U1FusionRule, U1Irrep,
@@ -3772,6 +3781,199 @@ mod lowered_metadata_tests {
             })
         );
         assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn encoded_cold_invalid_count_does_not_publish_layouts() {
+        // What: an invalid explicit encoded U1 shape count leaves both staged
+        // process-global cache snapshots unchanged before any layout commit.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let homspace =
+            FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
+        let before = (
+            fusion_tree_layout_cache_info(),
+            complete_hom_space_structure_cache_info(),
+        );
+
+        let error = DynamicFusionMapSpace::from_degeneracy_shapes(
+            &U1FusionRule,
+            homspace,
+            Vec::<Vec<usize>>::new(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            OperationError::Core(CoreError::BlockCountMismatch {
+                expected: 1,
+                actual: 0,
+            })
+        );
+        assert_eq!(
+            (
+                fusion_tree_layout_cache_info(),
+                complete_hom_space_structure_cache_info(),
+            ),
+            before
+        );
+    }
+
+    #[test]
+    fn encoded_existing_candidate_invalid_shape_does_not_publish_again() {
+        // What: an already committed encoded U1 candidate remains
+        // observationally unchanged when a later explicit shape is invalid.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let homspace =
+            FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
+        DynamicFusionMapSpace::from_degeneracy_shapes(
+            &U1FusionRule,
+            homspace.clone(),
+            [Vec::<usize>::new()],
+        )
+        .unwrap();
+        let before = (
+            fusion_tree_layout_cache_info(),
+            complete_hom_space_structure_cache_info(),
+        );
+
+        let error =
+            DynamicFusionMapSpace::from_degeneracy_shapes(&U1FusionRule, homspace, [vec![1]])
+                .unwrap_err();
+
+        assert_eq!(
+            error,
+            OperationError::Core(CoreError::StructureRankMismatch {
+                expected: 0,
+                actual: 1,
+            })
+        );
+        assert_eq!(
+            (
+                fusion_tree_layout_cache_info(),
+                complete_hom_space_structure_cache_info(),
+            ),
+            before
+        );
+    }
+
+    #[test]
+    fn encoded_cold_extent_overflow_does_not_publish_layouts() {
+        // What: a valid explicit U1 shape whose final extent overflows leaves
+        // both staged cache snapshots unchanged before any layout commit.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let vacuum = U1Irrep::new(0).sector_id();
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(vacuum, usize::MAX)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(vacuum, 2)], false)]),
+        );
+        let before = (
+            fusion_tree_layout_cache_info(),
+            complete_hom_space_structure_cache_info(),
+        );
+
+        let error = DynamicFusionMapSpace::from_degeneracy_shapes(
+            &U1FusionRule,
+            homspace,
+            [vec![usize::MAX, 2]],
+        )
+        .unwrap_err();
+
+        assert_eq!(error, OperationError::Core(CoreError::ElementCountOverflow));
+        assert_eq!(
+            (
+                fusion_tree_layout_cache_info(),
+                complete_hom_space_structure_cache_info(),
+            ),
+            before
+        );
+    }
+
+    #[test]
+    fn encoded_and_lowered_explicit_layouts_share_checked_frozen_content() {
+        // What: checked encoded and lowered explicit constructors retain exact
+        // block order, shape, stride, offset, and storage length while one
+        // encoded transaction publishes the canonical frozen content once.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let rule = rule();
+        let homspace = homspace();
+        let shapes = shapes_from_tree_keys(&rule, &homspace);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+
+        let encoded =
+            DynamicFusionMapSpace::from_degeneracy_shapes(&rule, homspace.clone(), shapes.clone())
+                .unwrap();
+        let after_encoded = (
+            fusion_tree_layout_cache_info(),
+            complete_hom_space_structure_cache_info(),
+        );
+        assert_eq!(after_encoded.0.entries(), 1);
+        assert_eq!(after_encoded.0.misses(), 1);
+        assert_eq!(after_encoded.1.admissions(), 1);
+
+        let lowered = DynamicFusionMapSpace::from_degeneracy_shapes_with_key_builder(
+            &rule,
+            homspace,
+            shapes,
+            |rule, homspace| lowered_layout_primer(rule, homspace),
+        )
+        .unwrap();
+
+        assert_eq!(layout_snapshot(&encoded), layout_snapshot(&lowered));
+        assert_eq!(encoded.required_len(), lowered.required_len());
+        assert_eq!(
+            complete_hom_space_structure_cache_info().admissions(),
+            after_encoded.1.admissions()
+        );
+    }
+
+    #[test]
+    fn encoded_explicit_u1_and_su2_complete_layouts_are_valid() {
+        // What: the staged explicit path accepts canonical U1 and SU2
+        // multiplicity-free storage layouts; the product case is covered by
+        // the encoded/lowered layout oracle above.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::reset_global_operation_caches();
+        tenet_core::reset_core_intern_tables();
+        let u1_vacuum = U1Irrep::new(0).sector_id();
+        let u1 = DynamicFusionMapSpace::from_degeneracy_shapes(
+            &U1FusionRule,
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([SectorLeg::new([(u1_vacuum, 2)], false)]),
+                FusionProductSpace::new([SectorLeg::new([(u1_vacuum, 3)], false)]),
+            ),
+            [vec![2, 3]],
+        )
+        .unwrap();
+        let su2_vacuum = SU2Irrep::from_twice_spin(0).sector_id();
+        let su2 = DynamicFusionMapSpace::from_degeneracy_shapes(
+            &SU2FusionRule,
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([SectorLeg::new([(su2_vacuum, 2)], false)]),
+                FusionProductSpace::new([SectorLeg::new([(su2_vacuum, 3)], false)]),
+            ),
+            [vec![2, 3]],
+        )
+        .unwrap();
+
+        assert_eq!(u1.required_len(), Ok(6));
+        assert_eq!(su2.required_len(), Ok(6));
     }
 
     #[test]

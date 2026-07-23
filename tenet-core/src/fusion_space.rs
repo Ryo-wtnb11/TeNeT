@@ -450,7 +450,7 @@ struct FusionTreeHomSpaceLayout {
 }
 
 #[derive(Debug)]
-enum PreparedLoweredFusionTreeLayoutState {
+enum PreparedFusionTreeLayoutState {
     Cached {
         key: FusionTreeHomSpaceCacheKey,
         layout: Arc<FusionTreeHomSpaceLayout>,
@@ -468,22 +468,22 @@ enum PreparedLoweredFusionTreeLayoutState {
 /// work succeeds.
 #[doc(hidden)]
 #[derive(Debug)]
-pub struct PreparedLoweredFusionTreeLayout {
-    state: PreparedLoweredFusionTreeLayoutState,
+pub struct PreparedFusionTreeLayout {
+    state: PreparedFusionTreeLayoutState,
 }
 
-impl PreparedLoweredFusionTreeLayout {
+impl PreparedFusionTreeLayout {
     fn cache_key(&self) -> &FusionTreeHomSpaceCacheKey {
         match &self.state {
-            PreparedLoweredFusionTreeLayoutState::Cached { key, .. }
-            | PreparedLoweredFusionTreeLayoutState::Cold { key, .. } => key,
+            PreparedFusionTreeLayoutState::Cached { key, .. }
+            | PreparedFusionTreeLayoutState::Cold { key, .. } => key,
         }
     }
 
     fn layout_data(&self) -> &FusionTreeHomSpaceLayoutData {
         match &self.state {
-            PreparedLoweredFusionTreeLayoutState::Cached { layout, .. } => layout,
-            PreparedLoweredFusionTreeLayoutState::Cold { data, .. } => data,
+            PreparedFusionTreeLayoutState::Cached { layout, .. } => layout,
+            PreparedFusionTreeLayoutState::Cold { data, .. } => data,
         }
     }
 
@@ -501,15 +501,15 @@ impl PreparedLoweredFusionTreeLayout {
 
     pub fn keys(&self) -> &[FusionTreePairKey] {
         match &self.state {
-            PreparedLoweredFusionTreeLayoutState::Cached { layout, .. } => layout.keys.as_ref(),
-            PreparedLoweredFusionTreeLayoutState::Cold { data, .. } => data.keys.as_ref(),
+            PreparedFusionTreeLayoutState::Cached { layout, .. } => layout.keys.as_ref(),
+            PreparedFusionTreeLayoutState::Cold { data, .. } => data.keys.as_ref(),
         }
     }
 
     pub fn keys_arc(&self) -> Arc<[FusionTreePairKey]> {
         match &self.state {
-            PreparedLoweredFusionTreeLayoutState::Cached { layout, .. } => Arc::clone(&layout.keys),
-            PreparedLoweredFusionTreeLayoutState::Cold { data, .. } => Arc::clone(&data.keys),
+            PreparedFusionTreeLayoutState::Cached { layout, .. } => Arc::clone(&layout.keys),
+            PreparedFusionTreeLayoutState::Cold { data, .. } => Arc::clone(&data.keys),
         }
     }
 
@@ -570,34 +570,36 @@ impl PreparedLoweredFusionTreeLayout {
     /// completed in `prepare`; the remaining cache race check, monotonic ID,
     /// and bounded admission are process-local publication only.
     pub fn commit(self) -> Arc<[FusionTreePairKey]> {
+        Arc::clone(&self.commit_layout().keys)
+    }
+
+    fn commit_layout(self) -> Arc<FusionTreeHomSpaceLayout> {
         match self.state {
-            PreparedLoweredFusionTreeLayoutState::Cached { key, layout } => {
+            PreparedFusionTreeLayoutState::Cached { key, layout } => {
                 let cache = fusion_tree_layout_cache();
                 let mut write = cache
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(existing) = write.lookup(&key) {
-                    return Arc::clone(&existing.keys);
+                    return existing;
                 }
                 let charged_bytes = charged_fusion_tree_layout_bytes(&key, &layout);
-                let admitted = write.admit(Arc::new(key), layout, charged_bytes);
-                Arc::clone(&admitted.keys)
+                write.admit(Arc::new(key), layout, charged_bytes)
             }
-            PreparedLoweredFusionTreeLayoutState::Cold { key, data } => {
+            PreparedFusionTreeLayoutState::Cold { key, data } => {
                 let cache = fusion_tree_layout_cache();
                 let mut write = cache
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(existing) = write.lookup(&key) {
-                    return Arc::clone(&existing.keys);
+                    return existing;
                 }
                 let computed = Arc::new(FusionTreeHomSpaceLayout {
                     id: next_fusion_tree_layout_id(),
                     data,
                 });
                 let charged_bytes = charged_fusion_tree_layout_bytes(&key, &computed);
-                let admitted = write.admit(Arc::new(key), computed, charged_bytes);
-                Arc::clone(&admitted.keys)
+                write.admit(Arc::new(key), computed, charged_bytes)
             }
         }
     }
@@ -1679,6 +1681,7 @@ fn reset_hom_space_intern_table() {
     }
 }
 
+#[cfg(test)]
 fn fusion_tree_layout_from_data(
     id: FusionTreeLayoutId,
     data: FusionTreeHomSpaceLayoutData,
@@ -2136,15 +2139,41 @@ impl FusionTreeHomSpace {
         Ok(self.prepare_fusion_tree_layout_lowered(rule)?.commit())
     }
 
+    /// Stages multiplicity-free layout metadata without publishing it.
+    #[doc(hidden)]
+    pub fn prepare_fusion_tree_layout<R>(&self, rule: &R) -> PreparedFusionTreeLayout
+    where
+        R: MultiplicityFreeFusionRule,
+    {
+        self.prepare_fusion_tree_layout_with(rule, || {
+            Ok::<_, std::convert::Infallible>(self.fusion_tree_layout_data_uncached(rule))
+        })
+        .unwrap_or_else(|error| match error {})
+    }
+
     /// Stages checked keys and coupled-sector metadata without issuing a
     /// layout ID or changing cache admission/accounting.
     #[doc(hidden)]
     pub fn prepare_fusion_tree_layout_lowered<R>(
         &self,
         rule: &R,
-    ) -> Result<PreparedLoweredFusionTreeLayout, LoweredFusionTreeBuildError>
+    ) -> Result<PreparedFusionTreeLayout, LoweredFusionTreeBuildError>
     where
         R: LoweredMultiplicityFreeAlgebra,
+    {
+        self.prepare_fusion_tree_layout_with(rule, || {
+            self.try_fusion_tree_layout_data_uncached_lowered(rule)
+        })
+    }
+
+    fn prepare_fusion_tree_layout_with<R, E, F>(
+        &self,
+        rule: &R,
+        build: F,
+    ) -> Result<PreparedFusionTreeLayout, E>
+    where
+        R: MultiplicityFreeFusionRule,
+        F: FnOnce() -> Result<FusionTreeHomSpaceLayoutData, E>,
     {
         let key = FusionTreeHomSpaceCacheKey::new(rule, self);
         let cache = fusion_tree_layout_cache();
@@ -2152,15 +2181,15 @@ impl FusionTreeHomSpace {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(layout) = read.lookup(&key) {
-            return Ok(PreparedLoweredFusionTreeLayout {
-                state: PreparedLoweredFusionTreeLayoutState::Cached { key, layout },
+            return Ok(PreparedFusionTreeLayout {
+                state: PreparedFusionTreeLayoutState::Cached { key, layout },
             });
         }
         drop(read);
 
-        let data = self.try_fusion_tree_layout_data_uncached_lowered(rule)?;
-        Ok(PreparedLoweredFusionTreeLayout {
-            state: PreparedLoweredFusionTreeLayoutState::Cold {
+        let data = build()?;
+        Ok(PreparedFusionTreeLayout {
+            state: PreparedFusionTreeLayoutState::Cold {
                 key,
                 data,
             },
@@ -2192,10 +2221,7 @@ impl FusionTreeHomSpace {
     where
         R: MultiplicityFreeFusionRule,
     {
-        self.try_cached_fusion_tree_layout_with(rule, || {
-            Ok::<_, std::convert::Infallible>(self.fusion_tree_layout_data_uncached(rule))
-        })
-        .unwrap_or_else(|error| match error {})
+        self.prepare_fusion_tree_layout(rule).commit_layout()
     }
 
     #[cfg(test)]
@@ -2206,47 +2232,7 @@ impl FusionTreeHomSpace {
     where
         R: LoweredMultiplicityFreeAlgebra,
     {
-        self.prepare_fusion_tree_layout_lowered(rule)?.commit();
-        let key = FusionTreeHomSpaceCacheKey::new(rule, self);
-        let cache = fusion_tree_layout_cache();
-        let read = cache
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Ok(read
-            .lookup(&key)
-            .expect("committed lowered layout must be cache-resident"))
-    }
-
-    fn try_cached_fusion_tree_layout_with<R, E, F>(
-        &self,
-        rule: &R,
-        build: F,
-    ) -> Result<Arc<FusionTreeHomSpaceLayout>, E>
-    where
-        R: MultiplicityFreeFusionRule,
-        F: FnOnce() -> Result<FusionTreeHomSpaceLayoutData, E>,
-    {
-        let key = FusionTreeHomSpaceCacheKey::new(rule, self);
-        let cache = fusion_tree_layout_cache();
-        let read = cache
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(layout) = read.lookup(&key) {
-            return Ok(layout);
-        }
-        drop(read);
-
-        let key = Arc::new(key);
-        let data = build()?;
-        let computed = Arc::new(fusion_tree_layout_from_data(
-            next_fusion_tree_layout_id(),
-            data,
-        ));
-        let charged_bytes = charged_fusion_tree_layout_bytes(&key, &computed);
-        let mut write = cache
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Ok(write.admit(key, computed, charged_bytes))
+        Ok(self.prepare_fusion_tree_layout_lowered(rule)?.commit_layout())
     }
 
     pub fn coupled_subblock_structure<R, Shapes>(
