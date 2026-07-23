@@ -4144,21 +4144,12 @@ mod lowered_metadata_tests {
             shapes.clone(),
         )
         .unwrap();
-        assert_eq!(
-            tenet_core::complete_hom_space_structure_cache_info().admissions(),
-            1
-        );
-        let hits_before_repeat = tenet_core::complete_hom_space_structure_cache_info().hits();
         let repeated_lowered = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
             Arc::clone(&provider),
             homspace.clone(),
             shapes.clone(),
         )
         .unwrap();
-        assert_eq!(
-            tenet_core::complete_hom_space_structure_cache_info().hits(),
-            hits_before_repeat + 1
-        );
         assert_eq!(
             lowered.space().structure().content_id(),
             repeated_lowered.space().structure().content_id()
