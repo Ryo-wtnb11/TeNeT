@@ -16821,6 +16821,27 @@ mod tests {
     }
 
     #[test]
+    fn hom_space_clone_shares_content_but_not_unpublished_id_state() {
+        // What: cloning reuses immutable HomSpace data while each handle keeps
+        // its own lazy identity publication snapshot.
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([u1_leg(1, 2, false)]),
+            FusionProductSpace::new([u1_leg(-1, 3, true)]),
+        );
+        let before_id = hom.clone();
+
+        assert!(Arc::ptr_eq(&hom.content, &before_id.content));
+        assert!(before_id.existing_id().is_none());
+
+        let id = hom.id();
+        assert!(before_id.existing_id().is_none());
+
+        let after_id = hom.clone();
+        assert!(Arc::ptr_eq(&hom.content, &after_id.content));
+        assert_eq!(after_id.existing_id(), Some(id));
+    }
+
+    #[test]
     fn hom_space_id_separates_dual_flip() {
         // Rank-1 duality analog of the #119 regression: flipping one leg's dual
         // bit must not alias, on either the codomain or the domain side.

@@ -119,16 +119,40 @@ impl FusionProductSpace {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct FusionTreeHomSpace {
+#[derive(Debug)]
+struct FusionTreeHomSpaceContent {
     codomain: FusionProductSpace,
     domain: FusionProductSpace,
+}
+
+pub struct FusionTreeHomSpace {
+    content: Arc<FusionTreeHomSpaceContent>,
     id: OnceLock<HomSpaceId>,
+}
+
+impl std::fmt::Debug for FusionTreeHomSpace {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FusionTreeHomSpace")
+            .field("codomain", &self.content.codomain)
+            .field("domain", &self.content.domain)
+            .field("id", &self.id)
+            .finish()
+    }
+}
+
+impl Clone for FusionTreeHomSpace {
+    fn clone(&self) -> Self {
+        Self {
+            content: Arc::clone(&self.content),
+            id: self.id.clone(),
+        }
+    }
 }
 
 impl PartialEq for FusionTreeHomSpace {
     fn eq(&self, other: &Self) -> bool {
-        self.codomain == other.codomain && self.domain == other.domain
+        self.content.codomain == other.content.codomain && self.content.domain == other.content.domain
     }
 }
 
@@ -136,8 +160,8 @@ impl Eq for FusionTreeHomSpace {}
 
 impl std::hash::Hash for FusionTreeHomSpace {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.codomain.hash(state);
-        self.domain.hash(state);
+        self.content.codomain.hash(state);
+        self.content.domain.hash(state);
     }
 }
 
@@ -181,20 +205,20 @@ impl<'homspace, 'structure>
 
             validate_fusion_tree_key_shape(codomain_tree)?;
             validate_fusion_tree_key_shape(domain_tree)?;
-            if codomain_tree.uncoupled().len() != homspace.codomain.len()
-                || domain_tree.uncoupled().len() != homspace.domain.len()
+            if codomain_tree.uncoupled().len() != homspace.codomain().len()
+                || domain_tree.uncoupled().len() != homspace.domain().len()
             {
                 return Err(CoreError::FusionSpaceSplitMismatch {
-                    expected_nout: homspace.codomain.len(),
-                    expected_nin: homspace.domain.len(),
+                    expected_nout: homspace.codomain().len(),
+                    expected_nin: homspace.domain().len(),
                     actual_nout: codomain_tree.uncoupled().len(),
                     actual_nin: domain_tree.uncoupled().len(),
                 });
             }
 
             for (space, tree) in [
-                (&homspace.codomain, codomain_tree),
-                (&homspace.domain, domain_tree),
+                (homspace.codomain(), codomain_tree),
+                (homspace.domain(), domain_tree),
             ] {
                 for (leg, &sector) in space.legs().iter().zip(tree.uncoupled()) {
                     if leg.degeneracy(sector).is_none() {
@@ -212,10 +236,10 @@ impl<'homspace, 'structure>
                 }
             }
 
-            let (codomain_shape, domain_shape) = block.shape().split_at(homspace.codomain.len());
+            let (codomain_shape, domain_shape) = block.shape().split_at(homspace.codomain().len());
             for (space, tree, shape) in [
-                (&homspace.codomain, codomain_tree, codomain_shape),
-                (&homspace.domain, domain_tree, domain_shape),
+                (homspace.codomain(), codomain_tree, codomain_shape),
+                (homspace.domain(), domain_tree, domain_shape),
             ] {
                 for ((leg, &sector), &actual) in
                     space.legs().iter().zip(tree.uncoupled()).zip(shape)
@@ -1262,14 +1286,14 @@ impl<'a> OrientedFusionTreeHomSpace<'a> {
     fn external_axis_leg_view(self, axis: usize) -> Option<OrientedLegView<'a>> {
         match self.orientation {
             FusionTreePairOrientation::Direct => {
-                if axis < self.source.codomain.len() {
+                if axis < self.source.codomain().len() {
                     Some(OrientedLegView::borrowed(
-                        &self.source.codomain.legs()[axis],
+                        &self.source.codomain().legs()[axis],
                     ))
                 } else if axis < self.source.rank() {
                     Some(
                         OrientedLegView::borrowed(
-                            &self.source.domain.legs()[axis - self.source.codomain.len()],
+                            &self.source.domain().legs()[axis - self.source.codomain().len()],
                         )
                         .toggled(),
                     )
@@ -1278,14 +1302,14 @@ impl<'a> OrientedFusionTreeHomSpace<'a> {
                 }
             }
             FusionTreePairOrientation::Adjoint => {
-                if axis < self.source.domain.len() {
+                if axis < self.source.domain().len() {
                     Some(OrientedLegView::borrowed(
-                        &self.source.domain.legs()[axis],
+                        &self.source.domain().legs()[axis],
                     ))
                 } else if axis < self.source.rank() {
                     Some(
                         OrientedLegView::borrowed(
-                            &self.source.codomain.legs()[axis - self.source.domain.len()],
+                            &self.source.codomain().legs()[axis - self.source.domain().len()],
                         )
                         .toggled(),
                     )
@@ -1538,8 +1562,7 @@ impl FusionTreeHomSpace {
     /// ```
     pub fn new(codomain: FusionProductSpace, domain: FusionProductSpace) -> Self {
         Self {
-            codomain,
-            domain,
+            content: Arc::new(FusionTreeHomSpaceContent { codomain, domain }),
             id: OnceLock::new(),
         }
     }
@@ -1608,17 +1631,17 @@ impl FusionTreeHomSpace {
 
     #[inline]
     pub fn codomain(&self) -> &FusionProductSpace {
-        &self.codomain
+        &self.content.codomain
     }
 
     #[inline]
     pub fn domain(&self) -> &FusionProductSpace {
-        &self.domain
+        &self.content.domain
     }
 
     #[inline]
     pub fn rank(&self) -> usize {
-        self.codomain.len() + self.domain.len()
+        self.content.codomain.len() + self.content.domain.len()
     }
 
     /// Lazily assigned collision-safe process-local semantic identity.
@@ -1626,7 +1649,7 @@ impl FusionTreeHomSpace {
     #[inline]
     pub fn id(&self) -> HomSpaceId {
         self.id
-            .get_or_init(|| intern_hom_space(&self.codomain, &self.domain))
+            .get_or_init(|| intern_hom_space(&self.content.codomain, &self.content.domain))
             .clone()
     }
 
@@ -1723,21 +1746,21 @@ impl FusionTreeHomSpace {
     where
         R: FusionRule,
     {
-        if lhs.domain.len() != rhs.codomain.len() {
+        if lhs.domain().len() != rhs.codomain().len() {
             return Err(CoreError::DimensionMismatch {
-                expected: lhs.domain.len(),
-                actual: rhs.codomain.len(),
+                expected: lhs.domain().len(),
+                actual: rhs.codomain().len(),
             });
         }
-        for (lhs_domain, rhs_codomain) in lhs.domain.legs().iter().zip(rhs.codomain.legs()) {
+        for (lhs_domain, rhs_codomain) in lhs.domain().legs().iter().zip(rhs.codomain().legs()) {
             validate_composed_leg(lhs_domain, rhs_codomain)?;
         }
         let descriptor = HomSpaceDescriptor::new(
-            lhs.codomain
+            lhs.codomain()
                 .legs()
                 .iter()
                 .map(OrientedLegView::borrowed),
-            rhs.domain.legs().iter().map(OrientedLegView::borrowed),
+            rhs.domain().legs().iter().map(OrientedLegView::borrowed),
         );
         Ok(descriptor.materialize(rule))
     }
@@ -2056,8 +2079,8 @@ impl FusionTreeHomSpace {
         key: &FusionTreePairKey,
     ) -> Result<DimVec, CoreError> {
         let rank = self.rank();
-        if key.codomain_uncoupled().len() != self.codomain.len()
-            || key.domain_uncoupled().len() != self.domain.len()
+        if key.codomain_uncoupled().len() != self.codomain().len()
+            || key.domain_uncoupled().len() != self.domain().len()
         {
             return Err(CoreError::StructureRankMismatch {
                 expected: rank,
@@ -2066,10 +2089,10 @@ impl FusionTreeHomSpace {
         }
         let mut shape = DimVec::new();
         for (leg, &sector) in self
-            .codomain
+            .codomain()
             .legs()
             .iter()
-            .chain(self.domain.legs())
+            .chain(self.domain().legs())
             .zip(
                 key.codomain_uncoupled()
                     .iter()
@@ -2091,8 +2114,8 @@ impl FusionTreeHomSpace {
     where
         R: MultiplicityFreeFusionRule,
     {
-        let codomain = fusion_trees_by_coupled_for_space(rule, &self.codomain);
-        let domain = fusion_trees_by_coupled_for_space(rule, &self.domain);
+        let codomain = fusion_trees_by_coupled_for_space(rule, self.codomain());
+        let domain = fusion_trees_by_coupled_for_space(rule, self.domain());
         let mut keys = Vec::new();
         let mut codomain_index = 0usize;
         let mut domain_index = 0usize;
@@ -2124,8 +2147,8 @@ impl FusionTreeHomSpace {
     where
         R: MultiplicityFreeFusionRule,
     {
-        let codomain = fusion_trees_by_coupled_for_space(rule, &self.codomain);
-        let domain = fusion_trees_by_coupled_for_space(rule, &self.domain);
+        let codomain = fusion_trees_by_coupled_for_space(rule, self.codomain());
+        let domain = fusion_trees_by_coupled_for_space(rule, self.domain());
         fusion_tree_layout_data_from_groups(&codomain, &domain)
     }
 
@@ -2137,8 +2160,8 @@ impl FusionTreeHomSpace {
     where
         R: LoweredMultiplicityFreeAlgebra,
     {
-        let codomain = try_fusion_trees_by_coupled_for_space_lowered(rule, &self.codomain)?;
-        let domain = try_fusion_trees_by_coupled_for_space_lowered(rule, &self.domain)?;
+        let codomain = try_fusion_trees_by_coupled_for_space_lowered(rule, self.codomain())?;
+        let domain = try_fusion_trees_by_coupled_for_space_lowered(rule, self.domain())?;
         Ok(merge_generic_tree_groups(&codomain, &domain))
     }
 
@@ -2149,8 +2172,8 @@ impl FusionTreeHomSpace {
     where
         R: LoweredMultiplicityFreeAlgebra,
     {
-        let codomain = try_fusion_trees_by_coupled_for_space_lowered(rule, &self.codomain)?;
-        let domain = try_fusion_trees_by_coupled_for_space_lowered(rule, &self.domain)?;
+        let codomain = try_fusion_trees_by_coupled_for_space_lowered(rule, self.codomain())?;
+        let domain = try_fusion_trees_by_coupled_for_space_lowered(rule, self.domain())?;
         Ok(fusion_tree_layout_data_from_groups(&codomain, &domain))
     }
 
@@ -2186,8 +2209,8 @@ impl FusionTreeHomSpace {
         R: FusionRule,
     {
         let (codomain, codomain_fold) =
-            fusion_trees_by_coupled_for_space_generic(rule, &self.codomain);
-        let (domain, domain_fold) = fusion_trees_by_coupled_for_space_generic(rule, &self.domain);
+            fusion_trees_by_coupled_for_space_generic(rule, self.codomain());
+        let (domain, domain_fold) = fusion_trees_by_coupled_for_space_generic(rule, self.domain());
         for (side, fold) in [("codomain", &codomain_fold), ("domain", &domain_fold)] {
             if !fold.is_fully_clean() {
                 return Err(CoreError::FusionOutsideTable {
@@ -2213,8 +2236,8 @@ impl FusionTreeHomSpace {
         R: FusionRule,
     {
         let (codomain, codomain_fold) =
-            fusion_trees_by_coupled_for_space_generic(rule, &self.codomain);
-        let (domain, domain_fold) = fusion_trees_by_coupled_for_space_generic(rule, &self.domain);
+            fusion_trees_by_coupled_for_space_generic(rule, self.codomain());
+        let (domain, domain_fold) = fusion_trees_by_coupled_for_space_generic(rule, self.domain());
         for (side, fold) in [("codomain", &codomain_fold), ("domain", &domain_fold)] {
             if fold.poisoned || fold.tainted.contains(&coupled) {
                 return Err(CoreError::FusionOutsideTable {
@@ -2250,7 +2273,7 @@ impl FusionTreeHomSpace {
     where
         R: MultiplicityFreeFusionRule,
     {
-        let rank = self.codomain.len() + self.domain.len();
+        let rank = self.codomain().len() + self.domain().len();
         // `from_keys` builds owned `BlockKey`s, so cloning out of the shared
         // slice is unavoidable here (a cold structure-build path, not a hot loop).
         SectorStructure::from_keys(rank, self.fusion_tree_keys(rule).iter().cloned())
@@ -2285,7 +2308,7 @@ impl FusionTreeHomSpace {
     where
         R: MultiplicityFreeFusionRule,
     {
-        let rank = self.codomain.len() + self.domain.len();
+        let rank = self.codomain().len() + self.domain().len();
         if sectors.len() != rank {
             return Err(CoreError::DimensionMismatch {
                 expected: rank,
@@ -2295,15 +2318,15 @@ impl FusionTreeHomSpace {
 
         let codomain = fusion_trees_by_coupled_for_selected_space(
             rule,
-            &self.codomain,
-            &sectors[..self.codomain.len()],
+            self.codomain(),
+            &sectors[..self.codomain().len()],
         )?;
-        let domain_sectors = sectors[self.codomain.len()..]
+        let domain_sectors = sectors[self.codomain().len()..]
             .iter()
             .map(|&sector| rule.dual(sector))
             .collect::<Vec<_>>();
         let domain =
-            fusion_trees_by_coupled_for_selected_space(rule, &self.domain, &domain_sectors)?;
+            fusion_trees_by_coupled_for_selected_space(rule, self.domain(), &domain_sectors)?;
         let mut keys = Vec::new();
         let mut codomain_index = 0usize;
         let mut domain_index = 0usize;
@@ -2345,10 +2368,10 @@ impl FusionTreeHomSpace {
         S: AsRef<[usize]>,
     {
         let legs = self
-            .codomain
+            .codomain()
             .legs()
             .iter()
-            .chain(self.domain.legs())
+            .chain(self.domain().legs())
             .collect::<Vec<_>>();
         for (key, shape) in keys.iter().zip(shapes) {
             let shape = shape.as_ref();
@@ -2427,18 +2450,18 @@ impl FusionTreeHomSpace {
     where
         R: FusionRule,
     {
-        if axis < self.codomain.len() {
-            self.codomain.legs()[axis].clone()
+        if axis < self.codomain().len() {
+            self.codomain().legs()[axis].clone()
         } else {
-            dual_sector_leg(rule, &self.domain.legs()[axis - self.codomain.len()])
+            dual_sector_leg(rule, &self.domain().legs()[axis - self.codomain().len()])
         }
     }
 
     fn external_axis_leg_view(&self, axis: usize) -> OrientedLegView<'_> {
-        if axis < self.codomain.len() {
-            OrientedLegView::borrowed(&self.codomain.legs()[axis])
+        if axis < self.codomain().len() {
+            OrientedLegView::borrowed(&self.codomain().legs()[axis])
         } else {
-            OrientedLegView::borrowed(&self.domain.legs()[axis - self.codomain.len()]).toggled()
+            OrientedLegView::borrowed(&self.domain().legs()[axis - self.codomain().len()]).toggled()
         }
     }
 
@@ -2446,10 +2469,10 @@ impl FusionTreeHomSpace {
     /// a domain leg verbatim: external domain axes are duals of their stored
     /// hom-space legs, matching [`Self::external_axis_leg`].
     pub fn external_axis_is_dual(&self, axis: usize) -> Option<bool> {
-        if axis < self.codomain.len() {
-            Some(self.codomain.legs()[axis].is_dual())
+        if axis < self.codomain().len() {
+            Some(self.codomain().legs()[axis].is_dual())
         } else if axis < self.rank() {
-            Some(!self.domain.legs()[axis - self.codomain.len()].is_dual())
+            Some(!self.domain().legs()[axis - self.codomain().len()].is_dual())
         } else {
             None
         }
