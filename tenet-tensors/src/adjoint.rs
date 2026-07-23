@@ -5,16 +5,14 @@
 //! transposes of `t`'s blocks (`block(t^H, c) = block(t, c)^H`). Codomain and
 //! domain swap as spaces; leg duality flags are unchanged.
 
-use std::hash::Hash;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use tenet_core::{
     BlockKey, BlockStructure, CoreError, FusionRule, FusionTensorMapSpace, FusionTreeHomSpace,
-    FusionTreePairKey, HomSpaceId, LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols,
-    TensorMap, TensorMapSpace,
+    FusionTreePairKey, LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols, TensorMap,
+    TensorMapSpace,
 };
 
-use crate::cache::registered_operation_cache;
 use crate::contract::{
     dispatch_prepare, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, LayoutKeyBuilder,
 };
@@ -24,84 +22,7 @@ use crate::contract::{
     reset_scratch_publication_observations, scratch_publication_observations, MetadataOutput,
     MetadataRequest,
 };
-use crate::tree_transform::TreeTransformRuleCacheKey;
 use crate::{ConjugateValue, OperationError};
-
-/// Identity of an adjoint (dagger) output space. The dagger is a pure function
-/// of the source: its hom space (legs carry the authoritative
-/// sector→degeneracy/duality map every adjoint block shape derives from) and its
-/// coupled subblock layout, under a given fusion rule. Unlike ordinary
-/// transform and contraction result spaces, this fixed dagger operation has a
-/// dedicated bounded store and therefore needs no operation field.
-///
-/// Why-not (`rule_type: &str` provenance): a type name distinguishes rule types
-/// but not two tables of the same type (a regenerated `TabulatedFusionRule` /
-/// SU(3) provider fuses the same sector ids differently), so the key carries the
-/// rule's `TreeTransformRuleCacheKey` — the provenance-bearing replay cache key.
-///
-/// Why-not (source `content_id` alone): the subblock structure is the
-/// coupled-sector *matrix* layout, coarser than the hom space, so distinct
-/// sources can share a `content_id` yet need different daggers — an id-only key
-/// aliases them (measured: the finite-torus singlet then fails with a dimension
-/// mismatch). The hom space plus `content_id`/`nout`/`nin` is sound; the source
-/// hom space enters as its interned [`HomSpaceId`] (PR-2), so the key hashes a
-/// small id instead of walking the space's legs by value on every repeated call.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-struct AdjointSpaceKey<RuleKey> {
-    rule_key: RuleKey,
-    source_homspace_id: HomSpaceId,
-    source_content_id: usize,
-    nout: usize,
-    nin: usize,
-}
-
-fn adjoint_space_key<R>(rule: &R, space: &DynamicFusionMapSpace) -> AdjointSpaceKey<R::Key>
-where
-    R: TreeTransformRuleCacheKey,
-{
-    AdjointSpaceKey {
-        rule_key: rule.tree_transform_rule_cache_key(),
-        source_homspace_id: space.homspace().id(),
-        source_content_id: space.structure().content_id(),
-        nout: space.nout(),
-        nin: space.nin(),
-    }
-}
-
-/// Bounded LRU store of built adjoint spaces (strong `Arc`, since
-/// `adjoint_space_dyn` returns by value and would leave a `Weak` with no owner).
-struct AdjointSpaceCache<RuleKey> {
-    entries: lru::LruCache<AdjointSpaceKey<RuleKey>, Arc<DynamicFusionMapSpace>>,
-}
-
-impl<RuleKey: Eq + Hash> Default for AdjointSpaceCache<RuleKey> {
-    fn default() -> Self {
-        Self {
-            entries: lru::LruCache::new(
-                std::num::NonZeroUsize::new(ADJOINT_SPACE_CACHE_CAP).unwrap(),
-            ),
-        }
-    }
-}
-
-/// Residency bound for the process-global adjoint-space cache. A finite-torus
-/// energy eval interns ~O(100) distinct daggers, so this never evicts in that
-/// workload; it exists only to keep an adversarial (many-distinct-space) run
-/// from growing the strong cache without limit, mirroring the operation cache
-/// policy's LRU cap rather than the sibling spaces' unbounded global maps.
-const ADJOINT_SPACE_CACHE_CAP: usize = 8192;
-
-/// Process-global adjoint-space cache, one bounded store per fusion `RuleKey`
-/// type — the per-type registry the tree-transform/contraction replay caches
-/// use, so `reset_global_operation_caches` clears it too. (Own accessor rather
-/// than `typed_global_map` because the map and its LRU order must share one lock
-/// to stay consistent.)
-fn adjoint_space_cache<RuleKey>() -> Arc<RwLock<AdjointSpaceCache<RuleKey>>>
-where
-    RuleKey: 'static + Eq + Hash + Send + Sync,
-{
-    registered_operation_cache::<RwLock<AdjointSpaceCache<RuleKey>>>().1
-}
 
 /// Dynamic-rank adjoint space (dagger of the homspace): codomain and domain
 /// swapped, per-block shapes transposed. Pure metadata — touches no data — so a
@@ -109,18 +30,13 @@ where
 /// without copying any elements. `adjoint_dyn` is exactly this plus the
 /// conjugate-transpose of the block data, and its output data lives in this
 /// space's layout.
-///
-/// Process-cached: the warm energy loop rebuilds the same daggers every eval,
-/// and even this metadata build pays per-key shape lookups plus
-/// `from_degeneracy_shapes`/`scratch_subblock_structure`/content interning, so
-/// an equal source resolves the already-built space instead (#118).
 #[cfg(test)]
 pub(crate) fn adjoint_space_dyn<R>(
     rule: &R,
     space: &DynamicFusionMapSpace,
 ) -> Result<DynamicFusionMapSpace, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     adjoint_space_dyn_with_primer(rule, space, encoded_layout_primer::<R>)
 }
@@ -131,26 +47,12 @@ fn adjoint_space_dyn_with_primer<R>(
     primer: LayoutKeyBuilder<R>,
 ) -> Result<DynamicFusionMapSpace, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     space.validate_rule(rule)?;
-    let key = adjoint_space_key(rule, space);
-    let cache = adjoint_space_cache::<R::Key>();
-    if let Ok(mut guard) = cache.write() {
-        if let Some(hit) = guard.entries.get(&key).cloned() {
-            // Clone the inner hom-space/subblock Arcs for the by-value return.
-            return Ok((*hit).clone());
-        }
-    }
-    let built = Arc::new(build_adjoint_space_dyn_with_primer(rule, space, primer)?);
-    if let Ok(mut guard) = cache.write() {
-        guard.entries.put(key, Arc::clone(&built));
-    }
-    Ok((*built).clone())
+    build_adjoint_space_dyn_with_primer(rule, space, primer)
 }
 
-/// Uncached build of the adjoint (dagger) space; [`adjoint_space_dyn`] memoizes
-/// it.
 fn build_adjoint_space_dyn_with_primer<R>(
     rule: &R,
     space: &DynamicFusionMapSpace,
@@ -163,8 +65,11 @@ where
     let adjoint_hom =
         FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone());
     let prepared = dispatch_prepare(primer, rule, &adjoint_hom)?;
-    validate_adjoint_lazy_source_keys(rule, homspace, space.structure())?;
-    validate_adjoint_source_structure(rule, homspace, space.structure())?;
+    let expected_source = homspace
+        .coupled_subblock_structure_from_leg_degeneracies(rule)
+        .map_err(OperationError::from_core_preserving_context)?;
+    validate_adjoint_lazy_source_keys(space.structure(), &expected_source)?;
+    validate_adjoint_source_structure_against(space.structure(), &expected_source)?;
 
     DynamicFusionMapSpace::from_final_homspace_with_prepared(rule, adjoint_hom, prepared)
 }
@@ -253,6 +158,13 @@ where
     let expected = homspace
         .coupled_subblock_structure_from_leg_degeneracies(rule)
         .map_err(OperationError::from_core_preserving_context)?;
+    validate_adjoint_source_structure_against(source, &expected)
+}
+
+fn validate_adjoint_source_structure_against(
+    source: &BlockStructure,
+    expected: &BlockStructure,
+) -> Result<(), OperationError> {
     if source.content_id() == expected.content_id() {
         return Ok(());
     }
@@ -298,21 +210,14 @@ where
     Ok(())
 }
 
-fn validate_adjoint_lazy_source_keys<R>(
-    rule: &R,
-    homspace: &FusionTreeHomSpace,
+fn validate_adjoint_lazy_source_keys(
     source: &BlockStructure,
-) -> Result<(), OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-{
+    expected: &BlockStructure,
+) -> Result<(), OperationError> {
     // Why not let target construction discover missing source keys: the final
     // HomSpace is now the sole target-layout authority, so it deliberately
-    // does not inspect source storage. The cold lazy path retains its public
+    // does not inspect source storage. The metadata path retains its public
     // MissingBlockKey failure before running the stricter canonical preflight.
-    let expected = homspace
-        .coupled_subblock_structure_from_leg_degeneracies(rule)
-        .map_err(OperationError::from_core_preserving_context)?;
     for index in 0..expected.block_count() {
         let key = expected
             .block(index)
@@ -482,7 +387,7 @@ pub fn adjoint_bound_space_dyn<R>(
     space: &BoundDynamicFusionMapSpace<R>,
 ) -> Result<BoundDynamicFusionMapSpace<R>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     let output =
         adjoint_space_dyn_with_primer(space.provider(), space.space(), space.layout_primer())?;
@@ -494,9 +399,7 @@ pub fn adjoint_bound_space_dyn_lowered<R>(
     space: &BoundDynamicFusionMapSpace<R>,
 ) -> Result<BoundDynamicFusionMapSpace<R>, OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + TreeTransformRuleCacheKey
-        + LoweredMultiplicityFreeAlgebra,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
 {
     let output =
         adjoint_space_dyn_with_primer(space.provider(), space.space(), space.layout_primer())?;
@@ -756,7 +659,6 @@ where
 #[cfg(test)]
 mod cache_tests {
     use super::*;
-    use crate::tree_transform::TreeTransformBuiltinRuleCacheKey;
     use num_complex::Complex64;
     use std::cell::Cell;
     use std::ops::Add;
@@ -1459,15 +1361,9 @@ mod cache_tests {
     }
 
     #[test]
-    fn lazy_adjoint_rejects_noncanonical_source_before_cache_admission() {
+    fn lazy_adjoint_rejects_noncanonical_source() {
         // What: metadata-only dagger construction rejects noncanonical source
-        // ordering without publishing that source's adjoint-space cache key;
-        // unrelated successful adjoints may share this process-global cache.
-        let _guard = crate::test_support::CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::reset_global_operation_caches();
-        tenet_core::reset_core_intern_tables();
+        // ordering after confirming that every canonical key is present.
         let zero = U1Irrep::new(0).sector_id();
         let one = U1Irrep::new(1).sector_id();
 
@@ -1496,22 +1392,11 @@ mod cache_tests {
         .unwrap();
         let reordered_tensor = typed_u1_expert_tensor(2, 2, double_homspace, reordered);
         let reordered = DynamicFusionMapSpace::from_typed(reordered_tensor.fusion_space().unwrap());
-        let rejected_key = adjoint_space_key(&U1FusionRule, &reordered);
 
         let reordered_error = adjoint_space_dyn(&U1FusionRule, &reordered).unwrap_err();
         assert_eq!(
             reordered_error,
             OperationError::StructureMismatch { tensor: "src" }
-        );
-        let cache = adjoint_space_cache::<<U1FusionRule as TreeTransformRuleCacheKey>::Key>();
-        assert!(
-            cache
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .entries
-                .peek(&rejected_key)
-                .is_none(),
-            "rejected source must not publish its adjoint-space cache key"
         );
     }
 
@@ -1535,7 +1420,7 @@ mod cache_tests {
     #[test]
     fn eager_adjoint_rejects_inexact_storage_before_target_work() {
         // What: short and oversized ordinary storage fail before target
-        // preparation, cache admission, layout publication, or output zero-fill.
+        // preparation, layout publication, or output zero-fill.
         let _guard = crate::test_support::CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1549,7 +1434,6 @@ mod cache_tests {
         .unwrap()
         .with_test_layout_primer(counting_primer);
         let expected = source.space().required_len().unwrap();
-        let cache = adjoint_space_cache::<<TripleRule as TreeTransformRuleCacheKey>::Key>();
 
         for actual in [expected - 1, expected + 1] {
             LOWERED_PRIMER_CALLS.with(|calls| calls.set(0));
@@ -1566,14 +1450,6 @@ mod cache_tests {
             assert_eq!(LOWERED_PRIMER_CALLS.with(Cell::get), 0);
             assert_eq!(OUTPUT_ZERO_CALLS.with(Cell::get), 0);
             assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
-            assert_eq!(
-                cache
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .entries
-                    .len(),
-                0
-            );
         }
     }
 
@@ -1676,12 +1552,9 @@ mod cache_tests {
     }
 
     #[test]
-    fn equal_source_returns_the_cached_layout() {
-        // What: the adjoint-space cache lives in the same process-global
-        // registry `reset_global_operation_caches` clears (see the accessor
-        // doc above), so a concurrent reset landing between the two builds
-        // below could evict the first entry and hand the second a fresh
-        // `Arc`, breaking the ptr_eq this test exists to check.
+    fn repeated_metadata_calls_ignore_global_operation_cache_reset() {
+        // What: repeated eager metadata builds retain the complete structural
+        // result before and after an unrelated global operation-cache reset.
         let _guard = crate::test_support::CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1689,42 +1562,19 @@ mod cache_tests {
         let src = u1_source(1, 2);
         let first = adjoint_space_dyn(&rule, &src).unwrap();
         let second = adjoint_space_dyn(&rule, &src).unwrap();
-        // A hit clones the cached space's inner Arcs, so both share one layout.
-        assert!(Arc::ptr_eq(first.structure(), second.structure()));
+        crate::reset_global_operation_caches();
+        let after_reset = adjoint_space_dyn(&rule, &src).unwrap();
+
+        assert_eq!(first.homspace(), second.homspace());
+        assert_eq!(first.homspace(), after_reset.homspace());
+        assert_complete_structure_eq(first.structure(), second.structure());
+        assert_complete_structure_eq(first.structure(), after_reset.structure());
     }
 
     #[test]
-    fn different_source_is_not_aliased() {
-        let rule = U1FusionRule;
-        let a = adjoint_space_dyn(&rule, &u1_source(1, 2)).unwrap();
-        let b = adjoint_space_dyn(&rule, &u1_source(3, 2)).unwrap();
-        assert!(!Arc::ptr_eq(a.structure(), b.structure()));
-    }
-
-    // Provenance is first-class in the key: two rules that would otherwise index
-    // the same source get distinct cache entries.
-    #[test]
-    fn distinct_rule_provenance_gives_distinct_keys() {
-        let src = u1_source(1, 2);
-        let make = |rule_key| AdjointSpaceKey {
-            rule_key,
-            source_homspace_id: src.homspace().id(),
-            source_content_id: src.structure().content_id(),
-            nout: src.nout(),
-            nin: src.nin(),
-        };
-        assert_ne!(
-            make(TreeTransformBuiltinRuleCacheKey::U1),
-            make(TreeTransformBuiltinRuleCacheKey::SU2Exact {
-                authority_version: tenet_core::SU2_EXACT_AUTHORITY_VERSION,
-            })
-        );
-    }
-
-    #[test]
-    fn lowered_adjoint_metadata_primes_once_and_eager_data_matches_encoded() {
-        // What: lazy adjoint metadata primes only on its operation-cache miss,
-        // while eager materialization preserves the encoded oracle's layout and data.
+    fn lowered_adjoint_metadata_and_eager_data_match_encoded() {
+        // What: one lowered eager metadata build and eager materialization
+        // preserve the encoded oracle's layout and data.
         let _guard = crate::test_support::CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1735,9 +1585,7 @@ mod cache_tests {
 
         LOWERED_PRIMER_CALLS.with(|calls| calls.set(0));
         let lowered = adjoint_space_dyn_with_primer(&rule, &source, counting_primer).unwrap();
-        let warm = adjoint_space_dyn_with_primer(&rule, &source, counting_primer).unwrap();
         assert_eq!(LOWERED_PRIMER_CALLS.with(Cell::get), 1);
-        assert_eq!(lowered, warm);
         crate::reset_global_operation_caches();
         tenet_core::reset_core_intern_tables();
         let encoded_lazy = adjoint_space_dyn(&rule, &source).unwrap();
@@ -1765,7 +1613,7 @@ mod cache_tests {
     #[test]
     fn lowered_adjoint_missing_source_key_abandons_prepared_layout() {
         // What: adjoint source-key mapping fails before its checked target
-        // layout receives an ID or cache admission.
+        // layout receives an ID or publication.
         let _guard = crate::test_support::CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
