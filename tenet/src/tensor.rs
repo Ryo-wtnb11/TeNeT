@@ -40,7 +40,8 @@ use tenet_tensors::cuda::{CudaStorage, CudaStorageGemm};
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, OperationError, OutputAxisOrder,
     OwnedCatC64Source as CatC64Source, OwnedCatCopy, OwnedCatSide, RecouplingCoefficientAction,
-    TensorContractSpec, TreeTransformOperation, TreeTransformRuleCacheKey,
+    TensorContractSpec, TreeTransformOperation, TreeTransformOperationKind,
+    TreeTransformRuleCacheKey,
 };
 
 use crate::error::Error;
@@ -5617,6 +5618,32 @@ impl Tensor {
                 domain_axes.iter().copied(),
             ),
         };
+
+        if let Data::Diagonal(diagonal) = self.stored_data() {
+            let is_rank_one_swap = self.codomain_rank() == 1
+                && self.domain_rank() == 1
+                && operation.codomain_permutation() == [1]
+                && operation.domain_permutation() == [0]
+                && matches!(
+                    operation.kind(),
+                    TreeTransformOperationKind::Permute | TreeTransformOperationKind::Transpose
+                );
+            // Why not include explicit braid or Generic fusion: their compact
+            // single-term scalar predicates are not proved, so they retain the
+            // existing dense fallback.
+            if is_rank_one_swap && self.rule_kind() != RuleKind::Su3 {
+                let destination = self.ordinary_body().space.transformed(&operation)?;
+                let data = with_user_rule!(self.ordinary_body().space, rule, {
+                    diagonal.transformed_rank_one_swap(
+                        rule,
+                        self.ordinary_body().space.raw(),
+                        destination.raw(),
+                        &operation,
+                    )
+                })?;
+                return self.with_bound(destination, Data::Diagonal(data));
+            }
+        }
 
         with_data!(self, data, self.transformed_impl(data, operation))
     }
