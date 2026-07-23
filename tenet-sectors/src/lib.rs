@@ -1,3 +1,7 @@
+#![forbid(unsafe_code)]
+
+//! Category vocabulary shared by TeNeT's sector and tensor layers.
+
 use smallvec::SmallVec;
 
 /// Opaque identifier used by one fusion-rule implementation.

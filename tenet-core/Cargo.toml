@@ -10,6 +10,7 @@ name = "tenet_core"
 path = "src/lib.rs"
 
 [dependencies]
+tenet-sectors = { path = "../tenet-sectors" }
 smallvec = { version = "1", features = ["const_generics", "union"] }
 # Fast non-cryptographic hasher for internal maps keyed on fusion-tree /
 # block structure (small integer sequences, no untrusted input) — the Rust
