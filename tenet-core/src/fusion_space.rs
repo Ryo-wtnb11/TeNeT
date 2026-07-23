@@ -487,6 +487,18 @@ impl PreparedLoweredFusionTreeLayout {
         }
     }
 
+    fn validate_homspace_signature(&self, homspace: &FusionTreeHomSpace) -> Result<(), CoreError> {
+        let key = self.cache_key();
+        if !fusion_product_space_matches_signature(homspace.codomain(), &key.codomain)
+            || !fusion_product_space_matches_signature(homspace.domain(), &key.domain)
+        {
+            return Err(CoreError::MalformedFusionTree {
+                message: "prepared layout does not match HomSpace sector signature",
+            });
+        }
+        Ok(())
+    }
+
     pub fn keys(&self) -> &[FusionTreePairKey] {
         match &self.state {
             PreparedLoweredFusionTreeLayoutState::Cached { layout, .. } => layout.keys.as_ref(),
@@ -507,14 +519,7 @@ impl PreparedLoweredFusionTreeLayout {
         &self,
         homspace: &FusionTreeHomSpace,
     ) -> Result<Arc<BlockStructure>, CoreError> {
-        let key = self.cache_key();
-        if !fusion_product_space_matches_signature(homspace.codomain(), &key.codomain)
-            || !fusion_product_space_matches_signature(homspace.domain(), &key.domain)
-        {
-            return Err(CoreError::MalformedFusionTree {
-                message: "prepared layout does not match HomSpace sector signature",
-            });
-        }
+        self.validate_homspace_signature(homspace)?;
         // Why not call the cached public builder: downstream validation must
         // finish before this transaction publishes a layout ID or admission,
         // and the prepared data already owns the one checked enumeration.
@@ -523,6 +528,39 @@ impl PreparedLoweredFusionTreeLayout {
         let (sector, degeneracy) =
             coupled_subblock_parts_from_leg_degeneracies(homspace, self.layout_data())?;
         BlockStructure::from_parts(sector, degeneracy).map(BlockStructure::into_shared)
+    }
+
+    /// Finalizes a checked complete multiplicity-free layout through the core
+    /// structural cache after all fallible leg-derived storage work succeeds.
+    #[doc(hidden)]
+    pub fn build_complete_from_leg_degeneracies(
+        &self,
+        homspace: &FusionTreeHomSpace,
+    ) -> Result<Arc<BlockStructure>, CoreError> {
+        self.validate_homspace_signature(homspace)?;
+        let key = Arc::new(CompleteHomSpaceStructureCacheKey {
+            rule: self.cache_key().rule.clone(),
+            homspace: Arc::clone(&homspace.content),
+        });
+        let cache = complete_hom_space_structure_cache();
+        let read = cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(content) = read.lookup(&key) {
+            return Ok(BlockStructure::from_content(content).into_shared());
+        }
+        drop(read);
+
+        let built = self.build_from_leg_degeneracies(homspace)?;
+        let content = built.content_key();
+        let charged_bytes = charged_complete_hom_space_structure_bytes(&key, &content);
+        drop(built);
+
+        let mut write = cache
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let content = write.admit(key, content, charged_bytes);
+        Ok(BlockStructure::from_content(content).into_shared())
     }
 
     /// Publishes the prepared layout and returns its shared key storage.
