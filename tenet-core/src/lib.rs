@@ -18,6 +18,9 @@ use num_complex::Complex64;
 use rustc_hash::FxHashMap;
 use smallvec::{smallvec, SmallVec};
 
+mod category_vocabulary;
+pub use category_vocabulary::{BraidingStyleKind, FusionStyleKind, SectorId, SectorVec};
+
 include!("storage.rs");
 include!("space.rs");
 include!("sector.rs");

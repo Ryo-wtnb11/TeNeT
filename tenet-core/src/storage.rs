@@ -1,11 +1,3 @@
-/// Inline storage for the low layer's small per-rank / per-leg / per-block
-/// metadata — the Rust analog of TensorKit's `NTuple` stack fields on
-/// `FusionTree`. Structural keys and layouts (sector lists, dims, duals,
-/// block indices, strides) stay allocation-free for the common small ranks,
-/// so hashing/cloning/comparing them in the cold structure/plan/recoupling
-/// caches touches no heap. Inline capacity 8 covers typical tensor ranks and
-/// per-leg sector counts; larger cases spill to heap exactly like `Vec`.
-pub type SectorVec = SmallVec<[SectorId; 8]>;
 /// Inline storage for one-based outer-multiplicity vertex labels.
 pub type MultiplicityVec = SmallVec<[MultiplicityIndex; 8]>;
 /// Inline storage for `usize` metadata (dims, strides, indices, permutations).
