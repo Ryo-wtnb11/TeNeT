@@ -10209,6 +10209,43 @@ mod tests {
     }
 
     #[test]
+    fn prepared_lowered_complete_structure_hits_without_rebuilding_layout() {
+        // What: a repeated valid lowered finalization validates its target
+        // locally, then reuses the retained complete content without another
+        // tree enumeration or cache admission.
+        let _guard = test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+        let hom = singleton_rank_hom(su2(1), 5);
+
+        let first_prepared = hom
+            .prepare_fusion_tree_layout_lowered(&SU2FusionRule)
+            .unwrap();
+        let first = first_prepared
+            .build_complete_from_leg_degeneracies(&hom)
+            .unwrap();
+        first_prepared.commit();
+        let after_first = complete_hom_space_structure_cache_info();
+        assert_eq!(after_first.admissions(), 1);
+
+        reset_lowered_layout_build_observations();
+        let second_prepared = hom
+            .prepare_fusion_tree_layout_lowered(&SU2FusionRule)
+            .unwrap();
+        let second = second_prepared
+            .build_complete_from_leg_degeneracies(&hom)
+            .unwrap();
+        second_prepared.commit();
+        let after_second = complete_hom_space_structure_cache_info();
+
+        assert_eq!(lowered_layout_build_observations(), (0, 0));
+        assert_eq!(first.content_id(), second.content_id());
+        assert_eq!(after_second.hits(), after_first.hits() + 1);
+        assert_eq!(after_second.admissions(), after_first.admissions());
+    }
+
+    #[test]
     fn prepared_lowered_final_structure_checks_signature_but_reads_target_degeneracies() {
         // What: a prepared layout rejects another same-rank sector signature
         // without publication, while the same sectors/duality with different

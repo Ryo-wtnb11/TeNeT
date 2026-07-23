@@ -1,18 +1,17 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use tenet_core::{
-    BlockKey, BlockStructure, CheckedFusionAlgebra, CheckedFusionSpaceError, CoreError, DimVec,
-    FusionRule, FusionSpaceAdmission, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
-    FusionTreePairKey, FusionTreePairOrientation, HomSpaceId, LoweredFusionTreeBuildError,
+    BlockKey, BlockStructure, CheckedFusionAlgebra, CheckedFusionSpaceError, CoreError, FusionRule,
+    FusionSpaceAdmission, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
+    FusionTreePairKey, FusionTreePairOrientation, LoweredFusionTreeBuildError,
     LoweredMultiplicityFreeAlgebra, MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols,
-    OrientedFusionTreeHomSpace, PreparedLoweredFusionTreeLayout, RuleIdentity, SectorLeg,
+    OrientedFusionTreeHomSpace, PreparedLoweredFusionTreeLayout, SectorLeg,
     StructurallyValidatedFusionTreeSubset,
 };
 
-use crate::cache::registered_operation_cache;
 use crate::{OperationError, TreeTransformOperation};
 use tenet_operations::{OutputAxisOrder, TensorContractSpec};
 
@@ -517,70 +516,6 @@ pub(crate) fn scratch_publication_observations() -> (usize, usize, usize, usize)
         SCRATCH_HOMSPACE_ID_REQUESTS.get(),
         LOWERED_LAYOUT_COMMITS.get(),
     )
-}
-
-/// Identity of a rule-specific coupled-storage layout: the fusion rule's
-/// coefficient provenance paired with the interned [`HomSpaceId`]. Kept as a
-/// named primitive because the two must never be conflated — the coupled
-/// layout is a function of BOTH the hom space and the rule, and PR-1 proved
-/// that keying a layout on a hom-space-independent structure id (a subblock
-/// `content_id` alone) aliases distinct sources (a finite-torus singlet then
-/// failed with a dimension mismatch).
-///
-/// Why-not (`type_name::<R>()`): the trait permits two instances of one Rust
-/// type to carry different fusion tables. [`RuleIdentity`] is the semantic
-/// provenance boundary used by tree-transform and coupled-layout identities,
-/// and prevents those instances from sharing a layout.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-struct LayoutId {
-    rule: RuleIdentity,
-    homspace: HomSpaceId,
-}
-
-/// Cache identity of a coupled scratch [`BlockStructure`]: its rule-layout plus
-/// the concrete degeneracy shapes (which carry the bond dimension χ, so a
-/// differently-truncated build keys separately).
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-struct ScratchStructureKey {
-    layout: LayoutId,
-    nout: usize,
-    rank: usize,
-    shapes: Arc<[DimVec]>,
-}
-
-/// Bounded LRU store of built scratch structures. Payload is a STRONG `Arc`,
-/// not a `Weak`: `from_degeneracy_shapes` returns a fresh `DynamicFusionMapSpace`
-/// whose owner (a transient per-eval scratch space) is dropped between warm
-/// evals, so a `Weak` would be dead on the next eval and rebuild every time —
-/// the same by-value-ownership trap PR-1 hit for the adjoint cache. The typed
-/// `coupled_block_structure_cache` can use `Weak` because its structures are
-/// owned by long-lived network tensors; the dynamic scratch path cannot.
-struct ScratchStructureCache {
-    entries: lru::LruCache<ScratchStructureKey, Arc<BlockStructure>>,
-}
-
-impl Default for ScratchStructureCache {
-    fn default() -> Self {
-        Self {
-            entries: lru::LruCache::new(
-                std::num::NonZeroUsize::new(SCRATCH_STRUCTURE_CACHE_CAP).unwrap(),
-            ),
-        }
-    }
-}
-
-/// Residency bound for the scratch-structure cache; matches the adjoint cache
-/// cap. A finite-torus eval interns O(100) distinct scratch structures, so this
-/// never evicts in that workload — it only keeps an adversarial
-/// many-distinct-layout run from growing the strong cache without bound.
-const SCRATCH_STRUCTURE_CACHE_CAP: usize = 8192;
-
-/// Process-global scratch-structure cache, held in the operation registry so
-/// `reset_global_operation_caches` clears it. Own accessor (not `typed_global_map`)
-/// because the map and its LRU order must share one lock, mirroring the adjoint
-/// cache accessor.
-fn scratch_structure_cache() -> Arc<RwLock<ScratchStructureCache>> {
-    registered_operation_cache::<RwLock<ScratchStructureCache>>().1
 }
 
 /// Builds scratch structures in the coupled-sector matrix layout. Scratch
@@ -1751,7 +1686,7 @@ impl DynamicFusionMapSpace {
             let nout = homspace.codomain().len();
             let nin = homspace.domain().len();
             let subblock_structure = prepared
-                .build_from_leg_degeneracies(&homspace)
+                .build_complete_from_leg_degeneracies(&homspace)
                 .map_err(OperationError::from_core_preserving_context)?;
             // All fallible final-storage work is complete. Why not commit
             // before building: malformed leg degeneracies or extent overflow
@@ -1878,40 +1813,12 @@ impl DynamicFusionMapSpace {
     {
         let nout = homspace.codomain().len();
         let nin = homspace.domain().len();
-        let rank = nout + nin;
         #[cfg(test)]
         LEGACY_SHAPE_PATH_BUILDS.with(|builds| builds.set(builds.get() + 1));
         let shapes = shapes
             .into_iter()
             .map(Into::into)
             .collect::<Vec<Vec<usize>>>();
-        let shape_key: Arc<[DimVec]> = shapes
-            .iter()
-            .map(|shape| shape.iter().copied().collect())
-            .collect();
-        let existing_cache_key = homspace.existing_id().map(|homspace| ScratchStructureKey {
-            layout: LayoutId {
-                rule: rule.rule_identity(),
-                homspace,
-            },
-            nout,
-            rank,
-            shapes: Arc::clone(&shape_key),
-        });
-        if let Some(cache_key) = existing_cache_key.as_ref() {
-            let cache = scratch_structure_cache();
-            if let Ok(mut guard) = cache.write() {
-                if let Some(subblock_structure) = guard.entries.get(cache_key).cloned() {
-                    return Ok(Self {
-                        nout,
-                        nin,
-                        homspace: Arc::new(homspace),
-                        subblock_structure,
-                        admission: FusionSpaceAdmission::Complete(rule.rule_identity()),
-                    });
-                }
-            };
-        }
         let prepared = build_keys(rule, &homspace)?;
         let keys = prepared.keys(rule, &homspace);
         if keys.len() != shapes.len() {
@@ -1925,43 +1832,22 @@ impl DynamicFusionMapSpace {
         homspace
             .validate_degeneracy_shapes(&keys, &shapes)
             .map_err(OperationError::from_core_preserving_context)?;
-        let blocks = keys
-            .iter()
-            .cloned()
-            .map(BlockKey::from)
-            .zip(shapes)
-            .collect::<Vec<_>>();
-        let built = Arc::new(scratch_subblock_structure(rule, nout, rank, blocks)?);
-        // All Result-returning work is complete. Why not publish earlier:
-        // checked algebra, caller shapes, and block extents can still fail.
-        // The remaining monotonic IDs and bounded cache insertions are
-        // logically infallible, so cross-cache rollback is unnecessary.
-        prepared.commit();
-        let cache_key = existing_cache_key.unwrap_or_else(|| {
-            #[cfg(test)]
-            SCRATCH_HOMSPACE_ID_REQUESTS.set(SCRATCH_HOMSPACE_ID_REQUESTS.get() + 1);
-            ScratchStructureKey {
-                layout: LayoutId {
-                    rule: rule.rule_identity(),
-                    homspace: homspace.id(),
-                },
-                nout,
-                rank,
-                shapes: shape_key,
+        let subblock_structure = match prepared {
+            PreparedLayoutKeys::Lowered(prepared) => {
+                let structure = prepared
+                    .build_complete_from_leg_degeneracies(&homspace)
+                    .map_err(OperationError::from_core_preserving_context)?;
+                prepared.commit();
+                structure
             }
-        });
-        let cache = scratch_structure_cache();
-        let subblock_structure = if let Ok(mut guard) = cache.write() {
-            if let Some(existing) = guard.entries.get(&cache_key).cloned() {
-                existing
-            } else {
-                #[cfg(test)]
-                SCRATCH_STRUCTURE_ADMISSIONS.set(SCRATCH_STRUCTURE_ADMISSIONS.get() + 1);
-                guard.entries.put(cache_key, Arc::clone(&built));
-                built
+            PreparedLayoutKeys::Encoded => {
+                // Why not retain an explicit-shape strong cache: this path
+                // first proves every caller shape equals the HomSpace legs,
+                // so canonical layouts belong to the core owner instead.
+                homspace
+                    .coupled_subblock_structure_from_leg_degeneracies(rule)
+                    .map_err(OperationError::from_core_preserving_context)?
             }
-        } else {
-            built
         };
         Ok(Self {
             nout,
@@ -3525,7 +3411,7 @@ mod lowered_metadata_tests {
         .unwrap();
         assert_eq!(legacy_shape_path_builds(), 1);
         let (scratch_builds, scratch_admissions, _, _) = scratch_publication_observations();
-        assert_eq!((scratch_builds, scratch_admissions), (1, 1));
+        assert_eq!((scratch_builds, scratch_admissions), (0, 0));
     }
 
     #[test]
@@ -3915,7 +3801,7 @@ mod lowered_metadata_tests {
             error,
             OperationError::Core(tenet_core::CoreError::ElementCountOverflow)
         );
-        assert_eq!(scratch_publication_observations(), (1, 0, 0, 0));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
     }
 
     #[test]
@@ -3987,9 +3873,9 @@ mod lowered_metadata_tests {
     }
 
     #[test]
-    fn validated_scratch_hit_skips_lowered_key_builder() {
-        // What: a successful warm scratch hit returns the same interned
-        // BlockStructure without invoking the lowered key builder again.
+    fn canonical_explicit_rebuilds_staged_lowered_keys_before_core_reuse() {
+        // What: explicit caller shapes are validated on every request before
+        // the core cache reuses their canonical frozen content.
         let _guard = CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4021,8 +3907,11 @@ mod lowered_metadata_tests {
             },
         )
         .unwrap();
-        assert_eq!(builds.get(), 0);
-        assert!(Arc::ptr_eq(first.structure(), second.structure()));
+        assert_eq!(builds.get(), 1);
+        assert_eq!(
+            first.structure().content_id(),
+            second.structure().content_id()
+        );
         assert_eq!(first, second);
     }
 
@@ -4255,12 +4144,23 @@ mod lowered_metadata_tests {
             shapes.clone(),
         )
         .unwrap();
+        let repeated_lowered = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
+            Arc::clone(&provider),
+            homspace.clone(),
+            shapes.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            lowered.space().structure().content_id(),
+            repeated_lowered.space().structure().content_id()
+        );
         let encoded = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
             Arc::clone(&provider),
             homspace,
             shapes,
         )
         .unwrap();
+        assert!(tenet_core::complete_hom_space_structure_cache_info().hits() >= 1);
         let operation = TreeTransformOperation::permute([1], [0]);
         let lowered_transform = lowered
             .transformed_multiplicity_free_lowered(&operation)
@@ -5046,13 +4946,13 @@ mod scratch_cache_tests {
     }
 
     #[test]
-    fn equal_layout_and_shapes_share_one_structure() {
+    fn equal_layout_and_shapes_share_frozen_content_not_regions() {
         let _guard = CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let a = u1_space(1, 3);
         let b = u1_space(1, 3);
-        assert!(Arc::ptr_eq(a.structure(), b.structure()));
+        assert_eq!(a.structure().content_id(), b.structure().content_id());
     }
 
     #[test]
@@ -5063,7 +4963,7 @@ mod scratch_cache_tests {
         // The shapes carry chi, so a differently-truncated build keys separately.
         let a = u1_space(1, 3);
         let b = u1_space(1, 4);
-        assert!(!Arc::ptr_eq(a.structure(), b.structure()));
+        assert_ne!(a.structure().content_id(), b.structure().content_id());
     }
 
     #[test]
@@ -5073,51 +4973,11 @@ mod scratch_cache_tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let a = u1_space(1, 3);
         let b = u1_space(2, 3);
-        assert!(!Arc::ptr_eq(a.structure(), b.structure()));
-    }
-
-    // Rule provenance is first-class in the layout id: two rules that index the
-    // same hom space still key to distinct layouts. `Su3FusionRule` (runtime
-    // provenance) never reaches this multiplicity-free cache, but its type is a
-    // distinct discriminant from any mult-free rule all the same.
-    #[test]
-    fn distinct_rule_provenance_gives_distinct_layout_ids() {
-        let _guard = CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        use tenet_core::{SU2FusionRule, Su3FusionRule};
-        let homspace = u1_space(1, 3).homspace().id();
-        let make = |rule| LayoutId {
-            rule,
-            homspace: homspace.clone(),
-        };
-        let u1 = make(RuleIdentity::of_type::<U1FusionRule>());
-        let su2 = make(RuleIdentity::of_type::<SU2FusionRule>());
-        let su3 = make(RuleIdentity::of_type::<Su3FusionRule>());
-        assert_ne!(u1, su2);
-        assert_ne!(u1, su3);
-        assert_ne!(su2, su3);
+        assert_ne!(a.structure().content_id(), b.structure().content_id());
     }
 
     #[test]
-    fn same_rule_type_with_distinct_provenance_gives_distinct_layout_ids() {
-        let _guard = CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let homspace = u1_space(1, 3).homspace().id();
-        let first = LayoutId {
-            rule: RuleIdentity::new_unique::<U1FusionRule>(),
-            homspace: homspace.clone(),
-        };
-        let second = LayoutId {
-            rule: RuleIdentity::new_unique::<U1FusionRule>(),
-            homspace,
-        };
-        assert_ne!(first, second);
-    }
-
-    #[test]
-    fn scratch_structure_reuses_after_homspace_intern_eviction() {
+    fn canonical_explicit_shapes_preserve_content_after_homspace_intern_eviction() {
         let _guard = CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -5130,11 +4990,11 @@ mod scratch_cache_tests {
         }
         let after = u1_space(73, 3);
         assert_eq!(before.homspace().id(), after.homspace().id());
-        assert!(Arc::ptr_eq(before.structure(), after.structure()));
+        assert_eq!(before.structure(), after.structure());
     }
 
     #[test]
-    fn large_shapes_reuse_without_allocating_tensor_storage() {
+    fn large_canonical_shapes_reuse_frozen_content_without_tensor_storage() {
         let _guard = CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -5148,7 +5008,7 @@ mod scratch_cache_tests {
         let second =
             DynamicFusionMapSpace::from_degeneracy_shapes(&rule, hom, [vec![4096, 4096]]).unwrap();
         assert_eq!(first.required_len().unwrap(), 4096 * 4096);
-        assert!(Arc::ptr_eq(first.structure(), second.structure()));
+        assert_eq!(first.structure(), second.structure());
     }
 
     #[test]
@@ -5178,7 +5038,10 @@ mod scratch_cache_tests {
             .all(|space| space.structure().as_ref() == expected));
         let rebuilt = u1_space(111, 5);
         let cached = u1_space(111, 5);
-        assert!(Arc::ptr_eq(rebuilt.structure(), cached.structure()));
+        assert_eq!(
+            rebuilt.structure().content_id(),
+            cached.structure().content_id()
+        );
     }
 
     #[test]

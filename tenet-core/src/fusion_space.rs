@@ -487,6 +487,18 @@ impl PreparedLoweredFusionTreeLayout {
         }
     }
 
+    fn validate_homspace_signature(&self, homspace: &FusionTreeHomSpace) -> Result<(), CoreError> {
+        let key = self.cache_key();
+        if !fusion_product_space_matches_signature(homspace.codomain(), &key.codomain)
+            || !fusion_product_space_matches_signature(homspace.domain(), &key.domain)
+        {
+            return Err(CoreError::MalformedFusionTree {
+                message: "prepared layout does not match HomSpace sector signature",
+            });
+        }
+        Ok(())
+    }
+
     pub fn keys(&self) -> &[FusionTreePairKey] {
         match &self.state {
             PreparedLoweredFusionTreeLayoutState::Cached { layout, .. } => layout.keys.as_ref(),
@@ -507,14 +519,7 @@ impl PreparedLoweredFusionTreeLayout {
         &self,
         homspace: &FusionTreeHomSpace,
     ) -> Result<Arc<BlockStructure>, CoreError> {
-        let key = self.cache_key();
-        if !fusion_product_space_matches_signature(homspace.codomain(), &key.codomain)
-            || !fusion_product_space_matches_signature(homspace.domain(), &key.domain)
-        {
-            return Err(CoreError::MalformedFusionTree {
-                message: "prepared layout does not match HomSpace sector signature",
-            });
-        }
+        self.validate_homspace_signature(homspace)?;
         // Why not call the cached public builder: downstream validation must
         // finish before this transaction publishes a layout ID or admission,
         // and the prepared data already owns the one checked enumeration.
@@ -523,6 +528,40 @@ impl PreparedLoweredFusionTreeLayout {
         let (sector, degeneracy) =
             coupled_subblock_parts_from_leg_degeneracies(homspace, self.layout_data())?;
         BlockStructure::from_parts(sector, degeneracy).map(BlockStructure::into_shared)
+    }
+
+    /// Finalizes a checked complete multiplicity-free layout through the core
+    /// structural cache after all fallible leg-derived storage work succeeds.
+    #[doc(hidden)]
+    pub fn build_complete_from_leg_degeneracies(
+        &self,
+        homspace: &FusionTreeHomSpace,
+    ) -> Result<Arc<BlockStructure>, CoreError> {
+        self.validate_homspace_signature(homspace)?;
+        visit_coupled_leg_blocks(homspace, self.layout_data(), |_| Ok(()))?;
+        let key = Arc::new(CompleteHomSpaceStructureCacheKey {
+            rule: self.cache_key().rule.clone(),
+            homspace: Arc::clone(&homspace.content),
+        });
+        let cache = complete_hom_space_structure_cache();
+        let read = cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(content) = read.lookup(&key) {
+            return Ok(BlockStructure::from_content(content).into_shared());
+        }
+        drop(read);
+
+        let built = self.build_from_leg_degeneracies(homspace)?;
+        let content = built.content_key();
+        let charged_bytes = charged_complete_hom_space_structure_bytes(&key, &content);
+        drop(built);
+
+        let mut write = cache
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let content = write.admit(key, content, charged_bytes);
+        Ok(BlockStructure::from_content(content).into_shared())
     }
 
     /// Publishes the prepared layout and returns its shared key storage.
@@ -3014,9 +3053,36 @@ fn coupled_subblock_parts_from_leg_degeneracies(
     layout: &FusionTreeHomSpaceLayoutData,
 ) -> Result<(SectorStructure, DegeneracyStructure), CoreError> {
     let rank = homspace.rank();
-    let nout = homspace.codomain().len();
     let mut degeneracy_blocks = Vec::with_capacity(layout.keys.len());
+    visit_coupled_leg_blocks(homspace, layout, |block| {
+        degeneracy_blocks.push(block);
+        Ok(())
+    })?;
+
+    let sector_structure =
+        SectorStructure::from_keys(rank, layout.keys.iter().cloned().map(BlockKey::from))?;
+    let degeneracy_structure =
+        DegeneracyStructure::from_blocks_with_rank(rank, degeneracy_blocks)?;
+    Ok((sector_structure, degeneracy_structure))
+}
+
+fn visit_coupled_leg_blocks<F>(
+    homspace: &FusionTreeHomSpace,
+    layout: &FusionTreeHomSpaceLayoutData,
+    mut visit: F,
+) -> Result<(), CoreError>
+where
+    F: FnMut(DegeneracyBlock) -> Result<(), CoreError>,
+{
+    let rank = homspace.rank();
+    let nout = homspace.codomain().len();
     let mut sector_offset = 0usize;
+    let mut row_shapes = SmallVec::<[DimVec; 8]>::new();
+    let mut row_dims = DimVec::new();
+    let mut col_shapes = SmallVec::<[DimVec; 8]>::new();
+    let mut col_dims = DimVec::new();
+    let mut row_offsets = DimVec::new();
+    let mut col_offsets = DimVec::new();
 
     for sector in &layout.sectors {
         let block_count = sector
@@ -3034,8 +3100,8 @@ fn coupled_subblock_parts_from_leg_degeneracies(
             });
         }
 
-        let mut row_shapes = Vec::with_capacity(sector.row_count);
-        let mut row_dims = Vec::with_capacity(sector.row_count);
+        row_shapes.clear();
+        row_dims.clear();
         for row in 0..sector.row_count {
             let key = &layout.keys[sector.start + row];
             let shape = degeneracy_shape_for_tree_side(homspace.codomain(), key.codomain_tree())?;
@@ -3048,8 +3114,8 @@ fn coupled_subblock_parts_from_leg_degeneracies(
             row_dims.push(dim);
         }
 
-        let mut col_shapes = Vec::with_capacity(sector.col_count);
-        let mut col_dims = Vec::with_capacity(sector.col_count);
+        col_shapes.clear();
+        col_dims.clear();
         for col in 0..sector.col_count {
             let local_offset = col
                 .checked_mul(sector.row_count)
@@ -3065,8 +3131,8 @@ fn coupled_subblock_parts_from_leg_degeneracies(
             col_dims.push(dim);
         }
 
-        let row_offsets = prefix_offsets(&row_dims)?;
-        let col_offsets = prefix_offsets(&col_dims)?;
+        prefix_offsets_into(&row_dims, &mut row_offsets)?;
+        prefix_offsets_into(&col_dims, &mut col_offsets)?;
         let matrix_rows = match row_offsets.last().zip(row_dims.last()) {
             Some((&offset, &dim)) => offset
                 .checked_add(dim)
@@ -3109,7 +3175,7 @@ fn coupled_subblock_parts_from_leg_degeneracies(
                             .and_then(|column| offset.checked_add(column))
                     })
                     .ok_or(CoreError::ElementCountOverflow)?;
-                degeneracy_blocks.push(DegeneracyBlock::new(shape, strides, offset)?);
+                visit(DegeneracyBlock::new(shape, strides, offset)?)?;
             }
         }
 
@@ -3121,12 +3187,7 @@ fn coupled_subblock_parts_from_leg_degeneracies(
             )
             .ok_or(CoreError::ElementCountOverflow)?;
     }
-
-    let sector_structure =
-        SectorStructure::from_keys(rank, layout.keys.iter().cloned().map(BlockKey::from))?;
-    let degeneracy_structure =
-        DegeneracyStructure::from_blocks_with_rank(rank, degeneracy_blocks)?;
-    Ok((sector_structure, degeneracy_structure))
+    Ok(())
 }
 
 /// Computes coupled-sector matrix block specs for fusion-tree subblocks.
@@ -3499,8 +3560,15 @@ fn register_layout_dim(slot: &mut Option<usize>, dim: usize) -> Result<(), CoreE
     }
 }
 
-fn prefix_offsets(dims: &[usize]) -> Result<Vec<usize>, CoreError> {
-    let mut offsets = Vec::with_capacity(dims.len());
+fn prefix_offsets(dims: &[usize]) -> Result<DimVec, CoreError> {
+    let mut offsets = DimVec::new();
+    prefix_offsets_into(dims, &mut offsets)?;
+    Ok(offsets)
+}
+
+fn prefix_offsets_into(dims: &[usize], offsets: &mut DimVec) -> Result<(), CoreError> {
+    offsets.clear();
+    offsets.reserve(dims.len());
     let mut offset = 0usize;
     for &dim in dims {
         offsets.push(offset);
@@ -3508,7 +3576,7 @@ fn prefix_offsets(dims: &[usize]) -> Result<Vec<usize>, CoreError> {
             .checked_add(dim)
             .ok_or(CoreError::ElementCountOverflow)?;
     }
-    Ok(offsets)
+    Ok(())
 }
 
 #[doc(hidden)]
