@@ -2369,6 +2369,67 @@ enum TransformKind<'a> {
     Transpose,
 }
 
+enum PlanarRequestKind<'a> {
+    FullTranspose,
+    Explicit {
+        codomain_axes: &'a [usize],
+        domain_axes: &'a [usize],
+    },
+    Repartition {
+        num_codomain: usize,
+    },
+}
+
+enum PlanarOverwriteRequest<'a> {
+    Planar(PlanarRequestKind<'a>),
+    RepartitionFromDestination,
+}
+
+fn with_planar_axes<T>(
+    source_codomain_rank: usize,
+    source_rank: usize,
+    kind: PlanarRequestKind<'_>,
+    apply: impl FnOnce(&[usize], &[usize]) -> Result<T, Error>,
+) -> Result<T, Error> {
+    let source_domain_rank = source_rank - source_codomain_rank;
+    let checked_apply = |codomain_axes: &[usize], domain_axes: &[usize]| {
+        PreparedTreePairOperation::validate_transpose_syntax(
+            source_codomain_rank,
+            source_domain_rank,
+            codomain_axes,
+            domain_axes,
+        )?;
+        apply(codomain_axes, domain_axes)
+    };
+    match kind {
+        PlanarRequestKind::FullTranspose => {
+            let axes = (source_codomain_rank..source_rank)
+                .rev()
+                .chain((0..source_codomain_rank).rev())
+                .collect::<Vec<_>>();
+            let (codomain_axes, domain_axes) = axes.split_at(source_domain_rank);
+            checked_apply(codomain_axes, domain_axes)
+        }
+        PlanarRequestKind::Explicit {
+            codomain_axes,
+            domain_axes,
+        } => checked_apply(codomain_axes, domain_axes),
+        PlanarRequestKind::Repartition { num_codomain } => {
+            if num_codomain > source_rank {
+                return Err(Error::InvalidArgument(format!(
+                    "repartition: num_codomain {num_codomain} exceeds rank {source_rank}",
+                )));
+            }
+            let mut axes = (0..source_codomain_rank)
+                .chain((source_codomain_rank..source_rank).rev())
+                .collect::<Vec<_>>();
+            axes[num_codomain..].reverse();
+            let (codomain_axes, domain_axes) = axes.split_at(num_codomain);
+            checked_apply(codomain_axes, domain_axes)
+        }
+    }
+}
+
 struct LoweredAdjointTransformRequest {
     codomain_axes: Vec<usize>,
     domain_axes: Vec<usize>,
@@ -5386,9 +5447,14 @@ impl Tensor {
     /// [`Self::transpose_axes`] with reversed domain axes as the new codomain
     /// and reversed codomain axes as the new domain.
     pub fn transpose(&self) -> Result<Self, Error> {
-        let codomain_axes: Vec<usize> = (self.codomain_rank()..self.rank()).rev().collect();
-        let domain_axes: Vec<usize> = (0..self.codomain_rank()).rev().collect();
-        self.transpose_axes(&codomain_axes, &domain_axes)
+        with_planar_axes(
+            self.codomain_rank(),
+            self.rank(),
+            PlanarRequestKind::FullTranspose,
+            |codomain_axes, domain_axes| {
+                self.transformed(codomain_axes, domain_axes, TransformKind::Transpose)
+            },
+        )
     }
 
     /// TensorKit `transpose` with an explicit cyclic axis map.
@@ -5404,7 +5470,17 @@ impl Tensor {
         codomain_axes: &[usize],
         domain_axes: &[usize],
     ) -> Result<Self, Error> {
-        self.transformed(codomain_axes, domain_axes, TransformKind::Transpose)
+        with_planar_axes(
+            self.codomain_rank(),
+            self.rank(),
+            PlanarRequestKind::Explicit {
+                codomain_axes,
+                domain_axes,
+            },
+            |codomain_axes, domain_axes| {
+                self.transformed(codomain_axes, domain_axes, TransformKind::Transpose)
+            },
+        )
     }
 
     /// TensorKit `repartition(t, N₁, N₂)`: move the planar boundary so the
@@ -5412,25 +5488,20 @@ impl Tensor {
     /// boundary order is codomain followed by reversed domain; legs which cross
     /// the boundary are bent without introducing a symmetric braid.
     pub fn repartition(&self, num_codomain: usize) -> Result<Self, Error> {
-        if num_codomain > self.rank() {
-            return Err(Error::InvalidArgument(format!(
-                "repartition: num_codomain {num_codomain} exceeds rank {}",
-                self.rank()
-            )));
-        }
         if num_codomain == self.codomain_rank() {
             return Ok(self.clone());
         }
 
-        let mut axes = (0..self.codomain_rank())
-            .chain((self.codomain_rank()..self.rank()).rev())
-            .collect::<Vec<_>>();
-        axes[num_codomain..].reverse();
-        let (codomain_axes, domain_axes) = axes.split_at(num_codomain);
-
-        // Why not identity `permute`: domain trees run opposite to the planar
-        // boundary, and flattening them would braid a different leg across it.
-        self.transformed(codomain_axes, domain_axes, TransformKind::Transpose)
+        with_planar_axes(
+            self.codomain_rank(),
+            self.rank(),
+            PlanarRequestKind::Repartition { num_codomain },
+            |codomain_axes, domain_axes| {
+                // Why not identity `permute`: domain trees run opposite to the planar
+                // boundary, and flattening them would braid a different leg across it.
+                self.transformed(codomain_axes, domain_axes, TransformKind::Transpose)
+            },
+        )
     }
 
     fn transformed(
@@ -5449,14 +5520,6 @@ impl Tensor {
                     levels.len()
                 )));
             }
-        }
-        if matches!(&kind, TransformKind::Transpose) {
-            PreparedTreePairOperation::validate_transpose_syntax(
-                nout,
-                rank - nout,
-                codomain_axes,
-                domain_axes,
-            )?;
         }
         // Identity tree transforms have no axis motion or adjacent braid swaps,
         // so return the tensor unchanged and share its owned storage. Levels
@@ -8354,6 +8417,122 @@ impl TensorExecutionContext {
             alpha,
             PreparedPermuteOperation::Owned(operation),
             expected.raw(),
+        )
+    }
+
+    fn planar_overwrite_into(
+        &mut self,
+        dst: &mut Tensor,
+        src: &Tensor,
+        request: PlanarOverwriteRequest<'_>,
+        alpha: Scalar,
+    ) -> Result<(), Error> {
+        self.validate_runtime(src)?;
+        self.validate_runtime(dst)?;
+        dst.validate_host_destination(src)?;
+        if src.is_adjoint_view() || matches!(src.stored_data(), Data::Diagonal(_)) {
+            return Err(Error::InvalidArgument(
+                "dynamic destination transpose requires an ordinary dense input".to_string(),
+            ));
+        }
+        let request = match request {
+            PlanarOverwriteRequest::RepartitionFromDestination => {
+                if dst.rank() != src.rank() {
+                    return Err(Error::InvalidArgument(format!(
+                        "repartition destination rank {} does not match source rank {}",
+                        dst.rank(),
+                        src.rank()
+                    )));
+                }
+                PlanarRequestKind::Repartition {
+                    num_codomain: dst.codomain_rank(),
+                }
+            }
+            PlanarOverwriteRequest::Planar(request) => request,
+        };
+        with_planar_axes(
+            src.codomain_rank(),
+            src.rank(),
+            request,
+            |codomain_axes, domain_axes| {
+                if permute_axes_are_identity(
+                    codomain_axes,
+                    domain_axes,
+                    src.codomain_rank(),
+                    src.domain_rank(),
+                ) {
+                    dst.validate_exact_destination_space(src.ordinary_body().space.raw())?;
+                    return self.write_identity_permute_prepared(dst, src, alpha);
+                }
+                let operation = TreeTransformOperation::transpose(
+                    codomain_axes.iter().copied(),
+                    domain_axes.iter().copied(),
+                );
+                let expected = src.ordinary_body().space.transformed(&operation)?;
+                dst.validate_exact_destination_space(expected.raw())?;
+                self.write_permute_prepared(
+                    dst,
+                    src,
+                    alpha,
+                    PreparedPermuteOperation::Owned(operation),
+                    expected.raw(),
+                )
+            },
+        )
+    }
+
+    /// Overwrites an exact-layout dense host destination with
+    /// `alpha * src.transpose()`. Validation errors leave `dst` unchanged; an
+    /// error returned after backend execution begins may leave it partially
+    /// overwritten.
+    pub fn transpose_overwrite_into(
+        &mut self,
+        dst: &mut Tensor,
+        src: &Tensor,
+        alpha: Scalar,
+    ) -> Result<(), Error> {
+        self.planar_overwrite_into(
+            dst,
+            src,
+            PlanarOverwriteRequest::Planar(PlanarRequestKind::FullTranspose),
+            alpha,
+        )
+    }
+
+    /// Overwrites an exact-layout dense host destination with
+    /// `alpha * src.transpose_axes(codomain_axes, domain_axes)`.
+    pub fn transpose_axes_overwrite_into(
+        &mut self,
+        dst: &mut Tensor,
+        src: &Tensor,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+        alpha: Scalar,
+    ) -> Result<(), Error> {
+        self.planar_overwrite_into(
+            dst,
+            src,
+            PlanarOverwriteRequest::Planar(PlanarRequestKind::Explicit {
+                codomain_axes,
+                domain_axes,
+            }),
+            alpha,
+        )
+    }
+
+    /// Overwrites an exact-layout dense host destination with
+    /// `alpha * src.repartition(dst.codomain_rank())`.
+    pub fn repartition_overwrite_into(
+        &mut self,
+        dst: &mut Tensor,
+        src: &Tensor,
+        alpha: Scalar,
+    ) -> Result<(), Error> {
+        self.planar_overwrite_into(
+            dst,
+            src,
+            PlanarOverwriteRequest::RepartitionFromDestination,
+            alpha,
         )
     }
 }
