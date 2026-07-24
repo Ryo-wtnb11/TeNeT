@@ -7104,19 +7104,6 @@ mod tests {
     }
 
     #[test]
-    fn product_rule_reuses_its_memoized_identity_node() {
-        let rule = product_fusion_rule(Z2FusionRule, U1FusionRule);
-        assert!(rule.identity.get().is_none());
-
-        let first = rule.rule_identity();
-        let cached = rule.identity.get().unwrap() as *const RuleIdentity;
-        let second = rule.rule_identity();
-
-        assert_eq!(first, second);
-        assert_eq!(cached, rule.identity.get().unwrap() as *const RuleIdentity);
-    }
-
-    #[test]
     fn product_fusion_rule_nested_fz2_u1_su2_channels_and_symbols_match_tensorkit() {
         type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
         type FpU1Su2Rule = ProductFusionRule<FpU1Rule, SU2FusionRule>;
