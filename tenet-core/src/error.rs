@@ -27,6 +27,12 @@ pub enum CoreError {
         permutation: Vec<usize>,
         rank: usize,
     },
+    /// Derived axis-position metadata disagrees with its source operation.
+    InconsistentAxisPosition {
+        logical_axis: usize,
+        expected_position: usize,
+        actual_position: usize,
+    },
     UnsupportedFusionStyle {
         expected: FusionStyleKind,
         actual: FusionStyleKind,
@@ -152,6 +158,16 @@ impl fmt::Display for CoreError {
             }
             Self::InvalidPermutation { permutation, rank } => {
                 write!(f, "invalid permutation {permutation:?} for rank {rank}")
+            }
+            Self::InconsistentAxisPosition {
+                logical_axis,
+                expected_position,
+                actual_position,
+            } => {
+                write!(
+                    f,
+                    "inconsistent axis position for logical axis {logical_axis}: expected {expected_position}, got {actual_position}"
+                )
             }
             Self::UnsupportedFusionStyle { expected, actual } => {
                 write!(
