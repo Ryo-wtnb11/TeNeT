@@ -2425,6 +2425,7 @@ fn tree_transform_operation_axes(operation: &TreeTransformOperation) -> (&[usize
 mod bound_invariant_tests {
     use super::*;
     use crate::tests::GenericMultiplicityRule;
+    use crate::BoundDynamicTensorRef;
     use tenet_core::{
         reset_core_intern_tables, BlockSpec, FermionParityFusionRule, FusionAlgebraError,
         FusionProductSpace, FusionTreePairKey, Fz2SectorLayout, PackedProductCodec,
@@ -2862,12 +2863,25 @@ mod bound_invariant_tests {
 
     #[test]
     fn bound_space_rejects_incoherent_axis_split() {
-        // What: a bound space cannot disagree with its hom-space codomain/domain split.
+        // What: bound admission and the public borrowed tensor proof both reject
+        // a dynamic rank that disagrees with its HomSpace.
         let raw = DynamicFusionMapSpace {
             nout: 0,
-            nin: 2,
+            nin: 1,
             ..matrix_space()
         };
+
+        let corrupted = BoundDynamicFusionMapSpace {
+            space: raw.clone(),
+            provider: Arc::new(Z2FusionRule),
+            layout_build: LayoutBuildCapability::encoded(),
+        };
+        assert!(matches!(
+            BoundDynamicTensorRef::<_, f64>::try_new(&corrupted, &[]),
+            Err(OperationError::Core(
+                CoreError::StructureRankMismatch { .. }
+            ))
+        ));
 
         let error = BoundDynamicFusionMapSpace::bind_multiplicity_free(raw, Arc::new(Z2FusionRule))
             .unwrap_err();
@@ -2880,7 +2894,8 @@ mod bound_invariant_tests {
 
     #[test]
     fn bound_space_rejects_incoherent_structure_rank() {
-        // What: a bound space cannot attach storage with a rank different from its hom space.
+        // What: bound admission and the public borrowed tensor proof both reject
+        // storage whose rank differs from its HomSpace.
         let raw = matrix_space();
         let block = raw.structure().block(0).unwrap();
         let structure = BlockStructure::from_blocks_with_rank(
@@ -2892,6 +2907,18 @@ mod bound_invariant_tests {
             subblock_structure: Arc::new(structure),
             ..raw
         };
+
+        let corrupted = BoundDynamicFusionMapSpace {
+            space: raw.clone(),
+            provider: Arc::new(Z2FusionRule),
+            layout_build: LayoutBuildCapability::encoded(),
+        };
+        assert!(matches!(
+            BoundDynamicTensorRef::<_, f64>::try_new(&corrupted, &[]),
+            Err(OperationError::Core(
+                CoreError::StructureRankMismatch { .. }
+            ))
+        ));
 
         let error = BoundDynamicFusionMapSpace::bind_multiplicity_free(raw, Arc::new(Z2FusionRule))
             .unwrap_err();
