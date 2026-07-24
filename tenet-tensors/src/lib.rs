@@ -11,6 +11,7 @@
 
 mod adjoint;
 mod backend_trace;
+mod bound_tensor;
 mod cache;
 mod contract;
 mod facade;
@@ -28,6 +29,7 @@ pub use adjoint::{
     adjoint_bound_space_dyn, adjoint_bound_space_dyn_generic, adjoint_bound_space_dyn_lowered,
 };
 pub use backend_trace::TensorTraceOperationsBackend;
+pub use bound_tensor::BoundDynamicTensorRef;
 pub use cache::{
     reset_global_operation_caches, BlockStructureCacheBlockKey, BlockStructureCacheKey,
     OperationCachePolicy, TensorContractStructureCache, TensorContractStructureCacheKey,
