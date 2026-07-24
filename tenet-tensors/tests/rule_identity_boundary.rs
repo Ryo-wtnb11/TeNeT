@@ -8,7 +8,7 @@ use tenet_core::{
 use tenet_tensors::{
     adjoint, tensorcontract_fusion_block_specs, tensorcontract_fusion_into,
     BoundDynamicFusionMapSpace, TensorContractFusionExecutionContext, TensorContractSpec,
-    TreeTransformBuiltinRuleCacheKey, TreeTransformRuleCacheKey,
+    TreeTransformRuleCacheKey,
 };
 use tenet_tensors::{DynamicFusionMapSpace, OperationError};
 
@@ -21,12 +21,7 @@ struct SymbolOnlyRule {
 #[test]
 fn su2_tree_transform_key_contains_the_rule_identity() {
     let rule = SU2FusionRule;
-    match rule.tree_transform_rule_cache_key() {
-        TreeTransformBuiltinRuleCacheKey::SU2(identity) => {
-            assert_eq!(identity, rule.rule_identity());
-        }
-        key => panic!("unexpected SU(2) tree-transform key: {key:?}"),
-    }
+    assert_eq!(rule.tree_transform_rule_cache_key(), rule.rule_identity());
 }
 
 impl SymbolOnlyRule {
@@ -288,8 +283,7 @@ fn fusion_contract_context_rejects_unbound_space_after_a_valid_call() {
     let rule = Z2FusionRule;
     let bound = bound_scalar_space(&rule);
     let axes = TensorContractSpec::with_default_output_order(&[], &[]);
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     let mut dst =
         TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![0.0], bound.clone()).unwrap();
     let lhs = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![2.0], bound.clone()).unwrap();

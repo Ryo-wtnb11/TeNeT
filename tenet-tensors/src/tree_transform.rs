@@ -7,8 +7,7 @@ pub use cache::{
     TreeTransformCache, TreeTransformCacheStats,
 };
 pub use operation::{
-    TreeTransformBuiltinRuleCacheKey, TreeTransformOperation, TreeTransformOperationKind,
-    TreeTransformProductRuleCacheKey, TreeTransformRuleCacheKey, TreeTransformSu3RuleCacheKey,
+    TreeTransformOperation, TreeTransformOperationKind, TreeTransformRuleCacheKey,
 };
 pub use plan::{
     build_all_codomain_tree_transform_group_plan, build_generic_tree_pair_transform_group_plan,

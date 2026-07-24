@@ -10,8 +10,8 @@ use tenet_core::{
 use tenet_tensors::{
     tree_transform_execute_with, tree_transform_into, tree_transform_into_with,
     tree_transform_into_with_context, tree_transform_structure, DenseTreeTransformOperations,
-    HostTensorOperations, TreeTransformBuiltinRuleCacheKey, TreeTransformExecutionContext,
-    TreeTransformOperation, TreeTransformRuleCacheKey, TreeTransformWorkspace,
+    HostTensorOperations, RuleIdentity, TreeTransformExecutionContext, TreeTransformOperation,
+    TreeTransformRuleCacheKey, TreeTransformWorkspace,
 };
 
 fn main() {
@@ -356,8 +356,7 @@ fn bench_su2(
         black_box(dst.data()[0]);
     });
 
-    let mut context =
-        TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
     tree_transform_into_with_context(
         &mut context,
         &SU2FusionRule,
@@ -383,12 +382,8 @@ fn bench_su2(
         black_box(dst.data()[0]);
     });
 
-    let mut host_context = TreeTransformExecutionContext::<
-        f64,
-        TreeTransformBuiltinRuleCacheKey,
-        f64,
-        HostTensorOperations,
-    >::default();
+    let mut host_context =
+        TreeTransformExecutionContext::<f64, RuleIdentity, f64, HostTensorOperations>::default();
     tree_transform_into_with_context(
         &mut host_context,
         &SU2FusionRule,

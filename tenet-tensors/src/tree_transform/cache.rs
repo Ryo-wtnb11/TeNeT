@@ -763,11 +763,9 @@ where
     /// Generic-fusion sibling of [`Self::get_or_compile_tree_pair`].
     ///
     /// This remains eager because completed-transformer retention for Generic
-    /// fusion needs its own measured key and ownership contract. The rule key
-    /// bound still preserves provider provenance for that future boundary.
-    /// Fusion-tree block keys follow
-    /// [`tenet_core::FusionTreeKey::validate_for_rule`]'s provider-domain
-    /// precondition.
+    /// fusion needs its own measured key and ownership contract. Why not retain
+    /// a rule key here: provider-domain validation is the eager boundary, and
+    /// this path retains no key or completed structure.
     pub fn get_or_compile_tree_pair_generic<
         R,
         TDst,
@@ -788,7 +786,7 @@ where
         src: &TensorMap<TSrc, SRC_NOUT, SRC_NIN, SSrc, DSrc>,
     ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
     where
-        R: GenericRigidSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        R: GenericRigidSymbols<Scalar = T>,
         R::Scalar: GenericBraidScalar,
         T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
         RuleKey: 'static + Send + Sync,
@@ -814,7 +812,7 @@ where
         src_structure: &Arc<BlockStructure>,
     ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
     where
-        R: GenericRigidSymbols<Scalar = T> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        R: GenericRigidSymbols<Scalar = T>,
         R::Scalar: GenericBraidScalar,
         T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
         RuleKey: 'static + Send + Sync,

@@ -613,7 +613,7 @@ where
         beta: D,
     ) -> Result<(), OperationError>
     where
-        R: GenericRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        R: GenericRigidSymbols<Scalar = C>,
         C: GenericBraidScalar,
     {
         let Self {
@@ -653,7 +653,7 @@ where
         alpha: D,
     ) -> Result<(), OperationError>
     where
-        R: GenericRigidSymbols<Scalar = C> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        R: GenericRigidSymbols<Scalar = C>,
         C: GenericBraidScalar,
     {
         self.compile_and_replay_overwrite(

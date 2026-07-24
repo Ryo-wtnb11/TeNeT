@@ -3002,32 +3002,32 @@ macro_rules! with_user_rule_ctx {
         match $space.as_ref() {
             UserBoundSpace::U1(bound) => {
                 let $rule = bound.provider();
-                let $ctxs = &mut $state.u1;
+                let $ctxs = &mut $state.mf;
                 $body
             }
             UserBoundSpace::Z2(bound) => {
                 let $rule = bound.provider();
-                let $ctxs = &mut $state.z2;
+                let $ctxs = &mut $state.mf;
                 $body
             }
             UserBoundSpace::FZ2(bound) => {
                 let $rule = bound.provider();
-                let $ctxs = &mut $state.fz2;
+                let $ctxs = &mut $state.mf;
                 $body
             }
             UserBoundSpace::SU2(bound) => {
                 let $rule = bound.provider();
-                let $ctxs = &mut $state.su2;
+                let $ctxs = &mut $state.mf;
                 $body
             }
             UserBoundSpace::U1FZ2(bound) => {
                 let $rule = bound.provider();
-                let $ctxs = &mut $state.u1_fz2;
+                let $ctxs = &mut $state.mf;
                 $body
             }
             UserBoundSpace::FZ2U1SU2(bound) => {
                 let $rule = bound.provider();
-                let $ctxs = &mut $state.fz2_u1_su2;
+                let $ctxs = &mut $state.mf;
                 $body
             }
             UserBoundSpace::Su3(_) => {
@@ -3041,27 +3041,27 @@ macro_rules! with_bound_ctx {
     ($space:expr, $state:expr, $bound:ident, $ctxs:ident, $body:expr) => {
         match $space.as_ref() {
             UserBoundSpace::U1($bound) => {
-                let $ctxs = &mut $state.u1;
+                let $ctxs = &mut $state.mf;
                 $body
             }
             UserBoundSpace::Z2($bound) => {
-                let $ctxs = &mut $state.z2;
+                let $ctxs = &mut $state.mf;
                 $body
             }
             UserBoundSpace::FZ2($bound) => {
-                let $ctxs = &mut $state.fz2;
+                let $ctxs = &mut $state.mf;
                 $body
             }
             UserBoundSpace::SU2($bound) => {
-                let $ctxs = &mut $state.su2;
+                let $ctxs = &mut $state.mf;
                 $body
             }
             UserBoundSpace::U1FZ2($bound) => {
-                let $ctxs = &mut $state.u1_fz2;
+                let $ctxs = &mut $state.mf;
                 $body
             }
             UserBoundSpace::FZ2U1SU2($bound) => {
-                let $ctxs = &mut $state.fz2_u1_su2;
+                let $ctxs = &mut $state.mf;
                 $body
             }
             UserBoundSpace::Su3(_) => unreachable!("generic provider is unsupported"),
@@ -5246,8 +5246,8 @@ impl Tensor {
         output_order: OutputAxisOrder<'_>,
         semantics: ContractionSemantics,
     ) -> Result<Self, Error> {
-        // Lease a per-rule context so independent operations on one runtime do
-        // not serialize while bound spaces remain the fusion authority.
+        // Lease an execution context so independent operations on one runtime
+        // do not serialize while bound spaces remain the fusion authority.
         let mut lease = self.rt.lease_context()?;
         let context = lease.context();
         let dst_bound = if self.rule_kind() == RuleKind::Su3 {
@@ -5343,32 +5343,32 @@ impl Tensor {
                 UserBoundSpace::U1(dst),
                 UserBoundSpace::U1(lhs_storage),
                 UserBoundSpace::U1(rhs_storage),
-            ) => contract_bound!(&mut context.u1, dst, lhs_storage, rhs_storage),
+            ) => contract_bound!(&mut context.mf, dst, lhs_storage, rhs_storage),
             (
                 UserBoundSpace::Z2(dst),
                 UserBoundSpace::Z2(lhs_storage),
                 UserBoundSpace::Z2(rhs_storage),
-            ) => contract_bound!(&mut context.z2, dst, lhs_storage, rhs_storage),
+            ) => contract_bound!(&mut context.mf, dst, lhs_storage, rhs_storage),
             (
                 UserBoundSpace::FZ2(dst),
                 UserBoundSpace::FZ2(lhs_storage),
                 UserBoundSpace::FZ2(rhs_storage),
-            ) => contract_bound!(&mut context.fz2, dst, lhs_storage, rhs_storage),
+            ) => contract_bound!(&mut context.mf, dst, lhs_storage, rhs_storage),
             (
                 UserBoundSpace::SU2(dst),
                 UserBoundSpace::SU2(lhs_storage),
                 UserBoundSpace::SU2(rhs_storage),
-            ) => contract_bound!(&mut context.su2, dst, lhs_storage, rhs_storage),
+            ) => contract_bound!(&mut context.mf, dst, lhs_storage, rhs_storage),
             (
                 UserBoundSpace::U1FZ2(dst),
                 UserBoundSpace::U1FZ2(lhs_storage),
                 UserBoundSpace::U1FZ2(rhs_storage),
-            ) => contract_bound!(&mut context.u1_fz2, dst, lhs_storage, rhs_storage),
+            ) => contract_bound!(&mut context.mf, dst, lhs_storage, rhs_storage),
             (
                 UserBoundSpace::FZ2U1SU2(dst),
                 UserBoundSpace::FZ2U1SU2(lhs_storage),
                 UserBoundSpace::FZ2U1SU2(rhs_storage),
-            ) => contract_bound!(&mut context.fz2_u1_su2, dst, lhs_storage, rhs_storage),
+            ) => contract_bound!(&mut context.mf, dst, lhs_storage, rhs_storage),
             (UserBoundSpace::Su3(dst), UserBoundSpace::Su3(lhs), UserBoundSpace::Su3(rhs)) => {
                 if lhs_is_adjoint || rhs_is_adjoint {
                     return Err(Error::InvalidArgument(
@@ -5453,27 +5453,27 @@ impl Tensor {
             rhs.ordinary_body().space.as_ref(),
         ) {
             (UserBoundSpace::U1(dst), UserBoundSpace::U1(lhs), UserBoundSpace::U1(rhs)) => {
-                contract_cuda_bound!(&mut state.u1, dst, lhs, rhs)
+                contract_cuda_bound!(&mut state.mf, dst, lhs, rhs)
             }
             (UserBoundSpace::Z2(dst), UserBoundSpace::Z2(lhs), UserBoundSpace::Z2(rhs)) => {
-                contract_cuda_bound!(&mut state.z2, dst, lhs, rhs)
+                contract_cuda_bound!(&mut state.mf, dst, lhs, rhs)
             }
             (UserBoundSpace::FZ2(dst), UserBoundSpace::FZ2(lhs), UserBoundSpace::FZ2(rhs)) => {
-                contract_cuda_bound!(&mut state.fz2, dst, lhs, rhs)
+                contract_cuda_bound!(&mut state.mf, dst, lhs, rhs)
             }
             (UserBoundSpace::SU2(dst), UserBoundSpace::SU2(lhs), UserBoundSpace::SU2(rhs)) => {
-                contract_cuda_bound!(&mut state.su2, dst, lhs, rhs)
+                contract_cuda_bound!(&mut state.mf, dst, lhs, rhs)
             }
             (
                 UserBoundSpace::U1FZ2(dst),
                 UserBoundSpace::U1FZ2(lhs),
                 UserBoundSpace::U1FZ2(rhs),
-            ) => contract_cuda_bound!(&mut state.u1_fz2, dst, lhs, rhs),
+            ) => contract_cuda_bound!(&mut state.mf, dst, lhs, rhs),
             (
                 UserBoundSpace::FZ2U1SU2(dst),
                 UserBoundSpace::FZ2U1SU2(lhs),
                 UserBoundSpace::FZ2U1SU2(rhs),
-            ) => contract_cuda_bound!(&mut state.fz2_u1_su2, dst, lhs, rhs),
+            ) => contract_cuda_bound!(&mut state.mf, dst, lhs, rhs),
             (UserBoundSpace::Su3(_), UserBoundSpace::Su3(_), UserBoundSpace::Su3(_)) => {
                 return Err(Error::InvalidArgument(
                     "CUDA contraction is not yet supported for SU(3) tensors".to_string(),
@@ -8761,7 +8761,7 @@ fn dispatch_contract_into<D: UserScalar>(
             UserBoundSpace::U1(lhs_space),
             UserBoundSpace::U1(rhs_space),
         ) => contract_into_bound(
-            &mut context.u1,
+            &mut context.mf,
             dst,
             dst_data,
             lhs_space,
@@ -8780,7 +8780,7 @@ fn dispatch_contract_into<D: UserScalar>(
             UserBoundSpace::Z2(lhs_space),
             UserBoundSpace::Z2(rhs_space),
         ) => contract_into_bound(
-            &mut context.z2,
+            &mut context.mf,
             dst,
             dst_data,
             lhs_space,
@@ -8799,7 +8799,7 @@ fn dispatch_contract_into<D: UserScalar>(
             UserBoundSpace::FZ2(lhs_space),
             UserBoundSpace::FZ2(rhs_space),
         ) => contract_into_bound(
-            &mut context.fz2,
+            &mut context.mf,
             dst,
             dst_data,
             lhs_space,
@@ -8818,7 +8818,7 @@ fn dispatch_contract_into<D: UserScalar>(
             UserBoundSpace::SU2(lhs_space),
             UserBoundSpace::SU2(rhs_space),
         ) => contract_into_bound(
-            &mut context.su2,
+            &mut context.mf,
             dst,
             dst_data,
             lhs_space,
@@ -8837,7 +8837,7 @@ fn dispatch_contract_into<D: UserScalar>(
             UserBoundSpace::U1FZ2(lhs_space),
             UserBoundSpace::U1FZ2(rhs_space),
         ) => contract_into_bound(
-            &mut context.u1_fz2,
+            &mut context.mf,
             dst,
             dst_data,
             lhs_space,
@@ -8856,7 +8856,7 @@ fn dispatch_contract_into<D: UserScalar>(
             UserBoundSpace::FZ2U1SU2(lhs_space),
             UserBoundSpace::FZ2U1SU2(rhs_space),
         ) => contract_into_bound(
-            &mut context.fz2_u1_su2,
+            &mut context.mf,
             dst,
             dst_data,
             lhs_space,
@@ -9007,13 +9007,13 @@ fn dispatch_permute_into_ref<D: UserScalar>(
         };
     }
     match authority {
-        UserBoundSpace::U1(space) => apply!(&mut context.u1, space.provider()),
-        UserBoundSpace::Z2(space) => apply!(&mut context.z2, space.provider()),
-        UserBoundSpace::FZ2(space) => apply!(&mut context.fz2, space.provider()),
-        UserBoundSpace::SU2(space) => apply!(&mut context.su2, space.provider()),
-        UserBoundSpace::U1FZ2(space) => apply!(&mut context.u1_fz2, space.provider()),
+        UserBoundSpace::U1(space) => apply!(&mut context.mf, space.provider()),
+        UserBoundSpace::Z2(space) => apply!(&mut context.mf, space.provider()),
+        UserBoundSpace::FZ2(space) => apply!(&mut context.mf, space.provider()),
+        UserBoundSpace::SU2(space) => apply!(&mut context.mf, space.provider()),
+        UserBoundSpace::U1FZ2(space) => apply!(&mut context.mf, space.provider()),
         UserBoundSpace::FZ2U1SU2(space) => {
-            apply!(&mut context.fz2_u1_su2, space.provider())
+            apply!(&mut context.mf, space.provider())
         }
         UserBoundSpace::Su3(space) => D::ctx_of(&mut context.su3)
             .tree_context_mut()
@@ -11644,7 +11644,7 @@ mod shared_context_tests {
 
         let mut actual = vec![f64::NAN; expected_data.len()];
         context
-            .su2
+            .mf
             .f64
             .tree_context_mut()
             .tree_transform_dyn_overwrite_into_ref(
@@ -11664,6 +11664,62 @@ mod shared_context_tests {
 #[cfg(test)]
 mod bound_provider_tests {
     use super::*;
+
+    #[test]
+    fn one_execution_context_reuses_the_multiplicity_free_lane_across_rule_identities() {
+        // What: one caller-owned context can execute distinct multiplicity-free
+        // providers without reusing a transform compiled for another rule.
+        let runtime = Runtime::builder().build().unwrap();
+        let u1 = Space::u1([(-1, 1), (0, 2), (1, 1)]);
+        let su2 = Space::su2([(0, 1), (1, 2), (2, 1)]).unwrap();
+        let product = Space::fz2_u1_su2([((0, 0, 0), 1), ((0, 1, 2), 1), ((1, -1, 1), 1)]).unwrap();
+        let mut context = TensorExecutionContext::for_runtime(&runtime).unwrap();
+
+        let u1_source =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&u1, &u1], [&u1], 551_001).unwrap();
+        let su2_source =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&su2, &su2], [&su2], 551_002).unwrap();
+        let product_source = Tensor::rand_with_seed(
+            &runtime,
+            Dtype::F64,
+            [&product, &product],
+            [&product],
+            551_003,
+        )
+        .unwrap();
+        assert!(su2_source.ordinary_body().space.structure().block_count() > 1);
+
+        let u1_key = with_user_rule!(u1_source.ordinary_body().space, rule, {
+            rule.tree_transform_rule_cache_key()
+        });
+        let su2_key = with_user_rule!(su2_source.ordinary_body().space, rule, {
+            rule.tree_transform_rule_cache_key()
+        });
+        let product_key = with_user_rule!(product_source.ordinary_body().space, rule, {
+            rule.tree_transform_rule_cache_key()
+        });
+        assert_eq!(u1_key, u1_source.ordinary_body().space.context().identity());
+        assert_eq!(
+            su2_key,
+            su2_source.ordinary_body().space.context().identity()
+        );
+        assert_eq!(
+            product_key,
+            product_source.ordinary_body().space.context().identity()
+        );
+        assert_ne!(u1_key, su2_key);
+        assert_ne!(u1_key, product_key);
+        assert_ne!(su2_key, product_key);
+
+        for source in [&u1_source, &su2_source, &product_source] {
+            let expected = source.permute(&[1], &[2, 0]).unwrap();
+            let mut destination = expected.scale(0.0).unwrap();
+            context
+                .permute_overwrite_into(&mut destination, source, &[1], &[2, 0], Scalar::F64(1.0))
+                .unwrap();
+            assert_eq!(destination.data(), expected.data());
+        }
+    }
 
     #[test]
     fn construction_and_svd_factors_share_one_provider_allocation() {
@@ -11741,7 +11797,7 @@ mod bound_provider_tests {
             Tensor::zeros(&runtime, Dtype::F64, [&space, &space], [&space]).unwrap();
         let mut execution = TensorExecutionContext::for_runtime(&runtime).unwrap();
         let mut cache = PermuteOverwriteCache::default();
-        let before = execution.z2.f64.tree_context().cache().stats();
+        let before = execution.mf.f64.tree_context().cache().stats();
 
         let outcome = execution
             .try_permute_overwrite_into(
@@ -11757,7 +11813,7 @@ mod bound_provider_tests {
         assert_eq!(outcome, OverwriteOutcome::Written);
         assert_eq!(destination.data(), expected.data());
         assert_eq!(cache.preparations(), 0);
-        assert_eq!(execution.z2.f64.tree_context().cache().stats(), before);
+        assert_eq!(execution.mf.f64.tree_context().cache().stats(), before);
     }
 
     #[test]
@@ -11771,14 +11827,14 @@ mod bound_provider_tests {
         let mut destination =
             Tensor::zeros(&runtime, Dtype::F64, [&space, &space], [&space]).unwrap();
         let mut execution = TensorExecutionContext::for_runtime(&runtime).unwrap();
-        let before = execution.z2.f64.tree_context().cache().stats();
+        let before = execution.mf.f64.tree_context().cache().stats();
 
         execution
             .permute_overwrite_into(&mut destination, &source, &[0, 1], &[2], Scalar::F64(-1.5))
             .unwrap();
 
         assert_eq!(destination.data(), expected.data());
-        assert_eq!(execution.z2.f64.tree_context().cache().stats(), before);
+        assert_eq!(execution.mf.f64.tree_context().cache().stats(), before);
     }
 
     #[test]

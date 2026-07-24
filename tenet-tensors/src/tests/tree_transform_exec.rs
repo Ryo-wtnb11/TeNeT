@@ -16,7 +16,7 @@ fn host_tree_transform_workspace_is_explicit_host_workspace() {
 
 #[test]
 fn tree_transform_execution_context_reports_host_placement() {
-    let context = TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
 
     assert_eq!(context.backend_placement(), Placement::Host);
     assert_eq!(context.workspace_placement(), Placement::Host);

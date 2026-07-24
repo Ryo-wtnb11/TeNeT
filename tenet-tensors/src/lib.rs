@@ -21,6 +21,8 @@ mod test_support;
 mod tree_context;
 mod tree_transform;
 
+pub use tenet_core::RuleIdentity;
+
 pub use adjoint::{
     adjoint, adjoint_bound_dyn, adjoint_bound_dyn_generic, adjoint_bound_dyn_lowered,
     adjoint_bound_space_dyn, adjoint_bound_space_dyn_generic, adjoint_bound_space_dyn_lowered,
@@ -119,10 +121,9 @@ pub use tree_transform::{
     build_all_codomain_tree_transform_group_plan, build_generic_tree_pair_transform_group_plan,
     build_tree_pair_transform_group_plan, build_tree_transform_group_plan,
     RuntimeTreeTransformCacheInfo, RuntimeTreeTransformStore, TreePairTransformCache,
-    TreeTransformBlockSpec, TreeTransformBuiltinRuleCacheKey, TreeTransformCache,
-    TreeTransformCacheStats, TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
-    TreeTransformKeyBlockSpec, TreeTransformOperation, TreeTransformOperationKind,
-    TreeTransformProductRuleCacheKey, TreeTransformRuleCacheKey, TreeTransformSu3RuleCacheKey,
+    TreeTransformBlockSpec, TreeTransformCache, TreeTransformCacheStats,
+    TreeTransformGroupBlockSpec, TreeTransformGroupPlan, TreeTransformKeyBlockSpec,
+    TreeTransformOperation, TreeTransformOperationKind, TreeTransformRuleCacheKey,
 };
 #[cfg(test)]
 pub(crate) use tree_transform::{

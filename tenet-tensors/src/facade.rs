@@ -1570,21 +1570,6 @@ where
 // (`tree_transform_execute_with`) is generic over the coefficient type, so no
 // recoupling math is added here — the wiring only swaps the plan builder.
 //
-// Deferred to Stage B3b (recorded rather than built, since nothing can exercise
-// them yet — no keyed Generic rule provider exists):
-//   * The `_with_context` / cache path (`TreeTransformCache::get_or_compile_*`)
-//     requires `TreeTransformRuleCacheKey`, which no Generic rule implements
-//     until the B3b SU(3) table provider lands. A Generic cache sibling now
-//     would be untestable dead code. When B3b adds a keyed Generic rule its
-//     `Key` is a fresh associated type, so the cache — monomorphized per
-//     `RuleKey` — shares no map with the mult-free
-//     `TreeTransformBuiltinRuleCacheKey` instance and cannot collide.
-//   * The top-level `tenet::Tensor` erases its rule behind the closed
-//     `RuleKind` enum (mult-free variants only); reaching Generic from there
-//     needs a new `RuleKind` variant + provider, which is B3b.
-//   * The all-codomain Generic lowering (plan.rs guards #4/#5) is only reached
-//     via the cache (`get_or_compile_all_codomain`); the non-cached facade
-//     path here only does tree-pair, so it stays deferred as in B2c.
 // ======================================================================
 
 /// Generic-fusion sibling of [`tree_transform_structure`]: builds the Stage B2c

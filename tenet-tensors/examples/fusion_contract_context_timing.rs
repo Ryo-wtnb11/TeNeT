@@ -11,8 +11,8 @@ use tenet_tensors::{
     prepare_tensorcontract_fusion_plan, tensorcontract_fusion_into,
     tensorcontract_fusion_prepared_into, tensorcontract_fusion_prepared_into_core_dst,
     tree_transform_into_with_context, FusionContractPlan, HostTensorOperations,
-    HostTreeFusionExecutionContext, OutputAxisOrder, TensorContractFusionExecutionContext,
-    TensorContractFusionProfile, TensorContractSpec, TreeTransformBuiltinRuleCacheKey,
+    HostTreeFusionExecutionContext, OutputAxisOrder, RuleIdentity,
+    TensorContractFusionExecutionContext, TensorContractFusionProfile, TensorContractSpec,
     TreeTransformExecutionContext, TreeTransformRuleCacheKey,
 };
 
@@ -45,8 +45,7 @@ fn bench_su2_non_core_form_source() {
     assert_close(&oneshot_data, &expected);
     let (context_cold, context_cold_data) = fixture.time_context_cold(COLD_CONTEXT_ITERS);
     assert_close(&context_cold_data, &expected);
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     assert_close(&fixture.context_warm_once(&mut context), &expected);
     let (warm, warm_data) = fixture.time_context_warm(&mut context, WARM_CONTEXT_ITERS);
     assert_close(&warm_data, &expected);
@@ -120,8 +119,7 @@ fn bench_su2_output_scratch() {
     assert_close(&manual_data, &expected);
     let (context_cold, cold_data) = fixture.time_context_cold(COLD_CONTEXT_ITERS);
     assert_close(&cold_data, &expected);
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     assert_close(&fixture.context_warm_once(&mut context), &expected);
     let (warm, warm_data) = fixture.time_context_warm(&mut context, WARM_CONTEXT_ITERS);
     assert_close(&warm_data, &expected);
@@ -346,10 +344,7 @@ impl Su2NoncoreFixture {
         let rule = SU2FusionRule;
         let mut dst = self.dst();
         let elapsed = time_loop(iterations, || {
-            let mut context = TensorContractFusionExecutionContext::<
-                f64,
-                TreeTransformBuiltinRuleCacheKey,
-            >::default();
+            let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
             dst.data_mut().copy_from_slice(&self.initial_dst);
             context
                 .tensorcontract_fusion_into(
@@ -369,7 +364,7 @@ impl Su2NoncoreFixture {
 
     fn time_context_warm(
         &self,
-        context: &mut TensorContractFusionExecutionContext<f64, TreeTransformBuiltinRuleCacheKey>,
+        context: &mut TensorContractFusionExecutionContext<f64, RuleIdentity>,
         iterations: usize,
     ) -> (Duration, Vec<f64>) {
         let rule = SU2FusionRule;
@@ -398,9 +393,7 @@ impl Su2NoncoreFixture {
     ) -> (TensorContractFusionProfile, Vec<f64>) {
         let rule = SU2FusionRule;
         let mut dst = self.dst();
-        let mut context =
-            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
-            );
+        let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         context
             .tensorcontract_fusion_into(
                 &rule,
@@ -437,8 +430,7 @@ impl Su2NoncoreFixture {
     fn time_context_warm_host_tree(&self, iterations: usize) -> (Duration, Vec<f64>) {
         let rule = SU2FusionRule;
         let mut dst = self.dst();
-        let mut context =
-            HostTreeFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+        let mut context = HostTreeFusionExecutionContext::<f64, RuleIdentity>::default();
         context
             .tensorcontract_fusion_into(
                 &rule,
@@ -472,8 +464,7 @@ impl Su2NoncoreFixture {
         let rule = SU2FusionRule;
         let mut lhs_core = self.lhs_core();
         let mut rhs_core = self.rhs_core();
-        let mut context =
-            TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+        let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
         tree_transform_into_with_context(
             &mut context,
             &rule,
@@ -527,12 +518,9 @@ impl Su2NoncoreFixture {
         let rule = SU2FusionRule;
         let mut lhs_core = self.lhs_core();
         let mut rhs_core = self.rhs_core();
-        let mut context = TreeTransformExecutionContext::<
-            f64,
-            TreeTransformBuiltinRuleCacheKey,
-            f64,
-            HostTensorOperations,
-        >::default();
+        let mut context =
+            TreeTransformExecutionContext::<f64, RuleIdentity, f64, HostTensorOperations>::default(
+            );
         tree_transform_into_with_context(
             &mut context,
             &rule,
@@ -588,9 +576,7 @@ impl Su2NoncoreFixture {
         let mut rhs_core = self.rhs_core();
         let mut dst = self.dst();
         self.transform_sources_into(&mut lhs_core, &mut rhs_core);
-        let mut context =
-            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
-            );
+        let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         context
             .tensorcontract_fusion_into(
                 &rule,
@@ -639,8 +625,7 @@ impl Su2NoncoreFixture {
         rhs_core: &mut TensorMap<f64, 3, 1>,
     ) {
         let rule = SU2FusionRule;
-        let mut context =
-            TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+        let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
         tree_transform_into_with_context(
             &mut context,
             &rule,
@@ -665,7 +650,7 @@ impl Su2NoncoreFixture {
 
     fn context_warm_once(
         &self,
-        context: &mut TensorContractFusionExecutionContext<f64, TreeTransformBuiltinRuleCacheKey>,
+        context: &mut TensorContractFusionExecutionContext<f64, RuleIdentity>,
     ) -> Vec<f64> {
         let rule = SU2FusionRule;
         let mut dst = self.dst();
@@ -818,10 +803,7 @@ impl Su2OutputScratchFixture {
         let rule = SU2FusionRule;
         let mut dst = self.dst();
         let elapsed = time_loop(iterations, || {
-            let mut context = TensorContractFusionExecutionContext::<
-                f64,
-                TreeTransformBuiltinRuleCacheKey,
-            >::default();
+            let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
             dst.data_mut().copy_from_slice(&self.initial_dst);
             context
                 .tensorcontract_fusion_into(
@@ -841,7 +823,7 @@ impl Su2OutputScratchFixture {
 
     fn time_context_warm(
         &self,
-        context: &mut TensorContractFusionExecutionContext<f64, TreeTransformBuiltinRuleCacheKey>,
+        context: &mut TensorContractFusionExecutionContext<f64, RuleIdentity>,
         iterations: usize,
     ) -> (Duration, Vec<f64>) {
         let rule = SU2FusionRule;
@@ -870,9 +852,7 @@ impl Su2OutputScratchFixture {
     ) -> (TensorContractFusionProfile, Vec<f64>) {
         let rule = SU2FusionRule;
         let mut dst = self.dst();
-        let mut context =
-            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
-            );
+        let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         context
             .tensorcontract_fusion_into(
                 &rule,
@@ -913,8 +893,7 @@ impl Su2OutputScratchFixture {
         let mut rhs_core = self.rhs_core();
         self.materialize_core_dst(&mut core_dst, &mut lhs_core, &mut rhs_core);
         let rule = SU2FusionRule;
-        let mut context =
-            TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+        let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
         tree_transform_into_with_context(
             &mut context,
             &rule,
@@ -944,7 +923,7 @@ impl Su2OutputScratchFixture {
 
     fn context_warm_once(
         &self,
-        context: &mut TensorContractFusionExecutionContext<f64, TreeTransformBuiltinRuleCacheKey>,
+        context: &mut TensorContractFusionExecutionContext<f64, RuleIdentity>,
     ) -> Vec<f64> {
         let rule = SU2FusionRule;
         let mut dst = self.dst();

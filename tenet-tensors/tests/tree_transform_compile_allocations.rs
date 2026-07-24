@@ -14,8 +14,8 @@ use tenet_core::{
 };
 use tenet_tensors::{
     build_all_codomain_tree_transform_group_plan, build_tree_pair_transform_group_plan,
-    reset_global_operation_caches, TreeTransformBlockSpec, TreeTransformBuiltinRuleCacheKey,
-    TreeTransformCache, TreeTransformOperation, TreeTransformStructure,
+    reset_global_operation_caches, RuleIdentity, TreeTransformBlockSpec, TreeTransformCache,
+    TreeTransformOperation, TreeTransformStructure,
 };
 
 struct CountingAllocator;
@@ -112,9 +112,6 @@ struct AdmissionCountingSu2Rule {
     nsymbol_calls: Arc<AtomicUsize>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct AdmissionCountingSu2CacheKey;
-
 impl FusionRule for AdmissionCountingSu2Rule {
     fn rule_identity(&self) -> tenet_core::RuleIdentity {
         SU2FusionRule.rule_identity()
@@ -202,14 +199,6 @@ impl MultiplicityFreeRigidSymbols for AdmissionCountingSu2Rule {
     }
 }
 
-impl tenet_tensors::TreeTransformRuleCacheKey for AdmissionCountingSu2Rule {
-    type Key = AdmissionCountingSu2CacheKey;
-
-    fn tree_transform_rule_cache_key(&self) -> Self::Key {
-        AdmissionCountingSu2CacheKey
-    }
-}
-
 fn rank_129_su2_vacuum_structure() -> Arc<BlockStructure> {
     const RANK: usize = 129;
 
@@ -248,7 +237,7 @@ fn rank_129_second_exact_warm_structure_hit_has_no_operation_key_allocation_or_p
     };
     let structure = rank_129_su2_vacuum_structure();
     let operation = TreeTransformOperation::permute(0..129, []);
-    let mut cache = TreeTransformCache::<f64, AdmissionCountingSu2CacheKey>::default();
+    let mut cache = TreeTransformCache::<f64, RuleIdentity>::default();
     let cold = cache
         .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
             &rule, &operation, &structure, &structure, false,
@@ -351,7 +340,7 @@ fn cold_ordered_tree_pair_compile_stays_within_allocation_envelopes() {
     // capacity exists, independently of unrelated typed-cache test order.
     reset_global_operation_caches();
     let (dst, src) = rank_eight_su2_subset(1);
-    TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new()
+    TreeTransformCache::<f64, RuleIdentity>::new()
         .get_or_compile_tree_pair(
             &SU2FusionRule,
             TreeTransformOperation::permute(0..8, []),
@@ -366,7 +355,7 @@ fn cold_ordered_tree_pair_compile_stays_within_allocation_envelopes() {
     {
         reset_global_operation_caches();
         let (dst, src) = rank_eight_su2_subset(source_count);
-        let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
+        let mut cache = TreeTransformCache::<f64, RuleIdentity>::new();
         cache.set_recoupling_threads(1);
 
         ALLOCATIONS.set(0);
@@ -396,7 +385,7 @@ fn cold_ordered_tree_pair_compile_stays_within_allocation_envelopes() {
 fn rank_nine_same_split_groups_do_not_clone_prepared_spill_storage() {
     let structure = Arc::new(rank_nine_same_split_su2_groups());
     let operation = TreeTransformOperation::braid([1, 0, 2, 3, 4, 5, 6, 7, 8], [], 0..9, []);
-    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
+    let mut cache = TreeTransformCache::<f64, RuleIdentity>::new();
     cache.set_recoupling_threads(1);
 
     ALLOCATIONS.set(0);
