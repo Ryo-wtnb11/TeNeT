@@ -109,6 +109,25 @@ fn lazy_adjoint_metadata_and_involution_stay_on_cuda() {
 
 #[test]
 #[ignore]
+fn unit_layout_rejects_cuda_without_host_fallback() {
+    // What: unit-leg metadata wrappers reject device payloads before any host
+    // materialization or implicit transfer.
+    let rt = Runtime::builder().cuda(0).build().unwrap();
+    let v = u1_space();
+    let device = Tensor::rand(&rt, Dtype::F64, [&v], [&v])
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    let lazy = device.adjoint().unwrap();
+
+    assert!(matches!(
+        lazy.insert_left_unit(0, false),
+        Err(Error::UnsupportedOnDevice(_))
+    ));
+}
+
+#[test]
+#[ignore]
 fn u1_contract_on_cuda_matches_host() {
     let rt = Runtime::builder().cuda(0).build().unwrap();
     let v = u1_space();
