@@ -1,39 +1,6 @@
 use tenet_core::{CoreError, FusionRule};
 
-use crate::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace, OperationError};
-
-fn validate_dynamic_tensor_input(
-    raw: &DynamicFusionMapSpace,
-    actual_len: usize,
-) -> Result<(), OperationError> {
-    let hom_rank = raw.homspace().codomain().len() + raw.homspace().domain().len();
-    if raw.rank() != hom_rank {
-        return Err(OperationError::from_core_preserving_context(
-            CoreError::StructureRankMismatch {
-                expected: hom_rank,
-                actual: raw.rank(),
-            },
-        ));
-    }
-    if raw.structure().rank() != raw.rank() {
-        return Err(OperationError::from_core_preserving_context(
-            CoreError::StructureRankMismatch {
-                expected: raw.rank(),
-                actual: raw.structure().rank(),
-            },
-        ));
-    }
-    let expected = raw.required_len()?;
-    if actual_len != expected {
-        return Err(OperationError::from_core_preserving_context(
-            CoreError::DimensionMismatch {
-                expected,
-                actual: actual_len,
-            },
-        ));
-    }
-    Ok(())
-}
+use crate::{BoundDynamicFusionMapSpace, OperationError};
 
 /// Borrowed dynamic tensor input whose provider, complete tree grid, rank, and
 /// storage length have been validated before an expert operation can run.
@@ -52,7 +19,32 @@ where
         data: &'a [D],
     ) -> Result<Self, OperationError> {
         let raw = space.space();
-        validate_dynamic_tensor_input(raw, data.len())?;
+        let hom_rank = raw.homspace().codomain().len() + raw.homspace().domain().len();
+        if raw.rank() != hom_rank {
+            return Err(OperationError::from_core_preserving_context(
+                CoreError::StructureRankMismatch {
+                    expected: hom_rank,
+                    actual: raw.rank(),
+                },
+            ));
+        }
+        if raw.structure().rank() != raw.rank() {
+            return Err(OperationError::from_core_preserving_context(
+                CoreError::StructureRankMismatch {
+                    expected: raw.rank(),
+                    actual: raw.structure().rank(),
+                },
+            ));
+        }
+        let expected = raw.required_len()?;
+        if data.len() != expected {
+            return Err(OperationError::from_core_preserving_context(
+                CoreError::DimensionMismatch {
+                    expected,
+                    actual: data.len(),
+                },
+            ));
+        }
         Ok(Self { space, data })
     }
 
