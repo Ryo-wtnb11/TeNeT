@@ -21,7 +21,7 @@ use tenet_core::{
     CheckedFusionSpaceError, CoupledSectorRegion, FusionProductSpace, FusionRule,
     FusionTreeHomSpace, FusionTreePairKey, FusionTreePairOrientation, GenericRigidSymbols,
     LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace,
-    Placement, SectorId, Su3FusionRule,
+    Placement, PreparedTreePairOperation, SectorId, Su3FusionRule,
 };
 #[cfg(feature = "cuda")]
 use tenet_core::{SectorLeg, TensorStorage};
@@ -5383,12 +5383,28 @@ impl Tensor {
     /// TensorKit `transpose`: the planar transpose `codomain <- domain`
     /// to `domain' <- codomain'`, i.e. cyclic leg rotation without
     /// braiding. Equivalent to
-    /// `transpose_into` with reversed domain axes as the new codomain and
-    /// reversed codomain axes as the new domain.
+    /// [`Self::transpose_axes`] with reversed domain axes as the new codomain
+    /// and reversed codomain axes as the new domain.
     pub fn transpose(&self) -> Result<Self, Error> {
         let codomain_axes: Vec<usize> = (self.codomain_rank()..self.rank()).rev().collect();
         let domain_axes: Vec<usize> = (0..self.codomain_rank()).rev().collect();
-        self.transformed(&codomain_axes, &domain_axes, TransformKind::Transpose)
+        self.transpose_axes(&codomain_axes, &domain_axes)
+    }
+
+    /// TensorKit `transpose` with an explicit cyclic axis map.
+    ///
+    /// The Rust name distinguishes this from [`Self::transpose`], which uses
+    /// TensorKit's conventional full planar transpose. `codomain_axes` and
+    /// `domain_axes` must together describe one cyclic rotation of the planar
+    /// source axes. They are zero-based flat source axis numbers, with
+    /// codomain axes first and domain axes second; unlike [`Self::permute`],
+    /// this operation never braids legs.
+    pub fn transpose_axes(
+        &self,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+    ) -> Result<Self, Error> {
+        self.transformed(codomain_axes, domain_axes, TransformKind::Transpose)
     }
 
     /// TensorKit `repartition(t, N₁, N₂)`: move the planar boundary so the
@@ -5433,6 +5449,14 @@ impl Tensor {
                     levels.len()
                 )));
             }
+        }
+        if matches!(&kind, TransformKind::Transpose) {
+            PreparedTreePairOperation::validate_transpose_syntax(
+                nout,
+                rank - nout,
+                codomain_axes,
+                domain_axes,
+            )?;
         }
         // Identity tree transforms have no axis motion or adjacent braid swaps,
         // so return the tensor unchanged and share its owned storage. Levels
@@ -11929,6 +11953,59 @@ mod tk_user_api_tests {
             &output.ordinary_body().data,
             &scalar.ordinary_body().data
         ));
+    }
+
+    #[test]
+    fn transpose_axes_accepts_only_planar_cyclic_axis_maps() {
+        // What: the public TensorKit-style transpose API accepts a cyclic
+        // rotation and rejects an ordinary noncyclic permutation as CoreError.
+        let rt = Runtime::builder().build().unwrap();
+        let space = Space::u1([(0, 1), (1, 1)]);
+        let source =
+            Tensor::rand_with_seed(&rt, Dtype::F64, [&space, &space], [&space, &space], 206)
+                .unwrap();
+
+        assert!(source.transpose_axes(&[1, 3], &[0, 2]).is_ok());
+        assert!(matches!(
+            source.transpose_axes(&[0, 2], &[1, 3]),
+            Err(Error::Core(error))
+                if matches!(error.as_ref(), tenet_core::CoreError::InvalidPermutation { .. })
+        ));
+    }
+
+    #[test]
+    fn transpose_axes_keeps_planar_fermionic_signs_distinct_from_permute() {
+        // What: a nontrivial odd fZ2 planar transpose is not a braided
+        // permutation, so the public operations produce distinct raw data.
+        let rt = Runtime::builder().build().unwrap();
+        let odd = Space::fz2([(1, 1)]).unwrap();
+        let source =
+            Tensor::from_block_fn(&rt, [&odd, &odd], std::iter::empty::<&Space>(), |_, _| 1.0)
+                .unwrap();
+
+        let transpose = source.transpose_axes(&[1, 0], &[]).unwrap();
+        let permute = source.permute(&[1, 0], &[]).unwrap();
+
+        assert_ne!(transpose.data(), permute.data());
+    }
+
+    #[test]
+    fn transpose_axes_boundary_move_matches_repartition_space_and_data() {
+        // What: the explicit cyclic map used by repartition has the same
+        // TensorKit planar output spaces and reduced data as repartition.
+        let rt = Runtime::builder().build().unwrap();
+        let a = Space::fz2([(0, 1), (1, 1)]).unwrap();
+        let b = Space::fz2([(0, 2), (1, 1)]).unwrap();
+        let c = Space::fz2([(0, 1), (1, 2)]).unwrap();
+        let d = Space::fz2([(0, 2), (1, 2)]).unwrap();
+        let source = sequential_f64_tensor(&rt, &[&a, &b], &[&c, &d]);
+
+        let transpose = source.transpose_axes(&[0, 1, 3], &[2]).unwrap();
+        let repartition = source.repartition(3).unwrap();
+
+        assert_eq!(transpose.codomain_spaces(), repartition.codomain_spaces());
+        assert_eq!(transpose.domain_spaces(), repartition.domain_spaces());
+        assert_eq!(transpose.data(), repartition.data());
     }
 
     #[test]
