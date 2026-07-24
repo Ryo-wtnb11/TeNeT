@@ -24,6 +24,10 @@ pub struct TensorContractFusionProfile {
     /// Reserved for source compatibility; ordinary contraction no longer
     /// looks up or publishes complete execution artifacts.
     pub prepared_plan: Duration,
+    /// Route preflight and candidate selection for one ordinary eager call.
+    pub resolution_preflight: Duration,
+    /// DynamicTree plan construction after route selection.
+    pub dynamic_tree_plan_build: Duration,
     pub source_space_lookup: Duration,
     pub lhs_scratch_prepare: Duration,
     pub rhs_scratch_prepare: Duration,
@@ -31,9 +35,11 @@ pub struct TensorContractFusionProfile {
     pub rhs_transform: Duration,
     pub core_dst_space_lookup: Duration,
     pub dst_scratch_prepare: Duration,
-    /// Eager route and fusion-block plan compilation. The legacy field name is
-    /// retained to avoid breaking profile consumers.
-    pub fusion_block_plan_lookup: Duration,
+    /// DynamicTree artifact assembly excluding separately attributed structure
+    /// lookups and core block-plan construction.
+    pub dynamic_tree_artifact_prepare: Duration,
+    /// Fresh coupled reduced-block plan construction.
+    pub core_block_plan_build: Duration,
     pub core_contract_total: Duration,
     pub core_validate: Duration,
     pub core_scale: Duration,
@@ -62,6 +68,8 @@ impl TensorContractFusionProfile {
         self.dense_structure_lookup += other.dense_structure_lookup;
         self.dense_contract += other.dense_contract;
         self.prepared_plan += other.prepared_plan;
+        self.resolution_preflight += other.resolution_preflight;
+        self.dynamic_tree_plan_build += other.dynamic_tree_plan_build;
         self.source_space_lookup += other.source_space_lookup;
         self.lhs_scratch_prepare += other.lhs_scratch_prepare;
         self.rhs_scratch_prepare += other.rhs_scratch_prepare;
@@ -69,7 +77,8 @@ impl TensorContractFusionProfile {
         self.rhs_transform += other.rhs_transform;
         self.core_dst_space_lookup += other.core_dst_space_lookup;
         self.dst_scratch_prepare += other.dst_scratch_prepare;
-        self.fusion_block_plan_lookup += other.fusion_block_plan_lookup;
+        self.dynamic_tree_artifact_prepare += other.dynamic_tree_artifact_prepare;
+        self.core_block_plan_build += other.core_block_plan_build;
         self.core_contract_total += other.core_contract_total;
         self.core_validate += other.core_validate;
         self.core_scale += other.core_scale;
