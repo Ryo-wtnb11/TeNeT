@@ -5151,6 +5151,10 @@ fn tree_pair_transform_context_storage_workspace_replays_and_caches_product_tran
 #[test]
 fn tree_transform_execution_context_reuses_product_tree_pair_cache() {
     let (rule, src_space, dst_space, _) = fz2_u1_su2_tree_pair_fixture();
+    let equivalent_rule = FpU1Su2Rule::new(
+        FpU1Rule::new(FermionParityFusionRule, U1FusionRule),
+        SU2FusionRule,
+    );
     type RuleKey = <FpU1Su2Rule as TreeTransformRuleCacheKey>::Key;
     let operation = TreeTransformOperation::permute([1, 0], [2]);
     let mut src =
@@ -5195,9 +5199,18 @@ fn tree_transform_execution_context_reuses_product_tree_pair_cache() {
         -1.0,
         0.5,
     );
-    tree_transform_into_with_context(&mut context, &rule, operation, &mut dst, &src, -1.0, 0.5)
-        .unwrap();
+    tree_transform_into_with_context(
+        &mut context,
+        &equivalent_rule,
+        operation,
+        &mut dst,
+        &src,
+        -1.0,
+        0.5,
+    )
+    .unwrap();
 
+    assert_eq!(rule.rule_identity(), equivalent_rule.rule_identity());
     assert_eq!(context.cache().structure_len(), 1);
     for (actual, expected) in dst.data().iter().zip(expected_second) {
         assert!(
