@@ -19397,6 +19397,18 @@ mod tests {
                 fusion_trees_by_coupled_for_space(&U1FusionRule, space),
             );
         }
+
+        // Dual legs change the stored FusionTreeKey duality flags; the checked
+        // walk must still reproduce the infallible key set exactly.
+        let dual_space = FusionProductSpace::new([
+            SectorLeg::new([(su2(1), 2)], true),
+            SectorLeg::new([(su2(1), 2)], false),
+        ]);
+        assert!(dual_space.legs().iter().any(SectorLeg::is_dual));
+        assert_eq!(
+            try_fusion_trees_by_coupled_for_space_checked(&SU2FusionRule, &dual_space).unwrap(),
+            fusion_trees_by_coupled_for_space(&SU2FusionRule, &dual_space),
+        );
     }
 
     #[test]

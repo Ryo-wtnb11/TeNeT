@@ -5788,10 +5788,12 @@ mod checked_admission_tests {
 
     fn unique_matrix_homspace() -> FusionTreeHomSpace {
         // Rank-4 XOR space whose codomain and domain each couple to {0, 1}.
+        // The domain legs are dual so every fixture built from this space also
+        // covers the dual-leg duality flags in the checked layout.
         let leg = |dual| SectorLeg::new([(SectorId::new(0), 2), (SectorId::new(1), 3)], dual);
         FusionTreeHomSpace::new(
             FusionProductSpace::new([leg(false), leg(false)]),
-            FusionProductSpace::new([leg(false), leg(false)]),
+            FusionProductSpace::new([leg(true), leg(true)]),
         )
     }
 
@@ -5934,51 +5936,102 @@ mod checked_admission_tests {
     }
 
     #[test]
-    fn checked_bind_failure_preserves_subset_admission_and_caches() {
-        // What: a checked bind whose provider cannot represent a leg dual fails
-        // transactionally, keeping the caller's Subset admission and leaving
-        // both cache snapshots unchanged.
+    fn checked_bound_space_permute_and_contract_match_the_encoded_oracle() {
+        // What: the reachable Permute and Contract dispatcher arms of a checked
+        // capability produce results identical to the same public operation on
+        // an encoded-bound oracle. The Select and OutwardLeg arms have no public
+        // BoundDynamicFusionMapSpace caller that routes through the stored
+        // capability (their capability methods are dead code outside the encoded
+        // and lowered helpers), so they are not reachable to smoke-test here.
         let _guard = CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::reset_global_operation_caches();
         reset_core_intern_tables();
 
-        let good = DynamicFusionMapSpace::from_final_homspace(
-            &ExternalUniqueRule::new(),
+        let encoded = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+            Arc::new(ExternalUniqueRule::new()),
             unique_matrix_homspace(),
         )
         .unwrap();
-        let mut subset = good.clone();
-        subset.admission = FusionSpaceAdmission::Subset(ExternalUniqueRule::new().rule_identity());
-        let original = subset.clone();
+        let checked = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_checked(
+            Arc::new(ExternalUniqueRule::new()),
+            unique_matrix_homspace(),
+        )
+        .unwrap();
 
-        reset_scratch_publication_observations();
-        let before = (
-            fusion_tree_layout_cache_info(),
-            complete_hom_space_structure_cache_info(),
+        let operation = TreeTransformOperation::permute([1, 0], [3, 2]);
+        assert_eq!(
+            checked
+                .transformed_multiplicity_free(&operation)
+                .unwrap()
+                .space(),
+            encoded
+                .transformed_multiplicity_free(&operation)
+                .unwrap()
+                .space(),
         );
 
-        let error = BoundDynamicFusionMapSpace::bind_multiplicity_free_checked(
-            subset,
-            Arc::new(ExternalUniqueRule {
-                fail: Some(CheckedFailStage::Dual),
-            }),
-        )
-        .unwrap_err();
+        let checked_contract =
+            BoundDynamicFusionMapSpace::contracted_multiplicity_free(&checked, &checked, &[], &[])
+                .unwrap();
+        let encoded_contract =
+            BoundDynamicFusionMapSpace::contracted_multiplicity_free(&encoded, &encoded, &[], &[])
+                .unwrap();
+        assert_eq!(checked_contract.space(), encoded_contract.space());
+    }
 
-        assert!(matches!(error, OperationError::FusionAlgebra(_)));
-        assert!(matches!(
-            original.admission(),
-            FusionSpaceAdmission::Subset(_)
-        ));
-        assert_eq!(
-            (
+    #[test]
+    fn checked_bind_failure_preserves_subset_admission_and_caches() {
+        // What: a checked bind fails transactionally at every checked stage —
+        // structural-proof algebra (channels, nsymbol) and the prepare leg-dual
+        // guard — keeping the caller's Subset admission and both cache snapshots
+        // unchanged.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        for stage in [
+            CheckedFailStage::Dual,
+            CheckedFailStage::Channels,
+            CheckedFailStage::Nsymbol,
+        ] {
+            crate::reset_global_operation_caches();
+            reset_core_intern_tables();
+            let good = DynamicFusionMapSpace::from_final_homspace(
+                &ExternalUniqueRule::new(),
+                unique_matrix_homspace(),
+            )
+            .unwrap();
+            let mut subset = good.clone();
+            subset.admission =
+                FusionSpaceAdmission::Subset(ExternalUniqueRule::new().rule_identity());
+            let original = subset.clone();
+
+            reset_scratch_publication_observations();
+            let before = (
                 fusion_tree_layout_cache_info(),
                 complete_hom_space_structure_cache_info(),
-            ),
-            before
-        );
-        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+            );
+
+            let error = BoundDynamicFusionMapSpace::bind_multiplicity_free_checked(
+                subset,
+                Arc::new(ExternalUniqueRule { fail: Some(stage) }),
+            )
+            .unwrap_err();
+
+            assert!(matches!(error, OperationError::FusionAlgebra(_)));
+            assert!(matches!(
+                original.admission(),
+                FusionSpaceAdmission::Subset(_)
+            ));
+            assert_eq!(
+                (
+                    fusion_tree_layout_cache_info(),
+                    complete_hom_space_structure_cache_info(),
+                ),
+                before
+            );
+            assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+        }
     }
 }
