@@ -2,8 +2,9 @@ use core::fmt;
 use std::hash::Hash;
 
 use crate::{
-    FusionAlgebraError, FusionTreePairKey, MultiplicityFreeFusionRule,
-    MultiplicityFreeFusionSymbols, ProductSectorCodecError, SectorId,
+    FermionParityFusionRule, FusionAlgebraError, FusionTreePairKey, MultiplicityFreeFusionRule,
+    MultiplicityFreeFusionSymbols, ProductSectorCodecError, SectorId, U1FusionRule, U1Irrep,
+    Z2FusionRule, Z2Irrep,
 };
 
 // Why not tenet-sectors: these traits and errors define FusionTree lowering
@@ -165,6 +166,213 @@ pub trait MultiplicityFreePivotalSymbols: MultiplicityFreeFusionSymbols {
         source: &FusionTreePairKey,
         destination: &FusionTreePairKey,
     ) -> Self::Scalar;
+}
+
+impl lowered_multiplicity_free_sealed::Sealed for Z2FusionRule {}
+
+impl LoweredMultiplicityFreeAlgebra for Z2FusionRule {
+    type Sector = Z2Irrep;
+
+    fn try_decode_lowered(
+        &self,
+        sector: SectorId,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Z2Irrep::from_sector_id(sector)
+            .ok_or_else(|| LoweredFusionTreeBuildError::invalid_sector(sector))
+    }
+
+    fn try_encode_lowered(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<SectorId, LoweredFusionTreeBuildError> {
+        Ok(sector.into())
+    }
+
+    fn try_lowered_vacuum(&self) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Ok(Z2Irrep::EVEN)
+    }
+
+    fn try_lowered_dual(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Ok(sector)
+    }
+
+    fn try_for_each_lowered_channel<F>(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        emit: &mut F,
+    ) -> Result<(), LoweredFusionTreeBuildError>
+    where
+        F: FnMut(Self::Sector) -> Result<(), LoweredFusionTreeBuildError>,
+    {
+        emit(Z2Irrep::new(left.parity() ^ right.parity()))
+    }
+
+    fn try_lowered_nsymbol(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        coupled: Self::Sector,
+    ) -> Result<usize, LoweredFusionTreeBuildError> {
+        Ok(usize::from(
+            coupled.parity() == (left.parity() ^ right.parity()),
+        ))
+    }
+}
+
+impl MultiplicityFreePivotalSymbols for Z2FusionRule {
+    fn bendright_scalar(
+        &self,
+        _left_coupled: SectorId,
+        _bent_sector: SectorId,
+        _coupled: SectorId,
+        _bent_leg_is_dual: bool,
+    ) -> Self::Scalar {
+        1.0
+    }
+
+    fn foldright_scalar(
+        &self,
+        _source: &FusionTreePairKey,
+        _destination: &FusionTreePairKey,
+    ) -> Self::Scalar {
+        1.0
+    }
+}
+
+impl lowered_multiplicity_free_sealed::Sealed for FermionParityFusionRule {}
+
+impl LoweredMultiplicityFreeAlgebra for FermionParityFusionRule {
+    type Sector = Z2Irrep;
+
+    fn try_decode_lowered(
+        &self,
+        sector: SectorId,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Z2FusionRule.try_decode_lowered(sector)
+    }
+
+    fn try_encode_lowered(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<SectorId, LoweredFusionTreeBuildError> {
+        Z2FusionRule.try_encode_lowered(sector)
+    }
+
+    fn try_lowered_vacuum(&self) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Z2FusionRule.try_lowered_vacuum()
+    }
+
+    fn try_lowered_dual(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Z2FusionRule.try_lowered_dual(sector)
+    }
+
+    fn try_for_each_lowered_channel<F>(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        emit: &mut F,
+    ) -> Result<(), LoweredFusionTreeBuildError>
+    where
+        F: FnMut(Self::Sector) -> Result<(), LoweredFusionTreeBuildError>,
+    {
+        Z2FusionRule.try_for_each_lowered_channel(left, right, emit)
+    }
+
+    fn try_lowered_nsymbol(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        coupled: Self::Sector,
+    ) -> Result<usize, LoweredFusionTreeBuildError> {
+        Z2FusionRule.try_lowered_nsymbol(left, right, coupled)
+    }
+}
+
+impl MultiplicityFreePivotalSymbols for FermionParityFusionRule {
+    fn bendright_scalar(
+        &self,
+        _left_coupled: SectorId,
+        _bent_sector: SectorId,
+        _coupled: SectorId,
+        _bent_leg_is_dual: bool,
+    ) -> Self::Scalar {
+        1.0
+    }
+
+    fn foldright_scalar(
+        &self,
+        _source: &FusionTreePairKey,
+        _destination: &FusionTreePairKey,
+    ) -> Self::Scalar {
+        1.0
+    }
+}
+
+impl lowered_multiplicity_free_sealed::Sealed for U1FusionRule {}
+
+impl LoweredMultiplicityFreeAlgebra for U1FusionRule {
+    type Sector = U1Irrep;
+
+    fn try_decode_lowered(
+        &self,
+        sector: SectorId,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        U1Irrep::from_sector_id(sector)
+            .ok_or_else(|| LoweredFusionTreeBuildError::invalid_sector(sector))
+    }
+
+    fn try_encode_lowered(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<SectorId, LoweredFusionTreeBuildError> {
+        Ok(sector.into())
+    }
+
+    fn try_lowered_vacuum(&self) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Ok(U1Irrep::new(0))
+    }
+
+    fn try_lowered_dual(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        sector
+            .checked_dual()
+            .map_err(LoweredFusionTreeBuildError::fusion_algebra)
+    }
+
+    fn try_for_each_lowered_channel<F>(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        emit: &mut F,
+    ) -> Result<(), LoweredFusionTreeBuildError>
+    where
+        F: FnMut(Self::Sector) -> Result<(), LoweredFusionTreeBuildError>,
+    {
+        let sector = left
+            .checked_fuse(right)
+            .map_err(LoweredFusionTreeBuildError::fusion_algebra)?;
+        emit(sector)
+    }
+
+    fn try_lowered_nsymbol(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        coupled: Self::Sector,
+    ) -> Result<usize, LoweredFusionTreeBuildError> {
+        left.checked_fuse(right)
+            .map(|expected| usize::from(coupled == expected))
+            .map_err(LoweredFusionTreeBuildError::fusion_algebra)
+    }
 }
 
 #[cfg(test)]
