@@ -36,9 +36,7 @@ where
                 },
             ));
         }
-        let expected = raw
-            .required_len()
-            .map_err(OperationError::from_core_preserving_context)?;
+        let expected = raw.required_len()?;
         if data.len() != expected {
             return Err(OperationError::from_core_preserving_context(
                 CoreError::DimensionMismatch {
