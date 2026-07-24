@@ -27,7 +27,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  GMP_MPFR_SYS_CACHE: ${{ github.workspace }}/.cache/gmp-mpfr-sys
 
 jobs:
   openblas-contract:
@@ -43,7 +42,6 @@ jobs:
           ref: main
           path: tenferro-rs
       - uses: dtolnay/rust-toolchain@stable
-      - uses: ./tenet/.github/actions/cache-gmp
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tenet

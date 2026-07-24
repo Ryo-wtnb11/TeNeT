@@ -2,13 +2,13 @@ use std::sync::Arc;
 use tenet_core::{
     BraidingStyleKind, CoreError, FusionRule, FusionStyleKind, FusionTensorMapSpace,
     FusionTreeHomSpace, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, RuleIdentity, SectorId, SectorVec, TensorMap, TensorMapSpace,
-    U1FusionRule, Z2FusionRule,
+    MultiplicityFreeRigidSymbols, RuleIdentity, SU2FusionRule, SectorId, SectorVec, TensorMap,
+    TensorMapSpace, U1FusionRule, Z2FusionRule,
 };
 use tenet_tensors::{
     adjoint, tensorcontract_fusion_block_specs, tensorcontract_fusion_into,
     BoundDynamicFusionMapSpace, TensorContractFusionExecutionContext, TensorContractSpec,
-    TreeTransformBuiltinRuleCacheKey,
+    TreeTransformBuiltinRuleCacheKey, TreeTransformRuleCacheKey,
 };
 use tenet_tensors::{DynamicFusionMapSpace, OperationError};
 
@@ -16,6 +16,17 @@ use tenet_tensors::{DynamicFusionMapSpace, OperationError};
 struct SymbolOnlyRule {
     identity: RuleIdentity,
     symbol: f64,
+}
+
+#[test]
+fn su2_tree_transform_key_contains_the_rule_identity() {
+    let rule = SU2FusionRule;
+    match rule.tree_transform_rule_cache_key() {
+        TreeTransformBuiltinRuleCacheKey::SU2(identity) => {
+            assert_eq!(identity, rule.rule_identity());
+        }
+        key => panic!("unexpected SU(2) tree-transform key: {key:?}"),
+    }
 }
 
 impl SymbolOnlyRule {

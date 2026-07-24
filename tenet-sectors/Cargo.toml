@@ -12,3 +12,4 @@ path = "src/lib.rs"
 [dependencies]
 smallvec = { version = "1", features = ["const_generics", "union"] }
 num-complex = "0.4"
+racah = { git = "https://github.com/Ryo-wtnb11/racah", rev = "489f367e7d0dce85842f15b253be0b74c4c47340" }

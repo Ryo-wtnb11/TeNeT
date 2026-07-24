@@ -2,8 +2,8 @@ use std::any::TypeId;
 use std::hash::Hash;
 
 use tenet_core::{
-    FermionParityFusionRule, FusionRule, ProductFusionRule, ProductSectorCodec, SU2FusionRule,
-    Su3FusionRule, U1FusionRule, Z2FusionRule,
+    FermionParityFusionRule, FusionRule, ProductFusionRule, ProductSectorCodec, RuleIdentity,
+    SU2FusionRule, Su3FusionRule, U1FusionRule, Z2FusionRule,
 };
 
 use crate::OperationError;
@@ -46,12 +46,12 @@ pub trait TreeTransformRuleCacheKey {
     fn tree_transform_rule_cache_key(&self) -> Self::Key;
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum TreeTransformBuiltinRuleCacheKey {
     Z2,
     FermionParity,
     U1,
-    SU2Exact { authority_version: u8 },
+    SU2(RuleIdentity),
 }
 
 impl TreeTransformRuleCacheKey for Z2FusionRule {
@@ -82,9 +82,7 @@ impl TreeTransformRuleCacheKey for SU2FusionRule {
     type Key = TreeTransformBuiltinRuleCacheKey;
 
     fn tree_transform_rule_cache_key(&self) -> Self::Key {
-        TreeTransformBuiltinRuleCacheKey::SU2Exact {
-            authority_version: tenet_core::SU2_EXACT_AUTHORITY_VERSION,
-        }
+        TreeTransformBuiltinRuleCacheKey::SU2(self.rule_identity())
     }
 }
 
