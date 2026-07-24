@@ -49,7 +49,9 @@ use tenet_tensors::{
 use crate::error::Error;
 use crate::runtime::{rule_lanes, Ctx, Ctxs, Runtime, RuntimeExecutionConfig, RuntimeIdentity};
 use crate::space::{Fz2U1Su2Rule, RuleKind, Space, U1Fz2Rule, UserRuleContext};
-use crate::typed_tensor_core::tree_transform_owned_multiplicity_free;
+use crate::typed_tensor_core::{
+    tensorcontract_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
+};
 
 mod diagonal;
 use diagonal::{
@@ -5211,6 +5213,45 @@ impl Tensor {
         // do not serialize while bound spaces remain the fusion authority.
         let mut lease = self.rt.lease_context()?;
         let context = lease.context();
+        if semantics == ContractionSemantics::TensorContract
+            && lhs_orientation == FusionTreePairOrientation::Direct
+            && rhs_orientation == FusionTreePairOrientation::Direct
+        {
+            macro_rules! contract_owned {
+                ($variant:ident, $lhs:expr, $rhs:expr) => {{
+                    let (space, data) = tensorcontract_owned_multiplicity_free(
+                        D::ctx_of(&mut context.mf),
+                        BoundDynamicTensorRef::try_new($lhs, lhs_data)?,
+                        BoundDynamicTensorRef::try_new($rhs, rhs_data)?,
+                        lhs_axes,
+                        rhs_axes,
+                        output_order,
+                    )?;
+                    return self.with_bound(UserBoundSpace::$variant(space), D::lift(data));
+                }};
+            }
+            match (lhs_storage, rhs_storage) {
+                (UserBoundSpace::U1(lhs), UserBoundSpace::U1(rhs)) => {
+                    contract_owned!(U1, lhs, rhs)
+                }
+                (UserBoundSpace::Z2(lhs), UserBoundSpace::Z2(rhs)) => {
+                    contract_owned!(Z2, lhs, rhs)
+                }
+                (UserBoundSpace::FZ2(lhs), UserBoundSpace::FZ2(rhs)) => {
+                    contract_owned!(FZ2, lhs, rhs)
+                }
+                (UserBoundSpace::SU2(lhs), UserBoundSpace::SU2(rhs)) => {
+                    contract_owned!(SU2, lhs, rhs)
+                }
+                (UserBoundSpace::U1FZ2(lhs), UserBoundSpace::U1FZ2(rhs)) => {
+                    contract_owned!(U1FZ2, lhs, rhs)
+                }
+                (UserBoundSpace::FZ2U1SU2(lhs), UserBoundSpace::FZ2U1SU2(rhs)) => {
+                    contract_owned!(FZ2U1SU2, lhs, rhs)
+                }
+                _ => {}
+            }
+        }
         let dst_bound = if self.rule_kind() == RuleKind::Su3 {
             self.materialized_body()?
                 .space
@@ -13908,6 +13949,39 @@ mod cat_tests {
 #[cfg(test)]
 mod compose_direct_tests {
     use super::*;
+
+    #[test]
+    fn direct_fermionic_odd_dual_contract_matches_hand_oracle() {
+        // What: direct tensorcontract keeps the TensorKit odd dual-leg twist.
+        let runtime = Runtime::builder().build().unwrap();
+        let space = Space::fz2([(0, 1), (1, 1)]).unwrap();
+        let lhs = Tensor::from_block_fn(&runtime, [&space], [&space.dual()], |key, _| {
+            let BlockKey::FusionTree(key) = key else {
+                return 0.0;
+            };
+            if key.codomain_uncoupled()[0].id() == 0 {
+                5.0
+            } else {
+                2.0
+            }
+        })
+        .unwrap();
+        let rhs = Tensor::from_block_fn(&runtime, [&space.dual()], [&space], |key, _| {
+            let BlockKey::FusionTree(key) = key else {
+                return 0.0;
+            };
+            if key.codomain_uncoupled()[0].id() == 0 {
+                7.0
+            } else {
+                3.0
+            }
+        })
+        .unwrap();
+
+        let actual = lhs.contract(&rhs, &[1], &[0]).unwrap();
+
+        assert_eq!(actual.data(), [35.0, -6.0]);
+    }
 
     #[test]
     fn direct_compose_does_not_invoke_tensor_twist() {

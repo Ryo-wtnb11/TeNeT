@@ -1,7 +1,7 @@
 use tenet_core::{MultiplicityFreeRigidSymbols, RuleIdentity};
 use tenet_tensors::{
-    BoundDynamicFusionMapSpace, BoundDynamicTensorRef, TreeTransformOperation,
-    TreeTransformRuleCacheKey,
+    BoundDynamicFusionMapSpace, BoundDynamicTensorRef, OutputAxisOrder, TensorContractSpec,
+    TreeTransformOperation, TreeTransformRuleCacheKey,
 };
 
 use crate::runtime::Ctx;
@@ -51,6 +51,40 @@ where
     Ok((destination, data))
 }
 
+pub(crate) fn tensorcontract_owned_multiplicity_free<R, D>(
+    context: &mut Ctx<D, RuleIdentity>,
+    lhs: BoundDynamicTensorRef<'_, R, D>,
+    rhs: BoundDynamicTensorRef<'_, R, D>,
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+    output_order: OutputAxisOrder<'_>,
+) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), tenet_tensors::OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
+    D: UserScalar,
+{
+    let destination = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+        lhs.space(),
+        rhs.space(),
+        lhs_axes,
+        rhs_axes,
+        output_order,
+    )?;
+    let mut data = vec![D::from_real(0.0); destination.space().required_len()?];
+    context.tensorcontract_fusion_dyn_into(
+        &destination,
+        &mut data,
+        lhs.space(),
+        lhs.data(),
+        rhs.space(),
+        rhs.data(),
+        TensorContractSpec::new(lhs_axes, rhs_axes, output_order),
+        D::from_real(1.0),
+        D::from_real(0.0),
+    )?;
+    Ok((destination, data))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -61,10 +95,10 @@ mod tests {
         RuleIdentity, SectorId, SectorLeg, SectorVec, Z2FusionRule,
     };
     use tenet_tensors::{
-        BoundDynamicFusionMapSpace, BoundDynamicTensorRef, TreeTransformOperation,
+        BoundDynamicFusionMapSpace, BoundDynamicTensorRef, OutputAxisOrder, TreeTransformOperation,
     };
 
-    use super::tree_transform_owned_multiplicity_free;
+    use super::{tensorcontract_owned_multiplicity_free, tree_transform_owned_multiplicity_free};
     use crate::runtime::Ctx;
 
     /// Deliberately outside the user-layer rule enum: this exercises the typed
@@ -207,5 +241,58 @@ mod tests {
 
         assert_eq!(actual_destination.space(), expected_destination.space());
         assert_eq!(actual_data, expected_data);
+    }
+
+    #[test]
+    fn external_multiplicity_free_provider_contracts_direct_with_output_order() {
+        let provider = Arc::new(ExternalZ2);
+        let lhs_codomain = SectorLeg::new([(SectorId::new(0), 2)], false);
+        let contracted = SectorLeg::new([(SectorId::new(0), 3)], false);
+        let rhs_domain = SectorLeg::new([(SectorId::new(0), 4)], false);
+        let lhs = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+            Arc::clone(&provider),
+            tenet_core::FusionTreeHomSpace::new(
+                FusionProductSpace::new([lhs_codomain.clone()]),
+                FusionProductSpace::new([contracted.clone()]),
+            ),
+            [vec![2, 3]],
+        )
+        .unwrap();
+        let rhs = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+            Arc::clone(&provider),
+            tenet_core::FusionTreeHomSpace::new(
+                FusionProductSpace::new([contracted]),
+                FusionProductSpace::new([rhs_domain.clone()]),
+            ),
+            [vec![3, 4]],
+        )
+        .unwrap();
+        let lhs_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let rhs_data = vec![
+            7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0,
+        ];
+
+        let lhs = BoundDynamicTensorRef::try_new(&lhs, &lhs_data).unwrap();
+        let rhs = BoundDynamicTensorRef::try_new(&rhs, &rhs_data).unwrap();
+        let mut context = Ctx::<f64, RuleIdentity>::default();
+        let (destination, data) = tensorcontract_owned_multiplicity_free(
+            &mut context,
+            lhs,
+            rhs,
+            &[1],
+            &[0],
+            OutputAxisOrder::from_axes(&[1, 0]),
+        )
+        .unwrap();
+
+        let expected_destination = tenet_core::FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(SectorId::new(0), 4)], true)]),
+            FusionProductSpace::new([SectorLeg::new([(SectorId::new(0), 2)], true)]),
+        );
+        assert_eq!(destination.space().homspace(), &expected_destination);
+        assert_eq!(
+            data,
+            [76.0, 103.0, 130.0, 157.0, 100.0, 136.0, 172.0, 208.0]
+        );
     }
 }
