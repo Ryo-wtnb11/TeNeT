@@ -2,9 +2,9 @@ use core::fmt;
 use std::hash::Hash;
 
 use crate::{
-    FermionParityFusionRule, FusionAlgebraError, FusionTreePairKey, MultiplicityFreeFusionRule,
-    MultiplicityFreeFusionSymbols, ProductSectorCodecError, SectorId, U1FusionRule, U1Irrep,
-    Z2FusionRule, Z2Irrep,
+    FermionParityFusionRule, FibonacciFusionRule, FusionAlgebraError, FusionTreePairKey,
+    MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, ProductSectorCodecError, SectorId,
+    U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
 };
 
 // Why not tenet-sectors: these traits and errors define FusionTree lowering
@@ -166,6 +166,36 @@ pub trait MultiplicityFreePivotalSymbols: MultiplicityFreeFusionSymbols {
         source: &FusionTreePairKey,
         destination: &FusionTreePairKey,
     ) -> Self::Scalar;
+}
+
+impl MultiplicityFreePivotalSymbols for FibonacciFusionRule {
+    // Dead code for this provider: every `unique_*` caller of
+    // `bendright_scalar`/`foldright_scalar` gates on
+    // `fusion_style() == FusionStyleKind::Unique` and errors out first
+    // (verified by reading every call site), and `FibonacciFusionRule` is
+    // `Simple`. The Simple-fusion bend path
+    // (`multiplicity_free_bendright_tree_pair`) instead derives its
+    // coefficient from `b_symbol_scalar`/`sqrt_dim_scalar`, which Fibonacci
+    // gets for free from `MultiplicityFreeRigidSymbols` below. Implemented
+    // here only for interface parity with the sibling providers
+    // (Z2/Fermion/AsymmetricAnyonic), which all also return the scalar unit.
+    fn bendright_scalar(
+        &self,
+        _left_coupled: SectorId,
+        _bent_sector: SectorId,
+        _coupled: SectorId,
+        _bent_leg_is_dual: bool,
+    ) -> Self::Scalar {
+        self.scalar_one()
+    }
+
+    fn foldright_scalar(
+        &self,
+        _source: &FusionTreePairKey,
+        _destination: &FusionTreePairKey,
+    ) -> Self::Scalar {
+        self.scalar_one()
+    }
 }
 
 impl lowered_multiplicity_free_sealed::Sealed for Z2FusionRule {}

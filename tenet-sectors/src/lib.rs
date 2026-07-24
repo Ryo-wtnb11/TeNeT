@@ -13,6 +13,9 @@ pub use algebra::*;
 mod abelian;
 pub use abelian::{FermionParityFusionRule, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep};
 
+mod fibonacci;
+pub use fibonacci::FibonacciFusionRule;
+
 /// Opaque identifier used by one fusion-rule implementation.
 ///
 /// The numeric value is an internal representation, not a stable wire format
