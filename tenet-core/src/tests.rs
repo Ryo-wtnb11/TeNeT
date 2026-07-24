@@ -10758,6 +10758,84 @@ mod tests {
     }
 
     #[test]
+    fn fusion_layout_local_cache_bypasses_oversized_product_rule_identity() {
+        #[derive(Clone)]
+        struct OversizedProductIdentityRule {
+            identity: RuleIdentity,
+        }
+
+        impl FusionRule for OversizedProductIdentityRule {
+            fn rule_identity(&self) -> RuleIdentity {
+                self.identity.clone()
+            }
+
+            fn fusion_style(&self) -> FusionStyleKind {
+                FusionStyleKind::Unique
+            }
+
+            fn braiding_style(&self) -> BraidingStyleKind {
+                BraidingStyleKind::Bosonic
+            }
+
+            fn vacuum(&self) -> SectorId {
+                SectorId::new(0)
+            }
+
+            fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+                smallvec![SectorId::new(left.id() ^ right.id())]
+            }
+        }
+
+        impl MultiplicityFreeFusionRule for OversizedProductIdentityRule {}
+
+        struct ProductIdentityCodec;
+
+        // What: a product identity retains the canonical bytes of both child
+        // identities, so core admission continues to reject an oversized key.
+        let canonical_bytes = Arc::<[u8]>::from(vec![
+            0;
+            FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES
+                .saturating_add(1)
+        ]);
+        let rule = OversizedProductIdentityRule {
+            identity: RuleIdentity::compose_with_codec::<ProductIdentityCodec>(
+                RuleIdentity::from_canonical_bytes::<OversizedProductIdentityRule>(
+                    0,
+                    canonical_bytes,
+                ),
+                RuleIdentity::of_type::<Z2FusionRule>(),
+            ),
+        };
+        assert!(
+            rule.identity.charged_retained_bytes()
+                > FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES
+        );
+        let hom = FusionTreeHomSpace::from_sectors(
+            [(SectorId::new(0), 1)],
+            Vec::<(SectorId, usize)>::new(),
+        );
+        let key = Arc::new(FusionTreeHomSpaceCacheKey::new(&rule, &hom));
+        let layout = Arc::new(fusion_tree_layout_from_data(
+            next_fusion_tree_layout_id(),
+            hom.fusion_tree_layout_data_uncached(&rule),
+        ));
+        let charged_bytes = charged_fusion_tree_layout_bytes(&key, &layout);
+        assert!(charged_bytes > FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES);
+
+        let mut cache = FusionTreeLayoutCache::new(
+            8,
+            FUSION_TREE_LAYOUT_CACHE_BYTE_BUDGET,
+            FUSION_TREE_LAYOUT_CACHE_MAX_ENTRY_BYTES,
+        );
+        let returned = cache.admit(Arc::clone(&key), Arc::clone(&layout), charged_bytes);
+        assert!(Arc::ptr_eq(&returned, &layout));
+        assert!(cache.lookup(&key).is_none());
+        let info = cache.info();
+        assert_eq!(info.entries(), 0);
+        assert_eq!(info.admission_bypasses(), 1);
+    }
+
+    #[test]
     fn complete_homspace_layout_cache_is_fifo_bounded_and_bypasses_one_over_limit() {
         // What: complete immutable layouts retain at most the configured
         // charge, evict the oldest admission without read promotion, and
