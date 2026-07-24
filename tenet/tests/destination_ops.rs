@@ -52,6 +52,87 @@ fn permute_overwrite_into_matches_owned_c64() {
 }
 
 #[test]
+fn planar_overwrite_into_matches_owned_odd_fz2_and_rejects_before_mutation() {
+    // What: planar destination APIs preserve the established odd-fermion
+    // transpose/repartition semantics, while malformed axes do not write.
+    let runtime = Runtime::builder().build().unwrap();
+    let odd = Space::fz2([(1, 1)]).unwrap();
+    let source =
+        Tensor::rand_with_seed(&runtime, Dtype::F64, [&odd, &odd], [&odd, &odd], 30_116).unwrap();
+    let alpha = -1.25;
+    let cases = [
+        ("full", source.transpose().unwrap(), PlanarCase::Full),
+        (
+            "explicit cyclic",
+            source.transpose_axes(&[1, 3], &[0, 2]).unwrap(),
+            PlanarCase::Explicit(&[1, 3], &[0, 2]),
+        ),
+        (
+            "destination-derived repartition",
+            source.repartition(3).unwrap(),
+            PlanarCase::Repartition,
+        ),
+    ];
+    let mut context = TensorExecutionContext::for_runtime(&runtime).unwrap();
+
+    for (name, owned, case) in cases {
+        let mut destination = owned.scale(f64::NAN).unwrap();
+        match case {
+            PlanarCase::Full => {
+                context.transpose_overwrite_into(&mut destination, &source, Scalar::F64(alpha))
+            }
+            PlanarCase::Explicit(codomain_axes, domain_axes) => context
+                .transpose_axes_overwrite_into(
+                    &mut destination,
+                    &source,
+                    codomain_axes,
+                    domain_axes,
+                    Scalar::F64(alpha),
+                ),
+            PlanarCase::Repartition => {
+                context.repartition_overwrite_into(&mut destination, &source, Scalar::F64(alpha))
+            }
+        }
+        .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_close(
+            destination.data(),
+            owned.scale(alpha).unwrap().data(),
+            1e-12,
+        );
+    }
+
+    let mut destination = source.transpose().unwrap().scale(f64::NAN).unwrap();
+    let before = destination
+        .data()
+        .iter()
+        .map(|value| value.to_bits())
+        .collect::<Vec<_>>();
+    assert!(context
+        .transpose_axes_overwrite_into(
+            &mut destination,
+            &source,
+            &[0, 2],
+            &[1, 3],
+            Scalar::F64(alpha),
+        )
+        .is_err());
+    assert_eq!(
+        destination
+            .data()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        before
+    );
+}
+
+enum PlanarCase {
+    Full,
+    Explicit(&'static [usize], &'static [usize]),
+    Repartition,
+}
+
+#[test]
 fn destination_validation_precedes_mutation() {
     let runtime = Runtime::builder().build().unwrap();
     let other_runtime = Runtime::builder().build().unwrap();
