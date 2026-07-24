@@ -1743,16 +1743,8 @@ impl MultiplicityFreeRigidSymbols for AdmissionCountingSu2Rule {
     }
 }
 
-impl TreeTransformRuleCacheKey for AdmissionCountingSu2Rule {
-    type Key = TreeTransformBuiltinRuleCacheKey;
-
-    fn tree_transform_rule_cache_key(&self) -> Self::Key {
-        SU2FusionRule.tree_transform_rule_cache_key()
-    }
-}
-
 fn builtin_tree_cache_state(
-    cache: &TreeTransformCache<f64, TreeTransformBuiltinRuleCacheKey>,
+    cache: &TreeTransformCache<f64, RuleIdentity>,
 ) -> (TreeTransformCacheStats, usize) {
     (cache.stats(), cache.structure_len())
 }
@@ -1916,7 +1908,7 @@ fn warm_structure_aliases_are_rejected_before_local_cache_lookup() {
         invalid_structure.block(0).unwrap().key()
     );
     let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
-    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut cache = TreeTransformCache::<f64, RuleIdentity>::default();
     cache
         .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
             &SU2FusionRule,
@@ -1955,7 +1947,7 @@ fn warm_structure_aliases_are_rejected_before_local_cache_lookup() {
     assert_invalid_simple_vertex(error);
     assert_eq!(builtin_tree_cache_state(&cache), local_before);
 
-    let mut independent = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut independent = TreeTransformCache::<f64, RuleIdentity>::default();
     let independent_before = builtin_tree_cache_state(&independent);
     let error = independent
         .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
@@ -1986,7 +1978,7 @@ fn exact_warm_structure_reuses_prior_local_admission_proof() {
     };
     let structure = simple_su2_vertex_structure(1);
     let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
-    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut cache = TreeTransformCache::<f64, RuleIdentity>::default();
 
     let cold = cache
         .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
@@ -2035,7 +2027,7 @@ fn completed_structure_miss_and_hit_validate_capability_once() {
 
     let structure = simple_su2_vertex_structure(1);
     let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
-    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut cache = TreeTransformCache::<f64, RuleIdentity>::default();
 
     reset_multiplicity_free_capability_validations();
     cache
@@ -2081,7 +2073,7 @@ fn prelowered_same_content_roles_share_one_local_admission() {
     let destination = Arc::new((*logical).clone());
     assert_eq!(logical.content_id(), storage.content_id());
     assert_eq!(logical.content_id(), destination.content_id());
-    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut cache = TreeTransformCache::<f64, RuleIdentity>::default();
 
     cache
         .get_or_compile_tree_pair_prelowered(
@@ -2116,19 +2108,16 @@ fn no_cache_tree_transform_paths_compile_without_retaining_structures() {
             .unwrap();
     let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
 
-    let assert_uncached =
-        |f: &mut dyn FnMut(&mut TreeTransformCache<f64, TreeTransformBuiltinRuleCacheKey>)| {
-            let mut cache =
-                TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::with_policy(
-                    OperationCachePolicy::NoCache,
-                );
-            f(&mut cache);
+    let assert_uncached = |f: &mut dyn FnMut(&mut TreeTransformCache<f64, RuleIdentity>)| {
+        let mut cache =
+            TreeTransformCache::<f64, RuleIdentity>::with_policy(OperationCachePolicy::NoCache);
+        f(&mut cache);
 
-            // What: NoCache compiles eagerly without retaining the completed
-            // structure.
-            assert_eq!(cache.stats().structure_misses(), 1);
-            assert_eq!(cache.structure_len(), 0);
-        };
+        // What: NoCache compiles eagerly without retaining the completed
+        // structure.
+        assert_eq!(cache.stats().structure_misses(), 1);
+        assert_eq!(cache.structure_len(), 0);
+    };
 
     assert_uncached(&mut |cache| {
         cache
@@ -2243,9 +2232,8 @@ fn oriented_adjoint_projection_matches_materialized_logical_oracle() {
     let storage_indices = [1, 0];
     let storage_axes = [2, 3, 0, 1];
 
-    let mut old_cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::with_policy(
-        OperationCachePolicy::NoCache,
-    );
+    let mut old_cache =
+        TreeTransformCache::<f64, RuleIdentity>::with_policy(OperationCachePolicy::NoCache);
     let old = old_cache
         .get_or_compile_tree_pair_prelowered(
             &SU2FusionRule,
@@ -2259,9 +2247,7 @@ fn oriented_adjoint_projection_matches_materialized_logical_oracle() {
         )
         .unwrap();
     let mut oriented_cache =
-        TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::with_policy(
-            OperationCachePolicy::NoCache,
-        );
+        TreeTransformCache::<f64, RuleIdentity>::with_policy(OperationCachePolicy::NoCache);
     let oriented = oriented_cache
         .get_or_compile_tree_pair_oriented(
             &SU2FusionRule,
@@ -2327,7 +2313,7 @@ fn prelowered_compile_does_not_enter_the_completed_structure_lru() {
     let operation_a = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
     let operation_b = TreeTransformOperation::permute([0, 1], []);
     let operation_c = TreeTransformOperation::braid([1, 0], [], [1, 0], []);
-    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::with_policy(
+    let mut cache = TreeTransformCache::<f64, RuleIdentity>::with_policy(
         OperationCachePolicy::task_local_lru(2),
     );
 
@@ -2418,7 +2404,7 @@ fn failed_structure_compile_does_not_change_completed_structure_recency() {
     let operation_a = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
     let operation_b = TreeTransformOperation::permute([0, 1], []);
     let operation_c = TreeTransformOperation::braid([1, 0], [], [1, 0], []);
-    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::with_policy(
+    let mut cache = TreeTransformCache::<f64, RuleIdentity>::with_policy(
         OperationCachePolicy::task_local_lru(2),
     );
 
@@ -2499,7 +2485,7 @@ fn warm_prelowered_raw_arc_aliases_do_not_observe_or_mutate_cache_state() {
     assert_ne!(valid.content_id(), invalid.content_id());
     assert!(!Arc::ptr_eq(&valid, &invalid));
     let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
-    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut cache = TreeTransformCache::<f64, RuleIdentity>::default();
     cache
         .get_or_compile_tree_pair_prelowered(
             &SU2FusionRule,
@@ -2548,8 +2534,7 @@ fn invalid_simple_source_does_not_mutate_cached_or_no_cache_state() {
         OperationCachePolicy::NoCache,
     ] {
         let (dst, src) = malformed_simple_su2_tree_pair_tensors();
-        let mut cache =
-            TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::with_policy(policy);
+        let mut cache = TreeTransformCache::<f64, RuleIdentity>::with_policy(policy);
         let before_stats = cache.stats();
 
         let error = cache
@@ -2582,7 +2567,7 @@ fn malformed_source_precedes_noncategorical_destination_without_cache_mutation()
         dst_structure,
     )
     .unwrap();
-    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
+    let mut cache = TreeTransformCache::<f64, RuleIdentity>::new();
 
     let error = cache
         .get_or_compile_tree_pair(
@@ -2614,7 +2599,7 @@ fn invalid_operation_precedes_malformed_simple_source_without_cache_mutation() {
     // What: operation syntax has deterministic precedence over categorical
     // source admission and neither failure is counted as a cache miss.
     let (dst, src) = malformed_simple_su2_tree_pair_tensors();
-    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
+    let mut cache = TreeTransformCache::<f64, RuleIdentity>::new();
 
     reset_tree_pair_operation_preparations();
     let error = cache
@@ -2657,7 +2642,7 @@ fn invalid_operation_precedes_non_categorical_namespace_without_cache_mutation()
         .unwrap();
         let src =
             TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![1.0], space, structure).unwrap();
-        let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
+        let mut cache = TreeTransformCache::<f64, RuleIdentity>::new();
 
         let error = cache
             .get_or_compile_tree_pair(
@@ -2723,7 +2708,7 @@ fn invalid_unique_source_does_not_count_eager_compile_misses() {
             .unwrap();
     let src =
         TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![1.0], space, src_structure).unwrap();
-    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
+    let mut cache = TreeTransformCache::<f64, RuleIdentity>::new();
 
     let error = cache
         .get_or_compile_tree_pair(
@@ -2769,8 +2754,7 @@ fn direct_tree_pair_rejects_nonalias_malformed_destination_without_writing() {
 fn typed_all_codomain_rejects_nonalias_malformed_destination_without_state_or_output_change() {
     let (mut dst, src) = valid_simple_source_and_nonalias_malformed_destination();
     let before_output = dst.data().to_vec();
-    let mut context =
-        TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
     let before_cache = builtin_tree_cache_state(context.cache());
 
     let error = context
@@ -2854,7 +2838,7 @@ fn all_codomain_pair_mismatch_is_rejected_before_source_scope_or_cache_state() {
             .unwrap();
     let dst = TensorMap::<f64, 3, 0>::from_vec_with_structure(vec![0.0], dst_space, dst_structure)
         .unwrap();
-    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
+    let mut cache = TreeTransformCache::<f64, RuleIdentity>::new();
 
     let error = cache
         .get_or_compile_all_codomain(
@@ -2950,28 +2934,25 @@ fn independent_tree_transform_contexts_compile_their_own_artifacts() {
     let rule = AdmissionCountingSu2Rule {
         nsymbol_calls: Arc::clone(&calls),
     };
-    let mut first =
-        TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
-    let run =
-        |context: &mut TreeTransformExecutionContext<f64, TreeTransformBuiltinRuleCacheKey>| {
-            let mut dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
-                vec![1.0, 2.0],
-                space.clone(),
-                block_structure.clone(),
-            )
+    let mut first = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
+    let run = |context: &mut TreeTransformExecutionContext<f64, RuleIdentity>| {
+        let mut dst = TensorMap::<f64, 4, 0>::from_vec_with_structure(
+            vec![1.0, 2.0],
+            space.clone(),
+            block_structure.clone(),
+        )
+        .unwrap();
+        context
+            .tree_transform_into(&rule, operation.clone(), &mut dst, &src, 2.0, -1.0)
             .unwrap();
-            context
-                .tree_transform_into(&rule, operation.clone(), &mut dst, &src, 2.0, -1.0)
-                .unwrap();
-            dst.data().to_vec()
-        };
+        dst.data().to_vec()
+    };
     let first_data = run(&mut first);
     assert_eq!(first.cache().stats().structure_misses(), 1);
     assert!(calls.load(Ordering::Relaxed) > 0);
 
     calls.store(0, Ordering::Relaxed);
-    let mut second =
-        TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut second = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
     let second_data = run(&mut second);
     assert_eq!(second.cache().stats().structure_misses(), 1);
     assert!(calls.load(Ordering::Relaxed) > 0);
@@ -2992,7 +2973,7 @@ fn concurrent_tree_transform_contexts_do_not_share_compiled_artifacts() {
             };
             let structure = simple_su2_vertex_structure(1);
             let operation = TreeTransformOperation::braid([1, 0], [], [0, 1], []);
-            let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+            let mut cache = TreeTransformCache::<f64, RuleIdentity>::default();
             barrier.wait();
             cache
                 .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
@@ -3066,7 +3047,7 @@ fn su2_two_by_two_f_move_uses_one_completed_structure_miss_compiler() {
     assert_eq!(direct_operation, miss_operation);
     assert_eq!(miss_operation, hit_operation);
     let group_count = src.structure().fusion_tree_groups().len();
-    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
+    let mut cache = TreeTransformCache::<f64, RuleIdentity>::new();
 
     reset_tree_pair_lowering_calls();
     let direct = tree_transform_structure(&SU2FusionRule, direct_operation, &dst, &src).unwrap();
@@ -3195,7 +3176,7 @@ fn tree_transform_cache_compiles_distinct_all_codomain_degeneracy_shapes() {
     )
     .unwrap();
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
-    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
+    let mut cache = TreeTransformCache::<f64, RuleIdentity>::new();
 
     {
         let structure = cache
@@ -3278,8 +3259,7 @@ fn tree_transform_execution_context_reuses_all_codomain_cache() {
         TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], space, block_structure)
             .unwrap();
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
-    let mut context =
-        TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
     assert_eq!(context.cache().stats(), TreeTransformCacheStats::default());
 
     context
@@ -3349,7 +3329,7 @@ fn all_codomain_artifacts_do_not_cross_context_boundaries() {
         TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], space, structure).unwrap();
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
 
-    let mut first = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut first = TreeTransformCache::<f64, RuleIdentity>::default();
     let cold = first
         .get_or_compile_all_codomain(&SU2FusionRule, operation.clone(), &dst, &src)
         .unwrap();
@@ -3358,7 +3338,7 @@ fn all_codomain_artifacts_do_not_cross_context_boundaries() {
         .unwrap();
     assert!(Arc::ptr_eq(&cold, &warm));
 
-    let mut fresh = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut fresh = TreeTransformCache::<f64, RuleIdentity>::default();
     let rebuilt = fresh
         .get_or_compile_all_codomain(&SU2FusionRule, operation, &dst, &src)
         .unwrap();
@@ -3409,8 +3389,7 @@ fn tree_transform_execution_context_no_cache_rebuilds_without_retaining_entries(
         TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], space, block_structure)
             .unwrap();
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
-    let mut context =
-        TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
     context
         .cache_mut()
         .set_policy(OperationCachePolicy::NoCache);
@@ -3438,8 +3417,7 @@ fn tree_transform_execution_context_no_cache_rebuilds_without_retaining_entries(
     ] {
         let mut policy_dst = dst.clone();
         policy_dst.data_mut().fill(0.0);
-        let mut policy_context =
-            TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+        let mut policy_context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
         policy_context.cache_mut().set_policy(policy);
         policy_context
             .all_codomain_tree_transform_into(
@@ -3460,7 +3438,7 @@ fn tree_transform_execution_context_no_cache_rebuilds_without_retaining_entries(
 
 #[test]
 fn tree_transform_execution_context_default_is_bounded() {
-    let context = TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
 
     // What: ordinary contexts retain at most the documented default number of
     // completed tree-transform structures.
@@ -3507,8 +3485,7 @@ fn tree_transform_execution_context_task_local_lru_evicts_old_transformer() {
         TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], space, block_structure)
             .unwrap();
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
-    let mut context =
-        TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
     context
         .cache_mut()
         .set_policy(OperationCachePolicy::task_local_lru(1));
@@ -3632,8 +3609,7 @@ fn tree_transform_execution_context_separates_tree_pair_and_all_codomain_scopes(
         TensorMap::<f64, 4, 0>::from_vec_with_structure(vec![0.0, 0.0], space, block_structure)
             .unwrap();
     let operation = TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []);
-    let mut context =
-        TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
 
     context
         .tree_transform_into(&SU2FusionRule, operation.clone(), &mut dst, &src, 1.0, 0.0)
@@ -3823,7 +3799,7 @@ fn unique_tree_pair_reuses_completed_transformers_with_complete_storage_keys() {
         .unwrap();
     let dst = TensorMap::<f64, 2, 1>::from_vec_with_structure(vec![0.0], dst_space, dst_structure)
         .unwrap();
-    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::new();
+    let mut cache = TreeTransformCache::<f64, RuleIdentity>::new();
 
     let first = cache
         .get_or_compile_tree_pair(&rule, operation.clone(), &dst, &src)
@@ -3875,7 +3851,7 @@ fn unique_tree_pair_reuses_completed_transformers_with_complete_storage_keys() {
     // conjugation remains a distinct completed-structure key.
     assert_eq!(cache.structure_len(), 2);
 
-    let mut bounded = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::with_policy(
+    let mut bounded = TreeTransformCache::<f64, RuleIdentity>::with_policy(
         OperationCachePolicy::task_local_lru(1),
     );
     let evicted = bounded
@@ -3913,7 +3889,7 @@ fn fermionic_storage_conjugation_uses_distinct_reusable_structures() {
     let structure =
         Arc::new(packed_fixture_structure(2, [(BlockKey::from(tree), vec![1, 1])]).unwrap());
     let operation = TreeTransformOperation::braid([1], [0], [0], [1]);
-    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut cache = TreeTransformCache::<f64, RuleIdentity>::default();
 
     let plain = cache
         .get_or_compile_tree_pair_structures_with_storage_conjugation_ref(
@@ -3986,7 +3962,7 @@ fn u1_unique_tree_pair_reuses_completed_transformer_but_no_cache_stays_eager() {
     let dst =
         TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0], space, dst_structure).unwrap();
     let operation = TreeTransformOperation::permute([1, 0], []);
-    let mut cache = TreeTransformCache::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut cache = TreeTransformCache::<f64, RuleIdentity>::default();
 
     let first = cache
         .get_or_compile_tree_pair(&U1FusionRule, operation.clone(), &dst, &src)
@@ -5410,8 +5386,7 @@ fn unique_all_codomain_context_reuses_completed_transformer() {
         TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![0.0], dst_space, dst_structure)
             .unwrap();
     let operation = TreeTransformOperation::permute([1, 0], Vec::<usize>::new());
-    let mut context =
-        TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
 
     context
         .all_codomain_tree_transform_into(
@@ -8210,19 +8185,13 @@ fn generic_facade_structure_rejects_multiplicity_free_style() {
 
 // Stage B3b: the non-memoized generic cache sibling
 // (`get_or_compile_tree_pair_generic`) drives the REAL SU(3) table provider and
-// must reproduce the (proven) non-cached facade path byte-for-byte, keyed by the
-// table's provenance hash.
+// must reproduce the (proven) non-cached facade path byte-for-byte.
 #[test]
 fn b3b_su3_cache_generic_sibling_matches_facade() {
-    use crate::TreeTransformRuleCacheKey;
-    use tenet_core::Su3FusionRule;
+    use tenet_core::{FusionRule, Su3FusionRule};
 
     let rule = Su3FusionRule::new();
-    // The Su3 cache key embeds the table provenance: two handles to the same
-    // table produce equal keys (so plans are shared), and the key carries the
-    // provenance hash (so a swapped table cannot collide).
-    let key = rule.tree_transform_rule_cache_key();
-    assert_eq!(key, Su3FusionRule::new().tree_transform_rule_cache_key());
+    assert_eq!(rule.rule_identity(), Su3FusionRule::new().rule_identity());
     assert_ne!(rule.provenance(), 0);
 
     let eight = rule.sector_of(1, 1).unwrap();
@@ -8251,8 +8220,7 @@ fn b3b_su3_cache_generic_sibling_matches_facade() {
     permute_into_generic(&rule, [1, 0], [], &mut dst_facade, &src, 1.0, 0.0).unwrap();
 
     // Cache sibling: compile via get_or_compile_tree_pair_generic, then execute.
-    let mut cache =
-        TreeTransformCache::<f64, crate::tree_transform::TreeTransformSu3RuleCacheKey>::new();
+    let mut cache = TreeTransformCache::<f64, crate::RuleIdentity>::new();
     let mut dst_cache = make(0.0);
     let structure = cache
         .get_or_compile_tree_pair_generic(
@@ -8279,10 +8247,7 @@ fn b3b_su3_cache_generic_sibling_matches_facade() {
 
     // What: the generic-fusion overwrite entry point writes directly over dirty
     // destination storage on repeated non-memoized compilation.
-    let mut context = TreeTransformExecutionContext::<
-        f64,
-        crate::tree_transform::TreeTransformSu3RuleCacheKey,
-    >::default();
+    let mut context = TreeTransformExecutionContext::<f64, crate::RuleIdentity>::default();
     let mut dst_overwrite = make(f64::NAN);
     let dst_structure = Arc::clone(dst_overwrite.structure());
     let src_structure = Arc::clone(src.structure());

@@ -1,4 +1,4 @@
-//! User-layer runtime: owns the per-rule execution/cache state so everyday
+//! User-layer runtime: owns shared execution and cache state so everyday
 //! tensor code never passes explicit contexts around.
 
 use std::any::Any;
@@ -11,22 +11,15 @@ use num_complex::Complex64;
 pub use tenet_tensors::RuntimeTreeTransformCacheInfo;
 use tenet_tensors::{
     DenseTreeTransformOperations, OperationCachePolicy, RuntimeTreeTransformStore,
-    TensorContractFusionExecutionContext, TreeTransformBuiltinRuleCacheKey,
-    TreeTransformProductRuleCacheKey, TreeTransformSu3RuleCacheKey,
+    TensorContractFusionExecutionContext,
 };
 
 use crate::error::Error;
 use crate::plancache::{Optimizer, PlanCacheConfig};
 pub type Ctx<D, Key> = TensorContractFusionExecutionContext<D, Key>;
-pub(crate) type BuiltinKey = TreeTransformBuiltinRuleCacheKey;
-pub(crate) type ProductKey = TreeTransformProductRuleCacheKey<BuiltinKey, BuiltinKey>;
-/// Cache key of the left-associated triple product `(fZ2 ⊠ U1) ⊠ SU2`.
-pub(crate) type TripleKey = TreeTransformProductRuleCacheKey<ProductKey, BuiltinKey>;
-/// Cache key of the Stage B3b SU(3) table provider (its provenance hash).
-pub(crate) type Su3Key = TreeTransformSu3RuleCacheKey;
-
-/// The pair of per-scalar execution contexts for one fusion rule: tensor
-/// operations dispatch on the stored dtype once per call and pick one side.
+/// The pair of per-scalar execution contexts for one cache-key namespace.
+/// Tensor operations dispatch on the stored dtype once per call and pick one
+/// side.
 pub struct Ctxs<Key: Clone + Eq + Hash + Send + Sync + 'static> {
     pub(crate) f64: Ctx<f64, Key>,
     pub(crate) c64: Ctx<Complex64, Key>,
@@ -163,26 +156,18 @@ impl<Key: Clone + Eq + Hash + Send + Sync + 'static> Ctxs<Key> {
 macro_rules! rule_lanes {
     ($callback:ident) => {
         $callback! {
-            u1: $crate::runtime::BuiltinKey,
-            z2: $crate::runtime::BuiltinKey,
-            fz2: $crate::runtime::BuiltinKey,
-            su2: $crate::runtime::BuiltinKey,
-            u1_fz2: $crate::runtime::ProductKey,
-            fz2_u1_su2: $crate::runtime::TripleKey,
-            su3: $crate::runtime::Su3Key,
+            mf: tenet_core::RuleIdentity,
+            su3: tenet_core::RuleIdentity,
         }
     };
 }
 
 pub(crate) use rule_lanes;
 
-// Why not keep separate field and visitor lists: heterogeneous cache-key types
-// prevent a homogeneous iterator, while separate lists let a new rule compile
-// without inheriting every runtime setting.
 macro_rules! define_runtime_state {
     ($( $field:ident: $key:ty ),+ $(,)?) => {
-        /// Per-rule expert-layer execution contexts plus the rule-independent
-        /// dense executor.
+        /// Expert-layer execution contexts for the multiplicity-free and
+        /// Generic-SU(3) namespaces, plus the rule-independent dense executor.
         pub(crate) struct RuntimeState {
             $(pub(crate) $field: Ctxs<$key>,)+
             pub(crate) dense: Box<dyn tenet_dense::DenseExecutor + Send>,
@@ -261,7 +246,7 @@ struct RuntimeInner {
     tree_transform_store: Arc<RuntimeTreeTransformStore<f64>>,
     /// Standalone-op parallelism (#155): rather than hold the coarse `state`
     /// mutex for a whole `contract`/`permute`/factorization, each op leases a
-    /// per-rule execution context (and, for factorizations, a dense executor)
+    /// execution context (and, for factorizations, a dense executor)
     /// for its duration and returns it, so ops on a shared `Runtime` run
     /// concurrently. Both pools mirror the network `WorkspacePool`: mint on
     /// empty, bounded idle count, quarantine-on-panic.
@@ -287,12 +272,12 @@ struct RuntimeInner {
     plan_cache: Mutex<PlanCacheHome>,
 }
 
-/// Pool entry for `RuntimeInner::context_pool`. Boxed: the context is a
-/// ~66 KB by-value struct (7 rules x 2 dtypes of inline `Ctx` state), and
-/// `Vec::pop`/`push` move entries wholesale — profiling showed those two
-/// memmoves were ~70% of a small standalone op's cost (issue #228). Boxing
-/// makes pool traffic an 8-byte pointer move; the pointer-size canary test
-/// below fails if this ever reverts to by-value pooling.
+/// Pool entry for `RuntimeInner::context_pool`. Boxed: a context owns both the
+/// multiplicity-free and Generic-SU(3) lanes, each with `f64` and `c64`
+/// state. `Vec::pop`/`push` must move only a pointer rather than that complete
+/// execution state; profiling showed by-value moves were ~70% of a small
+/// standalone op's cost (issue #228). The pointer-size canary test below
+/// prevents that regression.
 type PooledContext = Box<crate::tensor::TensorExecutionContext>;
 
 /// Mints a dense executor identical to the one `RuntimeBuilder::build` created
@@ -310,7 +295,7 @@ fn mint_dense(config: &RuntimeExecutionConfig) -> Box<dyn tenet_dense::DenseExec
     )
 }
 
-/// RAII lease of a pooled per-rule execution context (#155). Returns it to the
+/// RAII lease of a pooled execution context (#155). Returns it to the
 /// pool on drop; on panic it is dropped instead of returned (quarantine —
 /// mirrors `tenet_network`'s `WorkspaceLease`).
 pub(crate) struct ContextLease<'a> {
@@ -400,8 +385,10 @@ pub(crate) struct RuntimeExecutionConfig {
     pub(crate) linalg_kind: Option<tenet_dense::CpuBackendKind>,
     pub(crate) tree_transform_store: Weak<RuntimeTreeTransformStore<f64>>,
     /// THE runtime's CPU context: one rayon pool shared by every executor this
-    /// runtime mints — the state's, the executor pool's, and all 28 transform
-    /// backends of every pooled `TensorExecutionContext`. Without it each
+    /// runtime mints — the state's, the executor pool's, and the eight
+    /// transform backends of every pooled `TensorExecutionContext`
+    /// (multiplicity-free and Generic-SU(3) lanes × `f64`/`c64` ×
+    /// tree/contract). Without it each
     /// executor built its own eager env-sized pool, and the #155 context pool
     /// multiplied that into a process-thread-cap failure (macOS `WouldBlock`)
     /// under concurrent leases.
@@ -416,10 +403,11 @@ pub(crate) struct RuntimeExecutionConfig {
 /// arguments. Context-local operation caches stay disabled; cloning a
 /// `Runtime` clones a shared handle, not the state.
 ///
-/// Concurrency: the internal state sits behind one coarse `Mutex`, locked
-/// once per tensor operation. The user layer is designed for
-/// single-threaded driving code (backend parallelism lives below), so the
-/// lock is uncontended in practice.
+/// Concurrency: standalone tensor operations lease independent execution
+/// contexts, so they do not hold the coarse state mutex for their full
+/// duration. The shared completed-transform store and the network plan cache
+/// each use their own synchronization; dense backend parallelism remains below
+/// this user-layer boundary.
 ///
 /// # Examples
 ///
@@ -505,13 +493,14 @@ impl Runtime {
         self.inner.tree_transform_store.clear();
     }
 
-    /// Leases a per-rule execution context for one standalone op (#155): pop an
-    /// idle one or mint a fresh config-bound one. The op runs on the leased
-    /// context, not under the coarse `state` lock, so ops on a shared runtime
-    /// run concurrently. Byte-identical to the old locked path: the per-rule
-    /// machinery is the same `Ctxs`. Completed tree transforms are shared by
-    /// the Runtime store regardless of which context is leased; unrelated
-    /// context-local caches remain disabled.
+    /// Leases an execution context for one standalone op (#155): pop an idle
+    /// one or mint a fresh config-bound one. Each context owns one
+    /// `RuleIdentity`-keyed multiplicity-free lane and a separate Generic-SU(3)
+    /// lane. The op runs on the leased context, not under the coarse `state`
+    /// lock, so ops on a shared runtime run concurrently. Byte-identical to the
+    /// old locked path: the machinery is the same `Ctxs`. Completed tree
+    /// transforms are shared by the Runtime store regardless of which context
+    /// is leased; unrelated context-local caches remain disabled.
     pub(crate) fn lease_context(&self) -> Result<ContextLease<'_>, Error> {
         let pooled = self
             .inner
@@ -851,8 +840,8 @@ impl RuntimeBuilder {
         let executor_mintable = self.dense_executor.is_none();
         let linalg_kind = self.linalg_backend.map(LinalgBackend::to_kind);
         // THE runtime's one CPU context (rayon pool): every executor below —
-        // factorization, executor-pool mints, all per-rule transform backends,
-        // and every pooled TensorExecutionContext — shares it. dense_threads
+        // factorization, executor-pool mints, both transform lanes, and every
+        // pooled TensorExecutionContext — shares it. dense_threads
         // pins the count; otherwise the environment decides once, here, instead
         // of once per executor.
         let shared_ctx = match dense_threads {
@@ -998,8 +987,8 @@ macro_rules! default {
 mod tests {
     use super::*;
 
-    // What: the context pool must hold pointer-sized entries. The context
-    // struct itself is ~66 KB; pooling it by value made Vec pop/push memmoves
+    // What: the context pool must hold pointer-sized entries. Pooling the
+    // complete two-lane execution state by value made Vec pop/push memmoves
     // ~70% of a small standalone op's cost (issue #228). Reverting
     // `PooledContext` to a by-value alias fails here instead of silently
     // reintroducing that tax.

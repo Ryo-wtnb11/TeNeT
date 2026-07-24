@@ -4,8 +4,7 @@ use tenet_core::{
 use tenet_tensors::{
     prepare_tensorcontract_fusion_plan, tensorcontract_fusion_prepared_into,
     tensorcontract_fusion_prepared_into_core_dst, tree_transform_into_with_context,
-    OutputAxisOrder, TensorContractSpec, TreeTransformBuiltinRuleCacheKey,
-    TreeTransformExecutionContext,
+    OutputAxisOrder, RuleIdentity, TensorContractSpec, TreeTransformExecutionContext,
 };
 
 fn main() {
@@ -119,8 +118,7 @@ fn main() {
         axes,
     )
     .unwrap();
-    let mut tree_context =
-        TreeTransformExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut tree_context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
     tree_transform_into_with_context(
         &mut tree_context,
         &rule,

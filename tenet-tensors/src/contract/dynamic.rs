@@ -699,7 +699,7 @@ pub(crate) fn execute_prelowered_dynamic_tree_execution_artifact_for_test<R, D>(
 ) -> Result<(), OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + TreeTransformRuleCacheKey<Key = crate::tree_transform::TreeTransformBuiltinRuleCacheKey>,
+        + TreeTransformRuleCacheKey<Key = crate::RuleIdentity>,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
 {
     let mut tree_context =
@@ -2932,7 +2932,7 @@ mod tests {
 
     #[test]
     fn dynamic_fusion_space_cache_default_is_bounded() {
-        let cache = DynamicFusionSpaceCache::<crate::TreeTransformBuiltinRuleCacheKey>::default();
+        let cache = DynamicFusionSpaceCache::<crate::RuleIdentity>::default();
 
         assert_eq!(
             cache.policy(),
@@ -2942,8 +2942,7 @@ mod tests {
 
     #[test]
     fn dynamic_fusion_space_cache_explicit_task_local_stays_unbounded() {
-        let mut cache =
-            DynamicFusionSpaceCache::<crate::TreeTransformBuiltinRuleCacheKey>::default();
+        let mut cache = DynamicFusionSpaceCache::<crate::RuleIdentity>::default();
 
         cache.set_policy(OperationCachePolicy::TaskLocal);
 
@@ -3171,10 +3170,8 @@ mod tests {
         let counted_source = source_bound
             .clone()
             .with_test_layout_primer(counting_su2_primer);
-        let mut context = crate::TensorContractFusionExecutionContext::<
-            f64,
-            crate::TreeTransformBuiltinRuleCacheKey,
-        >::default();
+        let mut context =
+            crate::TensorContractFusionExecutionContext::<f64, crate::RuleIdentity>::default();
         let mut dst_data = vec![0.0; output_bound.space().required_len().unwrap()];
         let lhs_data = vec![0.0; counted_source.space().required_len().unwrap()];
         let rhs_data = vec![0.0; scalar_bound.space().required_len().unwrap()];
@@ -3208,10 +3205,8 @@ mod tests {
             .unwrap();
         assert_eq!(execution_primer_calls(), cold_calls);
 
-        let mut no_cache_context = crate::TensorContractFusionExecutionContext::<
-            f64,
-            crate::TreeTransformBuiltinRuleCacheKey,
-        >::default();
+        let mut no_cache_context =
+            crate::TensorContractFusionExecutionContext::<f64, crate::RuleIdentity>::default();
         no_cache_context.set_cache_policy(OperationCachePolicy::NoCache);
         reset_execution_primer_calls();
         for expected_minimum in 1..=2 {
@@ -3243,10 +3238,8 @@ mod tests {
         )
         .unwrap();
         let mut other_dst_data = vec![0.0; other_output.space().required_len().unwrap()];
-        let mut lru_context = crate::TensorContractFusionExecutionContext::<
-            f64,
-            crate::TreeTransformBuiltinRuleCacheKey,
-        >::default();
+        let mut lru_context =
+            crate::TensorContractFusionExecutionContext::<f64, crate::RuleIdentity>::default();
         lru_context.set_cache_policy(OperationCachePolicy::task_local_lru(1));
         reset_execution_primer_calls();
         macro_rules! execute_lru {
@@ -3944,7 +3937,7 @@ mod tests {
         beta: f64,
     ) where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>
-            + TreeTransformRuleCacheKey<Key = crate::tree_transform::TreeTransformBuiltinRuleCacheKey>,
+            + TreeTransformRuleCacheKey<Key = crate::RuleIdentity>,
     {
         let mut tree_context =
             TreeTransformExecutionContext::new(DenseTreeTransformOperations::default_executor());

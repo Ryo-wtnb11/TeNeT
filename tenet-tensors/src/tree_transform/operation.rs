@@ -1,10 +1,6 @@
-use std::any::TypeId;
 use std::hash::Hash;
 
-use tenet_core::{
-    FermionParityFusionRule, FusionRule, ProductFusionRule, ProductSectorCodec, RuleIdentity,
-    SU2FusionRule, Su3FusionRule, U1FusionRule, Z2FusionRule,
-};
+use tenet_core::{FusionRule, MultiplicityFreeRigidSymbols, RuleIdentity};
 
 use crate::OperationError;
 
@@ -33,123 +29,24 @@ impl ValidateBraidingSupport for TreeTransformOperation {
     }
 }
 
-/// Semantic cache identity for fusion-tree transformation replay.
+/// Marks a multiplicity-free rule as eligible for keyed tree-transform replay.
 ///
-/// Equal keys must imply identical fusion, duality, braiding, and recoupling
-/// coefficients for every sector/tree combination the rule can produce.
-/// Cached tree-transform and fusion-contraction replay plans may be reused
-/// solely from this key plus the operand structures, so custom rules must
-/// include every parameter that can change those coefficients.
+/// Its key is the rule's canonical identity. Why not permit an independent
+/// cache key: `FusionRule::rule_identity` already owns the complete semantic
+/// identity contract, and a second value could omit a coefficient determinant.
 pub trait TreeTransformRuleCacheKey {
     type Key: 'static + Clone + Eq + Hash + Send + Sync;
 
     fn tree_transform_rule_cache_key(&self) -> Self::Key;
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub enum TreeTransformBuiltinRuleCacheKey {
-    Z2,
-    FermionParity,
-    U1,
-    SU2(RuleIdentity),
-}
-
-impl TreeTransformRuleCacheKey for Z2FusionRule {
-    type Key = TreeTransformBuiltinRuleCacheKey;
-
-    fn tree_transform_rule_cache_key(&self) -> Self::Key {
-        TreeTransformBuiltinRuleCacheKey::Z2
-    }
-}
-
-impl TreeTransformRuleCacheKey for FermionParityFusionRule {
-    type Key = TreeTransformBuiltinRuleCacheKey;
-
-    fn tree_transform_rule_cache_key(&self) -> Self::Key {
-        TreeTransformBuiltinRuleCacheKey::FermionParity
-    }
-}
-
-impl TreeTransformRuleCacheKey for U1FusionRule {
-    type Key = TreeTransformBuiltinRuleCacheKey;
-
-    fn tree_transform_rule_cache_key(&self) -> Self::Key {
-        TreeTransformBuiltinRuleCacheKey::U1
-    }
-}
-
-impl TreeTransformRuleCacheKey for SU2FusionRule {
-    type Key = TreeTransformBuiltinRuleCacheKey;
-
-    fn tree_transform_rule_cache_key(&self) -> Self::Key {
-        TreeTransformBuiltinRuleCacheKey::SU2(self.rule_identity())
-    }
-}
-
-/// Cache identity for the Stage B3b SU(3) table provider. Keyed by the table's
-/// provenance hash (payload FNV-1a-64), NOT a unit marker: a regenerated /
-/// swapped table produces different recoupling coefficients, so its compiled
-/// plans must never be reused. A distinct `Key` type also means the SU(3)
-/// cache — monomorphized per `RuleKey` — shares no map with the mult-free
-/// `TreeTransformBuiltinRuleCacheKey` instance and cannot collide with it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct TreeTransformSu3RuleCacheKey {
-    provenance: u64,
-}
-
-impl TreeTransformRuleCacheKey for Su3FusionRule {
-    type Key = TreeTransformSu3RuleCacheKey;
-
-    fn tree_transform_rule_cache_key(&self) -> Self::Key {
-        TreeTransformSu3RuleCacheKey {
-            provenance: self.provenance(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub struct TreeTransformProductRuleCacheKey<LeftKey, RightKey> {
-    left: LeftKey,
-    right: RightKey,
-    codec: TypeId,
-}
-
-impl<LeftKey, RightKey> TreeTransformProductRuleCacheKey<LeftKey, RightKey> {
-    pub fn new<Codec>(left: LeftKey, right: RightKey) -> Self
-    where
-        Codec: 'static,
-    {
-        Self {
-            left,
-            right,
-            codec: TypeId::of::<Codec>(),
-        }
-    }
-
-    #[inline]
-    pub fn left(&self) -> &LeftKey {
-        &self.left
-    }
-
-    #[inline]
-    pub fn right(&self) -> &RightKey {
-        &self.right
-    }
-}
-
-impl<LeftRule, RightRule, Codec> TreeTransformRuleCacheKey
-    for ProductFusionRule<LeftRule, RightRule, Codec>
+impl<R> TreeTransformRuleCacheKey for R
 where
-    LeftRule: TreeTransformRuleCacheKey,
-    RightRule: TreeTransformRuleCacheKey,
-    Codec: ProductSectorCodec + 'static,
+    R: MultiplicityFreeRigidSymbols,
 {
-    type Key = TreeTransformProductRuleCacheKey<LeftRule::Key, RightRule::Key>;
+    type Key = RuleIdentity;
 
     fn tree_transform_rule_cache_key(&self) -> Self::Key {
-        TreeTransformProductRuleCacheKey::new::<Codec>(
-            self.left_rule().tree_transform_rule_cache_key(),
-            self.right_rule().tree_transform_rule_cache_key(),
-        )
+        self.rule_identity()
     }
 }

@@ -29,8 +29,7 @@ fn assert_complex64_bits_eq(
 
 #[test]
 fn tensor_contract_fusion_execution_context_reports_host_placement() {
-    let context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
 
     assert_eq!(context.tree_backend_placement(), Placement::Host);
     assert_eq!(context.tree_workspace_placement(), Placement::Host);
@@ -122,8 +121,7 @@ fn tensorcontract_fusion_structure_enumerates_z2_compose_blocks_and_replays() {
         dst.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     context
         .tensorcontract_fusion_into(
             &rule,
@@ -238,8 +236,7 @@ fn tensorcontract_fusion_context_accepts_custom_host_storage() {
     let lhs = test_host_read_fusion_tensor_map(vec![2.0_f64, 3.0], fusion_space());
     let rhs = test_host_read_fusion_tensor_map(vec![5.0_f64, 7.0], fusion_space());
     let mut dst = test_host_fusion_tensor_map(vec![10.0_f64, 20.0], fusion_space());
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
 
     context
         .tensorcontract_fusion_into(
@@ -751,8 +748,7 @@ fn paired_axis_selector_scores_once_and_publishes_only_winner_replay() {
     assert_eq!(crate::contract::source_layout_homspace_id_comparisons(), 0);
     reset_global_operation_caches();
     crate::contract::reset_candidate_score_calls();
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
 
     context
         .tensorcontract_fusion_into(&rule, &mut dst, &lhs, &rhs, axes, 1.0, 0.0)
@@ -955,8 +951,7 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
         ),
         Err(reverse_unsupported.clone())
     );
-    let mut explicit_context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut explicit_context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     assert_eq!(
         explicit_context.tensorcontract_fusion_prepared_into(
             &rule,
@@ -1068,29 +1063,25 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
 
     for storage_first in [true, false] {
         reset_global_operation_caches();
-        let mut context =
-            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
-            );
+        let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         let mut storage_dst = vec![0.0; initial.len()];
         let mut owned_dst =
             TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(initial.clone(), dst_space.clone())
                 .unwrap();
-        let storage_call = |context: &mut TensorContractFusionExecutionContext<
-            f64,
-            TreeTransformBuiltinRuleCacheKey,
-        >,
-                            storage_dst: &mut Vec<f64>| {
-            context.tensorcontract_fusion_dyn_direct_on_storage(
-                &mut RejectingStorageGemm,
-                &dst_bound,
-                storage_dst,
-                &lhs_bound,
-                &lhs.data().to_vec(),
-                &rhs_bound,
-                &rhs.data().to_vec(),
-                axes(),
-            )
-        };
+        let storage_call =
+            |context: &mut TensorContractFusionExecutionContext<f64, RuleIdentity>,
+             storage_dst: &mut Vec<f64>| {
+                context.tensorcontract_fusion_dyn_direct_on_storage(
+                    &mut RejectingStorageGemm,
+                    &dst_bound,
+                    storage_dst,
+                    &lhs_bound,
+                    &lhs.data().to_vec(),
+                    &rhs_bound,
+                    &rhs.data().to_vec(),
+                    axes(),
+                )
+            };
         if storage_first {
             assert_eq!(
                 storage_call(&mut context, &mut storage_dst),
@@ -1134,17 +1125,12 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
 
     for typed_first in [true, false] {
         reset_global_operation_caches();
-        let mut context =
-            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
-            );
+        let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         let mut typed_dst =
             TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(initial.clone(), dst_space.clone())
                 .unwrap();
         let mut dynamic_dst = initial.clone();
-        let typed_call = |context: &mut TensorContractFusionExecutionContext<
-            f64,
-            TreeTransformBuiltinRuleCacheKey,
-        >,
+        let typed_call = |context: &mut TensorContractFusionExecutionContext<f64, RuleIdentity>,
                           dst: &mut TensorMap<f64, 2, 2>| {
             context.tensorcontract_fusion_into(
                 provider.as_ref(),
@@ -1156,23 +1142,21 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
                 beta,
             )
         };
-        let dynamic_call = |context: &mut TensorContractFusionExecutionContext<
-            f64,
-            TreeTransformBuiltinRuleCacheKey,
-        >,
-                            dst: &mut [f64]| {
-            context.tensorcontract_fusion_dyn_into(
-                &dst_bound,
-                dst,
-                &lhs_bound,
-                lhs.data(),
-                &rhs_bound,
-                rhs.data(),
-                axes(),
-                alpha,
-                beta,
-            )
-        };
+        let dynamic_call =
+            |context: &mut TensorContractFusionExecutionContext<f64, RuleIdentity>,
+             dst: &mut [f64]| {
+                context.tensorcontract_fusion_dyn_into(
+                    &dst_bound,
+                    dst,
+                    &lhs_bound,
+                    lhs.data(),
+                    &rhs_bound,
+                    rhs.data(),
+                    axes(),
+                    alpha,
+                    beta,
+                )
+            };
         if typed_first {
             typed_call(&mut context, &mut typed_dst).unwrap();
             dynamic_call(&mut context, &mut dynamic_dst).unwrap();
@@ -1190,49 +1174,43 @@ fn reverse_winner_is_independent_of_first_cached_consumer() {
 
     for profiled_first in [true, false] {
         reset_global_operation_caches();
-        let mut context =
-            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
-            );
+        let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         let mut ordinary_dst =
             TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(initial.clone(), dst_space.clone())
                 .unwrap();
         let mut profiled_dst =
             TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(initial.clone(), dst_space.clone())
                 .unwrap();
-        let ordinary_call = |context: &mut TensorContractFusionExecutionContext<
-            f64,
-            TreeTransformBuiltinRuleCacheKey,
-        >,
-                             dst: &mut TensorMap<f64, 2, 2>| {
-            context.tensorcontract_fusion_into(
-                provider.as_ref(),
-                dst,
-                &lhs,
-                &rhs,
-                axes(),
-                alpha,
-                beta,
-            )
-        };
-        let profiled_call = |context: &mut TensorContractFusionExecutionContext<
-            f64,
-            TreeTransformBuiltinRuleCacheKey,
-        >,
-                             dst: &mut TensorMap<f64, 2, 2>| {
-            let mut profile = TensorContractFusionProfile::default();
-            context.tensorcontract_fusion_into_profiled(
-                provider.as_ref(),
-                dst,
-                &lhs,
-                &rhs,
-                axes(),
-                alpha,
-                beta,
-                &mut profile,
-            )?;
-            assert_eq!(profile.route, TensorContractFusionRoute::DynamicTreeCore);
-            Ok::<_, OperationError>(())
-        };
+        let ordinary_call =
+            |context: &mut TensorContractFusionExecutionContext<f64, RuleIdentity>,
+             dst: &mut TensorMap<f64, 2, 2>| {
+                context.tensorcontract_fusion_into(
+                    provider.as_ref(),
+                    dst,
+                    &lhs,
+                    &rhs,
+                    axes(),
+                    alpha,
+                    beta,
+                )
+            };
+        let profiled_call =
+            |context: &mut TensorContractFusionExecutionContext<f64, RuleIdentity>,
+             dst: &mut TensorMap<f64, 2, 2>| {
+                let mut profile = TensorContractFusionProfile::default();
+                context.tensorcontract_fusion_into_profiled(
+                    provider.as_ref(),
+                    dst,
+                    &lhs,
+                    &rhs,
+                    axes(),
+                    alpha,
+                    beta,
+                    &mut profile,
+                )?;
+                assert_eq!(profile.route, TensorContractFusionRoute::DynamicTreeCore);
+                Ok::<_, OperationError>(())
+            };
         if profiled_first {
             profiled_call(&mut context, &mut profiled_dst).unwrap();
             ordinary_call(&mut context, &mut ordinary_dst).unwrap();
@@ -1324,8 +1302,7 @@ fn paired_axis_selector_rejects_invalid_axes_before_scoring_or_mutation() {
 
     let mut context_dst =
         TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![5.0], space).unwrap();
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     let context_error = context
         .tensorcontract_fusion_into(&rule, &mut context_dst, &lhs, &rhs, axes, 1.0, 0.0)
         .unwrap_err();
@@ -1714,8 +1691,7 @@ fn prepared_tensorcontract_fusion_matches_facade_and_rejects_foreign_tensors() {
     let mut dst_facade = test_host_fusion_tensor_map(vec![10.0_f64, 20.0], space.clone());
     let mut dst_prepared = test_host_fusion_tensor_map(vec![10.0_f64, 20.0], space.clone());
     let axes = TensorContractSpec::with_default_output_order(&[1], &[0]);
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
 
     let prepared = context
         .prepare_tensorcontract_fusion(&rule, &dst_prepared, &lhs, &rhs, axes)
@@ -1815,8 +1791,7 @@ fn prepared_tensorcontract_fusion_pins_exact_space_allocations() {
         .unwrap()
     };
     let axes = TensorContractSpec::with_default_output_order(&[1], &[0]);
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     let (prepared, dst_weak, lhs_weak, rhs_weak) = {
         let lhs = test_host_read_fusion_tensor_map(vec![2.0_f64, 3.0], fusion_space());
         let rhs = test_host_read_fusion_tensor_map(vec![5.0_f64, 7.0], fusion_space());
@@ -1958,8 +1933,7 @@ fn tensorcontract_fusion_block_replay_scales_inactive_dst_blocks_once() {
         dst.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     context
         .tensorcontract_fusion_into(&rule, &mut context_dst, &lhs, &rhs, axes, alpha, beta)
         .unwrap();
@@ -2087,10 +2061,7 @@ fn self_dual_conjugate_structure_scales_inactive_block_like_eager_adjoint_oracle
         tensorcontract_fusion_structure(&rule, &actual, &lhs, &rhs, conjugate_axes).unwrap();
     assert_eq!(structure.terms().len(), 1);
 
-    let mut context = TensorContractFusionExecutionContext::<
-        Complex64,
-        TreeTransformBuiltinRuleCacheKey,
-    >::default();
+    let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
     for _ in 0..2 {
         actual
             .data_mut()
@@ -2462,10 +2433,7 @@ fn bosonic_tensorcompose_matches_ordinary_contract() {
     .unwrap();
     let lhs = vec![1.0; source.required_len().unwrap()];
     let rhs = vec![2.0; source.required_len().unwrap()];
-    let mut context = crate::TensorContractFusionExecutionContext::<
-        f64,
-        TreeTransformBuiltinRuleCacheKey,
-    >::default();
+    let mut context = crate::TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     let mut ordinary = vec![0.0; dst.required_len().unwrap()];
     context
         .tensorcontract_fusion_dyn_into_lowered(
@@ -2521,10 +2489,7 @@ fn tensorcompose_fusion_preflights_all_extents_before_mutating_destination() {
     let lhs = vec![1.0; source.required_len().unwrap()];
     let rhs = vec![2.0; source.required_len().unwrap()];
     let operand = crate::FusionOperand::direct(&source);
-    let mut context = crate::TensorContractFusionExecutionContext::<
-        f64,
-        TreeTransformBuiltinRuleCacheKey,
-    >::default();
+    let mut context = crate::TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
 
     let mut valid = vec![0.0; dst.required_len().unwrap()];
     context
@@ -2621,10 +2586,7 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
         Arc::clone(&provider),
     )
     .unwrap();
-    let mut context = crate::TensorContractFusionExecutionContext::<
-        f64,
-        TreeTransformBuiltinRuleCacheKey,
-    >::default();
+    let mut context = crate::TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     let mut contracted = vec![0.0; dst.required_len().unwrap()];
     context
         .tensorcontract_fusion_dyn_into_lowered(
@@ -2641,10 +2603,7 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
         .unwrap();
     assert_eq!(contracted, [-6.0]);
 
-    let compose = |context: &mut crate::TensorContractFusionExecutionContext<
-        f64,
-        TreeTransformBuiltinRuleCacheKey,
-    >| {
+    let compose = |context: &mut crate::TensorContractFusionExecutionContext<f64, RuleIdentity>| {
         let mut output = vec![0.0; dst.required_len().unwrap()];
         context
             .tensorcompose_fusion_dyn_into_lowered(
@@ -3988,8 +3947,7 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
     let mut context_rhs_core =
         TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![456.0], context_rhs_core_space)
             .unwrap();
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     context
         .tensorcontract_fusion_prepared_into_core_dst(
             &rule,
@@ -4019,7 +3977,7 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
     )
     .unwrap();
     let mut automatic_context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+        TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     crate::contract::reset_profiled_artifact_compile_phases();
     let mut profile = TensorContractFusionProfile::default();
     automatic_context
@@ -4468,8 +4426,7 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
         rhs_core_space,
     )
     .unwrap();
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     context
         .tensorcontract_fusion_prepared_into(
             &rule,
@@ -4549,7 +4506,7 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     )
     .unwrap();
     let mut automatic_context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+        TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     automatic_context
         .tensorcontract_fusion_into(
             &rule,
@@ -4586,8 +4543,7 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
         context_dst.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
-    let mut no_cache_context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut no_cache_context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     no_cache_context.set_cache_policy(OperationCachePolicy::NoCache);
     let mut previous_dynamic_misses = 0;
     for _ in 0..2 {
@@ -4625,7 +4581,7 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     )
     .unwrap();
     let mut warm_policy_context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+        TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     warm_policy_context
         .tensorcontract_fusion_into(&rule, &mut warm_policy_dst, &lhs, &rhs, axes, alpha, beta)
         .unwrap();
@@ -4639,8 +4595,7 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
         context_dst.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
-    let mut lru_context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut lru_context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     lru_context.set_cache_policy(OperationCachePolicy::task_local_lru(1));
     lru_context
         .tensorcontract_fusion_into(&rule, &mut lru_dst, &lhs, &rhs, axes, alpha, beta)
@@ -4852,8 +4807,7 @@ fn tensorcontract_fusion_granular_caches_handle_block_structure_variants() {
     let initial_dst = vec![0.5, -1.0, 2.0, -4.0];
     let alpha = 0.75;
     let beta = -0.25;
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
 
     for case_index in 0..3 {
         let lhs_space = make_lhs_space(case_index);
@@ -4942,8 +4896,7 @@ fn tensorcontract_fusion_granular_caches_handle_output_axes() {
     let initial_dst = vec![2.0, -1.0, 4.0, -3.0];
     let alpha = -1.5;
     let beta = 0.25;
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
 
     for output_axes in [[0usize, 1usize], [1usize, 0usize]] {
         let axes = TensorContractSpec::new(
@@ -4997,10 +4950,7 @@ fn tensorcontract_fusion_granular_caches_distinguish_source_conjugation() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let rule = SU2FusionRule;
-    let mut context = TensorContractFusionExecutionContext::<
-        Complex64,
-        TreeTransformBuiltinRuleCacheKey,
-    >::default();
+    let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
     let alpha = Complex64::new(-1.5, 0.25);
     let beta = Complex64::new(0.25, -0.125);
     let initial_dst = vec![
@@ -5353,10 +5303,7 @@ fn assert_non_core_form_su2_adjoint_prepared_plan_matches_reference_sequence(
         expected_dst.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
-    let mut context = TensorContractFusionExecutionContext::<
-        Complex64,
-        TreeTransformBuiltinRuleCacheKey,
-    >::default();
+    let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
     context
         .tensorcontract_fusion_into(&rule, &mut context_dst, &lhs, &rhs, axes, alpha, beta)
         .unwrap();
@@ -6420,8 +6367,7 @@ fn coupled_layout_compose_uses_direct_gemm_groups() {
     let mut dst =
         TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(vec![0.0; dst_len], dst_space).unwrap();
 
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     let axes =
         || TensorContractSpec::new(&[2, 3], &[0, 1], OutputAxisOrder::from_axes(&[0, 1, 2, 3]));
     let mut profile = TensorContractFusionProfile::default();
@@ -7052,28 +6998,26 @@ fn prelowered_storage_layouts_and_execution_paths_match_oracle() {
     // of the identity-order column-major oracle below.
     assert_eq!(padded_artifact_output, [0.0, 6.5, 2.0, 13.5]);
 
-    let execute_prelowered = |context: &mut TensorContractFusionExecutionContext<
-        f64,
-        TreeTransformBuiltinRuleCacheKey,
-    >,
-                              lhs: crate::FusionOperand<'_>,
-                              lhs_data: &[f64]| {
-        let mut output = vec![0.0; dst.required_len().unwrap()];
-        context
-            .tensorcontract_fusion_dyn_prelowered_into(
-                &dst_bound,
-                &mut output,
-                lhs,
-                lhs_data,
-                rhs_operand,
-                &rhs_data,
-                prelowered_axes(),
-                1.0,
-                0.0,
-            )
-            .unwrap();
-        output
-    };
+    let execute_prelowered =
+        |context: &mut TensorContractFusionExecutionContext<f64, RuleIdentity>,
+         lhs: crate::FusionOperand<'_>,
+         lhs_data: &[f64]| {
+            let mut output = vec![0.0; dst.required_len().unwrap()];
+            context
+                .tensorcontract_fusion_dyn_prelowered_into(
+                    &dst_bound,
+                    &mut output,
+                    lhs,
+                    lhs_data,
+                    rhs_operand,
+                    &rhs_data,
+                    prelowered_axes(),
+                    1.0,
+                    0.0,
+                )
+                .unwrap();
+            output
+        };
 
     for (first, first_data, second, second_data) in [
         (
@@ -7090,9 +7034,7 @@ fn prelowered_storage_layouts_and_execution_paths_match_oracle() {
         ),
     ] {
         reset_global_operation_caches();
-        let mut context =
-            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
-            );
+        let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         let first_output = execute_prelowered(&mut context, first, first_data);
         assert_eq!(first_output, oracle);
         let second_output = execute_prelowered(&mut context, second, second_data);
@@ -7105,16 +7047,12 @@ fn prelowered_storage_layouts_and_execution_paths_match_oracle() {
         assert_eq!(repeated, oracle);
 
         reset_global_operation_caches();
-        let mut publisher =
-            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
-            );
+        let mut publisher = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         assert_eq!(
             execute_prelowered(&mut publisher, first, first_data),
             oracle
         );
-        let mut consumer =
-            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
-            );
+        let mut consumer = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         // What: execution is independent of state built by another context.
         assert_eq!(
             execute_prelowered(&mut consumer, second, second_data),
@@ -7128,7 +7066,7 @@ fn prelowered_storage_layouts_and_execution_paths_match_oracle() {
 
     reset_global_operation_caches();
     let mut namespace_context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+        TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     let mut ordinary = vec![0.0; dst.required_len().unwrap()];
     namespace_context
         .tensorcontract_fusion_dyn_into(

@@ -7,8 +7,7 @@ use tenet_core::{
 };
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, OperationError, OutputAxisOrder,
-    TensorContractFusionExecutionContext, TensorContractSpec, TreeTransformBuiltinRuleCacheKey,
-    TreeTransformRuleCacheKey,
+    TensorContractFusionExecutionContext, TensorContractSpec, TreeTransformRuleCacheKey,
 };
 
 use crate::factorize::{
@@ -2957,8 +2956,7 @@ fn reconstruct_from_svd<R>(
     svd: &SvdTrunc<R, f64, 2, 2>,
 ) -> TensorMap<f64, 2, 2>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + TreeTransformRuleCacheKey<Key = TreeTransformBuiltinRuleCacheKey>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
 {
     let mut scaled_vt = svd.vh.tensor().clone();
     scale_vt_rows_by_singular_values(&mut scaled_vt, &svd.singular_values);
@@ -2967,8 +2965,7 @@ where
         template.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     context
         .tensorcontract_fusion_into(
             rule,
@@ -3347,8 +3344,7 @@ fn tsvd_singular_tensor_composes_u_s_vt() {
     .unwrap();
     let s_tensor = svd.s.clone();
 
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     let mut u_s = TensorMap::<f64, 2, 1>::from_vec_with_fusion_space(
         vec![0.0; svd.u.data().len()],
         svd.u.fusion_space().unwrap().as_ref().clone(),
@@ -4187,8 +4183,7 @@ fn svd_full_gives_square_unitaries_and_reconstructs() {
         us_space,
     )
     .unwrap();
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     context
         .tensorcontract_fusion_into(
             &rule,
@@ -4302,10 +4297,7 @@ fn svd_trunc_c64_reconstruction_distance_matches_error() {
         tensor.fusion_space().unwrap().as_ref().clone(),
     )
     .unwrap();
-    let mut context = TensorContractFusionExecutionContext::<
-        Complex64,
-        TreeTransformBuiltinRuleCacheKey,
-    >::default();
+    let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
     context
         .tensorcontract_fusion_into(
             &rule,
@@ -4364,10 +4356,7 @@ fn eig_full_satisfies_the_eigen_equation_for_real_input() {
     )
     .unwrap();
 
-    let mut context = TensorContractFusionExecutionContext::<
-        Complex64,
-        TreeTransformBuiltinRuleCacheKey,
-    >::default();
+    let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
     let mut tv = TensorMap::<Complex64, 2, 1>::from_vec_with_fusion_space(
         vec![Complex64::new(0.0, 0.0); eig.v.data().len()],
         eig.v.fusion_space().unwrap().as_ref().clone(),
@@ -5332,9 +5321,8 @@ fn assert_identity_matrices(matrices: &[(SectorId, usize, usize, Vec<f64>)]) {
     }
 }
 
-fn default_context() -> TensorContractFusionExecutionContext<f64, TreeTransformBuiltinRuleCacheKey>
-{
-    TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default()
+fn default_context() -> TensorContractFusionExecutionContext<f64, RuleIdentity> {
+    TensorContractFusionExecutionContext::<f64, RuleIdentity>::default()
 }
 
 fn lowered_z2_binding<const NOUT: usize, const NIN: usize>(
@@ -5609,9 +5597,7 @@ fn inv_rejects_nonisomorphic_spaces_before_dense_execution() {
     for &(codomain, domain) in cases {
         let tensor = u1_cross_space_map(codomain, domain);
         let mut dense = RejectExecutorCalls;
-        let mut context =
-            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
-            );
+        let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         let error = inv(
             &mut dense,
             &mut context,
@@ -5751,9 +5737,7 @@ fn inv_uses_each_u1_sector_scale_for_f64_rank_and_value() {
     for dominant in [1.0, 1e12] {
         let tensor = u1_block_endomorphism(&[(0, 1, vec![dominant]), (1, 1, vec![1e-14_f64])]);
         let mut dense = tenet_dense::DefaultDenseExecutor::new();
-        let mut context =
-            TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default(
-            );
+        let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
 
         let inverse = inv(
             &mut dense,
@@ -5806,10 +5790,7 @@ fn inv_uses_each_u1_sector_scale_for_phased_c64_values() {
     let small = Complex64::from_polar(1e-14, -0.91);
     let tensor = u1_block_endomorphism(&[(0, 1, vec![large]), (1, 1, vec![small])]);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let mut context = TensorContractFusionExecutionContext::<
-        Complex64,
-        TreeTransformBuiltinRuleCacheKey,
-    >::default();
+    let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
 
     let inverse = inv(
         &mut dense,
@@ -6123,8 +6104,7 @@ fn inv_rejects_a_genuinely_singular_sector_without_an_output() {
     // What: the dense solve reports an exact singular direction as a typed numerical failure.
     let tensor = u1_block_endomorphism(&[(0, 2, vec![1.0_f64, 0.0, 0.0, 0.0])]);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
 
     let error = inv(
         &mut dense,
@@ -6188,8 +6168,7 @@ fn inv_accepts_a_zero_dimensional_endomorphism_without_dense_execution() {
     // What: the inverse of the legal empty endomorphism is the empty endomorphism.
     let tensor = rectangular_svd_tensor(0, 0);
     let mut dense = RejectExecutorCalls;
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
 
     let inverse = inv(
         &mut dense,
@@ -6236,8 +6215,7 @@ fn pinv_keeps_its_global_rcond_cutoff() {
     // What: public pinv still drops singular values relative to the global maximum.
     let tensor = u1_block_endomorphism(&[(0, 1, vec![1.0_f64]), (1, 1, vec![1e-14])]);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let mut context =
-        TensorContractFusionExecutionContext::<f64, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
 
     let inverse = pinv(
         &mut dense,
@@ -6518,8 +6496,7 @@ fn single_precision_svd_and_eig_work_end_to_end() {
             }
         }
     }
-    let mut context =
-        TensorContractFusionExecutionContext::<f32, TreeTransformBuiltinRuleCacheKey>::default();
+    let mut context = TensorContractFusionExecutionContext::<f32, RuleIdentity>::default();
     let reconstructed = crate::compose::compose(&mut context, &rule, &svd.u, &scaled_vh).unwrap();
     let distance = tensor_f32
         .data()
