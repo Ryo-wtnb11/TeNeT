@@ -51,6 +51,15 @@ impl FusionRule for StatefulPointedRule {
 
 impl MultiplicityFreeFusionRule for StatefulPointedRule {}
 
+struct AlternateCanonicalRule;
+struct FirstIdentityCodec;
+struct SecondIdentityCodec;
+
+#[test]
+fn core_rule_identity_reexports_the_tenet_sectors_type() {
+    let _: tenet_sectors::RuleIdentity = RuleIdentity::of_type::<StatefulPointedRule>();
+}
+
 fn two_ones_to_vacuum_homspace() -> FusionTreeHomSpace {
     FusionTreeHomSpace::new(
         FusionProductSpace::new([
@@ -116,6 +125,19 @@ fn content_identity_hash_cost_does_not_scale_with_table_bytes() {
 
     assert_eq!(short_hasher.0, long_hasher.0);
     assert_ne!(short, long);
+}
+
+#[test]
+fn canonical_identity_keeps_prehash_and_provider_type_as_determinants() {
+    let bytes = Arc::<[u8]>::from([1u8, 2, 3]);
+    let same_type_other_prehash =
+        RuleIdentity::from_canonical_bytes::<StatefulPointedRule>(8, Arc::clone(&bytes));
+    let other_type = RuleIdentity::from_canonical_bytes::<AlternateCanonicalRule>(7, bytes);
+    let baseline =
+        RuleIdentity::from_canonical_bytes::<StatefulPointedRule>(7, Arc::from([1u8, 2, 3]));
+
+    assert_ne!(baseline, same_type_other_prehash);
+    assert_ne!(baseline, other_type);
 }
 
 fn raw_scalar_space() -> FusionTensorMapSpace<0, 0> {
@@ -287,6 +309,29 @@ fn product_rule_identity_includes_stateful_child_identity() {
     let second = product_fusion_rule(StatefulPointedRule::new(1), Z2FusionRule);
 
     assert_ne!(first.rule_identity(), second.rule_identity());
+}
+
+#[test]
+fn product_identity_keeps_child_order_codec_and_retained_charge() {
+    let left = RuleIdentity::from_canonical_bytes::<StatefulPointedRule>(3, Arc::from([1u8, 2, 3]));
+    let right =
+        RuleIdentity::from_canonical_bytes::<AlternateCanonicalRule>(5, Arc::from([4u8, 5]));
+    let forward =
+        RuleIdentity::compose_with_codec::<FirstIdentityCodec>(left.clone(), right.clone());
+    let reverse =
+        RuleIdentity::compose_with_codec::<FirstIdentityCodec>(right.clone(), left.clone());
+    let alternate_codec =
+        RuleIdentity::compose_with_codec::<SecondIdentityCodec>(left.clone(), right.clone());
+    let repeat = RuleIdentity::compose_with_codec::<FirstIdentityCodec>(left, right);
+
+    assert_ne!(forward, reverse);
+    assert_ne!(forward, alternate_codec);
+    assert_eq!(forward, repeat);
+    assert_eq!(
+        forward.charged_retained_bytes(),
+        repeat.charged_retained_bytes()
+    );
+    assert!(forward.charged_retained_bytes() > 5);
 }
 
 #[test]

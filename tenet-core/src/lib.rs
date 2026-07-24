@@ -17,7 +17,7 @@ use std::sync::{Arc, OnceLock, RwLock, Weak};
 use num_complex::Complex64;
 use rustc_hash::FxHashMap;
 use smallvec::{smallvec, SmallVec};
-pub use tenet_sectors::{BraidingStyleKind, FusionStyleKind, SectorId, SectorVec};
+pub use tenet_sectors::{BraidingStyleKind, FusionStyleKind, RuleIdentity, SectorId, SectorVec};
 
 mod core_rule_bridge;
 pub(crate) use core_rule_bridge::lowered_multiplicity_free_sealed;

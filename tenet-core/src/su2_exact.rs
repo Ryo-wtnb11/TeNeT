@@ -364,7 +364,7 @@ mod tests {
 
         let current_product =
             ProductFusionRule::<U1FusionRule, SU2FusionRule>::new(U1FusionRule, SU2FusionRule);
-        let legacy_product = RuleIdentity::product::<TensorKitProductCodec>(
+        let legacy_product = RuleIdentity::compose_with_codec::<TensorKitProductCodec>(
             U1FusionRule.rule_identity(),
             RuleIdentity::of_type::<SU2FusionRule>(),
         );
