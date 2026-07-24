@@ -32,14 +32,13 @@ pub enum OperationCachePolicy {
     TaskLocalLru { max_entries: usize },
 }
 
-// Why-not use `OperationCachePolicy::default()`: that intentionally remains the
-// explicit unbounded task-local policy for callers that ask for it, while default
-// execution contexts should not grow without a cap.
-pub(crate) const DEFAULT_CONTRACT_CONTEXT_CACHE_ENTRIES: usize = 256;
+pub(crate) const DEFAULT_OPERATION_CACHE_ENTRIES: usize = 256;
 
 impl Default for OperationCachePolicy {
     fn default() -> Self {
-        Self::TaskLocal
+        Self::TaskLocalLru {
+            max_entries: DEFAULT_OPERATION_CACHE_ENTRIES,
+        }
     }
 }
 
@@ -50,6 +49,7 @@ impl OperationCachePolicy {
     }
 
     #[inline]
+    /// Retains entries without a bound until the owning execution context is dropped.
     pub const fn task_local() -> Self {
         Self::TaskLocal
     }
@@ -326,7 +326,7 @@ impl<C, PlanKey> Default for TensorContractStructureCache<C, PlanKey> {
         Self {
             structures: FxHashMap::default(),
             lru_order: VecDeque::new(),
-            policy: OperationCachePolicy::task_local_lru(DEFAULT_CONTRACT_CONTEXT_CACHE_ENTRIES),
+            policy: OperationCachePolicy::task_local_lru(DEFAULT_OPERATION_CACHE_ENTRIES),
         }
     }
 }
@@ -516,7 +516,7 @@ where
 mod tests {
     use super::{
         reset_global_operation_caches, OperationCachePolicy, TensorContractStructureCache,
-        DEFAULT_CONTRACT_CONTEXT_CACHE_ENTRIES,
+        TreeTransformStructureCache, DEFAULT_OPERATION_CACHE_ENTRIES,
     };
     use crate::test_support::CACHE_TEST_LOCK;
     use tenet_core::BlockStructure;
@@ -527,8 +527,24 @@ mod tests {
 
         assert_eq!(
             cache.policy(),
-            OperationCachePolicy::task_local_lru(DEFAULT_CONTRACT_CONTEXT_CACHE_ENTRIES)
+            OperationCachePolicy::task_local_lru(DEFAULT_OPERATION_CACHE_ENTRIES)
         );
+    }
+
+    #[test]
+    fn default_operation_policy_and_tree_transform_structure_caches_are_bounded() {
+        let policy = OperationCachePolicy::default();
+        assert_eq!(
+            policy,
+            OperationCachePolicy::task_local_lru(DEFAULT_OPERATION_CACHE_ENTRIES)
+        );
+
+        for cache in [
+            TreeTransformStructureCache::<f64, usize>::default(),
+            TreeTransformStructureCache::<f64, usize>::new(),
+        ] {
+            assert_eq!(cache.policy(), policy);
+        }
     }
 
     #[test]

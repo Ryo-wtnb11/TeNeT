@@ -11,8 +11,7 @@ use tenet_core::{
 };
 
 use crate::cache::{
-    touch_lru_key, BlockStructureCacheKey, OperationCachePolicy,
-    DEFAULT_CONTRACT_CONTEXT_CACHE_ENTRIES,
+    touch_lru_key, BlockStructureCacheKey, OperationCachePolicy, DEFAULT_OPERATION_CACHE_ENTRIES,
 };
 use crate::lowering::adjoint_fusion_space_view;
 use crate::tree_context::TreeTransformExecutionContext;
@@ -1839,7 +1838,7 @@ impl<RuleKey> Default for DynamicFusionSpaceCache<RuleKey> {
             last_core_dst: None,
             fast_core_dsts: FxHashMap::default(),
             core_dsts: FxHashMap::default(),
-            policy: OperationCachePolicy::task_local_lru(DEFAULT_CONTRACT_CONTEXT_CACHE_ENTRIES),
+            policy: OperationCachePolicy::task_local_lru(DEFAULT_OPERATION_CACHE_ENTRIES),
             stats: DynamicFusionSpaceCacheStats::default(),
         }
     }
@@ -2937,7 +2936,7 @@ mod tests {
 
         assert_eq!(
             cache.policy(),
-            OperationCachePolicy::task_local_lru(DEFAULT_CONTRACT_CONTEXT_CACHE_ENTRIES)
+            OperationCachePolicy::task_local_lru(DEFAULT_OPERATION_CACHE_ENTRIES)
         );
     }
 
