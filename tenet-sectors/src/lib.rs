@@ -4,6 +4,12 @@
 
 use smallvec::SmallVec;
 
+/// Process-global SU(2) coefficient cache controls owned by `racah`.
+///
+/// TeNeT does not reset or mirror this cache. Applications that choose a
+/// process-wide reset policy may invoke racah's public controls directly.
+pub use racah::cache as su2_coefficient_cache;
+
 mod rule_identity;
 pub use rule_identity::RuleIdentity;
 
@@ -15,6 +21,9 @@ pub use abelian::{FermionParityFusionRule, U1FusionRule, U1Irrep, Z2FusionRule, 
 
 mod fibonacci;
 pub use fibonacci::FibonacciFusionRule;
+
+mod su2;
+pub use su2::{SU2FusionRule, SU2Irrep, SU2_MAX_DOUBLED_SPIN};
 
 mod product_rule;
 pub use product_rule::{

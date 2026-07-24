@@ -5,7 +5,8 @@ use crate::{
     FermionParityFusionRule, FibonacciFusionRule, FusionAlgebraError, FusionTreePairKey,
     MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, PackedProductCodec,
     PackedSectorLayout, ProductFusionRule, ProductSector, ProductSectorCodec,
-    ProductSectorCodecError, SectorId, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
+    ProductSectorCodecError, SU2FusionRule, SU2Irrep, SectorId, U1FusionRule, U1Irrep,
+    Z2FusionRule, Z2Irrep,
 };
 
 // Why not tenet-sectors: these traits and errors define FusionTree lowering
@@ -196,6 +197,77 @@ impl MultiplicityFreePivotalSymbols for FibonacciFusionRule {
         _destination: &FusionTreePairKey,
     ) -> Self::Scalar {
         self.scalar_one()
+    }
+}
+
+impl lowered_multiplicity_free_sealed::Sealed for SU2FusionRule {}
+
+impl LoweredMultiplicityFreeAlgebra for SU2FusionRule {
+    type Sector = SU2Irrep;
+
+    fn try_decode_lowered(
+        &self,
+        sector: SectorId,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        SU2Irrep::try_from_sector_id(sector)
+            .ok_or_else(|| LoweredFusionTreeBuildError::invalid_sector(sector))
+    }
+
+    fn try_encode_lowered(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<SectorId, LoweredFusionTreeBuildError> {
+        Ok(sector.into())
+    }
+
+    fn try_lowered_vacuum(&self) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Ok(SU2Irrep::from_twice_spin(0))
+    }
+
+    fn try_lowered_dual(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Ok(sector)
+    }
+
+    fn try_for_each_lowered_channel<F>(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        emit: &mut F,
+    ) -> Result<(), LoweredFusionTreeBuildError>
+    where
+        F: FnMut(Self::Sector) -> Result<(), LoweredFusionTreeBuildError>,
+    {
+        match self
+            .try_for_each_representable_channel(left, right, |channel| match emit(channel) {
+                Ok(()) => core::ops::ControlFlow::Continue(()),
+                Err(error) => core::ops::ControlFlow::Break(error),
+            })
+            .map_err(LoweredFusionTreeBuildError::fusion_algebra)?
+        {
+            core::ops::ControlFlow::Continue(()) => Ok(()),
+            core::ops::ControlFlow::Break(error) => Err(error),
+        }
+    }
+
+    fn try_lowered_nsymbol(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        coupled: Self::Sector,
+    ) -> Result<usize, LoweredFusionTreeBuildError> {
+        let mut multiplicity = 0;
+        let _ = self
+            .try_for_each_representable_channel(left, right, |channel| {
+                if channel == coupled {
+                    multiplicity = 1;
+                }
+                core::ops::ControlFlow::<()>::Continue(())
+            })
+            .map_err(LoweredFusionTreeBuildError::fusion_algebra)?;
+        Ok(multiplicity)
     }
 }
 

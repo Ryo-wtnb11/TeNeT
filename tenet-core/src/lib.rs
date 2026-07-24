@@ -26,12 +26,12 @@ pub use tenet_sectors::{
     MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
     PackedProductCodec, PackedSectorLayout, ProductFusionRule, ProductFusionRuleExt, ProductSector,
     ProductSectorCodec, ProductSectorCodecError, ProductSectorComponent, ProductSectorLayout,
-    RuleIdentity, SectorId, SectorVec, Su2SectorLayout, SymbolShapeError, TensorKitProductCodec,
-    U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep,
+    RuleIdentity, SU2FusionRule, SU2Irrep, SectorId, SectorVec, Su2SectorLayout, SymbolShapeError,
+    TensorKitProductCodec, U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep,
+    SU2_MAX_DOUBLED_SPIN,
 };
 
 mod core_rule_bridge;
-pub(crate) use core_rule_bridge::lowered_multiplicity_free_sealed;
 pub use core_rule_bridge::{
     LoweredFusionTreeBuildError, LoweredMultiplicityFreeAlgebra, MultiplicityFreePivotalSymbols,
 };
@@ -40,8 +40,6 @@ include!("storage.rs");
 include!("space.rs");
 include!("sector.rs");
 include!("fusion_space.rs");
-mod su2_exact;
-include!("fusion_rule.rs");
 include!("su3.rs");
 include!("fusion_tree.rs");
 include!("block_structure.rs");

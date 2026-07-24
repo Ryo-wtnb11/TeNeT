@@ -34,7 +34,6 @@ jobs:
           julia --project=tools/sun-table-gen tools/sun-table-gen/gen.jl 3 10 /tmp/su3_om_table.bin
         working-directory: tenet
       - uses: dtolnay/rust-toolchain@stable
-      - uses: ./tenet/.github/actions/cache-gmp
       - name: Load the generated artifact through TeNeT
         run: cargo test -p tenet-core generated_su4_artifact_passes_the_production_loader -- --ignored
         working-directory: tenet

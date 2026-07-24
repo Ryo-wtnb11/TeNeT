@@ -18376,9 +18376,8 @@ mod tests {
 
     #[test]
     fn lowered_su2_success_stays_below_the_sector_id_boundary() {
-        // What: validated lowered irreps compute channel bounds and
-        // multiplicity without revalidating or re-encoding SectorIds.
-        reset_su2_id_boundary_observations();
+        // What: the core-local lowered bridge preserves the adapter's
+        // representable channel sequence and multiplicity.
         let rule = SU2FusionRule;
         let left = SU2Irrep::from_twice_spin(2);
         let right = SU2Irrep::from_twice_spin(1);
@@ -18393,12 +18392,27 @@ mod tests {
             rule.try_lowered_nsymbol(left, right, SU2Irrep::from_twice_spin(1)),
             Ok(1)
         );
-        assert_eq!(su2_id_boundary_observations(), (0, 0));
+    }
 
-        assert!(rule
-            .try_fusion_channels(left.sector_id(), right.sector_id())
-            .is_ok());
-        assert_eq!(su2_id_boundary_observations(), (2, 0));
+    #[test]
+    fn lowered_su2_streaming_stops_at_the_first_emission_error() {
+        // What: lowered SU(2) channel enumeration is streamed, so an emitter
+        // failure does not build or visit later channels.
+        let rule = SU2FusionRule;
+        let mut emissions = 0;
+        let error = LoweredFusionTreeBuildError::invalid_sector(SectorId::new(255));
+        assert_eq!(
+            rule.try_for_each_lowered_channel(
+                SU2Irrep::from_twice_spin(4),
+                SU2Irrep::from_twice_spin(4),
+                &mut |_| {
+                    emissions += 1;
+                    Err(error.clone())
+                },
+            ),
+            Err(error)
+        );
+        assert_eq!(emissions, 1);
     }
 
     #[test]

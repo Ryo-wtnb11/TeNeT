@@ -16,7 +16,8 @@ use crate::{OperationError, TensorContractStructure, TreeTransformStructure};
 /// has no filesystem ownership or cross-process reset effect.
 ///
 /// Why not rename it: public compatibility; no operation-result cache remains,
-/// and it now resets only global tenet-core intern, layout, and algebra state.
+/// and it resets only global tenet-core intern and layout state. Racah's
+/// coefficient cache has separate provider-owned reset semantics.
 pub fn reset_global_operation_caches() {
     tenet_core::reset_core_intern_tables();
 }
@@ -519,7 +520,9 @@ mod tests {
         TreeTransformStructureCache, DEFAULT_OPERATION_CACHE_ENTRIES,
     };
     use crate::test_support::CACHE_TEST_LOCK;
-    use tenet_core::BlockStructure;
+    use tenet_core::{
+        BlockStructure, FusionRule, MultiplicityFreeFusionSymbols, SU2FusionRule, SectorId,
+    };
 
     #[test]
     fn tensor_contract_structure_cache_default_is_bounded() {
@@ -580,6 +583,52 @@ mod tests {
         assert!(
             id_after > id_before,
             "reset chain must not reuse content ids, got before={id_before} after={id_after}"
+        );
+    }
+
+    #[test]
+    fn core_and_racah_resets_have_separate_owners() {
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tenet_sectors::su2_coefficient_cache::reset();
+
+        let rule = SU2FusionRule;
+        let identity = rule.rule_identity();
+        let structure = BlockStructure::trivial(&[700_000_001]).unwrap();
+        let structure_id = structure.content_id();
+        let sector = SectorId::new;
+        let _ = rule.f_symbol_scalar(
+            sector(1),
+            sector(1),
+            sector(1),
+            sector(1),
+            sector(0),
+            sector(0),
+        );
+        tenet_sectors::su2_coefficient_cache::reset();
+        assert_eq!(rule.rule_identity(), identity);
+        assert_eq!(
+            BlockStructure::trivial(&[700_000_001])
+                .unwrap()
+                .content_id(),
+            structure_id
+        );
+
+        let _ = rule.f_symbol_scalar(
+            sector(1),
+            sector(1),
+            sector(1),
+            sector(1),
+            sector(0),
+            sector(0),
+        );
+        let populated = tenet_sectors::su2_coefficient_cache::base_cache_stats();
+        assert_ne!(populated.total().entries, 0);
+        tenet_core::reset_core_intern_tables();
+        assert_eq!(
+            tenet_sectors::su2_coefficient_cache::base_cache_stats(),
+            populated
         );
     }
 }
