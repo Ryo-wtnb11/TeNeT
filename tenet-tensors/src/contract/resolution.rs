@@ -12,6 +12,7 @@ use super::structure::TensorContractStructure;
 use crate::OperationError;
 use tenet_operations::axis::TensorContractSpec;
 use tenet_operations::fusion_replay::FusionBlockContractPlan;
+use tenet_operations::TensorContractFusionProfile;
 
 use super::dynamic_space::{DynamicFusionMapSpace, FusionOperand, FusionOperandLayout};
 use super::fusion::{external_axis_is_dual, FusionContractPlan};
@@ -49,20 +50,114 @@ pub(crate) fn compile_resolution<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
+    compile_resolution_with_profile::<R, false>(
+        rule,
+        dst,
+        lhs,
+        rhs,
+        axes,
+        compile_structure,
+        compile_dynamic,
+        None,
+    )
+}
+
+/// Compiles and attributes the ordinary eager route without introducing a
+/// reusable execution artifact.
+pub(crate) fn compile_resolution_profiled<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+    compile_structure: impl FnOnce()
+        -> Result<Option<Arc<TensorContractStructure<f64>>>, OperationError>,
+    compile_dynamic: impl FnOnce() -> Result<Arc<FusionContractPlan>, OperationError>,
+    profile: &mut TensorContractFusionProfile,
+) -> Result<Resolution, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    compile_resolution_with_profile::<R, true>(
+        rule,
+        dst,
+        lhs,
+        rhs,
+        axes,
+        compile_structure,
+        compile_dynamic,
+        Some(profile),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_resolution_with_profile<R, const PROFILED: bool>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+    compile_structure: impl FnOnce()
+        -> Result<Option<Arc<TensorContractStructure<f64>>>, OperationError>,
+    compile_dynamic: impl FnOnce() -> Result<Arc<FusionContractPlan>, OperationError>,
+    mut profile: Option<&mut TensorContractFusionProfile>,
+) -> Result<Resolution, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let preflight_start = PROFILED.then(std::time::Instant::now);
     let preflight = CoreContractPreflight::compile(rule, dst, lhs, rhs, axes)?;
     if !preflight.has_conjugation() {
         if let Some(validated) = preflight.validate_core_geometry()? {
             if !validated_rhs_contract_requires_twist(&validated)? {
+                record_resolution_preflight(&mut profile, preflight_start);
+                let block_plan_start = profile.as_ref().map(|_| std::time::Instant::now());
                 let plan = compile_fusion_block_contract_plan_validated(validated, dst, lhs, rhs)?;
+                if let Some(start) = block_plan_start {
+                    profile
+                        .as_deref_mut()
+                        .expect("profiled route compilation carries a profile")
+                        .core_block_plan_build += start.elapsed();
+                }
                 return Ok(Resolution::Core(Arc::new(plan)));
             }
         }
-        return Ok(Resolution::DynamicTree(compile_dynamic()?));
+        record_resolution_preflight(&mut profile, preflight_start);
+        return compile_dynamic_tree_plan::<PROFILED>(compile_dynamic, &mut profile);
     }
     if let Some(structure) = compile_structure()? {
+        record_resolution_preflight(&mut profile, preflight_start);
         return Ok(Resolution::Structure(structure));
     }
-    Ok(Resolution::DynamicTree(compile_dynamic()?))
+    record_resolution_preflight(&mut profile, preflight_start);
+    compile_dynamic_tree_plan::<PROFILED>(compile_dynamic, &mut profile)
+}
+
+fn record_resolution_preflight(
+    profile: &mut Option<&mut TensorContractFusionProfile>,
+    start: Option<std::time::Instant>,
+) {
+    if let Some(start) = start {
+        profile
+            .as_deref_mut()
+            .expect("profiled route compilation carries a profile")
+            .resolution_preflight += start.elapsed();
+    }
+}
+
+fn compile_dynamic_tree_plan<const PROFILED: bool>(
+    compile_dynamic: impl FnOnce() -> Result<Arc<FusionContractPlan>, OperationError>,
+    profile: &mut Option<&mut TensorContractFusionProfile>,
+) -> Result<Resolution, OperationError> {
+    let start = PROFILED.then(std::time::Instant::now);
+    let plan = compile_dynamic()?;
+    if let Some(start) = start {
+        profile
+            .as_deref_mut()
+            .expect("profiled route compilation carries a profile")
+            .dynamic_tree_plan_build += start.elapsed();
+    }
+    Ok(Resolution::DynamicTree(plan))
 }
 
 /// Compiles one contraction whose logical and storage spaces are already

@@ -1137,7 +1137,7 @@ where
         profile
             .as_deref_mut()
             .expect("profiled compilation carries a profile")
-            .fusion_block_plan_lookup += start.elapsed();
+            .core_block_plan_build += start.elapsed();
         #[cfg(test)]
         PROFILED_ARTIFACT_COMPILE_PHASES
             .with(|phases| phases.set(phases.get() | PROFILED_ARTIFACT_BLOCK_PLAN_PHASE));

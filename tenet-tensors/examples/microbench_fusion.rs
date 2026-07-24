@@ -252,16 +252,19 @@ where
             let us =
                 |duration: std::time::Duration| duration.as_secs_f64() * 1e6 / profile_iters as f64;
             println!(
-                "  route={route:?} total={total:.1} plan_lookups={lookups:.1} \
+                "  route={route:?} total={total:.1} lowering={lowering:.1} \
                  src_transforms={src:.1} scratch_prepare={scratch:.1} \
                  pack={pack:.1} matmul={matmul:.1} scatter={scatter:.1} \
                  scale+validate={scale:.1} out_transform={out:.1} groups={groups}",
                 route = profile.route,
                 total = us(profile.total),
-                lookups = us(profile.prepared_plan
+                lowering = us(profile.prepared_plan
+                    + profile.resolution_preflight
+                    + profile.dynamic_tree_plan_build
                     + profile.source_space_lookup
                     + profile.core_dst_space_lookup
-                    + profile.fusion_block_plan_lookup
+                    + profile.dynamic_tree_artifact_prepare
+                    + profile.core_block_plan_build
                     + profile.core_route_check
                     + profile.typed_space_setup),
                 src = us(profile.lhs_transform + profile.rhs_transform),

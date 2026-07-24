@@ -1430,6 +1430,14 @@ fn print_profile_breakdown(profile: &TensorContractFusionProfile, iterations: us
         nanos_per(profile.prepared_plan, iterations)
     );
     println!(
+        "profile_resolution_preflight_ns,{:.3}",
+        nanos_per(profile.resolution_preflight, iterations)
+    );
+    println!(
+        "profile_dynamic_tree_plan_build_ns,{:.3}",
+        nanos_per(profile.dynamic_tree_plan_build, iterations)
+    );
+    println!(
         "profile_source_space_lookup_ns,{:.3}",
         nanos_per(profile.source_space_lookup, iterations)
     );
@@ -1458,8 +1466,12 @@ fn print_profile_breakdown(profile: &TensorContractFusionProfile, iterations: us
         nanos_per(profile.dst_scratch_prepare, iterations)
     );
     println!(
-        "profile_fusion_block_plan_lookup_ns,{:.3}",
-        nanos_per(profile.fusion_block_plan_lookup, iterations)
+        "profile_dynamic_tree_artifact_prepare_ns,{:.3}",
+        nanos_per(profile.dynamic_tree_artifact_prepare, iterations)
+    );
+    println!(
+        "profile_core_block_plan_build_ns,{:.3}",
+        nanos_per(profile.core_block_plan_build, iterations)
     );
     println!(
         "profile_core_contract_total_ns,{:.3}",

@@ -4036,6 +4036,13 @@ fn tensorcontract_fusion_explicit_output_transform_materializes_core_dst() {
         .unwrap();
     // What: a cold profiled dynamic artifact attributes each owning compile phase.
     assert_eq!(profile.route, TensorContractFusionRoute::DynamicTreeCore);
+    assert_ne!(profile.resolution_preflight, std::time::Duration::ZERO);
+    assert_ne!(profile.dynamic_tree_plan_build, std::time::Duration::ZERO);
+    assert_ne!(profile.source_space_lookup, std::time::Duration::ZERO);
+    assert_ne!(profile.core_dst_space_lookup, std::time::Duration::ZERO);
+    assert_ne!(profile.core_block_plan_build, std::time::Duration::ZERO);
+    assert_eq!(profile.prepared_plan, std::time::Duration::ZERO);
+    assert_eq!(profile.dense_contract, std::time::Duration::ZERO);
     assert_eq!(
         crate::contract::profiled_artifact_compile_phases(),
         (true, true, true)

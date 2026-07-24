@@ -1879,8 +1879,7 @@ where
         let rhs_dynamic = DynamicFusionMapSpace::from_typed(rhs_fusion);
         profile.typed_space_setup += start.elapsed();
 
-        let start = std::time::Instant::now();
-        let resolution = compile_resolution(
+        let resolution = super::resolution::compile_resolution_profiled(
             rule,
             &dst_dynamic,
             &lhs_dynamic,
@@ -1903,10 +1902,10 @@ where
                 )
                 .map(std::sync::Arc::new)
             },
+            profile,
         )?;
         #[cfg(test)]
         self.record_top_level_resolution(&resolution);
-        profile.fusion_block_plan_lookup += start.elapsed();
 
         match &resolution {
             Resolution::Core(block_plan) => {
@@ -1947,6 +1946,10 @@ where
                 let dst_structure = Arc::clone(dst.structure());
                 let lhs_structure = Arc::clone(lhs.structure());
                 let rhs_structure = Arc::clone(rhs.structure());
+                let artifact_start = std::time::Instant::now();
+                let source_before = profile.source_space_lookup;
+                let core_dst_before = profile.core_dst_space_lookup;
+                let block_plan_before = profile.core_block_plan_build;
                 let artifact = self
                     .compile_dynamic_execution_artifact::<_, true>(
                         &resolution,
@@ -1960,6 +1963,12 @@ where
                         Some(profile),
                     )?
                     .expect("dynamic-tree resolution compiles an execution artifact");
+                let separately_attributed = (profile.source_space_lookup - source_before)
+                    + (profile.core_dst_space_lookup - core_dst_before)
+                    + (profile.core_block_plan_build - block_plan_before);
+                profile.dynamic_tree_artifact_prepare += artifact_start
+                    .elapsed()
+                    .saturating_sub(separately_attributed);
                 let Self {
                     tree_context,
                     contract_backend,
