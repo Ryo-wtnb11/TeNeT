@@ -6115,6 +6115,125 @@ mod tests {
         }
     }
 
+    #[test]
+    fn unique_multistep_braid_mutates_one_operation_local_tree() {
+        // What: a prepared UniqueFusion schedule has the exact frozen-tree
+        // fields and coefficient bits of one-step replay without publishing
+        // a frozen intermediate key for every Artin crossing.
+        let rule = AsymmetricAnyonicRule;
+        let source = FusionTreeKey::try_from_sector_ids(
+            [1, 1, 2, 0],
+            0,
+            [false, true, false, true],
+            [2, 0],
+            [1, 1, 1],
+        )
+        .unwrap();
+        let permutation = [3, 2, 1, 0];
+        let levels = [0, 3, 1, 2];
+        let owned = PreparedTreeBraid::new(&permutation, &levels, source.uncoupled().len()).unwrap();
+
+        let mut expected_tree = source.clone();
+        let mut expected_coefficient = rule.scalar_one();
+        for step in &owned.artin_steps {
+            let (next, coefficient) = immutable_unique_artin_braid_at_with_inverse_oracle(
+                &rule,
+                &expected_tree,
+                step.index,
+                step.inverse,
+            )
+            .unwrap();
+            expected_tree = next;
+            expected_coefficient *= coefficient;
+        }
+        let assert_replay = |actual: &(FusionTreeKey, f64)| {
+            assert_eq!(actual.0.uncoupled(), expected_tree.uncoupled());
+            assert_eq!(actual.0.is_dual(), expected_tree.is_dual());
+            assert_eq!(actual.0.coupled(), expected_tree.coupled());
+            assert_eq!(actual.0.innerlines(), expected_tree.innerlines());
+            assert_eq!(actual.0.vertices(), expected_tree.vertices());
+            assert_eq!(actual.1.to_bits(), expected_coefficient.to_bits());
+        };
+
+        let actual = execute_unique_tree_braid(&rule, &source, &owned.permutation, &owned.artin_steps)
+            .unwrap();
+        assert_replay(&actual);
+
+        let generic = execute_multiplicity_free_tree_braid(
+            &rule,
+            &source,
+            &owned.permutation,
+            &owned.artin_steps,
+        )
+        .unwrap();
+        assert_eq!(generic.len(), 1);
+        assert_replay(&generic[0]);
+
+        let raw_axis_positions = [3, 2, 1, 0];
+        let prepared = PreparedTreePairOperation::prepare_braid_with_raw_axis_positions(
+            &rule,
+            4,
+            0,
+            &permutation,
+            &[],
+            &levels,
+            &[],
+            &raw_axis_positions,
+        )
+        .unwrap();
+        let PreparedTreePairPlan::UniqueBraid(borrowed) = &prepared.plan else {
+            panic!("UniqueFusion braid must retain borrowed operation metadata");
+        };
+        let actual = execute_unique_tree_braid_borrowed(&rule, &source, borrowed).unwrap();
+        assert_replay(&actual);
+
+        let domain = FusionTreeKey::try_new_for_rule(
+            &rule,
+            [],
+            rule.vacuum(),
+            [],
+            [],
+            [],
+        )
+        .unwrap();
+        let second = FusionTreeKey::try_from_sector_ids(
+            [1, 1, 2, 0],
+            0,
+            [true, false, true, false],
+            [2, 0],
+            [1, 1, 1],
+        )
+        .unwrap();
+        let sources = [
+            FusionTreePairKey::pair(source.clone(), domain.clone()),
+            FusionTreePairKey::pair(second, domain),
+        ];
+        let source_snapshots = sources.clone();
+        for source in &sources {
+            let mut expected_tree = source.codomain_tree().clone();
+            let mut expected_coefficient = rule.scalar_one();
+            for step in &owned.artin_steps {
+                let (next, coefficient) = immutable_unique_artin_braid_at_with_inverse_oracle(
+                    &rule,
+                    &expected_tree,
+                    step.index,
+                    step.inverse,
+                )
+                .unwrap();
+                expected_tree = next;
+                expected_coefficient *= coefficient;
+            }
+            let actual = prepared.execute_multiplicity_free(&rule, source).unwrap();
+            assert_eq!(actual.len(), 1);
+            assert_eq!(
+                actual[0].0,
+                FusionTreePairKey::pair(expected_tree, source.domain_tree().clone())
+            );
+            assert_eq!(actual[0].1.to_bits(), expected_coefficient.to_bits());
+        }
+        assert_eq!(sources, source_snapshots);
+    }
+
     fn next_lexicographic_permutation(values: &mut [usize]) -> bool {
         let Some(pivot) = (0..values.len().saturating_sub(1))
             .rev()

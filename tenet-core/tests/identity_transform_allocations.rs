@@ -5,9 +5,12 @@ use std::hint::black_box;
 use tenet_core::{
     multiplicity_free_braid_tree_block, multiplicity_free_permute_tree_pair_block,
     multiplicity_free_permute_tree_pair_block_indexed, unique_permute_tree, BlockKey, BlockSpec,
-    BlockStructure, FermionParityFusionRule, FusionProductSpace, FusionTreeHomSpace, FusionTreeKey,
-    FusionTreePairKey, FusionTreePairOrientation, MultiplicityIndex, PreparedTreePairOperation,
-    SU2FusionRule, SU2Irrep, SectorLeg, SectorStructure, Z2FusionRule, Z2Irrep,
+    BlockStructure, BraidingStyleKind, FermionParityFusionRule, FusionProductSpace, FusionRule,
+    FusionStyleKind, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
+    FusionTreePairOrientation, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, MultiplicityIndex, PreparedTreePairOperation, RuleIdentity,
+    SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorStructure, SectorVec, Z2FusionRule,
+    Z2Irrep,
 };
 
 struct CountingAllocator;
@@ -44,6 +47,92 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+#[derive(Clone, Copy)]
+struct AllocationAnyonicRule;
+
+impl FusionRule for AllocationAnyonicRule {
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::of_type::<Self>()
+    }
+
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Unique
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Anyonic
+    }
+
+    fn vacuum(&self) -> SectorId {
+        SectorId::new(0)
+    }
+
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        SectorVec::from_slice(&[SectorId::new((left.id() + right.id()) % 32)])
+    }
+}
+
+impl MultiplicityFreeFusionRule for AllocationAnyonicRule {}
+
+impl MultiplicityFreeFusionSymbols for AllocationAnyonicRule {
+    type Scalar = f64;
+
+    fn scalar_one(&self) -> Self::Scalar {
+        1.0
+    }
+
+    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+        value
+    }
+
+    fn f_symbol_scalar(
+        &self,
+        _left: SectorId,
+        _middle: SectorId,
+        _right: SectorId,
+        _coupled: SectorId,
+        _left_coupled: SectorId,
+        _right_coupled: SectorId,
+    ) -> Self::Scalar {
+        1.0
+    }
+
+    fn r_symbol_scalar(
+        &self,
+        _left: SectorId,
+        _right: SectorId,
+        _coupled: SectorId,
+    ) -> Self::Scalar {
+        1.0
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for AllocationAnyonicRule {
+    fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn twist_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+}
 
 #[test]
 fn constructed_sector_structure_borrows_fusion_groups_without_allocation() {
@@ -574,6 +663,78 @@ fn prepared_nonidentity_unique_operations_have_zero_prepare_and_stable_execute_a
         assert_eq!(cohort_calls, single_calls * cohort.len());
         assert_eq!(cohort_bytes, single_bytes * cohort.len());
     }
+}
+
+#[test]
+fn borrowed_unique_execution_allocations_do_not_scale_with_artin_schedule() {
+    let rule = AllocationAnyonicRule;
+    let rank = 9;
+    let source_tree = FusionTreeKey::try_new_for_rule(
+        &rule,
+        std::iter::repeat_n(SectorId::new(1), rank - 1).chain([SectorId::new(24)]),
+        rule.vacuum(),
+        std::iter::repeat_n(false, rank),
+        (2..rank).map(SectorId::new),
+        std::iter::repeat_n(MultiplicityIndex::ONE, rank - 1),
+    )
+    .unwrap();
+    let domain = FusionTreeKey::try_new_for_rule(&rule, [], rule.vacuum(), [], [], []).unwrap();
+    let source = FusionTreePairKey::pair(source_tree, domain);
+    let levels = (0..rank).collect::<Vec<_>>();
+    let short_permutation = [1]
+        .into_iter()
+        .chain([0])
+        .chain(2..rank)
+        .collect::<Vec<_>>();
+    let short_positions = short_permutation.iter().enumerate().fold(
+        vec![0; rank],
+        |mut positions, (position, &axis)| {
+            positions[axis] = position;
+            positions
+        },
+    );
+    let long_permutation = (0..rank).rev().collect::<Vec<_>>();
+    let long_positions = long_permutation.iter().enumerate().fold(
+        vec![0; rank],
+        |mut positions, (position, &axis)| {
+            positions[axis] = position;
+            positions
+        },
+    );
+    let short = PreparedTreePairOperation::prepare_braid_with_raw_axis_positions(
+        &rule,
+        rank,
+        0,
+        &short_permutation,
+        &[],
+        &levels,
+        &[],
+        &short_positions,
+    )
+    .unwrap();
+    let long = PreparedTreePairOperation::prepare_braid_with_raw_axis_positions(
+        &rule,
+        rank,
+        0,
+        &long_permutation,
+        &[],
+        &levels,
+        &[],
+        &long_positions,
+    )
+    .unwrap();
+    let run = |prepared: &PreparedTreePairOperation<'_>| {
+        black_box(prepared.execute_multiplicity_free(&rule, &source).unwrap())
+    };
+
+    run(&short);
+    run(&long);
+    let (_, short_calls) = measured_allocations(|| run(&short));
+    let (_, long_calls) = measured_allocations(|| run(&long));
+
+    // What: same-rank UniqueFusion replay owns one final result regardless of
+    // whether the prepared Artin schedule has one crossing or many.
+    assert_eq!(short_calls, long_calls);
 }
 
 #[test]

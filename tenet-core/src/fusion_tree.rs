@@ -2968,10 +2968,7 @@ where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
 {
-    if rule.fusion_style() == FusionStyleKind::Unique
-        && rule.braiding_style().is_symmetric()
-        && rule.has_trivial_associator_gauge()
-    {
+    if rule.fusion_style() == FusionStyleKind::Unique {
         let (destination, coefficient) =
             execute_unique_tree_braid(rule, tree, permutation, artin_steps)?;
         return Ok(vec![(destination, coefficient)]);
@@ -2990,6 +2987,11 @@ where
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar>,
     I: IntoIterator<Item = PreparedArtinStep>,
 {
+    if rule.fusion_style() == FusionStyleKind::Unique {
+        let (destination, coefficient) = execute_unique_tree_braid_steps(rule, tree, steps)?;
+        return Ok(vec![(destination, coefficient)]);
+    }
+
     let mut current = vec![(tree.clone(), rule.scalar_one())];
     for step in steps {
         let mut next_terms = FusionTermAccumulator::new();
@@ -6784,19 +6786,7 @@ where
         return Ok((destination, coefficient));
     }
 
-    let mut current = tree.clone();
-    let mut coefficient = rule.scalar_one();
-    for step in artin_steps {
-        let (next, step_coefficient) = unique_artin_braid_at_with_inverse(
-            rule,
-            &current,
-            step.index,
-            step.inverse,
-        )?;
-        coefficient = coefficient * step_coefficient;
-        current = next;
-    }
-    Ok((current, coefficient))
+    execute_unique_tree_braid_steps(rule, tree, artin_steps.iter().copied())
 }
 
 fn execute_unique_tree_braid_borrowed<R>(
@@ -6847,13 +6837,27 @@ where
         return Ok((destination, coefficient));
     }
 
+    execute_unique_tree_braid_steps(rule, tree, braid.artin_steps())
+}
+
+fn execute_unique_tree_braid_steps<R, I>(
+    rule: &R,
+    tree: &FusionTreeKey,
+    steps: I,
+) -> Result<(FusionTreeKey, R::Scalar), CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Mul<Output = R::Scalar>,
+    I: IntoIterator<Item = PreparedArtinStep>,
+{
+    // Why not freeze a key after every step: this state is private to one
+    // execution, while only the final categorical identity can escape.
     let mut current = tree.clone();
     let mut coefficient = rule.scalar_one();
-    for step in braid.artin_steps() {
-        let (next, step_coefficient) =
-            unique_artin_braid_at_with_inverse(rule, &current, step.index, step.inverse)?;
+    for step in steps {
+        let step_coefficient =
+            apply_unique_artin_braid_at_with_inverse(rule, &mut current, step.index, step.inverse)?;
         coefficient = coefficient * step_coefficient;
-        current = next;
     }
     Ok((current, coefficient))
 }
@@ -6941,6 +6945,22 @@ where
 }
 
 fn unique_artin_braid_at_with_inverse<R>(
+    rule: &R,
+    tree: &FusionTreeKey,
+    index: usize,
+    inverse: bool,
+) -> Result<(FusionTreeKey, R::Scalar), CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Mul<Output = R::Scalar>,
+{
+    let mut braided = tree.clone();
+    let coefficient = apply_unique_artin_braid_at_with_inverse(rule, &mut braided, index, inverse)?;
+    Ok((braided, coefficient))
+}
+
+#[cfg(test)]
+fn immutable_unique_artin_braid_at_with_inverse_oracle<R>(
     rule: &R,
     tree: &FusionTreeKey,
     index: usize,
@@ -7047,6 +7067,114 @@ where
         left * rule.scalar_conj(f_symbol * right)
     };
     Ok((braided, coefficient))
+}
+
+fn apply_unique_artin_braid_at_with_inverse<R>(
+    rule: &R,
+    tree: &mut FusionTreeKey,
+    index: usize,
+    inverse: bool,
+) -> Result<R::Scalar, CoreError>
+where
+    R: MultiplicityFreeFusionSymbols,
+    R::Scalar: Mul<Output = R::Scalar>,
+{
+    if rule.fusion_style() != FusionStyleKind::Unique {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Unique,
+            actual: rule.fusion_style(),
+        });
+    }
+
+    let rank = tree.uncoupled().len();
+    if index + 1 >= rank {
+        return Err(CoreError::InvalidBraidIndex { index, rank });
+    }
+
+    let left = tree.uncoupled()[index];
+    let right = tree.uncoupled()[index + 1];
+
+    if left == rule.vacuum() || right == rule.vacuum() {
+        if index > 0 {
+            let inner_source = if left == rule.vacuum() {
+                inner_extended_sector(tree, index + 1)?
+            } else {
+                inner_extended_sector(tree, index - 1)?
+            };
+            *tree
+                .innerlines
+                .get_mut(index - 1)
+                .ok_or(CoreError::MalformedFusionTree {
+                    message: "unit braid past the first adjacent pair requires an innerline",
+                })? = inner_source;
+            if tree.vertices.len() <= index {
+                return Err(CoreError::MalformedFusionTree {
+                    message: "unit braid past the first adjacent pair requires adjacent vertices",
+                });
+            }
+            tree.vertices.swap(index - 1, index);
+        }
+
+        tree.uncoupled.swap(index, index + 1);
+        tree.is_dual.swap(index, index + 1);
+        return Ok(rule.scalar_one());
+    }
+
+    if !rule.braiding_style().has_braiding() {
+        return Err(CoreError::UnsupportedSectorBraid {
+            left,
+            right,
+            style: rule.braiding_style(),
+        });
+    }
+
+    if index == 0 {
+        let coupled = if rank > 2 {
+            tree.innerlines()
+                .first()
+                .copied()
+                .ok_or(CoreError::MalformedFusionTree {
+                    message: "first braid of a rank > 2 tree requires the first innerline",
+                })?
+        } else {
+            tree.coupled()
+        };
+
+        let coefficient = if inverse {
+            rule.scalar_conj(rule.r_symbol_scalar(right, left, coupled))
+        } else {
+            rule.r_symbol_scalar(left, right, coupled)
+        };
+        tree.uncoupled.swap(index, index + 1);
+        tree.is_dual.swap(index, index + 1);
+        return Ok(coefficient);
+    }
+
+    let a = inner_extended_sector(tree, index - 1)?;
+    let b = left;
+    let c = inner_extended_sector(tree, index)?;
+    let d = right;
+    let e = inner_extended_sector(tree, index + 1)?;
+    let c_prime = only_fusion_channel(rule, a, d)?;
+    *tree
+        .innerlines
+        .get_mut(index - 1)
+        .ok_or(CoreError::MalformedFusionTree {
+            message: "non-first braid requires an innerline to update",
+        })? = c_prime;
+    let f_symbol = rule.f_symbol_scalar(d, a, b, e, c_prime, c);
+    let coefficient = if inverse {
+        let left = rule.r_symbol_scalar(d, c, e);
+        let right = rule.r_symbol_scalar(d, a, c_prime);
+        rule.scalar_conj(left * f_symbol) * right
+    } else {
+        let left = rule.r_symbol_scalar(c, d, e);
+        let right = rule.r_symbol_scalar(a, d, c_prime);
+        left * rule.scalar_conj(f_symbol * right)
+    };
+    tree.uncoupled.swap(index, index + 1);
+    tree.is_dual.swap(index, index + 1);
+    Ok(coefficient)
 }
 
 trait MultiplicityFreeTreeLocalData {
