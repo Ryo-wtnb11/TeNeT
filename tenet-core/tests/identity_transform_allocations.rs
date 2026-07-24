@@ -575,3 +575,18 @@ fn prepared_nonidentity_unique_operations_have_zero_prepare_and_stable_execute_a
         assert_eq!(cohort_bytes, single_bytes * cohort.len());
     }
 }
+
+#[test]
+fn direct_simple_preparation_does_not_freeze_compiler_owners() {
+    let prepare = || {
+        PreparedTreePairOperation::prepare_braid(&SU2FusionRule, 2, 0, &[1, 0], &[], &[0, 1], &[])
+            .unwrap()
+    };
+
+    let _ = prepare();
+    let (_, allocations) = measured_allocations(|| black_box(prepare()));
+
+    // What: direct SimpleFusion preparation keeps its ephemeral lowering;
+    // compiler-owned runtime storage is introduced only after this API returns.
+    assert_eq!(allocations, 0);
+}

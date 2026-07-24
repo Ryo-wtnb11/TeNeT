@@ -2059,7 +2059,7 @@ where
 {
     #[cfg(test)]
     TREE_PAIR_OPERATION_PREPARATIONS.set(TREE_PAIR_OPERATION_PREPARATIONS.get() + 1);
-    match operation.kind() {
+    let prepared = match operation.kind() {
         TreeTransformOperationKind::Permute => match operation.raw_axis_positions() {
             Some(raw_axis_positions) => {
                 PreparedTreePairOperation::prepare_permute_with_raw_axis_positions(
@@ -2112,7 +2112,8 @@ where
             operation.domain_permutation(),
         ),
     }
-    .map_err(OperationError::from_core_preserving_context)
+    .map_err(OperationError::from_core_preserving_context)?;
+    Ok(prepared.into_compiler_owned_simple_braid())
 }
 
 fn prepare_tree_pair_operation_syntax(

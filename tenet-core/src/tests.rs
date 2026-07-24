@@ -6045,6 +6045,33 @@ mod tests {
     }
 
     #[test]
+    fn simple_prepared_braid_has_runtime_rank_schedule() {
+        // What: a nontrivial SimpleFusion braid keeps the complete high-rank
+        // Artin schedule through compilation without a rank-specialized plan.
+        let rank = 19;
+        let permutation = (0..rank).rev().collect::<Vec<_>>();
+        let levels = (0..rank).collect::<Vec<_>>();
+        let prepared = PreparedTreePairOperation::prepare_braid(
+            &SU2FusionRule,
+            rank,
+            0,
+            &permutation,
+            &[],
+            &levels,
+            &[],
+        )
+        .unwrap();
+
+        assert!(matches!(prepared.plan, PreparedTreePairPlan::Braid(_)));
+        let prepared = prepared.into_compiler_owned_simple_braid();
+        assert!(matches!(prepared.plan, PreparedTreePairPlan::SimpleBraid(_)));
+        assert_eq!(
+            prepared.plan.artin_steps().unwrap().count(),
+            rank * (rank - 1) / 2
+        );
+    }
+
+    #[test]
     fn borrowed_unique_artin_lowering_matches_materialized_replay() {
         // What: operation-local inverse positions preserve the former
         // materialized Artin word and inverse flag for every small-rank
