@@ -18,12 +18,10 @@ use crate::factorize::{
 use crate::*;
 use num_complex::{Complex32, Complex64};
 use num_traits::Zero;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tenet_dense::{
     DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseTensor, DenseWrite,
 };
-
-static COMPACT_FACTOR_PLAN_IDENTITY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 struct RejectExecutorCalls;
 
@@ -1353,7 +1351,7 @@ fn eigh_rejects_non_finite_backend_eigenvalues_before_sorting() {
 
 #[test]
 fn eigh_vectors_retain_each_callers_exact_provider_arc() {
-    // What: a shared geometry plan rebinds EIGH vectors to each caller's provider allocation.
+    // What: per-call EIGH factor construction preserves each caller's provider allocation.
     let tensor = hermitian_test_tensor(&Z2FusionRule, &[SectorId::new(0), SectorId::new(1)]);
     let first_provider = Arc::new(Z2FusionRule);
     let second_provider = Arc::new(Z2FusionRule);
@@ -1419,7 +1417,7 @@ fn compact_qr_error_preserves_borrowed_input_and_publishes_no_factors() {
 
 #[test]
 fn compact_qr_factors_retain_each_callers_exact_provider_arc() {
-    // What: a shared geometry plan rebinds both QR factors to each caller's provider allocation.
+    // What: per-call QR factor construction preserves each caller's provider allocation.
     let tensor = rectangular_svd_tensor(7, 5);
     let first_provider = Arc::new(Z2FusionRule);
     let second_provider = Arc::new(Z2FusionRule);
@@ -1455,7 +1453,7 @@ fn compact_lq_error_preserves_borrowed_input_and_publishes_no_factors() {
 
 #[test]
 fn compact_lq_factors_retain_each_callers_exact_provider_arc() {
-    // What: a shared geometry plan rebinds both LQ factors to each caller's provider allocation.
+    // What: per-call LQ factor construction preserves each caller's provider allocation.
     let tensor = rectangular_svd_tensor(7, 5);
     let first_provider = Arc::new(Z2FusionRule);
     let second_provider = Arc::new(Z2FusionRule);
@@ -1472,31 +1470,6 @@ fn compact_lq_factors_retain_each_callers_exact_provider_arc() {
     for factor in [&second_l, &second_q] {
         assert!(Arc::ptr_eq(factor.space().provider_arc(), &second_provider));
     }
-}
-
-#[test]
-fn compact_svd_qr_eigh_and_lq_preserve_one_factor_plan_generation() {
-    // What: SVD, QR, EIGH, and LQ keep one factor-plan generation alive across all operations.
-    let _guard = COMPACT_FACTOR_PLAN_IDENTITY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let tensor = hermitian_test_tensor(&Z2FusionRule, &[SectorId::new(0), SectorId::new(1)]);
-    let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
-    let mut dense = tenet_dense::DefaultDenseExecutor::new();
-
-    tenet_tensors::reset_global_operation_caches();
-    let before = crate::factorize::compact_factor_plan_for_test(bound.space())
-        .unwrap()
-        .unwrap();
-    svd_compact(&mut dense, &bound.as_ref()).unwrap();
-    qr_compact(&mut dense, &bound.as_ref()).unwrap();
-    eigh_full(&mut dense, &bound.as_ref()).unwrap();
-    lq_compact(&mut dense, &bound.as_ref()).unwrap();
-    let after = crate::factorize::compact_factor_plan_for_test(bound.space())
-        .unwrap()
-        .unwrap();
-
-    assert!(Arc::ptr_eq(&before, &after));
 }
 
 #[test]
@@ -1519,95 +1492,8 @@ fn compact_svd_error_preserves_borrowed_input_and_publishes_no_factors() {
 }
 
 #[test]
-fn compact_factor_plan_reuses_clone_before_init_and_concurrent_first_use() {
-    // What: one semantic compact-factor plan serves clones made before and during first use.
-    let _guard = COMPACT_FACTOR_PLAN_IDENTITY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let tensor = rectangular_svd_tensor(23, 17);
-    let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
-    let before_init = bound.space().clone();
-    let spaces = (0..8).map(|_| before_init.clone()).collect::<Vec<_>>();
-    let plans = std::thread::scope(|scope| {
-        spaces
-            .iter()
-            .map(|space| {
-                scope.spawn(|| {
-                    crate::factorize::compact_factor_plan_for_test(space)
-                        .unwrap()
-                        .unwrap()
-                })
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|handle| handle.join().unwrap())
-            .collect::<Vec<_>>()
-    });
-    let after_init = bound.space().clone();
-    let after = crate::factorize::compact_factor_plan_for_test(&after_init)
-        .unwrap()
-        .unwrap();
-
-    assert!(plans.iter().all(|plan| Arc::ptr_eq(plan, &plans[0])));
-    assert!(Arc::ptr_eq(&after, &plans[0]));
-}
-
-#[test]
-fn compact_svd_shared_plan_rebinds_every_factor_to_each_caller() {
-    // What: one semantic plan serves distinct provider Arcs while U/S/Vh inherit each caller.
-    let _guard = COMPACT_FACTOR_PLAN_IDENTITY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let tensor = rectangular_svd_tensor(7, 5);
-    let first_provider = Arc::new(Z2FusionRule);
-    let second_provider = Arc::new(Z2FusionRule);
-    let first = bound_tensor(Arc::clone(&first_provider), &tensor);
-    let second = bound_tensor(Arc::clone(&second_provider), &tensor);
-    let first_plan = crate::factorize::compact_factor_plan_for_test(first.space())
-        .unwrap()
-        .unwrap();
-    let second_plan = crate::factorize::compact_factor_plan_for_test(second.space())
-        .unwrap()
-        .unwrap();
-    assert!(Arc::ptr_eq(&first_plan, &second_plan));
-
-    let first_input = BoundDynamicTensorRef::try_new(first.space(), tensor.data()).unwrap();
-    let second_input = BoundDynamicTensorRef::try_new(second.space(), tensor.data()).unwrap();
-    let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let first_svd = svd_compact_dyn(&mut dense, &first_input).unwrap();
-    let second_svd = svd_compact_dyn(&mut dense, &second_input).unwrap();
-
-    for factor in [first_svd.u(), first_svd.s(), first_svd.vh()] {
-        assert!(Arc::ptr_eq(factor.space().provider_arc(), &first_provider));
-    }
-    for factor in [second_svd.u(), second_svd.s(), second_svd.vh()] {
-        assert!(Arc::ptr_eq(factor.space().provider_arc(), &second_provider));
-    }
-}
-
-#[test]
-fn global_operation_reset_replaces_compact_factor_plan_generation() {
-    // What: a completed global reset invalidates both the shared plan and this thread's front.
-    let _guard = COMPACT_FACTOR_PLAN_IDENTITY_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let tensor = rectangular_svd_tensor(29, 23);
-    let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
-    let before = crate::factorize::compact_factor_plan_for_test(bound.space())
-        .unwrap()
-        .unwrap();
-
-    tenet_tensors::reset_global_operation_caches();
-
-    let after = crate::factorize::compact_factor_plan_for_test(bound.space())
-        .unwrap()
-        .unwrap();
-    assert!(!Arc::ptr_eq(&before, &after));
-}
-
-#[test]
-fn compact_factor_cached_plan_does_not_retain_first_provider() {
-    // What: a cached semantic plan never owns the provider that first built it.
+fn compact_factor_plan_does_not_retain_provider() {
+    // What: plan construction does not retain the input space's provider.
     let tensor = rectangular_svd_tensor(19, 11);
     let provider = Arc::new(Z2FusionRule);
     let weak = Arc::downgrade(&provider);

@@ -27,10 +27,9 @@ pub use adjoint::{
 };
 pub use backend_trace::TensorTraceOperationsBackend;
 pub use cache::{
-    operation_cache_reset_epoch, registered_operation_cache, reset_global_operation_caches,
-    BlockStructureCacheBlockKey, BlockStructureCacheKey, OperationCachePolicy,
-    TensorContractStructureCache, TensorContractStructureCacheKey, TreeTransformStructureCache,
-    TreeTransformStructureCacheKey,
+    reset_global_operation_caches, BlockStructureCacheBlockKey, BlockStructureCacheKey,
+    OperationCachePolicy, TensorContractStructureCache, TensorContractStructureCacheKey,
+    TreeTransformStructureCache, TreeTransformStructureCacheKey,
 };
 #[cfg(test)]
 pub(crate) use contract::{
