@@ -2,9 +2,10 @@ use core::marker::PhantomData;
 use std::sync::OnceLock;
 
 use crate::{
-    BraidingStyleKind, CheckedFusionAlgebra, FusionAlgebraError, FusionRule, FusionStyleKind,
-    MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
-    ProductSectorCodec, RuleIdentity, SectorId, SectorVec, TensorKitProductCodec,
+    BraidingStyleKind, CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionAlgebraError,
+    FusionRule, FusionStyleKind, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, ProductSectorCodec, RuleIdentity, SectorId, SectorVec,
+    TensorKitProductCodec,
 };
 
 #[derive(Clone, Debug)]
@@ -180,6 +181,15 @@ impl<LeftRule, RightRule, Codec> MultiplicityFreeFusionRule
 where
     LeftRule: MultiplicityFreeFusionRule,
     RightRule: MultiplicityFreeFusionRule,
+    Codec: ProductSectorCodec + 'static,
+{
+}
+
+impl<LeftRule, RightRule, Codec> CanonicalUnitFusionRule
+    for ProductFusionRule<LeftRule, RightRule, Codec>
+where
+    LeftRule: CanonicalUnitFusionRule,
+    RightRule: CanonicalUnitFusionRule,
     Codec: ProductSectorCodec + 'static,
 {
 }
@@ -367,7 +377,40 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FermionParityFusionRule, U1FusionRule, U1Irrep, Z2Irrep};
+    use crate::{
+        CanonicalUnitFusionRule, FermionParityFusionRule, MultiplicityFreeFusionSymbols,
+        U1FusionRule, U1Irrep, Z2Irrep,
+    };
+
+    #[test]
+    fn product_of_canonical_unit_rules_has_canonical_unit() {
+        // What: product construction preserves the unit law componentwise.
+        fn accepts_canonical_unit<R: CanonicalUnitFusionRule>(_rule: &R) {}
+
+        let rule = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
+        let vacuum = rule.vacuum();
+        let sector = rule.encode_sector(Z2Irrep::ODD.into(), U1Irrep::new(-17).into());
+        let fused = rule.fusion_channels(sector, sector)[0];
+        accepts_canonical_unit(&rule);
+        assert_eq!(rule.dual(vacuum), vacuum);
+        assert_eq!(rule.fusion_channels(vacuum, sector).as_slice(), &[sector]);
+        assert_eq!(rule.fusion_channels(sector, vacuum).as_slice(), &[sector]);
+        assert_eq!(rule.nsymbol(vacuum, sector, sector), 1);
+        assert_eq!(rule.nsymbol(sector, vacuum, sector), 1);
+        assert_eq!(rule.nsymbol(vacuum, sector, vacuum), 0);
+        assert_eq!(
+            rule.f_symbol_scalar(vacuum, sector, sector, fused, sector, fused),
+            1.0
+        );
+        assert_eq!(
+            rule.f_symbol_scalar(sector, vacuum, sector, fused, sector, sector),
+            1.0
+        );
+        assert_eq!(
+            rule.f_symbol_scalar(sector, sector, vacuum, fused, fused, sector),
+            1.0
+        );
+    }
 
     #[test]
     fn product_rule_composes_checked_symbols_rigidity_and_ordered_identity() {

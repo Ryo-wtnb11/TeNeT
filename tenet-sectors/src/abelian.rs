@@ -1,7 +1,7 @@
 use crate::{
-    BraidingStyleKind, CheckedFusionAlgebra, FusionAlgebraError, FusionRule, FusionStyleKind,
-    MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
-    RuleIdentity, SectorId, SectorVec,
+    BraidingStyleKind, CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionAlgebraError,
+    FusionRule, FusionStyleKind, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, RuleIdentity, SectorId, SectorVec,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -109,6 +109,8 @@ impl CheckedFusionAlgebra for Z2FusionRule {
 }
 
 impl MultiplicityFreeFusionRule for Z2FusionRule {}
+
+impl CanonicalUnitFusionRule for Z2FusionRule {}
 
 impl MultiplicityFreeFusionSymbols for Z2FusionRule {
     type Scalar = f64;
@@ -226,6 +228,8 @@ impl CheckedFusionAlgebra for FermionParityFusionRule {
 }
 
 impl MultiplicityFreeFusionRule for FermionParityFusionRule {}
+
+impl CanonicalUnitFusionRule for FermionParityFusionRule {}
 
 impl MultiplicityFreeFusionSymbols for FermionParityFusionRule {
     type Scalar = f64;
@@ -430,6 +434,8 @@ impl CheckedFusionAlgebra for U1FusionRule {
 
 impl MultiplicityFreeFusionRule for U1FusionRule {}
 
+impl CanonicalUnitFusionRule for U1FusionRule {}
+
 impl MultiplicityFreeFusionSymbols for U1FusionRule {
     type Scalar = f64;
 
@@ -513,7 +519,60 @@ impl MultiplicityFreeRigidSymbols for U1FusionRule {
 
 #[cfg(test)]
 mod tests {
-    use super::{u1_charge_from_zigzag_u32, u1_charge_to_zigzag_u32, U1Irrep};
+    use super::{
+        u1_charge_from_zigzag_u32, u1_charge_to_zigzag_u32, FermionParityFusionRule, U1FusionRule,
+        U1Irrep, Z2FusionRule, Z2Irrep,
+    };
+    use crate::{CanonicalUnitFusionRule, FusionRule, MultiplicityFreeFusionSymbols, SectorId};
+
+    fn assert_canonical_unit<R>(rule: &R, sector: SectorId)
+    where
+        R: CanonicalUnitFusionRule + MultiplicityFreeFusionSymbols<Scalar = f64>,
+    {
+        let vacuum = rule.vacuum();
+        let fused = rule.fusion_channels(sector, sector)[0];
+        assert_eq!(rule.dual(vacuum), vacuum);
+        assert_eq!(rule.fusion_channels(vacuum, sector).as_slice(), &[sector]);
+        assert_eq!(rule.fusion_channels(sector, vacuum).as_slice(), &[sector]);
+        assert_eq!(rule.nsymbol(vacuum, sector, sector), 1);
+        assert_eq!(rule.nsymbol(sector, vacuum, sector), 1);
+        assert_eq!(rule.nsymbol(vacuum, sector, vacuum), 0);
+        assert_eq!(
+            rule.f_symbol_scalar(vacuum, sector, sector, fused, sector, fused),
+            1.0
+        );
+        assert_eq!(
+            rule.f_symbol_scalar(sector, vacuum, sector, fused, sector, sector),
+            1.0
+        );
+        assert_eq!(
+            rule.f_symbol_scalar(sector, sector, vacuum, fused, fused, sector),
+            1.0
+        );
+    }
+
+    #[test]
+    fn abelian_providers_have_canonical_unit_channels_and_associators() {
+        // What: certified abelian providers keep the vacuum as a unique,
+        // self-dual identity with an exact unit F-symbol.
+        assert_canonical_unit(&Z2FusionRule, Z2Irrep::ODD.into());
+        assert_canonical_unit(&FermionParityFusionRule, Z2Irrep::ODD.into());
+        assert_canonical_unit(&U1FusionRule, U1Irrep::new(-17).into());
+        let u1_boundary: SectorId = U1Irrep::new(i32::MAX).into();
+        let u1_vacuum = U1FusionRule.vacuum();
+        assert_eq!(
+            U1FusionRule
+                .fusion_channels(u1_vacuum, u1_boundary)
+                .as_slice(),
+            &[u1_boundary]
+        );
+        assert_eq!(
+            U1FusionRule
+                .fusion_channels(u1_boundary, u1_vacuum)
+                .as_slice(),
+            &[u1_boundary]
+        );
+    }
 
     #[test]
     fn u1_zigzag_roundtrips_native_and_simulated_32_bit_extremes() {

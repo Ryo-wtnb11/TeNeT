@@ -1,8 +1,9 @@
 use tenet_sectors::{
-    BraidingStyleKind, CheckedFusionAlgebra, FermionParityFusionRule, FusionAlgebraError,
-    FusionRule, FusionStyleKind, GenericFArray, GenericFusionSymbols, GenericRMatrix,
-    MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
-    RuleIdentity, SectorId, SectorVec, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
+    BraidingStyleKind, CanonicalUnitFusionRule, CheckedFusionAlgebra, FermionParityFusionRule,
+    FusionAlgebraError, FusionRule, FusionStyleKind, GenericFArray, GenericFusionSymbols,
+    GenericRMatrix, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, RuleIdentity, SectorId, SectorVec, U1FusionRule, U1Irrep,
+    Z2FusionRule, Z2Irrep,
 };
 
 #[derive(Clone, Copy)]
@@ -57,6 +58,8 @@ impl CheckedFusionAlgebra for CheckedMultiplicityFreeRule {
 
 impl MultiplicityFreeFusionRule for CheckedMultiplicityFreeRule {}
 
+impl CanonicalUnitFusionRule for CheckedMultiplicityFreeRule {}
+
 impl MultiplicityFreeFusionSymbols for CheckedMultiplicityFreeRule {
     type Scalar = f64;
 
@@ -110,26 +113,64 @@ impl FusionRule for GenericRule {
         SectorId::new(0)
     }
 
-    fn fusion_channels(&self, _left: SectorId, _right: SectorId) -> SectorVec {
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        let vacuum = self.vacuum();
+        let coupled = if left == vacuum {
+            right
+        } else if right == vacuum {
+            left
+        } else {
+            SectorId::new(1)
+        };
         let mut channels = SectorVec::new();
-        channels.push(SectorId::new(0));
+        channels.push(coupled);
         channels
     }
+
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        if left == SectorId::new(1) && right == SectorId::new(1) && coupled == SectorId::new(1) {
+            2
+        } else {
+            usize::from(self.fusion_channels(left, right).contains(&coupled))
+        }
+    }
 }
+
+impl CanonicalUnitFusionRule for GenericRule {}
 
 impl GenericFusionSymbols for GenericRule {
     type Scalar = f64;
 
     fn f_symbol_generic(
         &self,
-        _a: SectorId,
-        _b: SectorId,
-        _c: SectorId,
-        _d: SectorId,
-        _e: SectorId,
-        _f: SectorId,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
     ) -> GenericFArray<Self::Scalar> {
-        GenericFArray::new(vec![1.0], (1, 1, 1, 1))
+        let shape = (
+            self.nsymbol(a, b, e),
+            self.nsymbol(e, c, d),
+            self.nsymbol(b, c, f),
+            self.nsymbol(a, f, d),
+        );
+        let rows = shape.0 * shape.1;
+        let cols = shape.2 * shape.3;
+        assert_eq!(rows, cols);
+        GenericFArray::new(
+            (0..rows * cols)
+                .map(|index| {
+                    if index / cols == index % cols {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect(),
+            shape,
+        )
     }
 
     fn r_symbol_generic(
@@ -147,6 +188,8 @@ fn portable_contracts_are_implementable_without_tenet_core() {
     // What: downstream sector providers can implement the checked
     // multiplicity-free and Generic contracts without importing the engine.
     let multiplicity_free = CheckedMultiplicityFreeRule;
+    fn accepts_canonical_unit<R: CanonicalUnitFusionRule>(_rule: &R) {}
+    accepts_canonical_unit(&multiplicity_free);
     assert_eq!(
         multiplicity_free
             .try_fusion_channels(SectorId::new(0), SectorId::new(0))
@@ -166,6 +209,42 @@ fn portable_contracts_are_implementable_without_tenet_core() {
     );
 
     let generic = GenericRule;
+    accepts_canonical_unit(&generic);
+    let nonunit = SectorId::new(1);
+    assert_eq!(generic.nsymbol(nonunit, nonunit, nonunit), 2);
+    for (a, b, c, d, e, f, shape) in [
+        (
+            SectorId::new(0),
+            nonunit,
+            nonunit,
+            nonunit,
+            nonunit,
+            nonunit,
+            (1, 2, 2, 1),
+        ),
+        (
+            nonunit,
+            SectorId::new(0),
+            nonunit,
+            nonunit,
+            nonunit,
+            nonunit,
+            (1, 2, 1, 2),
+        ),
+        (
+            nonunit,
+            nonunit,
+            SectorId::new(0),
+            nonunit,
+            nonunit,
+            nonunit,
+            (2, 1, 1, 2),
+        ),
+    ] {
+        let block = generic.f_symbol_generic(a, b, c, d, e, f);
+        assert_eq!(block.shape(), shape);
+        assert_eq!(block.data(), [1.0, 0.0, 0.0, 1.0]);
+    }
     assert_eq!(
         generic
             .f_symbol_generic(

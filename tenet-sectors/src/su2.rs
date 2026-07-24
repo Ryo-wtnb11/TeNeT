@@ -1,9 +1,9 @@
 use std::sync::{Arc, OnceLock};
 
 use crate::{
-    BraidingStyleKind, CheckedFusionAlgebra, FusionAlgebraError, FusionRule, FusionStyleKind,
-    MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
-    RuleIdentity, SectorId, SectorVec,
+    BraidingStyleKind, CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionAlgebraError,
+    FusionRule, FusionStyleKind, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, RuleIdentity, SectorId, SectorVec,
 };
 
 /// Largest doubled spin representable by TeNeT's compact SU(2) sector encoding.
@@ -203,6 +203,8 @@ impl CheckedFusionAlgebra for SU2FusionRule {
 
 impl MultiplicityFreeFusionRule for SU2FusionRule {}
 
+impl CanonicalUnitFusionRule for SU2FusionRule {}
+
 impl MultiplicityFreeFusionSymbols for SU2FusionRule {
     type Scalar = f64;
 
@@ -341,6 +343,45 @@ mod tests {
             ),
             0.0
         );
+    }
+
+    #[test]
+    fn su2_has_canonical_unit_channels_and_associator() {
+        // What: the SU(2) vacuum remains a unique unit at the supported
+        // label boundary, with exact unit associator.
+        fn accepts_canonical_unit<R: CanonicalUnitFusionRule>(_rule: &R) {}
+
+        let rule = SU2FusionRule;
+        let vacuum = rule.vacuum();
+        let boundary = SectorId::new(254);
+        let sample = SectorId::new(127);
+        accepts_canonical_unit(&rule);
+        assert_eq!(rule.dual(vacuum), vacuum);
+        assert_eq!(
+            rule.fusion_channels(vacuum, boundary).as_slice(),
+            &[boundary]
+        );
+        assert_eq!(
+            rule.fusion_channels(boundary, vacuum).as_slice(),
+            &[boundary]
+        );
+        assert_eq!(rule.nsymbol(vacuum, boundary, boundary), 1);
+        assert_eq!(rule.nsymbol(boundary, vacuum, boundary), 1);
+        assert_eq!(rule.nsymbol(vacuum, boundary, vacuum), 0);
+        for fused in rule.fusion_channels(sample, sample) {
+            assert_eq!(
+                rule.f_symbol_scalar(vacuum, sample, sample, fused, sample, fused),
+                1.0
+            );
+            assert_eq!(
+                rule.f_symbol_scalar(sample, vacuum, sample, fused, sample, sample),
+                1.0
+            );
+            assert_eq!(
+                rule.f_symbol_scalar(sample, sample, vacuum, fused, fused, sample),
+                1.0
+            );
+        }
     }
 
     #[test]
