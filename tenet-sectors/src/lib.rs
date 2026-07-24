@@ -7,6 +7,9 @@ use smallvec::SmallVec;
 mod rule_identity;
 pub use rule_identity::RuleIdentity;
 
+mod algebra;
+pub use algebra::*;
+
 /// Opaque identifier used by one fusion-rule implementation.
 ///
 /// The numeric value is an internal representation, not a stable wire format

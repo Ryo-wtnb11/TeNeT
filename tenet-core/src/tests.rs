@@ -16613,10 +16613,7 @@ mod tests {
         let mut fsymbols = FxHashMap::default();
         fsymbols.insert(
             [0; 6],
-            GenericFArray {
-                data: Vec::<f64>::new(),
-                shape: (33, 33, 33, 33),
-            },
+            GenericFArray::new(vec![0.0], (1, 1, 1, 1)),
         );
         let mut covered = FxHashMap::default();
         covered.insert((0, 0), smallvec![SectorId::new(0)]);
