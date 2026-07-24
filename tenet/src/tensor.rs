@@ -49,6 +49,7 @@ use tenet_tensors::{
 use crate::error::Error;
 use crate::runtime::{rule_lanes, Ctx, Ctxs, Runtime, RuntimeExecutionConfig, RuntimeIdentity};
 use crate::space::{Fz2U1Su2Rule, RuleKind, Space, U1Fz2Rule, UserRuleContext};
+use crate::typed_tensor_core::tree_transform_owned_multiplicity_free;
 
 mod diagonal;
 use diagonal::{
@@ -2997,46 +2998,6 @@ macro_rules! with_user_rule {
     };
 }
 
-macro_rules! with_user_rule_ctx {
-    ($space:expr, $state:expr, $rule:ident, $ctxs:ident, $body:expr) => {
-        match $space.as_ref() {
-            UserBoundSpace::U1(bound) => {
-                let $rule = bound.provider();
-                let $ctxs = &mut $state.mf;
-                $body
-            }
-            UserBoundSpace::Z2(bound) => {
-                let $rule = bound.provider();
-                let $ctxs = &mut $state.mf;
-                $body
-            }
-            UserBoundSpace::FZ2(bound) => {
-                let $rule = bound.provider();
-                let $ctxs = &mut $state.mf;
-                $body
-            }
-            UserBoundSpace::SU2(bound) => {
-                let $rule = bound.provider();
-                let $ctxs = &mut $state.mf;
-                $body
-            }
-            UserBoundSpace::U1FZ2(bound) => {
-                let $rule = bound.provider();
-                let $ctxs = &mut $state.mf;
-                $body
-            }
-            UserBoundSpace::FZ2U1SU2(bound) => {
-                let $rule = bound.provider();
-                let $ctxs = &mut $state.mf;
-                $body
-            }
-            UserBoundSpace::Su3(_) => {
-                unreachable!("generic provider requires a dedicated operation path")
-            }
-        }
-    };
-}
-
 macro_rules! with_bound_ctx {
     ($space:expr, $state:expr, $bound:ident, $ctxs:ident, $body:expr) => {
         match $space.as_ref() {
@@ -5781,13 +5742,13 @@ impl Tensor {
         // proof in the derived destination.
         let mut lease = self.rt.lease_context()?;
         let context = lease.context();
-        let dst_bound = self.ordinary_body().space.transformed(&operation)?;
         // SU(3) (Generic): dedicated non-macro path — build the generic result
         // space and drive the non-memoized generic tree-transform. The recoupling
         // coefficient scalar is f64 for either data dtype, so the generic braid
         // math is identical to the tree-level layer this stage proved against TK.
         if self.rule_kind() == RuleKind::Su3 {
             let rule = self.su3_rule();
+            let dst_bound = self.ordinary_body().space.transformed(&operation)?;
             let dst_space = dst_bound.raw();
             let mut data = vec![D::from_real(0.0); dst_space.required_len()?];
             D::ctx_of(&mut context.su3)
@@ -5804,39 +5765,17 @@ impl Tensor {
                 )?;
             return self.with_bound(dst_bound, D::lift(data));
         }
-        let data = with_user_rule_ctx!(self.ordinary_body().space, context, rule, ctxs, {
-            let dst_space = dst_bound.raw();
-            let required_len = dst_space.required_len()?;
-            let owned = D::ctx_of(ctxs)
-                .tree_context_mut()
-                .try_tree_transform_dyn_overwrite_owned(
-                    rule,
-                    &operation,
-                    &Arc::clone(dst_space.structure()),
-                    self.ordinary_body().space.structure(),
-                    dst_space.nout(),
-                    src_data,
-                    D::from_real(1.0),
-                )?;
-            let data = if let Some(data) = owned {
-                data
-            } else {
-                let mut data = vec![D::from_real(0.0); required_len];
-                D::ctx_of(ctxs).tree_context_mut().tree_transform_dyn_into(
-                    rule,
-                    operation,
-                    &Arc::clone(dst_space.structure()),
-                    self.ordinary_body().space.structure(),
-                    &mut data,
-                    src_data,
-                    D::from_real(1.0),
-                    D::from_real(0.0),
-                )?;
-                data
-            };
-            Ok::<_, Error>(D::lift(data))
-        })?;
-        self.with_bound(dst_bound, data)
+        with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
+            let (dst_bound, data) = tree_transform_owned_multiplicity_free(
+                D::ctx_of(&mut context.mf),
+                BoundDynamicTensorRef::try_new(bound, src_data)?,
+                operation,
+            )?;
+            self.with_bound(
+                UserBoundSpace::from_bound(&self.ordinary_body().space, dst_bound)?,
+                D::lift(data),
+            )
+        })
     }
 
     /// Partial trace over pairs of mutually dual legs (TensorKit

@@ -34,6 +34,7 @@ pub mod plancache;
 mod runtime;
 pub(crate) mod space;
 pub(crate) mod tensor;
+mod typed_tensor_core;
 
 // Crate-root re-exports so the `default!` macro's `$crate::set_default_runtime`
 // path resolves in user code (the `runtime` module itself is private).

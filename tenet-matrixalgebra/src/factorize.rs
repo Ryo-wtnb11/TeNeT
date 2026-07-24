@@ -15,6 +15,7 @@ use tenet_core::{
 };
 use tenet_dense::{DenseError, DenseExecutor, DenseTensor, DenseView, DenseViewMut};
 
+pub use tenet_tensors::BoundDynamicTensorRef;
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, DenseBlockScalar, DenseRecouplingScalar, DynamicFusionMapSpace,
     ValidatedDynamicFusionLayout,
@@ -304,14 +305,6 @@ pub struct SectorSpectrum<V = f64> {
 /// returns).
 pub(crate) type DynFactor<D> = (DynamicFusionMapSpace, Vec<D>);
 
-/// Borrowed dynamic factorization input whose provider, complete tree grid,
-/// rank, and storage length have been validated before the dense executor can
-/// be reached. SVD-derived matrix functions consume the same authority.
-pub struct BoundDynamicTensorRef<'a, R, D> {
-    space: &'a BoundDynamicFusionMapSpace<R>,
-    data: &'a [D],
-}
-
 /// Typed tensor plus the sole provider authority accepted by provider-sensitive
 /// factorization and matrix-function APIs.
 pub struct BoundTensorMapRef<'a, R, D, const NOUT: usize, const NIN: usize> {
@@ -413,61 +406,11 @@ where
     }
 
     pub(crate) fn dynamic(&self) -> BoundDynamicTensorRef<'_, R, D> {
-        BoundDynamicTensorRef {
-            space: &self.space,
-            data: self.tensor.data(),
-        }
-    }
-}
-
-impl<'a, R, D> BoundDynamicTensorRef<'a, R, D>
-where
-    R: FusionRule,
-{
-    pub fn try_new(
-        space: &'a BoundDynamicFusionMapSpace<R>,
-        data: &'a [D],
-    ) -> Result<Self, OperationError> {
-        let raw = space.space();
-        let hom_rank = raw.homspace().codomain().len() + raw.homspace().domain().len();
-        if raw.rank() != hom_rank {
-            return Err(OperationError::from_core_preserving_context(
-                CoreError::StructureRankMismatch {
-                    expected: hom_rank,
-                    actual: raw.rank(),
-                },
-            ));
-        }
-        if raw.structure().rank() != raw.rank() {
-            return Err(OperationError::from_core_preserving_context(
-                CoreError::StructureRankMismatch {
-                    expected: raw.rank(),
-                    actual: raw.structure().rank(),
-                },
-            ));
-        }
-        let expected = raw
-            .required_len()
-            .map_err(OperationError::from_core_preserving_context)?;
-        if data.len() != expected {
-            return Err(OperationError::from_core_preserving_context(
-                CoreError::DimensionMismatch {
-                    expected,
-                    actual: data.len(),
-                },
-            ));
-        }
-        Ok(Self { space, data })
-    }
-
-    #[inline]
-    pub fn space(&self) -> &BoundDynamicFusionMapSpace<R> {
-        self.space
-    }
-
-    #[inline]
-    pub fn data(&self) -> &'a [D] {
-        self.data
+        // Why not expose an unchecked constructor: `BoundTensorMap::try_new`
+        // establishes this invariant once, while external dynamic inputs must
+        // continue through `BoundDynamicTensorRef::try_new`.
+        BoundDynamicTensorRef::try_new(self.space, self.tensor.data())
+            .expect("BoundTensorMap preserves its validated dynamic layout")
     }
 }
 
