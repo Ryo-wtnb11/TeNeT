@@ -921,38 +921,22 @@ fn charged_fusion_tree_layout_bytes(
             },
         )
         .saturating_add(identity.rule.charged_retained_bytes());
+    let mut frozen_backings = rustc_hash::FxHashSet::default();
     let tree_bytes = layout
         .keys
         .iter()
-        .map(|key| {
+        .fold(0usize, |bytes, key| {
             [key.codomain_tree(), key.domain_tree()]
                 .iter()
-                .map(|tree| {
-                    std::mem::size_of::<FusionTreeKey>()
-                        .saturating_add(
-                            tree.uncoupled
-                                .capacity()
-                                .saturating_mul(std::mem::size_of::<SectorId>()),
-                        )
-                        .saturating_add(
-                            tree.is_dual
-                                .capacity()
-                                .saturating_mul(std::mem::size_of::<bool>()),
-                        )
-                        .saturating_add(
-                            tree.innerlines
-                                .capacity()
-                                .saturating_mul(std::mem::size_of::<SectorId>()),
-                        )
-                        .saturating_add(
-                            tree.vertices
-                                .capacity()
-                                .saturating_mul(std::mem::size_of::<SectorId>()),
-                        )
+                .fold(bytes, |tree_bytes, tree| {
+                    tree_bytes
+                        .saturating_add(std::mem::size_of::<FusionTreeKey>())
+                        .saturating_add(charge_fusion_tree_key_backings(
+                            &mut frozen_backings,
+                            tree,
+                        ))
                 })
-                .fold(0usize, usize::saturating_add)
-        })
-        .fold(0usize, usize::saturating_add);
+        });
     let sector_bytes = layout
         .sectors
         .capacity()
