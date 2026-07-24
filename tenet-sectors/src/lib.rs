@@ -10,6 +10,9 @@ pub use rule_identity::RuleIdentity;
 mod algebra;
 pub use algebra::*;
 
+mod abelian;
+pub use abelian::{FermionParityFusionRule, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep};
+
 /// Opaque identifier used by one fusion-rule implementation.
 ///
 /// The numeric value is an internal representation, not a stable wire format

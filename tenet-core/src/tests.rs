@@ -18437,25 +18437,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn u1_zigzag_roundtrips_native_and_simulated_32_bit_extremes() {
-        // What: every i32 charge, including both asymmetric endpoints, has
-        // the historical u32 zigzag ID without target-width arithmetic.
-        let cases = [
-            (i32::MIN, u32::MAX),
-            (-1, 1),
-            (0, 0),
-            (1, 2),
-            (i32::MAX, u32::MAX - 1),
-        ];
-        for (charge, encoded) in cases {
-            assert_eq!(u1_charge_to_zigzag_u32(charge), encoded);
-            assert_eq!(u1_charge_from_zigzag_u32(encoded), charge);
-            let sector = U1Irrep::new(charge).sector_id();
-            assert_eq!(sector.id(), encoded as usize);
-            assert_eq!(U1Irrep::from_sector_id(sector), Some(U1Irrep::new(charge)));
-        }
-    }
 
     #[test]
     fn checked_u1_reports_nonclosure_and_preserves_valid_boundaries() {
