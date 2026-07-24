@@ -33,6 +33,7 @@ pub enum CoreError {
         expected_position: usize,
         actual_position: usize,
     },
+    UnitLayoutCorrespondence,
     UnsupportedFusionStyle {
         expected: FusionStyleKind,
         actual: FusionStyleKind,
@@ -168,6 +169,9 @@ impl fmt::Display for CoreError {
                     f,
                     "inconsistent axis position for logical axis {logical_axis}: expected {expected_position}, got {actual_position}"
                 )
+            }
+            Self::UnitLayoutCorrespondence => {
+                write!(f, "unit-leg layout does not correspond to the supplied source layout")
             }
             Self::UnsupportedFusionStyle { expected, actual } => {
                 write!(
