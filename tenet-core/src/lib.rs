@@ -19,6 +19,12 @@ use rustc_hash::FxHashMap;
 use smallvec::{smallvec, SmallVec};
 pub use tenet_sectors::{BraidingStyleKind, FusionStyleKind, SectorId, SectorVec};
 
+mod core_rule_bridge;
+pub(crate) use core_rule_bridge::lowered_multiplicity_free_sealed;
+pub use core_rule_bridge::{
+    LoweredFusionTreeBuildError, LoweredMultiplicityFreeAlgebra, MultiplicityFreePivotalSymbols,
+};
+
 include!("storage.rs");
 include!("space.rs");
 include!("sector.rs");
