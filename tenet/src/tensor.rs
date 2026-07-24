@@ -17,11 +17,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use num_complex::Complex64;
 use smallvec::SmallVec;
 use tenet_core::{
-    BlockKey, BlockStructure, BlockView, BlockViewMut, CheckedFusionAlgebra,
-    CheckedFusionSpaceError, CoupledSectorRegion, FusionProductSpace, FusionRule,
-    FusionTreeHomSpace, FusionTreePairKey, FusionTreePairOrientation, GenericRigidSymbols,
-    LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace,
-    Placement, PreparedTreePairOperation, SectorId, Su3FusionRule,
+    validate_unit_layout_correspondence_checked, BlockKey, BlockStructure, BlockView, BlockViewMut,
+    CheckedFusionAlgebra, CheckedFusionSpaceError, CoupledSectorRegion, FusionProductSpace,
+    FusionRule, FusionTreeHomSpace, FusionTreePairKey, FusionTreePairOrientation,
+    GenericRigidSymbols, LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols,
+    OrientedFusionTreeHomSpace, Placement, PreparedTreePairOperation, SectorId, Su3FusionRule,
+    UnitLegInsertion,
 };
 #[cfg(feature = "cuda")]
 use tenet_core::{SectorLeg, TensorStorage};
@@ -528,6 +529,14 @@ fn device_unsupported(what: &str) -> Error {
         "{what} has no device implementation yet; move the tensor to the \
          host explicitly with to_host()"
     ))
+}
+
+fn map_checked_unit_layout_error(error: CheckedFusionSpaceError) -> Error {
+    match error {
+        CheckedFusionSpaceError::Core(error) => Error::Core(error),
+        CheckedFusionSpaceError::FusionAlgebra(error) => Error::FusionAlgebra(error),
+        other => Error::InvalidArgument(format!("unit layout correspondence failed: {other}")),
+    }
 }
 
 /// The scalar types a [`Tensor`] can store: `f64` and [`Complex64`]. This
@@ -4134,6 +4143,124 @@ impl Tensor {
         ))
     }
 
+    fn materialized_dense_data_arc(&self, body: &TensorBody) -> Result<Arc<Data>, Error> {
+        match body.data.as_ref() {
+            Data::F64(_) | Data::C64(_) => Ok(Arc::clone(&body.data)),
+            Data::Diagonal(_) => {
+                let _ = self.coupled_data()?;
+                self.compact_dense.get().cloned().ok_or_else(|| {
+                    Error::InvalidArgument(
+                        "compact diagonal materialization completed without publishing dense storage"
+                            .to_string(),
+                    )
+                })
+            }
+            #[cfg(feature = "cuda")]
+            Data::CudaF64(_) => Err(device_unsupported("unit-leg layout operation")),
+        }
+    }
+
+    fn insert_unit(&self, insertion: UnitLegInsertion) -> Result<Self, Error> {
+        let (position, operation) = match insertion {
+            UnitLegInsertion::Left { position, .. } => (position, "Tensor::insert_left_unit"),
+            UnitLegInsertion::Right { position, .. } => (position, "Tensor::insert_right_unit"),
+        };
+        if position > self.rank() {
+            return Err(Error::InvalidArgument(format!(
+                "{operation}: position {position} exceeds rank {}",
+                self.rank()
+            )));
+        }
+        self.reject_unwired_su3(operation)?;
+        #[cfg(feature = "cuda")]
+        if matches!(self.stored_data(), Data::CudaF64(_)) {
+            return Err(device_unsupported(operation));
+        }
+
+        let source = self.materialized_body()?;
+        with_user_rule!(source.space, rule, {
+            let homspace = match insertion {
+                UnitLegInsertion::Left { position, dual } => source
+                    .space
+                    .homspace()
+                    .insert_left_unit(rule, position, dual)?,
+                UnitLegInsertion::Right { position, dual } => source
+                    .space
+                    .homspace()
+                    .insert_right_unit(rule, position, dual)?,
+            };
+            let destination = source.space.from_homspace(homspace)?;
+            validate_unit_layout_correspondence_checked(
+                rule,
+                (source.space.homspace(), source.space.structure()),
+                (destination.homspace(), destination.structure()),
+                insertion,
+            )
+            .map_err(map_checked_unit_layout_error)?;
+            let data = self.materialized_dense_data_arc(source)?;
+            Ok(Self::owned(self.rt.clone(), Arc::new(destination), data))
+        })
+    }
+
+    fn remove_unit_layout(&self, axis: usize) -> Result<Self, Error> {
+        if axis >= self.rank() {
+            return Err(Error::InvalidArgument(format!(
+                "Tensor::remove_unit: axis {axis} is out of range for rank {}",
+                self.rank()
+            )));
+        }
+        self.reject_unwired_su3("Tensor::remove_unit")?;
+        with_user_rule!(self.rule_authority_space(), rule, {
+            let metadata = self.metadata();
+            let leg = if axis < metadata.nout() {
+                &metadata.codomain().legs()[axis]
+            } else {
+                &metadata.domain().legs()[axis - metadata.nout()]
+            };
+            if leg.sectors() != [rule.vacuum()] || leg.degeneracy(rule.vacuum()) != Some(1) {
+                return Err(Error::InvalidArgument(format!(
+                    "Tensor::remove_unit: axis {axis} is not a canonical unit leg"
+                )));
+            }
+            Ok::<_, Error>(())
+        })?;
+        #[cfg(feature = "cuda")]
+        if matches!(self.stored_data(), Data::CudaF64(_)) {
+            return Err(device_unsupported("Tensor::remove_unit"));
+        }
+
+        let source = self.materialized_body()?;
+        with_user_rule!(source.space, rule, {
+            let stored_leg = if axis < source.space.nout() {
+                &source.space.homspace().codomain().legs()[axis]
+            } else {
+                &source.space.homspace().domain().legs()[axis - source.space.nout()]
+            };
+            let insertion = if axis < source.space.nout() {
+                UnitLegInsertion::Right {
+                    position: axis,
+                    dual: stored_leg.is_dual(),
+                }
+            } else {
+                UnitLegInsertion::Left {
+                    position: axis,
+                    dual: stored_leg.is_dual(),
+                }
+            };
+            let homspace = source.space.homspace().remove_unit(rule, axis)?;
+            let destination = source.space.from_homspace(homspace)?;
+            validate_unit_layout_correspondence_checked(
+                rule,
+                (destination.homspace(), destination.structure()),
+                (source.space.homspace(), source.space.structure()),
+                insertion,
+            )
+            .map_err(map_checked_unit_layout_error)?;
+            let data = self.materialized_dense_data_arc(source)?;
+            Ok(Self::owned(self.rt.clone(), Arc::new(destination), data))
+        })
+    }
+
     fn build_adjoint_body(parent: &TensorBody) -> Result<Arc<TensorBody>, Error> {
         macro_rules! materialize {
             ($space:expr, $variant:ident, $function:ident, $data:expr, $lift:ident) => {{
@@ -4372,6 +4499,37 @@ impl Tensor {
     /// Total number of legs. TensorKit `numind`; alias of [`Self::rank`].
     pub fn numind(&self) -> usize {
         self.rank()
+    }
+
+    /// Inserts the canonical unit leg at zero-based external slot `position`.
+    ///
+    /// This follows TensorKit's left seam convention: the codomain/domain seam
+    /// belongs to the domain side. The returned tensor has the corresponding
+    /// HomSpace and block layout. Owned dense input shares its `Arc<Data>`;
+    /// compact and lazy input materialize once through their existing route,
+    /// then the output shares that resulting dense `Arc<Data>`.
+    pub fn insert_left_unit(&self, position: usize, dual: bool) -> Result<Self, Error> {
+        self.insert_unit(UnitLegInsertion::Left { position, dual })
+    }
+
+    /// Inserts the canonical unit leg at zero-based external slot `position`.
+    ///
+    /// This follows TensorKit's right seam convention: the codomain/domain
+    /// seam belongs to the codomain side. Owned dense input shares its
+    /// `Arc<Data>`; compact and lazy input materialize once through their
+    /// existing route, then the output shares that resulting dense `Arc<Data>`.
+    pub fn insert_right_unit(&self, position: usize, dual: bool) -> Result<Self, Error> {
+        self.insert_unit(UnitLegInsertion::Right { position, dual })
+    }
+
+    /// Removes the canonical unit leg at flat external axis `axis`.
+    ///
+    /// The selected leg must contain exactly the vacuum sector with degeneracy
+    /// one. Owned dense input shares its `Arc<Data>`; compact and lazy input
+    /// materialize once through their existing route, then the output shares
+    /// that resulting dense `Arc<Data>`.
+    pub fn remove_unit(&self, axis: usize) -> Result<Self, Error> {
+        self.remove_unit_layout(axis)
     }
 
     /// Number of tensors currently sharing this tensor's storage allocation.
@@ -9953,6 +10111,138 @@ where
     S: IntoIterator<Item = &'a Space>,
 {
     Tensor::id(&crate::runtime::default_runtime()?, dtype, spaces)
+}
+
+#[cfg(test)]
+mod unit_layout_tensor_tests {
+    use super::*;
+
+    fn assert_unit_roundtrip(tensor: &Tensor, position: usize, dual: bool, left: bool) {
+        let data = Arc::clone(&tensor.ordinary_body().data);
+        let inserted = if left {
+            tensor.insert_left_unit(position, dual).unwrap()
+        } else {
+            tensor.insert_right_unit(position, dual).unwrap()
+        };
+        assert!(Arc::ptr_eq(&inserted.ordinary_body().data, &data));
+        let restored = inserted.remove_unit(position).unwrap();
+        assert_eq!(restored.codomain_spaces(), tensor.codomain_spaces());
+        assert_eq!(restored.domain_spaces(), tensor.domain_spaces());
+        assert!(Arc::ptr_eq(&restored.ordinary_body().data, &data));
+    }
+
+    #[test]
+    fn unit_layout_uses_tensorkit_slots_without_symmetry_branches() {
+        // What: U1 covers rank-zero/start/seam/end slots and both dual flags;
+        // SU2, odd fZ2, and product spaces take the same metadata-only path.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let space = Space::u1([(-1, 1), (0, 2), (1, 1)]);
+        let tensor =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 549_001).unwrap();
+        let scalar = tensor.trace_pairs(&[(0, 1)]).unwrap();
+        for dual in [false, true] {
+            assert_unit_roundtrip(&scalar, 0, dual, true);
+            assert_unit_roundtrip(&scalar, 0, dual, false);
+            for position in 0..=tensor.rank() {
+                assert_unit_roundtrip(&tensor, position, dual, true);
+                assert_unit_roundtrip(&tensor, position, dual, false);
+            }
+        }
+
+        let left_seam = tensor.insert_left_unit(1, false).unwrap();
+        assert_eq!((left_seam.codomain_rank(), left_seam.domain_rank()), (1, 2));
+        assert!(left_seam.space(1).unwrap().is_dual());
+        let right_seam = tensor.insert_right_unit(1, true).unwrap();
+        assert_eq!(
+            (right_seam.codomain_rank(), right_seam.domain_rank()),
+            (2, 1)
+        );
+
+        let su2 = Space::su2([(0, 1), (1, 2), (2, 1)]).unwrap();
+        let su2_tensor =
+            Tensor::rand_with_seed(&runtime, Dtype::C64, [&su2, &su2], [&su2], 549_003).unwrap();
+        assert!(su2_tensor.ordinary_body().space.structure().block_count() > 1);
+        assert_unit_roundtrip(&su2_tensor, 1, true, false);
+
+        let odd = Space::fz2([(1, 1)]).unwrap();
+        let odd_tensor = Tensor::zeros(&runtime, Dtype::F64, [&odd], [&odd]).unwrap();
+        assert_unit_roundtrip(&odd_tensor, 1, false, true);
+
+        let product = Space::fz2_u1_su2([((0, 0, 0), 1), ((1, -1, 1), 2)]).unwrap();
+        let product_tensor = Tensor::zeros(&runtime, Dtype::F64, [&product], [&product]).unwrap();
+        assert_unit_roundtrip(&product_tensor, 1, true, false);
+    }
+
+    #[test]
+    fn unit_layout_materializes_compact_and_lazy_once_then_shares() {
+        // What: compact diagonal and lazy-adjoint inputs only materialize at
+        // the documented boundary, and the result reuses that Arc<Data>.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let space = Space::u1([(0, 2), (1, 1)]);
+        let source =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 549_002).unwrap();
+
+        let compact = source.svd_compact().unwrap().1;
+        assert!(!compact.has_cached_materialization());
+        let compact_out = compact.insert_right_unit(1, false).unwrap();
+        assert!(compact.has_cached_materialization());
+        assert!(Arc::ptr_eq(
+            &compact_out.ordinary_body().data,
+            compact.compact_dense.get().unwrap()
+        ));
+
+        let lazy = source.adjoint().unwrap();
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        let lazy_out = lazy.insert_left_unit(0, true).unwrap();
+        assert_eq!(lazy.adjoint_body_builds(), 1);
+        assert!(Arc::ptr_eq(
+            &lazy_out.ordinary_body().data,
+            &lazy.materialized_body().unwrap().data
+        ));
+    }
+
+    #[test]
+    fn unit_layout_preflight_leaves_lazy_adjoint_unmaterialized() {
+        // What: invalid axis and non-unit requests fail before the lazy
+        // adjoint's dense body is built.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let space = Space::u1([(1, 1)]);
+        let lazy = Tensor::zeros(&runtime, Dtype::F64, [&space], [&space])
+            .unwrap()
+            .adjoint()
+            .unwrap();
+
+        assert!(matches!(
+            lazy.insert_left_unit(lazy.rank() + 1, false),
+            Err(Error::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            lazy.remove_unit(0),
+            Err(Error::InvalidArgument(_))
+        ));
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+    }
+
+    #[test]
+    fn unit_layout_rejects_generic_rule_before_lazy_materialization() {
+        // What: the multiplicity-bearing provider has no unit-layout wrapper
+        // yet, and the typed boundary does not build its lazy adjoint body.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let su3 = Space::su3([((1, 0), 1), ((0, 1), 1)]).unwrap();
+        let lazy = Tensor::zeros(&runtime, Dtype::F64, [&su3], [&su3])
+            .unwrap()
+            .adjoint()
+            .unwrap();
+
+        assert_eq!(
+            lazy.insert_right_unit(0, false).unwrap_err(),
+            Error::UnsupportedForRule {
+                operation: "Tensor::insert_right_unit",
+                rule: "SU(3)",
+            }
+        );
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+    }
 }
 
 #[cfg(test)]
