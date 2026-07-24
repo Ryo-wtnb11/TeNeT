@@ -176,6 +176,31 @@ fn large_tree_pair_syntax_validation_does_not_allocate() {
 }
 
 #[test]
+fn unique_rank_129_preparation_borrows_prebuilt_operation_metadata() {
+    let rank = 129;
+    let permutation = (0..rank).rev().collect::<Vec<_>>();
+    let raw_axis_positions = (0..rank).rev().collect::<Vec<_>>();
+    let run = || {
+        PreparedTreePairOperation::prepare_permute_with_raw_axis_positions(
+            &Z2FusionRule,
+            rank,
+            0,
+            &permutation,
+            &[],
+            &raw_axis_positions,
+        )
+        .unwrap()
+    };
+    run();
+
+    let (_, calls, bytes) = measured_allocation_stats(|| black_box(run()));
+
+    // What: once runtime-rank operation metadata exists, UniqueFusion
+    // preparation creates no retained permutation or Artin-step allocation.
+    assert_eq!((calls, bytes), (0, 0));
+}
+
+#[test]
 fn block_identity_permute_allocates_only_owned_output() {
     let source = FusionTreePairKey::try_pair_from_sector_ids(
         [1, 1],
@@ -492,7 +517,7 @@ fn prepared_nonidentity_unique_operations_have_zero_prepare_and_stable_execute_a
     .unwrap();
     let transpose = PreparedTreePairOperation::prepare_transpose(2, 2, &[1, 3], &[0, 2]).unwrap();
 
-    let preparations: [fn() -> PreparedTreePairOperation; 3] = [
+    let preparations: [fn() -> PreparedTreePairOperation<'static>; 3] = [
         || {
             PreparedTreePairOperation::prepare_permute(
                 &FermionParityFusionRule,

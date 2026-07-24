@@ -1875,7 +1875,7 @@ where
     pub fn execute_unique_rigid_for_block_index(
         &self,
         index: usize,
-        operation: &PreparedTreePairOperation,
+        operation: &PreparedTreePairOperation<'_>,
     ) -> Result<(FusionTreePairKey, R::Scalar), CoreError> {
         if self.rule.fusion_style() != FusionStyleKind::Unique {
             return Err(CoreError::UnsupportedFusionStyle {
@@ -1893,7 +1893,7 @@ where
     pub fn execute_multiplicity_free_for_block_index(
         &self,
         index: usize,
-        operation: &PreparedTreePairOperation,
+        operation: &PreparedTreePairOperation<'_>,
     ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError> {
         if !self.rule.fusion_style().is_multiplicity_free() {
             return Err(CoreError::UnsupportedFusionStyle {
@@ -1911,7 +1911,7 @@ where
     pub fn execute_multiplicity_free_braid_for_block_indices<I>(
         &self,
         indices: I,
-        operation: PreparedTreePairOperation,
+        operation: PreparedTreePairOperation<'_>,
     ) -> Result<Vec<Vec<(FusionTreePairKey, R::Scalar)>>, CoreError>
     where
         I: IntoIterator<Item = usize>,
@@ -1941,7 +1941,7 @@ where
     pub fn execute_multiplicity_free_braid_ordered_for_block_indices<I>(
         &self,
         indices: I,
-        operation: PreparedTreePairOperation,
+        operation: PreparedTreePairOperation<'_>,
     ) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
     where
         I: IntoIterator<Item = usize>,
@@ -1955,7 +1955,7 @@ where
     pub fn execute_multiplicity_free_braid_ordered_for_block_indices_borrowed<I>(
         &self,
         indices: I,
-        operation: &PreparedTreePairOperation,
+        operation: &PreparedTreePairOperation<'_>,
     ) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
     where
         I: IntoIterator<Item = usize>,
@@ -1971,7 +1971,7 @@ where
     pub fn execute_multiplicity_free_transpose_for_block_indices<I>(
         &self,
         indices: I,
-        operation: PreparedTreePairOperation,
+        operation: PreparedTreePairOperation<'_>,
     ) -> Result<Vec<Vec<(FusionTreePairKey, R::Scalar)>>, CoreError>
     where
         I: IntoIterator<Item = usize>,
@@ -2000,7 +2000,7 @@ where
     pub fn execute_multiplicity_free_transpose_ordered_for_block_indices<I>(
         &self,
         indices: I,
-        operation: PreparedTreePairOperation,
+        operation: PreparedTreePairOperation<'_>,
     ) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
     where
         I: IntoIterator<Item = usize>,
@@ -2014,7 +2014,7 @@ where
     pub fn execute_multiplicity_free_transpose_ordered_for_block_indices_borrowed<I>(
         &self,
         indices: I,
-        operation: &PreparedTreePairOperation,
+        operation: &PreparedTreePairOperation<'_>,
     ) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
     where
         I: IntoIterator<Item = usize>,

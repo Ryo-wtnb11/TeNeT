@@ -1285,7 +1285,7 @@ where
     let src_structure = source_proof.structure();
     let source_axes = operation_source_axes(&operation);
     let mut primary_prepared = None;
-    let mut additional_prepared = None::<FxHashMap<(usize, usize), PreparedTreePairOperation>>;
+    let mut additional_prepared = None::<FxHashMap<(usize, usize), PreparedTreePairOperation<'_>>>;
     let mut specs = Vec::new();
     for group in src_structure.fusion_tree_group_slice() {
         let source_split = (
@@ -1315,7 +1315,7 @@ fn build_one_multiplicity_free_tree_pair_group<R>(
     operation: &TreeTransformOperation,
     source_axes: &Arc<[usize]>,
     group: &FusionTreeBlockGroup,
-    prepared: &PreparedTreePairOperation,
+    prepared: &PreparedTreePairOperation<'_>,
 ) -> Result<Vec<TreeTransformGroupBlockSpec<R::Scalar>>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
@@ -1375,7 +1375,7 @@ where
     let src_structure = source_proof.structure();
     let source_axes = operation_source_axes(&operation);
     let mut primary_prepared = None;
-    let mut additional_prepared = None::<FxHashMap<(usize, usize), PreparedTreePairOperation>>;
+    let mut additional_prepared = None::<FxHashMap<(usize, usize), PreparedTreePairOperation<'_>>>;
     let mut staged_groups = Vec::with_capacity(src_structure.fusion_tree_group_slice().len());
     for group in src_structure.fusion_tree_group_slice() {
         let source_split = (
@@ -1471,7 +1471,7 @@ where
     }
 
     let mut primary_prepared = None;
-    let mut additional_prepared = None::<FxHashMap<(usize, usize), PreparedTreePairOperation>>;
+    let mut additional_prepared = None::<FxHashMap<(usize, usize), PreparedTreePairOperation<'_>>>;
     for (_, _, source_split) in &staged_groups {
         prepared_tree_pair_operation_for_split(
             &mut primary_prepared,
@@ -1988,7 +1988,7 @@ where
     let src_structure = source_proof.structure();
     let source_axes = operation_source_axes(&operation);
     let mut primary_prepared = None;
-    let mut additional_prepared = None::<FxHashMap<(usize, usize), PreparedTreePairOperation>>;
+    let mut additional_prepared = None::<FxHashMap<(usize, usize), PreparedTreePairOperation<'_>>>;
     let mut specs = Vec::with_capacity(src_structure.block_count());
     for index in 0..src_structure.block_count() {
         let Some(src_key) = source_proof.fusion_tree_pair_key(index)? else {
@@ -2016,13 +2016,15 @@ where
     Ok(TreeTransformGroupPlan::new(specs))
 }
 
-fn prepared_tree_pair_operation_for_split<'prepared, R>(
-    primary: &'prepared mut Option<((usize, usize), PreparedTreePairOperation)>,
-    additional: &'prepared mut Option<FxHashMap<(usize, usize), PreparedTreePairOperation>>,
+fn prepared_tree_pair_operation_for_split<'prepared, 'operation, R>(
+    primary: &'prepared mut Option<((usize, usize), PreparedTreePairOperation<'operation>)>,
+    additional: &'prepared mut Option<
+        FxHashMap<(usize, usize), PreparedTreePairOperation<'operation>>,
+    >,
     rule: &R,
-    operation: &TreeTransformOperation,
+    operation: &'operation TreeTransformOperation,
     source_split: (usize, usize),
-) -> Result<&'prepared PreparedTreePairOperation, OperationError>
+) -> Result<&'prepared PreparedTreePairOperation<'operation>, OperationError>
 where
     R: FusionRule,
 {
@@ -2047,33 +2049,62 @@ where
     Ok(prepared)
 }
 
-fn prepare_tree_pair_operation<R>(
+fn prepare_tree_pair_operation<'operation, R>(
     rule: &R,
-    operation: &TreeTransformOperation,
+    operation: &'operation TreeTransformOperation,
     (source_codomain_rank, source_domain_rank): (usize, usize),
-) -> Result<PreparedTreePairOperation, OperationError>
+) -> Result<PreparedTreePairOperation<'operation>, OperationError>
 where
     R: FusionRule,
 {
     #[cfg(test)]
     TREE_PAIR_OPERATION_PREPARATIONS.set(TREE_PAIR_OPERATION_PREPARATIONS.get() + 1);
     match operation.kind() {
-        TreeTransformOperationKind::Permute => PreparedTreePairOperation::prepare_permute(
-            rule,
-            source_codomain_rank,
-            source_domain_rank,
-            operation.codomain_permutation(),
-            operation.domain_permutation(),
-        ),
-        TreeTransformOperationKind::Braid => PreparedTreePairOperation::prepare_braid(
-            rule,
-            source_codomain_rank,
-            source_domain_rank,
-            operation.codomain_permutation(),
-            operation.domain_permutation(),
-            operation.codomain_levels(),
-            operation.domain_levels(),
-        ),
+        TreeTransformOperationKind::Permute => match operation.raw_axis_positions() {
+            Some(raw_axis_positions) => {
+                PreparedTreePairOperation::prepare_permute_with_raw_axis_positions(
+                    rule,
+                    source_codomain_rank,
+                    source_domain_rank,
+                    operation.codomain_permutation(),
+                    operation.domain_permutation(),
+                    raw_axis_positions,
+                )
+            }
+            // Why not require this internal segment here: operation
+            // construction deliberately accepts malformed metadata so the
+            // established validation error remains observable at execution.
+            None => PreparedTreePairOperation::prepare_permute(
+                rule,
+                source_codomain_rank,
+                source_domain_rank,
+                operation.codomain_permutation(),
+                operation.domain_permutation(),
+            ),
+        },
+        TreeTransformOperationKind::Braid => match operation.raw_axis_positions() {
+            Some(raw_axis_positions) => {
+                PreparedTreePairOperation::prepare_braid_with_raw_axis_positions(
+                    rule,
+                    source_codomain_rank,
+                    source_domain_rank,
+                    operation.codomain_permutation(),
+                    operation.domain_permutation(),
+                    operation.codomain_levels(),
+                    operation.domain_levels(),
+                    raw_axis_positions,
+                )
+            }
+            None => PreparedTreePairOperation::prepare_braid(
+                rule,
+                source_codomain_rank,
+                source_domain_rank,
+                operation.codomain_permutation(),
+                operation.domain_permutation(),
+                operation.codomain_levels(),
+                operation.domain_levels(),
+            ),
+        },
         TreeTransformOperationKind::Transpose => PreparedTreePairOperation::prepare_transpose(
             source_codomain_rank,
             source_domain_rank,

@@ -3771,7 +3771,7 @@ mod tests {
     fn prepared_tree_pair_operation_size_excludes_a_second_step_arena() {
         // What: the expert plan stores one inline Artin lowering, not parallel
         // Artin and inversion arrays for mutually exclusive execution paths.
-        assert!(std::mem::size_of::<PreparedTreePairOperation>() <= 600);
+        assert!(std::mem::size_of::<PreparedTreePairOperation<'static>>() <= 600);
     }
 
     #[test]
@@ -6031,16 +6031,153 @@ mod tests {
         let prepared =
             PreparedTreePairOperation::prepare_permute(&Z2FusionRule, 1, 2, &[0], &[2, 1])
                 .unwrap();
-        let PreparedTreePairPlan::Braid(braid) = prepared.plan else {
-            panic!("domain-only swap must prepare a braid");
-        };
-
         assert_eq!(
-            braid.artin_steps.as_slice(),
+            prepared
+                .plan
+                .artin_steps()
+                .expect("domain-only swap must prepare a braid")
+                .collect::<Vec<_>>(),
             &[PreparedArtinStep {
                 index: 1,
                 inverse: true,
             }]
+        );
+    }
+
+    #[test]
+    fn borrowed_unique_artin_lowering_matches_materialized_replay() {
+        // What: operation-local inverse positions preserve the former
+        // materialized Artin word and inverse flag for every small-rank
+        // permutation, not only a selected reverse ordering.
+        for rank in 0..=8 {
+            let mut permutation = (0..rank).collect::<Vec<_>>();
+            let levels = (0..rank).map(|index| (index * 7) % 11).collect::<Vec<_>>();
+            loop {
+                let mut raw_axis_positions = vec![usize::MAX; rank];
+                for (position, &axis) in permutation.iter().enumerate() {
+                    raw_axis_positions[axis] = position;
+                }
+                let expected = PreparedTreeBraid::new(&permutation, &levels, rank)
+                    .unwrap()
+                    .artin_steps
+                    .into_vec();
+                let prepared = PreparedTreePairOperation::prepare_braid_with_raw_axis_positions(
+                    &Z2FusionRule,
+                    rank,
+                    0,
+                    &permutation,
+                    &[],
+                    &levels,
+                    &[],
+                    &raw_axis_positions,
+                )
+                .unwrap();
+                assert_eq!(
+                    prepared
+                        .plan
+                        .artin_steps()
+                        .map(|steps| steps.collect::<Vec<_>>())
+                        .unwrap_or_default(),
+                    expected,
+                    "rank-{rank} permutation {permutation:?} changed"
+                );
+                if !next_lexicographic_permutation(&mut permutation) {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn next_lexicographic_permutation(values: &mut [usize]) -> bool {
+        let Some(pivot) = (0..values.len().saturating_sub(1))
+            .rev()
+            .find(|&index| values[index] < values[index + 1])
+        else {
+            return false;
+        };
+        let successor = (pivot + 1..values.len())
+            .rev()
+            .find(|&index| values[pivot] < values[index])
+            .expect("increasing pivot has a successor");
+        values.swap(pivot, successor);
+        values[pivot + 1..].reverse();
+        true
+    }
+
+    #[test]
+    fn borrowed_unique_schedule_derivation_uses_quadratic_position_queries() {
+        // What: operation-local inverse positions keep lazy Artin schedule
+        // derivation quadratic in runtime rank; this deliberately measures
+        // schedule lowering only, not the subsequent tree execution.
+        let rank = 129;
+        let permutation = (0..rank).rev().collect::<Vec<_>>();
+        let raw_axis_positions = (0..rank).rev().collect::<Vec<_>>();
+        let prepared = PreparedTreePairOperation::prepare_permute_with_raw_axis_positions(
+            &Z2FusionRule,
+            rank,
+            0,
+            &permutation,
+            &[],
+            &raw_axis_positions,
+        )
+        .unwrap();
+
+        reset_unique_borrowed_position_queries();
+        let steps = prepared
+            .plan
+            .artin_steps()
+            .expect("reverse permutation must prepare a braid")
+            .count();
+        assert_eq!(steps, rank * (rank - 1) / 2);
+        assert_eq!(unique_borrowed_position_queries(), rank * (rank - 1));
+    }
+
+    #[test]
+    fn borrowed_unique_metadata_rejects_inconsistent_inverse_positions() {
+        // What: the doc-hidden safe lowering entry points reject a same-length
+        // inverse table that would otherwise erase a nontrivial swap.
+        let expected = CoreError::InconsistentAxisPosition {
+            logical_axis: 1,
+            expected_position: 0,
+            actual_position: 1,
+        };
+        assert_eq!(
+            PreparedTreePairOperation::prepare_permute_with_raw_axis_positions(
+                &Z2FusionRule,
+                2,
+                0,
+                &[1, 0],
+                &[],
+                &[0, 1],
+            ),
+            Err(expected.clone())
+        );
+        assert_eq!(
+            PreparedTreePairOperation::prepare_braid_with_raw_axis_positions(
+                &Z2FusionRule,
+                2,
+                0,
+                &[1, 0],
+                &[],
+                &[0, 1],
+                &[],
+                &[0, 1],
+            ),
+            Err(expected)
+        );
+        assert_eq!(
+            PreparedTreePairOperation::prepare_permute_with_raw_axis_positions(
+                &Z2FusionRule,
+                2,
+                0,
+                &[0, 0],
+                &[],
+                &[0, 1],
+            ),
+            Err(CoreError::InvalidPermutation {
+                permutation: vec![0, 0],
+                rank: 2,
+            })
         );
     }
 
@@ -6068,7 +6205,10 @@ mod tests {
             plans[1].plan,
             PreparedTreePairPlan::Repartition
         ));
-        assert!(matches!(plans[2].plan, PreparedTreePairPlan::Braid(_)));
+        assert!(matches!(
+            plans[2].plan,
+            PreparedTreePairPlan::Braid(_) | PreparedTreePairPlan::UniqueBraid(_)
+        ));
 
         for prepared in plans {
             assert_eq!(

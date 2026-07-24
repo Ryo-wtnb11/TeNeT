@@ -6396,7 +6396,7 @@ fn unique_production_prepares_each_distinct_source_split() {
     let source_structure =
         packed_fixture_structure(2, source_order.iter().cloned().map(|key| (key, vec![1, 1])))
             .unwrap();
-    let operation = TreeTransformOperation::permute([0], [1]);
+    let operation = TreeTransformOperation::permute([1], [0]);
 
     let specialized =
         build_tree_pair_transform_group_plan(&rule, operation.clone(), &source_structure).unwrap();
@@ -6404,8 +6404,8 @@ fn unique_production_prepares_each_distinct_source_split() {
         build_multiplicity_free_tree_pair_transform_group_plan(&rule, operation, &source_structure)
             .unwrap();
 
-    // What: a rank-homogeneous structure may still contain distinct
-    // codomain/domain splits; each split keeps the generic destination,
+    // What: one nontrivial operation-local inverse table is interpreted
+    // against both source splits, preserving the generic destination,
     // coefficient, and raw source order under the prepared Unique path.
     assert_eq!(specialized, generic);
     assert_eq!(

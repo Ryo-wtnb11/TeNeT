@@ -5,6 +5,8 @@
 use std::fmt;
 use std::sync::Arc;
 
+const INVALID_RAW_AXIS_POSITION: usize = usize::MAX - 1;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum TreeTransformOperationKind {
     /// Planar transpose, including codomain/domain repartitioning.
@@ -23,7 +25,7 @@ pub enum TreeTransformOperationKind {
 pub struct TreeTransformOperation {
     kind: TreeTransformOperationKind,
     data: Arc<[usize]>,
-    ends: [usize; 3],
+    ends: [usize; 4],
 }
 
 impl TreeTransformOperation {
@@ -135,6 +137,25 @@ impl TreeTransformOperation {
         data.extend(codomain_levels);
         let codomain_levels_end = data.len();
         data.extend(domain_levels);
+        let domain_levels_end = data.len();
+        if matches!(
+            kind,
+            TreeTransformOperationKind::Permute | TreeTransformOperationKind::Braid
+        ) {
+            let rank = domain_permutation_end;
+            let mut raw_positions = vec![usize::MAX; rank];
+            for (position, &axis) in data[..domain_permutation_end].iter().enumerate() {
+                if axis >= rank {
+                    continue;
+                }
+                if raw_positions[axis] != usize::MAX {
+                    raw_positions[axis] = INVALID_RAW_AXIS_POSITION;
+                    continue;
+                }
+                raw_positions[axis] = position;
+            }
+            data.extend(raw_positions);
+        }
         Self {
             kind,
             data: data.into(),
@@ -142,6 +163,7 @@ impl TreeTransformOperation {
                 codomain_permutation_end,
                 domain_permutation_end,
                 codomain_levels_end,
+                domain_levels_end,
             ],
         }
     }
@@ -173,7 +195,23 @@ impl TreeTransformOperation {
     /// Return explicit braid levels for source domain axes.
     #[inline]
     pub fn domain_levels(&self) -> &[usize] {
-        &self.data[self.ends[2]..]
+        &self.data[self.ends[2]..self.ends[3]]
+    }
+
+    /// Return source-logical-axis positions for a permutation or braid.
+    ///
+    /// The table is derived with the operation, before any source split is
+    /// known. Invalid logical maps retain sentinels so construction keeps the
+    /// public API's deferred validation and error precedence.
+    #[doc(hidden)]
+    #[inline]
+    pub fn raw_axis_positions(&self) -> Option<&[usize]> {
+        match self.kind {
+            TreeTransformOperationKind::Permute | TreeTransformOperationKind::Braid => {
+                Some(&self.data[self.ends[3]..])
+            }
+            TreeTransformOperationKind::Transpose => None,
+        }
     }
 
     pub fn requires_symmetric_braiding(&self) -> bool {
@@ -234,7 +272,7 @@ mod tests {
     use std::hash::{Hash, Hasher};
     use std::sync::Arc;
 
-    use super::{TreeTransformOperation, TreeTransformOperationKind};
+    use super::{TreeTransformOperation, TreeTransformOperationKind, INVALID_RAW_AXIS_POSITION};
 
     #[test]
     fn operation_values_expose_all_logical_segments_at_runtime_rank() {
@@ -256,6 +294,7 @@ mod tests {
         assert_eq!(permute.domain_permutation(), &[2]);
         assert!(permute.codomain_levels().is_empty());
         assert!(permute.domain_levels().is_empty());
+        assert_eq!(permute.raw_axis_positions(), Some(&[1, 0, 2][..]));
 
         let braid = TreeTransformOperation::braid([1, 0], [2], [7, 3], [5]);
         assert_eq!(braid.kind(), TreeTransformOperationKind::Braid);
@@ -263,6 +302,8 @@ mod tests {
         assert_eq!(braid.domain_permutation(), &[2]);
         assert_eq!(braid.codomain_levels(), &[7, 3]);
         assert_eq!(braid.domain_levels(), &[5]);
+        assert_eq!(braid.raw_axis_positions(), Some(&[1, 0, 2][..]));
+        assert_eq!(transpose.raw_axis_positions(), None);
 
         let equal = TreeTransformOperation::braid(vec![1, 0], vec![2], vec![7, 3], vec![5]);
         let mut left_hash = DefaultHasher::new();
@@ -272,6 +313,26 @@ mod tests {
         assert!(!Arc::ptr_eq(&braid.data, &equal.data));
         assert_eq!(braid, equal);
         assert_eq!(left_hash.finish(), right_hash.finish());
+    }
+
+    #[test]
+    fn raw_axis_positions_preserve_invalid_operation_construction() {
+        // What: malformed operations remain constructible and defer their
+        // established validation errors until a rule-aware execution path.
+        let invalid = TreeTransformOperation::permute([0, 0], []);
+        assert_eq!(
+            invalid.raw_axis_positions(),
+            Some(&[INVALID_RAW_AXIS_POSITION, usize::MAX][..])
+        );
+    }
+
+    #[test]
+    fn retained_bytes_include_operation_local_inverse_positions() {
+        // What: cache resource accounting charges the full immutable backing
+        // allocation, including the derived position segment.
+        let word = core::mem::size_of::<usize>();
+        let operation = TreeTransformOperation::permute([1, 0], [2]);
+        assert_eq!(operation.charged_retained_bytes(), 8 * word);
     }
 
     #[test]
