@@ -114,6 +114,15 @@ pub trait FusionRule: 'static {
     }
 }
 
+/// Marks a fusion rule whose vacuum obeys TeNeT's canonical unit conventions.
+///
+/// Implementors promise that the vacuum is self-dual, `1 x a -> a` and
+/// `a x 1 -> a` are the only multiplicity-one channels, and unitors and
+/// associators act as the identity on every multiplicity space.
+/// The marker is intentionally open: external sector providers can certify
+/// the same law without depending on TeNeT's execution crates.
+pub trait CanonicalUnitFusionRule: FusionRule {}
+
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FusionAlgebraError {
@@ -659,6 +668,12 @@ pub const fn product_sector<Left, Right>(left: Left, right: Right) -> ProductSec
     ProductSector::new(left, right)
 }
 
+/// Reversible encoding for product-sector IDs.
+///
+/// For every representable pair, `decode(encode(left, right))` must return
+/// that pair; every decodable ID must round-trip through `encode`; and
+/// distinct representable pairs must not alias. Violating these laws breaks
+/// `ProductFusionRule`'s fusion, dual, and symbol semantics.
 pub trait ProductSectorCodec {
     fn try_encode(left: SectorId, right: SectorId) -> Option<SectorId>;
 

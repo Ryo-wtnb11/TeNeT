@@ -2,9 +2,9 @@ use num_complex::Complex64;
 use smallvec::smallvec;
 
 use crate::{
-    BraidingStyleKind, CheckedFusionAlgebra, FusionAlgebraError, FusionRule, FusionStyleKind,
-    MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
-    RuleIdentity, SectorId, SectorVec,
+    BraidingStyleKind, CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionAlgebraError,
+    FusionRule, FusionStyleKind, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, RuleIdentity, SectorId, SectorVec,
 };
 
 // FibonacciAnyon: the simplest genuinely non-abelian anyon model (Simple
@@ -101,6 +101,8 @@ impl CheckedFusionAlgebra for FibonacciFusionRule {
 }
 
 impl MultiplicityFreeFusionRule for FibonacciFusionRule {}
+
+impl CanonicalUnitFusionRule for FibonacciFusionRule {}
 
 impl MultiplicityFreeFusionSymbols for FibonacciFusionRule {
     type Scalar = Complex64;
@@ -275,5 +277,37 @@ mod tests {
             rule.frobenius_schur_phase_scalar(tau),
             Complex64::new(1.0, 0.0)
         );
+    }
+
+    #[test]
+    fn fibonacci_has_canonical_unit_channels_and_associator() {
+        // What: Fibonacci's vacuum is a unique self-dual identity even though
+        // its non-unit fusion has multiple channels.
+        fn accepts_canonical_unit<R: CanonicalUnitFusionRule>(_rule: &R) {}
+
+        let rule = FibonacciFusionRule;
+        let vacuum = rule.vacuum();
+        let tau = SectorId::new(1);
+        accepts_canonical_unit(&rule);
+        assert_eq!(rule.dual(vacuum), vacuum);
+        assert_eq!(rule.fusion_channels(vacuum, tau).as_slice(), &[tau]);
+        assert_eq!(rule.fusion_channels(tau, vacuum).as_slice(), &[tau]);
+        assert_eq!(rule.nsymbol(vacuum, tau, tau), 1);
+        assert_eq!(rule.nsymbol(tau, vacuum, tau), 1);
+        assert_eq!(rule.nsymbol(vacuum, tau, vacuum), 0);
+        for fused in rule.fusion_channels(tau, tau) {
+            assert_complex_bits(
+                rule.f_symbol_scalar(vacuum, tau, tau, fused, tau, fused),
+                Complex64::new(1.0, 0.0),
+            );
+            assert_complex_bits(
+                rule.f_symbol_scalar(tau, vacuum, tau, fused, tau, tau),
+                Complex64::new(1.0, 0.0),
+            );
+            assert_complex_bits(
+                rule.f_symbol_scalar(tau, tau, vacuum, fused, fused, tau),
+                Complex64::new(1.0, 0.0),
+            );
+        }
     }
 }
