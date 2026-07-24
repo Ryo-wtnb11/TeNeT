@@ -1491,6 +1491,12 @@ struct PreparedTreeBraid {
     artin_steps: SmallVec<[PreparedArtinStep; 28]>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SimplePreparedTreeBraid {
+    permutation: Arc<[usize]>,
+    artin_steps: Vec<PreparedArtinStep>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UniqueBorrowedBraidLevels<'operation> {
     Symmetric,
@@ -1685,6 +1691,15 @@ impl PreparedTreeBraid {
     }
 }
 
+impl SimplePreparedTreeBraid {
+    fn from_prepared(braid: PreparedTreeBraid) -> Self {
+        Self {
+            permutation: Arc::from(braid.permutation.into_vec()),
+            artin_steps: braid.artin_steps.into_vec(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PreparedCycleDirection {
     Clockwise,
@@ -1702,14 +1717,13 @@ const PREPARED_BRAID_BLOCK_FAMILY_ERROR: &str =
 const PREPARED_TRANSPOSE_BLOCK_FAMILY_ERROR: &str =
     "prepared tree-pair operation is incompatible with transpose block execution";
 
-// Why not box the braid variant: rank<=8 preparation is intentionally
-// allocation-free, and this expert plan is reused instead of copied per tree.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum PreparedTreePairPlan<'operation> {
     Identity,
     Repartition,
     Braid(PreparedTreeBraid),
+    SimpleBraid(SimplePreparedTreeBraid),
     UniqueBraid(UniqueBorrowedTreePairBraid<'operation>),
     Transpose {
         direction: PreparedCycleDirection,
@@ -1734,9 +1748,23 @@ impl Iterator for PreparedTreePairArtinSteps<'_> {
 }
 
 impl PreparedTreePairPlan<'_> {
+    fn owned_braid_parts(&self) -> Option<(&[usize], &[PreparedArtinStep])> {
+        match self {
+            Self::Braid(braid) => Some((&braid.permutation, &braid.artin_steps)),
+            Self::SimpleBraid(braid) => Some((&braid.permutation, &braid.artin_steps)),
+            Self::Identity
+            | Self::Repartition
+            | Self::UniqueBraid(_)
+            | Self::Transpose { .. } => None,
+        }
+    }
+
     fn artin_steps(&self) -> Option<PreparedTreePairArtinSteps<'_>> {
         match self {
             Self::Braid(braid) => Some(PreparedTreePairArtinSteps::Owned(braid.artin_steps.iter())),
+            Self::SimpleBraid(braid) => {
+                Some(PreparedTreePairArtinSteps::Owned(braid.artin_steps.iter()))
+            }
             Self::UniqueBraid(braid) => Some(PreparedTreePairArtinSteps::Unique(braid.artin_steps())),
             Self::Identity | Self::Repartition | Self::Transpose { .. } => None,
         }
@@ -1766,6 +1794,32 @@ pub struct PreparedTreePairOperation<'operation> {
 impl<'operation> PreparedTreePairOperation<'operation> {
     pub(crate) fn is_identity(&self) -> bool {
         matches!(self.plan, PreparedTreePairPlan::Identity)
+    }
+
+    #[doc(hidden)]
+    pub fn into_compiler_owned_simple_braid(self) -> Self {
+        let Self {
+            source_codomain_rank,
+            source_domain_rank,
+            target_codomain_rank,
+            requires_symmetric_braiding,
+            family,
+            plan,
+        } = self;
+        let plan = match plan {
+            PreparedTreePairPlan::Braid(braid) => {
+                PreparedTreePairPlan::SimpleBraid(SimplePreparedTreeBraid::from_prepared(braid))
+            }
+            plan => plan,
+        };
+        Self {
+            source_codomain_rank,
+            source_domain_rank,
+            target_codomain_rank,
+            requires_symmetric_braiding,
+            family,
+            plan,
+        }
     }
 
     /// Validate operation metadata that depends only on total tensor rank.
@@ -2458,7 +2512,10 @@ impl<'operation> PreparedTreePairOperation<'operation> {
                     self.target_codomain_rank,
                 )
             }
-            PreparedTreePairPlan::Braid(braid) => {
+            plan @ (PreparedTreePairPlan::Braid(_) | PreparedTreePairPlan::SimpleBraid(_)) => {
+                let (permutation, artin_steps) = plan
+                    .owned_braid_parts()
+                    .expect("owned braid plan exposes its schedule");
                 let all_rank = self.source_codomain_rank + self.source_domain_rank;
                 let all_codomain =
                     multiplicity_free_repartition_tree_pair_validated(validated, all_rank)?;
@@ -2466,7 +2523,8 @@ impl<'operation> PreparedTreePairOperation<'operation> {
                     execute_multiplicity_free_tree_braid(
                         rule,
                         key.codomain_tree(),
-                        braid,
+                        permutation,
+                        artin_steps,
                     )
                     .map(|terms| {
                         terms
@@ -2607,14 +2665,18 @@ impl<'operation> PreparedTreePairOperation<'operation> {
                     self.target_codomain_rank,
                 )
             }
-            PreparedTreePairPlan::Braid(braid) => {
+            plan @ (PreparedTreePairPlan::Braid(_) | PreparedTreePairPlan::SimpleBraid(_)) => {
+                let (permutation, artin_steps) = plan
+                    .owned_braid_parts()
+                    .expect("owned braid plan exposes its schedule");
                 let all_rank = self.source_codomain_rank + self.source_domain_rank;
                 let (all_codomain, repartition_to_all) =
                     unique_rigid_repartition_tree_pair_validated(validated, all_rank)?;
                 let (braided_tree, braid_coefficient) = execute_unique_tree_braid(
                     rule,
                     all_codomain.codomain_tree(),
-                    braid,
+                    permutation,
+                    artin_steps,
                 )?;
                 let braided_pair = FusionTreePairKey::pair(
                     braided_tree,
@@ -2700,14 +2762,18 @@ impl<'operation> PreparedTreePairOperation<'operation> {
             PreparedTreePairPlan::Repartition => {
                 unique_repartition_tree_pair_validated(validated, self.target_codomain_rank)
             }
-            PreparedTreePairPlan::Braid(braid) => {
+            plan @ (PreparedTreePairPlan::Braid(_) | PreparedTreePairPlan::SimpleBraid(_)) => {
+                let (permutation, artin_steps) = plan
+                    .owned_braid_parts()
+                    .expect("owned braid plan exposes its schedule");
                 let all_rank = self.source_codomain_rank + self.source_domain_rank;
                 let (all_codomain, repartition_to_all) =
                     unique_repartition_tree_pair_validated(validated, all_rank)?;
                 let (braided_tree, braid_coefficient) = execute_unique_tree_braid(
                     rule,
                     all_codomain.codomain_tree(),
-                    braid,
+                    permutation,
+                    artin_steps,
                 )?;
                 let braided_pair = FusionTreePairKey::pair(
                     braided_tree,
@@ -2792,7 +2858,7 @@ where
     if prepared.permutation.iter().copied().eq(0..rank) {
         return Ok((tree.clone(), rule.scalar_one()));
     }
-    execute_unique_tree_braid(rule, tree, &prepared)
+    execute_unique_tree_braid(rule, tree, &prepared.permutation, &prepared.artin_steps)
 }
 
 /// `tree` follows [`FusionTreeKey::validate_for_rule`]'s provider-domain
@@ -2825,7 +2891,7 @@ where
     if permutation.iter().copied().eq(0..rank) {
         return Ok((tree.clone(), rule.scalar_one()));
     }
-    execute_unique_tree_braid(rule, tree, &prepared)
+    execute_unique_tree_braid(rule, tree, &prepared.permutation, &prepared.artin_steps)
 }
 
 /// `tree` follows [`FusionTreeKey::validate_for_rule`]'s provider-domain
@@ -2884,13 +2950,19 @@ where
     if prepared.permutation.iter().copied().eq(0..rank) {
         return Ok(vec![(tree.clone(), rule.scalar_one())]);
     }
-    execute_multiplicity_free_tree_braid(rule, tree, &prepared)
+    execute_multiplicity_free_tree_braid(
+        rule,
+        tree,
+        &prepared.permutation,
+        &prepared.artin_steps,
+    )
 }
 
 fn execute_multiplicity_free_tree_braid<R>(
     rule: &R,
     tree: &FusionTreeKey,
-    prepared: &PreparedTreeBraid,
+    permutation: &[usize],
+    artin_steps: &[PreparedArtinStep],
 ) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>
 where
     R: MultiplicityFreeFusionSymbols,
@@ -2900,11 +2972,12 @@ where
         && rule.braiding_style().is_symmetric()
         && rule.has_trivial_associator_gauge()
     {
-        let (destination, coefficient) = execute_unique_tree_braid(rule, tree, prepared)?;
+        let (destination, coefficient) =
+            execute_unique_tree_braid(rule, tree, permutation, artin_steps)?;
         return Ok(vec![(destination, coefficient)]);
     }
 
-    execute_multiplicity_free_tree_braid_steps(rule, tree, prepared.artin_steps.iter().copied())
+    execute_multiplicity_free_tree_braid_steps(rule, tree, artin_steps.iter().copied())
 }
 
 fn execute_multiplicity_free_tree_braid_steps<R, I>(
@@ -5469,7 +5542,9 @@ where
                 prepared.target_codomain_rank,
             );
         }
-        PreparedTreePairPlan::Braid(_) | PreparedTreePairPlan::UniqueBraid(_) => {}
+        PreparedTreePairPlan::Braid(_)
+        | PreparedTreePairPlan::SimpleBraid(_)
+        | PreparedTreePairPlan::UniqueBraid(_) => {}
         PreparedTreePairPlan::Transpose { .. } => {
             unreachable!("braid preparation cannot create a transpose plan")
         }
@@ -5807,7 +5882,9 @@ where
         PreparedTreePairPlan::Transpose { direction, count } => {
             (*direction, *count)
         }
-        PreparedTreePairPlan::Braid(_) | PreparedTreePairPlan::UniqueBraid(_) => {
+        PreparedTreePairPlan::Braid(_)
+        | PreparedTreePairPlan::SimpleBraid(_)
+        | PreparedTreePairPlan::UniqueBraid(_) => {
             unreachable!("transpose preparation cannot create a braid plan")
         }
     };
@@ -6036,7 +6113,9 @@ where
         }
         PreparedTreePairPlan::Repartition => None,
         PreparedTreePairPlan::Transpose { direction, count } => Some((*direction, *count)),
-        PreparedTreePairPlan::Braid(_) | PreparedTreePairPlan::UniqueBraid(_) => {
+        PreparedTreePairPlan::Braid(_)
+        | PreparedTreePairPlan::SimpleBraid(_)
+        | PreparedTreePairPlan::UniqueBraid(_) => {
             unreachable!("transpose preparation cannot create a braid plan")
         }
     };
@@ -6649,16 +6728,17 @@ fn tree_pair_axis_map_is_identity(
 fn execute_unique_tree_braid<R>(
     rule: &R,
     tree: &FusionTreeKey,
-    prepared: &PreparedTreeBraid,
+    permutation: &[usize],
+    artin_steps: &[PreparedArtinStep],
 ) -> Result<(FusionTreeKey, R::Scalar), CoreError>
 where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Mul<Output = R::Scalar>,
 {
     let rank = tree.uncoupled().len();
-    if prepared.permutation.len() != rank {
+    if permutation.len() != rank {
         return Err(CoreError::InvalidPermutation {
-            permutation: prepared.permutation.to_vec(),
+            permutation: permutation.to_vec(),
             rank,
         });
     }
@@ -6672,8 +6752,8 @@ where
         let mut coefficient = rule.scalar_one();
         for right_position in 0..rank {
             for left_position in 0..right_position {
-                let left_axis = prepared.permutation[left_position];
-                let right_axis = prepared.permutation[right_position];
+                let left_axis = permutation[left_position];
+                let right_axis = permutation[right_position];
                 if left_axis > right_axis {
                     let left = tree.uncoupled()[left_axis];
                     let right = tree.uncoupled()[right_axis];
@@ -6690,13 +6770,11 @@ where
                 }
             }
         }
-        let uncoupled = prepared
-            .permutation
+        let uncoupled = permutation
             .iter()
             .map(|&axis| tree.uncoupled()[axis])
             .collect::<SmallVec<[SectorId; 8]>>();
-        let is_dual = prepared
-            .permutation
+        let is_dual = permutation
             .iter()
             .map(|&axis| tree.is_dual()[axis])
             .collect::<SmallVec<[bool; 8]>>();
@@ -6708,7 +6786,7 @@ where
 
     let mut current = tree.clone();
     let mut coefficient = rule.scalar_one();
-    for step in &prepared.artin_steps {
+    for step in artin_steps {
         let (next, step_coefficient) = unique_artin_braid_at_with_inverse(
             rule,
             &current,
