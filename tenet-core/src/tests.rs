@@ -6045,6 +6045,82 @@ mod tests {
     }
 
     #[test]
+    fn prepared_braid_matches_public_wrapper_at_runtime_rank() {
+        // What: prepared braid and the public braid wrapper agree on rows and
+        // validation errors across runtime ranks; low-rank coverage is separate.
+        let rule = Z2FusionRule;
+        for rank in [8, 9, 19, 129] {
+            let codomain = FusionTreeKey::try_new_for_rule(
+                &rule,
+                vec![z2_even(); rank],
+                z2_even(),
+                vec![false; rank],
+                vec![z2_even(); rank.saturating_sub(2)],
+                vec![MultiplicityIndex::ONE; rank.saturating_sub(1)],
+            )
+            .unwrap();
+            let source = FusionTreePairKey::pair(
+                codomain,
+                FusionTreeKey::try_new_for_rule(&rule, [], z2_even(), [], [], []).unwrap(),
+            );
+            let permutation = (0..rank).rev().collect::<Vec<_>>();
+            let levels = (0..rank).collect::<Vec<_>>();
+
+            let prepared = PreparedTreePairOperation::prepare_braid(
+                &rule,
+                rank,
+                0,
+                &permutation,
+                &[],
+                &levels,
+                &[],
+            )
+            .unwrap();
+            assert_eq!(
+                prepared.execute_multiplicity_free(&rule, &source),
+                multiplicity_free_braid_tree_pair(
+                    &rule,
+                    &source,
+                    &permutation,
+                    &[],
+                    &levels,
+                    &[],
+                )
+            );
+
+            let mut duplicate = permutation;
+            duplicate[rank - 1] = duplicate[rank - 2];
+            let prepared_error = PreparedTreePairOperation::prepare_braid(
+                &rule,
+                rank,
+                0,
+                &duplicate,
+                &[],
+                &levels,
+                &[],
+            )
+            .unwrap_err();
+            let eager_error = multiplicity_free_braid_tree_pair(
+                &rule,
+                &source,
+                &duplicate,
+                &[],
+                &levels,
+                &[],
+            )
+            .unwrap_err();
+            assert_eq!(prepared_error, eager_error);
+            assert_eq!(
+                prepared_error,
+                CoreError::InvalidPermutation {
+                    permutation: duplicate,
+                    rank,
+                }
+            );
+        }
+    }
+
+    #[test]
     fn prepared_permute_revalidates_symmetric_capability_for_reused_rule() {
         // What: a prepared permutation cannot become an identity, repartition,
         // or general braid when executed with a non-symmetric provider.
@@ -6283,8 +6359,8 @@ mod tests {
         let codomain_levels = (0..codomain_rank).collect::<Vec<_>>();
         let domain_levels = (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
 
-        // What: the validation-only API handles ranks beyond SmallVec's inline
-        // permutation capacity without requiring a prepared Artin plan.
+        // What: the validation-only API handles runtime-rank permutations
+        // without requiring a prepared Artin plan.
         PreparedTreePairOperation::validate_permute_syntax(
             codomain_rank,
             domain_rank,

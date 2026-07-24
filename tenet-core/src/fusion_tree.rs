@@ -1487,18 +1487,18 @@ struct PreparedArtinStep {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PreparedTreeBraid {
-    permutation: SmallVec<[usize; 8]>,
-    artin_steps: SmallVec<[PreparedArtinStep; 28]>,
+    permutation: Arc<[usize]>,
+    artin_steps: Vec<PreparedArtinStep>,
 }
 
 impl PreparedTreeBraid {
     fn new(permutation: &[usize], levels: &[usize], rank: usize) -> Result<Self, CoreError> {
-        validate_permutation_inline(permutation, rank)?;
+        validate_permutation(permutation, rank)?;
         debug_assert_eq!(levels.len(), rank);
 
-        let mut work = SmallVec::<[usize; 8]>::from_slice(permutation);
-        let mut current_levels = SmallVec::<[usize; 8]>::from_slice(levels);
-        let mut artin_steps = SmallVec::new();
+        let mut work = permutation.to_vec();
+        let mut current_levels = levels.to_vec();
+        let mut artin_steps = Vec::new();
         for target in 0..rank.saturating_sub(1) {
             let source = work[target];
             for index in (target..source).rev() {
@@ -1517,7 +1517,7 @@ impl PreparedTreeBraid {
         }
 
         Ok(Self {
-            permutation: SmallVec::from_slice(permutation),
+            permutation: Arc::from(permutation),
             artin_steps,
         })
     }
@@ -1540,8 +1540,8 @@ const PREPARED_BRAID_BLOCK_FAMILY_ERROR: &str =
 const PREPARED_TRANSPOSE_BLOCK_FAMILY_ERROR: &str =
     "prepared tree-pair operation is incompatible with transpose block execution";
 
-// Why not box the braid variant: rank<=8 preparation is intentionally
-// allocation-free, and this expert plan is reused instead of copied per tree.
+// Why not box the braid variant: callers retain the compiled plan by value, so
+// boxing would add a separate allocation without reducing replay ownership.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum PreparedTreePairPlan {
@@ -1700,8 +1700,7 @@ impl PreparedTreePairOperation {
             });
         }
 
-        let mut levels =
-            SmallVec::<[usize; 8]>::with_capacity(source_codomain_rank + source_domain_rank);
+        let mut levels = Vec::with_capacity(source_codomain_rank + source_domain_rank);
         levels.extend_from_slice(codomain_levels);
         levels.extend(domain_levels.iter().rev().copied());
         let braid = PreparedTreeBraid::new(&permutation, &levels, levels.len())?;
@@ -1824,8 +1823,7 @@ impl PreparedTreePairOperation {
                 plan: PreparedTreePairPlan::Repartition,
             });
         }
-        let mut levels =
-            SmallVec::<[usize; 8]>::with_capacity(source_codomain_rank + source_domain_rank);
+        let mut levels = Vec::with_capacity(source_codomain_rank + source_domain_rank);
         levels.extend(0..source_codomain_rank);
         levels.extend(
             (source_codomain_rank..source_codomain_rank + source_domain_rank).rev(),
@@ -1908,7 +1906,7 @@ impl PreparedTreePairOperation {
         domain_permutation: &[usize],
         source_codomain_rank: usize,
         source_domain_rank: usize,
-    ) -> Result<SmallVec<[usize; 8]>, CoreError> {
+    ) -> Result<Vec<usize>, CoreError> {
         validate_cyclic_tree_pair_axis_map_inline(
             codomain_permutation,
             domain_permutation,
@@ -2345,7 +2343,7 @@ where
         });
     }
     let rank = tree.uncoupled().len();
-    let levels = (0..rank).collect::<SmallVec<[usize; 8]>>();
+    let levels = (0..rank).collect::<Vec<_>>();
     let prepared = PreparedTreeBraid::new(permutation, &levels, rank)?;
     validate_fusion_tree_for_rule(rule, tree)?;
     if permutation.iter().copied().eq(0..rank) {
@@ -2474,7 +2472,7 @@ where
         });
     }
     let rank = tree.uncoupled().len();
-    let levels = (0..rank).collect::<SmallVec<[usize; 8]>>();
+    let levels = (0..rank).collect::<Vec<_>>();
     let prepared = PreparedTreeBraid::new(permutation, &levels, rank)?;
     let validated = validate_fusion_tree_for_rule(rule, tree)?;
     execute_multiplicity_free_tree_braid_proven(validated, prepared)
@@ -4328,8 +4326,7 @@ where
             })?,
     );
     if current_codomain_rank > target_codomain_rank {
-        let mut steps: SmallVec<[PreparedMultiplicityFreeBendRight; 8]> =
-            SmallVec::new();
+        let mut steps = Vec::new();
         let mut frame = initial_frame.clone();
         let mut local = first_local;
         let num_steps = current_codomain_rank - target_codomain_rank;
@@ -4365,8 +4362,7 @@ where
             }
         }
     } else {
-        let mut steps: SmallVec<[PreparedMultiplicityFreeBendLeft; 8]> =
-            SmallVec::new();
+        let mut steps = Vec::new();
         let mut frame = initial_frame.clone();
         let mut local = first_local;
         let num_steps = target_codomain_rank - current_codomain_rank;
@@ -4703,7 +4699,7 @@ where
         return Ok(Vec::new());
     };
     let rank = first.uncoupled().len();
-    let levels = (0..rank).collect::<SmallVec<[usize; 8]>>();
+    let levels = (0..rank).collect::<Vec<_>>();
     let prepared = PreparedTreeBraid::new(permutation, &levels, rank)?;
     let group = validate_fusion_tree_block_group_for_rule(rule, src_keys)?
         .expect("nonempty source block produces a validation proof");
@@ -5965,7 +5961,7 @@ fn linearize_tree_pair_permutation_inline(
     domain_permutation: &[usize],
     codomain_rank: usize,
     domain_rank: usize,
-) -> Result<SmallVec<[usize; 8]>, CoreError> {
+) -> Result<Vec<usize>, CoreError> {
     validate_tree_pair_axis_map_inline(
         codomain_permutation,
         domain_permutation,
@@ -5994,8 +5990,12 @@ fn validate_tree_pair_axis_map_inline(
             total_rank,
         ));
     }
-    let mut seen = SmallVec::<[u64; 2]>::new();
-    seen.resize(total_rank.div_ceil(u64::BITS as usize), 0);
+    if (0..total_rank)
+        .all(|position| raw_tree_pair_axis_at(codomain_permutation, domain_permutation, position) == position)
+    {
+        return Ok(());
+    }
+    let mut seen = vec![0; total_rank.div_ceil(u64::BITS as usize)];
     for position in 0..total_rank {
         let axis = raw_tree_pair_axis_at(codomain_permutation, domain_permutation, position);
         if axis >= total_rank {
@@ -6057,8 +6057,7 @@ fn validate_cyclic_tree_pair_axis_map_inline(
                     domain_permutation,
                     codomain_rank,
                     domain_rank,
-                )
-                .into_vec(),
+                ),
                 rank: total_rank,
             });
         }
@@ -6098,7 +6097,7 @@ fn materialize_linearized_tree_pair_permutation(
     domain_permutation: &[usize],
     codomain_rank: usize,
     domain_rank: usize,
-) -> SmallVec<[usize; 8]> {
+) -> Vec<usize> {
     let total_rank = codomain_rank + domain_rank;
     (0..total_rank)
         .map(|position| {

@@ -1,7 +1,6 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use smallvec::SmallVec;
 use tenet_core::{
     validate_block_storage_injective, BlockStructure, CoreError, TensorMap, TensorStorage,
 };
@@ -1587,8 +1586,7 @@ fn validate_axis_permutation(axes: &[usize], rank: usize) -> Result<(), Operatio
             rank,
         });
     }
-    let mut seen = SmallVec::<[bool; 16]>::new();
-    seen.resize(rank, false);
+    let mut seen = vec![false; rank];
     for &axis in axes {
         if axis >= rank || seen[axis] {
             return Err(OperationError::InvalidPermutation {
@@ -1835,8 +1833,8 @@ mod tests {
         let mut duplicate = reverse.clone();
         duplicate[rank - 1] = duplicate[rank - 2];
 
-        // What: validation remains correct when rank exceeds inline metadata
-        // capacity, including a duplicate discovered only at the final axis.
+        // What: validation remains correct for a duplicate discovered only at
+        // the final axis of a high-rank permutation.
         assert_eq!(validate_axis_permutation(&reverse, rank), Ok(()));
         assert_eq!(
             validate_axis_permutation(&duplicate, rank),
