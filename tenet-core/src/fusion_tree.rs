@@ -66,9 +66,22 @@ where
                 is_dual.push(leg.is_dual());
                 effective.push(leg.sector());
             }
+            let frozen_uncoupled: Arc<[SectorId]> = uncoupled.clone().into();
+            let frozen_is_dual: Arc<[bool]> = is_dual.clone().into();
+            let frozen_vertices: Arc<[MultiplicityIndex]> = std::iter::repeat_n(
+                MultiplicityIndex::ONE,
+                uncoupled.len().saturating_sub(1),
+            )
+            .collect::<Vec<_>>()
+            .into();
             for coupled in reachable_coupled_sectors(rule, &effective) {
-                let trees = collect_fusion_trees_for_coupled(
-                    rule, &uncoupled, &is_dual, &effective, coupled,
+                let trees = collect_fusion_trees_for_coupled_frozen(
+                    rule,
+                    &frozen_uncoupled,
+                    &frozen_is_dual,
+                    &frozen_vertices,
+                    &effective,
+                    coupled,
                 );
                 match index.get(&coupled) {
                     Some(&i) => grouped[i].trees.extend(trees),
@@ -205,6 +218,14 @@ where
                 is_dual.push(leg.is_dual);
                 effective.push(leg.lowered);
             }
+            let frozen_uncoupled: Arc<[SectorId]> = uncoupled.clone().into();
+            let frozen_is_dual: Arc<[bool]> = is_dual.clone().into();
+            let frozen_vertices: Arc<[MultiplicityIndex]> = std::iter::repeat_n(
+                MultiplicityIndex::ONE,
+                uncoupled.len().saturating_sub(1),
+            )
+            .collect::<Vec<_>>()
+            .into();
             try_for_each_reachable_coupled_lowered(
                 rule,
                 &effective,
@@ -224,8 +245,9 @@ where
                 };
                 try_append_fusion_trees_for_coupled_lowered(
                     rule,
-                    &uncoupled,
-                    &is_dual,
+                    &frozen_uncoupled,
+                    &frozen_is_dual,
+                    &frozen_vertices,
                     &effective,
                     coupled,
                     &mut grouped[group].trees,
@@ -310,8 +332,9 @@ where
 
 fn try_append_fusion_trees_for_coupled_lowered<R>(
     rule: &R,
-    uncoupled: &[SectorId],
-    is_dual: &[bool],
+    uncoupled: &Arc<[SectorId]>,
+    is_dual: &Arc<[bool]>,
+    vertices: &Arc<[MultiplicityIndex]>,
     effective: &[R::Sector],
     coupled: R::Sector,
     out: &mut Vec<FusionTreeKey>,
@@ -320,7 +343,6 @@ where
     R: LoweredMultiplicityFreeAlgebra,
 {
     let coupled_encoded = rule.try_encode_lowered(coupled)?;
-    let vertex_count = uncoupled.len().saturating_sub(1);
     let mut inner_rev = SmallVec::<[R::Sector; 8]>::new();
     try_visit_fusion_trees_lowered(
         rule,
@@ -332,12 +354,12 @@ where
             for &sector in inner_rev.iter().rev() {
                 innerlines.push(rule.try_encode_lowered(sector)?);
             }
-            out.push(FusionTreeKey::new(
-                uncoupled.iter().copied(),
+            out.push(FusionTreeKey::from_frozen(
+                Arc::clone(uncoupled),
                 coupled_encoded,
-                is_dual.iter().copied(),
-                innerlines,
-                std::iter::repeat_n(MultiplicityIndex::ONE, vertex_count),
+                Arc::clone(is_dual),
+                innerlines.into_vec().into(),
+                Arc::clone(vertices),
             ));
             Ok(())
         },
@@ -427,10 +449,25 @@ where
     let effective = effective_sectors(rule, &legs);
     let uncoupled: Vec<SectorId> = legs.iter().map(|leg| leg.sector()).collect();
     let is_dual: Vec<bool> = legs.iter().map(|leg| leg.is_dual()).collect();
+    let frozen_uncoupled: Arc<[SectorId]> = uncoupled.into();
+    let frozen_is_dual: Arc<[bool]> = is_dual.into();
+    let frozen_vertices: Arc<[MultiplicityIndex]> = std::iter::repeat_n(
+        MultiplicityIndex::ONE,
+        frozen_uncoupled.len().saturating_sub(1),
+    )
+    .collect::<Vec<_>>()
+    .into();
     let mut grouped = Vec::new();
     for coupled in reachable_coupled_sectors(rule, &effective) {
         let trees =
-            collect_fusion_trees_for_coupled(rule, &uncoupled, &is_dual, &effective, coupled);
+            collect_fusion_trees_for_coupled_frozen(
+                rule,
+                &frozen_uncoupled,
+                &frozen_is_dual,
+                &frozen_vertices,
+                &effective,
+                coupled,
+            );
         if !trees.is_empty() {
             grouped.push(CoupledFusionTrees { coupled, trees });
         }
@@ -480,10 +517,16 @@ where
                 is_dual.push(leg.is_dual());
                 effective.push(leg.sector());
             }
+            let frozen_uncoupled: Arc<[SectorId]> = uncoupled.clone().into();
+            let frozen_is_dual: Arc<[bool]> = is_dual.clone().into();
             let fold = rule.coupled_sector_fold(&effective);
             for &coupled in &fold.clean {
-                let trees = collect_generic_fusion_trees_for_coupled(
-                    rule, &uncoupled, &is_dual, &effective, coupled,
+                let trees = collect_generic_fusion_trees_for_coupled_frozen(
+                    rule,
+                    &frozen_uncoupled,
+                    &frozen_is_dual,
+                    &effective,
+                    coupled,
                 );
                 match index.get(&coupled) {
                     Some(&i) => grouped[i].trees.extend(trees),
@@ -634,20 +677,46 @@ fn collect_fusion_trees_for_coupled<R>(
 where
     R: MultiplicityFreeFusionRule,
 {
-    // Vertices are the trivial label for every multiplicity-free tree; a tree of
-    // `n` legs has `n - 1` vertices (and `n - 2` inner lines), or none for n < 2.
-    let vertex_count = uncoupled.len().saturating_sub(1);
+    let frozen_uncoupled = Arc::from(uncoupled);
+    let frozen_is_dual = Arc::from(is_dual);
+    let frozen_vertices = std::iter::repeat_n(
+        MultiplicityIndex::ONE,
+        uncoupled.len().saturating_sub(1),
+    )
+    .collect::<Vec<_>>()
+    .into();
+    collect_fusion_trees_for_coupled_frozen(
+        rule,
+        &frozen_uncoupled,
+        &frozen_is_dual,
+        &frozen_vertices,
+        effective,
+        coupled,
+    )
+}
+
+fn collect_fusion_trees_for_coupled_frozen<R>(
+    rule: &R,
+    uncoupled: &Arc<[SectorId]>,
+    is_dual: &Arc<[bool]>,
+    vertices: &Arc<[MultiplicityIndex]>,
+    effective: &[SectorId],
+    coupled: SectorId,
+) -> Vec<FusionTreeKey>
+where
+    R: MultiplicityFreeFusionRule,
+{
     let mut out = Vec::new();
     // `inner_rev` accumulates the inner lines outermost-first as the walk
     // descends; the stored key wants innermost-first, so emit reverses it.
     let mut inner_rev: Vec<SectorId> = Vec::new();
     visit_fusion_trees(rule, effective, coupled, &mut inner_rev, &mut |inner_rev| {
-        out.push(FusionTreeKey::new(
-            uncoupled.iter().copied(),
+        out.push(FusionTreeKey::from_frozen(
+            Arc::clone(uncoupled),
             coupled,
-            is_dual.iter().copied(),
-            inner_rev.iter().rev().copied(),
-            std::iter::repeat_n(MultiplicityIndex::ONE, vertex_count),
+            Arc::clone(is_dual),
+            inner_rev.iter().rev().copied().collect::<Vec<_>>().into(),
+            Arc::clone(vertices),
         ));
     });
     out
@@ -739,10 +808,10 @@ where
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct FusionTreeGroupKey {
-    codomain_uncoupled: SectorVec,
-    domain_uncoupled: SectorVec,
-    codomain_is_dual: DualVec,
-    domain_is_dual: DualVec,
+    codomain_uncoupled: Arc<[SectorId]>,
+    domain_uncoupled: Arc<[SectorId]>,
+    codomain_is_dual: Arc<[bool]>,
+    domain_is_dual: Arc<[bool]>,
 }
 
 impl FusionTreeGroupKey {
@@ -759,10 +828,24 @@ impl FusionTreeGroupKey {
         DomainDual: IntoIterator<Item = bool>,
     {
         Self {
-            codomain_uncoupled: codomain_uncoupled.into_iter().collect(),
-            domain_uncoupled: domain_uncoupled.into_iter().collect(),
-            codomain_is_dual: codomain_is_dual.into_iter().collect(),
-            domain_is_dual: domain_is_dual.into_iter().collect(),
+            codomain_uncoupled: codomain_uncoupled.into_iter().collect::<Vec<_>>().into(),
+            domain_uncoupled: domain_uncoupled.into_iter().collect::<Vec<_>>().into(),
+            codomain_is_dual: codomain_is_dual.into_iter().collect::<Vec<_>>().into(),
+            domain_is_dual: domain_is_dual.into_iter().collect::<Vec<_>>().into(),
+        }
+    }
+
+    fn from_frozen(
+        codomain_uncoupled: Arc<[SectorId]>,
+        domain_uncoupled: Arc<[SectorId]>,
+        codomain_is_dual: Arc<[bool]>,
+        domain_is_dual: Arc<[bool]>,
+    ) -> Self {
+        Self {
+            codomain_uncoupled,
+            domain_uncoupled,
+            codomain_is_dual,
+            domain_is_dual,
         }
     }
 
@@ -809,11 +892,11 @@ impl FusionTreeGroupKey {
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct FusionTreeKey {
-    uncoupled: SectorVec,
+    uncoupled: Arc<[SectorId]>,
     coupled: SectorId,
-    is_dual: DualVec,
-    innerlines: SectorVec,
-    vertices: MultiplicityVec,
+    is_dual: Arc<[bool]>,
+    innerlines: Arc<[SectorId]>,
+    vertices: Arc<[MultiplicityIndex]>,
 }
 
 impl FusionTreeKey {
@@ -882,11 +965,27 @@ impl FusionTreeKey {
         Vertices: IntoIterator<Item = MultiplicityIndex>,
     {
         Self {
-            uncoupled: uncoupled.into_iter().collect(),
+            uncoupled: uncoupled.into_iter().collect::<Vec<_>>().into(),
             coupled,
-            is_dual: is_dual.into_iter().collect(),
-            innerlines: innerlines.into_iter().collect(),
-            vertices: vertices.into_iter().collect(),
+            is_dual: is_dual.into_iter().collect::<Vec<_>>().into(),
+            innerlines: innerlines.into_iter().collect::<Vec<_>>().into(),
+            vertices: vertices.into_iter().collect::<Vec<_>>().into(),
+        }
+    }
+
+    fn from_frozen(
+        uncoupled: Arc<[SectorId]>,
+        coupled: SectorId,
+        is_dual: Arc<[bool]>,
+        innerlines: Arc<[SectorId]>,
+        vertices: Arc<[MultiplicityIndex]>,
+    ) -> Self {
+        Self {
+            uncoupled,
+            coupled,
+            is_dual,
+            innerlines,
+            vertices,
         }
     }
 
@@ -1052,7 +1151,41 @@ impl FusionTreeKey {
         validate_fusion_tree_for_rule_checked(rule, self)?;
         Ok(())
     }
+}
 
+const FROZEN_SLICE_CONTROL_BYTES: usize = 2 * std::mem::size_of::<usize>();
+
+fn charge_frozen_slice<T>(seen: &mut rustc_hash::FxHashSet<usize>, slice: &Arc<[T]>) -> usize {
+    let pointer = Arc::as_ptr(slice) as *const T as usize;
+    if seen.insert(pointer) {
+        FROZEN_SLICE_CONTROL_BYTES.saturating_add(
+            slice
+                .len()
+                .saturating_mul(std::mem::size_of::<T>()),
+        )
+    } else {
+        0
+    }
+}
+
+fn charge_fusion_tree_key_backings(
+    seen: &mut rustc_hash::FxHashSet<usize>,
+    tree: &FusionTreeKey,
+) -> usize {
+    charge_frozen_slice(seen, &tree.uncoupled)
+        .saturating_add(charge_frozen_slice(seen, &tree.is_dual))
+        .saturating_add(charge_frozen_slice(seen, &tree.innerlines))
+        .saturating_add(charge_frozen_slice(seen, &tree.vertices))
+}
+
+fn charge_fusion_tree_group_key_backings(
+    seen: &mut rustc_hash::FxHashSet<usize>,
+    group: &FusionTreeGroupKey,
+) -> usize {
+    charge_frozen_slice(seen, &group.codomain_uncoupled)
+        .saturating_add(charge_frozen_slice(seen, &group.domain_uncoupled))
+        .saturating_add(charge_frozen_slice(seen, &group.codomain_is_dual))
+        .saturating_add(charge_frozen_slice(seen, &group.domain_is_dual))
 }
 
 #[derive(Clone, Copy)]
@@ -7101,8 +7234,7 @@ where
             } else {
                 inner_extended_sector(tree, index - 1)?
             };
-            *tree
-                .innerlines
+            *Arc::make_mut(&mut tree.innerlines)
                 .get_mut(index - 1)
                 .ok_or(CoreError::MalformedFusionTree {
                     message: "unit braid past the first adjacent pair requires an innerline",
@@ -7112,11 +7244,11 @@ where
                     message: "unit braid past the first adjacent pair requires adjacent vertices",
                 });
             }
-            tree.vertices.swap(index - 1, index);
+            Arc::make_mut(&mut tree.vertices).swap(index - 1, index);
         }
 
-        tree.uncoupled.swap(index, index + 1);
-        tree.is_dual.swap(index, index + 1);
+        Arc::make_mut(&mut tree.uncoupled).swap(index, index + 1);
+        Arc::make_mut(&mut tree.is_dual).swap(index, index + 1);
         return Ok(rule.scalar_one());
     }
 
@@ -7145,8 +7277,8 @@ where
         } else {
             rule.r_symbol_scalar(left, right, coupled)
         };
-        tree.uncoupled.swap(index, index + 1);
-        tree.is_dual.swap(index, index + 1);
+        Arc::make_mut(&mut tree.uncoupled).swap(index, index + 1);
+        Arc::make_mut(&mut tree.is_dual).swap(index, index + 1);
         return Ok(coefficient);
     }
 
@@ -7156,8 +7288,7 @@ where
     let d = right;
     let e = inner_extended_sector(tree, index + 1)?;
     let c_prime = only_fusion_channel(rule, a, d)?;
-    *tree
-        .innerlines
+    *Arc::make_mut(&mut tree.innerlines)
         .get_mut(index - 1)
         .ok_or(CoreError::MalformedFusionTree {
             message: "non-first braid requires an innerline to update",
@@ -7172,8 +7303,8 @@ where
         let right = rule.r_symbol_scalar(a, d, c_prime);
         left * rule.scalar_conj(f_symbol * right)
     };
-    tree.uncoupled.swap(index, index + 1);
-    tree.is_dual.swap(index, index + 1);
+    Arc::make_mut(&mut tree.uncoupled).swap(index, index + 1);
+    Arc::make_mut(&mut tree.is_dual).swap(index, index + 1);
     Ok(coefficient)
 }
 
@@ -7208,8 +7339,9 @@ impl MultiplicityFreeTreeData for FusionTreeKey {
 
 #[derive(Clone, PartialEq, Eq)]
 struct MultiplicityFreeTreeFrame {
-    uncoupled: SectorVec,
-    is_dual: DualVec,
+    uncoupled: Arc<[SectorId]>,
+    is_dual: Arc<[bool]>,
+    vertices: Arc<[MultiplicityIndex]>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -7535,10 +7667,28 @@ impl MultiplicityFreeTreeLocal {
 }
 
 impl MultiplicityFreeTreeFrame {
+    fn from_frozen_externals(
+        uncoupled: Arc<[SectorId]>,
+        is_dual: Arc<[bool]>,
+    ) -> Self {
+        let vertices = std::iter::repeat_n(
+            MultiplicityIndex::ONE,
+            uncoupled.len().saturating_sub(1),
+        )
+        .collect::<Vec<_>>()
+        .into();
+        Self {
+            uncoupled,
+            is_dual,
+            vertices,
+        }
+    }
+
     fn from_tree(tree: &FusionTreeKey) -> Self {
         Self {
-            uncoupled: tree.uncoupled().iter().copied().collect(),
-            is_dual: tree.is_dual().iter().copied().collect(),
+            uncoupled: Arc::clone(&tree.uncoupled),
+            is_dual: Arc::clone(&tree.is_dual),
+            vertices: Arc::clone(&tree.vertices),
         }
     }
 
@@ -7555,18 +7705,17 @@ impl MultiplicityFreeTreeFrame {
     fn matches_tree(&self, tree: &FusionTreeKey) -> bool {
         // Why not split and compare frames: every source shares these slices,
         // while collecting rank > 8 frames would allocate once per source.
-        self.uncoupled.as_slice() == tree.uncoupled()
-            && self.is_dual.as_slice() == tree.is_dual()
+        self.uncoupled.as_ref() == tree.uncoupled()
+            && self.is_dual.as_ref() == tree.is_dual()
     }
 
     fn materialize(&self, local: MultiplicityFreeTreeLocal) -> FusionTreeKey {
-        let vertex_count = self.uncoupled.len().saturating_sub(1);
-        FusionTreeKey::new(
-            self.uncoupled.iter().copied(),
+        FusionTreeKey::from_frozen(
+            Arc::clone(&self.uncoupled),
             local.coupled,
-            self.is_dual.iter().copied(),
-            local.innerlines,
-            std::iter::repeat_n(MultiplicityIndex::ONE, vertex_count),
+            Arc::clone(&self.is_dual),
+            Arc::from(local.innerlines.as_slice()),
+            Arc::clone(&self.vertices),
         )
     }
 }
@@ -7688,15 +7837,14 @@ where
 
     let left = frame.uncoupled[index];
     let right = frame.uncoupled[index + 1];
-    // Collect into the inline `SmallVec` types (stack-resident for ≤8 legs)
-    // rather than heap `Vec`s: this is on the per-swap braid hot path.
-    let mut uncoupled = frame.uncoupled.clone();
+    let mut uncoupled = frame.uncoupled.to_vec();
     uncoupled.swap(index, index + 1);
-    let mut is_dual = frame.is_dual.clone();
+    let mut is_dual = frame.is_dual.to_vec();
     is_dual.swap(index, index + 1);
     let frame = MultiplicityFreeTreeFrame {
-        uncoupled,
-        is_dual,
+        uncoupled: uncoupled.into(),
+        is_dual: is_dual.into(),
+        vertices: Arc::clone(&frame.vertices),
     };
 
     if left != rule.vacuum()
@@ -7920,18 +8068,20 @@ where
     // "other naming convention" comment at :151.
     let left = tree.uncoupled()[index];
     let right = tree.uncoupled()[index + 1];
-    let mut uncoupled: SectorVec = tree.uncoupled().iter().copied().collect();
+    let mut uncoupled = tree.uncoupled().to_vec();
     uncoupled.swap(index, index + 1);
-    let mut is_dual: DualVec = tree.is_dual().iter().copied().collect();
+    let mut is_dual = tree.is_dual().to_vec();
     is_dual.swap(index, index + 1);
+    let uncoupled: Arc<[SectorId]> = uncoupled.into();
+    let is_dual: Arc<[bool]> = is_dual.into();
 
     // Braiding with the trivial sector: simple and always possible, coefficient
     // 1, no F/R needed (braiding_manipulations.jl:101-120). Identical bookkeeping
     // to the mult-free branch; the vertices just carry OM labels now.
     if left == rule.vacuum() || right == rule.vacuum() {
-        let mut innerlines = tree.innerlines().to_vec();
-        let mut vertices = tree.vertices().to_vec();
-        if index > 0 {
+        let (innerlines, vertices) = if index > 0 {
+            let mut innerlines = tree.innerlines().to_vec();
+            let mut vertices = tree.vertices().to_vec();
             let inner_source = if left == rule.vacuum() {
                 inner_extended_sector(tree, index + 1)?
             } else {
@@ -7948,9 +8098,18 @@ where
                 });
             }
             vertices.swap(index - 1, index);
-        }
+            (Arc::from(innerlines), Arc::from(vertices))
+        } else {
+            (Arc::clone(&tree.innerlines), Arc::clone(&tree.vertices))
+        };
         return Ok(vec![(
-            FusionTreeKey::new(uncoupled, tree.coupled(), is_dual, innerlines, vertices),
+            FusionTreeKey::from_frozen(
+                uncoupled,
+                tree.coupled(),
+                is_dual,
+                innerlines,
+                vertices,
+            ),
             R::Scalar::braid_one(),
         )]);
     }
@@ -8011,12 +8170,12 @@ where
                 })? = MultiplicityIndex::new(nu0 + 1)
                 .expect("enumerated Generic multiplicity labels are one-based");
             out.push((
-                FusionTreeKey::new(
-                    uncoupled.clone(),
+                FusionTreeKey::from_frozen(
+                    Arc::clone(&uncoupled),
                     tree.coupled(),
-                    is_dual.clone(),
-                    tree.innerlines().iter().copied(),
-                    vertices,
+                    Arc::clone(&is_dual),
+                    Arc::clone(&tree.innerlines),
+                    vertices.into_vec().into(),
                 ),
                 r,
             ));
@@ -8117,12 +8276,12 @@ where
                 vertices[index] = MultiplicityIndex::new(lambda0 + 1)
                     .expect("enumerated Generic multiplicity labels are one-based");
                 out.push((
-                    FusionTreeKey::new(
-                        uncoupled.clone(),
+                    FusionTreeKey::from_frozen(
+                        Arc::clone(&uncoupled),
                         tree.coupled(),
-                        is_dual.clone(),
-                        innerlines,
-                        vertices,
+                        Arc::clone(&is_dual),
+                        innerlines.into_vec().into(),
+                        vertices.into_vec().into(),
                     ),
                     coeff,
                 ));
@@ -8284,14 +8443,14 @@ impl PreparedMultiplicityFreeBendRight {
         let mut domain_is_dual = self.output_domain_is_dual_prefix.clone();
         domain_is_dual.push(!bent_is_dual);
         Ok(MultiplicityFreeTreePairFrame {
-            codomain: MultiplicityFreeTreeFrame {
-                uncoupled: self.output_codomain_uncoupled.clone(),
-                is_dual: self.output_codomain_is_dual.clone(),
-            },
-            domain: MultiplicityFreeTreeFrame {
-                uncoupled: domain_uncoupled,
-                is_dual: domain_is_dual,
-            },
+            codomain: MultiplicityFreeTreeFrame::from_frozen_externals(
+                self.output_codomain_uncoupled.clone().into_vec().into(),
+                self.output_codomain_is_dual.clone().into_vec().into(),
+            ),
+            domain: MultiplicityFreeTreeFrame::from_frozen_externals(
+                domain_uncoupled.into_vec().into(),
+                domain_is_dual.into_vec().into(),
+            ),
         })
     }
 
@@ -8417,8 +8576,8 @@ where
         bent_is_dual,
         output_codomain_uncoupled,
         output_codomain_is_dual,
-        output_domain_uncoupled_prefix: domain.uncoupled.clone(),
-        output_domain_is_dual_prefix: domain.is_dual.clone(),
+        output_domain_uncoupled_prefix: domain.uncoupled.iter().copied().collect(),
+        output_domain_is_dual_prefix: domain.is_dual.iter().copied().collect(),
     })
 }
 
@@ -8621,24 +8780,27 @@ where
     let domain_rank = domain.uncoupled().len();
     // Base domain data shared by every ν; only the appended vertex label varies
     // (TK :100-103, `uncoupled₂/coupled₂/isdual₂/inner₂` hoisted out of the loop).
-    let domain_uncoupled: SectorVec = domain
+    let domain_uncoupled: Arc<[SectorId]> = domain
         .uncoupled()
         .iter()
         .copied()
         .chain(std::iter::once(rule.dual(bent_sector)))
-        .collect();
-    let domain_is_dual: DualVec = domain
+        .collect::<Vec<_>>()
+        .into();
+    let domain_is_dual: Arc<[bool]> = domain
         .is_dual()
         .iter()
         .copied()
         .chain(std::iter::once(!bent_is_dual))
-        .collect();
-    let domain_innerlines: SectorVec = domain
+        .collect::<Vec<_>>()
+        .into();
+    let domain_innerlines: Arc<[SectorId]> = domain
         .innerlines()
         .iter()
         .copied()
         .chain((domain_rank > 1).then_some(coupled))
-        .collect();
+        .collect::<Vec<_>>()
+        .into();
 
     // coeff₀ = √dim(c)·(1/√dim(a)); ·conj(κ_{dual(b)}) if the bent leg is dual
     // (TK :89-92, same placement as the mult-free bend :2424-2429).
@@ -8668,11 +8830,11 @@ where
         }
         // vertices₂ = N₂>0 ? (f₂.vertices..., ν) : ()  (TK :107). ν is the
         // 1-based output vertex label (mu_index inverts this on the way back).
-        let new_domain = FusionTreeKey::new(
-            domain_uncoupled.iter().copied(),
+        let new_domain = FusionTreeKey::from_frozen(
+            Arc::clone(&domain_uncoupled),
             left_coupled,
-            domain_is_dual.iter().copied(),
-            domain_innerlines.iter().copied(),
+            Arc::clone(&domain_is_dual),
+            Arc::clone(&domain_innerlines),
             domain
                 .vertices()
                 .iter()
@@ -8682,7 +8844,9 @@ where
                         MultiplicityIndex::new(nu0 + 1)
                             .expect("enumerated Generic multiplicity labels are one-based")
                     }),
-                ),
+                )
+                .collect::<Vec<_>>()
+                .into(),
         );
         let key = FusionTreePairKey::pair(new_codomain.clone(), new_domain);
         // TK block writes `U[row, col] = coeff` (:110), so a repeated key (only
@@ -8879,6 +9043,25 @@ fn collect_generic_fusion_trees_for_coupled<R>(
 where
     R: FusionRule,
 {
+    collect_generic_fusion_trees_for_coupled_frozen(
+        rule,
+        &Arc::from(uncoupled),
+        &Arc::from(is_dual),
+        effective,
+        coupled,
+    )
+}
+
+fn collect_generic_fusion_trees_for_coupled_frozen<R>(
+    rule: &R,
+    uncoupled: &Arc<[SectorId]>,
+    is_dual: &Arc<[bool]>,
+    effective: &[SectorId],
+    coupled: SectorId,
+) -> Vec<FusionTreeKey>
+where
+    R: FusionRule,
+{
     let mut out = Vec::new();
     // `inner_rev` / `vtx_rev` accumulate outermost-first as the walk descends
     // (the top vertex/innerline is pushed first); the stored key wants
@@ -8894,15 +9077,20 @@ where
         &mut vtx_rev,
         &mut |inner_rev, vtx_rev| {
             out.push(
-                FusionTreeKey::new(
-                    uncoupled.iter().copied(),
+                FusionTreeKey::from_frozen(
+                    Arc::clone(uncoupled),
                     coupled,
-                    is_dual.iter().copied(),
-                    inner_rev.iter().rev().copied(),
-                    vtx_rev.iter().rev().map(|&label| {
-                        MultiplicityIndex::new(label)
-                            .expect("enumerated Generic multiplicity labels are one-based")
-                    }),
+                    Arc::clone(is_dual),
+                    inner_rev.iter().rev().copied().collect::<Vec<_>>().into(),
+                    vtx_rev
+                        .iter()
+                        .rev()
+                        .map(|&label| {
+                            MultiplicityIndex::new(label)
+                                .expect("enumerated Generic multiplicity labels are one-based")
+                        })
+                        .collect::<Vec<_>>()
+                        .into(),
                 )
             );
         },
@@ -9171,15 +9359,17 @@ where
     let coupled = tree.coupled();
     let tail_uncoupled = &tree.uncoupled()[1..];
     let tail_is_dual = &tree.is_dual()[1..];
+    let frozen_tail_uncoupled: Arc<[SectorId]> = Arc::from(tail_uncoupled);
+    let frozen_tail_is_dual: Arc<[bool]> = Arc::from(tail_is_dual);
     let mut terms = Vec::new();
     // `fusion_channels_in_table`: same clean-sector argument as the braid
     // above — frontier tail_coupled candidates are dead on clean trees.
     for tail_coupled in rule.fusion_channels_in_table(rule.dual(first), coupled) {
         let tail_effective = effective_sectors_for_uncoupled(rule, tail_uncoupled, tail_is_dual)?;
-        for tail_tree in collect_generic_fusion_trees_for_coupled(
+        for tail_tree in collect_generic_fusion_trees_for_coupled_frozen(
             rule,
-            tail_uncoupled,
-            tail_is_dual,
+            &frozen_tail_uncoupled,
+            &frozen_tail_is_dual,
             &tail_effective,
             tail_coupled,
         ) {
@@ -9959,18 +10149,18 @@ where
                 message: "codomain tree is missing the first duality flag",
             })?;
     let output_frame = MultiplicityFreeTreePairFrame {
-        codomain: MultiplicityFreeTreeFrame {
-            uncoupled: frame.codomain.uncoupled[1..].iter().copied().collect(),
-            is_dual: frame.codomain.is_dual[1..].iter().copied().collect(),
-        },
-        domain: MultiplicityFreeTreeFrame {
-            uncoupled: std::iter::once(rule.dual(first))
+        codomain: MultiplicityFreeTreeFrame::from_frozen_externals(
+            frame.codomain.uncoupled[1..].iter().copied().collect(),
+            frame.codomain.is_dual[1..].iter().copied().collect(),
+        ),
+        domain: MultiplicityFreeTreeFrame::from_frozen_externals(
+            std::iter::once(rule.dual(first))
                 .chain(frame.domain.uncoupled.iter().copied())
                 .collect(),
-            is_dual: std::iter::once(!first_is_dual)
+            std::iter::once(!first_is_dual)
                 .chain(frame.domain.is_dual.iter().copied())
                 .collect(),
-        },
+        ),
     };
     Ok(PreparedMultiplicityFreeFoldRight {
         first,
@@ -10368,8 +10558,8 @@ where
     if source_frame.uncoupled.len() != source_frame.is_dual.len()
         || output_frame.uncoupled.len() != output_frame.is_dual.len()
         || output_frame.uncoupled.len() != source_frame.uncoupled.len() + 1
-        || output_frame.uncoupled[1..] != *source_frame.uncoupled.as_slice()
-        || output_frame.is_dual[1..] != *source_frame.is_dual.as_slice()
+        || output_frame.uncoupled[1..] != *source_frame.uncoupled.as_ref()
+        || output_frame.is_dual[1..] != *source_frame.is_dual.as_ref()
     {
         return Err(CoreError::MalformedFusionTree {
             message: "multi_Fmove inverse requires one leading external sector",
@@ -10428,10 +10618,10 @@ where
 {
     let (frame, local) = project_multiplicity_free_tree(rule, tree)?;
     let terms = multiplicity_free_multi_fmove_local(rule, &frame, &local)?;
-    let output_frame = MultiplicityFreeTreeFrame {
-        uncoupled: frame.uncoupled[1..].iter().copied().collect(),
-        is_dual: frame.is_dual[1..].iter().copied().collect(),
-    };
+    let output_frame = MultiplicityFreeTreeFrame::from_frozen_externals(
+        frame.uncoupled[1..].iter().copied().collect(),
+        frame.is_dual[1..].iter().copied().collect(),
+    );
     Ok(terms
         .into_iter()
         .map(|(local, coefficient)| (output_frame.materialize(local), coefficient))
@@ -10456,10 +10646,10 @@ where
     let mut is_dual = Vec::with_capacity(tree.is_dual().len() + 1);
     is_dual.push(leading_is_dual);
     is_dual.extend_from_slice(tree.is_dual());
-    let output_frame = MultiplicityFreeTreeFrame {
-        uncoupled: uncoupled.into_iter().collect(),
-        is_dual: is_dual.into_iter().collect(),
-    };
+    let output_frame = MultiplicityFreeTreeFrame::from_frozen_externals(
+        uncoupled.into_iter().collect(),
+        is_dual.into_iter().collect(),
+    );
     Ok(multiplicity_free_multi_fmove_inv_local(
         rule,
         coupled,

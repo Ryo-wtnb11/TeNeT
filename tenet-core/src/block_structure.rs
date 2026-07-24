@@ -188,11 +188,11 @@ impl FusionTreePairKey {
     }
 
     pub fn group_key(&self) -> FusionTreeGroupKey {
-        FusionTreeGroupKey::new(
-            self.codomain_tree.uncoupled().iter().copied(),
-            self.domain_tree.uncoupled().iter().copied(),
-            self.codomain_tree.is_dual().iter().copied(),
-            self.domain_tree.is_dual().iter().copied(),
+        FusionTreeGroupKey::from_frozen(
+            Arc::clone(&self.codomain_tree.uncoupled),
+            Arc::clone(&self.domain_tree.uncoupled),
+            Arc::clone(&self.codomain_tree.is_dual),
+            Arc::clone(&self.domain_tree.is_dual),
         )
     }
 
@@ -1208,19 +1208,21 @@ impl BlockStructureContent {
     }
 
     pub(crate) fn charged_retained_bytes(&self) -> usize {
-        fn key_bytes(key: &BlockKey) -> usize {
+        fn key_bytes(key: &BlockKey, seen: &mut rustc_hash::FxHashSet<usize>) -> usize {
             match key {
                 BlockKey::Dense => 0,
                 BlockKey::Opaque(key) => spilled_smallvec_heap_bytes(&key.words),
                 BlockKey::FusionTree(pair) => {
-                    charged_fusion_tree_key_heap_bytes(pair.codomain_tree())
-                        .saturating_add(charged_fusion_tree_key_heap_bytes(pair.domain_tree()))
+                    charge_fusion_tree_key_backings(seen, pair.codomain_tree()).saturating_add(
+                        charge_fusion_tree_key_backings(seen, pair.domain_tree()),
+                    )
                 }
             }
         }
 
+        let mut frozen_backings = rustc_hash::FxHashSet::default();
         let sector_blocks = self.sector.blocks.iter().fold(0usize, |bytes, block| {
-            bytes.saturating_add(key_bytes(block.key()))
+            bytes.saturating_add(key_bytes(block.key(), &mut frozen_backings))
         });
         let groups = self
             .sector
@@ -1229,17 +1231,9 @@ impl BlockStructureContent {
             .fold(0usize, |bytes, group| {
                 bytes
                     .saturating_add(spilled_smallvec_heap_bytes(&group.block_indices))
-                    .saturating_add(spilled_smallvec_heap_bytes(
-                        &group.group_key.codomain_uncoupled,
-                    ))
-                    .saturating_add(spilled_smallvec_heap_bytes(
-                        &group.group_key.domain_uncoupled,
-                    ))
-                    .saturating_add(spilled_smallvec_heap_bytes(
-                        &group.group_key.codomain_is_dual,
-                    ))
-                    .saturating_add(spilled_smallvec_heap_bytes(
-                        &group.group_key.domain_is_dual,
+                    .saturating_add(charge_fusion_tree_group_key_backings(
+                        &mut frozen_backings,
+                        &group.group_key,
                     ))
             });
         let compact_lookup = self.sector.compact_lookup.as_ref().map_or(0, |lookup| {
@@ -1252,7 +1246,7 @@ impl BlockStructureContent {
         });
         let copied_blocks = self.blocks.iter().fold(0usize, |bytes, block| {
             bytes
-                .saturating_add(key_bytes(&block.key))
+                .saturating_add(key_bytes(&block.key, &mut frozen_backings))
                 .saturating_add(spilled_smallvec_heap_bytes(&block.shape))
                 .saturating_add(spilled_smallvec_heap_bytes(&block.strides))
         });
@@ -1509,14 +1503,8 @@ where
     }
 }
 
-fn charged_fusion_tree_key_heap_bytes(tree: &FusionTreeKey) -> usize {
-    spilled_smallvec_heap_bytes(&tree.uncoupled)
-        .saturating_add(spilled_smallvec_heap_bytes(&tree.is_dual))
-        .saturating_add(spilled_smallvec_heap_bytes(&tree.innerlines))
-        .saturating_add(spilled_smallvec_heap_bytes(&tree.vertices))
-}
-
 fn charged_block_structure_intern_key_bytes(key: &BlockStructureInternKey) -> usize {
+    let mut frozen_backings = rustc_hash::FxHashSet::default();
     key.blocks
         .iter()
         .fold(
@@ -1532,10 +1520,14 @@ fn charged_block_structure_intern_key_bytes(key: &BlockStructureInternKey) -> us
                 let key_heap = match &block.key {
                     BlockKey::Dense => 0,
                     BlockKey::Opaque(key) => spilled_smallvec_heap_bytes(&key.words),
-                    BlockKey::FusionTree(pair) => charged_fusion_tree_key_heap_bytes(
+                    BlockKey::FusionTree(pair) => charge_fusion_tree_key_backings(
+                        &mut frozen_backings,
                         pair.codomain_tree(),
                     )
-                    .saturating_add(charged_fusion_tree_key_heap_bytes(pair.domain_tree())),
+                    .saturating_add(charge_fusion_tree_key_backings(
+                        &mut frozen_backings,
+                        pair.domain_tree(),
+                    )),
                 };
                 charged
                     .saturating_add(key_heap)

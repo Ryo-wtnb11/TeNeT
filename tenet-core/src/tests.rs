@@ -13542,6 +13542,107 @@ mod tests {
     }
 
     #[test]
+    fn frozen_fusion_tree_identity_and_group_projection_are_content_based() {
+        // What: independently allocated equal keys compare and hash by content,
+        // while group projection reuses the pair's external owners.
+        let a = SectorId::new(ToyOmRule::A);
+        let c = SectorId::new(ToyOmRule::C);
+        let first = FusionTreeKey::new(
+            [a, a],
+            c,
+            [false, true],
+            [],
+            [MultiplicityIndex::ONE],
+        );
+        let second = FusionTreeKey::new(
+            [a, a],
+            c,
+            [false, true],
+            [],
+            [MultiplicityIndex::ONE],
+        );
+        assert!(!Arc::ptr_eq(&first.uncoupled, &second.uncoupled));
+        assert_eq!(first, second);
+        assert_eq!(first.cmp(&second), std::cmp::Ordering::Equal);
+
+        let mut cache = std::collections::HashMap::new();
+        cache.insert(first.clone(), 7usize);
+        assert_eq!(cache.get(&second), Some(&7));
+
+        let pair = FusionTreePairKey::pair(first, second);
+        let group = pair.group_key();
+        assert!(Arc::ptr_eq(
+            &group.codomain_uncoupled,
+            &pair.codomain_tree.uncoupled
+        ));
+        assert!(Arc::ptr_eq(
+            &group.domain_uncoupled,
+            &pair.domain_tree.uncoupled
+        ));
+        assert!(Arc::ptr_eq(
+            &group.codomain_is_dual,
+            &pair.codomain_tree.is_dual
+        ));
+        assert!(Arc::ptr_eq(
+            &group.domain_is_dual,
+            &pair.domain_tree.is_dual
+        ));
+    }
+
+    #[test]
+    fn frozen_generic_enumeration_shares_externals_and_charges_each_owner_once() {
+        // What: Generic fanout shares external fields; retained-byte accounting
+        // deduplicates one owner's shared backing but charges independently
+        // allocated equal-content backing separately.
+        let rule = ToyOmRule;
+        let a = SectorId::new(ToyOmRule::A);
+        let c = SectorId::new(ToyOmRule::C);
+        let trees = collect_generic_fusion_trees_for_coupled(
+            &rule,
+            &[a, a],
+            &[false, false],
+            &[a, a],
+            c,
+        );
+        assert!(trees.len() > 1);
+        assert!(trees
+            .windows(2)
+            .all(|trees| Arc::ptr_eq(&trees[0].uncoupled, &trees[1].uncoupled)));
+        assert!(trees
+            .windows(2)
+            .all(|trees| Arc::ptr_eq(&trees[0].is_dual, &trees[1].is_dual)));
+
+        let independent = FusionTreeKey::new(
+            trees[0].uncoupled().iter().copied(),
+            trees[0].coupled(),
+            trees[0].is_dual().iter().copied(),
+            trees[0].innerlines().iter().copied(),
+            trees[0].vertices().iter().copied(),
+        );
+        let mut shared_seen = rustc_hash::FxHashSet::default();
+        let shared_charge = charge_fusion_tree_key_backings(&mut shared_seen, &trees[0])
+            .saturating_add(charge_fusion_tree_key_backings(
+                &mut shared_seen,
+                &trees[0],
+            ));
+        let mut independent_seen = rustc_hash::FxHashSet::default();
+        let independent_charge =
+            charge_fusion_tree_key_backings(&mut independent_seen, &trees[0])
+                .saturating_add(charge_fusion_tree_key_backings(
+                    &mut independent_seen,
+                    &independent,
+                ));
+        assert_eq!(
+            shared_charge,
+            charge_fusion_tree_key_backings(
+                &mut rustc_hash::FxHashSet::default(),
+                &trees[0]
+            )
+        );
+        assert!(independent_charge > shared_charge);
+    }
+
+    #[test]
     fn tree_pair_axis_validation_remains_linear_above_inline_bitset_capacity() {
         let rule = Z2FusionRule;
         let rank = 129;
@@ -15035,6 +15136,17 @@ mod tests {
             let dom = FusionTreeKey::new([s], s, [false], [], []);
             let pair = FusionTreePairKey::pair(cod, dom);
             let out = generic_bendright_tree_pair(&rule, &pair).unwrap();
+            // What: ν fanout owns only its changed vertex labels; the three
+            // unchanged domain fields share one frozen owner.
+            assert_eq!(out.len(), 2);
+            for terms in out.windows(2) {
+                let left = terms[0].0.domain_tree();
+                let right = terms[1].0.domain_tree();
+                assert!(Arc::ptr_eq(&left.uncoupled, &right.uncoupled));
+                assert!(Arc::ptr_eq(&left.is_dual, &right.is_dual));
+                assert!(Arc::ptr_eq(&left.innerlines, &right.innerlines));
+                assert!(!Arc::ptr_eq(&left.vertices, &right.vertices));
+            }
             // Collect coeff keyed by output domain vertex label (=ν+1).
             let mut got = [0.0f64; 2];
             for (key, coeff) in &out {
@@ -15302,6 +15414,16 @@ mod tests {
         for (inner, v1, v2, outputs) in table {
             let out = generic_multi_fmove_tree(&rule, &a4f_rank3(inner, v1, v2)).unwrap();
             assert_eq!(out.len(), 5, "in({inner},{v1},{v2}): 5 tails");
+            // What: every tail-coupled candidate reuses the same frozen
+            // external runtime-rank identity.
+            assert!(out.windows(2).all(|terms| Arc::ptr_eq(
+                &terms[0].0.uncoupled,
+                &terms[1].0.uncoupled
+            )));
+            assert!(out.windows(2).all(|terms| Arc::ptr_eq(
+                &terms[0].0.is_dual,
+                &terms[1].0.is_dual
+            )));
             for (coupled, vtx, want) in outputs {
                 let got = find_coeff(&out, coupled, vtx);
                 assert_vec(&got, &want, &format!("in({inner},{v1},{v2}) out(c={coupled},v={vtx})"));
