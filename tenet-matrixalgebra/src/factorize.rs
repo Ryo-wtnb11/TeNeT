@@ -1,8 +1,6 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
-use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -1693,89 +1691,13 @@ pub(crate) struct CompactFactorPlan {
     routes: Arc<[CompactFactorRoute]>,
 }
 
-const COMPACT_FACTOR_PLAN_CACHE_CAP: usize = 1024;
-
-// Why not take the global LRU mutex on every warm factorization: concurrent
-// sector factorizations would serialize on metadata lookup. Why not a
-// per-thread map: one strong front entry bounds residency per worker.
-thread_local! {
-    static COMPACT_FACTOR_PLAN_FRONT: RefCell<Option<(
-        u64,
-        ValidatedDynamicFusionLayout,
-        Arc<CompactFactorPlan>,
-    )>> = const { RefCell::new(None) };
-}
-
-struct CompactFactorPlanCache {
-    entries: Mutex<lru::LruCache<ValidatedDynamicFusionLayout, Arc<CompactFactorPlan>>>,
-}
-
-impl Default for CompactFactorPlanCache {
-    fn default() -> Self {
-        Self {
-            entries: Mutex::new(lru::LruCache::new(
-                NonZeroUsize::new(COMPACT_FACTOR_PLAN_CACHE_CAP).unwrap(),
-            )),
-        }
-    }
-}
-
-fn compact_factor_plan_cache() -> (u64, Arc<CompactFactorPlanCache>) {
-    tenet_tensors::registered_operation_cache::<CompactFactorPlanCache>()
-}
-
 fn compact_factor_plan<R>(
     input: &BoundDynamicFusionMapSpace<R>,
 ) -> Result<Option<Arc<CompactFactorPlan>>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    let source_layout = input.validated_layout();
-    let current_epoch = tenet_tensors::operation_cache_reset_epoch();
-    if let Some(plan) = COMPACT_FACTOR_PLAN_FRONT.with_borrow_mut(|front| {
-        if front
-            .as_ref()
-            .is_some_and(|(epoch, _, _)| *epoch != current_epoch)
-        {
-            *front = None;
-        }
-        front.as_ref().and_then(|(epoch, layout, plan)| {
-            (*epoch == current_epoch && layout == &source_layout).then(|| Arc::clone(plan))
-        })
-    }) {
-        return Ok(Some(plan));
-    }
-    let (cache_epoch, cache) = compact_factor_plan_cache();
-    if let Ok(mut entries) = cache.entries.lock() {
-        if let Some(plan) = entries.get(&source_layout) {
-            let plan = Arc::clone(plan);
-            COMPACT_FACTOR_PLAN_FRONT.with_borrow_mut(|front| {
-                *front = Some((cache_epoch, source_layout, Arc::clone(&plan)));
-            });
-            return Ok(Some(plan));
-        }
-    }
-
-    let Some(built) = build_compact_factor_plan(input, source_layout.clone())? else {
-        return Ok(None);
-    };
-    if let Ok(mut entries) = cache.entries.lock() {
-        if let Some(plan) = entries.get(&source_layout) {
-            let plan = Arc::clone(plan);
-            COMPACT_FACTOR_PLAN_FRONT.with_borrow_mut(|front| {
-                *front = Some((cache_epoch, source_layout, Arc::clone(&plan)));
-            });
-            return Ok(Some(plan));
-        }
-        entries.put(source_layout.clone(), Arc::clone(&built));
-    }
-    // Why not make reset a quiescence barrier: a call already holding this
-    // immutable plan may finish safely. Its epoch makes the next call discard
-    // the front entry and resolve the reset generation instead.
-    COMPACT_FACTOR_PLAN_FRONT.with_borrow_mut(|front| {
-        *front = Some((cache_epoch, source_layout, Arc::clone(&built)));
-    });
-    Ok(Some(built))
+    build_compact_factor_plan(input, input.validated_layout())
 }
 
 fn build_compact_factor_plan<R>(
