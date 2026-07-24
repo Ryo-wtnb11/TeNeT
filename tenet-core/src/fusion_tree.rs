@@ -101,6 +101,185 @@ where
     grouped
 }
 
+/// Checked sibling of [`fusion_trees_by_coupled_for_space`] for external
+/// multiplicity-free providers.
+///
+/// It enumerates the identical [`CoupledFusionTrees`] set and canonical order
+/// using only the fallible [`CheckedFusionAlgebra`] primitives, returning the
+/// exact [`FusionAlgebraError`] instead of relying on the infallible hot-path
+/// methods, which may panic or overflow on an unrepresentable sector produced
+/// by an external provider.
+///
+/// Why a sibling and not a shared enumeration core: the built-in lowered fast
+/// path decodes each sector to an associated type and the infallible path calls
+/// `fusion_channels`/`nsymbol` directly; threading either through a shared
+/// generic core would perturb their output ordering or dispatch. This walk is
+/// structurally identical to the infallible enumerator, so its keys and order
+/// match byte-for-byte on any provider whose checked methods agree with their
+/// infallible counterparts.
+fn try_fusion_trees_by_coupled_for_space_checked<R>(
+    rule: &R,
+    space: &FusionProductSpace,
+) -> Result<Vec<CoupledFusionTrees>, FusionAlgebraError>
+where
+    R: CheckedFusionAlgebra,
+{
+    let mut grouped = Vec::<CoupledFusionTrees>::new();
+    let mut index: FxHashMap<SectorId, usize> = FxHashMap::default();
+    let mut uncoupled = Vec::with_capacity(space.len());
+    let mut is_dual = Vec::with_capacity(space.len());
+    let mut effective = Vec::with_capacity(space.len());
+    space.try_visit_selected_leg_tuples(&mut |tuple| {
+        uncoupled.clear();
+        is_dual.clear();
+        effective.clear();
+        for leg in tuple {
+            uncoupled.push(leg.sector());
+            is_dual.push(leg.is_dual());
+            effective.push(leg.sector());
+        }
+        let frozen_uncoupled: Arc<[SectorId]> = uncoupled.clone().into();
+        let frozen_is_dual: Arc<[bool]> = is_dual.clone().into();
+        let frozen_vertices: Arc<[MultiplicityIndex]> =
+            std::iter::repeat_n(MultiplicityIndex::ONE, uncoupled.len().saturating_sub(1))
+                .collect::<Vec<_>>()
+                .into();
+        for coupled in try_reachable_coupled_sectors_checked(rule, &effective)? {
+            let trees = try_collect_fusion_trees_for_coupled_frozen_checked(
+                rule,
+                &frozen_uncoupled,
+                &frozen_is_dual,
+                &frozen_vertices,
+                &effective,
+                coupled,
+            )?;
+            match index.get(&coupled) {
+                Some(&i) => grouped[i].trees.extend(trees),
+                None => {
+                    index.insert(coupled, grouped.len());
+                    grouped.push(CoupledFusionTrees { coupled, trees });
+                }
+            }
+        }
+        Ok::<(), FusionAlgebraError>(())
+    })?;
+    grouped.sort_by_key(|group| group.coupled);
+    Ok(grouped)
+}
+
+fn try_reachable_coupled_sectors_checked<R>(
+    rule: &R,
+    effective: &[SectorId],
+) -> Result<Vec<SectorId>, FusionAlgebraError>
+where
+    R: CheckedFusionAlgebra,
+{
+    let mut acc: Vec<SectorId> = match effective.first() {
+        None => vec![rule.vacuum()],
+        Some(&first) => vec![first],
+    };
+    for &last in effective.iter().skip(1) {
+        let mut next = Vec::new();
+        for &front in &acc {
+            next.extend(rule.try_fusion_channels(front, last)?);
+        }
+        next.sort_unstable();
+        next.dedup();
+        acc = next;
+    }
+    acc.sort_unstable();
+    acc.dedup();
+    Ok(acc)
+}
+
+fn try_collect_fusion_trees_for_coupled_frozen_checked<R>(
+    rule: &R,
+    uncoupled: &Arc<[SectorId]>,
+    is_dual: &Arc<[bool]>,
+    vertices: &Arc<[MultiplicityIndex]>,
+    effective: &[SectorId],
+    coupled: SectorId,
+) -> Result<Vec<FusionTreeKey>, FusionAlgebraError>
+where
+    R: CheckedFusionAlgebra,
+{
+    let mut out = Vec::new();
+    // `inner_rev` accumulates the inner lines outermost-first as the walk
+    // descends; the stored key wants innermost-first, so emit reverses it.
+    let mut inner_rev: Vec<SectorId> = Vec::new();
+    try_visit_fusion_trees_checked(
+        rule,
+        effective,
+        coupled,
+        &mut inner_rev,
+        &mut |inner_rev| {
+            out.push(FusionTreeKey::from_frozen(
+                Arc::clone(uncoupled),
+                coupled,
+                Arc::clone(is_dual),
+                inner_rev.iter().rev().copied().collect::<Vec<_>>().into(),
+                Arc::clone(vertices),
+            ));
+            Ok(())
+        },
+    )?;
+    Ok(out)
+}
+
+fn try_visit_fusion_trees_checked<R, F>(
+    rule: &R,
+    effective: &[SectorId],
+    coupled: SectorId,
+    inner_rev: &mut Vec<SectorId>,
+    emit: &mut F,
+) -> Result<(), FusionAlgebraError>
+where
+    R: CheckedFusionAlgebra,
+    F: FnMut(&[SectorId]) -> Result<(), FusionAlgebraError>,
+{
+    match effective.len() {
+        0 => {
+            if coupled == rule.vacuum() {
+                emit(inner_rev)?;
+            }
+        }
+        1 => {
+            if effective[0] == coupled {
+                emit(inner_rev)?;
+            }
+        }
+        2 => {
+            if rule.try_nsymbol(effective[0], effective[1], coupled)? != 0 {
+                emit(inner_rev)?;
+            }
+        }
+        _ => {
+            let last = effective[effective.len() - 1];
+            let front_effective = &effective[..effective.len() - 1];
+            let dual_last = rule.try_dual_sector(last)?;
+            // Inner line `a` ranges over `coupled ⊗ dual(last)`; `Nsymbol(a,
+            // last, coupled)` is the last vertex. Identical to the infallible
+            // `visit_fusion_trees` walk so the emitted key order matches.
+            for front_coupled in rule.try_fusion_channels(coupled, dual_last)? {
+                if rule.try_nsymbol(front_coupled, last, coupled)? == 0 {
+                    continue;
+                }
+                inner_rev.push(front_coupled);
+                let result = try_visit_fusion_trees_checked(
+                    rule,
+                    front_effective,
+                    front_coupled,
+                    inner_rev,
+                    emit,
+                );
+                inner_rev.pop();
+                result?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 struct LoweredFusionTreeLeg<S> {
     encoded: SectorId,

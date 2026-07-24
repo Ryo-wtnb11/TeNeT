@@ -19282,4 +19282,163 @@ mod tests {
                 if *error == FusionAlgebraError::InvalidSector { sector: invalid }
         ));
     }
+
+    #[derive(Clone, Copy)]
+    enum CheckedFailStage {
+        Dual,
+        Channels,
+        Nsymbol,
+    }
+
+    // Trivial external multiplicity-free algebra (every product fuses to the
+    // vacuum) that can be told to fail exactly one checked primitive, so the
+    // checked enumeration transaction can be probed one fallible stage at a time.
+    #[derive(Clone, Copy)]
+    struct CheckedFailRule {
+        fail: CheckedFailStage,
+    }
+
+    impl FusionRule for CheckedFailRule {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+        fn fusion_channels(&self, _left: SectorId, _right: SectorId) -> SectorVec {
+            core::iter::once(SectorId::new(0)).collect()
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for CheckedFailRule {}
+
+    impl CheckedFusionAlgebra for CheckedFailRule {
+        fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+            if matches!(self.fail, CheckedFailStage::Dual) {
+                return Err(FusionAlgebraError::InvalidSector { sector });
+            }
+            Ok(sector)
+        }
+        fn try_fusion_channels(
+            &self,
+            left: SectorId,
+            right: SectorId,
+        ) -> Result<SectorVec, FusionAlgebraError> {
+            if matches!(self.fail, CheckedFailStage::Channels) {
+                return Err(FusionAlgebraError::FusionNotRepresentable { left, right });
+            }
+            Ok(self.fusion_channels(left, right))
+        }
+        fn try_nsymbol(
+            &self,
+            left: SectorId,
+            right: SectorId,
+            coupled: SectorId,
+        ) -> Result<usize, FusionAlgebraError> {
+            if matches!(self.fail, CheckedFailStage::Nsymbol) {
+                return Err(FusionAlgebraError::MultiplicityOverflow {
+                    left,
+                    right,
+                    coupled,
+                });
+            }
+            Ok(self.nsymbol(left, right, coupled))
+        }
+    }
+
+    #[test]
+    fn checked_enumeration_matches_infallible_for_simple_and_unique_rules() {
+        // What: the checked SectorId enumerator reproduces the exact
+        // CoupledFusionTrees set, order, and prepared layout keys of the
+        // infallible hot path for a Simple (SU2) and a Unique (U1) provider —
+        // the TensorKit tree-grid oracle plus a byte/order-identity regression.
+        let _guard = crate::test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let su2_space = FusionTreeHomSpace::from_sectors(
+            [(su2(1), 2), (su2(1), 2)],
+            [(su2(1), 2), (su2(1), 2)],
+        );
+        for space in [su2_space.codomain(), su2_space.domain()] {
+            assert_eq!(
+                try_fusion_trees_by_coupled_for_space_checked(&SU2FusionRule, space).unwrap(),
+                fusion_trees_by_coupled_for_space(&SU2FusionRule, space),
+            );
+        }
+        // Multi-block: SU2 spin-1/2 x spin-1/2 couples to spin 0 and spin 1.
+        assert!(
+            try_fusion_trees_by_coupled_for_space_checked(&SU2FusionRule, su2_space.codomain())
+                .unwrap()
+                .len()
+                >= 2
+        );
+
+        reset_core_intern_tables();
+        let checked = su2_space
+            .prepare_fusion_tree_layout_checked(&SU2FusionRule)
+            .unwrap();
+        let infallible = su2_space.prepare_fusion_tree_layout(&SU2FusionRule);
+        assert_eq!(checked.keys(), infallible.keys());
+
+        let u1_space = FusionTreeHomSpace::from_sectors(
+            [(U1Irrep::new(1).sector_id(), 1), (U1Irrep::new(-1).sector_id(), 1)],
+            [(U1Irrep::new(0).sector_id(), 1)],
+        );
+        for space in [u1_space.codomain(), u1_space.domain()] {
+            assert_eq!(
+                try_fusion_trees_by_coupled_for_space_checked(&U1FusionRule, space).unwrap(),
+                fusion_trees_by_coupled_for_space(&U1FusionRule, space),
+            );
+        }
+    }
+
+    #[test]
+    fn checked_prepare_surfaces_each_stage_failure_without_publishing() {
+        // What: an injected failure in dual, channels, or nsymbol returns the
+        // exact typed error and leaves the layout cache statistics untouched
+        // (no layout id issued, no admission).
+        let _guard = crate::test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let homspace = FusionTreeHomSpace::from_sector_ids([(0, 1), (1, 1)], []);
+
+        for (stage, expected) in [
+            (
+                CheckedFailStage::Dual,
+                FusionAlgebraError::InvalidSector {
+                    sector: SectorId::new(0),
+                },
+            ),
+            (
+                CheckedFailStage::Channels,
+                FusionAlgebraError::FusionNotRepresentable {
+                    left: SectorId::new(0),
+                    right: SectorId::new(1),
+                },
+            ),
+            (
+                CheckedFailStage::Nsymbol,
+                FusionAlgebraError::MultiplicityOverflow {
+                    left: SectorId::new(0),
+                    right: SectorId::new(1),
+                    coupled: SectorId::new(0),
+                },
+            ),
+        ] {
+            reset_core_intern_tables();
+            reset_fusion_tree_layout_probe_side_effect_calls();
+            let error = homspace
+                .prepare_fusion_tree_layout_checked(&CheckedFailRule { fail: stage })
+                .unwrap_err();
+            assert_eq!(error, expected);
+            assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
+        }
+    }
 }
