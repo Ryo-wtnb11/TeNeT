@@ -19,11 +19,12 @@ use num_complex::Complex64;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 pub use tenet_sectors::{
-    product_sector, BraidingStyleKind, CheckedFusionAlgebra, CoupledSectorFold,
-    FermionParityFusionRule, FibonacciFusionRule, FusionAlgebraError, FusionRule, FusionStyleKind,
-    Fz2SectorLayout, GenericBraidScalar, GenericFArray, GenericFusionSymbols, GenericRMatrix,
-    GenericRigidSymbols, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, PackedProductCodec, PackedSectorLayout, ProductSector,
+    product_fusion_rule, product_fusion_rule_with_codec, product_sector, BraidingStyleKind,
+    CheckedFusionAlgebra, CoupledSectorFold, FermionParityFusionRule, FibonacciFusionRule,
+    FusionAlgebraError, FusionRule, FusionStyleKind, Fz2SectorLayout, GenericBraidScalar,
+    GenericFArray, GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols,
+    MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
+    PackedProductCodec, PackedSectorLayout, ProductFusionRule, ProductFusionRuleExt, ProductSector,
     ProductSectorCodec, ProductSectorCodecError, ProductSectorComponent, ProductSectorLayout,
     RuleIdentity, SectorId, SectorVec, Su2SectorLayout, SymbolShapeError, TensorKitProductCodec,
     U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep,

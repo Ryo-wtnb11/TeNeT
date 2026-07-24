@@ -3,8 +3,9 @@ use std::hash::Hash;
 
 use crate::{
     FermionParityFusionRule, FibonacciFusionRule, FusionAlgebraError, FusionTreePairKey,
-    MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, ProductSectorCodecError, SectorId,
-    U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
+    MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, PackedProductCodec,
+    PackedSectorLayout, ProductFusionRule, ProductSector, ProductSectorCodec,
+    ProductSectorCodecError, SectorId, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
 };
 
 // Why not tenet-sectors: these traits and errors define FusionTree lowering
@@ -464,5 +465,119 @@ mod tests {
         );
         assert_eq!(error.clone().into_checked_fusion_algebra(), cause);
         assert_eq!(error.into_fusion_algebra(), Ok(cause));
+    }
+}
+impl<LeftRule, RightRule, LeftLayout, RightLayout> lowered_multiplicity_free_sealed::Sealed
+    for ProductFusionRule<LeftRule, RightRule, PackedProductCodec<LeftLayout, RightLayout>>
+where
+    LeftRule: LoweredMultiplicityFreeAlgebra,
+    RightRule: LoweredMultiplicityFreeAlgebra,
+    LeftLayout: PackedSectorLayout + 'static,
+    RightLayout: PackedSectorLayout + 'static,
+{
+}
+
+impl<LeftRule, RightRule, LeftLayout, RightLayout> LoweredMultiplicityFreeAlgebra
+    for ProductFusionRule<LeftRule, RightRule, PackedProductCodec<LeftLayout, RightLayout>>
+where
+    LeftRule: LoweredMultiplicityFreeAlgebra,
+    RightRule: LoweredMultiplicityFreeAlgebra,
+    LeftLayout: PackedSectorLayout + 'static,
+    RightLayout: PackedSectorLayout + 'static,
+{
+    type Sector = ProductSector<LeftRule::Sector, RightRule::Sector>;
+
+    fn try_decode_lowered(
+        &self,
+        sector: SectorId,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        let (left, right) = PackedProductCodec::<LeftLayout, RightLayout>::decode_checked(sector)
+            .map_err(LoweredFusionTreeBuildError::codec)?;
+        Ok(ProductSector::new(
+            self.left_rule().try_decode_lowered(left)?,
+            self.right_rule().try_decode_lowered(right)?,
+        ))
+    }
+
+    fn try_encode_lowered(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<SectorId, LoweredFusionTreeBuildError> {
+        let left = self.left_rule().try_encode_lowered(*sector.left())?;
+        let right = self.right_rule().try_encode_lowered(*sector.right())?;
+        PackedProductCodec::<LeftLayout, RightLayout>::encode_checked(left, right)
+            .map_err(LoweredFusionTreeBuildError::codec)
+    }
+
+    fn try_lowered_vacuum(&self) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Ok(ProductSector::new(
+            self.left_rule().try_lowered_vacuum()?,
+            self.right_rule().try_lowered_vacuum()?,
+        ))
+    }
+
+    fn try_lowered_dual(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Ok(ProductSector::new(
+            self.left_rule().try_lowered_dual(*sector.left())?,
+            self.right_rule().try_lowered_dual(*sector.right())?,
+        ))
+    }
+
+    fn try_for_each_lowered_channel<F>(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        emit: &mut F,
+    ) -> Result<(), LoweredFusionTreeBuildError>
+    where
+        F: FnMut(Self::Sector) -> Result<(), LoweredFusionTreeBuildError>,
+    {
+        self.right_rule().try_for_each_lowered_channel(
+            *left.right(),
+            *right.right(),
+            &mut |right_channel| {
+                self.left_rule().try_for_each_lowered_channel(
+                    *left.left(),
+                    *right.left(),
+                    &mut |left_channel| emit(ProductSector::new(left_channel, right_channel)),
+                )
+            },
+        )
+    }
+
+    fn try_lowered_nsymbol(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        coupled: Self::Sector,
+    ) -> Result<usize, LoweredFusionTreeBuildError> {
+        let left_n =
+            self.left_rule()
+                .try_lowered_nsymbol(*left.left(), *right.left(), *coupled.left())?;
+        let right_n = self.right_rule().try_lowered_nsymbol(
+            *left.right(),
+            *right.right(),
+            *coupled.right(),
+        )?;
+        match left_n.checked_mul(right_n) {
+            Some(multiplicity) => Ok(multiplicity),
+            None => {
+                // Why not encode every successful call: persistent IDs are
+                // needed only to diagnose the exceptional overflow branch.
+                let left = self.try_encode_lowered(left)?;
+                let right = self.try_encode_lowered(right)?;
+                let coupled = self.try_encode_lowered(coupled)?;
+                Err(LoweredFusionTreeBuildError::fusion_algebra(
+                    FusionAlgebraError::MultiplicityOverflow {
+                        left,
+                        right,
+                        coupled,
+                    },
+                ))
+            }
+        }
     }
 }
