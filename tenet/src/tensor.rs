@@ -639,6 +639,21 @@ macro_rules! define_tensor_execution_context {
                 $(self.$field.set_recoupling_threads(threads);)+
             }
 
+            /// The multiplicity-free lane's execution context for scalar `D`.
+            ///
+            /// Why an accessor rather than reaching the lane fields directly:
+            /// they are private to `mod tensor`, and `crate::typed` needs
+            /// exactly this one lane — the same `RuleIdentity`-keyed lane the
+            /// erased facade drives, so typed and erased uses of one layout
+            /// share cache entries instead of each priming its own. Naming
+            /// only this lane also keeps the Generic-SU(3) lane out of the
+            /// typed facade's reach, which is the boundary, not an omission.
+            pub(crate) fn multiplicity_free_lane<D: UserScalar>(
+                &mut self,
+            ) -> &mut Ctx<D, tenet_core::RuleIdentity> {
+                D::ctx_of(&mut self.mf)
+            }
+
             #[doc(hidden)]
             pub fn release_runtime_binding(&mut self) {
                 self.runtime = None;
@@ -5220,7 +5235,7 @@ impl Tensor {
             macro_rules! contract_owned {
                 ($variant:ident, $lhs:expr, $rhs:expr) => {{
                     let (space, data) = tensorcontract_owned_multiplicity_free(
-                        D::ctx_of(&mut context.mf),
+                        context.multiplicity_free_lane::<D>(),
                         BoundDynamicTensorRef::try_new($lhs, lhs_data)?,
                         BoundDynamicTensorRef::try_new($rhs, rhs_data)?,
                         lhs_axes,
@@ -5808,7 +5823,7 @@ impl Tensor {
         }
         with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
             let (dst_bound, data) = tree_transform_owned_multiplicity_free(
-                D::ctx_of(&mut context.mf),
+                context.multiplicity_free_lane::<D>(),
                 BoundDynamicTensorRef::try_new(bound, src_data)?,
                 operation,
             )?;
