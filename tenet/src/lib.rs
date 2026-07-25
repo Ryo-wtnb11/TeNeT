@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-//! Public facade for the active TeNeT rebuild.
+//! Public facade for TeNeT.
 //!
 //! # Execution model
 //!
