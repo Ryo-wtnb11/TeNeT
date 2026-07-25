@@ -5,15 +5,26 @@
 //! that a downstream application can drive the typed facade with its own
 //! fusion rule.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tenet::core::{
-    BraidingStyleKind, CheckedFusionAlgebra, FusionAlgebraError, FusionRule, FusionStyleKind,
+    complete_hom_space_structure_cache_info, fusion_tree_layout_cache_info, BraidingStyleKind,
+    CheckedFusionAlgebra, FusionAlgebraError, FusionRule, FusionStyleKind,
     MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
     RuleIdentity, SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorVec,
 };
-use tenet::prelude::Runtime;
-use tenet::typed::GradedSpace;
+use tenet::prelude::{Complex64, Runtime};
+use tenet::typed::{GradedSpace, TensorMap};
+
+/// The fusion-tree layout and complete-structure caches are process-global, so
+/// the tests in this binary that snapshot them must not run beside a test that
+/// builds a layout. Only this binary shares those globals; other test binaries
+/// are separate processes.
+static CACHE_LOCK: Mutex<()> = Mutex::new(());
+
+fn cache_lock() -> MutexGuard<'static, ()> {
+    CACHE_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 // ---------------------------------------------------------------------------
 // External Unique-fusion provider: Z3 charges, addition mod 3.
@@ -37,15 +48,31 @@ enum Quirk {
 #[derive(Clone, Copy)]
 struct ExternalZ3 {
     quirk: Option<Quirk>,
+    /// Distinguishes two otherwise identical provider values, so the facade's
+    /// `RuleIdentity` handling can be tested in both directions with one type.
+    identity_tag: u8,
 }
 
 impl ExternalZ3 {
     fn new() -> Self {
-        Self { quirk: None }
+        Self {
+            quirk: None,
+            identity_tag: 0,
+        }
     }
 
     fn with(quirk: Quirk) -> Self {
-        Self { quirk: Some(quirk) }
+        Self {
+            quirk: Some(quirk),
+            identity_tag: 0,
+        }
+    }
+
+    fn tagged(identity_tag: u8) -> Self {
+        Self {
+            quirk: None,
+            identity_tag,
+        }
     }
 }
 
@@ -54,7 +81,13 @@ struct Z3Charge(u8);
 
 impl FusionRule for ExternalZ3 {
     fn rule_identity(&self) -> RuleIdentity {
-        RuleIdentity::of_type::<Self>()
+        // Only the tag participates: an injected quirk is a broken provider,
+        // not a different fusion algebra, and the failure-injection tests rely
+        // on it keeping the identity it claims.
+        RuleIdentity::from_canonical_bytes::<Self>(
+            0x5a33_0000_0000_0000,
+            Arc::<[u8]>::from(vec![self.identity_tag]),
+        )
     }
     fn fusion_style(&self) -> FusionStyleKind {
         FusionStyleKind::Unique
@@ -421,4 +454,142 @@ fn graded_space_carries_a_simple_fusion_provider_too() {
     assert_eq!(space.sectors().unwrap(), vec![SU2Irrep::from_twice_spin(1)]);
     assert!(space.is_dual());
     assert_eq!(runtime().tree_transform_cache_info().entries(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Slice 5: `TensorMap<R, D>` ownership and `zeros`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tensor_map_zeros_builds_a_multi_block_checked_layout() {
+    // What: `zeros` admits a runtime-rank multi-block layout through the
+    // checked path and returns a zero buffer of exactly the layout's length.
+    let _guard = cache_lock();
+    let provider = Arc::new(ExternalZ3::new());
+    let leg = z3_leg(&provider, false);
+    let dual = leg.try_dual().unwrap();
+    let runtime = runtime();
+
+    let tensor: TensorMap<ExternalZ3, f64> =
+        TensorMap::zeros(&runtime, [&leg, &leg], [&dual, &dual]).unwrap();
+
+    assert!(tensor.block_count() >= 2);
+    assert!(!tensor.data().is_empty());
+    assert!(tensor.data().iter().all(|&value| value == 0.0));
+}
+
+#[test]
+fn tensor_map_zeros_carries_a_complex_payload() {
+    // What: the payload dtype is independent of the provider's real
+    // categorical coefficient scalar.
+    let _guard = cache_lock();
+    let provider = Arc::new(ExternalSu2);
+    let leg = su2_leg(&provider, false);
+    let runtime = runtime();
+
+    let tensor: TensorMap<ExternalSu2, Complex64> =
+        TensorMap::zeros(&runtime, [&leg, &leg], [&leg, &leg]).unwrap();
+
+    assert!(tensor.block_count() >= 2);
+    assert!(tensor
+        .data()
+        .iter()
+        .all(|&value| value == Complex64::new(0.0, 0.0)));
+}
+
+#[test]
+fn tensor_map_accepts_separately_allocated_equal_identity_providers() {
+    // What: two independent allocations of one rule interoperate; the facade
+    // keys on `RuleIdentity`, never on `Arc` identity.
+    let _guard = cache_lock();
+    let first = Arc::new(ExternalZ3::new());
+    let second = Arc::new(ExternalZ3::new());
+    assert!(!Arc::ptr_eq(&first, &second));
+    let runtime = runtime();
+
+    let tensor: TensorMap<ExternalZ3, f64> =
+        TensorMap::zeros(&runtime, [&z3_leg(&first, false)], [&z3_leg(&second, true)]).unwrap();
+
+    assert!(tensor.block_count() >= 1);
+}
+
+#[test]
+fn tensor_map_rejects_distinct_rule_identities_before_provider_work() {
+    // What: two providers of the same Rust type but different identities are a
+    // rule mismatch, reported before any layout is staged — the caches stay
+    // exactly as they were.
+    let _guard = cache_lock();
+    let first = Arc::new(ExternalZ3::tagged(0));
+    let second = Arc::new(ExternalZ3::tagged(1));
+    assert_ne!(first.rule_identity(), second.rule_identity());
+    let runtime = runtime();
+    let before = (
+        fusion_tree_layout_cache_info(),
+        complete_hom_space_structure_cache_info(),
+    );
+
+    let error = TensorMap::<ExternalZ3, f64>::zeros(
+        &runtime,
+        [&z3_leg(&first, false)],
+        [&z3_leg(&second, true)],
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, tenet::prelude::Error::RuleMismatch));
+    assert_eq!(
+        (
+            fusion_tree_layout_cache_info(),
+            complete_hom_space_structure_cache_info(),
+        ),
+        before
+    );
+}
+
+#[test]
+fn tensor_map_zeros_needs_at_least_one_leg() {
+    // What: the provider is inferred from the legs, so an empty tensor map has
+    // nothing to infer it from.
+    let runtime = runtime();
+    let empty: [&GradedSpace<ExternalZ3>; 0] = [];
+
+    assert!(TensorMap::<ExternalZ3, f64>::zeros(&runtime, empty, empty).is_err());
+}
+
+#[test]
+fn checked_construction_failure_publishes_no_cache_state() {
+    // What: a provider that fails mid-staging returns a typed error and leaves
+    // both process-global layout caches and the runtime's own cache untouched,
+    // which is the transactional guarantee the checked path promises.
+    let _guard = cache_lock();
+    // The broken provider must be the layout authority (the first leg's
+    // provider), otherwise the staging never calls its failing primitive.
+    let broken = Arc::new(ExternalZ3::with(Quirk::FailDual));
+    let codomain = z3_leg(&broken, false);
+    let domain = GradedSpace::try_new(
+        Arc::clone(&broken),
+        [(Z3Charge(0), 2), (Z3Charge(2), 3), (Z3Charge(1), 1)],
+        true,
+    )
+    .unwrap();
+    let runtime = runtime();
+    let before = (
+        fusion_tree_layout_cache_info(),
+        complete_hom_space_structure_cache_info(),
+    );
+    let runtime_before = runtime.tree_transform_cache_info();
+
+    let error = TensorMap::<ExternalZ3, f64>::zeros(&runtime, [&codomain], [&domain]).unwrap_err();
+
+    assert!(matches!(
+        error,
+        tenet::prelude::Error::FusionAlgebra(_) | tenet::prelude::Error::Operation(_)
+    ));
+    assert_eq!(
+        (
+            fusion_tree_layout_cache_info(),
+            complete_hom_space_structure_cache_info(),
+        ),
+        before
+    );
+    assert_eq!(runtime.tree_transform_cache_info(), runtime_before);
 }

@@ -24,11 +24,17 @@
 
 use std::sync::Arc;
 
-use tenet_core::{CheckedFusionAlgebra, SectorLeg};
+use tenet_core::{
+    CheckedFusionAlgebra, FusionProductSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
+    SectorLeg,
+};
+use tenet_tensors::BoundDynamicFusionMapSpace;
 
 pub use tenet_core::SectorCodec;
 
 use crate::error::Error;
+use crate::runtime::Runtime;
+use crate::tensor::{apply_fill, Fill, TensorScalar};
 
 /// One tensor leg: a provider plus the sector-to-degeneracy map of that axis
 /// (TensorKit's `GradedSpace`).
@@ -174,5 +180,159 @@ where
             provider: Arc::clone(&self.provider),
             leg: self.leg.try_dual(self.provider.as_ref())?,
         })
+    }
+}
+
+impl<R> GradedSpace<R> {
+    // Bound-free so the crate-internal accessors stay usable wherever the leg
+    // travels, independently of what the caller has to certify.
+    pub(crate) fn leg(&self) -> &SectorLeg {
+        &self.leg
+    }
+
+    pub(crate) fn provider_arc(&self) -> &Arc<R> {
+        &self.provider
+    }
+}
+
+/// Storage shared by every clone of one typed tensor map: the admitted space
+/// and its block payload.
+struct TypedTensorBody<R, D> {
+    space: BoundDynamicFusionMapSpace<R>,
+    data: Vec<D>,
+}
+
+/// A block-sparse symmetric tensor map that keeps its provider type.
+///
+/// `D` is the payload dtype ([`f64`] or [`num_complex::Complex64`]) and is
+/// independent of the provider's real categorical coefficient scalar — the
+/// same separation TensorKit makes between a tensor's `T` and its sector type.
+///
+/// Cloning is cheap: the runtime handle and the shared body are both
+/// reference-counted.
+pub struct TensorMap<R, D> {
+    runtime: Runtime,
+    body: Arc<TypedTensorBody<R, D>>,
+}
+
+// Why hand-written: the derives would demand `R: Clone` and `D: Clone`, and
+// neither is needed behind the shared `Arc`.
+impl<R, D> Clone for TensorMap<R, D> {
+    fn clone(&self) -> Self {
+        Self {
+            runtime: self.runtime.clone(),
+            body: Arc::clone(&self.body),
+        }
+    }
+}
+
+impl<R, D> core::fmt::Debug for TensorMap<R, D> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("TensorMap")
+            .field("elements", &self.body.data.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+{
+    fn build<'a, Codomain, Domain>(
+        runtime: &Runtime,
+        codomain: Codomain,
+        domain: Domain,
+        fill: Fill<'_, D>,
+    ) -> Result<Self, Error>
+    where
+        Codomain: IntoIterator<Item = &'a GradedSpace<R>>,
+        Domain: IntoIterator<Item = &'a GradedSpace<R>>,
+        R: 'a,
+    {
+        let codomain: Vec<&GradedSpace<R>> = codomain.into_iter().collect();
+        let domain: Vec<&GradedSpace<R>> = domain.into_iter().collect();
+        let mut legs = codomain.iter().chain(domain.iter());
+        let authority = legs.next().ok_or_else(|| {
+            Error::InvalidArgument(
+                "at least one leg is required to infer the fusion provider".to_string(),
+            )
+        })?;
+        // Why compare `RuleIdentity` rather than `Arc::ptr_eq`: separately
+        // allocated providers of one rule must interoperate, exactly as they do
+        // for the erased facade. Checking here also means a mismatch is
+        // reported before any provider algebra or layout staging runs.
+        let identity = authority.provider().rule_identity();
+        if legs.any(|leg| leg.provider().rule_identity() != identity) {
+            return Err(Error::RuleMismatch);
+        }
+
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new(codomain.iter().map(|leg| leg.leg().clone())),
+            FusionProductSpace::new(domain.iter().map(|leg| leg.leg().clone())),
+        );
+        // Why only the checked root: the infallible enumeration reaches legacy
+        // encoded paths that may panic on an external provider's unrepresentable
+        // value. The checked root publishes no layout, cache, or admission state
+        // until every fallible stage has passed.
+        let space = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_checked(
+            Arc::clone(authority.provider_arc()),
+            hom,
+        )?;
+        let data = apply_fill(space.space(), fill)?;
+        Ok(Self {
+            runtime: runtime.clone(),
+            body: Arc::new(TypedTensorBody { space, data }),
+        })
+    }
+
+    /// Zero tensor map on `codomain <- domain` (TensorKit `zeros(T, W <- V)`).
+    ///
+    /// The payload dtype comes from `D`, so no dtype token is needed. Every
+    /// leg must carry a provider with the same
+    /// [`tenet_core::FusionRule::rule_identity`]; the first leg's provider allocation
+    /// becomes the tensor's authority.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] when no leg is given, since the provider is
+    ///   inferred from the legs.
+    /// - [`Error::RuleMismatch`] when the legs disagree on the rule identity.
+    ///   This is reported before any provider algebra runs.
+    /// - [`Error::FusionAlgebra`] / [`Error::Operation`] when the provider
+    ///   cannot certify the layout. Nothing is published in that case.
+    pub fn zeros<'a, Codomain, Domain>(
+        runtime: &Runtime,
+        codomain: Codomain,
+        domain: Domain,
+    ) -> Result<Self, Error>
+    where
+        Codomain: IntoIterator<Item = &'a GradedSpace<R>>,
+        Domain: IntoIterator<Item = &'a GradedSpace<R>>,
+        R: 'a,
+    {
+        Self::build(runtime, codomain, domain, Fill::Zeros)
+    }
+
+    /// The runtime this tensor map is bound to.
+    #[inline]
+    pub fn runtime(&self) -> &Runtime {
+        &self.runtime
+    }
+
+    /// Number of stored symmetry-allowed blocks.
+    #[inline]
+    pub fn block_count(&self) -> usize {
+        self.body.space.space().structure().block_count()
+    }
+
+    /// The whole block payload in storage order.
+    ///
+    /// Individual blocks address this buffer through their own offset and
+    /// strides.
+    #[inline]
+    pub fn data(&self) -> &[D] {
+        &self.body.data
     }
 }
