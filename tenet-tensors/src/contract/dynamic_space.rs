@@ -20,6 +20,10 @@ pub(crate) enum PreparedLayoutKeys {
     Encoded,
     Staged(PreparedFusionTreeLayout),
     Lowered(PreparedFusionTreeLayout),
+    /// Checked staging for an external multiplicity-free provider. Distinct
+    /// from `Lowered` only in provenance: the built-in lowered codec did not
+    /// produce these keys, so lowered-specific commit accounting must not fire.
+    Checked(PreparedFusionTreeLayout),
 }
 
 impl PreparedLayoutKeys {
@@ -32,14 +36,16 @@ impl PreparedLayoutKeys {
         R: MultiplicityFreeFusionRule,
     {
         match self {
-            Self::Staged(prepared) | Self::Lowered(prepared) => prepared.keys_arc(),
+            Self::Staged(prepared) | Self::Lowered(prepared) | Self::Checked(prepared) => {
+                prepared.keys_arc()
+            }
             Self::Encoded => homspace.fusion_tree_keys(rule),
         }
     }
 
     fn commit(self) {
         let prepared = match self {
-            Self::Staged(prepared) => prepared,
+            Self::Staged(prepared) | Self::Checked(prepared) => prepared,
             Self::Lowered(prepared) => {
                 #[cfg(test)]
                 LOWERED_LAYOUT_COMMITS.set(LOWERED_LAYOUT_COMMITS.get() + 1);
@@ -234,6 +240,17 @@ where
     }
 }
 
+impl<R> LayoutBuildCapability<R>
+where
+    R: MultiplicityFreeFusionRule + CheckedFusionAlgebra,
+{
+    const fn checked() -> Self {
+        Self {
+            dispatch: checked_metadata_dispatcher::<R>,
+        }
+    }
+}
+
 pub(crate) fn dispatch_prepare<R>(
     dispatcher: LayoutKeyBuilder<R>,
     rule: &R,
@@ -395,7 +412,81 @@ where
             axis,
             dualize,
             tensor,
-        } => lowered_outward_leg(rule, homspace, axis, dualize, tensor).map(MetadataOutput::Leg),
+        } => checked_outward_leg(rule, homspace, axis, dualize, tensor).map(MetadataOutput::Leg),
+    }
+}
+
+/// Checked external-provider sibling of [`lowered_layout_primer`]: stages a
+/// complete layout for a rule that certifies only [`CheckedFusionAlgebra`],
+/// without requiring the sealed built-in lowered codec.
+pub(crate) fn checked_layout_primer<R>(
+    rule: &R,
+    homspace: &FusionTreeHomSpace,
+) -> Result<PreparedLayoutKeys, OperationError>
+where
+    R: MultiplicityFreeFusionRule + CheckedFusionAlgebra,
+{
+    homspace
+        .prepare_fusion_tree_layout_checked(rule)
+        .map(PreparedLayoutKeys::Checked)
+        .map_err(|error| OperationError::FusionAlgebra(Box::new(error)))
+}
+
+pub(crate) fn checked_metadata_dispatcher<R>(
+    rule: &R,
+    request: MetadataRequest<'_>,
+) -> Result<MetadataOutput, OperationError>
+where
+    R: MultiplicityFreeFusionRule + CheckedFusionAlgebra,
+{
+    let prepare = |homspace: FusionTreeHomSpace| {
+        let prepared = checked_layout_primer(rule, &homspace)?;
+        Ok(MetadataOutput::HomSpace { homspace, prepared })
+    };
+    match request {
+        MetadataRequest::Prepare { homspace } => {
+            checked_layout_primer(rule, homspace).map(MetadataOutput::Prepared)
+        }
+        MetadataRequest::Permute {
+            homspace,
+            codomain_axes,
+            domain_axes,
+        } => homspace
+            .try_permute_checked(rule, codomain_axes, domain_axes)
+            .map_err(checked_metadata_operation_error)
+            .and_then(prepare),
+        MetadataRequest::Contract {
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+            dst_codomain_rank,
+        } => FusionTreeHomSpace::try_tensorcontract_homspace_checked(
+            rule,
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+            dst_codomain_rank,
+        )
+        .map_err(checked_metadata_operation_error)
+        .and_then(prepare),
+        MetadataRequest::Select {
+            homspace,
+            codomain_axes,
+            domain_axes,
+        } => homspace
+            .try_select_checked(rule, codomain_axes, domain_axes)
+            .map_err(checked_metadata_operation_error)
+            .and_then(prepare),
+        MetadataRequest::OutwardLeg {
+            homspace,
+            axis,
+            dualize,
+            tensor,
+        } => checked_outward_leg(rule, homspace, axis, dualize, tensor).map(MetadataOutput::Leg),
     }
 }
 
@@ -426,7 +517,7 @@ where
     Ok(leg)
 }
 
-fn lowered_outward_leg<R>(
+fn checked_outward_leg<R>(
     rule: &R,
     homspace: &FusionTreeHomSpace,
     axis: usize,
@@ -434,7 +525,7 @@ fn lowered_outward_leg<R>(
     tensor: &'static str,
 ) -> Result<SectorLeg, OperationError>
 where
-    R: LoweredMultiplicityFreeAlgebra + CheckedFusionAlgebra,
+    R: CheckedFusionAlgebra,
 {
     let mut leg = if axis < homspace.codomain().len() {
         homspace.codomain().legs()[axis].clone()
@@ -1222,6 +1313,46 @@ where
         })
     }
 
+    /// Checked external-provider admission for an already-constructed
+    /// multiplicity-free dynamic layout.
+    ///
+    /// Structural, algebraic, and complete-grid proofs run before any layout
+    /// or admission state is published, and the provider only needs to certify
+    /// [`CheckedFusionAlgebra`] rather than the sealed built-in lowered codec.
+    /// Matching legacy Subset and Complete stamps are revalidated.
+    pub fn bind_multiplicity_free_checked(
+        mut space: DynamicFusionMapSpace,
+        provider: Arc<R>,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
+    {
+        space.validate_rule(provider.as_ref())?;
+        validate_bound_space_invariants(&space)?;
+        // Step 1: structural proof before any provider algebra runs.
+        let proof =
+            StructurallyValidatedFusionTreeSubset::try_new(space.homspace(), space.structure())
+                .map_err(OperationError::from_core_preserving_context)?;
+        proof
+            .validate_for_rule_checked(provider.as_ref())
+            .map_err(checked_metadata_operation_error)?;
+        // Step 2: checked sector/tree/layout preparation (validates leg duals).
+        let prepared = proof
+            .homspace()
+            .prepare_fusion_tree_layout_checked(provider.as_ref())
+            .map_err(|error| OperationError::FusionAlgebra(Box::new(error)))?;
+        // Step 3: complete-grid validation against the caller's storage.
+        space.validate_complete_tree_grid(prepared.keys())?;
+        // Steps 5-6: publish only after every fallible check has passed.
+        prepared.commit();
+        space.admission = FusionSpaceAdmission::Complete(provider.rule_identity());
+        Ok(Self {
+            space,
+            provider,
+            layout_build: LayoutBuildCapability::checked(),
+        })
+    }
+
     /// Builds a checked contraction result while retaining the exact provider
     /// allocation shared by both operands.
     pub fn contracted_multiplicity_free(
@@ -1377,6 +1508,30 @@ where
         // Why not route this ordinary constructor through the caller-shape
         // expert API: the final HomSpace already owns every leg degeneracy,
         // and the prepared lowered layout owns the matching tree enumeration.
+        let space = DynamicFusionMapSpace::from_final_homspace_with_prepared(
+            provider.as_ref(),
+            homspace,
+            prepared,
+        )?;
+        Self::from_derived_with_capability(provider, space, layout_build)
+    }
+
+    /// Ordinary multiplicity-free root/output layout for an external provider,
+    /// derived from the final hom space's stored leg degeneracies.
+    ///
+    /// The provider certifies only [`CheckedFusionAlgebra`]; the layout is
+    /// enumerated, its complete storage grid is built, and the prepared layout
+    /// is committed before the [`FusionSpaceAdmission::Complete`] stamp, so a
+    /// failure at any checked stage leaves no published layout or admission.
+    pub fn from_final_homspace_multiplicity_free_checked(
+        provider: Arc<R>,
+        homspace: FusionTreeHomSpace,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
+    {
+        let layout_build = LayoutBuildCapability::checked();
+        let prepared = layout_build.prepare(provider.as_ref(), &homspace)?;
         let space = DynamicFusionMapSpace::from_final_homspace_with_prepared(
             provider.as_ref(),
             homspace,
@@ -1688,7 +1843,12 @@ impl DynamicFusionMapSpace {
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     {
         observe_final_result_layout_build();
-        if let PreparedLayoutKeys::Lowered(prepared) = prepared {
+        let staged = match prepared {
+            PreparedLayoutKeys::Lowered(prepared) => Some((prepared, true)),
+            PreparedLayoutKeys::Checked(prepared) => Some((prepared, false)),
+            PreparedLayoutKeys::Encoded | PreparedLayoutKeys::Staged(_) => None,
+        };
+        if let Some((prepared, _lowered)) = staged {
             let nout = homspace.codomain().len();
             let nin = homspace.domain().len();
             let subblock_structure = prepared
@@ -1696,9 +1856,12 @@ impl DynamicFusionMapSpace {
                 .map_err(OperationError::from_core_preserving_context)?;
             // All fallible final-storage work is complete. Why not commit
             // before building: malformed leg degeneracies or extent overflow
-            // must leave process-local layout identity untouched.
+            // must leave process-local layout identity untouched. The commit
+            // count is lowered-provenance only; checked staging must not bump it.
             #[cfg(test)]
-            LOWERED_LAYOUT_COMMITS.set(LOWERED_LAYOUT_COMMITS.get() + 1);
+            if _lowered {
+                LOWERED_LAYOUT_COMMITS.set(LOWERED_LAYOUT_COMMITS.get() + 1);
+            }
             prepared.commit();
             return Ok(Self {
                 nout,
@@ -1841,7 +2004,9 @@ impl DynamicFusionMapSpace {
             .validate_degeneracy_shapes(&keys, &shapes)
             .map_err(OperationError::from_core_preserving_context)?;
         let subblock_structure = match prepared {
-            PreparedLayoutKeys::Staged(prepared) | PreparedLayoutKeys::Lowered(prepared) => {
+            PreparedLayoutKeys::Staged(prepared)
+            | PreparedLayoutKeys::Lowered(prepared)
+            | PreparedLayoutKeys::Checked(prepared) => {
                 let structure = prepared
                     .build_complete_from_leg_degeneracies(&homspace)
                     .map_err(OperationError::from_core_preserving_context)?;
@@ -5386,5 +5551,487 @@ mod scratch_cache_tests {
             ),
             Err(OperationError::InvalidArgument { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod checked_admission_tests {
+    use super::*;
+    use crate::test_support::CACHE_TEST_LOCK;
+    use tenet_core::{
+        complete_hom_space_structure_cache_info, fusion_tree_layout_cache_info,
+        reset_core_intern_tables, BraidingStyleKind, FusionAlgebraError, FusionProductSpace,
+        FusionStyleKind, MultiplicityFreeFusionSymbols, RuleIdentity, SU2FusionRule, SU2Irrep,
+        SectorId, SectorLeg, SectorVec,
+    };
+
+    #[derive(Clone, Copy)]
+    enum CheckedFailStage {
+        Dual,
+        Channels,
+        Nsymbol,
+    }
+
+    // External abelian (Unique) provider with XOR fusion on sectors {0, 1}.
+    // It certifies only CheckedFusionAlgebra + MultiplicityFreeRigidSymbols,
+    // never the sealed built-in lowered codec, so it exercises the checked
+    // admission path as a genuine downstream provider would. An optional stage
+    // flag makes exactly one checked primitive fail.
+    #[derive(Clone, Copy)]
+    struct ExternalUniqueRule {
+        fail: Option<CheckedFailStage>,
+    }
+
+    impl ExternalUniqueRule {
+        fn new() -> Self {
+            Self { fail: None }
+        }
+    }
+
+    impl FusionRule for ExternalUniqueRule {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Unique
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            core::iter::once(SectorId::new(left.id() ^ right.id())).collect()
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for ExternalUniqueRule {}
+
+    impl MultiplicityFreeFusionSymbols for ExternalUniqueRule {
+        type Scalar = f64;
+        fn scalar_one(&self) -> f64 {
+            1.0
+        }
+        fn scalar_conj(&self, value: f64) -> f64 {
+            value
+        }
+        fn f_symbol_scalar(
+            &self,
+            _: SectorId,
+            _: SectorId,
+            _: SectorId,
+            _: SectorId,
+            _: SectorId,
+            _: SectorId,
+        ) -> f64 {
+            1.0
+        }
+        fn r_symbol_scalar(&self, _: SectorId, _: SectorId, _: SectorId) -> f64 {
+            1.0
+        }
+    }
+
+    impl MultiplicityFreeRigidSymbols for ExternalUniqueRule {
+        fn dim_scalar(&self, _: SectorId) -> f64 {
+            1.0
+        }
+        fn inv_dim_scalar(&self, _: SectorId) -> f64 {
+            1.0
+        }
+        fn sqrt_dim_scalar(&self, _: SectorId) -> f64 {
+            1.0
+        }
+        fn inv_sqrt_dim_scalar(&self, _: SectorId) -> f64 {
+            1.0
+        }
+        fn twist_scalar(&self, _: SectorId) -> f64 {
+            1.0
+        }
+        fn frobenius_schur_phase_scalar(&self, _: SectorId) -> f64 {
+            1.0
+        }
+    }
+
+    impl CheckedFusionAlgebra for ExternalUniqueRule {
+        fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+            if matches!(self.fail, Some(CheckedFailStage::Dual)) {
+                return Err(FusionAlgebraError::InvalidSector { sector });
+            }
+            Ok(sector)
+        }
+        fn try_fusion_channels(
+            &self,
+            left: SectorId,
+            right: SectorId,
+        ) -> Result<SectorVec, FusionAlgebraError> {
+            if matches!(self.fail, Some(CheckedFailStage::Channels)) {
+                return Err(FusionAlgebraError::FusionNotRepresentable { left, right });
+            }
+            Ok(self.fusion_channels(left, right))
+        }
+        fn try_nsymbol(
+            &self,
+            left: SectorId,
+            right: SectorId,
+            coupled: SectorId,
+        ) -> Result<usize, FusionAlgebraError> {
+            if matches!(self.fail, Some(CheckedFailStage::Nsymbol)) {
+                return Err(FusionAlgebraError::MultiplicityOverflow {
+                    left,
+                    right,
+                    coupled,
+                });
+            }
+            Ok(self.nsymbol(left, right, coupled))
+        }
+    }
+
+    // External Simple (multiplicity-free non-abelian) provider that reuses the
+    // SU(2) fusion mathematics but is a distinct type without the sealed
+    // lowered codec, so a genuine Simple external provider drives the checked
+    // path. Delegation keeps the categorical semantics honest.
+    #[derive(Clone, Copy)]
+    struct ExternalSimpleRule;
+
+    impl FusionRule for ExternalSimpleRule {
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Simple
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+        fn vacuum(&self) -> SectorId {
+            SU2FusionRule.vacuum()
+        }
+        fn dual(&self, sector: SectorId) -> SectorId {
+            SU2FusionRule.dual(sector)
+        }
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            SU2FusionRule.fusion_channels(left, right)
+        }
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            SU2FusionRule.nsymbol(left, right, coupled)
+        }
+    }
+
+    impl MultiplicityFreeFusionRule for ExternalSimpleRule {}
+
+    impl MultiplicityFreeFusionSymbols for ExternalSimpleRule {
+        type Scalar = f64;
+        fn scalar_one(&self) -> f64 {
+            SU2FusionRule.scalar_one()
+        }
+        fn scalar_conj(&self, value: f64) -> f64 {
+            SU2FusionRule.scalar_conj(value)
+        }
+        fn f_symbol_scalar(
+            &self,
+            l: SectorId,
+            m: SectorId,
+            r: SectorId,
+            c: SectorId,
+            lc: SectorId,
+            rc: SectorId,
+        ) -> f64 {
+            SU2FusionRule.f_symbol_scalar(l, m, r, c, lc, rc)
+        }
+        fn r_symbol_scalar(&self, l: SectorId, r: SectorId, c: SectorId) -> f64 {
+            SU2FusionRule.r_symbol_scalar(l, r, c)
+        }
+    }
+
+    impl MultiplicityFreeRigidSymbols for ExternalSimpleRule {
+        fn dim_scalar(&self, s: SectorId) -> f64 {
+            SU2FusionRule.dim_scalar(s)
+        }
+        fn inv_dim_scalar(&self, s: SectorId) -> f64 {
+            SU2FusionRule.inv_dim_scalar(s)
+        }
+        fn sqrt_dim_scalar(&self, s: SectorId) -> f64 {
+            SU2FusionRule.sqrt_dim_scalar(s)
+        }
+        fn inv_sqrt_dim_scalar(&self, s: SectorId) -> f64 {
+            SU2FusionRule.inv_sqrt_dim_scalar(s)
+        }
+        fn twist_scalar(&self, s: SectorId) -> f64 {
+            SU2FusionRule.twist_scalar(s)
+        }
+        fn frobenius_schur_phase_scalar(&self, s: SectorId) -> f64 {
+            SU2FusionRule.frobenius_schur_phase_scalar(s)
+        }
+    }
+
+    impl CheckedFusionAlgebra for ExternalSimpleRule {
+        fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+            Ok(self.dual(sector))
+        }
+        fn try_fusion_channels(
+            &self,
+            left: SectorId,
+            right: SectorId,
+        ) -> Result<SectorVec, FusionAlgebraError> {
+            Ok(self.fusion_channels(left, right))
+        }
+        fn try_nsymbol(
+            &self,
+            left: SectorId,
+            right: SectorId,
+            coupled: SectorId,
+        ) -> Result<usize, FusionAlgebraError> {
+            Ok(self.nsymbol(left, right, coupled))
+        }
+    }
+
+    fn unique_matrix_homspace() -> FusionTreeHomSpace {
+        // Rank-4 XOR space whose codomain and domain each couple to {0, 1}.
+        // The domain legs are dual so every fixture built from this space also
+        // covers the dual-leg duality flags in the checked layout.
+        let leg = |dual| SectorLeg::new([(SectorId::new(0), 2), (SectorId::new(1), 3)], dual);
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(false), leg(false)]),
+            FusionProductSpace::new([leg(true), leg(true)]),
+        )
+    }
+
+    fn simple_matrix_homspace() -> FusionTreeHomSpace {
+        // SU(2) spin-1/2 x spin-1/2 on each side couples to spin 0 and spin 1.
+        let half = SU2Irrep::from_twice_spin(1).sector_id();
+        let leg = |dual| SectorLeg::new([(half, 2)], dual);
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(false), leg(false)]),
+            FusionProductSpace::new([leg(false), leg(false)]),
+        )
+    }
+
+    #[test]
+    fn checked_final_root_builds_multi_block_layout_matching_the_encoded_oracle() {
+        // What: external Unique and Simple providers build a complete
+        // multi-block runtime-rank layout through the checked root, structurally
+        // identical to the trusted encoded (infallible) construction.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        reset_core_intern_tables();
+        let unique = ExternalUniqueRule::new();
+        let oracle = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+            Arc::new(unique),
+            unique_matrix_homspace(),
+        )
+        .unwrap();
+        let checked = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_checked(
+            Arc::new(unique),
+            unique_matrix_homspace(),
+        )
+        .unwrap();
+        assert!(checked.space().structure().block_count() >= 2);
+        assert!(matches!(
+            checked.space().admission(),
+            FusionSpaceAdmission::Complete(_)
+        ));
+        assert_eq!(checked.space(), oracle.space());
+        assert_eq!(
+            checked.space().required_len().unwrap(),
+            oracle.space().required_len().unwrap()
+        );
+
+        reset_core_intern_tables();
+        let simple = ExternalSimpleRule;
+        let oracle = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+            Arc::new(simple),
+            simple_matrix_homspace(),
+        )
+        .unwrap();
+        let checked = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_checked(
+            Arc::new(simple),
+            simple_matrix_homspace(),
+        )
+        .unwrap();
+        assert!(checked.space().structure().block_count() >= 2);
+        assert_eq!(checked.space(), oracle.space());
+    }
+
+    #[test]
+    fn separately_allocated_equal_identity_providers_build_equivalent_structures() {
+        // What: two independent provider allocations with the same RuleIdentity
+        // admit content-identical checked layouts.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+        let first = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_checked(
+            Arc::new(ExternalUniqueRule::new()),
+            unique_matrix_homspace(),
+        )
+        .unwrap();
+        let second = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_checked(
+            Arc::new(ExternalUniqueRule::new()),
+            unique_matrix_homspace(),
+        )
+        .unwrap();
+        assert!(!Arc::ptr_eq(first.provider_arc(), second.provider_arc()));
+        assert_eq!(first.space(), second.space());
+    }
+
+    #[test]
+    fn checked_final_root_stage_failures_publish_no_layout_or_admission() {
+        // What: an injected failure in dual, channels, or nsymbol returns the
+        // exact typed error and leaves both process-global cache snapshots and
+        // scratch publication observations unchanged.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        for (stage, expected) in [
+            (
+                CheckedFailStage::Dual,
+                FusionAlgebraError::InvalidSector {
+                    sector: SectorId::new(0),
+                },
+            ),
+            (
+                CheckedFailStage::Channels,
+                FusionAlgebraError::FusionNotRepresentable {
+                    left: SectorId::new(0),
+                    right: SectorId::new(0),
+                },
+            ),
+            (
+                CheckedFailStage::Nsymbol,
+                FusionAlgebraError::MultiplicityOverflow {
+                    left: SectorId::new(0),
+                    right: SectorId::new(0),
+                    coupled: SectorId::new(0),
+                },
+            ),
+        ] {
+            crate::reset_global_operation_caches();
+            reset_core_intern_tables();
+            reset_scratch_publication_observations();
+            let before = (
+                fusion_tree_layout_cache_info(),
+                complete_hom_space_structure_cache_info(),
+            );
+
+            let error = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_checked(
+                Arc::new(ExternalUniqueRule { fail: Some(stage) }),
+                unique_matrix_homspace(),
+            )
+            .unwrap_err();
+
+            assert_eq!(error, OperationError::FusionAlgebra(Box::new(expected)));
+            assert_eq!(
+                (
+                    fusion_tree_layout_cache_info(),
+                    complete_hom_space_structure_cache_info(),
+                ),
+                before
+            );
+            assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+        }
+    }
+
+    #[test]
+    fn checked_bound_space_permute_and_contract_match_the_encoded_oracle() {
+        // What: the reachable Permute and Contract dispatcher arms of a checked
+        // capability produce results identical to the same public operation on
+        // an encoded-bound oracle. The Select and OutwardLeg arms have no public
+        // BoundDynamicFusionMapSpace caller that routes through the stored
+        // capability (their capability methods are dead code outside the encoded
+        // and lowered helpers), so they are not reachable to smoke-test here.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+
+        let encoded = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+            Arc::new(ExternalUniqueRule::new()),
+            unique_matrix_homspace(),
+        )
+        .unwrap();
+        let checked = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_checked(
+            Arc::new(ExternalUniqueRule::new()),
+            unique_matrix_homspace(),
+        )
+        .unwrap();
+
+        let operation = TreeTransformOperation::permute([1, 0], [3, 2]);
+        assert_eq!(
+            checked
+                .transformed_multiplicity_free(&operation)
+                .unwrap()
+                .space(),
+            encoded
+                .transformed_multiplicity_free(&operation)
+                .unwrap()
+                .space(),
+        );
+
+        let checked_contract =
+            BoundDynamicFusionMapSpace::contracted_multiplicity_free(&checked, &checked, &[], &[])
+                .unwrap();
+        let encoded_contract =
+            BoundDynamicFusionMapSpace::contracted_multiplicity_free(&encoded, &encoded, &[], &[])
+                .unwrap();
+        assert_eq!(checked_contract.space(), encoded_contract.space());
+    }
+
+    #[test]
+    fn checked_bind_failure_preserves_subset_admission_and_caches() {
+        // What: a checked bind fails transactionally at every checked stage —
+        // structural-proof algebra (channels, nsymbol) and the prepare leg-dual
+        // guard — keeping the caller's Subset admission and both cache snapshots
+        // unchanged.
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        for stage in [
+            CheckedFailStage::Dual,
+            CheckedFailStage::Channels,
+            CheckedFailStage::Nsymbol,
+        ] {
+            crate::reset_global_operation_caches();
+            reset_core_intern_tables();
+            let good = DynamicFusionMapSpace::from_final_homspace(
+                &ExternalUniqueRule::new(),
+                unique_matrix_homspace(),
+            )
+            .unwrap();
+            let mut subset = good.clone();
+            subset.admission =
+                FusionSpaceAdmission::Subset(ExternalUniqueRule::new().rule_identity());
+            let original = subset.clone();
+
+            reset_scratch_publication_observations();
+            let before = (
+                fusion_tree_layout_cache_info(),
+                complete_hom_space_structure_cache_info(),
+            );
+
+            let error = BoundDynamicFusionMapSpace::bind_multiplicity_free_checked(
+                subset,
+                Arc::new(ExternalUniqueRule { fail: Some(stage) }),
+            )
+            .unwrap_err();
+
+            assert!(matches!(error, OperationError::FusionAlgebra(_)));
+            assert!(matches!(
+                original.admission(),
+                FusionSpaceAdmission::Subset(_)
+            ));
+            assert_eq!(
+                (
+                    fusion_tree_layout_cache_info(),
+                    complete_hom_space_structure_cache_info(),
+                ),
+                before
+            );
+            assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+        }
     }
 }

@@ -2484,6 +2484,32 @@ impl FusionTreeHomSpace {
         })
     }
 
+    /// Stages checked layout metadata for an external multiplicity-free
+    /// provider without issuing a layout ID or changing cache accounting.
+    ///
+    /// Every HomSpace leg sector is validated through [`CheckedFusionAlgebra::try_dual_sector`]
+    /// before any cache lookup, because a rigid multiplicity-free provider
+    /// requires a representable dual for every leg it admits. Enumeration then
+    /// reuses the same [`Self::prepare_fusion_tree_layout_with`] staging and
+    /// bounded layout cache as the built-in paths.
+    #[doc(hidden)]
+    pub fn prepare_fusion_tree_layout_checked<R>(
+        &self,
+        rule: &R,
+    ) -> Result<PreparedFusionTreeLayout, FusionAlgebraError>
+    where
+        R: MultiplicityFreeFusionRule + CheckedFusionAlgebra,
+    {
+        for leg in self.codomain().legs().iter().chain(self.domain().legs()) {
+            for &sector in leg.sectors() {
+                rule.try_dual_sector(sector)?;
+            }
+        }
+        self.prepare_fusion_tree_layout_with(rule, || {
+            self.try_fusion_tree_layout_data_uncached_checked(rule)
+        })
+    }
+
     fn prepare_fusion_tree_layout_with<R, E, F>(
         &self,
         rule: &R,
@@ -2790,6 +2816,18 @@ impl FusionTreeHomSpace {
     {
         let codomain = try_fusion_trees_by_coupled_for_space_lowered(rule, self.codomain())?;
         let domain = try_fusion_trees_by_coupled_for_space_lowered(rule, self.domain())?;
+        Ok(fusion_tree_layout_data_from_groups(&codomain, &domain))
+    }
+
+    fn try_fusion_tree_layout_data_uncached_checked<R>(
+        &self,
+        rule: &R,
+    ) -> Result<FusionTreeHomSpaceLayoutData, FusionAlgebraError>
+    where
+        R: MultiplicityFreeFusionRule + CheckedFusionAlgebra,
+    {
+        let codomain = try_fusion_trees_by_coupled_for_space_checked(rule, self.codomain())?;
+        let domain = try_fusion_trees_by_coupled_for_space_checked(rule, self.domain())?;
         Ok(fusion_tree_layout_data_from_groups(&codomain, &domain))
     }
 
