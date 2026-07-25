@@ -51,7 +51,7 @@ pub use tenet_core::SectorCodec;
 
 use crate::error::Error;
 use crate::runtime::Runtime;
-use crate::tensor::{apply_fill, Fill, TensorScalar};
+use crate::tensor::{apply_fill, with_planar_axes, Fill, PlanarRequestKind, TensorScalar};
 use crate::typed_tensor_core::{
     tensorcontract_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
 };
@@ -588,6 +588,83 @@ where
             levels[..nout].iter().copied(),
             levels[nout..].iter().copied(),
         ))
+    }
+
+    /// TensorKit `transpose`: the planar transpose of `codomain <- domain` to
+    /// `domain' <- codomain'`, i.e. one full cyclic rotation of the legs round
+    /// the planar boundary.
+    ///
+    /// Planar means it **never braids**: legs are bent across the boundary, and
+    /// bending conjugates them, so the result's spaces carry flipped dual
+    /// flags. Spelling this as a [`Self::permute`] of the same axis order would
+    /// be wrong for any provider whose braiding is not symmetric — the two
+    /// agree only up to the R-symbols a permute inserts and this does not.
+    ///
+    /// It is its own inverse: transposing twice restores the source layout.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] from
+    /// the expert layer. The generated axis order is planar by construction, so
+    /// a failure here means the provider could not carry the bend.
+    pub fn transpose(&self) -> Result<Self, Error> {
+        self.planar(PlanarRequestKind::FullTranspose)
+    }
+
+    /// TensorKit `transpose` with an explicit cyclic axis map.
+    ///
+    /// The name is Rust-only, disambiguating this from [`Self::transpose`]:
+    /// TensorKit has a single `transpose` taking an optional `Index2Tuple`,
+    /// which Rust cannot spell as one method. TensorKit's argument-free
+    /// `transpose` is [`Self::transpose`]; this is the explicit form.
+    ///
+    /// `codomain_axes` and `domain_axes` are flat source axis numbers
+    /// (`0..rank`, codomain axes first), exactly as for [`Self::permute`], but
+    /// together they must describe one **cyclic rotation** of the planar source
+    /// order (codomain axes followed by the domain axes reversed). Unlike
+    /// [`Self::permute`], this operation never braids.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] / [`Error::Operation`] / [`Error::Core`] /
+    /// [`Error::FusionAlgebra`] when the axis lists are malformed or are not a
+    /// cyclic rotation of the planar order — a re-arrangement that would need a
+    /// braid is refused rather than silently braided. As everywhere in this
+    /// facade the expert layer owns that validation; it is not repeated here.
+    pub fn transpose_axes(
+        &self,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+    ) -> Result<Self, Error> {
+        self.planar(PlanarRequestKind::Explicit {
+            codomain_axes,
+            domain_axes,
+        })
+    }
+
+    /// Shared body of the planar operations: derive the planar axis
+    /// order, let the expert layer check it, and run it as a transpose.
+    ///
+    /// Why the axis derivation is borrowed from the erased layer rather than
+    /// rewritten here: it *is* the definition of what "planar" means for each
+    /// request kind, and a second copy would be free to drift from the erased
+    /// sibling these operations are byte-compared against.
+    fn planar(&self, kind: PlanarRequestKind<'_>) -> Result<Self, Error> {
+        with_planar_axes(
+            self.codomain_rank(),
+            self.rank(),
+            kind,
+            |codomain_axes, domain_axes| {
+                // Why `transpose` and not `permute` even when the axes happen
+                // to be a plain permutation: domain trees run opposite to the
+                // planar boundary, so flattening them into a permute would
+                // braid a different leg across it.
+                self.tree_transform(TreeTransformOperation::transpose(
+                    codomain_axes.iter().copied(),
+                    domain_axes.iter().copied(),
+                ))
+            },
+        )
     }
 
     /// Runs one prepared tree transform on this tensor's own runtime.

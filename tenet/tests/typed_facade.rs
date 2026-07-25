@@ -1438,3 +1438,124 @@ fn typed_and_erased_braid_agree_byte_for_byte_on_a_builtin_rule() {
     assert_eq!(typed_braided.data(), erased_braided.data());
     assert_ne!(typed_braided.data(), typed.data());
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4, slice 2: `TensorMap::transpose` and `TensorMap::transpose_axes`.
+// ---------------------------------------------------------------------------
+
+/// The `(is_dual, degeneracies)` shape of a typed tensor map's legs, codomain
+/// first — enough to pin where each source leg landed and how it was bent.
+fn typed_leg_shapes<R: 'static, D>(tensor: &TensorMap<R, D>) -> Vec<(bool, Vec<usize>)>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: tenet::prelude::TensorScalar,
+{
+    tensor
+        .codomain()
+        .iter()
+        .chain(tensor.domain().iter())
+        .map(|leg| (leg.is_dual(), leg.degeneracies().to_vec()))
+        .collect()
+}
+
+/// The same shape summary for an erased tensor, so a typed result can be
+/// checked against the erased sibling rather than against a guess.
+fn erased_leg_shapes(tensor: &tenet::prelude::Tensor) -> Vec<(bool, Vec<usize>)> {
+    tensor
+        .codomain_spaces()
+        .iter()
+        .chain(tensor.domain_spaces().iter())
+        .map(|space| {
+            (
+                space.is_dual(),
+                space
+                    .sectors()
+                    .into_iter()
+                    .map(|(_, degeneracy)| degeneracy)
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn transpose_twice_returns_the_source_layout() {
+    // What: the planar transpose is an involution — it rotates every leg once
+    // round the boundary, so applying it twice restores the source spaces,
+    // block order and bytes exactly.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    let once = tensor.transpose().unwrap();
+    let twice = once.transpose().unwrap();
+
+    assert_ne!(once.data(), tensor.data());
+    assert_eq!(typed_leg_shapes(&twice), typed_leg_shapes(&tensor));
+    assert_eq!(twice.data(), tensor.data());
+    assert_eq!(twice.block_count(), tensor.block_count());
+    for index in 0..tensor.block_count() {
+        assert_eq!(
+            twice.block_fusion_trees(index).unwrap(),
+            tensor.block_fusion_trees(index).unwrap()
+        );
+    }
+}
+
+#[test]
+fn typed_and_erased_transpose_agree_byte_for_byte_on_a_builtin_rule() {
+    // What: the typed transpose is the erased planar transpose — same bent
+    // spaces (dual flags included) and same bytes. It must not be a permute in
+    // disguise: on this rank-3 layout the two differ, which the assertion
+    // against the permuted buffer pins.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    let erased_transposed = erased.transpose().unwrap();
+    let typed_transposed = typed.transpose().unwrap();
+
+    assert_eq!(typed_transposed.data(), erased_transposed.data());
+    assert_eq!(
+        typed_leg_shapes(&typed_transposed),
+        erased_leg_shapes(&erased_transposed)
+    );
+    assert_eq!(typed_transposed.codomain().len(), 1);
+    assert_eq!(typed_transposed.domain().len(), 2);
+}
+
+#[test]
+fn typed_and_erased_transpose_axes_agree_byte_for_byte_on_a_builtin_rule() {
+    // What: an explicit cyclic rotation other than the full transpose agrees
+    // with the erased sibling, bytes and bent spaces.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    // Planar source order is `0, 1, 2` (codomain then reversed domain); this is
+    // the one-step rotation of it.
+    let erased_rotated = erased.transpose_axes(&[1, 2], &[0]).unwrap();
+    let typed_rotated = typed.transpose_axes(&[1, 2], &[0]).unwrap();
+
+    assert_eq!(typed_rotated.data(), erased_rotated.data());
+    assert_eq!(
+        typed_leg_shapes(&typed_rotated),
+        erased_leg_shapes(&erased_rotated)
+    );
+}
+
+#[test]
+fn transpose_axes_rejects_malformed_axes_without_panicking() {
+    // What: out-of-range axes, a wrong-length list and a non-planar
+    // re-arrangement (a permute, which `transpose_axes` must refuse rather than
+    // silently braid) all come back as `Err`.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    assert!(tensor.transpose_axes(&[0, 9], &[2, 3]).is_err());
+    assert!(tensor.transpose_axes(&[0], &[2, 3]).is_err());
+    assert!(tensor.transpose_axes(&[1, 2], &[3, 0]).is_err());
+}
