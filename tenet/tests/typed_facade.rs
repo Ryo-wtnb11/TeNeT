@@ -46,6 +46,9 @@ enum Quirk {
     /// Refuses to decode charge 2, which the engine reaches by fusing two
     /// charge-1 legs — a violation of the codec's decode-totality law.
     NarrowDecode,
+    /// Duals every sector to the vacuum, i.e. a non-injective dual: a broken
+    /// rigidity structure rather than an unrepresentable value.
+    CollapsingDual,
 }
 
 #[derive(Clone, Copy)]
@@ -160,6 +163,9 @@ impl CheckedFusionAlgebra for ExternalZ3 {
     fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
         if self.quirk == Some(Quirk::FailDual) {
             return Err(FusionAlgebraError::InvalidSector { sector });
+        }
+        if self.quirk == Some(Quirk::CollapsingDual) {
+            return Ok(SectorId::new(0));
         }
         Ok(self.dual(sector))
     }
@@ -451,6 +457,20 @@ fn graded_space_dual_surfaces_a_failing_checked_dual() {
     let space = z3_leg(&provider, false);
 
     assert!(space.try_dual().is_err());
+}
+
+#[test]
+fn graded_space_dual_reports_a_non_injective_dual_instead_of_panicking() {
+    // What: a provider whose dual collapses two sectors onto one id is a
+    // broken rigidity structure. The leg cannot hold the result, and the
+    // failure must come back as a typed error — the constructor underneath
+    // used to panic inside this `Result`-returning API.
+    let provider = Arc::new(ExternalZ3::with(Quirk::CollapsingDual));
+    let space = z3_leg(&provider, false);
+
+    let error = space.try_dual().unwrap_err();
+
+    assert!(error.to_string().contains("not injective"), "{error}");
 }
 
 #[test]

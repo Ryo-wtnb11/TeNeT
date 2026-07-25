@@ -176,7 +176,9 @@ where
     /// # Errors
     ///
     /// Returns [`Error::FusionAlgebra`] when the provider cannot represent the
-    /// dual of some sector. No partially dualized leg is produced.
+    /// dual of some sector, or when its dual collapses two of this leg's
+    /// sectors onto one and so is not the involution rigidity requires. No
+    /// partially dualized leg is produced in either case.
     pub fn try_dual(&self) -> Result<Self, Error> {
         Ok(Self {
             provider: Arc::clone(&self.provider),

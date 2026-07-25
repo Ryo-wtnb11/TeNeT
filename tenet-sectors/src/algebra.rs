@@ -154,6 +154,11 @@ pub enum FusionAlgebraError {
         right: SectorId,
     },
     ProductCodec(ProductSectorCodecError),
+    /// The rule's dual maps two distinct sectors onto one, so it is not the
+    /// involution rigidity requires. Reported with the shared image.
+    DualNotInjective {
+        dual: SectorId,
+    },
     MultiplicityOverflow {
         left: SectorId,
         right: SectorId,
@@ -185,6 +190,10 @@ impl fmt::Display for FusionAlgebraError {
             Self::FusionNotRepresentable { left, right } => write!(
                 formatter,
                 "fusion output for {left:?} x {right:?} is not representable"
+            ),
+            Self::DualNotInjective { dual } => write!(
+                formatter,
+                "fusion rule dual is not injective: two sectors share the dual {dual:?}"
             ),
             Self::ProductCodec(error) => error.fmt(formatter),
             Self::MultiplicityOverflow {
