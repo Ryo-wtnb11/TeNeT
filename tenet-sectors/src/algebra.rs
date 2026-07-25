@@ -633,7 +633,11 @@ where
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+/// Label of a product sector, ordered lexicographically as `(left, right)`.
+///
+/// The derived order follows the component declaration order. It is a label
+/// order for ordered containers only and carries no fusion-algebra meaning.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ProductSector<Left, Right> {
     left: Left,
     right: Right,
