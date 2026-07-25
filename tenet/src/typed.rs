@@ -642,7 +642,25 @@ where
         })
     }
 
-    /// Shared body of the planar operations: derive the planar axis
+    /// TensorKit `repartition(t, N₁, N₂)`: moves the planar boundary so the
+    /// codomain holds `num_codomain` legs and the domain holds the rest.
+    ///
+    /// The planar order — codomain followed by reversed domain — is preserved;
+    /// legs that cross the boundary are bent, and so arrive with their dual
+    /// flag flipped and their sectors dualized, without any braid being
+    /// introduced.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when `num_codomain` exceeds the rank, and
+    /// otherwise [`Error::Operation`] / [`Error::Core`] /
+    /// [`Error::FusionAlgebra`] from the expert layer, which owns the
+    /// validation this facade passes through.
+    pub fn repartition(&self, num_codomain: usize) -> Result<Self, Error> {
+        self.planar(PlanarRequestKind::Repartition { num_codomain })
+    }
+
+    /// Shared body of the three planar operations: derive the planar axis
     /// order, let the expert layer check it, and run it as a transpose.
     ///
     /// Why the axis derivation is borrowed from the erased layer rather than

@@ -1559,3 +1559,85 @@ fn transpose_axes_rejects_malformed_axes_without_panicking() {
     assert!(tensor.transpose_axes(&[0], &[2, 3]).is_err());
     assert!(tensor.transpose_axes(&[1, 2], &[3, 0]).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4, slice 3: `TensorMap::repartition`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn repartition_moves_the_boundary_and_round_trips_at_every_split() {
+    // What: every split point of a rank-4 tensor map is reachable, reports the
+    // requested codomain/domain sizes, and comes back to the source layout —
+    // spaces, block identities and bytes — when repartitioned to the original
+    // split.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    for num_codomain in 0..=4 {
+        let moved = tensor.repartition(num_codomain).unwrap();
+        assert_eq!(moved.codomain().len(), num_codomain);
+        assert_eq!(moved.domain().len(), 4 - num_codomain);
+        assert_eq!(moved.data().len(), tensor.data().len());
+
+        let back = moved.repartition(2).unwrap();
+        assert_eq!(typed_leg_shapes(&back), typed_leg_shapes(&tensor));
+        assert_eq!(back.data(), tensor.data());
+        for index in 0..tensor.block_count() {
+            assert_eq!(
+                back.block_fusion_trees(index).unwrap(),
+                tensor.block_fusion_trees(index).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn typed_and_erased_repartition_agree_on_bytes_and_on_the_bent_spaces() {
+    // What: every split point matches the erased sibling in bytes and in the
+    // resulting spaces. The space comparison is the load-bearing half: a leg
+    // that crosses the boundary is bent, which flips its dual flag and dualizes
+    // its sectors (so a Z2-even/odd degeneracy pair can reorder), and the
+    // erased result — not an assumption about which way that goes — is the
+    // reference.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    for num_codomain in 0..=3 {
+        let erased_moved = erased.repartition(num_codomain).unwrap();
+        let typed_moved = typed.repartition(num_codomain).unwrap();
+
+        assert_eq!(typed_moved.data(), erased_moved.data(), "{num_codomain}");
+        assert_eq!(
+            typed_leg_shapes(&typed_moved),
+            erased_leg_shapes(&erased_moved),
+            "{num_codomain}"
+        );
+    }
+    // Non-vacuous: at least one split really does flip a dual flag relative to
+    // the source, so the comparison above is not comparing three copies of the
+    // identity.
+    let flipped = typed.repartition(0).unwrap();
+    assert!(typed_leg_shapes(&flipped)
+        .iter()
+        .any(|(is_dual, _)| *is_dual));
+    assert!(typed_leg_shapes(&typed)
+        .iter()
+        .all(|(is_dual, _)| !*is_dual));
+}
+
+#[test]
+fn repartition_rejects_a_split_beyond_the_rank() {
+    // What: `num_codomain > rank` has no planar reading at all, so it is
+    // rejected rather than clamped.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    let error = tensor.repartition(5).unwrap_err();
+
+    assert!(error.to_string().contains("exceeds rank 4"), "{error}");
+}
