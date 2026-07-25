@@ -14,7 +14,7 @@
 //! This is the phase-2 surface of issue #557: **construction and inspection
 //! only**. A [`TensorMap`] can be built ([`TensorMap::zeros`],
 //! [`TensorMap::from_block_fn`]) and read ([`TensorMap::codomain`],
-//! [`TensorMap::domain`], [`TensorMap::block_sectors`], [`TensorMap::block`],
+//! [`TensorMap::domain`], [`TensorMap::block_fusion_trees`], [`TensorMap::block`],
 //! [`TensorMap::data`]), and nothing else. Transforms and contractions are
 //! phase 3 and are deliberately not reachable from here yet, so the operation
 //! surface gets its own review before it exists. The module is not in the
@@ -200,7 +200,14 @@ impl<R> GradedSpace<R> {
 }
 
 /// The provider-labelled identity of one stored block: the fusion tree on each
-/// side of the tensor map, decoded through the codec.
+/// side of the tensor map, decoded through the codec — the labelled
+/// counterpart of [`tenet_core::FusionTreePairKey`], named after TensorKit's
+/// `fusiontrees(t)`.
+///
+/// Why not `BlockSectors` / `block_sectors`: TensorKit's `blocksectors(t)` is
+/// the set of coupled sectors of a tensor, which is a strictly smaller thing
+/// than a per-block tree pair. Reusing the name for something else would be a
+/// false friend for anyone arriving from TensorKit.
 ///
 /// Inner lines are part of the identity, not decoration: from rank three up,
 /// two distinct blocks can share their uncoupled and coupled sectors and
@@ -210,7 +217,7 @@ impl<R> GradedSpace<R> {
 /// Vertex labels are absent because this facade admits multiplicity-free
 /// providers only, where every fusion vertex is the unique one.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct BlockSectors<S> {
+pub struct BlockFusionTrees<S> {
     coupled: S,
     codomain_uncoupled: Vec<S>,
     codomain_innerlines: Vec<S>,
@@ -218,7 +225,7 @@ pub struct BlockSectors<S> {
     domain_innerlines: Vec<S>,
 }
 
-impl<S> BlockSectors<S> {
+impl<S> BlockFusionTrees<S> {
     /// The sector both trees couple to.
     #[inline]
     pub fn coupled(&self) -> &S {
@@ -268,7 +275,10 @@ where
 /// Every id here came out of the engine's own fusion enumeration, so a failure
 /// is the provider breaking [`SectorCodec`]'s decode-totality law, and it is
 /// surfaced as the codec's own error rather than a panic.
-fn decode_block_sectors<R>(provider: &R, key: &BlockKey) -> Result<BlockSectors<R::Sector>, Error>
+fn decode_block_fusion_trees<R>(
+    provider: &R,
+    key: &BlockKey,
+) -> Result<BlockFusionTrees<R::Sector>, Error>
 where
     R: SectorCodec,
 {
@@ -280,7 +290,7 @@ where
     })?;
     let codomain = pair.codomain_tree();
     let domain = pair.domain_tree();
-    Ok(BlockSectors {
+    Ok(BlockFusionTrees {
         coupled: provider.decode_sector(codomain.coupled())?,
         codomain_uncoupled: decode_sectors(provider, codomain.uncoupled())?,
         codomain_innerlines: decode_sectors(provider, codomain.innerlines())?,
@@ -437,7 +447,7 @@ where
     where
         Codomain: IntoIterator<Item = &'a GradedSpace<R>>,
         Domain: IntoIterator<Item = &'a GradedSpace<R>>,
-        F: FnMut(&BlockSectors<R::Sector>, &[usize]) -> D,
+        F: FnMut(&BlockFusionTrees<R::Sector>, &[usize]) -> D,
         R: 'a,
     {
         let codomain: Vec<&GradedSpace<R>> = codomain.into_iter().collect();
@@ -453,13 +463,13 @@ where
         // decode per block plus one key comparison per element, which the
         // odometer already pays per element anyway.
         let mut decode_failure: Option<Error> = None;
-        let mut memo: Option<(BlockKey, BlockSectors<R::Sector>)> = None;
+        let mut memo: Option<(BlockKey, BlockFusionTrees<R::Sector>)> = None;
         let mut labelled = |key: &BlockKey, indices: &[usize]| -> D {
             if decode_failure.is_some() {
                 return D::from_real(0.0);
             }
             if memo.as_ref().is_none_or(|(cached, _)| cached != key) {
-                match decode_block_sectors(provider.as_ref(), key) {
+                match decode_block_fusion_trees(provider.as_ref(), key) {
                     Ok(sectors) => memo = Some((key.clone(), sectors)),
                     Err(error) => {
                         decode_failure = Some(error);
@@ -507,15 +517,15 @@ where
             .collect()
     }
 
-    /// The provider-labelled identity of the block at `index`.
+    /// The provider-labelled fusion trees of the block at `index`.
     ///
     /// # Errors
     ///
     /// [`Error::Core`] when `index` is out of range, [`Error::FusionAlgebra`]
     /// when the provider cannot decode one of its own sectors.
-    pub fn block_sectors(&self, index: usize) -> Result<BlockSectors<R::Sector>, Error> {
+    pub fn block_fusion_trees(&self, index: usize) -> Result<BlockFusionTrees<R::Sector>, Error> {
         let block = self.body.space.space().structure().block(index)?;
-        decode_block_sectors(self.body.space.provider(), block.key())
+        decode_block_fusion_trees(self.body.space.provider(), block.key())
     }
 
     /// Shape, strides and offset of the block at `index` into [`Self::data`].

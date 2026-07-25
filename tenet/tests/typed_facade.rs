@@ -709,7 +709,7 @@ fn tensor_map_inspection_round_trips_the_spaces_and_blocks() {
 
     let mut elements = 0;
     for index in 0..tensor.block_count() {
-        let sectors = tensor.block_sectors(index).unwrap();
+        let sectors = tensor.block_fusion_trees(index).unwrap();
         assert_eq!(sectors.codomain_uncoupled().len(), 2);
         assert_eq!(sectors.domain_uncoupled().len(), 1);
         // Unique fusion: the two codomain charges fuse to the coupled charge.
@@ -724,7 +724,7 @@ fn tensor_map_inspection_round_trips_the_spaces_and_blocks() {
 }
 
 #[test]
-fn block_sectors_reports_a_non_self_dual_domain_label() {
+fn block_fusion_trees_reports_a_non_self_dual_domain_label() {
     // What: a dual domain leg carrying charge 2 — whose dual is charge 1, so a
     // confusion between the two would show — is decoded as charge 2, matching
     // the convention that a tree labels a domain leg with the space's own
@@ -743,7 +743,7 @@ fn block_sectors_reports_a_non_self_dual_domain_label() {
         TensorMap::zeros(&runtime, [&codomain, &codomain], [&domain]).unwrap();
 
     assert_eq!(tensor.block_count(), 1);
-    let sectors = tensor.block_sectors(0).unwrap();
+    let sectors = tensor.block_fusion_trees(0).unwrap();
     assert_eq!(sectors.coupled(), &Z3Charge(2));
     assert_eq!(sectors.codomain_uncoupled(), &[Z3Charge(1), Z3Charge(1)]);
     assert_eq!(sectors.domain_uncoupled(), &[Z3Charge(2)]);
@@ -775,7 +775,13 @@ fn simple_fusion_provider_round_trips_construction_fill_and_inspection() {
     // Two spin-1/2 legs couple to spin 0 and spin 1 on each side.
     assert!(tensor.block_count() >= 2);
     let coupled: Vec<usize> = (0..tensor.block_count())
-        .map(|index| tensor.block_sectors(index).unwrap().coupled().twice_spin())
+        .map(|index| {
+            tensor
+                .block_fusion_trees(index)
+                .unwrap()
+                .coupled()
+                .twice_spin()
+        })
         .collect();
     assert!(coupled.contains(&0) && coupled.contains(&2));
     assert!(tensor
@@ -813,7 +819,7 @@ fn erased_fill_value(key: &tenet::prelude::BlockKey, indices: &[usize]) -> f64 {
 
 /// The same value computed from the typed labels the facade hands the closure.
 fn typed_fill_value(
-    sectors: &tenet::typed::BlockSectors<tenet::core::Z2Irrep>,
+    sectors: &tenet::typed::BlockFusionTrees<tenet::core::Z2Irrep>,
     indices: &[usize],
 ) -> f64 {
     let mut value = f64::from(sectors.coupled().parity()) * 1000.0;
@@ -871,7 +877,7 @@ fn typed_and_erased_block_fill_produce_identical_storage_on_a_builtin_rule() {
     assert_eq!(typed.block_count(), erased_keys.len());
     for (index, key) in erased_keys.iter().enumerate() {
         let pair = key.as_fusion_tree_pair().unwrap();
-        let sectors = typed.block_sectors(index).unwrap();
+        let sectors = typed.block_fusion_trees(index).unwrap();
         let expected: Vec<tenet::core::Z2Irrep> = pair
             .codomain_tree()
             .uncoupled()
