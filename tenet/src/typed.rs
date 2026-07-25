@@ -20,7 +20,8 @@
 //! ([`TensorMap::zeros`], [`TensorMap::from_block_fn`]), inspection
 //! ([`TensorMap::codomain`], [`TensorMap::domain`],
 //! [`TensorMap::block_fusion_trees`], [`TensorMap::block`],
-//! [`TensorMap::data`]), and the index-manipulation and contraction
+//! [`TensorMap::block_count`], [`TensorMap::data`], [`TensorMap::runtime`]),
+//! and the index-manipulation and contraction
 //! operations — [`TensorMap::permute`], [`TensorMap::braid`],
 //! [`TensorMap::transpose`], [`TensorMap::transpose_axes`],
 //! [`TensorMap::repartition`] and [`TensorMap::contract`].
@@ -36,7 +37,8 @@
 //!   reviewed on its own.
 //! - **Composition** — TensorKit `A * B`, which unlike [`TensorMap::contract`]
 //!   never twists dual legs — is blocked below this layer: fermionic compose
-//!   needs a seam the tensor engine currently seals, and a silently
+//!   needs a new public seam over `LoweredMultiplicityFreeAlgebra`, which
+//!   `tenet-core` seals, and a silently
 //!   bosonic-only `compose` would return wrong fermionic signs rather than an
 //!   error.
 //! - `adjoint` and `conj` are design-gated: only an eager `adjoint` is
@@ -66,9 +68,10 @@ pub use tenet_core::SectorCodec;
 /// provider: every fallible method here returns this error.
 pub use crate::error::Error;
 /// Re-exported for the same reason as [`Error`]: every constructor here takes
-/// a runtime. Neither type is promoted into [`crate::prelude`] instead,
-/// because this module's [`TensorMap`] name collides with the erased
-/// [`tenet_core::TensorMap`].
+/// a runtime. Both types are also in [`crate::prelude`]; re-exporting them
+/// here is what lets a caller glob-import this module alone. The module
+/// itself stays out of the prelude, because its [`TensorMap`] would collide
+/// with the erased [`tenet_core::TensorMap`] already exported there.
 pub use crate::runtime::Runtime;
 
 use crate::tensor::{apply_fill, with_planar_axes, Fill, PlanarRequestKind, TensorScalar};
@@ -611,8 +614,9 @@ where
     }
 
     /// TensorKit `transpose`: the planar transpose of `codomain <- domain` to
-    /// `domain' <- codomain'`, i.e. one full cyclic rotation of the legs round
-    /// the planar boundary.
+    /// `domain' <- codomain'`, i.e. a cyclic rotation of the legs round the
+    /// planar boundary by the codomain rank, which is what carries every
+    /// codomain leg across the boundary and every domain leg back.
     ///
     /// Planar means it **never braids**: legs are bent across the boundary, and
     /// bending conjugates them, so the result's spaces carry flipped dual
@@ -646,10 +650,10 @@ where
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidArgument`] / [`Error::Operation`] / [`Error::Core`] /
-    /// [`Error::FusionAlgebra`] when the axis lists are malformed or are not a
-    /// cyclic rotation of the planar order — a re-arrangement that would need a
-    /// braid is refused rather than silently braided. As everywhere in this
+    /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] when
+    /// the axis lists are malformed or are not a cyclic rotation of the planar
+    /// order — a re-arrangement that would need a braid is refused rather than
+    /// silently braided. As everywhere in this
     /// facade the expert layer owns that validation; it is not repeated here.
     pub fn transpose_axes(
         &self,
