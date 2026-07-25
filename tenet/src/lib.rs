@@ -13,6 +13,11 @@
 //! the core layer additionally supports anyonic rules such as Fibonacci), so the user
 //! layer is rule-erased while the machinery stays fusion-tree-aware.
 //!
+//! The erasure belongs to this ergonomic layer, not to the design: [`typed`]
+//! is the sibling facade that keeps the concrete provider type through
+//! monomorphized construction, so a fusion rule defined outside this workspace
+//! drives it too.
+//!
 //! A [`prelude::Runtime`] owns the shared execution state: the per-rule
 //! contraction/tree-transform contexts, the dense backend (selectable per
 //! [`prelude::LinalgBackend`]), and the
