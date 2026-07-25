@@ -882,7 +882,7 @@ pub struct EigTrunc {
 }
 
 /// How a freshly built tensor is filled.
-enum Fill<'f, D> {
+pub(crate) enum Fill<'f, D> {
     Zeros,
     Rand(u64),
     BlockFn(&'f mut dyn FnMut(&BlockKey, &[usize]) -> D),
@@ -2105,7 +2105,7 @@ fn build_bound_space_generic<R: FusionRule>(
 
 /// Fills a freshly-built coupled space (rule-agnostic: only touches the block
 /// structure). Shared by the mult-free and SU(3) construction paths.
-fn apply_fill<S: UserScalar>(
+pub(crate) fn apply_fill<S: UserScalar>(
     space: &DynamicFusionMapSpace,
     fill: Fill<'_, S>,
 ) -> Result<Vec<S>, Error> {
@@ -2130,7 +2130,7 @@ fn apply_fill<S: UserScalar>(
 /// mirroring [`tenet_core::TensorMap::from_block_fn_with_fusion_space`]
 /// (degeneracy coordinates local to the block, codomain axes first, first
 /// axis fastest).
-fn fill_block_elements<D: UserScalar>(
+pub(crate) fn fill_block_elements<D: UserScalar>(
     structure: &BlockStructure,
     data: &mut [D],
     fill: &mut dyn FnMut(&BlockKey, &[usize]) -> D,

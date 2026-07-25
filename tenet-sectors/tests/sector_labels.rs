@@ -1,10 +1,11 @@
 use std::collections::BTreeSet;
 
 use tenet_sectors::{
-    product_sector, BraidingStyleKind, FermionParityFusionRule, FusionAlgebraError, FusionRule,
-    FusionStyleKind, Fz2SectorLayout, PackedProductCodec, ProductFusionRule, ProductSector,
-    ProductSectorCodecError, RuleIdentity, SU2FusionRule, SU2Irrep, SectorCodec, SectorId,
-    SectorVec, U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep, SU2_MAX_DOUBLED_SPIN,
+    product_sector, BraidingStyleKind, CheckedFusionAlgebra, FermionParityFusionRule,
+    FusionAlgebraError, FusionRule, FusionStyleKind, Fz2SectorLayout, PackedProductCodec,
+    ProductFusionRule, ProductSector, ProductSectorCodecError, RuleIdentity, SU2FusionRule,
+    SU2Irrep, SectorCodec, SectorId, SectorVec, U1FusionRule, U1Irrep, U1SectorLayout,
+    Z2FusionRule, Z2Irrep, SU2_MAX_DOUBLED_SPIN,
 };
 
 #[test]
@@ -69,6 +70,97 @@ where
         ids.insert(id);
     }
     assert_eq!(ids.len(), count, "distinct labels aliased onto one id");
+}
+
+/// Asserts the decode-totality law: `vacuum` decodes, and so does every id
+/// the provider generates from decodable ids through duals and fusion, closed
+/// under `rounds` fusion rounds starting from `seeds`.
+///
+/// Why a closure rather than a fixed sample: the law is about ids the engine
+/// itself produces, so the only faithful test generates them the way the
+/// engine does.
+fn assert_decode_total<Rule>(
+    rule: &Rule,
+    seeds: impl IntoIterator<Item = Rule::Sector>,
+    rounds: usize,
+) where
+    Rule: SectorCodec + CheckedFusionAlgebra,
+{
+    let mut reachable: BTreeSet<SectorId> = seeds
+        .into_iter()
+        .map(|label| rule.encode_sector(&label).expect("seed label encodes"))
+        .collect();
+    reachable.insert(rule.vacuum());
+
+    // A boundary seed's dual or fusion is often genuinely unrepresentable
+    // (U(1) charge overflow, SU(2) past the maximum spin). That is the encode
+    // side of the contract, which the law explicitly permits, so such an id is
+    // never generated and never has to decode. Only what the rule does hand
+    // back is held to decode totality.
+    let mut generated = 0usize;
+    for _ in 0..rounds {
+        let mut next = reachable.clone();
+        for &left in &reachable {
+            if let Ok(dual) = rule.try_dual_sector(left) {
+                generated += 1;
+                next.insert(dual);
+            }
+            for &right in &reachable {
+                if let Ok(channels) = rule.try_fusion_channels(left, right) {
+                    generated += channels.len();
+                    next.extend(channels);
+                }
+            }
+        }
+        reachable = next;
+    }
+    assert!(generated > 0, "the rule generated no ids at all");
+
+    // Why not assert the closure grew: a finite closed algebra (Z2, fZ2)
+    // reaches its whole sector set from the vacuum, which is the law fully
+    // discharged, not a vacuous test.
+    for id in reachable {
+        assert!(
+            SectorCodec::decode_sector(rule, id).is_ok(),
+            "id {id:?} is reachable from the provider's own algebra but does not decode"
+        );
+    }
+}
+
+#[test]
+fn builtin_codecs_decode_every_id_their_own_algebra_reaches() {
+    // What: each built-in codec's decode domain covers the vacuum and the
+    // dual/fusion closure of its decodable ids, so the typed facade can label
+    // any block the engine builds.
+    // Seeds sit both in the interior and hard against each codec's advertised
+    // representable maximum, so a decode domain truncated anywhere below that
+    // maximum fails here instead of slipping past an easy sample.
+    assert_decode_total(
+        &U1FusionRule,
+        [-2, 3, i32::MIN + 1, i32::MAX - 1].map(U1Irrep::new),
+        2,
+    );
+    assert_decode_total(&Z2FusionRule, [Z2Irrep::ODD], 2);
+    assert_decode_total(&FermionParityFusionRule, [Z2Irrep::ODD], 2);
+    assert_decode_total(
+        &SU2FusionRule,
+        [1, 2, SU2_MAX_DOUBLED_SPIN - 1, SU2_MAX_DOUBLED_SPIN].map(SU2Irrep::from_twice_spin),
+        2,
+    );
+    assert_decode_total(
+        &U1Fz2Rule::default(),
+        [
+            product_sector(U1Irrep::new(1), Z2Irrep::ODD),
+            product_sector(U1Irrep::new(-2), Z2Irrep::EVEN),
+            product_sector(U1Irrep::new(i32::MAX - 1), Z2Irrep::ODD),
+            product_sector(U1Irrep::new(i32::MIN + 1), Z2Irrep::EVEN),
+        ],
+        2,
+    );
+    // Why no `TinyRule` here: it certifies only `FusionRule` + `SectorCodec`,
+    // and the closure must be generated through the checked primitives. The
+    // external-provider side of this law is covered by the typed facade tests,
+    // whose providers do certify `CheckedFusionAlgebra`.
 }
 
 #[test]

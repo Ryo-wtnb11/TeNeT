@@ -213,7 +213,9 @@ impl SectorLeg {
     }
 
     /// The dual leg, returning a finite-algebra error when any sector has no
-    /// representable dual.
+    /// representable dual ([`FusionAlgebraError`] from the rule) or when the
+    /// rule's dual collapses two of this leg's sectors onto one
+    /// ([`FusionAlgebraError::DualNotInjective`]).
     pub fn try_dual<R>(&self, rule: &R) -> Result<Self, FusionAlgebraError>
     where
         R: CheckedFusionAlgebra,
@@ -227,7 +229,17 @@ impl SectorLeg {
             .collect::<Result<SmallVec<[(SectorId, usize); 8]>, _>>()?;
         // Why not mutate a cloned leg as sectors succeed: a later failure must
         // leave no partially dualized value available to callers.
-        Ok(Self::new(sectors, !self.is_dual))
+        //
+        // Why `try_new` and not `new`: a rule whose dual collapses two sectors
+        // onto one id would make the panicking constructor fire inside this
+        // `Result`-returning API. A dual is an involution on the sector set, so
+        // a collision is the rule's rigidity structure being broken, not a
+        // caller mistake, and it belongs in the algebra error.
+        Self::try_new(sectors, !self.is_dual).map_err(|error| match error {
+            SectorLegConstructionError::DuplicateSector { sector } => {
+                FusionAlgebraError::DualNotInjective { dual: sector }
+            }
+        })
     }
 
     #[inline]
