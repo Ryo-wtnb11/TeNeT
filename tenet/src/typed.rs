@@ -12,11 +12,13 @@
 //! # Phase boundary
 //!
 //! This is the phase-2 surface of issue #557: **construction and inspection
-//! only**. A typed tensor map can be built and read (spaces, blocks, labels,
-//! data), and nothing else. Transforms and contractions are phase 3 and are
-//! deliberately not reachable from here yet, so the operation surface gets its
-//! own review before it exists. The module is not in the prelude for the same
-//! reason.
+//! only**. A [`TensorMap`] can be built ([`TensorMap::zeros`],
+//! [`TensorMap::from_block_fn`]) and read ([`TensorMap::codomain`],
+//! [`TensorMap::domain`], [`TensorMap::block_sectors`], [`TensorMap::block`],
+//! [`TensorMap::data`]), and nothing else. Transforms and contractions are
+//! phase 3 and are deliberately not reachable from here yet, so the operation
+//! surface gets its own review before it exists. The module is not in the
+//! prelude for the same reason.
 //!
 //! Construction consumes only the transactional checked admission path, so a
 //! provider that reports an invalid or unrepresentable algebra fails with a
