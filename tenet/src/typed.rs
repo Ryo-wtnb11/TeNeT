@@ -16,14 +16,22 @@
 //!
 //! # Phase boundary
 //!
-//! This is the phase-2 surface of issue #557: **construction and inspection
-//! only**. A [`TensorMap`] can be built ([`TensorMap::zeros`],
-//! [`TensorMap::from_block_fn`]) and read ([`TensorMap::codomain`],
-//! [`TensorMap::domain`], [`TensorMap::block_fusion_trees`], [`TensorMap::block`],
-//! [`TensorMap::data`]), and nothing else. Transforms and contractions are
-//! phase 3 and are deliberately not reachable from here yet, so the operation
-//! surface gets its own review before it exists. The module is not in the
-//! prelude for the same reason.
+//! This is the phase-3 surface of issue #557: construction
+//! ([`TensorMap::zeros`], [`TensorMap::from_block_fn`]), inspection
+//! ([`TensorMap::codomain`], [`TensorMap::domain`],
+//! [`TensorMap::block_fusion_trees`], [`TensorMap::block`],
+//! [`TensorMap::data`]), and two operations — [`TensorMap::permute`] and
+//! [`TensorMap::contract`].
+//!
+//! Everything else is deliberately still absent. `braid`, `transpose` and
+//! `repartition` each need plumbing this phase does not carry (`transpose`
+//! and `repartition` are planar operations with their own validation, not
+//! permutes), composition semantics — TensorKit `A * B`, which unlike
+//! [`TensorMap::contract`] never twists dual legs — has no typed spelling
+//! yet, and the decompositions have none either. The phase-4 review decides
+//! which of those the facade grows, and whether the module joins the prelude;
+//! adding them here ahead of that review would bypass the gate that exists to
+//! keep this surface deliberate.
 //!
 //! Construction consumes only the transactional checked admission path, so a
 //! provider that reports an invalid or unrepresentable algebra fails with a
@@ -35,13 +43,18 @@ use tenet_core::{
     BlockKey, BlockRef, CheckedFusionAlgebra, FusionProductSpace, FusionTreeHomSpace,
     MultiplicityFreeRigidSymbols, SectorLeg,
 };
-use tenet_tensors::BoundDynamicFusionMapSpace;
+use tenet_tensors::{
+    BoundDynamicFusionMapSpace, BoundDynamicTensorRef, OutputAxisOrder, TreeTransformOperation,
+};
 
 pub use tenet_core::SectorCodec;
 
 use crate::error::Error;
 use crate::runtime::Runtime;
 use crate::tensor::{apply_fill, Fill, TensorScalar};
+use crate::typed_tensor_core::{
+    tensorcontract_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
+};
 
 /// One tensor leg: a provider plus the sector-to-degeneracy map of that axis
 /// (TensorKit's `GradedSpace`).
@@ -499,6 +512,114 @@ where
             return Err(error);
         }
         built
+    }
+
+    /// TensorKit `permute`: re-arranges legs with symmetric braiding.
+    ///
+    /// `codomain_axes` and `domain_axes` list source axis numbers (`0..rank`,
+    /// codomain axes first) for the new codomain and domain — the same
+    /// argument shape as the erased [`crate::prelude::Tensor::permute`], so
+    /// there is one vocabulary for the operation rather than two.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] when
+    /// the axis lists are malformed (out of range, repeated, or not a
+    /// partition of `0..rank`) or the provider cannot support the braiding the
+    /// requested motion needs. The expert layer's own typed errors are the
+    /// contract here: re-validating the axes at this layer would be a second
+    /// copy of a rule that already exists one call down, free to drift.
+    pub fn permute(&self, codomain_axes: &[usize], domain_axes: &[usize]) -> Result<Self, Error> {
+        // Why no identity shortcut (the erased facade shares storage when the
+        // axes do not move): the result would be byte-identical either way, so
+        // the shortcut is a pure cost question, and adding one without a gate
+        // that measures it is speculative.
+        let operation = TreeTransformOperation::permute(
+            codomain_axes.iter().copied(),
+            domain_axes.iter().copied(),
+        );
+        // Leasing rather than locking, matching the erased path: independent
+        // operations on one runtime must not serialize behind each other.
+        let mut lease = self.runtime.lease_context()?;
+        let (space, data) = tree_transform_owned_multiplicity_free(
+            lease.context().multiplicity_free_lane::<D>(),
+            BoundDynamicTensorRef::try_new(&self.body.space, &self.body.data)?,
+            operation,
+        )?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody { space, data }),
+        })
+    }
+
+    /// Contracts `lhs_axes` of `self` with `rhs_axes` of `other` (pairwise, in
+    /// list order) and lays the open axes out in `output_axes`.
+    ///
+    /// `output_axes` is a permutation of `0..open_rank` over the open axes,
+    /// `self`'s ascending first and `other`'s after; passing `0..open_rank`
+    /// gives the default order (TensorKit `tensorcontract!` with default
+    /// `pAB`). The codomain/domain split of the result follows the
+    /// TensorOperations convention the engine implements: **every** open axis
+    /// of `self` becomes the result's codomain
+    /// (`self.rank() - lhs_axes.len()` axes) and every open axis of `other`
+    /// becomes its domain (`other.rank() - rhs_axes.len()` axes), regardless
+    /// of which side of either operand those axes came from.
+    ///
+    /// **Fermionic semantics**: like TensorKit `tensorcontract!` / `@tensor`
+    /// (and the erased [`crate::prelude::Tensor::contract`]), this **twists**
+    /// dual contracted legs with the fermionic supertrace twist — unlike
+    /// composition (TensorKit `A * B` / `mul!`), which never does. Bosonic
+    /// rules are unaffected; fermionic rules can differ by signs. There is no
+    /// typed `compose` yet, so this is the only contraction semantics the
+    /// typed facade offers.
+    ///
+    /// The result is bound to `self`'s provider allocation, the same
+    /// left-authority rule [`Self::zeros`] uses for its first leg: the two
+    /// operands must agree on
+    /// [`tenet_core::FusionRule::rule_identity`], which makes the choice of
+    /// allocation immaterial to the algebra.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::RuntimeMismatch`] when the operands belong to different
+    ///   runtimes.
+    /// - [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] for
+    ///   malformed axis lists, an output order that is not a permutation of
+    ///   the open axes, mismatched contracted legs, or operands whose
+    ///   providers report different rule identities. Those all come back from
+    ///   the expert layer, which owns the rules; re-checking them here would
+    ///   be a second copy free to drift.
+    pub fn contract(
+        &self,
+        other: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+    ) -> Result<Self, Error> {
+        // The one check the expert layer cannot make: it never sees the two
+        // runtimes, and mixing execution state across them is a trust-boundary
+        // violation rather than an algebra error. Mirrors the erased facade's
+        // `check_same_world`. Dtype and placement need no arm here — `D` is a
+        // type parameter and the typed facade is host-only.
+        if !self.runtime.same_runtime(&other.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        let mut lease = self.runtime.lease_context()?;
+        let (space, data) = tensorcontract_owned_multiplicity_free(
+            lease.context().multiplicity_free_lane::<D>(),
+            BoundDynamicTensorRef::try_new(&self.body.space, &self.body.data)?,
+            BoundDynamicTensorRef::try_new(&other.body.space, &other.body.data)?,
+            lhs_axes,
+            rhs_axes,
+            // Why `OutputAxisOrder` stays out of the signature: it is an
+            // expert-layer borrow type, and a `&[usize]` says the same thing
+            // at the facade without a second public vocabulary.
+            OutputAxisOrder::from_axes(output_axes),
+        )?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody { space, data }),
+        })
     }
 
     /// The codomain legs, in axis order.

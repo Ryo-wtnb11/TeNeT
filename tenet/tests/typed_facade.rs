@@ -892,3 +892,483 @@ fn typed_and_erased_block_fill_produce_identical_storage_on_a_builtin_rule() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3, slice 2: `TensorMap::permute`.
+// ---------------------------------------------------------------------------
+
+/// The second Z3 leg shape, deliberately unlike [`z3_leg`]'s: with four legs of
+/// two distinct degeneracy patterns, a permuted leg can be identified by its
+/// degeneracies, which a uniform fixture could not distinguish.
+fn z3_other_leg(provider: &Arc<ExternalZ3>, is_dual: bool) -> GradedSpace<ExternalZ3> {
+    GradedSpace::try_new(
+        Arc::clone(provider),
+        [(Z3Charge(0), 1), (Z3Charge(1), 2), (Z3Charge(2), 4)],
+        is_dual,
+    )
+    .expect("Z3 leg is well formed")
+}
+
+/// A rank-4 Z3 tensor map whose elements are all distinct, so any leg, block or
+/// element reordering is visible in the buffer. The layout is
+/// `[wide, narrow] <- [wide', narrow']`, so no two axes share a shape.
+fn z3_rank_four(runtime: &Runtime, provider: &Arc<ExternalZ3>) -> TensorMap<ExternalZ3, f64> {
+    let wide = z3_leg(provider, false);
+    let narrow = z3_other_leg(provider, false);
+    let wide_dual = wide.try_dual().unwrap();
+    let narrow_dual = narrow.try_dual().unwrap();
+    let mut counter = 0.0;
+    TensorMap::from_block_fn(
+        runtime,
+        [&wide, &narrow],
+        [&wide_dual, &narrow_dual],
+        |_, _| {
+            counter += 1.0;
+            counter
+        },
+    )
+    .expect("Z3 rank-4 layout is admissible")
+}
+
+#[test]
+fn permute_moves_legs_of_a_multi_block_external_provider_tensor() {
+    // What: a non-identity permute of a runtime-rank multi-block external
+    // provider tensor produces the reordered spaces, keeps the element count,
+    // and moves the payload (this rule's F/R symbols are all 1, so the permuted
+    // buffer is a rearrangement of the source, never a rescaling).
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    // The source is `[wide, narrow] <- [wide', narrow']`; this order sends one
+    // leg of each shape across the codomain/domain split, so the degeneracies
+    // pin which source leg landed where. Flags alone would not: they are
+    // symmetric under swapping the split.
+    let permuted = tensor.permute(&[1, 2], &[3, 0]).unwrap();
+
+    assert_eq!(permuted.codomain().len(), 2);
+    assert_eq!(permuted.domain().len(), 2);
+    // Axis 1 (`narrow`) stays in the codomain unchanged; axis 2 (`wide'`) is
+    // bent round from the domain, which conjugates it, so it arrives as the
+    // non-dual `wide`. Symmetrically axis 0 (`wide`) bent into the domain
+    // arrives as `wide'`, while axis 3 (`narrow'`) is carried across as is.
+    assert_eq!(permuted.codomain()[0].degeneracies(), &[1, 2, 4]);
+    assert_eq!(permuted.codomain()[1].degeneracies(), &[2, 3, 1]);
+    assert_eq!(permuted.domain()[0].degeneracies(), &[1, 4, 2]);
+    assert_eq!(permuted.domain()[1].degeneracies(), &[2, 1, 3]);
+    assert!(!permuted.codomain()[0].is_dual());
+    assert!(!permuted.codomain()[1].is_dual());
+    assert!(permuted.domain()[0].is_dual());
+    assert!(permuted.domain()[1].is_dual());
+    assert_eq!(permuted.data().len(), tensor.data().len());
+    assert_ne!(permuted.data(), tensor.data());
+    let mut moved: Vec<f64> = permuted.data().to_vec();
+    let mut original: Vec<f64> = tensor.data().to_vec();
+    moved.sort_by(f64::total_cmp);
+    original.sort_by(f64::total_cmp);
+    assert_eq!(moved, original);
+}
+
+#[test]
+fn permute_round_trips_back_to_the_source_layout() {
+    // What: permuting and permuting back is the identity on both the spaces and
+    // the payload — a stronger statement than "the multiset survived", since it
+    // pins where each element landed.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    let there = tensor.permute(&[1, 3], &[0, 2]).unwrap();
+    let back = there.permute(&[2, 0], &[3, 1]).unwrap();
+
+    assert_eq!(back.data(), tensor.data());
+    assert_eq!(back.block_count(), tensor.block_count());
+    for index in 0..tensor.block_count() {
+        assert_eq!(
+            back.block_fusion_trees(index).unwrap(),
+            tensor.block_fusion_trees(index).unwrap()
+        );
+    }
+}
+
+#[test]
+fn permute_carries_a_simple_fusion_provider_with_a_complex_payload() {
+    // What: nothing in the typed transform is abelian- or real-specific; the
+    // SU(2) recoupling coefficients reach a `Complex64` payload.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalSu2);
+    let leg = su2_leg(&provider, false);
+    let tensor: TensorMap<ExternalSu2, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |sectors, indices| {
+            Complex64::new(
+                sectors.coupled().twice_spin() as f64 + 1.0,
+                indices.iter().sum::<usize>() as f64 + 1.0,
+            )
+        })
+        .unwrap();
+
+    let permuted = tensor.permute(&[0, 2], &[1, 3]).unwrap();
+
+    assert_eq!(permuted.codomain().len(), 2);
+    assert_eq!(permuted.domain().len(), 2);
+    assert!(permuted.block_count() >= 1);
+    assert!(permuted
+        .data()
+        .iter()
+        .any(|value| *value != Complex64::new(0.0, 0.0)));
+}
+
+#[test]
+fn permute_rejects_malformed_axes_without_panicking() {
+    // What: the expert layer's typed errors are the contract — an out-of-range
+    // axis, a repeated axis and a wrong-length axis list all come back as `Err`.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    assert!(tensor.permute(&[0, 9], &[2, 3]).is_err());
+    assert!(tensor.permute(&[0, 0], &[2, 3]).is_err());
+    assert!(tensor.permute(&[0], &[2, 3]).is_err());
+}
+
+/// The erased/typed pair of the byte-oracle fixture: one built-in Z2 layout
+/// filled identically through both facades.
+fn z2_oracle_pair(
+    runtime: &Runtime,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::Z2FusionRule, f64>,
+) {
+    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        runtime,
+        [&space, &space],
+        [&space],
+        erased_fill_value,
+    )
+    .unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 3),
+        ],
+        false,
+    )
+    .unwrap();
+    let typed = TensorMap::from_block_fn(runtime, [&leg, &leg], [&leg], typed_fill_value).unwrap();
+    (erased, typed)
+}
+
+#[test]
+fn typed_and_erased_permute_agree_byte_for_byte_on_a_builtin_rule() {
+    // What: the typed permute is the erased permute, not a lookalike — same
+    // destination layout, same block order, same bytes. A non-identity order is
+    // used deliberately, so neither side can take an identity shortcut.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    let erased_permuted = erased.permute(&[2, 0], &[1]).unwrap();
+    let typed_permuted = typed.permute(&[2, 0], &[1]).unwrap();
+
+    assert_eq!(typed_permuted.data(), erased_permuted.data());
+    assert_ne!(typed_permuted.data(), typed.data());
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3, slice 3: `TensorMap::contract`.
+// ---------------------------------------------------------------------------
+
+/// A single-sector Z3 leg: the whole tensor map is then one dense block, so a
+/// contraction result can be checked against a hand-computed matrix product.
+fn z3_dense_leg(provider: &Arc<ExternalZ3>, degeneracy: usize) -> GradedSpace<ExternalZ3> {
+    GradedSpace::try_new(Arc::clone(provider), [(Z3Charge(0), degeneracy)], false)
+        .expect("single-sector Z3 leg is well formed")
+}
+
+/// Fills a tensor map's storage with `start, start + 1, ...` in storage order.
+fn counting_z3(
+    runtime: &Runtime,
+    codomain: &GradedSpace<ExternalZ3>,
+    domain: &GradedSpace<ExternalZ3>,
+    start: f64,
+) -> TensorMap<ExternalZ3, f64> {
+    let mut next = start - 1.0;
+    TensorMap::from_block_fn(runtime, [codomain], [domain], |_, _| {
+        next += 1.0;
+        next
+    })
+    .expect("single-block Z3 layout is admissible")
+}
+
+#[test]
+fn contract_matches_a_hand_computed_product_with_a_reordered_output() {
+    // What: a 2x3 by 3x4 contraction with `output_axes = [1, 0]` is the
+    // transpose of the matrix product, element for element. The values are the
+    // ones the expert-layer helper is pinned to, so the facade is proved to
+    // pass the axes and the output order through unaltered.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let (rows, shared, columns) = (
+        z3_dense_leg(&provider, 2),
+        z3_dense_leg(&provider, 3),
+        z3_dense_leg(&provider, 4),
+    );
+    let lhs = counting_z3(&runtime, &rows, &shared, 1.0);
+    let rhs = counting_z3(&runtime, &shared, &columns, 7.0);
+    assert_eq!(lhs.data(), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    assert_eq!(rhs.data().len(), 12);
+
+    let contracted = lhs.contract(&rhs, &[1], &[0], &[1, 0]).unwrap();
+
+    assert_eq!(
+        contracted.data(),
+        [76.0, 103.0, 130.0, 157.0, 100.0, 136.0, 172.0, 208.0]
+    );
+    assert_eq!(contracted.codomain().len(), 1);
+    assert_eq!(contracted.domain().len(), 1);
+}
+
+#[test]
+fn contract_with_the_default_output_order_keeps_the_open_axes_in_place() {
+    // What: `0..open_rank` is the identity output order (the erased facade's
+    // default `pAB`), so the same product comes back untransposed.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let (rows, shared, columns) = (
+        z3_dense_leg(&provider, 2),
+        z3_dense_leg(&provider, 3),
+        z3_dense_leg(&provider, 4),
+    );
+    let lhs = counting_z3(&runtime, &rows, &shared, 1.0);
+    let rhs = counting_z3(&runtime, &shared, &columns, 7.0);
+
+    let contracted = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
+
+    assert_eq!(
+        contracted.data(),
+        [76.0, 100.0, 103.0, 136.0, 130.0, 172.0, 157.0, 208.0]
+    );
+}
+
+#[test]
+fn contract_carries_a_simple_fusion_provider_with_a_complex_payload() {
+    // What: the contraction seam is neither abelian- nor real-specific.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalSu2);
+    let leg = su2_leg(&provider, false);
+    let mut next = Complex64::new(0.0, 0.0);
+    let build = |next: &mut Complex64| {
+        let mut step = *next;
+        let tensor: TensorMap<ExternalSu2, Complex64> =
+            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |_, _| {
+                step += Complex64::new(1.0, 0.5);
+                step
+            })
+            .unwrap();
+        *next = step;
+        tensor
+    };
+    let lhs = build(&mut next);
+    let rhs = build(&mut next);
+
+    // Two spin-1/2 legs on each side, so both operands carry the spin-0 and
+    // spin-1 blocks; the pair of contracted legs makes the result rank 4.
+    let contracted = lhs.contract(&rhs, &[2, 3], &[0, 1], &[2, 0, 3, 1]).unwrap();
+
+    assert_eq!(contracted.codomain().len() + contracted.domain().len(), 4);
+    assert!(contracted
+        .data()
+        .iter()
+        .any(|value| *value != Complex64::new(0.0, 0.0)));
+}
+
+#[test]
+fn contract_rejects_operands_from_different_runtimes() {
+    // What: the runtime is a trust boundary — two runtimes own separate
+    // execution state, so mixing them is refused before any provider work.
+    let _guard = cache_lock();
+    let first = runtime();
+    let second = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let (rows, shared, columns) = (
+        z3_dense_leg(&provider, 2),
+        z3_dense_leg(&provider, 3),
+        z3_dense_leg(&provider, 4),
+    );
+    let lhs = counting_z3(&first, &rows, &shared, 1.0);
+    let rhs = counting_z3(&second, &shared, &columns, 1.0);
+
+    let error = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
+
+    assert!(matches!(error, tenet::prelude::Error::RuntimeMismatch));
+}
+
+#[test]
+fn contract_accepts_separately_allocated_equal_identity_providers() {
+    // What: the counterpart of the distinct-identity rejection — two
+    // independent allocations of one rule interoperate in an operation, not
+    // just in construction, and produce the same values a single allocation
+    // does.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let first = Arc::new(ExternalZ3::new());
+    let second = Arc::new(ExternalZ3::new());
+    assert!(!Arc::ptr_eq(&first, &second));
+    let lhs = counting_z3(
+        &runtime,
+        &z3_dense_leg(&first, 2),
+        &z3_dense_leg(&first, 3),
+        1.0,
+    );
+    let rhs = counting_z3(
+        &runtime,
+        &z3_dense_leg(&second, 3),
+        &z3_dense_leg(&second, 4),
+        7.0,
+    );
+
+    let contracted = lhs.contract(&rhs, &[1], &[0], &[1, 0]).unwrap();
+
+    assert_eq!(
+        contracted.data(),
+        [76.0, 103.0, 130.0, 157.0, 100.0, 136.0, 172.0, 208.0]
+    );
+}
+
+#[test]
+fn contract_rejects_operands_with_distinct_rule_identities() {
+    // What: two providers of one Rust type but different identities are a
+    // different algebra. The rejection comes from the expert layer, which is
+    // why the facade does not pre-check it.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let first = Arc::new(ExternalZ3::tagged(0));
+    let second = Arc::new(ExternalZ3::tagged(1));
+    let lhs = counting_z3(
+        &runtime,
+        &z3_dense_leg(&first, 2),
+        &z3_dense_leg(&first, 3),
+        1.0,
+    );
+    let rhs = counting_z3(
+        &runtime,
+        &z3_dense_leg(&second, 3),
+        &z3_dense_leg(&second, 4),
+        1.0,
+    );
+
+    assert!(lhs.contract(&rhs, &[1], &[0], &[0, 1]).is_err());
+}
+
+#[test]
+fn contract_rejects_malformed_axes_without_panicking() {
+    // What: mismatched axis-list lengths, out-of-range axes and a wrong-length
+    // output order all come back as `Err`.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let (rows, shared, columns) = (
+        z3_dense_leg(&provider, 2),
+        z3_dense_leg(&provider, 3),
+        z3_dense_leg(&provider, 4),
+    );
+    let lhs = counting_z3(&runtime, &rows, &shared, 1.0);
+    let rhs = counting_z3(&runtime, &shared, &columns, 1.0);
+
+    assert!(lhs.contract(&rhs, &[1], &[], &[0, 1]).is_err());
+    assert!(lhs.contract(&rhs, &[9], &[0], &[0, 1]).is_err());
+    assert!(lhs.contract(&rhs, &[1], &[9], &[0, 1]).is_err());
+    assert!(lhs.contract(&rhs, &[1], &[0], &[0]).is_err());
+}
+
+#[test]
+fn typed_and_erased_contract_agree_byte_for_byte_on_a_builtin_rule() {
+    // What: the typed contraction is the erased `contract_ordered`, bytes and
+    // layout, on a non-identity output order.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    let erased_contracted = erased
+        .contract_ordered(&erased, &[2], &[0], &[1, 0, 3, 2])
+        .unwrap();
+    let typed_contracted = typed.contract(&typed, &[2], &[0], &[1, 0, 3, 2]).unwrap();
+
+    assert_eq!(typed_contracted.data(), erased_contracted.data());
+    assert!(typed_contracted.data().iter().any(|&value| value != 0.0));
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3, slice 4: non-regression gates.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_typed_operation_reads_the_runtime_owned_transform_store() {
+    // What: the typed permute runs on a context leased from the tensor's own
+    // runtime, so it reads the completed transform the erased permute of the
+    // same built-in layout already put in that runtime's store — one entry,
+    // and a hit rather than a second computation. A typed path that executed
+    // on an unbound default context would miss and add its own entry.
+    //
+    // What this deliberately does not claim: that the two facades use the same
+    // execution lane. Lane identity has no observable — the store is owned by
+    // the Runtime and keyed by rule identity, operation and interned structure
+    // ids, so any leased context sees the same entries.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+    runtime.clear_tree_transform_cache();
+    assert_eq!(runtime.tree_transform_cache_info().entries(), 0);
+
+    erased.permute(&[2, 0], &[1]).unwrap();
+    let after_erased = runtime.tree_transform_cache_info().entries();
+    assert_eq!(after_erased, 1);
+
+    let hits_before = runtime.tree_transform_cache_info().hits();
+    typed.permute(&[2, 0], &[1]).unwrap();
+
+    let after_typed = runtime.tree_transform_cache_info();
+    assert_eq!(after_typed.entries(), after_erased);
+    // Non-vacuous: the typed run did not merely fail to add an entry, it read
+    // the entry the erased run left behind.
+    assert!(after_typed.hits() > hits_before);
+}
+
+#[test]
+fn a_failing_typed_operation_publishes_no_cache_state() {
+    // What: an operation rejected by the expert layer leaves both process-global
+    // layout caches and the runtime's tree-transform cache exactly as they were,
+    // the same transactional guarantee construction gives.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+    let before = (
+        fusion_tree_layout_cache_info(),
+        complete_hom_space_structure_cache_info(),
+    );
+    let runtime_before = runtime.tree_transform_cache_info();
+
+    assert!(tensor.permute(&[0, 0], &[2, 3]).is_err());
+    assert!(tensor
+        .contract(&tensor, &[3], &[9], &[0, 1, 2, 3, 4, 5])
+        .is_err());
+
+    assert_eq!(
+        (
+            fusion_tree_layout_cache_info(),
+            complete_hom_space_structure_cache_info(),
+        ),
+        before
+    );
+    assert_eq!(runtime.tree_transform_cache_info(), runtime_before);
+}
