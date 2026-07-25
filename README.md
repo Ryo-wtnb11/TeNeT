@@ -21,10 +21,14 @@ sector vocabulary was recently split out of `tenet-core` into `tenet-sectors`.
 Public APIs are intended to stay Rust-native while matching the TensorKit
 ecosystem's semantics closely: TensorKit, TensorKitSectors, TensorOperations,
 MatrixAlgebraKit, Strided.jl, and StridedViews.jl are the reference vocabulary,
-and names follow the TensorKit 0.17 spelling. For non-abelian conventions
-(SU(2), and the fZ2 ⊠ U(1) ⊠ SU(2) products), [QSpace][qspace] (Weichselbaum) is
-an additional design and numerical reference — its non-abelian fusion /
-recoupling (CGC) handling is a second oracle to check conventions against.
+and names follow the TensorKit 0.17 spelling. [QSpace][qspace] (Weichselbaum)
+is the second design reference, in two roles. It fixes the compiled execution
+model that the `Runtime` layer follows: quantum labels, block structure,
+coefficient records, and runtime-rank metadata stay tensor-near and feed
+whole-tensor kernel dispatch, rather than being recomputed per operation. It is
+also the numerical oracle for non-abelian conventions (SU(2), and the
+fZ2 ⊠ U(1) ⊠ SU(2) products) — its fusion / recoupling (CGC) handling is the
+second source to check conventions against, alongside TensorKit.
 [`docs/tk_api_parity.md`](docs/tk_api_parity.md) is the per-export lookup table.
 
 SU(2) representation algebra itself is not reimplemented here: `tenet-sectors`
