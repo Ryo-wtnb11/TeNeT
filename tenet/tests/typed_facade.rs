@@ -43,6 +43,9 @@ enum Quirk {
     AliasLabels,
     /// Fails the checked dual, i.e. mid-staging inside the checked path.
     FailDual,
+    /// Refuses to decode charge 2, which the engine reaches by fusing two
+    /// charge-1 legs — a violation of the codec's decode-totality law.
+    NarrowDecode,
 }
 
 #[derive(Clone, Copy)]
@@ -195,9 +198,14 @@ impl SectorCodec for ExternalZ3 {
     }
 
     fn decode_sector(&self, sector: SectorId) -> Result<Self::Sector, FusionAlgebraError> {
+        let limit = if self.quirk == Some(Quirk::NarrowDecode) {
+            2
+        } else {
+            3
+        };
         u8::try_from(sector.id())
             .ok()
-            .filter(|&charge| charge < 3)
+            .filter(|&charge| charge < limit)
             .map(Z3Charge)
             .ok_or(FusionAlgebraError::InvalidSector { sector })
     }
@@ -592,4 +600,132 @@ fn checked_construction_failure_publishes_no_cache_state() {
         before
     );
     assert_eq!(runtime.tree_transform_cache_info(), runtime_before);
+}
+
+// ---------------------------------------------------------------------------
+// Slice 6: `from_block_fn` and inspection.
+// ---------------------------------------------------------------------------
+
+/// Numeric stand-in for a Z3 charge, so a fill value can depend on the labels
+/// the closure was handed.
+fn z3_weight(charge: Z3Charge) -> f64 {
+    f64::from(charge.0) + 1.0
+}
+
+#[test]
+fn from_block_fn_sees_decoded_labels_and_fills_every_allowed_element() {
+    // What: the closure is handed the provider's own labels (not `SectorId`s)
+    // for the coupled sector and both sides' uncoupled legs, and every stored
+    // element is written.
+    let _guard = cache_lock();
+    let provider = Arc::new(ExternalZ3::new());
+    let leg = z3_leg(&provider, false);
+    let dual = leg.try_dual().unwrap();
+    let runtime = runtime();
+
+    let tensor: TensorMap<ExternalZ3, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&dual], |sectors, indices| {
+            assert_eq!(sectors.codomain_uncoupled().len(), 1);
+            assert_eq!(sectors.domain_uncoupled().len(), 1);
+            z3_weight(*sectors.coupled()) * 100.0
+                + z3_weight(sectors.codomain_uncoupled()[0]) * 10.0
+                + indices.iter().sum::<usize>() as f64
+        })
+        .unwrap();
+
+    assert!(tensor.block_count() >= 1);
+    assert!(tensor.data().iter().all(|&value| value >= 100.0));
+}
+
+#[test]
+fn from_block_fn_surfaces_a_decode_failure_as_the_codec_error() {
+    // What: a codec that cannot decode an id the engine produced fails the
+    // construction with the provider's own error instead of panicking inside
+    // the fill.
+    let _guard = cache_lock();
+    let provider = Arc::new(ExternalZ3::with(Quirk::NarrowDecode));
+    let leg = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(Z3Charge(0), 1), (Z3Charge(1), 2)],
+        false,
+    )
+    .unwrap();
+    let runtime = runtime();
+
+    // Two charge-1 codomain legs couple to charge 2, the id this codec refuses.
+    let error = TensorMap::<ExternalZ3, f64>::from_block_fn(
+        &runtime,
+        [&leg, &leg],
+        [&leg, &leg],
+        |_, _| 1.0,
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, tenet::prelude::Error::FusionAlgebra(_)));
+}
+
+#[test]
+fn tensor_map_inspection_round_trips_the_spaces_and_blocks() {
+    // What: the legs come back as typed graded spaces with their labels and
+    // dual flags intact, and every block reports decoded labels plus a data
+    // view consistent with the buffer.
+    let _guard = cache_lock();
+    let provider = Arc::new(ExternalZ3::new());
+    let leg = z3_leg(&provider, false);
+    let dual = leg.try_dual().unwrap();
+    let runtime = runtime();
+
+    let tensor: TensorMap<ExternalZ3, f64> =
+        TensorMap::zeros(&runtime, [&leg, &leg], [&dual]).unwrap();
+
+    let codomain = tensor.codomain();
+    let domain = tensor.domain();
+    assert_eq!(codomain.len(), 2);
+    assert_eq!(domain.len(), 1);
+    assert_eq!(codomain[0].sectors().unwrap(), leg.sectors().unwrap());
+    assert!(!codomain[0].is_dual());
+    assert_eq!(domain[0].sectors().unwrap(), dual.sectors().unwrap());
+    assert!(domain[0].is_dual());
+
+    let mut elements = 0;
+    for index in 0..tensor.block_count() {
+        let sectors = tensor.block_sectors(index).unwrap();
+        assert_eq!(sectors.codomain_uncoupled().len(), 2);
+        assert_eq!(sectors.domain_uncoupled().len(), 1);
+        // Unique fusion: the two codomain charges fuse to the coupled charge.
+        let sum = (sectors.codomain_uncoupled()[0].0 + sectors.codomain_uncoupled()[1].0) % 3;
+        assert_eq!(&Z3Charge(sum), sectors.coupled());
+
+        let block = tensor.block(index).unwrap();
+        assert!(block.storage_end_exclusive().unwrap() <= tensor.data().len());
+        elements += block.element_count().unwrap();
+    }
+    assert_eq!(elements, tensor.data().len());
+}
+
+#[test]
+fn block_sectors_reports_a_non_self_dual_domain_label() {
+    // What: a dual domain leg carrying charge 2 — whose dual is charge 1, so a
+    // confusion between the two would show — is decoded as charge 2, matching
+    // the convention that a tree labels a domain leg with the space's own
+    // sector rather than its dual.
+    let _guard = cache_lock();
+    let provider = Arc::new(ExternalZ3::new());
+    let codomain = GradedSpace::try_new(Arc::clone(&provider), [(Z3Charge(1), 1)], false).unwrap();
+    let domain = GradedSpace::try_new(Arc::clone(&provider), [(Z3Charge(2), 1)], true).unwrap();
+    assert_eq!(
+        domain.try_dual().unwrap().sectors().unwrap(),
+        vec![Z3Charge(1)]
+    );
+    let runtime = runtime();
+
+    let tensor: TensorMap<ExternalZ3, f64> =
+        TensorMap::zeros(&runtime, [&codomain, &codomain], [&domain]).unwrap();
+
+    assert_eq!(tensor.block_count(), 1);
+    let sectors = tensor.block_sectors(0).unwrap();
+    assert_eq!(sectors.coupled(), &Z3Charge(2));
+    assert_eq!(sectors.codomain_uncoupled(), &[Z3Charge(1), Z3Charge(1)]);
+    assert_eq!(sectors.domain_uncoupled(), &[Z3Charge(2)]);
+    assert!(tensor.domain()[0].is_dual());
 }

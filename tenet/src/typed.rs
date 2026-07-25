@@ -25,8 +25,8 @@
 use std::sync::Arc;
 
 use tenet_core::{
-    CheckedFusionAlgebra, FusionProductSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
-    SectorLeg,
+    BlockKey, BlockRef, CheckedFusionAlgebra, FusionProductSpace, FusionTreeHomSpace,
+    FusionTreeKey, MultiplicityFreeRigidSymbols, SectorLeg,
 };
 use tenet_tensors::BoundDynamicFusionMapSpace;
 
@@ -195,6 +195,102 @@ impl<R> GradedSpace<R> {
     }
 }
 
+/// The provider-labelled identity of one stored block: the fusion tree on each
+/// side of the tensor map, decoded through the codec.
+///
+/// Inner lines are part of the identity, not decoration: from rank three up,
+/// two distinct blocks can share their uncoupled and coupled sectors and
+/// differ only in how the intermediate fusions ran, so a key without them
+/// would not name a block.
+///
+/// Vertex labels are absent because this facade admits multiplicity-free
+/// providers only, where every fusion vertex is the unique one.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct BlockSectors<S> {
+    coupled: S,
+    codomain_uncoupled: Vec<S>,
+    codomain_innerlines: Vec<S>,
+    domain_uncoupled: Vec<S>,
+    domain_innerlines: Vec<S>,
+}
+
+impl<S> BlockSectors<S> {
+    /// The sector both trees couple to.
+    #[inline]
+    pub fn coupled(&self) -> &S {
+        &self.coupled
+    }
+
+    /// Codomain leg sectors, in codomain axis order.
+    #[inline]
+    pub fn codomain_uncoupled(&self) -> &[S] {
+        &self.codomain_uncoupled
+    }
+
+    /// Codomain intermediate fusion sectors, from the innermost outwards.
+    #[inline]
+    pub fn codomain_innerlines(&self) -> &[S] {
+        &self.codomain_innerlines
+    }
+
+    /// Domain leg sectors, in domain axis order.
+    ///
+    /// These are the domain spaces' own sectors (TensorKit's `f2.uncoupled`),
+    /// not their duals; on both sides the uncoupled sectors fuse to
+    /// [`Self::coupled`].
+    #[inline]
+    pub fn domain_uncoupled(&self) -> &[S] {
+        &self.domain_uncoupled
+    }
+
+    /// Domain intermediate fusion sectors, from the innermost outwards.
+    #[inline]
+    pub fn domain_innerlines(&self) -> &[S] {
+        &self.domain_innerlines
+    }
+}
+
+fn decode_tree<R>(
+    provider: &R,
+    tree: &FusionTreeKey,
+) -> Result<(Vec<R::Sector>, Vec<R::Sector>), Error>
+where
+    R: SectorCodec,
+{
+    let decode = |ids: &[tenet_core::SectorId]| -> Result<Vec<R::Sector>, Error> {
+        ids.iter()
+            .map(|&id| provider.decode_sector(id).map_err(Error::from))
+            .collect()
+    };
+    Ok((decode(tree.uncoupled())?, decode(tree.innerlines())?))
+}
+
+/// Decodes one block key into provider labels.
+///
+/// Every id here came out of the engine's own fusion enumeration, so a failure
+/// is the provider breaking [`SectorCodec`]'s decode-totality law, and it is
+/// surfaced as the codec's own error rather than a panic.
+fn decode_block_sectors<R>(provider: &R, key: &BlockKey) -> Result<BlockSectors<R::Sector>, Error>
+where
+    R: SectorCodec,
+{
+    let pair = key.as_fusion_tree_pair().ok_or_else(|| {
+        Error::InvalidArgument(format!(
+            "block key is {}, not a fusion-tree pair",
+            key.kind()
+        ))
+    })?;
+    let (codomain_uncoupled, codomain_innerlines) = decode_tree(provider, pair.codomain_tree())?;
+    let (domain_uncoupled, domain_innerlines) = decode_tree(provider, pair.domain_tree())?;
+    Ok(BlockSectors {
+        coupled: provider.decode_sector(pair.codomain_tree().coupled())?,
+        codomain_uncoupled,
+        codomain_innerlines,
+        domain_uncoupled,
+        domain_innerlines,
+    })
+}
+
 /// Storage shared by every clone of one typed tensor map: the admitted space
 /// and its block payload.
 struct TypedTensorBody<R, D> {
@@ -240,21 +336,10 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
 {
-    fn build<'a, Codomain, Domain>(
-        runtime: &Runtime,
-        codomain: Codomain,
-        domain: Domain,
-        fill: Fill<'_, D>,
-    ) -> Result<Self, Error>
-    where
-        Codomain: IntoIterator<Item = &'a GradedSpace<R>>,
-        Domain: IntoIterator<Item = &'a GradedSpace<R>>,
-        R: 'a,
-    {
-        let codomain: Vec<&GradedSpace<R>> = codomain.into_iter().collect();
-        let domain: Vec<&GradedSpace<R>> = domain.into_iter().collect();
-        let mut legs = codomain.iter().chain(domain.iter());
-        let authority = legs.next().ok_or_else(|| {
+    /// The provider that owns the layout, after proving every leg agrees on
+    /// the rule identity.
+    fn authority<'a>(legs: &[&'a GradedSpace<R>]) -> Result<&'a Arc<R>, Error> {
+        let (authority, rest) = legs.split_first().ok_or_else(|| {
             Error::InvalidArgument(
                 "at least one leg is required to infer the fusion provider".to_string(),
             )
@@ -264,10 +349,22 @@ where
         // for the erased facade. Checking here also means a mismatch is
         // reported before any provider algebra or layout staging runs.
         let identity = authority.provider().rule_identity();
-        if legs.any(|leg| leg.provider().rule_identity() != identity) {
+        if rest
+            .iter()
+            .any(|leg| leg.provider().rule_identity() != identity)
+        {
             return Err(Error::RuleMismatch);
         }
+        Ok(authority.provider_arc())
+    }
 
+    fn build(
+        runtime: &Runtime,
+        provider: Arc<R>,
+        codomain: &[&GradedSpace<R>],
+        domain: &[&GradedSpace<R>],
+        fill: Fill<'_, D>,
+    ) -> Result<Self, Error> {
         let hom = FusionTreeHomSpace::new(
             FusionProductSpace::new(codomain.iter().map(|leg| leg.leg().clone())),
             FusionProductSpace::new(domain.iter().map(|leg| leg.leg().clone())),
@@ -277,8 +374,7 @@ where
         // value. The checked root publishes no layout, cache, or admission state
         // until every fallible stage has passed.
         let space = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_checked(
-            Arc::clone(authority.provider_arc()),
-            hom,
+            provider, hom,
         )?;
         let data = apply_fill(space.space(), fill)?;
         Ok(Self {
@@ -312,7 +408,130 @@ where
         Domain: IntoIterator<Item = &'a GradedSpace<R>>,
         R: 'a,
     {
-        Self::build(runtime, codomain, domain, Fill::Zeros)
+        let codomain: Vec<&GradedSpace<R>> = codomain.into_iter().collect();
+        let domain: Vec<&GradedSpace<R>> = domain.into_iter().collect();
+        let legs: Vec<&GradedSpace<R>> = codomain.iter().chain(&domain).copied().collect();
+        let provider = Arc::clone(Self::authority(&legs)?);
+        Self::build(runtime, provider, &codomain, &domain, Fill::Zeros)
+    }
+
+    /// Tensor map whose every symmetry-allowed element is produced by
+    /// `fill(sectors, indices)`.
+    ///
+    /// `sectors` names the block through the provider's own labels; `indices`
+    /// are the degeneracy coordinates local to that block, codomain axes
+    /// first, first axis fastest. The payload dtype follows `D`.
+    ///
+    /// The block labels are decoded once per block, not once per element: the
+    /// erased odometer underneath reports the same key for every element of a
+    /// block, and the decode is memoized against it.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::zeros`] reports, plus [`Error::FusionAlgebra`] when
+    /// the provider cannot decode a sector its own algebra produced.
+    pub fn from_block_fn<'a, Codomain, Domain, F>(
+        runtime: &Runtime,
+        codomain: Codomain,
+        domain: Domain,
+        mut fill: F,
+    ) -> Result<Self, Error>
+    where
+        Codomain: IntoIterator<Item = &'a GradedSpace<R>>,
+        Domain: IntoIterator<Item = &'a GradedSpace<R>>,
+        F: FnMut(&BlockSectors<R::Sector>, &[usize]) -> D,
+        R: 'a,
+    {
+        let codomain: Vec<&GradedSpace<R>> = codomain.into_iter().collect();
+        let domain: Vec<&GradedSpace<R>> = domain.into_iter().collect();
+        let legs: Vec<&GradedSpace<R>> = codomain.iter().chain(&domain).copied().collect();
+        let provider = Arc::clone(Self::authority(&legs)?);
+
+        // Why reuse the erased `Fill::BlockFn` odometer instead of walking the
+        // blocks here: the traversal order and the strided element addressing
+        // are exactly the erased facade's, and duplicating them would be a
+        // second place for the two to drift apart. The adapter below only adds
+        // the label decode — memoized on the block key, so the cost stays one
+        // decode per block plus one key comparison per element, which the
+        // odometer already pays per element anyway.
+        let mut decode_failure: Option<Error> = None;
+        let mut memo: Option<(BlockKey, BlockSectors<R::Sector>)> = None;
+        let mut labelled = |key: &BlockKey, indices: &[usize]| -> D {
+            if decode_failure.is_some() {
+                return D::from_real(0.0);
+            }
+            if memo.as_ref().is_none_or(|(cached, _)| cached != key) {
+                match decode_block_sectors(provider.as_ref(), key) {
+                    Ok(sectors) => memo = Some((key.clone(), sectors)),
+                    Err(error) => {
+                        decode_failure = Some(error);
+                        return D::from_real(0.0);
+                    }
+                }
+            }
+            let (_, sectors) = memo.as_ref().expect("memo was just populated");
+            fill(sectors, indices)
+        };
+
+        let built = Self::build(
+            runtime,
+            Arc::clone(&provider),
+            &codomain,
+            &domain,
+            Fill::BlockFn(&mut labelled),
+        );
+        // A decode failure inside the infallible odometer callback is reported
+        // here; the partially written buffer never leaves this function.
+        if let Some(error) = decode_failure {
+            return Err(error);
+        }
+        built
+    }
+
+    /// The codomain legs, in axis order.
+    pub fn codomain(&self) -> Vec<GradedSpace<R>> {
+        self.legs(self.body.space.space().homspace().codomain())
+    }
+
+    /// The domain legs, in axis order.
+    pub fn domain(&self) -> Vec<GradedSpace<R>> {
+        self.legs(self.body.space.space().homspace().domain())
+    }
+
+    fn legs(&self, product: &FusionProductSpace) -> Vec<GradedSpace<R>> {
+        product
+            .legs()
+            .iter()
+            .map(|leg| GradedSpace {
+                provider: Arc::clone(self.body.space.provider_arc()),
+                leg: leg.clone(),
+            })
+            .collect()
+    }
+
+    /// The provider-labelled identity of the block at `index`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Core`] when `index` is out of range, [`Error::FusionAlgebra`]
+    /// when the provider cannot decode one of its own sectors.
+    pub fn block_sectors(&self, index: usize) -> Result<BlockSectors<R::Sector>, Error> {
+        let block = self.body.space.space().structure().block(index)?;
+        decode_block_sectors(self.body.space.provider(), block.key())
+    }
+
+    /// Shape, strides and offset of the block at `index` into [`Self::data`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Core`] when `index` is out of range.
+    pub fn block(&self, index: usize) -> Result<BlockRef<'_>, Error> {
+        self.body
+            .space
+            .space()
+            .structure()
+            .block(index)
+            .map_err(Error::from)
     }
 
     /// The runtime this tensor map is bound to.
