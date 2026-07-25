@@ -1050,3 +1050,198 @@ fn typed_and_erased_permute_agree_byte_for_byte_on_a_builtin_rule() {
     assert_eq!(typed_permuted.data(), erased_permuted.data());
     assert_ne!(typed_permuted.data(), typed.data());
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3, slice 3: `TensorMap::contract`.
+// ---------------------------------------------------------------------------
+
+/// A single-sector Z3 leg: the whole tensor map is then one dense block, so a
+/// contraction result can be checked against a hand-computed matrix product.
+fn z3_dense_leg(provider: &Arc<ExternalZ3>, degeneracy: usize) -> GradedSpace<ExternalZ3> {
+    GradedSpace::try_new(Arc::clone(provider), [(Z3Charge(0), degeneracy)], false)
+        .expect("single-sector Z3 leg is well formed")
+}
+
+/// Fills a tensor map's storage with `start, start + 1, ...` in storage order.
+fn counting_z3(
+    runtime: &Runtime,
+    codomain: &GradedSpace<ExternalZ3>,
+    domain: &GradedSpace<ExternalZ3>,
+    start: f64,
+) -> TensorMap<ExternalZ3, f64> {
+    let mut next = start - 1.0;
+    TensorMap::from_block_fn(runtime, [codomain], [domain], |_, _| {
+        next += 1.0;
+        next
+    })
+    .expect("single-block Z3 layout is admissible")
+}
+
+#[test]
+fn contract_matches_a_hand_computed_product_with_a_reordered_output() {
+    // What: a 2x3 by 3x4 contraction with `output_axes = [1, 0]` is the
+    // transpose of the matrix product, element for element. The values are the
+    // ones the expert-layer helper is pinned to, so the facade is proved to
+    // pass the axes and the output order through unaltered.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let (rows, shared, columns) = (
+        z3_dense_leg(&provider, 2),
+        z3_dense_leg(&provider, 3),
+        z3_dense_leg(&provider, 4),
+    );
+    let lhs = counting_z3(&runtime, &rows, &shared, 1.0);
+    let rhs = counting_z3(&runtime, &shared, &columns, 7.0);
+    assert_eq!(lhs.data(), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    assert_eq!(rhs.data().len(), 12);
+
+    let contracted = lhs.contract(&rhs, &[1], &[0], &[1, 0]).unwrap();
+
+    assert_eq!(
+        contracted.data(),
+        [76.0, 103.0, 130.0, 157.0, 100.0, 136.0, 172.0, 208.0]
+    );
+    assert_eq!(contracted.codomain().len(), 1);
+    assert_eq!(contracted.domain().len(), 1);
+}
+
+#[test]
+fn contract_with_the_default_output_order_keeps_the_open_axes_in_place() {
+    // What: `0..open_rank` is the identity output order (the erased facade's
+    // default `pAB`), so the same product comes back untransposed.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let (rows, shared, columns) = (
+        z3_dense_leg(&provider, 2),
+        z3_dense_leg(&provider, 3),
+        z3_dense_leg(&provider, 4),
+    );
+    let lhs = counting_z3(&runtime, &rows, &shared, 1.0);
+    let rhs = counting_z3(&runtime, &shared, &columns, 7.0);
+
+    let contracted = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
+
+    assert_eq!(
+        contracted.data(),
+        [76.0, 100.0, 103.0, 136.0, 130.0, 172.0, 157.0, 208.0]
+    );
+}
+
+#[test]
+fn contract_carries_a_simple_fusion_provider_with_a_complex_payload() {
+    // What: the contraction seam is neither abelian- nor real-specific.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalSu2);
+    let leg = su2_leg(&provider, false);
+    let mut next = Complex64::new(0.0, 0.0);
+    let build = |next: &mut Complex64| {
+        let mut step = *next;
+        let tensor: TensorMap<ExternalSu2, Complex64> =
+            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |_, _| {
+                step += Complex64::new(1.0, 0.5);
+                step
+            })
+            .unwrap();
+        *next = step;
+        tensor
+    };
+    let lhs = build(&mut next);
+    let rhs = build(&mut next);
+
+    // Two spin-1/2 legs on each side, so both operands carry the spin-0 and
+    // spin-1 blocks; the pair of contracted legs makes the result rank 4.
+    let contracted = lhs.contract(&rhs, &[2, 3], &[0, 1], &[2, 0, 3, 1]).unwrap();
+
+    assert_eq!(contracted.codomain().len() + contracted.domain().len(), 4);
+    assert!(contracted
+        .data()
+        .iter()
+        .any(|value| *value != Complex64::new(0.0, 0.0)));
+}
+
+#[test]
+fn contract_rejects_operands_from_different_runtimes() {
+    // What: the runtime is a trust boundary — two runtimes own separate
+    // execution state, so mixing them is refused before any provider work.
+    let _guard = cache_lock();
+    let first = runtime();
+    let second = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let (rows, shared, columns) = (
+        z3_dense_leg(&provider, 2),
+        z3_dense_leg(&provider, 3),
+        z3_dense_leg(&provider, 4),
+    );
+    let lhs = counting_z3(&first, &rows, &shared, 1.0);
+    let rhs = counting_z3(&second, &shared, &columns, 1.0);
+
+    let error = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
+
+    assert!(matches!(error, tenet::prelude::Error::RuntimeMismatch));
+}
+
+#[test]
+fn contract_rejects_operands_with_distinct_rule_identities() {
+    // What: two providers of one Rust type but different identities are a
+    // different algebra. The rejection comes from the expert layer, which is
+    // why the facade does not pre-check it.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let first = Arc::new(ExternalZ3::tagged(0));
+    let second = Arc::new(ExternalZ3::tagged(1));
+    let lhs = counting_z3(
+        &runtime,
+        &z3_dense_leg(&first, 2),
+        &z3_dense_leg(&first, 3),
+        1.0,
+    );
+    let rhs = counting_z3(
+        &runtime,
+        &z3_dense_leg(&second, 3),
+        &z3_dense_leg(&second, 4),
+        1.0,
+    );
+
+    assert!(lhs.contract(&rhs, &[1], &[0], &[0, 1]).is_err());
+}
+
+#[test]
+fn contract_rejects_malformed_axes_without_panicking() {
+    // What: mismatched axis-list lengths, out-of-range axes and a wrong-length
+    // output order all come back as `Err`.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let (rows, shared, columns) = (
+        z3_dense_leg(&provider, 2),
+        z3_dense_leg(&provider, 3),
+        z3_dense_leg(&provider, 4),
+    );
+    let lhs = counting_z3(&runtime, &rows, &shared, 1.0);
+    let rhs = counting_z3(&runtime, &shared, &columns, 1.0);
+
+    assert!(lhs.contract(&rhs, &[1], &[], &[0, 1]).is_err());
+    assert!(lhs.contract(&rhs, &[9], &[0], &[0, 1]).is_err());
+    assert!(lhs.contract(&rhs, &[1], &[9], &[0, 1]).is_err());
+    assert!(lhs.contract(&rhs, &[1], &[0], &[0]).is_err());
+}
+
+#[test]
+fn typed_and_erased_contract_agree_byte_for_byte_on_a_builtin_rule() {
+    // What: the typed contraction is the erased `contract_ordered`, bytes and
+    // layout, on a non-identity output order.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    let erased_contracted = erased
+        .contract_ordered(&erased, &[2], &[0], &[1, 0, 3, 2])
+        .unwrap();
+    let typed_contracted = typed.contract(&typed, &[2], &[0], &[1, 0, 3, 2]).unwrap();
+
+    assert_eq!(typed_contracted.data(), erased_contracted.data());
+    assert!(typed_contracted.data().iter().any(|&value| value != 0.0));
+}

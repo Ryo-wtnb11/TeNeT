@@ -35,14 +35,18 @@ use tenet_core::{
     BlockKey, BlockRef, CheckedFusionAlgebra, FusionProductSpace, FusionTreeHomSpace,
     MultiplicityFreeRigidSymbols, SectorLeg,
 };
-use tenet_tensors::{BoundDynamicFusionMapSpace, BoundDynamicTensorRef, TreeTransformOperation};
+use tenet_tensors::{
+    BoundDynamicFusionMapSpace, BoundDynamicTensorRef, OutputAxisOrder, TreeTransformOperation,
+};
 
 pub use tenet_core::SectorCodec;
 
 use crate::error::Error;
 use crate::runtime::Runtime;
 use crate::tensor::{apply_fill, Fill, TensorScalar};
-use crate::typed_tensor_core::tree_transform_owned_multiplicity_free;
+use crate::typed_tensor_core::{
+    tensorcontract_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
+};
 
 /// One tensor leg: a provider plus the sector-to-degeneracy map of that axis
 /// (TensorKit's `GradedSpace`).
@@ -533,6 +537,73 @@ where
             lease.context().multiplicity_free_lane::<D>(),
             BoundDynamicTensorRef::try_new(&self.body.space, &self.body.data)?,
             operation,
+        )?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody { space, data }),
+        })
+    }
+
+    /// Contracts `lhs_axes` of `self` with `rhs_axes` of `other` (pairwise, in
+    /// list order) and lays the open axes out in `output_axes`.
+    ///
+    /// `output_axes` is a permutation of `0..open_rank` over the open axes,
+    /// `self`'s ascending first and `other`'s after; passing `0..open_rank`
+    /// gives the default order (TensorKit `tensorcontract!` with default
+    /// `pAB`). The first `self.codomain_rank() + other.codomain_rank() -
+    /// lhs_axes.len()` entries — the codomain of the result — follow from the
+    /// destination the expert layer derives.
+    ///
+    /// **Fermionic semantics**: like TensorKit `tensorcontract!` / `@tensor`
+    /// (and the erased [`crate::prelude::Tensor::contract`]), this **twists**
+    /// dual contracted legs with the fermionic supertrace twist — unlike
+    /// composition (TensorKit `A * B` / `mul!`), which never does. Bosonic
+    /// rules are unaffected; fermionic rules can differ by signs. There is no
+    /// typed `compose` yet, so this is the only contraction semantics the
+    /// typed facade offers.
+    ///
+    /// The result is bound to `self`'s provider allocation, the same
+    /// left-authority rule [`Self::zeros`] uses for its first leg: the two
+    /// operands must agree on
+    /// [`tenet_core::FusionRule::rule_identity`], which makes the choice of
+    /// allocation immaterial to the algebra.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::RuntimeMismatch`] when the operands belong to different
+    ///   runtimes.
+    /// - [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] for
+    ///   malformed axis lists, an output order that is not a permutation of
+    ///   the open axes, mismatched contracted legs, or operands whose
+    ///   providers report different rule identities. Those all come back from
+    ///   the expert layer, which owns the rules; re-checking them here would
+    ///   be a second copy free to drift.
+    pub fn contract(
+        &self,
+        other: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+    ) -> Result<Self, Error> {
+        // The one check the expert layer cannot make: it never sees the two
+        // runtimes, and mixing execution state across them is a trust-boundary
+        // violation rather than an algebra error. Mirrors the erased facade's
+        // `check_same_world`. Dtype and placement need no arm here — `D` is a
+        // type parameter and the typed facade is host-only.
+        if !self.runtime.same_runtime(&other.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        let mut lease = self.runtime.lease_context()?;
+        let (space, data) = tensorcontract_owned_multiplicity_free(
+            lease.context().multiplicity_free_lane::<D>(),
+            BoundDynamicTensorRef::try_new(&self.body.space, &self.body.data)?,
+            BoundDynamicTensorRef::try_new(&other.body.space, &other.body.data)?,
+            lhs_axes,
+            rhs_axes,
+            // Why `OutputAxisOrder` stays out of the signature: it is an
+            // expert-layer borrow type, and a `&[usize]` says the same thing
+            // at the facade without a second public vocabulary.
+            OutputAxisOrder::from_axes(output_axes),
         )?;
         Ok(Self {
             runtime: self.runtime.clone(),
