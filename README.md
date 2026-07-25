@@ -1,39 +1,88 @@
 # TeNeT
 
-TeNeT is a Rust tensor-network library for TensorKit-style symmetric tensors.
-The public user layer is built around `Runtime`, `Space`, `Tensor`, and the
-`tensor!` contraction macro. Lower layers keep the execution machinery explicit:
-sector algebra and fusion rules, fusion-tree/block structure handling,
-TensorOperations-style lowering, dense kernel dispatch, matrix decompositions,
-contraction planning, and plan caching live in separate crates.
+TeNeT is a Rust tensor-network library for symmetric tensors. A tensor is a map
+`codomain <- domain` stored as fusion-tree-indexed reduced blocks; symmetries
+enter as fusion-rule *providers* rather than as a fixed symmetry list; and
+contraction-path planning is separated from execution.
 
-Symmetries enter through fusion-rule providers, not a fixed symmetry list.
-`tenet-sectors` owns the provider vocabulary — `FusionRule`, `SectorCodec`,
-`MultiplicityFreeRigidSymbols`, `GenericRigidSymbols`, `RuleIdentity` — and the
-built-in rules (U(1), Z2, fZ2, SU(2), Fibonacci, and their products; SU(3)'s
-tabulated rule lives in `tenet-core`) are ordinary implementations of it.
-Admitting provider types defined outside the workspace is being built out; the
-label-codec half of that contract (`SectorCodec`) is already in place.
+Design priority, in this order: Rust-native maintainability and extensibility;
+speed that survives dynamic-rank tensor networks; TensorKit-level usability.
 
 All crates are at version `0.1.0`. The public API is not stabilized and
-expert-layer types still move between crates as the layering settles — the
-sector vocabulary was recently split out of `tenet-core` into `tenet-sectors`.
-Public APIs are intended to stay Rust-native while matching the TensorKit
-ecosystem's semantics closely: TensorKit, TensorKitSectors, TensorOperations,
-MatrixAlgebraKit, Strided.jl, and StridedViews.jl are the reference vocabulary,
-and names follow the TensorKit 0.17 spelling. For non-abelian conventions
-(SU(2), and the fZ2 ⊠ U(1) ⊠ SU(2) products), [QSpace][qspace] (Weichselbaum) is
-an additional design and numerical reference — its non-abelian fusion /
-recoupling (CGC) handling is a second oracle to check conventions against.
-[`docs/tk_api_parity.md`](docs/tk_api_parity.md) is the per-export lookup table.
+expert-layer types still move between crates as the layering settles.
+
+## Two reference frames
+
+TeNeT is not a port of a single library. Two references divide the design, and
+the split is visible in the crate layering.
+
+**TensorKit (Julia) fixes the semantic model.** Spaces and tensor maps retain
+their sector/provider type; categorical algorithms dispatch on *fusion
+capability* — multiplicity-free versus generic symbols, braiding style,
+rigidity — instead of on a symmetry enum; tensor maps are `codomain <- domain`
+with explicit duality. Names follow the TensorKit 0.17 spelling, and
+TensorKitSectors, TensorOperations, MatrixAlgebraKit, Strided.jl and
+StridedViews.jl are the vocabulary for the layers below the user API.
+[`docs/tk_api_parity.md`](docs/tk_api_parity.md) is the per-export lookup table
+for anyone arriving from TensorKit.
+
+**[QSpace][qspace] (Weichselbaum) fixes the compiled execution model** — it is the base of
+the `Runtime`/backend layer. Quantum labels, block structure, coefficient
+records and runtime-rank metadata stay *tensor-near*: an admitted tensor carries
+its own block layout (fusion-tree keys plus per-block shape, strides and
+offset into one contiguous payload), so an operation resolves the layout once
+and then dispatches whole blocks into dense kernels, instead of rediscovering
+the symmetry structure per element or per call. Fusion-tree layouts, complete
+hom-space structures, recoupling replay and contraction plans are recorded and
+reused rather than recomputed. QSpace is also the second oracle for non-abelian
+conventions: SU(2) and the fZ2 ⊠ U(1) ⊠ SU(2) products are checked against its
+fusion/recoupling (CGC) handling as well as against TensorKit.
+
+Rust's part is to hold both at once: keep the concrete provider type `R` through
+monomorphized execution — TensorKit's semantics without a vtable — over a
+QSpace-style compiled block engine, whose kernels are selectable at
+`Runtime::builder()` (see [Backend Philosophy](#backend-philosophy)).
+
+[qspace]: https://bitbucket.org/qspace4u/workspace/repositories/
+
+## Symmetries are providers
+
+`tenet-sectors` owns the provider vocabulary — `FusionRule`,
+`CheckedFusionAlgebra`, `SectorCodec`, `MultiplicityFreeRigidSymbols`,
+`GenericRigidSymbols`, `RuleIdentity` — and the built-in symmetries (U(1), Z2,
+fZ2, SU(2), Fibonacci, and their products; SU(3)'s tabulated rule lives in
+`tenet-core`) are ordinary implementations of those traits, with no privileged
+status in the engine. The crate has zero workspace dependencies.
+
+The provider-typed facade `tenet::typed::{GradedSpace<R>, TensorMap<R, D>}` is
+where the architecture is headed: `R` stays concrete, sectors come back as the
+provider's own labels (`SectorCodec::Sector`) instead of opaque `SectorId`s, and
+the payload dtype `D` (`f64` / `Complex64`) is independent of the provider's
+categorical coefficient scalar — the separation TensorKit makes between a
+tensor's `T` and its sector type. Construction goes exclusively through a
+transactional checked admission path, so a provider that reports an invalid or
+unrepresentable algebra fails with a typed error and publishes no layout, cache
+or admission state.
+
+That facade is deliberately small today: construction and inspection only
+(`zeros`, `from_block_fn`, leg/block accessors). Direct transform and
+contraction on `TensorMap` are in progress, and the operation surface gets its
+own review before it grows — which is also why `tenet::typed` is not in the
+prelude yet.
+
+The erased `Runtime` / `Space` / `Tensor` / `tensor!` layer is the ergonomic
+and compatibility wrapper over the built-in symmetries. It is mature, fully
+functional, and by a wide margin the richest surface — decompositions,
+contraction planning, fermionic signs, SU(3), CUDA paths — so it is what you
+should use today. It is the convenience layer, not the architectural direction:
+it erases the rule behind a fixed built-in set, which is exactly what the typed
+facade exists to stop doing.
 
 SU(2) representation algebra itself is not reimplemented here: `tenet-sectors`
-delegates 3j/6j, F/R, and Frobenius-Schur coefficients plus their caches to the
+delegates 3j/6j, F/R and Frobenius-Schur coefficients plus their caches to the
 pinned [`racah`](https://github.com/Ryo-wtnb11/racah) crate. See
 [`docs/su2_authority.md`](docs/su2_authority.md) for the pinned revision and the
 compatibility protocol.
-
-[qspace]: https://bitbucket.org/qspace4u/workspace/repositories/
 
 ## Quick Start
 
@@ -42,7 +91,7 @@ cargo test --workspace
 cargo doc --workspace --no-deps
 ```
 
-Minimal user-layer example:
+The erased user layer — the shortest path to a working contraction:
 
 ```rust
 use tenet::prelude::*;
@@ -68,14 +117,47 @@ fn main() -> Result<(), Error> {
 inside the macro, `;` separates codomain and domain legs, `[]` is a scalar
 output, and `conj(x)[...]` marks an adjoint operand.
 
+The same U(1) space through the typed facade. The provider is an ordinary value
+here, so a fusion rule defined outside this workspace substitutes for
+`U1FusionRule` without touching the engine:
+
+```rust
+use std::sync::Arc;
+
+use tenet::core::{U1FusionRule, U1Irrep};
+use tenet::prelude::{Error, Runtime};
+use tenet::typed::{GradedSpace, TensorMap};
+
+fn main() -> Result<(), Error> {
+    let rt = Runtime::builder().build()?;
+    let u1 = Arc::new(U1FusionRule);
+
+    let v = GradedSpace::try_new(
+        Arc::clone(&u1),
+        [(U1Irrep::new(-1), 2), (U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
+        false,
+    )?;
+
+    let t: TensorMap<U1FusionRule, f64> = TensorMap::zeros(&rt, [&v], [&v])?;
+    assert_eq!(t.block_count(), 3);
+
+    // Blocks report the provider's own labels, not SectorIds.
+    let trees = t.block_fusion_trees(0)?;
+    assert_eq!(trees.coupled(), &U1Irrep::new(0));
+
+    Ok(())
+}
+```
+
 ## Backend Philosophy
 
-**Operators say WHAT to compute; backends say WHICH kernel computes it.** Every
-compute primitive that has more than one plausible implementation is a trait
-with an explicit selection point, never a hardcoded dependency. Operator and
-user-layer code express spaces, axes, conjugate flags, and output order —
-whether that becomes a faer call, a BLAS `op='C'`, or a CUDA kernel is the
-backend layer's business. The full rule set is
+**Operators say WHAT to compute; backends say WHICH kernel computes it.** The
+compiled block layout above is what the kernels run over; the kernel itself is a
+separate, replaceable decision. Every compute primitive that has more than one
+plausible implementation is a trait with an explicit selection point, never a
+hardcoded dependency. Operator and user-layer code express spaces, axes,
+conjugate flags, and output order — whether that becomes a faer call, a BLAS
+`op='C'`, or a CUDA kernel is the backend layer's business. The full rule set is
 [`docs/backend_policy.md`](docs/backend_policy.md).
 
 Three consequences worth knowing before you build a `Runtime`:
@@ -116,11 +198,11 @@ choice.
 
 | crate | role |
 | --- | --- |
-| `tenet` | Public facade: `Runtime`, `Space`, `Tensor`, scalar dtype, tensor methods, decomposition wrappers. |
+| `tenet` | Public facade: the erased `Runtime`, `Space`, `Tensor`, scalar dtype, tensor methods, decomposition wrappers, and the provider-typed `tenet::typed` facade. |
 | `tenet-network` | `tensor!` frontend, `NetworkIR`, contraction-order optimizers, reusable `ContractionPlan`, plan cache, slicing metadata. |
 | `tenet-macros` | Procedural macro implementation for `tensor!`. |
 | `tenet-sectors` | Sector-algebra vocabulary: fusion-rule/codec traits, `SectorId`, and the built-in irrep providers (U(1), Z2, fZ2, SU(2), Fibonacci, products). No workspace dependencies; re-exported wholesale by `tenet-core`. |
-| `tenet-core` | Fusion-tree spaces and keys, block structures, low-level storage types, the typed `TensorMap`, and the tabulated SU(3) rule. |
+| `tenet-core` | Fusion-tree spaces and keys, block structures, low-level statically-ranked tensor-map storage, and the tabulated SU(3) rule. |
 | `tenet-tensors` | Symmetric tensor maps, tensor contraction/transform resolution, execution contexts, caches. |
 | `tenet-operations` | TensorOperations-style tensoradd/contract/trace/permute lowering and replay support. |
 | `tenet-dense` | Dense block execution boundary and CPU/GPU backend selection. |
@@ -208,6 +290,9 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
 
 ## Current Limitations
 
+- The typed facade constructs and inspects tensor maps; it does not transform or
+  contract them yet, and it does not convert to or from the erased `Tensor`.
+  Anything algorithmic runs on the erased layer today.
 - Execution crates reject a no-default-features build because their convenience
   APIs require a concrete executor. Use `tenet-sectors` / `tenet-core` for
   backend-free types, or enable a CPU feature or `provider-inject` for the full
@@ -260,3 +345,4 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
 Before architectural or semantic changes, read the repository review policy in
 `../AGENTS.md`. TeNeT changes that claim TensorKit compatibility should be
 checked against the reference implementation, not only against local tests.
+</content>
