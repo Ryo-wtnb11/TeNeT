@@ -1445,7 +1445,7 @@ fn typed_and_erased_braid_agree_byte_for_byte_on_a_builtin_rule() {
 
 /// The `(is_dual, degeneracies)` shape of a typed tensor map's legs, codomain
 /// first — enough to pin where each source leg landed and how it was bent.
-fn typed_leg_shapes<R: 'static, D>(tensor: &TensorMap<R, D>) -> Vec<(bool, Vec<usize>)>
+fn typed_leg_shapes<R, D>(tensor: &TensorMap<R, D>) -> Vec<(bool, Vec<usize>)>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: tenet::prelude::TensorScalar,
