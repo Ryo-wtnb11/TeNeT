@@ -16,14 +16,22 @@
 //!
 //! # Phase boundary
 //!
-//! This is the phase-2 surface of issue #557: **construction and inspection
-//! only**. A [`TensorMap`] can be built ([`TensorMap::zeros`],
-//! [`TensorMap::from_block_fn`]) and read ([`TensorMap::codomain`],
-//! [`TensorMap::domain`], [`TensorMap::block_fusion_trees`], [`TensorMap::block`],
-//! [`TensorMap::data`]), and nothing else. Transforms and contractions are
-//! phase 3 and are deliberately not reachable from here yet, so the operation
-//! surface gets its own review before it exists. The module is not in the
-//! prelude for the same reason.
+//! This is the phase-3 surface of issue #557: construction
+//! ([`TensorMap::zeros`], [`TensorMap::from_block_fn`]), inspection
+//! ([`TensorMap::codomain`], [`TensorMap::domain`],
+//! [`TensorMap::block_fusion_trees`], [`TensorMap::block`],
+//! [`TensorMap::data`]), and two operations — [`TensorMap::permute`] and
+//! [`TensorMap::contract`].
+//!
+//! Everything else is deliberately still absent. `braid`, `transpose` and
+//! `repartition` each need plumbing this phase does not carry (`transpose`
+//! and `repartition` are planar operations with their own validation, not
+//! permutes), composition semantics — TensorKit `A * B`, which unlike
+//! [`TensorMap::contract`] never twists dual legs — has no typed spelling
+//! yet, and the decompositions have none either. The phase-4 review decides
+//! which of those the facade grows, and whether the module joins the prelude;
+//! adding them here ahead of that review would bypass the gate that exists to
+//! keep this surface deliberate.
 //!
 //! Construction consumes only the transactional checked admission path, so a
 //! provider that reports an invalid or unrepresentable algebra fails with a

@@ -1245,3 +1245,63 @@ fn typed_and_erased_contract_agree_byte_for_byte_on_a_builtin_rule() {
     assert_eq!(typed_contracted.data(), erased_contracted.data());
     assert!(typed_contracted.data().iter().any(|&value| value != 0.0));
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3, slice 4: non-regression gates.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn typed_and_erased_permute_share_one_tree_transform_cache_entry() {
+    // What: both facades drive the one `RuleIdentity`-keyed multiplicity-free
+    // lane, so the same transform of the same built-in layout is cached once.
+    // A typed facade that primed its own lane would show two entries here and
+    // would silently double the cost of every mixed workload.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+    runtime.clear_tree_transform_cache();
+    assert_eq!(runtime.tree_transform_cache_info().entries(), 0);
+
+    erased.permute(&[2, 0], &[1]).unwrap();
+    let after_erased = runtime.tree_transform_cache_info().entries();
+    assert_eq!(after_erased, 1);
+
+    let hits_before = runtime.tree_transform_cache_info().hits();
+    typed.permute(&[2, 0], &[1]).unwrap();
+
+    let after_typed = runtime.tree_transform_cache_info();
+    assert_eq!(after_typed.entries(), after_erased);
+    // Non-vacuous: the typed run did not merely fail to add an entry, it read
+    // the entry the erased run left behind.
+    assert!(after_typed.hits() > hits_before);
+}
+
+#[test]
+fn a_failing_typed_operation_publishes_no_cache_state() {
+    // What: an operation rejected by the expert layer leaves both process-global
+    // layout caches and the runtime's tree-transform cache exactly as they were,
+    // the same transactional guarantee construction gives.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+    let before = (
+        fusion_tree_layout_cache_info(),
+        complete_hom_space_structure_cache_info(),
+    );
+    let runtime_before = runtime.tree_transform_cache_info();
+
+    assert!(tensor.permute(&[0, 0], &[2, 3]).is_err());
+    assert!(tensor
+        .contract(&tensor, &[3], &[9], &[0, 1, 2, 3, 4, 5])
+        .is_err());
+
+    assert_eq!(
+        (
+            fusion_tree_layout_cache_info(),
+            complete_hom_space_structure_cache_info(),
+        ),
+        before
+    );
+    assert_eq!(runtime.tree_transform_cache_info(), runtime_before);
+}
