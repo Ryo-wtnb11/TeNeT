@@ -89,10 +89,14 @@ fn checked_fz2_sector(parity: u8) -> Result<SectorId, Error> {
         .ok_or_else(|| FusionAlgebraError::InvalidSector { sector }.into())
 }
 
+// Why not `InvalidSector { sector: SectorId::new(twice_spin) }`: an
+// out-of-domain doubled spin names no sector id at all, so that form
+// fabricated an identifier the SU(2) codec can never produce.
 fn checked_su2_irrep(twice_spin: usize) -> Result<SU2Irrep, Error> {
     SU2Irrep::try_from_twice_spin(twice_spin).ok_or_else(|| {
-        FusionAlgebraError::InvalidSector {
-            sector: SectorId::new(twice_spin),
+        FusionAlgebraError::UnrepresentableSectorLabel {
+            rule: SU2FusionRule.rule_identity(),
+            label: format!("SU(2) 2j = {twice_spin}"),
         }
         .into()
     })

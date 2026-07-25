@@ -130,6 +130,17 @@ pub enum FusionAlgebraError {
     InvalidSector {
         sector: SectorId,
     },
+    /// A semantic sector label has no ID in the rule's representable domain.
+    ///
+    /// This is the encode-side counterpart of [`Self::InvalidSector`]: no
+    /// `SectorId` names the rejected label, so the label is reported as the
+    /// rule's own display form together with the rejecting rule identity.
+    UnrepresentableSectorLabel {
+        /// Identity of the rule whose codec rejected the label.
+        rule: RuleIdentity,
+        /// The rejected label in the rule's display form.
+        label: String,
+    },
     U1DualOverflow {
         charge: i32,
     },
@@ -154,6 +165,10 @@ impl fmt::Display for FusionAlgebraError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidSector { sector } => write!(formatter, "invalid fusion sector {sector:?}"),
+            Self::UnrepresentableSectorLabel { rule, label } => write!(
+                formatter,
+                "sector label {label} is not representable by fusion rule {rule:?}"
+            ),
             Self::U1DualOverflow { charge } => {
                 write!(
                     formatter,
