@@ -1382,13 +1382,18 @@ fn braid_moves_legs_of_a_multi_block_external_provider_tensor() {
     // What: an explicit braid with a full level assignment produces the same
     // reordered spaces a permute of the same axes does, and moves the payload.
     //
-    // Why not a case where braid differs from permute: every provider this
-    // suite can build is bosonic (`BraidingStyleKind::Bosonic` for both
-    // fixtures, and the built-in Z2/SU(2) rules likewise), and for a symmetric
-    // braiding the level assignment cannot change the result — over- and
-    // under-crossing are the same morphism. Distinguishing the two needs an
-    // anyonic provider, which is out of scope here; the byte oracle against the
-    // erased `braid` is the guard that the levels are wired through.
+    // Why not a case where braid differs from permute: the level *values* are
+    // unobservable for every provider this facade can host. The symmetric ones
+    // (both fixtures here, the built-in Z2/SU(2), and even the fermionic rule
+    // used further down) make over- and under-crossing the same morphism, and
+    // the one built-in rule that would not — `FibonacciFusionRule` — is
+    // excluded by this facade's `Scalar = f64` and `SectorCodec` bounds.
+    //
+    // What the tests below therefore do and do not prove: they pin how the
+    // levels are *split* (by the source codomain rank, which the oracle below
+    // pins with an axis list of a different length) and that a wrong-length
+    // list is refused. Nothing here can pin the values, and no test in this
+    // crate can until an anyonic provider is reachable.
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(ExternalZ3::new());
@@ -1437,6 +1442,17 @@ fn typed_and_erased_braid_agree_byte_for_byte_on_a_builtin_rule() {
 
     assert_eq!(typed_braided.data(), erased_braided.data());
     assert_ne!(typed_braided.data(), typed.data());
+
+    // The source is `2 <- 1`, so this destination split (`1 <- 2`) has a
+    // codomain axis list of a different length. That is what pins the levels
+    // being split by the *source* codomain rank: splitting by the requested
+    // codomain length instead is a plausible misreading, and one the case
+    // above cannot see because there the two coincide.
+    let erased_moved = erased.braid(&[2], &[0, 1], &[2, 0, 1]).unwrap();
+    let typed_moved = typed.braid(&[2], &[0, 1], &[2, 0, 1]).unwrap();
+
+    assert_eq!(typed_moved.data(), erased_moved.data());
+    assert_eq!(typed_moved.codomain().len(), 1);
 }
 
 // ---------------------------------------------------------------------------
