@@ -3,7 +3,7 @@ use std::sync::{Arc, OnceLock};
 use crate::{
     BraidingStyleKind, CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionAlgebraError,
     FusionRule, FusionStyleKind, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, RuleIdentity, SectorId, SectorVec,
+    MultiplicityFreeRigidSymbols, RuleIdentity, SectorCodec, SectorId, SectorVec,
 };
 
 /// Largest doubled spin representable by TeNeT's compact SU(2) sector encoding.
@@ -198,6 +198,18 @@ impl CheckedFusionAlgebra for SU2FusionRule {
             core::ops::ControlFlow::<()>::Continue(())
         })?;
         Ok(multiplicity)
+    }
+}
+
+impl SectorCodec for SU2FusionRule {
+    type Sector = SU2Irrep;
+
+    fn encode_sector(&self, value: &Self::Sector) -> Result<SectorId, FusionAlgebraError> {
+        Ok(value.sector_id())
+    }
+
+    fn decode_sector(&self, id: SectorId) -> Result<Self::Sector, FusionAlgebraError> {
+        checked_irrep(id)
     }
 }
 

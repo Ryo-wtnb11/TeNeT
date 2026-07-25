@@ -4,8 +4,8 @@ use std::sync::OnceLock;
 use crate::{
     BraidingStyleKind, CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionAlgebraError,
     FusionRule, FusionStyleKind, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, ProductSectorCodec, RuleIdentity, SectorId, SectorVec,
-    TensorKitProductCodec,
+    MultiplicityFreeRigidSymbols, ProductSector, ProductSectorCodec, RuleIdentity, SectorCodec,
+    SectorId, SectorVec, TensorKitProductCodec,
 };
 
 #[derive(Clone, Debug)]
@@ -173,6 +173,40 @@ where
         let (coupled_left, coupled_right) = self.decode_sector_or_panic(coupled);
         self.left.nsymbol(left_left, right_left, coupled_left)
             * self.right.nsymbol(left_right, right_right, coupled_right)
+    }
+}
+
+/// The product label is the component label pair; the id is whatever `Codec`
+/// packs those component ids into.
+///
+/// Note the name clash with the inherent id-level
+/// [`ProductFusionRule::encode_sector`] / [`ProductFusionRule::decode_sector`]
+/// pair: on a concrete `ProductFusionRule` value the inherent methods win, so
+/// call these through the trait (`SectorCodec::decode_sector(&rule, id)`).
+/// Generic `R: SectorCodec` code — the facade's only caller — is unaffected.
+impl<LeftRule, RightRule, Codec> SectorCodec for ProductFusionRule<LeftRule, RightRule, Codec>
+where
+    LeftRule: SectorCodec,
+    RightRule: SectorCodec,
+    Codec: ProductSectorCodec + 'static,
+{
+    type Sector = ProductSector<LeftRule::Sector, RightRule::Sector>;
+
+    fn encode_sector(&self, value: &Self::Sector) -> Result<SectorId, FusionAlgebraError> {
+        let left = self.left.encode_sector(value.left())?;
+        let right = self.right.encode_sector(value.right())?;
+        // Why not map this to `UnrepresentableSectorLabel`: the packed codec
+        // already names the offending component and its bit budget, which a
+        // label string would only blur.
+        Ok(Codec::encode_checked(left, right)?)
+    }
+
+    fn decode_sector(&self, id: SectorId) -> Result<Self::Sector, FusionAlgebraError> {
+        let (left, right) = Codec::decode_checked(id)?;
+        Ok(ProductSector::new(
+            self.left.decode_sector(left)?,
+            self.right.decode_sector(right)?,
+        ))
     }
 }
 

@@ -1044,37 +1044,68 @@ fn u1_fz2_space_represents_the_full_packed_u1_label_domain() {
     );
 }
 
+fn unrepresentable_fz2_label(parity: u8) -> Error {
+    use tenet::core::{FermionParityFusionRule, FusionRule};
+
+    Error::FusionAlgebra(Box::new(FusionAlgebraError::UnrepresentableSectorLabel {
+        rule: FermionParityFusionRule.rule_identity(),
+        label: format!("fermion parity {parity}"),
+    }))
+}
+
+fn unrepresentable_su2_label(twice_spin: usize) -> Error {
+    use tenet::core::{FusionRule, SU2FusionRule};
+
+    Error::FusionAlgebra(Box::new(FusionAlgebraError::UnrepresentableSectorLabel {
+        rule: SU2FusionRule.rule_identity(),
+        label: format!("SU(2) 2j = {twice_spin}"),
+    }))
+}
+
 #[test]
 fn fz2_u1_su2_space_rejects_invalid_su2_child() {
     // What: the user boundary preserves the exact invalid SU2 child label.
     let error = Space::fz2_u1_su2([((1, 0, 255), 1)]).unwrap_err();
-    assert_eq!(
-        error,
-        Error::FusionAlgebra(Box::new(FusionAlgebraError::InvalidSector {
-            sector: SectorId::new(255),
-        }))
-    );
+    assert_eq!(error, unrepresentable_su2_label(255));
+}
+
+#[test]
+fn out_of_range_su2_labels_are_reported_as_labels_not_sector_ids() {
+    // What: a doubled spin outside the provider's domain names no `SectorId`
+    // at all, so the boundary reports the rejected label together with the
+    // rule that rejected it.
+    for twice_spin in [255, 4096, usize::MAX] {
+        assert_eq!(
+            Space::su2([(twice_spin, 1)]).unwrap_err(),
+            unrepresentable_su2_label(twice_spin)
+        );
+        assert_eq!(
+            Space::fz2_u1_su2([((0, 0, twice_spin), 1)]).unwrap_err(),
+            unrepresentable_su2_label(twice_spin)
+        );
+    }
 }
 
 #[test]
 fn builtin_space_constructors_reject_invalid_numeric_labels() {
-    // What: every ordinary fZ2 input and the ordinary SU2 input expose the
-    // existing typed invalid-sector authority without normalization or unwind.
-    let invalid_parity = Error::FusionAlgebra(Box::new(FusionAlgebraError::InvalidSector {
-        sector: SectorId::new(2),
-    }));
+    // What: every ordinary fZ2 input and the ordinary SU2 input report the
+    // rejected label itself, without normalization, unwind, or an invented
+    // sector id.
+    let invalid_parity = unrepresentable_fz2_label(2);
     assert_eq!(Space::fz2([(2, 1)]).unwrap_err(), invalid_parity);
     assert_eq!(Space::product([((0, 2), 1)]).unwrap_err(), invalid_parity);
     assert_eq!(
         Space::fz2_u1_su2([((2, 0, 0), 1)]).unwrap_err(),
         invalid_parity
     );
+    assert_eq!(
+        Space::fz2([(u8::MAX, 1)]).unwrap_err(),
+        unrepresentable_fz2_label(u8::MAX)
+    );
 
     assert_eq!(
         Space::su2([(255, 1)]).unwrap_err(),
-        Error::FusionAlgebra(Box::new(FusionAlgebraError::InvalidSector {
-            sector: SectorId::new(255),
-        }))
+        unrepresentable_su2_label(255)
     );
 }
 

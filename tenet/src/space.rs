@@ -82,17 +82,26 @@ type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
 type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
 type Fz2U1Su2Codec = PackedProductCodec<Fz2U1Layout, Su2SectorLayout>;
 
+// Why not `InvalidSector { sector: SectorId::new(<user value>) }` in either
+// helper below: an out-of-domain parity or doubled spin names no sector id at
+// all, so that form fabricated an identifier the codec can never produce.
 fn checked_fz2_sector(parity: u8) -> Result<SectorId, Error> {
-    let sector = SectorId::new(usize::from(parity));
-    Z2Irrep::from_sector_id(sector)
+    Z2Irrep::from_sector_id(SectorId::new(usize::from(parity)))
         .map(Into::into)
-        .ok_or_else(|| FusionAlgebraError::InvalidSector { sector }.into())
+        .ok_or_else(|| {
+            FusionAlgebraError::UnrepresentableSectorLabel {
+                rule: FermionParityFusionRule.rule_identity(),
+                label: format!("fermion parity {parity}"),
+            }
+            .into()
+        })
 }
 
 fn checked_su2_irrep(twice_spin: usize) -> Result<SU2Irrep, Error> {
     SU2Irrep::try_from_twice_spin(twice_spin).ok_or_else(|| {
-        FusionAlgebraError::InvalidSector {
-            sector: SectorId::new(twice_spin),
+        FusionAlgebraError::UnrepresentableSectorLabel {
+            rule: SU2FusionRule.rule_identity(),
+            label: format!("SU(2) 2j = {twice_spin}"),
         }
         .into()
     })
