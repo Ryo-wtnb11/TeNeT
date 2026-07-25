@@ -48,17 +48,27 @@ fn product_sector_is_usable_as_a_btree_key() {
 // `SectorCodec`: the typed facade's label <-> `SectorId` boundary.
 // ---------------------------------------------------------------------------
 
+/// Asserts all three codec laws over `labels`: label round trip, id round
+/// trip, and injectivity of the encoding.
 fn assert_round_trip<Rule>(rule: &Rule, labels: impl IntoIterator<Item = Rule::Sector>)
 where
     Rule: SectorCodec,
 {
+    let mut ids = BTreeSet::new();
+    let mut count = 0;
     for label in labels {
+        count += 1;
         let id = rule.encode_sector(&label).expect("label is representable");
+        let decoded = SectorCodec::decode_sector(rule, id).expect("id is representable");
+        assert_eq!(decoded, label);
         assert_eq!(
-            SectorCodec::decode_sector(rule, id).expect("id is representable"),
-            label
+            rule.encode_sector(&decoded)
+                .expect("label is representable"),
+            id
         );
+        ids.insert(id);
     }
+    assert_eq!(ids.len(), count, "distinct labels aliased onto one id");
 }
 
 #[test]
@@ -212,12 +222,17 @@ fn an_external_provider_implements_the_codec_without_builtin_machinery() {
     // vocabulary alone, and both failure directions are expressible.
     assert_round_trip(&TinyRule, [TinyLabel(0), TinyLabel(1), TinyLabel(2)]);
 
+    let rejected = TinyRule.encode_sector(&TinyLabel(7)).unwrap_err();
     assert_eq!(
-        TinyRule.encode_sector(&TinyLabel(7)),
-        Err(FusionAlgebraError::UnrepresentableSectorLabel {
+        rejected,
+        FusionAlgebraError::UnrepresentableSectorLabel {
             rule: RuleIdentity::of_type::<TinyRule>(),
             label: "Z3 charge 7".to_owned(),
-        })
+        }
+    );
+    assert_eq!(
+        rejected.to_string(),
+        "sector label Z3 charge 7 is not representable by its fusion rule"
     );
     let sector = SectorId::new(3);
     assert_eq!(

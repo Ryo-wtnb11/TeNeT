@@ -165,9 +165,12 @@ impl fmt::Display for FusionAlgebraError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidSector { sector } => write!(formatter, "invalid fusion sector {sector:?}"),
-            Self::UnrepresentableSectorLabel { rule, label } => write!(
+            // Why not include `rule`: it stays for programmatic matching, but
+            // `RuleIdentity` has no display form worth showing a user, and
+            // giving it one would widen a public surface for a message.
+            Self::UnrepresentableSectorLabel { label, .. } => write!(
                 formatter,
-                "sector label {label} is not representable by fusion rule {rule:?}"
+                "sector label {label} is not representable by its fusion rule"
             ),
             Self::U1DualOverflow { charge } => {
                 write!(
