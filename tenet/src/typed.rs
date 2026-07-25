@@ -16,21 +16,36 @@
 //!
 //! # Phase boundary
 //!
-//! This is the phase-3 surface of issue #557: construction
+//! This is the phase-4 surface of issue #557: construction
 //! ([`TensorMap::zeros`], [`TensorMap::from_block_fn`]), inspection
 //! ([`TensorMap::codomain`], [`TensorMap::domain`],
 //! [`TensorMap::block_fusion_trees`], [`TensorMap::block`],
-//! [`TensorMap::data`]), and two operations — [`TensorMap::permute`] and
-//! [`TensorMap::contract`].
+//! [`TensorMap::block_count`], [`TensorMap::data`], [`TensorMap::runtime`]),
+//! and the index-manipulation and contraction
+//! operations — [`TensorMap::permute`], [`TensorMap::braid`],
+//! [`TensorMap::transpose`], [`TensorMap::transpose_axes`],
+//! [`TensorMap::repartition`] and [`TensorMap::contract`].
 //!
-//! Everything else is deliberately still absent. `braid`, `transpose` and
-//! `repartition` each need plumbing this phase does not carry (`transpose`
-//! and `repartition` are planar operations with their own validation, not
-//! permutes), composition semantics — TensorKit `A * B`, which unlike
-//! [`TensorMap::contract`] never twists dual legs — has no typed spelling
-//! yet, and the decompositions have none either. The phase-4 review decides
-//! which of those the facade grows, and whether the module joins the prelude;
-//! adding them here ahead of that review would bypass the gate that exists to
+//! Everything else is deliberately still absent, each for its own reason:
+//!
+//! - The **decompositions** (`svd_*`, `qr`/`lq`, `left_orth`/`right_orth`, the
+//!   null spaces) get their own readiness step: they force a decision on how a
+//!   spectrum is labelled and they touch the matrix-algebra result types, so
+//!   they are a phase rather than an addition.
+//! - The **scalar operations** (`add`, `scale`, `norm`, `inner`, `tr`) are
+//!   reachable but raise the operator-overload ergonomics question, which is
+//!   reviewed on its own.
+//! - **Composition** — TensorKit `A * B`, which unlike [`TensorMap::contract`]
+//!   never twists dual legs — is blocked below this layer: fermionic compose
+//!   needs a new public seam over `LoweredMultiplicityFreeAlgebra`, which
+//!   `tenet-core` seals, and a silently
+//!   bosonic-only `compose` would return wrong fermionic signs rather than an
+//!   error.
+//! - `adjoint` and `conj` are design-gated: only an eager `adjoint` is
+//!   reachable here, which would diverge from the lazy erased sibling, and
+//!   `conj` has an open correctness question for non-self-dual sectors.
+//!
+//! Adding any of them ahead of its review would bypass the gate that exists to
 //! keep this surface deliberate.
 //!
 //! Construction consumes only the transactional checked admission path, so a
@@ -49,9 +64,17 @@ use tenet_tensors::{
 
 pub use tenet_core::SectorCodec;
 
-use crate::error::Error;
-use crate::runtime::Runtime;
-use crate::tensor::{apply_fill, Fill, TensorScalar};
+/// Re-exported so `use tenet::typed::*` is self-sufficient apart from the
+/// provider: every fallible method here returns this error.
+pub use crate::error::Error;
+/// Re-exported for the same reason as [`Error`]: every constructor here takes
+/// a runtime. Both types are also in [`crate::prelude`]; re-exporting them
+/// here is what lets a caller glob-import this module alone. The module
+/// itself stays out of the prelude, because its [`TensorMap`] would collide
+/// with the erased [`tenet_core::TensorMap`] already exported there.
+pub use crate::runtime::Runtime;
+
+use crate::tensor::{apply_fill, with_planar_axes, Fill, PlanarRequestKind, TensorScalar};
 use crate::typed_tensor_core::{
     tensorcontract_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
 };
@@ -533,11 +556,161 @@ where
         // Why no identity shortcut (the erased facade shares storage when the
         // axes do not move): the result would be byte-identical either way, so
         // the shortcut is a pure cost question, and adding one without a gate
-        // that measures it is speculative.
-        let operation = TreeTransformOperation::permute(
+        // that measures it is speculative. The same reasoning covers every
+        // other operation routed through `tree_transform` below.
+        self.tree_transform(TreeTransformOperation::permute(
             codomain_axes.iter().copied(),
             domain_axes.iter().copied(),
-        );
+        ))
+    }
+
+    /// TensorKit `braid`: re-arranges legs with an explicit braid, one level
+    /// per source axis.
+    ///
+    /// `codomain_axes` and `domain_axes` name source axes exactly as for
+    /// [`Self::permute`]. `levels` is per source *strand*, one entry for every
+    /// axis in `0..rank` — codomain axes first — and it is split by the
+    /// **source** codomain rank, so entry `i` always describes source axis `i`
+    /// regardless of where that axis ends up. The levels decide which strand
+    /// crosses above at each transposition; for a symmetric (bosonic) braiding
+    /// they cannot change the result, and this is then [`Self::permute`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when `levels` does not have one entry per
+    /// source axis — the one check this facade makes itself, because the axis
+    /// lists and the levels are validated by different layers and a
+    /// mis-lengthed `levels` would otherwise be split silently.
+    ///
+    /// Otherwise [`Error::Operation`] / [`Error::Core`] /
+    /// [`Error::FusionAlgebra`] straight from the expert layer for malformed
+    /// axis lists or a provider that cannot support the requested braiding.
+    /// As for [`Self::permute`], those errors are the contract; this layer does
+    /// not re-validate axes.
+    pub fn braid(
+        &self,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+        levels: &[usize],
+    ) -> Result<Self, Error> {
+        // Mirrors the erased pre-check verbatim (`Tensor::transformed`), same
+        // message: two facades reporting one mistake two ways is a support
+        // burden with no upside.
+        let rank = self.rank();
+        if levels.len() != rank {
+            return Err(Error::InvalidArgument(format!(
+                "braid levels must list one level per source axis \
+                 (expected {rank}, got {})",
+                levels.len()
+            )));
+        }
+        let nout = self.codomain_rank();
+        self.tree_transform(TreeTransformOperation::braid(
+            codomain_axes.iter().copied(),
+            domain_axes.iter().copied(),
+            levels[..nout].iter().copied(),
+            levels[nout..].iter().copied(),
+        ))
+    }
+
+    /// TensorKit `transpose`: the planar transpose of `codomain <- domain` to
+    /// `domain' <- codomain'`, i.e. a cyclic rotation of the legs round the
+    /// planar boundary by the codomain rank, which is what carries every
+    /// codomain leg across the boundary and every domain leg back.
+    ///
+    /// Planar means it **never braids**: legs are bent across the boundary, and
+    /// bending conjugates them, so the result's spaces carry flipped dual
+    /// flags. Spelling this as a [`Self::permute`] of the same axis order would
+    /// be wrong for any provider whose braiding is not symmetric — the two
+    /// agree only up to the R-symbols a permute inserts and this does not.
+    ///
+    /// It is its own inverse: transposing twice restores the source layout.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] from
+    /// the expert layer. The generated axis order is planar by construction, so
+    /// a failure here means the provider could not carry the bend.
+    pub fn transpose(&self) -> Result<Self, Error> {
+        self.planar(PlanarRequestKind::FullTranspose)
+    }
+
+    /// TensorKit `transpose` with an explicit cyclic axis map.
+    ///
+    /// The name is Rust-only, disambiguating this from [`Self::transpose`]:
+    /// TensorKit has a single `transpose` taking an optional `Index2Tuple`,
+    /// which Rust cannot spell as one method. TensorKit's argument-free
+    /// `transpose` is [`Self::transpose`]; this is the explicit form.
+    ///
+    /// `codomain_axes` and `domain_axes` are flat source axis numbers
+    /// (`0..rank`, codomain axes first), exactly as for [`Self::permute`], but
+    /// together they must describe one **cyclic rotation** of the planar source
+    /// order (codomain axes followed by the domain axes reversed). Unlike
+    /// [`Self::permute`], this operation never braids.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] when
+    /// the axis lists are malformed or are not a cyclic rotation of the planar
+    /// order — a re-arrangement that would need a braid is refused rather than
+    /// silently braided. As everywhere in this
+    /// facade the expert layer owns that validation; it is not repeated here.
+    pub fn transpose_axes(
+        &self,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+    ) -> Result<Self, Error> {
+        self.planar(PlanarRequestKind::Explicit {
+            codomain_axes,
+            domain_axes,
+        })
+    }
+
+    /// TensorKit `repartition(t, N₁, N₂)`: moves the planar boundary so the
+    /// codomain holds `num_codomain` legs and the domain holds the rest.
+    ///
+    /// The planar order — codomain followed by reversed domain — is preserved;
+    /// legs that cross the boundary are bent, and so arrive with their dual
+    /// flag flipped and their sectors dualized, without any braid being
+    /// introduced.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when `num_codomain` exceeds the rank, and
+    /// otherwise [`Error::Operation`] / [`Error::Core`] /
+    /// [`Error::FusionAlgebra`] from the expert layer, which owns the
+    /// validation this facade passes through.
+    pub fn repartition(&self, num_codomain: usize) -> Result<Self, Error> {
+        self.planar(PlanarRequestKind::Repartition { num_codomain })
+    }
+
+    /// Shared body of the three planar operations: derive the planar axis
+    /// order, let the expert layer check it, and run it as a transpose.
+    ///
+    /// Why the axis derivation is borrowed from the erased layer rather than
+    /// rewritten here: it *is* the definition of what "planar" means for each
+    /// request kind, and a second copy would be free to drift from the erased
+    /// sibling these operations are byte-compared against.
+    fn planar(&self, kind: PlanarRequestKind<'_>) -> Result<Self, Error> {
+        with_planar_axes(
+            self.codomain_rank(),
+            self.rank(),
+            kind,
+            |codomain_axes, domain_axes| {
+                // Why `transpose` and not `permute` even when the axes happen
+                // to be a plain permutation: domain trees run opposite to the
+                // planar boundary, so flattening them into a permute would
+                // braid a different leg across it.
+                self.tree_transform(TreeTransformOperation::transpose(
+                    codomain_axes.iter().copied(),
+                    domain_axes.iter().copied(),
+                ))
+            },
+        )
+    }
+
+    /// Runs one prepared tree transform on this tensor's own runtime.
+    fn tree_transform(&self, operation: TreeTransformOperation) -> Result<Self, Error> {
         // Leasing rather than locking, matching the erased path: independent
         // operations on one runtime must not serialize behind each other.
         let mut lease = self.runtime.lease_context()?;
@@ -550,6 +723,14 @@ where
             runtime: self.runtime.clone(),
             body: Arc::new(TypedTensorBody { space, data }),
         })
+    }
+
+    fn codomain_rank(&self) -> usize {
+        self.body.space.space().homspace().codomain().len()
+    }
+
+    fn rank(&self) -> usize {
+        self.codomain_rank() + self.body.space.space().homspace().domain().len()
     }
 
     /// Contracts `lhs_axes` of `self` with `rhs_axes` of `other` (pairwise, in

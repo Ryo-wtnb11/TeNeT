@@ -2400,7 +2400,7 @@ enum TransformKind<'a> {
     Transpose,
 }
 
-enum PlanarRequestKind<'a> {
+pub(crate) enum PlanarRequestKind<'a> {
     FullTranspose,
     Explicit {
         codomain_axes: &'a [usize],
@@ -2416,7 +2416,7 @@ enum PlanarOverwriteRequest<'a> {
     RepartitionFromDestination,
 }
 
-fn with_planar_axes<T>(
+pub(crate) fn with_planar_axes<T>(
     source_codomain_rank: usize,
     source_rank: usize,
     kind: PlanarRequestKind<'_>,

@@ -1372,3 +1372,430 @@ fn a_failing_typed_operation_publishes_no_cache_state() {
     );
     assert_eq!(runtime.tree_transform_cache_info(), runtime_before);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4, slice 1: `TensorMap::braid`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn braid_moves_legs_of_a_multi_block_external_provider_tensor() {
+    // What: an explicit braid with a full level assignment produces the same
+    // reordered spaces a permute of the same axes does, and moves the payload.
+    //
+    // Why not a case where braid differs from permute: the level *values* are
+    // unobservable for every provider this facade can host. The symmetric ones
+    // (both fixtures here, the built-in Z2/SU(2), and even the fermionic rule
+    // used further down) make over- and under-crossing the same morphism, and
+    // the one built-in rule that would not — `FibonacciFusionRule` — is
+    // excluded by this facade's `Scalar = f64` and `SectorCodec` bounds.
+    //
+    // What the tests below therefore do and do not prove: they pin how the
+    // levels are *split* (by the source codomain rank, which the oracle below
+    // pins with an axis list of a different length) and that a wrong-length
+    // list is refused. Nothing here can pin the values, and no test in this
+    // crate can until an anyonic provider is reachable.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    let braided = tensor.braid(&[1, 2], &[3, 0], &[0, 1, 2, 3]).unwrap();
+    let permuted = tensor.permute(&[1, 2], &[3, 0]).unwrap();
+
+    assert_eq!(braided.data(), permuted.data());
+    assert_ne!(braided.data(), tensor.data());
+    assert_eq!(braided.codomain()[0].degeneracies(), &[1, 2, 4]);
+    assert_eq!(braided.domain()[1].degeneracies(), &[2, 1, 3]);
+    // A different level assignment is the same morphism for a bosonic rule.
+    let reversed = tensor.braid(&[1, 2], &[3, 0], &[3, 2, 1, 0]).unwrap();
+    assert_eq!(reversed.data(), braided.data());
+}
+
+#[test]
+fn braid_rejects_a_wrong_length_levels_list() {
+    // What: the one facade-level pre-check — `levels` must name every source
+    // axis — with the erased layer's own diagnosis, in both directions.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    let short = tensor.braid(&[1, 2], &[3, 0], &[0, 1, 2]).unwrap_err();
+    let message = short.to_string();
+    assert!(message.contains("one level per source axis"), "{message}");
+    assert!(message.contains("expected 4"), "{message}");
+    assert!(tensor.braid(&[1, 2], &[3, 0], &[0; 5]).is_err());
+    // Malformed axes still come back from the expert layer, not from here.
+    assert!(tensor.braid(&[0, 0], &[2, 3], &[0, 1, 2, 3]).is_err());
+}
+
+#[test]
+fn typed_and_erased_braid_agree_byte_for_byte_on_a_builtin_rule() {
+    // What: the typed braid is the erased braid — same destination layout, same
+    // bytes — including how `levels` is split by the *source* codomain rank.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    let erased_braided = erased.braid(&[2, 0], &[1], &[2, 0, 1]).unwrap();
+    let typed_braided = typed.braid(&[2, 0], &[1], &[2, 0, 1]).unwrap();
+
+    assert_eq!(typed_braided.data(), erased_braided.data());
+    assert_ne!(typed_braided.data(), typed.data());
+
+    // The source is `2 <- 1`, so this destination split (`1 <- 2`) has a
+    // codomain axis list of a different length. That is what pins the levels
+    // being split by the *source* codomain rank: splitting by the requested
+    // codomain length instead is a plausible misreading, and one the case
+    // above cannot see because there the two coincide.
+    let erased_moved = erased.braid(&[2], &[0, 1], &[2, 0, 1]).unwrap();
+    let typed_moved = typed.braid(&[2], &[0, 1], &[2, 0, 1]).unwrap();
+
+    assert_eq!(typed_moved.data(), erased_moved.data());
+    assert_eq!(typed_moved.codomain().len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4, slice 2: `TensorMap::transpose` and `TensorMap::transpose_axes`.
+// ---------------------------------------------------------------------------
+
+/// The `(is_dual, degeneracies)` shape of a typed tensor map's legs, codomain
+/// first — enough to pin where each source leg landed and how it was bent.
+fn typed_leg_shapes<R, D>(tensor: &TensorMap<R, D>) -> Vec<(bool, Vec<usize>)>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: tenet::prelude::TensorScalar,
+{
+    tensor
+        .codomain()
+        .iter()
+        .chain(tensor.domain().iter())
+        .map(|leg| (leg.is_dual(), leg.degeneracies().to_vec()))
+        .collect()
+}
+
+/// The same shape summary for an erased tensor, so a typed result can be
+/// checked against the erased sibling rather than against a guess.
+fn erased_leg_shapes(tensor: &tenet::prelude::Tensor) -> Vec<(bool, Vec<usize>)> {
+    tensor
+        .codomain_spaces()
+        .iter()
+        .chain(tensor.domain_spaces().iter())
+        .map(|space| {
+            (
+                space.is_dual(),
+                space
+                    .sectors()
+                    .into_iter()
+                    .map(|(_, degeneracy)| degeneracy)
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn transpose_twice_returns_the_source_layout() {
+    // What: the planar transpose is an involution — it rotates every leg once
+    // round the boundary, so applying it twice restores the source spaces,
+    // block order and bytes exactly.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    let once = tensor.transpose().unwrap();
+    let twice = once.transpose().unwrap();
+
+    assert_ne!(once.data(), tensor.data());
+    assert_eq!(typed_leg_shapes(&twice), typed_leg_shapes(&tensor));
+    assert_eq!(twice.data(), tensor.data());
+    assert_eq!(twice.block_count(), tensor.block_count());
+    for index in 0..tensor.block_count() {
+        assert_eq!(
+            twice.block_fusion_trees(index).unwrap(),
+            tensor.block_fusion_trees(index).unwrap()
+        );
+    }
+}
+
+#[test]
+fn typed_and_erased_transpose_agree_byte_for_byte_on_a_builtin_rule() {
+    // What: the typed transpose is the erased planar transpose — same bent
+    // spaces (dual flags included) and same bytes. It must not be a permute in
+    // disguise: on this rank-3 layout the two differ, which the assertion
+    // against the permuted buffer pins.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    let erased_transposed = erased.transpose().unwrap();
+    let typed_transposed = typed.transpose().unwrap();
+
+    assert_eq!(typed_transposed.data(), erased_transposed.data());
+    assert_eq!(
+        typed_leg_shapes(&typed_transposed),
+        erased_leg_shapes(&erased_transposed)
+    );
+    assert_eq!(typed_transposed.codomain().len(), 1);
+    assert_eq!(typed_transposed.domain().len(), 2);
+}
+
+#[test]
+fn typed_and_erased_transpose_axes_agree_byte_for_byte_on_a_builtin_rule() {
+    // What: an explicit cyclic rotation other than the full transpose agrees
+    // with the erased sibling, bytes and bent spaces.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    // Planar source order is `0, 1, 2` (codomain then reversed domain); this is
+    // the one-step rotation of it.
+    let erased_rotated = erased.transpose_axes(&[1, 2], &[0]).unwrap();
+    let typed_rotated = typed.transpose_axes(&[1, 2], &[0]).unwrap();
+
+    assert_eq!(typed_rotated.data(), erased_rotated.data());
+    assert_eq!(
+        typed_leg_shapes(&typed_rotated),
+        erased_leg_shapes(&erased_rotated)
+    );
+}
+
+#[test]
+fn transpose_axes_rejects_malformed_axes_without_panicking() {
+    // What: out-of-range axes, a wrong-length list and a non-planar
+    // re-arrangement (a permute, which `transpose_axes` must refuse rather than
+    // silently braid) all come back as `Err`.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    assert!(tensor.transpose_axes(&[0, 9], &[2, 3]).is_err());
+    assert!(tensor.transpose_axes(&[0], &[2, 3]).is_err());
+    assert!(tensor.transpose_axes(&[1, 2], &[3, 0]).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4, slice 3: `TensorMap::repartition`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn repartition_moves_the_boundary_and_round_trips_at_every_split() {
+    // What: every split point of a rank-4 tensor map is reachable, reports the
+    // requested codomain/domain sizes, and comes back to the source layout —
+    // spaces, block identities and bytes — when repartitioned to the original
+    // split.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    for num_codomain in 0..=4 {
+        let moved = tensor.repartition(num_codomain).unwrap();
+        assert_eq!(moved.codomain().len(), num_codomain);
+        assert_eq!(moved.domain().len(), 4 - num_codomain);
+        assert_eq!(moved.data().len(), tensor.data().len());
+
+        let back = moved.repartition(2).unwrap();
+        assert_eq!(typed_leg_shapes(&back), typed_leg_shapes(&tensor));
+        assert_eq!(back.data(), tensor.data());
+        for index in 0..tensor.block_count() {
+            assert_eq!(
+                back.block_fusion_trees(index).unwrap(),
+                tensor.block_fusion_trees(index).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn typed_and_erased_repartition_agree_on_bytes_and_on_the_bent_spaces() {
+    // What: every split point matches the erased sibling in bytes and in the
+    // resulting spaces. The space comparison is the load-bearing half: a leg
+    // that crosses the boundary is bent, which flips its dual flag and dualizes
+    // its sectors (so a Z2-even/odd degeneracy pair can reorder), and the
+    // erased result — not an assumption about which way that goes — is the
+    // reference.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    for num_codomain in 0..=3 {
+        let erased_moved = erased.repartition(num_codomain).unwrap();
+        let typed_moved = typed.repartition(num_codomain).unwrap();
+
+        assert_eq!(typed_moved.data(), erased_moved.data(), "{num_codomain}");
+        assert_eq!(
+            typed_leg_shapes(&typed_moved),
+            erased_leg_shapes(&erased_moved),
+            "{num_codomain}"
+        );
+    }
+    // Non-vacuous: at least one split really does flip a dual flag relative to
+    // the source, so the comparison above is not comparing three copies of the
+    // identity.
+    let flipped = typed.repartition(0).unwrap();
+    assert!(typed_leg_shapes(&flipped)
+        .iter()
+        .any(|(is_dual, _)| *is_dual));
+    assert!(typed_leg_shapes(&typed)
+        .iter()
+        .all(|(is_dual, _)| !*is_dual));
+}
+
+#[test]
+fn repartition_rejects_a_split_beyond_the_rank() {
+    // What: `num_codomain > rank` has no planar reading at all, so it is
+    // rejected rather than clamped.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    let error = tensor.repartition(5).unwrap_err();
+
+    assert!(error.to_string().contains("exceeds rank 4"), "{error}");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4, slice 4: `use tenet::typed::*` self-sufficiency (issue #557, O7b).
+// ---------------------------------------------------------------------------
+
+/// Deliberately imports nothing but the typed facade's glob and the provider
+/// this suite defines: if `Error` or `Runtime` were missing from the module,
+/// this module would not compile. The provider itself must come from
+/// somewhere — a typed facade is parameterised by one — which is exactly the
+/// "self-sufficient apart from the provider" claim.
+mod typed_glob_is_self_sufficient {
+    use std::sync::Arc;
+    use tenet::typed::*;
+
+    use super::{ExternalZ3, Z3Charge};
+
+    #[test]
+    fn a_glob_import_runs_an_end_to_end_typed_operation() {
+        let _guard = super::cache_lock();
+        let runtime: Runtime = Runtime::builder().build().expect("runtime builds");
+        let provider = Arc::new(ExternalZ3::new());
+        let leg = GradedSpace::try_new(
+            Arc::clone(&provider),
+            [(Z3Charge(0), 2), (Z3Charge(1), 3)],
+            false,
+        )
+        .expect("leg is well formed");
+
+        let build = || -> Result<TensorMap<ExternalZ3, f64>, Error> {
+            let mut next = 0.0;
+            let tensor = TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, _| {
+                next += 1.0;
+                next
+            })?;
+            tensor.transpose()
+        };
+
+        let transposed = build().expect("the typed pipeline runs");
+        assert_eq!(transposed.codomain().len(), 1);
+        assert_eq!(transposed.domain().len(), 2);
+
+        // The re-exported `Error` is the same type the facade returns, not a
+        // lookalike: this only type-checks if the two are one.
+        let failure: Error = transposed.repartition(9).unwrap_err();
+        assert!(matches!(failure, Error::InvalidArgument(_)));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4, slice 5: planar is not permute.
+//
+// The built-in `FermionParityFusionRule` is the only rule reachable from this
+// facade whose braiding is not symmetric (`BraidingStyleKind::Fermionic`), so
+// it is the only one that can tell a planar bend apart from a braid. It meets
+// every typed-facade bound — it is a genuine external-shaped provider here,
+// not crate-internal machinery.
+// ---------------------------------------------------------------------------
+
+/// A rank-2 fermionic tensor map, `[odd, odd] <- []`. Both legs odd, so every
+/// bend crosses a fermion past a fermion and the sign is observable; the empty
+/// domain keeps the layout to a single one-element block, so a sign flip is the
+/// only thing a comparison can be reporting.
+/// A fermionic leg carrying both parities, degeneracy one each.
+fn fermionic_leg() -> GradedSpace<tenet::core::FermionParityFusionRule> {
+    GradedSpace::try_new(
+        Arc::new(tenet::core::FermionParityFusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 1),
+            (tenet::core::Z2Irrep::ODD, 1),
+        ],
+        false,
+    )
+    .expect("fermionic leg is well formed")
+}
+
+/// `[leg, leg] <- [leg]`, counting fill: four elements across two blocks, all
+/// distinct, so both the motion and the sign of every element are visible.
+fn fermionic_rank_three(runtime: &Runtime) -> TensorMap<tenet::core::FermionParityFusionRule, f64> {
+    let leg = fermionic_leg();
+    let mut next = 0.0;
+    TensorMap::from_block_fn(runtime, [&leg, &leg], [&leg], |_, _| {
+        next += 1.0;
+        next
+    })
+    .expect("fermionic layout is admissible")
+}
+
+#[test]
+fn planar_transposes_bend_where_permute_braids_for_a_fermionic_provider() {
+    // What: for a provider whose braiding is not symmetric, a planar transpose
+    // and a permute of the *same* axes are different morphisms — the permute
+    // crosses strands and picks up the fermionic sign, the planar bend does
+    // not. Every other test in this suite is blind to the difference, because
+    // every other provider it can host is bosonic; spelling `transpose` as a
+    // `permute` would pass all of them and be wrong here.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let tensor = fermionic_rank_three(&runtime);
+    assert_eq!(tensor.data(), [1.0, 2.0, 3.0, 4.0]);
+
+    // Full transpose: same element motion either way, opposite signs.
+    assert_eq!(tensor.transpose().unwrap().data(), [1.0, 2.0, 4.0, 3.0]);
+    assert_eq!(
+        tensor.permute(&[2], &[1, 0]).unwrap().data(),
+        [1.0, 2.0, -4.0, -3.0]
+    );
+
+    // The explicit form, on a different rotation of the planar order.
+    assert_eq!(
+        tensor.transpose_axes(&[1, 2], &[0]).unwrap().data(),
+        [1.0, 4.0, 2.0, 3.0]
+    );
+    assert_eq!(
+        tensor.permute(&[1, 2], &[0]).unwrap().data(),
+        [1.0, 4.0, -2.0, -3.0]
+    );
+}
+
+#[test]
+fn repartition_is_sign_free_even_for_a_fermionic_provider() {
+    // What: moving the planar boundary never crosses two strands — the cyclic
+    // order of the legs is what `repartition` preserves by definition — so
+    // unlike the transposes above, its result carries no braiding phase and
+    // coincides with the permute of the same axes even fermionically.
+    //
+    // Recorded because it is not obvious and it bounds what a test can prove:
+    // no provider this facade can host makes a `repartition`-only substitution
+    // of the planar transform by a braided one observable. The two transposes
+    // above are what guard the shared planar helper the three methods route
+    // through.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let tensor = fermionic_rank_three(&runtime);
+
+    assert_eq!(tensor.repartition(0).unwrap().data(), [1.0, 4.0, 3.0, 2.0]);
+    assert_eq!(tensor.repartition(1).unwrap().data(), [1.0, 4.0, 3.0, 2.0]);
+    assert_eq!(tensor.repartition(3).unwrap().data(), [1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(
+        tensor.repartition(0).unwrap().data(),
+        tensor.permute(&[], &[2, 1, 0]).unwrap().data()
+    );
+}
