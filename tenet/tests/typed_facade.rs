@@ -729,3 +729,140 @@ fn block_sectors_reports_a_non_self_dual_domain_label() {
     assert_eq!(sectors.domain_uncoupled(), &[Z3Charge(2)]);
     assert!(tensor.domain()[0].is_dual());
 }
+
+// ---------------------------------------------------------------------------
+// Slice 7: cross-cutting gates.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn simple_fusion_provider_round_trips_construction_fill_and_inspection() {
+    // What: the whole phase-2 surface works for a non-abelian (Simple) external
+    // provider with a complex payload, not just for the abelian fixture.
+    let _guard = cache_lock();
+    let provider = Arc::new(ExternalSu2);
+    let leg = su2_leg(&provider, false);
+    let runtime = runtime();
+
+    let tensor: TensorMap<ExternalSu2, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |sectors, indices| {
+            Complex64::new(
+                sectors.coupled().twice_spin() as f64,
+                indices.iter().sum::<usize>() as f64,
+            )
+        })
+        .unwrap();
+
+    // Two spin-1/2 legs couple to spin 0 and spin 1 on each side.
+    assert!(tensor.block_count() >= 2);
+    let coupled: Vec<usize> = (0..tensor.block_count())
+        .map(|index| tensor.block_sectors(index).unwrap().coupled().twice_spin())
+        .collect();
+    assert!(coupled.contains(&0) && coupled.contains(&2));
+    assert!(tensor
+        .data()
+        .iter()
+        .zip(0..)
+        .all(|(value, _)| value.re == 0.0 || value.re == 2.0));
+    assert_eq!(tensor.codomain().len(), 2);
+    assert_eq!(tensor.domain().len(), 2);
+}
+
+/// Fill value from the erased fusion-tree key: parities weighted by position
+/// so any reordering of legs, blocks or elements changes the buffer.
+fn erased_fill_value(key: &tenet::prelude::BlockKey, indices: &[usize]) -> f64 {
+    let pair = key.as_fusion_tree_pair().expect("fusion-tree block");
+    let parity = |id| {
+        SectorCodec::decode_sector(&tenet::core::Z2FusionRule, id)
+            .expect("built-in codec decodes its own ids")
+            .parity()
+    };
+    let mut value = f64::from(parity(pair.codomain_tree().coupled())) * 1000.0;
+    for (position, &id) in pair.codomain_tree().uncoupled().iter().enumerate() {
+        value += f64::from(parity(id)) * 100.0 * (position + 1) as f64;
+    }
+    for (position, &id) in pair.domain_tree().uncoupled().iter().enumerate() {
+        value += f64::from(parity(id)) * 10.0 * (position + 1) as f64;
+    }
+    value
+        + indices
+            .iter()
+            .enumerate()
+            .map(|(a, &i)| (a + 1) * i)
+            .sum::<usize>() as f64
+}
+
+/// The same value computed from the typed labels the facade hands the closure.
+fn typed_fill_value(
+    sectors: &tenet::typed::BlockSectors<tenet::core::Z2Irrep>,
+    indices: &[usize],
+) -> f64 {
+    let mut value = f64::from(sectors.coupled().parity()) * 1000.0;
+    for (position, label) in sectors.codomain_uncoupled().iter().enumerate() {
+        value += f64::from(label.parity()) * 100.0 * (position + 1) as f64;
+    }
+    for (position, label) in sectors.domain_uncoupled().iter().enumerate() {
+        value += f64::from(label.parity()) * 10.0 * (position + 1) as f64;
+    }
+    value
+        + indices
+            .iter()
+            .enumerate()
+            .map(|(a, &i)| (a + 1) * i)
+            .sum::<usize>() as f64
+}
+
+#[test]
+fn typed_and_erased_block_fill_produce_identical_storage_on_a_builtin_rule() {
+    // What: for a built-in rule reachable from both facades, the typed checked
+    // construction and the erased one agree byte for byte and block for block —
+    // same layout, same block order, same element order.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
+    let mut erased_keys: Vec<tenet::prelude::BlockKey> = Vec::new();
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        &runtime,
+        [&space, &space],
+        [&space],
+        |key, indices| {
+            if erased_keys.last() != Some(key) {
+                erased_keys.push(key.clone());
+            }
+            erased_fill_value(key, indices)
+        },
+    )
+    .unwrap();
+
+    let provider = Arc::new(tenet::core::Z2FusionRule);
+    let leg = GradedSpace::try_new(
+        provider,
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 3),
+        ],
+        false,
+    )
+    .unwrap();
+    let typed: TensorMap<tenet::core::Z2FusionRule, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], typed_fill_value).unwrap();
+
+    assert_eq!(typed.data(), erased.data());
+    assert_eq!(typed.block_count(), erased_keys.len());
+    for (index, key) in erased_keys.iter().enumerate() {
+        let pair = key.as_fusion_tree_pair().unwrap();
+        let sectors = typed.block_sectors(index).unwrap();
+        let expected: Vec<tenet::core::Z2Irrep> = pair
+            .codomain_tree()
+            .uncoupled()
+            .iter()
+            .map(|&id| SectorCodec::decode_sector(&tenet::core::Z2FusionRule, id).unwrap())
+            .collect();
+        assert_eq!(sectors.codomain_uncoupled(), expected.as_slice());
+        assert_eq!(
+            sectors.coupled(),
+            &SectorCodec::decode_sector(&tenet::core::Z2FusionRule, pair.codomain_tree().coupled())
+                .unwrap()
+        );
+    }
+}

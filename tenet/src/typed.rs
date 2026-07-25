@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use tenet_core::{
     BlockKey, BlockRef, CheckedFusionAlgebra, FusionProductSpace, FusionTreeHomSpace,
-    FusionTreeKey, MultiplicityFreeRigidSymbols, SectorLeg,
+    MultiplicityFreeRigidSymbols, SectorLeg,
 };
 use tenet_tensors::BoundDynamicFusionMapSpace;
 
@@ -250,19 +250,13 @@ impl<S> BlockSectors<S> {
     }
 }
 
-fn decode_tree<R>(
-    provider: &R,
-    tree: &FusionTreeKey,
-) -> Result<(Vec<R::Sector>, Vec<R::Sector>), Error>
+fn decode_sectors<R>(provider: &R, ids: &[tenet_core::SectorId]) -> Result<Vec<R::Sector>, Error>
 where
     R: SectorCodec,
 {
-    let decode = |ids: &[tenet_core::SectorId]| -> Result<Vec<R::Sector>, Error> {
-        ids.iter()
-            .map(|&id| provider.decode_sector(id).map_err(Error::from))
-            .collect()
-    };
-    Ok((decode(tree.uncoupled())?, decode(tree.innerlines())?))
+    ids.iter()
+        .map(|&id| provider.decode_sector(id).map_err(Error::from))
+        .collect()
 }
 
 /// Decodes one block key into provider labels.
@@ -280,14 +274,14 @@ where
             key.kind()
         ))
     })?;
-    let (codomain_uncoupled, codomain_innerlines) = decode_tree(provider, pair.codomain_tree())?;
-    let (domain_uncoupled, domain_innerlines) = decode_tree(provider, pair.domain_tree())?;
+    let codomain = pair.codomain_tree();
+    let domain = pair.domain_tree();
     Ok(BlockSectors {
-        coupled: provider.decode_sector(pair.codomain_tree().coupled())?,
-        codomain_uncoupled,
-        codomain_innerlines,
-        domain_uncoupled,
-        domain_innerlines,
+        coupled: provider.decode_sector(codomain.coupled())?,
+        codomain_uncoupled: decode_sectors(provider, codomain.uncoupled())?,
+        codomain_innerlines: decode_sectors(provider, codomain.innerlines())?,
+        domain_uncoupled: decode_sectors(provider, domain.uncoupled())?,
+        domain_innerlines: decode_sectors(provider, domain.innerlines())?,
     })
 }
 
