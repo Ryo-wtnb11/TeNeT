@@ -263,6 +263,17 @@ pub trait CheckedFusionAlgebra: FusionRule {
 /// every decodable id, and that distinct labels never encode to one id.
 /// Equal [`FusionRule::rule_identity`] values therefore require an equal
 /// codec, not only equal fusion and recoupling semantics.
+///
+/// The fourth law is decode totality over the reachable algebra:
+/// [`FusionRule::vacuum`] must decode, and so must every id the provider
+/// itself generates from decodable inputs through [`FusionRule::dual`] /
+/// [`CheckedFusionAlgebra::try_dual_sector`] and
+/// [`FusionRule::fusion_channels`] / [`CheckedFusionAlgebra::try_fusion_channels`].
+/// A decode domain narrower than that closure is a codec bug, not a user
+/// error: the engine hands the codec exactly the ids its own fusion and duals
+/// produced, so a facade inspecting a legitimately built tensor would fail on
+/// its own output. Encoding stays free to reject labels outside the provider's
+/// representable range — that is a user-supplied value, not an engine output.
 pub trait SectorCodec: FusionRule {
     /// The provider's public sector label.
     ///
