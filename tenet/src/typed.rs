@@ -533,11 +533,65 @@ where
         // Why no identity shortcut (the erased facade shares storage when the
         // axes do not move): the result would be byte-identical either way, so
         // the shortcut is a pure cost question, and adding one without a gate
-        // that measures it is speculative.
-        let operation = TreeTransformOperation::permute(
+        // that measures it is speculative. The same reasoning covers every
+        // other operation routed through `tree_transform` below.
+        self.tree_transform(TreeTransformOperation::permute(
             codomain_axes.iter().copied(),
             domain_axes.iter().copied(),
-        );
+        ))
+    }
+
+    /// TensorKit `braid`: re-arranges legs with an explicit braid, one level
+    /// per source axis.
+    ///
+    /// `codomain_axes` and `domain_axes` name source axes exactly as for
+    /// [`Self::permute`]. `levels` is per source *strand*, one entry for every
+    /// axis in `0..rank` — codomain axes first — and it is split by the
+    /// **source** codomain rank, so entry `i` always describes source axis `i`
+    /// regardless of where that axis ends up. The levels decide which strand
+    /// crosses above at each transposition; for a symmetric (bosonic) braiding
+    /// they cannot change the result, and this is then [`Self::permute`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when `levels` does not have one entry per
+    /// source axis — the one check this facade makes itself, because the axis
+    /// lists and the levels are validated by different layers and a
+    /// mis-lengthed `levels` would otherwise be split silently.
+    ///
+    /// Otherwise [`Error::Operation`] / [`Error::Core`] /
+    /// [`Error::FusionAlgebra`] straight from the expert layer for malformed
+    /// axis lists or a provider that cannot support the requested braiding.
+    /// As for [`Self::permute`], those errors are the contract; this layer does
+    /// not re-validate axes.
+    pub fn braid(
+        &self,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+        levels: &[usize],
+    ) -> Result<Self, Error> {
+        // Mirrors the erased pre-check verbatim (`Tensor::transformed`), same
+        // message: two facades reporting one mistake two ways is a support
+        // burden with no upside.
+        let rank = self.rank();
+        if levels.len() != rank {
+            return Err(Error::InvalidArgument(format!(
+                "braid levels must list one level per source axis \
+                 (expected {rank}, got {})",
+                levels.len()
+            )));
+        }
+        let nout = self.codomain_rank();
+        self.tree_transform(TreeTransformOperation::braid(
+            codomain_axes.iter().copied(),
+            domain_axes.iter().copied(),
+            levels[..nout].iter().copied(),
+            levels[nout..].iter().copied(),
+        ))
+    }
+
+    /// Runs one prepared tree transform on this tensor's own runtime.
+    fn tree_transform(&self, operation: TreeTransformOperation) -> Result<Self, Error> {
         // Leasing rather than locking, matching the erased path: independent
         // operations on one runtime must not serialize behind each other.
         let mut lease = self.runtime.lease_context()?;
@@ -550,6 +604,14 @@ where
             runtime: self.runtime.clone(),
             body: Arc::new(TypedTensorBody { space, data }),
         })
+    }
+
+    fn codomain_rank(&self) -> usize {
+        self.body.space.space().homspace().codomain().len()
+    }
+
+    fn rank(&self) -> usize {
+        self.codomain_rank() + self.body.space.space().homspace().domain().len()
     }
 
     /// Contracts `lhs_axes` of `self` with `rhs_axes` of `other` (pairwise, in

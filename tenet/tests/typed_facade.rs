@@ -1372,3 +1372,69 @@ fn a_failing_typed_operation_publishes_no_cache_state() {
     );
     assert_eq!(runtime.tree_transform_cache_info(), runtime_before);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4, slice 1: `TensorMap::braid`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn braid_moves_legs_of_a_multi_block_external_provider_tensor() {
+    // What: an explicit braid with a full level assignment produces the same
+    // reordered spaces a permute of the same axes does, and moves the payload.
+    //
+    // Why not a case where braid differs from permute: every provider this
+    // suite can build is bosonic (`BraidingStyleKind::Bosonic` for both
+    // fixtures, and the built-in Z2/SU(2) rules likewise), and for a symmetric
+    // braiding the level assignment cannot change the result — over- and
+    // under-crossing are the same morphism. Distinguishing the two needs an
+    // anyonic provider, which is out of scope here; the byte oracle against the
+    // erased `braid` is the guard that the levels are wired through.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    let braided = tensor.braid(&[1, 2], &[3, 0], &[0, 1, 2, 3]).unwrap();
+    let permuted = tensor.permute(&[1, 2], &[3, 0]).unwrap();
+
+    assert_eq!(braided.data(), permuted.data());
+    assert_ne!(braided.data(), tensor.data());
+    assert_eq!(braided.codomain()[0].degeneracies(), &[1, 2, 4]);
+    assert_eq!(braided.domain()[1].degeneracies(), &[2, 1, 3]);
+    // A different level assignment is the same morphism for a bosonic rule.
+    let reversed = tensor.braid(&[1, 2], &[3, 0], &[3, 2, 1, 0]).unwrap();
+    assert_eq!(reversed.data(), braided.data());
+}
+
+#[test]
+fn braid_rejects_a_wrong_length_levels_list() {
+    // What: the one facade-level pre-check — `levels` must name every source
+    // axis — with the erased layer's own diagnosis, in both directions.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    let short = tensor.braid(&[1, 2], &[3, 0], &[0, 1, 2]).unwrap_err();
+    let message = short.to_string();
+    assert!(message.contains("one level per source axis"), "{message}");
+    assert!(message.contains("expected 4"), "{message}");
+    assert!(tensor.braid(&[1, 2], &[3, 0], &[0; 5]).is_err());
+    // Malformed axes still come back from the expert layer, not from here.
+    assert!(tensor.braid(&[0, 0], &[2, 3], &[0, 1, 2, 3]).is_err());
+}
+
+#[test]
+fn typed_and_erased_braid_agree_byte_for_byte_on_a_builtin_rule() {
+    // What: the typed braid is the erased braid — same destination layout, same
+    // bytes — including how `levels` is split by the *source* codomain rank.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    let erased_braided = erased.braid(&[2, 0], &[1], &[2, 0, 1]).unwrap();
+    let typed_braided = typed.braid(&[2, 0], &[1], &[2, 0, 1]).unwrap();
+
+    assert_eq!(typed_braided.data(), erased_braided.data());
+    assert_ne!(typed_braided.data(), typed.data());
+}
