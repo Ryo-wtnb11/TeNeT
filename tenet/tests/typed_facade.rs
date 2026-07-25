@@ -1688,3 +1688,98 @@ mod typed_glob_is_self_sufficient {
         assert!(matches!(failure, Error::InvalidArgument(_)));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4, slice 5: planar is not permute.
+//
+// The built-in `FermionParityFusionRule` is the only rule reachable from this
+// facade whose braiding is not symmetric (`BraidingStyleKind::Fermionic`), so
+// it is the only one that can tell a planar bend apart from a braid. It meets
+// every typed-facade bound — it is a genuine external-shaped provider here,
+// not crate-internal machinery.
+// ---------------------------------------------------------------------------
+
+/// A rank-2 fermionic tensor map, `[odd, odd] <- []`. Both legs odd, so every
+/// bend crosses a fermion past a fermion and the sign is observable; the empty
+/// domain keeps the layout to a single one-element block, so a sign flip is the
+/// only thing a comparison can be reporting.
+/// A fermionic leg carrying both parities, degeneracy one each.
+fn fermionic_leg() -> GradedSpace<tenet::core::FermionParityFusionRule> {
+    GradedSpace::try_new(
+        Arc::new(tenet::core::FermionParityFusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 1),
+            (tenet::core::Z2Irrep::ODD, 1),
+        ],
+        false,
+    )
+    .expect("fermionic leg is well formed")
+}
+
+/// `[leg, leg] <- [leg]`, counting fill: four elements across two blocks, all
+/// distinct, so both the motion and the sign of every element are visible.
+fn fermionic_rank_three(runtime: &Runtime) -> TensorMap<tenet::core::FermionParityFusionRule, f64> {
+    let leg = fermionic_leg();
+    let mut next = 0.0;
+    TensorMap::from_block_fn(runtime, [&leg, &leg], [&leg], |_, _| {
+        next += 1.0;
+        next
+    })
+    .expect("fermionic layout is admissible")
+}
+
+#[test]
+fn planar_transposes_bend_where_permute_braids_for_a_fermionic_provider() {
+    // What: for a provider whose braiding is not symmetric, a planar transpose
+    // and a permute of the *same* axes are different morphisms — the permute
+    // crosses strands and picks up the fermionic sign, the planar bend does
+    // not. Every other test in this suite is blind to the difference, because
+    // every other provider it can host is bosonic; spelling `transpose` as a
+    // `permute` would pass all of them and be wrong here.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let tensor = fermionic_rank_three(&runtime);
+    assert_eq!(tensor.data(), [1.0, 2.0, 3.0, 4.0]);
+
+    // Full transpose: same element motion either way, opposite signs.
+    assert_eq!(tensor.transpose().unwrap().data(), [1.0, 2.0, 4.0, 3.0]);
+    assert_eq!(
+        tensor.permute(&[2], &[1, 0]).unwrap().data(),
+        [1.0, 2.0, -4.0, -3.0]
+    );
+
+    // The explicit form, on a different rotation of the planar order.
+    assert_eq!(
+        tensor.transpose_axes(&[1, 2], &[0]).unwrap().data(),
+        [1.0, 4.0, 2.0, 3.0]
+    );
+    assert_eq!(
+        tensor.permute(&[1, 2], &[0]).unwrap().data(),
+        [1.0, 4.0, -2.0, -3.0]
+    );
+}
+
+#[test]
+fn repartition_is_sign_free_even_for_a_fermionic_provider() {
+    // What: moving the planar boundary never crosses two strands — the cyclic
+    // order of the legs is what `repartition` preserves by definition — so
+    // unlike the transposes above, its result carries no braiding phase and
+    // coincides with the permute of the same axes even fermionically.
+    //
+    // Recorded because it is not obvious and it bounds what a test can prove:
+    // no provider this facade can host makes a `repartition`-only substitution
+    // of the planar transform by a braided one observable. The two transposes
+    // above are what guard the shared planar helper the three methods route
+    // through.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let tensor = fermionic_rank_three(&runtime);
+
+    assert_eq!(tensor.repartition(0).unwrap().data(), [1.0, 4.0, 3.0, 2.0]);
+    assert_eq!(tensor.repartition(1).unwrap().data(), [1.0, 4.0, 3.0, 2.0]);
+    assert_eq!(tensor.repartition(3).unwrap().data(), [1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(
+        tensor.repartition(0).unwrap().data(),
+        tensor.permute(&[], &[2, 1, 0]).unwrap().data()
+    );
+}
