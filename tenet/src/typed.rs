@@ -4,10 +4,15 @@
 //! The ergonomic [`crate::prelude`] facade erases the rule behind a fixed set
 //! of built-ins. This module is its typed sibling: `R` stays concrete through
 //! monomorphized construction, so any provider — including one defined
-//! downstream — can drive it, and inspection returns
-//! [`SectorCodec::Sector`] labels instead of opaque
+//! downstream — can drive it, and the categorical identity of a tensor comes
+//! back as [`SectorCodec::Sector`] labels instead of opaque
 //! [`tenet_core::SectorId`] keys. The engine itself never sees a label; the
 //! codec is the single boundary where one enters or leaves.
+//!
+//! The exception is deliberate: [`TensorMap::block`] is the engine-level
+//! layout view, and the [`tenet_core::BlockRef`] it returns carries the raw
+//! [`tenet_core::BlockKey`]. Labels are what [`TensorMap::block_fusion_trees`]
+//! is for.
 //!
 //! # Phase boundary
 //!
@@ -528,7 +533,15 @@ where
         decode_block_fusion_trees(self.body.space.provider(), block.key())
     }
 
-    /// Shape, strides and offset of the block at `index` into [`Self::data`].
+    /// Engine-level layout view of the block at `index`: its shape, strides
+    /// and offset addressing into [`Self::data`].
+    ///
+    /// This is the one accessor here that speaks the engine's vocabulary
+    /// rather than the provider's — the returned [`BlockRef`] exposes the raw
+    /// [`tenet_core::BlockKey`], whose sectors are [`tenet_core::SectorId`]s.
+    /// It is not wrapped because a layout view has no use for labels; for the
+    /// block's categorical identity use [`Self::block_fusion_trees`], which
+    /// reports the same block through the codec.
     ///
     /// # Errors
     ///
