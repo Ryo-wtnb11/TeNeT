@@ -92,22 +92,30 @@ fn assert_decode_total<Rule>(
         .collect();
     reachable.insert(rule.vacuum());
 
+    // A boundary seed's dual or fusion is often genuinely unrepresentable
+    // (U(1) charge overflow, SU(2) past the maximum spin). That is the encode
+    // side of the contract, which the law explicitly permits, so such an id is
+    // never generated and never has to decode. Only what the rule does hand
+    // back is held to decode totality.
+    let mut generated = 0usize;
     for _ in 0..rounds {
         let mut next = reachable.clone();
         for &left in &reachable {
-            next.insert(
-                rule.try_dual_sector(left)
-                    .expect("dual of a decodable sector is representable"),
-            );
+            if let Ok(dual) = rule.try_dual_sector(left) {
+                generated += 1;
+                next.insert(dual);
+            }
             for &right in &reachable {
-                next.extend(
-                    rule.try_fusion_channels(left, right)
-                        .expect("fusion of decodable sectors is representable"),
-                );
+                if let Ok(channels) = rule.try_fusion_channels(left, right) {
+                    generated += channels.len();
+                    next.extend(channels);
+                }
             }
         }
         reachable = next;
     }
+    assert!(generated > 0, "the rule generated no ids at all");
+
     // Why not assert the closure grew: a finite closed algebra (Z2, fZ2)
     // reaches its whole sector set from the vacuum, which is the law fully
     // discharged, not a vacuous test.
@@ -124,15 +132,28 @@ fn builtin_codecs_decode_every_id_their_own_algebra_reaches() {
     // What: each built-in codec's decode domain covers the vacuum and the
     // dual/fusion closure of its decodable ids, so the typed facade can label
     // any block the engine builds.
-    assert_decode_total(&U1FusionRule, [-2, 3].map(U1Irrep::new), 2);
+    // Seeds sit both in the interior and hard against each codec's advertised
+    // representable maximum, so a decode domain truncated anywhere below that
+    // maximum fails here instead of slipping past an easy sample.
+    assert_decode_total(
+        &U1FusionRule,
+        [-2, 3, i32::MIN + 1, i32::MAX - 1].map(U1Irrep::new),
+        2,
+    );
     assert_decode_total(&Z2FusionRule, [Z2Irrep::ODD], 2);
     assert_decode_total(&FermionParityFusionRule, [Z2Irrep::ODD], 2);
-    assert_decode_total(&SU2FusionRule, [1, 2].map(SU2Irrep::from_twice_spin), 2);
+    assert_decode_total(
+        &SU2FusionRule,
+        [1, 2, SU2_MAX_DOUBLED_SPIN - 1, SU2_MAX_DOUBLED_SPIN].map(SU2Irrep::from_twice_spin),
+        2,
+    );
     assert_decode_total(
         &U1Fz2Rule::default(),
         [
             product_sector(U1Irrep::new(1), Z2Irrep::ODD),
             product_sector(U1Irrep::new(-2), Z2Irrep::EVEN),
+            product_sector(U1Irrep::new(i32::MAX - 1), Z2Irrep::ODD),
+            product_sector(U1Irrep::new(i32::MIN + 1), Z2Irrep::EVEN),
         ],
         2,
     );
