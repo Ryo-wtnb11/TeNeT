@@ -1,7 +1,7 @@
 use crate::{
     BraidingStyleKind, CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionAlgebraError,
     FusionRule, FusionStyleKind, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, RuleIdentity, SectorId, SectorVec,
+    MultiplicityFreeRigidSymbols, RuleIdentity, SectorCodec, SectorId, SectorVec,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -105,6 +105,18 @@ impl CheckedFusionAlgebra for Z2FusionRule {
         Ok(usize::from(
             coupled.parity() == (left.parity() ^ right.parity()),
         ))
+    }
+}
+
+impl SectorCodec for Z2FusionRule {
+    type Sector = Z2Irrep;
+
+    fn encode_sector(&self, value: &Self::Sector) -> Result<SectorId, FusionAlgebraError> {
+        Ok(value.sector_id())
+    }
+
+    fn decode_sector(&self, id: SectorId) -> Result<Self::Sector, FusionAlgebraError> {
+        checked_z2_irrep(id)
     }
 }
 
@@ -224,6 +236,18 @@ impl CheckedFusionAlgebra for FermionParityFusionRule {
         coupled: SectorId,
     ) -> Result<usize, FusionAlgebraError> {
         Z2FusionRule.try_nsymbol(left, right, coupled)
+    }
+}
+
+impl SectorCodec for FermionParityFusionRule {
+    type Sector = Z2Irrep;
+
+    fn encode_sector(&self, value: &Self::Sector) -> Result<SectorId, FusionAlgebraError> {
+        Ok(value.sector_id())
+    }
+
+    fn decode_sector(&self, id: SectorId) -> Result<Self::Sector, FusionAlgebraError> {
+        checked_z2_irrep(id)
     }
 }
 
@@ -429,6 +453,18 @@ impl CheckedFusionAlgebra for U1FusionRule {
         let right = checked_u1_irrep(right)?;
         let coupled = checked_u1_irrep(coupled)?;
         Ok(usize::from(coupled == left.checked_fuse(right)?))
+    }
+}
+
+impl SectorCodec for U1FusionRule {
+    type Sector = U1Irrep;
+
+    fn encode_sector(&self, value: &Self::Sector) -> Result<SectorId, FusionAlgebraError> {
+        Ok(value.sector_id())
+    }
+
+    fn decode_sector(&self, id: SectorId) -> Result<Self::Sector, FusionAlgebraError> {
+        checked_u1_irrep(id)
     }
 }
 

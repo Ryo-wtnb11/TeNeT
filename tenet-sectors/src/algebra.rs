@@ -245,6 +245,48 @@ pub trait CheckedFusionAlgebra: FusionRule {
     ) -> Result<usize, FusionAlgebraError>;
 }
 
+/// Translation between a provider's semantic sector labels and the opaque
+/// [`SectorId`] keys the fusion engine runs on.
+///
+/// `SectorId` stays the canonical internal key: the engine never needs
+/// labels, and this trait is the only place a label enters or leaves it.
+/// Providers whose label domain is wider than their id domain (or vice
+/// versa) report the rejected value instead of wrapping or truncating it:
+/// [`FusionAlgebraError::UnrepresentableSectorLabel`] on the encode side and
+/// [`FusionAlgebraError::InvalidSector`] on the decode side.
+///
+/// Implementors promise that `decode_sector(encode_sector(x)) == x` for every
+/// representable label, that `encode_sector(decode_sector(id)) == id` for
+/// every decodable id, and that distinct labels never encode to one id.
+/// Equal [`FusionRule::rule_identity`] values therefore require an equal
+/// codec, not only equal fusion and recoupling semantics.
+pub trait SectorCodec: FusionRule {
+    /// The provider's public sector label.
+    ///
+    /// `Ord` and `Hash` exist so callers can key ordered and hashed
+    /// containers on labels; the order is the label order the provider
+    /// chooses and carries no fusion-algebra meaning.
+    type Sector: Clone + Eq + Ord + core::hash::Hash + core::fmt::Debug;
+
+    /// Returns the id naming `value`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FusionAlgebraError::UnrepresentableSectorLabel`] (or the
+    /// provider's more specific representation error) when no id names the
+    /// label.
+    fn encode_sector(&self, value: &Self::Sector) -> Result<SectorId, FusionAlgebraError>;
+
+    /// Returns the label named by `id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FusionAlgebraError::InvalidSector`] (or the provider's more
+    /// specific representation error) when the id is outside the provider's
+    /// domain.
+    fn decode_sector(&self, id: SectorId) -> Result<Self::Sector, FusionAlgebraError>;
+}
+
 pub trait MultiplicityFreeFusionRule: FusionRule {}
 
 pub trait MultiplicityFreeFusionSymbols: MultiplicityFreeFusionRule {

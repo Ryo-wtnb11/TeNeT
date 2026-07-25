@@ -26,9 +26,9 @@ pub use tenet_sectors::{
     MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
     PackedProductCodec, PackedSectorLayout, ProductFusionRule, ProductFusionRuleExt, ProductSector,
     ProductSectorCodec, ProductSectorCodecError, ProductSectorComponent, ProductSectorLayout,
-    RuleIdentity, SU2FusionRule, SU2Irrep, SectorId, SectorVec, Su2SectorLayout, SymbolShapeError,
-    TensorKitProductCodec, U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep,
-    SU2_MAX_DOUBLED_SPIN,
+    RuleIdentity, SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorVec, Su2SectorLayout,
+    SymbolShapeError, TensorKitProductCodec, U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule,
+    Z2Irrep, SU2_MAX_DOUBLED_SPIN,
 };
 
 mod core_rule_bridge;
