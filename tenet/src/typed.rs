@@ -49,8 +49,15 @@ use tenet_tensors::{
 
 pub use tenet_core::SectorCodec;
 
-use crate::error::Error;
-use crate::runtime::Runtime;
+/// Re-exported so `use tenet::typed::*` is self-sufficient apart from the
+/// provider: every fallible method here returns this error.
+pub use crate::error::Error;
+/// Re-exported for the same reason as [`Error`]: every constructor here takes
+/// a runtime. Neither type is promoted into [`crate::prelude`] instead,
+/// because this module's [`TensorMap`] name collides with the erased
+/// [`tenet_core::TensorMap`].
+pub use crate::runtime::Runtime;
+
 use crate::tensor::{apply_fill, with_planar_axes, Fill, PlanarRequestKind, TensorScalar};
 use crate::typed_tensor_core::{
     tensorcontract_owned_multiplicity_free, tree_transform_owned_multiplicity_free,

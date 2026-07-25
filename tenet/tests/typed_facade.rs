@@ -1641,3 +1641,50 @@ fn repartition_rejects_a_split_beyond_the_rank() {
 
     assert!(error.to_string().contains("exceeds rank 4"), "{error}");
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4, slice 4: `use tenet::typed::*` self-sufficiency (issue #557, O7b).
+// ---------------------------------------------------------------------------
+
+/// Deliberately imports nothing but the typed facade's glob and the provider
+/// this suite defines: if `Error` or `Runtime` were missing from the module,
+/// this module would not compile. The provider itself must come from
+/// somewhere — a typed facade is parameterised by one — which is exactly the
+/// "self-sufficient apart from the provider" claim.
+mod typed_glob_is_self_sufficient {
+    use std::sync::Arc;
+    use tenet::typed::*;
+
+    use super::{ExternalZ3, Z3Charge};
+
+    #[test]
+    fn a_glob_import_runs_an_end_to_end_typed_operation() {
+        let _guard = super::cache_lock();
+        let runtime: Runtime = Runtime::builder().build().expect("runtime builds");
+        let provider = Arc::new(ExternalZ3::new());
+        let leg = GradedSpace::try_new(
+            Arc::clone(&provider),
+            [(Z3Charge(0), 2), (Z3Charge(1), 3)],
+            false,
+        )
+        .expect("leg is well formed");
+
+        let build = || -> Result<TensorMap<ExternalZ3, f64>, Error> {
+            let mut next = 0.0;
+            let tensor = TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, _| {
+                next += 1.0;
+                next
+            })?;
+            tensor.transpose()
+        };
+
+        let transposed = build().expect("the typed pipeline runs");
+        assert_eq!(transposed.codomain().len(), 1);
+        assert_eq!(transposed.domain().len(), 2);
+
+        // The re-exported `Error` is the same type the facade returns, not a
+        // lookalike: this only type-checks if the two are one.
+        let failure: Error = transposed.repartition(9).unwrap_err();
+        assert!(matches!(failure, Error::InvalidArgument(_)));
+    }
+}
