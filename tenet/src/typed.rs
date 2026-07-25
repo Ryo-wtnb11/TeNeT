@@ -16,21 +16,34 @@
 //!
 //! # Phase boundary
 //!
-//! This is the phase-3 surface of issue #557: construction
+//! This is the phase-4 surface of issue #557: construction
 //! ([`TensorMap::zeros`], [`TensorMap::from_block_fn`]), inspection
 //! ([`TensorMap::codomain`], [`TensorMap::domain`],
 //! [`TensorMap::block_fusion_trees`], [`TensorMap::block`],
-//! [`TensorMap::data`]), and two operations — [`TensorMap::permute`] and
-//! [`TensorMap::contract`].
+//! [`TensorMap::data`]), and the index-manipulation and contraction
+//! operations — [`TensorMap::permute`], [`TensorMap::braid`],
+//! [`TensorMap::transpose`], [`TensorMap::transpose_axes`],
+//! [`TensorMap::repartition`] and [`TensorMap::contract`].
 //!
-//! Everything else is deliberately still absent. `braid`, `transpose` and
-//! `repartition` each need plumbing this phase does not carry (`transpose`
-//! and `repartition` are planar operations with their own validation, not
-//! permutes), composition semantics — TensorKit `A * B`, which unlike
-//! [`TensorMap::contract`] never twists dual legs — has no typed spelling
-//! yet, and the decompositions have none either. The phase-4 review decides
-//! which of those the facade grows, and whether the module joins the prelude;
-//! adding them here ahead of that review would bypass the gate that exists to
+//! Everything else is deliberately still absent, each for its own reason:
+//!
+//! - The **decompositions** (`svd_*`, `qr`/`lq`, `left_orth`/`right_orth`, the
+//!   null spaces) get their own readiness step: they force a decision on how a
+//!   spectrum is labelled and they touch the matrix-algebra result types, so
+//!   they are a phase rather than an addition.
+//! - The **scalar operations** (`add`, `scale`, `norm`, `inner`, `tr`) are
+//!   reachable but raise the operator-overload ergonomics question, which is
+//!   reviewed on its own.
+//! - **Composition** — TensorKit `A * B`, which unlike [`TensorMap::contract`]
+//!   never twists dual legs — is blocked below this layer: fermionic compose
+//!   needs a seam the tensor engine currently seals, and a silently
+//!   bosonic-only `compose` would return wrong fermionic signs rather than an
+//!   error.
+//! - `adjoint` and `conj` are design-gated: only an eager `adjoint` is
+//!   reachable here, which would diverge from the lazy erased sibling, and
+//!   `conj` has an open correctness question for non-self-dual sectors.
+//!
+//! Adding any of them ahead of its review would bypass the gate that exists to
 //! keep this surface deliberate.
 //!
 //! Construction consumes only the transactional checked admission path, so a
