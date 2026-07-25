@@ -558,9 +558,12 @@ where
     /// `output_axes` is a permutation of `0..open_rank` over the open axes,
     /// `self`'s ascending first and `other`'s after; passing `0..open_rank`
     /// gives the default order (TensorKit `tensorcontract!` with default
-    /// `pAB`). The first `self.codomain_rank() + other.codomain_rank() -
-    /// lhs_axes.len()` entries — the codomain of the result — follow from the
-    /// destination the expert layer derives.
+    /// `pAB`). The codomain/domain split of the result follows the
+    /// TensorOperations convention the engine implements: **every** open axis
+    /// of `self` becomes the result's codomain
+    /// (`self.rank() - lhs_axes.len()` axes) and every open axis of `other`
+    /// becomes its domain (`other.rank() - rhs_axes.len()` axes), regardless
+    /// of which side of either operand those axes came from.
     ///
     /// **Fermionic semantics**: like TensorKit `tensorcontract!` / `@tensor`
     /// (and the erased [`crate::prelude::Tensor::contract`]), this **twists**

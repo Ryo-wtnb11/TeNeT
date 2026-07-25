@@ -642,12 +642,16 @@ macro_rules! define_tensor_execution_context {
             /// The multiplicity-free lane's execution context for scalar `D`.
             ///
             /// Why an accessor rather than reaching the lane fields directly:
-            /// they are private to `mod tensor`, and `crate::typed` needs
-            /// exactly this one lane — the same `RuleIdentity`-keyed lane the
-            /// erased facade drives, so typed and erased uses of one layout
-            /// share cache entries instead of each priming its own. Naming
+            /// they are private to `mod tensor`, and a caller outside that
+            /// module (`crate::typed`) still has to land on the lane matching
+            /// `D` instead of minting per-context state of its own. Naming
             /// only this lane also keeps the Generic-SU(3) lane out of the
             /// typed facade's reach, which is the boundary, not an omission.
+            ///
+            /// Cache sharing between the facades is not what this buys:
+            /// completed transforms live in the Runtime-owned store, keyed by
+            /// rule identity, operation and interned structure ids, so every
+            /// runtime-leased context already sees the same entries.
             pub(crate) fn multiplicity_free_lane<D: UserScalar>(
                 &mut self,
             ) -> &mut Ctx<D, tenet_core::RuleIdentity> {

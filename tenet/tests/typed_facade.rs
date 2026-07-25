@@ -897,16 +897,36 @@ fn typed_and_erased_block_fill_produce_identical_storage_on_a_builtin_rule() {
 // Phase 3, slice 2: `TensorMap::permute`.
 // ---------------------------------------------------------------------------
 
+/// The second Z3 leg shape, deliberately unlike [`z3_leg`]'s: with four legs of
+/// two distinct degeneracy patterns, a permuted leg can be identified by its
+/// degeneracies, which a uniform fixture could not distinguish.
+fn z3_other_leg(provider: &Arc<ExternalZ3>, is_dual: bool) -> GradedSpace<ExternalZ3> {
+    GradedSpace::try_new(
+        Arc::clone(provider),
+        [(Z3Charge(0), 1), (Z3Charge(1), 2), (Z3Charge(2), 4)],
+        is_dual,
+    )
+    .expect("Z3 leg is well formed")
+}
+
 /// A rank-4 Z3 tensor map whose elements are all distinct, so any leg, block or
-/// element reordering is visible in the buffer.
+/// element reordering is visible in the buffer. The layout is
+/// `[wide, narrow] <- [wide', narrow']`, so no two axes share a shape.
 fn z3_rank_four(runtime: &Runtime, provider: &Arc<ExternalZ3>) -> TensorMap<ExternalZ3, f64> {
-    let leg = z3_leg(provider, false);
-    let dual = leg.try_dual().unwrap();
+    let wide = z3_leg(provider, false);
+    let narrow = z3_other_leg(provider, false);
+    let wide_dual = wide.try_dual().unwrap();
+    let narrow_dual = narrow.try_dual().unwrap();
     let mut counter = 0.0;
-    TensorMap::from_block_fn(runtime, [&leg, &leg], [&dual, &dual], |_, _| {
-        counter += 1.0;
-        counter
-    })
+    TensorMap::from_block_fn(
+        runtime,
+        [&wide, &narrow],
+        [&wide_dual, &narrow_dual],
+        |_, _| {
+            counter += 1.0;
+            counter
+        },
+    )
     .expect("Z3 rank-4 layout is admissible")
 }
 
@@ -921,13 +941,22 @@ fn permute_moves_legs_of_a_multi_block_external_provider_tensor() {
     let provider = Arc::new(ExternalZ3::new());
     let tensor = z3_rank_four(&runtime, &provider);
 
-    let permuted = tensor.permute(&[2, 0], &[3, 1]).unwrap();
+    // The source is `[wide, narrow] <- [wide', narrow']`; this order sends one
+    // leg of each shape across the codomain/domain split, so the degeneracies
+    // pin which source leg landed where. Flags alone would not: they are
+    // symmetric under swapping the split.
+    let permuted = tensor.permute(&[1, 2], &[3, 0]).unwrap();
 
     assert_eq!(permuted.codomain().len(), 2);
     assert_eq!(permuted.domain().len(), 2);
-    // Axis 2 was a dual domain leg; bending it round to the codomain
-    // conjugates the space, so it arrives non-dual, while axis 0 (a non-dual
-    // codomain leg) bent into the domain arrives dual.
+    // Axis 1 (`narrow`) stays in the codomain unchanged; axis 2 (`wide'`) is
+    // bent round from the domain, which conjugates it, so it arrives as the
+    // non-dual `wide`. Symmetrically axis 0 (`wide`) bent into the domain
+    // arrives as `wide'`, while axis 3 (`narrow'`) is carried across as is.
+    assert_eq!(permuted.codomain()[0].degeneracies(), &[1, 2, 4]);
+    assert_eq!(permuted.codomain()[1].degeneracies(), &[2, 3, 1]);
+    assert_eq!(permuted.domain()[0].degeneracies(), &[1, 4, 2]);
+    assert_eq!(permuted.domain()[1].degeneracies(), &[2, 1, 3]);
     assert!(!permuted.codomain()[0].is_dual());
     assert!(!permuted.codomain()[1].is_dual());
     assert!(permuted.domain()[0].is_dual());
@@ -1019,7 +1048,7 @@ fn z2_oracle_pair(
         runtime,
         [&space, &space],
         [&space],
-        |key, indices| erased_fill_value(key, indices),
+        erased_fill_value,
     )
     .unwrap();
     let leg = GradedSpace::try_new(
@@ -1184,6 +1213,38 @@ fn contract_rejects_operands_from_different_runtimes() {
 }
 
 #[test]
+fn contract_accepts_separately_allocated_equal_identity_providers() {
+    // What: the counterpart of the distinct-identity rejection — two
+    // independent allocations of one rule interoperate in an operation, not
+    // just in construction, and produce the same values a single allocation
+    // does.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let first = Arc::new(ExternalZ3::new());
+    let second = Arc::new(ExternalZ3::new());
+    assert!(!Arc::ptr_eq(&first, &second));
+    let lhs = counting_z3(
+        &runtime,
+        &z3_dense_leg(&first, 2),
+        &z3_dense_leg(&first, 3),
+        1.0,
+    );
+    let rhs = counting_z3(
+        &runtime,
+        &z3_dense_leg(&second, 3),
+        &z3_dense_leg(&second, 4),
+        7.0,
+    );
+
+    let contracted = lhs.contract(&rhs, &[1], &[0], &[1, 0]).unwrap();
+
+    assert_eq!(
+        contracted.data(),
+        [76.0, 103.0, 130.0, 157.0, 100.0, 136.0, 172.0, 208.0]
+    );
+}
+
+#[test]
 fn contract_rejects_operands_with_distinct_rule_identities() {
     // What: two providers of one Rust type but different identities are a
     // different algebra. The rejection comes from the expert layer, which is
@@ -1251,11 +1312,17 @@ fn typed_and_erased_contract_agree_byte_for_byte_on_a_builtin_rule() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn typed_and_erased_permute_share_one_tree_transform_cache_entry() {
-    // What: both facades drive the one `RuleIdentity`-keyed multiplicity-free
-    // lane, so the same transform of the same built-in layout is cached once.
-    // A typed facade that primed its own lane would show two entries here and
-    // would silently double the cost of every mixed workload.
+fn a_typed_operation_reads_the_runtime_owned_transform_store() {
+    // What: the typed permute runs on a context leased from the tensor's own
+    // runtime, so it reads the completed transform the erased permute of the
+    // same built-in layout already put in that runtime's store — one entry,
+    // and a hit rather than a second computation. A typed path that executed
+    // on an unbound default context would miss and add its own entry.
+    //
+    // What this deliberately does not claim: that the two facades use the same
+    // execution lane. Lane identity has no observable — the store is owned by
+    // the Runtime and keyed by rule identity, operation and interned structure
+    // ids, so any leased context sees the same entries.
     let _guard = cache_lock();
     let runtime = runtime();
     let (erased, typed) = z2_oracle_pair(&runtime);
