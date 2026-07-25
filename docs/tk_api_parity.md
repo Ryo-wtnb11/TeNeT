@@ -89,7 +89,7 @@ Added this sweep: `Tensor::numout` / `numin` / `numind`, `Tensor::repartition`,
 | `twist` | has | `Tensor::twist` | |
 | `flip` (tensor) | has | `Tensor::flip` | |
 | `repartition` | added | `Tensor::repartition` | Single split-point arg (domain rank fixed by `rank`). |
-| `insertleftunit` / `insertrightunit` / `removeunit` | design-gated | — | Needs a trivial-unit `Space` constructor on the facade (see `unitspace` below). |
+| `insertleftunit` / `insertrightunit` / `removeunit` | added | `Tensor::insert_left_unit` / `Tensor::insert_right_unit` / `Tensor::remove_unit` | Insertion takes the zero-based external slot plus a `dual` flag; removal requires that axis to carry exactly the vacuum sector with degeneracy one. |
 | `catdomain` / `catcodomain` | has | `Tensor::catdomain` / `Tensor::catcodomain` | TensorKit names as Rust binary methods; concatenate the sole domain/codomain leg and place reduced blocks in adjacent column/row slabs. |
 | `absorb` | has | `Tensor::absorb` | Immutable Rust form of TensorKit `absorb`: copies the shared prefix of every matching fusion-tree subblock from a source into a destination-shaped tensor; distinct from composition and diagonal absorption. Host only; device and mutable destination variants remain unsupported. |
 | `*!` bang forms | N/A | — | Immutable facade. |
@@ -143,7 +143,8 @@ Added this sweep: `Tensor::numout` / `numin` / `numind`, `Tensor::repartition`,
 | `hassector` | added | `Space::has_sector` | Boolean membership (SU(3) via `su3_degeneracy`). |
 | `sectortype` / `spacetype` | N/A | — | The concrete sector/rule type is erased at the user layer; `SectorLabel` enumerates it instead. |
 | `field` | N/A | — | Scalar field is carried by the `Dtype` token (`F64`/`C64`). |
-| `unitspace` / `zerospace` / `leftunitspace` / `rightunitspace` / `isunitspace` | design-gated | — | No trivial-unit / zero `Space` constructor on the facade yet (blocks `insertunit`/`removeunit`). |
+| `unitspace` | has | `Space::unitspace` | Trivial-unit space for the receiver's rule; what `insert_left_unit` / `insert_right_unit` insert. |
+| `zerospace` / `leftunitspace` / `rightunitspace` / `isunitspace` | design-gated | — | No zero-space constructor or unit-space predicate on the facade. |
 | `infimum` / `supremum` / `isisomorphic` / `ismonomorphic` / `isepimorphic` | design-gated | — | Space-lattice predicates; no facade surface. |
 | `unit` / `allunits` / `deligneproduct` / `timereversed` | N/A | — | Category-theoretic sector surface TeNeT does not model at the user layer. |
 

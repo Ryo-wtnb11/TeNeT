@@ -74,12 +74,14 @@ let c_c64 = c.to_c64();                          // c64 には明示 widening
 ユーザー層は同名メソッドの透過のみ。0.17 の export にない legacy alias は
 作らない。インデックス操作も同様に export 一覧基準:
 `permute`/`braid`/`transpose`/`twist`、構築系は
-`id`/`isomorphism`/`unitary`/`isometry`。repartition(脚の折り曲げ)は独立
-メソッドではなく `permute(codomain_axes, domain_axes)` に codomain↔domain を
-またぐ分割を渡す形で提供済み(名前付き wrapper は未実装)。`catdomain` /
+`id`/`isomorphism`/`unitary`/`isometry`。repartition(脚の折り曲げ)は
+`permute(codomain_axes, domain_axes)` に codomain↔domain をまたぐ分割を渡す形
+に加え、名前付き `Tensor::repartition(num_codomain)` も実装済み。`catdomain` /
 `catcodomain` / `absorb` は TensorKit 0.17 semantics の host owned facade
-として実装済み。未実装の TK export: insertunit / removeunit / insertleg /
-ishermitian / project_*(roadmap.md 参照)。
+として実装済み。`ishermitian`(`Tensor::is_hermitian`)と unit leg 系
+(`Space::unitspace` / `Tensor::insert_left_unit` / `insert_right_unit` /
+`remove_unit`)も実装済み。未実装の TK export と現状は
+`tk_api_parity.md` を正本とする。
 
 ## 縮約適合性の契約(2026-07-04 合意)
 
