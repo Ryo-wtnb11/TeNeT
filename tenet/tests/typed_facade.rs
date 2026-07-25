@@ -892,3 +892,161 @@ fn typed_and_erased_block_fill_produce_identical_storage_on_a_builtin_rule() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3, slice 2: `TensorMap::permute`.
+// ---------------------------------------------------------------------------
+
+/// A rank-4 Z3 tensor map whose elements are all distinct, so any leg, block or
+/// element reordering is visible in the buffer.
+fn z3_rank_four(runtime: &Runtime, provider: &Arc<ExternalZ3>) -> TensorMap<ExternalZ3, f64> {
+    let leg = z3_leg(provider, false);
+    let dual = leg.try_dual().unwrap();
+    let mut counter = 0.0;
+    TensorMap::from_block_fn(runtime, [&leg, &leg], [&dual, &dual], |_, _| {
+        counter += 1.0;
+        counter
+    })
+    .expect("Z3 rank-4 layout is admissible")
+}
+
+#[test]
+fn permute_moves_legs_of_a_multi_block_external_provider_tensor() {
+    // What: a non-identity permute of a runtime-rank multi-block external
+    // provider tensor produces the reordered spaces, keeps the element count,
+    // and moves the payload (this rule's F/R symbols are all 1, so the permuted
+    // buffer is a rearrangement of the source, never a rescaling).
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    let permuted = tensor.permute(&[2, 0], &[3, 1]).unwrap();
+
+    assert_eq!(permuted.codomain().len(), 2);
+    assert_eq!(permuted.domain().len(), 2);
+    // Axis 2 was a dual domain leg; bending it round to the codomain
+    // conjugates the space, so it arrives non-dual, while axis 0 (a non-dual
+    // codomain leg) bent into the domain arrives dual.
+    assert!(!permuted.codomain()[0].is_dual());
+    assert!(!permuted.codomain()[1].is_dual());
+    assert!(permuted.domain()[0].is_dual());
+    assert!(permuted.domain()[1].is_dual());
+    assert_eq!(permuted.data().len(), tensor.data().len());
+    assert_ne!(permuted.data(), tensor.data());
+    let mut moved: Vec<f64> = permuted.data().to_vec();
+    let mut original: Vec<f64> = tensor.data().to_vec();
+    moved.sort_by(f64::total_cmp);
+    original.sort_by(f64::total_cmp);
+    assert_eq!(moved, original);
+}
+
+#[test]
+fn permute_round_trips_back_to_the_source_layout() {
+    // What: permuting and permuting back is the identity on both the spaces and
+    // the payload — a stronger statement than "the multiset survived", since it
+    // pins where each element landed.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    let there = tensor.permute(&[1, 3], &[0, 2]).unwrap();
+    let back = there.permute(&[2, 0], &[3, 1]).unwrap();
+
+    assert_eq!(back.data(), tensor.data());
+    assert_eq!(back.block_count(), tensor.block_count());
+    for index in 0..tensor.block_count() {
+        assert_eq!(
+            back.block_fusion_trees(index).unwrap(),
+            tensor.block_fusion_trees(index).unwrap()
+        );
+    }
+}
+
+#[test]
+fn permute_carries_a_simple_fusion_provider_with_a_complex_payload() {
+    // What: nothing in the typed transform is abelian- or real-specific; the
+    // SU(2) recoupling coefficients reach a `Complex64` payload.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalSu2);
+    let leg = su2_leg(&provider, false);
+    let tensor: TensorMap<ExternalSu2, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |sectors, indices| {
+            Complex64::new(
+                sectors.coupled().twice_spin() as f64 + 1.0,
+                indices.iter().sum::<usize>() as f64 + 1.0,
+            )
+        })
+        .unwrap();
+
+    let permuted = tensor.permute(&[0, 2], &[1, 3]).unwrap();
+
+    assert_eq!(permuted.codomain().len(), 2);
+    assert_eq!(permuted.domain().len(), 2);
+    assert!(permuted.block_count() >= 1);
+    assert!(permuted
+        .data()
+        .iter()
+        .any(|value| *value != Complex64::new(0.0, 0.0)));
+}
+
+#[test]
+fn permute_rejects_malformed_axes_without_panicking() {
+    // What: the expert layer's typed errors are the contract — an out-of-range
+    // axis, a repeated axis and a wrong-length axis list all come back as `Err`.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    assert!(tensor.permute(&[0, 9], &[2, 3]).is_err());
+    assert!(tensor.permute(&[0, 0], &[2, 3]).is_err());
+    assert!(tensor.permute(&[0], &[2, 3]).is_err());
+}
+
+/// The erased/typed pair of the byte-oracle fixture: one built-in Z2 layout
+/// filled identically through both facades.
+fn z2_oracle_pair(
+    runtime: &Runtime,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::Z2FusionRule, f64>,
+) {
+    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        runtime,
+        [&space, &space],
+        [&space],
+        |key, indices| erased_fill_value(key, indices),
+    )
+    .unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 3),
+        ],
+        false,
+    )
+    .unwrap();
+    let typed = TensorMap::from_block_fn(runtime, [&leg, &leg], [&leg], typed_fill_value).unwrap();
+    (erased, typed)
+}
+
+#[test]
+fn typed_and_erased_permute_agree_byte_for_byte_on_a_builtin_rule() {
+    // What: the typed permute is the erased permute, not a lookalike — same
+    // destination layout, same block order, same bytes. A non-identity order is
+    // used deliberately, so neither side can take an identity shortcut.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    let erased_permuted = erased.permute(&[2, 0], &[1]).unwrap();
+    let typed_permuted = typed.permute(&[2, 0], &[1]).unwrap();
+
+    assert_eq!(typed_permuted.data(), erased_permuted.data());
+    assert_ne!(typed_permuted.data(), typed.data());
+}

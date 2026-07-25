@@ -35,13 +35,14 @@ use tenet_core::{
     BlockKey, BlockRef, CheckedFusionAlgebra, FusionProductSpace, FusionTreeHomSpace,
     MultiplicityFreeRigidSymbols, SectorLeg,
 };
-use tenet_tensors::BoundDynamicFusionMapSpace;
+use tenet_tensors::{BoundDynamicFusionMapSpace, BoundDynamicTensorRef, TreeTransformOperation};
 
 pub use tenet_core::SectorCodec;
 
 use crate::error::Error;
 use crate::runtime::Runtime;
 use crate::tensor::{apply_fill, Fill, TensorScalar};
+use crate::typed_tensor_core::tree_transform_owned_multiplicity_free;
 
 /// One tensor leg: a provider plus the sector-to-degeneracy map of that axis
 /// (TensorKit's `GradedSpace`).
@@ -499,6 +500,44 @@ where
             return Err(error);
         }
         built
+    }
+
+    /// TensorKit `permute`: re-arranges legs with symmetric braiding.
+    ///
+    /// `codomain_axes` and `domain_axes` list source axis numbers (`0..rank`,
+    /// codomain axes first) for the new codomain and domain — the same
+    /// argument shape as the erased [`crate::prelude::Tensor::permute`], so
+    /// there is one vocabulary for the operation rather than two.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] when
+    /// the axis lists are malformed (out of range, repeated, or not a
+    /// partition of `0..rank`) or the provider cannot support the braiding the
+    /// requested motion needs. The expert layer's own typed errors are the
+    /// contract here: re-validating the axes at this layer would be a second
+    /// copy of a rule that already exists one call down, free to drift.
+    pub fn permute(&self, codomain_axes: &[usize], domain_axes: &[usize]) -> Result<Self, Error> {
+        // Why no identity shortcut (the erased facade shares storage when the
+        // axes do not move): the result would be byte-identical either way, so
+        // the shortcut is a pure cost question, and adding one without a gate
+        // that measures it is speculative.
+        let operation = TreeTransformOperation::permute(
+            codomain_axes.iter().copied(),
+            domain_axes.iter().copied(),
+        );
+        // Leasing rather than locking, matching the erased path: independent
+        // operations on one runtime must not serialize behind each other.
+        let mut lease = self.runtime.lease_context()?;
+        let (space, data) = tree_transform_owned_multiplicity_free(
+            lease.context().multiplicity_free_lane::<D>(),
+            BoundDynamicTensorRef::try_new(&self.body.space, &self.body.data)?,
+            operation,
+        )?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody { space, data }),
+        })
     }
 
     /// The codomain legs, in axis order.
