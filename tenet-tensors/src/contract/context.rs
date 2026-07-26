@@ -1170,9 +1170,15 @@ where
     /// Unlike `tensorcontract!`, TensorKit `mul!` does not insert a
     /// fermionic supertrace twist. The logical/storage split still carries
     /// lazy adjoints without materializing either operand.
+    ///
+    /// Nothing on this path decodes typed sectors: the operand preparation,
+    /// [`compile_composition_plan`] and the execution are all bounded at the
+    /// multiplicity-free rigid symbols, so an externally defined provider
+    /// composes here. [`Self::tensorcompose_fusion_dyn_into_lowered`] is the
+    /// built-in sibling, exactly as for the contraction pair.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
-    pub fn tensorcompose_fusion_dyn_into_lowered<R>(
+    pub fn tensorcompose_fusion_dyn_into<R>(
         &mut self,
         dst_space: &BoundDynamicFusionMapSpace<R>,
         dst_data: &mut [D],
@@ -1186,10 +1192,7 @@ where
         beta: D,
     ) -> Result<(), OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>
-            + LoweredMultiplicityFreeAlgebra
-            + CheckedFusionAlgebra
-            + TreeTransformRuleCacheKey<Key = RuleKey>,
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
         D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
     {
         let rule = dst_space.provider();
@@ -1218,7 +1221,7 @@ where
                     dst_space.layout_primer(),
                 );
             }
-            return self.tensorcontract_fusion_dyn_prelowered_into_lowered(
+            return self.tensorcontract_fusion_dyn_prelowered_into(
                 dst_space, dst_data, lhs, lhs_data, rhs, rhs_data, axes, alpha, beta,
             );
         }
@@ -1242,6 +1245,36 @@ where
             rhs_data,
             alpha,
             beta,
+        )
+    }
+
+    /// Built-in multiplicity-free sibling of the composition seam. Precedent:
+    /// [`Self::tensorcontract_fusion_dyn_into_lowered`] is the same
+    /// passthrough — composition never needed the lowered decode.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn tensorcompose_fusion_dyn_into_lowered<R>(
+        &mut self,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        dst_data: &mut [D],
+        lhs: FusionOperand<'_>,
+        lhs_data: &[D],
+        rhs: FusionOperand<'_>,
+        rhs_data: &[D],
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        alpha: D,
+        beta: D,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>
+            + LoweredMultiplicityFreeAlgebra
+            + CheckedFusionAlgebra
+            + TreeTransformRuleCacheKey<Key = RuleKey>,
+        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
+    {
+        self.tensorcompose_fusion_dyn_into(
+            dst_space, dst_data, lhs, lhs_data, rhs, rhs_data, lhs_axes, rhs_axes, alpha, beta,
         )
     }
 
