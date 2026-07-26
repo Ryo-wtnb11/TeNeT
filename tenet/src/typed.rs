@@ -412,11 +412,17 @@ where
     R: SectorCodec,
 {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Every field is shown: `TensorMap`'s own `Debug` is bound-free, so
+        // there is nothing about the factors this impl cannot print, and the
+        // erased `SvdTrunc` shows its three tensors too.
         formatter
             .debug_struct("SvdTrunc")
+            .field("u", &self.u)
+            .field("s", &self.s)
+            .field("vh", &self.vh)
             .field("singular_values", &self.singular_values)
             .field("error", &self.error)
-            .finish_non_exhaustive()
+            .finish()
     }
 }
 
