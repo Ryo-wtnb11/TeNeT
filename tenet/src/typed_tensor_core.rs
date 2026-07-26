@@ -165,8 +165,11 @@ where
 /// Hermiticity gate rejected it — so taking the real part is the same answer,
 /// not a looser one.
 ///
-/// Strict, like TensorKit's Cholesky-based test: a value exactly at the
-/// threshold is `false`, so a positive *semi*definite spectrum is rejected.
+/// Strict: a value exactly at the threshold is `false`, so a positive
+/// *semi*definite spectrum is rejected. That is TensorKit's answer on both of
+/// its routes — the diagonal one cited above is `all(isposdef, d.data)`, i.e.
+/// strict positivity per stored value, and the general one is Cholesky-based,
+/// which fails on a singular matrix.
 pub(crate) fn compact_is_posdef<V>(spectrum: &[SectorSpectrum<V>], threshold: f64) -> bool
 where
     V: tenet_matrixalgebra::FactorScalar,

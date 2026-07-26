@@ -1150,6 +1150,9 @@ fn full_rank_one_trace_pairs_matches_the_dense_route_on_every_rule() {
                         .permute(&[1], &[0])
                         .unwrap(),
                 ),
+                // Not the excluded adjoint-*view* path — `adjoint` of compact
+                // storage short-circuits to an owned conjugated spectrum, so
+                // this is the compact arm again, on conjugated values.
                 (
                     "adjoint c64",
                     complex_diagonal(&runtime, &space, 585_006)

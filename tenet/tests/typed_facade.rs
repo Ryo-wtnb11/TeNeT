@@ -5230,6 +5230,17 @@ fn the_diagonal_contract_arm_is_its_own_dense_route_on_every_axis_pattern() {
 /// space through the ordinary tree transform, which no compact arm fires on
 /// (its permutations are `[0]` / `[1]`, not the swap `[1]` / `[0]`). The same
 /// idiom the `contract` sweep above uses, for the same reason.
+///
+/// **This entrenches a TensorKit divergence.** TensorKit 0.17
+/// `src/tensors/diagonal.jl:217` returns the identity partition of a
+/// `DiagonalTensorMap` compact and free; we still densify it. Closing that gap
+/// would break every value oracle in this file that goes through
+/// `forced_dense` — they would compare the fast path against itself — as well
+/// as the `repartition(1)` entry of [`rank_one_reorderings`], the `contract`
+/// sweep's `s_dense`, and the probe
+/// `the_geometries_outside_the_proved_swap_keep_the_dense_route` in
+/// `tests/typed_diagonal_allocations.rs`, which asserts the densification
+/// outright. Whoever closes it has to supply a different dense twin first.
 fn forced_dense<R, D>(compact: &TensorMap<R, D>) -> TensorMap<R, D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -5292,6 +5303,11 @@ fn compact_rank_one_swaps_match_the_forced_dense_and_erased_routes() {
     // it was computed from. The erased sibling is compared as well, because it
     // already owns the proved compact swap and is the reference the typed arm
     // must not drift from.
+    //
+    // What this test cannot see: Z2 is self-dual and bosonic, so every swap
+    // coefficient is exactly 1 — dropping the coefficient entirely still passes
+    // here. The coefficient is carried by the Z3 and fZ2 sweep below, which is
+    // where a mutation to it dies.
     let _guard = cache_lock();
     let runtime = runtime();
     let (erased, typed) = z2_bond_pair(&runtime);

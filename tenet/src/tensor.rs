@@ -6025,9 +6025,10 @@ impl Tensor {
         // destination is the empty tree, so the traced channel is a single
         // uncoupled sector and the coefficient collapses to a per-sector
         // scalar. Any wider geometry leaves an open destination tree whose
-        // recoupling is not a per-sector scaling of a diagonal. An adjoint view
-        // is excluded because its stored spectrum is the parent's, not this
-        // tensor's logical one — the same line the compact `is_posdef` draws.
+        // recoupling is not a per-sector scaling of a diagonal. The
+        // adjoint-view exclusion is defensive and unreachable today, for the
+        // reason spelled out at the compact `is_posdef` arm: `adjoint`
+        // short-circuits `Data::Diagonal` and never builds a view over it.
         if let Data::Diagonal(diagonal) = self.stored_data() {
             if !source_conjugate && rank == 2 && self.codomain_rank() == 1 && pairs.len() == 1 {
                 // The traced channel's twist is applied exactly when the traced
@@ -6863,10 +6864,12 @@ impl Tensor {
         let threshold = tol * self.norm()?.max(1.0);
         // Compact arm: a spectrum factor's stored values *are* its Hermitian
         // eigenvalues, so there is nothing to factorize and nothing to
-        // materialize (#585). An adjoint view is excluded because its stored
-        // spectrum is the parent's, not this tensor's logical one; a Hermitian
-        // tensor's is the same up to conjugation, but the compact paths do not
-        // rely on that anywhere else and this one does not start.
+        // materialize (#585). The adjoint-view exclusion is defensive and is
+        // unreachable today: `Tensor::adjoint` short-circuits `Data::Diagonal`
+        // and never builds an `AdjointView` over it, so no compact tensor is
+        // ever a view. Kept anyway — if compact adjoint views ever appear, the
+        // stored spectrum would be the parent's rather than this tensor's
+        // logical one, and this arm would silently read the wrong values.
         if let Data::Diagonal(diagonal) = self.stored_data() {
             if !self.is_adjoint_view() {
                 return Ok(diagonal.is_posdef(threshold));
