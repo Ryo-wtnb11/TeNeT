@@ -1295,7 +1295,12 @@ where
     /// composition — so until that specialization exists, **absorb a spectrum
     /// with [`Self::compose`]** (`u.compose(&s)`, `s.compose(&vh)`), which
     /// takes the scaling path, and reach for `contract` for the general case.
-    /// The same gap is open in the erased facade.
+    ///
+    /// The gap is this facade's alone: the erased
+    /// [`crate::prelude::Tensor::contract`] closed it in #75, where a
+    /// single-axis contraction against a compact operand scales the other
+    /// operand's contracted leg and permutes, at O(d·n) instead of the dense
+    /// route's O(d²·n). Issue #584 ports that arm here.
     ///
     /// The result is bound to `self`'s provider allocation, the same
     /// left-authority rule [`Self::zeros`] uses for its first leg: the two
