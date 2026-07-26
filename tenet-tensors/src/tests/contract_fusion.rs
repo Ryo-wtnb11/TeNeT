@@ -2471,6 +2471,85 @@ fn bosonic_tensorcompose_matches_ordinary_contract() {
 }
 
 #[test]
+fn bosonic_tensorcompose_with_an_adjoint_operand_matches_the_materialized_adjoint() {
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // What: bosonic composition with a *conjugated* operand — the one arm of
+    // the composition seam no other caller in this workspace reaches (the
+    // erased facade enters the seam only when the rule is fermionic, and the
+    // typed facade always passes direct operands). It is also the arm whose
+    // inner call the non-lowered seam changed, so this is where the claim
+    // "the two entry points compute the same thing" is actually pinned.
+    //
+    // Oracle: the lazy adjoint operand must produce exactly what the eagerly
+    // materialized adjoint produces as a direct operand. The payload is
+    // element-distinct, so the per-block transpose the adjoint performs is
+    // visible in every element of the result.
+    let typed = z2_matrix_space_with_homspace(z2_matrix_homspace(), vec![2, 2]);
+    let source = crate::DynamicFusionMapSpace::from_typed(&typed);
+    let provider = Arc::new(Z2FusionRule);
+    let source_bound = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        source.clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let lhs: Vec<f64> = (0..source.required_len().unwrap())
+        .map(|index| index as f64 + 1.0)
+        .collect();
+    let rhs: Vec<f64> = lhs.iter().map(|value| value * 0.5 + 3.0).collect();
+
+    let (adjoint_bound, adjoint_data) = crate::adjoint_bound_dyn(&source_bound, &lhs).unwrap();
+    let dst = crate::DynamicFusionMapSpace::contracted(
+        &Z2FusionRule,
+        adjoint_bound.space(),
+        &source,
+        &[1],
+        &[0],
+    )
+    .unwrap();
+    let dst_bound =
+        crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(dst.clone(), provider).unwrap();
+    let mut context = crate::TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+
+    let mut reference = vec![0.0; dst.required_len().unwrap()];
+    context
+        .tensorcompose_fusion_dyn_into(
+            &dst_bound,
+            &mut reference,
+            crate::FusionOperand::direct(adjoint_bound.space()),
+            &adjoint_data,
+            crate::FusionOperand::direct(&source),
+            &rhs,
+            &[1],
+            &[0],
+            1.0,
+            0.0,
+        )
+        .unwrap();
+
+    let mut lazy = vec![0.0; dst.required_len().unwrap()];
+    context
+        .tensorcompose_fusion_dyn_into(
+            &dst_bound,
+            &mut lazy,
+            crate::FusionOperand::adjoint(&source),
+            &lhs,
+            crate::FusionOperand::direct(&source),
+            &rhs,
+            &[1],
+            &[0],
+            1.0,
+            0.0,
+        )
+        .unwrap();
+
+    assert_eq!(lazy, reference);
+    // Not the degenerate all-zero destination the assertion would also accept.
+    assert!(lazy.iter().any(|value| *value != 0.0));
+}
+
+#[test]
 fn tensorcompose_fusion_preflights_all_extents_before_mutating_destination() {
     // What: both cold and cached composition plans reject malformed source or
     // destination extents before beta scaling or grouped GEMM changes output.
