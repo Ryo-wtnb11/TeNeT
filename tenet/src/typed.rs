@@ -2004,6 +2004,81 @@ where
         Ok(self.wrap_bound_factor(out))
     }
 
+    /// TensorKit 0.17 / MatrixAlgebraKit `pinv`: the Moore-Penrose
+    /// pseudo-inverse `t⁺ = V S⁺ Uᴴ`, where `t = U S Vᴴ` is the compact SVD and
+    /// `S⁺` inverts every singular value above the cutoff and sends the rest to
+    /// zero. `t⁺` satisfies `t t⁺ t = t` and reduces to [`Self::inv`] when `t`
+    /// is nonsingular and `rcond` is small enough to keep every singular value.
+    ///
+    /// # Tolerance, and the divergence from TensorKit
+    ///
+    /// The cutoff is `rcond * σ_max` with **one global `σ_max` taken across all
+    /// coupled sectors**, and the comparison is strict: a singular value
+    /// sitting exactly on the cutoff is discarded. TensorKit instead takes
+    /// per-block `atol`/`rtol` keywords, so its relative tolerance is measured
+    /// against each block's own largest singular value. That is a deliberate
+    /// divergence, not a gap: a per-block relative tolerance cannot cut
+    /// anything in a one-dimensional sector however small that sector's
+    /// contribution to the tensor is, and TensorKit's own source carries a TODO
+    /// saying the tolerance should be relative to the total norm — which is
+    /// what this facade already does. TensorKit's `DiagonalTensorMap` branch is
+    /// deliberately **not** mirrored either: there `rtol` is ignored whenever
+    /// `atol` is nonzero, and the default is no cutoff at all.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] when `rcond` is not finite or is negative.
+    ///   Checked before any work on both storages.
+    /// - [`Error::Operation`] / [`Error::Core`] from the SVD, on the dense arm.
+    ///
+    /// There is no singular-input failure: sending the offending directions to
+    /// zero is what a pseudo-inverse is for.
+    ///
+    /// # Complexity
+    ///
+    /// Dense input: one compact SVD, `O(Σ_c n_c³)`, plus a bond scaling and one
+    /// composition; `S⁺` is folded into a column scaling rather than
+    /// materialized. Compact input (TensorKit's `DiagonalTensorMap`): the
+    /// **O(rank) elementwise cutoff-and-reciprocal arm** over the `Σ_c k_c`
+    /// stored values — the singular values of a diagonal are its `|entry|`s, so
+    /// no SVD is needed — and the result stays compact.
+    pub fn pinv(&self, rcond: f64) -> Result<Self, Error> {
+        // Ahead of the storage split, so both arms answer alike: the seam
+        // repeats this check for its own callers, but the compact arm never
+        // reaches the seam.
+        if !rcond.is_finite() || rcond < 0.0 {
+            return Err(Error::InvalidArgument(
+                "pinv rcond must be finite and non-negative".to_string(),
+            ));
+        }
+        if let Some(spectrum) = self.spectrum() {
+            let cutoff = rcond
+                * spectrum
+                    .iter()
+                    .flat_map(|entry| entry.values.iter())
+                    .fold(0.0f64, |largest, &value| largest.max(value.abs_value()));
+            // Strict `>`, matching the dense fold and the erased facade: a
+            // value exactly on the cutoff is cut. Changing it to `>=` is what
+            // `pinv_cuts_a_singular_value_sitting_exactly_on_the_cutoff` kills.
+            return Ok(self.with_spectrum(map_spectrum(spectrum, |value| {
+                Ok(if value.abs_value() > cutoff {
+                    value.recip_value()
+                } else {
+                    D::from_real(0.0)
+                })
+            })?));
+        }
+        let mut dense = self.runtime.lease_dense();
+        let mut lease = self.runtime.lease_context()?;
+        let out = tenet_matrixalgebra::pinv_dyn(
+            dense.dense(),
+            lease.context().multiplicity_free_lane::<D>(),
+            &BoundDynamicTensorRef::try_new(&self.body.space, self.dense_data())?,
+            rcond,
+        )?;
+        Ok(self.wrap_bound_factor(out))
+    }
+
     /// Builds a sibling on this tensor's own space and runtime from a fresh
     /// buffer. Every element-wise scalar operation below produces exactly
     /// that: the space is unchanged and only the payload is new, so the shared

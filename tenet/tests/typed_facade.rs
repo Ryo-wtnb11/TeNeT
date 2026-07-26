@@ -4186,3 +4186,203 @@ fn inv_accepts_isomorphic_but_unequal_codomain_and_domain() {
         .fold(0.0f64, f64::max);
     assert!(error < 1e-9, "t * inv(t) is not the identity: {error}");
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6 (issue #576), slice 2: `pinv`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn typed_and_erased_pinv_agree_byte_for_byte() {
+    // What: the same SVD-and-fold seam on both facades, so the payloads compare
+    // bitwise. The fixture is deliberately rank deficient — a full-rank one
+    // would let a broken cutoff pass.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+
+    for rcond in [0.0, 1e-12, 1e-3] {
+        assert_eq!(
+            typed.pinv(rcond).unwrap().data(),
+            erased.pinv(rcond).unwrap().data(),
+            "pinv payloads diverge at rcond {rcond}"
+        );
+    }
+
+    // Moore-Penrose: `t t^+ t = t`, the identity that a wrong fold would break.
+    // `rcond` is well above the fixture's numerically-zero singular values and
+    // well below its real ones, so the cutoff drops exactly the null directions
+    // — inverting those instead would amplify rounding into the millions of ulp.
+    let pseudo = typed.pinv(1e-6).unwrap();
+    let round_trip = typed.compose(&pseudo).unwrap().compose(&typed).unwrap();
+    let error = round_trip
+        .data()
+        .iter()
+        .zip(typed.data())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        error < 1e-9 * typed.norm().unwrap(),
+        "t t^+ t != t: {error}"
+    );
+}
+
+#[test]
+fn pinv_of_a_compact_spectrum_stays_compact_and_agrees_with_the_erased_arm() {
+    // What: the O(rank) arm — an elementwise cutoff and reciprocal, whose own
+    // singular values are `|entry|`, so no SVD runs at all.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+    let erased_s = erased
+        .svd_trunc(&tenet::prelude::Truncation::Full)
+        .unwrap()
+        .s;
+    let typed_s = typed.svd_trunc(&Truncation::Full).unwrap().s;
+
+    for rcond in [0.0, 1e-12, 1e-3] {
+        assert_eq!(
+            typed_s.pinv(rcond).unwrap().data(),
+            erased_s.pinv(rcond).unwrap().data(),
+            "compact pinv payloads diverge at rcond {rcond}"
+        );
+    }
+}
+
+#[test]
+fn pinv_cuts_a_singular_value_sitting_exactly_on_the_cutoff() {
+    // What: the boundary. The comparison is `sigma > rcond * sigma_max`, so a
+    // singular value at *exactly* the cutoff is discarded, not kept — on both
+    // storages and on both facades. This is the one bit of the cutoff policy a
+    // mutation to `>=` would otherwise slip past.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [(tenet::core::Z2Irrep::EVEN, 2)],
+        false,
+    )
+    .unwrap();
+    // Diagonal with entries 4 and 1: sigma_max is 4, so rcond = 0.25 puts the
+    // second singular value exactly on the cutoff. Both are powers of two, so
+    // the product is exact and the comparison is not floating-point weather.
+    let tensor = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices: &[usize]| {
+        if indices[0] != indices[1] {
+            0.0
+        } else if indices[0] == 0 {
+            4.0
+        } else {
+            1.0
+        }
+    })
+    .unwrap();
+    assert_eq!(0.25 * 4.0, 1.0, "the fixture's cutoff must be exact");
+
+    let dense_pinv = tensor.pinv(0.25).unwrap();
+    // Kept: 1/4 for the surviving value. Cut: an exact 0 where 1/1 would be.
+    let mut kept: Vec<f64> = dense_pinv
+        .data()
+        .iter()
+        .copied()
+        .filter(|v| *v != 0.0)
+        .collect();
+    kept.sort_by(f64::total_cmp);
+    assert_eq!(kept, vec![0.25], "the boundary singular value survived");
+
+    // And on the compact arm, whose comparison is the erased facade's own.
+    let spectrum = tensor.svd_trunc(&Truncation::Full).unwrap().s;
+    let compact_pinv = spectrum.pinv(0.25).unwrap();
+    let mut kept: Vec<f64> = compact_pinv
+        .data()
+        .iter()
+        .copied()
+        .filter(|v| *v != 0.0)
+        .collect();
+    kept.sort_by(f64::total_cmp);
+    assert_eq!(
+        kept,
+        vec![0.25],
+        "the boundary value survived the compact arm"
+    );
+}
+
+#[test]
+fn pinv_rejects_a_nonfinite_or_negative_rcond_before_any_work() {
+    // What: `rcond` is validated at the facade, so a bad one never reaches the
+    // SVD — and the compact arm validates it too, which a guard placed only on
+    // the dense route would miss.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, typed) = z2_endo_oracle_pair(&runtime);
+    let spectrum = typed.svd_trunc(&Truncation::Full).unwrap().s;
+
+    for rcond in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            matches!(
+                typed.pinv(rcond),
+                Err(tenet::typed::Error::InvalidArgument(_))
+            ),
+            "dense pinv accepted rcond {rcond}"
+        );
+        assert!(
+            matches!(
+                spectrum.pinv(rcond),
+                Err(tenet::typed::Error::InvalidArgument(_))
+            ),
+            "compact pinv accepted rcond {rcond}"
+        );
+    }
+}
+
+#[test]
+fn pinv_uses_one_global_sigma_max_across_every_sector() {
+    // What: the cutoff is relative to the largest singular value of the *whole*
+    // tensor, not of each coupled sector — the deliberate divergence from
+    // TensorKit's per-block `rtol`. A per-sector cutoff would keep the small
+    // sector's value here; the global one discards it.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 1),
+            (tenet::core::Z2Irrep::ODD, 1),
+        ],
+        false,
+    )
+    .unwrap();
+    // Even sector: 1024. Odd sector: 1. Each sector is 1x1, so per-sector
+    // sigma_max would be the entry itself and nothing could ever be cut.
+    let tensor = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, _| {
+        if *trees.coupled() == tenet::core::Z2Irrep::EVEN {
+            1024.0
+        } else {
+            1.0
+        }
+    })
+    .unwrap();
+
+    let pseudo = tensor.pinv(0.5).unwrap();
+    let mut kept: Vec<f64> = pseudo
+        .data()
+        .iter()
+        .copied()
+        .filter(|v| *v != 0.0)
+        .collect();
+    kept.sort_by(f64::total_cmp);
+    assert_eq!(
+        kept,
+        vec![1.0 / 1024.0],
+        "a per-sector cutoff kept the small sector"
+    );
+    // The compact arm's own `max|entry|` is global for the same reason.
+    let spectrum = tensor.svd_trunc(&Truncation::Full).unwrap().s;
+    let kept = spectrum
+        .pinv(0.5)
+        .unwrap()
+        .data()
+        .iter()
+        .copied()
+        .filter(|v| *v != 0.0)
+        .count();
+    assert_eq!(kept, 1, "the compact arm used a per-sector cutoff");
+}
