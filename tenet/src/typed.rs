@@ -543,6 +543,55 @@ fn is_diagonal_bond_space(space: &DynamicFusionMapSpace) -> bool {
     space.nout() == 1 && space.nin() == 1 && homspace.codomain().legs() == homspace.domain().legs()
 }
 
+/// Result of [`TensorMap::eigh_trunc`]: `t ~ v * d * v^H` with the eigenbasis
+/// truncated (MatrixAlgebraKit `eigh_trunc`).
+///
+/// Field order is `d` then `v`, matching [`TensorMap::eigh_full`]'s tuple and
+/// MatrixAlgebraKit's own `initialize_output`, so the two cannot be read the
+/// wrong way round against each other.
+// The `SectorCodec` bound is the field types' own, exactly as for [`SvdTrunc`].
+pub struct EighTrunc<R: SectorCodec, D> {
+    /// Eigenvalue factor `d : bond <- bond`, in compact diagonal storage.
+    pub d: TensorMap<R, D>,
+    /// Eigenvector isometry `v : codomain <- bond`.
+    pub v: TensorMap<R, D>,
+    /// Kept eigenvalues per coupled sector, sorted by provider label. Real for
+    /// both payload dtypes, as TensorKit's Hermitian `D` is.
+    pub eigenvalues: Vec<SectorSpectrum<R::Sector>>,
+    /// Quantum-dimension-weighted 2-norm of everything discarded.
+    pub error: f64,
+}
+
+// Hand-written for the reason [`SvdTrunc`]'s are.
+impl<R, D> Clone for EighTrunc<R, D>
+where
+    R: SectorCodec,
+{
+    fn clone(&self) -> Self {
+        Self {
+            d: self.d.clone(),
+            v: self.v.clone(),
+            eigenvalues: self.eigenvalues.clone(),
+            error: self.error,
+        }
+    }
+}
+
+impl<R, D> core::fmt::Debug for EighTrunc<R, D>
+where
+    R: SectorCodec,
+{
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("EighTrunc")
+            .field("d", &self.d)
+            .field("v", &self.v)
+            .field("eigenvalues", &self.eigenvalues)
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
 /// Storage shared by every clone of one typed tensor map: the admitted space
 /// and its block payload.
 struct TypedTensorBody<R, D> {
@@ -1563,6 +1612,76 @@ where
         let mut dense = self.runtime.lease_dense();
         let out = tenet_matrixalgebra::right_null_dyn(dense.dense(), &self.bound_ref()?)?;
         Ok(self.wrap_bound_factor(out))
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `eigh_full`: the Hermitian
+    /// eigendecomposition `t = v * d * v^H` of an endomorphism, returned as
+    /// `(d, v)`.
+    ///
+    /// `d : bond <- bond` carries the eigenvalues in compact diagonal storage
+    /// (TensorKit's `DiagonalTensorMap`), so `v.compose(&d)` takes the
+    /// bond-scaling path; `v : codomain <- bond` is the eigenbasis. The
+    /// eigenvalues are real for both payload dtypes — TensorKit's Hermitian `D`
+    /// is real too — but `d` keeps the payload dtype `D` so it composes with
+    /// `v` directly.
+    ///
+    /// The `(d, v)` order is MatrixAlgebraKit's `initialize_output` order and
+    /// the erased [`crate::prelude::Tensor::eigh_full`]'s, not the `v, d`
+    /// reading order of the formula. It is deliberate on both facades.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] when the tensor is not an endomorphism or its
+    /// coupled blocks are not Hermitian, and otherwise
+    /// [`Error::Core`] / [`Error::FusionAlgebra`] from the seam — which owns
+    /// those rules, so they are not re-checked here.
+    pub fn eigh_full(&self) -> Result<(Self, Self), Error> {
+        let mut dense = self.runtime.lease_dense();
+        let out = tenet_matrixalgebra::eigh_full_dyn(dense.dense(), &self.bound_ref()?)?;
+        let (v, eigenvalues) = out.into_parts();
+        Ok((
+            self.diagonal_factor(eigenvalues, D::from_real)?,
+            self.wrap_bound_factor(v),
+        ))
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `eigh_trunc`: [`Self::eigh_full`] with
+    /// the eigenbasis truncated by `truncation`; see [`EighTrunc`].
+    ///
+    /// Returned as a named struct rather than a four-tuple, the same rule
+    /// [`Self::svd_trunc`] follows.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::eigh_full`]'s, plus a malformed `truncation` — validated
+    /// where it is applied, not here.
+    pub fn eigh_trunc(&self, truncation: &Truncation) -> Result<EighTrunc<R, D>, Error> {
+        let mut dense = self.runtime.lease_dense();
+        let out =
+            tenet_matrixalgebra::eigh_trunc_dyn(dense.dense(), &self.bound_ref()?, truncation)?;
+        let (v, eigenvalues, error) = out.into_parts();
+        Ok(EighTrunc {
+            d: self.diagonal_factor(eigenvalues.clone(), D::from_real)?,
+            v: self.wrap_bound_factor(v),
+            eigenvalues: self.decode_spectrum(eigenvalues)?,
+            error,
+        })
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `eigh_vals`: the Hermitian eigenvalues
+    /// per coupled sector, and nothing else.
+    ///
+    /// No factor and no bond space is built, so this is the cheap way to ask
+    /// about a spectrum — the [`Self::svd_vals`] of the eigendecompositions.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::eigh_full`]'s, plus [`Error::FusionAlgebra`] when the provider
+    /// cannot decode a coupled sector its own algebra produced.
+    pub fn eigh_vals(&self) -> Result<Vec<SectorSpectrum<R::Sector>>, Error> {
+        let mut dense = self.runtime.lease_dense();
+        let raw = tenet_matrixalgebra::eigh_vals_dyn(dense.dense(), &self.bound_ref()?)?;
+        self.decode_spectrum(raw)
     }
 
     /// Builds a sibling on this tensor's own space and runtime from a fresh

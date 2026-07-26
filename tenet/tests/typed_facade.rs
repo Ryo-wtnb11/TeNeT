@@ -14,7 +14,7 @@ use tenet::core::{
     RuleIdentity, SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorVec,
 };
 use tenet::prelude::{Complex64, Runtime};
-use tenet::typed::{GradedSpace, TensorMap};
+use tenet::typed::{GradedSpace, TensorMap, Truncation};
 
 /// The fusion-tree layout and complete-structure caches are process-global, so
 /// the tests in this binary that snapshot them must not run beside a test that
@@ -3514,4 +3514,157 @@ fn compose_declines_a_compact_arm_it_cannot_prove() {
     // spectrum's bond.
     assert!(wide.compose(&narrow_s).is_err());
     assert!(narrow_s.compose(&wide).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 (issue #570), slice 2: the Hermitian eigendecompositions.
+// ---------------------------------------------------------------------------
+
+/// A Hermitian endomorphism through both facades: `p = t + t†`, which is
+/// Hermitian by construction on every provider, so `eigh` is defined on it
+/// without either facade having to project first.
+fn z2_hermitian_pair(
+    runtime: &Runtime,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::Z2FusionRule, f64>,
+) {
+    let (erased, typed) = z2_endo_oracle_pair(runtime);
+    (
+        erased.add(&erased.adjoint().unwrap(), 1.0, 1.0).unwrap(),
+        typed.add(&typed.adjoint().unwrap(), 1.0, 1.0).unwrap(),
+    )
+}
+
+fn su2_hermitian_pair(
+    runtime: &Runtime,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::SU2FusionRule, f64>,
+) {
+    let (erased, typed) = su2_oracle_pair(runtime);
+    (
+        erased.add(&erased.adjoint().unwrap(), 1.0, 1.0).unwrap(),
+        typed.add(&typed.adjoint().unwrap(), 1.0, 1.0).unwrap(),
+    )
+}
+
+#[test]
+fn typed_and_erased_eigh_full_agree_byte_for_byte() {
+    // What: the same seam on both facades, so `v` compares bitwise and `d` —
+    // compact on both — compares through its shared materialization. The
+    // return is `(d, v)`, which is what the destructuring here pins.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_hermitian_pair(&runtime);
+
+    let (ed, ev) = erased.eigh_full().unwrap();
+    let (td, tv) = typed.eigh_full().unwrap();
+
+    assert_eq!(td.data(), ed.data());
+    assert_eq!(tv.data(), ev.data());
+    // `d` really is the eigenvalue factor and `v` the eigenbasis, not the other
+    // way round: `v` is an isometry and `d` is diagonal. A swapped return would
+    // fail both.
+    assert_eq!(td.data().len(), 13, "d is the bond <- bond factor");
+    assert_eq!(tv.data().len(), 13, "v is the codomain <- bond factor");
+    assert_eq!(
+        td.eigh_vals().unwrap(),
+        typed.eigh_vals().unwrap(),
+        "d carries the source's own spectrum on its diagonal"
+    );
+}
+
+#[test]
+fn eigh_full_reconstructs_the_source_through_compose() {
+    // What: `v * d * v†` is the source. The middle composition takes the
+    // compact bond-scaling arm, so this exercises the storage as well as the
+    // factorization.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, typed) = z2_hermitian_pair(&runtime);
+
+    let (d, v) = typed.eigh_full().unwrap();
+    let recon = v
+        .compose(&d)
+        .unwrap()
+        .compose(&v.adjoint().unwrap())
+        .unwrap();
+
+    assert_eq!(recon.data().len(), typed.data().len());
+    for (got, want) in recon.data().iter().zip(typed.data()) {
+        assert!(
+            (got - want).abs() <= 1e-10 * want.abs().max(1.0),
+            "{got} vs {want}"
+        );
+    }
+}
+
+#[test]
+fn typed_and_erased_eigh_vals_agree_including_the_su2_branch() {
+    // What: the spectra match label for label. SU(2) is here because its
+    // dimension-weighted machinery runs underneath the eigenvalue enumeration
+    // even though the eigenvalues themselves are not weighted.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    let (erased, typed) = z2_hermitian_pair(&runtime);
+    assert_eq!(
+        typed_z2_spectrum(&typed.eigh_vals().unwrap()),
+        erased_z2_spectrum(&erased.eigh_vals().unwrap())
+    );
+
+    let (erased, typed) = su2_hermitian_pair(&runtime);
+    let typed_values: Vec<Vec<f64>> = typed
+        .eigh_vals()
+        .unwrap()
+        .iter()
+        .map(|entry| entry.values.clone())
+        .collect();
+    let mut erased_entries = erased.eigh_vals().unwrap();
+    erased_entries.sort_by_key(|entry| {
+        SectorCodec::decode_sector(&tenet::core::SU2FusionRule, entry.sector).unwrap()
+    });
+    let erased_values: Vec<Vec<f64>> = erased_entries
+        .iter()
+        .map(|entry| entry.values.clone())
+        .collect();
+    assert_eq!(typed_values, erased_values);
+    assert!(
+        erased_values.len() > 1,
+        "the SU(2) fixture must span more than one coupled sector"
+    );
+}
+
+#[test]
+fn typed_and_erased_eigh_trunc_agree_and_report_the_discarded_weight() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_hermitian_pair(&runtime);
+    let truncation = Truncation::rank(3);
+
+    let erased_out = erased.eigh_trunc(&truncation).unwrap();
+    let typed_out = typed.eigh_trunc(&truncation).unwrap();
+
+    assert_eq!(typed_out.d.data(), erased_out.d.data());
+    assert_eq!(typed_out.v.data(), erased_out.v.data());
+    assert_eq!(typed_out.error, erased_out.error);
+    assert_eq!(
+        typed_z2_spectrum(&typed_out.eigenvalues),
+        erased_z2_spectrum(&erased_out.eigenvalues)
+    );
+    // Something was actually discarded, so `error` is not vacuously zero.
+    assert!(typed_out.error > 0.0);
+    assert!(typed_out.d.data().len() < typed.eigh_full().unwrap().0.data().len());
+}
+
+#[test]
+fn eigh_reports_a_non_hermitian_input_rather_than_a_wrong_answer() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, typed) = z2_endo_oracle_pair(&runtime);
+
+    assert!(typed.eigh_full().is_err());
+    assert!(typed.eigh_vals().is_err());
+    assert!(typed.eigh_trunc(&Truncation::Full).is_err());
 }
