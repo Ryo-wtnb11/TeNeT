@@ -390,3 +390,69 @@ fn contracting_a_spectrum_scales_instead_of_densifying() {
         "s * s materialized its operand"
     );
 }
+
+#[test]
+fn the_rank_one_swap_keeps_its_source_and_its_result_compact() {
+    // What: re-ordering the two legs of a spectrum factor is a per-sector
+    // rescaling of the stored values (#585), so it neither reads nor writes a
+    // `Σ_c k_c²` payload. Three things are measured, because each catches a
+    // different way of getting it wrong: the swap's own byte cost (a densified
+    // route would pay for two dense buffers), that the *source* still owes its
+    // materialization afterwards (a route through `dense_data()` would have
+    // filled the shared cache and hidden itself from the byte ceiling), and
+    // that the *result* owes one too (a compact-in, dense-out route would pass
+    // both of the first two).
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let d = spectrum(0x5eed_0041);
+    let ceiling = dense_payload_bytes();
+
+    for (name, bytes) in [
+        ("permute", warmed_bytes(|| d.permute(&[1], &[0]).unwrap())),
+        ("transpose", warmed_bytes(|| d.transpose().unwrap())),
+        (
+            "transpose_axes",
+            warmed_bytes(|| d.transpose_axes(&[1], &[0]).unwrap()),
+        ),
+    ] {
+        assert!(
+            bytes < ceiling,
+            "compact {name} allocated at least one dense payload: {bytes} bytes"
+        );
+    }
+
+    assert!(
+        measured_bytes(|| d.data().len()) >= ceiling,
+        "the rank-one swap materialized its source"
+    );
+    let swapped = d.transpose().unwrap();
+    assert!(
+        measured_bytes(|| swapped.data().len()) >= ceiling,
+        "the rank-one swap built a dense result"
+    );
+}
+
+#[test]
+fn the_geometries_outside_the_proved_swap_keep_the_dense_route() {
+    // What: the compact arm is deliberately narrow. `repartition(1)` is the
+    // identity partition of a bond space and `braid` is an explicit braid;
+    // neither is the proved swap, so both must still go through the dense tree
+    // transform. Recorded as a probe rather than a comment because the whole
+    // `contract` value-oracle sweep in `typed_facade.rs` uses `repartition(1)`
+    // as its *dense twin* — widening the arm to cover it would silently turn
+    // that oracle into a comparison of the fast path against itself.
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let d = spectrum(0x5eed_0042);
+
+    let repartitioned = d.repartition(1).unwrap();
+    assert_eq!(
+        measured_bytes(|| repartitioned.data().len()),
+        0,
+        "repartition(1) returned compact storage instead of the dense route"
+    );
+    let braided = d.braid(&[1], &[0], &[0, 1]).unwrap();
+    assert_eq!(
+        measured_bytes(|| braided.data().len()),
+        0,
+        "an explicit braid returned compact storage instead of the dense route"
+    );
+}

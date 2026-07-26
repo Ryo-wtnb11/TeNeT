@@ -1,11 +1,175 @@
-use tenet_core::{MultiplicityFreeRigidSymbols, RuleIdentity};
+use std::collections::HashMap;
+
+use tenet_core::{BlockKey, MultiplicityFreeRigidSymbols, PreparedTreePairOperation, RuleIdentity};
+use tenet_matrixalgebra::SectorSpectrum;
 use tenet_tensors::{
-    BoundDynamicFusionMapSpace, BoundDynamicTensorRef, FusionOperand, OutputAxisOrder,
-    TensorContractSpec, TreeTransformOperation, TreeTransformRuleCacheKey,
+    BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace, FusionOperand,
+    OutputAxisOrder, RecouplingCoefficientAction, TensorContractSpec, TreeTransformOperation,
+    TreeTransformOperationKind, TreeTransformRuleCacheKey,
 };
 
 use crate::runtime::Ctx;
-use crate::tensor::UserScalar;
+use crate::tensor::{internal_layout_error, UserScalar};
+
+/// Transforms a compact diagonal spectrum through a rank-(1,1) leg swap
+/// without ever building the `Σ_c k_c²` dense payload — TensorKit 0.17
+/// `src/tensors/diagonal.jl:215-242`, where `permute`/`transpose` of a
+/// `DiagonalTensorMap` re-labels the stored diagonal instead of materializing
+/// it.
+///
+/// The geometry this accepts is exactly the one already proved for the erased
+/// facade: rank `(1, 1)`, codomain permutation `[1]`, domain permutation `[0]`,
+/// and a `Permute` or `Transpose` operation — see [`is_rank_one_diagonal_swap`],
+/// which both facades ask before calling this. Under it every source block
+/// lowers to a **single** destination term, so the whole transform is one real
+/// coefficient per sector applied to that sector's stored values. The
+/// single-term property is asserted here rather than assumed: zero or several
+/// terms is an engine invariant break, not a caller mistake, and is reported as
+/// one.
+///
+/// Why the guard is not widened: an explicit braid, a higher rank, or a Generic
+/// (non-multiplicity-free) fusion rule can lower one source block to a *sum* of
+/// destination terms, which is no longer a per-sector scaling of a diagonal and
+/// has no compact single-term predicate proved for it. Those keep the dense
+/// fallback.
+///
+/// `V` is the stored value type and is only ever acted on by the real
+/// coefficient, so the `f64`, `Complex64` and real-valued-`Complex64` storages
+/// all share this one body. The bound is the crate's own
+/// [`RecouplingCoefficientAction`] rather than a bare `Mul<f64>`: it is the
+/// seam every other recoupling coefficient in the engine acts through, and it
+/// is already a supertrait of the typed facade's payload scalar, so neither
+/// facade has to widen a public bound to reach this helper.
+pub(crate) fn transform_rank_one_diagonal_spectrum<R, V>(
+    rule: &R,
+    source: &DynamicFusionMapSpace,
+    destination: &DynamicFusionMapSpace,
+    operation: &TreeTransformOperation,
+    spectrum: &[SectorSpectrum<V>],
+) -> Result<Vec<SectorSpectrum<V>>, crate::error::Error>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    V: RecouplingCoefficientAction<f64>,
+{
+    let source_structure = source.structure();
+    if source_structure.block_count() != spectrum.len() {
+        return Err(internal_layout_error(
+            "compact diagonal spectrum does not cover its rank-one block structure",
+        ));
+    }
+    let spectrum_by_sector = spectrum
+        .iter()
+        .map(|entry| (entry.sector, entry))
+        .collect::<HashMap<_, _>>();
+    let mut output_by_sector = HashMap::with_capacity(spectrum.len());
+    let prepared = match operation.kind() {
+        TreeTransformOperationKind::Permute => PreparedTreePairOperation::prepare_permute(
+            rule,
+            1,
+            1,
+            operation.codomain_permutation(),
+            operation.domain_permutation(),
+        )?,
+        TreeTransformOperationKind::Transpose => PreparedTreePairOperation::prepare_transpose(
+            1,
+            1,
+            operation.codomain_permutation(),
+            operation.domain_permutation(),
+        )?,
+        TreeTransformOperationKind::Braid => {
+            return Err(internal_layout_error(
+                "compact diagonal swap does not accept an explicit braid",
+            ));
+        }
+    };
+
+    for index in 0..source_structure.block_count() {
+        let block = source_structure.block(index)?;
+        let BlockKey::FusionTree(source) = block.key() else {
+            return Err(internal_layout_error(
+                "compact diagonal storage requires fusion-tree blocks",
+            ));
+        };
+        let source_sector = source.codomain_tree().coupled();
+        let entry = spectrum_by_sector.get(&source_sector).ok_or_else(|| {
+            internal_layout_error("compact diagonal spectrum is missing a rank-one block sector")
+        })?;
+        let rows = prepared.execute_multiplicity_free(rule, source)?;
+        let mut rows = rows.into_iter();
+        let (destination, coefficient) = rows.next().ok_or_else(|| {
+            internal_layout_error("rank-one diagonal swap produced no destination term")
+        })?;
+        if rows.next().is_some() {
+            return Err(internal_layout_error(
+                "rank-one diagonal swap produced multiple destination terms",
+            ));
+        }
+        let entry = SectorSpectrum {
+            sector: destination.codomain_tree().coupled(),
+            values: entry
+                .values
+                .iter()
+                .copied()
+                .map(|value| value.scale_by_coefficient(coefficient))
+                .collect(),
+        };
+        if output_by_sector.insert(entry.sector, entry).is_some() {
+            return Err(internal_layout_error(
+                "rank-one diagonal swap produced duplicate destination sectors",
+            ));
+        }
+    }
+
+    let destination_structure = destination.structure();
+    let mut output = Vec::with_capacity(spectrum.len());
+    for index in 0..destination_structure.block_count() {
+        let block = destination_structure.block(index)?;
+        let BlockKey::FusionTree(destination) = block.key() else {
+            return Err(internal_layout_error(
+                "compact diagonal destination requires fusion-tree blocks",
+            ));
+        };
+        let sector = destination.codomain_tree().coupled();
+        let entry = output_by_sector.remove(&sector).ok_or_else(|| {
+            internal_layout_error("rank-one diagonal swap is missing a destination block sector")
+        })?;
+        let [rows, columns] = block.shape() else {
+            return Err(internal_layout_error(
+                "compact diagonal destination block is not a matrix",
+            ));
+        };
+        if rows != columns || entry.values.len() != *rows {
+            return Err(internal_layout_error(
+                "rank-one diagonal spectrum does not match its destination block shape",
+            ));
+        }
+        output.push(entry);
+    }
+    if !output_by_sector.is_empty() || output.len() != spectrum.len() {
+        return Err(internal_layout_error(
+            "rank-one diagonal swap destination does not cover its compact spectrum",
+        ));
+    }
+    Ok(output)
+}
+
+/// Whether `operation` on a tensor of these ranks is the rank-(1,1) leg swap
+/// [`transform_rank_one_diagonal_spectrum`] is proved for. Shared so the two
+/// facades cannot drift on which geometries take the compact route.
+pub(crate) fn is_rank_one_diagonal_swap(
+    codomain_rank: usize,
+    domain_rank: usize,
+    operation: &TreeTransformOperation,
+) -> bool {
+    codomain_rank == 1
+        && domain_rank == 1
+        && operation.codomain_permutation() == [1]
+        && operation.domain_permutation() == [0]
+        && matches!(
+            operation.kind(),
+            TreeTransformOperationKind::Permute | TreeTransformOperationKind::Transpose
+        )
+}
 
 /// Executes one owned multiplicity-free transform from a validated provider
 /// binding. The caller keeps user-layer dispatch and representation policy;

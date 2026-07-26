@@ -42,8 +42,7 @@ use tenet_tensors::cuda::{CudaStorage, CudaStorageGemm};
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, OperationError, OutputAxisOrder,
     OwnedCatC64Source as CatC64Source, OwnedCatCopy, OwnedCatSide, RecouplingCoefficientAction,
-    TensorContractSpec, TreeTransformOperation, TreeTransformOperationKind,
-    TreeTransformRuleCacheKey,
+    TensorContractSpec, TreeTransformOperation, TreeTransformRuleCacheKey,
 };
 
 use crate::error::Error;
@@ -5854,17 +5853,16 @@ impl Tensor {
         };
 
         if let Data::Diagonal(diagonal) = self.stored_data() {
-            let is_rank_one_swap = self.codomain_rank() == 1
-                && self.domain_rank() == 1
-                && operation.codomain_permutation() == [1]
-                && operation.domain_permutation() == [0]
-                && matches!(
-                    operation.kind(),
-                    TreeTransformOperationKind::Permute | TreeTransformOperationKind::Transpose
-                );
             // Why not include explicit braid or Generic fusion: their compact
             // single-term scalar predicates are not proved, so they retain the
-            // existing dense fallback.
+            // existing dense fallback. The geometry test is shared with the
+            // typed facade so the two cannot drift apart on which swaps are
+            // compact.
+            let is_rank_one_swap = crate::typed_tensor_core::is_rank_one_diagonal_swap(
+                self.codomain_rank(),
+                self.domain_rank(),
+                &operation,
+            );
             if is_rank_one_swap && self.rule_kind() != RuleKind::Su3 {
                 let destination = self.ordinary_body().space.transformed(&operation)?;
                 let data = with_user_rule!(self.ordinary_body().space, rule, {
@@ -9184,7 +9182,7 @@ fn sqrt_diagonal_impl<D: UserScalar + PartialEq>(
 
 type SectorRegion = CoupledSectorRegion;
 
-fn internal_layout_error(what: &str) -> Error {
+pub(crate) fn internal_layout_error(what: &str) -> Error {
     Error::InvalidArgument(format!(
         "internal coupled-layout invariant violated ({what}); please report this"
     ))
