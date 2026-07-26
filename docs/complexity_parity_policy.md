@@ -44,18 +44,22 @@ Let `d` = per-sector bond degeneracy (the diagonal's essential size, `O(d)`),
 | Path | TK | TeNeT status |
 |------|----|--------------|
 | `compose` / `U*S*Vh` (mul!/lmul!/rmul!) | `O(d·n)` scale, `O(d)` store | **compliant** — explicit block scaling (#72) |
-| general `contract` / `tensor!` with a diagonal | `O(d·n)` scale, `O(d)` store | **violating** — densifies to `O(d²)` and GEMMs `O(d²·n)` |
+| general `contract` / `tensor!` with a diagonal | `O(d·n)` scale, `O(d)` store | **compliant** — explicit block scaling on the erased facade (#75) and on the provider-typed one (#584) |
 
-The general-`contract` row is a genuine order regression (factor `d` in both
-FLOPs and transient storage). It is tracked by #75 (seam-level diagonal
-exploitation in `tenet-tensors`), which under this policy is **required for
-order parity, not an optional performance nicety**. The modest *constant-factor*
-payoff for SU(2) (where leg-permute cost dominates and is unavoidable, matching
-TK) does not change that: order parity is the obligation; constant-factor wins
-are separate.
+That row was a genuine order regression — densifying to `O(d²)` and GEMMing
+`O(d²·n)`, a factor `d` in both FLOPs and transient storage — and it was closed
+as an order-parity obligation rather than a performance nicety: #75 on the erased
+facade, #584 on the provider-typed one. Both scale the *other* operand's
+contracted leg by the spectrum and lay the result out with one `permute`, which
+is where all the recoupling stays. The modest *constant-factor* payoff for SU(2)
+(where leg-permute cost dominates and is unavoidable, matching TK) was never the
+point: order parity is the obligation; constant-factor wins are separate.
 
-Interim guidance until #75 lands: absorb diagonals via `compose` (mul!), which
-is already order-correct, rather than a general `tensor!` contraction.
+Both fast paths cover the single-axis geometries that are a composition on the
+contracted leg, in either order, and *decline* to the dense route otherwise — a
+decline costs the factor `d` back, so reach for `compose` (mul!) when the shape
+allows it, which needs no guard to hit the scaling. The two routes are pinned to
+the same values and the same destination space in `tenet/tests/typed_facade.rs`.
 
 ## Checklist when porting a TK operation
 
