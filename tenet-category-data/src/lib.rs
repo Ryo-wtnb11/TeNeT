@@ -61,3 +61,9 @@
 
 mod provenance;
 pub use provenance::{CategoryProvenance, PROJECTION_EPOCH};
+
+mod table;
+pub use table::{CategoryDataError, CategoryObject};
+
+mod fibonacci;
+pub use fibonacci::CategoryDataFibonacci;
