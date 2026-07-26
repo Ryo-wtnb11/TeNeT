@@ -40,7 +40,9 @@
 //! and the **`is_hermitian` / `project_*` family** ([`TensorMap::is_hermitian`],
 //! [`TensorMap::is_antihermitian`], [`TensorMap::is_isometric`],
 //! [`TensorMap::is_unitary`], [`TensorMap::is_posdef`],
-//! [`TensorMap::project_hermitian`], [`TensorMap::project_antihermitian`]).
+//! [`TensorMap::project_hermitian`], [`TensorMap::project_antihermitian`]) and
+//! — with issue #576 — the **matrix functions** ([`TensorMap::exp`],
+//! [`TensorMap::inv`], [`TensorMap::pinv`], [`TensorMap::sqrt`]).
 //!
 //! Issue #570 also gave the facade **compact diagonal storage**: a spectrum
 //! factor — `svd_compact`'s and `svd_trunc`'s `s`, `eigh`/`eig`'s `d` — holds
@@ -69,11 +71,21 @@
 //! `isomorphism`/`isometry`/`unitary` constructors and `rand`/`rand_with_seed`.
 //! Those are ports waiting on nothing but their turn; the ones below are not:
 //!
-//! - The **matrix functions** (`exp`, `inv`, `pinv`, `sqrt`) are their own
-//!   phase. `exp` and `sqrt` ride on the eigendecompositions that just landed;
-//!   `inv` and `pinv` need a diagonal-aware elementwise layer over the compact
-//!   storage, plus `pinv`'s relative-cutoff policy, which is a decision rather
-//!   than a port. None of them is a one-liner over what is here.
+//! - The **rest of the matrix-function family** — the trigonometric and
+//!   hyperbolic members, `log`, `sylvester`, the `\` and `/` solves and integer
+//!   `^` — is out by decision, not by queue position (issue #576). Every one of
+//!   them is a spectral function or a solve over the same seams, so adding them
+//!   is mechanical; what is missing is a reason to. The four that landed are
+//!   the ones the tensor-network algorithms in this repository actually call.
+//!   Two capability gaps stand behind that line and are tracked separately:
+//!   general **non-Hermitian `exp`** needs a Padé/Taylor seam (issue #577;
+//!   [`TensorMap::exp`] is Hermitian-only, a recorded divergence from
+//!   TensorKit), and general endomorphism **`sqrt`** needs a Schur seam
+//!   ([`TensorMap::sqrt`] is the diagonal-bond idiom only). Neither seam exists
+//!   below this facade; both are their own phase. Issue #578 records the
+//!   erased [`crate::prelude::Tensor::exp`]'s remaining complexity-parity gap,
+//!   which the typed [`TensorMap::exp`] does not share: the erased one
+//!   densifies a diagonal payload, this one has an O(rank) arm.
 //! - **Outer multiplicity** (SU(3) and any other `Generic` provider) is out at
 //!   the admission boundary, not at this layer: every constructor here consumes
 //!   the multiplicity-free checked root. A `Generic` provider needs its own
@@ -497,6 +509,33 @@ enum TypedData<D> {
     Diagonal(Vec<tenet_matrixalgebra::SectorSpectrum<D>>),
 }
 
+/// Applies a scalar function to every stored value of a compact spectrum,
+/// leaving the sector keys and the per-sector lengths untouched.
+///
+/// This is the whole of the O(rank) arm shared by [`TensorMap::exp`],
+/// [`TensorMap::inv`], [`TensorMap::pinv`] and [`TensorMap::sqrt`]: a spectral
+/// function acts on eigenvalues, so it never moves weight between sectors and
+/// never changes a bond dimension, which is exactly why the result can stay on
+/// the space it was called on.
+fn map_spectrum<D: Copy>(
+    spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
+    mut value_of: impl FnMut(D) -> Result<D, Error>,
+) -> Result<Vec<tenet_matrixalgebra::SectorSpectrum<D>>, Error> {
+    spectrum
+        .iter()
+        .map(|entry| {
+            Ok(tenet_matrixalgebra::SectorSpectrum {
+                sector: entry.sector,
+                values: entry
+                    .values
+                    .iter()
+                    .map(|&value| value_of(value))
+                    .collect::<Result<_, Error>>()?,
+            })
+        })
+        .collect()
+}
+
 /// Two compact spectra that live on one bond space must agree sector for
 /// sector and length for length; when they do not, the space and the payload
 /// have gone out of step, which is an engine invariant break rather than
@@ -666,22 +705,26 @@ where
 /// two facades disagreeing about which destinations may stay compact would be a
 /// silent divergence rather than a visible one.
 ///
-/// Applied to the *destination* of an operation, never to the operands. An
-/// operand's storage says what it holds; only the destination says whether the
-/// compact result is representable.
+/// Applied either to the *destination* of an operation — an operand's storage
+/// says what it holds, only the destination says whether a compact result is
+/// representable — or, in [`TensorMap::sqrt`], to the receiver, because there
+/// the bond shape is the operation's own domain restriction rather than a
+/// storage question.
 ///
-/// # Unreachable today, kept deliberately
+/// # Reachability
 ///
-/// Every [`TypedData::Diagonal`] payload this module can produce sits on a
-/// space built by [`diagonal_factor_on`], i.e. by
+/// Only [`TensorMap::sqrt`] can make this answer `false`, and does: a general
+/// tensor is a legal argument to write and an illegal one to accept, so the
+/// guard is killable there. At the compact-*destination* call sites it still
+/// cannot fail — every [`TypedData::Diagonal`] payload this module can produce
+/// sits on a space built by [`diagonal_factor_on`], i.e. by
 /// [`tenet_matrixalgebra::diagonal_bond_bound_space_like`], which is a bond
-/// space by construction — and the operations that preserve the payload
+/// space by construction, and the operations that preserve the payload
 /// ([`TensorMap::scale`], [`TensorMap::add`], [`TensorMap::adjoint`], the
-/// `D * D` arm) all keep that space. So this predicate cannot currently return
-/// `false` at any of its call sites, and no test can kill it. It stays because
-/// it is the erased facade's own guard and because the next constructor of a
-/// compact payload — a diagonal-aware `contract`, say — would be the first one
-/// able to aim at a destination that is not a bond space, and should find the
+/// `D * D` arm) all keep that space. It stays at those sites because the next
+/// constructor of a compact payload — a diagonal-aware `contract`, say — would
+/// be the first one able to aim at a destination that is not a bond space, and
+/// should find the
 /// check already in place rather than have to notice it is missing.
 fn is_diagonal_bond_space(space: &DynamicFusionMapSpace) -> bool {
     let homspace = space.homspace();
@@ -1920,6 +1963,285 @@ where
         let mut dense = self.runtime.lease_dense();
         let raw = tenet_matrixalgebra::eig_vals_dyn(dense.dense(), &self.bound_ref()?)?;
         self.decode_spectrum(raw)
+    }
+
+    /// The matrix exponential `exp(t) = Σ_k t^k / k!`, evaluated per coupled
+    /// sector as the spectral function `V exp(D) Vᴴ` of the Hermitian
+    /// eigendecomposition.
+    ///
+    /// # Domain, and the divergence from TensorKit
+    ///
+    /// This facade's `exp` is **Hermitian-only**: the input must be an
+    /// endomorphism whose coupled-sector blocks are Hermitian, which is what
+    /// makes the eigenbasis unitary and the spectral formula exact. TensorKit's
+    /// `exp(::AbstractTensorMap)` has no such restriction — it applies a
+    /// general per-block Padé approximant and accepts any endomorphism. That is
+    /// a recorded divergence: a Padé/Taylor seam does not exist below this
+    /// facade, and general (non-Hermitian) `exp` waits on one — issue #577.
+    /// Until then a non-Hermitian argument is refused rather than silently
+    /// symmetrized.
+    ///
+    /// The **compact** arm is a different story and matches TensorKit exactly:
+    /// `exp(::DiagonalTensorMap)` is unconditionally elementwise, with no
+    /// hermiticity gate, and so is the arm below. Storage therefore decides
+    /// whether a nonreal spectrum is accepted — in this facade as in TensorKit.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Operation`] when the input is not an endomorphism, or when a
+    ///   coupled-sector block is not Hermitian to MatrixAlgebraKit's own
+    ///   tolerance. Both come from the eigendecomposition seam.
+    /// - [`Error::Core`] / [`Error::FusionAlgebra`] from the composition that
+    ///   reassembles `V exp(D) Vᴴ`.
+    ///
+    /// # Complexity
+    ///
+    /// Dense input: `O(Σ_c n_c³)` — one Hermitian eigendecomposition per
+    /// coupled sector plus one composition, with `exp(D)` folded into a column
+    /// scaling of `V` rather than materialized. Compact input (TensorKit's
+    /// `DiagonalTensorMap`): the **O(rank) elementwise arm**, `exp(s_i)` over
+    /// the `Σ_c k_c` stored values, staying compact. The erased
+    /// [`crate::prelude::Tensor::exp`] has no such arm — it materializes a
+    /// diagonal payload and eigendecomposes the block-diagonal buffer, which is
+    /// the complexity-parity gap this one closes and issue #578 tracks on the
+    /// erased side.
+    pub fn exp(&self) -> Result<Self, Error> {
+        if let Some(spectrum) = self.spectrum() {
+            // Why no hermiticity gate here while the dense arm has one: see the
+            // rustdoc. TensorKit splits the same way, and a gate would make the
+            // compact arm stricter than the TK function it ports.
+            return Ok(self.with_spectrum(map_spectrum(spectrum, |value| Ok(value.exp_value()))?));
+        }
+        let mut dense = self.runtime.lease_dense();
+        let mut lease = self.runtime.lease_context()?;
+        let out = tenet_matrixalgebra::exp_dyn(
+            dense.dense(),
+            lease.context().multiplicity_free_lane::<D>(),
+            &BoundDynamicTensorRef::try_new(&self.body.space, self.dense_data())?,
+        )?;
+        Ok(self.wrap_bound_factor(out))
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `inv`: the true inverse `t^-1` of a
+    /// nonsingular map, defined by `t * t^-1 = id` on the codomain and
+    /// `t^-1 * t = id` on the domain. Computed per coupled sector as the exact
+    /// dense solve `t_c X_c = 1`, not as a spectral function — there is no
+    /// truncation policy to apply and no factor tensor to build.
+    ///
+    /// # Domain
+    ///
+    /// TensorKit asks for `codomain ≅ domain` — **isomorphic, not equal** —
+    /// and returns a map `domain <- codomain`. This facade's seam agrees: a
+    /// rank-one codomain and a rank-two domain with the same coupled-sector
+    /// dimensions are accepted, and the result carries the two spaces swapped.
+    /// The pin is `inv_accepts_isomorphic_but_unequal_codomain_and_domain`.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Operation`] when the two sides are not isomorphic, and when a
+    ///   coupled-sector block is singular — the dense solve is where that
+    ///   surfaces, so it comes back as an execution error rather than an
+    ///   argument one. Never a panic.
+    /// - [`Error::InvalidArgument`] from the compact arm below, whose zero
+    ///   entry is visible before any solve runs and is therefore reported as
+    ///   the caller mistake it is. The two storages of one singular tensor
+    ///   consequently report different variants; both are pinned by
+    ///   `inv_reports_a_singular_input_as_a_typed_error`.
+    ///
+    /// # Complexity
+    ///
+    /// Dense input: `O(Σ_c n_c³)`, one LU solve per coupled sector. Compact
+    /// input (a spectrum factor, TensorKit's `DiagonalTensorMap`): the
+    /// **O(rank) elementwise-reciprocal arm**, `1/s_i` over the `Σ_c k_c`
+    /// stored values, and the result stays compact — matching TensorKit's
+    /// `inv(::DiagonalTensorMap)`, which is `inv.(d.data)`. Nothing dense is
+    /// built on either side of that arm.
+    pub fn inv(&self) -> Result<Self, Error> {
+        if let Some(spectrum) = self.spectrum() {
+            // Why `== 0` and not a tolerance: the dense arm has none either
+            // (the solve either fails or it does not), and a compact arm that
+            // refused near-zero entries would let storage change the answer.
+            // Same comparison as the erased facade's `try_recip`.
+            return Ok(self.with_spectrum(map_spectrum(spectrum, |value| {
+                if value.abs_value() == 0.0 {
+                    Err(Error::InvalidArgument(
+                        "inv of a singular diagonal (zero entry)".to_string(),
+                    ))
+                } else {
+                    Ok(value.recip_value())
+                }
+            })?));
+        }
+        let mut dense = self.runtime.lease_dense();
+        let out = tenet_matrixalgebra::inv_direct_dyn(dense.dense(), &self.bound_ref()?)?;
+        Ok(self.wrap_bound_factor(out))
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `pinv`: the Moore-Penrose
+    /// pseudo-inverse `t⁺ = V S⁺ Uᴴ`, where `t = U S Vᴴ` is the compact SVD and
+    /// `S⁺` inverts every singular value above the cutoff and sends the rest to
+    /// zero. `t⁺` satisfies `t t⁺ t = t` and reduces to [`Self::inv`] when `t`
+    /// is nonsingular and `rcond` is small enough to keep every singular value.
+    ///
+    /// # Tolerance, and the divergence from TensorKit
+    ///
+    /// The cutoff is `rcond * σ_max` with **one global `σ_max` taken across all
+    /// coupled sectors**, and the comparison is strict: a singular value
+    /// sitting exactly on the cutoff is discarded. TensorKit instead takes
+    /// per-block `atol`/`rtol` keywords, so its relative tolerance is measured
+    /// against each block's own largest singular value. That is a deliberate
+    /// divergence, not a gap: a per-block relative tolerance cannot cut
+    /// anything in a one-dimensional sector however small that sector's
+    /// contribution to the tensor is, and TensorKit's own source carries a TODO
+    /// saying the tolerance should be relative to the total norm — which is
+    /// what this facade already does. TensorKit's `DiagonalTensorMap` branch is
+    /// deliberately **not** mirrored either: there `rtol` is ignored whenever
+    /// `atol` is nonzero, the default is no cutoff at all, and its comparison
+    /// (`abs(x) < tol` discards) *keeps* a value sitting exactly on the cutoff
+    /// — the opposite of the strict `>` above. On that last point TensorKit
+    /// contradicts itself: its general `pinv` goes through Julia's, which keeps
+    /// only `sigma > tol`, and that is the boundary this facade matches on both
+    /// storages.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] when `rcond` is not finite or is negative.
+    ///   Checked before any work on both storages.
+    /// - [`Error::Operation`] / [`Error::Core`] from the SVD, on the dense arm.
+    ///
+    /// There is no singular-input failure: sending the offending directions to
+    /// zero is what a pseudo-inverse is for.
+    ///
+    /// # Complexity
+    ///
+    /// Dense input: one compact SVD, `O(Σ_c n_c³)`, plus a bond scaling and one
+    /// composition; `S⁺` is folded into a column scaling rather than
+    /// materialized. Compact input (TensorKit's `DiagonalTensorMap`): the
+    /// **O(rank) elementwise cutoff-and-reciprocal arm** over the `Σ_c k_c`
+    /// stored values — the singular values of a diagonal are its `|entry|`s, so
+    /// no SVD is needed — and the result stays compact.
+    pub fn pinv(&self, rcond: f64) -> Result<Self, Error> {
+        // Ahead of the storage split, so both arms answer alike: the seam
+        // repeats this check for its own callers, but the compact arm never
+        // reaches the seam.
+        if !rcond.is_finite() || rcond < 0.0 {
+            return Err(Error::InvalidArgument(
+                "pinv rcond must be finite and non-negative".to_string(),
+            ));
+        }
+        if let Some(spectrum) = self.spectrum() {
+            let cutoff = rcond
+                * spectrum
+                    .iter()
+                    .flat_map(|entry| entry.values.iter())
+                    .fold(0.0f64, |largest, &value| largest.max(value.abs_value()));
+            // Strict `>`, matching the dense fold and the erased facade: a
+            // value exactly on the cutoff is cut. Changing it to `>=` is what
+            // `pinv_cuts_a_singular_value_sitting_exactly_on_the_cutoff` kills.
+            return Ok(self.with_spectrum(map_spectrum(spectrum, |value| {
+                Ok(if value.abs_value() > cutoff {
+                    value.recip_value()
+                } else {
+                    D::from_real(0.0)
+                })
+            })?));
+        }
+        let mut dense = self.runtime.lease_dense();
+        let mut lease = self.runtime.lease_context()?;
+        let out = tenet_matrixalgebra::pinv_dyn(
+            dense.dense(),
+            lease.context().multiplicity_free_lane::<D>(),
+            &BoundDynamicTensorRef::try_new(&self.body.space, self.dense_data())?,
+            rcond,
+        )?;
+        Ok(self.wrap_bound_factor(out))
+    }
+
+    /// TensorKit 0.17 `sqrt(::DiagonalTensorMap)`: the elementwise principal
+    /// square root of a diagonal bond tensor, `√s_i` on each diagonal entry, so
+    /// that `√t · √t = t`. This is the idiom that splits singular values in
+    /// Vidal-gauge and gate-application updates.
+    ///
+    /// # Domain
+    ///
+    /// The receiver must be a **diagonal bond tensor** `[v] <- [v]`: one
+    /// codomain leg equal to the one domain leg, and every stored block
+    /// diagonal, with off-diagonal entries exactly zero. That is the shape the
+    /// factorizations produce ([`Self::svd_compact`]'s and [`Self::svd_trunc`]'s
+    /// `s`, [`Self::eigh_full`]'s `d`), and it is the receiver type TensorKit's
+    /// own diagonal `sqrt` demands.
+    ///
+    /// General endomorphism `sqrt` is deliberately out of scope. TensorKit does
+    /// have one (`sqrt(::AbstractTensorMap)`, Schur-based, always returning a
+    /// complex tensor), but no Schur seam exists below this facade, and its
+    /// value-independent complexification is not expressible in a typed
+    /// signature. A wider `sqrt` is a separate phase, not an omission here.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] in every failure case:
+    ///
+    /// - the receiver is not shaped `[v] <- [v]`;
+    /// - a stored block has a nonzero off-diagonal entry (dense arm only — a
+    ///   compact payload has none by construction);
+    /// - the payload is `f64` and a diagonal entry is negative. The message
+    ///   points at the complex payload, matching the erased facade and
+    ///   TensorKit's diagonal-path `DomainError`. TensorKit's *dense* path
+    ///   instead complexifies silently, which contradicts its own diagonal path
+    ///   and is not mirrored here.
+    ///
+    /// A [`num_complex::Complex64`] payload never fails on a value: it takes the
+    /// principal branch (`√(-1) = +i`).
+    ///
+    /// # Complexity
+    ///
+    /// Compact input (TensorKit's `DiagonalTensorMap`, what the factorizations
+    /// hand back): the **O(rank) elementwise arm** over the `Σ_c k_c` stored
+    /// values, staying compact — so `s.sqrt()` and the two `compose`s around it
+    /// are all bond scalings. Dense input: `O(Σ_c n_c²)`, one walk over the
+    /// block-diagonal buffer, which is what the off-diagonal check costs; the
+    /// root itself is still only `Σ_c n_c` square roots.
+    pub fn sqrt(&self) -> Result<Self, Error> {
+        // Same guard as the erased facade's, and the same one
+        // [`is_diagonal_bond_space`] applies to compact *destinations*: here it
+        // is asked of the receiver, which is what makes it reachable.
+        if !is_diagonal_bond_space(self.body.space.space()) {
+            return Err(Error::InvalidArgument(
+                "sqrt requires a diagonal bond tensor `[v] <- [v]` (equal single \
+                 codomain and domain legs), like the `s` factor of svd_trunc"
+                    .to_string(),
+            ));
+        }
+        if let Some(spectrum) = self.spectrum() {
+            return Ok(self.with_spectrum(map_spectrum(spectrum, D::sqrt_value)?));
+        }
+        // Dense payload on a bond space: block-diagonal by the space's shape,
+        // but only by convention — the buffer is free to hold anything, so the
+        // off-diagonal entries are checked rather than assumed. Skipping the
+        // check would silently drop them.
+        let data = self.dense_data();
+        let zero = num_complex::Complex64::new(0.0, 0.0);
+        let mut out = vec![D::from_real(0.0); data.len()];
+        let structure = self.body.space.space().structure();
+        for index in 0..structure.block_count() {
+            let block = structure.block(index)?;
+            let (shape, strides, offset) = (block.shape(), block.strides(), block.offset());
+            for row in 0..shape[0] {
+                for col in 0..shape[1] {
+                    let position = offset + row * strides[0] + col * strides[1];
+                    if row == col {
+                        out[position] = data[position].sqrt_value()?;
+                    } else if data[position].widen_complex() != zero {
+                        return Err(Error::InvalidArgument(format!(
+                            "sqrt requires a diagonal bond tensor, but block {:?} has a \
+                             nonzero off-diagonal entry at ({row}, {col})",
+                            block.key()
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(self.with_data(out))
     }
 
     /// Builds a sibling on this tensor's own space and runtime from a fresh

@@ -285,3 +285,62 @@ fn absorbing_a_spectrum_through_compose_scales_instead_of_densifying() {
         "compose materialized the spectrum behind our back"
     );
 }
+
+#[test]
+fn the_matrix_functions_have_o_rank_diagonal_arms() {
+    // What: `exp`, `inv`, `pinv` and `sqrt` on a spectrum factor are elementwise
+    // on the `Σ_c k_c` stored values, not block work on the `Σ_c k_c²`
+    // materialization. The ceiling catches a densified route; the "still owes"
+    // assertion afterwards catches one that densifies into the shared cache,
+    // which the warm-up run would otherwise have paid for silently.
+    //
+    // `exp` is the one that is new in the typed facade: the erased sibling
+    // materializes a diagonal payload and eigendecomposes it, so this probe is
+    // what pins the parity fix rather than just guarding it.
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let d = spectrum(0x5eed_0021);
+    let ceiling = dense_payload_bytes();
+
+    for (name, bytes) in [
+        ("exp", warmed_bytes(|| d.exp().unwrap())),
+        ("inv", warmed_bytes(|| d.inv().unwrap())),
+        ("pinv", warmed_bytes(|| d.pinv(1e-12).unwrap())),
+        ("sqrt", warmed_bytes(|| d.sqrt().unwrap())),
+    ] {
+        assert!(
+            bytes < ceiling,
+            "compact {name} allocated at least one dense payload: {bytes} bytes"
+        );
+    }
+
+    assert!(
+        measured_bytes(|| d.data().len()) >= ceiling,
+        "one of the matrix functions materialized the spectrum behind our back"
+    );
+}
+
+#[test]
+fn a_complex_spectrums_matrix_functions_stay_o_rank_too() {
+    // What: the arms are dtype-generic, so a c64 spectrum takes the same route
+    // — at twice the byte size, which is what the ceiling here accounts for.
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let d = complex_source(0x5eed_0022).svd_compact().unwrap().1;
+    let ceiling = 2 * dense_payload_bytes();
+
+    for (name, bytes) in [
+        ("exp", warmed_bytes(|| d.exp().unwrap())),
+        ("inv", warmed_bytes(|| d.inv().unwrap())),
+        ("pinv", warmed_bytes(|| d.pinv(1e-12).unwrap())),
+        ("sqrt", warmed_bytes(|| d.sqrt().unwrap())),
+    ] {
+        assert!(
+            bytes < ceiling,
+            "compact c64 {name} allocated at least one dense payload: {bytes} bytes"
+        );
+    }
+
+    assert!(
+        measured_bytes(|| d.data().len()) >= ceiling,
+        "one of the c64 matrix functions materialized the spectrum"
+    );
+}

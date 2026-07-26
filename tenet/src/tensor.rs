@@ -569,6 +569,56 @@ pub trait UserScalar: FactorScalar + RecouplingCoefficientAction<f64> {
         ctxs: &mut Ctxs<Key>,
     ) -> &mut Ctx<Self, Key>;
     fn rand_unit(state: &mut u64) -> Self;
+
+    /// `|self|`: the modulus for a complex payload, the absolute value for a
+    /// real one. What the diagonal `pinv` cutoff compares against, and — as
+    /// `== 0.0` — how the diagonal `inv` recognizes a singular entry.
+    fn abs_value(self) -> f64;
+
+    /// `exp(self)` in the payload dtype.
+    fn exp_value(self) -> Self;
+
+    /// `1/self` in the payload dtype.
+    fn recip_value(self) -> Self;
+
+    /// The principal square root in the payload dtype, or the erased facade's
+    /// negative-real refusal.
+    ///
+    /// # Why these four exist
+    ///
+    /// [`crate::typed::TensorMap`]'s payload type is a parameter, so its
+    /// elementwise arms have no `Data` enum to match on. The obvious
+    /// alternative — widen to [`Complex64`] with
+    /// [`FactorScalar::widen_complex`], compute, narrow back — is wrong for
+    /// exactly one of the four:
+    ///
+    /// - [`Self::recip_value`] is **forced**. Complex division is not real
+    ///   division: routing an `f64` reciprocal through `Complex64` disagrees
+    ///   with `1.0 / x` in the last ulp on roughly a quarter of arguments, and
+    ///   `inv`/`pinv` are byte-compared against their erased siblings.
+    /// - [`Self::exp_value`], [`Self::sqrt_value`] and [`Self::abs_value`] are
+    ///   not forced — measurement shows no drift through the widen route for
+    ///   any of them. They are here for dispatch cleanliness (one mechanism for
+    ///   all four arms) and, for `sqrt_value`, because the negative-`f64`
+    ///   refusal *is* the dtype branch: it has no complex counterpart to
+    ///   express, and a widen route would silently return `i·√|x|` for an `f64`
+    ///   tensor.
+    ///
+    /// # What this does not buy
+    ///
+    /// Byte-identity with the erased facade for **c64 compact storage**. The
+    /// erased [`DiagonalData`] has a `RealC64` variant — a real spectrum inside
+    /// a c64 tensor — and runs *real* arithmetic on it; the typed
+    /// `TypedData::Diagonal` has one arm holding values of exactly the payload
+    /// type and always divides in complex. So c64 compact `inv` and `pinv`
+    /// differ from the erased sibling in the last ulp on part of the spectrum.
+    /// That is accepted rather than chased: a `RealC64` equivalent in the typed
+    /// storage is its own phase, and finite-precision value differences are
+    /// within the coefficient-exactness principle, which requires structure,
+    /// gauge determinism and verification to be exact — not the last bit of a
+    /// division. `typed_and_erased_c64_compact_inv_and_pinv_agree_to_rounding`
+    /// pins the size of the gap so it stays visible.
+    fn sqrt_value(self) -> Result<Self, Error>;
 }
 
 impl UserScalar for f64 {
@@ -585,6 +635,29 @@ impl UserScalar for f64 {
     fn rand_unit(state: &mut u64) -> Self {
         rand_unit(state)
     }
+
+    fn abs_value(self) -> f64 {
+        self.abs()
+    }
+
+    fn exp_value(self) -> Self {
+        self.exp()
+    }
+
+    fn recip_value(self) -> Self {
+        1.0 / self
+    }
+
+    fn sqrt_value(self) -> Result<Self, Error> {
+        if self < 0.0 {
+            Err(Error::InvalidArgument(format!(
+                "sqrt of a negative diagonal entry {self}; convert to c64 \
+                 with to_c64() for the complex square root"
+            )))
+        } else {
+            Ok(self.sqrt())
+        }
+    }
 }
 
 impl UserScalar for Complex64 {
@@ -600,6 +673,22 @@ impl UserScalar for Complex64 {
 
     fn rand_unit(state: &mut u64) -> Self {
         Complex64::new(rand_unit(state), rand_unit(state))
+    }
+
+    fn abs_value(self) -> f64 {
+        self.norm()
+    }
+
+    fn exp_value(self) -> Self {
+        self.exp()
+    }
+
+    fn recip_value(self) -> Self {
+        Complex64::new(1.0, 0.0) / self
+    }
+
+    fn sqrt_value(self) -> Result<Self, Error> {
+        Ok(self.sqrt())
     }
 }
 
