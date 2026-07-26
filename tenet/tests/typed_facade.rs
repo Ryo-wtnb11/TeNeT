@@ -1930,6 +1930,74 @@ fn svd_compact_reconstructs_the_source_through_the_typed_contract() {
 }
 
 #[test]
+fn typed_and_erased_svd_compact_agree_byte_for_byte_on_a_complex_payload() {
+    // What: the payload dtype is a type parameter here and a stored `Dtype`
+    // there, so c64 takes a different route through both facades. The
+    // imaginary part is deliberately not proportional to the real one, so a
+    // stray conjugation or a real-only path is visible.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let complex = |value: f64| Complex64::new(value, 1.0 + value % 5.0);
+    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        &runtime,
+        [&space, &space],
+        [&space],
+        |key: &tenet::prelude::BlockKey, indices: &[usize]| {
+            complex(erased_fill_value(key, indices))
+        },
+    )
+    .unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 3),
+        ],
+        false,
+    )
+    .unwrap();
+    let typed: TensorMap<tenet::core::Z2FusionRule, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |sectors, indices| {
+            complex(typed_fill_value(sectors, indices))
+        })
+        .unwrap();
+    assert_eq!(typed.data(), erased.try_data_c64().unwrap());
+
+    let (eu, _, evh) = erased.svd_compact().unwrap();
+    let (tu, ts, tvh) = typed.svd_compact().unwrap();
+
+    assert_eq!(tu.data(), eu.try_data_c64().unwrap());
+    assert_eq!(tvh.data(), evh.try_data_c64().unwrap());
+    // The erased `s` is diagonal storage (#570), so it is compared through its
+    // spectrum rather than its bytes.
+    assert_eq!(
+        typed
+            .svd_vals()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.values.clone())
+            .collect::<Vec<_>>(),
+        erased_z2_spectrum(&erased.svd_vals().unwrap())
+            .iter()
+            .map(|(_, values)| values.clone())
+            .collect::<Vec<_>>()
+    );
+
+    let recon = tu
+        .contract(&ts, &[2], &[0], &[0, 1, 2])
+        .unwrap()
+        .contract(&tvh, &[2], &[0], &[0, 1, 2])
+        .unwrap();
+    for (got, want) in recon.data().iter().zip(typed.data()) {
+        assert!(
+            (got - want).norm() <= 1e-12 * want.norm().max(1.0),
+            "{got} vs {want}"
+        );
+    }
+}
+
+#[test]
 fn typed_and_erased_svd_full_agree_byte_for_byte() {
     // `svd_full`'s `s` is dense rectangular on both sides — TensorKit's own
     // shape — so unlike `svd_compact` all three factors compare bitwise.
