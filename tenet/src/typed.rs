@@ -1297,13 +1297,14 @@ where
     /// pattern that does not fit falls through to the dense route rather than
     /// being refused.
     ///
-    /// **Complexity.** For a bond of dimension `d` (per coupled sector) and `n`
-    /// entries in the other operand's blocks, the dense route materializes the
+    /// **Complexity.** In `docs/complexity_parity_policy.md`'s parameters — `d`
+    /// the per-sector bond degeneracy, `n` the other operand's *open*-leg size,
+    /// so its blocks hold `d·n` entries — the dense route materializes the
     /// spectrum as a `Σ_c d_c²` block-diagonal buffer and multiplies it in, at
-    /// O(d²) storage and O(d²·n) work. The scaling route touches each of the `n`
-    /// entries once, at O(d) storage and O(d·n) work — the row
-    /// `docs/complexity_parity_policy.md` requires. `D · D` multiplies the two
-    /// spectra elementwise and stays compact, at O(d).
+    /// O(d²) storage and O(d²·n) work. The scaling route touches each of those
+    /// `d·n` entries once, at O(d) storage and O(d·n) work, which is the order
+    /// that policy's row requires. `D · D` multiplies the two spectra
+    /// elementwise and stays compact, at O(d).
     ///
     /// **TensorKit correspondence.** This is what TensorKit's
     /// `DiagonalTensorMap` gets from its type: `block(D, c)` is a `Diagonal`, so
