@@ -107,8 +107,8 @@ pub use tenet_matrixalgebra::Truncation;
 use tenet_matrixalgebra::BoundDynFactor;
 
 use crate::tensor::{
-    apply_fill, weighted_inner, weighted_trace, with_planar_axes, Fill, PlanarRequestKind,
-    TensorScalar,
+    apply_fill, sector_regions, weighted_inner, weighted_trace, with_planar_axes, Fill,
+    PlanarRequestKind, TensorScalar,
 };
 use crate::typed_tensor_core::{
     tensorcompose_owned_multiplicity_free, tensorcontract_owned_multiplicity_free,
@@ -644,6 +644,51 @@ where
             return Err(error);
         }
         built
+    }
+
+    /// The identity endomorphism on `spaces <- spaces` (TensorKit `id(V)`):
+    /// every coupled-sector block is the identity matrix.
+    ///
+    /// TensorKit's `one`/`id` for the same object. The erased
+    /// [`crate::prelude::Tensor::id`] takes a [`crate::prelude::Dtype`] token;
+    /// here the payload dtype is `D`, so there is nothing to pass — otherwise
+    /// the argument shape is the erased one, a single leg list used for both
+    /// sides.
+    ///
+    /// Square by construction: the codomain *is* the domain, so the
+    /// isomorphism precondition the erased structural constructors check
+    /// (`isomorphism`, `isometry`) holds trivially and is not re-checked. The
+    /// legs may still be heterogeneous — different sector content and
+    /// different degeneracies per leg — since only the fused content matters
+    /// and it is identical on both sides by definition.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::zeros`] reports, plus [`Error::Core`] when the
+    /// admitted layout is not the canonical coupled-sector matrix one, which
+    /// is an engine invariant rather than a caller mistake.
+    #[doc(alias = "one")]
+    pub fn id<'a, S>(runtime: &Runtime, spaces: S) -> Result<Self, Error>
+    where
+        S: IntoIterator<Item = &'a GradedSpace<R>>,
+        R: 'a,
+    {
+        let spaces: Vec<&GradedSpace<R>> = spaces.into_iter().collect();
+        let provider = Arc::clone(Self::authority(&spaces)?);
+        let zero = Self::build(runtime, provider, &spaces, &spaces, Fill::Zeros)?;
+        // Same coupled-sector region walk and same diagonal addressing as the
+        // erased `Tensor::structural`, on the shared helper: the two build the
+        // same tensor, and a second copy of the offset arithmetic would be free
+        // to drift from the sibling this is byte-compared against.
+        let space = zero.body.space.space();
+        let regions = sector_regions(space.structure(), space.nout())?;
+        let mut data = vec![D::from_real(0.0); space.required_len()?];
+        for region in regions.iter() {
+            for i in 0..region.rows().min(region.cols()) {
+                data[region.range().start + i * (region.rows() + 1)] = D::from_real(1.0);
+            }
+        }
+        Ok(zero.with_data(data))
     }
 
     /// TensorKit `permute`: re-arranges legs with symmetric braiding.

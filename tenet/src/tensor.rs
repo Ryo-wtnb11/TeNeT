@@ -9106,7 +9106,10 @@ fn internal_layout_error(what: &str) -> Error {
 /// packed column-major sector matrix. The structural constructors and the
 /// device paths rely on these offsets, so any other layout is an explicit
 /// error, never silent misaddressing.
-fn sector_regions(structure: &BlockStructure, nout: usize) -> Result<Arc<[SectorRegion]>, Error> {
+pub(crate) fn sector_regions(
+    structure: &BlockStructure,
+    nout: usize,
+) -> Result<Arc<[SectorRegion]>, Error> {
     structure
         .coupled_sector_regions(nout)?
         .ok_or_else(|| internal_layout_error("non-packed coupled-sector layout"))

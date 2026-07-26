@@ -3169,3 +3169,93 @@ fn compose_rejects_operands_whose_domain_and_codomain_do_not_meet() {
         TensorMap::from_block_fn(&runtime, [&narrow_leg], [&narrow_leg], typed_fill_value).unwrap();
     assert!(endo.compose(&narrow).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6 (issue #569), slice 2: `TensorMap::id`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn typed_and_erased_id_agree_byte_for_byte() {
+    // What: the typed identity is the erased one, including on a leg list whose
+    // per-sector degeneracies differ from leg to leg — the case where the
+    // diagonal offsets inside a coupled-sector block are not all the same.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let z2 = Arc::new(tenet::core::Z2FusionRule);
+    let typed_leg = |even, odd| {
+        GradedSpace::try_new(
+            Arc::clone(&z2),
+            [
+                (tenet::core::Z2Irrep::EVEN, even),
+                (tenet::core::Z2Irrep::ODD, odd),
+            ],
+            false,
+        )
+        .unwrap()
+    };
+
+    let wide = typed_leg(2, 3);
+    let narrow = typed_leg(1, 4);
+    let typed = TensorMap::<_, f64>::id(&runtime, [&wide, &narrow]).unwrap();
+
+    let erased = tenet::prelude::Tensor::id(
+        &runtime,
+        tenet::prelude::Dtype::F64,
+        [
+            &tenet::prelude::Space::z2([(0, 2), (1, 3)]),
+            &tenet::prelude::Space::z2([(0, 1), (1, 4)]),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(typed.data(), erased.data());
+    // Not the zero tensor, and not the all-ones one either: a genuine diagonal.
+    // 14 even + 11 odd fused states: `2*1 + 3*4` and `2*4 + 3*1`.
+    assert_eq!(typed.data().iter().filter(|&&v| v == 1.0).count(), 25);
+    assert!(typed.data().iter().any(|&v| v == 0.0));
+}
+
+#[test]
+fn id_composes_as_the_identity_on_both_sides() {
+    // What: the defining property, as a byte oracle against the source tensor.
+    // `[v, v] <- [v]`, so the two sides exercise different ranks.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, typed) = z2_oracle_pair(&runtime);
+
+    let left = TensorMap::id(&runtime, &typed.codomain()).unwrap();
+    let right = TensorMap::id(&runtime, &typed.domain()).unwrap();
+
+    assert_eq!(left.compose(&typed).unwrap().data(), typed.data());
+    assert_eq!(typed.compose(&right).unwrap().data(), typed.data());
+}
+
+#[test]
+fn id_composes_as_the_identity_for_a_fermionic_provider() {
+    // What: no stray sign. A fermionic identity is still the plain diagonal —
+    // the twist question belongs to the contracted legs, and composition does
+    // not ask it.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, (typed_a, _)) = fermionic_compose_pair(&runtime);
+
+    let left = TensorMap::id(&runtime, &typed_a.codomain()).unwrap();
+    let right = TensorMap::id(&runtime, &typed_a.domain()).unwrap();
+
+    assert_eq!(left.compose(&typed_a).unwrap().data(), typed_a.data());
+    assert_eq!(typed_a.compose(&right).unwrap().data(), typed_a.data());
+}
+
+#[test]
+fn id_needs_at_least_one_leg() {
+    // The provider is inferred from the legs, exactly as for `zeros`.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let legs: [&GradedSpace<tenet::core::Z2FusionRule>; 0] = [];
+
+    assert!(matches!(
+        TensorMap::<_, f64>::id(&runtime, legs).unwrap_err(),
+        tenet::prelude::Error::InvalidArgument(message)
+            if message.contains("at least one leg")
+    ));
+}
