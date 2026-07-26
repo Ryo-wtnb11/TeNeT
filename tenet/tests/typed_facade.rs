@@ -1043,11 +1043,27 @@ fn z2_oracle_pair(
     tenet::prelude::Tensor,
     TensorMap<tenet::core::Z2FusionRule, f64>,
 ) {
+    z2_oracle_pair_split(runtime, 2)
+}
+
+/// The same oracle pair over three identical legs, split into
+/// `num_codomain <- rest`. `2` is tall in every coupled sector and `1` is wide,
+/// which is what separates the compact factorizations from the full ones:
+/// on a tall input LQ-compact and LQ-full coincide.
+fn z2_oracle_pair_split(
+    runtime: &Runtime,
+    num_codomain: usize,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::Z2FusionRule, f64>,
+) {
     let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
+    let spaces = [&space, &space, &space];
+    let (codomain, domain) = spaces.split_at(num_codomain);
     let erased = tenet::prelude::Tensor::from_block_fn(
         runtime,
-        [&space, &space],
-        [&space],
+        codomain.iter().copied(),
+        domain.iter().copied(),
         erased_fill_value,
     )
     .unwrap();
@@ -1060,7 +1076,15 @@ fn z2_oracle_pair(
         false,
     )
     .unwrap();
-    let typed = TensorMap::from_block_fn(runtime, [&leg, &leg], [&leg], typed_fill_value).unwrap();
+    let legs = [&leg, &leg, &leg];
+    let (codomain, domain) = legs.split_at(num_codomain);
+    let typed = TensorMap::from_block_fn(
+        runtime,
+        codomain.iter().copied(),
+        domain.iter().copied(),
+        typed_fill_value,
+    )
+    .unwrap();
     (erased, typed)
 }
 
@@ -2004,18 +2028,24 @@ fn svd_vals_reports_decoded_labels_sorted_by_label() {
 
 #[test]
 fn typed_and_erased_qr_and_lq_agree_byte_for_byte() {
+    // Both splits are exercised deliberately: `2 <- 1` is tall in every coupled
+    // sector, where LQ-compact and LQ-full return the same factors and so
+    // cannot tell the two seams apart; `1 <- 2` is wide, where they differ (and
+    // symmetrically for QR).
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
+    for num_codomain in [2, 1] {
+        let (erased, typed) = z2_oracle_pair_split(&runtime, num_codomain);
 
-    for (erased_out, typed_out) in [
-        (erased.qr_compact().unwrap(), typed.qr_compact().unwrap()),
-        (erased.qr_full().unwrap(), typed.qr_full().unwrap()),
-        (erased.lq_compact().unwrap(), typed.lq_compact().unwrap()),
-        (erased.lq_full().unwrap(), typed.lq_full().unwrap()),
-    ] {
-        assert_eq!(typed_out.0.data(), erased_out.0.data());
-        assert_eq!(typed_out.1.data(), erased_out.1.data());
+        for (erased_out, typed_out) in [
+            (erased.qr_compact().unwrap(), typed.qr_compact().unwrap()),
+            (erased.qr_full().unwrap(), typed.qr_full().unwrap()),
+            (erased.lq_compact().unwrap(), typed.lq_compact().unwrap()),
+            (erased.lq_full().unwrap(), typed.lq_full().unwrap()),
+        ] {
+            assert_eq!(typed_out.0.data(), erased_out.0.data());
+            assert_eq!(typed_out.1.data(), erased_out.1.data());
+        }
     }
 }
 
