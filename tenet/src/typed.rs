@@ -1217,6 +1217,81 @@ where
         self.with_data(self.body.data.iter().map(|&value| value * factor).collect())
     }
 
+    /// Partial trace over pairs of mutually dual legs (TensorKit
+    /// `tensortrace!` / TensorOperations `@tensor a[i, i; j]`).
+    ///
+    /// Each `(lhs, rhs)` pair of flat axis numbers (`0..rank`, codomain axes
+    /// first) is traced away; the remaining legs keep their order and their
+    /// codomain/domain side. Tracing nothing returns the source.
+    ///
+    /// This is the **tensor-contraction** trace: it applies the categorical
+    /// trace coefficients, including a fermionic rule's twists, so it is the
+    /// supertrace there. [`Self::tr`] is TensorKit's positive trace instead,
+    /// and the two genuinely disagree for a fermionic provider.
+    ///
+    /// The `&[(usize, usize)]` shape mirrors the erased facade; TensorKit's
+    /// native parallel-list `Index2Tuple` is what the seam takes internally.
+    /// One cross-facade vocabulary wins over matching the seam's.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when the pair list is malformed — an axis out
+    /// of range, or one named twice — with the erased facade's own message.
+    /// Otherwise [`Error::Operation`] / [`Error::Core`] /
+    /// [`Error::FusionAlgebra`] from the seam, which owns the rest of the
+    /// validation (legs that are not mutually dual, above all).
+    pub fn trace_pairs(&self, pairs: &[(usize, usize)]) -> Result<Self, Error> {
+        // Why this validation is kept rather than left to the seam, unlike
+        // everywhere else in this facade: `seen` is not a check, it is the
+        // derivation of `output_axes` below — the seam cannot supply it, and a
+        // malformed list would otherwise produce a silently wrong output order
+        // rather than an error. Same precedent as `braid`'s levels pre-check.
+        let rank = self.rank();
+        let mut seen = vec![false; rank];
+        for &(lhs, rhs) in pairs {
+            for axis in [lhs, rhs] {
+                if axis >= rank || seen[axis] {
+                    return Err(Error::InvalidArgument(format!(
+                        "invalid trace pair list {pairs:?} for rank {rank} \
+                         (axes must be in range and distinct)"
+                    )));
+                }
+                seen[axis] = true;
+            }
+        }
+        if pairs.is_empty() {
+            return Ok(self.clone());
+        }
+        let output_axes: Vec<usize> = (0..rank).filter(|&axis| !seen[axis]).collect();
+        let destination_codomain_rank = output_axes
+            .iter()
+            .filter(|&&axis| axis < self.codomain_rank())
+            .count();
+        let trace_lhs: Vec<usize> = pairs.iter().map(|&(lhs, _)| lhs).collect();
+        let trace_rhs: Vec<usize> = pairs.iter().map(|&(_, rhs)| rhs).collect();
+        let axes = tenet_tensors::TensorTraceAxisSpec::new(&output_axes, &trace_lhs, &trace_rhs);
+        // Preflight first, exactly as the erased facade does: the checked
+        // homspace selection must fail before any destination layout is
+        // derived, so a rejected trace publishes no state.
+        let homspace = tenet_tensors::tensortrace_fusion_dyn_selected_homspace_checked(
+            &self.body.space,
+            axes,
+            destination_codomain_rank,
+        )?;
+        let space = self.body.space.derive_from_final_homspace(homspace)?;
+        let data = tenet_tensors::tensortrace_fusion_dyn_owned_checked(
+            &space,
+            &self.body.space,
+            &self.body.data,
+            axes,
+            D::from_real(1.0),
+        )?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody { space, data }),
+        })
+    }
+
     /// TensorKit `adjoint` (dagger): swaps codomain and domain and
     /// conjugate-transposes every block. Real payloads are transposed only;
     /// c64 entries are conjugated as well.

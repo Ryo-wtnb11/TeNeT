@@ -2733,3 +2733,133 @@ fn adjoint_carries_an_external_provider() {
     // A dagger preserves the dimension-weighted norm.
     assert!((adjoint.norm().unwrap() - tensor.norm().unwrap()).abs() < 1e-12);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 5 (issue #568), slice 5: `TensorMap::trace_pairs`.
+// ---------------------------------------------------------------------------
+
+/// The erased sibling of [`fermionic_rank_three`], as an endomorphism
+/// `[v] <- [v]`: the shape `tr` needs, on the one provider here whose braiding
+/// is not symmetric.
+fn fermionic_endo_pair(
+    runtime: &Runtime,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::FermionParityFusionRule, f64>,
+) {
+    let space = tenet::prelude::Space::fz2([(0, 1), (1, 1)]).unwrap();
+    let mut next = 0.0;
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        runtime,
+        [&space],
+        [&space],
+        |_: &tenet::prelude::BlockKey, _: &[usize]| {
+            next += 1.0;
+            next
+        },
+    )
+    .unwrap();
+    let leg = fermionic_leg();
+    let mut next = 0.0;
+    let typed = TensorMap::from_block_fn(runtime, [&leg], [&leg], |_, _| {
+        next += 1.0;
+        next
+    })
+    .unwrap();
+    assert_eq!(typed.data(), erased.data());
+    (erased, typed)
+}
+
+#[test]
+fn typed_and_erased_trace_pairs_agree_byte_for_byte() {
+    // What: the full trace to a rank-0 tensor and a partial trace that leaves a
+    // leg open, both against the erased sibling. The partial case is the one
+    // that exercises the output-axis derivation and the destination's
+    // codomain rank; the full case is the degenerate one.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+    let full = typed.trace_pairs(&[(0, 1)]).unwrap();
+    assert_eq!(full.data(), erased.trace_pairs(&[(0, 1)]).unwrap().data());
+    assert_eq!(full.data().len(), 1);
+
+    // `[v, v] <- [v]`: tracing axis 1 against axis 2 leaves axis 0 open, so the
+    // result is `[v] <- []` and the open axis keeps its side.
+    let (erased, typed) = z2_oracle_pair(&runtime);
+    let partial = typed.trace_pairs(&[(1, 2)]).unwrap();
+    assert_eq!(
+        partial.data(),
+        erased.trace_pairs(&[(1, 2)]).unwrap().data()
+    );
+    assert_eq!(partial.codomain().len(), 1);
+    assert_eq!(partial.domain().len(), 0);
+}
+
+#[test]
+fn trace_pairs_agrees_with_the_erased_facade_on_a_non_abelian_rule() {
+    // SU(2): the categorical trace coefficients are not all one here, so this
+    // is where a coefficient-free partial trace would diverge.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = su2_oracle_pair(&runtime);
+
+    assert_eq!(
+        typed.trace_pairs(&[(0, 1)]).unwrap().data(),
+        erased.trace_pairs(&[(0, 1)]).unwrap().data()
+    );
+}
+
+#[test]
+fn trace_pairs_of_nothing_is_the_source() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, typed) = z2_oracle_pair(&runtime);
+
+    let traced = typed.trace_pairs(&[]).unwrap();
+
+    assert_eq!(traced.data(), typed.data());
+    assert_eq!(traced.codomain().len(), 2);
+}
+
+#[test]
+fn trace_pairs_rejects_malformed_pairs() {
+    // Out of range and repeated axes, both with the erased facade's message.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, typed) = z2_endo_oracle_pair(&runtime);
+
+    for pairs in [vec![(0usize, 9usize)], vec![(0, 0)], vec![(0, 1), (1, 0)]] {
+        assert!(matches!(
+            typed.trace_pairs(&pairs).unwrap_err(),
+            tenet::prelude::Error::InvalidArgument(message)
+                if message.contains("invalid trace pair list")
+        ));
+    }
+}
+
+#[test]
+fn fermionic_trace_pairs_is_the_supertrace_and_tr_is_not() {
+    // What: the documented divergence. `tr` is TensorKit's positive trace
+    // (`Σ_c dim(c) tr(b_c)`), `trace_pairs` is the tensor-contraction trace,
+    // which for a fermionic rule carries the twist — the supertrace. On this
+    // fixture the odd sector contributes with opposite signs, so the two
+    // numbers differ, and both match their erased siblings.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = fermionic_endo_pair(&runtime);
+
+    let positive = typed.tr().unwrap();
+    let super_trace = typed.trace_pairs(&[(0, 1)]).unwrap();
+
+    assert_eq!(positive, erased.tr().unwrap().re());
+    assert_eq!(
+        super_trace.data(),
+        erased.trace_pairs(&[(0, 1)]).unwrap().data()
+    );
+    assert_ne!(
+        super_trace.data(),
+        [positive],
+        "the fermionic supertrace must not coincide with the positive trace"
+    );
+}
