@@ -176,6 +176,8 @@ fn every_derived_value_matches_the_pinned_julia_environment() {
     let fib = table();
     let entries = fixture();
 
+    let mut checked = 0usize;
+
     for a in SECTORS {
         assert_bits(
             fib.dim_scalar(a),
@@ -192,6 +194,7 @@ fn every_derived_value_matches_the_pinned_julia_environment() {
             fixture_value(&entries, "twist", &[a.id()]),
             "twist",
         );
+        checked += 3;
     }
 
     // A and B come from the `tenet-sectors` trait defaults, so this also pins
@@ -210,9 +213,13 @@ fn every_derived_value_matches_the_pinned_julia_environment() {
                     fixture_value(&entries, "B", &labels),
                     "B",
                 );
+                checked += 2;
             }
         }
     }
+
+    // 2 x (dim + Frobenius-Schur + twist) + 8 A + 8 B.
+    assert_eq!(checked, 6 + 8 + 8);
 }
 
 // -------------------------------------------------------------------------
@@ -474,6 +481,11 @@ fn both_hexagon_equations_hold() {
                             let over = fib.r_symbol_scalar(c, a, e)
                                 * facbdef
                                 * fib.r_symbol_scalar(c, b, f);
+                            // `conj(R)` where TensorKitSectors writes
+                            // `inv(R)`: equal only because R is unitary, which
+                            // `r_symbols_are_unit_modulus_on_admissible_channels`
+                            // asserts independently. Not circular — that test
+                            // reads R alone and never touches the hexagon.
                             let under = fib.r_symbol_scalar(a, c, e).conj()
                                 * facbdef
                                 * fib.r_symbol_scalar(b, c, f).conj();

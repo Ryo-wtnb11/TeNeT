@@ -534,15 +534,18 @@ mod tests {
 
     #[test]
     fn rejects_non_finite_and_unreadable_coefficients() {
+        // `TRIVIAL_R`, not `TRIVIAL_F`, as the R text: passing a 12-field F
+        // record to the 7-field R parser would make this pass on an arity
+        // error the moment the parse order changed.
         assert!(matches!(
-            parse_trivial(TRIVIAL_N, "1 1 1 1 1 1 1 1 1 1 inf 0\n", TRIVIAL_F),
+            parse_trivial(TRIVIAL_N, "1 1 1 1 1 1 1 1 1 1 inf 0\n", TRIVIAL_R),
             Err(CategoryDataError::NonFinite {
                 table: "Fsymbols",
                 ..
             })
         ));
         assert!(matches!(
-            parse_trivial(TRIVIAL_N, "1 1 1 1 1 1 1 1 1 1 zzz 0\n", TRIVIAL_F),
+            parse_trivial(TRIVIAL_N, "1 1 1 1 1 1 1 1 1 1 zzz 0\n", TRIVIAL_R),
             Err(CategoryDataError::Field {
                 table: "Fsymbols",
                 ..
