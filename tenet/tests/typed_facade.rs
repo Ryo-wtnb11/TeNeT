@@ -1104,6 +1104,42 @@ fn z2_oracle_pair_split(
     (erased, typed)
 }
 
+/// The c64 sibling of [`z2_oracle_pair`]. The imaginary part is deliberately
+/// not proportional to the real one, so a stray conjugation or a real-only
+/// path is visible in every comparison this pair feeds.
+fn z2_complex_oracle_pair(
+    runtime: &Runtime,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::Z2FusionRule, Complex64>,
+) {
+    let complex = |value: f64| Complex64::new(value, 1.0 + value % 5.0);
+    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        runtime,
+        [&space, &space],
+        [&space],
+        |key: &tenet::prelude::BlockKey, indices: &[usize]| {
+            complex(erased_fill_value(key, indices))
+        },
+    )
+    .unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 3),
+        ],
+        false,
+    )
+    .unwrap();
+    let typed = TensorMap::from_block_fn(runtime, [&leg, &leg], [&leg], |sectors, indices| {
+        complex(typed_fill_value(sectors, indices))
+    })
+    .unwrap();
+    (erased, typed)
+}
+
 #[test]
 fn typed_and_erased_permute_agree_byte_for_byte_on_a_builtin_rule() {
     // What: the typed permute is the erased permute, not a lookalike — same
@@ -1937,31 +1973,7 @@ fn typed_and_erased_svd_compact_agree_byte_for_byte_on_a_complex_payload() {
     // stray conjugation or a real-only path is visible.
     let _guard = cache_lock();
     let runtime = runtime();
-    let complex = |value: f64| Complex64::new(value, 1.0 + value % 5.0);
-    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
-    let erased = tenet::prelude::Tensor::from_block_fn(
-        &runtime,
-        [&space, &space],
-        [&space],
-        |key: &tenet::prelude::BlockKey, indices: &[usize]| {
-            complex(erased_fill_value(key, indices))
-        },
-    )
-    .unwrap();
-    let leg = GradedSpace::try_new(
-        Arc::new(tenet::core::Z2FusionRule),
-        [
-            (tenet::core::Z2Irrep::EVEN, 2),
-            (tenet::core::Z2Irrep::ODD, 3),
-        ],
-        false,
-    )
-    .unwrap();
-    let typed: TensorMap<tenet::core::Z2FusionRule, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |sectors, indices| {
-            complex(typed_fill_value(sectors, indices))
-        })
-        .unwrap();
+    let (erased, typed) = z2_complex_oracle_pair(&runtime);
     assert_eq!(typed.data(), erased.try_data_c64().unwrap());
 
     let (eu, _, evh) = erased.svd_compact().unwrap();
@@ -2256,5 +2268,646 @@ fn decompositions_carry_an_external_provider_with_its_own_labels() {
             .iter()
             .map(|entry| entry.sector)
             .collect::<Vec<_>>()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5 (issue #568), slice 1: `TensorMap::add` and `TensorMap::scale`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn typed_and_erased_add_agree_byte_for_byte() {
+    // What: `alpha * self + beta * other` is the erased combination, coefficient
+    // for coefficient. The two coefficients are deliberately different and
+    // neither is 1, so swapping them (or dropping one) moves the buffer.
+    //
+    // The second operand is a permute of the first: same space, same layout,
+    // different values, and no second fixture — `permute` is already pinned
+    // against the erased facade byte for byte.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+    let erased_other = erased.permute(&[1, 0], &[2]).unwrap();
+    let typed_other = typed.permute(&[1, 0], &[2]).unwrap();
+
+    let erased_sum = erased.add(&erased_other, 2.0, -3.0).unwrap();
+    let typed_sum = typed.add(&typed_other, 2.0, -3.0).unwrap();
+
+    assert_eq!(typed_sum.data(), erased_sum.data());
+    // The asymmetry is real: the swapped combination is a different tensor.
+    assert_ne!(
+        typed.add(&typed_other, -3.0, 2.0).unwrap().data(),
+        typed_sum.data()
+    );
+}
+
+#[test]
+fn add_carries_complex_coefficients() {
+    // What: `D` is the coefficient type too, so the c64 instantiation covers
+    // the erased facade's separate `add_c64` with no second method here.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_complex_oracle_pair(&runtime);
+    let alpha = Complex64::new(0.5, -2.0);
+    let beta = Complex64::new(-1.5, 0.25);
+
+    let erased_sum = erased
+        .add_c64(&erased.permute(&[1, 0], &[2]).unwrap(), alpha, beta)
+        .unwrap();
+    let typed_sum = typed
+        .add(&typed.permute(&[1, 0], &[2]).unwrap(), alpha, beta)
+        .unwrap();
+
+    assert_eq!(typed_sum.data(), erased_sum.try_data_c64().unwrap());
+}
+
+#[test]
+fn add_rejects_a_different_runtime_and_a_different_space() {
+    // What: the two checks this facade makes itself, in order — the runtime
+    // identity the expert layer never sees, then the space equality that makes
+    // the element-wise combination meaningful.
+    let _guard = cache_lock();
+    let other_runtime = runtime();
+    let runtime = runtime();
+    let (_, typed) = z2_oracle_pair(&runtime);
+    let (_, elsewhere) = z2_oracle_pair(&other_runtime);
+    let (_, other_split) = z2_oracle_pair_split(&runtime, 1);
+
+    assert!(matches!(
+        typed.add(&elsewhere, 1.0, 1.0).unwrap_err(),
+        tenet::prelude::Error::RuntimeMismatch
+    ));
+    // The erased facade's `check_same_space` message, verbatim: one mistake
+    // must not be reported two ways across the two facades.
+    assert!(matches!(
+        typed.add(&other_split, 1.0, 1.0).unwrap_err(),
+        tenet::prelude::Error::InvalidArgument(message)
+            if message == "tensors live on different spaces or block layouts"
+    ));
+}
+
+#[test]
+fn typed_and_erased_scale_agree_byte_for_byte() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    assert_eq!(typed.scale(-2.5).data(), erased.scale(-2.5).unwrap().data());
+
+    let (erased_c, typed_c) = z2_complex_oracle_pair(&runtime);
+    let factor = Complex64::new(0.25, 3.0);
+    assert_eq!(
+        typed_c.scale(factor).data(),
+        erased_c.scale_c64(factor).unwrap().try_data_c64().unwrap()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5 (issue #568), slice 2: `norm`, `norm_inf`, `normalize`.
+// ---------------------------------------------------------------------------
+
+/// An SU(2) oracle pair over two legs, split into `num_codomain <- rest`: the
+/// same tensor built through both facades on the built-in `SU2FusionRule`.
+///
+/// Why this fixture exists at all, next to the Z2 one: SU(2) is the only
+/// non-abelian rule here, so it is the only one whose coupled sectors have
+/// `dim(c) != 1`. Z2 is abelian and takes `weighted_inner`'s `Unique` fast
+/// path, where the quantum-dimension weights are all one and therefore
+/// invisible — every dimension-weighted operation needs this pair as well.
+///
+/// The fill is a plain counter, so the two buffers agree only if the two
+/// facades walk blocks and elements in the same order; the helper asserts that
+/// before handing the pair out.
+fn su2_oracle_pair_split(
+    runtime: &Runtime,
+    num_codomain: usize,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::SU2FusionRule, f64>,
+) {
+    let space = tenet::prelude::Space::su2([(0, 1), (1, 2)]).unwrap();
+    let spaces = [&space, &space];
+    let (codomain, domain) = spaces.split_at(num_codomain);
+    let mut next = 0.0;
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        runtime,
+        codomain.iter().copied(),
+        domain.iter().copied(),
+        |_: &tenet::prelude::BlockKey, _: &[usize]| {
+            next += 1.0;
+            next
+        },
+    )
+    .unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::SU2FusionRule),
+        [
+            (SU2Irrep::from_twice_spin(0), 1),
+            (SU2Irrep::from_twice_spin(1), 2),
+        ],
+        false,
+    )
+    .unwrap();
+    let legs = [&leg, &leg];
+    let (codomain, domain) = legs.split_at(num_codomain);
+    let mut next = 0.0;
+    let typed = TensorMap::from_block_fn(
+        runtime,
+        codomain.iter().copied(),
+        domain.iter().copied(),
+        |_, _| {
+            next += 1.0;
+            next
+        },
+    )
+    .unwrap();
+    assert_eq!(typed.data(), erased.data());
+    (erased, typed)
+}
+
+/// The endomorphism split of [`su2_oracle_pair_split`]: `[v] <- [v]`, which is
+/// what `tr` needs and what every other SU(2) assertion here happens to use.
+fn su2_oracle_pair(
+    runtime: &Runtime,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::SU2FusionRule, f64>,
+) {
+    su2_oracle_pair_split(runtime, 1)
+}
+
+#[test]
+fn typed_and_erased_norm_agree_including_the_dimension_weighted_branch() {
+    // What: `norm` is TensorKit's quantum-dimension-weighted Frobenius norm on
+    // both facades. The SU(2) half is the one that matters: there
+    // `norm^2 != sum |x|^2`, so a weight-free implementation would pass the Z2
+    // half and fail here.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    let (erased, typed) = z2_oracle_pair(&runtime);
+    let unweighted: f64 = typed.data().iter().map(|value| value * value).sum();
+    assert_eq!(typed.norm().unwrap(), erased.norm().unwrap());
+    // Z2 is abelian: every dim(c) is one, so the weighting is the identity and
+    // this fixture alone cannot see the weight at all.
+    assert!((typed.norm().unwrap() - unweighted.sqrt()).abs() < 1e-12);
+
+    let (erased, typed) = su2_oracle_pair(&runtime);
+    let unweighted: f64 = typed.data().iter().map(|value| value * value).sum();
+    assert_eq!(typed.norm().unwrap(), erased.norm().unwrap());
+    assert!(
+        (typed.norm().unwrap() - unweighted.sqrt()).abs() > 1.0,
+        "the SU(2) fixture must actually separate the weighted norm from the \
+         unweighted one, or it cannot kill a dropped dim(c)"
+    );
+}
+
+#[test]
+fn typed_and_erased_norm_inf_agree_and_are_not_dimension_weighted() {
+    // What: TensorKit's `norm(t, Inf)` — the largest absolute stored entry,
+    // with no quantum-dimension weighting. Checked on SU(2), where a weighted
+    // implementation would differ.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    let (erased, typed) = su2_oracle_pair(&runtime);
+    let largest = typed
+        .data()
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0, f64::max);
+    assert_eq!(typed.norm_inf().unwrap(), erased.norm_inf().unwrap());
+    assert_eq!(typed.norm_inf().unwrap(), largest);
+    assert_ne!(typed.norm_inf().unwrap(), typed.norm().unwrap());
+
+    // c64: the modulus, not the real part.
+    let (erased, typed) = z2_complex_oracle_pair(&runtime);
+    assert_eq!(typed.norm_inf().unwrap(), erased.norm_inf().unwrap());
+    assert!(typed
+        .data()
+        .iter()
+        .all(|value| value.norm() <= typed.norm_inf().unwrap()));
+}
+
+#[test]
+fn normalize_returns_a_unit_norm_tensor_matching_the_erased_facade() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    // SU(2): normalizing by a dimension-weighted norm is what a plain
+    // Frobenius normalization would get wrong, and only a non-abelian fixture
+    // can see it.
+    let (erased, typed) = su2_oracle_pair(&runtime);
+    let unit = typed.normalize().unwrap();
+    assert_eq!(unit.data(), erased.normalize().unwrap().data());
+    assert!((unit.norm().unwrap() - 1.0).abs() < 1e-12);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5 (issue #568), slice 3: `inner`, `dot`, `tr`.
+// ---------------------------------------------------------------------------
+
+/// A Z2 endomorphism oracle pair, `[v] <- [v]`: the abelian half of the `tr`
+/// comparison, where every quantum dimension is one.
+fn z2_endo_oracle_pair(
+    runtime: &Runtime,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::Z2FusionRule, f64>,
+) {
+    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
+    let erased =
+        tenet::prelude::Tensor::from_block_fn(runtime, [&space], [&space], erased_fill_value)
+            .unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 3),
+        ],
+        false,
+    )
+    .unwrap();
+    let typed = TensorMap::from_block_fn(runtime, [&leg], [&leg], typed_fill_value).unwrap();
+    (erased, typed)
+}
+
+#[test]
+fn typed_and_erased_inner_agree_including_the_dimension_weighted_branch() {
+    // What: `inner` is TensorKit's `dot(x, y)` — conjugate-linear in the first
+    // argument and quantum-dimension weighted — on both facades, and it comes
+    // back as a `D` rather than the erased `Scalar` enum. SU(2) is what
+    // exercises the weighted branch; Z2 alone would take the abelian fast path.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    let (z2_erased, z2_typed) = z2_oracle_pair(&runtime);
+    let (su2_erased, su2_typed) = su2_oracle_pair(&runtime);
+    // The two providers are different types, so the shared assertions live in a
+    // closure over the pair of scalars rather than in a loop over the pairs.
+    let agree = |typed_value: f64, erased_value: f64, norm: f64| {
+        assert_eq!(typed_value, erased_value);
+        // `<t, t>` is the squared norm, which is the identity that pins this
+        // weighting to `norm`'s.
+        assert!((typed_value - norm * norm).abs() < 1e-9 * norm * norm);
+    };
+    agree(
+        z2_typed.inner(&z2_typed).unwrap(),
+        z2_erased.inner(&z2_erased).unwrap().re(),
+        z2_typed.norm().unwrap(),
+    );
+    agree(
+        su2_typed.inner(&su2_typed).unwrap(),
+        su2_erased.inner(&su2_erased).unwrap().re(),
+        su2_typed.norm().unwrap(),
+    );
+}
+
+#[test]
+fn inner_conjugates_its_first_argument() {
+    // What: the conjugation is on `self`, so for a complex payload
+    // `<a, b> = conj(<b, a>)` and the two are genuinely different numbers.
+    // A dropped conjugation makes both sides equal and this test fail.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_complex_oracle_pair(&runtime);
+    // The extra `i` is what makes the product genuinely complex: this fixture's
+    // imaginary part is a function of its real one, so the plain permuted
+    // partner happens to give a real inner product and could not see a phase.
+    let imaginary = Complex64::new(0.0, 1.0);
+    let other = typed.permute(&[1, 0], &[2]).unwrap().scale(imaginary);
+    let erased_other = erased
+        .permute(&[1, 0], &[2])
+        .unwrap()
+        .scale_c64(imaginary)
+        .unwrap();
+
+    let value = typed.inner(&other).unwrap();
+    assert_eq!(value, erased.inner(&erased_other).unwrap().to_c64());
+    assert_eq!(value, other.inner(&typed).unwrap().conj());
+    assert_ne!(value, other.inner(&typed).unwrap());
+    assert!(value.im.abs() > 1e-6, "the fixture must have a real phase");
+}
+
+#[test]
+fn dot_is_inner() {
+    // The erased `dot` is a plain alias for `inner`; so is this one, and the
+    // two names must not be able to come to mean different things.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, typed) = z2_complex_oracle_pair(&runtime);
+    let other = typed.permute(&[1, 0], &[2]).unwrap();
+
+    assert_eq!(typed.dot(&other).unwrap(), typed.inner(&other).unwrap());
+}
+
+#[test]
+fn inner_rejects_a_different_runtime_and_a_different_space() {
+    let _guard = cache_lock();
+    let other_runtime = runtime();
+    let runtime = runtime();
+    let (_, typed) = z2_oracle_pair(&runtime);
+    let (_, elsewhere) = z2_oracle_pair(&other_runtime);
+    let (_, other_split) = z2_oracle_pair_split(&runtime, 1);
+
+    assert!(matches!(
+        typed.inner(&elsewhere).unwrap_err(),
+        tenet::prelude::Error::RuntimeMismatch
+    ));
+    assert!(matches!(
+        typed.inner(&other_split).unwrap_err(),
+        tenet::prelude::Error::InvalidArgument(message)
+            if message == "tensors live on different spaces or block layouts"
+    ));
+}
+
+#[test]
+fn typed_and_erased_tr_agree_including_the_dimension_weighted_branch() {
+    // What: TensorKit's positive trace `Σ_c dim(c) * tr(b_c)`. The SU(2) half
+    // separates it from the unweighted diagonal sum; the Z2 half is where the
+    // two coincide.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+    assert_eq!(typed.tr().unwrap(), erased.tr().unwrap().re());
+
+    let (erased, typed) = su2_oracle_pair(&runtime);
+    let trace = typed.tr().unwrap();
+    assert_eq!(trace, erased.tr().unwrap().re());
+    // The unweighted diagonal sum of the same blocks, for contrast: `tr` is
+    // not it, which is what a dropped `dim(c)` would make it.
+    let unweighted: f64 = (0..typed.block_count())
+        .map(|index| {
+            let block = typed.block(index).unwrap();
+            let size = block.shape()[0];
+            (0..size)
+                .map(|i| {
+                    typed.data()[block.offset() + i * (block.strides()[0] + block.strides()[1])]
+                })
+                .sum::<f64>()
+        })
+        .sum();
+    assert!(
+        (trace - unweighted).abs() > 1.0,
+        "the SU(2) fixture must separate the weighted trace from the unweighted one"
+    );
+}
+
+#[test]
+fn tr_requires_an_endomorphism() {
+    // The erased facade's own message, verbatim.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, typed) = z2_oracle_pair(&runtime);
+
+    assert!(matches!(
+        typed.tr().unwrap_err(),
+        tenet::prelude::Error::InvalidArgument(message)
+            if message == "tr() requires an endomorphism (domain == codomain)"
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5 (issue #568), slice 4: `TensorMap::adjoint`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn typed_and_erased_adjoint_agree_byte_for_byte() {
+    // What: the eager typed adjoint is the erased lazy view's materialized
+    // buffer, byte for byte — the divergence is in when the work happens, not
+    // in what comes out. The spaces swap sides, which the shape assertions pin.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    let adjoint = typed.adjoint().unwrap();
+
+    assert_eq!(adjoint.data(), erased.adjoint().unwrap().data());
+    assert_eq!(adjoint.codomain().len(), typed.domain().len());
+    assert_eq!(adjoint.domain().len(), typed.codomain().len());
+    // Its own inverse, as a dagger must be.
+    assert_eq!(adjoint.adjoint().unwrap().data(), typed.data());
+}
+
+#[test]
+fn adjoint_conjugates_a_complex_payload() {
+    // What: c64 entries come back conjugated, not merely transposed. Compared
+    // as multisets, because the transpose moves entries around: the point is
+    // that the *values* are the conjugated ones and not the original ones.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_complex_oracle_pair(&runtime);
+
+    let adjoint = typed.adjoint().unwrap();
+    assert_eq!(
+        adjoint.data(),
+        erased.adjoint().unwrap().try_data_c64().unwrap()
+    );
+
+    let sorted = |values: &mut Vec<Complex64>| {
+        values.sort_by(|a, b| a.re.total_cmp(&b.re).then(a.im.total_cmp(&b.im)));
+    };
+    let mut got: Vec<Complex64> = adjoint.data().to_vec();
+    let mut conjugated: Vec<Complex64> = typed.data().iter().map(|v| v.conj()).collect();
+    let mut plain: Vec<Complex64> = typed.data().to_vec();
+    sorted(&mut got);
+    sorted(&mut conjugated);
+    sorted(&mut plain);
+    assert_eq!(got, conjugated);
+    assert_ne!(
+        got, plain,
+        "the fixture must have a non-zero imaginary part"
+    );
+}
+
+#[test]
+fn adjoint_carries_an_external_provider() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    let adjoint = tensor.adjoint().unwrap();
+
+    assert_eq!(adjoint.data().len(), tensor.data().len());
+    assert_eq!(adjoint.adjoint().unwrap().data(), tensor.data());
+    // A dagger preserves the dimension-weighted norm.
+    assert!((adjoint.norm().unwrap() - tensor.norm().unwrap()).abs() < 1e-12);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5 (issue #568), slice 5: `TensorMap::trace_pairs`.
+// ---------------------------------------------------------------------------
+
+/// The erased sibling of [`fermionic_rank_three`], as an endomorphism
+/// `[v] <- [v]`: the shape `tr` needs, on the one provider here whose braiding
+/// is not symmetric.
+fn fermionic_endo_pair(
+    runtime: &Runtime,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::FermionParityFusionRule, f64>,
+) {
+    let space = tenet::prelude::Space::fz2([(0, 1), (1, 1)]).unwrap();
+    let mut next = 0.0;
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        runtime,
+        [&space],
+        [&space],
+        |_: &tenet::prelude::BlockKey, _: &[usize]| {
+            next += 1.0;
+            next
+        },
+    )
+    .unwrap();
+    let leg = fermionic_leg();
+    let mut next = 0.0;
+    let typed = TensorMap::from_block_fn(runtime, [&leg], [&leg], |_, _| {
+        next += 1.0;
+        next
+    })
+    .unwrap();
+    assert_eq!(typed.data(), erased.data());
+    (erased, typed)
+}
+
+#[test]
+fn typed_and_erased_trace_pairs_agree_byte_for_byte() {
+    // What: the full trace to a rank-0 tensor and a partial trace that leaves a
+    // leg open, both against the erased sibling. The partial case is the one
+    // that exercises the output-axis derivation and the destination's
+    // codomain rank; the full case is the degenerate one.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+    let full = typed.trace_pairs(&[(0, 1)]).unwrap();
+    assert_eq!(full.data(), erased.trace_pairs(&[(0, 1)]).unwrap().data());
+    assert_eq!(full.data().len(), 1);
+
+    // `[v, v] <- [v]`: tracing axis 1 against axis 2 leaves axis 0 open, so the
+    // result is `[v] <- []` and the open axis keeps its side.
+    let (erased, typed) = z2_oracle_pair(&runtime);
+    let partial = typed.trace_pairs(&[(1, 2)]).unwrap();
+    assert_eq!(
+        partial.data(),
+        erased.trace_pairs(&[(1, 2)]).unwrap().data()
+    );
+    assert_eq!(partial.codomain().len(), 1);
+    assert_eq!(partial.domain().len(), 0);
+
+    // The two cases above leave at most one survivor, and it is codomain-side,
+    // so neither can see the order of `output_axes` nor the codomain-rank
+    // filter that splits the destination. These two can.
+    //
+    // `[v] <- [v, v]`, tracing (0, 1): the survivor is axis 2, a domain-side
+    // leg, so the destination is `[] <- [v]` — a dropped codomain-rank filter
+    // would put it in the codomain instead.
+    let (erased, typed) = z2_oracle_pair_split(&runtime, 1);
+    let survivor = typed.trace_pairs(&[(0, 1)]).unwrap();
+    assert_eq!(
+        survivor.data(),
+        erased.trace_pairs(&[(0, 1)]).unwrap().data()
+    );
+    assert_eq!(survivor.codomain().len(), 0);
+    assert_eq!(survivor.domain().len(), 1);
+
+    // `[v, v] <- [v, v]`, tracing (0, 3): two survivors, axes 1 and 2, one on
+    // each side — so their relative order in `output_axes` is observable, and
+    // reversing it changes the bytes.
+    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        &runtime,
+        [&space, &space],
+        [&space, &space],
+        erased_fill_value,
+    )
+    .unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 3),
+        ],
+        false,
+    )
+    .unwrap();
+    let typed: TensorMap<tenet::core::Z2FusionRule, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], typed_fill_value).unwrap();
+    let two_survivors = typed.trace_pairs(&[(0, 3)]).unwrap();
+    assert_eq!(
+        two_survivors.data(),
+        erased.trace_pairs(&[(0, 3)]).unwrap().data()
+    );
+    assert_eq!(two_survivors.codomain().len(), 1);
+    assert_eq!(two_survivors.domain().len(), 1);
+}
+
+#[test]
+fn trace_pairs_agrees_with_the_erased_facade_on_a_non_abelian_rule() {
+    // SU(2): the categorical trace coefficients are not all one here, so this
+    // is where a coefficient-free partial trace would diverge.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = su2_oracle_pair(&runtime);
+
+    assert_eq!(
+        typed.trace_pairs(&[(0, 1)]).unwrap().data(),
+        erased.trace_pairs(&[(0, 1)]).unwrap().data()
+    );
+}
+
+#[test]
+fn trace_pairs_of_nothing_is_the_source() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, typed) = z2_oracle_pair(&runtime);
+
+    let traced = typed.trace_pairs(&[]).unwrap();
+
+    assert_eq!(traced.data(), typed.data());
+    assert_eq!(traced.codomain().len(), 2);
+}
+
+#[test]
+fn trace_pairs_rejects_malformed_pairs() {
+    // Out of range and repeated axes, both with the erased facade's message.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, typed) = z2_endo_oracle_pair(&runtime);
+
+    for pairs in [vec![(0usize, 9usize)], vec![(0, 0)], vec![(0, 1), (1, 0)]] {
+        assert!(matches!(
+            typed.trace_pairs(&pairs).unwrap_err(),
+            tenet::prelude::Error::InvalidArgument(message)
+                if message.contains("invalid trace pair list")
+        ));
+    }
+}
+
+#[test]
+fn fermionic_trace_pairs_is_the_supertrace_and_tr_is_not() {
+    // What: the documented divergence. `tr` is TensorKit's positive trace
+    // (`Σ_c dim(c) tr(b_c)`), `trace_pairs` is the tensor-contraction trace,
+    // which for a fermionic rule carries the twist — the supertrace. On this
+    // fixture the odd sector contributes with opposite signs, so the two
+    // numbers differ, and both match their erased siblings.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = fermionic_endo_pair(&runtime);
+
+    let positive = typed.tr().unwrap();
+    let super_trace = typed.trace_pairs(&[(0, 1)]).unwrap();
+
+    assert_eq!(positive, erased.tr().unwrap().re());
+    assert_eq!(
+        super_trace.data(),
+        erased.trace_pairs(&[(0, 1)]).unwrap().data()
+    );
+    assert_ne!(
+        super_trace.data(),
+        [positive],
+        "the fermionic supertrace must not coincide with the positive trace"
     );
 }

@@ -30,7 +30,11 @@
 //! [`TensorMap::qr_compact`], [`TensorMap::qr_full`],
 //! [`TensorMap::lq_compact`], [`TensorMap::lq_full`],
 //! [`TensorMap::left_orth`], [`TensorMap::right_orth`],
-//! [`TensorMap::left_null`] and [`TensorMap::right_null`].
+//! [`TensorMap::left_null`] and [`TensorMap::right_null`] — plus the scalar
+//! operations of issue #568: [`TensorMap::add`], [`TensorMap::scale`],
+//! [`TensorMap::norm`], [`TensorMap::norm_inf`], [`TensorMap::normalize`],
+//! [`TensorMap::inner`], [`TensorMap::dot`], [`TensorMap::tr`],
+//! [`TensorMap::trace_pairs`] and [`TensorMap::adjoint`].
 //!
 //! Everything else is deliberately still absent, each for its own reason:
 //!
@@ -39,18 +43,33 @@
 //!   seam and would have to instantiate that question rather than inherit it,
 //!   and `eig_*` additionally needs a per-method `D::Eig` bound. Shipping part
 //!   of the family would leave a broken parity row.
-//! - The **scalar operations** (`add`, `scale`, `norm`, `inner`, `tr`) are
-//!   reachable but raise the operator-overload ergonomics question, which is
-//!   reviewed on its own.
+//! - The **operator overloads** (`impl Add`, `impl Mul`) are out on purpose.
+//!   `&a * &b` means [`crate::prelude::Tensor::compose`] in the erased facade
+//!   and this facade has no `compose`, so a typed `Mul` meaning scalar
+//!   multiplication would be a cross-facade false friend. And an operator
+//!   cannot return a `Result`: the erased `Mul` precedent panics, and a
+//!   panicking `+` as the only spelling of addition contradicts this facade's
+//!   passthrough-error contract. Adding them later is not a breaking change.
+//! - The **`is_hermitian` / `project_*` family** is blocked: three of its seven
+//!   members need something this facade does not have — `is_isometric` needs
+//!   `compose` and `id`, `is_unitary` delegates to it, and `is_posdef` needs
+//!   `eigh_vals`. Shipping the other four would leave the broken parity row
+//!   this doc refuses everywhere else. Those four (`is_hermitian`,
+//!   `is_antihermitian`, `project_hermitian`, `project_antihermitian`) are now
+//!   trivially reachable, though — each is a one-liner over
+//!   [`TensorMap::add`], [`TensorMap::adjoint`] and [`TensorMap::norm`] — so a
+//!   future phase closes the family as soon as `compose`, `id` and `eigh_vals`
+//!   land.
 //! - **Composition** — TensorKit `A * B`, which unlike [`TensorMap::contract`]
 //!   never twists dual legs — is blocked below this layer: fermionic compose
 //!   needs a new public seam over `LoweredMultiplicityFreeAlgebra`, which
 //!   `tenet-core` seals, and a silently
 //!   bosonic-only `compose` would return wrong fermionic signs rather than an
 //!   error.
-//! - `adjoint` and `conj` are design-gated: only an eager `adjoint` is
-//!   reachable here, which would diverge from the lazy erased sibling, and
-//!   `conj` has an open correctness question for non-self-dual sectors.
+//! - `conj` stays design-gated on its open correctness question for
+//!   non-self-dual sectors. [`TensorMap::adjoint`] is now in, eagerly: see its
+//!   own documentation for why that is TensorKit's `adjoint!` rather than a
+//!   divergence from the erased facade's lazy view.
 //!
 //! Adding any of them ahead of its review would bypass the gate that exists to
 //! keep this surface deliberate.
@@ -87,7 +106,10 @@ pub use tenet_matrixalgebra::Truncation;
 
 use tenet_matrixalgebra::BoundDynFactor;
 
-use crate::tensor::{apply_fill, with_planar_axes, Fill, PlanarRequestKind, TensorScalar};
+use crate::tensor::{
+    apply_fill, weighted_inner, weighted_trace, with_planar_axes, Fill, PlanarRequestKind,
+    TensorScalar,
+};
 use crate::typed_tensor_core::{
     tensorcontract_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
 };
@@ -1136,6 +1158,332 @@ where
         let mut dense = self.runtime.lease_dense();
         let out = tenet_matrixalgebra::right_null_dyn(dense.dense(), &self.bound_ref()?)?;
         Ok(self.wrap_bound_factor(out))
+    }
+
+    /// Builds a sibling on this tensor's own space and runtime from a fresh
+    /// buffer. Every element-wise scalar operation below produces exactly
+    /// that: the space is unchanged and only the payload is new, so the shared
+    /// [`BoundDynamicFusionMapSpace`] is cloned rather than re-derived — it
+    /// carries a checked admission proof this kind of operation cannot
+    /// invalidate.
+    fn with_data(&self, data: Vec<D>) -> Self {
+        Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody {
+                space: self.body.space.clone(),
+                data,
+            }),
+        }
+    }
+
+    /// The linear combination `alpha * self + beta * other`, mirroring the
+    /// erased [`crate::prelude::Tensor::add`].
+    ///
+    /// Both operands must live on the same runtime and on the same space —
+    /// identical hom space and block layout — since the combination is
+    /// element-wise on the shared storage order.
+    ///
+    /// # False friend
+    ///
+    /// VectorInterface's `add(y, x, α, β)` is `y * β + x * α`: its **first**
+    /// coefficient belongs to its **second** argument. Here `alpha` belongs to
+    /// `self` and `beta` to `other`, matching the erased facade. Callers
+    /// arriving from Julia should go by the argument order, not by the
+    /// coefficient names.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::RuntimeMismatch`] when the operands belong to different
+    ///   runtimes, as for [`Self::contract`].
+    /// - [`Error::InvalidArgument`] when they do not live on the same space,
+    ///   with the erased facade's own message. Operands whose providers report
+    ///   different rule identities land here too, rather than in
+    ///   [`Error::RuleMismatch`] as the erased `check_same_world` would report
+    ///   them: the space comparison already covers rule identity, so a
+    ///   separate check would only re-report the same disagreement.
+    pub fn add(&self, other: &Self, alpha: D, beta: D) -> Result<Self, Error> {
+        // Runtime first, exactly as `contract` does: crossing runtimes is a
+        // trust-boundary violation rather than an algebra error, and the
+        // erased facade's `check_same_space` checks it first too.
+        if !self.runtime.same_runtime(&other.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        // `DynamicFusionMapSpace: PartialEq` covers the hom space, the
+        // codomain/domain split and the block structure, which is exactly what
+        // makes the zipped element-wise combination below meaningful. Message
+        // verbatim from the erased `check_same_space`: one mistake reported two
+        // ways across the two facades is a support burden with no upside.
+        if self.body.space.space() != other.body.space.space() {
+            return Err(Error::InvalidArgument(
+                "tensors live on different spaces or block layouts".to_string(),
+            ));
+        }
+        Ok(self.with_data(
+            self.body
+                .data
+                .iter()
+                .zip(&other.body.data)
+                .map(|(&x, &y)| x * alpha + y * beta)
+                .collect(),
+        ))
+    }
+
+    /// `factor * self` (TensorKit `scale`).
+    ///
+    /// Infallible, unlike the erased [`crate::prelude::Tensor::scale`]: that
+    /// one returns a `Result` because it must reconcile a runtime dtype and a
+    /// possible device or diagonal storage first, none of which exist here —
+    /// `D` is a type parameter and the payload is always a host buffer. The
+    /// erased `scale`/`scale_c64` split has the same origin and likewise
+    /// collapses: `factor` is simply a `D`.
+    pub fn scale(&self, factor: D) -> Self {
+        self.with_data(self.body.data.iter().map(|&value| value * factor).collect())
+    }
+
+    /// Partial trace over pairs of mutually dual legs (TensorKit
+    /// `tensortrace!` / TensorOperations `@tensor a[i, i; j]`).
+    ///
+    /// Each `(lhs, rhs)` pair of flat axis numbers (`0..rank`, codomain axes
+    /// first) is traced away; the remaining legs keep their order and their
+    /// codomain/domain side. Tracing nothing returns the source.
+    ///
+    /// This is the **tensor-contraction** trace: it applies the categorical
+    /// trace coefficients, including a fermionic rule's twists, so it is the
+    /// supertrace there. [`Self::tr`] is TensorKit's positive trace instead,
+    /// and the two genuinely disagree for a fermionic provider.
+    ///
+    /// The `&[(usize, usize)]` shape mirrors the erased facade; TensorKit's
+    /// native parallel-list `Index2Tuple` is what the seam takes internally.
+    /// One cross-facade vocabulary wins over matching the seam's.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when the pair list is malformed — an axis out
+    /// of range, or one named twice — with the erased facade's own message.
+    /// Otherwise [`Error::Operation`] / [`Error::Core`] /
+    /// [`Error::FusionAlgebra`] from the seam, which owns the rest of the
+    /// validation (legs that are not mutually dual, above all).
+    pub fn trace_pairs(&self, pairs: &[(usize, usize)]) -> Result<Self, Error> {
+        // Why this validation is kept rather than left to the seam, unlike
+        // everywhere else in this facade: `seen` is not a check, it is the
+        // derivation of `output_axes` below — the seam cannot supply it, and a
+        // malformed list would otherwise produce a silently wrong output order
+        // rather than an error. Same precedent as `braid`'s levels pre-check.
+        let rank = self.rank();
+        let mut seen = vec![false; rank];
+        for &(lhs, rhs) in pairs {
+            for axis in [lhs, rhs] {
+                if axis >= rank || seen[axis] {
+                    return Err(Error::InvalidArgument(format!(
+                        "invalid trace pair list {pairs:?} for rank {rank} \
+                         (axes must be in range and distinct)"
+                    )));
+                }
+                seen[axis] = true;
+            }
+        }
+        if pairs.is_empty() {
+            return Ok(self.clone());
+        }
+        let output_axes: Vec<usize> = (0..rank).filter(|&axis| !seen[axis]).collect();
+        let destination_codomain_rank = output_axes
+            .iter()
+            .filter(|&&axis| axis < self.codomain_rank())
+            .count();
+        let trace_lhs: Vec<usize> = pairs.iter().map(|&(lhs, _)| lhs).collect();
+        let trace_rhs: Vec<usize> = pairs.iter().map(|&(_, rhs)| rhs).collect();
+        let axes = tenet_tensors::TensorTraceAxisSpec::new(&output_axes, &trace_lhs, &trace_rhs);
+        // Preflight first, exactly as the erased facade does: the checked
+        // homspace selection must fail before any destination layout is
+        // derived, so a rejected trace publishes no state.
+        let homspace = tenet_tensors::tensortrace_fusion_dyn_selected_homspace_checked(
+            &self.body.space,
+            axes,
+            destination_codomain_rank,
+        )?;
+        let space = self.body.space.derive_from_final_homspace(homspace)?;
+        let data = tenet_tensors::tensortrace_fusion_dyn_owned_checked(
+            &space,
+            &self.body.space,
+            &self.body.data,
+            axes,
+            D::from_real(1.0),
+        )?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody { space, data }),
+        })
+    }
+
+    /// TensorKit `adjoint` (dagger): swaps codomain and domain and
+    /// conjugate-transposes every block. Real payloads are transposed only;
+    /// c64 entries are conjugated as well.
+    ///
+    /// Eager, into a fresh destination — TensorKit's own `adjoint!`
+    /// (`linalg.jl:218`), so this is a TK-sanctioned form rather than a
+    /// divergence. The erased [`crate::prelude::Tensor::adjoint`] is instead
+    /// the analogue of TensorKit's lazy `AdjointTensorMap` view: same result,
+    /// different point at which the work is paid. Only the eager seam is
+    /// reachable from this facade.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`]
+    /// straight from the seam, which owns the bend the dagger performs.
+    pub fn adjoint(&self) -> Result<Self, Error> {
+        let (space, data) = tenet_tensors::adjoint_bound_dyn(&self.body.space, &self.body.data)
+            .map_err(Error::from)?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody { space, data }),
+        })
+    }
+
+    /// TensorKit `norm`: the Frobenius norm weighted by the coupled sectors'
+    /// quantum dimensions, `norm(t)^2 = Σ_c dim(c) * |block_c|^2`.
+    ///
+    /// Always real, for both payload dtypes. For an abelian rule every
+    /// `dim(c)` is one and this is the plain Frobenius norm; for a non-abelian
+    /// one it is not.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Core`] when the block structure cannot be walked, which is an
+    /// engine-internal invariant rather than a caller mistake.
+    pub fn norm(&self) -> Result<f64, Error> {
+        // Same weighted reduction the erased `norm` runs, on the same helper:
+        // a second copy would be free to drift from the sibling this is
+        // byte-compared against.
+        Ok(self.weighted_self_inner()?.re.sqrt())
+    }
+
+    /// TensorKit `norm(t, Inf)`: the largest absolute stored entry.
+    ///
+    /// Julia's `norm(array, Inf)` is the maximum absolute element (for
+    /// matrices too), and TensorKit applies it per block, so on coupled
+    /// storage it is the maximum over the whole payload. Unlike [`Self::norm`]
+    /// this is **not** quantum-dimension weighted.
+    ///
+    /// # Errors
+    ///
+    /// None today; the `Result` keeps the shape of [`Self::norm`], which the
+    /// two are usually reached through together.
+    pub fn norm_inf(&self) -> Result<f64, Error> {
+        // Why `widen_complex().norm()` rather than an f64/c64 match: the erased
+        // facade needs the match because its dtype is a runtime property. Here
+        // the widening is exact and `Complex64::new(x, 0.0).norm()` is exactly
+        // `|x|`, so one expression covers both instantiations.
+        Ok(self
+            .body
+            .data
+            .iter()
+            .map(|&value| value.widen_complex().norm())
+            .fold(0.0, f64::max))
+    }
+
+    /// TensorKit `normalize`: `self / norm(self)`, the unit-norm tensor
+    /// pointing the same way. The norm is [`Self::norm`]'s, so the result
+    /// satisfies `t.normalize()?.norm()? == 1`.
+    ///
+    /// Like TensorKit, a zero-norm tensor is not special-cased: normalizing it
+    /// divides by zero and yields non-finite entries. Guard the caller if that
+    /// input is reachable.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::norm`]'s.
+    pub fn normalize(&self) -> Result<Self, Error> {
+        Ok(self.scale(D::from_real(1.0 / self.norm()?)))
+    }
+
+    /// The dimension-weighted inner product of this tensor with itself, the
+    /// body of [`Self::norm`].
+    fn weighted_self_inner(&self) -> Result<num_complex::Complex64, Error> {
+        weighted_inner(
+            self.body.space.provider(),
+            self.body.space.space().structure(),
+            self.body.space.space().nout(),
+            &self.body.data,
+            &self.body.data,
+        )
+    }
+
+    /// TensorKit `dot(x, y)`: the quantum-dimension-weighted Frobenius inner
+    /// product `Σ_c dim(c) * <a_c, b_c>` with **`self` conjugated** — the
+    /// product is conjugate-linear in its first argument.
+    ///
+    /// `t.inner(&t)?` is `t.norm()?²` up to floating point, and for `D = f64`
+    /// the result is exactly real: the erased sibling returns
+    /// `Scalar::F64(value.re)` there, and the narrowing here is the same `.re`.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::add`]'s — the operands must share a runtime and a space
+    /// — plus [`Error::Core`] from the block-structure walk, as for
+    /// [`Self::norm`].
+    pub fn inner(&self, other: &Self) -> Result<D, Error> {
+        if !self.runtime.same_runtime(&other.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        if self.body.space.space() != other.body.space.space() {
+            return Err(Error::InvalidArgument(
+                "tensors live on different spaces or block layouts".to_string(),
+            ));
+        }
+        // `D::from_complex64` is `.re` for the real scalar and the identity for
+        // the complex one, so this is bit-identical to the erased facade's
+        // `Scalar::F64(v.re)` / `Scalar::C64(v)` dispatch, without the enum.
+        Ok(D::from_complex64(weighted_inner(
+            self.body.space.provider(),
+            self.body.space.space().structure(),
+            self.body.space.space().nout(),
+            &self.body.data,
+            &other.body.data,
+        )?))
+    }
+
+    /// `LinearAlgebra.dot` / TensorKit `dot(x, y)` — an alias for
+    /// [`Self::inner`], for callers who reach for that name. The erased facade
+    /// makes the same alias, deliberately, so the two names cannot come to
+    /// mean different things.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::inner`]'s.
+    pub fn dot(&self, other: &Self) -> Result<D, Error> {
+        self.inner(other)
+    }
+
+    /// TensorKit `tr`: the full trace of an endomorphism
+    /// (`domain == codomain`), pairing codomain leg `i` with domain leg `i`.
+    ///
+    /// This is TensorKit's **positive** trace, quantum-dimension weighted:
+    /// `Σ_c dim(c) * tr(b_c)`. It is *not* the supertrace — a fermionic rule's
+    /// twists belong to tensor contraction, and [`Self::trace_pairs`] is where
+    /// they appear. The two therefore disagree for a fermionic provider, by
+    /// design and as in the erased facade.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when the tensor is not an endomorphism, with
+    /// the erased facade's own message, and [`Error::Core`] when the block
+    /// structure cannot be walked.
+    pub fn tr(&self) -> Result<D, Error> {
+        let hom = self.body.space.space().homspace();
+        // Mirrors the erased pre-check verbatim, message included: the weighted
+        // trace below indexes codomain axis `i` together with domain axis
+        // `nout + i` and would be meaningless without it.
+        if hom.codomain().legs() != hom.domain().legs() {
+            return Err(Error::InvalidArgument(
+                "tr() requires an endomorphism (domain == codomain)".to_string(),
+            ));
+        }
+        Ok(D::from_complex64(weighted_trace(
+            self.body.space.provider(),
+            self.body.space.space().structure(),
+            self.body.space.space().nout(),
+            &self.body.data,
+        )?))
     }
 
     /// The codomain legs, in axis order.
