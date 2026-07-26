@@ -14,7 +14,7 @@ use tenet::core::{
     RuleIdentity, SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorVec,
 };
 use tenet::prelude::{Complex64, Runtime};
-use tenet::typed::{GradedSpace, TensorMap};
+use tenet::typed::{GradedSpace, TensorMap, Truncation};
 
 /// The fusion-tree layout and complete-structure caches are process-global, so
 /// the tests in this binary that snapshot them must not run beside a test that
@@ -1918,18 +1918,21 @@ fn typed_and_erased_svd_compact_agree_byte_for_byte() {
     let runtime = runtime();
     let (erased, typed) = z2_oracle_pair(&runtime);
 
-    let (eu, _, evh) = erased.svd_compact().unwrap();
+    let (eu, es, evh) = erased.svd_compact().unwrap();
     let (tu, ts, tvh) = typed.svd_compact().unwrap();
 
     assert_eq!(tu.data(), eu.data());
     assert_eq!(tvh.data(), evh.data());
-    // The erased `s` is diagonal storage and the typed one is dense (#570), so
-    // the two `s` factors are not byte-comparable. What `s` holds is pinned by
-    // the `svd_vals` oracle above and the reconstruction test below.
-    //
-    // The #570 ceiling, asserted as the exact number it is: one dense block per
-    // coupled sector, k_c² elements each, so 2² + 3² = 13 where diagonal
-    // storage would hold 2 + 3 = 5. This literal is what closing #570 changes.
+    // Both `s` factors are compact diagonal storage now (#570 closed), so they
+    // are byte-comparable through their common materialization — which the
+    // previous revision of this test could only assert a size ceiling on.
+    // `data()` deliberately reports the dense buffer on both facades: the
+    // `Σ_c k_c` storage claim underneath is what
+    // `tests/typed_diagonal_allocations.rs` measures, since neither facade
+    // publishes a compact accessor.
+    assert_eq!(ts.data(), es.data());
+    // One dense block per coupled sector, k_c² elements each: 2² + 3² = 13.
+    // Kept as the shape of the materialization, not as a storage ceiling.
     assert_eq!(ts.data().len(), 13);
 }
 
@@ -1976,13 +1979,15 @@ fn typed_and_erased_svd_compact_agree_byte_for_byte_on_a_complex_payload() {
     let (erased, typed) = z2_complex_oracle_pair(&runtime);
     assert_eq!(typed.data(), erased.try_data_c64().unwrap());
 
-    let (eu, _, evh) = erased.svd_compact().unwrap();
+    let (eu, es, evh) = erased.svd_compact().unwrap();
     let (tu, ts, tvh) = typed.svd_compact().unwrap();
 
     assert_eq!(tu.data(), eu.try_data_c64().unwrap());
     assert_eq!(tvh.data(), evh.try_data_c64().unwrap());
-    // The erased `s` is diagonal storage (#570), so it is compared through its
-    // spectrum rather than its bytes.
+    // Both `s` factors are compact diagonal storage (#570 closed), so `s`
+    // compares bitwise through its materialization like the f64 sibling above,
+    // not only through its spectrum.
+    assert_eq!(ts.data(), es.try_data_c64().unwrap());
     assert_eq!(
         typed
             .svd_vals()
@@ -3292,4 +3297,720 @@ fn id_needs_at_least_one_leg() {
         tenet::prelude::Error::InvalidArgument(message)
             if message.contains("at least one leg")
     ));
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 (issue #570), slice 1: compact diagonal storage and the operations
+// that consume it.
+//
+// Every oracle here is against the erased facade, which keeps diagonal storage
+// on exactly the same paths — so an assertion that only checked values would
+// pass even if this facade had densified. The storage claim itself is measured
+// in `tests/typed_diagonal_allocations.rs`; what these pin is that the compact
+// route computes the same tensor the dense one does.
+// ---------------------------------------------------------------------------
+
+/// The `(erased, typed)` `s` factors of one Z2 oracle pair: two spectrum
+/// tensors on the same bond space, one per facade.
+fn z2_spectrum_pair(
+    runtime: &Runtime,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::Z2FusionRule, f64>,
+) {
+    let (erased, typed) = z2_oracle_pair(runtime);
+    (
+        erased.svd_compact().unwrap().1,
+        typed.svd_compact().unwrap().1,
+    )
+}
+
+#[test]
+fn compact_scale_and_adjoint_agree_with_the_erased_facade() {
+    // What: both keep the payload compact on both facades, so `data()` is the
+    // shared materialization of the same spectrum. `adjoint` on a real spectrum
+    // is the identity — a bond space is its own adjoint — and the erased
+    // sibling says so too.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_spectrum_pair(&runtime);
+
+    assert_eq!(typed.scale(-2.5).data(), erased.scale(-2.5).unwrap().data());
+    assert_eq!(
+        typed.adjoint().unwrap().data(),
+        erased.adjoint().unwrap().data()
+    );
+    // The values themselves, not just their agreement: a dropped factor would
+    // agree with a sibling that dropped it too, but not with the source.
+    for (scaled, original) in typed.scale(-2.5).data().iter().zip(typed.data()) {
+        assert_eq!(*scaled, -2.5 * original);
+    }
+}
+
+#[test]
+fn compact_reductions_agree_with_the_erased_facade() {
+    // What: `norm`, `norm_inf`, `tr` and `inner` read the stored spectrum
+    // instead of its materialization, and land on the same numbers.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_spectrum_pair(&runtime);
+
+    assert_eq!(typed.norm().unwrap(), erased.norm().unwrap());
+    assert_eq!(typed.norm_inf().unwrap(), erased.norm_inf().unwrap());
+    assert_eq!(typed.tr().unwrap(), erased.tr().unwrap().re());
+    assert_eq!(
+        typed.inner(&typed).unwrap(),
+        erased.inner(&erased).unwrap().re()
+    );
+    assert_eq!(typed.dot(&typed).unwrap(), typed.inner(&typed).unwrap());
+    // `<s, s>` is the squared norm: the identity that pins the weighting.
+    let norm = typed.norm().unwrap();
+    assert!((typed.inner(&typed).unwrap() - norm * norm).abs() < 1e-9 * norm * norm);
+}
+
+#[test]
+fn compact_reductions_carry_the_su2_dimension_weight() {
+    // What: the compact reductions apply `dim(c)` exactly where the dense ones
+    // do. Z2 alone cannot see this — every `dim(c)` is one there.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = su2_oracle_pair(&runtime);
+    let erased = erased.svd_compact().unwrap().1;
+    let typed = typed.svd_compact().unwrap().1;
+
+    assert_eq!(typed.norm().unwrap(), erased.norm().unwrap());
+    assert_eq!(typed.tr().unwrap(), erased.tr().unwrap().re());
+    assert_eq!(
+        typed.inner(&typed).unwrap(),
+        erased.inner(&erased).unwrap().re()
+    );
+    // The unweighted sum, for contrast: a dropped `dim(c)` would make `tr` this.
+    let unweighted: f64 = typed.data().iter().sum();
+    assert!(
+        (typed.tr().unwrap() - unweighted).abs() > 1e-6,
+        "the SU(2) spectrum trace is not dimension weighted"
+    );
+    // `norm_inf` is deliberately *not* weighted, on either facade.
+    assert_eq!(typed.norm_inf().unwrap(), erased.norm_inf().unwrap());
+}
+
+#[test]
+fn compact_add_agrees_with_the_erased_facade_on_both_arms() {
+    // What: diagonal + diagonal stays diagonal, and diagonal + dense goes dense
+    // — the same two arms the erased facade takes, with the same values.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_spectrum_pair(&runtime);
+
+    assert_eq!(
+        typed.add(&typed, 0.75, -0.5).unwrap().data(),
+        erased.add(&erased, 0.75, -0.5).unwrap().data()
+    );
+
+    // A dense operand on the same bond space: `id` is the cheapest one, and it
+    // is not diagonal *storage* on either facade even though its values are.
+    let erased_dense = tenet::prelude::Tensor::id(
+        &runtime,
+        tenet::prelude::Dtype::F64,
+        &erased.domain_spaces(),
+    )
+    .unwrap()
+    .scale(3.0)
+    .unwrap();
+    let typed_dense = TensorMap::id(&runtime, &typed.domain()).unwrap().scale(3.0);
+    assert_eq!(typed_dense.data(), erased_dense.data());
+
+    for (alpha, beta) in [(0.75, -0.5), (1.0, 1.0)] {
+        assert_eq!(
+            typed.add(&typed_dense, alpha, beta).unwrap().data(),
+            erased.add(&erased_dense, alpha, beta).unwrap().data(),
+            "diagonal + dense disagrees at ({alpha}, {beta})"
+        );
+        assert_eq!(
+            typed_dense.add(&typed, alpha, beta).unwrap().data(),
+            erased_dense.add(&erased, alpha, beta).unwrap().data(),
+            "dense + diagonal disagrees at ({alpha}, {beta})"
+        );
+    }
+}
+
+#[test]
+fn compose_takes_the_compact_paths_and_reconstructs_the_source() {
+    // What: `u * s * vh` now runs through the bond-scaling arms rather than a
+    // dense GEMM, and still reproduces the source — plus `s * s`, the
+    // diagonal-times-diagonal arm, against its erased sibling.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+    let (eu, es, evh) = erased.svd_compact().unwrap();
+    let (tu, ts, tvh) = typed.svd_compact().unwrap();
+
+    // `t * D`, `D * t` and `D * D`, each against the erased facade's own arm.
+    assert_eq!(
+        tu.compose(&ts).unwrap().data(),
+        eu.compose(&es).unwrap().data()
+    );
+    assert_eq!(
+        ts.compose(&tvh).unwrap().data(),
+        es.compose(&evh).unwrap().data()
+    );
+    assert_eq!(
+        ts.compose(&ts).unwrap().data(),
+        es.compose(&es).unwrap().data()
+    );
+    // `s * s` is still a spectrum: its entries are the squares.
+    for (squared, original) in ts.compose(&ts).unwrap().data().iter().zip(ts.data()) {
+        assert!((squared - original * original).abs() < 1e-12);
+    }
+
+    let recon = tu.compose(&ts).unwrap().compose(&tvh).unwrap();
+    assert_eq!(recon.data().len(), typed.data().len());
+    for (got, want) in recon.data().iter().zip(typed.data()) {
+        assert!(
+            (got - want).abs() <= 1e-12 * want.abs().max(1.0),
+            "{got} vs {want}"
+        );
+    }
+}
+
+#[test]
+fn compose_declines_a_compact_arm_it_cannot_prove() {
+    // What: the compact arms fire on a proved destination, not on the storage
+    // alone. Two spectra on different bond spaces are not composable at all,
+    // and the guard is what leaves that verdict to the expert layer instead of
+    // multiplying two unrelated spectra elementwise.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, wide) = z2_oracle_pair_split(&runtime, 2);
+    // A second endomorphism on a leg with different degeneracies, so its bond
+    // space genuinely differs from `wide`'s rather than merely being a second
+    // allocation of the same one.
+    let narrow_leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 1),
+            (tenet::core::Z2Irrep::ODD, 1),
+        ],
+        false,
+    )
+    .unwrap();
+    let mut next = 0.0;
+    let narrow = TensorMap::from_block_fn(&runtime, [&narrow_leg], [&narrow_leg], |_, _| {
+        next += 1.0;
+        next
+    })
+    .unwrap();
+    let wide_s = wide.svd_compact().unwrap().1;
+    let narrow_s = narrow.svd_compact().unwrap().1;
+
+    assert_ne!(
+        wide_s.data().len(),
+        narrow_s.data().len(),
+        "the fixture's two bond spaces must differ for this to test anything"
+    );
+    assert!(
+        wide_s.compose(&narrow_s).is_err(),
+        "composing spectra on mismatched bond spaces must be refused"
+    );
+    // And the same for a dense operand whose contracted leg does not match the
+    // spectrum's bond.
+    assert!(wide.compose(&narrow_s).is_err());
+    assert!(narrow_s.compose(&wide).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 (issue #570), slice 2: the Hermitian eigendecompositions.
+// ---------------------------------------------------------------------------
+
+/// A Hermitian endomorphism through both facades: `p = t + t†`, which is
+/// Hermitian by construction on every provider, so `eigh` is defined on it
+/// without either facade having to project first.
+fn z2_hermitian_pair(
+    runtime: &Runtime,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::Z2FusionRule, f64>,
+) {
+    let (erased, typed) = z2_endo_oracle_pair(runtime);
+    (
+        erased.add(&erased.adjoint().unwrap(), 1.0, 1.0).unwrap(),
+        typed.add(&typed.adjoint().unwrap(), 1.0, 1.0).unwrap(),
+    )
+}
+
+fn su2_hermitian_pair(
+    runtime: &Runtime,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::SU2FusionRule, f64>,
+) {
+    let (erased, typed) = su2_oracle_pair(runtime);
+    (
+        erased.add(&erased.adjoint().unwrap(), 1.0, 1.0).unwrap(),
+        typed.add(&typed.adjoint().unwrap(), 1.0, 1.0).unwrap(),
+    )
+}
+
+#[test]
+fn typed_and_erased_eigh_full_agree_byte_for_byte() {
+    // What: the same seam on both facades, so `v` compares bitwise and `d` —
+    // compact on both — compares through its shared materialization. The
+    // return is `(d, v)`, which is what the destructuring here pins.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_hermitian_pair(&runtime);
+
+    let (ed, ev) = erased.eigh_full().unwrap();
+    let (td, tv) = typed.eigh_full().unwrap();
+
+    assert_eq!(td.data(), ed.data());
+    assert_eq!(tv.data(), ev.data());
+    // `d` really is the eigenvalue factor and `v` the eigenbasis, not the other
+    // way round: `v` is an isometry and `d` is diagonal. A swapped return would
+    // fail both.
+    assert_eq!(td.data().len(), 13, "d is the bond <- bond factor");
+    assert_eq!(tv.data().len(), 13, "v is the codomain <- bond factor");
+    assert_eq!(
+        td.eigh_vals().unwrap(),
+        typed.eigh_vals().unwrap(),
+        "d carries the source's own spectrum on its diagonal"
+    );
+}
+
+#[test]
+fn eigh_full_reconstructs_the_source_through_compose() {
+    // What: `v * d * v†` is the source. The middle composition takes the
+    // compact bond-scaling arm, so this exercises the storage as well as the
+    // factorization.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, typed) = z2_hermitian_pair(&runtime);
+
+    let (d, v) = typed.eigh_full().unwrap();
+    let recon = v
+        .compose(&d)
+        .unwrap()
+        .compose(&v.adjoint().unwrap())
+        .unwrap();
+
+    assert_eq!(recon.data().len(), typed.data().len());
+    for (got, want) in recon.data().iter().zip(typed.data()) {
+        assert!(
+            (got - want).abs() <= 1e-10 * want.abs().max(1.0),
+            "{got} vs {want}"
+        );
+    }
+}
+
+#[test]
+fn typed_and_erased_eigh_vals_agree_including_the_su2_branch() {
+    // What: the spectra match label for label. SU(2) is here because its
+    // dimension-weighted machinery runs underneath the eigenvalue enumeration
+    // even though the eigenvalues themselves are not weighted.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    let (erased, typed) = z2_hermitian_pair(&runtime);
+    assert_eq!(
+        typed_z2_spectrum(&typed.eigh_vals().unwrap()),
+        erased_z2_spectrum(&erased.eigh_vals().unwrap())
+    );
+
+    let (erased, typed) = su2_hermitian_pair(&runtime);
+    let typed_values: Vec<Vec<f64>> = typed
+        .eigh_vals()
+        .unwrap()
+        .iter()
+        .map(|entry| entry.values.clone())
+        .collect();
+    let mut erased_entries = erased.eigh_vals().unwrap();
+    erased_entries.sort_by_key(|entry| {
+        SectorCodec::decode_sector(&tenet::core::SU2FusionRule, entry.sector).unwrap()
+    });
+    let erased_values: Vec<Vec<f64>> = erased_entries
+        .iter()
+        .map(|entry| entry.values.clone())
+        .collect();
+    assert_eq!(typed_values, erased_values);
+    assert!(
+        erased_values.len() > 1,
+        "the SU(2) fixture must span more than one coupled sector"
+    );
+}
+
+#[test]
+fn typed_and_erased_eigh_trunc_agree_and_report_the_discarded_weight() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_hermitian_pair(&runtime);
+    let truncation = Truncation::rank(3);
+
+    let erased_out = erased.eigh_trunc(&truncation).unwrap();
+    let typed_out = typed.eigh_trunc(&truncation).unwrap();
+
+    assert_eq!(typed_out.d.data(), erased_out.d.data());
+    assert_eq!(typed_out.v.data(), erased_out.v.data());
+    assert_eq!(typed_out.error, erased_out.error);
+    assert_eq!(
+        typed_z2_spectrum(&typed_out.eigenvalues),
+        erased_z2_spectrum(&erased_out.eigenvalues)
+    );
+    // Something was actually discarded, so `error` is not vacuously zero.
+    assert!(typed_out.error > 0.0);
+    assert!(typed_out.d.data().len() < typed.eigh_full().unwrap().0.data().len());
+}
+
+#[test]
+fn eigh_reports_a_non_hermitian_input_rather_than_a_wrong_answer() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, typed) = z2_endo_oracle_pair(&runtime);
+
+    assert!(typed.eigh_full().is_err());
+    assert!(typed.eigh_vals().is_err());
+    assert!(typed.eigh_trunc(&Truncation::Full).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 (issue #570), slice 3: the general eigendecompositions.
+// ---------------------------------------------------------------------------
+
+/// The c64 endomorphism pair `eig` needs: [`z2_complex_oracle_pair`] is
+/// rank three, and `eig` is defined on square maps only.
+fn z2_complex_endo_oracle_pair(
+    runtime: &Runtime,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::Z2FusionRule, Complex64>,
+) {
+    let complex = |value: f64| Complex64::new(value, 1.0 + value % 5.0);
+    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        runtime,
+        [&space],
+        [&space],
+        |key: &tenet::prelude::BlockKey, indices: &[usize]| {
+            complex(erased_fill_value(key, indices))
+        },
+    )
+    .unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 3),
+        ],
+        false,
+    )
+    .unwrap();
+    let typed = TensorMap::from_block_fn(runtime, [&leg], [&leg], |trees, indices| {
+        complex(typed_fill_value(trees, indices))
+    })
+    .unwrap();
+    (erased, typed)
+}
+
+#[test]
+fn typed_and_erased_eig_full_agree_on_a_real_payload() {
+    // What: the factors are complex for a real input on both facades —
+    // TensorKit's `eigen` promotes too — and `d` is the compact spectrum.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+
+    let (ed, ev) = erased.eig_full().unwrap();
+    let (td, tv) = typed.eig_full().unwrap();
+
+    assert_eq!(td.data(), ed.try_data_c64().unwrap());
+    assert_eq!(tv.data(), ev.try_data_c64().unwrap());
+}
+
+#[test]
+fn typed_and_erased_eig_agree_on_a_complex_payload_and_conjugate_the_adjoint() {
+    // What: the c64 route, where the spectrum is genuinely complex rather than
+    // a real one widened. `d.adjoint()` must conjugate it — on a real spectrum
+    // that is invisible, which is why the check lives here.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_complex_endo_oracle_pair(&runtime);
+
+    let (ed, ev) = erased.eig_full().unwrap();
+    let (td, tv) = typed.eig_full().unwrap();
+    assert_eq!(td.data(), ed.try_data_c64().unwrap());
+    assert_eq!(tv.data(), ev.try_data_c64().unwrap());
+
+    // Genuinely complex, so a missing conjugation is observable.
+    assert!(
+        td.data().iter().any(|value| value.im.abs() > 1e-6),
+        "the eig spectrum must be off the real axis for this to test anything"
+    );
+    let adjoint = td.adjoint().unwrap();
+    assert_eq!(
+        adjoint.data(),
+        ed.adjoint().unwrap().try_data_c64().unwrap()
+    );
+    for (conjugated, original) in adjoint.data().iter().zip(td.data()) {
+        assert_eq!(*conjugated, original.conj());
+    }
+
+    // The compact reductions on a genuinely complex spectrum. Every other
+    // compact oracle in this suite reads an SVD spectrum, which is real, so a
+    // dropped conjugation in the compact inner product is invisible there:
+    // `Σ conj(a) a` and `Σ a a` agree on the reals. Here they do not.
+    assert_eq!(td.inner(&td).unwrap(), ed.inner(&ed).unwrap().to_c64());
+    assert_eq!(td.norm().unwrap(), ed.norm().unwrap());
+    assert_eq!(td.tr().unwrap(), ed.tr().unwrap().to_c64());
+    // `<d, d>` is real and positive precisely because the first argument is
+    // conjugated; the unconjugated sum of squares is not.
+    let unconjugated: Complex64 = td.data().iter().map(|value| value * value).sum();
+    assert!(
+        unconjugated.im.abs() > 1e-6,
+        "the spectrum must make the unconjugated sum complex for this to test anything"
+    );
+    assert_eq!(td.inner(&td).unwrap().im, 0.0);
+    let norm = td.norm().unwrap();
+    assert!((td.inner(&td).unwrap().re - norm * norm).abs() < 1e-9 * norm * norm);
+}
+
+#[test]
+fn typed_and_erased_eig_vals_and_eig_trunc_agree() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+
+    let decode = |spectrum: &[tenet::prelude::SectorSpectrum<Complex64>]| {
+        let mut decoded: Vec<_> = spectrum
+            .iter()
+            .map(|entry| {
+                (
+                    SectorCodec::decode_sector(&tenet::core::Z2FusionRule, entry.sector).unwrap(),
+                    entry.values.clone(),
+                )
+            })
+            .collect();
+        decoded.sort_by_key(|(sector, _): &(tenet::core::Z2Irrep, _)| *sector);
+        decoded
+    };
+    let typed_decoded: Vec<_> = typed
+        .eig_vals()
+        .unwrap()
+        .iter()
+        .map(|entry| (entry.sector, entry.values.clone()))
+        .collect();
+    assert_eq!(typed_decoded, decode(&erased.eig_vals().unwrap()));
+
+    let truncation = Truncation::rank(3);
+    let erased_out = erased.eig_trunc(&truncation).unwrap();
+    let typed_out = typed.eig_trunc(&truncation).unwrap();
+    assert_eq!(typed_out.d.data(), erased_out.d.try_data_c64().unwrap());
+    assert_eq!(typed_out.v.data(), erased_out.v.try_data_c64().unwrap());
+    assert_eq!(typed_out.error, erased_out.error);
+    assert_eq!(
+        typed_out
+            .eigenvalues
+            .iter()
+            .map(|entry| (entry.sector, entry.values.clone()))
+            .collect::<Vec<_>>(),
+        decode(&erased_out.eigenvalues)
+    );
+    assert!(typed_out.error > 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 (issue #570), slice 4: the `is_hermitian` / `project_*` family.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_hermitian_family_agrees_with_the_erased_predicates() {
+    // What: all seven members, oracled against the erased facade on the same
+    // tensor — a general endomorphism, its Hermitian part and its
+    // anti-Hermitian part, so each predicate sees both verdicts.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+    let tol = 1e-10;
+
+    let erased_cases = [
+        erased.clone(),
+        erased.project_hermitian().unwrap(),
+        erased.project_antihermitian().unwrap(),
+    ];
+    let typed_cases = [
+        typed.clone(),
+        typed.project_hermitian().unwrap(),
+        typed.project_antihermitian().unwrap(),
+    ];
+
+    for (index, (erased, typed)) in erased_cases.iter().zip(&typed_cases).enumerate() {
+        // The projections themselves agree bitwise before anything is asked
+        // about them.
+        assert_eq!(typed.data(), erased.data(), "case {index} payload");
+        assert_eq!(
+            typed.is_hermitian(tol).unwrap(),
+            erased.is_hermitian(tol).unwrap(),
+            "case {index} is_hermitian"
+        );
+        assert_eq!(
+            typed.is_antihermitian(tol).unwrap(),
+            erased.is_antihermitian(tol).unwrap(),
+            "case {index} is_antihermitian"
+        );
+        assert_eq!(
+            typed.is_isometric(tol).unwrap(),
+            erased.is_isometric(tol).unwrap(),
+            "case {index} is_isometric"
+        );
+        assert_eq!(
+            typed.is_unitary(tol).unwrap(),
+            erased.is_unitary(tol).unwrap(),
+            "case {index} is_unitary"
+        );
+        assert_eq!(
+            typed.is_posdef(tol).unwrap(),
+            erased.is_posdef(tol).unwrap(),
+            "case {index} is_posdef"
+        );
+    }
+
+    // The verdicts are not all the same value, so the agreement above is not
+    // vacuous: the projections really are (anti-)Hermitian and the source is
+    // neither.
+    assert!(!typed_cases[0].is_hermitian(tol).unwrap());
+    assert!(typed_cases[1].is_hermitian(tol).unwrap());
+    assert!(!typed_cases[1].is_antihermitian(tol).unwrap());
+    assert!(typed_cases[2].is_antihermitian(tol).unwrap());
+}
+
+#[test]
+fn isometry_and_posdef_see_their_positive_cases() {
+    // What: the two members the fixture above only ever answers `false` for.
+    // `u` from an SVD is isometric by construction, and `t† t` is positive
+    // definite when `t` has full rank.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+    let tol = 1e-9;
+
+    let eu = erased.svd_compact().unwrap().0;
+    let tu = typed.svd_compact().unwrap().0;
+    assert!(tu.is_isometric(tol).unwrap());
+    assert_eq!(tu.is_isometric(tol).unwrap(), eu.is_isometric(tol).unwrap());
+    // Isometric but not unitary: `u` is tall here.
+    assert!(!tu.is_unitary(tol).unwrap());
+    assert_eq!(tu.is_unitary(tol).unwrap(), eu.is_unitary(tol).unwrap());
+
+    // `2 * id` is Hermitian with every eigenvalue at 2: positive definite on
+    // any provider, and the cheapest tensor that is.
+    let erased_positive = tenet::prelude::Tensor::id(
+        &runtime,
+        tenet::prelude::Dtype::F64,
+        &erased.domain_spaces(),
+    )
+    .unwrap()
+    .scale(2.0)
+    .unwrap();
+    let typed_positive = TensorMap::id(&runtime, &typed.domain()).unwrap().scale(2.0);
+    assert!(typed_positive.is_hermitian(tol).unwrap());
+    assert!(typed_positive.is_posdef(tol).unwrap());
+    assert_eq!(
+        typed_positive.is_posdef(tol).unwrap(),
+        erased_positive.is_posdef(tol).unwrap()
+    );
+    // Hermitian but not positive definite: the same tensor negated.
+    let negated = typed_positive.scale(-1.0);
+    assert!(negated.is_hermitian(tol).unwrap());
+    assert!(!negated.is_posdef(tol).unwrap());
+    assert_eq!(
+        negated.is_posdef(tol).unwrap(),
+        erased_positive.scale(-1.0).unwrap().is_posdef(tol).unwrap()
+    );
+    // Positive *semi*definite is `false`, not `true`: TensorKit's `isposdef` is
+    // Cholesky-based and strict, and this facade's rustdoc promises the same.
+    // A real diagonal endomorphism with one entry at exactly zero is the case
+    // that separates `>` from `>=` — `eigh` on it returns that zero exactly, so
+    // the comparison is not floating-point weather.
+    let semidefinite_leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 3),
+        ],
+        false,
+    )
+    .unwrap();
+    let semidefinite = TensorMap::from_block_fn(
+        &runtime,
+        [&semidefinite_leg],
+        [&semidefinite_leg],
+        |_, indices: &[usize]| {
+            if indices[0] != indices[1] {
+                0.0
+            } else {
+                // Row 0 of every block is the zero eigenvalue.
+                indices[0] as f64
+            }
+        },
+    )
+    .unwrap();
+    assert!(semidefinite.is_hermitian(0.0).unwrap());
+    assert!(semidefinite
+        .eigh_vals()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.values.contains(&0.0)));
+    assert!(
+        !semidefinite.is_posdef(0.0).unwrap(),
+        "a positive semidefinite tensor must not be reported positive definite"
+    );
+
+    // A Gram matrix agrees with the erased verdict whichever way it falls.
+    let egram = erased.adjoint().unwrap().compose(&erased).unwrap();
+    let tgram = typed.adjoint().unwrap().compose(&typed).unwrap();
+    assert!(tgram.is_hermitian(tol).unwrap());
+    assert_eq!(tgram.is_posdef(tol).unwrap(), egram.is_posdef(tol).unwrap());
+}
+
+#[test]
+fn a_non_endomorphism_is_never_hermitian_and_never_errors() {
+    // What: TensorKit throws here; both facades answer `false`. The projections
+    // do error, because there is no tensor to return.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    assert!(!typed.is_hermitian(1e-9).unwrap());
+    assert!(!typed.is_antihermitian(1e-9).unwrap());
+    assert!(!typed.is_posdef(1e-9).unwrap());
+    assert_eq!(
+        typed.is_hermitian(1e-9).unwrap(),
+        erased.is_hermitian(1e-9).unwrap()
+    );
+    assert!(typed.project_hermitian().is_err());
+    assert!(typed.project_antihermitian().is_err());
+}
+
+#[test]
+fn the_hermitian_family_carries_the_su2_dimension_weight() {
+    // What: every member reduces through `norm`, which is dimension weighted on
+    // a non-abelian provider. Z2 alone cannot separate the two.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = su2_oracle_pair(&runtime);
+    let tol = 1e-9;
+
+    assert_eq!(
+        typed.project_hermitian().unwrap().data(),
+        erased.project_hermitian().unwrap().data()
+    );
+    assert!(typed
+        .project_hermitian()
+        .unwrap()
+        .is_hermitian(tol)
+        .unwrap());
+    assert_eq!(
+        typed.is_hermitian(tol).unwrap(),
+        erased.is_hermitian(tol).unwrap()
+    );
+    let (_, v) = typed.project_hermitian().unwrap().eigh_full().unwrap();
+    assert!(v.is_unitary(tol).unwrap());
 }

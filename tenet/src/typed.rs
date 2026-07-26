@@ -16,27 +16,43 @@
 //!
 //! # Phase boundary
 //!
-//! This is the phase-4 surface of issue #557: construction
-//! ([`TensorMap::zeros`], [`TensorMap::from_block_fn`]), inspection
-//! ([`TensorMap::codomain`], [`TensorMap::domain`],
+//! This is the phase-6 surface of issue #557: construction
+//! ([`TensorMap::zeros`], [`TensorMap::from_block_fn`], [`TensorMap::id`]),
+//! inspection ([`TensorMap::codomain`], [`TensorMap::domain`],
 //! [`TensorMap::block_fusion_trees`], [`TensorMap::block`],
 //! [`TensorMap::block_count`], [`TensorMap::data`], [`TensorMap::runtime`]),
-//! and the index-manipulation and contraction
-//! operations — [`TensorMap::permute`], [`TensorMap::braid`],
-//! [`TensorMap::transpose`], [`TensorMap::transpose_axes`],
-//! [`TensorMap::repartition`] and [`TensorMap::contract`] — plus the
-//! decompositions of issue #567: [`TensorMap::svd_compact`],
+//! the index-manipulation and contraction operations
+//! ([`TensorMap::permute`], [`TensorMap::braid`], [`TensorMap::transpose`],
+//! [`TensorMap::transpose_axes`], [`TensorMap::repartition`],
+//! [`TensorMap::contract`], [`TensorMap::compose`]), the scalar operations
+//! ([`TensorMap::add`], [`TensorMap::scale`], [`TensorMap::norm`],
+//! [`TensorMap::norm_inf`], [`TensorMap::normalize`], [`TensorMap::inner`],
+//! [`TensorMap::dot`], [`TensorMap::tr`], [`TensorMap::trace_pairs`],
+//! [`TensorMap::adjoint`]), the factorizations ([`TensorMap::svd_compact`],
 //! [`TensorMap::svd_full`], [`TensorMap::svd_trunc`], [`TensorMap::svd_vals`],
 //! [`TensorMap::qr_compact`], [`TensorMap::qr_full`],
 //! [`TensorMap::lq_compact`], [`TensorMap::lq_full`],
 //! [`TensorMap::left_orth`], [`TensorMap::right_orth`],
-//! [`TensorMap::left_null`] and [`TensorMap::right_null`] — plus the scalar
-//! operations of issue #568: [`TensorMap::add`], [`TensorMap::scale`],
-//! [`TensorMap::norm`], [`TensorMap::norm_inf`], [`TensorMap::normalize`],
-//! [`TensorMap::inner`], [`TensorMap::dot`], [`TensorMap::tr`],
-//! [`TensorMap::trace_pairs`] and [`TensorMap::adjoint`] — plus the
-//! composition operations of issue #569: [`TensorMap::compose`] and
-//! [`TensorMap::id`].
+//! [`TensorMap::left_null`], [`TensorMap::right_null`]) and — with issue #570
+//! — the **eigendecompositions** ([`TensorMap::eigh_full`],
+//! [`TensorMap::eigh_trunc`], [`TensorMap::eigh_vals`],
+//! [`TensorMap::eig_full`], [`TensorMap::eig_trunc`], [`TensorMap::eig_vals`])
+//! and the **`is_hermitian` / `project_*` family** ([`TensorMap::is_hermitian`],
+//! [`TensorMap::is_antihermitian`], [`TensorMap::is_isometric`],
+//! [`TensorMap::is_unitary`], [`TensorMap::is_posdef`],
+//! [`TensorMap::project_hermitian`], [`TensorMap::project_antihermitian`]).
+//!
+//! Issue #570 also gave the facade **compact diagonal storage**: a spectrum
+//! factor — `svd_compact`'s and `svd_trunc`'s `s`, `eigh`/`eig`'s `d` — holds
+//! `Σ_c k_c` values rather than the `Σ_c k_c²` block-diagonal buffer they would
+//! fill, which is what TensorKit's `DiagonalTensorMap` is. It is a storage
+//! property and not a type: no signature mentions it, [`TensorMap::data`] still
+//! reports the dense buffer (materialized once, on demand, shared by every
+//! clone), and the operations that can exploit it — [`TensorMap::compose`],
+//! [`TensorMap::scale`], [`TensorMap::add`], [`TensorMap::adjoint`] and the
+//! reductions — do so silently. The ones that cannot say so in their own
+//! documentation: [`TensorMap::permute`] and its family, and
+//! [`TensorMap::contract`].
 //!
 //! [`TensorMap::compose`] was previously documented here as blocked below this
 //! layer, on a public seam sealed by `LoweredMultiplicityFreeAlgebra`. That
@@ -45,30 +61,35 @@
 //! short-circuit that already had a non-lowered twin. Swapping that one call
 //! opened the seam for every provider, fermionic signs included.
 //!
-//! Everything else is deliberately still absent, each for its own reason:
+//! What is still absent — among what remains, the entries below are the ones
+//! with a decision behind them rather than a queue position. This facade is
+//! deliberately narrower than the erased [`crate::prelude::Tensor`], which also
+//! carries `left_polar`/`right_polar`, `twist`, `flip`, the unit-leg
+//! insert/remove pair, `absorb`, the structural
+//! `isomorphism`/`isometry`/`unitary` constructors and `rand`/`rand_with_seed`.
+//! Those are ports waiting on nothing but their turn; the ones below are not:
 //!
-//! - The **eigendecompositions** (`eigh_*`, `eig_*`) ride with the typed
-//!   diagonal-storage question of issue #570: `eigh_full`'s `d` factor has no
-//!   seam and would have to instantiate that question rather than inherit it,
-//!   and `eig_*` additionally needs a per-method `D::Eig` bound. Shipping part
-//!   of the family would leave a broken parity row. The erased `compose`'s
-//!   diagonal fast paths ride with the same question, for the same reason.
+//! - The **matrix functions** (`exp`, `inv`, `pinv`, `sqrt`) are their own
+//!   phase. `exp` and `sqrt` ride on the eigendecompositions that just landed;
+//!   `inv` and `pinv` need a diagonal-aware elementwise layer over the compact
+//!   storage, plus `pinv`'s relative-cutoff policy, which is a decision rather
+//!   than a port. None of them is a one-liner over what is here.
+//! - **Outer multiplicity** (SU(3) and any other `Generic` provider) is out at
+//!   the admission boundary, not at this layer: every constructor here consumes
+//!   the multiplicity-free checked root. A `Generic` provider needs its own
+//!   admission path before any of this surface can accept one.
+//! - **Device placement** is absent for the same structural reason: the payload
+//!   is a `Vec<D>` host buffer by construction, and there is no dtype or
+//!   placement token to reconcile because `D` is a type parameter. Adding a
+//!   device would change what the body holds, not what a method promises.
 //! - The **operator overloads** (`impl Add`, `impl Mul`) are out on the
-//!   `Result` argument alone now. An operator cannot return one: the erased
+//!   `Result` argument alone. An operator cannot return one: the erased
 //!   `Mul` precedent panics, and a panicking `*` or `+` as the only spelling
 //!   of an operation contradicts this facade's passthrough-error contract. The
 //!   cross-facade false-friend argument that used to stand beside it expired
 //!   with [`TensorMap::compose`]: `&a * &b` means composition in the erased
 //!   facade, and composition is what this facade would spell it as. Adding
 //!   them later is not a breaking change.
-//! - The **`is_hermitian` / `project_*` family** has lost its structural
-//!   blocker: `is_isometric` needed `compose` and `id`, and both are in. Every
-//!   member but one is now a one-liner over [`TensorMap::add`],
-//!   [`TensorMap::adjoint`], [`TensorMap::norm`], [`TensorMap::compose`] and
-//!   [`TensorMap::id`]. The exception is `is_posdef`, which needs `eigh_vals`,
-//!   so the family lands **when the eigendecompositions do** — as one complete
-//!   row, not as six members and a hole. That is the same rule the entry above
-//!   applies to `eig_*` itself.
 //! - `conj` stays design-gated on its open correctness question for
 //!   non-self-dual sectors. [`TensorMap::adjoint`] is now in, eagerly: see its
 //!   own documentation for why that is TensorKit's `adjoint!` rather than a
@@ -88,7 +109,8 @@ use tenet_core::{
     MultiplicityFreeRigidSymbols, SectorLeg,
 };
 use tenet_tensors::{
-    BoundDynamicFusionMapSpace, BoundDynamicTensorRef, OutputAxisOrder, TreeTransformOperation,
+    BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace, OutputAxisOrder,
+    TreeTransformOperation,
 };
 
 pub use tenet_core::SectorCodec;
@@ -107,7 +129,7 @@ pub use crate::runtime::Runtime;
 /// self-sufficient without it.
 pub use tenet_matrixalgebra::Truncation;
 
-use tenet_matrixalgebra::BoundDynFactor;
+use tenet_matrixalgebra::{BoundDynFactor, FactorScalar};
 
 use crate::tensor::{
     apply_fill, sector_regions, weighted_inner, weighted_trace, with_planar_axes, Fill,
@@ -389,12 +411,19 @@ where
 /// otherwise be raw ids.
 ///
 /// `values` is descending by magnitude, as the seam guarantees.
+///
+/// `V` is the value type and defaults to [`f64`], the singular/Hermitian-
+/// eigenvalue case, so `SectorSpectrum<S>` keeps its meaning. The general
+/// eigendecompositions spell it `SectorSpectrum<S, Complex64>`. The default is
+/// what [`tenet_matrixalgebra::SectorSpectrum`] already does, for the same
+/// reason: a real spectrum is by far the common one, and a caller who never
+/// touches `eig_*` should never have to name the parameter.
 #[derive(Clone, Debug, PartialEq)]
-pub struct SectorSpectrum<S> {
+pub struct SectorSpectrum<S, V = f64> {
     /// The coupled sector, in the provider's own labels.
     pub sector: S,
     /// That sector's values, descending by magnitude.
-    pub values: Vec<f64>,
+    pub values: Vec<V>,
 }
 
 /// Result of [`TensorMap::svd_trunc`]: `t ~ u * s * vh` with the truncated
@@ -404,8 +433,8 @@ pub struct SectorSpectrum<S> {
 pub struct SvdTrunc<R: SectorCodec, D> {
     /// Left isometry `u : codomain <- bond`.
     pub u: TensorMap<R, D>,
-    /// Singular-value factor `s : bond <- bond`. Dense — see the order-parity
-    /// gap on [`TensorMap::svd_compact`] (issue #570).
+    /// Singular-value factor `s : bond <- bond`, in compact diagonal storage
+    /// (TensorKit's `DiagonalTensorMap`); see [`TensorMap::svd_compact`].
     pub s: TensorMap<R, D>,
     /// Right isometry `vh : bond <- domain`.
     pub vh: TensorMap<R, D>,
@@ -452,11 +481,283 @@ where
     }
 }
 
+/// The two block payload representations one typed tensor map can carry.
+///
+/// The erased [`crate::tensor::Data`] needs three diagonal variants to record a
+/// spectrum's dtype and whether it must widen on materialization; here `D` is a
+/// type parameter, so the whole question collapses to one arm holding values of
+/// exactly the payload type.
+enum TypedData<D> {
+    /// The dense coupled-sector buffer every operation can read.
+    Dense(Vec<D>),
+    /// Compact O(Σ_c k_c) storage for a spectrum factor (SVD `s`, `eigh`/`eig`
+    /// `d`): only the per-sector diagonal values, keyed by the engine's raw
+    /// [`tenet_core::SectorId`] — a stored payload never leaves this module, so
+    /// there is nothing here for the codec to label.
+    Diagonal(Vec<tenet_matrixalgebra::SectorSpectrum<D>>),
+}
+
+/// Two compact spectra that live on one bond space must agree sector for
+/// sector and length for length; when they do not, the space and the payload
+/// have gone out of step, which is an engine invariant break rather than
+/// anything a caller did.
+fn spectra_disagree() -> Error {
+    Error::InvalidArgument("equal bond spaces carry incompatible compact spectra".to_string())
+}
+
+/// Result of [`TensorMap::eig_trunc`]: `t ~ v * d * v^-1` with the eigenbasis
+/// truncated (MatrixAlgebraKit `eig_trunc`).
+///
+/// The factors are `D::Eig`-payloaded, not `D`-payloaded: a real matrix has
+/// complex eigenpairs, so both are complex for either input dtype — TensorKit's
+/// `eigen`, whose `D` and `V` are `ComplexF64` even for a real argument.
+// `D: TensorScalar` rather than a bare parameter because the field types are
+// spelled through `D::Eig`, which is `FactorScalar`'s associated type.
+pub struct EigTrunc<R: SectorCodec, D: TensorScalar> {
+    /// Eigenvalue factor `d : bond <- bond`, in compact diagonal storage.
+    pub d: TensorMap<R, <D as FactorScalar>::Eig>,
+    /// Eigenbasis `v : codomain <- bond`.
+    pub v: TensorMap<R, <D as FactorScalar>::Eig>,
+    /// Kept eigenvalues per coupled sector, sorted by provider label.
+    pub eigenvalues: Vec<SectorSpectrum<R::Sector, num_complex::Complex64>>,
+    /// Quantum-dimension-weighted 2-norm of the discarded `|eigenvalue|`s.
+    pub error: f64,
+}
+
+// Hand-written for the reason [`SvdTrunc`]'s are.
+impl<R, D> Clone for EigTrunc<R, D>
+where
+    R: SectorCodec,
+    D: TensorScalar,
+{
+    fn clone(&self) -> Self {
+        Self {
+            d: self.d.clone(),
+            v: self.v.clone(),
+            eigenvalues: self.eigenvalues.clone(),
+            error: self.error,
+        }
+    }
+}
+
+impl<R, D> core::fmt::Debug for EigTrunc<R, D>
+where
+    R: SectorCodec,
+    D: TensorScalar,
+{
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("EigTrunc")
+            .field("d", &self.d)
+            .field("v", &self.v)
+            .field("eigenvalues", &self.eigenvalues)
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
+/// [`TensorMap::diagonal_factor`]'s body, as a free function so the
+/// `eig_*` family can build a `TensorMap<R, D::Eig>` from a `TensorMap<R, D>`.
+/// The payload type of a factor need not be the payload type of the tensor it
+/// came from, and an inherent method cannot say that.
+fn diagonal_factor_on<R, E, V>(
+    runtime: &Runtime,
+    authority: &BoundDynamicFusionMapSpace<R>,
+    mut spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<V>>,
+    to_scalar: impl Fn(V) -> E,
+) -> Result<TensorMap<R, E>, Error>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    spectrum.sort_unstable_by_key(|entry| entry.sector);
+    let space = tenet_matrixalgebra::diagonal_bond_bound_space_like(authority, &spectrum)?;
+    let data = spectrum
+        .into_iter()
+        .map(|entry| tenet_matrixalgebra::SectorSpectrum {
+            sector: entry.sector,
+            values: entry.values.into_iter().map(&to_scalar).collect(),
+        })
+        .collect();
+    Ok(TensorMap {
+        runtime: runtime.clone(),
+        body: Arc::new(TypedTensorBody {
+            space,
+            data: TypedData::Diagonal(data),
+            dense_cache: std::sync::OnceLock::new(),
+        }),
+    })
+}
+
+/// [`TensorMap::wrap_bound_factor`]'s body, free for the same reason as
+/// [`diagonal_factor_on`].
+fn wrap_factor_on<R, E>(runtime: &Runtime, factor: BoundDynFactor<R, E>) -> TensorMap<R, E>
+where
+    R: tenet_core::FusionRule,
+{
+    let (space, data) = factor.into_parts();
+    TensorMap {
+        runtime: runtime.clone(),
+        body: Arc::new(TypedTensorBody::dense(space, data)),
+    }
+}
+
+/// `dense_factor * dense + diagonal_factor * spectrum`, laid out per `space`.
+///
+/// The dense operand is scaled into a fresh owned buffer and the spectrum is
+/// added onto that buffer's per-block diagonal, which is the only place a bond
+/// space is non-zero. Same block addressing as
+/// [`tenet_matrixalgebra::diagonal_bond_data`], which is what put the values
+/// there in the first place.
+fn scatter_spectrum<D>(
+    space: &DynamicFusionMapSpace,
+    dense: &[D],
+    dense_factor: D,
+    spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
+    diagonal_factor: D,
+) -> Result<Vec<D>, Error>
+where
+    D: TensorScalar,
+{
+    let mut data: Vec<D> = dense.iter().map(|&value| value * dense_factor).collect();
+    let structure = space.structure();
+    for index in 0..structure.block_count() {
+        let block = structure.block(index)?;
+        let Some(pair) = block.key().as_fusion_tree_pair() else {
+            continue;
+        };
+        let sector = pair.codomain_tree().coupled();
+        // O(k) per block, so O(k²) over the walk. Fine at the sizes a bond
+        // space reaches; index it if a spectrum ever spans many sectors.
+        let Some(entry) = spectrum.iter().find(|entry| entry.sector == sector) else {
+            // Both operands live on one space, and a compact payload's space is
+            // built from its own spectrum, so every block's coupled sector has
+            // an entry. Skipping is the safe behaviour if that ever breaks —
+            // the block keeps the dense operand's contribution — but it is a
+            // silent wrong answer, so say so loudly in a debug build.
+            debug_assert!(
+                false,
+                "no spectrum entry for coupled sector {sector:?} on its own bond space"
+            );
+            continue;
+        };
+        let strides = block.strides();
+        let stride = strides[0] + strides[1];
+        let offset = block.offset();
+        // The three lengths agree by construction, for the same reason.
+        debug_assert_eq!(block.shape()[0], block.shape()[1]);
+        debug_assert_eq!(block.shape()[0], entry.values.len());
+        let count = block.shape()[0]
+            .min(block.shape()[1])
+            .min(entry.values.len());
+        for (i, &value) in entry.values[..count].iter().enumerate() {
+            let position = offset + i * stride;
+            data[position] = data[position] + value * diagonal_factor;
+        }
+    }
+    Ok(data)
+}
+
+/// Whether `space` is a bond space: rank one on each side, with the same leg on
+/// both — the shape a compact spectrum can address, and the only shape whose
+/// dense form is block-diagonal.
+///
+/// Verbatim from the erased `Tensor::is_diagonal_bond_space`, deliberately: it
+/// is the guard TensorKit's `DiagonalTensorMap` gets for free from its type, and
+/// two facades disagreeing about which destinations may stay compact would be a
+/// silent divergence rather than a visible one.
+///
+/// Applied to the *destination* of an operation, never to the operands. An
+/// operand's storage says what it holds; only the destination says whether the
+/// compact result is representable.
+///
+/// # Unreachable today, kept deliberately
+///
+/// Every [`TypedData::Diagonal`] payload this module can produce sits on a
+/// space built by [`diagonal_factor_on`], i.e. by
+/// [`tenet_matrixalgebra::diagonal_bond_bound_space_like`], which is a bond
+/// space by construction — and the operations that preserve the payload
+/// ([`TensorMap::scale`], [`TensorMap::add`], [`TensorMap::adjoint`], the
+/// `D * D` arm) all keep that space. So this predicate cannot currently return
+/// `false` at any of its call sites, and no test can kill it. It stays because
+/// it is the erased facade's own guard and because the next constructor of a
+/// compact payload — a diagonal-aware `contract`, say — would be the first one
+/// able to aim at a destination that is not a bond space, and should find the
+/// check already in place rather than have to notice it is missing.
+fn is_diagonal_bond_space(space: &DynamicFusionMapSpace) -> bool {
+    let homspace = space.homspace();
+    space.nout() == 1 && space.nin() == 1 && homspace.codomain().legs() == homspace.domain().legs()
+}
+
+/// Result of [`TensorMap::eigh_trunc`]: `t ~ v * d * v^H` with the eigenbasis
+/// truncated (MatrixAlgebraKit `eigh_trunc`).
+///
+/// Field order is `d` then `v`, matching [`TensorMap::eigh_full`]'s tuple and
+/// MatrixAlgebraKit's own `initialize_output`, so the two cannot be read the
+/// wrong way round against each other.
+// The `SectorCodec` bound is the field types' own, exactly as for [`SvdTrunc`].
+pub struct EighTrunc<R: SectorCodec, D> {
+    /// Eigenvalue factor `d : bond <- bond`, in compact diagonal storage.
+    pub d: TensorMap<R, D>,
+    /// Eigenvector isometry `v : codomain <- bond`.
+    pub v: TensorMap<R, D>,
+    /// Kept eigenvalues per coupled sector, sorted by provider label. Real for
+    /// both payload dtypes, as TensorKit's Hermitian `D` is.
+    pub eigenvalues: Vec<SectorSpectrum<R::Sector>>,
+    /// Quantum-dimension-weighted 2-norm of everything discarded.
+    pub error: f64,
+}
+
+// Hand-written for the reason [`SvdTrunc`]'s are.
+impl<R, D> Clone for EighTrunc<R, D>
+where
+    R: SectorCodec,
+{
+    fn clone(&self) -> Self {
+        Self {
+            d: self.d.clone(),
+            v: self.v.clone(),
+            eigenvalues: self.eigenvalues.clone(),
+            error: self.error,
+        }
+    }
+}
+
+impl<R, D> core::fmt::Debug for EighTrunc<R, D>
+where
+    R: SectorCodec,
+{
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("EighTrunc")
+            .field("d", &self.d)
+            .field("v", &self.v)
+            .field("eigenvalues", &self.eigenvalues)
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
 /// Storage shared by every clone of one typed tensor map: the admitted space
 /// and its block payload.
 struct TypedTensorBody<R, D> {
     space: BoundDynamicFusionMapSpace<R>,
-    data: Vec<D>,
+    data: TypedData<D>,
+    /// Materialization of a [`TypedData::Diagonal`] payload into the dense
+    /// coupled layout, computed at most once and shared by every clone of this
+    /// body — the erased sibling's `compact_dense` cache, without its hand-copy
+    /// on each `Tensor` value. Never populated for a dense payload.
+    dense_cache: std::sync::OnceLock<Vec<D>>,
+}
+
+impl<R, D> TypedTensorBody<R, D> {
+    /// A body holding an already-dense payload.
+    fn dense(space: BoundDynamicFusionMapSpace<R>, data: Vec<D>) -> Self {
+        Self {
+            space,
+            data: TypedData::Dense(data),
+            dense_cache: std::sync::OnceLock::new(),
+        }
+    }
 }
 
 /// A block-sparse symmetric tensor map that keeps its provider type.
@@ -487,7 +788,18 @@ impl<R, D> core::fmt::Debug for TensorMap<R, D> {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_struct("TensorMap")
-            .field("elements", &self.body.data.len())
+            // Storage-shaped, deliberately: a compact spectrum payload reports
+            // the values it stores, and forcing its dense materialization for a
+            // `{:?}` would make a diagnostic the most expensive call on the type.
+            .field(
+                "elements",
+                &match &self.body.data {
+                    TypedData::Dense(data) => data.len(),
+                    TypedData::Diagonal(spectrum) => {
+                        spectrum.iter().map(|entry| entry.values.len()).sum()
+                    }
+                },
+            )
             .finish_non_exhaustive()
     }
 }
@@ -540,7 +852,7 @@ where
         let data = apply_fill(space.space(), fill)?;
         Ok(Self {
             runtime: runtime.clone(),
-            body: Arc::new(TypedTensorBody { space, data }),
+            body: Arc::new(TypedTensorBody::dense(space, data)),
         })
     }
 
@@ -692,9 +1004,12 @@ where
             let space = body.space.space();
             sector_regions(space.structure(), space.nout())?
         };
+        let TypedData::Dense(data) = &mut body.data else {
+            unreachable!("`build` always produces a dense payload");
+        };
         for region in regions.iter() {
             for i in 0..region.rows().min(region.cols()) {
-                body.data[region.range().start + i * (region.rows() + 1)] = D::from_real(1.0);
+                data[region.range().start + i * (region.rows() + 1)] = D::from_real(1.0);
             }
         }
         Ok(identity)
@@ -706,6 +1021,17 @@ where
     /// codomain axes first) for the new codomain and domain — the same
     /// argument shape as the erased [`crate::prelude::Tensor::permute`], so
     /// there is one vocabulary for the operation rather than two.
+    ///
+    /// # Compact storage
+    ///
+    /// A factor in compact diagonal storage ([`Self::svd_compact`]'s `s`,
+    /// [`Self::eigh_full`]'s `d`) is **materialized** here, and so by
+    /// [`Self::braid`], [`Self::transpose`], [`Self::transpose_axes`] and
+    /// [`Self::repartition`] as well: the result is a dense `Σ_c k_c²` buffer.
+    /// TensorKit draws the line in the same place — its `DiagonalTensorMap`
+    /// implements only the two permutations that leave a diagonal diagonal —
+    /// and the general case genuinely is not diagonal, so this is a missing
+    /// specialization for two axis orders rather than a missing operation.
     ///
     /// # Errors
     ///
@@ -879,12 +1205,12 @@ where
         let mut lease = self.runtime.lease_context()?;
         let (space, data) = tree_transform_owned_multiplicity_free(
             lease.context().multiplicity_free_lane::<D>(),
-            BoundDynamicTensorRef::try_new(&self.body.space, &self.body.data)?,
+            BoundDynamicTensorRef::try_new(&self.body.space, self.dense_data())?,
             operation,
         )?;
         Ok(Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody { space, data }),
+            body: Arc::new(TypedTensorBody::dense(space, data)),
         })
     }
 
@@ -916,6 +1242,17 @@ where
     /// rules are unaffected; fermionic rules can differ by signs.
     /// [`Self::compose`] is the other semantics, and its documentation states
     /// the exact relation between the two.
+    ///
+    /// # Compact storage
+    ///
+    /// Unlike [`Self::compose`], this has no compact fast path: a diagonal
+    /// operand is materialized and the contraction runs dense. Contracting one
+    /// leg of a general tensor against a spectrum is per-leg bond scaling and
+    /// could stay compact, but only for the axis patterns that are exactly a
+    /// composition — so until that specialization exists, **absorb a spectrum
+    /// with [`Self::compose`]** (`u.compose(&s)`, `s.compose(&vh)`), which
+    /// takes the scaling path, and reach for `contract` for the general case.
+    /// The same gap is open in the erased facade.
     ///
     /// The result is bound to `self`'s provider allocation, the same
     /// left-authority rule [`Self::zeros`] uses for its first leg: the two
@@ -951,8 +1288,8 @@ where
         let mut lease = self.runtime.lease_context()?;
         let (space, data) = tensorcontract_owned_multiplicity_free(
             lease.context().multiplicity_free_lane::<D>(),
-            BoundDynamicTensorRef::try_new(&self.body.space, &self.body.data)?,
-            BoundDynamicTensorRef::try_new(&other.body.space, &other.body.data)?,
+            BoundDynamicTensorRef::try_new(&self.body.space, self.dense_data())?,
+            BoundDynamicTensorRef::try_new(&other.body.space, other.dense_data())?,
             lhs_axes,
             rhs_axes,
             // Why `OutputAxisOrder` stays out of the signature: it is an
@@ -962,7 +1299,7 @@ where
         )?;
         Ok(Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody { space, data }),
+            body: Arc::new(TypedTensorBody::dense(space, data)),
         })
     }
 
@@ -985,13 +1322,29 @@ where
     /// [`crate::prelude::Tensor::compose`] take none.
     ///
     /// The result is bound to `self`'s provider allocation — the same
-    /// left-authority rule as [`Self::contract`] and [`Self::zeros`].
+    /// left-authority rule as [`Self::contract`] and [`Self::zeros`] — with one
+    /// exemption: the `D * t` compact arm below returns `t`'s own space and
+    /// runtime handle, because that space *is* the destination and rebuilding
+    /// it under the left allocation would be a copy for nothing. The two
+    /// allocations must already agree on
+    /// [`tenet_core::FusionRule::rule_identity`] for the composition to be
+    /// legal at all, so the choice is immaterial to the algebra. The erased
+    /// [`crate::prelude::Tensor::compose`] takes the same exemption on the same
+    /// arm, and the two facades are byte-compared across it.
     ///
-    /// Why no diagonal fast paths, which the erased sibling has for `t * D`
-    /// and `D * t`: this facade has no diagonal storage to detect. They ride
-    /// with the typed diagonal-storage question of issue #570, and are a pure
-    /// cost question rather than a semantic one — the dense route computes the
-    /// same tensor.
+    /// # Compact fast paths
+    ///
+    /// When either operand carries compact diagonal storage — an `s` from
+    /// [`Self::svd_compact`], a `d` from [`Self::eigh_full`] — and the
+    /// destination is representable, this takes TensorKit's
+    /// `DiagonalTensorMap` route instead of a GEMM: `t * D` and `D * t` scale
+    /// one bond axis per block (`rmul!` / `lmul!`), and `D * D` multiplies the
+    /// two spectra elementwise and stays compact. Verified twist-free against
+    /// TK's `diagonal.jl`: `block(D, c)` is a `Diagonal`, so LinearAlgebra
+    /// dispatches to scaling, with no braiding or recoupling. The result is the
+    /// same tensor the dense route computes, so this is a cost question only,
+    /// and any operand or destination that does not fit falls through to the
+    /// dense path rather than being refused.
     ///
     /// # Errors
     ///
@@ -1009,20 +1362,125 @@ where
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }
+        if let Some(compact) = self.compose_compact(other)? {
+            return Ok(compact);
+        }
         let lhs_axes: Vec<usize> = (self.codomain_rank()..self.rank()).collect();
         let rhs_axes: Vec<usize> = (0..other.codomain_rank()).collect();
         let mut lease = self.runtime.lease_context()?;
         let (space, data) = tensorcompose_owned_multiplicity_free(
             lease.context().multiplicity_free_lane::<D>(),
-            BoundDynamicTensorRef::try_new(&self.body.space, &self.body.data)?,
-            BoundDynamicTensorRef::try_new(&other.body.space, &other.body.data)?,
+            BoundDynamicTensorRef::try_new(&self.body.space, self.dense_data())?,
+            BoundDynamicTensorRef::try_new(&other.body.space, other.dense_data())?,
             &lhs_axes,
             &rhs_axes,
         )?;
         Ok(Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody { space, data }),
+            body: Arc::new(TypedTensorBody::dense(space, data)),
         })
+    }
+
+    /// The compact arms of [`Self::compose`], or `None` when the operands or
+    /// the destination cannot support one and the dense route must run.
+    ///
+    /// Each arm proves its destination rather than deriving it. Composition
+    /// glues `self.codomain <- other.domain`, so:
+    ///
+    /// - `D * D` — both operands are bond spaces (`codomain == domain`), so
+    ///   when the two spaces are equal the destination *is* that space, and
+    ///   [`is_diagonal_bond_space`] certifies it can hold a compact result.
+    /// - `t * D` — the destination is `t.codomain <- D.domain`; `D` is a bond
+    ///   space, so `D.domain == D.codomain`, and requiring that to equal
+    ///   `t.domain` makes the destination `t`'s own space. `t`'s payload is
+    ///   then `t`'s data with each block's trailing axis scaled.
+    /// - `D * t` — the mirror image, scaling `t`'s leading axis.
+    ///
+    /// Without those equalities the destination is a different space (a dual
+    /// leg on the contracted side is the reachable case) and reusing an
+    /// operand's would silently produce a tensor on the wrong space, so the
+    /// arm declines and the expert layer decides — including by rejecting a
+    /// composition that is not one at all.
+    fn compose_compact(&self, other: &Self) -> Result<Option<Self>, Error> {
+        if !self.same_rule(other) {
+            return Ok(None);
+        }
+        let (left, right) = (self.body.space.space(), other.body.space.space());
+        match (self.spectrum(), other.spectrum()) {
+            (Some(lhs), Some(rhs)) => {
+                // Both clauses are unreachable today and stay for the reason
+                // [`is_diagonal_bond_space`] gives. `left != right` is the
+                // weaker one: two compact payloads on unequal bond spaces
+                // necessarily carry spectra that differ in their sectors or
+                // their lengths, so the elementwise product below would refuse
+                // them anyway — just with `spectra_disagree`'s message instead
+                // of the expert layer's. Removing it would change which error a
+                // caller sees, not whether one is reported.
+                if left != right || !is_diagonal_bond_space(left) {
+                    return Ok(None);
+                }
+                if lhs.len() != rhs.len() {
+                    return Err(spectra_disagree());
+                }
+                let product = lhs
+                    .iter()
+                    .zip(rhs)
+                    .map(|(left, right)| {
+                        if left.sector != right.sector || left.values.len() != right.values.len() {
+                            return Err(spectra_disagree());
+                        }
+                        Ok(tenet_matrixalgebra::SectorSpectrum {
+                            sector: left.sector,
+                            values: left
+                                .values
+                                .iter()
+                                .zip(&right.values)
+                                .map(|(&a, &b)| a * b)
+                                .collect(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?;
+                Ok(Some(self.with_spectrum(product)))
+            }
+            // `t * D`: scale each block's trailing axis (TensorKit `rmul!`).
+            (None, Some(spectrum)) => {
+                if !is_diagonal_bond_space(right)
+                    || left.homspace().domain().legs() != right.homspace().codomain().legs()
+                {
+                    return Ok(None);
+                }
+                self.scaled_axis(None, spectrum).map(Some)
+            }
+            // `D * t`: scale each block's leading axis (TensorKit `lmul!`).
+            (Some(spectrum), None) => {
+                if !is_diagonal_bond_space(left)
+                    || right.homspace().codomain().legs() != left.homspace().domain().legs()
+                {
+                    return Ok(None);
+                }
+                other.scaled_axis(Some(0), spectrum).map(Some)
+            }
+            (None, None) => Ok(None),
+        }
+    }
+
+    /// This tensor with one bond axis of every block scaled by `spectrum`,
+    /// on its own space. `axis = None` scales the trailing axis, `Some(0)` the
+    /// leading one, exactly as the seam names them.
+    fn scaled_axis(
+        &self,
+        axis: Option<usize>,
+        spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
+    ) -> Result<Self, Error> {
+        let mut data = self.dense_data().to_vec();
+        tenet_matrixalgebra::scale_axis_by_spectrum_mapped(
+            self.body.space.space(),
+            &mut data,
+            axis,
+            spectrum,
+            |value| value,
+        )?;
+        Ok(self.with_data(data))
     }
 
     /// Wraps one factor the matrix-algebra seam produced into a typed tensor
@@ -1030,11 +1488,27 @@ where
     /// [`TypedTensorBody`] stores, so there is nothing to validate here — the
     /// seam already certified the space against its own data.
     fn wrap_bound_factor(&self, factor: BoundDynFactor<R, D>) -> Self {
-        let (space, data) = factor.into_parts();
-        Self {
-            runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody { space, data }),
-        }
+        wrap_factor_on(&self.runtime, factor)
+    }
+
+    /// Wraps a seam spectrum as a factor in compact diagonal storage: the bond
+    /// space is derived from the spectrum itself, but the payload stays the
+    /// `Σ_c k_c` values rather than the `Σ_c k_c²` block-diagonal buffer they
+    /// would fill (TensorKit's `DiagonalTensorMap`).
+    ///
+    /// The spectrum is stored raw — engine [`tenet_core::SectorId`]s, values in
+    /// the payload dtype `D`. Decoding belongs to the caller-facing spectrum
+    /// fields, not to storage; a stored payload never leaves this module.
+    ///
+    /// Sorted by sector id first, matching the erased
+    /// `Tensor::from_diagonal_real_spectrum`: the bond leg is built from this
+    /// order, so the two facades' factors are only byte-comparable if both sort.
+    fn diagonal_factor<V>(
+        &self,
+        spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<V>>,
+        to_scalar: impl Fn(V) -> D,
+    ) -> Result<Self, Error> {
+        diagonal_factor_on(&self.runtime, &self.body.space, spectrum, to_scalar)
     }
 
     /// Decodes a seam spectrum into provider labels and sorts it by label.
@@ -1042,12 +1516,12 @@ where
     /// Every id here came out of the engine's own coupled-sector enumeration,
     /// so a decode failure is the provider breaking [`SectorCodec`]'s
     /// decode-totality law — same contract as [`decode_block_fusion_trees`].
-    fn decode_spectrum(
+    fn decode_spectrum<V>(
         &self,
-        raw: Vec<tenet_matrixalgebra::SectorSpectrum>,
-    ) -> Result<Vec<SectorSpectrum<R::Sector>>, Error> {
+        raw: Vec<tenet_matrixalgebra::SectorSpectrum<V>>,
+    ) -> Result<Vec<SectorSpectrum<R::Sector, V>>, Error> {
         let provider = self.body.space.provider();
-        let mut decoded: Vec<SectorSpectrum<R::Sector>> = raw
+        let mut decoded: Vec<SectorSpectrum<R::Sector, V>> = raw
             .into_iter()
             .map(|entry| {
                 Ok(SectorSpectrum {
@@ -1064,7 +1538,7 @@ where
 
     /// Borrowed seam view of this tensor map.
     fn bound_ref(&self) -> Result<BoundDynamicTensorRef<'_, R, D>, Error> {
-        BoundDynamicTensorRef::try_new(&self.body.space, &self.body.data).map_err(Error::from)
+        BoundDynamicTensorRef::try_new(&self.body.space, self.dense_data()).map_err(Error::from)
     }
 
     /// TensorKit 0.17 / MatrixAlgebraKit `svd_compact`: `t = u * s * vh` with
@@ -1073,16 +1547,15 @@ where
     /// Returns `(u, s, vh)` with `u : codomain <- bond`, `s : bond <- bond`
     /// and `vh : bond <- domain`.
     ///
-    /// # Order-parity gap (issue #570)
+    /// # Storage
     ///
-    /// TensorKit's `svd_compact` returns `s` as a `DiagonalTensorMap`, and the
-    /// erased [`crate::prelude::Tensor`] matches it with diagonal storage. This
-    /// facade has only dense block storage, so `s` costs `Σ_c k_c²` instead of
-    /// `Σ_c k_c`, and a downstream `u * s * vh` runs the dense GEMM path rather
-    /// than the O(d·n) block scaling. Interim guidance: a caller that only
-    /// needs the spectrum should use [`Self::svd_vals`], which never
-    /// materializes `s` at all. When typed diagonal storage lands the signature
-    /// does not change — only the storage behind `s`.
+    /// `s` is held in compact diagonal storage — `Σ_c k_c` values, not the
+    /// `Σ_c k_c²` block-diagonal buffer — matching the `DiagonalTensorMap`
+    /// TensorKit's own `svd_compact` returns. A downstream `u.compose(&s)` or
+    /// `s.compose(&vh)` takes the O(d·n) bond-scaling path rather than a dense
+    /// GEMM. [`Self::data`] still reports the dense buffer, materializing it
+    /// once on demand; a caller who only needs the values should reach for
+    /// [`Self::svd_vals`], which builds no factor at all.
     ///
     /// # Errors
     ///
@@ -1095,11 +1568,14 @@ where
         // entirely on the dense-executor boundary, so leasing the (scarcer)
         // recoupling context here would serialize unrelated work for nothing.
         let mut dense = self.runtime.lease_dense();
-        let out = tenet_matrixalgebra::svd_compact_dyn(dense.dense(), &self.bound_ref()?)?;
-        let (u, s, vh, _) = out.into_parts();
+        // Why the `_factors_` seam rather than `svd_compact_dyn`: the latter
+        // builds the dense block-diagonal `s` itself, so taking it and throwing
+        // it away would pay the very `Σ_c k_c²` allocation this storage avoids.
+        let (u, vh, spectrum) =
+            tenet_matrixalgebra::svd_compact_factors_dyn(dense.dense(), &self.bound_ref()?)?;
         Ok((
             self.wrap_bound_factor(u),
-            self.wrap_bound_factor(s),
+            self.diagonal_factor(spectrum, D::from_real)?,
             self.wrap_bound_factor(vh),
         ))
     }
@@ -1110,10 +1586,12 @@ where
     /// Returns `(u, s, vh)` with `u : codomain <- W`, `s : W <- W'` and
     /// `vh : W' <- domain`.
     ///
-    /// Unlike [`Self::svd_compact`] this carries no order-parity gap: TensorKit's
-    /// own `svd_full` builds `s` as a dense rectangular tensor
-    /// (`similar(t, real(scalartype(t)), V_cod <- V_dom)`), so a dense `s` here
-    /// is TK-exact.
+    /// `s` is dense here where [`Self::svd_compact`]'s is diagonal, and that is
+    /// TK-exact rather than a residual gap: TensorKit's own `svd_full` builds
+    /// `s` as a dense rectangular tensor
+    /// (`similar(t, real(scalartype(t)), V_cod <- V_dom)`). TensorKit's
+    /// diagonal-`S` `svd_full!` applies to diagonal *inputs*, which is a
+    /// different operation.
     ///
     /// # Errors
     ///
@@ -1136,8 +1614,7 @@ where
     /// named struct, following the same rule the erased facade uses — tuples up
     /// to three, a struct beyond.
     ///
-    /// The dense-`s` order-parity gap of [`Self::svd_compact`] (issue #570)
-    /// applies here verbatim, with the same interim guidance.
+    /// `s` is in compact diagonal storage, exactly as [`Self::svd_compact`]'s.
     ///
     /// # Errors
     ///
@@ -1146,12 +1623,15 @@ where
     /// validated where it is applied, not here.
     pub fn svd_trunc(&self, truncation: &Truncation) -> Result<SvdTrunc<R, D>, Error> {
         let mut dense = self.runtime.lease_dense();
-        let out =
-            tenet_matrixalgebra::svd_trunc_dyn(dense.dense(), &self.bound_ref()?, truncation)?;
-        let (u, s, vh, singular_values, error) = out.into_parts();
+        // The `_factors_` seam, for the reason `svd_compact` gives.
+        let (u, vh, singular_values, error) = tenet_matrixalgebra::svd_trunc_factors_dyn(
+            dense.dense(),
+            &self.bound_ref()?,
+            truncation,
+        )?;
         Ok(SvdTrunc {
             u: self.wrap_bound_factor(u),
-            s: self.wrap_bound_factor(s),
+            s: self.diagonal_factor(singular_values.clone(), D::from_real)?,
             vh: self.wrap_bound_factor(vh),
             singular_values: self.decode_spectrum(singular_values)?,
             error,
@@ -1161,8 +1641,8 @@ where
     /// TensorKit 0.17 / MatrixAlgebraKit `svd_vals`: the singular values per
     /// coupled sector, and nothing else.
     ///
-    /// No factor tensor is built, so this is also the way around the dense-`s`
-    /// ceiling documented on [`Self::svd_compact`].
+    /// No factor tensor and no bond space is built at all, so this is cheaper
+    /// still than reading [`Self::svd_compact`]'s compact `s`.
     ///
     /// # Errors
     ///
@@ -1274,6 +1754,174 @@ where
         Ok(self.wrap_bound_factor(out))
     }
 
+    /// TensorKit 0.17 / MatrixAlgebraKit `eigh_full`: the Hermitian
+    /// eigendecomposition `t = v * d * v^H` of an endomorphism, returned as
+    /// `(d, v)`.
+    ///
+    /// `d : bond <- bond` carries the eigenvalues in compact diagonal storage
+    /// (TensorKit's `DiagonalTensorMap`), so `v.compose(&d)` takes the
+    /// bond-scaling path; `v : codomain <- bond` is the eigenbasis. The
+    /// eigenvalues are real for both payload dtypes — TensorKit's Hermitian `D`
+    /// is real too — but `d` keeps the payload dtype `D` so it composes with
+    /// `v` directly.
+    ///
+    /// The `(d, v)` order is MatrixAlgebraKit's `initialize_output` order and
+    /// the erased [`crate::prelude::Tensor::eigh_full`]'s, not the `v, d`
+    /// reading order of the formula. It is deliberate on both facades.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] when the tensor is not an endomorphism or its
+    /// coupled blocks are not Hermitian, and otherwise
+    /// [`Error::Core`] / [`Error::FusionAlgebra`] from the seam — which owns
+    /// those rules, so they are not re-checked here.
+    pub fn eigh_full(&self) -> Result<(Self, Self), Error> {
+        let mut dense = self.runtime.lease_dense();
+        let out = tenet_matrixalgebra::eigh_full_dyn(dense.dense(), &self.bound_ref()?)?;
+        let (v, eigenvalues) = out.into_parts();
+        Ok((
+            self.diagonal_factor(eigenvalues, D::from_real)?,
+            self.wrap_bound_factor(v),
+        ))
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `eigh_trunc`: [`Self::eigh_full`] with
+    /// the eigenbasis truncated by `truncation`; see [`EighTrunc`].
+    ///
+    /// Returned as a named struct rather than a four-tuple, the same rule
+    /// [`Self::svd_trunc`] follows.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::eigh_full`]'s, plus a malformed `truncation` — validated
+    /// where it is applied, not here.
+    pub fn eigh_trunc(&self, truncation: &Truncation) -> Result<EighTrunc<R, D>, Error> {
+        let mut dense = self.runtime.lease_dense();
+        let out =
+            tenet_matrixalgebra::eigh_trunc_dyn(dense.dense(), &self.bound_ref()?, truncation)?;
+        let (v, eigenvalues, error) = out.into_parts();
+        Ok(EighTrunc {
+            d: self.diagonal_factor(eigenvalues.clone(), D::from_real)?,
+            v: self.wrap_bound_factor(v),
+            eigenvalues: self.decode_spectrum(eigenvalues)?,
+            error,
+        })
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `eigh_vals`: the Hermitian eigenvalues
+    /// per coupled sector, and nothing else.
+    ///
+    /// No factor and no bond space is built, so this is the cheap way to ask
+    /// about a spectrum — the [`Self::svd_vals`] of the eigendecompositions.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::eigh_full`]'s, plus [`Error::FusionAlgebra`] when the provider
+    /// cannot decode a coupled sector its own algebra produced.
+    pub fn eigh_vals(&self) -> Result<Vec<SectorSpectrum<R::Sector>>, Error> {
+        let mut dense = self.runtime.lease_dense();
+        let raw = tenet_matrixalgebra::eigh_vals_dyn(dense.dense(), &self.bound_ref()?)?;
+        self.decode_spectrum(raw)
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `eig_full`: the general
+    /// (non-Hermitian) eigendecomposition `t = v * d * v^-1` of an
+    /// endomorphism, returned as `(d, v)` — [`Self::eigh_full`]'s order, for
+    /// the same reason.
+    ///
+    /// Both factors are complex whatever `D` is: a real matrix's eigenpairs are
+    /// complex in general, and TensorKit's `eigen` likewise returns
+    /// `ComplexF64` `D` and `V` for a real argument. `d` carries the spectrum
+    /// in compact diagonal storage.
+    ///
+    /// # The `D::Eig` bound
+    ///
+    /// The `where` clause is vacuous for the two payload types this facade
+    /// admits — `f64` and `Complex64` both have `Eig = Complex64`, which is a
+    /// [`TensorScalar`]. It is written out because
+    /// [`tenet_matrixalgebra::FactorScalar::Eig`] is the wider seam's associated
+    /// type and is not constrained to this facade's scalars, so without it the
+    /// factors could not be `TensorMap`s at all. Per-method rather than on the
+    /// impl block, so nothing outside the `eig_*` row pays for it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] when the tensor is not an endomorphism, and
+    /// otherwise [`Error::Core`] / [`Error::FusionAlgebra`] from the seam.
+    #[allow(clippy::type_complexity)]
+    pub fn eig_full(
+        &self,
+    ) -> Result<
+        (
+            TensorMap<R, <D as FactorScalar>::Eig>,
+            TensorMap<R, <D as FactorScalar>::Eig>,
+        ),
+        Error,
+    >
+    where
+        <D as FactorScalar>::Eig: TensorScalar,
+    {
+        let mut dense = self.runtime.lease_dense();
+        let out = tenet_matrixalgebra::eig_full_dyn(dense.dense(), &self.bound_ref()?)?;
+        let (v, eigenvalues) = out.into_parts();
+        Ok((
+            diagonal_factor_on(
+                &self.runtime,
+                &self.body.space,
+                eigenvalues,
+                <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
+            )?,
+            wrap_factor_on(&self.runtime, v),
+        ))
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `eig_trunc`: [`Self::eig_full`] with
+    /// the eigenbasis truncated by descending `|eigenvalue|`; see [`EigTrunc`].
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::eig_full`]'s, plus a malformed `truncation`.
+    pub fn eig_trunc(&self, truncation: &Truncation) -> Result<EigTrunc<R, D>, Error>
+    where
+        // See [`Self::eig_full`] for why this bound is per-method.
+        <D as FactorScalar>::Eig: TensorScalar,
+    {
+        let mut dense = self.runtime.lease_dense();
+        let out =
+            tenet_matrixalgebra::eig_trunc_dyn(dense.dense(), &self.bound_ref()?, truncation)?;
+        let (v, eigenvalues, error) = out.into_parts();
+        Ok(EigTrunc {
+            d: diagonal_factor_on(
+                &self.runtime,
+                &self.body.space,
+                eigenvalues.clone(),
+                <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
+            )?,
+            v: wrap_factor_on(&self.runtime, v),
+            eigenvalues: self.decode_spectrum(eigenvalues)?,
+            error,
+        })
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `eig_vals`: the general eigenvalues
+    /// per coupled sector, and nothing else. Complex for both payload dtypes.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::eig_full`]'s, plus [`Error::FusionAlgebra`] when the provider
+    /// cannot decode a coupled sector its own algebra produced.
+    pub fn eig_vals(&self) -> Result<Vec<SectorSpectrum<R::Sector, num_complex::Complex64>>, Error>
+    where
+        // Carried across the whole row even though this member builds no
+        // factor: the three are one API surface, and a caller who can spell two
+        // of them but not the third would be reading an accident.
+        <D as FactorScalar>::Eig: TensorScalar,
+    {
+        let mut dense = self.runtime.lease_dense();
+        let raw = tenet_matrixalgebra::eig_vals_dyn(dense.dense(), &self.bound_ref()?)?;
+        self.decode_spectrum(raw)
+    }
+
     /// Builds a sibling on this tensor's own space and runtime from a fresh
     /// buffer. Every element-wise scalar operation below produces exactly
     /// that: the space is unchanged and only the payload is new, so the shared
@@ -1283,11 +1931,64 @@ where
     fn with_data(&self, data: Vec<D>) -> Self {
         Self {
             runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody::dense(self.body.space.clone(), data)),
+        }
+    }
+
+    /// A sibling on this tensor's own space carrying a new compact spectrum.
+    /// Every operation that reaches this keeps the bond space it was called on,
+    /// so the checked admission proof carries over exactly as for
+    /// [`Self::with_data`].
+    fn with_spectrum(&self, spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<D>>) -> Self {
+        Self {
+            runtime: self.runtime.clone(),
             body: Arc::new(TypedTensorBody {
                 space: self.body.space.clone(),
-                data,
+                data: TypedData::Diagonal(spectrum),
+                dense_cache: std::sync::OnceLock::new(),
             }),
         }
+    }
+
+    /// The compact payload, when this tensor has one.
+    fn spectrum(&self) -> Option<&[tenet_matrixalgebra::SectorSpectrum<D>]> {
+        match &self.body.data {
+            TypedData::Diagonal(spectrum) => Some(spectrum),
+            TypedData::Dense(_) => None,
+        }
+    }
+
+    /// Whether two operands' providers are the same rule. The compact paths
+    /// below skip the expert layer, which is where a mismatch would otherwise
+    /// be caught, so they have to ask themselves.
+    fn same_rule(&self, other: &Self) -> bool {
+        self.body.space.provider().rule_identity() == other.body.space.provider().rule_identity()
+    }
+
+    /// The dimension-weighted inner product of two compact spectra,
+    /// `Σ_c dim(c) * Σ_i conj(a_i) b_i` — [`weighted_inner`]'s reduction with
+    /// the zeros left out, since a bond space's dense form is zero off the
+    /// per-sector diagonal.
+    fn compact_inner(
+        lhs: &[tenet_matrixalgebra::SectorSpectrum<D>],
+        rhs: &[tenet_matrixalgebra::SectorSpectrum<D>],
+        provider: &R,
+    ) -> Result<num_complex::Complex64, Error> {
+        if lhs.len() != rhs.len() {
+            return Err(spectra_disagree());
+        }
+        let mut total = num_complex::Complex64::new(0.0, 0.0);
+        for (left, right) in lhs.iter().zip(rhs) {
+            if left.sector != right.sector || left.values.len() != right.values.len() {
+                return Err(spectra_disagree());
+            }
+            let mut partial = D::from_real(0.0);
+            for (&a, &b) in left.values.iter().zip(&right.values) {
+                partial = partial + FactorScalar::adjoint(a) * b;
+            }
+            total += partial.widen_complex() * provider.dim_scalar(left.sector);
+        }
+        Ok(total)
     }
 
     /// The linear combination `alpha * self + beta * other`, mirroring the
@@ -1332,11 +2033,60 @@ where
                 "tensors live on different spaces or block layouts".to_string(),
             ));
         }
+        match (self.spectrum(), other.spectrum()) {
+            // Two spectra on one bond space: the sum is diagonal too.
+            (Some(lhs), Some(rhs)) => {
+                if lhs.len() != rhs.len() {
+                    return Err(spectra_disagree());
+                }
+                let sum = lhs
+                    .iter()
+                    .zip(rhs)
+                    .map(|(left, right)| {
+                        if left.sector != right.sector || left.values.len() != right.values.len() {
+                            return Err(spectra_disagree());
+                        }
+                        Ok(tenet_matrixalgebra::SectorSpectrum {
+                            sector: left.sector,
+                            values: left
+                                .values
+                                .iter()
+                                .zip(&right.values)
+                                .map(|(&x, &y)| x * alpha + y * beta)
+                                .collect(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?;
+                return Ok(self.with_spectrum(sum));
+            }
+            // Mixed: the result is dense, but the *diagonal operand* is never
+            // materialized to get there — the one O(n²) buffer this needs is
+            // the owned result, which scatters the spectrum onto its own
+            // diagonal. Materializing first would allocate a second.
+            (Some(diagonal), None) => {
+                return Ok(self.with_data(scatter_spectrum(
+                    self.body.space.space(),
+                    other.dense_data(),
+                    beta,
+                    diagonal,
+                    alpha,
+                )?))
+            }
+            (None, Some(diagonal)) => {
+                return Ok(self.with_data(scatter_spectrum(
+                    self.body.space.space(),
+                    self.dense_data(),
+                    alpha,
+                    diagonal,
+                    beta,
+                )?))
+            }
+            (None, None) => {}
+        }
         Ok(self.with_data(
-            self.body
-                .data
+            self.dense_data()
                 .iter()
-                .zip(&other.body.data)
+                .zip(other.dense_data())
                 .map(|(&x, &y)| x * alpha + y * beta)
                 .collect(),
         ))
@@ -1350,8 +2100,27 @@ where
     /// `D` is a type parameter and the payload is always a host buffer. The
     /// erased `scale`/`scale_c64` split has the same origin and likewise
     /// collapses: `factor` is simply a `D`.
+    ///
+    /// Compact diagonal storage is preserved: scaling a spectrum factor stays
+    /// `Σ_c k_c` values rather than densifying.
     pub fn scale(&self, factor: D) -> Self {
-        self.with_data(self.body.data.iter().map(|&value| value * factor).collect())
+        if let Some(spectrum) = self.spectrum() {
+            return self.with_spectrum(
+                spectrum
+                    .iter()
+                    .map(|entry| tenet_matrixalgebra::SectorSpectrum {
+                        sector: entry.sector,
+                        values: entry.values.iter().map(|&value| value * factor).collect(),
+                    })
+                    .collect(),
+            );
+        }
+        self.with_data(
+            self.dense_data()
+                .iter()
+                .map(|&value| value * factor)
+                .collect(),
+        )
     }
 
     /// Partial trace over pairs of mutually dual legs (TensorKit
@@ -1419,13 +2188,13 @@ where
         let data = tenet_tensors::tensortrace_fusion_dyn_owned_checked(
             &space,
             &self.body.space,
-            &self.body.data,
+            self.dense_data(),
             axes,
             D::from_real(1.0),
         )?;
         Ok(Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody { space, data }),
+            body: Arc::new(TypedTensorBody::dense(space, data)),
         })
     }
 
@@ -1445,11 +2214,32 @@ where
     /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`]
     /// straight from the seam, which owns the bend the dagger performs.
     pub fn adjoint(&self) -> Result<Self, Error> {
-        let (space, data) = tenet_tensors::adjoint_bound_dyn(&self.body.space, &self.body.data)
+        if let Some(spectrum) = self.spectrum() {
+            // A bond space is its own adjoint (`codomain == domain`), and the
+            // dagger of a diagonal is the conjugated diagonal — so this is
+            // O(Σ_c k_c) with no dense buffer and no bend. For a real payload
+            // `FactorScalar::adjoint` is the identity, which is why there is no
+            // separate real arm: the erased facade's `RealF64`/`RealC64`/`C64`
+            // split exists only because its dtype is a runtime property.
+            return Ok(self.with_spectrum(
+                spectrum
+                    .iter()
+                    .map(|entry| tenet_matrixalgebra::SectorSpectrum {
+                        sector: entry.sector,
+                        values: entry
+                            .values
+                            .iter()
+                            .map(|&value| FactorScalar::adjoint(value))
+                            .collect(),
+                    })
+                    .collect(),
+            ));
+        }
+        let (space, data) = tenet_tensors::adjoint_bound_dyn(&self.body.space, self.dense_data())
             .map_err(Error::from)?;
         Ok(Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody { space, data }),
+            body: Arc::new(TypedTensorBody::dense(space, data)),
         })
     }
 
@@ -1468,6 +2258,10 @@ where
         // Same weighted reduction the erased `norm` runs, on the same helper:
         // a second copy would be free to drift from the sibling this is
         // byte-compared against.
+        if let Some(spectrum) = self.spectrum() {
+            let provider = self.body.space.provider();
+            return Ok(Self::compact_inner(spectrum, spectrum, provider)?.re.sqrt());
+        }
         Ok(self.weighted_self_inner()?.re.sqrt())
     }
 
@@ -1487,9 +2281,15 @@ where
         // facade needs the match because its dtype is a runtime property. Here
         // the widening is exact and `Complex64::new(x, 0.0).norm()` is exactly
         // `|x|`, so one expression covers both instantiations.
+        if let Some(spectrum) = self.spectrum() {
+            return Ok(spectrum
+                .iter()
+                .flat_map(|entry| entry.values.iter())
+                .map(|&value| value.widen_complex().norm())
+                .fold(0.0, f64::max));
+        }
         Ok(self
-            .body
-            .data
+            .dense_data()
             .iter()
             .map(|&value| value.widen_complex().norm())
             .fold(0.0, f64::max))
@@ -1517,8 +2317,8 @@ where
             self.body.space.provider(),
             self.body.space.space().structure(),
             self.body.space.space().nout(),
-            &self.body.data,
-            &self.body.data,
+            self.dense_data(),
+            self.dense_data(),
         )
     }
 
@@ -1544,6 +2344,14 @@ where
                 "tensors live on different spaces or block layouts".to_string(),
             ));
         }
+        // Two compact spectra reduce without either being materialized. A mixed
+        // pair does not: the dense operand has to be read at its diagonal
+        // positions anyway, so it goes through the shared materialization
+        // cache like every other dense consumer.
+        if let (Some(lhs), Some(rhs)) = (self.spectrum(), other.spectrum()) {
+            let provider = self.body.space.provider();
+            return Ok(D::from_complex64(Self::compact_inner(lhs, rhs, provider)?));
+        }
         // `D::from_complex64` is `.re` for the real scalar and the identity for
         // the complex one, so this is bit-identical to the erased facade's
         // `Scalar::F64(v.re)` / `Scalar::C64(v)` dispatch, without the enum.
@@ -1551,8 +2359,8 @@ where
             self.body.space.provider(),
             self.body.space.space().structure(),
             self.body.space.space().nout(),
-            &self.body.data,
-            &other.body.data,
+            self.dense_data(),
+            other.dense_data(),
         )?))
     }
 
@@ -1592,12 +2400,136 @@ where
                 "tr() requires an endomorphism (domain == codomain)".to_string(),
             ));
         }
+        if let Some(spectrum) = self.spectrum() {
+            // `Σ_c dim(c) * Σ_i d_i`: TensorKit's positive trace on a
+            // `DiagonalTensorMap`, read straight off the stored values.
+            let provider = self.body.space.provider();
+            let mut total = num_complex::Complex64::new(0.0, 0.0);
+            for entry in spectrum {
+                let mut partial = D::from_real(0.0);
+                for &value in &entry.values {
+                    partial = partial + value;
+                }
+                total += partial.widen_complex() * provider.dim_scalar(entry.sector);
+            }
+            return Ok(D::from_complex64(total));
+        }
         Ok(D::from_complex64(weighted_trace(
             self.body.space.provider(),
             self.body.space.space().structure(),
             self.body.space.space().nout(),
-            &self.body.data,
+            self.dense_data(),
         )?))
+    }
+
+    /// Whether the tensor equals its own adjoint within `tol`, relative to its
+    /// norm (TensorKit `ishermitian`).
+    ///
+    /// A non-endomorphism is never Hermitian and comes back `false` rather than
+    /// as an error, which is where both this facade and the erased one differ
+    /// from TensorKit — it throws. A predicate that can only be called after
+    /// another predicate is not one.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::add`]'s and [`Self::adjoint`]'s, which is where the work happens.
+    pub fn is_hermitian(&self, tol: f64) -> Result<bool, Error> {
+        if !self.is_endomorphism() {
+            return Ok(false);
+        }
+        let difference = self.add(&self.adjoint()?, D::from_real(1.0), D::from_real(-1.0))?;
+        Ok(difference.norm()? <= tol * self.norm()?.max(1.0))
+    }
+
+    /// Whether the tensor equals minus its own adjoint within `tol`
+    /// (TensorKit `isantihermitian`). A non-endomorphism is `false`, as for
+    /// [`Self::is_hermitian`].
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::is_hermitian`]'s.
+    pub fn is_antihermitian(&self, tol: f64) -> Result<bool, Error> {
+        if !self.is_endomorphism() {
+            return Ok(false);
+        }
+        let sum = self.add(&self.adjoint()?, D::from_real(1.0), D::from_real(1.0))?;
+        Ok(sum.norm()? <= tol * self.norm()?.max(1.0))
+    }
+
+    /// Whether `t† ∘ t` is the identity on the domain within `tol`
+    /// (TensorKit `isisometric`): the columns are orthonormal. Defined for any
+    /// shape, not only square ones.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::adjoint`]'s, [`Self::compose`]'s and [`Self::id`]'s.
+    pub fn is_isometric(&self, tol: f64) -> Result<bool, Error> {
+        let gram = self.adjoint()?.compose(self)?;
+        let identity = Self::id(&self.runtime, &self.domain())?;
+        let difference = gram.add(&identity, D::from_real(1.0), D::from_real(-1.0))?;
+        Ok(difference.norm()? <= tol * gram.norm()?.max(1.0))
+    }
+
+    /// Whether the tensor is unitary within `tol` (TensorKit `isunitary`):
+    /// isometric in both directions.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::is_isometric`]'s.
+    pub fn is_unitary(&self, tol: f64) -> Result<bool, Error> {
+        Ok(self.is_isometric(tol)? && self.adjoint()?.is_isometric(tol)?)
+    }
+
+    /// Whether the tensor is Hermitian and positive definite (TensorKit
+    /// `isposdef`): every Hermitian eigenvalue exceeds `tol * max(norm, 1)`.
+    ///
+    /// Strict, like TensorKit's Cholesky-based test: a positive *semi*definite
+    /// spectrum — an eigenvalue at zero — is `false`. With `tol = 0.0` this is
+    /// exact strict positivity up to floating point.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::is_hermitian`]'s and [`Self::eigh_vals`]'s.
+    pub fn is_posdef(&self, tol: f64) -> Result<bool, Error> {
+        if !self.is_hermitian(tol)? {
+            return Ok(false);
+        }
+        let threshold = tol * self.norm()?.max(1.0);
+        Ok(self
+            .eigh_vals()?
+            .iter()
+            .flat_map(|spectrum| spectrum.values.iter())
+            .all(|&eigenvalue| eigenvalue > threshold))
+    }
+
+    /// The Hermitian part `(t + t†)/2` (TensorKit `project_hermitian`), the
+    /// nearest Hermitian tensor.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::add`]'s — including [`Error::InvalidArgument`] when the tensor is
+    /// not an endomorphism, since then it and its adjoint live on different
+    /// spaces. Unlike [`Self::is_hermitian`] there is no `false` to return here.
+    pub fn project_hermitian(&self) -> Result<Self, Error> {
+        self.add(&self.adjoint()?, D::from_real(0.5), D::from_real(0.5))
+    }
+
+    /// The anti-Hermitian part `(t - t†)/2` (TensorKit
+    /// `project_antihermitian`).
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::project_hermitian`]'s.
+    pub fn project_antihermitian(&self) -> Result<Self, Error> {
+        self.add(&self.adjoint()?, D::from_real(0.5), D::from_real(-0.5))
+    }
+
+    /// Whether codomain and domain are the same product space — the
+    /// precondition every member of the family above tests against, and the
+    /// same comparison [`Self::tr`] makes.
+    fn is_endomorphism(&self) -> bool {
+        let hom = self.body.space.space().homspace();
+        hom.codomain().legs() == hom.domain().legs()
     }
 
     /// The codomain legs, in axis order.
@@ -1672,6 +2604,27 @@ where
     /// strides.
     #[inline]
     pub fn data(&self) -> &[D] {
-        &self.body.data
+        self.dense_data()
+    }
+
+    /// The dense coupled-sector payload, materializing a compact spectrum on
+    /// first demand into the body's shared cache.
+    ///
+    /// Why infallible: the fill is total on a bond space this module built
+    /// itself from that same spectrum, so a failure would be an engine
+    /// invariant break rather than a caller mistake — the same judgement, and
+    /// the same `expect`, as the erased `Tensor::materialize_diagonal`.
+    fn dense_data(&self) -> &[D] {
+        match &self.body.data {
+            TypedData::Dense(data) => data,
+            TypedData::Diagonal(spectrum) => self.body.dense_cache.get_or_init(|| {
+                tenet_matrixalgebra::diagonal_bond_data(
+                    self.body.space.space(),
+                    spectrum,
+                    &|value| value,
+                )
+                .expect("diagonal fill is total on the stored bond space")
+            }),
+        }
     }
 }
