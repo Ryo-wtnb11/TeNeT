@@ -61,13 +61,14 @@
 //!   with [`TensorMap::compose`]: `&a * &b` means composition in the erased
 //!   facade, and composition is what this facade would spell it as. Adding
 //!   them later is not a breaking change.
-//! - The **`is_hermitian` / `project_*` family** is now unblocked in full:
-//!   `is_isometric` needed `compose` and `id`, and both are in, so only
-//!   `is_posdef`'s `eigh_vals` is still missing — and that one is a
-//!   dependency, not a blocker, since the family can land beside it. Every
-//!   other member is a one-liner over [`TensorMap::add`],
+//! - The **`is_hermitian` / `project_*` family** has lost its structural
+//!   blocker: `is_isometric` needed `compose` and `id`, and both are in. Every
+//!   member but one is now a one-liner over [`TensorMap::add`],
 //!   [`TensorMap::adjoint`], [`TensorMap::norm`], [`TensorMap::compose`] and
-//!   [`TensorMap::id`]. A future phase closes the row.
+//!   [`TensorMap::id`]. The exception is `is_posdef`, which needs `eigh_vals`,
+//!   so the family lands **when the eigendecompositions do** — as one complete
+//!   row, not as six members and a hole. That is the same rule the entry above
+//!   applies to `eig_*` itself.
 //! - `conj` stays design-gated on its open correctness question for
 //!   non-self-dual sectors. [`TensorMap::adjoint`] is now in, eagerly: see its
 //!   own documentation for why that is TensorKit's `adjoint!` rather than a
