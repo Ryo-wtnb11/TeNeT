@@ -2096,7 +2096,12 @@ where
     /// saying the tolerance should be relative to the total norm — which is
     /// what this facade already does. TensorKit's `DiagonalTensorMap` branch is
     /// deliberately **not** mirrored either: there `rtol` is ignored whenever
-    /// `atol` is nonzero, and the default is no cutoff at all.
+    /// `atol` is nonzero, the default is no cutoff at all, and its comparison
+    /// (`abs(x) < tol` discards) *keeps* a value sitting exactly on the cutoff
+    /// — the opposite of the strict `>` above. On that last point TensorKit
+    /// contradicts itself: its general `pinv` goes through Julia's, which keeps
+    /// only `sigma > tol`, and that is the boundary this facade matches on both
+    /// storages.
     ///
     /// # Errors
     ///
