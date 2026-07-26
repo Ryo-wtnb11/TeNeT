@@ -4386,3 +4386,170 @@ fn pinv_uses_one_global_sigma_max_across_every_sector() {
         .count();
     assert_eq!(kept, 1, "the compact arm used a per-sector cutoff");
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6 (issue #576), slice 3: `exp`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn typed_and_erased_exp_agree_byte_for_byte_on_a_dense_hermitian_input() {
+    // What: the dense arm is the erased one — the same eigh-and-fold seam — so
+    // the payloads compare bitwise.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_hermitian_pair(&runtime);
+
+    assert_eq!(typed.exp().unwrap().data(), erased.exp().unwrap().data());
+
+    // And the SU(2) branch, where the recoupling weights are not all one.
+    let (erased, typed) = su2_hermitian_pair(&runtime);
+    assert_eq!(typed.exp().unwrap().data(), erased.exp().unwrap().data());
+}
+
+#[test]
+fn exp_of_the_identity_is_e_times_the_identity() {
+    // What: the value oracle that does not go through the erased facade.
+    // `exp(id) = e * id` on every provider, which pins the `V exp(D) V^H`
+    // assembly rather than just its agreement with a sibling.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, typed) = z2_endo_oracle_pair(&runtime);
+    let identity = TensorMap::<_, f64>::id(&runtime, &typed.domain()).unwrap();
+
+    let expected = identity.scale(std::f64::consts::E);
+    let error = identity
+        .exp()
+        .unwrap()
+        .data()
+        .iter()
+        .zip(expected.data())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+    assert!(error < 1e-12, "exp(id) != e * id: {error}");
+}
+
+#[test]
+fn exp_rejects_a_non_hermitian_endomorphism() {
+    // What: this facade's `exp` is Hermitian-only — a recorded divergence from
+    // TensorKit, whose `exp` is a general per-block Pade approximant. The
+    // refusal is the visible half of that divergence, so it is pinned.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+
+    assert!(!typed.is_hermitian(1e-9).unwrap());
+    assert!(typed.exp().is_err(), "a non-Hermitian exp was accepted");
+    assert!(erased.exp().is_err(), "the erased facade disagrees");
+}
+
+#[test]
+fn exp_of_a_compact_spectrum_stays_compact_and_is_elementwise() {
+    // What: the arm this phase adds. The erased facade densifies a diagonal
+    // `exp` and runs a full eigendecomposition on the block-diagonal buffer;
+    // here it is `exp(s_i)` on the `Σ_c k_c` stored values, which is
+    // TensorKit's own `exp(::DiagonalTensorMap)`. The two must still agree
+    // numerically — the point of the arm is the complexity, not the answer.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+    // Scaled down: the fixture's largest singular value is in the thousands and
+    // `exp` of it overflows to infinity, which no comparison can separate from
+    // a wrong infinity.
+    let erased_s = erased
+        .svd_trunc(&tenet::prelude::Truncation::Full)
+        .unwrap()
+        .s
+        .scale(1e-3)
+        .unwrap();
+    let typed_s = typed.svd_trunc(&Truncation::Full).unwrap().s.scale(1e-3);
+
+    let typed_exp = typed_s.exp().unwrap();
+    let erased_exp = erased_s.exp().unwrap();
+    let error = typed_exp
+        .data()
+        .iter()
+        .zip(erased_exp.data())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+    assert!(
+        error < 1e-12,
+        "the compact exp arm disagrees with the erased densified one: {error}"
+    );
+    // Every stored value is `exp` of the source's: the elementwise claim, read
+    // off the materialized diagonal so it does not need a compact accessor.
+    for (index, (source, image)) in typed_s.data().iter().zip(typed_exp.data()).enumerate() {
+        let expected = if *source == 0.0 && !on_diagonal(&typed_s, index) {
+            // Off-diagonal of the block-diagonal materialization: `exp` of a
+            // diagonal is diagonal, so these stay zero rather than becoming 1.
+            0.0
+        } else {
+            source.exp()
+        };
+        assert!(
+            (image - expected).abs() < 1e-12,
+            "entry {index}: {image} is not exp({source})"
+        );
+    }
+}
+
+/// Whether storage position `index` sits on a block's own diagonal. Used to
+/// read a compact tensor's elementwise claim off its dense materialization.
+fn on_diagonal<R, D>(tensor: &TensorMap<R, D>, index: usize) -> bool
+where
+    R: tenet::core::MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet::core::CheckedFusionAlgebra
+        + tenet::typed::SectorCodec,
+    D: tenet::prelude::TensorScalar,
+{
+    (0..tensor.block_count()).any(|block| {
+        let block = tensor.block(block).unwrap();
+        let shape = block.shape();
+        (0..shape[0]).any(|row| {
+            index == block.offset() + row * block.strides()[0] + row * block.strides()[1]
+        })
+    })
+}
+
+#[test]
+fn exp_of_a_complex_compact_spectrum_takes_the_complex_elementwise_branch() {
+    // What: the compact arm is TensorKit's `exp(::DiagonalTensorMap)`, which is
+    // unconditionally elementwise — so a c64 spectrum with a nonreal entry, the
+    // case the Hermitian dense arm would refuse, comes back as `exp` of that
+    // entry. Storage therefore *does* change what `exp` accepts, exactly as it
+    // does in TensorKit; the rustdoc says so and this is the pin.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [(tenet::core::Z2Irrep::EVEN, 2)],
+        false,
+    )
+    .unwrap();
+    let dense = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices: &[usize]| {
+        if indices[0] == indices[1] {
+            Complex64::new(0.0, indices[0] as f64)
+        } else {
+            Complex64::new(0.0, 0.0)
+        }
+    })
+    .unwrap();
+    // Dense storage of the very same matrix: refused, because it is not
+    // Hermitian.
+    assert!(!dense.is_hermitian(1e-9).unwrap());
+    assert!(dense.exp().is_err());
+
+    // Compact storage of the same values: accepted, elementwise.
+    let spectrum = dense.eig_full().unwrap().0.scale(Complex64::new(1.0, 0.0));
+    let image = spectrum.exp().unwrap();
+    for (index, (source, value)) in spectrum.data().iter().zip(image.data()).enumerate() {
+        let expected = if *source == Complex64::new(0.0, 0.0) && !on_diagonal(&spectrum, index) {
+            Complex64::new(0.0, 0.0)
+        } else {
+            source.exp()
+        };
+        assert!(
+            (value - expected).norm() < 1e-12,
+            "entry {index}: {value} is not exp({source})"
+        );
+    }
+}

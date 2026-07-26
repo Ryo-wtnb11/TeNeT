@@ -1949,6 +1949,61 @@ where
         self.decode_spectrum(raw)
     }
 
+    /// The matrix exponential `exp(t) = Σ_k t^k / k!`, evaluated per coupled
+    /// sector as the spectral function `V exp(D) Vᴴ` of the Hermitian
+    /// eigendecomposition.
+    ///
+    /// # Domain, and the divergence from TensorKit
+    ///
+    /// This facade's `exp` is **Hermitian-only**: the input must be an
+    /// endomorphism whose coupled-sector blocks are Hermitian, which is what
+    /// makes the eigenbasis unitary and the spectral formula exact. TensorKit's
+    /// `exp(::AbstractTensorMap)` has no such restriction — it applies a
+    /// general per-block Padé approximant and accepts any endomorphism. That is
+    /// a recorded divergence: a Padé/Taylor seam does not exist below this
+    /// facade, and general (non-Hermitian) `exp` waits on one. Until then a
+    /// non-Hermitian argument is refused rather than silently symmetrized.
+    ///
+    /// The **compact** arm is a different story and matches TensorKit exactly:
+    /// `exp(::DiagonalTensorMap)` is unconditionally elementwise, with no
+    /// hermiticity gate, and so is the arm below. Storage therefore decides
+    /// whether a nonreal spectrum is accepted — in this facade as in TensorKit.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Operation`] when the input is not an endomorphism, or when a
+    ///   coupled-sector block is not Hermitian to MatrixAlgebraKit's own
+    ///   tolerance. Both come from the eigendecomposition seam.
+    /// - [`Error::Core`] / [`Error::FusionAlgebra`] from the composition that
+    ///   reassembles `V exp(D) Vᴴ`.
+    ///
+    /// # Complexity
+    ///
+    /// Dense input: `O(Σ_c n_c³)` — one Hermitian eigendecomposition per
+    /// coupled sector plus one composition, with `exp(D)` folded into a column
+    /// scaling of `V` rather than materialized. Compact input (TensorKit's
+    /// `DiagonalTensorMap`): the **O(rank) elementwise arm**, `exp(s_i)` over
+    /// the `Σ_c k_c` stored values, staying compact. The erased
+    /// [`crate::prelude::Tensor::exp`] has no such arm — it materializes a
+    /// diagonal payload and eigendecomposes the block-diagonal buffer, which is
+    /// the complexity-parity gap this one closes.
+    pub fn exp(&self) -> Result<Self, Error> {
+        if let Some(spectrum) = self.spectrum() {
+            // Why no hermiticity gate here while the dense arm has one: see the
+            // rustdoc. TensorKit splits the same way, and a gate would make the
+            // compact arm stricter than the TK function it ports.
+            return Ok(self.with_spectrum(map_spectrum(spectrum, |value| Ok(value.exp_value()))?));
+        }
+        let mut dense = self.runtime.lease_dense();
+        let mut lease = self.runtime.lease_context()?;
+        let out = tenet_matrixalgebra::exp_dyn(
+            dense.dense(),
+            lease.context().multiplicity_free_lane::<D>(),
+            &BoundDynamicTensorRef::try_new(&self.body.space, self.dense_data())?,
+        )?;
+        Ok(self.wrap_bound_factor(out))
+    }
+
     /// TensorKit 0.17 / MatrixAlgebraKit `inv`: the true inverse `t^-1` of a
     /// nonsingular map, defined by `t * t^-1 = id` on the codomain and
     /// `t^-1 * t = id` on the domain. Computed per coupled sector as the exact
