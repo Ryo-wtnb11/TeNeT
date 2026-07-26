@@ -693,22 +693,26 @@ where
 /// two facades disagreeing about which destinations may stay compact would be a
 /// silent divergence rather than a visible one.
 ///
-/// Applied to the *destination* of an operation, never to the operands. An
-/// operand's storage says what it holds; only the destination says whether the
-/// compact result is representable.
+/// Applied either to the *destination* of an operation — an operand's storage
+/// says what it holds, only the destination says whether a compact result is
+/// representable — or, in [`TensorMap::sqrt`], to the receiver, because there
+/// the bond shape is the operation's own domain restriction rather than a
+/// storage question.
 ///
-/// # Unreachable today, kept deliberately
+/// # Reachability
 ///
-/// Every [`TypedData::Diagonal`] payload this module can produce sits on a
-/// space built by [`diagonal_factor_on`], i.e. by
+/// Only [`TensorMap::sqrt`] can make this answer `false`, and does: a general
+/// tensor is a legal argument to write and an illegal one to accept, so the
+/// guard is killable there. At the compact-*destination* call sites it still
+/// cannot fail — every [`TypedData::Diagonal`] payload this module can produce
+/// sits on a space built by [`diagonal_factor_on`], i.e. by
 /// [`tenet_matrixalgebra::diagonal_bond_bound_space_like`], which is a bond
-/// space by construction — and the operations that preserve the payload
+/// space by construction, and the operations that preserve the payload
 /// ([`TensorMap::scale`], [`TensorMap::add`], [`TensorMap::adjoint`], the
-/// `D * D` arm) all keep that space. So this predicate cannot currently return
-/// `false` at any of its call sites, and no test can kill it. It stays because
-/// it is the erased facade's own guard and because the next constructor of a
-/// compact payload — a diagonal-aware `contract`, say — would be the first one
-/// able to aim at a destination that is not a bond space, and should find the
+/// `D * D` arm) all keep that space. It stays at those sites because the next
+/// constructor of a compact payload — a diagonal-aware `contract`, say — would
+/// be the first one able to aim at a destination that is not a bond space, and
+/// should find the
 /// check already in place rather than have to notice it is missing.
 fn is_diagonal_bond_space(space: &DynamicFusionMapSpace) -> bool {
     let homspace = space.homspace();
@@ -2132,6 +2136,93 @@ where
             rcond,
         )?;
         Ok(self.wrap_bound_factor(out))
+    }
+
+    /// TensorKit 0.17 `sqrt(::DiagonalTensorMap)`: the elementwise principal
+    /// square root of a diagonal bond tensor, `√s_i` on each diagonal entry, so
+    /// that `√t · √t = t`. This is the idiom that splits singular values in
+    /// Vidal-gauge and gate-application updates.
+    ///
+    /// # Domain
+    ///
+    /// The receiver must be a **diagonal bond tensor** `[v] <- [v]`: one
+    /// codomain leg equal to the one domain leg, and every stored block
+    /// diagonal, with off-diagonal entries exactly zero. That is the shape the
+    /// factorizations produce ([`Self::svd_compact`]'s and [`Self::svd_trunc`]'s
+    /// `s`, [`Self::eigh_full`]'s `d`), and it is the receiver type TensorKit's
+    /// own diagonal `sqrt` demands.
+    ///
+    /// General endomorphism `sqrt` is deliberately out of scope. TensorKit does
+    /// have one (`sqrt(::AbstractTensorMap)`, Schur-based, always returning a
+    /// complex tensor), but no Schur seam exists below this facade, and its
+    /// value-independent complexification is not expressible in a typed
+    /// signature. A wider `sqrt` is a separate phase, not an omission here.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] in every failure case:
+    ///
+    /// - the receiver is not shaped `[v] <- [v]`;
+    /// - a stored block has a nonzero off-diagonal entry (dense arm only — a
+    ///   compact payload has none by construction);
+    /// - the payload is `f64` and a diagonal entry is negative. The message
+    ///   points at the complex payload, matching the erased facade and
+    ///   TensorKit's diagonal-path `DomainError`. TensorKit's *dense* path
+    ///   instead complexifies silently, which contradicts its own diagonal path
+    ///   and is not mirrored here.
+    ///
+    /// A [`num_complex::Complex64`] payload never fails on a value: it takes the
+    /// principal branch (`√(-1) = +i`).
+    ///
+    /// # Complexity
+    ///
+    /// Compact input (TensorKit's `DiagonalTensorMap`, what the factorizations
+    /// hand back): the **O(rank) elementwise arm** over the `Σ_c k_c` stored
+    /// values, staying compact — so `s.sqrt()` and the two `compose`s around it
+    /// are all bond scalings. Dense input: `O(Σ_c n_c²)`, one walk over the
+    /// block-diagonal buffer, which is what the off-diagonal check costs; the
+    /// root itself is still only `Σ_c n_c` square roots.
+    pub fn sqrt(&self) -> Result<Self, Error> {
+        // Same guard as the erased facade's, and the same one
+        // [`is_diagonal_bond_space`] applies to compact *destinations*: here it
+        // is asked of the receiver, which is what makes it reachable.
+        if !is_diagonal_bond_space(self.body.space.space()) {
+            return Err(Error::InvalidArgument(
+                "sqrt requires a diagonal bond tensor `[v] <- [v]` (equal single \
+                 codomain and domain legs), like the `s` factor of svd_trunc"
+                    .to_string(),
+            ));
+        }
+        if let Some(spectrum) = self.spectrum() {
+            return Ok(self.with_spectrum(map_spectrum(spectrum, D::sqrt_value)?));
+        }
+        // Dense payload on a bond space: block-diagonal by the space's shape,
+        // but only by convention — the buffer is free to hold anything, so the
+        // off-diagonal entries are checked rather than assumed. Skipping the
+        // check would silently drop them.
+        let data = self.dense_data();
+        let zero = num_complex::Complex64::new(0.0, 0.0);
+        let mut out = vec![D::from_real(0.0); data.len()];
+        let structure = self.body.space.space().structure();
+        for index in 0..structure.block_count() {
+            let block = structure.block(index)?;
+            let (shape, strides, offset) = (block.shape(), block.strides(), block.offset());
+            for row in 0..shape[0] {
+                for col in 0..shape[1] {
+                    let position = offset + row * strides[0] + col * strides[1];
+                    if row == col {
+                        out[position] = data[position].sqrt_value()?;
+                    } else if data[position].widen_complex() != zero {
+                        return Err(Error::InvalidArgument(format!(
+                            "sqrt requires a diagonal bond tensor, but block {:?} has a \
+                             nonzero off-diagonal entry at ({row}, {col})",
+                            block.key()
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(self.with_data(out))
     }
 
     /// Builds a sibling on this tensor's own space and runtime from a fresh

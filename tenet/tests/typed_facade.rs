@@ -4553,3 +4553,171 @@ fn exp_of_a_complex_compact_spectrum_takes_the_complex_elementwise_branch() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6 (issue #576), slice 4: `sqrt`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn typed_and_erased_sqrt_agree_byte_for_byte_on_both_storages() {
+    // What: the diagonal-bond idiom, `√S · √S = S`, on both facades and on both
+    // storages of the same spectrum — compact (the factor as returned) and
+    // dense (the same values after a round trip through an operation that
+    // materializes).
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+    let erased_s = erased
+        .svd_trunc(&tenet::prelude::Truncation::Full)
+        .unwrap()
+        .s;
+    let typed_s = typed.svd_trunc(&Truncation::Full).unwrap().s;
+
+    assert_eq!(
+        typed_s.sqrt().unwrap().data(),
+        erased_s.sqrt().unwrap().data()
+    );
+
+    // √S · √S = S.
+    let root = typed_s.sqrt().unwrap();
+    let squared = root.compose(&root).unwrap();
+    let error = squared
+        .data()
+        .iter()
+        .zip(typed_s.data())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+    assert!(error < 1e-9, "√S · √S != S: {error}");
+
+    // The dense storage of the same tensor: `add`ing zero to a dense sibling
+    // forces the materialized payload, and the block walk must reach the same
+    // answer as the compact arm.
+    let dense_zero = TensorMap::<_, f64>::id(&runtime, &typed_s.domain())
+        .unwrap()
+        .scale(0.0);
+    let dense_s = typed_s.add(&dense_zero, 1.0, 1.0).unwrap();
+    assert_eq!(dense_s.data(), typed_s.data());
+    assert_eq!(
+        dense_s.sqrt().unwrap().data(),
+        typed_s.sqrt().unwrap().data()
+    );
+}
+
+#[test]
+fn sqrt_refuses_anything_that_is_not_a_diagonal_bond_tensor() {
+    // What: the scope guard. `sqrt` here is TensorKit's
+    // `sqrt(::DiagonalTensorMap)` and nothing wider — a general endomorphism
+    // `sqrt` needs a Schur seam that does not exist below this facade — so a
+    // rank-two tensor, and a bond-shaped one whose block has a nonzero
+    // off-diagonal entry, are both refused.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+    assert!(typed.sqrt().is_err(), "a non-bond tensor was accepted");
+    assert!(erased.sqrt().is_err(), "the erased facade disagrees");
+
+    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+    // Bond shaped (`[v] <- [v]`) but not diagonal: the off-diagonal check is
+    // what refuses it, and it is the check that separates this from a general
+    // endomorphism `sqrt`.
+    assert!(typed.data().iter().any(|&value| value != 0.0));
+    match typed.sqrt() {
+        Err(tenet::typed::Error::InvalidArgument(message)) => {
+            assert!(message.contains("off-diagonal"), "unexpected: {message}");
+        }
+        other => panic!("expected an off-diagonal refusal, got {other:?}"),
+    }
+    assert!(erased.sqrt().is_err(), "the erased facade disagrees");
+}
+
+#[test]
+fn sqrt_of_a_negative_f64_entry_points_at_the_complex_payload() {
+    // What: a real payload has no principal square root of a negative number to
+    // return, so both storages refuse and say what to do instead. This is
+    // TensorKit's `DiagonalTensorMap` behavior (a `DomainError`); TensorKit's
+    // dense path silently returns a complex tensor, which a typed signature
+    // cannot express and which disagrees with TensorKit's own diagonal path.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+    let erased_s = erased
+        .svd_trunc(&tenet::prelude::Truncation::Full)
+        .unwrap()
+        .s
+        .scale(-1.0)
+        .unwrap();
+    let typed_s = typed.svd_trunc(&Truncation::Full).unwrap().s.scale(-1.0);
+
+    for (name, result) in [
+        ("compact", typed_s.sqrt()),
+        (
+            "dense",
+            typed_s
+                .add(
+                    &TensorMap::<_, f64>::id(&runtime, &typed_s.domain())
+                        .unwrap()
+                        .scale(0.0),
+                    1.0,
+                    1.0,
+                )
+                .unwrap()
+                .sqrt(),
+        ),
+    ] {
+        match result {
+            Err(tenet::typed::Error::InvalidArgument(message)) => {
+                assert!(
+                    message.contains("negative") && message.contains("c64"),
+                    "the {name} arm's message does not point at the complex \
+                     payload: {message}"
+                );
+            }
+            other => panic!("the {name} arm accepted a negative entry: {other:?}"),
+        }
+    }
+    assert!(erased_s.sqrt().is_err(), "the erased facade disagrees");
+}
+
+#[test]
+fn sqrt_of_a_complex_payload_takes_the_principal_branch() {
+    // What: with a c64 payload there is a root to return, and it is the
+    // principal one — `√(-1) = i`, not `-i`. Checked on both storages.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [(tenet::core::Z2Irrep::EVEN, 2)],
+        false,
+    )
+    .unwrap();
+    let negative = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices: &[usize]| {
+        if indices[0] == indices[1] {
+            Complex64::new(-1.0, 0.0)
+        } else {
+            Complex64::new(0.0, 0.0)
+        }
+    })
+    .unwrap();
+
+    let root = negative.sqrt().unwrap();
+    let squared = root.compose(&root).unwrap();
+    let error = squared
+        .data()
+        .iter()
+        .zip(negative.data())
+        .map(|(a, b)| (a - b).norm())
+        .fold(0.0f64, f64::max);
+    assert!(error < 1e-12, "√t · √t != t: {error}");
+    // The principal branch, not the other one: every diagonal entry is `+i`.
+    for (index, value) in root.data().iter().enumerate() {
+        let expected = if on_diagonal(&root, index) {
+            Complex64::new(0.0, 1.0)
+        } else {
+            Complex64::new(0.0, 0.0)
+        };
+        assert!(
+            (value - expected).norm() < 1e-12,
+            "entry {index} is {value}, not the principal root {expected}"
+        );
+    }
+}
