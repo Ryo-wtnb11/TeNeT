@@ -139,7 +139,7 @@ pub use crate::runtime::Runtime;
 /// Re-exported for the same reason as [`Error`] and [`Runtime`]:
 /// [`TensorMap::svd_trunc`] takes one, so `use tenet::typed::*` would not be
 /// self-sufficient without it.
-pub use tenet_matrixalgebra::Truncation;
+pub use tenet_matrixalgebra::{Truncation, TruncationSpace};
 
 use tenet_matrixalgebra::{BoundDynFactor, FactorScalar};
 
@@ -298,6 +298,35 @@ where
             provider: Arc::clone(&self.provider),
             leg: self.leg.try_dual(self.provider.as_ref())?,
         })
+    }
+
+    /// This leg read as a fixed truncation target: TensorKit `truncspace(V)`
+    /// (`src/factorizations/truncation.jl:261-269`).
+    ///
+    /// The resulting [`Truncation::space`] policy keeps exactly this leg's
+    /// degeneracy for every coupled sector it carries, and drops any sector it
+    /// does not — TensorKit reads the same `dim(V, c)`, which is zero for an
+    /// absent sector. A request longer than the spectrum offers is clamped to
+    /// it. The dual flag is ignored: a truncation target names sector content,
+    /// not orientation.
+    ///
+    /// The profile records this leg's provider identity, so handing it to a
+    /// factorization of a tensor built on a different rule is a typed error
+    /// rather than a silent truncation to nothing.
+    ///
+    /// # Complexity
+    ///
+    /// `O(k log k)` in the number of sectors (one `BTreeMap` build); no
+    /// spectrum or payload is touched.
+    pub fn truncspace(&self) -> TruncationSpace {
+        TruncationSpace::new(
+            self.provider.rule_identity(),
+            self.leg
+                .sectors()
+                .iter()
+                .copied()
+                .zip(self.leg.degeneracies().iter().copied()),
+        )
     }
 }
 

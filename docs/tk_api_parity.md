@@ -33,7 +33,7 @@ Counts are table rows; a few rows bundle several closely-related exports
 |---|---|
 | has | 44 |
 | has-different-name | 26 |
-| added (this sweep) | 13 |
+| added (this sweep) | 14 |
 | design-gated | 24 |
 | N/A | 8 |
 
@@ -41,7 +41,8 @@ Added this sweep: `Tensor::repartition`, `Tensor::zeros_like`,
 `Tensor::insert_left_unit` / `insert_right_unit` / `remove_unit`,
 `Tensor::is_hermitian` / `is_antihermitian` / `is_isometric` / `is_unitary` /
 `is_posdef`, `Tensor::project_hermitian` / `project_antihermitian`,
-`Space::has_sector`, `Space::oplus`, `Tensor::norm_p` / `TensorMap::norm_p`.
+`Space::has_sector`, `Space::oplus`, `Tensor::norm_p` / `TensorMap::norm_p`,
+`Space::truncspace` / `GradedSpace::truncspace`.
 
 ---
 
@@ -201,7 +202,8 @@ constructor is called, and read back as a `SectorLabel`.
 | `trunctol` | has-different-name | `Truncation::absolute_cutoff` / `relative_cutoff` / `relative_inf_cutoff` | Checked constructors; `p=Inf` → `ToleranceInf`. |
 | `truncerror` | has-different-name | `Truncation::relative_error` | Checked constructor bounding the discarded 2-norm tail. |
 | (compose truncations) | has-different-name | `Truncation::and` | |
-| `truncfilter` / `truncspace` | design-gated | — | Non-prefix filters / space-target truncation; the prefix-only decision layer does not model them (see `truncation.rs` header). |
+| `truncspace` | added | `Space::truncspace` / `GradedSpace::truncspace` → `Truncation::space` | Fixed per-sector prefix counts read off a target space (`truncation.jl:261-269`). Absent sector = rank zero, over-long requests clamp to the available prefix, and a profile from another fusion rule is a typed error. |
+| `truncfilter` | design-gated | — | Arbitrary non-prefix index filters; the prefix-only decision layer does not model them (see the `truncation.rs` header). |
 
 ## Notes on deliberate omissions
 
