@@ -452,11 +452,46 @@ where
     }
 }
 
+/// The two block payload representations one typed tensor map can carry.
+///
+/// The erased [`crate::tensor::Data`] needs three diagonal variants to record a
+/// spectrum's dtype and whether it must widen on materialization; here `D` is a
+/// type parameter, so the whole question collapses to one arm holding values of
+/// exactly the payload type.
+enum TypedData<D> {
+    /// The dense coupled-sector buffer every operation can read.
+    Dense(Vec<D>),
+    /// Compact O(Σ_c k_c) storage for a spectrum factor (SVD `s`, `eigh`/`eig`
+    /// `d`): only the per-sector diagonal values, keyed by the engine's raw
+    /// [`tenet_core::SectorId`] — a stored payload never leaves this module, so
+    /// there is nothing here for the codec to label.
+    // Constructed from the next commit on (the `svd_compact` storage swap);
+    // the materialization side lands first so the swap is a one-line change.
+    #[allow(dead_code)]
+    Diagonal(Vec<tenet_matrixalgebra::SectorSpectrum<D>>),
+}
+
 /// Storage shared by every clone of one typed tensor map: the admitted space
 /// and its block payload.
 struct TypedTensorBody<R, D> {
     space: BoundDynamicFusionMapSpace<R>,
-    data: Vec<D>,
+    data: TypedData<D>,
+    /// Materialization of a [`TypedData::Diagonal`] payload into the dense
+    /// coupled layout, computed at most once and shared by every clone of this
+    /// body — the erased sibling's `compact_dense` cache, without its hand-copy
+    /// on each `Tensor` value. Never populated for a dense payload.
+    dense_cache: std::sync::OnceLock<Vec<D>>,
+}
+
+impl<R, D> TypedTensorBody<R, D> {
+    /// A body holding an already-dense payload.
+    fn dense(space: BoundDynamicFusionMapSpace<R>, data: Vec<D>) -> Self {
+        Self {
+            space,
+            data: TypedData::Dense(data),
+            dense_cache: std::sync::OnceLock::new(),
+        }
+    }
 }
 
 /// A block-sparse symmetric tensor map that keeps its provider type.
@@ -487,7 +522,18 @@ impl<R, D> core::fmt::Debug for TensorMap<R, D> {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
             .debug_struct("TensorMap")
-            .field("elements", &self.body.data.len())
+            // Storage-shaped, deliberately: a compact spectrum payload reports
+            // the values it stores, and forcing its dense materialization for a
+            // `{:?}` would make a diagnostic the most expensive call on the type.
+            .field(
+                "elements",
+                &match &self.body.data {
+                    TypedData::Dense(data) => data.len(),
+                    TypedData::Diagonal(spectrum) => {
+                        spectrum.iter().map(|entry| entry.values.len()).sum()
+                    }
+                },
+            )
             .finish_non_exhaustive()
     }
 }
@@ -540,7 +586,7 @@ where
         let data = apply_fill(space.space(), fill)?;
         Ok(Self {
             runtime: runtime.clone(),
-            body: Arc::new(TypedTensorBody { space, data }),
+            body: Arc::new(TypedTensorBody::dense(space, data)),
         })
     }
 
@@ -692,9 +738,12 @@ where
             let space = body.space.space();
             sector_regions(space.structure(), space.nout())?
         };
+        let TypedData::Dense(data) = &mut body.data else {
+            unreachable!("`build` always produces a dense payload");
+        };
         for region in regions.iter() {
             for i in 0..region.rows().min(region.cols()) {
-                body.data[region.range().start + i * (region.rows() + 1)] = D::from_real(1.0);
+                data[region.range().start + i * (region.rows() + 1)] = D::from_real(1.0);
             }
         }
         Ok(identity)
@@ -879,12 +928,12 @@ where
         let mut lease = self.runtime.lease_context()?;
         let (space, data) = tree_transform_owned_multiplicity_free(
             lease.context().multiplicity_free_lane::<D>(),
-            BoundDynamicTensorRef::try_new(&self.body.space, &self.body.data)?,
+            BoundDynamicTensorRef::try_new(&self.body.space, self.dense_data())?,
             operation,
         )?;
         Ok(Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody { space, data }),
+            body: Arc::new(TypedTensorBody::dense(space, data)),
         })
     }
 
@@ -951,8 +1000,8 @@ where
         let mut lease = self.runtime.lease_context()?;
         let (space, data) = tensorcontract_owned_multiplicity_free(
             lease.context().multiplicity_free_lane::<D>(),
-            BoundDynamicTensorRef::try_new(&self.body.space, &self.body.data)?,
-            BoundDynamicTensorRef::try_new(&other.body.space, &other.body.data)?,
+            BoundDynamicTensorRef::try_new(&self.body.space, self.dense_data())?,
+            BoundDynamicTensorRef::try_new(&other.body.space, other.dense_data())?,
             lhs_axes,
             rhs_axes,
             // Why `OutputAxisOrder` stays out of the signature: it is an
@@ -962,7 +1011,7 @@ where
         )?;
         Ok(Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody { space, data }),
+            body: Arc::new(TypedTensorBody::dense(space, data)),
         })
     }
 
@@ -1014,14 +1063,14 @@ where
         let mut lease = self.runtime.lease_context()?;
         let (space, data) = tensorcompose_owned_multiplicity_free(
             lease.context().multiplicity_free_lane::<D>(),
-            BoundDynamicTensorRef::try_new(&self.body.space, &self.body.data)?,
-            BoundDynamicTensorRef::try_new(&other.body.space, &other.body.data)?,
+            BoundDynamicTensorRef::try_new(&self.body.space, self.dense_data())?,
+            BoundDynamicTensorRef::try_new(&other.body.space, other.dense_data())?,
             &lhs_axes,
             &rhs_axes,
         )?;
         Ok(Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody { space, data }),
+            body: Arc::new(TypedTensorBody::dense(space, data)),
         })
     }
 
@@ -1033,7 +1082,7 @@ where
         let (space, data) = factor.into_parts();
         Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody { space, data }),
+            body: Arc::new(TypedTensorBody::dense(space, data)),
         }
     }
 
@@ -1064,7 +1113,7 @@ where
 
     /// Borrowed seam view of this tensor map.
     fn bound_ref(&self) -> Result<BoundDynamicTensorRef<'_, R, D>, Error> {
-        BoundDynamicTensorRef::try_new(&self.body.space, &self.body.data).map_err(Error::from)
+        BoundDynamicTensorRef::try_new(&self.body.space, self.dense_data()).map_err(Error::from)
     }
 
     /// TensorKit 0.17 / MatrixAlgebraKit `svd_compact`: `t = u * s * vh` with
@@ -1283,10 +1332,7 @@ where
     fn with_data(&self, data: Vec<D>) -> Self {
         Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody {
-                space: self.body.space.clone(),
-                data,
-            }),
+            body: Arc::new(TypedTensorBody::dense(self.body.space.clone(), data)),
         }
     }
 
@@ -1333,10 +1379,9 @@ where
             ));
         }
         Ok(self.with_data(
-            self.body
-                .data
+            self.dense_data()
                 .iter()
-                .zip(&other.body.data)
+                .zip(other.dense_data())
                 .map(|(&x, &y)| x * alpha + y * beta)
                 .collect(),
         ))
@@ -1351,7 +1396,12 @@ where
     /// erased `scale`/`scale_c64` split has the same origin and likewise
     /// collapses: `factor` is simply a `D`.
     pub fn scale(&self, factor: D) -> Self {
-        self.with_data(self.body.data.iter().map(|&value| value * factor).collect())
+        self.with_data(
+            self.dense_data()
+                .iter()
+                .map(|&value| value * factor)
+                .collect(),
+        )
     }
 
     /// Partial trace over pairs of mutually dual legs (TensorKit
@@ -1419,13 +1469,13 @@ where
         let data = tenet_tensors::tensortrace_fusion_dyn_owned_checked(
             &space,
             &self.body.space,
-            &self.body.data,
+            self.dense_data(),
             axes,
             D::from_real(1.0),
         )?;
         Ok(Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody { space, data }),
+            body: Arc::new(TypedTensorBody::dense(space, data)),
         })
     }
 
@@ -1445,11 +1495,11 @@ where
     /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`]
     /// straight from the seam, which owns the bend the dagger performs.
     pub fn adjoint(&self) -> Result<Self, Error> {
-        let (space, data) = tenet_tensors::adjoint_bound_dyn(&self.body.space, &self.body.data)
+        let (space, data) = tenet_tensors::adjoint_bound_dyn(&self.body.space, self.dense_data())
             .map_err(Error::from)?;
         Ok(Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody { space, data }),
+            body: Arc::new(TypedTensorBody::dense(space, data)),
         })
     }
 
@@ -1488,8 +1538,7 @@ where
         // the widening is exact and `Complex64::new(x, 0.0).norm()` is exactly
         // `|x|`, so one expression covers both instantiations.
         Ok(self
-            .body
-            .data
+            .dense_data()
             .iter()
             .map(|&value| value.widen_complex().norm())
             .fold(0.0, f64::max))
@@ -1517,8 +1566,8 @@ where
             self.body.space.provider(),
             self.body.space.space().structure(),
             self.body.space.space().nout(),
-            &self.body.data,
-            &self.body.data,
+            self.dense_data(),
+            self.dense_data(),
         )
     }
 
@@ -1551,8 +1600,8 @@ where
             self.body.space.provider(),
             self.body.space.space().structure(),
             self.body.space.space().nout(),
-            &self.body.data,
-            &other.body.data,
+            self.dense_data(),
+            other.dense_data(),
         )?))
     }
 
@@ -1596,7 +1645,7 @@ where
             self.body.space.provider(),
             self.body.space.space().structure(),
             self.body.space.space().nout(),
-            &self.body.data,
+            self.dense_data(),
         )?))
     }
 
@@ -1672,6 +1721,27 @@ where
     /// strides.
     #[inline]
     pub fn data(&self) -> &[D] {
-        &self.body.data
+        self.dense_data()
+    }
+
+    /// The dense coupled-sector payload, materializing a compact spectrum on
+    /// first demand into the body's shared cache.
+    ///
+    /// Why infallible: the fill is total on a bond space this module built
+    /// itself from that same spectrum, so a failure would be an engine
+    /// invariant break rather than a caller mistake — the same judgement, and
+    /// the same `expect`, as the erased `Tensor::materialize_diagonal`.
+    fn dense_data(&self) -> &[D] {
+        match &self.body.data {
+            TypedData::Dense(data) => data,
+            TypedData::Diagonal(spectrum) => self.body.dense_cache.get_or_init(|| {
+                tenet_matrixalgebra::diagonal_bond_data(
+                    self.body.space.space(),
+                    spectrum,
+                    &|value| value,
+                )
+                .expect("diagonal fill is total on the stored bond space")
+            }),
+        }
     }
 }
