@@ -4843,3 +4843,195 @@ fn typed_and_erased_c64_compact_inv_and_pinv_agree_to_rounding() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Issue #584: the compact diagonal arm of `contract`.
+// ---------------------------------------------------------------------------
+
+/// The three axis patterns the diagonal `contract` arm claims, plus one it must
+/// decline, as `(name, lhs_axes, rhs_axes, output_axes)` on a `[v, v] <- [v]`
+/// tensor `t` and its own SVD spectrum `s`.
+///
+/// `t · s` contracts `t`'s domain axis against `s`'s codomain axis (the
+/// compose-shaped pairing, which is the only one the engine admits: contracted
+/// legs must agree on their duality flag), and `s · t` the mirror.
+const DIAGONAL_CONTRACT_CASES: &[(&str, bool, &[usize], &[usize], &[usize])] = &[
+    // `t · s`, identity output order: the scaled leg stays last.
+    ("t*s", true, &[2], &[0], &[0, 1, 2]),
+    // The same, with the output order moving the scaled leg across the split.
+    ("t*s reordered", true, &[2], &[0], &[2, 0, 1]),
+    // `s · t`: `s`'s domain axis against `t`'s leading codomain axis, so the
+    // scaled leg comes first and the destination is `[v] <- [v, v]`.
+    ("s*t", false, &[1], &[0], &[0, 1, 2]),
+    ("s*t reordered", false, &[1], &[0], &[1, 2, 0]),
+    // `s · t` on `t`'s second codomain axis: the arm's leg position is free
+    // within the preserved side.
+    ("s*t inner leg", false, &[1], &[1], &[0, 1, 2]),
+    // Declined by the arm — `s`'s *codomain* axis against `t`'s domain axis is
+    // admissible but is not one of the two proved geometries — and computed
+    // densely. The bytes must still be the erased facade's.
+    ("s*t dense fallback", false, &[0], &[2], &[0, 1, 2]),
+];
+
+#[test]
+fn typed_and_erased_diagonal_contract_agree_byte_for_byte() {
+    // What: every axis pattern of the compact diagonal arm is the erased
+    // facade's `contract_ordered` byte for byte — the erased side has taken its
+    // own diagonal fast path since #75, so this compares two fast paths for the
+    // patterns they share and fast against dense for the ones they do not.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+    let erased_s = erased.svd_compact().unwrap().1;
+    let typed_s = typed.svd_compact().unwrap().1;
+    assert_eq!(typed_s.data(), erased_s.data());
+
+    for &(name, spectrum_on_the_right, lhs_axes, rhs_axes, output_axes) in DIAGONAL_CONTRACT_CASES {
+        let (erased_lhs, erased_rhs, typed_lhs, typed_rhs) = if spectrum_on_the_right {
+            (&erased, &erased_s, &typed, &typed_s)
+        } else {
+            (&erased_s, &erased, &typed_s, &typed)
+        };
+        let expected = erased_lhs
+            .contract_ordered(erased_rhs, lhs_axes, rhs_axes, output_axes)
+            .unwrap();
+        let got = typed_lhs
+            .contract(typed_rhs, lhs_axes, rhs_axes, output_axes)
+            .unwrap();
+        assert_eq!(got.data(), expected.data(), "{name} payload");
+        assert_eq!(
+            got.codomain().len(),
+            expected.codomain_rank(),
+            "{name} split"
+        );
+        assert!(
+            got.data().iter().any(|&value| value != 0.0),
+            "{name} is all zeros, so it proves nothing"
+        );
+    }
+
+    // `s · s` is the compose-shaped product of two spectra: compact in, compact
+    // out, and the same bytes as the erased product.
+    let expected = erased_s
+        .contract_ordered(&erased_s, &[1], &[0], &[0, 1])
+        .unwrap();
+    let got = typed_s.contract(&typed_s, &[1], &[0], &[0, 1]).unwrap();
+    assert_eq!(got.data(), expected.data());
+}
+
+#[test]
+fn typed_and_erased_diagonal_contract_agree_for_a_complex_payload() {
+    // What: the arm is dtype-generic — `D` is a type parameter, so a c64
+    // spectrum scales exactly the same way with no widening variant.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_complex_oracle_pair(&runtime);
+    let erased_s = erased.svd_compact().unwrap().1;
+    let typed_s = typed.svd_compact().unwrap().1;
+
+    for &(name, spectrum_on_the_right, lhs_axes, rhs_axes, output_axes) in DIAGONAL_CONTRACT_CASES {
+        let (erased_lhs, erased_rhs, typed_lhs, typed_rhs) = if spectrum_on_the_right {
+            (&erased, &erased_s, &typed, &typed_s)
+        } else {
+            (&erased_s, &erased, &typed_s, &typed)
+        };
+        let expected = erased_lhs
+            .contract_ordered(erased_rhs, lhs_axes, rhs_axes, output_axes)
+            .unwrap();
+        let got = typed_lhs
+            .contract(typed_rhs, lhs_axes, rhs_axes, output_axes)
+            .unwrap();
+        // The erased spectrum of a c64 SVD is `RealC64` — real values in a
+        // complex payload — while the typed one is plain `D`, so the two can
+        // differ by a rounding on the scaled entries (the same divergence the
+        // compact matrix-function comparison above documents). Values, not
+        // bytes, is what this asserts; the f64 case above is the byte oracle.
+        let expected = expected.try_data_c64().unwrap();
+        assert_eq!(got.data().len(), expected.len(), "{name} length");
+        for (index, (mine, theirs)) in got.data().iter().zip(expected).enumerate() {
+            let scale = theirs.norm().max(f64::MIN_POSITIVE);
+            assert!(
+                (mine - theirs).norm() / scale < 1e-14,
+                "c64 {name} entry {index}: {mine} vs {theirs}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_diagonal_contract_arm_keeps_fermionic_signs() {
+    // What: a fermionic provider (`FermionParity`, the one rule here whose
+    // braiding is not symmetric) takes the same arm, and the result is still
+    // the erased facade's byte for byte — bends inside the arm's `permute` pick
+    // up the parity signs the dense route would.
+    //
+    // The supertrace twist `contract` applies to a **dual** contracted leg of
+    // the right operand cannot be reached from this facade, so it is not
+    // asserted here: a compact spectrum's bond leg is built non-dual
+    // (`diagonal_bond_bound_space_like`), the engine admits a contraction only
+    // when the two contracted legs agree on their duality flag, and the arm's
+    // right-operand leg is codomain-side, where external duality *is* that
+    // flag. `TensorMap::try_contract_diagonal` declines rather than assumes it,
+    // and that guard is what would have to be tested if a dual bond leg ever
+    // became constructible here.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = fermionic_endo_pair(&runtime);
+    let erased_s = erased.svd_compact().unwrap().1;
+    let typed_s = typed.svd_compact().unwrap().1;
+    assert_eq!(typed_s.data(), erased_s.data());
+
+    for &(name, lhs_axes, rhs_axes, output_axes, spectrum_on_the_right) in &[
+        ("t*s", &[1usize][..], &[0usize][..], &[0usize, 1][..], true),
+        ("t*s reordered", &[1][..], &[0][..], &[1, 0][..], true),
+        ("s*t", &[1][..], &[0][..], &[0, 1][..], false),
+        ("s*s", &[1][..], &[0][..], &[0, 1][..], false),
+    ] {
+        let (erased_lhs, erased_rhs, typed_lhs, typed_rhs) = if spectrum_on_the_right {
+            (&erased, &erased_s, &typed, &typed_s)
+        } else {
+            (&erased_s, &erased, &typed_s, &typed)
+        };
+        let expected = erased_lhs
+            .contract_ordered(erased_rhs, lhs_axes, rhs_axes, output_axes)
+            .unwrap();
+        let got = typed_lhs
+            .contract(typed_rhs, lhs_axes, rhs_axes, output_axes)
+            .unwrap();
+        assert_eq!(got.data(), expected.data(), "fermionic {name}");
+    }
+}
+
+#[test]
+fn the_diagonal_contract_arm_declines_an_illegal_contraction() {
+    // What: the arm must not answer where the dense route would refuse. A
+    // contracted leg whose duality flag does not match the spectrum's bond leg
+    // is inadmissible, and the error is the expert layer's, not a scaled tensor
+    // on a made-up space.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 3),
+        ],
+        false,
+    )
+    .unwrap();
+    let dual = leg.try_dual().unwrap();
+    let typed = TensorMap::from_block_fn(&runtime, [&dual], [&leg], typed_fill_value).unwrap();
+    let s = TensorMap::from_block_fn(&runtime, [&leg], [&leg], typed_fill_value)
+        .unwrap()
+        .svd_compact()
+        .unwrap()
+        .1;
+
+    // `s`'s domain leg is non-dual, `typed`'s leading codomain leg is dual.
+    assert!(s.contract(&typed, &[1], &[0], &[0, 1]).is_err());
+    // And a wrong-length axis list or a non-permutation output order is still
+    // the expert layer's error rather than a fast-path answer.
+    assert!(typed.contract(&s, &[1], &[0], &[0]).is_err());
+    assert!(typed.contract(&s, &[1], &[0], &[1, 1]).is_err());
+    assert!(typed.contract(&s, &[9], &[0], &[0, 1]).is_err());
+}

@@ -344,3 +344,49 @@ fn a_complex_spectrums_matrix_functions_stay_o_rank_too() {
         "one of the c64 matrix functions materialized the spectrum"
     );
 }
+
+#[test]
+fn contracting_a_spectrum_scales_instead_of_densifying() {
+    // What: `contract` against a compact operand takes the same scaling route
+    // `compose` does (issue #584) — TensorKit's `lmul!`/`rmul!` on a
+    // `DiagonalTensorMap` — rather than materializing the `Σ_c k_c²` block
+    // diagonal and running a GEMM.
+    //
+    // The byte ceiling alone cannot prove it: the scaling route allocates a
+    // scaled copy plus the `permute` destination, which is about what the dense
+    // route spends on the materialization plus the GEMM result. What proves it
+    // is that the spectrum is *still* compact afterwards — the first `data()`
+    // on it must still pay for the dense buffer. That is what dies if the arm
+    // is removed and `contract` reaches for `dense_data()` instead.
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let d = spectrum(0x5eed_0031);
+    let dense = source(0x5eed_0032);
+
+    // `t · s`: the spectrum scales `t`'s contracted domain leg (`rmul!`).
+    black_box(dense.contract(&d, &[1], &[0], &[0, 1]).unwrap());
+    assert!(
+        measured_bytes(|| d.data().len()) >= dense_payload_bytes(),
+        "t * s materialized the spectrum"
+    );
+
+    // `s · t`: the mirror image, scaling `t`'s leading codomain leg (`lmul!`).
+    let e = spectrum(0x5eed_0033);
+    black_box(e.contract(&dense, &[1], &[0], &[0, 1]).unwrap());
+    assert!(
+        measured_bytes(|| e.data().len()) >= dense_payload_bytes(),
+        "s * t materialized the spectrum"
+    );
+
+    // `s · s` stays compact end to end, so here the ceiling *is* decisive: the
+    // whole contraction must cost less than a single dense payload.
+    let f = spectrum(0x5eed_0034);
+    let bytes = warmed_bytes(|| f.contract(&f, &[1], &[0], &[0, 1]).unwrap());
+    assert!(
+        bytes < dense_payload_bytes(),
+        "s * s allocated at least one dense payload: {bytes} bytes"
+    );
+    assert!(
+        measured_bytes(|| f.data().len()) >= dense_payload_bytes(),
+        "s * s materialized its operand"
+    );
+}
