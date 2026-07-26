@@ -1168,3 +1168,54 @@ fn full_rank_one_trace_pairs_is_the_supertrace_for_a_fermionic_rule() {
         );
     }
 }
+
+#[test]
+fn compact_is_posdef_matches_the_dense_route_and_never_materializes() {
+    // What: reading the stored spectrum answers exactly what eigendecomposing
+    // the materialization answers — on positive, positive-*semi*definite,
+    // negative and indefinite spectra, at every tolerance, for both the real
+    // and the real-valued-c64 storage. The strictness at zero is the one place
+    // a `>=` would pass a semidefinite spectrum the dense route rejects.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = product_space();
+
+    // A constant block is rank one, so all but one singular value per sector is
+    // zero: the positive-semidefinite fixture.
+    let semidefinite = Tensor::from_block_fn(&runtime, [&space], [&space], |_, _| 1.0)
+        .unwrap()
+        .svd_compact()
+        .unwrap()
+        .1;
+    for (name, diagonal) in [
+        ("positive f64", real_diagonal(&runtime, &space, 585_021)),
+        ("positive c64", real_c64_diagonal(&runtime, &space, 585_022)),
+        ("semidefinite", semidefinite.clone()),
+        (
+            "negative",
+            real_diagonal(&runtime, &space, 585_023)
+                .scale(-1.0)
+                .unwrap(),
+        ),
+        (
+            "indefinite",
+            real_diagonal(&runtime, &space, 585_024)
+                .add(&semidefinite, 1.0, -3.0)
+                .unwrap(),
+        ),
+    ] {
+        let oracle = dense_oracle(&diagonal);
+        for tol in [0.0, 1e-14, 1e-8, 1e-3, 0.5] {
+            assert_eq!(
+                diagonal.is_posdef(tol).unwrap(),
+                oracle.is_posdef(tol).unwrap(),
+                "{name} at tol {tol}"
+            );
+        }
+        assert_compact_unmaterialized(&diagonal);
+    }
+
+    assert!(real_diagonal(&runtime, &space, 585_021)
+        .is_posdef(0.0)
+        .unwrap());
+    assert!(!semidefinite.is_posdef(0.0).unwrap());
+}

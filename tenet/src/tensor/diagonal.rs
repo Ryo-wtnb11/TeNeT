@@ -4,7 +4,7 @@ use tenet_matrixalgebra::{FactorScalar, SectorSpectrum};
 use tenet_tensors::{DynamicFusionMapSpace, TreeTransformOperation};
 
 use super::{Data, DiagonalData, Error, UserScalar};
-use crate::typed_tensor_core::transform_rank_one_diagonal_spectrum;
+use crate::typed_tensor_core::{compact_is_posdef, transform_rank_one_diagonal_spectrum};
 
 fn map_spectra<I: Copy, O>(
     spectra: &[SectorSpectrum<I>],
@@ -83,6 +83,18 @@ impl DiagonalData {
             Self::RealC64(spectrum) => Self::RealC64(transform!(spectrum)),
             Self::C64(spectrum) => Self::C64(transform!(spectrum)),
         })
+    }
+
+    /// The dtype wrapper over
+    /// [`crate::typed_tensor_core::compact_is_posdef`]; see there for why the
+    /// real part is the right reading and why the comparison is strict.
+    pub(super) fn is_posdef(&self, threshold: f64) -> bool {
+        match self {
+            Self::RealF64(spectra) | Self::RealC64(spectra) => {
+                compact_is_posdef(spectra, threshold)
+            }
+            Self::C64(spectra) => compact_is_posdef(spectra, threshold),
+        }
     }
 
     pub(super) fn conjugated_complex(&self) -> Result<Self, Error> {

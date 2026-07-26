@@ -153,6 +153,30 @@ where
     Ok(output)
 }
 
+/// TensorKit 0.17 `src/tensors/diagonal.jl:379-381`: `isposdef` on a
+/// `DiagonalTensorMap` reads the stored diagonal values rather than
+/// factorizing. The caller owns the two steps that come first — the Hermiticity
+/// gate and `threshold = tol * max(norm, 1)` — so this is only the comparison.
+///
+/// Why the real part and not the modulus: the route this replaces
+/// eigendecomposes the materialization with the *Hermitian* solver, which reads
+/// one triangle and therefore only ever sees the diagonal's real part. A
+/// stored value whose imaginary part is not negligible cannot reach here — the
+/// Hermiticity gate rejected it — so taking the real part is the same answer,
+/// not a looser one.
+///
+/// Strict, like TensorKit's Cholesky-based test: a value exactly at the
+/// threshold is `false`, so a positive *semi*definite spectrum is rejected.
+pub(crate) fn compact_is_posdef<V>(spectrum: &[SectorSpectrum<V>], threshold: f64) -> bool
+where
+    V: tenet_matrixalgebra::FactorScalar,
+{
+    spectrum
+        .iter()
+        .flat_map(|entry| entry.values.iter())
+        .all(|&value| value.widen_complex().re > threshold)
+}
+
 /// Whether `operation` on a tensor of these ranks is the rank-(1,1) leg swap
 /// [`transform_rank_one_diagonal_spectrum`] is proved for. Shared so the two
 /// facades cannot drift on which geometries take the compact route.

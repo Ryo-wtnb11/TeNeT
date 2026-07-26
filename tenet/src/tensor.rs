@@ -6810,6 +6810,17 @@ impl Tensor {
             return Ok(false);
         }
         let threshold = tol * self.norm()?.max(1.0);
+        // Compact arm: a spectrum factor's stored values *are* its Hermitian
+        // eigenvalues, so there is nothing to factorize and nothing to
+        // materialize (#585). An adjoint view is excluded because its stored
+        // spectrum is the parent's, not this tensor's logical one; a Hermitian
+        // tensor's is the same up to conjugation, but the compact paths do not
+        // rely on that anywhere else and this one does not start.
+        if let Data::Diagonal(diagonal) = self.stored_data() {
+            if !self.is_adjoint_view() {
+                return Ok(diagonal.is_posdef(threshold));
+            }
+        }
         Ok(self
             .eigh_vals()?
             .iter()

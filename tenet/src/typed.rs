@@ -3040,6 +3040,16 @@ where
             return Ok(false);
         }
         let threshold = tol * self.norm()?.max(1.0);
+        // Compact arm: a spectrum factor's stored values *are* its Hermitian
+        // eigenvalues, so there is nothing to factorize and nothing to
+        // materialize (#585). The gate and the threshold above are already
+        // compact — `is_hermitian` and `norm` both read the spectrum — so this
+        // is the last step that reached `dense_data()`.
+        if let Some(spectrum) = self.spectrum() {
+            return Ok(crate::typed_tensor_core::compact_is_posdef(
+                spectrum, threshold,
+            ));
+        }
         Ok(self
             .eigh_vals()?
             .iter()

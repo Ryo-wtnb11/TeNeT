@@ -456,3 +456,38 @@ fn the_geometries_outside_the_proved_swap_keep_the_dense_route() {
         "an explicit braid returned compact storage instead of the dense route"
     );
 }
+
+#[test]
+fn compact_is_posdef_never_builds_or_caches_a_dense_payload() {
+    // What: `is_posdef` on a spectrum factor is a comparison over the stored
+    // values (#585). It is not allocation-*free* — the Hermiticity gate it
+    // opens with is `t - t†`, which owns two compact `Σ_c k_c` results, and
+    // that is the route TensorKit takes too — but it must stay far below the
+    // `Σ_c k_c²` materialization the eigensolver route needed, and it must not
+    // populate the shared dense cache, which the byte ceiling alone cannot see
+    // once the warm-up run has paid for it.
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let ceiling = dense_payload_bytes();
+
+    let d = spectrum(0x5eed_0051);
+    let bytes = warmed_bytes(|| d.is_posdef(0.0).unwrap());
+    assert!(
+        bytes < ceiling,
+        "compact is_posdef allocated at least one dense payload: {bytes} bytes"
+    );
+    assert!(
+        measured_bytes(|| d.data().len()) >= ceiling,
+        "compact is_posdef materialized the spectrum"
+    );
+
+    let e = complex_source(0x5eed_0052).svd_compact().unwrap().1;
+    let bytes = warmed_bytes(|| e.is_posdef(1e-12).unwrap());
+    assert!(
+        bytes < 2 * ceiling,
+        "compact c64 is_posdef allocated at least one dense payload: {bytes} bytes"
+    );
+    assert!(
+        measured_bytes(|| e.data().len()) >= 2 * ceiling,
+        "compact c64 is_posdef materialized the spectrum"
+    );
+}
