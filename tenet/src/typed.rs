@@ -677,20 +677,26 @@ where
     {
         let spaces: Vec<&GradedSpace<R>> = spaces.into_iter().collect();
         let provider = Arc::clone(Self::authority(&spaces)?);
-        let zero = Self::build(runtime, provider, &spaces, &spaces, Fill::Zeros)?;
+        let mut identity = Self::build(runtime, provider, &spaces, &spaces, Fill::Zeros)?;
+        // The zero fill is written into, not replaced: `build` has just
+        // allocated the payload and nothing else holds the body yet, so the
+        // diagonal goes in place rather than into a second buffer.
+        let body =
+            Arc::get_mut(&mut identity.body).expect("a freshly built body has no other owner");
         // Same coupled-sector region walk and same diagonal addressing as the
         // erased `Tensor::structural`, on the shared helper: the two build the
         // same tensor, and a second copy of the offset arithmetic would be free
         // to drift from the sibling this is byte-compared against.
-        let space = zero.body.space.space();
-        let regions = sector_regions(space.structure(), space.nout())?;
-        let mut data = vec![D::from_real(0.0); space.required_len()?];
+        let regions = {
+            let space = body.space.space();
+            sector_regions(space.structure(), space.nout())?
+        };
         for region in regions.iter() {
             for i in 0..region.rows().min(region.cols()) {
-                data[region.range().start + i * (region.rows() + 1)] = D::from_real(1.0);
+                body.data[region.range().start + i * (region.rows() + 1)] = D::from_real(1.0);
             }
         }
-        Ok(zero.with_data(data))
+        Ok(identity)
     }
 
     /// TensorKit `permute`: re-arranges legs with symmetric braiding.
