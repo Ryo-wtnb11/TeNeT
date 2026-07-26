@@ -2227,7 +2227,7 @@ fn scale_blocks_impl<D: UserScalar>(
 /// blocks: `sum_c dim(c) * <a_c, b_c>` with the first argument conjugated,
 /// matching TensorKit's `dot` (which conjugates its first argument). Real
 /// tensors produce an exactly-real result.
-fn weighted_inner<R, D>(
+pub(crate) fn weighted_inner<R, D>(
     rule: &R,
     structure: &BlockStructure,
     nout: usize,
@@ -2342,7 +2342,7 @@ where
 /// `nout + i` (equal degeneracies, since the spaces match). Real tensors give
 /// an exactly-real result. Fermionic twists belong to `trace_pairs` / tensor
 /// contractions and are not part of this matrix trace.
-fn weighted_trace<R, D>(
+pub(crate) fn weighted_trace<R, D>(
     rule: &R,
     structure: &BlockStructure,
     nout: usize,

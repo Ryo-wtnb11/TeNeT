@@ -1138,6 +1138,82 @@ where
         Ok(self.wrap_bound_factor(out))
     }
 
+    /// Builds a sibling on this tensor's own space and runtime from a fresh
+    /// buffer. Every element-wise scalar operation below produces exactly
+    /// that: the space is unchanged and only the payload is new, so the shared
+    /// [`BoundDynamicFusionMapSpace`] is cloned rather than re-derived — it
+    /// carries a checked admission proof this kind of operation cannot
+    /// invalidate.
+    fn with_data(&self, data: Vec<D>) -> Self {
+        Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody {
+                space: self.body.space.clone(),
+                data,
+            }),
+        }
+    }
+
+    /// The linear combination `alpha * self + beta * other`, mirroring the
+    /// erased [`crate::prelude::Tensor::add`].
+    ///
+    /// Both operands must live on the same runtime and on the same space —
+    /// identical hom space and block layout — since the combination is
+    /// element-wise on the shared storage order.
+    ///
+    /// # False friend
+    ///
+    /// VectorInterface's `add(y, x, α, β)` is `y * β + x * α`: its **first**
+    /// coefficient belongs to its **second** argument. Here `alpha` belongs to
+    /// `self` and `beta` to `other`, matching the erased facade. Callers
+    /// arriving from Julia should go by the argument order, not by the
+    /// coefficient names.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::RuntimeMismatch`] when the operands belong to different
+    ///   runtimes, as for [`Self::contract`].
+    /// - [`Error::InvalidArgument`] when they do not live on the same space,
+    ///   with the erased facade's own message.
+    pub fn add(&self, other: &Self, alpha: D, beta: D) -> Result<Self, Error> {
+        // Runtime first, exactly as `contract` does: crossing runtimes is a
+        // trust-boundary violation rather than an algebra error, and the
+        // erased facade's `check_same_space` checks it first too.
+        if !self.runtime.same_runtime(&other.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        // `DynamicFusionMapSpace: PartialEq` covers the hom space, the
+        // codomain/domain split and the block structure, which is exactly what
+        // makes the zipped element-wise combination below meaningful. Message
+        // verbatim from the erased `check_same_space`: one mistake reported two
+        // ways across the two facades is a support burden with no upside.
+        if self.body.space.space() != other.body.space.space() {
+            return Err(Error::InvalidArgument(
+                "tensors live on different spaces or block layouts".to_string(),
+            ));
+        }
+        Ok(self.with_data(
+            self.body
+                .data
+                .iter()
+                .zip(&other.body.data)
+                .map(|(&x, &y)| x * alpha + y * beta)
+                .collect(),
+        ))
+    }
+
+    /// `factor * self` (TensorKit `scale`).
+    ///
+    /// Infallible, unlike the erased [`crate::prelude::Tensor::scale`]: that
+    /// one returns a `Result` because it must reconcile a runtime dtype and a
+    /// possible device or diagonal storage first, none of which exist here —
+    /// `D` is a type parameter and the payload is always a host buffer. The
+    /// erased `scale`/`scale_c64` split has the same origin and likewise
+    /// collapses: `factor` is simply a `D`.
+    pub fn scale(&self, factor: D) -> Self {
+        self.with_data(self.body.data.iter().map(|&value| value * factor).collect())
+    }
+
     /// The codomain legs, in axis order.
     pub fn codomain(&self) -> Vec<GradedSpace<R>> {
         self.legs(self.body.space.space().homspace().codomain())

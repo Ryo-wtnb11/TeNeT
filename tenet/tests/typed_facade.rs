@@ -1104,6 +1104,42 @@ fn z2_oracle_pair_split(
     (erased, typed)
 }
 
+/// The c64 sibling of [`z2_oracle_pair`]. The imaginary part is deliberately
+/// not proportional to the real one, so a stray conjugation or a real-only
+/// path is visible in every comparison this pair feeds.
+fn z2_complex_oracle_pair(
+    runtime: &Runtime,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::Z2FusionRule, Complex64>,
+) {
+    let complex = |value: f64| Complex64::new(value, 1.0 + value % 5.0);
+    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        runtime,
+        [&space, &space],
+        [&space],
+        |key: &tenet::prelude::BlockKey, indices: &[usize]| {
+            complex(erased_fill_value(key, indices))
+        },
+    )
+    .unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 3),
+        ],
+        false,
+    )
+    .unwrap();
+    let typed = TensorMap::from_block_fn(runtime, [&leg, &leg], [&leg], |sectors, indices| {
+        complex(typed_fill_value(sectors, indices))
+    })
+    .unwrap();
+    (erased, typed)
+}
+
 #[test]
 fn typed_and_erased_permute_agree_byte_for_byte_on_a_builtin_rule() {
     // What: the typed permute is the erased permute, not a lookalike — same
@@ -1937,31 +1973,7 @@ fn typed_and_erased_svd_compact_agree_byte_for_byte_on_a_complex_payload() {
     // stray conjugation or a real-only path is visible.
     let _guard = cache_lock();
     let runtime = runtime();
-    let complex = |value: f64| Complex64::new(value, 1.0 + value % 5.0);
-    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
-    let erased = tenet::prelude::Tensor::from_block_fn(
-        &runtime,
-        [&space, &space],
-        [&space],
-        |key: &tenet::prelude::BlockKey, indices: &[usize]| {
-            complex(erased_fill_value(key, indices))
-        },
-    )
-    .unwrap();
-    let leg = GradedSpace::try_new(
-        Arc::new(tenet::core::Z2FusionRule),
-        [
-            (tenet::core::Z2Irrep::EVEN, 2),
-            (tenet::core::Z2Irrep::ODD, 3),
-        ],
-        false,
-    )
-    .unwrap();
-    let typed: TensorMap<tenet::core::Z2FusionRule, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |sectors, indices| {
-            complex(typed_fill_value(sectors, indices))
-        })
-        .unwrap();
+    let (erased, typed) = z2_complex_oracle_pair(&runtime);
     assert_eq!(typed.data(), erased.try_data_c64().unwrap());
 
     let (eu, _, evh) = erased.svd_compact().unwrap();
@@ -2256,5 +2268,96 @@ fn decompositions_carry_an_external_provider_with_its_own_labels() {
             .iter()
             .map(|entry| entry.sector)
             .collect::<Vec<_>>()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5 (issue #568), slice 1: `TensorMap::add` and `TensorMap::scale`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn typed_and_erased_add_agree_byte_for_byte() {
+    // What: `alpha * self + beta * other` is the erased combination, coefficient
+    // for coefficient. The two coefficients are deliberately different and
+    // neither is 1, so swapping them (or dropping one) moves the buffer.
+    //
+    // The second operand is a permute of the first: same space, same layout,
+    // different values, and no second fixture — `permute` is already pinned
+    // against the erased facade byte for byte.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+    let erased_other = erased.permute(&[1, 0], &[2]).unwrap();
+    let typed_other = typed.permute(&[1, 0], &[2]).unwrap();
+
+    let erased_sum = erased.add(&erased_other, 2.0, -3.0).unwrap();
+    let typed_sum = typed.add(&typed_other, 2.0, -3.0).unwrap();
+
+    assert_eq!(typed_sum.data(), erased_sum.data());
+    // The asymmetry is real: the swapped combination is a different tensor.
+    assert_ne!(
+        typed.add(&typed_other, -3.0, 2.0).unwrap().data(),
+        typed_sum.data()
+    );
+}
+
+#[test]
+fn add_carries_complex_coefficients() {
+    // What: `D` is the coefficient type too, so the c64 instantiation covers
+    // the erased facade's separate `add_c64` with no second method here.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_complex_oracle_pair(&runtime);
+    let alpha = Complex64::new(0.5, -2.0);
+    let beta = Complex64::new(-1.5, 0.25);
+
+    let erased_sum = erased
+        .add_c64(&erased.permute(&[1, 0], &[2]).unwrap(), alpha, beta)
+        .unwrap();
+    let typed_sum = typed
+        .add(&typed.permute(&[1, 0], &[2]).unwrap(), alpha, beta)
+        .unwrap();
+
+    assert_eq!(typed_sum.data(), erased_sum.try_data_c64().unwrap());
+}
+
+#[test]
+fn add_rejects_a_different_runtime_and_a_different_space() {
+    // What: the two checks this facade makes itself, in order — the runtime
+    // identity the expert layer never sees, then the space equality that makes
+    // the element-wise combination meaningful.
+    let _guard = cache_lock();
+    let other_runtime = runtime();
+    let runtime = runtime();
+    let (_, typed) = z2_oracle_pair(&runtime);
+    let (_, elsewhere) = z2_oracle_pair(&other_runtime);
+    let (_, other_split) = z2_oracle_pair_split(&runtime, 1);
+
+    assert!(matches!(
+        typed.add(&elsewhere, 1.0, 1.0).unwrap_err(),
+        tenet::prelude::Error::RuntimeMismatch
+    ));
+    // The erased facade's `check_same_space` message, verbatim: one mistake
+    // must not be reported two ways across the two facades.
+    assert!(matches!(
+        typed.add(&other_split, 1.0, 1.0).unwrap_err(),
+        tenet::prelude::Error::InvalidArgument(message)
+            if message == "tensors live on different spaces or block layouts"
+    ));
+}
+
+#[test]
+fn typed_and_erased_scale_agree_byte_for_byte() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    assert_eq!(typed.scale(-2.5).data(), erased.scale(-2.5).unwrap().data());
+
+    let (erased_c, typed_c) = z2_complex_oracle_pair(&runtime);
+    let factor = Complex64::new(0.25, 3.0);
+    assert_eq!(
+        typed_c.scale(factor).data(),
+        erased_c.scale_c64(factor).unwrap().try_data_c64().unwrap()
     );
 }
