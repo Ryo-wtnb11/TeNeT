@@ -1196,7 +1196,11 @@ where
     /// - [`Error::RuntimeMismatch`] when the operands belong to different
     ///   runtimes, as for [`Self::contract`].
     /// - [`Error::InvalidArgument`] when they do not live on the same space,
-    ///   with the erased facade's own message.
+    ///   with the erased facade's own message. Operands whose providers report
+    ///   different rule identities land here too, rather than in
+    ///   [`Error::RuleMismatch`] as the erased `check_same_world` would report
+    ///   them: the space comparison already covers rule identity, so a
+    ///   separate check would only re-report the same disagreement.
     pub fn add(&self, other: &Self, alpha: D, beta: D) -> Result<Self, Error> {
         // Runtime first, exactly as `contract` does: crossing runtimes is a
         // trust-boundary violation rather than an algebra error, and the
@@ -1414,7 +1418,9 @@ where
     ///
     /// # Errors
     ///
-    /// Exactly [`Self::add`]'s: the operands must share a runtime and a space.
+    /// Exactly [`Self::add`]'s — the operands must share a runtime and a space
+    /// — plus [`Error::Core`] from the block-structure walk, as for
+    /// [`Self::norm`].
     pub fn inner(&self, other: &Self) -> Result<D, Error> {
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
