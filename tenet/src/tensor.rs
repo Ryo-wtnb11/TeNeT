@@ -2227,7 +2227,7 @@ fn scale_blocks_impl<D: UserScalar>(
 /// blocks: `sum_c dim(c) * <a_c, b_c>` with the first argument conjugated,
 /// matching TensorKit's `dot` (which conjugates its first argument). Real
 /// tensors produce an exactly-real result.
-fn weighted_inner<R, D>(
+pub(crate) fn weighted_inner<R, D>(
     rule: &R,
     structure: &BlockStructure,
     nout: usize,
@@ -2342,7 +2342,7 @@ where
 /// `nout + i` (equal degeneracies, since the spaces match). Real tensors give
 /// an exactly-real result. Fermionic twists belong to `trace_pairs` / tensor
 /// contractions and are not part of this matrix trace.
-fn weighted_trace<R, D>(
+pub(crate) fn weighted_trace<R, D>(
     rule: &R,
     structure: &BlockStructure,
     nout: usize,
@@ -9106,7 +9106,10 @@ fn internal_layout_error(what: &str) -> Error {
 /// packed column-major sector matrix. The structural constructors and the
 /// device paths rely on these offsets, so any other layout is an explicit
 /// error, never silent misaddressing.
-fn sector_regions(structure: &BlockStructure, nout: usize) -> Result<Arc<[SectorRegion]>, Error> {
+pub(crate) fn sector_regions(
+    structure: &BlockStructure,
+    nout: usize,
+) -> Result<Arc<[SectorRegion]>, Error> {
     structure
         .coupled_sector_regions(nout)?
         .ok_or_else(|| internal_layout_error("non-packed coupled-sector layout"))
