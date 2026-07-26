@@ -358,6 +358,90 @@ mod tests {
         );
     }
 
+    /// The exact byte composition `try_new` hashes, with `F` swappable.
+    fn identity_bytes(f_text: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        CategoryDataFibonacci::PROVENANCE.write_canonical_bytes(&mut bytes);
+        for (tag, text) in [
+            ("Nsymbols", N_TEXT),
+            ("Fsymbols", f_text),
+            ("Rsymbols", R_TEXT),
+        ] {
+            bytes.extend_from_slice(b"--- ");
+            bytes.extend_from_slice(tag.as_bytes());
+            bytes.push(b'\n');
+            bytes.extend_from_slice(text.as_bytes());
+        }
+        bytes
+    }
+
+    fn identity_of(f_text: &str) -> RuleIdentity {
+        let bytes = identity_bytes(f_text);
+        RuleIdentity::from_canonical_bytes::<CategoryDataFibonacci>(
+            fnv1a64(&bytes),
+            Arc::from(bytes),
+        )
+    }
+
+    // Golden digests of the three shipped files and of the identity they
+    // produce. This is the only test that can fail on a *tamper*: every other
+    // test in the crate reads the shipped bytes and would happily agree with
+    // an edited table whose values still round to the same `f64`. Such an edit
+    // silently moves `rule_identity` and desynchronises the SHA-256s recorded
+    // in `references.md`, which is exactly the TODO-1 acceptance criterion.
+    //
+    // Updating a constant here is therefore a deliberate act: it means the
+    // pinned source changed, and `references.md` must change with it.
+    const N_TEXT_FNV: u64 = 0xaba7_7aa3_3176_9df0;
+    const F_TEXT_FNV: u64 = 0xbc12_a51a_3729_3fdf;
+    const R_TEXT_FNV: u64 = 0x2c13_49ae_3a17_11fe;
+    const IDENTITY_PREHASH: u64 = 0xee32_d986_edef_625b;
+
+    /// FNV-1a of `Rsymbols/FR_2_1_0_2_0_1.txt` from the same pinned artifact:
+    /// the *mirror* braiding of this category. Recorded rather than shipped
+    /// because the crate must not carry data it does not use. Asserting it
+    /// differs from `R_TEXT_FNV` pins the braid-index-0 choice: swapping the
+    /// mirror file in fails `shipped_table_bytes_are_pinned` below, and
+    /// `identity_moves_on_a_source_edit_too_small_to_move_a_coefficient`
+    /// separately establishes that different table bytes give a different
+    /// identity.
+    const MIRROR_BRAID_R_FNV: u64 = 0x7c19_0b00_80ec_d4d6;
+
+    #[test]
+    fn shipped_table_bytes_are_pinned() {
+        assert_eq!(
+            fnv1a64(N_TEXT.as_bytes()),
+            N_TEXT_FNV,
+            "Nsymbols file changed"
+        );
+        assert_eq!(
+            fnv1a64(F_TEXT.as_bytes()),
+            F_TEXT_FNV,
+            "Fsymbols file changed"
+        );
+        assert_eq!(
+            fnv1a64(R_TEXT.as_bytes()),
+            R_TEXT_FNV,
+            "Rsymbols file changed"
+        );
+        assert_ne!(
+            fnv1a64(R_TEXT.as_bytes()),
+            MIRROR_BRAID_R_FNV,
+            "the mirror braiding was loaded instead of braid index 0"
+        );
+
+        // The identity is a pure function of the provenance bytes and these
+        // three files, so pinning its prehash pins the whole composition.
+        let provider = CategoryDataFibonacci::try_new().expect("valid");
+        assert_eq!(
+            provider.rule_identity(),
+            RuleIdentity::from_canonical_bytes::<CategoryDataFibonacci>(
+                IDENTITY_PREHASH,
+                Arc::from(identity_bytes(F_TEXT)),
+            )
+        );
+    }
+
     #[test]
     fn identity_moves_on_a_source_edit_too_small_to_move_a_coefficient() {
         // A change in the 21st decimal of a table entry rounds to the same
@@ -365,39 +449,43 @@ mod tests {
         // anyway: it is bound to the source bytes, which is what makes the
         // acceptance criterion "changing the source changes the identity" hold
         // below the projection's resolution as well as above it.
-        let edited = F_TEXT.replacen("0.61803398874989484820", "0.61803398874989484821", 1);
-        assert_ne!(edited, F_TEXT);
+        // Appends one trailing zero digit to every decimal literal, e.g.
+        // `0.786…607` -> `0.786…6070`. Value-preserving by construction and
+        // below binary64 resolution, with no hard-coded literal to rot.
+        let edited: String = F_TEXT
+            .lines()
+            .map(|line| {
+                let fields: Vec<String> = line
+                    .split_whitespace()
+                    .map(|field| {
+                        if field.contains('.') {
+                            format!("{field}0")
+                        } else {
+                            field.to_owned()
+                        }
+                    })
+                    .collect();
+                format!("{}\n", fields.join(" "))
+            })
+            .collect();
+        assert_ne!(edited, F_TEXT, "the edit did not apply");
+
+        // Every parsed field, not one sampled field: this is the claim that
+        // the edit is invisible to the projection, so it has to be checked
+        // over the whole table.
+        let fields = |text: &str| {
+            text.split_whitespace()
+                .map(|field| field.parse::<f64>().expect("numeric field").to_bits())
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
-            edited
-                .split_whitespace()
-                .nth(10)
-                .map(|field| field.parse::<f64>().unwrap().to_bits()),
-            F_TEXT
-                .split_whitespace()
-                .nth(10)
-                .map(|field| field.parse::<f64>().unwrap().to_bits()),
+            fields(&edited),
+            fields(F_TEXT),
+            "the edit moved a coefficient"
         );
 
-        let identity = |f_text: &str| {
-            let mut bytes = Vec::new();
-            CategoryDataFibonacci::PROVENANCE.write_canonical_bytes(&mut bytes);
-            for (tag, text) in [
-                ("Nsymbols", N_TEXT),
-                ("Fsymbols", f_text),
-                ("Rsymbols", R_TEXT),
-            ] {
-                bytes.extend_from_slice(b"--- ");
-                bytes.extend_from_slice(tag.as_bytes());
-                bytes.push(b'\n');
-                bytes.extend_from_slice(text.as_bytes());
-            }
-            RuleIdentity::from_canonical_bytes::<CategoryDataFibonacci>(
-                fnv1a64(&bytes),
-                Arc::from(bytes),
-            )
-        };
         let provider = CategoryDataFibonacci::try_new().expect("valid");
-        assert_eq!(identity(F_TEXT), provider.rule_identity());
-        assert_ne!(identity(&edited), provider.rule_identity());
+        assert_eq!(identity_of(F_TEXT), provider.rule_identity());
+        assert_ne!(identity_of(&edited), provider.rule_identity());
     }
 }

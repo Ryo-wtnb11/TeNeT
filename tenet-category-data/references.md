@@ -54,6 +54,18 @@ paths. Their SHA-256 values are:
 | `Fsymbols/FR_2_1_0_2_0.txt` | `00cbae541c159fa4eb5f3142c3759f626966cbac001cf0eb585b76d2657cb30e` |
 | `Rsymbols/FR_2_1_0_2_0_0.txt` | `24a653d14322cd5f177e577b7a1328e4ed92217a0cbc7c613d5be0eeef032b2d` |
 
+These hashes are not self-enforcing, so the crate pins the same bytes in code:
+`fibonacci.rs::tests::shipped_table_bytes_are_pinned` holds a golden FNV-1a of
+each file and of the resulting `RuleIdentity` prehash. Any edit to a shipped
+table — including one too small to move a `Complex64`, which no coefficient
+test can see — fails that test. Updating a golden means the table above must be
+updated in the same commit.
+
+The mirror braiding of the same category, `Rsymbols/FR_2_1_0_2_0_1.txt`, is
+deliberately *not* shipped; its FNV-1a is recorded in that test so that loading
+it by mistake is rejected rather than silently accepted as a different braided
+category.
+
 ## Category identity, ordering, and gauge
 
 | Field | Value |
