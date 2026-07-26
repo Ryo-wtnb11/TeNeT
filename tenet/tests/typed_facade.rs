@@ -1979,13 +1979,15 @@ fn typed_and_erased_svd_compact_agree_byte_for_byte_on_a_complex_payload() {
     let (erased, typed) = z2_complex_oracle_pair(&runtime);
     assert_eq!(typed.data(), erased.try_data_c64().unwrap());
 
-    let (eu, _, evh) = erased.svd_compact().unwrap();
+    let (eu, es, evh) = erased.svd_compact().unwrap();
     let (tu, ts, tvh) = typed.svd_compact().unwrap();
 
     assert_eq!(tu.data(), eu.try_data_c64().unwrap());
     assert_eq!(tvh.data(), evh.try_data_c64().unwrap());
-    // The erased `s` is diagonal storage (#570), so it is compared through its
-    // spectrum rather than its bytes.
+    // Both `s` factors are compact diagonal storage (#570 closed), so `s`
+    // compares bitwise through its materialization like the f64 sibling above,
+    // not only through its spectrum.
+    assert_eq!(ts.data(), es.try_data_c64().unwrap());
     assert_eq!(
         typed
             .svd_vals()
@@ -3750,6 +3752,24 @@ fn typed_and_erased_eig_agree_on_a_complex_payload_and_conjugate_the_adjoint() {
     for (conjugated, original) in adjoint.data().iter().zip(td.data()) {
         assert_eq!(*conjugated, original.conj());
     }
+
+    // The compact reductions on a genuinely complex spectrum. Every other
+    // compact oracle in this suite reads an SVD spectrum, which is real, so a
+    // dropped conjugation in the compact inner product is invisible there:
+    // `Σ conj(a) a` and `Σ a a` agree on the reals. Here they do not.
+    assert_eq!(td.inner(&td).unwrap(), ed.inner(&ed).unwrap().to_c64());
+    assert_eq!(td.norm().unwrap(), ed.norm().unwrap());
+    assert_eq!(td.tr().unwrap(), ed.tr().unwrap().to_c64());
+    // `<d, d>` is real and positive precisely because the first argument is
+    // conjugated; the unconjugated sum of squares is not.
+    let unconjugated: Complex64 = td.data().iter().map(|value| value * value).sum();
+    assert!(
+        unconjugated.im.abs() > 1e-6,
+        "the spectrum must make the unconjugated sum complex for this to test anything"
+    );
+    assert_eq!(td.inner(&td).unwrap().im, 0.0);
+    let norm = td.norm().unwrap();
+    assert!((td.inner(&td).unwrap().re - norm * norm).abs() < 1e-9 * norm * norm);
 }
 
 #[test]
@@ -3904,6 +3924,45 @@ fn isometry_and_posdef_see_their_positive_cases() {
         negated.is_posdef(tol).unwrap(),
         erased_positive.scale(-1.0).unwrap().is_posdef(tol).unwrap()
     );
+    // Positive *semi*definite is `false`, not `true`: TensorKit's `isposdef` is
+    // Cholesky-based and strict, and this facade's rustdoc promises the same.
+    // A real diagonal endomorphism with one entry at exactly zero is the case
+    // that separates `>` from `>=` — `eigh` on it returns that zero exactly, so
+    // the comparison is not floating-point weather.
+    let semidefinite_leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 3),
+        ],
+        false,
+    )
+    .unwrap();
+    let semidefinite = TensorMap::from_block_fn(
+        &runtime,
+        [&semidefinite_leg],
+        [&semidefinite_leg],
+        |_, indices: &[usize]| {
+            if indices[0] != indices[1] {
+                0.0
+            } else {
+                // Row 0 of every block is the zero eigenvalue.
+                indices[0] as f64
+            }
+        },
+    )
+    .unwrap();
+    assert!(semidefinite.is_hermitian(0.0).unwrap());
+    assert!(semidefinite
+        .eigh_vals()
+        .unwrap()
+        .iter()
+        .any(|entry| entry.values.contains(&0.0)));
+    assert!(
+        !semidefinite.is_posdef(0.0).unwrap(),
+        "a positive semidefinite tensor must not be reported positive definite"
+    );
+
     // A Gram matrix agrees with the erased verdict whichever way it falls.
     let egram = erased.adjoint().unwrap().compose(&erased).unwrap();
     let tgram = typed.adjoint().unwrap().compose(&typed).unwrap();
