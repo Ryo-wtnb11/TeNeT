@@ -50,10 +50,16 @@
 //!   cannot return a `Result`: the erased `Mul` precedent panics, and a
 //!   panicking `+` as the only spelling of addition contradicts this facade's
 //!   passthrough-error contract. Adding them later is not a breaking change.
-//! - The **`is_hermitian` / `project_*` family** is blocked: four of its seven
-//!   members need `compose`, `id` or `eigh_vals`, none of which exist here, and
-//!   shipping the reachable three would leave the broken parity row this doc
-//!   refuses everywhere else.
+//! - The **`is_hermitian` / `project_*` family** is blocked: three of its seven
+//!   members need something this facade does not have — `is_isometric` needs
+//!   `compose` and `id`, `is_unitary` delegates to it, and `is_posdef` needs
+//!   `eigh_vals`. Shipping the other four would leave the broken parity row
+//!   this doc refuses everywhere else. Those four (`is_hermitian`,
+//!   `is_antihermitian`, `project_hermitian`, `project_antihermitian`) are now
+//!   trivially reachable, though — each is a one-liner over
+//!   [`TensorMap::add`], [`TensorMap::adjoint`] and [`TensorMap::norm`] — so a
+//!   future phase closes the family as soon as `compose`, `id` and `eigh_vals`
+//!   land.
 //! - **Composition** — TensorKit `A * B`, which unlike [`TensorMap::contract`]
 //!   never twists dual legs — is blocked below this layer: fermionic compose
 //!   needs a new public seam over `LoweredMultiplicityFreeAlgebra`, which
