@@ -242,9 +242,15 @@ impl SectorCodec for CategoryDataFibonacci {
 
 impl MultiplicityFreeFusionRule for CategoryDataFibonacci {}
 
-// The unit laws this marker promises are checked exactly at construction
-// (`MultiplicityFreeTable::check_unit_laws`), and the unit-gauge triangle
-// identities are covered by the crate's consistency tests.
+// Both halves of this marker's promise are checked exactly, never within a
+// tolerance, because the trait contract is exact: the unit fusion laws at
+// construction (`MultiplicityFreeTable::check_unit_laws`), and the unitor
+// associators by `tests/reference.rs::unit_associators_are_bitwise_one`,
+// which asserts them bitwise equal to `1 + 0i`.
+//
+// Why the associator half is a test rather than a constructor check: it is a
+// statement about projected floating-point coefficients, and this crate keeps
+// numerics in tests and exact-integer facts in the constructor.
 impl CanonicalUnitFusionRule for CategoryDataFibonacci {}
 
 impl MultiplicityFreeFusionSymbols for CategoryDataFibonacci {

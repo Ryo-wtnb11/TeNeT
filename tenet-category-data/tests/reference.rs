@@ -388,26 +388,32 @@ fn r_symbols_are_unit_modulus_on_admissible_channels() {
 }
 
 #[test]
-fn unit_gauge_satisfies_the_triangle_equation() {
-    // TensorKitSectors `triangle_equation` (sectors.jl): the three unitor
-    // associators are the scalar one. This is what makes the
-    // `CanonicalUnitFusionRule` marker on the provider a true statement.
+fn unit_associators_are_bitwise_one() {
+    // The three unitor associators of TensorKitSectors' `triangle_equation`
+    // (sectors.jl), but asserted bitwise rather than within `FP_BOUND`.
+    //
+    // This is the one consistency check in this file that is really a
+    // *contract* check: `CanonicalUnitFusionRule`
+    // (tenet-sectors/src/algebra.rs) promises that unitors and associators act
+    // as the identity on every multiplicity space, and the provider implements
+    // that marker unconditionally. "Identity" there is exact, not
+    // approximate — the engine's Unique/SymmetricBraiding lowering may drop
+    // these factors entirely rather than multiply by them. A future table
+    // revision whose unit-associated F drifted by one ulp would still satisfy
+    // a tolerance, while making the marker a false statement and the lowering
+    // silently wrong. So this is the assertion that has to be bitwise.
     let fib = table();
     let unit = fib.vacuum();
     let one = Complex64::new(1.0, 0.0);
     for a in SECTORS {
         for b in SECTORS {
             for c in fib.fusion_channels(a, b) {
-                for value in [
-                    fib.f_symbol_scalar(unit, a, b, c, a, c),
-                    fib.f_symbol_scalar(a, unit, b, c, a, b),
-                    fib.f_symbol_scalar(a, b, unit, c, c, b),
+                for (which, value) in [
+                    ("left unitor", fib.f_symbol_scalar(unit, a, b, c, a, c)),
+                    ("middle unitor", fib.f_symbol_scalar(a, unit, b, c, a, b)),
+                    ("right unitor", fib.f_symbol_scalar(a, b, unit, c, c, b)),
                 ] {
-                    assert!(
-                        (value - one).norm() <= FP_BOUND,
-                        "triangle{:?}: {value}",
-                        (a, b, c)
-                    );
+                    assert_bits(value, one, &format!("{which}{:?}", (a, b, c)));
                 }
             }
         }
