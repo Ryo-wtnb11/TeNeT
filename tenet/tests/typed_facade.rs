@@ -5491,6 +5491,31 @@ fn compact_is_posdef_matches_the_forced_dense_route_for_a_hermitian_c64_spectrum
     assert!(hermitian.is_hermitian(1e-10).unwrap());
 
     let d = hermitian.eigh_full().unwrap().0;
+
+    // The Hermiticity gate is load-bearing and is checked here, because every
+    // other fixture in this file answers the same with or without it. Rotating
+    // the spectrum by `1 + i` keeps every real part positive — so a predicate
+    // that reads only the stored real parts calls it positive definite — while
+    // making the tensor not Hermitian at all. The gate is the only thing
+    // standing between the compact arm and a wrong `true`.
+    // Built from singular values, not from the Gram's eigenvalues: the latter
+    // can hold an exact zero, which the compact predicate rejects on its own
+    // and which would therefore hide the gate rather than test it.
+    let skewed = real
+        .svd_compact()
+        .unwrap()
+        .1
+        .scale(Complex64::new(1.0, 1.0));
+    assert!(!skewed.is_hermitian(1e-10).unwrap());
+    for tol in [0.0, 1e-14, 1e-8, 1e-3] {
+        assert!(!skewed.is_posdef(tol).unwrap(), "skewed at tol {tol}");
+        assert_eq!(
+            skewed.is_posdef(tol).unwrap(),
+            forced_dense(&skewed).is_posdef(tol).unwrap(),
+            "skewed at tol {tol}"
+        );
+    }
+
     let oracle = forced_dense(&d);
     for tol in [0.0, 1e-14, 1e-8, 1e-3] {
         assert_eq!(

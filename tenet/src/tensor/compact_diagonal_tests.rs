@@ -1263,4 +1263,25 @@ fn compact_is_posdef_matches_the_dense_route_and_never_materializes() {
         .is_posdef(0.0)
         .unwrap());
     assert!(!semidefinite.is_posdef(0.0).unwrap());
+
+    // The Hermiticity gate is load-bearing and is checked separately, because
+    // every fixture above would answer the same with or without it. A spectrum
+    // whose values all have a positive real part *and* a non-negligible
+    // imaginary one is positive definite to a predicate that reads only the
+    // stored real parts, and is not Hermitian at all — so the gate is the only
+    // thing standing between the compact arm and a wrong `true`.
+    let skewed = real_c64_diagonal(&runtime, &space, 585_025)
+        .scale_c64(Complex64::new(1.0, 1.0))
+        .unwrap();
+    assert!(!skewed.is_hermitian(1e-10).unwrap());
+    let oracle = dense_oracle(&skewed);
+    for tol in [0.0, 1e-14, 1e-8, 1e-3] {
+        assert!(!skewed.is_posdef(tol).unwrap(), "skewed at tol {tol}");
+        assert_eq!(
+            skewed.is_posdef(tol).unwrap(),
+            oracle.is_posdef(tol).unwrap(),
+            "skewed at tol {tol}"
+        );
+    }
+    assert_compact_unmaterialized(&skewed);
 }
