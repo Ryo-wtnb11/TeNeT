@@ -14,8 +14,55 @@
 //! and contributes `(2j + 1) * value^2` to the 2-norm.
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeMap, BinaryHeap};
 use std::fmt;
+
+use tenet_core::{RuleIdentity, SectorId};
+
+/// A fixed per-sector prefix count, TensorKit's `TruncationSpace`
+/// (`src/factorizations/truncation.jl:261-269`).
+///
+/// TensorKit reads the target rank of coupled sector `c` as
+/// `dim(strategy.space, c)` — the *reduced* (per-sector degeneracy) dimension
+/// of a target space — and then applies a plain `truncrank` inside that block.
+/// That is exactly a per-sector prefix count, which is why this fits the
+/// prefix-only decision layer instead of needing the non-prefix filter layer
+/// `truncfilter` would.
+///
+/// Build one from a space via `Space::truncspace` / `GradedSpace::truncspace`
+/// rather than by hand: the sector keys are the engine's opaque
+/// [`SectorId`]s, so the space that produced them is the only honest source,
+/// and the [`RuleIdentity`] recorded alongside is what lets the factorization
+/// reject a profile built against a different fusion rule.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TruncationSpace {
+    rule: RuleIdentity,
+    ranks: BTreeMap<SectorId, usize>,
+}
+
+impl TruncationSpace {
+    /// Builds a profile from a rule identity and its `(sector, rank)` pairs.
+    ///
+    /// Intended for the facade adapters, which take both from one space. A
+    /// sector missing from `ranks` is truncated away entirely (rank zero),
+    /// matching TensorKit: `dim(V, c)` of an absent sector is zero.
+    pub fn new(rule: RuleIdentity, ranks: impl IntoIterator<Item = (SectorId, usize)>) -> Self {
+        Self {
+            rule,
+            ranks: ranks.into_iter().collect(),
+        }
+    }
+
+    /// The fusion rule this profile's sector ids belong to.
+    pub fn rule(&self) -> &RuleIdentity {
+        &self.rule
+    }
+
+    /// The requested rank of a coupled sector; `0` when the sector is absent.
+    pub fn rank(&self, sector: SectorId) -> usize {
+        self.ranks.get(&sector).copied().unwrap_or(0)
+    }
+}
 
 /// Truncation policy over per-sector descending spectra.
 #[derive(Clone, Debug, PartialEq)]
@@ -37,6 +84,9 @@ pub enum Truncation {
     /// discarded stays at or below `rtol * norm`.
     #[non_exhaustive]
     DiscardWeight { rtol: f64 },
+    /// Keep exactly the requested prefix of every coupled sector, clamped to
+    /// what the spectrum offers. TensorKit `TruncationSpace`.
+    Space(TruncationSpace),
     /// Keep a value only if every component keeps it. Prefix rules compose to
     /// a prefix rule, so this is the per-sector minimum of the kept counts.
     All(Vec<Truncation>),
@@ -44,8 +94,16 @@ pub enum Truncation {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TruncationError {
-    InvalidPolicy { message: &'static str },
-    InvalidSpectrum { message: &'static str },
+    InvalidPolicy {
+        message: &'static str,
+    },
+    InvalidSpectrum {
+        message: &'static str,
+    },
+    /// A [`Truncation::Space`] profile was built against a different fusion
+    /// rule than the tensor being factorized, so its [`SectorId`] keys name
+    /// different sectors than the spectra do.
+    RuleMismatch,
 }
 
 impl fmt::Display for TruncationError {
@@ -55,6 +113,10 @@ impl fmt::Display for TruncationError {
             Self::InvalidSpectrum { message } => {
                 write!(f, "invalid truncation spectrum: {message}")
             }
+            Self::RuleMismatch => write!(
+                f,
+                "truncation space profile was built for a different fusion rule"
+            ),
         }
     }
 }
@@ -62,9 +124,18 @@ impl fmt::Display for TruncationError {
 impl std::error::Error for TruncationError {}
 
 impl From<TruncationError> for tenet_tensors::OperationError {
-    fn from(_: TruncationError) -> Self {
+    fn from(error: TruncationError) -> Self {
         Self::InvalidArgument {
-            message: "invalid truncation input",
+            // `OperationError` carries a `&'static str`, so the policy/spectrum
+            // detail cannot travel; the rule mismatch gets its own message
+            // because it is the one a caller can actually act on (they passed
+            // a profile built from the wrong space).
+            message: match error {
+                TruncationError::RuleMismatch => {
+                    "truncation space profile was built for a different fusion rule"
+                }
+                _ => "invalid truncation input",
+            },
         }
     }
 }
@@ -112,6 +183,12 @@ impl Truncation {
         Ok(Self::DiscardWeight { rtol })
     }
 
+    /// Keep the fixed per-sector prefix `profile` names (TensorKit
+    /// `truncspace`).
+    pub fn space(profile: TruncationSpace) -> Self {
+        Self::Space(profile)
+    }
+
     /// Intersects two policies (both must keep a value).
     pub fn and(self, other: Truncation) -> Self {
         match (self, other) {
@@ -134,10 +211,15 @@ impl Truncation {
     }
 }
 
-/// One coupled sector's spectrum offered to the selection: its quantum
-/// dimension and its values, non-negative and descending.
+/// One coupled sector's spectrum offered to the selection: its identity, its
+/// quantum dimension and its values, non-negative and descending.
+///
+/// `sector` is only read by [`Truncation::Space`], the one policy whose
+/// decision is per-sector rather than magnitude-driven; every other policy
+/// stays identity-blind.
 #[derive(Clone, Copy, Debug)]
 pub struct WeightedSpectrum<'a> {
+    pub sector: SectorId,
     pub weight: f64,
     pub values: &'a [f64],
 }
@@ -154,15 +236,54 @@ pub struct TruncationDecision {
 ///
 /// Host-side scalar computation by design: spectra are small compared to the
 /// tensors, so the decision never needs to touch device data.
+///
+/// `rule` is the fusion rule the caller's [`WeightedSpectrum::sector`] ids
+/// belong to. It is checked against every [`Truncation::Space`] profile in
+/// `truncation` *before* any selection runs, so a profile built from another
+/// rule's space is rejected rather than silently reading its sector ids as
+/// this rule's — which would truncate to rank zero at random.
+///
+/// Why the rule is a parameter rather than a check each factorization makes
+/// for itself: this is the single seam every truncated factorization already
+/// routes through, so putting the guard here is the one place a future caller
+/// cannot forget it.
+///
+/// # Errors
+///
+/// [`TruncationError::RuleMismatch`] for a foreign profile,
+/// [`TruncationError::InvalidPolicy`] for a policy with a non-finite or
+/// negative tolerance, [`TruncationError::InvalidSpectrum`] for spectra that
+/// are not finite, non-negative and descending.
 pub fn select_truncation(
     spectra: &[WeightedSpectrum<'_>],
     truncation: &Truncation,
+    rule: &RuleIdentity,
 ) -> Result<TruncationDecision, TruncationError> {
+    validate_rule(truncation, rule)?;
     validate_truncation(truncation)?;
     validate_spectra(spectra)?;
     let kept = kept_counts(spectra, truncation);
     let error = discarded_norm(spectra, &kept);
     Ok(TruncationDecision { kept, error })
+}
+
+/// Rejects every [`Truncation::Space`] profile in `truncation` that was built
+/// against a rule other than `rule`. Recurses through [`Truncation::All`]
+/// because [`Truncation::and`] can bury a profile inside a composite.
+fn validate_rule(truncation: &Truncation, rule: &RuleIdentity) -> Result<(), TruncationError> {
+    match truncation {
+        Truncation::Space(profile) => {
+            if profile.rule == *rule {
+                Ok(())
+            } else {
+                Err(TruncationError::RuleMismatch)
+            }
+        }
+        Truncation::All(components) => components
+            .iter()
+            .try_for_each(|component| validate_rule(component, rule)),
+        _ => Ok(()),
+    }
 }
 
 fn validate_nonnegative_finite(value: f64, message: &'static str) -> Result<(), TruncationError> {
@@ -175,7 +296,10 @@ fn validate_nonnegative_finite(value: f64, message: &'static str) -> Result<(), 
 
 fn validate_truncation(truncation: &Truncation) -> Result<(), TruncationError> {
     match truncation {
-        Truncation::Full | Truncation::Rank(_) => Ok(()),
+        // A `Space` profile carries only `usize` ranks and a rule identity;
+        // the rule is checked by `validate_rule` and there is no numeric
+        // domain left to reject here.
+        Truncation::Full | Truncation::Rank(_) | Truncation::Space(_) => Ok(()),
         Truncation::Tolerance { atol, rtol } => {
             validate_nonnegative_finite(
                 *atol,
@@ -302,6 +426,17 @@ fn kept_counts(spectra: &[WeightedSpectrum<'_>], truncation: &Truncation) -> Vec
             }
             kept
         }
+        // TensorKit `findtruncated(values, ::TruncationSpace)`
+        // (truncation.jl:261-269): a plain `truncrank(dim(space, c))` inside
+        // each block. Absent sector -> rank zero (TK's `dim(V, c)` is zero
+        // there); clamped to what the spectrum actually offers, since asking
+        // for more than exists is a request the prefix cannot honour rather
+        // than an error. No magnitude enters, so the descending-prefix
+        // invariant is preserved by construction.
+        Truncation::Space(profile) => spectra
+            .iter()
+            .map(|spectrum| profile.rank(spectrum.sector).min(spectrum.values.len()))
+            .collect(),
         Truncation::All(components) => {
             let mut kept: Vec<usize> = spectra
                 .iter()
@@ -439,14 +574,46 @@ fn discarded_norm(spectra: &[WeightedSpectrum<'_>], kept: &[usize]) -> f64 {
 mod tests {
     use super::*;
 
+    /// The rule the test spectra's sector ids belong to. `select_truncation`
+    /// now takes one; any stable identity works for the magnitude-driven
+    /// policies, which never look at a sector.
+    struct TestRule;
+
+    fn rule() -> RuleIdentity {
+        RuleIdentity::of_type::<TestRule>()
+    }
+
+    fn other_rule() -> RuleIdentity {
+        struct OtherRule;
+        RuleIdentity::of_type::<OtherRule>()
+    }
+
+    /// Sector ids are the entry positions, so a profile keyed by position is
+    /// the same thing a space-derived profile would be.
     fn spectra<'a>(entries: &'a [(f64, Vec<f64>)]) -> Vec<WeightedSpectrum<'a>> {
         entries
             .iter()
-            .map(|(weight, values)| WeightedSpectrum {
+            .enumerate()
+            .map(|(index, (weight, values))| WeightedSpectrum {
+                sector: SectorId::new(index),
                 weight: *weight,
                 values,
             })
             .collect()
+    }
+
+    fn select(
+        spectra: &[WeightedSpectrum<'_>],
+        truncation: &Truncation,
+    ) -> Result<TruncationDecision, TruncationError> {
+        select_truncation(spectra, truncation, &rule())
+    }
+
+    fn profile(pairs: [(usize, usize); 2]) -> TruncationSpace {
+        TruncationSpace::new(
+            rule(),
+            pairs.map(|(sector, rank)| (SectorId::new(sector), rank)),
+        )
     }
 
     #[test]
@@ -454,13 +621,13 @@ mod tests {
         let entries = [(1.0, vec![5.0, 1.0]), (3.0, vec![4.0, 0.5])];
         let spectra = spectra(&entries);
         // Budget 4: keep 5.0 (weight 1) and 4.0 (weight 3) exactly.
-        let decision = select_truncation(&spectra, &Truncation::rank(4)).unwrap();
+        let decision = select(&spectra, &Truncation::rank(4)).unwrap();
         assert_eq!(decision.kept, vec![1, 1]);
         // Budget 5: the next candidate (1.0, weight 1) fits.
-        let decision = select_truncation(&spectra, &Truncation::rank(5)).unwrap();
+        let decision = select(&spectra, &Truncation::rank(5)).unwrap();
         assert_eq!(decision.kept, vec![2, 1]);
         // Budget 6: 0.5 has weight 3 and does not fit.
-        let decision = select_truncation(&spectra, &Truncation::rank(6)).unwrap();
+        let decision = select(&spectra, &Truncation::rank(6)).unwrap();
         assert_eq!(decision.kept, vec![2, 1]);
     }
 
@@ -468,10 +635,10 @@ mod tests {
     fn rank_ties_keep_parent_storage_order() {
         let entries = [(1.0, vec![2.0, 1.0]), (1.0, vec![2.0, 1.0])];
         let spectra = spectra(&entries);
-        let decision = select_truncation(&spectra, &Truncation::rank(1)).unwrap();
+        let decision = select(&spectra, &Truncation::rank(1)).unwrap();
         assert_eq!(decision.kept, vec![1, 0]);
 
-        let decision = select_truncation(&spectra, &Truncation::rank(3)).unwrap();
+        let decision = select(&spectra, &Truncation::rank(3)).unwrap();
         assert_eq!(decision.kept, vec![2, 1]);
     }
 
@@ -480,13 +647,13 @@ mod tests {
         let entries = [(1.0, vec![4.0, 3.0, 0.1])];
         let spectra = spectra(&entries);
         let truncation = Truncation::absolute_cutoff(1.0).unwrap();
-        let decision = select_truncation(&spectra, &truncation).unwrap();
+        let decision = select(&spectra, &truncation).unwrap();
         assert_eq!(decision.kept, vec![2]);
         assert!((decision.error - 0.1).abs() < 1e-12);
 
         // norm = 5.001..., rtol 0.5 => threshold ~2.5: keeps 4 and 3.
         let truncation = Truncation::relative_cutoff(0.5).unwrap();
-        let decision = select_truncation(&spectra, &truncation).unwrap();
+        let decision = select(&spectra, &truncation).unwrap();
         assert_eq!(decision.kept, vec![2]);
     }
 
@@ -495,7 +662,7 @@ mod tests {
         let entries = [(3.0, vec![4.0, 3.0, 0.1]), (1.0, vec![2.5])];
         let spectra = spectra(&entries);
         let truncation = Truncation::relative_inf_cutoff(0.7).unwrap();
-        let decision = select_truncation(&spectra, &truncation).unwrap();
+        let decision = select(&spectra, &truncation).unwrap();
         assert_eq!(decision.kept, vec![2, 0]);
     }
 
@@ -505,7 +672,7 @@ mod tests {
         let spectra = spectra(&entries);
         let norm = full_norm(&spectra);
         let truncation = Truncation::relative_error(0.3).unwrap();
-        let decision = select_truncation(&spectra, &truncation).unwrap();
+        let decision = select(&spectra, &truncation).unwrap();
         assert!(decision.error <= 0.3 * norm + 1e-12);
         assert!(decision.kept[0] < 4, "a 30% budget must discard something");
         // Discarding one more value would exceed the budget.
@@ -519,11 +686,11 @@ mod tests {
         let entries = [(1.0, vec![4.0, 3.0, 2.0, 1.0])];
         let spectra = spectra(&entries);
         let combined = Truncation::rank(3).and(Truncation::absolute_cutoff(2.5).unwrap());
-        let decision = select_truncation(&spectra, &combined).unwrap();
+        let decision = select(&spectra, &combined).unwrap();
         assert_eq!(decision.kept, vec![2]);
 
         let combined = Truncation::rank(1).and(Truncation::absolute_cutoff(0.5).unwrap());
-        let decision = select_truncation(&spectra, &combined).unwrap();
+        let decision = select(&spectra, &combined).unwrap();
         assert_eq!(decision.kept, vec![1]);
     }
 
@@ -531,7 +698,7 @@ mod tests {
     fn full_keeps_everything_with_zero_error() {
         let entries = [(1.0, vec![2.0, 1.0]), (2.0, vec![1.5])];
         let spectra = spectra(&entries);
-        let decision = select_truncation(&spectra, &Truncation::Full).unwrap();
+        let decision = select(&spectra, &Truncation::Full).unwrap();
         assert_eq!(decision.kept, vec![2, 1]);
         assert_eq!(decision.error, 0.0);
     }
@@ -550,7 +717,7 @@ mod tests {
 
         for policy in policies {
             assert!(matches!(
-                select_truncation(&spectra, &policy),
+                select(&spectra, &policy),
                 Err(TruncationError::InvalidSpectrum { .. })
             ));
         }
@@ -576,9 +743,72 @@ mod tests {
             rtol: f64::NAN,
         });
         assert!(matches!(
-            select_truncation(&spectra, &unchecked),
+            select(&spectra, &unchecked),
             Err(TruncationError::InvalidPolicy { .. })
         ));
+    }
+
+    #[test]
+    fn space_profile_keeps_exactly_the_requested_prefix_counts() {
+        // What: the counts come from the profile alone. The magnitudes are
+        // arranged so that no magnitude-driven policy would produce `[1, 3]` —
+        // sector 0 holds the three largest values — so a decision that leaked
+        // into `Rank` / `Tolerance` behaviour cannot pass.
+        let entries = [(1.0, vec![9.0, 8.0, 7.0]), (3.0, vec![2.0, 1.0, 0.5])];
+        let spectra = spectra(&entries);
+        let decision = select(&spectra, &Truncation::space(profile([(0, 1), (1, 3)]))).unwrap();
+        assert_eq!(decision.kept, vec![1, 3]);
+        // The reported error is still the weighted 2-norm of the discarded tail.
+        let expected = (8.0f64 * 8.0 + 7.0 * 7.0).sqrt();
+        assert!((decision.error - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn space_profile_treats_absent_sectors_as_rank_zero_and_clamps_the_rest() {
+        // What: TensorKit reads `dim(space, c)`, which is zero for a sector the
+        // target space does not carry — so an absent key drops that sector
+        // entirely. A key asking for more than the spectrum has is clamped
+        // rather than rejected: the prefix simply cannot be longer.
+        let entries = [(1.0, vec![5.0, 4.0]), (2.0, vec![3.0])];
+        let spectra = spectra(&entries);
+        let sparse = TruncationSpace::new(rule(), [(SectorId::new(0), 9)]);
+        let decision = select(&spectra, &Truncation::space(sparse)).unwrap();
+        assert_eq!(decision.kept, vec![2, 0]);
+    }
+
+    #[test]
+    fn space_profile_composes_as_a_prefix_rule() {
+        // What: `and` still takes the per-sector minimum, so a profile can be
+        // intersected with a magnitude rule without leaving prefix-land.
+        let entries = [(1.0, vec![4.0, 3.0, 0.1]), (1.0, vec![2.0, 1.0])];
+        let spectra = spectra(&entries);
+        let combined = Truncation::space(profile([(0, 3), (1, 1)]))
+            .and(Truncation::absolute_cutoff(1.0).unwrap());
+        let decision = select(&spectra, &combined).unwrap();
+        assert_eq!(decision.kept, vec![2, 1]);
+    }
+
+    #[test]
+    fn a_profile_from_another_rule_is_a_typed_error_before_any_selection() {
+        // What: a foreign rule's sector ids name different sectors, so reading
+        // them as this rule's would silently zero the spectrum out instead of
+        // failing. Checked through `and` too, since a profile can be buried
+        // inside a composite.
+        let entries = [(1.0, vec![5.0, 4.0]), (2.0, vec![3.0])];
+        let spectra = spectra(&entries);
+        let foreign = TruncationSpace::new(other_rule(), [(SectorId::new(0), 1)]);
+
+        assert_eq!(
+            select(&spectra, &Truncation::space(foreign.clone())),
+            Err(TruncationError::RuleMismatch)
+        );
+        assert_eq!(
+            select(
+                &spectra,
+                &Truncation::rank(2).and(Truncation::space(foreign)),
+            ),
+            Err(TruncationError::RuleMismatch)
+        );
     }
 
     #[test]
@@ -586,7 +816,7 @@ mod tests {
         let entries = [(1.0, vec![3.0, 1.0, 2.0])];
         let spectra = spectra(&entries);
         assert!(matches!(
-            select_truncation(&spectra, &Truncation::rank(2)),
+            select(&spectra, &Truncation::rank(2)),
             Err(TruncationError::InvalidSpectrum { .. })
         ));
     }

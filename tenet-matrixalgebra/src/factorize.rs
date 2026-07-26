@@ -1980,11 +1980,12 @@ where
         .iter()
         .zip(&magnitudes)
         .map(|(entry, values)| WeightedSpectrum {
+            sector: entry.sector,
             weight: rule.dim_scalar(entry.sector),
             values: values.as_slice(),
         })
         .collect();
-    select_truncation(&weighted, truncation).map_err(OperationError::from)
+    select_truncation(&weighted, truncation, &rule.rule_identity()).map_err(OperationError::from)
 }
 
 /// Applies a truncation policy to an untruncated compact factorization (the host
@@ -6152,11 +6153,12 @@ where
         .iter()
         .zip(&magnitudes)
         .map(|(entry, values)| WeightedSpectrum {
+            sector: entry.sector,
             weight: generic_truncation_weight(rule.sqrt_dim_scalar(entry.sector)),
             values: values.as_slice(),
         })
         .collect();
-    select_truncation(&weighted, truncation).map_err(OperationError::from)
+    select_truncation(&weighted, truncation, &rule.rule_identity()).map_err(OperationError::from)
 }
 
 #[cfg(test)]

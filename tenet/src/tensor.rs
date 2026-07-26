@@ -9736,11 +9736,12 @@ fn decide_kept<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
         .iter()
         .zip(&magnitudes)
         .map(|(entry, values)| WeightedSpectrum {
+            sector: entry.sector,
             weight: rule.dim_scalar(entry.sector),
             values,
         })
         .collect();
-    let decision = select_truncation(&weighted, truncation)
+    let decision = select_truncation(&weighted, truncation, &rule.rule_identity())
         .map_err(|err| Error::InvalidArgument(err.to_string()))?;
     if spectra
         .iter()
