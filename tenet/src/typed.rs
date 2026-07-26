@@ -40,7 +40,9 @@
 //! and the **`is_hermitian` / `project_*` family** ([`TensorMap::is_hermitian`],
 //! [`TensorMap::is_antihermitian`], [`TensorMap::is_isometric`],
 //! [`TensorMap::is_unitary`], [`TensorMap::is_posdef`],
-//! [`TensorMap::project_hermitian`], [`TensorMap::project_antihermitian`]).
+//! [`TensorMap::project_hermitian`], [`TensorMap::project_antihermitian`]) and
+//! — with issue #576 — the **matrix functions** ([`TensorMap::exp`],
+//! [`TensorMap::inv`], [`TensorMap::pinv`], [`TensorMap::sqrt`]).
 //!
 //! Issue #570 also gave the facade **compact diagonal storage**: a spectrum
 //! factor — `svd_compact`'s and `svd_trunc`'s `s`, `eigh`/`eig`'s `d` — holds
@@ -69,11 +71,21 @@
 //! `isomorphism`/`isometry`/`unitary` constructors and `rand`/`rand_with_seed`.
 //! Those are ports waiting on nothing but their turn; the ones below are not:
 //!
-//! - The **matrix functions** (`exp`, `inv`, `pinv`, `sqrt`) are their own
-//!   phase. `exp` and `sqrt` ride on the eigendecompositions that just landed;
-//!   `inv` and `pinv` need a diagonal-aware elementwise layer over the compact
-//!   storage, plus `pinv`'s relative-cutoff policy, which is a decision rather
-//!   than a port. None of them is a one-liner over what is here.
+//! - The **rest of the matrix-function family** — the trigonometric and
+//!   hyperbolic members, `log`, `sylvester`, the `\` and `/` solves and integer
+//!   `^` — is out by decision, not by queue position (issue #576). Every one of
+//!   them is a spectral function or a solve over the same seams, so adding them
+//!   is mechanical; what is missing is a reason to. The four that landed are
+//!   the ones the tensor-network algorithms in this repository actually call.
+//!   Two capability gaps stand behind that line and are tracked separately:
+//!   general **non-Hermitian `exp`** needs a Padé/Taylor seam (issue #577;
+//!   [`TensorMap::exp`] is Hermitian-only, a recorded divergence from
+//!   TensorKit), and general endomorphism **`sqrt`** needs a Schur seam
+//!   ([`TensorMap::sqrt`] is the diagonal-bond idiom only). Neither seam exists
+//!   below this facade; both are their own phase. Issue #578 records the
+//!   erased [`crate::prelude::Tensor::exp`]'s remaining complexity-parity gap,
+//!   which the typed [`TensorMap::exp`] does not share: the erased one
+//!   densifies a diagonal payload, this one has an O(rank) arm.
 //! - **Outer multiplicity** (SU(3) and any other `Generic` provider) is out at
 //!   the admission boundary, not at this layer: every constructor here consumes
 //!   the multiplicity-free checked root. A `Generic` provider needs its own
@@ -1965,8 +1977,9 @@ where
     /// `exp(::AbstractTensorMap)` has no such restriction — it applies a
     /// general per-block Padé approximant and accepts any endomorphism. That is
     /// a recorded divergence: a Padé/Taylor seam does not exist below this
-    /// facade, and general (non-Hermitian) `exp` waits on one. Until then a
-    /// non-Hermitian argument is refused rather than silently symmetrized.
+    /// facade, and general (non-Hermitian) `exp` waits on one — issue #577.
+    /// Until then a non-Hermitian argument is refused rather than silently
+    /// symmetrized.
     ///
     /// The **compact** arm is a different story and matches TensorKit exactly:
     /// `exp(::DiagonalTensorMap)` is unconditionally elementwise, with no
@@ -1990,7 +2003,8 @@ where
     /// the `Σ_c k_c` stored values, staying compact. The erased
     /// [`crate::prelude::Tensor::exp`] has no such arm — it materializes a
     /// diagonal payload and eigendecomposes the block-diagonal buffer, which is
-    /// the complexity-parity gap this one closes.
+    /// the complexity-parity gap this one closes and issue #578 tracks on the
+    /// erased side.
     pub fn exp(&self) -> Result<Self, Error> {
         if let Some(spectrum) = self.spectrum() {
             // Why no hermiticity gate here while the dense arm has one: see the
