@@ -24,14 +24,21 @@
 //! and the index-manipulation and contraction
 //! operations — [`TensorMap::permute`], [`TensorMap::braid`],
 //! [`TensorMap::transpose`], [`TensorMap::transpose_axes`],
-//! [`TensorMap::repartition`] and [`TensorMap::contract`].
+//! [`TensorMap::repartition`] and [`TensorMap::contract`] — plus the
+//! decompositions of issue #567: [`TensorMap::svd_compact`],
+//! [`TensorMap::svd_full`], [`TensorMap::svd_trunc`], [`TensorMap::svd_vals`],
+//! [`TensorMap::qr_compact`], [`TensorMap::qr_full`],
+//! [`TensorMap::lq_compact`], [`TensorMap::lq_full`],
+//! [`TensorMap::left_orth`], [`TensorMap::right_orth`],
+//! [`TensorMap::left_null`] and [`TensorMap::right_null`].
 //!
 //! Everything else is deliberately still absent, each for its own reason:
 //!
-//! - The **decompositions** (`svd_*`, `qr`/`lq`, `left_orth`/`right_orth`, the
-//!   null spaces) get their own readiness step: they force a decision on how a
-//!   spectrum is labelled and they touch the matrix-algebra result types, so
-//!   they are a phase rather than an addition.
+//! - The **eigendecompositions** (`eigh_*`, `eig_*`) ride with the typed
+//!   diagonal-storage question of issue #570: `eigh_full`'s `d` factor has no
+//!   seam and would have to instantiate that question rather than inherit it,
+//!   and `eig_*` additionally needs a per-method `D::Eig` bound. Shipping part
+//!   of the family would leave a broken parity row.
 //! - The **scalar operations** (`add`, `scale`, `norm`, `inner`, `tr`) are
 //!   reachable but raise the operator-overload ergonomics question, which is
 //!   reviewed on its own.
@@ -73,6 +80,12 @@ pub use crate::error::Error;
 /// itself stays out of the prelude, because its [`TensorMap`] would collide
 /// with the erased [`tenet_core::TensorMap`] already exported there.
 pub use crate::runtime::Runtime;
+/// Re-exported for the same reason as [`Error`] and [`Runtime`]:
+/// [`TensorMap::svd_trunc`] takes one, so `use tenet::typed::*` would not be
+/// self-sufficient without it.
+pub use tenet_matrixalgebra::Truncation;
+
+use tenet_matrixalgebra::BoundDynFactor;
 
 use crate::tensor::{apply_fill, with_planar_axes, Fill, PlanarRequestKind, TensorScalar};
 use crate::typed_tensor_core::{
@@ -338,6 +351,79 @@ where
         domain_uncoupled: decode_sectors(provider, domain.uncoupled())?,
         domain_innerlines: decode_sectors(provider, domain.innerlines())?,
     })
+}
+
+/// One coupled sector's factorization spectrum, labelled through the provider:
+/// the typed counterpart of [`tenet_matrixalgebra::SectorSpectrum`], whose
+/// `sector` is a raw [`tenet_core::SectorId`].
+///
+/// Why decode rather than extend the raw-id exception that [`TensorMap::block`]
+/// carries: that exception is scoped to engine layout views, and a spectrum is
+/// caller-facing physics — [`TensorMap::svd_vals`]'s entire return would
+/// otherwise be raw ids.
+///
+/// `values` is descending by magnitude, as the seam guarantees.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SectorSpectrum<S> {
+    /// The coupled sector, in the provider's own labels.
+    pub sector: S,
+    /// That sector's values, descending by magnitude.
+    pub values: Vec<f64>,
+}
+
+/// Result of [`TensorMap::svd_trunc`]: `t ~ u * s * vh` with the truncated
+/// bond (TensorKit 0.17 `svd_trunc`, which returns `(U, S, Vᴴ, ϵ)`).
+// The `SectorCodec` bound is the field types' own: `singular_values` is
+// labelled, so the struct cannot be spelled without it.
+pub struct SvdTrunc<R: SectorCodec, D> {
+    /// Left isometry `u : codomain <- bond`.
+    pub u: TensorMap<R, D>,
+    /// Singular-value factor `s : bond <- bond`. Dense — see the order-parity
+    /// gap on [`TensorMap::svd_compact`] (issue #570).
+    pub s: TensorMap<R, D>,
+    /// Right isometry `vh : bond <- domain`.
+    pub vh: TensorMap<R, D>,
+    /// Kept singular values per coupled sector, sorted by provider label.
+    pub singular_values: Vec<SectorSpectrum<R::Sector>>,
+    /// Quantum-dimension-weighted 2-norm of everything discarded.
+    pub error: f64,
+}
+
+// Why hand-written, as for `TensorMap` itself: the derives would demand
+// `R: Clone + Debug`, and neither is needed — the provider lives behind an
+// `Arc` and its labels, not the rule, are what a diagnostic shows.
+impl<R, D> Clone for SvdTrunc<R, D>
+where
+    R: SectorCodec,
+{
+    fn clone(&self) -> Self {
+        Self {
+            u: self.u.clone(),
+            s: self.s.clone(),
+            vh: self.vh.clone(),
+            singular_values: self.singular_values.clone(),
+            error: self.error,
+        }
+    }
+}
+
+impl<R, D> core::fmt::Debug for SvdTrunc<R, D>
+where
+    R: SectorCodec,
+{
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Every field is shown: `TensorMap`'s own `Debug` is bound-free, so
+        // there is nothing about the factors this impl cannot print, and the
+        // erased `SvdTrunc` shows its three tensors too.
+        formatter
+            .debug_struct("SvdTrunc")
+            .field("u", &self.u)
+            .field("s", &self.s)
+            .field("vh", &self.vh)
+            .field("singular_values", &self.singular_values)
+            .field("error", &self.error)
+            .finish()
+    }
 }
 
 /// Storage shared by every clone of one typed tensor map: the admitted space
@@ -801,6 +887,255 @@ where
             runtime: self.runtime.clone(),
             body: Arc::new(TypedTensorBody { space, data }),
         })
+    }
+
+    /// Wraps one factor the matrix-algebra seam produced into a typed tensor
+    /// map. `BoundDynFactor::into_parts` hands back exactly the pair
+    /// [`TypedTensorBody`] stores, so there is nothing to validate here — the
+    /// seam already certified the space against its own data.
+    fn wrap_bound_factor(&self, factor: BoundDynFactor<R, D>) -> Self {
+        let (space, data) = factor.into_parts();
+        Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody { space, data }),
+        }
+    }
+
+    /// Decodes a seam spectrum into provider labels and sorts it by label.
+    ///
+    /// Every id here came out of the engine's own coupled-sector enumeration,
+    /// so a decode failure is the provider breaking [`SectorCodec`]'s
+    /// decode-totality law — same contract as [`decode_block_fusion_trees`].
+    fn decode_spectrum(
+        &self,
+        raw: Vec<tenet_matrixalgebra::SectorSpectrum>,
+    ) -> Result<Vec<SectorSpectrum<R::Sector>>, Error> {
+        let provider = self.body.space.provider();
+        let mut decoded: Vec<SectorSpectrum<R::Sector>> = raw
+            .into_iter()
+            .map(|entry| {
+                Ok(SectorSpectrum {
+                    sector: provider.decode_sector(entry.sector)?,
+                    values: entry.values,
+                })
+            })
+            .collect::<Result<_, Error>>()?;
+        // Label order, not the engine's id order: see the type's own rustdoc
+        // for why this facade sorts and the erased one does not.
+        decoded.sort_by(|left, right| left.sector.cmp(&right.sector));
+        Ok(decoded)
+    }
+
+    /// Borrowed seam view of this tensor map.
+    fn bound_ref(&self) -> Result<BoundDynamicTensorRef<'_, R, D>, Error> {
+        BoundDynamicTensorRef::try_new(&self.body.space, &self.body.data).map_err(Error::from)
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `svd_compact`: `t = u * s * vh` with
+    /// the bond `min(rows, cols)` per coupled sector.
+    ///
+    /// Returns `(u, s, vh)` with `u : codomain <- bond`, `s : bond <- bond`
+    /// and `vh : bond <- domain`.
+    ///
+    /// # Order-parity gap (issue #570)
+    ///
+    /// TensorKit's `svd_compact` returns `s` as a `DiagonalTensorMap`, and the
+    /// erased [`crate::prelude::Tensor`] matches it with diagonal storage. This
+    /// facade has only dense block storage, so `s` costs `Σ_c k_c²` instead of
+    /// `Σ_c k_c`, and a downstream `u * s * vh` runs the dense GEMM path rather
+    /// than the O(d·n) block scaling. Interim guidance: a caller that only
+    /// needs the spectrum should use [`Self::svd_vals`], which never
+    /// materializes `s` at all. When typed diagonal storage lands the signature
+    /// does not change — only the storage behind `s`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`]
+    /// straight from the matrix-algebra seam. As everywhere in this facade
+    /// there are no pre-checks here: the seam owns the rules, and a second copy
+    /// would be free to drift.
+    pub fn svd_compact(&self) -> Result<(Self, Self, Self), Error> {
+        // Dense lease only, matching the erased sibling: a factorization runs
+        // entirely on the dense-executor boundary, so leasing the (scarcer)
+        // recoupling context here would serialize unrelated work for nothing.
+        let mut dense = self.runtime.lease_dense();
+        let out = tenet_matrixalgebra::svd_compact_dyn(dense.dense(), &self.bound_ref()?)?;
+        let (u, s, vh, _) = out.into_parts();
+        Ok((
+            self.wrap_bound_factor(u),
+            self.wrap_bound_factor(s),
+            self.wrap_bound_factor(vh),
+        ))
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `svd_full`: `t = u * s * vh` with
+    /// square unitaries and a rectangular `s` per coupled sector.
+    ///
+    /// Returns `(u, s, vh)` with `u : codomain <- W`, `s : W <- W'` and
+    /// `vh : W' <- domain`.
+    ///
+    /// Unlike [`Self::svd_compact`] this carries no order-parity gap: TensorKit's
+    /// own `svd_full` builds `s` as a dense rectangular tensor
+    /// (`similar(t, real(scalartype(t)), V_cod <- V_dom)`), so a dense `s` here
+    /// is TK-exact.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    pub fn svd_full(&self) -> Result<(Self, Self, Self), Error> {
+        let mut dense = self.runtime.lease_dense();
+        let out = tenet_matrixalgebra::svd_full_dyn(dense.dense(), &self.bound_ref()?)?;
+        let (u, s, vh, _) = out.into_parts();
+        Ok((
+            self.wrap_bound_factor(u),
+            self.wrap_bound_factor(s),
+            self.wrap_bound_factor(vh),
+        ))
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `svd_trunc`: `t ~ u * s * vh` with the
+    /// bond truncated by `truncation`; see [`SvdTrunc`].
+    ///
+    /// TensorKit returns the four-tuple `(U, S, Vᴴ, ϵ)`; this returns them as a
+    /// named struct, following the same rule the erased facade uses — tuples up
+    /// to three, a struct beyond.
+    ///
+    /// The dense-`s` order-parity gap of [`Self::svd_compact`] (issue #570)
+    /// applies here verbatim, with the same interim guidance.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] from
+    /// the seam, including a malformed `truncation` — the truncation policy is
+    /// validated where it is applied, not here.
+    pub fn svd_trunc(&self, truncation: &Truncation) -> Result<SvdTrunc<R, D>, Error> {
+        let mut dense = self.runtime.lease_dense();
+        let out =
+            tenet_matrixalgebra::svd_trunc_dyn(dense.dense(), &self.bound_ref()?, truncation)?;
+        let (u, s, vh, singular_values, error) = out.into_parts();
+        Ok(SvdTrunc {
+            u: self.wrap_bound_factor(u),
+            s: self.wrap_bound_factor(s),
+            vh: self.wrap_bound_factor(vh),
+            singular_values: self.decode_spectrum(singular_values)?,
+            error,
+        })
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `svd_vals`: the singular values per
+    /// coupled sector, and nothing else.
+    ///
+    /// No factor tensor is built, so this is also the way around the dense-`s`
+    /// ceiling documented on [`Self::svd_compact`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] / [`Error::Core`] from the seam, plus
+    /// [`Error::FusionAlgebra`] when the provider cannot decode a coupled
+    /// sector its own algebra produced.
+    pub fn svd_vals(&self) -> Result<Vec<SectorSpectrum<R::Sector>>, Error> {
+        let mut dense = self.runtime.lease_dense();
+        let raw = tenet_matrixalgebra::svd_vals_dyn(dense.dense(), &self.bound_ref()?)?;
+        self.decode_spectrum(raw)
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `qr_compact`: `t = q * r` with `q`
+    /// carrying orthonormal columns per coupled sector.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    pub fn qr_compact(&self) -> Result<(Self, Self), Error> {
+        let mut dense = self.runtime.lease_dense();
+        let (q, r) = tenet_matrixalgebra::qr_compact_dyn(dense.dense(), &self.bound_ref()?)?;
+        Ok((self.wrap_bound_factor(q), self.wrap_bound_factor(r)))
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `qr_full`: `t = q * r` with a square
+    /// `q` per coupled sector.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    pub fn qr_full(&self) -> Result<(Self, Self), Error> {
+        let mut dense = self.runtime.lease_dense();
+        let (q, r) = tenet_matrixalgebra::qr_full_dyn(dense.dense(), &self.bound_ref()?)?;
+        Ok((self.wrap_bound_factor(q), self.wrap_bound_factor(r)))
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `lq_compact`: `t = l * q` with `q`
+    /// carrying orthonormal rows per coupled sector.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    pub fn lq_compact(&self) -> Result<(Self, Self), Error> {
+        let mut dense = self.runtime.lease_dense();
+        let (l, q) = tenet_matrixalgebra::lq_compact_dyn(dense.dense(), &self.bound_ref()?)?;
+        Ok((self.wrap_bound_factor(l), self.wrap_bound_factor(q)))
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `lq_full`: `t = l * q` with a square
+    /// `q` per coupled sector.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    pub fn lq_full(&self) -> Result<(Self, Self), Error> {
+        let mut dense = self.runtime.lease_dense();
+        let (l, q) = tenet_matrixalgebra::lq_full_dyn(dense.dense(), &self.bound_ref()?)?;
+        Ok((self.wrap_bound_factor(l), self.wrap_bound_factor(q)))
+    }
+
+    /// TensorKit 0.17 `left_orth`: the left isometry factorization
+    /// `t = v * c`, `v` isometric and `c` the corestriction.
+    ///
+    /// TensorKit's default `kind` is `:qr`, so this is [`Self::qr_compact`] —
+    /// the same one-line delegation the erased facade makes, deliberately, so
+    /// the two names cannot come to mean different things.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::qr_compact`]'s.
+    pub fn left_orth(&self) -> Result<(Self, Self), Error> {
+        self.qr_compact()
+    }
+
+    /// TensorKit 0.17 `right_orth`: the right isometry factorization
+    /// `t = c * vh`, `vh` carrying orthonormal rows.
+    ///
+    /// TensorKit's default `kind` is `:lq`, so this is [`Self::lq_compact`];
+    /// see [`Self::left_orth`] for why it is a delegation.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::lq_compact`]'s.
+    pub fn right_orth(&self) -> Result<(Self, Self), Error> {
+        self.lq_compact()
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `left_null`: `n : codomain <- W` with
+    /// `n^H * t = 0`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    pub fn left_null(&self) -> Result<Self, Error> {
+        let mut dense = self.runtime.lease_dense();
+        let out = tenet_matrixalgebra::left_null_dyn(dense.dense(), &self.bound_ref()?)?;
+        Ok(self.wrap_bound_factor(out))
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `right_null`: `n : W <- domain` with
+    /// `t * n^H = 0`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    pub fn right_null(&self) -> Result<Self, Error> {
+        let mut dense = self.runtime.lease_dense();
+        let out = tenet_matrixalgebra::right_null_dyn(dense.dense(), &self.bound_ref()?)?;
+        Ok(self.wrap_bound_factor(out))
     }
 
     /// The codomain legs, in axis order.

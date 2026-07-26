@@ -49,6 +49,11 @@ enum Quirk {
     /// Duals every sector to the vacuum, i.e. a non-injective dual: a broken
     /// rigidity structure rather than an unrepresentable value.
     CollapsingDual,
+    /// Labels the charges in the reverse of the engine's `SectorId` order
+    /// (`c <-> 2 - c`). Not broken at all — a valid codec whose label order
+    /// simply is not the id order, which is the only way to observe that a
+    /// facade sorts by label rather than by id.
+    ReversedLabels,
 }
 
 #[derive(Clone, Copy)]
@@ -194,7 +199,12 @@ impl SectorCodec for ExternalZ3 {
             return Ok(SectorId::new(0));
         }
         if value.0 < 3 {
-            Ok(SectorId::new(usize::from(value.0)))
+            let id = if self.quirk == Some(Quirk::ReversedLabels) {
+                2 - value.0
+            } else {
+                value.0
+            };
+            Ok(SectorId::new(usize::from(id)))
         } else {
             Err(FusionAlgebraError::UnrepresentableSectorLabel {
                 rule: self.rule_identity(),
@@ -212,7 +222,13 @@ impl SectorCodec for ExternalZ3 {
         u8::try_from(sector.id())
             .ok()
             .filter(|&charge| charge < limit)
-            .map(Z3Charge)
+            .map(|charge| {
+                Z3Charge(if self.quirk == Some(Quirk::ReversedLabels) {
+                    2 - charge
+                } else {
+                    charge
+                })
+            })
             .ok_or(FusionAlgebraError::InvalidSector { sector })
     }
 }
@@ -1043,11 +1059,27 @@ fn z2_oracle_pair(
     tenet::prelude::Tensor,
     TensorMap<tenet::core::Z2FusionRule, f64>,
 ) {
+    z2_oracle_pair_split(runtime, 2)
+}
+
+/// The same oracle pair over three identical legs, split into
+/// `num_codomain <- rest`. `2` is tall in every coupled sector and `1` is wide,
+/// which is what separates the compact factorizations from the full ones:
+/// on a tall input LQ-compact and LQ-full coincide.
+fn z2_oracle_pair_split(
+    runtime: &Runtime,
+    num_codomain: usize,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::Z2FusionRule, f64>,
+) {
     let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
+    let spaces = [&space, &space, &space];
+    let (codomain, domain) = spaces.split_at(num_codomain);
     let erased = tenet::prelude::Tensor::from_block_fn(
         runtime,
-        [&space, &space],
-        [&space],
+        codomain.iter().copied(),
+        domain.iter().copied(),
         erased_fill_value,
     )
     .unwrap();
@@ -1060,7 +1092,15 @@ fn z2_oracle_pair(
         false,
     )
     .unwrap();
-    let typed = TensorMap::from_block_fn(runtime, [&leg, &leg], [&leg], typed_fill_value).unwrap();
+    let legs = [&leg, &leg, &leg];
+    let (codomain, domain) = legs.split_at(num_codomain);
+    let typed = TensorMap::from_block_fn(
+        runtime,
+        codomain.iter().copied(),
+        domain.iter().copied(),
+        typed_fill_value,
+    )
+    .unwrap();
     (erased, typed)
 }
 
@@ -1797,5 +1837,424 @@ fn repartition_is_sign_free_even_for_a_fermionic_provider() {
     assert_eq!(
         tensor.repartition(0).unwrap().data(),
         tensor.permute(&[], &[2, 1, 0]).unwrap().data()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5: decompositions (issue #567).
+//
+// The byte oracles here are exact rather than gauge-tolerant: both facades
+// call the same `*_dyn` seams, whose gauge fixing is deterministic, so a
+// difference of a single bit is a real divergence and not floating-point
+// weather.
+// ---------------------------------------------------------------------------
+
+/// Decodes an erased spectrum's raw ids into `Z2Irrep` labels, so an erased
+/// spectrum can be compared to a typed one label-for-label.
+fn erased_z2_spectrum(
+    spectrum: &[tenet::prelude::SectorSpectrum],
+) -> Vec<(tenet::core::Z2Irrep, Vec<f64>)> {
+    let mut decoded: Vec<_> = spectrum
+        .iter()
+        .map(|entry| {
+            (
+                SectorCodec::decode_sector(&tenet::core::Z2FusionRule, entry.sector).unwrap(),
+                entry.values.clone(),
+            )
+        })
+        .collect();
+    decoded.sort_by_key(|(sector, _)| *sector);
+    decoded
+}
+
+fn typed_z2_spectrum(
+    spectrum: &[tenet::typed::SectorSpectrum<tenet::core::Z2Irrep>],
+) -> Vec<(tenet::core::Z2Irrep, Vec<f64>)> {
+    spectrum
+        .iter()
+        .map(|entry| (entry.sector, entry.values.clone()))
+        .collect()
+}
+
+#[test]
+fn typed_and_erased_svd_compact_agree_byte_for_byte() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    let (eu, _, evh) = erased.svd_compact().unwrap();
+    let (tu, ts, tvh) = typed.svd_compact().unwrap();
+
+    assert_eq!(tu.data(), eu.data());
+    assert_eq!(tvh.data(), evh.data());
+    // The erased `s` is diagonal storage and the typed one is dense (#570), so
+    // the two `s` factors are not byte-comparable. What `s` holds is pinned by
+    // the `svd_vals` oracle above and the reconstruction test below.
+    //
+    // The #570 ceiling, asserted as the exact number it is: one dense block per
+    // coupled sector, k_c² elements each, so 2² + 3² = 13 where diagonal
+    // storage would hold 2 + 3 = 5. This literal is what closing #570 changes.
+    assert_eq!(ts.data().len(), 13);
+}
+
+/// `u * s * vh` through the typed `contract`, for a `[2] <- [1]` factor chain:
+/// `u`'s last axis is its bond, `s` is `bond <- bond`, `vh` is `bond <- rest`.
+fn recompose(
+    u: &TensorMap<tenet::core::Z2FusionRule, f64>,
+    s: &TensorMap<tenet::core::Z2FusionRule, f64>,
+    vh: &TensorMap<tenet::core::Z2FusionRule, f64>,
+) -> TensorMap<tenet::core::Z2FusionRule, f64> {
+    let us = u.contract(s, &[2], &[0], &[0, 1, 2]).unwrap();
+    us.contract(vh, &[2], &[0], &[0, 1, 2]).unwrap()
+}
+
+#[test]
+fn svd_compact_reconstructs_the_source_through_the_typed_contract() {
+    // What: the factors really are a factorization in this facade's own
+    // vocabulary. There is no typed `compose`, so the composition runs through
+    // `contract` — bosonic here, where the two agree.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, typed) = z2_oracle_pair(&runtime);
+
+    let (u, s, vh) = typed.svd_compact().unwrap();
+    let recon = recompose(&u, &s, &vh);
+
+    assert_eq!(recon.data().len(), typed.data().len());
+    for (got, want) in recon.data().iter().zip(typed.data()) {
+        assert!(
+            (got - want).abs() <= 1e-12 * want.abs().max(1.0),
+            "{got} vs {want}"
+        );
+    }
+}
+
+#[test]
+fn typed_and_erased_svd_compact_agree_byte_for_byte_on_a_complex_payload() {
+    // What: the payload dtype is a type parameter here and a stored `Dtype`
+    // there, so c64 takes a different route through both facades. The
+    // imaginary part is deliberately not proportional to the real one, so a
+    // stray conjugation or a real-only path is visible.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let complex = |value: f64| Complex64::new(value, 1.0 + value % 5.0);
+    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        &runtime,
+        [&space, &space],
+        [&space],
+        |key: &tenet::prelude::BlockKey, indices: &[usize]| {
+            complex(erased_fill_value(key, indices))
+        },
+    )
+    .unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 3),
+        ],
+        false,
+    )
+    .unwrap();
+    let typed: TensorMap<tenet::core::Z2FusionRule, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |sectors, indices| {
+            complex(typed_fill_value(sectors, indices))
+        })
+        .unwrap();
+    assert_eq!(typed.data(), erased.try_data_c64().unwrap());
+
+    let (eu, _, evh) = erased.svd_compact().unwrap();
+    let (tu, ts, tvh) = typed.svd_compact().unwrap();
+
+    assert_eq!(tu.data(), eu.try_data_c64().unwrap());
+    assert_eq!(tvh.data(), evh.try_data_c64().unwrap());
+    // The erased `s` is diagonal storage (#570), so it is compared through its
+    // spectrum rather than its bytes.
+    assert_eq!(
+        typed
+            .svd_vals()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.values.clone())
+            .collect::<Vec<_>>(),
+        erased_z2_spectrum(&erased.svd_vals().unwrap())
+            .iter()
+            .map(|(_, values)| values.clone())
+            .collect::<Vec<_>>()
+    );
+
+    let recon = tu
+        .contract(&ts, &[2], &[0], &[0, 1, 2])
+        .unwrap()
+        .contract(&tvh, &[2], &[0], &[0, 1, 2])
+        .unwrap();
+    for (got, want) in recon.data().iter().zip(typed.data()) {
+        assert!(
+            (got - want).norm() <= 1e-12 * want.norm().max(1.0),
+            "{got} vs {want}"
+        );
+    }
+}
+
+#[test]
+fn typed_and_erased_svd_full_agree_byte_for_byte() {
+    // `svd_full`'s `s` is dense rectangular on both sides — TensorKit's own
+    // shape — so unlike `svd_compact` all three factors compare bitwise.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    let (eu, es, evh) = erased.svd_full().unwrap();
+    let (tu, ts, tvh) = typed.svd_full().unwrap();
+
+    assert_eq!(tu.data(), eu.data());
+    assert_eq!(ts.data(), es.data());
+    assert_eq!(tvh.data(), evh.data());
+}
+
+#[test]
+fn typed_and_erased_svd_trunc_agree_and_report_the_discarded_weight() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    let truncation = tenet::typed::Truncation::rank(2);
+    let erased_out = erased.svd_trunc(&truncation).unwrap();
+    let typed_out = typed.svd_trunc(&truncation).unwrap();
+
+    assert_eq!(typed_out.u.data(), erased_out.u.data());
+    assert_eq!(typed_out.vh.data(), erased_out.vh.data());
+    assert_eq!(typed_out.error, erased_out.error);
+    assert_eq!(
+        typed_z2_spectrum(&typed_out.singular_values),
+        erased_z2_spectrum(&erased_out.singular_values)
+    );
+
+    // The reported error is the 2-norm of everything the truncation dropped.
+    // Z2 is a group, so every quantum dimension is one and the weighting is
+    // the identity — the check is then a plain sum of squares.
+    let full = typed.svd_vals().unwrap();
+    let kept = typed_z2_spectrum(&typed_out.singular_values);
+    let mut discarded = 0.0;
+    for entry in &full {
+        let kept_here = kept
+            .iter()
+            .find(|(sector, _)| sector == &entry.sector)
+            .map_or(0, |(_, values)| values.len());
+        for value in &entry.values[kept_here..] {
+            discarded += value * value;
+        }
+    }
+    assert!(discarded > 0.0, "the fixture must actually truncate");
+    assert!((typed_out.error - discarded.sqrt()).abs() < 1e-12);
+
+    // A degenerate but well-formed policy is a policy, not an error: keeping
+    // nothing succeeds and discards the whole spectrum.
+    let empty = typed
+        .svd_trunc(&tenet::typed::Truncation::Rank(0))
+        .expect("Rank(0) is degenerate, not malformed");
+    assert!(empty.s.data().is_empty());
+    assert!(empty
+        .singular_values
+        .iter()
+        .all(|entry| entry.values.is_empty()));
+}
+
+#[test]
+fn a_spectrum_decode_failure_comes_back_as_the_codec_error() {
+    // What: a codec that cannot decode a coupled sector the engine produced
+    // fails the call with the provider's own error instead of panicking inside
+    // the label map.
+    //
+    // This is the Err path worth testing because a degenerate `Truncation` is
+    // not one: `Rank(0)`, `Rank(usize::MAX)` and `All(vec![])` are all
+    // constructible and all legitimately succeed (see the `Rank(0)` assertion
+    // in the truncation test), and the states that would fail validation are
+    // unreachable from outside `tenet-matrixalgebra` — their variants are
+    // `#[non_exhaustive]` and their constructors are fallible. So the provider
+    // is the only input to these methods a caller can actually malform.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::with(Quirk::NarrowDecode));
+    let leg = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(Z3Charge(0), 1), (Z3Charge(1), 2)],
+        false,
+    )
+    .unwrap();
+    // Two charge-1 codomain legs couple to charge 2, the id this codec refuses.
+    // `zeros` never decodes, so the tensor builds and the failure lands in the
+    // spectrum decode.
+    let tensor = TensorMap::<ExternalZ3, f64>::zeros(&runtime, [&leg, &leg], [&leg, &leg]).unwrap();
+
+    assert!(matches!(
+        tensor.svd_vals().unwrap_err(),
+        tenet::prelude::Error::FusionAlgebra(_)
+    ));
+    assert!(matches!(
+        tensor
+            .svd_trunc(&tenet::typed::Truncation::Full)
+            .unwrap_err(),
+        tenet::prelude::Error::FusionAlgebra(_)
+    ));
+}
+
+#[test]
+fn svd_vals_reports_decoded_labels_sorted_by_label() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    let spectrum = typed.svd_vals().unwrap();
+    assert_eq!(spectrum.len(), 2);
+    // The oracle: same values as the erased facade, label for label.
+    assert_eq!(
+        typed_z2_spectrum(&spectrum),
+        erased_z2_spectrum(&erased.svd_vals().unwrap())
+    );
+    assert!(spectrum.windows(2).all(|w| w[0].sector < w[1].sector));
+    // Descending by magnitude within a sector, as the seam guarantees.
+    for entry in &spectrum {
+        assert!(entry.values.windows(2).all(|w| w[0] >= w[1]));
+    }
+    // `Z2Irrep` orders exactly as its ids do, so this fixture cannot tell a
+    // label sort from an id sort. The next test does.
+}
+
+#[test]
+fn svd_vals_sorts_by_label_where_that_differs_from_the_id_order() {
+    // What: the O2' promise is *label* order, and the only way to see it is a
+    // provider whose codec does not order its labels the way the engine orders
+    // its ids. `Quirk::ReversedLabels` is exactly that — a valid codec, not a
+    // broken one — so the seam hands the spectrum back in the reversed order
+    // and only the facade's own sort puts it right.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::with(Quirk::ReversedLabels));
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    let labels: Vec<u8> = tensor
+        .svd_vals()
+        .unwrap()
+        .iter()
+        .map(|entry| entry.sector.0)
+        .collect();
+
+    assert_eq!(labels, [0, 1, 2]);
+}
+
+#[test]
+fn typed_and_erased_qr_and_lq_agree_byte_for_byte() {
+    // Both splits are exercised deliberately: `2 <- 1` is tall in every coupled
+    // sector, where LQ-compact and LQ-full return the same factors and so
+    // cannot tell the two seams apart; `1 <- 2` is wide, where they differ (and
+    // symmetrically for QR).
+    let _guard = cache_lock();
+    let runtime = runtime();
+    for num_codomain in [2, 1] {
+        let (erased, typed) = z2_oracle_pair_split(&runtime, num_codomain);
+
+        for (erased_out, typed_out) in [
+            (erased.qr_compact().unwrap(), typed.qr_compact().unwrap()),
+            (erased.qr_full().unwrap(), typed.qr_full().unwrap()),
+            (erased.lq_compact().unwrap(), typed.lq_compact().unwrap()),
+            (erased.lq_full().unwrap(), typed.lq_full().unwrap()),
+        ] {
+            assert_eq!(typed_out.0.data(), erased_out.0.data());
+            assert_eq!(typed_out.1.data(), erased_out.1.data());
+        }
+    }
+}
+
+#[test]
+fn left_and_right_orth_are_the_tensorkit_default_kinds() {
+    // TensorKit 0.17 defaults `left_orth` to `:qr` and `right_orth` to `:lq`.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, typed) = z2_oracle_pair(&runtime);
+
+    let (v, c) = typed.left_orth().unwrap();
+    let (q, r) = typed.qr_compact().unwrap();
+    assert_eq!(v.data(), q.data());
+    assert_eq!(c.data(), r.data());
+
+    let (c, vh) = typed.right_orth().unwrap();
+    let (l, q) = typed.lq_compact().unwrap();
+    assert_eq!(c.data(), l.data());
+    assert_eq!(vh.data(), q.data());
+}
+
+#[test]
+fn typed_and_erased_null_spaces_agree_byte_for_byte() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    // `[v, v] <- [v]` is tall per coupled sector, so the left null space is
+    // non-empty; the right one is empty, which is itself a shape the two
+    // facades must agree on.
+    assert_eq!(
+        typed.left_null().unwrap().data(),
+        erased.left_null().unwrap().data()
+    );
+    assert!(!typed.left_null().unwrap().data().is_empty());
+    assert_eq!(
+        typed.right_null().unwrap().data(),
+        erased.right_null().unwrap().data()
+    );
+}
+
+#[test]
+fn decompositions_carry_a_fermionic_provider() {
+    // The one provider this facade can host whose braiding is not symmetric.
+    // Every quantum dimension is one for `FermionParity`, and the fusion-tree
+    // storage of a block *is* its coupled-sector matricization, so the sum of
+    // squared singular values is the sum of squared stored elements — a
+    // hand-checkable identity that no gauge convention can move.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let tensor = fermionic_rank_three(&runtime);
+
+    let spectrum = tensor.svd_vals().unwrap();
+    let from_spectrum: f64 = spectrum
+        .iter()
+        .flat_map(|entry| entry.values.iter())
+        .map(|value| value * value)
+        .sum();
+    let from_data: f64 = tensor.data().iter().map(|value| value * value).sum();
+    assert!((from_spectrum - from_data).abs() < 1e-12);
+
+    // And the seam is reachable at all for this provider, in both directions.
+    let (q, r) = tensor.qr_compact().unwrap();
+    assert_eq!(q.codomain().len(), 2);
+    assert_eq!(r.domain().len(), 1);
+}
+
+#[test]
+fn decompositions_carry_an_external_provider_with_its_own_labels() {
+    // A downstream provider drives the same surface, and its spectrum comes
+    // back in its own labels rather than raw ids.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    let spectrum = tensor.svd_vals().unwrap();
+    assert!(!spectrum.is_empty());
+    assert!(spectrum.iter().all(|entry| entry.sector.0 < 3));
+    assert!(spectrum.windows(2).all(|w| w[0].sector < w[1].sector));
+
+    let out = tensor.svd_trunc(&tenet::typed::Truncation::Full).unwrap();
+    assert_eq!(out.error, 0.0);
+    assert_eq!(
+        out.singular_values
+            .iter()
+            .map(|entry| entry.sector)
+            .collect::<Vec<_>>(),
+        spectrum
+            .iter()
+            .map(|entry| entry.sector)
+            .collect::<Vec<_>>()
     );
 }
