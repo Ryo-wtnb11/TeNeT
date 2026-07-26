@@ -16,7 +16,7 @@
 //!
 //! # Phase boundary
 //!
-//! This is the phase-5 surface of issue #557: construction
+//! This is the phase-6 surface of issue #557: construction
 //! ([`TensorMap::zeros`], [`TensorMap::from_block_fn`], [`TensorMap::id`]),
 //! inspection ([`TensorMap::codomain`], [`TensorMap::domain`],
 //! [`TensorMap::block_fusion_trees`], [`TensorMap::block`],
@@ -61,7 +61,13 @@
 //! short-circuit that already had a non-lowered twin. Swapping that one call
 //! opened the seam for every provider, fermionic signs included.
 //!
-//! What is still absent, each for its own reason:
+//! What is still absent — among what remains, the entries below are the ones
+//! with a decision behind them rather than a queue position. This facade is
+//! deliberately narrower than the erased [`crate::prelude::Tensor`], which also
+//! carries `left_polar`/`right_polar`, `twist`, `flip`, the unit-leg
+//! insert/remove pair, `absorb`, the structural
+//! `isomorphism`/`isometry`/`unitary` constructors and `rand`/`rand_with_seed`.
+//! Those are ports waiting on nothing but their turn; the ones below are not:
 //!
 //! - The **matrix functions** (`exp`, `inv`, `pinv`, `sqrt`) are their own
 //!   phase. `exp` and `sqrt` ride on the eigendecompositions that just landed;
@@ -491,18 +497,6 @@ enum TypedData<D> {
     Diagonal(Vec<tenet_matrixalgebra::SectorSpectrum<D>>),
 }
 
-/// Whether `space` is a bond space: rank one on each side, with the same leg on
-/// both — the shape a compact spectrum can address, and the only shape whose
-/// dense form is block-diagonal.
-///
-/// Verbatim from the erased `Tensor::is_diagonal_bond_space`, deliberately: it
-/// is the guard TensorKit's `DiagonalTensorMap` gets for free from its type, and
-/// two facades disagreeing about which destinations may stay compact would be a
-/// silent divergence rather than a visible one.
-///
-/// Applied to the *destination* of an operation, never to the operands. An
-/// operand's storage says what it holds; only the destination says whether the
-/// compact result is representable.
 /// Two compact spectra that live on one bond space must agree sector for
 /// sector and length for length; when they do not, the space and the payload
 /// have gone out of step, which is an engine invariant break rather than
@@ -632,12 +626,26 @@ where
             continue;
         };
         let sector = pair.codomain_tree().coupled();
+        // O(k) per block, so O(k²) over the walk. Fine at the sizes a bond
+        // space reaches; index it if a spectrum ever spans many sectors.
         let Some(entry) = spectrum.iter().find(|entry| entry.sector == sector) else {
+            // Both operands live on one space, and a compact payload's space is
+            // built from its own spectrum, so every block's coupled sector has
+            // an entry. Skipping is the safe behaviour if that ever breaks —
+            // the block keeps the dense operand's contribution — but it is a
+            // silent wrong answer, so say so loudly in a debug build.
+            debug_assert!(
+                false,
+                "no spectrum entry for coupled sector {sector:?} on its own bond space"
+            );
             continue;
         };
         let strides = block.strides();
         let stride = strides[0] + strides[1];
         let offset = block.offset();
+        // The three lengths agree by construction, for the same reason.
+        debug_assert_eq!(block.shape()[0], block.shape()[1]);
+        debug_assert_eq!(block.shape()[0], entry.values.len());
         let count = block.shape()[0]
             .min(block.shape()[1])
             .min(entry.values.len());
@@ -649,6 +657,32 @@ where
     Ok(data)
 }
 
+/// Whether `space` is a bond space: rank one on each side, with the same leg on
+/// both — the shape a compact spectrum can address, and the only shape whose
+/// dense form is block-diagonal.
+///
+/// Verbatim from the erased `Tensor::is_diagonal_bond_space`, deliberately: it
+/// is the guard TensorKit's `DiagonalTensorMap` gets for free from its type, and
+/// two facades disagreeing about which destinations may stay compact would be a
+/// silent divergence rather than a visible one.
+///
+/// Applied to the *destination* of an operation, never to the operands. An
+/// operand's storage says what it holds; only the destination says whether the
+/// compact result is representable.
+///
+/// # Unreachable today, kept deliberately
+///
+/// Every [`TypedData::Diagonal`] payload this module can produce sits on a
+/// space built by [`diagonal_factor_on`], i.e. by
+/// [`tenet_matrixalgebra::diagonal_bond_bound_space_like`], which is a bond
+/// space by construction — and the operations that preserve the payload
+/// ([`TensorMap::scale`], [`TensorMap::add`], [`TensorMap::adjoint`], the
+/// `D * D` arm) all keep that space. So this predicate cannot currently return
+/// `false` at any of its call sites, and no test can kill it. It stays because
+/// it is the erased facade's own guard and because the next constructor of a
+/// compact payload — a diagonal-aware `contract`, say — would be the first one
+/// able to aim at a destination that is not a bond space, and should find the
+/// check already in place rather than have to notice it is missing.
 fn is_diagonal_bond_space(space: &DynamicFusionMapSpace) -> bool {
     let homspace = space.homspace();
     space.nout() == 1 && space.nin() == 1 && homspace.codomain().legs() == homspace.domain().legs()
@@ -1288,7 +1322,15 @@ where
     /// [`crate::prelude::Tensor::compose`] take none.
     ///
     /// The result is bound to `self`'s provider allocation — the same
-    /// left-authority rule as [`Self::contract`] and [`Self::zeros`].
+    /// left-authority rule as [`Self::contract`] and [`Self::zeros`] — with one
+    /// exemption: the `D * t` compact arm below returns `t`'s own space and
+    /// runtime handle, because that space *is* the destination and rebuilding
+    /// it under the left allocation would be a copy for nothing. The two
+    /// allocations must already agree on
+    /// [`tenet_core::FusionRule::rule_identity`] for the composition to be
+    /// legal at all, so the choice is immaterial to the algebra. The erased
+    /// [`crate::prelude::Tensor::compose`] takes the same exemption on the same
+    /// arm, and the two facades are byte-compared across it.
     ///
     /// # Compact fast paths
     ///
@@ -1366,6 +1408,14 @@ where
         let (left, right) = (self.body.space.space(), other.body.space.space());
         match (self.spectrum(), other.spectrum()) {
             (Some(lhs), Some(rhs)) => {
+                // Both clauses are unreachable today and stay for the reason
+                // [`is_diagonal_bond_space`] gives. `left != right` is the
+                // weaker one: two compact payloads on unequal bond spaces
+                // necessarily carry spectra that differ in their sectors or
+                // their lengths, so the elementwise product below would refuse
+                // them anyway — just with `spectra_disagree`'s message instead
+                // of the expert layer's. Removing it would change which error a
+                // caller sees, not whether one is reported.
                 if left != right || !is_diagonal_bond_space(left) {
                     return Ok(None);
                 }
