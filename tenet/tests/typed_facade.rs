@@ -3668,3 +3668,130 @@ fn eigh_reports_a_non_hermitian_input_rather_than_a_wrong_answer() {
     assert!(typed.eigh_vals().is_err());
     assert!(typed.eigh_trunc(&Truncation::Full).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6 (issue #570), slice 3: the general eigendecompositions.
+// ---------------------------------------------------------------------------
+
+/// The c64 endomorphism pair `eig` needs: [`z2_complex_oracle_pair`] is
+/// rank three, and `eig` is defined on square maps only.
+fn z2_complex_endo_oracle_pair(
+    runtime: &Runtime,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::Z2FusionRule, Complex64>,
+) {
+    let complex = |value: f64| Complex64::new(value, 1.0 + value % 5.0);
+    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        runtime,
+        [&space],
+        [&space],
+        |key: &tenet::prelude::BlockKey, indices: &[usize]| {
+            complex(erased_fill_value(key, indices))
+        },
+    )
+    .unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 3),
+        ],
+        false,
+    )
+    .unwrap();
+    let typed = TensorMap::from_block_fn(runtime, [&leg], [&leg], |trees, indices| {
+        complex(typed_fill_value(trees, indices))
+    })
+    .unwrap();
+    (erased, typed)
+}
+
+#[test]
+fn typed_and_erased_eig_full_agree_on_a_real_payload() {
+    // What: the factors are complex for a real input on both facades —
+    // TensorKit's `eigen` promotes too — and `d` is the compact spectrum.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+
+    let (ed, ev) = erased.eig_full().unwrap();
+    let (td, tv) = typed.eig_full().unwrap();
+
+    assert_eq!(td.data(), ed.try_data_c64().unwrap());
+    assert_eq!(tv.data(), ev.try_data_c64().unwrap());
+}
+
+#[test]
+fn typed_and_erased_eig_agree_on_a_complex_payload_and_conjugate_the_adjoint() {
+    // What: the c64 route, where the spectrum is genuinely complex rather than
+    // a real one widened. `d.adjoint()` must conjugate it — on a real spectrum
+    // that is invisible, which is why the check lives here.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_complex_endo_oracle_pair(&runtime);
+
+    let (ed, ev) = erased.eig_full().unwrap();
+    let (td, tv) = typed.eig_full().unwrap();
+    assert_eq!(td.data(), ed.try_data_c64().unwrap());
+    assert_eq!(tv.data(), ev.try_data_c64().unwrap());
+
+    // Genuinely complex, so a missing conjugation is observable.
+    assert!(
+        td.data().iter().any(|value| value.im.abs() > 1e-6),
+        "the eig spectrum must be off the real axis for this to test anything"
+    );
+    let adjoint = td.adjoint().unwrap();
+    assert_eq!(
+        adjoint.data(),
+        ed.adjoint().unwrap().try_data_c64().unwrap()
+    );
+    for (conjugated, original) in adjoint.data().iter().zip(td.data()) {
+        assert_eq!(*conjugated, original.conj());
+    }
+}
+
+#[test]
+fn typed_and_erased_eig_vals_and_eig_trunc_agree() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+
+    let decode = |spectrum: &[tenet::prelude::SectorSpectrum<Complex64>]| {
+        let mut decoded: Vec<_> = spectrum
+            .iter()
+            .map(|entry| {
+                (
+                    SectorCodec::decode_sector(&tenet::core::Z2FusionRule, entry.sector).unwrap(),
+                    entry.values.clone(),
+                )
+            })
+            .collect();
+        decoded.sort_by_key(|(sector, _): &(tenet::core::Z2Irrep, _)| *sector);
+        decoded
+    };
+    let typed_decoded: Vec<_> = typed
+        .eig_vals()
+        .unwrap()
+        .iter()
+        .map(|entry| (entry.sector, entry.values.clone()))
+        .collect();
+    assert_eq!(typed_decoded, decode(&erased.eig_vals().unwrap()));
+
+    let truncation = Truncation::rank(3);
+    let erased_out = erased.eig_trunc(&truncation).unwrap();
+    let typed_out = typed.eig_trunc(&truncation).unwrap();
+    assert_eq!(typed_out.d.data(), erased_out.d.try_data_c64().unwrap());
+    assert_eq!(typed_out.v.data(), erased_out.v.try_data_c64().unwrap());
+    assert_eq!(typed_out.error, erased_out.error);
+    assert_eq!(
+        typed_out
+            .eigenvalues
+            .iter()
+            .map(|entry| (entry.sector, entry.values.clone()))
+            .collect::<Vec<_>>(),
+        decode(&erased_out.eigenvalues)
+    );
+    assert!(typed_out.error > 0.0);
+}

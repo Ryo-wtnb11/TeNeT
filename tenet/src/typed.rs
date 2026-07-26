@@ -108,7 +108,7 @@ pub use crate::runtime::Runtime;
 /// self-sufficient without it.
 pub use tenet_matrixalgebra::Truncation;
 
-use tenet_matrixalgebra::BoundDynFactor;
+use tenet_matrixalgebra::{BoundDynFactor, FactorScalar};
 
 use crate::tensor::{
     apply_fill, sector_regions, weighted_inner, weighted_trace, with_planar_axes, Fill,
@@ -494,6 +494,102 @@ enum TypedData<D> {
 /// anything a caller did.
 fn spectra_disagree() -> Error {
     Error::InvalidArgument("equal bond spaces carry incompatible compact spectra".to_string())
+}
+
+/// Result of [`TensorMap::eig_trunc`]: `t ~ v * d * v^-1` with the eigenbasis
+/// truncated (MatrixAlgebraKit `eig_trunc`).
+///
+/// The factors are `D::Eig`-payloaded, not `D`-payloaded: a real matrix has
+/// complex eigenpairs, so both are complex for either input dtype — TensorKit's
+/// `eigen`, whose `D` and `V` are `ComplexF64` even for a real argument.
+// `D: TensorScalar` rather than a bare parameter because the field types are
+// spelled through `D::Eig`, which is `FactorScalar`'s associated type.
+pub struct EigTrunc<R: SectorCodec, D: TensorScalar> {
+    /// Eigenvalue factor `d : bond <- bond`, in compact diagonal storage.
+    pub d: TensorMap<R, <D as FactorScalar>::Eig>,
+    /// Eigenbasis `v : codomain <- bond`.
+    pub v: TensorMap<R, <D as FactorScalar>::Eig>,
+    /// Kept eigenvalues per coupled sector, sorted by provider label.
+    pub eigenvalues: Vec<SectorSpectrum<R::Sector, num_complex::Complex64>>,
+    /// Quantum-dimension-weighted 2-norm of the discarded `|eigenvalue|`s.
+    pub error: f64,
+}
+
+// Hand-written for the reason [`SvdTrunc`]'s are.
+impl<R, D> Clone for EigTrunc<R, D>
+where
+    R: SectorCodec,
+    D: TensorScalar,
+{
+    fn clone(&self) -> Self {
+        Self {
+            d: self.d.clone(),
+            v: self.v.clone(),
+            eigenvalues: self.eigenvalues.clone(),
+            error: self.error,
+        }
+    }
+}
+
+impl<R, D> core::fmt::Debug for EigTrunc<R, D>
+where
+    R: SectorCodec,
+    D: TensorScalar,
+{
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("EigTrunc")
+            .field("d", &self.d)
+            .field("v", &self.v)
+            .field("eigenvalues", &self.eigenvalues)
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
+/// [`TensorMap::diagonal_factor`]'s body, as a free function so the
+/// `eig_*` family can build a `TensorMap<R, D::Eig>` from a `TensorMap<R, D>`.
+/// The payload type of a factor need not be the payload type of the tensor it
+/// came from, and an inherent method cannot say that.
+fn diagonal_factor_on<R, E, V>(
+    runtime: &Runtime,
+    authority: &BoundDynamicFusionMapSpace<R>,
+    mut spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<V>>,
+    to_scalar: impl Fn(V) -> E,
+) -> Result<TensorMap<R, E>, Error>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    spectrum.sort_unstable_by_key(|entry| entry.sector);
+    let space = tenet_matrixalgebra::diagonal_bond_bound_space_like(authority, &spectrum)?;
+    let data = spectrum
+        .into_iter()
+        .map(|entry| tenet_matrixalgebra::SectorSpectrum {
+            sector: entry.sector,
+            values: entry.values.into_iter().map(&to_scalar).collect(),
+        })
+        .collect();
+    Ok(TensorMap {
+        runtime: runtime.clone(),
+        body: Arc::new(TypedTensorBody {
+            space,
+            data: TypedData::Diagonal(data),
+            dense_cache: std::sync::OnceLock::new(),
+        }),
+    })
+}
+
+/// [`TensorMap::wrap_bound_factor`]'s body, free for the same reason as
+/// [`diagonal_factor_on`].
+fn wrap_factor_on<R, E>(runtime: &Runtime, factor: BoundDynFactor<R, E>) -> TensorMap<R, E>
+where
+    R: tenet_core::FusionRule,
+{
+    let (space, data) = factor.into_parts();
+    TensorMap {
+        runtime: runtime.clone(),
+        body: Arc::new(TypedTensorBody::dense(space, data)),
+    }
 }
 
 /// `dense_factor * dense + diagonal_factor * spectrum`, laid out per `space`.
@@ -1327,11 +1423,7 @@ where
     /// [`TypedTensorBody`] stores, so there is nothing to validate here — the
     /// seam already certified the space against its own data.
     fn wrap_bound_factor(&self, factor: BoundDynFactor<R, D>) -> Self {
-        let (space, data) = factor.into_parts();
-        Self {
-            runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody::dense(space, data)),
-        }
+        wrap_factor_on(&self.runtime, factor)
     }
 
     /// Wraps a seam spectrum as a factor in compact diagonal storage: the bond
@@ -1348,27 +1440,10 @@ where
     /// order, so the two facades' factors are only byte-comparable if both sort.
     fn diagonal_factor<V>(
         &self,
-        mut spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<V>>,
+        spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<V>>,
         to_scalar: impl Fn(V) -> D,
     ) -> Result<Self, Error> {
-        spectrum.sort_unstable_by_key(|entry| entry.sector);
-        let space =
-            tenet_matrixalgebra::diagonal_bond_bound_space_like(&self.body.space, &spectrum)?;
-        let data = spectrum
-            .into_iter()
-            .map(|entry| tenet_matrixalgebra::SectorSpectrum {
-                sector: entry.sector,
-                values: entry.values.into_iter().map(&to_scalar).collect(),
-            })
-            .collect();
-        Ok(Self {
-            runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody {
-                space,
-                data: TypedData::Diagonal(data),
-                dense_cache: std::sync::OnceLock::new(),
-            }),
-        })
+        diagonal_factor_on(&self.runtime, &self.body.space, spectrum, to_scalar)
     }
 
     /// Decodes a seam spectrum into provider labels and sorts it by label.
@@ -1684,6 +1759,104 @@ where
         self.decode_spectrum(raw)
     }
 
+    /// TensorKit 0.17 / MatrixAlgebraKit `eig_full`: the general
+    /// (non-Hermitian) eigendecomposition `t = v * d * v^-1` of an
+    /// endomorphism, returned as `(d, v)` — [`Self::eigh_full`]'s order, for
+    /// the same reason.
+    ///
+    /// Both factors are complex whatever `D` is: a real matrix's eigenpairs are
+    /// complex in general, and TensorKit's `eigen` likewise returns
+    /// `ComplexF64` `D` and `V` for a real argument. `d` carries the spectrum
+    /// in compact diagonal storage.
+    ///
+    /// # The `D::Eig` bound
+    ///
+    /// The `where` clause is vacuous for the two payload types this facade
+    /// admits — `f64` and `Complex64` both have `Eig = Complex64`, which is a
+    /// [`TensorScalar`]. It is written out because
+    /// [`tenet_matrixalgebra::FactorScalar::Eig`] is the wider seam's associated
+    /// type and is not constrained to this facade's scalars, so without it the
+    /// factors could not be `TensorMap`s at all. Per-method rather than on the
+    /// impl block, so nothing outside the `eig_*` row pays for it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] when the tensor is not an endomorphism, and
+    /// otherwise [`Error::Core`] / [`Error::FusionAlgebra`] from the seam.
+    #[allow(clippy::type_complexity)]
+    pub fn eig_full(
+        &self,
+    ) -> Result<
+        (
+            TensorMap<R, <D as FactorScalar>::Eig>,
+            TensorMap<R, <D as FactorScalar>::Eig>,
+        ),
+        Error,
+    >
+    where
+        <D as FactorScalar>::Eig: TensorScalar,
+    {
+        let mut dense = self.runtime.lease_dense();
+        let out = tenet_matrixalgebra::eig_full_dyn(dense.dense(), &self.bound_ref()?)?;
+        let (v, eigenvalues) = out.into_parts();
+        Ok((
+            diagonal_factor_on(
+                &self.runtime,
+                &self.body.space,
+                eigenvalues,
+                <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
+            )?,
+            wrap_factor_on(&self.runtime, v),
+        ))
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `eig_trunc`: [`Self::eig_full`] with
+    /// the eigenbasis truncated by descending `|eigenvalue|`; see [`EigTrunc`].
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::eig_full`]'s, plus a malformed `truncation`.
+    pub fn eig_trunc(&self, truncation: &Truncation) -> Result<EigTrunc<R, D>, Error>
+    where
+        // See [`Self::eig_full`] for why this bound is per-method.
+        <D as FactorScalar>::Eig: TensorScalar,
+    {
+        let mut dense = self.runtime.lease_dense();
+        let out =
+            tenet_matrixalgebra::eig_trunc_dyn(dense.dense(), &self.bound_ref()?, truncation)?;
+        let (v, eigenvalues, error) = out.into_parts();
+        Ok(EigTrunc {
+            d: diagonal_factor_on(
+                &self.runtime,
+                &self.body.space,
+                eigenvalues.clone(),
+                <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
+            )?,
+            v: wrap_factor_on(&self.runtime, v),
+            eigenvalues: self.decode_spectrum(eigenvalues)?,
+            error,
+        })
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `eig_vals`: the general eigenvalues
+    /// per coupled sector, and nothing else. Complex for both payload dtypes.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::eig_full`]'s, plus [`Error::FusionAlgebra`] when the provider
+    /// cannot decode a coupled sector its own algebra produced.
+    pub fn eig_vals(&self) -> Result<Vec<SectorSpectrum<R::Sector, num_complex::Complex64>>, Error>
+    where
+        // Carried across the whole row even though this member builds no
+        // factor: the three are one API surface, and a caller who can spell two
+        // of them but not the third would be reading an accident.
+        <D as FactorScalar>::Eig: TensorScalar,
+    {
+        let mut dense = self.runtime.lease_dense();
+        let raw = tenet_matrixalgebra::eig_vals_dyn(dense.dense(), &self.bound_ref()?)?;
+        self.decode_spectrum(raw)
+    }
+
     /// Builds a sibling on this tensor's own space and runtime from a fresh
     /// buffer. Every element-wise scalar operation below produces exactly
     /// that: the space is unchanged and only the payload is new, so the shared
@@ -1746,7 +1919,7 @@ where
             }
             let mut partial = D::from_real(0.0);
             for (&a, &b) in left.values.iter().zip(&right.values) {
-                partial = partial + tenet_matrixalgebra::FactorScalar::adjoint(a) * b;
+                partial = partial + FactorScalar::adjoint(a) * b;
             }
             total += partial.widen_complex() * provider.dim_scalar(left.sector);
         }
@@ -1991,7 +2164,7 @@ where
                         values: entry
                             .values
                             .iter()
-                            .map(|&value| tenet_matrixalgebra::FactorScalar::adjoint(value))
+                            .map(|&value| FactorScalar::adjoint(value))
                             .collect(),
                     })
                     .collect(),
