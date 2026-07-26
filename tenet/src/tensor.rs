@@ -584,12 +584,40 @@ pub trait UserScalar: FactorScalar + RecouplingCoefficientAction<f64> {
     /// The principal square root in the payload dtype, or the erased facade's
     /// negative-real refusal.
     ///
-    /// Why these three live on the scalar trait rather than being computed
-    /// through [`FactorScalar::widen_complex`] and narrowed back: the complex
-    /// division and complex `exp` algorithms differ from the real ones in the
-    /// last ulp, so a widen/narrow route would make an f64 result depend on
-    /// which facade computed it. Dispatching on the payload type is what keeps
-    /// the two byte-identical.
+    /// # Why these four exist
+    ///
+    /// [`crate::typed::TensorMap`]'s payload type is a parameter, so its
+    /// elementwise arms have no `Data` enum to match on. The obvious
+    /// alternative — widen to [`Complex64`] with
+    /// [`FactorScalar::widen_complex`], compute, narrow back — is wrong for
+    /// exactly one of the four:
+    ///
+    /// - [`Self::recip_value`] is **forced**. Complex division is not real
+    ///   division: routing an `f64` reciprocal through `Complex64` disagrees
+    ///   with `1.0 / x` in the last ulp on roughly a quarter of arguments, and
+    ///   `inv`/`pinv` are byte-compared against their erased siblings.
+    /// - [`Self::exp_value`], [`Self::sqrt_value`] and [`Self::abs_value`] are
+    ///   not forced — measurement shows no drift through the widen route for
+    ///   any of them. They are here for dispatch cleanliness (one mechanism for
+    ///   all four arms) and, for `sqrt_value`, because the negative-`f64`
+    ///   refusal *is* the dtype branch: it has no complex counterpart to
+    ///   express, and a widen route would silently return `i·√|x|` for an `f64`
+    ///   tensor.
+    ///
+    /// # What this does not buy
+    ///
+    /// Byte-identity with the erased facade for **c64 compact storage**. The
+    /// erased [`DiagonalData`] has a `RealC64` variant — a real spectrum inside
+    /// a c64 tensor — and runs *real* arithmetic on it; the typed
+    /// `TypedData::Diagonal` has one arm holding values of exactly the payload
+    /// type and always divides in complex. So c64 compact `inv` and `pinv`
+    /// differ from the erased sibling in the last ulp on part of the spectrum.
+    /// That is accepted rather than chased: a `RealC64` equivalent in the typed
+    /// storage is its own phase, and finite-precision value differences are
+    /// within the coefficient-exactness principle, which requires structure,
+    /// gauge determinism and verification to be exact — not the last bit of a
+    /// division. `typed_and_erased_c64_compact_inv_and_pinv_agree_to_rounding`
+    /// pins the size of the gap so it stays visible.
     fn sqrt_value(self) -> Result<Self, Error>;
 }
 
