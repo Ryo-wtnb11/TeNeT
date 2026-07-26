@@ -30,7 +30,11 @@
 //! [`TensorMap::qr_compact`], [`TensorMap::qr_full`],
 //! [`TensorMap::lq_compact`], [`TensorMap::lq_full`],
 //! [`TensorMap::left_orth`], [`TensorMap::right_orth`],
-//! [`TensorMap::left_null`] and [`TensorMap::right_null`].
+//! [`TensorMap::left_null`] and [`TensorMap::right_null`] — plus the scalar
+//! operations of issue #568: [`TensorMap::add`], [`TensorMap::scale`],
+//! [`TensorMap::norm`], [`TensorMap::norm_inf`], [`TensorMap::normalize`],
+//! [`TensorMap::inner`], [`TensorMap::dot`], [`TensorMap::tr`],
+//! [`TensorMap::trace_pairs`] and [`TensorMap::adjoint`].
 //!
 //! Everything else is deliberately still absent, each for its own reason:
 //!
@@ -39,18 +43,27 @@
 //!   seam and would have to instantiate that question rather than inherit it,
 //!   and `eig_*` additionally needs a per-method `D::Eig` bound. Shipping part
 //!   of the family would leave a broken parity row.
-//! - The **scalar operations** (`add`, `scale`, `norm`, `inner`, `tr`) are
-//!   reachable but raise the operator-overload ergonomics question, which is
-//!   reviewed on its own.
+//! - The **operator overloads** (`impl Add`, `impl Mul`) are out on purpose.
+//!   `&a * &b` means [`crate::prelude::Tensor::compose`] in the erased facade
+//!   and this facade has no `compose`, so a typed `Mul` meaning scalar
+//!   multiplication would be a cross-facade false friend. And an operator
+//!   cannot return a `Result`: the erased `Mul` precedent panics, and a
+//!   panicking `+` as the only spelling of addition contradicts this facade's
+//!   passthrough-error contract. Adding them later is not a breaking change.
+//! - The **`is_hermitian` / `project_*` family** is blocked: four of its seven
+//!   members need `compose`, `id` or `eigh_vals`, none of which exist here, and
+//!   shipping the reachable three would leave the broken parity row this doc
+//!   refuses everywhere else.
 //! - **Composition** — TensorKit `A * B`, which unlike [`TensorMap::contract`]
 //!   never twists dual legs — is blocked below this layer: fermionic compose
 //!   needs a new public seam over `LoweredMultiplicityFreeAlgebra`, which
 //!   `tenet-core` seals, and a silently
 //!   bosonic-only `compose` would return wrong fermionic signs rather than an
 //!   error.
-//! - `adjoint` and `conj` are design-gated: only an eager `adjoint` is
-//!   reachable here, which would diverge from the lazy erased sibling, and
-//!   `conj` has an open correctness question for non-self-dual sectors.
+//! - `conj` stays design-gated on its open correctness question for
+//!   non-self-dual sectors. [`TensorMap::adjoint`] is now in, eagerly: see its
+//!   own documentation for why that is TensorKit's `adjoint!` rather than a
+//!   divergence from the erased facade's lazy view.
 //!
 //! Adding any of them ahead of its review would bypass the gate that exists to
 //! keep this surface deliberate.

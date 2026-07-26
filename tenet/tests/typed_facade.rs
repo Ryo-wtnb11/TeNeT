@@ -2494,11 +2494,13 @@ fn normalize_returns_a_unit_norm_tensor_matching_the_erased_facade() {
     let _guard = cache_lock();
     let runtime = runtime();
 
-    for (erased, typed) in [su2_oracle_pair(&runtime)] {
-        let unit = typed.normalize().unwrap();
-        assert_eq!(unit.data(), erased.normalize().unwrap().data());
-        assert!((unit.norm().unwrap() - 1.0).abs() < 1e-12);
-    }
+    // SU(2): normalizing by a dimension-weighted norm is what a plain
+    // Frobenius normalization would get wrong, and only a non-abelian fixture
+    // can see it.
+    let (erased, typed) = su2_oracle_pair(&runtime);
+    let unit = typed.normalize().unwrap();
+    assert_eq!(unit.data(), erased.normalize().unwrap().data());
+    assert!((unit.norm().unwrap() - 1.0).abs() < 1e-12);
 }
 
 // ---------------------------------------------------------------------------
