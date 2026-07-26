@@ -41,7 +41,7 @@
 use std::sync::Arc;
 
 use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::prelude::{Complex64, Error, Runtime, Space, Tensor};
+use tenet::prelude::{Complex64, Dtype, Error, Runtime, Space, Tensor};
 use tenet::typed::{GradedSpace, TensorMap};
 
 /// Relative agreement with the TensorKit oracle. The two engines sum the same
@@ -391,4 +391,42 @@ fn compact_norm_p_equals_the_dense_answer() {
             &format!("compact vs dense p={p}"),
         );
     }
+}
+
+/// The erased facade's compact arm needs its own value gate: it is a separate
+/// implementation from the typed one (`DiagonalData::abs_pow_sum_with` vs the
+/// typed spectrum fold), and the erased allocation fixture is a single U(1)
+/// sector, where every `dim(c)` is one and a dropped weight is invisible.
+///
+/// SU(2) with spins 0, 1/2 and 1 gives `dim(c) ∈ {1, 2, 3}`, and the singular
+/// values of a random tensor differ per sector, so the weights cannot cancel.
+#[test]
+fn erased_compact_norm_p_equals_the_dense_answer_with_nontrivial_quantum_dimensions() {
+    let rt = runtime();
+    let leg = Space::su2([(0, 3), (1, 3), (2, 3)]).unwrap();
+    let source = Tensor::rand_with_seed(&rt, Dtype::F64, [&leg], [&leg], 0x5eed_7000).unwrap();
+    let s = source.svd_compact().unwrap().1;
+
+    // `0 * id + 1 * s` is a value-identical *dense* twin: `id` on the bond
+    // space is dense, so the sum leaves the compact route entirely.
+    let bond = s.space(0).unwrap();
+    let twin = Tensor::id(&rt, Dtype::F64, [&bond])
+        .unwrap()
+        .add(&s, 0.0, 1.0)
+        .unwrap();
+
+    for p in [1.0, 3.0, 0.5] {
+        assert_close(
+            s.norm_p(p).unwrap(),
+            twin.norm_p(p).unwrap(),
+            &format!("erased compact vs dense p={p}"),
+        );
+    }
+    // p = 2 delegates to `norm`, whose compact arm is a different reduction —
+    // pinned here so the two compact routes cannot disagree either.
+    assert_close(
+        s.norm_p(2.0).unwrap(),
+        twin.norm_p(2.0).unwrap(),
+        "erased compact vs dense p=2",
+    );
 }
