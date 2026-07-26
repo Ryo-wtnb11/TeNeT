@@ -1217,6 +1217,30 @@ where
         self.with_data(self.body.data.iter().map(|&value| value * factor).collect())
     }
 
+    /// TensorKit `adjoint` (dagger): swaps codomain and domain and
+    /// conjugate-transposes every block. Real payloads are transposed only;
+    /// c64 entries are conjugated as well.
+    ///
+    /// Eager, into a fresh destination — TensorKit's own `adjoint!`
+    /// (`linalg.jl:218`), so this is a TK-sanctioned form rather than a
+    /// divergence. The erased [`crate::prelude::Tensor::adjoint`] is instead
+    /// the analogue of TensorKit's lazy `AdjointTensorMap` view: same result,
+    /// different point at which the work is paid. Only the eager seam is
+    /// reachable from this facade.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`]
+    /// straight from the seam, which owns the bend the dagger performs.
+    pub fn adjoint(&self) -> Result<Self, Error> {
+        let (space, data) = tenet_tensors::adjoint_bound_dyn(&self.body.space, &self.body.data)
+            .map_err(Error::from)?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody { space, data }),
+        })
+    }
+
     /// TensorKit `norm`: the Frobenius norm weighted by the coupled sectors'
     /// quantum dimensions, `norm(t)^2 = Σ_c dim(c) * |block_c|^2`.
     ///

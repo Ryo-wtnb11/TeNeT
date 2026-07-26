@@ -2665,3 +2665,71 @@ fn tr_requires_an_endomorphism() {
             if message == "tr() requires an endomorphism (domain == codomain)"
     ));
 }
+
+// ---------------------------------------------------------------------------
+// Phase 5 (issue #568), slice 4: `TensorMap::adjoint`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn typed_and_erased_adjoint_agree_byte_for_byte() {
+    // What: the eager typed adjoint is the erased lazy view's materialized
+    // buffer, byte for byte — the divergence is in when the work happens, not
+    // in what comes out. The spaces swap sides, which the shape assertions pin.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    let adjoint = typed.adjoint().unwrap();
+
+    assert_eq!(adjoint.data(), erased.adjoint().unwrap().data());
+    assert_eq!(adjoint.codomain().len(), typed.domain().len());
+    assert_eq!(adjoint.domain().len(), typed.codomain().len());
+    // Its own inverse, as a dagger must be.
+    assert_eq!(adjoint.adjoint().unwrap().data(), typed.data());
+}
+
+#[test]
+fn adjoint_conjugates_a_complex_payload() {
+    // What: c64 entries come back conjugated, not merely transposed. Compared
+    // as multisets, because the transpose moves entries around: the point is
+    // that the *values* are the conjugated ones and not the original ones.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_complex_oracle_pair(&runtime);
+
+    let adjoint = typed.adjoint().unwrap();
+    assert_eq!(
+        adjoint.data(),
+        erased.adjoint().unwrap().try_data_c64().unwrap()
+    );
+
+    let sorted = |values: &mut Vec<Complex64>| {
+        values.sort_by(|a, b| a.re.total_cmp(&b.re).then(a.im.total_cmp(&b.im)));
+    };
+    let mut got: Vec<Complex64> = adjoint.data().to_vec();
+    let mut conjugated: Vec<Complex64> = typed.data().iter().map(|v| v.conj()).collect();
+    let mut plain: Vec<Complex64> = typed.data().to_vec();
+    sorted(&mut got);
+    sorted(&mut conjugated);
+    sorted(&mut plain);
+    assert_eq!(got, conjugated);
+    assert_ne!(
+        got, plain,
+        "the fixture must have a non-zero imaginary part"
+    );
+}
+
+#[test]
+fn adjoint_carries_an_external_provider() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    let adjoint = tensor.adjoint().unwrap();
+
+    assert_eq!(adjoint.data().len(), tensor.data().len());
+    assert_eq!(adjoint.adjoint().unwrap().data(), tensor.data());
+    // A dagger preserves the dimension-weighted norm.
+    assert!((adjoint.norm().unwrap() - tensor.norm().unwrap()).abs() < 1e-12);
+}
