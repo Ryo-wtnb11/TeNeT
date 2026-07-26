@@ -73,7 +73,6 @@ pub use crate::error::Error;
 /// itself stays out of the prelude, because its [`TensorMap`] would collide
 /// with the erased [`tenet_core::TensorMap`] already exported there.
 pub use crate::runtime::Runtime;
-
 use crate::tensor::{apply_fill, with_planar_axes, Fill, PlanarRequestKind, TensorScalar};
 use crate::typed_tensor_core::{
     tensorcontract_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
@@ -338,6 +337,24 @@ where
         domain_uncoupled: decode_sectors(provider, domain.uncoupled())?,
         domain_innerlines: decode_sectors(provider, domain.innerlines())?,
     })
+}
+
+/// One coupled sector's factorization spectrum, labelled through the provider:
+/// the typed counterpart of [`tenet_matrixalgebra::SectorSpectrum`], whose
+/// `sector` is a raw [`tenet_core::SectorId`].
+///
+/// Why decode rather than extend the raw-id exception that [`TensorMap::block`]
+/// carries: that exception is scoped to engine layout views, and a spectrum is
+/// caller-facing physics — [`TensorMap::svd_vals`]'s entire return would
+/// otherwise be raw ids.
+///
+/// `values` is descending by magnitude, as the seam guarantees.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SectorSpectrum<S> {
+    /// The coupled sector, in the provider's own labels.
+    pub sector: S,
+    /// That sector's values, descending by magnitude.
+    pub values: Vec<f64>,
 }
 
 /// Storage shared by every clone of one typed tensor map: the admitted space
@@ -801,6 +818,53 @@ where
             runtime: self.runtime.clone(),
             body: Arc::new(TypedTensorBody { space, data }),
         })
+    }
+
+    /// Decodes a seam spectrum into provider labels and sorts it by label.
+    ///
+    /// Every id here came out of the engine's own coupled-sector enumeration,
+    /// so a decode failure is the provider breaking [`SectorCodec`]'s
+    /// decode-totality law — same contract as [`decode_block_fusion_trees`].
+    fn decode_spectrum(
+        &self,
+        raw: Vec<tenet_matrixalgebra::SectorSpectrum>,
+    ) -> Result<Vec<SectorSpectrum<R::Sector>>, Error> {
+        let provider = self.body.space.provider();
+        let mut decoded: Vec<SectorSpectrum<R::Sector>> = raw
+            .into_iter()
+            .map(|entry| {
+                Ok(SectorSpectrum {
+                    sector: provider.decode_sector(entry.sector)?,
+                    values: entry.values,
+                })
+            })
+            .collect::<Result<_, Error>>()?;
+        // Label order, not the engine's id order: see the type's own rustdoc
+        // for why this facade sorts and the erased one does not.
+        decoded.sort_by(|left, right| left.sector.cmp(&right.sector));
+        Ok(decoded)
+    }
+
+    /// Borrowed seam view of this tensor map.
+    fn bound_ref(&self) -> Result<BoundDynamicTensorRef<'_, R, D>, Error> {
+        BoundDynamicTensorRef::try_new(&self.body.space, &self.body.data).map_err(Error::from)
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `svd_vals`: the singular values per
+    /// coupled sector, and nothing else.
+    ///
+    /// No factor tensor is built at all: the seam runs the no-vector LAPACK
+    /// path per coupled sector.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] / [`Error::Core`] from the seam, plus
+    /// [`Error::FusionAlgebra`] when the provider cannot decode a coupled
+    /// sector its own algebra produced.
+    pub fn svd_vals(&self) -> Result<Vec<SectorSpectrum<R::Sector>>, Error> {
+        let mut dense = self.runtime.lease_dense();
+        let raw = tenet_matrixalgebra::svd_vals_dyn(dense.dense(), &self.bound_ref()?)?;
+        self.decode_spectrum(raw)
     }
 
     /// The codomain legs, in axis order.

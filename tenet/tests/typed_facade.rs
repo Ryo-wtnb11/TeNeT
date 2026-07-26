@@ -1799,3 +1799,94 @@ fn repartition_is_sign_free_even_for_a_fermionic_provider() {
         tensor.permute(&[], &[2, 1, 0]).unwrap().data()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 5: decompositions (issue #567).
+//
+// The byte oracles here are exact rather than gauge-tolerant: both facades
+// call the same `*_dyn` seams, whose gauge fixing is deterministic, so a
+// difference of a single bit is a real divergence and not floating-point
+// weather.
+// ---------------------------------------------------------------------------
+
+/// Decodes an erased spectrum's raw ids into `Z2Irrep` labels, so an erased
+/// spectrum can be compared to a typed one label-for-label.
+fn erased_z2_spectrum(
+    spectrum: &[tenet::prelude::SectorSpectrum],
+) -> Vec<(tenet::core::Z2Irrep, Vec<f64>)> {
+    let mut decoded: Vec<_> = spectrum
+        .iter()
+        .map(|entry| {
+            (
+                SectorCodec::decode_sector(&tenet::core::Z2FusionRule, entry.sector).unwrap(),
+                entry.values.clone(),
+            )
+        })
+        .collect();
+    decoded.sort_by_key(|(sector, _)| *sector);
+    decoded
+}
+
+fn typed_z2_spectrum(
+    spectrum: &[tenet::typed::SectorSpectrum<tenet::core::Z2Irrep>],
+) -> Vec<(tenet::core::Z2Irrep, Vec<f64>)> {
+    spectrum
+        .iter()
+        .map(|entry| (entry.sector, entry.values.clone()))
+        .collect()
+}
+
+#[test]
+fn a_spectrum_decode_failure_comes_back_as_the_codec_error() {
+    // What: the one input a caller of these methods can actually malform is
+    // the provider itself — every `Truncation` state that fails validation is
+    // unconstructible outside `tenet-matrixalgebra` (the fallible constructors
+    // reject them and the variants are `#[non_exhaustive]`), so there is no
+    // malformed policy to feed. A codec that cannot decode a coupled sector the
+    // engine produced fails the call with the provider's own error instead of
+    // panicking inside the label map.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::with(Quirk::NarrowDecode));
+    let leg = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(Z3Charge(0), 1), (Z3Charge(1), 2)],
+        false,
+    )
+    .unwrap();
+    // Two charge-1 codomain legs couple to charge 2, the id this codec refuses.
+    // `zeros` never decodes, so the tensor builds and the failure lands in the
+    // spectrum decode.
+    let tensor = TensorMap::<ExternalZ3, f64>::zeros(&runtime, [&leg, &leg], [&leg, &leg]).unwrap();
+
+    assert!(matches!(
+        tensor.svd_vals().unwrap_err(),
+        tenet::prelude::Error::FusionAlgebra(_)
+    ));
+}
+
+#[test]
+fn svd_vals_reports_decoded_labels_sorted_by_label() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    let spectrum = typed.svd_vals().unwrap();
+    assert_eq!(spectrum.len(), 2);
+    // The oracle: same values as the erased facade, label for label.
+    assert_eq!(
+        typed_z2_spectrum(&spectrum),
+        erased_z2_spectrum(&erased.svd_vals().unwrap())
+    );
+    assert!(spectrum.windows(2).all(|w| w[0].sector < w[1].sector));
+    // Descending by magnitude within a sector, as the seam guarantees.
+    for entry in &spectrum {
+        assert!(entry.values.windows(2).all(|w| w[0] >= w[1]));
+    }
+    // Why no test that label order actually *differs* from the engine's
+    // `SectorId` order: no provider this suite hosts separates the two —
+    // `Z3Charge`, `Z2Irrep` and `SU2Irrep` all order exactly as their ids do.
+    // Standing up a provider whose `Ord` is deliberately reversed would be a
+    // second full rule implementation to observe a sort that this test already
+    // pins by its own predicate.
+}
