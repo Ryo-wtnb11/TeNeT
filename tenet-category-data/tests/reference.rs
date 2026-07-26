@@ -288,11 +288,12 @@ fn table_and_closed_form_agree_within_the_documented_bound() {
     // Reported, not asserted at a specific value: the point of the bound above
     // is that it is a stated property, while the measured ulp gap is an
     // observation about today's two evaluations.
+    // Why not also assert the two differ by at least 1 ulp: two independent
+    // evaluations legitimately rounding to the same binary64 is not evidence
+    // that one path started calling the other, so that assert would fail on a
+    // correct change. The property it looked like it was protecting —
+    // `RuleIdentity` inequality — is asserted directly in the next test.
     println!("worst table-vs-closed-form gap: {worst_ulps} ulp at {worst_where}");
-    assert!(
-        worst_ulps > 0,
-        "the two providers were expected to differ by at least 1 ulp"
-    );
 }
 
 #[test]
