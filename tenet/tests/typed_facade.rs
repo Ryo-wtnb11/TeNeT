@@ -4613,7 +4613,19 @@ fn sqrt_refuses_anything_that_is_not_a_diagonal_bond_tensor() {
     let _guard = cache_lock();
     let runtime = runtime();
     let (erased, typed) = z2_oracle_pair(&runtime);
-    assert!(typed.sqrt().is_err(), "a non-bond tensor was accepted");
+    // The *shape* guard, not the off-diagonal walk behind it: both refuse a
+    // rank-two tensor, so only the message separates them, and without this the
+    // guard has no killing test at all.
+    match typed.sqrt() {
+        Err(tenet::typed::Error::InvalidArgument(message)) => {
+            assert!(
+                message.contains("`[v] <- [v]`"),
+                "a non-bond tensor was refused by something other than the shape \
+                 guard: {message}"
+            );
+        }
+        other => panic!("a non-bond tensor was accepted: {other:?}"),
+    }
     assert!(erased.sqrt().is_err(), "the erased facade disagrees");
 
     let (erased, typed) = z2_endo_oracle_pair(&runtime);
