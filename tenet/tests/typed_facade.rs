@@ -2003,6 +2003,87 @@ fn svd_vals_reports_decoded_labels_sorted_by_label() {
 }
 
 #[test]
+fn typed_and_erased_qr_and_lq_agree_byte_for_byte() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    for (erased_out, typed_out) in [
+        (erased.qr_compact().unwrap(), typed.qr_compact().unwrap()),
+        (erased.qr_full().unwrap(), typed.qr_full().unwrap()),
+        (erased.lq_compact().unwrap(), typed.lq_compact().unwrap()),
+        (erased.lq_full().unwrap(), typed.lq_full().unwrap()),
+    ] {
+        assert_eq!(typed_out.0.data(), erased_out.0.data());
+        assert_eq!(typed_out.1.data(), erased_out.1.data());
+    }
+}
+
+#[test]
+fn left_and_right_orth_are_the_tensorkit_default_kinds() {
+    // TensorKit 0.17 defaults `left_orth` to `:qr` and `right_orth` to `:lq`.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, typed) = z2_oracle_pair(&runtime);
+
+    let (v, c) = typed.left_orth().unwrap();
+    let (q, r) = typed.qr_compact().unwrap();
+    assert_eq!(v.data(), q.data());
+    assert_eq!(c.data(), r.data());
+
+    let (c, vh) = typed.right_orth().unwrap();
+    let (l, q) = typed.lq_compact().unwrap();
+    assert_eq!(c.data(), l.data());
+    assert_eq!(vh.data(), q.data());
+}
+
+#[test]
+fn typed_and_erased_null_spaces_agree_byte_for_byte() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    // `[v, v] <- [v]` is tall per coupled sector, so the left null space is
+    // non-empty; the right one is empty, which is itself a shape the two
+    // facades must agree on.
+    assert_eq!(
+        typed.left_null().unwrap().data(),
+        erased.left_null().unwrap().data()
+    );
+    assert!(!typed.left_null().unwrap().data().is_empty());
+    assert_eq!(
+        typed.right_null().unwrap().data(),
+        erased.right_null().unwrap().data()
+    );
+}
+
+#[test]
+fn decompositions_carry_a_fermionic_provider() {
+    // The one provider this facade can host whose braiding is not symmetric.
+    // Every quantum dimension is one for `FermionParity`, and the fusion-tree
+    // storage of a block *is* its coupled-sector matricization, so the sum of
+    // squared singular values is the sum of squared stored elements — a
+    // hand-checkable identity that no gauge convention can move.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let tensor = fermionic_rank_three(&runtime);
+
+    let spectrum = tensor.svd_vals().unwrap();
+    let from_spectrum: f64 = spectrum
+        .iter()
+        .flat_map(|entry| entry.values.iter())
+        .map(|value| value * value)
+        .sum();
+    let from_data: f64 = tensor.data().iter().map(|value| value * value).sum();
+    assert!((from_spectrum - from_data).abs() < 1e-12);
+
+    // And the seam is reachable at all for this provider, in both directions.
+    let (q, r) = tensor.qr_compact().unwrap();
+    assert_eq!(q.codomain().len(), 2);
+    assert_eq!(r.domain().len(), 1);
+}
+
+#[test]
 fn decompositions_carry_an_external_provider_with_its_own_labels() {
     // A downstream provider drives the same surface, and its spectrum comes
     // back in its own labels rather than raw ids.

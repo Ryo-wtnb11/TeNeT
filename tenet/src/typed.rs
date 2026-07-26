@@ -1026,6 +1026,105 @@ where
         self.decode_spectrum(raw)
     }
 
+    /// TensorKit 0.17 / MatrixAlgebraKit `qr_compact`: `t = q * r` with `q`
+    /// carrying orthonormal columns per coupled sector.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    pub fn qr_compact(&self) -> Result<(Self, Self), Error> {
+        let mut dense = self.runtime.lease_dense();
+        let (q, r) = tenet_matrixalgebra::qr_compact_dyn(dense.dense(), &self.bound_ref()?)?;
+        Ok((self.wrap_bound_factor(q), self.wrap_bound_factor(r)))
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `qr_full`: `t = q * r` with a square
+    /// `q` per coupled sector.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    pub fn qr_full(&self) -> Result<(Self, Self), Error> {
+        let mut dense = self.runtime.lease_dense();
+        let (q, r) = tenet_matrixalgebra::qr_full_dyn(dense.dense(), &self.bound_ref()?)?;
+        Ok((self.wrap_bound_factor(q), self.wrap_bound_factor(r)))
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `lq_compact`: `t = l * q` with `q`
+    /// carrying orthonormal rows per coupled sector.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    pub fn lq_compact(&self) -> Result<(Self, Self), Error> {
+        let mut dense = self.runtime.lease_dense();
+        let (l, q) = tenet_matrixalgebra::lq_compact_dyn(dense.dense(), &self.bound_ref()?)?;
+        Ok((self.wrap_bound_factor(l), self.wrap_bound_factor(q)))
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `lq_full`: `t = l * q` with a square
+    /// `q` per coupled sector.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    pub fn lq_full(&self) -> Result<(Self, Self), Error> {
+        let mut dense = self.runtime.lease_dense();
+        let (l, q) = tenet_matrixalgebra::lq_full_dyn(dense.dense(), &self.bound_ref()?)?;
+        Ok((self.wrap_bound_factor(l), self.wrap_bound_factor(q)))
+    }
+
+    /// TensorKit 0.17 `left_orth`: the left isometry factorization
+    /// `t = v * c`, `v` isometric and `c` the corestriction.
+    ///
+    /// TensorKit's default `kind` is `:qr`, so this is [`Self::qr_compact`] —
+    /// the same one-line delegation the erased facade makes, deliberately, so
+    /// the two names cannot come to mean different things.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::qr_compact`]'s.
+    pub fn left_orth(&self) -> Result<(Self, Self), Error> {
+        self.qr_compact()
+    }
+
+    /// TensorKit 0.17 `right_orth`: the right isometry factorization
+    /// `t = c * vh`, `vh` carrying orthonormal rows.
+    ///
+    /// TensorKit's default `kind` is `:lq`, so this is [`Self::lq_compact`];
+    /// see [`Self::left_orth`] for why it is a delegation.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::lq_compact`]'s.
+    pub fn right_orth(&self) -> Result<(Self, Self), Error> {
+        self.lq_compact()
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `left_null`: `n : codomain <- W` with
+    /// `n^H * t = 0`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    pub fn left_null(&self) -> Result<Self, Error> {
+        let mut dense = self.runtime.lease_dense();
+        let out = tenet_matrixalgebra::left_null_dyn(dense.dense(), &self.bound_ref()?)?;
+        Ok(self.wrap_bound_factor(out))
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `right_null`: `n : W <- domain` with
+    /// `t * n^H = 0`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    pub fn right_null(&self) -> Result<Self, Error> {
+        let mut dense = self.runtime.lease_dense();
+        let out = tenet_matrixalgebra::right_null_dyn(dense.dense(), &self.bound_ref()?)?;
+        Ok(self.wrap_bound_factor(out))
+    }
+
     /// The codomain legs, in axis order.
     pub fn codomain(&self) -> Vec<GradedSpace<R>> {
         self.legs(self.body.space.space().homspace().codomain())
