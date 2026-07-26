@@ -1086,3 +1086,85 @@ fn absorb_densifies_a_compact_destination_before_prefix_overwrite() {
     assert!(diagonal.has_cached_materialization());
     assert_eq!(actual.data(), source.data());
 }
+
+/// The single value of a rank-0 result, widened so f64 and c64 fixtures share
+/// one assertion.
+fn rank_zero_value(tensor: &Tensor) -> Complex64 {
+    match tensor.scalar().unwrap() {
+        Scalar::F64(value) => Complex64::new(value, 0.0),
+        Scalar::C64(value) => value,
+    }
+}
+
+fn assert_scalar_close(actual: Complex64, expected: Complex64, label: &str) {
+    assert!(
+        (actual - expected).norm() <= 1e-12 * expected.norm().max(1.0),
+        "{label}: {actual:?} vs {expected:?}"
+    );
+}
+
+#[test]
+fn full_rank_one_trace_pairs_matches_the_dense_route_on_every_rule() {
+    // What: the categorical trace of a rank-(1,1) tensor over its only pair is
+    // the same number whichever storage it is read from — for a self-dual
+    // bosonic rule, for one with a non-unit quantum dimension, for a fermionic
+    // one whose twist makes it a supertrace, and for a dual leg, which is what
+    // decides the orientation the coefficients are taken in.
+    //
+    // Both pair orders are swept: `(0, 1)` and `(1, 0)` name the same pair of
+    // legs and must trace to the same number.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let spaces = [
+        ("u1", Space::u1([(-1, 2), (0, 3), (1, 2)])),
+        ("su2", Space::su2([(0, 2), (1, 3)]).unwrap()),
+        ("fz2", Space::fz2([(0, 2), (1, 3)]).unwrap()),
+        ("product", product_space()),
+    ];
+    for (name, space) in spaces {
+        for dual in [false, true] {
+            let space = if dual { space.dual() } else { space.clone() };
+            for (dtype, diagonal) in [
+                ("f64", real_diagonal(&runtime, &space, 585_001)),
+                ("c64", complex_diagonal(&runtime, &space, 585_002)),
+                ("real-c64", real_c64_diagonal(&runtime, &space, 585_003)),
+            ] {
+                let oracle = dense_oracle(&diagonal);
+                for pairs in [[(0usize, 1usize)], [(1, 0)]] {
+                    let actual = diagonal.trace_pairs(&pairs).unwrap();
+                    let expected = oracle.trace_pairs(&pairs).unwrap();
+                    assert_eq!(actual.dtype(), expected.dtype());
+                    assert_scalar_close(
+                        rank_zero_value(&actual),
+                        rank_zero_value(&expected),
+                        &format!("{name} dual={dual} {dtype} {pairs:?}"),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn full_rank_one_trace_pairs_is_the_supertrace_for_a_fermionic_rule() {
+    // What: `trace_pairs` is the categorical trace with the fermionic twist —
+    // unlike `tr`, which is TensorKit's positive matrix trace. On a single
+    // fermion-parity sector the two differ by exactly the twist, so an odd
+    // space flips the sign and an even one does not. The bosonic Z2 twin of the
+    // odd space pins that the sign is the *twist* and not the parity label.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    for (name, space, sign) in [
+        ("fz2 even", Space::fz2([(0, 3)]).unwrap(), 1.0),
+        ("fz2 odd", Space::fz2([(1, 3)]).unwrap(), -1.0),
+        ("z2 odd", Space::z2([(1, 3)]), 1.0),
+    ] {
+        let diagonal = complex_diagonal(&runtime, &space, 585_011);
+        let Scalar::C64(trace) = diagonal.tr().unwrap() else {
+            panic!("a c64 spectrum traces to a c64 scalar");
+        };
+        assert_scalar_close(
+            rank_zero_value(&diagonal.trace_pairs(&[(0, 1)]).unwrap()),
+            trace * sign,
+            name,
+        );
+    }
+}
