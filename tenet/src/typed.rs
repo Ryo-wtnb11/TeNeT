@@ -411,8 +411,8 @@ pub struct SectorSpectrum<S, V = f64> {
 pub struct SvdTrunc<R: SectorCodec, D> {
     /// Left isometry `u : codomain <- bond`.
     pub u: TensorMap<R, D>,
-    /// Singular-value factor `s : bond <- bond`. Dense — see the order-parity
-    /// gap on [`TensorMap::svd_compact`] (issue #570).
+    /// Singular-value factor `s : bond <- bond`, in compact diagonal storage
+    /// (TensorKit's `DiagonalTensorMap`); see [`TensorMap::svd_compact`].
     pub s: TensorMap<R, D>,
     /// Right isometry `vh : bond <- domain`.
     pub vh: TensorMap<R, D>,
@@ -472,9 +472,6 @@ enum TypedData<D> {
     /// `d`): only the per-sector diagonal values, keyed by the engine's raw
     /// [`tenet_core::SectorId`] — a stored payload never leaves this module, so
     /// there is nothing here for the codec to label.
-    // Constructed from the next commit on (the `svd_compact` storage swap);
-    // the materialization side lands first so the swap is a one-line change.
-    #[allow(dead_code)]
     Diagonal(Vec<tenet_matrixalgebra::SectorSpectrum<D>>),
 }
 
@@ -1093,6 +1090,43 @@ where
         }
     }
 
+    /// Wraps a seam spectrum as a factor in compact diagonal storage: the bond
+    /// space is derived from the spectrum itself, but the payload stays the
+    /// `Σ_c k_c` values rather than the `Σ_c k_c²` block-diagonal buffer they
+    /// would fill (TensorKit's `DiagonalTensorMap`).
+    ///
+    /// The spectrum is stored raw — engine [`tenet_core::SectorId`]s, values in
+    /// the payload dtype `D`. Decoding belongs to the caller-facing spectrum
+    /// fields, not to storage; a stored payload never leaves this module.
+    ///
+    /// Sorted by sector id first, matching the erased
+    /// `Tensor::from_diagonal_real_spectrum`: the bond leg is built from this
+    /// order, so the two facades' factors are only byte-comparable if both sort.
+    fn diagonal_factor<V>(
+        &self,
+        mut spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<V>>,
+        to_scalar: impl Fn(V) -> D,
+    ) -> Result<Self, Error> {
+        spectrum.sort_unstable_by_key(|entry| entry.sector);
+        let space =
+            tenet_matrixalgebra::diagonal_bond_bound_space_like(&self.body.space, &spectrum)?;
+        let data = spectrum
+            .into_iter()
+            .map(|entry| tenet_matrixalgebra::SectorSpectrum {
+                sector: entry.sector,
+                values: entry.values.into_iter().map(&to_scalar).collect(),
+            })
+            .collect();
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody {
+                space,
+                data: TypedData::Diagonal(data),
+                dense_cache: std::sync::OnceLock::new(),
+            }),
+        })
+    }
+
     /// Decodes a seam spectrum into provider labels and sorts it by label.
     ///
     /// Every id here came out of the engine's own coupled-sector enumeration,
@@ -1129,16 +1163,15 @@ where
     /// Returns `(u, s, vh)` with `u : codomain <- bond`, `s : bond <- bond`
     /// and `vh : bond <- domain`.
     ///
-    /// # Order-parity gap (issue #570)
+    /// # Storage
     ///
-    /// TensorKit's `svd_compact` returns `s` as a `DiagonalTensorMap`, and the
-    /// erased [`crate::prelude::Tensor`] matches it with diagonal storage. This
-    /// facade has only dense block storage, so `s` costs `Σ_c k_c²` instead of
-    /// `Σ_c k_c`, and a downstream `u * s * vh` runs the dense GEMM path rather
-    /// than the O(d·n) block scaling. Interim guidance: a caller that only
-    /// needs the spectrum should use [`Self::svd_vals`], which never
-    /// materializes `s` at all. When typed diagonal storage lands the signature
-    /// does not change — only the storage behind `s`.
+    /// `s` is held in compact diagonal storage — `Σ_c k_c` values, not the
+    /// `Σ_c k_c²` block-diagonal buffer — matching the `DiagonalTensorMap`
+    /// TensorKit's own `svd_compact` returns. A downstream `u.compose(&s)` or
+    /// `s.compose(&vh)` takes the O(d·n) bond-scaling path rather than a dense
+    /// GEMM. [`Self::data`] still reports the dense buffer, materializing it
+    /// once on demand; a caller who only needs the values should reach for
+    /// [`Self::svd_vals`], which builds no factor at all.
     ///
     /// # Errors
     ///
@@ -1151,11 +1184,14 @@ where
         // entirely on the dense-executor boundary, so leasing the (scarcer)
         // recoupling context here would serialize unrelated work for nothing.
         let mut dense = self.runtime.lease_dense();
-        let out = tenet_matrixalgebra::svd_compact_dyn(dense.dense(), &self.bound_ref()?)?;
-        let (u, s, vh, _) = out.into_parts();
+        // Why the `_factors_` seam rather than `svd_compact_dyn`: the latter
+        // builds the dense block-diagonal `s` itself, so taking it and throwing
+        // it away would pay the very `Σ_c k_c²` allocation this storage avoids.
+        let (u, vh, spectrum) =
+            tenet_matrixalgebra::svd_compact_factors_dyn(dense.dense(), &self.bound_ref()?)?;
         Ok((
             self.wrap_bound_factor(u),
-            self.wrap_bound_factor(s),
+            self.diagonal_factor(spectrum, D::from_real)?,
             self.wrap_bound_factor(vh),
         ))
     }
@@ -1166,10 +1202,12 @@ where
     /// Returns `(u, s, vh)` with `u : codomain <- W`, `s : W <- W'` and
     /// `vh : W' <- domain`.
     ///
-    /// Unlike [`Self::svd_compact`] this carries no order-parity gap: TensorKit's
-    /// own `svd_full` builds `s` as a dense rectangular tensor
-    /// (`similar(t, real(scalartype(t)), V_cod <- V_dom)`), so a dense `s` here
-    /// is TK-exact.
+    /// `s` is dense here where [`Self::svd_compact`]'s is diagonal, and that is
+    /// TK-exact rather than a residual gap: TensorKit's own `svd_full` builds
+    /// `s` as a dense rectangular tensor
+    /// (`similar(t, real(scalartype(t)), V_cod <- V_dom)`). TensorKit's
+    /// diagonal-`S` `svd_full!` applies to diagonal *inputs*, which is a
+    /// different operation.
     ///
     /// # Errors
     ///
@@ -1192,8 +1230,7 @@ where
     /// named struct, following the same rule the erased facade uses — tuples up
     /// to three, a struct beyond.
     ///
-    /// The dense-`s` order-parity gap of [`Self::svd_compact`] (issue #570)
-    /// applies here verbatim, with the same interim guidance.
+    /// `s` is in compact diagonal storage, exactly as [`Self::svd_compact`]'s.
     ///
     /// # Errors
     ///
@@ -1202,12 +1239,15 @@ where
     /// validated where it is applied, not here.
     pub fn svd_trunc(&self, truncation: &Truncation) -> Result<SvdTrunc<R, D>, Error> {
         let mut dense = self.runtime.lease_dense();
-        let out =
-            tenet_matrixalgebra::svd_trunc_dyn(dense.dense(), &self.bound_ref()?, truncation)?;
-        let (u, s, vh, singular_values, error) = out.into_parts();
+        // The `_factors_` seam, for the reason `svd_compact` gives.
+        let (u, vh, singular_values, error) = tenet_matrixalgebra::svd_trunc_factors_dyn(
+            dense.dense(),
+            &self.bound_ref()?,
+            truncation,
+        )?;
         Ok(SvdTrunc {
             u: self.wrap_bound_factor(u),
-            s: self.wrap_bound_factor(s),
+            s: self.diagonal_factor(singular_values.clone(), D::from_real)?,
             vh: self.wrap_bound_factor(vh),
             singular_values: self.decode_spectrum(singular_values)?,
             error,
@@ -1217,8 +1257,8 @@ where
     /// TensorKit 0.17 / MatrixAlgebraKit `svd_vals`: the singular values per
     /// coupled sector, and nothing else.
     ///
-    /// No factor tensor is built, so this is also the way around the dense-`s`
-    /// ceiling documented on [`Self::svd_compact`].
+    /// No factor tensor and no bond space is built at all, so this is cheaper
+    /// still than reading [`Self::svd_compact`]'s compact `s`.
     ///
     /// # Errors
     ///

@@ -1918,18 +1918,21 @@ fn typed_and_erased_svd_compact_agree_byte_for_byte() {
     let runtime = runtime();
     let (erased, typed) = z2_oracle_pair(&runtime);
 
-    let (eu, _, evh) = erased.svd_compact().unwrap();
+    let (eu, es, evh) = erased.svd_compact().unwrap();
     let (tu, ts, tvh) = typed.svd_compact().unwrap();
 
     assert_eq!(tu.data(), eu.data());
     assert_eq!(tvh.data(), evh.data());
-    // The erased `s` is diagonal storage and the typed one is dense (#570), so
-    // the two `s` factors are not byte-comparable. What `s` holds is pinned by
-    // the `svd_vals` oracle above and the reconstruction test below.
-    //
-    // The #570 ceiling, asserted as the exact number it is: one dense block per
-    // coupled sector, k_c² elements each, so 2² + 3² = 13 where diagonal
-    // storage would hold 2 + 3 = 5. This literal is what closing #570 changes.
+    // Both `s` factors are compact diagonal storage now (#570 closed), so they
+    // are byte-comparable through their common materialization — which the
+    // previous revision of this test could only assert a size ceiling on.
+    // `data()` deliberately reports the dense buffer on both facades: the
+    // `Σ_c k_c` storage claim underneath is what
+    // `tests/typed_diagonal_allocations.rs` measures, since neither facade
+    // publishes a compact accessor.
+    assert_eq!(ts.data(), es.data());
+    // One dense block per coupled sector, k_c² elements each: 2² + 3² = 13.
+    // Kept as the shape of the materialization, not as a storage ceiling.
     assert_eq!(ts.data().len(), 13);
 }
 
