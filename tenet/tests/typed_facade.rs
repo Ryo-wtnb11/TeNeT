@@ -2361,3 +2361,121 @@ fn typed_and_erased_scale_agree_byte_for_byte() {
         erased_c.scale_c64(factor).unwrap().try_data_c64().unwrap()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 5 (issue #568), slice 2: `norm`, `norm_inf`, `normalize`.
+// ---------------------------------------------------------------------------
+
+/// An SU(2) oracle pair: the same tensor built through both facades on the
+/// built-in `SU2FusionRule`.
+///
+/// Why this fixture exists at all, next to the Z2 one: SU(2) is the only
+/// non-abelian rule here, so it is the only one whose coupled sectors have
+/// `dim(c) != 1`. Z2 is abelian and takes `weighted_inner`'s `Unique` fast
+/// path, where the quantum-dimension weights are all one and therefore
+/// invisible — every dimension-weighted operation needs this pair as well.
+///
+/// The fill is a plain counter, so the two buffers agree only if the two
+/// facades walk blocks and elements in the same order; each test asserts that
+/// before it asserts anything else.
+fn su2_oracle_pair(
+    runtime: &Runtime,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::SU2FusionRule, f64>,
+) {
+    let space = tenet::prelude::Space::su2([(0, 1), (1, 2)]).unwrap();
+    let mut next = 0.0;
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        runtime,
+        [&space, &space],
+        [&space],
+        |_: &tenet::prelude::BlockKey, _: &[usize]| {
+            next += 1.0;
+            next
+        },
+    )
+    .unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::SU2FusionRule),
+        [
+            (SU2Irrep::from_twice_spin(0), 1),
+            (SU2Irrep::from_twice_spin(1), 2),
+        ],
+        false,
+    )
+    .unwrap();
+    let mut next = 0.0;
+    let typed = TensorMap::from_block_fn(runtime, [&leg, &leg], [&leg], |_, _| {
+        next += 1.0;
+        next
+    })
+    .unwrap();
+    assert_eq!(typed.data(), erased.data());
+    (erased, typed)
+}
+
+#[test]
+fn typed_and_erased_norm_agree_including_the_dimension_weighted_branch() {
+    // What: `norm` is TensorKit's quantum-dimension-weighted Frobenius norm on
+    // both facades. The SU(2) half is the one that matters: there
+    // `norm^2 != sum |x|^2`, so a weight-free implementation would pass the Z2
+    // half and fail here.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    let (erased, typed) = z2_oracle_pair(&runtime);
+    let unweighted: f64 = typed.data().iter().map(|value| value * value).sum();
+    assert_eq!(typed.norm().unwrap(), erased.norm().unwrap());
+    // Z2 is abelian: every dim(c) is one, so the weighting is the identity and
+    // this fixture alone cannot see the weight at all.
+    assert!((typed.norm().unwrap() - unweighted.sqrt()).abs() < 1e-12);
+
+    let (erased, typed) = su2_oracle_pair(&runtime);
+    let unweighted: f64 = typed.data().iter().map(|value| value * value).sum();
+    assert_eq!(typed.norm().unwrap(), erased.norm().unwrap());
+    assert!(
+        (typed.norm().unwrap() - unweighted.sqrt()).abs() > 1.0,
+        "the SU(2) fixture must actually separate the weighted norm from the \
+         unweighted one, or it cannot kill a dropped dim(c)"
+    );
+}
+
+#[test]
+fn typed_and_erased_norm_inf_agree_and_are_not_dimension_weighted() {
+    // What: TensorKit's `norm(t, Inf)` — the largest absolute stored entry,
+    // with no quantum-dimension weighting. Checked on SU(2), where a weighted
+    // implementation would differ.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    let (erased, typed) = su2_oracle_pair(&runtime);
+    let largest = typed
+        .data()
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0, f64::max);
+    assert_eq!(typed.norm_inf().unwrap(), erased.norm_inf().unwrap());
+    assert_eq!(typed.norm_inf().unwrap(), largest);
+    assert_ne!(typed.norm_inf().unwrap(), typed.norm().unwrap());
+
+    // c64: the modulus, not the real part.
+    let (erased, typed) = z2_complex_oracle_pair(&runtime);
+    assert_eq!(typed.norm_inf().unwrap(), erased.norm_inf().unwrap());
+    assert!(typed
+        .data()
+        .iter()
+        .all(|value| value.norm() <= typed.norm_inf().unwrap()));
+}
+
+#[test]
+fn normalize_returns_a_unit_norm_tensor_matching_the_erased_facade() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    for (erased, typed) in [su2_oracle_pair(&runtime)] {
+        let unit = typed.normalize().unwrap();
+        assert_eq!(unit.data(), erased.normalize().unwrap().data());
+        assert!((unit.norm().unwrap() - 1.0).abs() < 1e-12);
+    }
+}

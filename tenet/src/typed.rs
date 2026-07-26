@@ -87,7 +87,9 @@ pub use tenet_matrixalgebra::Truncation;
 
 use tenet_matrixalgebra::BoundDynFactor;
 
-use crate::tensor::{apply_fill, with_planar_axes, Fill, PlanarRequestKind, TensorScalar};
+use crate::tensor::{
+    apply_fill, weighted_inner, with_planar_axes, Fill, PlanarRequestKind, TensorScalar,
+};
 use crate::typed_tensor_core::{
     tensorcontract_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
 };
@@ -1212,6 +1214,75 @@ where
     /// collapses: `factor` is simply a `D`.
     pub fn scale(&self, factor: D) -> Self {
         self.with_data(self.body.data.iter().map(|&value| value * factor).collect())
+    }
+
+    /// TensorKit `norm`: the Frobenius norm weighted by the coupled sectors'
+    /// quantum dimensions, `norm(t)^2 = Σ_c dim(c) * |block_c|^2`.
+    ///
+    /// Always real, for both payload dtypes. For an abelian rule every
+    /// `dim(c)` is one and this is the plain Frobenius norm; for a non-abelian
+    /// one it is not.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Core`] when the block structure cannot be walked, which is an
+    /// engine-internal invariant rather than a caller mistake.
+    pub fn norm(&self) -> Result<f64, Error> {
+        // Same weighted reduction the erased `norm` runs, on the same helper:
+        // a second copy would be free to drift from the sibling this is
+        // byte-compared against.
+        Ok(self.weighted_self_inner()?.re.sqrt())
+    }
+
+    /// TensorKit `norm(t, Inf)`: the largest absolute stored entry.
+    ///
+    /// Julia's `norm(array, Inf)` is the maximum absolute element (for
+    /// matrices too), and TensorKit applies it per block, so on coupled
+    /// storage it is the maximum over the whole payload. Unlike [`Self::norm`]
+    /// this is **not** quantum-dimension weighted.
+    ///
+    /// # Errors
+    ///
+    /// None today; the `Result` keeps the shape of [`Self::norm`], which the
+    /// two are usually reached through together.
+    pub fn norm_inf(&self) -> Result<f64, Error> {
+        // Why `widen_complex().norm()` rather than an f64/c64 match: the erased
+        // facade needs the match because its dtype is a runtime property. Here
+        // the widening is exact and `Complex64::new(x, 0.0).norm()` is exactly
+        // `|x|`, so one expression covers both instantiations.
+        Ok(self
+            .body
+            .data
+            .iter()
+            .map(|&value| value.widen_complex().norm())
+            .fold(0.0, f64::max))
+    }
+
+    /// TensorKit `normalize`: `self / norm(self)`, the unit-norm tensor
+    /// pointing the same way. The norm is [`Self::norm`]'s, so the result
+    /// satisfies `t.normalize()?.norm()? == 1`.
+    ///
+    /// Like TensorKit, a zero-norm tensor is not special-cased: normalizing it
+    /// divides by zero and yields non-finite entries. Guard the caller if that
+    /// input is reachable.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::norm`]'s.
+    pub fn normalize(&self) -> Result<Self, Error> {
+        Ok(self.scale(D::from_real(1.0 / self.norm()?)))
+    }
+
+    /// The dimension-weighted inner product of this tensor with itself, the
+    /// shared body of [`Self::norm`] and of [`Self::inner`]'s diagonal case.
+    fn weighted_self_inner(&self) -> Result<num_complex::Complex64, Error> {
+        weighted_inner(
+            self.body.space.provider(),
+            self.body.space.space().structure(),
+            self.body.space.space().nout(),
+            &self.body.data,
+            &self.body.data,
+        )
     }
 
     /// The codomain legs, in axis order.
