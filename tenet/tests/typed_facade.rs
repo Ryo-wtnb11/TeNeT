@@ -5215,3 +5215,335 @@ fn the_diagonal_contract_arm_is_its_own_dense_route_on_every_axis_pattern() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Issue #585: compact diagonal parity, round 2.
+//
+// The value oracles below are what pin the compact arms that follow. They are
+// written against the routes those arms replace — the forced-dense twin inside
+// this facade, and the erased sibling — so they are independent of whatever
+// shared helper the compact arms end up calling.
+// ---------------------------------------------------------------------------
+
+/// A dense twin of a compact bond factor: `repartition(1)` on a `bond <- bond`
+/// space is the identity partition, so it returns the same values on the same
+/// space through the ordinary tree transform, which no compact arm fires on
+/// (its permutations are `[0]` / `[1]`, not the swap `[1]` / `[0]`). The same
+/// idiom the `contract` sweep above uses, for the same reason.
+///
+/// **This entrenches a TensorKit divergence.** TensorKit 0.17
+/// `src/tensors/diagonal.jl:217` returns the identity partition of a
+/// `DiagonalTensorMap` compact and free; we still densify it. Closing that gap
+/// would break every value oracle in this file that goes through
+/// `forced_dense` — they would compare the fast path against itself — as well
+/// as the `repartition(1)` entry of [`rank_one_reorderings`], the `contract`
+/// sweep's `s_dense`, and the probe
+/// `the_geometries_outside_the_proved_swap_keep_the_dense_route` in
+/// `tests/typed_diagonal_allocations.rs`, which asserts the densification
+/// outright. Whoever closes it has to supply a different dense twin first.
+fn forced_dense<R, D>(compact: &TensorMap<R, D>) -> TensorMap<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: tenet::prelude::TensorScalar + std::fmt::Debug,
+{
+    let dense = compact.repartition(1).expect("bond repartition is total");
+    assert_eq!(dense.data(), compact.data(), "the dense twin lost values");
+    dense
+}
+
+/// The `bond <- bond` factor of a square Z2 tensor, on both facades.
+fn z2_bond_pair(
+    runtime: &Runtime,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::Z2FusionRule, f64>,
+) {
+    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
+    let erased =
+        tenet::prelude::Tensor::from_block_fn(runtime, [&space], [&space], erased_fill_value)
+            .unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 3),
+        ],
+        false,
+    )
+    .unwrap();
+    let typed = TensorMap::from_block_fn(runtime, [&leg], [&leg], typed_fill_value).unwrap();
+    (
+        erased.svd_compact().unwrap().1,
+        typed.svd_compact().unwrap().1,
+    )
+}
+
+/// The three rank-(1,1) re-orderings that reduce to the proved swap, plus the
+/// two repartitions that do not — the latter are here so a compact arm that
+/// fires too widely is caught by the same sweep.
+fn rank_one_reorderings<R, D>(tensor: &TensorMap<R, D>) -> Vec<(&'static str, TensorMap<R, D>)>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: tenet::prelude::TensorScalar + std::fmt::Debug,
+{
+    vec![
+        ("permute", tensor.permute(&[1], &[0]).unwrap()),
+        ("transpose", tensor.transpose().unwrap()),
+        ("transpose_axes", tensor.transpose_axes(&[1], &[0]).unwrap()),
+        ("repartition(1)", tensor.repartition(1).unwrap()),
+        ("repartition(0)", tensor.repartition(0).unwrap()),
+        ("repartition(2)", tensor.repartition(2).unwrap()),
+    ]
+}
+
+#[test]
+fn compact_rank_one_swaps_match_the_forced_dense_and_erased_routes() {
+    // What: every re-ordering of a compact bond factor returns the tensor the
+    // dense tree transform returns — same legs, same bytes — whichever storage
+    // it was computed from. The erased sibling is compared as well, because it
+    // already owns the proved compact swap and is the reference the typed arm
+    // must not drift from.
+    //
+    // What this test cannot see: Z2 is self-dual and bosonic, so every swap
+    // coefficient is exactly 1 — dropping the coefficient entirely still passes
+    // here. The coefficient is carried by the Z3 and fZ2 sweep below, which is
+    // where a mutation to it dies.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_bond_pair(&runtime);
+    let dense = forced_dense(&typed);
+
+    for ((name, compact), (_, oracle)) in rank_one_reorderings(&typed)
+        .into_iter()
+        .zip(rank_one_reorderings(&dense))
+    {
+        assert_eq!(
+            typed_leg_shapes(&compact),
+            typed_leg_shapes(&oracle),
+            "{name} legs"
+        );
+        assert_eq!(compact.data(), oracle.data(), "{name} payload");
+    }
+
+    for (name, erased_result, typed_result) in [
+        (
+            "permute",
+            erased.permute(&[1], &[0]).unwrap(),
+            typed.permute(&[1], &[0]).unwrap(),
+        ),
+        (
+            "transpose",
+            erased.transpose().unwrap(),
+            typed.transpose().unwrap(),
+        ),
+    ] {
+        assert_eq!(
+            typed_leg_shapes(&typed_result),
+            erased_leg_shapes(&erased_result),
+            "{name} legs vs erased"
+        );
+        assert_eq!(
+            typed_result.data(),
+            erased_result.data(),
+            "{name} payload vs erased"
+        );
+    }
+}
+
+#[test]
+fn compact_rank_one_swaps_match_the_dense_route_for_dual_and_fermionic_legs() {
+    // What: the swap's per-sector coefficient is only observable where the two
+    // ends of the bond are not interchangeable. Z3 is not self-dual, so the
+    // destination block of every sector is a *different* sector; the fermionic
+    // provider adds a braiding phase the bosonic cases cannot show. A dual leg
+    // is swept on both, since bending is what fixes which sector labels the
+    // destination structure carries.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    for is_dual in [false, true] {
+        let provider = Arc::new(ExternalZ3::new());
+        let leg = z3_leg(&provider, is_dual);
+        let mut next = 0.0;
+        let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| {
+            next += 1.0;
+            next
+        })
+        .unwrap();
+        let compact = source.svd_compact().unwrap().1;
+        let dense = forced_dense(&compact);
+        for ((name, actual), (_, expected)) in rank_one_reorderings(&compact)
+            .into_iter()
+            .zip(rank_one_reorderings(&dense))
+        {
+            assert_eq!(
+                typed_leg_shapes(&actual),
+                typed_leg_shapes(&expected),
+                "z3 dual={is_dual} {name} legs"
+            );
+            assert_eq!(
+                actual.data(),
+                expected.data(),
+                "z3 dual={is_dual} {name} payload"
+            );
+        }
+
+        let leg = GradedSpace::try_new(
+            Arc::new(tenet::core::FermionParityFusionRule),
+            [
+                (tenet::core::Z2Irrep::EVEN, 2),
+                (tenet::core::Z2Irrep::ODD, 3),
+            ],
+            is_dual,
+        )
+        .unwrap();
+        let mut next = 0.0;
+        let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| {
+            next += 1.0;
+            next
+        })
+        .unwrap();
+        let compact = source.svd_compact().unwrap().1;
+        let dense = forced_dense(&compact);
+        for ((name, actual), (_, expected)) in rank_one_reorderings(&compact)
+            .into_iter()
+            .zip(rank_one_reorderings(&dense))
+        {
+            assert_eq!(
+                typed_leg_shapes(&actual),
+                typed_leg_shapes(&expected),
+                "fZ2 dual={is_dual} {name} legs"
+            );
+            assert_eq!(
+                actual.data(),
+                expected.data(),
+                "fZ2 dual={is_dual} {name} payload"
+            );
+        }
+    }
+}
+
+/// A compact bond factor whose spectrum is exactly `values` per sector, built
+/// by rescaling a singular-value factor: `scale` stays compact, so the fixture
+/// never leaves compact storage on its way to the assertion.
+fn z2_spectrum_fixture(
+    runtime: &Runtime,
+    rank_deficient: bool,
+) -> TensorMap<tenet::core::Z2FusionRule, f64> {
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 3),
+        ],
+        false,
+    )
+    .unwrap();
+    // A constant block is rank one, so all but one singular value per sector is
+    // zero — the positive *semi*definite fixture `isposdef` must still reject.
+    let source = TensorMap::from_block_fn(runtime, [&leg], [&leg], |sectors, indices| {
+        if rank_deficient {
+            1.0
+        } else {
+            typed_fill_value(sectors, indices)
+        }
+    })
+    .unwrap();
+    source.svd_compact().unwrap().1
+}
+
+#[test]
+fn compact_is_posdef_matches_the_forced_dense_route() {
+    // What: reading the stored spectrum answers exactly what eigendecomposing
+    // the materialization answers, on every sign pattern and at every
+    // tolerance — including the strictness at zero, which is the one place a
+    // `>=` would pass a positive-semidefinite spectrum the dense route rejects.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    let positive = z2_spectrum_fixture(&runtime, false);
+    let semidefinite = z2_spectrum_fixture(&runtime, true);
+    let negative = positive.scale(-1.0);
+    let indefinite = positive.add(&semidefinite, 1.0, -3.0).unwrap();
+
+    for (name, tensor) in [
+        ("positive", &positive),
+        ("semidefinite", &semidefinite),
+        ("negative", &negative),
+        ("indefinite", &indefinite),
+    ] {
+        let oracle = forced_dense(tensor);
+        for tol in [0.0, 1e-14, 1e-8, 1e-3, 0.5] {
+            assert_eq!(
+                tensor.is_posdef(tol).unwrap(),
+                oracle.is_posdef(tol).unwrap(),
+                "{name} at tol {tol}"
+            );
+        }
+    }
+
+    // The one case whose answer is asserted absolutely rather than only against
+    // the oracle: a rank-deficient spectrum is positive semidefinite, and
+    // `isposdef` is strict.
+    assert!(positive.is_posdef(0.0).unwrap());
+    assert!(!semidefinite.is_posdef(0.0).unwrap());
+    assert!(!negative.is_posdef(0.0).unwrap());
+}
+
+#[test]
+fn compact_is_posdef_matches_the_forced_dense_route_for_a_hermitian_c64_spectrum() {
+    // What: a c64 payload whose stored values are real up to rounding is the
+    // case where a compact branch could disagree with the dense one — the dense
+    // route Hermitian-eigendecomposes and so reads only the real part, and the
+    // compact branch must make the same choice rather than, say, comparing a
+    // modulus. The `d` of `eigh_full` is exactly that payload.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, real) = z2_complex_oracle_pair(&runtime);
+    let square = real
+        .contract(&real.adjoint().unwrap(), &[2], &[0], &[0, 1, 2, 3])
+        .unwrap();
+    let hermitian = square.repartition(2).unwrap();
+    assert!(hermitian.is_hermitian(1e-10).unwrap());
+
+    let d = hermitian.eigh_full().unwrap().0;
+
+    // The Hermiticity gate is load-bearing and is checked here, because every
+    // other fixture in this file answers the same with or without it. Rotating
+    // the spectrum by `1 + i` keeps every real part positive — so a predicate
+    // that reads only the stored real parts calls it positive definite — while
+    // making the tensor not Hermitian at all. The gate is the only thing
+    // standing between the compact arm and a wrong `true`.
+    // Built from singular values, not from the Gram's eigenvalues: the latter
+    // can hold an exact zero, which the compact predicate rejects on its own
+    // and which would therefore hide the gate rather than test it.
+    let skewed = real
+        .svd_compact()
+        .unwrap()
+        .1
+        .scale(Complex64::new(1.0, 1.0));
+    assert!(!skewed.is_hermitian(1e-10).unwrap());
+    for tol in [0.0, 1e-14, 1e-8, 1e-3] {
+        assert!(!skewed.is_posdef(tol).unwrap(), "skewed at tol {tol}");
+        assert_eq!(
+            skewed.is_posdef(tol).unwrap(),
+            forced_dense(&skewed).is_posdef(tol).unwrap(),
+            "skewed at tol {tol}"
+        );
+    }
+
+    let oracle = forced_dense(&d);
+    for tol in [0.0, 1e-14, 1e-8, 1e-3] {
+        assert_eq!(
+            d.is_posdef(tol).unwrap(),
+            oracle.is_posdef(tol).unwrap(),
+            "gram at tol {tol}"
+        );
+        let flipped = d.scale(Complex64::new(-1.0, 0.0));
+        assert_eq!(
+            flipped.is_posdef(tol).unwrap(),
+            forced_dense(&flipped).is_posdef(tol).unwrap(),
+            "negated gram at tol {tol}"
+        );
+    }
+}

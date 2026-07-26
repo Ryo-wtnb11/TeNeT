@@ -42,8 +42,7 @@ use tenet_tensors::cuda::{CudaStorage, CudaStorageGemm};
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, OperationError, OutputAxisOrder,
     OwnedCatC64Source as CatC64Source, OwnedCatCopy, OwnedCatSide, RecouplingCoefficientAction,
-    TensorContractSpec, TreeTransformOperation, TreeTransformOperationKind,
-    TreeTransformRuleCacheKey,
+    TensorContractSpec, TreeTransformOperation, TreeTransformRuleCacheKey,
 };
 
 use crate::error::Error;
@@ -5854,17 +5853,16 @@ impl Tensor {
         };
 
         if let Data::Diagonal(diagonal) = self.stored_data() {
-            let is_rank_one_swap = self.codomain_rank() == 1
-                && self.domain_rank() == 1
-                && operation.codomain_permutation() == [1]
-                && operation.domain_permutation() == [0]
-                && matches!(
-                    operation.kind(),
-                    TreeTransformOperationKind::Permute | TreeTransformOperationKind::Transpose
-                );
             // Why not include explicit braid or Generic fusion: their compact
             // single-term scalar predicates are not proved, so they retain the
-            // existing dense fallback.
+            // existing dense fallback. The geometry test is shared with the
+            // typed facade so the two cannot drift apart on which swaps are
+            // compact.
+            let is_rank_one_swap = crate::typed_tensor_core::is_rank_one_diagonal_swap(
+                self.codomain_rank(),
+                self.domain_rank(),
+                &operation,
+            );
             if is_rank_one_swap && self.rule_kind() != RuleKind::Su3 {
                 let destination = self.ordinary_body().space.transformed(&operation)?;
                 let data = with_user_rule!(self.ordinary_body().space, rule, {
@@ -6015,6 +6013,58 @@ impl Tensor {
             )
             .map_err(map_trace_preflight_error)
         })?;
+        // Compact arm: the full trace of a rank-(1,1) tensor over its only pair
+        // is a reduction of the stored diagonal, so there is nothing to
+        // materialize (#585). This is the *categorical* trace, not `tr()`:
+        // TensorOperations' `tensortrace!` carries the quantum dimension of the
+        // traced channel and the fermionic twist of its orientation, which is
+        // what makes it the supertrace for a fermionic rule and what makes the
+        // coefficient here `dim(c) * θ(c)` rather than `tr()`'s `dim(c)`.
+        //
+        // Why the guard is this narrow: with one pair and rank two the
+        // destination is the empty tree, so the traced channel is a single
+        // uncoupled sector and the coefficient collapses to a per-sector
+        // scalar. Any wider geometry leaves an open destination tree whose
+        // recoupling is not a per-sector scaling of a diagonal. The
+        // adjoint-view exclusion is defensive and unreachable today, for the
+        // reason spelled out at the compact `is_posdef` arm: `adjoint`
+        // short-circuits `Data::Diagonal` and never builds a view over it.
+        if let Data::Diagonal(diagonal) = self.stored_data() {
+            if !source_conjugate && rank == 2 && self.codomain_rank() == 1 && pairs.len() == 1 {
+                // The traced channel's twist is applied exactly when the traced
+                // leg is *not* dual — `tensortrace`'s own rule for the
+                // uncoupled legs of a trace channel (see
+                // `tenet_tensors::tensortrace`'s `trace_channel_factor`), and
+                // the reason a compact `transpose`, which flips both bond legs,
+                // trades the supertrace for the ordinary one. The whole
+                // coefficient is pinned against the engine route by the value
+                // oracles in `compact_diagonal_tests.rs`, which sweep both
+                // orientations on a fermionic rule; it is not derivable from
+                // `tr()`, whose weight is `dim(c)` unconditionally.
+                let traced_leg_is_dual =
+                    self.ordinary_body().space.homspace().codomain().legs()[0].is_dual();
+                let value = with_user_rule!(self.ordinary_body().space, rule, {
+                    diagonal.ordinary_trace_with(|sector| {
+                        if traced_leg_is_dual {
+                            rule.dim_scalar(sector)
+                        } else {
+                            rule.dim_scalar(sector) * rule.twist_scalar(sector)
+                        }
+                    })
+                });
+                let dst_bound = source.space.from_selected_homspace(hom)?;
+                if dst_bound.raw().required_len()? != 1 {
+                    return Err(internal_layout_error(
+                        "a fully traced rank-one destination is not a single scalar",
+                    ));
+                }
+                let data = match diagonal {
+                    DiagonalData::RealF64(_) => Data::F64(vec![value.re]),
+                    DiagonalData::RealC64(_) | DiagonalData::C64(_) => Data::C64(vec![value]),
+                };
+                return self.with_bound(dst_bound, data);
+            }
+        }
         let data = if source_conjugate {
             self.stored_data()
         } else {
@@ -6812,6 +6862,19 @@ impl Tensor {
             return Ok(false);
         }
         let threshold = tol * self.norm()?.max(1.0);
+        // Compact arm: a spectrum factor's stored values *are* its Hermitian
+        // eigenvalues, so there is nothing to factorize and nothing to
+        // materialize (#585). The adjoint-view exclusion is defensive and is
+        // unreachable today: `Tensor::adjoint` short-circuits `Data::Diagonal`
+        // and never builds an `AdjointView` over it, so no compact tensor is
+        // ever a view. Kept anyway — if compact adjoint views ever appear, the
+        // stored spectrum would be the parent's rather than this tensor's
+        // logical one, and this arm would silently read the wrong values.
+        if let Data::Diagonal(diagonal) = self.stored_data() {
+            if !self.is_adjoint_view() {
+                return Ok(diagonal.is_posdef(threshold));
+            }
+        }
         Ok(self
             .eigh_vals()?
             .iter()
@@ -9184,7 +9247,7 @@ fn sqrt_diagonal_impl<D: UserScalar + PartialEq>(
 
 type SectorRegion = CoupledSectorRegion;
 
-fn internal_layout_error(what: &str) -> Error {
+pub(crate) fn internal_layout_error(what: &str) -> Error {
     Error::InvalidArgument(format!(
         "internal coupled-layout invariant violated ({what}); please report this"
     ))

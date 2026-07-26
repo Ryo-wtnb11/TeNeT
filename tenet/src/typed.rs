@@ -1243,6 +1243,30 @@ where
 
     /// Runs one prepared tree transform on this tensor's own runtime.
     fn tree_transform(&self, operation: TreeTransformOperation) -> Result<Self, Error> {
+        // Compact arm: a rank-(1,1) leg swap of a spectrum factor is a
+        // per-sector rescaling of the stored diagonal, so it never touches the
+        // `Σ_c k_c²` materialization. Every other geometry — an explicit braid,
+        // any higher rank, the identity partitions `repartition` produces —
+        // falls through to the dense route below; the shared guard documents
+        // why. TensorKit 0.17 `src/tensors/diagonal.jl:215-242` makes the same
+        // split.
+        if let Some(spectrum) = self.spectrum() {
+            if crate::typed_tensor_core::is_rank_one_diagonal_swap(
+                self.codomain_rank(),
+                self.rank() - self.codomain_rank(),
+                &operation,
+            ) {
+                let destination = self.body.space.transformed_multiplicity_free(&operation)?;
+                let transformed = crate::typed_tensor_core::transform_rank_one_diagonal_spectrum(
+                    self.body.space.provider(),
+                    self.body.space.space(),
+                    destination.space(),
+                    &operation,
+                    spectrum,
+                )?;
+                return Ok(self.with_spectrum_on(destination, transformed));
+            }
+        }
         // Leasing rather than locking, matching the erased path: independent
         // operations on one runtime must not serialize behind each other.
         let mut lease = self.runtime.lease_context()?;
@@ -2451,6 +2475,26 @@ where
         }
     }
 
+    /// A sibling on a **different** space carrying a new compact spectrum —
+    /// [`Self::with_spectrum`] for the one operation that moves the bond space
+    /// rather than keeping it. The space must be one the expert layer derived
+    /// from this tensor's own, so the checked admission proof carries over the
+    /// same way.
+    fn with_spectrum_on(
+        &self,
+        space: BoundDynamicFusionMapSpace<R>,
+        spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<D>>,
+    ) -> Self {
+        Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody {
+                space,
+                data: TypedData::Diagonal(spectrum),
+                dense_cache: std::sync::OnceLock::new(),
+            }),
+        }
+    }
+
     /// The compact payload, when this tensor has one.
     fn spectrum(&self) -> Option<&[tenet_matrixalgebra::SectorSpectrum<D>]> {
         match &self.body.data {
@@ -2996,6 +3040,16 @@ where
             return Ok(false);
         }
         let threshold = tol * self.norm()?.max(1.0);
+        // Compact arm: a spectrum factor's stored values *are* its Hermitian
+        // eigenvalues, so there is nothing to factorize and nothing to
+        // materialize (#585). The gate and the threshold above are already
+        // compact — `is_hermitian` and `norm` both read the spectrum — so this
+        // is the last step that reached `dense_data()`.
+        if let Some(spectrum) = self.spectrum() {
+            return Ok(crate::typed_tensor_core::compact_is_posdef(
+                spectrum, threshold,
+            ));
+        }
         Ok(self
             .eigh_vals()?
             .iter()

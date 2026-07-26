@@ -294,9 +294,17 @@ fn asymmetric_odd_product_swap_preserves_compact_c64_storage_and_dense_values() 
 }
 
 #[test]
-fn nonempty_trace_pairs_keeps_the_existing_diagonal_densification_boundary() {
-    // What: partial trace of compact storage remains the established dense
-    // fallback and agrees with an explicitly densified tensor.
+fn nonempty_trace_pairs_reduces_the_compact_spectrum_without_densifying() {
+    // What: the full pair of a rank-(1,1) compact tensor is now reduced from
+    // the stored spectrum (#585) and still agrees with the explicitly densified
+    // route. The previous revision of this test pinned the opposite — that the
+    // trace materialized — which was the live compact regression the #585
+    // design audit found.
+    //
+    // There is no wider geometry to guard on this side: compact diagonal
+    // storage only ever holds a rank-(1,1) bond, and an empty pair list returns
+    // the tensor unchanged before any of this, so the full pair is the whole
+    // reachable surface of the arm.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let space = product_space();
     let diagonal = complex_diagonal(&runtime, &space, 261_408);
@@ -306,7 +314,7 @@ fn nonempty_trace_pairs_keeps_the_existing_diagonal_densification_boundary() {
     let expected = oracle.trace_pairs(&[(0, 1)]).unwrap();
 
     assert_tensor_close(&actual, &expected);
-    assert!(diagonal.has_cached_materialization());
+    assert_compact_unmaterialized(&diagonal);
 }
 
 fn fixed_diagonal(
@@ -1085,4 +1093,198 @@ fn absorb_densifies_a_compact_destination_before_prefix_overwrite() {
     assert!(!matches!(actual.stored_data(), Data::Diagonal(_)));
     assert!(diagonal.has_cached_materialization());
     assert_eq!(actual.data(), source.data());
+}
+
+/// The single value of a rank-0 result, widened so f64 and c64 fixtures share
+/// one assertion.
+fn rank_zero_value(tensor: &Tensor) -> Complex64 {
+    match tensor.scalar().unwrap() {
+        Scalar::F64(value) => Complex64::new(value, 0.0),
+        Scalar::C64(value) => value,
+    }
+}
+
+fn assert_scalar_close(actual: Complex64, expected: Complex64, label: &str) {
+    assert!(
+        (actual - expected).norm() <= 1e-12 * expected.norm().max(1.0),
+        "{label}: {actual:?} vs {expected:?}"
+    );
+}
+
+#[test]
+fn full_rank_one_trace_pairs_matches_the_dense_route_on_every_rule() {
+    // What: the categorical trace of a rank-(1,1) tensor over its only pair is
+    // the same number whichever storage it is read from — for a self-dual
+    // bosonic rule, for one with a non-unit quantum dimension, for a fermionic
+    // one whose twist makes it a supertrace, and for a dual leg, which is what
+    // decides the orientation the coefficients are taken in.
+    //
+    // Both pair orders are swept: `(0, 1)` and `(1, 0)` name the same pair of
+    // legs and must trace to the same number.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let spaces = [
+        ("u1", Space::u1([(-1, 2), (0, 3), (1, 2)])),
+        ("su2", Space::su2([(0, 2), (1, 3)]).unwrap()),
+        ("fz2", Space::fz2([(0, 2), (1, 3)]).unwrap()),
+        ("product", product_space()),
+    ];
+    for (name, space) in spaces {
+        for dual in [false, true] {
+            let space = if dual { space.dual() } else { space.clone() };
+            for (dtype, diagonal) in [
+                ("f64", real_diagonal(&runtime, &space, 585_001)),
+                ("c64", complex_diagonal(&runtime, &space, 585_002)),
+                ("real-c64", real_c64_diagonal(&runtime, &space, 585_003)),
+                // The bond space a compact swap produces, so the arm is also
+                // read on legs it bent itself rather than only on freshly
+                // factorized ones.
+                (
+                    "transposed c64",
+                    complex_diagonal(&runtime, &space, 585_004)
+                        .transpose()
+                        .unwrap(),
+                ),
+                (
+                    "permuted c64",
+                    complex_diagonal(&runtime, &space, 585_005)
+                        .permute(&[1], &[0])
+                        .unwrap(),
+                ),
+                // Not the excluded adjoint-*view* path — `adjoint` of compact
+                // storage short-circuits to an owned conjugated spectrum, so
+                // this is the compact arm again, on conjugated values.
+                (
+                    "adjoint c64",
+                    complex_diagonal(&runtime, &space, 585_006)
+                        .adjoint()
+                        .unwrap(),
+                ),
+            ] {
+                let oracle = dense_oracle(&diagonal);
+                for pairs in [[(0usize, 1usize)], [(1, 0)]] {
+                    let actual = diagonal.trace_pairs(&pairs).unwrap();
+                    let expected = oracle.trace_pairs(&pairs).unwrap();
+                    assert_eq!(actual.dtype(), expected.dtype());
+                    assert_scalar_close(
+                        rank_zero_value(&actual),
+                        rank_zero_value(&expected),
+                        &format!("{name} dual={dual} {dtype} {pairs:?}"),
+                    );
+                }
+                assert_compact_unmaterialized(&diagonal);
+            }
+        }
+    }
+}
+
+#[test]
+fn full_rank_one_trace_pairs_is_the_supertrace_for_a_fermionic_rule() {
+    // What: `trace_pairs` is the categorical trace with the fermionic twist —
+    // unlike `tr`, which is TensorKit's positive matrix trace. On a single
+    // fermion-parity sector the two differ by exactly the twist, so an odd
+    // space flips the sign and an even one does not. The bosonic Z2 twin of the
+    // odd space pins that the sign is the *twist* and not the parity label.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    for (name, space, sign) in [
+        ("fz2 even", Space::fz2([(0, 3)]).unwrap(), 1.0),
+        ("fz2 odd", Space::fz2([(1, 3)]).unwrap(), -1.0),
+        ("z2 odd", Space::z2([(1, 3)]), 1.0),
+    ] {
+        let diagonal = complex_diagonal(&runtime, &space, 585_011);
+        let Scalar::C64(trace) = diagonal.tr().unwrap() else {
+            panic!("a c64 spectrum traces to a c64 scalar");
+        };
+        assert_scalar_close(
+            rank_zero_value(&diagonal.trace_pairs(&[(0, 1)]).unwrap()),
+            trace * sign,
+            name,
+        );
+
+        // And the orientation is load-bearing, not incidental: a planar
+        // transpose duals both bond legs, and `tensortrace` twists a traced
+        // channel only where its leg is *not* dual, so the same tensor traces
+        // without the fermionic sign once transposed. A coefficient that read
+        // the sector alone would return the supertrace here too.
+        let transposed = diagonal.transpose().unwrap();
+        let Scalar::C64(transposed_trace) = transposed.tr().unwrap() else {
+            panic!("a c64 spectrum traces to a c64 scalar");
+        };
+        assert_scalar_close(
+            rank_zero_value(&transposed.trace_pairs(&[(0, 1)]).unwrap()),
+            transposed_trace,
+            &format!("{name} transposed"),
+        );
+    }
+}
+
+#[test]
+fn compact_is_posdef_matches_the_dense_route_and_never_materializes() {
+    // What: reading the stored spectrum answers exactly what eigendecomposing
+    // the materialization answers — on positive, positive-*semi*definite,
+    // negative and indefinite spectra, at every tolerance, for both the real
+    // and the real-valued-c64 storage. The strictness at zero is the one place
+    // a `>=` would pass a semidefinite spectrum the dense route rejects.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = product_space();
+
+    // A constant block is rank one, so all but one singular value per sector is
+    // zero: the positive-semidefinite fixture.
+    let semidefinite = Tensor::from_block_fn(&runtime, [&space], [&space], |_, _| 1.0)
+        .unwrap()
+        .svd_compact()
+        .unwrap()
+        .1;
+    for (name, diagonal) in [
+        ("positive f64", real_diagonal(&runtime, &space, 585_021)),
+        ("positive c64", real_c64_diagonal(&runtime, &space, 585_022)),
+        ("semidefinite", semidefinite.clone()),
+        (
+            "negative",
+            real_diagonal(&runtime, &space, 585_023)
+                .scale(-1.0)
+                .unwrap(),
+        ),
+        (
+            "indefinite",
+            real_diagonal(&runtime, &space, 585_024)
+                .add(&semidefinite, 1.0, -3.0)
+                .unwrap(),
+        ),
+    ] {
+        let oracle = dense_oracle(&diagonal);
+        for tol in [0.0, 1e-14, 1e-8, 1e-3, 0.5] {
+            assert_eq!(
+                diagonal.is_posdef(tol).unwrap(),
+                oracle.is_posdef(tol).unwrap(),
+                "{name} at tol {tol}"
+            );
+        }
+        assert_compact_unmaterialized(&diagonal);
+    }
+
+    assert!(real_diagonal(&runtime, &space, 585_021)
+        .is_posdef(0.0)
+        .unwrap());
+    assert!(!semidefinite.is_posdef(0.0).unwrap());
+
+    // The Hermiticity gate is load-bearing and is checked separately, because
+    // every fixture above would answer the same with or without it. A spectrum
+    // whose values all have a positive real part *and* a non-negligible
+    // imaginary one is positive definite to a predicate that reads only the
+    // stored real parts, and is not Hermitian at all — so the gate is the only
+    // thing standing between the compact arm and a wrong `true`.
+    let skewed = real_c64_diagonal(&runtime, &space, 585_025)
+        .scale_c64(Complex64::new(1.0, 1.0))
+        .unwrap();
+    assert!(!skewed.is_hermitian(1e-10).unwrap());
+    let oracle = dense_oracle(&skewed);
+    for tol in [0.0, 1e-14, 1e-8, 1e-3] {
+        assert!(!skewed.is_posdef(tol).unwrap(), "skewed at tol {tol}");
+        assert_eq!(
+            skewed.is_posdef(tol).unwrap(),
+            oracle.is_posdef(tol).unwrap(),
+            "skewed at tol {tol}"
+        );
+    }
+    assert_compact_unmaterialized(&skewed);
 }
