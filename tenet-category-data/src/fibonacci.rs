@@ -357,4 +357,47 @@ mod tests {
             )
         );
     }
+
+    #[test]
+    fn identity_moves_on_a_source_edit_too_small_to_move_a_coefficient() {
+        // A change in the 21st decimal of a table entry rounds to the same
+        // `f64`, so no coefficient observably changes. The identity must move
+        // anyway: it is bound to the source bytes, which is what makes the
+        // acceptance criterion "changing the source changes the identity" hold
+        // below the projection's resolution as well as above it.
+        let edited = F_TEXT.replacen("0.61803398874989484820", "0.61803398874989484821", 1);
+        assert_ne!(edited, F_TEXT);
+        assert_eq!(
+            edited
+                .split_whitespace()
+                .nth(10)
+                .map(|field| field.parse::<f64>().unwrap().to_bits()),
+            F_TEXT
+                .split_whitespace()
+                .nth(10)
+                .map(|field| field.parse::<f64>().unwrap().to_bits()),
+        );
+
+        let identity = |f_text: &str| {
+            let mut bytes = Vec::new();
+            CategoryDataFibonacci::PROVENANCE.write_canonical_bytes(&mut bytes);
+            for (tag, text) in [
+                ("Nsymbols", N_TEXT),
+                ("Fsymbols", f_text),
+                ("Rsymbols", R_TEXT),
+            ] {
+                bytes.extend_from_slice(b"--- ");
+                bytes.extend_from_slice(tag.as_bytes());
+                bytes.push(b'\n');
+                bytes.extend_from_slice(text.as_bytes());
+            }
+            RuleIdentity::from_canonical_bytes::<CategoryDataFibonacci>(
+                fnv1a64(&bytes),
+                Arc::from(bytes),
+            )
+        };
+        let provider = CategoryDataFibonacci::try_new().expect("valid");
+        assert_eq!(identity(F_TEXT), provider.rule_identity());
+        assert_ne!(identity(&edited), provider.rule_identity());
+    }
 }
