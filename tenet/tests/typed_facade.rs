@@ -4014,3 +4014,175 @@ fn the_hermitian_family_carries_the_su2_dimension_weight() {
     let (_, v) = typed.project_hermitian().unwrap().eigh_full().unwrap();
     assert!(v.is_unitary(tol).unwrap());
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6 (issue #576), slice 1: `inv`.
+// ---------------------------------------------------------------------------
+
+/// An endomorphism whose every coupled-sector block is nonsingular: the fill
+/// used by [`z2_endo_oracle_pair`] is position-weighted and produces rank-one
+/// blocks, so `inv` on it would be testing the singular path instead. Adding a
+/// multiple of the identity is the cheapest fix that stays byte-identical
+/// across the two facades.
+fn z2_invertible_pair(
+    runtime: &Runtime,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::Z2FusionRule, f64>,
+) {
+    let (erased, typed) = z2_endo_oracle_pair(runtime);
+    let erased_id =
+        tenet::prelude::Tensor::id(runtime, tenet::prelude::Dtype::F64, &erased.domain_spaces())
+            .unwrap();
+    let typed_id = TensorMap::id(runtime, &typed.domain()).unwrap();
+    (
+        erased.add(&erased_id, 1.0, 100.0).unwrap(),
+        typed.add(&typed_id, 1.0, 100.0).unwrap(),
+    )
+}
+
+#[test]
+fn typed_and_erased_inv_agree_byte_for_byte() {
+    // What: the typed `inv` is the erased one — the same per-sector dense solve
+    // through the same seam — so the payloads compare bitwise, not just within
+    // a tolerance.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_invertible_pair(&runtime);
+
+    let erased_inverse = erased.inv().unwrap();
+    let typed_inverse = typed.inv().unwrap();
+    assert_eq!(typed_inverse.data(), erased_inverse.data());
+
+    // And it is an inverse: `t * t^-1` is the identity on the codomain.
+    let identity = typed.compose(&typed_inverse).unwrap();
+    let expected = TensorMap::<_, f64>::id(&runtime, &typed.domain()).unwrap();
+    let error = identity
+        .data()
+        .iter()
+        .zip(expected.data())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+    assert!(error < 1e-9, "t * inv(t) is not the identity: {error}");
+}
+
+#[test]
+fn inv_of_a_compact_spectrum_is_the_elementwise_reciprocal() {
+    // What: the O(rank) arm. A spectrum's inverse is `1/s_i` on the stored
+    // values, and it agrees with the erased facade's own diagonal arm.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+
+    let erased_s = erased
+        .svd_trunc(&tenet::prelude::Truncation::Full)
+        .unwrap()
+        .s;
+    let typed_s = typed.svd_trunc(&Truncation::Full).unwrap().s;
+    // The fixture is rank deficient, so the full spectrum contains zeros that
+    // `inv` must refuse; keep only the nonzero part.
+    let erased_s = erased_s
+        .svd_trunc(&tenet::prelude::Truncation::Rank(2))
+        .unwrap()
+        .s;
+    let typed_s = typed_s.svd_trunc(&Truncation::Rank(2)).unwrap().s;
+
+    assert_eq!(
+        typed_s.inv().unwrap().data(),
+        erased_s.inv().unwrap().data()
+    );
+    // `s * s^-1` is the identity on the bond.
+    let product = typed_s.compose(&typed_s.inv().unwrap()).unwrap();
+    let expected = TensorMap::<_, f64>::id(&runtime, &typed_s.domain()).unwrap();
+    let error = product
+        .data()
+        .iter()
+        .zip(expected.data())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+    assert!(error < 1e-9, "s * inv(s) is not the identity: {error}");
+}
+
+#[test]
+fn inv_reports_a_singular_input_as_a_typed_error() {
+    // What: singular input is a `Result`, never a panic, and the two storages
+    // report it through different variants because the two arms detect it in
+    // different places — the compact one by inspecting the stored value, the
+    // dense one inside the LAPACK solve. Both are pinned here, because both are
+    // documented.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, typed) = z2_endo_oracle_pair(&runtime);
+
+    // Compact: a spectrum scaled to exactly zero. Why not the tail of a
+    // rank-deficient SVD: those singular values come back tiny but nonzero, and
+    // the arm under test compares against exact zero, not a tolerance.
+    let spectrum = typed.svd_trunc(&Truncation::Full).unwrap().s.scale(0.0);
+    match spectrum.inv() {
+        Err(tenet::typed::Error::InvalidArgument(message)) => {
+            assert!(
+                message.contains("singular"),
+                "unexpected message: {message}"
+            );
+        }
+        other => panic!("expected an InvalidArgument for a singular spectrum, got {other:?}"),
+    }
+
+    // Dense: an all-zero endomorphism.
+    let zeros = typed.scale(0.0);
+    match zeros.inv() {
+        Err(tenet::typed::Error::Operation(_)) => {}
+        other => panic!("expected an Operation error for a singular dense block, got {other:?}"),
+    }
+}
+
+#[test]
+fn inv_accepts_isomorphic_but_unequal_codomain_and_domain() {
+    // What: TensorKit's `inv` asks for `codomain ≅ domain`, not `==`, and
+    // returns `domain <- codomain`. The seam agrees: a rank-one codomain and a
+    // rank-two domain with the same coupled-sector dimensions is accepted, and
+    // the result carries the swapped spaces. This is a behavior pin — the
+    // rustdoc states it, so a seam that tightened to equality must fail here.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(tenet::core::Z2FusionRule);
+    let wide = GradedSpace::try_new(
+        provider.clone(),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 2),
+        ],
+        false,
+    )
+    .unwrap();
+    // `narrow ⊗ narrow` has coupled dimensions (even 2, odd 2) as well, so the
+    // two sides are isomorphic while the hom spaces differ in rank.
+    let narrow = GradedSpace::try_new(
+        provider,
+        [
+            (tenet::core::Z2Irrep::EVEN, 1),
+            (tenet::core::Z2Irrep::ODD, 1),
+        ],
+        false,
+    )
+    .unwrap();
+    let mut next = 0.0;
+    let tensor = TensorMap::from_block_fn(&runtime, [&wide], [&narrow, &narrow], |_, _| {
+        next += 1.0;
+        next * next
+    })
+    .unwrap();
+
+    let inverse = tensor.inv().unwrap();
+    assert_eq!(inverse.codomain().len(), 2);
+    assert_eq!(inverse.domain().len(), 1);
+    let identity = tensor.compose(&inverse).unwrap();
+    let expected = TensorMap::<_, f64>::id(&runtime, [&wide]).unwrap();
+    let error = identity
+        .data()
+        .iter()
+        .zip(expected.data())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+    assert!(error < 1e-9, "t * inv(t) is not the identity: {error}");
+}

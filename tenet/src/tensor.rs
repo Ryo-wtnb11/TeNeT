@@ -569,6 +569,28 @@ pub trait UserScalar: FactorScalar + RecouplingCoefficientAction<f64> {
         ctxs: &mut Ctxs<Key>,
     ) -> &mut Ctx<Self, Key>;
     fn rand_unit(state: &mut u64) -> Self;
+
+    /// `|self|`: the modulus for a complex payload, the absolute value for a
+    /// real one. What the diagonal `pinv` cutoff compares against, and — as
+    /// `== 0.0` — how the diagonal `inv` recognizes a singular entry.
+    fn abs_value(self) -> f64;
+
+    /// `exp(self)` in the payload dtype.
+    fn exp_value(self) -> Self;
+
+    /// `1/self` in the payload dtype.
+    fn recip_value(self) -> Self;
+
+    /// The principal square root in the payload dtype, or the erased facade's
+    /// negative-real refusal.
+    ///
+    /// Why these three live on the scalar trait rather than being computed
+    /// through [`FactorScalar::widen_complex`] and narrowed back: the complex
+    /// division and complex `exp` algorithms differ from the real ones in the
+    /// last ulp, so a widen/narrow route would make an f64 result depend on
+    /// which facade computed it. Dispatching on the payload type is what keeps
+    /// the two byte-identical.
+    fn sqrt_value(self) -> Result<Self, Error>;
 }
 
 impl UserScalar for f64 {
@@ -585,6 +607,29 @@ impl UserScalar for f64 {
     fn rand_unit(state: &mut u64) -> Self {
         rand_unit(state)
     }
+
+    fn abs_value(self) -> f64 {
+        self.abs()
+    }
+
+    fn exp_value(self) -> Self {
+        self.exp()
+    }
+
+    fn recip_value(self) -> Self {
+        1.0 / self
+    }
+
+    fn sqrt_value(self) -> Result<Self, Error> {
+        if self < 0.0 {
+            Err(Error::InvalidArgument(format!(
+                "sqrt of a negative diagonal entry {self}; convert to c64 \
+                 with to_c64() for the complex square root"
+            )))
+        } else {
+            Ok(self.sqrt())
+        }
+    }
 }
 
 impl UserScalar for Complex64 {
@@ -600,6 +645,22 @@ impl UserScalar for Complex64 {
 
     fn rand_unit(state: &mut u64) -> Self {
         Complex64::new(rand_unit(state), rand_unit(state))
+    }
+
+    fn abs_value(self) -> f64 {
+        self.norm()
+    }
+
+    fn exp_value(self) -> Self {
+        self.exp()
+    }
+
+    fn recip_value(self) -> Self {
+        Complex64::new(1.0, 0.0) / self
+    }
+
+    fn sqrt_value(self) -> Result<Self, Error> {
+        Ok(self.sqrt())
     }
 }
 

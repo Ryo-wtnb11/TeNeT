@@ -497,6 +497,33 @@ enum TypedData<D> {
     Diagonal(Vec<tenet_matrixalgebra::SectorSpectrum<D>>),
 }
 
+/// Applies a scalar function to every stored value of a compact spectrum,
+/// leaving the sector keys and the per-sector lengths untouched.
+///
+/// This is the whole of the O(rank) arm shared by [`TensorMap::exp`],
+/// [`TensorMap::inv`], [`TensorMap::pinv`] and [`TensorMap::sqrt`]: a spectral
+/// function acts on eigenvalues, so it never moves weight between sectors and
+/// never changes a bond dimension, which is exactly why the result can stay on
+/// the space it was called on.
+fn map_spectrum<D: Copy>(
+    spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
+    mut value_of: impl FnMut(D) -> Result<D, Error>,
+) -> Result<Vec<tenet_matrixalgebra::SectorSpectrum<D>>, Error> {
+    spectrum
+        .iter()
+        .map(|entry| {
+            Ok(tenet_matrixalgebra::SectorSpectrum {
+                sector: entry.sector,
+                values: entry
+                    .values
+                    .iter()
+                    .map(|&value| value_of(value))
+                    .collect::<Result<_, Error>>()?,
+            })
+        })
+        .collect()
+}
+
 /// Two compact spectra that live on one bond space must agree sector for
 /// sector and length for length; when they do not, the space and the payload
 /// have gone out of step, which is an engine invariant break rather than
@@ -1920,6 +1947,61 @@ where
         let mut dense = self.runtime.lease_dense();
         let raw = tenet_matrixalgebra::eig_vals_dyn(dense.dense(), &self.bound_ref()?)?;
         self.decode_spectrum(raw)
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `inv`: the true inverse `t^-1` of a
+    /// nonsingular map, defined by `t * t^-1 = id` on the codomain and
+    /// `t^-1 * t = id` on the domain. Computed per coupled sector as the exact
+    /// dense solve `t_c X_c = 1`, not as a spectral function — there is no
+    /// truncation policy to apply and no factor tensor to build.
+    ///
+    /// # Domain
+    ///
+    /// TensorKit asks for `codomain ≅ domain` — **isomorphic, not equal** —
+    /// and returns a map `domain <- codomain`. This facade's seam agrees: a
+    /// rank-one codomain and a rank-two domain with the same coupled-sector
+    /// dimensions are accepted, and the result carries the two spaces swapped.
+    /// The pin is `inv_accepts_isomorphic_but_unequal_codomain_and_domain`.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Operation`] when the two sides are not isomorphic, and when a
+    ///   coupled-sector block is singular — the dense solve is where that
+    ///   surfaces, so it comes back as an execution error rather than an
+    ///   argument one. Never a panic.
+    /// - [`Error::InvalidArgument`] from the compact arm below, whose zero
+    ///   entry is visible before any solve runs and is therefore reported as
+    ///   the caller mistake it is. The two storages of one singular tensor
+    ///   consequently report different variants; both are pinned by
+    ///   `inv_reports_a_singular_input_as_a_typed_error`.
+    ///
+    /// # Complexity
+    ///
+    /// Dense input: `O(Σ_c n_c³)`, one LU solve per coupled sector. Compact
+    /// input (a spectrum factor, TensorKit's `DiagonalTensorMap`): the
+    /// **O(rank) elementwise-reciprocal arm**, `1/s_i` over the `Σ_c k_c`
+    /// stored values, and the result stays compact — matching TensorKit's
+    /// `inv(::DiagonalTensorMap)`, which is `inv.(d.data)`. Nothing dense is
+    /// built on either side of that arm.
+    pub fn inv(&self) -> Result<Self, Error> {
+        if let Some(spectrum) = self.spectrum() {
+            // Why `== 0` and not a tolerance: the dense arm has none either
+            // (the solve either fails or it does not), and a compact arm that
+            // refused near-zero entries would let storage change the answer.
+            // Same comparison as the erased facade's `try_recip`.
+            return Ok(self.with_spectrum(map_spectrum(spectrum, |value| {
+                if value.abs_value() == 0.0 {
+                    Err(Error::InvalidArgument(
+                        "inv of a singular diagonal (zero entry)".to_string(),
+                    ))
+                } else {
+                    Ok(value.recip_value())
+                }
+            })?));
+        }
+        let mut dense = self.runtime.lease_dense();
+        let out = tenet_matrixalgebra::inv_direct_dyn(dense.dense(), &self.bound_ref()?)?;
+        Ok(self.wrap_bound_factor(out))
     }
 
     /// Builds a sibling on this tensor's own space and runtime from a fresh
