@@ -5029,9 +5029,189 @@ fn the_diagonal_contract_arm_declines_an_illegal_contraction() {
 
     // `s`'s domain leg is non-dual, `typed`'s leading codomain leg is dual.
     assert!(s.contract(&typed, &[1], &[0], &[0, 1]).is_err());
+    // The mirror direction needs its own case, because it is the `t · D` arm's
+    // own leg comparison that has to reject it: `leg <- dual` contracted on its
+    // domain axis against `s`, whose bond leg is non-dual by construction, so
+    // the two raw flags differ and the engine refuses the pair.
+    let dual_domain =
+        TensorMap::from_block_fn(&runtime, [&leg], [&dual], typed_fill_value).unwrap();
+    assert!(dual_domain.contract(&s, &[1], &[0], &[0, 1]).is_err());
+    // A degeneracy mismatch on an otherwise well-oriented pair is the other way
+    // the comparison earns its keep: nothing about the axis pattern is wrong, so
+    // only the legs themselves say this is not a contraction.
+    let narrow = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 2),
+        ],
+        false,
+    )
+    .unwrap();
+    let narrow_bond = TensorMap::from_block_fn(&runtime, [&narrow], [&narrow], typed_fill_value)
+        .unwrap()
+        .svd_compact()
+        .unwrap()
+        .1;
+    let wide = TensorMap::from_block_fn(&runtime, [&leg], [&leg], typed_fill_value).unwrap();
+    assert!(wide.contract(&narrow_bond, &[1], &[0], &[0, 1]).is_err());
+    assert!(narrow_bond.contract(&wide, &[1], &[0], &[0, 1]).is_err());
     // And a wrong-length axis list or a non-permutation output order is still
-    // the expert layer's error rather than a fast-path answer.
+    // the expert layer's error rather than a fast-path answer. `[0, 2]` is the
+    // out-of-range case, which the arm has to reject *before* indexing its own
+    // source order with it.
     assert!(typed.contract(&s, &[1], &[0], &[0]).is_err());
     assert!(typed.contract(&s, &[1], &[0], &[1, 1]).is_err());
+    assert!(wide.contract(&s, &[1], &[0], &[0, 2]).is_err());
     assert!(typed.contract(&s, &[9], &[0], &[0, 1]).is_err());
+}
+
+/// The codomain/domain split plus every leg's sectors, degeneracies and dual
+/// flag. Comparing the split alone is too weak: a reordered output can leave the
+/// rank and the codomain length intact and still land on legs with the opposite
+/// duality flag, which is exactly what the `D · D` output-order guard refuses.
+#[allow(clippy::type_complexity)]
+fn space_shape(
+    t: &TensorMap<tenet::core::Z2FusionRule, f64>,
+) -> (usize, Vec<(Vec<tenet::core::Z2Irrep>, Vec<usize>, bool)>) {
+    let legs = t
+        .codomain()
+        .iter()
+        .chain(t.domain().iter())
+        .map(|leg| {
+            (
+                leg.sectors().unwrap(),
+                leg.degeneracies().to_vec(),
+                leg.is_dual(),
+            )
+        })
+        .collect();
+    (t.codomain().len(), legs)
+}
+
+/// Every permutation of `0..n`, for the exhaustive output-order sweep below.
+fn all_output_orders(n: usize) -> Vec<Vec<usize>> {
+    if n == 0 {
+        return vec![Vec::new()];
+    }
+    let mut orders = Vec::new();
+    for head in 0..n {
+        for mut rest in all_output_orders(n - 1) {
+            for axis in &mut rest {
+                if *axis >= head {
+                    *axis += 1;
+                }
+            }
+            let mut order = vec![head];
+            order.extend(rest);
+            orders.push(order);
+        }
+    }
+    orders
+}
+
+#[test]
+fn the_diagonal_contract_arm_is_its_own_dense_route_on_every_axis_pattern() {
+    // What: the compact arm never differs from the route it replaces. The byte
+    // oracle above compares typed-fast against *erased-fast* (the erased side
+    // has taken its own #75 arm since then for the same geometries), so it
+    // cannot see the two fast paths sharing a mistake, and it cannot see the
+    // codomain-rank the arm derives itself (`self.rank() - 1` for `t · D`, `1`
+    // for `D · t`) diverge from the one the engine would build.
+    //
+    // Here the comparison is fast against dense *inside this facade*:
+    // `repartition(1)` on a bond space is the identity partition, so it returns
+    // the same values on the same space with a **dense** payload, which no
+    // compact arm can fire on. Every single-axis pattern and every output order
+    // is swept on both codomain/domain splits, so `t · D` is covered at an
+    // inner domain axis (which `[v, v] <- [v]` cannot reach: it has one domain
+    // leg) as well as at the trailing one, and an inadmissible pattern must be
+    // refused by both routes rather than answered by one.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    for split in [1, 2] {
+        let (_erased, t) = z2_oracle_pair_split(&runtime, split);
+        let s = t.svd_compact().unwrap().1;
+        // Dense twin of `s`: same space, same bytes, no compact payload.
+        let s_dense = s.repartition(1).unwrap();
+        assert_eq!(s_dense.data(), s.data());
+
+        let mut fired = 0usize;
+        for orders in [&all_output_orders(3)] {
+            for output_axes in orders {
+                for lhs_axis in 0..3 {
+                    for rhs_axis in 0..2 {
+                        // `t · s`
+                        let dense = t.contract(&s_dense, &[lhs_axis], &[rhs_axis], output_axes);
+                        let fast = t.contract(&s, &[lhs_axis], &[rhs_axis], output_axes);
+                        let label =
+                            format!("t*s split={split} {lhs_axis}/{rhs_axis} {output_axes:?}");
+                        match (dense, fast) {
+                            (Ok(dense), Ok(fast)) => {
+                                assert_eq!(
+                                    space_shape(&fast),
+                                    space_shape(&dense),
+                                    "{label} space"
+                                );
+                                assert_eq!(fast.data(), dense.data(), "{label} payload");
+                                fired += 1;
+                            }
+                            (Err(_), Err(_)) => {}
+                            (dense, fast) => panic!(
+                                "{label}: dense {:?} but fast {:?}",
+                                dense.map(|_| ()),
+                                fast.map(|_| ())
+                            ),
+                        }
+                        // `s · t`
+                        let dense = s_dense.contract(&t, &[rhs_axis], &[lhs_axis], output_axes);
+                        let fast = s.contract(&t, &[rhs_axis], &[lhs_axis], output_axes);
+                        let label =
+                            format!("s*t split={split} {rhs_axis}/{lhs_axis} {output_axes:?}");
+                        match (dense, fast) {
+                            (Ok(dense), Ok(fast)) => {
+                                assert_eq!(
+                                    space_shape(&fast),
+                                    space_shape(&dense),
+                                    "{label} space"
+                                );
+                                assert_eq!(fast.data(), dense.data(), "{label} payload");
+                                fired += 1;
+                            }
+                            (Err(_), Err(_)) => {}
+                            (dense, fast) => panic!(
+                                "{label}: dense {:?} but fast {:?}",
+                                dense.map(|_| ()),
+                                fast.map(|_| ())
+                            ),
+                        }
+                    }
+                }
+            }
+        }
+        assert!(fired > 0, "split={split} swept no admissible pattern");
+
+        // `s · s`, where the surviving bond may stay compact.
+        for output_axes in all_output_orders(2) {
+            for lhs_axis in 0..2 {
+                for rhs_axis in 0..2 {
+                    let dense = s_dense.contract(&s_dense, &[lhs_axis], &[rhs_axis], &output_axes);
+                    let fast = s.contract(&s, &[lhs_axis], &[rhs_axis], &output_axes);
+                    let label = format!("s*s {lhs_axis}/{rhs_axis} {output_axes:?}");
+                    match (dense, fast) {
+                        (Ok(dense), Ok(fast)) => {
+                            assert_eq!(space_shape(&fast), space_shape(&dense), "{label} space");
+                            assert_eq!(fast.data(), dense.data(), "{label} payload");
+                        }
+                        (Err(_), Err(_)) => {}
+                        (dense, fast) => panic!(
+                            "{label}: dense {:?} but fast {:?}",
+                            dense.map(|_| ()),
+                            fast.map(|_| ())
+                        ),
+                    }
+                }
+            }
+        }
+    }
 }
