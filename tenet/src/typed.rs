@@ -2357,6 +2357,116 @@ where
         )?))
     }
 
+    /// Whether the tensor equals its own adjoint within `tol`, relative to its
+    /// norm (TensorKit `ishermitian`).
+    ///
+    /// A non-endomorphism is never Hermitian and comes back `false` rather than
+    /// as an error, which is where both this facade and the erased one differ
+    /// from TensorKit — it throws. A predicate that can only be called after
+    /// another predicate is not one.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::add`]'s and [`Self::adjoint`]'s, which is where the work happens.
+    pub fn is_hermitian(&self, tol: f64) -> Result<bool, Error> {
+        if !self.is_endomorphism() {
+            return Ok(false);
+        }
+        let difference = self.add(&self.adjoint()?, D::from_real(1.0), D::from_real(-1.0))?;
+        Ok(difference.norm()? <= tol * self.norm()?.max(1.0))
+    }
+
+    /// Whether the tensor equals minus its own adjoint within `tol`
+    /// (TensorKit `isantihermitian`). A non-endomorphism is `false`, as for
+    /// [`Self::is_hermitian`].
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::is_hermitian`]'s.
+    pub fn is_antihermitian(&self, tol: f64) -> Result<bool, Error> {
+        if !self.is_endomorphism() {
+            return Ok(false);
+        }
+        let sum = self.add(&self.adjoint()?, D::from_real(1.0), D::from_real(1.0))?;
+        Ok(sum.norm()? <= tol * self.norm()?.max(1.0))
+    }
+
+    /// Whether `t† ∘ t` is the identity on the domain within `tol`
+    /// (TensorKit `isisometric`): the columns are orthonormal. Defined for any
+    /// shape, not only square ones.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::adjoint`]'s, [`Self::compose`]'s and [`Self::id`]'s.
+    pub fn is_isometric(&self, tol: f64) -> Result<bool, Error> {
+        let gram = self.adjoint()?.compose(self)?;
+        let identity = Self::id(&self.runtime, &self.domain())?;
+        let difference = gram.add(&identity, D::from_real(1.0), D::from_real(-1.0))?;
+        Ok(difference.norm()? <= tol * gram.norm()?.max(1.0))
+    }
+
+    /// Whether the tensor is unitary within `tol` (TensorKit `isunitary`):
+    /// isometric in both directions.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::is_isometric`]'s.
+    pub fn is_unitary(&self, tol: f64) -> Result<bool, Error> {
+        Ok(self.is_isometric(tol)? && self.adjoint()?.is_isometric(tol)?)
+    }
+
+    /// Whether the tensor is Hermitian and positive definite (TensorKit
+    /// `isposdef`): every Hermitian eigenvalue exceeds `tol * max(norm, 1)`.
+    ///
+    /// Strict, like TensorKit's Cholesky-based test: a positive *semi*definite
+    /// spectrum — an eigenvalue at zero — is `false`. With `tol = 0.0` this is
+    /// exact strict positivity up to floating point.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::is_hermitian`]'s and [`Self::eigh_vals`]'s.
+    pub fn is_posdef(&self, tol: f64) -> Result<bool, Error> {
+        if !self.is_hermitian(tol)? {
+            return Ok(false);
+        }
+        let threshold = tol * self.norm()?.max(1.0);
+        Ok(self
+            .eigh_vals()?
+            .iter()
+            .flat_map(|spectrum| spectrum.values.iter())
+            .all(|&eigenvalue| eigenvalue > threshold))
+    }
+
+    /// The Hermitian part `(t + t†)/2` (TensorKit `project_hermitian`), the
+    /// nearest Hermitian tensor.
+    ///
+    /// # Errors
+    ///
+    /// [`Self::add`]'s — including [`Error::InvalidArgument`] when the tensor is
+    /// not an endomorphism, since then it and its adjoint live on different
+    /// spaces. Unlike [`Self::is_hermitian`] there is no `false` to return here.
+    pub fn project_hermitian(&self) -> Result<Self, Error> {
+        self.add(&self.adjoint()?, D::from_real(0.5), D::from_real(0.5))
+    }
+
+    /// The anti-Hermitian part `(t - t†)/2` (TensorKit
+    /// `project_antihermitian`).
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::project_hermitian`]'s.
+    pub fn project_antihermitian(&self) -> Result<Self, Error> {
+        self.add(&self.adjoint()?, D::from_real(0.5), D::from_real(-0.5))
+    }
+
+    /// Whether codomain and domain are the same product space — the
+    /// precondition every member of the family above tests against, and the
+    /// same comparison [`Self::tr`] makes.
+    fn is_endomorphism(&self) -> bool {
+        let hom = self.body.space.space().homspace();
+        hom.codomain().legs() == hom.domain().legs()
+    }
+
     /// The codomain legs, in axis order.
     pub fn codomain(&self) -> Vec<GradedSpace<R>> {
         self.legs(self.body.space.space().homspace().codomain())

@@ -3795,3 +3795,163 @@ fn typed_and_erased_eig_vals_and_eig_trunc_agree() {
     );
     assert!(typed_out.error > 0.0);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6 (issue #570), slice 4: the `is_hermitian` / `project_*` family.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_hermitian_family_agrees_with_the_erased_predicates() {
+    // What: all seven members, oracled against the erased facade on the same
+    // tensor — a general endomorphism, its Hermitian part and its
+    // anti-Hermitian part, so each predicate sees both verdicts.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+    let tol = 1e-10;
+
+    let erased_cases = [
+        erased.clone(),
+        erased.project_hermitian().unwrap(),
+        erased.project_antihermitian().unwrap(),
+    ];
+    let typed_cases = [
+        typed.clone(),
+        typed.project_hermitian().unwrap(),
+        typed.project_antihermitian().unwrap(),
+    ];
+
+    for (index, (erased, typed)) in erased_cases.iter().zip(&typed_cases).enumerate() {
+        // The projections themselves agree bitwise before anything is asked
+        // about them.
+        assert_eq!(typed.data(), erased.data(), "case {index} payload");
+        assert_eq!(
+            typed.is_hermitian(tol).unwrap(),
+            erased.is_hermitian(tol).unwrap(),
+            "case {index} is_hermitian"
+        );
+        assert_eq!(
+            typed.is_antihermitian(tol).unwrap(),
+            erased.is_antihermitian(tol).unwrap(),
+            "case {index} is_antihermitian"
+        );
+        assert_eq!(
+            typed.is_isometric(tol).unwrap(),
+            erased.is_isometric(tol).unwrap(),
+            "case {index} is_isometric"
+        );
+        assert_eq!(
+            typed.is_unitary(tol).unwrap(),
+            erased.is_unitary(tol).unwrap(),
+            "case {index} is_unitary"
+        );
+        assert_eq!(
+            typed.is_posdef(tol).unwrap(),
+            erased.is_posdef(tol).unwrap(),
+            "case {index} is_posdef"
+        );
+    }
+
+    // The verdicts are not all the same value, so the agreement above is not
+    // vacuous: the projections really are (anti-)Hermitian and the source is
+    // neither.
+    assert!(!typed_cases[0].is_hermitian(tol).unwrap());
+    assert!(typed_cases[1].is_hermitian(tol).unwrap());
+    assert!(!typed_cases[1].is_antihermitian(tol).unwrap());
+    assert!(typed_cases[2].is_antihermitian(tol).unwrap());
+}
+
+#[test]
+fn isometry_and_posdef_see_their_positive_cases() {
+    // What: the two members the fixture above only ever answers `false` for.
+    // `u` from an SVD is isometric by construction, and `t† t` is positive
+    // definite when `t` has full rank.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+    let tol = 1e-9;
+
+    let eu = erased.svd_compact().unwrap().0;
+    let tu = typed.svd_compact().unwrap().0;
+    assert!(tu.is_isometric(tol).unwrap());
+    assert_eq!(tu.is_isometric(tol).unwrap(), eu.is_isometric(tol).unwrap());
+    // Isometric but not unitary: `u` is tall here.
+    assert!(!tu.is_unitary(tol).unwrap());
+    assert_eq!(tu.is_unitary(tol).unwrap(), eu.is_unitary(tol).unwrap());
+
+    // `2 * id` is Hermitian with every eigenvalue at 2: positive definite on
+    // any provider, and the cheapest tensor that is.
+    let erased_positive = tenet::prelude::Tensor::id(
+        &runtime,
+        tenet::prelude::Dtype::F64,
+        &erased.domain_spaces(),
+    )
+    .unwrap()
+    .scale(2.0)
+    .unwrap();
+    let typed_positive = TensorMap::id(&runtime, &typed.domain()).unwrap().scale(2.0);
+    assert!(typed_positive.is_hermitian(tol).unwrap());
+    assert!(typed_positive.is_posdef(tol).unwrap());
+    assert_eq!(
+        typed_positive.is_posdef(tol).unwrap(),
+        erased_positive.is_posdef(tol).unwrap()
+    );
+    // Hermitian but not positive definite: the same tensor negated.
+    let negated = typed_positive.scale(-1.0);
+    assert!(negated.is_hermitian(tol).unwrap());
+    assert!(!negated.is_posdef(tol).unwrap());
+    assert_eq!(
+        negated.is_posdef(tol).unwrap(),
+        erased_positive.scale(-1.0).unwrap().is_posdef(tol).unwrap()
+    );
+    // A Gram matrix agrees with the erased verdict whichever way it falls.
+    let egram = erased.adjoint().unwrap().compose(&erased).unwrap();
+    let tgram = typed.adjoint().unwrap().compose(&typed).unwrap();
+    assert!(tgram.is_hermitian(tol).unwrap());
+    assert_eq!(tgram.is_posdef(tol).unwrap(), egram.is_posdef(tol).unwrap());
+}
+
+#[test]
+fn a_non_endomorphism_is_never_hermitian_and_never_errors() {
+    // What: TensorKit throws here; both facades answer `false`. The projections
+    // do error, because there is no tensor to return.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    assert!(!typed.is_hermitian(1e-9).unwrap());
+    assert!(!typed.is_antihermitian(1e-9).unwrap());
+    assert!(!typed.is_posdef(1e-9).unwrap());
+    assert_eq!(
+        typed.is_hermitian(1e-9).unwrap(),
+        erased.is_hermitian(1e-9).unwrap()
+    );
+    assert!(typed.project_hermitian().is_err());
+    assert!(typed.project_antihermitian().is_err());
+}
+
+#[test]
+fn the_hermitian_family_carries_the_su2_dimension_weight() {
+    // What: every member reduces through `norm`, which is dimension weighted on
+    // a non-abelian provider. Z2 alone cannot separate the two.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = su2_oracle_pair(&runtime);
+    let tol = 1e-9;
+
+    assert_eq!(
+        typed.project_hermitian().unwrap().data(),
+        erased.project_hermitian().unwrap().data()
+    );
+    assert!(typed
+        .project_hermitian()
+        .unwrap()
+        .is_hermitian(tol)
+        .unwrap());
+    assert_eq!(
+        typed.is_hermitian(tol).unwrap(),
+        erased.is_hermitian(tol).unwrap()
+    );
+    let (_, v) = typed.project_hermitian().unwrap().eigh_full().unwrap();
+    assert!(v.is_unitary(tol).unwrap());
+}
