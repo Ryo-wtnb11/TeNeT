@@ -4337,8 +4337,15 @@ fn pinv_rejects_a_nonfinite_or_negative_rcond_before_any_work() {
 fn pinv_uses_one_global_sigma_max_across_every_sector() {
     // What: the cutoff is relative to the largest singular value of the *whole*
     // tensor, not of each coupled sector — the deliberate divergence from
-    // TensorKit's per-block `rtol`. A per-sector cutoff would keep the small
-    // sector's value here; the global one discards it.
+    // TensorKit's per-block `rtol`.
+    //
+    // The global maximum deliberately lives in the **second** sector. A fold
+    // that only ever looks at the first sector reads `sigma_max = 1` here, which
+    // puts the cutoff at 0.5 and keeps everything — so that weaker mutant fails
+    // this test, as does the per-sector one, which cannot cut anything in a 1x1
+    // sector at all. Both were run by hand against this fixture and both fail
+    // it; with the maximum in the first sector, the first-sector-only mutant
+    // survived, because there the two folds happen to agree.
     let _guard = cache_lock();
     let runtime = runtime();
     let leg = GradedSpace::try_new(
@@ -4350,13 +4357,15 @@ fn pinv_uses_one_global_sigma_max_across_every_sector() {
         false,
     )
     .unwrap();
-    // Even sector: 1024. Odd sector: 1. Each sector is 1x1, so per-sector
-    // sigma_max would be the entry itself and nothing could ever be cut.
+    // Even sector (stored first): 1. Odd sector: 1024. Each sector is 1x1, so
+    // per-sector sigma_max would be the entry itself and nothing could ever be
+    // cut; and the global maximum is not in the sector a first-sector-only fold
+    // would find.
     let tensor = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, _| {
         if *trees.coupled() == tenet::core::Z2Irrep::EVEN {
-            1024.0
-        } else {
             1.0
+        } else {
+            1024.0
         }
     })
     .unwrap();
