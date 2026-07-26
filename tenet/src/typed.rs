@@ -16,27 +16,43 @@
 //!
 //! # Phase boundary
 //!
-//! This is the phase-4 surface of issue #557: construction
-//! ([`TensorMap::zeros`], [`TensorMap::from_block_fn`]), inspection
-//! ([`TensorMap::codomain`], [`TensorMap::domain`],
+//! This is the phase-5 surface of issue #557: construction
+//! ([`TensorMap::zeros`], [`TensorMap::from_block_fn`], [`TensorMap::id`]),
+//! inspection ([`TensorMap::codomain`], [`TensorMap::domain`],
 //! [`TensorMap::block_fusion_trees`], [`TensorMap::block`],
 //! [`TensorMap::block_count`], [`TensorMap::data`], [`TensorMap::runtime`]),
-//! and the index-manipulation and contraction
-//! operations — [`TensorMap::permute`], [`TensorMap::braid`],
-//! [`TensorMap::transpose`], [`TensorMap::transpose_axes`],
-//! [`TensorMap::repartition`] and [`TensorMap::contract`] — plus the
-//! decompositions of issue #567: [`TensorMap::svd_compact`],
+//! the index-manipulation and contraction operations
+//! ([`TensorMap::permute`], [`TensorMap::braid`], [`TensorMap::transpose`],
+//! [`TensorMap::transpose_axes`], [`TensorMap::repartition`],
+//! [`TensorMap::contract`], [`TensorMap::compose`]), the scalar operations
+//! ([`TensorMap::add`], [`TensorMap::scale`], [`TensorMap::norm`],
+//! [`TensorMap::norm_inf`], [`TensorMap::normalize`], [`TensorMap::inner`],
+//! [`TensorMap::dot`], [`TensorMap::tr`], [`TensorMap::trace_pairs`],
+//! [`TensorMap::adjoint`]), the factorizations ([`TensorMap::svd_compact`],
 //! [`TensorMap::svd_full`], [`TensorMap::svd_trunc`], [`TensorMap::svd_vals`],
 //! [`TensorMap::qr_compact`], [`TensorMap::qr_full`],
 //! [`TensorMap::lq_compact`], [`TensorMap::lq_full`],
 //! [`TensorMap::left_orth`], [`TensorMap::right_orth`],
-//! [`TensorMap::left_null`] and [`TensorMap::right_null`] — plus the scalar
-//! operations of issue #568: [`TensorMap::add`], [`TensorMap::scale`],
-//! [`TensorMap::norm`], [`TensorMap::norm_inf`], [`TensorMap::normalize`],
-//! [`TensorMap::inner`], [`TensorMap::dot`], [`TensorMap::tr`],
-//! [`TensorMap::trace_pairs`] and [`TensorMap::adjoint`] — plus the
-//! composition operations of issue #569: [`TensorMap::compose`] and
-//! [`TensorMap::id`].
+//! [`TensorMap::left_null`], [`TensorMap::right_null`]) and — with issue #570
+//! — the **eigendecompositions** ([`TensorMap::eigh_full`],
+//! [`TensorMap::eigh_trunc`], [`TensorMap::eigh_vals`],
+//! [`TensorMap::eig_full`], [`TensorMap::eig_trunc`], [`TensorMap::eig_vals`])
+//! and the **`is_hermitian` / `project_*` family** ([`TensorMap::is_hermitian`],
+//! [`TensorMap::is_antihermitian`], [`TensorMap::is_isometric`],
+//! [`TensorMap::is_unitary`], [`TensorMap::is_posdef`],
+//! [`TensorMap::project_hermitian`], [`TensorMap::project_antihermitian`]).
+//!
+//! Issue #570 also gave the facade **compact diagonal storage**: a spectrum
+//! factor — `svd_compact`'s and `svd_trunc`'s `s`, `eigh`/`eig`'s `d` — holds
+//! `Σ_c k_c` values rather than the `Σ_c k_c²` block-diagonal buffer they would
+//! fill, which is what TensorKit's `DiagonalTensorMap` is. It is a storage
+//! property and not a type: no signature mentions it, [`TensorMap::data`] still
+//! reports the dense buffer (materialized once, on demand, shared by every
+//! clone), and the operations that can exploit it — [`TensorMap::compose`],
+//! [`TensorMap::scale`], [`TensorMap::add`], [`TensorMap::adjoint`] and the
+//! reductions — do so silently. The ones that cannot say so in their own
+//! documentation: [`TensorMap::permute`] and its family, and
+//! [`TensorMap::contract`].
 //!
 //! [`TensorMap::compose`] was previously documented here as blocked below this
 //! layer, on a public seam sealed by `LoweredMultiplicityFreeAlgebra`. That
@@ -45,30 +61,29 @@
 //! short-circuit that already had a non-lowered twin. Swapping that one call
 //! opened the seam for every provider, fermionic signs included.
 //!
-//! Everything else is deliberately still absent, each for its own reason:
+//! What is still absent, each for its own reason:
 //!
-//! - The **eigendecompositions** (`eigh_*`, `eig_*`) ride with the typed
-//!   diagonal-storage question of issue #570: `eigh_full`'s `d` factor has no
-//!   seam and would have to instantiate that question rather than inherit it,
-//!   and `eig_*` additionally needs a per-method `D::Eig` bound. Shipping part
-//!   of the family would leave a broken parity row. The erased `compose`'s
-//!   diagonal fast paths ride with the same question, for the same reason.
+//! - The **matrix functions** (`exp`, `inv`, `pinv`, `sqrt`) are their own
+//!   phase. `exp` and `sqrt` ride on the eigendecompositions that just landed;
+//!   `inv` and `pinv` need a diagonal-aware elementwise layer over the compact
+//!   storage, plus `pinv`'s relative-cutoff policy, which is a decision rather
+//!   than a port. None of them is a one-liner over what is here.
+//! - **Outer multiplicity** (SU(3) and any other `Generic` provider) is out at
+//!   the admission boundary, not at this layer: every constructor here consumes
+//!   the multiplicity-free checked root. A `Generic` provider needs its own
+//!   admission path before any of this surface can accept one.
+//! - **Device placement** is absent for the same structural reason: the payload
+//!   is a `Vec<D>` host buffer by construction, and there is no dtype or
+//!   placement token to reconcile because `D` is a type parameter. Adding a
+//!   device would change what the body holds, not what a method promises.
 //! - The **operator overloads** (`impl Add`, `impl Mul`) are out on the
-//!   `Result` argument alone now. An operator cannot return one: the erased
+//!   `Result` argument alone. An operator cannot return one: the erased
 //!   `Mul` precedent panics, and a panicking `*` or `+` as the only spelling
 //!   of an operation contradicts this facade's passthrough-error contract. The
 //!   cross-facade false-friend argument that used to stand beside it expired
 //!   with [`TensorMap::compose`]: `&a * &b` means composition in the erased
 //!   facade, and composition is what this facade would spell it as. Adding
 //!   them later is not a breaking change.
-//! - The **`is_hermitian` / `project_*` family** has lost its structural
-//!   blocker: `is_isometric` needed `compose` and `id`, and both are in. Every
-//!   member but one is now a one-liner over [`TensorMap::add`],
-//!   [`TensorMap::adjoint`], [`TensorMap::norm`], [`TensorMap::compose`] and
-//!   [`TensorMap::id`]. The exception is `is_posdef`, which needs `eigh_vals`,
-//!   so the family lands **when the eigendecompositions do** — as one complete
-//!   row, not as six members and a hole. That is the same rule the entry above
-//!   applies to `eig_*` itself.
 //! - `conj` stays design-gated on its open correctness question for
 //!   non-self-dual sectors. [`TensorMap::adjoint`] is now in, eagerly: see its
 //!   own documentation for why that is TensorKit's `adjoint!` rather than a
