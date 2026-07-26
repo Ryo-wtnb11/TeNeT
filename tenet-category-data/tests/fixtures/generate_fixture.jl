@@ -1,4 +1,16 @@
-using Pkg; Pkg.activate(@__DIR__)
+# Offline generator for fib-categorydata-v0.1.3.txt. Nothing in the shipped
+# crate runs this; it needs Julia and network access and is a manual step.
+#
+# Reproduce in a scratch project (NOT this directory):
+#
+#   julia --project=/tmp/fixture -e 'using Pkg; Pkg.add(url="https://github.com/lkdvos/CategoryData.jl", rev="e793a08a093f6ba890a32c7e57d8e8b347441058"); Pkg.add(name="TensorKitSectors", version="0.3.9")'
+#   julia --project=/tmp/fixture path/to/generate_fixture.jl
+#   mv fixture.txt path/to/fib-categorydata-v0.1.3.txt
+#
+# Values are printed with Julia's shortest round-trip `repr`, and Rust's
+# `str::parse::<f64>()` is correctly rounded, so the fixture recovers
+# bit-for-bit in the tests.
+using Pkg
 using CategoryData, TensorKitSectors, Printf
 
 const objs = collect(values(Object{Fib}))
