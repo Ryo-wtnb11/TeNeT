@@ -1891,9 +1891,10 @@ fn typed_and_erased_svd_compact_agree_byte_for_byte() {
     // the two `s` factors are not byte-comparable. What `s` holds is pinned by
     // the `svd_vals` oracle above and the reconstruction test below.
     //
-    // Dense `s`: one block per coupled sector, k_c² elements each — the ceiling
-    // #570 records. If typed diagonal storage lands this is what changes.
-    assert!(ts.data().len() > typed.svd_vals().unwrap()[0].values.len());
+    // The #570 ceiling, asserted as the exact number it is: one dense block per
+    // coupled sector, k_c² elements each, so 2² + 3² = 13 where diagonal
+    // storage would hold 2 + 3 = 5. This literal is what closing #570 changes.
+    assert_eq!(ts.data().len(), 13);
 }
 
 /// `u * s * vh` through the typed `contract`, for a `[2] <- [1]` factor chain:
@@ -1979,17 +1980,32 @@ fn typed_and_erased_svd_trunc_agree_and_report_the_discarded_weight() {
     }
     assert!(discarded > 0.0, "the fixture must actually truncate");
     assert!((typed_out.error - discarded.sqrt()).abs() < 1e-12);
+
+    // A degenerate but well-formed policy is a policy, not an error: keeping
+    // nothing succeeds and discards the whole spectrum.
+    let empty = typed
+        .svd_trunc(&tenet::typed::Truncation::Rank(0))
+        .expect("Rank(0) is degenerate, not malformed");
+    assert!(empty.s.data().is_empty());
+    assert!(empty
+        .singular_values
+        .iter()
+        .all(|entry| entry.values.is_empty()));
 }
 
 #[test]
 fn a_spectrum_decode_failure_comes_back_as_the_codec_error() {
-    // What: the one input a caller of these methods can actually malform is
-    // the provider itself — every `Truncation` state that fails validation is
-    // unconstructible outside `tenet-matrixalgebra` (the fallible constructors
-    // reject them and the variants are `#[non_exhaustive]`), so there is no
-    // malformed policy to feed. A codec that cannot decode a coupled sector the
-    // engine produced fails the call with the provider's own error instead of
-    // panicking inside the label map.
+    // What: a codec that cannot decode a coupled sector the engine produced
+    // fails the call with the provider's own error instead of panicking inside
+    // the label map.
+    //
+    // This is the Err path worth testing because a degenerate `Truncation` is
+    // not one: `Rank(0)`, `Rank(usize::MAX)` and `All(vec![])` are all
+    // constructible and all legitimately succeed (see the `Rank(0)` assertion
+    // in the truncation test), and the states that would fail validation are
+    // unreachable from outside `tenet-matrixalgebra` — their variants are
+    // `#[non_exhaustive]` and their constructors are fallible. So the provider
+    // is the only input to these methods a caller can actually malform.
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(ExternalZ3::with(Quirk::NarrowDecode));
