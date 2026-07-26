@@ -3156,8 +3156,9 @@ fn compose_rejects_operands_whose_domain_and_codomain_do_not_meet() {
 
     // Matching ranks, mismatched legs: the degeneracies differ, so the two do
     // not meet even though the shapes line up.
+    let z2 = Arc::new(tenet::core::Z2FusionRule);
     let narrow_leg = GradedSpace::try_new(
-        Arc::new(tenet::core::Z2FusionRule),
+        Arc::clone(&z2),
         [
             (tenet::core::Z2Irrep::EVEN, 1),
             (tenet::core::Z2Irrep::ODD, 1),
@@ -3167,7 +3168,40 @@ fn compose_rejects_operands_whose_domain_and_codomain_do_not_meet() {
     .unwrap();
     let narrow =
         TensorMap::from_block_fn(&runtime, [&narrow_leg], [&narrow_leg], typed_fill_value).unwrap();
-    assert!(endo.compose(&narrow).is_err());
+    assert!(endo
+        .compose(&narrow)
+        .unwrap_err()
+        .to_string()
+        .contains("leg degeneracy mismatch"));
+
+    // Matching ranks and matching degeneracies, opposite dual flags.
+    let wide_leg = GradedSpace::try_new(
+        Arc::clone(&z2),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 3),
+        ],
+        true,
+    )
+    .unwrap();
+    let dual_endo =
+        TensorMap::from_block_fn(&runtime, [&wide_leg], [&wide_leg], typed_fill_value).unwrap();
+    assert!(endo
+        .compose(&dual_endo)
+        .unwrap_err()
+        .to_string()
+        .contains("contracted fusion leg duality flags do not match"));
+
+    // Matching ranks and flags, different sector content.
+    let even_only =
+        GradedSpace::try_new(Arc::clone(&z2), [(tenet::core::Z2Irrep::EVEN, 2)], false).unwrap();
+    let even_endo =
+        TensorMap::from_block_fn(&runtime, [&even_only], [&even_only], typed_fill_value).unwrap();
+    assert!(endo
+        .compose(&even_endo)
+        .unwrap_err()
+        .to_string()
+        .contains("dimension mismatch"));
 }
 
 // ---------------------------------------------------------------------------
