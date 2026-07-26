@@ -1837,6 +1837,111 @@ fn typed_z2_spectrum(
 }
 
 #[test]
+fn typed_and_erased_svd_compact_agree_byte_for_byte() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    let (eu, _, evh) = erased.svd_compact().unwrap();
+    let (tu, ts, tvh) = typed.svd_compact().unwrap();
+
+    assert_eq!(tu.data(), eu.data());
+    assert_eq!(tvh.data(), evh.data());
+    // The erased `s` is diagonal storage and the typed one is dense (#570), so
+    // the two `s` factors are not byte-comparable. What `s` holds is pinned by
+    // the `svd_vals` oracle above and the reconstruction test below.
+    //
+    // Dense `s`: one block per coupled sector, k_c² elements each — the ceiling
+    // #570 records. If typed diagonal storage lands this is what changes.
+    assert!(ts.data().len() > typed.svd_vals().unwrap()[0].values.len());
+}
+
+/// `u * s * vh` through the typed `contract`, for a `[2] <- [1]` factor chain:
+/// `u`'s last axis is its bond, `s` is `bond <- bond`, `vh` is `bond <- rest`.
+fn recompose(
+    u: &TensorMap<tenet::core::Z2FusionRule, f64>,
+    s: &TensorMap<tenet::core::Z2FusionRule, f64>,
+    vh: &TensorMap<tenet::core::Z2FusionRule, f64>,
+) -> TensorMap<tenet::core::Z2FusionRule, f64> {
+    let us = u.contract(s, &[2], &[0], &[0, 1, 2]).unwrap();
+    us.contract(vh, &[2], &[0], &[0, 1, 2]).unwrap()
+}
+
+#[test]
+fn svd_compact_reconstructs_the_source_through_the_typed_contract() {
+    // What: the factors really are a factorization in this facade's own
+    // vocabulary. There is no typed `compose`, so the composition runs through
+    // `contract` — bosonic here, where the two agree.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, typed) = z2_oracle_pair(&runtime);
+
+    let (u, s, vh) = typed.svd_compact().unwrap();
+    let recon = recompose(&u, &s, &vh);
+
+    assert_eq!(recon.data().len(), typed.data().len());
+    for (got, want) in recon.data().iter().zip(typed.data()) {
+        assert!(
+            (got - want).abs() <= 1e-12 * want.abs().max(1.0),
+            "{got} vs {want}"
+        );
+    }
+}
+
+#[test]
+fn typed_and_erased_svd_full_agree_byte_for_byte() {
+    // `svd_full`'s `s` is dense rectangular on both sides — TensorKit's own
+    // shape — so unlike `svd_compact` all three factors compare bitwise.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    let (eu, es, evh) = erased.svd_full().unwrap();
+    let (tu, ts, tvh) = typed.svd_full().unwrap();
+
+    assert_eq!(tu.data(), eu.data());
+    assert_eq!(ts.data(), es.data());
+    assert_eq!(tvh.data(), evh.data());
+}
+
+#[test]
+fn typed_and_erased_svd_trunc_agree_and_report_the_discarded_weight() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    let truncation = tenet::typed::Truncation::rank(2);
+    let erased_out = erased.svd_trunc(&truncation).unwrap();
+    let typed_out = typed.svd_trunc(&truncation).unwrap();
+
+    assert_eq!(typed_out.u.data(), erased_out.u.data());
+    assert_eq!(typed_out.vh.data(), erased_out.vh.data());
+    assert_eq!(typed_out.error, erased_out.error);
+    assert_eq!(
+        typed_z2_spectrum(&typed_out.singular_values),
+        erased_z2_spectrum(&erased_out.singular_values)
+    );
+
+    // The reported error is the 2-norm of everything the truncation dropped.
+    // Z2 is a group, so every quantum dimension is one and the weighting is
+    // the identity — the check is then a plain sum of squares.
+    let full = typed.svd_vals().unwrap();
+    let kept = typed_z2_spectrum(&typed_out.singular_values);
+    let mut discarded = 0.0;
+    for entry in &full {
+        let kept_here = kept
+            .iter()
+            .find(|(sector, _)| sector == &entry.sector)
+            .map_or(0, |(_, values)| values.len());
+        for value in &entry.values[kept_here..] {
+            discarded += value * value;
+        }
+    }
+    assert!(discarded > 0.0, "the fixture must actually truncate");
+    assert!((typed_out.error - discarded.sqrt()).abs() < 1e-12);
+}
+
+#[test]
 fn a_spectrum_decode_failure_comes_back_as_the_codec_error() {
     // What: the one input a caller of these methods can actually malform is
     // the provider itself — every `Truncation` state that fails validation is
@@ -1861,6 +1966,12 @@ fn a_spectrum_decode_failure_comes_back_as_the_codec_error() {
 
     assert!(matches!(
         tensor.svd_vals().unwrap_err(),
+        tenet::prelude::Error::FusionAlgebra(_)
+    ));
+    assert!(matches!(
+        tensor
+            .svd_trunc(&tenet::typed::Truncation::Full)
+            .unwrap_err(),
         tenet::prelude::Error::FusionAlgebra(_)
     ));
 }
@@ -1889,4 +2000,32 @@ fn svd_vals_reports_decoded_labels_sorted_by_label() {
     // Standing up a provider whose `Ord` is deliberately reversed would be a
     // second full rule implementation to observe a sort that this test already
     // pins by its own predicate.
+}
+
+#[test]
+fn decompositions_carry_an_external_provider_with_its_own_labels() {
+    // A downstream provider drives the same surface, and its spectrum comes
+    // back in its own labels rather than raw ids.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    let spectrum = tensor.svd_vals().unwrap();
+    assert!(!spectrum.is_empty());
+    assert!(spectrum.iter().all(|entry| entry.sector.0 < 3));
+    assert!(spectrum.windows(2).all(|w| w[0].sector < w[1].sector));
+
+    let out = tensor.svd_trunc(&tenet::typed::Truncation::Full).unwrap();
+    assert_eq!(out.error, 0.0);
+    assert_eq!(
+        out.singular_values
+            .iter()
+            .map(|entry| entry.sector)
+            .collect::<Vec<_>>(),
+        spectrum
+            .iter()
+            .map(|entry| entry.sector)
+            .collect::<Vec<_>>()
+    );
 }

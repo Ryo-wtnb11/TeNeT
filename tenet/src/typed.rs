@@ -73,6 +73,13 @@ pub use crate::error::Error;
 /// itself stays out of the prelude, because its [`TensorMap`] would collide
 /// with the erased [`tenet_core::TensorMap`] already exported there.
 pub use crate::runtime::Runtime;
+/// Re-exported for the same reason as [`Error`] and [`Runtime`]:
+/// [`TensorMap::svd_trunc`] takes one, so `use tenet::typed::*` would not be
+/// self-sufficient without it.
+pub use tenet_matrixalgebra::Truncation;
+
+use tenet_matrixalgebra::BoundDynFactor;
+
 use crate::tensor::{apply_fill, with_planar_axes, Fill, PlanarRequestKind, TensorScalar};
 use crate::typed_tensor_core::{
     tensorcontract_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
@@ -355,6 +362,55 @@ pub struct SectorSpectrum<S> {
     pub sector: S,
     /// That sector's values, descending by magnitude.
     pub values: Vec<f64>,
+}
+
+/// Result of [`TensorMap::svd_trunc`]: `t ~ u * s * vh` with the truncated
+/// bond (TensorKit 0.17 `svd_trunc`, which returns `(U, S, Vᴴ, ϵ)`).
+// The `SectorCodec` bound is the field types' own: `singular_values` is
+// labelled, so the struct cannot be spelled without it.
+pub struct SvdTrunc<R: SectorCodec, D> {
+    /// Left isometry `u : codomain <- bond`.
+    pub u: TensorMap<R, D>,
+    /// Singular-value factor `s : bond <- bond`. Dense — see the order-parity
+    /// gap on [`TensorMap::svd_compact`] (issue #570).
+    pub s: TensorMap<R, D>,
+    /// Right isometry `vh : bond <- domain`.
+    pub vh: TensorMap<R, D>,
+    /// Kept singular values per coupled sector, sorted by provider label.
+    pub singular_values: Vec<SectorSpectrum<R::Sector>>,
+    /// Quantum-dimension-weighted 2-norm of everything discarded.
+    pub error: f64,
+}
+
+// Why hand-written, as for `TensorMap` itself: the derives would demand
+// `R: Clone + Debug`, and neither is needed — the provider lives behind an
+// `Arc` and its labels, not the rule, are what a diagnostic shows.
+impl<R, D> Clone for SvdTrunc<R, D>
+where
+    R: SectorCodec,
+{
+    fn clone(&self) -> Self {
+        Self {
+            u: self.u.clone(),
+            s: self.s.clone(),
+            vh: self.vh.clone(),
+            singular_values: self.singular_values.clone(),
+            error: self.error,
+        }
+    }
+}
+
+impl<R, D> core::fmt::Debug for SvdTrunc<R, D>
+where
+    R: SectorCodec,
+{
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("SvdTrunc")
+            .field("singular_values", &self.singular_values)
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Storage shared by every clone of one typed tensor map: the admitted space
@@ -820,6 +876,18 @@ where
         })
     }
 
+    /// Wraps one factor the matrix-algebra seam produced into a typed tensor
+    /// map. `BoundDynFactor::into_parts` hands back exactly the pair
+    /// [`TypedTensorBody`] stores, so there is nothing to validate here — the
+    /// seam already certified the space against its own data.
+    fn wrap_bound_factor(&self, factor: BoundDynFactor<R, D>) -> Self {
+        let (space, data) = factor.into_parts();
+        Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody { space, data }),
+        }
+    }
+
     /// Decodes a seam spectrum into provider labels and sorts it by label.
     ///
     /// Every id here came out of the engine's own coupled-sector enumeration,
@@ -850,11 +918,102 @@ where
         BoundDynamicTensorRef::try_new(&self.body.space, &self.body.data).map_err(Error::from)
     }
 
+    /// TensorKit 0.17 / MatrixAlgebraKit `svd_compact`: `t = u * s * vh` with
+    /// the bond `min(rows, cols)` per coupled sector.
+    ///
+    /// Returns `(u, s, vh)` with `u : codomain <- bond`, `s : bond <- bond`
+    /// and `vh : bond <- domain`.
+    ///
+    /// # Order-parity gap (issue #570)
+    ///
+    /// TensorKit's `svd_compact` returns `s` as a `DiagonalTensorMap`, and the
+    /// erased [`crate::prelude::Tensor`] matches it with diagonal storage. This
+    /// facade has only dense block storage, so `s` costs `Σ_c k_c²` instead of
+    /// `Σ_c k_c`, and a downstream `u * s * vh` runs the dense GEMM path rather
+    /// than the O(d·n) block scaling. Interim guidance: a caller that only
+    /// needs the spectrum should use [`Self::svd_vals`], which never
+    /// materializes `s` at all. When typed diagonal storage lands the signature
+    /// does not change — only the storage behind `s`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`]
+    /// straight from the matrix-algebra seam. As everywhere in this facade
+    /// there are no pre-checks here: the seam owns the rules, and a second copy
+    /// would be free to drift.
+    pub fn svd_compact(&self) -> Result<(Self, Self, Self), Error> {
+        // Dense lease only, matching the erased sibling: a factorization runs
+        // entirely on the dense-executor boundary, so leasing the (scarcer)
+        // recoupling context here would serialize unrelated work for nothing.
+        let mut dense = self.runtime.lease_dense();
+        let out = tenet_matrixalgebra::svd_compact_dyn(dense.dense(), &self.bound_ref()?)?;
+        let (u, s, vh, _) = out.into_parts();
+        Ok((
+            self.wrap_bound_factor(u),
+            self.wrap_bound_factor(s),
+            self.wrap_bound_factor(vh),
+        ))
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `svd_full`: `t = u * s * vh` with
+    /// square unitaries and a rectangular `s` per coupled sector.
+    ///
+    /// Returns `(u, s, vh)` with `u : codomain <- W`, `s : W <- W'` and
+    /// `vh : W' <- domain`.
+    ///
+    /// Unlike [`Self::svd_compact`] this carries no order-parity gap: TensorKit's
+    /// own `svd_full` builds `s` as a dense rectangular tensor
+    /// (`similar(t, real(scalartype(t)), V_cod <- V_dom)`), so a dense `s` here
+    /// is TK-exact.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    pub fn svd_full(&self) -> Result<(Self, Self, Self), Error> {
+        let mut dense = self.runtime.lease_dense();
+        let out = tenet_matrixalgebra::svd_full_dyn(dense.dense(), &self.bound_ref()?)?;
+        let (u, s, vh, _) = out.into_parts();
+        Ok((
+            self.wrap_bound_factor(u),
+            self.wrap_bound_factor(s),
+            self.wrap_bound_factor(vh),
+        ))
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `svd_trunc`: `t ~ u * s * vh` with the
+    /// bond truncated by `truncation`; see [`SvdTrunc`].
+    ///
+    /// TensorKit returns the four-tuple `(U, S, Vᴴ, ϵ)`; this returns them as a
+    /// named struct, following the same rule the erased facade uses — tuples up
+    /// to three, a struct beyond.
+    ///
+    /// The dense-`s` order-parity gap of [`Self::svd_compact`] (issue #570)
+    /// applies here verbatim, with the same interim guidance.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] from
+    /// the seam, including a malformed `truncation` — the truncation policy is
+    /// validated where it is applied, not here.
+    pub fn svd_trunc(&self, truncation: &Truncation) -> Result<SvdTrunc<R, D>, Error> {
+        let mut dense = self.runtime.lease_dense();
+        let out =
+            tenet_matrixalgebra::svd_trunc_dyn(dense.dense(), &self.bound_ref()?, truncation)?;
+        let (u, s, vh, singular_values, error) = out.into_parts();
+        Ok(SvdTrunc {
+            u: self.wrap_bound_factor(u),
+            s: self.wrap_bound_factor(s),
+            vh: self.wrap_bound_factor(vh),
+            singular_values: self.decode_spectrum(singular_values)?,
+            error,
+        })
+    }
+
     /// TensorKit 0.17 / MatrixAlgebraKit `svd_vals`: the singular values per
     /// coupled sector, and nothing else.
     ///
-    /// No factor tensor is built at all: the seam runs the no-vector LAPACK
-    /// path per coupled sector.
+    /// No factor tensor is built, so this is also the way around the dense-`s`
+    /// ceiling documented on [`Self::svd_compact`].
     ///
     /// # Errors
     ///
