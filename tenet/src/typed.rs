@@ -34,7 +34,16 @@
 //! operations of issue #568: [`TensorMap::add`], [`TensorMap::scale`],
 //! [`TensorMap::norm`], [`TensorMap::norm_inf`], [`TensorMap::normalize`],
 //! [`TensorMap::inner`], [`TensorMap::dot`], [`TensorMap::tr`],
-//! [`TensorMap::trace_pairs`] and [`TensorMap::adjoint`].
+//! [`TensorMap::trace_pairs`] and [`TensorMap::adjoint`] — plus the
+//! composition operations of issue #569: [`TensorMap::compose`] and
+//! [`TensorMap::id`].
+//!
+//! [`TensorMap::compose`] was previously documented here as blocked below this
+//! layer, on a public seam sealed by `LoweredMultiplicityFreeAlgebra`. That
+//! diagnosis was wrong: the composition path never decoded a typed sector, and
+//! the lowered bound was inherited from one inner call in a bosonic
+//! short-circuit that already had a non-lowered twin. Swapping that one call
+//! opened the seam for every provider, fermionic signs included.
 //!
 //! Everything else is deliberately still absent, each for its own reason:
 //!
@@ -42,30 +51,23 @@
 //!   diagonal-storage question of issue #570: `eigh_full`'s `d` factor has no
 //!   seam and would have to instantiate that question rather than inherit it,
 //!   and `eig_*` additionally needs a per-method `D::Eig` bound. Shipping part
-//!   of the family would leave a broken parity row.
-//! - The **operator overloads** (`impl Add`, `impl Mul`) are out on purpose.
-//!   `&a * &b` means [`crate::prelude::Tensor::compose`] in the erased facade
-//!   and this facade has no `compose`, so a typed `Mul` meaning scalar
-//!   multiplication would be a cross-facade false friend. And an operator
-//!   cannot return a `Result`: the erased `Mul` precedent panics, and a
-//!   panicking `+` as the only spelling of addition contradicts this facade's
-//!   passthrough-error contract. Adding them later is not a breaking change.
-//! - The **`is_hermitian` / `project_*` family** is blocked: three of its seven
-//!   members need something this facade does not have — `is_isometric` needs
-//!   `compose` and `id`, `is_unitary` delegates to it, and `is_posdef` needs
-//!   `eigh_vals`. Shipping the other four would leave the broken parity row
-//!   this doc refuses everywhere else. Those four (`is_hermitian`,
-//!   `is_antihermitian`, `project_hermitian`, `project_antihermitian`) are now
-//!   trivially reachable, though — each is a one-liner over
-//!   [`TensorMap::add`], [`TensorMap::adjoint`] and [`TensorMap::norm`] — so a
-//!   future phase closes the family as soon as `compose`, `id` and `eigh_vals`
-//!   land.
-//! - **Composition** — TensorKit `A * B`, which unlike [`TensorMap::contract`]
-//!   never twists dual legs — is blocked below this layer: fermionic compose
-//!   needs a new public seam over `LoweredMultiplicityFreeAlgebra`, which
-//!   `tenet-core` seals, and a silently
-//!   bosonic-only `compose` would return wrong fermionic signs rather than an
-//!   error.
+//!   of the family would leave a broken parity row. The erased `compose`'s
+//!   diagonal fast paths ride with the same question, for the same reason.
+//! - The **operator overloads** (`impl Add`, `impl Mul`) are out on the
+//!   `Result` argument alone now. An operator cannot return one: the erased
+//!   `Mul` precedent panics, and a panicking `*` or `+` as the only spelling
+//!   of an operation contradicts this facade's passthrough-error contract. The
+//!   cross-facade false-friend argument that used to stand beside it expired
+//!   with [`TensorMap::compose`]: `&a * &b` means composition in the erased
+//!   facade, and composition is what this facade would spell it as. Adding
+//!   them later is not a breaking change.
+//! - The **`is_hermitian` / `project_*` family** is now unblocked in full:
+//!   `is_isometric` needed `compose` and `id`, and both are in, so only
+//!   `is_posdef`'s `eigh_vals` is still missing — and that one is a
+//!   dependency, not a blocker, since the family can land beside it. Every
+//!   other member is a one-liner over [`TensorMap::add`],
+//!   [`TensorMap::adjoint`], [`TensorMap::norm`], [`TensorMap::compose`] and
+//!   [`TensorMap::id`]. A future phase closes the row.
 //! - `conj` stays design-gated on its open correctness question for
 //!   non-self-dual sectors. [`TensorMap::adjoint`] is now in, eagerly: see its
 //!   own documentation for why that is TensorKit's `adjoint!` rather than a
@@ -904,9 +906,9 @@ where
     /// (and the erased [`crate::prelude::Tensor::contract`]), this **twists**
     /// dual contracted legs with the fermionic supertrace twist — unlike
     /// composition (TensorKit `A * B` / `mul!`), which never does. Bosonic
-    /// rules are unaffected; fermionic rules can differ by signs. There is no
-    /// typed `compose` yet, so this is the only contraction semantics the
-    /// typed facade offers.
+    /// rules are unaffected; fermionic rules can differ by signs.
+    /// [`Self::compose`] is the other semantics, and its documentation states
+    /// the exact relation between the two.
     ///
     /// The result is bound to `self`'s provider allocation, the same
     /// left-authority rule [`Self::zeros`] uses for its first leg: the two

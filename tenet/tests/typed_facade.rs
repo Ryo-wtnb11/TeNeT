@@ -3212,7 +3212,7 @@ fn typed_and_erased_id_agree_byte_for_byte() {
     // Not the zero tensor, and not the all-ones one either: a genuine diagonal.
     // 14 even + 11 odd fused states: `2*1 + 3*4` and `2*4 + 3*1`.
     assert_eq!(typed.data().iter().filter(|&&v| v == 1.0).count(), 25);
-    assert!(typed.data().iter().any(|&v| v == 0.0));
+    assert!(typed.data().contains(&0.0));
 }
 
 #[test]
