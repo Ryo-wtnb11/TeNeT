@@ -2911,3 +2911,261 @@ fn fermionic_trace_pairs_is_the_supertrace_and_tr_is_not() {
         "the fermionic supertrace must not coincide with the positive trace"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6 (issue #569), slice 1: `TensorMap::compose`.
+// ---------------------------------------------------------------------------
+
+/// Fill value from an fz2 fusion-tree key, weighted by position exactly as
+/// [`erased_fill_value`] is: the fermionic pair below needs a fill whose every
+/// element is distinct, so a sign flip on any single block is visible.
+fn fermionic_erased_fill(key: &tenet::prelude::BlockKey, indices: &[usize]) -> f64 {
+    let pair = key.as_fusion_tree_pair().expect("fusion-tree block");
+    let parity = |id| {
+        SectorCodec::decode_sector(&tenet::core::FermionParityFusionRule, id)
+            .expect("built-in codec decodes its own ids")
+            .parity()
+    };
+    let mut value = f64::from(parity(pair.codomain_tree().coupled())) * 1000.0;
+    for (position, &id) in pair.codomain_tree().uncoupled().iter().enumerate() {
+        value += f64::from(parity(id)) * 100.0 * (position + 1) as f64;
+    }
+    for (position, &id) in pair.domain_tree().uncoupled().iter().enumerate() {
+        value += f64::from(parity(id)) * 10.0 * (position + 1) as f64;
+    }
+    value + 1.0 + indices.iter().sum::<usize>() as f64
+}
+
+/// The same value from the typed labels, so the two facades' operands are the
+/// same tensor before either composition runs.
+fn fermionic_typed_fill(
+    sectors: &tenet::typed::BlockFusionTrees<tenet::core::Z2Irrep>,
+    indices: &[usize],
+) -> f64 {
+    let mut value = f64::from(sectors.coupled().parity()) * 1000.0;
+    for (position, label) in sectors.codomain_uncoupled().iter().enumerate() {
+        value += f64::from(label.parity()) * 100.0 * (position + 1) as f64;
+    }
+    for (position, label) in sectors.domain_uncoupled().iter().enumerate() {
+        value += f64::from(label.parity()) * 10.0 * (position + 1) as f64;
+    }
+    value + 1.0 + indices.iter().sum::<usize>() as f64
+}
+
+/// `a : [v] <- [v*, v]` and `b : [v*, v] <- [v]` on both facades.
+///
+/// Composition contracts two legs here, exactly one of which is **dual** —
+/// and a dual leg is the only place a fermionic twist can act. The mixed pair
+/// is deliberate: with every contracted leg dual, "twist the dual contracted
+/// legs" and "twist all contracted legs" would be the same statement, and the
+/// twist identity below would not be pinned to a leg set at all.
+#[allow(clippy::type_complexity)]
+fn fermionic_compose_pair(
+    runtime: &Runtime,
+) -> (
+    (tenet::prelude::Tensor, tenet::prelude::Tensor),
+    (
+        TensorMap<tenet::core::FermionParityFusionRule, f64>,
+        TensorMap<tenet::core::FermionParityFusionRule, f64>,
+    ),
+) {
+    let space = tenet::prelude::Space::fz2([(0, 1), (1, 2)]).unwrap();
+    let dual = space.dual();
+    let erased_a = tenet::prelude::Tensor::from_block_fn(
+        runtime,
+        [&space],
+        [&dual, &space],
+        fermionic_erased_fill,
+    )
+    .unwrap();
+    let erased_b = tenet::prelude::Tensor::from_block_fn(
+        runtime,
+        [&dual, &space],
+        [&space],
+        fermionic_erased_fill,
+    )
+    .unwrap();
+
+    let leg = fermionic_leg_with(&[1, 2]);
+    let leg_dual = leg.try_dual().unwrap();
+    let typed_a =
+        TensorMap::from_block_fn(runtime, [&leg], [&leg_dual, &leg], fermionic_typed_fill).unwrap();
+    let typed_b =
+        TensorMap::from_block_fn(runtime, [&leg_dual, &leg], [&leg], fermionic_typed_fill).unwrap();
+
+    // The operands themselves must be one tensor on both facades, or a
+    // difference downstream would not be about composition at all.
+    assert_eq!(typed_a.data(), erased_a.data());
+    assert_eq!(typed_b.data(), erased_b.data());
+    ((erased_a, erased_b), (typed_a, typed_b))
+}
+
+/// [`fermionic_leg`] with explicit `[even, odd]` degeneracies.
+fn fermionic_leg_with(
+    degeneracies: &[usize; 2],
+) -> GradedSpace<tenet::core::FermionParityFusionRule> {
+    GradedSpace::try_new(
+        Arc::new(tenet::core::FermionParityFusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, degeneracies[0]),
+            (tenet::core::Z2Irrep::ODD, degeneracies[1]),
+        ],
+        false,
+    )
+    .expect("fermionic leg is well formed")
+}
+
+#[test]
+fn typed_and_erased_compose_agree_byte_for_byte_on_a_fermionic_provider() {
+    // What: the typed compose is the erased compose, on the one provider whose
+    // braiding is not symmetric — so this pins the fermionic signs, not just
+    // the arithmetic. A bosonic-only compose passes every other test here and
+    // fails this one.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let ((erased_a, erased_b), (typed_a, typed_b)) = fermionic_compose_pair(&runtime);
+
+    let typed = typed_a.compose(&typed_b).unwrap();
+
+    assert_eq!(typed.data(), erased_a.compose(&erased_b).unwrap().data());
+    assert_eq!(typed.codomain().len(), 1);
+    assert_eq!(typed.domain().len(), 1);
+}
+
+#[test]
+fn fermionic_compose_is_contract_against_a_twisted_right_operand() {
+    // What: the exact relation between the two contraction semantics —
+    // `compose(a, b) == contract(a, twist(b, b's dual codomain legs))`. The
+    // twisted operand is built through `from_block_fn` rather than through the
+    // erased facade's `twist`: theta is -1 on an odd sector and +1 otherwise,
+    // so the twisted tensor is a one-line fill here, and building it typed
+    // keeps the identity inside this facade instead of borrowing the erased
+    // one to state it.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, (typed_a, typed_b)) = fermionic_compose_pair(&runtime);
+
+    let leg = fermionic_leg_with(&[1, 2]);
+    let leg_dual = leg.try_dual().unwrap();
+    let twisted_b =
+        TensorMap::from_block_fn(&runtime, [&leg_dual, &leg], [&leg], |sectors, indices| {
+            // Codomain leg 0 is the dual one; leg 1 is contracted too but is
+            // not dual, so theta does not act on it.
+            let theta = if sectors.codomain_uncoupled()[0] == tenet::core::Z2Irrep::ODD {
+                -1.0
+            } else {
+                1.0
+            };
+            theta * fermionic_typed_fill(sectors, indices)
+        })
+        .unwrap();
+
+    assert_eq!(
+        typed_a.compose(&typed_b).unwrap().data(),
+        typed_a
+            .contract(&twisted_b, &[1, 2], &[0, 1], &[0, 1])
+            .unwrap()
+            .data()
+    );
+}
+
+#[test]
+fn fermionic_compose_and_contract_disagree() {
+    // What: the sign is real. If `compose` were routed through the ordinary
+    // contraction the two would coincide and this assertion would fail.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, (typed_a, typed_b)) = fermionic_compose_pair(&runtime);
+
+    assert_ne!(
+        typed_a.compose(&typed_b).unwrap().data(),
+        typed_a
+            .contract(&typed_b, &[1, 2], &[0, 1], &[0, 1])
+            .unwrap()
+            .data()
+    );
+}
+
+#[test]
+fn bosonic_compose_is_contract_with_the_identity_output_order() {
+    // What: for a symmetric braiding the supertrace twist is the identity, so
+    // the two semantics coincide — and the typed result still matches the
+    // erased sibling byte for byte.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+
+    let composed = typed.compose(&typed).unwrap();
+
+    assert_eq!(composed.data(), erased.compose(&erased).unwrap().data());
+    assert_eq!(
+        composed.data(),
+        typed.contract(&typed, &[1], &[0], &[0, 1]).unwrap().data()
+    );
+}
+
+#[test]
+fn compose_contracts_the_whole_domain_against_the_whole_codomain() {
+    // What: the derived axes. `[v, v] <- [v]` composed with `[v] <- [v, v]`
+    // contracts exactly the one shared leg and leaves `[v, v] <- [v, v]`, and
+    // the same tensor comes back from the explicit contraction. Perturbing
+    // either axis derivation changes the shape or the numbers here.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, tall) = z2_oracle_pair_split(&runtime, 2);
+    let (_, wide) = z2_oracle_pair_split(&runtime, 1);
+
+    let composed = tall.compose(&wide).unwrap();
+
+    assert_eq!(composed.codomain().len(), 2);
+    assert_eq!(composed.domain().len(), 2);
+    assert_eq!(
+        composed.data(),
+        tall.contract(&wide, &[2], &[0], &[0, 1, 2, 3])
+            .unwrap()
+            .data()
+    );
+}
+
+#[test]
+fn compose_rejects_operands_from_different_runtimes() {
+    let _guard = cache_lock();
+    let (_, left) = z2_endo_oracle_pair(&runtime());
+    let (_, right) = z2_endo_oracle_pair(&runtime());
+
+    assert!(matches!(
+        left.compose(&right).unwrap_err(),
+        tenet::prelude::Error::RuntimeMismatch
+    ));
+}
+
+#[test]
+fn compose_rejects_operands_whose_domain_and_codomain_do_not_meet() {
+    // A rank mismatch and a matching-rank but non-dual leg mismatch, both from
+    // the expert layer rather than from a pre-check here.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, endo) = z2_endo_oracle_pair(&runtime);
+    let (_, tall) = z2_oracle_pair_split(&runtime, 2);
+    let (_, wide) = z2_oracle_pair_split(&runtime, 1);
+
+    // Rank mismatch in both directions: one domain leg against two codomain
+    // legs, and two domain legs against one codomain leg.
+    assert!(endo.compose(&tall).is_err());
+    assert!(wide.compose(&endo).is_err());
+
+    // Matching ranks, mismatched legs: the degeneracies differ, so the two do
+    // not meet even though the shapes line up.
+    let narrow_leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 1),
+            (tenet::core::Z2Irrep::ODD, 1),
+        ],
+        false,
+    )
+    .unwrap();
+    let narrow =
+        TensorMap::from_block_fn(&runtime, [&narrow_leg], [&narrow_leg], typed_fill_value).unwrap();
+    assert!(endo.compose(&narrow).is_err());
+}

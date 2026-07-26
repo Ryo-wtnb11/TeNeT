@@ -1,7 +1,7 @@
 use tenet_core::{MultiplicityFreeRigidSymbols, RuleIdentity};
 use tenet_tensors::{
-    BoundDynamicFusionMapSpace, BoundDynamicTensorRef, OutputAxisOrder, TensorContractSpec,
-    TreeTransformOperation, TreeTransformRuleCacheKey,
+    BoundDynamicFusionMapSpace, BoundDynamicTensorRef, FusionOperand, OutputAxisOrder,
+    TensorContractSpec, TreeTransformOperation, TreeTransformRuleCacheKey,
 };
 
 use crate::runtime::Ctx;
@@ -79,6 +79,51 @@ where
         rhs.space(),
         rhs.data(),
         TensorContractSpec::new(lhs_axes, rhs_axes, output_order),
+        D::from_real(1.0),
+        D::from_real(0.0),
+    )?;
+    Ok((destination, data))
+}
+
+/// Categorical composition (TensorKit `A * B` / `mul!`) of two owned
+/// multiplicity-free operands.
+///
+/// Differs from [`tensorcontract_owned_multiplicity_free`] in exactly two
+/// places: the output order is fixed to the identity (composition has no
+/// re-ordering freedom — the open axes keep their sides), and the seam is the
+/// composition one, which never inserts the fermionic supertrace twist.
+///
+/// The operands are always direct: this facade has no lazy adjoint view, so
+/// there is no conjugated storage for [`tenet_tensors::FusionOperand`] to
+/// separate from its logical geometry.
+pub(crate) fn tensorcompose_owned_multiplicity_free<R, D>(
+    context: &mut Ctx<D, RuleIdentity>,
+    lhs: BoundDynamicTensorRef<'_, R, D>,
+    rhs: BoundDynamicTensorRef<'_, R, D>,
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), tenet_tensors::OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
+    D: UserScalar,
+{
+    let destination = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+        lhs.space(),
+        rhs.space(),
+        lhs_axes,
+        rhs_axes,
+        OutputAxisOrder::identity(),
+    )?;
+    let mut data = vec![D::from_real(0.0); destination.space().required_len()?];
+    context.tensorcompose_fusion_dyn_into(
+        &destination,
+        &mut data,
+        FusionOperand::direct(lhs.space().space()),
+        lhs.data(),
+        FusionOperand::direct(rhs.space().space()),
+        rhs.data(),
+        lhs_axes,
+        rhs_axes,
         D::from_real(1.0),
         D::from_real(0.0),
     )?;

@@ -111,7 +111,8 @@ use crate::tensor::{
     TensorScalar,
 };
 use crate::typed_tensor_core::{
-    tensorcontract_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
+    tensorcompose_owned_multiplicity_free, tensorcontract_owned_multiplicity_free,
+    tree_transform_owned_multiplicity_free,
 };
 
 /// One tensor leg: a provider plus the sector-to-degeneracy map of that axis
@@ -904,6 +905,65 @@ where
             // expert-layer borrow type, and a `&[usize]` says the same thing
             // at the facade without a second public vocabulary.
             OutputAxisOrder::from_axes(output_axes),
+        )?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody { space, data }),
+        })
+    }
+
+    /// Categorical composition of two tensor maps, TensorKit `A * B` / `mul!`:
+    /// `self`'s whole domain is contracted against `other`'s whole codomain,
+    /// leaving `self.codomain() <- other.domain()`.
+    ///
+    /// **Fermionic semantics**: unlike [`Self::contract`] (TensorKit
+    /// `tensorcontract!` / `@tensor`), composition never twists dual
+    /// contracted legs — there is no supertrace here. Bosonic rules cannot
+    /// tell the two apart; a fermionic one differs by a sign on every dual
+    /// contracted leg carrying an odd sector, so the exact relation is
+    /// `self.compose(other) == self.contract(twist(other, other's dual
+    /// codomain legs), ..)`. Reach for `compose` when you mean operator
+    /// multiplication of tensor maps, and for `contract` when you mean
+    /// index-notation contraction.
+    ///
+    /// The axes are not arguments, deliberately: composition is defined by the
+    /// codomain/domain split itself, and both TensorKit's `*` and the erased
+    /// [`crate::prelude::Tensor::compose`] take none.
+    ///
+    /// The result is bound to `self`'s provider allocation — the same
+    /// left-authority rule as [`Self::contract`] and [`Self::zeros`].
+    ///
+    /// Why no diagonal fast paths, which the erased sibling has for `t * D`
+    /// and `D * t`: this facade has no diagonal storage to detect. They ride
+    /// with the typed diagonal-storage question of issue #570, and are a pure
+    /// cost question rather than a semantic one — the dense route computes the
+    /// same tensor.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::RuntimeMismatch`] when the operands belong to different
+    ///   runtimes, as for [`Self::contract`].
+    /// - [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`]
+    ///   when the two are not composable — mismatched ranks, legs that are not
+    ///   mutually dual, or providers reporting different rule identities.
+    ///   Those come back from the expert layer, which owns the rules.
+    #[doc(alias = "mul")]
+    pub fn compose(&self, other: &Self) -> Result<Self, Error> {
+        // Runtime first, exactly as `contract`: crossing runtimes is a
+        // trust-boundary violation rather than an algebra error, and the
+        // expert layer never sees the two runtimes.
+        if !self.runtime.same_runtime(&other.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        let lhs_axes: Vec<usize> = (self.codomain_rank()..self.rank()).collect();
+        let rhs_axes: Vec<usize> = (0..other.codomain_rank()).collect();
+        let mut lease = self.runtime.lease_context()?;
+        let (space, data) = tensorcompose_owned_multiplicity_free(
+            lease.context().multiplicity_free_lane::<D>(),
+            BoundDynamicTensorRef::try_new(&self.body.space, &self.body.data)?,
+            BoundDynamicTensorRef::try_new(&other.body.space, &other.body.data)?,
+            &lhs_axes,
+            &rhs_axes,
         )?;
         Ok(Self {
             runtime: self.runtime.clone(),
