@@ -34,7 +34,16 @@
 //! operations of issue #568: [`TensorMap::add`], [`TensorMap::scale`],
 //! [`TensorMap::norm`], [`TensorMap::norm_inf`], [`TensorMap::normalize`],
 //! [`TensorMap::inner`], [`TensorMap::dot`], [`TensorMap::tr`],
-//! [`TensorMap::trace_pairs`] and [`TensorMap::adjoint`].
+//! [`TensorMap::trace_pairs`] and [`TensorMap::adjoint`] — plus the
+//! composition operations of issue #569: [`TensorMap::compose`] and
+//! [`TensorMap::id`].
+//!
+//! [`TensorMap::compose`] was previously documented here as blocked below this
+//! layer, on a public seam sealed by `LoweredMultiplicityFreeAlgebra`. That
+//! diagnosis was wrong: the composition path never decoded a typed sector, and
+//! the lowered bound was inherited from one inner call in a bosonic
+//! short-circuit that already had a non-lowered twin. Swapping that one call
+//! opened the seam for every provider, fermionic signs included.
 //!
 //! Everything else is deliberately still absent, each for its own reason:
 //!
@@ -42,30 +51,24 @@
 //!   diagonal-storage question of issue #570: `eigh_full`'s `d` factor has no
 //!   seam and would have to instantiate that question rather than inherit it,
 //!   and `eig_*` additionally needs a per-method `D::Eig` bound. Shipping part
-//!   of the family would leave a broken parity row.
-//! - The **operator overloads** (`impl Add`, `impl Mul`) are out on purpose.
-//!   `&a * &b` means [`crate::prelude::Tensor::compose`] in the erased facade
-//!   and this facade has no `compose`, so a typed `Mul` meaning scalar
-//!   multiplication would be a cross-facade false friend. And an operator
-//!   cannot return a `Result`: the erased `Mul` precedent panics, and a
-//!   panicking `+` as the only spelling of addition contradicts this facade's
-//!   passthrough-error contract. Adding them later is not a breaking change.
-//! - The **`is_hermitian` / `project_*` family** is blocked: three of its seven
-//!   members need something this facade does not have — `is_isometric` needs
-//!   `compose` and `id`, `is_unitary` delegates to it, and `is_posdef` needs
-//!   `eigh_vals`. Shipping the other four would leave the broken parity row
-//!   this doc refuses everywhere else. Those four (`is_hermitian`,
-//!   `is_antihermitian`, `project_hermitian`, `project_antihermitian`) are now
-//!   trivially reachable, though — each is a one-liner over
-//!   [`TensorMap::add`], [`TensorMap::adjoint`] and [`TensorMap::norm`] — so a
-//!   future phase closes the family as soon as `compose`, `id` and `eigh_vals`
-//!   land.
-//! - **Composition** — TensorKit `A * B`, which unlike [`TensorMap::contract`]
-//!   never twists dual legs — is blocked below this layer: fermionic compose
-//!   needs a new public seam over `LoweredMultiplicityFreeAlgebra`, which
-//!   `tenet-core` seals, and a silently
-//!   bosonic-only `compose` would return wrong fermionic signs rather than an
-//!   error.
+//!   of the family would leave a broken parity row. The erased `compose`'s
+//!   diagonal fast paths ride with the same question, for the same reason.
+//! - The **operator overloads** (`impl Add`, `impl Mul`) are out on the
+//!   `Result` argument alone now. An operator cannot return one: the erased
+//!   `Mul` precedent panics, and a panicking `*` or `+` as the only spelling
+//!   of an operation contradicts this facade's passthrough-error contract. The
+//!   cross-facade false-friend argument that used to stand beside it expired
+//!   with [`TensorMap::compose`]: `&a * &b` means composition in the erased
+//!   facade, and composition is what this facade would spell it as. Adding
+//!   them later is not a breaking change.
+//! - The **`is_hermitian` / `project_*` family** has lost its structural
+//!   blocker: `is_isometric` needed `compose` and `id`, and both are in. Every
+//!   member but one is now a one-liner over [`TensorMap::add`],
+//!   [`TensorMap::adjoint`], [`TensorMap::norm`], [`TensorMap::compose`] and
+//!   [`TensorMap::id`]. The exception is `is_posdef`, which needs `eigh_vals`,
+//!   so the family lands **when the eigendecompositions do** — as one complete
+//!   row, not as six members and a hole. That is the same rule the entry above
+//!   applies to `eig_*` itself.
 //! - `conj` stays design-gated on its open correctness question for
 //!   non-self-dual sectors. [`TensorMap::adjoint`] is now in, eagerly: see its
 //!   own documentation for why that is TensorKit's `adjoint!` rather than a
@@ -107,11 +110,12 @@ pub use tenet_matrixalgebra::Truncation;
 use tenet_matrixalgebra::BoundDynFactor;
 
 use crate::tensor::{
-    apply_fill, weighted_inner, weighted_trace, with_planar_axes, Fill, PlanarRequestKind,
-    TensorScalar,
+    apply_fill, sector_regions, weighted_inner, weighted_trace, with_planar_axes, Fill,
+    PlanarRequestKind, TensorScalar,
 };
 use crate::typed_tensor_core::{
-    tensorcontract_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
+    tensorcompose_owned_multiplicity_free, tensorcontract_owned_multiplicity_free,
+    tree_transform_owned_multiplicity_free,
 };
 
 /// One tensor leg: a provider plus the sector-to-degeneracy map of that axis
@@ -645,6 +649,57 @@ where
         built
     }
 
+    /// The identity endomorphism on `spaces <- spaces` (TensorKit `id(V)`):
+    /// every coupled-sector block is the identity matrix.
+    ///
+    /// TensorKit's `one`/`id` for the same object. The erased
+    /// [`crate::prelude::Tensor::id`] takes a [`crate::prelude::Dtype`] token;
+    /// here the payload dtype is `D`, so there is nothing to pass — otherwise
+    /// the argument shape is the erased one, a single leg list used for both
+    /// sides.
+    ///
+    /// Square by construction: the codomain *is* the domain, so the
+    /// isomorphism precondition the erased structural constructors check
+    /// (`isomorphism`, `isometry`) holds trivially and is not re-checked. The
+    /// legs may still be heterogeneous — different sector content and
+    /// different degeneracies per leg — since only the fused content matters
+    /// and it is identical on both sides by definition.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::zeros`] reports, plus [`Error::Core`] when the
+    /// admitted layout is not the canonical coupled-sector matrix one, which
+    /// is an engine invariant rather than a caller mistake.
+    #[doc(alias = "one")]
+    pub fn id<'a, S>(runtime: &Runtime, spaces: S) -> Result<Self, Error>
+    where
+        S: IntoIterator<Item = &'a GradedSpace<R>>,
+        R: 'a,
+    {
+        let spaces: Vec<&GradedSpace<R>> = spaces.into_iter().collect();
+        let provider = Arc::clone(Self::authority(&spaces)?);
+        let mut identity = Self::build(runtime, provider, &spaces, &spaces, Fill::Zeros)?;
+        // The zero fill is written into, not replaced: `build` has just
+        // allocated the payload and nothing else holds the body yet, so the
+        // diagonal goes in place rather than into a second buffer.
+        let body =
+            Arc::get_mut(&mut identity.body).expect("a freshly built body has no other owner");
+        // Same coupled-sector region walk and same diagonal addressing as the
+        // erased `Tensor::structural`, on the shared helper: the two build the
+        // same tensor, and a second copy of the offset arithmetic would be free
+        // to drift from the sibling this is byte-compared against.
+        let regions = {
+            let space = body.space.space();
+            sector_regions(space.structure(), space.nout())?
+        };
+        for region in regions.iter() {
+            for i in 0..region.rows().min(region.cols()) {
+                body.data[region.range().start + i * (region.rows() + 1)] = D::from_real(1.0);
+            }
+        }
+        Ok(identity)
+    }
+
     /// TensorKit `permute`: re-arranges legs with symmetric braiding.
     ///
     /// `codomain_axes` and `domain_axes` list source axis numbers (`0..rank`,
@@ -858,9 +913,9 @@ where
     /// (and the erased [`crate::prelude::Tensor::contract`]), this **twists**
     /// dual contracted legs with the fermionic supertrace twist — unlike
     /// composition (TensorKit `A * B` / `mul!`), which never does. Bosonic
-    /// rules are unaffected; fermionic rules can differ by signs. There is no
-    /// typed `compose` yet, so this is the only contraction semantics the
-    /// typed facade offers.
+    /// rules are unaffected; fermionic rules can differ by signs.
+    /// [`Self::compose`] is the other semantics, and its documentation states
+    /// the exact relation between the two.
     ///
     /// The result is bound to `self`'s provider allocation, the same
     /// left-authority rule [`Self::zeros`] uses for its first leg: the two
@@ -904,6 +959,65 @@ where
             // expert-layer borrow type, and a `&[usize]` says the same thing
             // at the facade without a second public vocabulary.
             OutputAxisOrder::from_axes(output_axes),
+        )?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody { space, data }),
+        })
+    }
+
+    /// Categorical composition of two tensor maps, TensorKit `A * B` / `mul!`:
+    /// `self`'s whole domain is contracted against `other`'s whole codomain,
+    /// leaving `self.codomain() <- other.domain()`.
+    ///
+    /// **Fermionic semantics**: unlike [`Self::contract`] (TensorKit
+    /// `tensorcontract!` / `@tensor`), composition never twists dual
+    /// contracted legs — there is no supertrace here. Bosonic rules cannot
+    /// tell the two apart; a fermionic one differs by a sign on every dual
+    /// contracted leg carrying an odd sector, so the exact relation is
+    /// `self.compose(other) == self.contract(twist(other, other's dual
+    /// codomain legs), ..)`. Reach for `compose` when you mean operator
+    /// multiplication of tensor maps, and for `contract` when you mean
+    /// index-notation contraction.
+    ///
+    /// The axes are not arguments, deliberately: composition is defined by the
+    /// codomain/domain split itself, and both TensorKit's `*` and the erased
+    /// [`crate::prelude::Tensor::compose`] take none.
+    ///
+    /// The result is bound to `self`'s provider allocation — the same
+    /// left-authority rule as [`Self::contract`] and [`Self::zeros`].
+    ///
+    /// Why no diagonal fast paths, which the erased sibling has for `t * D`
+    /// and `D * t`: this facade has no diagonal storage to detect. They ride
+    /// with the typed diagonal-storage question of issue #570, and are a pure
+    /// cost question rather than a semantic one — the dense route computes the
+    /// same tensor.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::RuntimeMismatch`] when the operands belong to different
+    ///   runtimes, as for [`Self::contract`].
+    /// - [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`]
+    ///   when the two are not composable — mismatched ranks, legs that are not
+    ///   mutually dual, or providers reporting different rule identities.
+    ///   Those come back from the expert layer, which owns the rules.
+    #[doc(alias = "mul")]
+    pub fn compose(&self, other: &Self) -> Result<Self, Error> {
+        // Runtime first, exactly as `contract`: crossing runtimes is a
+        // trust-boundary violation rather than an algebra error, and the
+        // expert layer never sees the two runtimes.
+        if !self.runtime.same_runtime(&other.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        let lhs_axes: Vec<usize> = (self.codomain_rank()..self.rank()).collect();
+        let rhs_axes: Vec<usize> = (0..other.codomain_rank()).collect();
+        let mut lease = self.runtime.lease_context()?;
+        let (space, data) = tensorcompose_owned_multiplicity_free(
+            lease.context().multiplicity_free_lane::<D>(),
+            BoundDynamicTensorRef::try_new(&self.body.space, &self.body.data)?,
+            BoundDynamicTensorRef::try_new(&other.body.space, &other.body.data)?,
+            &lhs_axes,
+            &rhs_axes,
         )?;
         Ok(Self {
             runtime: self.runtime.clone(),
