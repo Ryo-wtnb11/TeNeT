@@ -2796,6 +2796,52 @@ fn typed_and_erased_trace_pairs_agree_byte_for_byte() {
     );
     assert_eq!(partial.codomain().len(), 1);
     assert_eq!(partial.domain().len(), 0);
+
+    // The two cases above leave at most one survivor, and it is codomain-side,
+    // so neither can see the order of `output_axes` nor the codomain-rank
+    // filter that splits the destination. These two can.
+    //
+    // `[v] <- [v, v]`, tracing (0, 1): the survivor is axis 2, a domain-side
+    // leg, so the destination is `[] <- [v]` — a dropped codomain-rank filter
+    // would put it in the codomain instead.
+    let (erased, typed) = z2_oracle_pair_split(&runtime, 1);
+    let survivor = typed.trace_pairs(&[(0, 1)]).unwrap();
+    assert_eq!(
+        survivor.data(),
+        erased.trace_pairs(&[(0, 1)]).unwrap().data()
+    );
+    assert_eq!(survivor.codomain().len(), 0);
+    assert_eq!(survivor.domain().len(), 1);
+
+    // `[v, v] <- [v, v]`, tracing (0, 3): two survivors, axes 1 and 2, one on
+    // each side — so their relative order in `output_axes` is observable, and
+    // reversing it changes the bytes.
+    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        &runtime,
+        [&space, &space],
+        [&space, &space],
+        erased_fill_value,
+    )
+    .unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 3),
+        ],
+        false,
+    )
+    .unwrap();
+    let typed: TensorMap<tenet::core::Z2FusionRule, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], typed_fill_value).unwrap();
+    let two_survivors = typed.trace_pairs(&[(0, 3)]).unwrap();
+    assert_eq!(
+        two_survivors.data(),
+        erased.trace_pairs(&[(0, 3)]).unwrap().data()
+    );
+    assert_eq!(two_survivors.codomain().len(), 1);
+    assert_eq!(two_survivors.domain().len(), 1);
 }
 
 #[test]
