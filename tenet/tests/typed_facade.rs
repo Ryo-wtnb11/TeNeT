@@ -3296,3 +3296,222 @@ fn id_needs_at_least_one_leg() {
             if message.contains("at least one leg")
     ));
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6 (issue #570), slice 1: compact diagonal storage and the operations
+// that consume it.
+//
+// Every oracle here is against the erased facade, which keeps diagonal storage
+// on exactly the same paths — so an assertion that only checked values would
+// pass even if this facade had densified. The storage claim itself is measured
+// in `tests/typed_diagonal_allocations.rs`; what these pin is that the compact
+// route computes the same tensor the dense one does.
+// ---------------------------------------------------------------------------
+
+/// The `(erased, typed)` `s` factors of one Z2 oracle pair: two spectrum
+/// tensors on the same bond space, one per facade.
+fn z2_spectrum_pair(
+    runtime: &Runtime,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::Z2FusionRule, f64>,
+) {
+    let (erased, typed) = z2_oracle_pair(runtime);
+    (
+        erased.svd_compact().unwrap().1,
+        typed.svd_compact().unwrap().1,
+    )
+}
+
+#[test]
+fn compact_scale_and_adjoint_agree_with_the_erased_facade() {
+    // What: both keep the payload compact on both facades, so `data()` is the
+    // shared materialization of the same spectrum. `adjoint` on a real spectrum
+    // is the identity — a bond space is its own adjoint — and the erased
+    // sibling says so too.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_spectrum_pair(&runtime);
+
+    assert_eq!(typed.scale(-2.5).data(), erased.scale(-2.5).unwrap().data());
+    assert_eq!(
+        typed.adjoint().unwrap().data(),
+        erased.adjoint().unwrap().data()
+    );
+    // The values themselves, not just their agreement: a dropped factor would
+    // agree with a sibling that dropped it too, but not with the source.
+    for (scaled, original) in typed.scale(-2.5).data().iter().zip(typed.data()) {
+        assert_eq!(*scaled, -2.5 * original);
+    }
+}
+
+#[test]
+fn compact_reductions_agree_with_the_erased_facade() {
+    // What: `norm`, `norm_inf`, `tr` and `inner` read the stored spectrum
+    // instead of its materialization, and land on the same numbers.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_spectrum_pair(&runtime);
+
+    assert_eq!(typed.norm().unwrap(), erased.norm().unwrap());
+    assert_eq!(typed.norm_inf().unwrap(), erased.norm_inf().unwrap());
+    assert_eq!(typed.tr().unwrap(), erased.tr().unwrap().re());
+    assert_eq!(
+        typed.inner(&typed).unwrap(),
+        erased.inner(&erased).unwrap().re()
+    );
+    assert_eq!(typed.dot(&typed).unwrap(), typed.inner(&typed).unwrap());
+    // `<s, s>` is the squared norm: the identity that pins the weighting.
+    let norm = typed.norm().unwrap();
+    assert!((typed.inner(&typed).unwrap() - norm * norm).abs() < 1e-9 * norm * norm);
+}
+
+#[test]
+fn compact_reductions_carry_the_su2_dimension_weight() {
+    // What: the compact reductions apply `dim(c)` exactly where the dense ones
+    // do. Z2 alone cannot see this — every `dim(c)` is one there.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = su2_oracle_pair(&runtime);
+    let erased = erased.svd_compact().unwrap().1;
+    let typed = typed.svd_compact().unwrap().1;
+
+    assert_eq!(typed.norm().unwrap(), erased.norm().unwrap());
+    assert_eq!(typed.tr().unwrap(), erased.tr().unwrap().re());
+    assert_eq!(
+        typed.inner(&typed).unwrap(),
+        erased.inner(&erased).unwrap().re()
+    );
+    // The unweighted sum, for contrast: a dropped `dim(c)` would make `tr` this.
+    let unweighted: f64 = typed.data().iter().sum();
+    assert!(
+        (typed.tr().unwrap() - unweighted).abs() > 1e-6,
+        "the SU(2) spectrum trace is not dimension weighted"
+    );
+    // `norm_inf` is deliberately *not* weighted, on either facade.
+    assert_eq!(typed.norm_inf().unwrap(), erased.norm_inf().unwrap());
+}
+
+#[test]
+fn compact_add_agrees_with_the_erased_facade_on_both_arms() {
+    // What: diagonal + diagonal stays diagonal, and diagonal + dense goes dense
+    // — the same two arms the erased facade takes, with the same values.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_spectrum_pair(&runtime);
+
+    assert_eq!(
+        typed.add(&typed, 0.75, -0.5).unwrap().data(),
+        erased.add(&erased, 0.75, -0.5).unwrap().data()
+    );
+
+    // A dense operand on the same bond space: `id` is the cheapest one, and it
+    // is not diagonal *storage* on either facade even though its values are.
+    let erased_dense = tenet::prelude::Tensor::id(
+        &runtime,
+        tenet::prelude::Dtype::F64,
+        &erased.domain_spaces(),
+    )
+    .unwrap()
+    .scale(3.0)
+    .unwrap();
+    let typed_dense = TensorMap::id(&runtime, &typed.domain()).unwrap().scale(3.0);
+    assert_eq!(typed_dense.data(), erased_dense.data());
+
+    for (alpha, beta) in [(0.75, -0.5), (1.0, 1.0)] {
+        assert_eq!(
+            typed.add(&typed_dense, alpha, beta).unwrap().data(),
+            erased.add(&erased_dense, alpha, beta).unwrap().data(),
+            "diagonal + dense disagrees at ({alpha}, {beta})"
+        );
+        assert_eq!(
+            typed_dense.add(&typed, alpha, beta).unwrap().data(),
+            erased_dense.add(&erased, alpha, beta).unwrap().data(),
+            "dense + diagonal disagrees at ({alpha}, {beta})"
+        );
+    }
+}
+
+#[test]
+fn compose_takes_the_compact_paths_and_reconstructs_the_source() {
+    // What: `u * s * vh` now runs through the bond-scaling arms rather than a
+    // dense GEMM, and still reproduces the source — plus `s * s`, the
+    // diagonal-times-diagonal arm, against its erased sibling.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+    let (eu, es, evh) = erased.svd_compact().unwrap();
+    let (tu, ts, tvh) = typed.svd_compact().unwrap();
+
+    // `t * D`, `D * t` and `D * D`, each against the erased facade's own arm.
+    assert_eq!(
+        tu.compose(&ts).unwrap().data(),
+        eu.compose(&es).unwrap().data()
+    );
+    assert_eq!(
+        ts.compose(&tvh).unwrap().data(),
+        es.compose(&evh).unwrap().data()
+    );
+    assert_eq!(
+        ts.compose(&ts).unwrap().data(),
+        es.compose(&es).unwrap().data()
+    );
+    // `s * s` is still a spectrum: its entries are the squares.
+    for (squared, original) in ts.compose(&ts).unwrap().data().iter().zip(ts.data()) {
+        assert!((squared - original * original).abs() < 1e-12);
+    }
+
+    let recon = tu.compose(&ts).unwrap().compose(&tvh).unwrap();
+    assert_eq!(recon.data().len(), typed.data().len());
+    for (got, want) in recon.data().iter().zip(typed.data()) {
+        assert!(
+            (got - want).abs() <= 1e-12 * want.abs().max(1.0),
+            "{got} vs {want}"
+        );
+    }
+}
+
+#[test]
+fn compose_declines_a_compact_arm_it_cannot_prove() {
+    // What: the compact arms fire on a proved destination, not on the storage
+    // alone. Two spectra on different bond spaces are not composable at all,
+    // and the guard is what leaves that verdict to the expert layer instead of
+    // multiplying two unrelated spectra elementwise.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, wide) = z2_oracle_pair_split(&runtime, 2);
+    // A second endomorphism on a leg with different degeneracies, so its bond
+    // space genuinely differs from `wide`'s rather than merely being a second
+    // allocation of the same one.
+    let narrow_leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 1),
+            (tenet::core::Z2Irrep::ODD, 1),
+        ],
+        false,
+    )
+    .unwrap();
+    let mut next = 0.0;
+    let narrow = TensorMap::from_block_fn(&runtime, [&narrow_leg], [&narrow_leg], |_, _| {
+        next += 1.0;
+        next
+    })
+    .unwrap();
+    let wide_s = wide.svd_compact().unwrap().1;
+    let narrow_s = narrow.svd_compact().unwrap().1;
+
+    assert_ne!(
+        wide_s.data().len(),
+        narrow_s.data().len(),
+        "the fixture's two bond spaces must differ for this to test anything"
+    );
+    assert!(
+        wide_s.compose(&narrow_s).is_err(),
+        "composing spectra on mismatched bond spaces must be refused"
+    );
+    // And the same for a dense operand whose contracted leg does not match the
+    // spectrum's bond.
+    assert!(wide.compose(&narrow_s).is_err());
+    assert!(narrow_s.compose(&wide).is_err());
+}

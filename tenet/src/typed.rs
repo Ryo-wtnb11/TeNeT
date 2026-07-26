@@ -88,7 +88,8 @@ use tenet_core::{
     MultiplicityFreeRigidSymbols, SectorLeg,
 };
 use tenet_tensors::{
-    BoundDynamicFusionMapSpace, BoundDynamicTensorRef, OutputAxisOrder, TreeTransformOperation,
+    BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace, OutputAxisOrder,
+    TreeTransformOperation,
 };
 
 pub use tenet_core::SectorCodec;
@@ -475,6 +476,73 @@ enum TypedData<D> {
     Diagonal(Vec<tenet_matrixalgebra::SectorSpectrum<D>>),
 }
 
+/// Whether `space` is a bond space: rank one on each side, with the same leg on
+/// both — the shape a compact spectrum can address, and the only shape whose
+/// dense form is block-diagonal.
+///
+/// Verbatim from the erased `Tensor::is_diagonal_bond_space`, deliberately: it
+/// is the guard TensorKit's `DiagonalTensorMap` gets for free from its type, and
+/// two facades disagreeing about which destinations may stay compact would be a
+/// silent divergence rather than a visible one.
+///
+/// Applied to the *destination* of an operation, never to the operands. An
+/// operand's storage says what it holds; only the destination says whether the
+/// compact result is representable.
+/// Two compact spectra that live on one bond space must agree sector for
+/// sector and length for length; when they do not, the space and the payload
+/// have gone out of step, which is an engine invariant break rather than
+/// anything a caller did.
+fn spectra_disagree() -> Error {
+    Error::InvalidArgument("equal bond spaces carry incompatible compact spectra".to_string())
+}
+
+/// `dense_factor * dense + diagonal_factor * spectrum`, laid out per `space`.
+///
+/// The dense operand is scaled into a fresh owned buffer and the spectrum is
+/// added onto that buffer's per-block diagonal, which is the only place a bond
+/// space is non-zero. Same block addressing as
+/// [`tenet_matrixalgebra::diagonal_bond_data`], which is what put the values
+/// there in the first place.
+fn scatter_spectrum<D>(
+    space: &DynamicFusionMapSpace,
+    dense: &[D],
+    dense_factor: D,
+    spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
+    diagonal_factor: D,
+) -> Result<Vec<D>, Error>
+where
+    D: TensorScalar,
+{
+    let mut data: Vec<D> = dense.iter().map(|&value| value * dense_factor).collect();
+    let structure = space.structure();
+    for index in 0..structure.block_count() {
+        let block = structure.block(index)?;
+        let Some(pair) = block.key().as_fusion_tree_pair() else {
+            continue;
+        };
+        let sector = pair.codomain_tree().coupled();
+        let Some(entry) = spectrum.iter().find(|entry| entry.sector == sector) else {
+            continue;
+        };
+        let strides = block.strides();
+        let stride = strides[0] + strides[1];
+        let offset = block.offset();
+        let count = block.shape()[0]
+            .min(block.shape()[1])
+            .min(entry.values.len());
+        for (i, &value) in entry.values[..count].iter().enumerate() {
+            let position = offset + i * stride;
+            data[position] = data[position] + value * diagonal_factor;
+        }
+    }
+    Ok(data)
+}
+
+fn is_diagonal_bond_space(space: &DynamicFusionMapSpace) -> bool {
+    let homspace = space.homspace();
+    space.nout() == 1 && space.nin() == 1 && homspace.codomain().legs() == homspace.domain().legs()
+}
+
 /// Storage shared by every clone of one typed tensor map: the admitted space
 /// and its block payload.
 struct TypedTensorBody<R, D> {
@@ -760,6 +828,17 @@ where
     /// argument shape as the erased [`crate::prelude::Tensor::permute`], so
     /// there is one vocabulary for the operation rather than two.
     ///
+    /// # Compact storage
+    ///
+    /// A factor in compact diagonal storage ([`Self::svd_compact`]'s `s`,
+    /// [`Self::eigh_full`]'s `d`) is **materialized** here, and so by
+    /// [`Self::braid`], [`Self::transpose`], [`Self::transpose_axes`] and
+    /// [`Self::repartition`] as well: the result is a dense `Σ_c k_c²` buffer.
+    /// TensorKit draws the line in the same place — its `DiagonalTensorMap`
+    /// implements only the two permutations that leave a diagonal diagonal —
+    /// and the general case genuinely is not diagonal, so this is a missing
+    /// specialization for two axis orders rather than a missing operation.
+    ///
     /// # Errors
     ///
     /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] when
@@ -970,6 +1049,17 @@ where
     /// [`Self::compose`] is the other semantics, and its documentation states
     /// the exact relation between the two.
     ///
+    /// # Compact storage
+    ///
+    /// Unlike [`Self::compose`], this has no compact fast path: a diagonal
+    /// operand is materialized and the contraction runs dense. Contracting one
+    /// leg of a general tensor against a spectrum is per-leg bond scaling and
+    /// could stay compact, but only for the axis patterns that are exactly a
+    /// composition — so until that specialization exists, **absorb a spectrum
+    /// with [`Self::compose`]** (`u.compose(&s)`, `s.compose(&vh)`), which
+    /// takes the scaling path, and reach for `contract` for the general case.
+    /// The same gap is open in the erased facade.
+    ///
     /// The result is bound to `self`'s provider allocation, the same
     /// left-authority rule [`Self::zeros`] uses for its first leg: the two
     /// operands must agree on
@@ -1040,11 +1130,19 @@ where
     /// The result is bound to `self`'s provider allocation — the same
     /// left-authority rule as [`Self::contract`] and [`Self::zeros`].
     ///
-    /// Why no diagonal fast paths, which the erased sibling has for `t * D`
-    /// and `D * t`: this facade has no diagonal storage to detect. They ride
-    /// with the typed diagonal-storage question of issue #570, and are a pure
-    /// cost question rather than a semantic one — the dense route computes the
-    /// same tensor.
+    /// # Compact fast paths
+    ///
+    /// When either operand carries compact diagonal storage — an `s` from
+    /// [`Self::svd_compact`], a `d` from [`Self::eigh_full`] — and the
+    /// destination is representable, this takes TensorKit's
+    /// `DiagonalTensorMap` route instead of a GEMM: `t * D` and `D * t` scale
+    /// one bond axis per block (`rmul!` / `lmul!`), and `D * D` multiplies the
+    /// two spectra elementwise and stays compact. Verified twist-free against
+    /// TK's `diagonal.jl`: `block(D, c)` is a `Diagonal`, so LinearAlgebra
+    /// dispatches to scaling, with no braiding or recoupling. The result is the
+    /// same tensor the dense route computes, so this is a cost question only,
+    /// and any operand or destination that does not fit falls through to the
+    /// dense path rather than being refused.
     ///
     /// # Errors
     ///
@@ -1062,6 +1160,9 @@ where
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }
+        if let Some(compact) = self.compose_compact(other)? {
+            return Ok(compact);
+        }
         let lhs_axes: Vec<usize> = (self.codomain_rank()..self.rank()).collect();
         let rhs_axes: Vec<usize> = (0..other.codomain_rank()).collect();
         let mut lease = self.runtime.lease_context()?;
@@ -1076,6 +1177,100 @@ where
             runtime: self.runtime.clone(),
             body: Arc::new(TypedTensorBody::dense(space, data)),
         })
+    }
+
+    /// The compact arms of [`Self::compose`], or `None` when the operands or
+    /// the destination cannot support one and the dense route must run.
+    ///
+    /// Each arm proves its destination rather than deriving it. Composition
+    /// glues `self.codomain <- other.domain`, so:
+    ///
+    /// - `D * D` — both operands are bond spaces (`codomain == domain`), so
+    ///   when the two spaces are equal the destination *is* that space, and
+    ///   [`is_diagonal_bond_space`] certifies it can hold a compact result.
+    /// - `t * D` — the destination is `t.codomain <- D.domain`; `D` is a bond
+    ///   space, so `D.domain == D.codomain`, and requiring that to equal
+    ///   `t.domain` makes the destination `t`'s own space. `t`'s payload is
+    ///   then `t`'s data with each block's trailing axis scaled.
+    /// - `D * t` — the mirror image, scaling `t`'s leading axis.
+    ///
+    /// Without those equalities the destination is a different space (a dual
+    /// leg on the contracted side is the reachable case) and reusing an
+    /// operand's would silently produce a tensor on the wrong space, so the
+    /// arm declines and the expert layer decides — including by rejecting a
+    /// composition that is not one at all.
+    fn compose_compact(&self, other: &Self) -> Result<Option<Self>, Error> {
+        if !self.same_rule(other) {
+            return Ok(None);
+        }
+        let (left, right) = (self.body.space.space(), other.body.space.space());
+        match (self.spectrum(), other.spectrum()) {
+            (Some(lhs), Some(rhs)) => {
+                if left != right || !is_diagonal_bond_space(left) {
+                    return Ok(None);
+                }
+                if lhs.len() != rhs.len() {
+                    return Err(spectra_disagree());
+                }
+                let product = lhs
+                    .iter()
+                    .zip(rhs)
+                    .map(|(left, right)| {
+                        if left.sector != right.sector || left.values.len() != right.values.len() {
+                            return Err(spectra_disagree());
+                        }
+                        Ok(tenet_matrixalgebra::SectorSpectrum {
+                            sector: left.sector,
+                            values: left
+                                .values
+                                .iter()
+                                .zip(&right.values)
+                                .map(|(&a, &b)| a * b)
+                                .collect(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?;
+                Ok(Some(self.with_spectrum(product)))
+            }
+            // `t * D`: scale each block's trailing axis (TensorKit `rmul!`).
+            (None, Some(spectrum)) => {
+                if !is_diagonal_bond_space(right)
+                    || left.homspace().domain().legs() != right.homspace().codomain().legs()
+                {
+                    return Ok(None);
+                }
+                self.scaled_axis(None, spectrum).map(Some)
+            }
+            // `D * t`: scale each block's leading axis (TensorKit `lmul!`).
+            (Some(spectrum), None) => {
+                if !is_diagonal_bond_space(left)
+                    || right.homspace().codomain().legs() != left.homspace().domain().legs()
+                {
+                    return Ok(None);
+                }
+                other.scaled_axis(Some(0), spectrum).map(Some)
+            }
+            (None, None) => Ok(None),
+        }
+    }
+
+    /// This tensor with one bond axis of every block scaled by `spectrum`,
+    /// on its own space. `axis = None` scales the trailing axis, `Some(0)` the
+    /// leading one, exactly as the seam names them.
+    fn scaled_axis(
+        &self,
+        axis: Option<usize>,
+        spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
+    ) -> Result<Self, Error> {
+        let mut data = self.dense_data().to_vec();
+        tenet_matrixalgebra::scale_axis_by_spectrum_mapped(
+            self.body.space.space(),
+            &mut data,
+            axis,
+            spectrum,
+            |value| value,
+        )?;
+        Ok(self.with_data(data))
     }
 
     /// Wraps one factor the matrix-algebra seam produced into a typed tensor
@@ -1383,6 +1578,62 @@ where
         }
     }
 
+    /// A sibling on this tensor's own space carrying a new compact spectrum.
+    /// Every operation that reaches this keeps the bond space it was called on,
+    /// so the checked admission proof carries over exactly as for
+    /// [`Self::with_data`].
+    fn with_spectrum(&self, spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<D>>) -> Self {
+        Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody {
+                space: self.body.space.clone(),
+                data: TypedData::Diagonal(spectrum),
+                dense_cache: std::sync::OnceLock::new(),
+            }),
+        }
+    }
+
+    /// The compact payload, when this tensor has one.
+    fn spectrum(&self) -> Option<&[tenet_matrixalgebra::SectorSpectrum<D>]> {
+        match &self.body.data {
+            TypedData::Diagonal(spectrum) => Some(spectrum),
+            TypedData::Dense(_) => None,
+        }
+    }
+
+    /// Whether two operands' providers are the same rule. The compact paths
+    /// below skip the expert layer, which is where a mismatch would otherwise
+    /// be caught, so they have to ask themselves.
+    fn same_rule(&self, other: &Self) -> bool {
+        self.body.space.provider().rule_identity() == other.body.space.provider().rule_identity()
+    }
+
+    /// The dimension-weighted inner product of two compact spectra,
+    /// `Σ_c dim(c) * Σ_i conj(a_i) b_i` — [`weighted_inner`]'s reduction with
+    /// the zeros left out, since a bond space's dense form is zero off the
+    /// per-sector diagonal.
+    fn compact_inner(
+        lhs: &[tenet_matrixalgebra::SectorSpectrum<D>],
+        rhs: &[tenet_matrixalgebra::SectorSpectrum<D>],
+        provider: &R,
+    ) -> Result<num_complex::Complex64, Error> {
+        if lhs.len() != rhs.len() {
+            return Err(spectra_disagree());
+        }
+        let mut total = num_complex::Complex64::new(0.0, 0.0);
+        for (left, right) in lhs.iter().zip(rhs) {
+            if left.sector != right.sector || left.values.len() != right.values.len() {
+                return Err(spectra_disagree());
+            }
+            let mut partial = D::from_real(0.0);
+            for (&a, &b) in left.values.iter().zip(&right.values) {
+                partial = partial + tenet_matrixalgebra::FactorScalar::adjoint(a) * b;
+            }
+            total += partial.widen_complex() * provider.dim_scalar(left.sector);
+        }
+        Ok(total)
+    }
+
     /// The linear combination `alpha * self + beta * other`, mirroring the
     /// erased [`crate::prelude::Tensor::add`].
     ///
@@ -1425,6 +1676,56 @@ where
                 "tensors live on different spaces or block layouts".to_string(),
             ));
         }
+        match (self.spectrum(), other.spectrum()) {
+            // Two spectra on one bond space: the sum is diagonal too.
+            (Some(lhs), Some(rhs)) => {
+                if lhs.len() != rhs.len() {
+                    return Err(spectra_disagree());
+                }
+                let sum = lhs
+                    .iter()
+                    .zip(rhs)
+                    .map(|(left, right)| {
+                        if left.sector != right.sector || left.values.len() != right.values.len() {
+                            return Err(spectra_disagree());
+                        }
+                        Ok(tenet_matrixalgebra::SectorSpectrum {
+                            sector: left.sector,
+                            values: left
+                                .values
+                                .iter()
+                                .zip(&right.values)
+                                .map(|(&x, &y)| x * alpha + y * beta)
+                                .collect(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?;
+                return Ok(self.with_spectrum(sum));
+            }
+            // Mixed: the result is dense, but the *diagonal operand* is never
+            // materialized to get there — the one O(n²) buffer this needs is
+            // the owned result, which scatters the spectrum onto its own
+            // diagonal. Materializing first would allocate a second.
+            (Some(diagonal), None) => {
+                return Ok(self.with_data(scatter_spectrum(
+                    self.body.space.space(),
+                    other.dense_data(),
+                    beta,
+                    diagonal,
+                    alpha,
+                )?))
+            }
+            (None, Some(diagonal)) => {
+                return Ok(self.with_data(scatter_spectrum(
+                    self.body.space.space(),
+                    self.dense_data(),
+                    alpha,
+                    diagonal,
+                    beta,
+                )?))
+            }
+            (None, None) => {}
+        }
         Ok(self.with_data(
             self.dense_data()
                 .iter()
@@ -1442,7 +1743,21 @@ where
     /// `D` is a type parameter and the payload is always a host buffer. The
     /// erased `scale`/`scale_c64` split has the same origin and likewise
     /// collapses: `factor` is simply a `D`.
+    ///
+    /// Compact diagonal storage is preserved: scaling a spectrum factor stays
+    /// `Σ_c k_c` values rather than densifying.
     pub fn scale(&self, factor: D) -> Self {
+        if let Some(spectrum) = self.spectrum() {
+            return self.with_spectrum(
+                spectrum
+                    .iter()
+                    .map(|entry| tenet_matrixalgebra::SectorSpectrum {
+                        sector: entry.sector,
+                        values: entry.values.iter().map(|&value| value * factor).collect(),
+                    })
+                    .collect(),
+            );
+        }
         self.with_data(
             self.dense_data()
                 .iter()
@@ -1542,6 +1857,27 @@ where
     /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`]
     /// straight from the seam, which owns the bend the dagger performs.
     pub fn adjoint(&self) -> Result<Self, Error> {
+        if let Some(spectrum) = self.spectrum() {
+            // A bond space is its own adjoint (`codomain == domain`), and the
+            // dagger of a diagonal is the conjugated diagonal — so this is
+            // O(Σ_c k_c) with no dense buffer and no bend. For a real payload
+            // `FactorScalar::adjoint` is the identity, which is why there is no
+            // separate real arm: the erased facade's `RealF64`/`RealC64`/`C64`
+            // split exists only because its dtype is a runtime property.
+            return Ok(self.with_spectrum(
+                spectrum
+                    .iter()
+                    .map(|entry| tenet_matrixalgebra::SectorSpectrum {
+                        sector: entry.sector,
+                        values: entry
+                            .values
+                            .iter()
+                            .map(|&value| tenet_matrixalgebra::FactorScalar::adjoint(value))
+                            .collect(),
+                    })
+                    .collect(),
+            ));
+        }
         let (space, data) = tenet_tensors::adjoint_bound_dyn(&self.body.space, self.dense_data())
             .map_err(Error::from)?;
         Ok(Self {
@@ -1565,6 +1901,10 @@ where
         // Same weighted reduction the erased `norm` runs, on the same helper:
         // a second copy would be free to drift from the sibling this is
         // byte-compared against.
+        if let Some(spectrum) = self.spectrum() {
+            let provider = self.body.space.provider();
+            return Ok(Self::compact_inner(spectrum, spectrum, provider)?.re.sqrt());
+        }
         Ok(self.weighted_self_inner()?.re.sqrt())
     }
 
@@ -1584,6 +1924,13 @@ where
         // facade needs the match because its dtype is a runtime property. Here
         // the widening is exact and `Complex64::new(x, 0.0).norm()` is exactly
         // `|x|`, so one expression covers both instantiations.
+        if let Some(spectrum) = self.spectrum() {
+            return Ok(spectrum
+                .iter()
+                .flat_map(|entry| entry.values.iter())
+                .map(|&value| value.widen_complex().norm())
+                .fold(0.0, f64::max));
+        }
         Ok(self
             .dense_data()
             .iter()
@@ -1640,6 +1987,14 @@ where
                 "tensors live on different spaces or block layouts".to_string(),
             ));
         }
+        // Two compact spectra reduce without either being materialized. A mixed
+        // pair does not: the dense operand has to be read at its diagonal
+        // positions anyway, so it goes through the shared materialization
+        // cache like every other dense consumer.
+        if let (Some(lhs), Some(rhs)) = (self.spectrum(), other.spectrum()) {
+            let provider = self.body.space.provider();
+            return Ok(D::from_complex64(Self::compact_inner(lhs, rhs, provider)?));
+        }
         // `D::from_complex64` is `.re` for the real scalar and the identity for
         // the complex one, so this is bit-identical to the erased facade's
         // `Scalar::F64(v.re)` / `Scalar::C64(v)` dispatch, without the enum.
@@ -1687,6 +2042,20 @@ where
             return Err(Error::InvalidArgument(
                 "tr() requires an endomorphism (domain == codomain)".to_string(),
             ));
+        }
+        if let Some(spectrum) = self.spectrum() {
+            // `Σ_c dim(c) * Σ_i d_i`: TensorKit's positive trace on a
+            // `DiagonalTensorMap`, read straight off the stored values.
+            let provider = self.body.space.provider();
+            let mut total = num_complex::Complex64::new(0.0, 0.0);
+            for entry in spectrum {
+                let mut partial = D::from_real(0.0);
+                for &value in &entry.values {
+                    partial = partial + value;
+                }
+                total += partial.widen_complex() * provider.dim_scalar(entry.sector);
+            }
+            return Ok(D::from_complex64(total));
         }
         Ok(D::from_complex64(weighted_trace(
             self.body.space.provider(),

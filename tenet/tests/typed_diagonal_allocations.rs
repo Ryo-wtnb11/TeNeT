@@ -175,3 +175,113 @@ fn a_complex_payloads_s_is_compact_as_well() {
          data() allocated only {first} bytes"
     );
 }
+
+/// Runs `operation` once to warm every process-global cache it touches, then
+/// measures a second, identical run.
+fn warmed_bytes<T>(operation: impl Fn() -> T) -> u64 {
+    black_box(operation());
+    measured_bytes(&operation)
+}
+
+fn spectrum(seed: u64) -> TensorMap<Z2FusionRule, f64> {
+    source(seed).svd_compact().unwrap().1
+}
+
+#[test]
+fn storage_local_compact_operations_never_build_a_dense_payload() {
+    // What: scale, adjoint, add(diagonal, diagonal) and compose(D, D) all stay
+    // in O(Σ_c k_c). Each allocates its own compact result and nothing else, so
+    // the ceiling is far below one dense payload.
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let d = spectrum(0x5eed_0011);
+    let ceiling = dense_payload_bytes();
+
+    for (name, bytes) in [
+        ("scale", warmed_bytes(|| d.scale(0.5))),
+        ("adjoint", warmed_bytes(|| d.adjoint().unwrap())),
+        ("add", warmed_bytes(|| d.add(&d, 0.75, -0.5).unwrap())),
+        ("compose", warmed_bytes(|| d.compose(&d).unwrap())),
+    ] {
+        assert!(
+            bytes < ceiling,
+            "compact {name} allocated at least one dense payload: {bytes} bytes"
+        );
+    }
+
+    // The reductions allocate nothing at all: they read the stored spectrum
+    // rather than its materialization, so there is no destination to own.
+    for (name, bytes) in [
+        ("norm", warmed_bytes(|| d.norm().unwrap())),
+        ("norm_inf", warmed_bytes(|| d.norm_inf().unwrap())),
+        ("tr", warmed_bytes(|| d.tr().unwrap())),
+        ("inner", warmed_bytes(|| d.inner(&d).unwrap())),
+    ] {
+        assert_eq!(bytes, 0, "compact {name} allocated temporary storage");
+    }
+
+    // And none of the above materialized the spectrum as a side effect: the
+    // first read still has to build the dense buffer.
+    assert!(
+        measured_bytes(|| d.data().len()) >= ceiling,
+        "one of the compact operations materialized the spectrum behind our back"
+    );
+}
+
+#[test]
+fn a_mixed_add_allocates_only_its_own_dense_result() {
+    // What: adding a spectrum to a dense tensor on the same bond space scatters
+    // straight into the owned result. Materializing the spectrum first would
+    // double this, which is what the ceiling rejects.
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let d = spectrum(0x5eed_0012);
+    let dense = TensorMap::id(runtime(), &d.domain()).unwrap();
+    // Reading `dense` must not be what pays for the diagonal: warm nothing on
+    // `d` beyond what the operation itself needs.
+    let bytes = warmed_bytes(|| d.add(&dense, 0.75, -0.5).unwrap());
+
+    assert!(
+        bytes < dense_payload_bytes() * 3 / 2,
+        "diagonal + dense allocated more than one dense payload: {bytes} bytes"
+    );
+    // The byte ceiling alone cannot see a materialization that the warm-up run
+    // already paid for and cached, so assert the absence directly: `d` must
+    // still owe its dense buffer. This is what dies if the mixed arm reaches
+    // for `dense_data()` instead of scattering the spectrum.
+    assert!(
+        measured_bytes(|| d.data().len()) >= dense_payload_bytes(),
+        "the mixed add materialized the diagonal operand"
+    );
+    // Same on the mirrored arm.
+    let e = spectrum(0x5eed_0014);
+    black_box(dense.add(&e, 0.75, -0.5).unwrap());
+    assert!(
+        measured_bytes(|| e.data().len()) >= dense_payload_bytes(),
+        "the mirrored mixed add materialized the diagonal operand"
+    );
+}
+
+#[test]
+fn absorbing_a_spectrum_through_compose_scales_instead_of_densifying() {
+    // What: `u * s` and `s * vh` take the bond-scaling arms. Each allocates its
+    // own dense result — `u` and `vh` are dense — but not a second dense buffer
+    // for `s`, which is what the ceiling here rejects. The dense GEMM route
+    // would need `s` materialized as well.
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let tensor = source(0x5eed_0013);
+    let (u, s, vh) = tensor.svd_compact().unwrap();
+    let ceiling = dense_payload_bytes() * 3 / 2;
+
+    assert!(
+        warmed_bytes(|| u.compose(&s).unwrap()) < ceiling,
+        "u * s densified the spectrum"
+    );
+    assert!(
+        warmed_bytes(|| s.compose(&vh).unwrap()) < ceiling,
+        "s * vh densified the spectrum"
+    );
+    // Still compact afterwards, for the same reason as above.
+    assert!(
+        measured_bytes(|| s.data().len()) >= dense_payload_bytes(),
+        "compose materialized the spectrum behind our back"
+    );
+}
