@@ -389,12 +389,19 @@ where
 /// otherwise be raw ids.
 ///
 /// `values` is descending by magnitude, as the seam guarantees.
+///
+/// `V` is the value type and defaults to [`f64`], the singular/Hermitian-
+/// eigenvalue case, so `SectorSpectrum<S>` keeps its meaning. The general
+/// eigendecompositions spell it `SectorSpectrum<S, Complex64>`. The default is
+/// what [`tenet_matrixalgebra::SectorSpectrum`] already does, for the same
+/// reason: a real spectrum is by far the common one, and a caller who never
+/// touches `eig_*` should never have to name the parameter.
 #[derive(Clone, Debug, PartialEq)]
-pub struct SectorSpectrum<S> {
+pub struct SectorSpectrum<S, V = f64> {
     /// The coupled sector, in the provider's own labels.
     pub sector: S,
     /// That sector's values, descending by magnitude.
-    pub values: Vec<f64>,
+    pub values: Vec<V>,
 }
 
 /// Result of [`TensorMap::svd_trunc`]: `t ~ u * s * vh` with the truncated
@@ -1091,12 +1098,12 @@ where
     /// Every id here came out of the engine's own coupled-sector enumeration,
     /// so a decode failure is the provider breaking [`SectorCodec`]'s
     /// decode-totality law — same contract as [`decode_block_fusion_trees`].
-    fn decode_spectrum(
+    fn decode_spectrum<V>(
         &self,
-        raw: Vec<tenet_matrixalgebra::SectorSpectrum>,
-    ) -> Result<Vec<SectorSpectrum<R::Sector>>, Error> {
+        raw: Vec<tenet_matrixalgebra::SectorSpectrum<V>>,
+    ) -> Result<Vec<SectorSpectrum<R::Sector, V>>, Error> {
         let provider = self.body.space.provider();
-        let mut decoded: Vec<SectorSpectrum<R::Sector>> = raw
+        let mut decoded: Vec<SectorSpectrum<R::Sector, V>> = raw
             .into_iter()
             .map(|entry| {
                 Ok(SectorSpectrum {
