@@ -88,7 +88,8 @@ pub use tenet_matrixalgebra::Truncation;
 use tenet_matrixalgebra::BoundDynFactor;
 
 use crate::tensor::{
-    apply_fill, weighted_inner, with_planar_axes, Fill, PlanarRequestKind, TensorScalar,
+    apply_fill, weighted_inner, weighted_trace, with_planar_axes, Fill, PlanarRequestKind,
+    TensorScalar,
 };
 use crate::typed_tensor_core::{
     tensorcontract_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
@@ -1274,7 +1275,7 @@ where
     }
 
     /// The dimension-weighted inner product of this tensor with itself, the
-    /// shared body of [`Self::norm`] and of [`Self::inner`]'s diagonal case.
+    /// body of [`Self::norm`].
     fn weighted_self_inner(&self) -> Result<num_complex::Complex64, Error> {
         weighted_inner(
             self.body.space.provider(),
@@ -1283,6 +1284,82 @@ where
             &self.body.data,
             &self.body.data,
         )
+    }
+
+    /// TensorKit `dot(x, y)`: the quantum-dimension-weighted Frobenius inner
+    /// product `Σ_c dim(c) * <a_c, b_c>` with **`self` conjugated** — the
+    /// product is conjugate-linear in its first argument.
+    ///
+    /// `t.inner(&t)?` is `t.norm()?²` up to floating point, and for `D = f64`
+    /// the result is exactly real: the erased sibling returns
+    /// `Scalar::F64(value.re)` there, and the narrowing here is the same `.re`.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::add`]'s: the operands must share a runtime and a space.
+    pub fn inner(&self, other: &Self) -> Result<D, Error> {
+        if !self.runtime.same_runtime(&other.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        if self.body.space.space() != other.body.space.space() {
+            return Err(Error::InvalidArgument(
+                "tensors live on different spaces or block layouts".to_string(),
+            ));
+        }
+        // `D::from_complex64` is `.re` for the real scalar and the identity for
+        // the complex one, so this is bit-identical to the erased facade's
+        // `Scalar::F64(v.re)` / `Scalar::C64(v)` dispatch, without the enum.
+        Ok(D::from_complex64(weighted_inner(
+            self.body.space.provider(),
+            self.body.space.space().structure(),
+            self.body.space.space().nout(),
+            &self.body.data,
+            &other.body.data,
+        )?))
+    }
+
+    /// `LinearAlgebra.dot` / TensorKit `dot(x, y)` — an alias for
+    /// [`Self::inner`], for callers who reach for that name. The erased facade
+    /// makes the same alias, deliberately, so the two names cannot come to
+    /// mean different things.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::inner`]'s.
+    pub fn dot(&self, other: &Self) -> Result<D, Error> {
+        self.inner(other)
+    }
+
+    /// TensorKit `tr`: the full trace of an endomorphism
+    /// (`domain == codomain`), pairing codomain leg `i` with domain leg `i`.
+    ///
+    /// This is TensorKit's **positive** trace, quantum-dimension weighted:
+    /// `Σ_c dim(c) * tr(b_c)`. It is *not* the supertrace — a fermionic rule's
+    /// twists belong to tensor contraction, and [`Self::trace_pairs`] is where
+    /// they appear. The two therefore disagree for a fermionic provider, by
+    /// design and as in the erased facade.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when the tensor is not an endomorphism, with
+    /// the erased facade's own message, and [`Error::Core`] when the block
+    /// structure cannot be walked.
+    pub fn tr(&self) -> Result<D, Error> {
+        let hom = self.body.space.space().homspace();
+        // Mirrors the erased pre-check verbatim, message included: the weighted
+        // trace below indexes codomain axis `i` together with domain axis
+        // `nout + i` and would be meaningless without it.
+        if hom.codomain().legs() != hom.domain().legs() {
+            return Err(Error::InvalidArgument(
+                "tr() requires an endomorphism (domain == codomain)".to_string(),
+            ));
+        }
+        Ok(D::from_complex64(weighted_trace(
+            self.body.space.provider(),
+            self.body.space.space().structure(),
+            self.body.space.space().nout(),
+            &self.body.data,
+        )?))
     }
 
     /// The codomain legs, in axis order.
