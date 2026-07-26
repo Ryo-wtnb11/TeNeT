@@ -213,6 +213,9 @@ fn storage_local_compact_operations_never_build_a_dense_payload() {
     for (name, bytes) in [
         ("norm", warmed_bytes(|| d.norm().unwrap())),
         ("norm_inf", warmed_bytes(|| d.norm_inf().unwrap())),
+        // p = 3 is the general arm; p = 2 and p = Inf only delegate to the two
+        // above, so they would prove nothing here.
+        ("norm_p(3)", warmed_bytes(|| d.norm_p(3.0).unwrap())),
         ("tr", warmed_bytes(|| d.tr().unwrap())),
         ("inner", warmed_bytes(|| d.inner(&d).unwrap())),
     ] {

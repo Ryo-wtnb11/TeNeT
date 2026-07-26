@@ -152,6 +152,15 @@ fn storage_local_diagonal_operations_do_not_allocate_dense_payloads() {
                 "norm",
                 measured_unary_bytes(&fixture.diagonal, |d| d.norm().unwrap()),
             ),
+            // `norm_p` at a general exponent takes the compact accumulator
+            // rather than delegating to `norm` / `norm_inf`, so it needs its
+            // own probe: p = 3 is the arm that would have to materialize if
+            // the `Σ_c dim(c) Σ_i |λ_i|^p` sum were written over the dense
+            // block diagonal instead of the stored spectra.
+            (
+                "norm_p(3)",
+                measured_unary_bytes(&fixture.diagonal, |d| d.norm_p(3.0).unwrap()),
+            ),
         ] {
             assert_eq!(bytes, 0, "{dtype} {name} allocated temporary storage");
         }

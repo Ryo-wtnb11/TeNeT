@@ -144,8 +144,8 @@ pub use tenet_matrixalgebra::Truncation;
 use tenet_matrixalgebra::{BoundDynFactor, FactorScalar};
 
 use crate::tensor::{
-    apply_fill, sector_regions, weighted_inner, weighted_trace, with_planar_axes, Fill,
-    PlanarRequestKind, TensorScalar,
+    apply_fill, coupled_region_pow_sum, sector_regions, validate_norm_p, weighted_inner,
+    weighted_trace, with_planar_axes, Fill, PlanarRequestKind, TensorScalar,
 };
 use crate::typed_tensor_core::{
     tensorcompose_owned_multiplicity_free, tensorcontract_owned_multiplicity_free,
@@ -2838,6 +2838,70 @@ where
             .iter()
             .map(|&value| value.widen_complex().norm())
             .fold(0.0, f64::max))
+    }
+
+    /// TensorKit `norm(t, p)` for a general exponent
+    /// (`src/tensors/linalg.jl:257-275`):
+    ///
+    /// ```text
+    /// p == Inf     -> maximum entry magnitude over blocks(t)
+    /// finite p > 0 -> (Σ_c dim(c) * norm(block_c, p)^p)^(1/p)
+    /// ```
+    ///
+    /// `norm(block, p)` is Julia's *entrywise* p-norm — matrices included — so
+    /// this is never an operator norm. Only `p == 2` is the quantum-dimension
+    /// weighted Frobenius norm of [`Self::norm`]; every other exponent weights
+    /// the same `dim(c)` against a different power sum.
+    ///
+    /// A separate method rather than an optional argument because Rust has no
+    /// overloading. `p == 2.0` and `p == f64::INFINITY` delegate to
+    /// [`Self::norm`] and [`Self::norm_inf`], so the three cannot drift apart.
+    ///
+    /// # Complexity
+    ///
+    /// One pass over the payload: `O(N)` for a dense payload of `N` scalars,
+    /// `O(Σ_c k_c)` on compact diagonal storage. The compact arm reads the
+    /// stored spectra and never materializes — the `k_c² − k_c` off-diagonal
+    /// zeros contribute nothing to any `p > 0`.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] when `p` is NaN, zero, negative, or `-inf`;
+    ///   TensorKit throws `ArgumentError` over the same domain.
+    /// - [`Error::Core`] when the block structure cannot be walked, exactly as
+    ///   [`Self::norm`].
+    pub fn norm_p(&self, p: f64) -> Result<f64, Error> {
+        // Checked before any dispatch so an invalid `p` is rejected the same
+        // way on compact and dense storage.
+        validate_norm_p(p)?;
+        if p == 2.0 {
+            return self.norm();
+        }
+        if p.is_infinite() {
+            return self.norm_inf();
+        }
+        let provider = self.body.space.provider();
+        if let Some(spectrum) = self.spectrum() {
+            let total: f64 = spectrum
+                .iter()
+                .map(|entry| {
+                    provider.dim_scalar(entry.sector)
+                        * entry
+                            .values
+                            .iter()
+                            .map(|&value| value.widen_complex().norm().powf(p))
+                            .sum::<f64>()
+                })
+                .sum();
+            return Ok(total.powf(p.recip()));
+        }
+        coupled_region_pow_sum(
+            self.body.space.space().structure(),
+            self.body.space.space().nout(),
+            self.dense_data(),
+            p,
+            |coupled| provider.dim_scalar(coupled),
+        )
     }
 
     /// TensorKit `normalize`: `self / norm(self)`, the unit-norm tensor

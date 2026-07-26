@@ -33,7 +33,7 @@ Counts are table rows; a few rows bundle several closely-related exports
 |---|---|
 | has | 44 |
 | has-different-name | 26 |
-| added (this sweep) | 12 |
+| added (this sweep) | 13 |
 | design-gated | 24 |
 | N/A | 8 |
 
@@ -41,7 +41,7 @@ Added this sweep: `Tensor::repartition`, `Tensor::zeros_like`,
 `Tensor::insert_left_unit` / `insert_right_unit` / `remove_unit`,
 `Tensor::is_hermitian` / `is_antihermitian` / `is_isometric` / `is_unitary` /
 `is_posdef`, `Tensor::project_hermitian` / `project_antihermitian`,
-`Space::has_sector`, `Space::oplus`.
+`Space::has_sector`, `Space::oplus`, `Tensor::norm_p` / `TensorMap::norm_p`.
 
 ---
 
@@ -67,6 +67,7 @@ Added this sweep: `Tensor::repartition`, `Tensor::zeros_like`,
 | TK 0.17 | Status | TeNeT | Notes |
 |---|---|---|---|
 | `norm` | has | `Tensor::norm` (+ `norm_inf`) | Quantum-dimension-weighted Frobenius. |
+| `norm(t, p)` | added | `Tensor::norm_p` / `TensorMap::norm_p` | General exponent (`linalg.jl:257-275`): `p = Inf` is the max entry magnitude, finite `p > 0` is `(Σ_c dim(c)·norm(block_c, p)^p)^(1/p)`, and non-positive / NaN `p` is a typed error. A separate method because Rust has no overloading; `p = 2` / `p = Inf` delegate to `norm` / `norm_inf`. Compact diagonal storage stays `O(Σ_c k_c)`. |
 | `dot` | has | `Tensor::dot` | |
 | `inner` | has | `Tensor::inner` | |
 | `normalize` | has | `Tensor::normalize` | Zero-norm not special-cased, as in TK. |
