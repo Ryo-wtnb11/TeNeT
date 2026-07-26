@@ -49,6 +49,11 @@ enum Quirk {
     /// Duals every sector to the vacuum, i.e. a non-injective dual: a broken
     /// rigidity structure rather than an unrepresentable value.
     CollapsingDual,
+    /// Labels the charges in the reverse of the engine's `SectorId` order
+    /// (`c <-> 2 - c`). Not broken at all — a valid codec whose label order
+    /// simply is not the id order, which is the only way to observe that a
+    /// facade sorts by label rather than by id.
+    ReversedLabels,
 }
 
 #[derive(Clone, Copy)]
@@ -194,7 +199,12 @@ impl SectorCodec for ExternalZ3 {
             return Ok(SectorId::new(0));
         }
         if value.0 < 3 {
-            Ok(SectorId::new(usize::from(value.0)))
+            let id = if self.quirk == Some(Quirk::ReversedLabels) {
+                2 - value.0
+            } else {
+                value.0
+            };
+            Ok(SectorId::new(usize::from(id)))
         } else {
             Err(FusionAlgebraError::UnrepresentableSectorLabel {
                 rule: self.rule_identity(),
@@ -212,7 +222,13 @@ impl SectorCodec for ExternalZ3 {
         u8::try_from(sector.id())
             .ok()
             .filter(|&charge| charge < limit)
-            .map(Z3Charge)
+            .map(|charge| {
+                Z3Charge(if self.quirk == Some(Quirk::ReversedLabels) {
+                    2 - charge
+                } else {
+                    charge
+                })
+            })
             .ok_or(FusionAlgebraError::InvalidSector { sector })
     }
 }
@@ -2018,12 +2034,30 @@ fn svd_vals_reports_decoded_labels_sorted_by_label() {
     for entry in &spectrum {
         assert!(entry.values.windows(2).all(|w| w[0] >= w[1]));
     }
-    // Why no test that label order actually *differs* from the engine's
-    // `SectorId` order: no provider this suite hosts separates the two —
-    // `Z3Charge`, `Z2Irrep` and `SU2Irrep` all order exactly as their ids do.
-    // Standing up a provider whose `Ord` is deliberately reversed would be a
-    // second full rule implementation to observe a sort that this test already
-    // pins by its own predicate.
+    // `Z2Irrep` orders exactly as its ids do, so this fixture cannot tell a
+    // label sort from an id sort. The next test does.
+}
+
+#[test]
+fn svd_vals_sorts_by_label_where_that_differs_from_the_id_order() {
+    // What: the O2' promise is *label* order, and the only way to see it is a
+    // provider whose codec does not order its labels the way the engine orders
+    // its ids. `Quirk::ReversedLabels` is exactly that — a valid codec, not a
+    // broken one — so the seam hands the spectrum back in the reversed order
+    // and only the facade's own sort puts it right.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::with(Quirk::ReversedLabels));
+    let tensor = z3_rank_four(&runtime, &provider);
+
+    let labels: Vec<u8> = tensor
+        .svd_vals()
+        .unwrap()
+        .iter()
+        .map(|entry| entry.sector.0)
+        .collect();
+
+    assert_eq!(labels, [0, 1, 2]);
 }
 
 #[test]
