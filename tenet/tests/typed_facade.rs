@@ -4733,3 +4733,104 @@ fn sqrt_of_a_complex_payload_takes_the_principal_branch() {
         );
     }
 }
+
+#[test]
+fn typed_and_erased_c64_compact_inv_and_pinv_agree_to_rounding() {
+    // What: the one place the two facades' compact arms are *not* byte
+    // identical, pinned rather than left untested.
+    //
+    // A c64 tensor's singular values are real. The erased facade records that in
+    // its `DiagonalData::RealC64` variant and divides in real arithmetic; the
+    // typed facade's compact payload holds values of exactly the payload type,
+    // so it divides in complex. Complex division is not real division, and the
+    // two disagree in the last ulp on part of the spectrum.
+    //
+    // The assertion is therefore relative, not `assert_eq!`: the gap is real and
+    // accepted (a `RealC64` route in the typed storage is its own phase), but it
+    // is bounded by rounding, and a genuine algorithm divergence — a dropped
+    // cutoff, a wrong reciprocal — would blow through this bound by orders of
+    // magnitude. The f64 siblings stay byte-compared, one test up.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    // A c64 `[v] <- [v]` map, full rank, with wide enough legs that the whole
+    // spectrum is 33 singular values: they are real while the payload dtype is
+    // not, which is exactly the `DiagonalData::RealC64` case, and the erased
+    // facade's real division agrees with the typed facade's complex division on
+    // only about three quarters of arguments — so a handful of values would be
+    // able to agree by luck and a wide spectrum cannot.
+    let complex = |value: f64| Complex64::new(value, 1.0 + value % 5.0);
+    let space = tenet::prelude::Space::z2([(0, 16), (1, 17)]);
+    let mut state = 0x5eed_c64u64;
+    let mut next = || {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        complex(((state >> 33) as f64) / (u32::MAX as f64) + 0.5)
+    };
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        &runtime,
+        [&space],
+        [&space],
+        |_: &tenet::prelude::BlockKey, _: &[usize]| next(),
+    )
+    .unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 16),
+            (tenet::core::Z2Irrep::ODD, 17),
+        ],
+        false,
+    )
+    .unwrap();
+    let mut state = 0x5eed_c64u64;
+    let mut next = || {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        complex(((state >> 33) as f64) / (u32::MAX as f64) + 0.5)
+    };
+    let typed = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| next()).unwrap();
+    assert_eq!(typed.data(), erased.data_c64(), "the fixtures differ");
+
+    let erased_s = erased
+        .svd_trunc(&tenet::prelude::Truncation::Full)
+        .unwrap()
+        .s;
+    let typed_s = typed.svd_trunc(&Truncation::Full).unwrap().s;
+    assert_eq!(
+        typed_s.data(),
+        erased_s.data_c64(),
+        "the two spectra differ before either matrix function runs"
+    );
+
+    for (name, typed_out, erased_out) in [
+        ("inv", typed_s.inv().unwrap(), erased_s.inv().unwrap()),
+        (
+            "pinv",
+            typed_s.pinv(1e-12).unwrap(),
+            erased_s.pinv(1e-12).unwrap(),
+        ),
+    ] {
+        let mut differing = 0usize;
+        for (index, (mine, theirs)) in typed_out
+            .data()
+            .iter()
+            .zip(erased_out.data_c64())
+            .enumerate()
+        {
+            let scale = theirs.norm().max(f64::MIN_POSITIVE);
+            assert!(
+                (mine - theirs).norm() / scale < 1e-15,
+                "c64 compact {name} entry {index}: {mine} vs {theirs} is more \
+                 than a rounding apart"
+            );
+            if mine != theirs {
+                differing += 1;
+            }
+        }
+        // And the gap is really there: if this ever hits zero, the typed storage
+        // grew a real-spectrum route and the comment above went stale.
+        assert!(
+            differing > 0,
+            "c64 compact {name} is now byte identical to the erased sibling — \
+             the RealC64 divergence this test documents is gone"
+        );
+    }
+}
