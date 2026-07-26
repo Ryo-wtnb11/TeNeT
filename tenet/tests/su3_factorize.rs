@@ -320,3 +320,40 @@ fn su3_svd_compact_c64_reconstructs() {
         assert!((x - y).norm() < 1e-12, "c64 svd reconstruction: {x} vs {y}");
     }
 }
+
+/// `Space::truncspace` on the Generic (SU(3)) rule, end to end.
+///
+/// The erased adapter deliberately does not route through `with_rule!` — that
+/// macro is multiplicity-free only and `unimplemented!()`s on SU(3) — because
+/// a truncation profile is pure metadata with no recoupling coefficient in it.
+/// This is the gate on that decision: a profile naming only **3** must keep
+/// the 3-sector prefix and drop 3̄ entirely, even though the discarded 3̄ value
+/// is the *larger* one, which no magnitude-driven policy would do.
+#[test]
+fn su3_truncspace_keeps_the_named_sector_and_drops_the_rest() {
+    let rt = Runtime::builder().build().unwrap();
+    let t = t_v(&rt, [[10.0, 0.0], [0.0, 0.5]], 7.0);
+    let c3 = Su3FusionRule::new().sector_of(1, 0).unwrap();
+
+    let target = Space::su3([((1, 0), 1)]).unwrap();
+    let out = t
+        .svd_trunc(&Truncation::space(target.truncspace()))
+        .unwrap();
+
+    assert_eq!(out.singular_values.len(), 1, "only the 3-sector survives");
+    assert_eq!(out.singular_values[0].sector, c3);
+    assert_eq!(out.singular_values[0].values, vec![10.0]);
+    assert_eq!(
+        out.u.domain_spaces()[0].su3_sectors().unwrap(),
+        target.su3_sectors().unwrap(),
+        "the bond space is not the requested profile"
+    );
+    // 7.0 is discarded despite being larger than the kept 0.5's sector-mate:
+    // the profile, not the magnitude, decides.
+    let want_error = (3.0f64 * (7.0 * 7.0 + 0.5 * 0.5)).sqrt();
+    assert!(
+        (out.error - want_error).abs() < 1e-12,
+        "dim-weighted discard error: {} vs {want_error}",
+        out.error
+    );
+}

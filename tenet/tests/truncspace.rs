@@ -14,8 +14,8 @@
 
 use std::sync::Arc;
 
-use tenet::core::{SU2FusionRule, SU2Irrep};
-use tenet::prelude::{Error, Runtime, SectorLabel, Space, Tensor, Truncation};
+use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use tenet::prelude::{Dtype, Error, Runtime, SectorLabel, Space, Tensor, Truncation};
 use tenet::typed::{GradedSpace, TensorMap};
 
 fn runtime() -> Runtime {
@@ -165,4 +165,61 @@ fn typed_truncspace_composes_with_a_magnitude_policy() {
         kept > 0 && kept <= 2,
         "the rank-2 budget did not tighten the profile: kept {kept}"
     );
+}
+
+#[test]
+fn typed_truncspace_from_another_rule_is_a_typed_error() {
+    // What: the typed facade reaches `select_truncation` through its own call
+    // site, so the guard needs its own gate here. A U(1) leg's `SectorId`s
+    // read as SU(2)'s would name unrelated spins and truncate to nothing.
+    let foreign = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+        false,
+    )
+    .unwrap();
+    let result = typed_source(0x5eed_5000).svd_trunc(&Truncation::space(foreign.truncspace()));
+    assert!(
+        matches!(result, Err(Error::Operation(_))),
+        "a foreign-rule profile must be a typed error, got {result:?}"
+    );
+}
+
+/// A truncation target names sector *content*, not orientation — the claim
+/// both `truncspace` rustdocs make. On a non-self-dual rule that has teeth:
+/// `Space::dual` rewrites the stored sector ids to their duals *and* flips the
+/// flag, so the two halves have to be separated.
+#[test]
+fn erased_truncspace_follows_stored_sectors_not_the_dual_flag() {
+    let rt = runtime();
+    let leg = Space::u1([(-1, 3), (0, 3), (1, 3)]);
+    let source = Tensor::rand_with_seed(&rt, Dtype::F64, [&leg], [&leg], 0x5eed_6000).unwrap();
+    let bond = |space: &Space| {
+        source
+            .svd_trunc(&Truncation::space(space.truncspace()))
+            .unwrap()
+            .u
+            .domain_spaces()[0]
+            .sectors()
+    };
+
+    // Content half: an asymmetric target and its dual carry mirrored charges,
+    // so they must select mirrored bond spaces — the profile reads the dual's
+    // rewritten ids, exactly as TensorKit's `dim(V', c)` does.
+    let skewed = Space::u1([(-1, 3), (0, 2), (1, 1)]);
+    assert_eq!(bond(&skewed), skewed.sectors());
+    assert_eq!(bond(&skewed.dual()), skewed.dual().sectors());
+    assert_ne!(
+        bond(&skewed),
+        bond(&skewed.dual()),
+        "a non-self-dual target and its dual must not select the same bond"
+    );
+
+    // Flag half: a charge-symmetric target has the *same* stored `(id, deg)`
+    // pairs as its dual and differs only in the flag, so the two profiles must
+    // agree. This is the assertion that dies if the flag ever leaks in.
+    let symmetric = Space::u1([(-1, 2), (0, 3), (1, 2)]);
+    assert!(symmetric.dual().is_dual() && !symmetric.is_dual());
+    assert_eq!(symmetric.sectors(), symmetric.dual().sectors());
+    assert_eq!(bond(&symmetric), bond(&symmetric.dual()));
 }
