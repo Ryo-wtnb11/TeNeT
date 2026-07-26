@@ -181,6 +181,26 @@ fn storage_local_diagonal_operations_do_not_allocate_dense_payloads() {
         }
     }
 
+    // The byte ceilings above cannot see a route that materializes: the
+    // warm-up run inside `measured_unary_bytes` would pay for it and cache it
+    // on the very tensor the measurement then reads, so the measured run is
+    // free either way. Assert the absence directly instead, on a *fresh*
+    // spectrum no warm-up has touched: after every reduction above has run on
+    // it, its first `data()` must still have to build the dense buffer.
+    //
+    // A fresh tensor rather than the shared `OnceLock` fixture because the
+    // assertion consumes the one un-materialized read a tensor has.
+    let fresh = prepare_fixture(128, Dtype::F64, 809).diagonal;
+    black_box(fresh.adjoint().unwrap());
+    black_box(fresh.twist(&[0]).unwrap());
+    black_box(fresh.norm().unwrap());
+    black_box(fresh.norm_p(3.0).unwrap());
+    black_box(fresh.tr().unwrap());
+    assert!(
+        measured_bytes(|| fresh.data().len()) >= (128 * 128 * std::mem::size_of::<f64>()) as u64,
+        "one of the compact reductions materialized the spectrum behind our back"
+    );
+
     let f64_diagonal = &f64_fixture(128).diagonal;
     let to_c64 = measured_unary_bytes(f64_diagonal, Tensor::to_c64);
     assert!(
