@@ -24,14 +24,21 @@
 //! and the index-manipulation and contraction
 //! operations — [`TensorMap::permute`], [`TensorMap::braid`],
 //! [`TensorMap::transpose`], [`TensorMap::transpose_axes`],
-//! [`TensorMap::repartition`] and [`TensorMap::contract`].
+//! [`TensorMap::repartition`] and [`TensorMap::contract`] — plus the
+//! decompositions of issue #567: [`TensorMap::svd_compact`],
+//! [`TensorMap::svd_full`], [`TensorMap::svd_trunc`], [`TensorMap::svd_vals`],
+//! [`TensorMap::qr_compact`], [`TensorMap::qr_full`],
+//! [`TensorMap::lq_compact`], [`TensorMap::lq_full`],
+//! [`TensorMap::left_orth`], [`TensorMap::right_orth`],
+//! [`TensorMap::left_null`] and [`TensorMap::right_null`].
 //!
 //! Everything else is deliberately still absent, each for its own reason:
 //!
-//! - The **decompositions** (`svd_*`, `qr`/`lq`, `left_orth`/`right_orth`, the
-//!   null spaces) get their own readiness step: they force a decision on how a
-//!   spectrum is labelled and they touch the matrix-algebra result types, so
-//!   they are a phase rather than an addition.
+//! - The **eigendecompositions** (`eigh_*`, `eig_*`) ride with the typed
+//!   diagonal-storage question of issue #570: `eigh_full`'s `d` factor has no
+//!   seam and would have to instantiate that question rather than inherit it,
+//!   and `eig_*` additionally needs a per-method `D::Eig` bound. Shipping part
+//!   of the family would leave a broken parity row.
 //! - The **scalar operations** (`add`, `scale`, `norm`, `inner`, `tr`) are
 //!   reachable but raise the operator-overload ergonomics question, which is
 //!   reviewed on its own.
