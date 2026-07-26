@@ -6013,6 +6013,57 @@ impl Tensor {
             )
             .map_err(map_trace_preflight_error)
         })?;
+        // Compact arm: the full trace of a rank-(1,1) tensor over its only pair
+        // is a reduction of the stored diagonal, so there is nothing to
+        // materialize (#585). This is the *categorical* trace, not `tr()`:
+        // TensorOperations' `tensortrace!` carries the quantum dimension of the
+        // traced channel and the fermionic twist of its orientation, which is
+        // what makes it the supertrace for a fermionic rule and what makes the
+        // coefficient here `dim(c) * θ(c)` rather than `tr()`'s `dim(c)`.
+        //
+        // Why the guard is this narrow: with one pair and rank two the
+        // destination is the empty tree, so the traced channel is a single
+        // uncoupled sector and the coefficient collapses to a per-sector
+        // scalar. Any wider geometry leaves an open destination tree whose
+        // recoupling is not a per-sector scaling of a diagonal. An adjoint view
+        // is excluded because its stored spectrum is the parent's, not this
+        // tensor's logical one — the same line the compact `is_posdef` draws.
+        if let Data::Diagonal(diagonal) = self.stored_data() {
+            if !source_conjugate && rank == 2 && self.codomain_rank() == 1 && pairs.len() == 1 {
+                // The traced channel's twist is applied exactly when the traced
+                // leg is *not* dual — `tensortrace`'s own rule for the
+                // uncoupled legs of a trace channel (see
+                // `tenet_tensors::tensortrace`'s `trace_channel_factor`), and
+                // the reason a compact `transpose`, which flips both bond legs,
+                // trades the supertrace for the ordinary one. The whole
+                // coefficient is pinned against the engine route by the value
+                // oracles in `compact_diagonal_tests.rs`, which sweep both
+                // orientations on a fermionic rule; it is not derivable from
+                // `tr()`, whose weight is `dim(c)` unconditionally.
+                let traced_leg_is_dual =
+                    self.ordinary_body().space.homspace().codomain().legs()[0].is_dual();
+                let value = with_user_rule!(self.ordinary_body().space, rule, {
+                    diagonal.ordinary_trace_with(|sector| {
+                        if traced_leg_is_dual {
+                            rule.dim_scalar(sector)
+                        } else {
+                            rule.dim_scalar(sector) * rule.twist_scalar(sector)
+                        }
+                    })
+                });
+                let dst_bound = source.space.from_selected_homspace(hom)?;
+                if dst_bound.raw().required_len()? != 1 {
+                    return Err(internal_layout_error(
+                        "a fully traced rank-one destination is not a single scalar",
+                    ));
+                }
+                let data = match diagonal {
+                    DiagonalData::RealF64(_) => Data::F64(vec![value.re]),
+                    DiagonalData::RealC64(_) | DiagonalData::C64(_) => Data::C64(vec![value]),
+                };
+                return self.with_bound(dst_bound, data);
+            }
+        }
         let data = if source_conjugate {
             self.stored_data()
         } else {

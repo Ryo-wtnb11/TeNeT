@@ -294,9 +294,17 @@ fn asymmetric_odd_product_swap_preserves_compact_c64_storage_and_dense_values() 
 }
 
 #[test]
-fn nonempty_trace_pairs_keeps_the_existing_diagonal_densification_boundary() {
-    // What: partial trace of compact storage remains the established dense
-    // fallback and agrees with an explicitly densified tensor.
+fn nonempty_trace_pairs_reduces_the_compact_spectrum_without_densifying() {
+    // What: the full pair of a rank-(1,1) compact tensor is now reduced from
+    // the stored spectrum (#585) and still agrees with the explicitly densified
+    // route. The previous revision of this test pinned the opposite — that the
+    // trace materialized — which was the live compact regression the #585
+    // design audit found.
+    //
+    // There is no wider geometry to guard on this side: compact diagonal
+    // storage only ever holds a rank-(1,1) bond, and an empty pair list returns
+    // the tensor unchanged before any of this, so the full pair is the whole
+    // reachable surface of the arm.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let space = product_space();
     let diagonal = complex_diagonal(&runtime, &space, 261_408);
@@ -306,7 +314,7 @@ fn nonempty_trace_pairs_keeps_the_existing_diagonal_densification_boundary() {
     let expected = oracle.trace_pairs(&[(0, 1)]).unwrap();
 
     assert_tensor_close(&actual, &expected);
-    assert!(diagonal.has_cached_materialization());
+    assert_compact_unmaterialized(&diagonal);
 }
 
 fn fixed_diagonal(
@@ -1127,6 +1135,27 @@ fn full_rank_one_trace_pairs_matches_the_dense_route_on_every_rule() {
                 ("f64", real_diagonal(&runtime, &space, 585_001)),
                 ("c64", complex_diagonal(&runtime, &space, 585_002)),
                 ("real-c64", real_c64_diagonal(&runtime, &space, 585_003)),
+                // The bond space a compact swap produces, so the arm is also
+                // read on legs it bent itself rather than only on freshly
+                // factorized ones.
+                (
+                    "transposed c64",
+                    complex_diagonal(&runtime, &space, 585_004)
+                        .transpose()
+                        .unwrap(),
+                ),
+                (
+                    "permuted c64",
+                    complex_diagonal(&runtime, &space, 585_005)
+                        .permute(&[1], &[0])
+                        .unwrap(),
+                ),
+                (
+                    "adjoint c64",
+                    complex_diagonal(&runtime, &space, 585_006)
+                        .adjoint()
+                        .unwrap(),
+                ),
             ] {
                 let oracle = dense_oracle(&diagonal);
                 for pairs in [[(0usize, 1usize)], [(1, 0)]] {
@@ -1139,6 +1168,7 @@ fn full_rank_one_trace_pairs_matches_the_dense_route_on_every_rule() {
                         &format!("{name} dual={dual} {dtype} {pairs:?}"),
                     );
                 }
+                assert_compact_unmaterialized(&diagonal);
             }
         }
     }
@@ -1165,6 +1195,21 @@ fn full_rank_one_trace_pairs_is_the_supertrace_for_a_fermionic_rule() {
             rank_zero_value(&diagonal.trace_pairs(&[(0, 1)]).unwrap()),
             trace * sign,
             name,
+        );
+
+        // And the orientation is load-bearing, not incidental: a planar
+        // transpose duals both bond legs, and `tensortrace` twists a traced
+        // channel only where its leg is *not* dual, so the same tensor traces
+        // without the fermionic sign once transposed. A coefficient that read
+        // the sector alone would return the supertrace here too.
+        let transposed = diagonal.transpose().unwrap();
+        let Scalar::C64(transposed_trace) = transposed.tr().unwrap() else {
+            panic!("a c64 spectrum traces to a c64 scalar");
+        };
+        assert_scalar_close(
+            rank_zero_value(&transposed.trace_pairs(&[(0, 1)]).unwrap()),
+            transposed_trace,
+            &format!("{name} transposed"),
         );
     }
 }

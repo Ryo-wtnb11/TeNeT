@@ -193,3 +193,43 @@ fn diagonal_dense_add_allocates_only_the_dense_result_payload() {
         "diagonal+dense add allocated more than one dense payload: {bytes} bytes"
     );
 }
+
+/// Bytes one full-pair trace costs on a *fresh* compact tensor.
+///
+/// Why not [`measured_unary_bytes`]: its warm-up run is on the very tensor it
+/// then measures, and a route that materialized would have filled that tensor's
+/// shared materialization cache during the warm-up — so the measured run would
+/// read the cache and look compact. The warm-up here runs on a throwaway twin,
+/// which leaves the process-global layout and fusion-tree caches hot (what the
+/// warm-up is for) while the measured tensor still owes its dense buffer.
+fn measured_fresh_trace_bytes(degeneracy: usize, dtype: Dtype, seed: u64) -> u64 {
+    let warmup = prepare_fixture(degeneracy, dtype, seed);
+    black_box(warmup.diagonal.trace_pairs(&[(0, 1)]).unwrap());
+    let fixture = prepare_fixture(degeneracy, dtype, seed);
+    measured_bytes(|| fixture.diagonal.trace_pairs(&[(0, 1)]).unwrap())
+}
+
+#[test]
+fn full_rank_one_trace_pairs_allocation_bytes_scale_linearly() {
+    // What: `trace_pairs` over the only pair of a rank-(1,1) compact tensor
+    // reduces the stored spectrum instead of materializing the `d`-by-`d`
+    // payload the partial-trace engine used to need (#585). Two sizes make the
+    // gate insensitive to the fixed rank-0 destination and its layout metadata
+    // while rejecting the old materialization.
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let small = measured_fresh_trace_bytes(64, Dtype::F64, 811);
+    let large = measured_fresh_trace_bytes(128, Dtype::F64, 813);
+    assert!(
+        large <= small * 4,
+        "allocation growth is not O(d): d=64 used {small} bytes, d=128 used {large} bytes"
+    );
+    assert!(
+        large < (128 * 128 * std::mem::size_of::<f64>()) as u64,
+        "compact trace_pairs allocated at least one dense payload: {large} bytes"
+    );
+    let complex = measured_fresh_trace_bytes(128, Dtype::C64, 815);
+    assert!(
+        complex < (2 * 128 * 128 * std::mem::size_of::<f64>()) as u64,
+        "compact c64 trace_pairs allocated at least one dense payload: {complex} bytes"
+    );
+}
