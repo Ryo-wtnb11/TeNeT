@@ -465,6 +465,33 @@ impl DiagonalData {
         })
     }
 
+    /// Elementwise exponential (TensorKit `exp(::DiagonalTensorMap)`,
+    /// `tensors/diagonal.jl:383-390`). Variant-preserving, `RealC64` included:
+    /// `exp` of a real value is real, so a real spectrum inside a c64 tensor
+    /// stays real instead of promoting to `C64` and doubling the stored payload
+    /// for no information.
+    fn exp(&self) -> DiagonalData {
+        fn map<V: Copy>(
+            spectra: &[SectorSpectrum<V>],
+            exp: impl Fn(V) -> V,
+        ) -> Vec<SectorSpectrum<V>> {
+            spectra
+                .iter()
+                .map(|entry| SectorSpectrum {
+                    sector: entry.sector,
+                    values: entry.values.iter().map(|&value| exp(value)).collect(),
+                })
+                .collect()
+        }
+        match self {
+            DiagonalData::RealF64(spectra) => DiagonalData::RealF64(map(spectra, f64::exp)),
+            DiagonalData::RealC64(spectra) => DiagonalData::RealC64(map(spectra, f64::exp)),
+            DiagonalData::C64(spectra) => {
+                DiagonalData::C64(map(spectra, |value: Complex64| value.exp()))
+            }
+        }
+    }
+
     /// Elementwise pseudo-inverse with an `rcond * max|entry|` cutoff (TensorKit
     /// `pinv` on a diagonal): entries at or below the cutoff map to 0, the rest
     /// to `1/entry`. Same variant (`1/entry` of a real entry stays real).
@@ -8114,11 +8141,45 @@ impl Tensor {
         })
     }
 
-    /// Matrix exponential of a Hermitian endomorphism, `exp(t) = v exp(d)
-    /// v^H` (TensorKit `exp`, via the eigendecomposition).
+    /// Matrix exponential, `exp(t) = v exp(d) v^H` per coupled sector
+    /// (TensorKit `exp`, via the Hermitian eigendecomposition) — or, on
+    /// compact diagonal storage, `exp` of each stored value.
+    ///
+    /// # Domain, and what storage decides
+    ///
+    /// The dense arm is **Hermitian-only**: the spectral formula needs a
+    /// unitary eigenbasis, so a non-Hermitian block is refused rather than
+    /// silently symmetrized. TensorKit's `exp(::AbstractTensorMap)` has no such
+    /// restriction — it runs a general per-block Padé approximant — which is a
+    /// recorded divergence waiting on a Padé/Taylor seam (issue #577).
+    ///
+    /// The **compact** arm is TensorKit's `exp(::DiagonalTensorMap)`
+    /// (`tensors/diagonal.jl:383-390`), which is unconditionally elementwise,
+    /// and so is this one: no hermiticity gate, because a diagonal's
+    /// exponential is elementwise whether or not its spectrum is real. Storage
+    /// therefore decides what `exp` accepts — a genuinely complex spectrum from
+    /// [`Self::eig_full`] is exponentiated here and refused as a dense matrix
+    /// of the same values — exactly as in TensorKit, and as on the
+    /// [`crate::typed::TensorMap`] facade (issue #576). Gating the compact arm
+    /// instead would make it stricter than the TensorKit function it ports.
+    ///
+    /// # Complexity
+    ///
+    /// Dense input: `O(Σ_c n_c³)`, one Hermitian eigendecomposition per coupled
+    /// sector plus the composition that reassembles `v exp(d) v^H`. Compact
+    /// input: `O(Σ_c k_c)` time and storage over the stored spectra, with no
+    /// dense buffer, no EIGH and no GEMM — the result stays compact, so a
+    /// following `compose` is still a bond scaling (issue #578).
     pub fn exp(&self) -> Result<Self, Error> {
         if self.is_adjoint_view() {
             return self.materialized_tensor()?.exp();
+        }
+        // Compact diagonal: `exp` is elementwise on the spectrum (O(Σ_c k_c))
+        // and stays diagonal, so it must not reach the dense lease below —
+        // materializing to eigendecompose a matrix already given in its
+        // eigenbasis is the complexity gap this arm closes.
+        if let Data::Diagonal(diagonal) = self.stored_data() {
+            return Ok(self.with_diagonal(diagonal.exp()));
         }
         self.reject_unwired_su3("Tensor::exp")?;
         with_data!(self, data, self.exp_impl(data))
