@@ -77,12 +77,11 @@
 //!   them is a spectral function or a solve over the same seams, so adding them
 //!   is mechanical; what is missing is a reason to. The four that landed are
 //!   the ones the tensor-network algorithms in this repository actually call.
-//!   Two capability gaps stand behind that line and are tracked separately:
-//!   general **non-Hermitian `exp`** needs a Padé/Taylor seam (issue #577;
-//!   [`TensorMap::exp`] is Hermitian-only, a recorded divergence from
-//!   TensorKit), and general endomorphism **`sqrt`** needs a Schur seam
-//!   ([`TensorMap::sqrt`] is the diagonal-bond idiom only). Neither seam exists
-//!   below this facade; both are their own phase. The erased
+//!   One capability gap still stands behind that line: general endomorphism
+//!   **`sqrt`** needs a Schur seam ([`TensorMap::sqrt`] is the diagonal-bond
+//!   idiom only), and that seam does not exist below this facade. The one that
+//!   used to stand beside it is closed — [`TensorMap::exp`] accepts any
+//!   endomorphism since issue #577, through a blockwise Padé arm. The erased
 //!   [`crate::prelude::Tensor::exp`] carried a complexity-parity gap against
 //!   this one — it densified a diagonal payload where this facade has an
 //!   O(rank) arm — until issue #578 gave it the same arm.
@@ -2198,45 +2197,50 @@ where
     }
 
     /// The matrix exponential `exp(t) = Σ_k t^k / k!`, evaluated per coupled
-    /// sector as the spectral function `V exp(D) Vᴴ` of the Hermitian
-    /// eigendecomposition.
+    /// sector — TensorKit's `exp(::AbstractTensorMap)` (`linalg.jl:419-427`),
+    /// which checks `domain == codomain` and exponentiates every block.
     ///
-    /// # Domain, and the divergence from TensorKit
+    /// # Domain
     ///
-    /// This facade's `exp` is **Hermitian-only**: the input must be an
-    /// endomorphism whose coupled-sector blocks are Hermitian, which is what
-    /// makes the eigenbasis unitary and the spectral formula exact. TensorKit's
-    /// `exp(::AbstractTensorMap)` has no such restriction — it applies a
-    /// general per-block Padé approximant and accepts any endomorphism. That is
-    /// a recorded divergence: a Padé/Taylor seam does not exist below this
-    /// facade, and general (non-Hermitian) `exp` waits on one — issue #577.
-    /// Until then a non-Hermitian argument is refused rather than silently
-    /// symmetrized.
+    /// Any endomorphism, of any dtype. Since issue #577 there are two dense
+    /// routes and the input picks one:
     ///
-    /// The **compact** arm is a different story and matches TensorKit exactly:
-    /// `exp(::DiagonalTensorMap)` is unconditionally elementwise, with no
-    /// hermiticity gate, and so is the arm below. Storage therefore decides
-    /// whether a nonreal spectrum is accepted — in this facade as in TensorKit.
+    /// - **Hermitian blocks** take the spectral function `V exp(D) Vᴴ` of the
+    ///   Hermitian eigendecomposition. Exact, and the cheaper of the two.
+    /// - **Everything else** takes blockwise scaling-and-squaring Padé [13/13]
+    ///   (Higham 2005) — the algorithm behind the `LinearAlgebra.exp!` that
+    ///   TensorKit's own `exp!` calls. Non-normal, defective and complex
+    ///   non-Hermitian blocks are all in domain; nothing is symmetrized.
+    ///
+    /// The **compact** arm is TensorKit's `exp(::DiagonalTensorMap)`:
+    /// unconditionally elementwise, with no hermiticity gate. Storage therefore
+    /// decides how `exp` is computed, no longer whether it is defined.
     ///
     /// # Errors
     ///
-    /// - [`Error::Operation`] when the input is not an endomorphism, or when a
-    ///   coupled-sector block is not Hermitian to MatrixAlgebraKit's own
-    ///   tolerance. Both come from the eigendecomposition seam.
+    /// - [`Error::Operation`] when the input is not an endomorphism
+    ///   (`codomain != domain`), when a general block holds a nonfinite entry,
+    ///   or when the backend fails — including an executor that supplies no
+    ///   dense solve, which the Padé route needs and which surfaces as
+    ///   `DenseError::Unsupported`. Nothing is published unless every coupled
+    ///   sector succeeded.
     /// - [`Error::Core`] / [`Error::FusionAlgebra`] from the composition that
-    ///   reassembles `V exp(D) Vᴴ`.
+    ///   reassembles `V exp(D) Vᴴ` on the Hermitian route.
     ///
     /// # Complexity
     ///
-    /// Dense input: `O(Σ_c n_c³)` — one Hermitian eigendecomposition per
-    /// coupled sector plus one composition, with `exp(D)` folded into a column
-    /// scaling of `V` rather than materialized. Compact input (TensorKit's
+    /// Dense input: `O(Σ_c n_c³)` on both routes — one Hermitian
+    /// eigendecomposition per coupled sector plus one composition, with
+    /// `exp(D)` folded into a column scaling of `V` rather than materialized;
+    /// or six GEMMs, one solve and `s = max(0, ceil(log2(||A_c||_1 / theta_13)))`
+    /// squarings per sector, over `O(max_c n_c²)` scratch reused across
+    /// sectors. Neither route couples sectors. Compact input (TensorKit's
     /// `DiagonalTensorMap`): the **O(rank) elementwise arm**, `exp(s_i)` over
     /// the `Σ_c k_c` stored values, staying compact. The erased
     /// [`crate::prelude::Tensor::exp`] has the same arm since issue #578 — it
     /// used to materialize a diagonal payload and eigendecompose the
-    /// block-diagonal buffer — so the two facades now agree both on complexity
-    /// and on what each storage accepts.
+    /// block-diagonal buffer — so the two facades agree on complexity and on
+    /// what each storage accepts.
     pub fn exp(&self) -> Result<Self, Error> {
         if let Some(spectrum) = self.spectrum() {
             // Why no hermiticity gate here while the dense arm has one: see the

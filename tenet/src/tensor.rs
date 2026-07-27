@@ -8141,35 +8141,39 @@ impl Tensor {
         })
     }
 
-    /// Matrix exponential, `exp(t) = v exp(d) v^H` per coupled sector
-    /// (TensorKit `exp`, via the Hermitian eigendecomposition) — or, on
-    /// compact diagonal storage, `exp` of each stored value.
+    /// Matrix exponential per coupled sector (TensorKit `exp`,
+    /// `tensors/linalg.jl:419-427`) — or, on compact diagonal storage, `exp` of
+    /// each stored value.
     ///
     /// # Domain, and what storage decides
     ///
-    /// The dense arm is **Hermitian-only**: the spectral formula needs a
-    /// unitary eigenbasis, so a non-Hermitian block is refused rather than
-    /// silently symmetrized. TensorKit's `exp(::AbstractTensorMap)` has no such
-    /// restriction — it runs a general per-block Padé approximant — which is a
-    /// recorded divergence waiting on a Padé/Taylor seam (issue #577).
+    /// Like TensorKit's, the dense arm accepts **any endomorphism** and picks
+    /// its algorithm from the blocks (issue #577):
+    ///
+    /// - Hermitian blocks take the spectral function `v exp(d) v^H` of the
+    ///   Hermitian eigendecomposition — exact, and the cheaper route;
+    /// - every other block takes blockwise scaling-and-squaring Padé [13/13]
+    ///   (Higham 2005), which is what the `LinearAlgebra.exp!` behind
+    ///   TensorKit's own `exp!` runs. Nothing is symmetrized on the way.
     ///
     /// The **compact** arm is TensorKit's `exp(::DiagonalTensorMap)`
     /// (`tensors/diagonal.jl:383-390`), which is unconditionally elementwise,
-    /// and so is this one: no hermiticity gate, because a diagonal's
-    /// exponential is elementwise whether or not its spectrum is real. Storage
-    /// therefore decides what `exp` accepts — a genuinely complex spectrum from
-    /// [`Self::eig_full`] is exponentiated here and refused as a dense matrix
-    /// of the same values — exactly as in TensorKit, and as on the
-    /// [`crate::typed::TensorMap`] facade (issue #576). Gating the compact arm
-    /// instead would make it stricter than the TensorKit function it ports.
+    /// and so is this one: a diagonal's exponential is elementwise whether or
+    /// not its spectrum is real. Storage therefore decides *how* `exp` is
+    /// computed, not whether it is defined — a genuinely complex spectrum from
+    /// [`Self::eig_full`] comes back the same either way, and the compact route
+    /// simply never builds the dense buffer (issue #578).
     ///
     /// # Complexity
     ///
-    /// Dense input: `O(Σ_c n_c³)`, one Hermitian eigendecomposition per coupled
-    /// sector plus the composition that reassembles `v exp(d) v^H`. Compact
-    /// input: `O(Σ_c k_c)` time and storage over the stored spectra, with no
-    /// dense buffer, no EIGH and no GEMM — the result stays compact, so a
-    /// following `compose` is still a bond scaling (issue #578).
+    /// Dense input: `O(Σ_c n_c³)` on both routes — one Hermitian
+    /// eigendecomposition per coupled sector plus the composition that
+    /// reassembles `v exp(d) v^H`, or six GEMMs, one solve and
+    /// `s = max(0, ceil(log2(||A_c||_1 / theta_13)))` squarings per sector over
+    /// `O(max_c n_c²)` scratch that every sector reuses. Sectors are never
+    /// coupled. Compact input: `O(Σ_c k_c)` time and storage over the stored
+    /// spectra, with no dense buffer, no EIGH and no GEMM — the result stays
+    /// compact, so a following `compose` is still a bond scaling (issue #578).
     ///
     /// # Errors
     ///
@@ -8177,8 +8181,12 @@ impl Tensor {
     /// storage is an admissible input, on every rule. The dense arm reports
     ///
     /// - [`Error::Operation`] wrapping an `InvalidArgument` for a payload that
-    ///   is not a Hermitian endomorphism — the eigendecomposition the spectral
-    ///   formula needs is only defined there;
+    ///   is not an endomorphism (`codomain != domain`), or for a nonfinite
+    ///   entry in a block bound for the general route;
+    /// - [`Error::Operation`] wrapping a `Dense` failure from the backend,
+    ///   including `DenseError::Unsupported` when the selected executor has no
+    ///   dense solve — the general route needs one, and there is no implicit
+    ///   host copy. Nothing is published unless every coupled sector succeeded;
     /// - [`Error::UnsupportedForRule`] for an SU(3) payload, whose dense
     ///   matrix-function seam is not wired.
     pub fn exp(&self) -> Result<Self, Error> {
