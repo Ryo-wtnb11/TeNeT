@@ -4087,7 +4087,13 @@ where
         let provider = self.body.space.provider();
         // NoBraiding preflight (PR #620 review): before the compact arm and
         // before any θ evaluation — see `reject_unbraided_nonunit_legs`.
-        reject_unbraided_nonunit_legs(provider, self.body.space.space().homspace(), legs, "twist")?;
+        reject_unbraided_nonunit_legs(
+            provider,
+            self.body.space.space().homspace(),
+            legs,
+            "twist",
+            true,
+        )?;
         let nout = self.codomain_rank();
         if let TypedData::Diagonal(spectrum) = &*self.body.data {
             // Compact arm, mirroring the erased `scaled_by_sector` route: a
@@ -4172,7 +4178,7 @@ where
         let hom = self.body.space.space().homspace();
         // NoBraiding preflight (PR #620 review): flip's coefficients are
         // built from the same θ/χ — see `reject_unbraided_nonunit_legs`.
-        reject_unbraided_nonunit_legs(self.body.space.provider(), hom, legs, "flip")?;
+        reject_unbraided_nonunit_legs(self.body.space.provider(), hom, legs, "flip", false)?;
         let nout = hom.codomain().len();
         // Sequential semantics for repeated legs, from the helper shared
         // with the erased facade (#580 PR 5).

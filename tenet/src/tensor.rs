@@ -2483,21 +2483,31 @@ fn uncoupled_sector_of_leg(key: &FusionTreePairKey, nout: usize, leg: usize) -> 
 }
 
 /// Shared NoBraiding preflight of both facades' `twist` and `flip` (#580
-/// PR 5, PR #620 review): under [`tenet_core::BraidingStyleKind::NoBraiding`] the
-/// ribbon-twist eigenvalue is undefined, so TensorKit's `has_shared_twist`
-/// (`tensors/indexmanipulations.jl:34-41`) throws `SectorMismatch` unless
-/// every requested leg carries only the unit sector — in which case the
-/// operation is trivially legal. `flip`'s coefficients are built from the
-/// same θ (and χ), so the identical precondition applies there.
+/// PR 5, PR #620 review): under [`tenet_core::BraidingStyleKind::NoBraiding`]
+/// the ribbon-twist eigenvalue is undefined, so neither operation's
+/// coefficients exist. The two operations differ in TensorKit — the
+/// asymmetry `allow_unit_legs` encodes:
+///
+/// - **twist** (`allow_unit_legs = true`): `has_shared_twist`
+///   (`tensors/indexmanipulations.jl:34-41`) throws `SectorMismatch` unless
+///   every requested leg carries only the unit sector, whose twist is
+///   trivially the identity — vacuum-only legs are explicitly legal.
+/// - **flip** (`allow_unit_legs = false`): no such exception. TK's
+///   fusion-tree `flip` unconditionally evaluates
+///   `frobenius_schur_phase(a)` and `twist(a)`
+///   (`fusiontrees/braiding_manipulations.jl:384-412`), and a NoBraiding
+///   sector type defines neither — flip fails in TK even on the vacuum, so
+///   any non-empty leg list is rejected here. (The empty list never
+///   reaches this guard: both facades' `flip` return an identical clone
+///   first.)
 ///
 /// Error class: [`Error::InvalidArgument`] rather than
-/// [`Error::UnsupportedForRule`] — the failure depends on the *legs* the
-/// caller named, not on the rule alone (vacuum-only legs succeed), which is
-/// exactly this facade's "invalid user input (axes, sectors, spaces)"
-/// class and mirrors TK's `SectorMismatch`; `UnsupportedForRule` is for
-/// operations a rule cannot run at all (the `reject_unwired_su3`
-/// precedent), and its `&'static str` rule name could not spell an external
-/// provider anyway.
+/// [`Error::UnsupportedForRule`] — for twist the failure depends on the
+/// *legs* the caller named (vacuum-only legs succeed), which is exactly
+/// this facade's "invalid user input (axes, sectors, spaces)" class and
+/// mirrors TK's `SectorMismatch`; flip keeps the same class so the two
+/// operations fail alike, and `UnsupportedForRule`'s `&'static str` rule
+/// name could not spell an external provider anyway.
 ///
 /// Runs BEFORE any coefficient evaluation and before the compact-diagonal
 /// dispatch on both facades. Dead from the erased facade today — its closed
@@ -2508,11 +2518,21 @@ pub(crate) fn reject_unbraided_nonunit_legs<R>(
     hom: &FusionTreeHomSpace,
     legs: &[usize],
     operation: &str,
+    allow_unit_legs: bool,
 ) -> Result<(), Error>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + ?Sized,
 {
     if rule.braiding_style() != tenet_core::BraidingStyleKind::NoBraiding {
+        return Ok(());
+    }
+    if !allow_unit_legs {
+        if let Some(&leg) = legs.first() {
+            return Err(Error::InvalidArgument(format!(
+                "{operation} leg {leg} needs the twist and Frobenius-Schur coefficients \
+                 but the fusion rule has no braiding"
+            )));
+        }
         return Ok(());
     }
     let nout = hom.codomain().len();
@@ -4312,6 +4332,7 @@ impl Tensor {
                 self.ordinary_body().space.homspace(),
                 legs,
                 "twist",
+                true,
             )
         })?;
         let nout = self.codomain_rank();
@@ -4396,7 +4417,7 @@ impl Tensor {
         self.reject_unwired_su3("Tensor::flip")?;
         let hom = self.ordinary_body().space.homspace();
         with_user_rule!(self.ordinary_body().space, rule, {
-            reject_unbraided_nonunit_legs(rule, hom, legs, "flip")
+            reject_unbraided_nonunit_legs(rule, hom, legs, "flip", false)
         })?;
         let nout = hom.codomain().len();
         // Sequential semantics for repeated legs (TensorKit flips one index

@@ -9132,12 +9132,17 @@ fn external_nobraiding_twist_and_flip_reject_nontrivial_sectors() {
 }
 
 #[test]
-fn external_nobraiding_twist_and_flip_pass_on_vacuum_only_legs() {
-    // What (PR #620 review P2): the TensorKit carve-out — every requested
-    // leg carrying only the unit sector is legal under NoBraiding
-    // (`indexmanipulations.jl:37-40`): twist is the identity (shared
-    // buffer), flip toggles duality with values unchanged (χ = θ = 1 on the
-    // vacuum).
+fn external_nobraiding_vacuum_only_legs_twist_passes_flip_rejects() {
+    // What (PR #620 review P2, second round): the TK asymmetry on
+    // vacuum-only legs under NoBraiding. `twist` carries an explicit
+    // unit-sector carve-out (`has_shared_twist`,
+    // `tensors/indexmanipulations.jl:34-41`) and is the identity (shared
+    // buffer). `flip` has NO such exception — TK's fusion-tree flip
+    // unconditionally evaluates `frobenius_schur_phase(a)` and `twist(a)`
+    // (`fusiontrees/braiding_manipulations.jl:384-412`), neither of which a
+    // NoBraiding sector defines, so flip fails in TK even on the vacuum and
+    // must fail here. The boundary stays: `flip(&[])` is the empty-list
+    // identical clone and never reaches the guard.
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(PlanarZ2);
@@ -9152,7 +9157,16 @@ fn external_nobraiding_twist_and_flip_pass_on_vacuum_only_legs() {
     let twisted: TensorMap<PlanarZ2, f64> = t.twist(&[0, 1]).unwrap();
     assert_eq!(twisted.data().as_ptr(), t.data().as_ptr());
 
-    let flipped: TensorMap<PlanarZ2, f64> = t.flip(&[0]).unwrap();
-    assert_eq!(flipped.data(), t.data());
-    assert!(flipped.codomain()[0].is_dual());
+    let flip_error = t.flip(&[0]).unwrap_err();
+    assert!(
+        matches!(flip_error, tenet::typed::Error::InvalidArgument(_)),
+        "{flip_error:?}"
+    );
+    assert!(
+        flip_error.to_string().contains("no braiding"),
+        "{flip_error}"
+    );
+
+    let unflipped: TensorMap<PlanarZ2, f64> = t.flip(&[]).unwrap();
+    assert_eq!(unflipped.data().as_ptr(), t.data().as_ptr());
 }
