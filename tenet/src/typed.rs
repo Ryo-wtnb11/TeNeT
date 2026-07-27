@@ -815,7 +815,13 @@ struct TypedTensorBody<R, D> {
     /// an O(1) metadata edit. Inline, such an operation would have to copy the
     /// whole `Vec<D>` to build a body with the new space; behind this `Arc` it
     /// clones a pointer. Clone-then-modify keeps the same property from the
-    /// other side: two `TensorMap`s share one payload until one of them writes.
+    /// other side: two *bodies* can share one payload until one of them writes
+    /// (today `TensorMap::clone` shares the whole body, so this `Arc` earns
+    /// its keep only once Group 4 operations build new bodies over old
+    /// payloads). This is also parity, not invention: the erased sibling's
+    /// `tensor.rs` `TensorBody { space: Arc<..>, data: Arc<Data> }` has had
+    /// exactly this two-`Arc` layout all along, so typed converges onto the
+    /// established in-repo shape.
     data: Arc<TypedData<D>>,
     /// Materialization of a [`TypedData::Diagonal`] payload into the dense
     /// coupled layout, computed at most once and shared by every clone of this
@@ -3358,6 +3364,9 @@ mod representation_gates {
         // body can hold the first body's payload at all, at pointer cost.
         let tensor = fixture();
         let payload = Arc::clone(&tensor.body.data);
+        // Hand-constructed body: a struct-shape change surfaces as a compile
+        // error here, not a gate failure. Group 4 (#580) should replace this
+        // with a real same-payload-different-space operation once one exists.
         let relabelled = TensorMap {
             runtime: tensor.runtime.clone(),
             body: Arc::new(TypedTensorBody {
@@ -3390,15 +3399,18 @@ mod representation_gates {
 
     #[test]
     fn a_reused_payload_does_not_inherit_the_dense_cache() {
-        // What: why `dense_cache` sits outside the payload `Arc`. A compact
-        // spectrum materializes against the space it is laid out on, so a body
-        // reusing the payload under another space must start cold rather than
-        // serve the previous layout's buffer.
+        // What: `dense_data()` materializes per-body, against the body's own
+        // cache. This does *not* gate the struct shape — the fresh `OnceLock`
+        // below is hand-supplied, so any layout keeping the field compiles and
+        // passes. It pins only that a cold cache stays cold until this body
+        // materializes for itself, yielding a distinct buffer.
         let s = fixture().svd_compact().unwrap().1;
         assert!(s.body.dense_cache.get().is_none(), "cache warm at birth");
         let materialized = s.data().as_ptr();
         assert!(s.body.dense_cache.get().is_some());
 
+        // Hand-constructed body, same caveat as the gate above: shape changes
+        // become compile errors; swap in a real operation under Group 4 (#580).
         let reused = TensorMap {
             runtime: s.runtime.clone(),
             body: Arc::new(TypedTensorBody {
