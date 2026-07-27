@@ -5271,6 +5271,17 @@ impl Tensor {
     /// [`Self::contract`] / `tensor!` when you mean index-notation
     /// contraction (TensorKit `@tensor`). Bosonic results are identical.
     ///
+    /// # Complexity
+    ///
+    /// Dense operands: one GEMM per coupled sector. A compact-diagonal
+    /// operand (an `s` from [`Self::svd_trunc`], a `d` from
+    /// [`Self::eigh_full`]) takes TensorKit's `DiagonalTensorMap` route
+    /// instead: `t * D` and `D * t` scale one bond axis of `t` in a single
+    /// pass over `t`'s payload with the diagonal never densified, and
+    /// `D * D` multiplies the two spectra elementwise in `O(Σ_c k_c)`,
+    /// staying compact. Operands or destinations the compact arms cannot
+    /// prove fall through to the dense route — same result, different cost.
+    ///
     /// # Errors
     ///
     /// - [`Error::InvalidArgument`] when the ranks do not compose (lhs domain
@@ -5362,6 +5373,18 @@ impl Tensor {
     /// (TensorKit `A * B` / `mul!`), which never does. Bosonic rules are
     /// unaffected; fermionic rules can differ by signs. See the worked
     /// example on [`Self::compose`].
+    ///
+    /// # Complexity
+    ///
+    /// Dense operands: one GEMM per coupled sector. A compact-diagonal
+    /// operand in one of the proven canonical rank-2 bond geometries never
+    /// becomes an `O(d²)` block-diagonal fed to an `O(d²·n)` GEMM: the other
+    /// operand's contracted leg is scaled by the stored spectrum (`O(d·n)`)
+    /// and the result is permuted into the contract output arrangement — the
+    /// same scale-plus-permute structure TensorKit runs. Geometries the
+    /// compact arm has not proven (outer products, scalar-output
+    /// contractions, unproved layouts) densify the diagonal and take the
+    /// ordinary dense route.
     ///
     /// # Errors
     ///
@@ -6431,6 +6454,12 @@ impl Tensor {
     /// positive/ordinary trace; [`Self::trace_pairs`] retains the fermionic
     /// supertrace semantics used by tensor contractions.
     ///
+    /// # Complexity
+    ///
+    /// One pass over the coupled-block diagonals of a dense payload — no
+    /// recoupling, no destination tensor. Compact diagonal storage is traced
+    /// directly on its `O(Σ_c k_c)` stored spectrum, never materialized.
+    ///
     /// # Errors
     ///
     /// - [`Error::InvalidArgument`] when the tensor is not an endomorphism.
@@ -6556,6 +6585,14 @@ impl Tensor {
     /// Frobenius norm, weighted by coupled-sector quantum dimensions
     /// (`norm(t)^2 = sum_c dim(c) * |block_c|^2`), matching TensorKit's
     /// `norm`. Always real, for both dtypes.
+    ///
+    /// # Complexity
+    ///
+    /// One pass over the payload: `O(N)` for a dense payload of `N` scalars,
+    /// `O(Σ_c k_c)` on compact diagonal storage — the stored spectrum is
+    /// reduced directly, never materialized. A lazy adjoint delegates to its
+    /// parent (conjugate-transposing blocks changes no magnitude), so it
+    /// pays no materialization either.
     ///
     /// # Errors
     ///
@@ -6832,6 +6869,21 @@ impl Tensor {
     /// Returns `alpha * self + beta * other` (real coefficients, both
     /// dtypes). Both tensors must live on the same spaces (identical hom
     /// space and block layout) and store the same dtype.
+    ///
+    /// TensorKit's counterpart is `VectorInterface.add(ty, tx, α, β)`
+    /// (`tensors/vectorinterface.jl:67-99`, also behind `t1 + t2`), which
+    /// computes `β*ty + α*tx` — a **false friend**: there the first
+    /// coefficient `α` belongs to the *second* argument. Here `alpha`
+    /// belongs to `self` and `beta` to `other`; go by argument order, not
+    /// coefficient names.
+    ///
+    /// # Complexity
+    ///
+    /// One elementwise pass, `O(N)` on dense payloads. Two compact-diagonal
+    /// operands combine spectrum-to-spectrum in `O(Σ_c k_c)` and **stay
+    /// compact**; diagonal + dense allocates only the one owned `O(N)` dense
+    /// result, scattering the spectrum onto its diagonal without densifying
+    /// the diagonal operand separately.
     ///
     /// # Errors
     ///
@@ -7934,6 +7986,15 @@ impl Tensor {
 
     /// Truncated SVD (MatrixAlgebraKit `svd_trunc`); see [`SvdTrunc`].
     ///
+    /// # Complexity
+    ///
+    /// Sectorwise cubic (one dense SVD per coupled sector); a
+    /// compact-diagonal input is materialized dense first. The returned `s`
+    /// is held in `O(Σ_c k_c)` compact diagonal storage — the
+    /// `DiagonalTensorMap` TensorKit's own `svd_trunc` returns, not the
+    /// `Σ_c k_c²` block-diagonal buffer — so a downstream `u.compose(&s)` or
+    /// `s.compose(&vh)` takes the bond-scaling path rather than a GEMM.
+    ///
     /// # Errors
     ///
     /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`]
@@ -8251,6 +8312,14 @@ impl Tensor {
     /// (TensorKit: real `D`); `d` keeps the input dtype so it composes with
     /// `v` directly.
     ///
+    /// # Complexity
+    ///
+    /// Sectorwise cubic (one dense EIGH per coupled sector); a
+    /// compact-diagonal input is materialized dense first. The returned `d`
+    /// is built as `O(Σ_c k_c)` compact diagonal storage straight from the
+    /// spectrum — nothing `O(Σ_c k_c²)` is materialized and discarded
+    /// (#56 item N) — so `v.compose(&d)` takes the bond-scaling path.
+    ///
     /// # Errors
     ///
     /// - [`Error::UnsupportedForRule`] for SU(3).
@@ -8544,6 +8613,14 @@ impl Tensor {
 
     /// Moore-Penrose pseudo-inverse `t^+ = v s^+ u^H` (MatrixAlgebraKit
     /// `pinv`) with an `rcond * sigma_max` cutoff on the singular values.
+    ///
+    /// # Complexity
+    ///
+    /// Dense input: one compact SVD, sectorwise cubic, plus a bond scaling
+    /// and one composition. Compact diagonal input skips the SVD entirely —
+    /// its singular values are its `|entry|`s — and applies the
+    /// cutoff-and-reciprocal elementwise in `O(Σ_c k_c)`, staying compact
+    /// (itebd's `l_out.pinv` rides this arm).
     ///
     /// # Errors
     ///
