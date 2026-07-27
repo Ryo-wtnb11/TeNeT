@@ -5013,18 +5013,26 @@ fn validate_hermitian_matrix_shape<D>(
     Ok(())
 }
 
-fn validate_hermitian_matrix_contents<D: FactorScalar>(
-    data: &[D],
-    n: usize,
-) -> Result<(), OperationError> {
-    let is_hermitian = if D::epsilon() == f32::EPSILON as f64 {
+/// MatrixAlgebraKit's hermiticity predicate at the working precision of `D`.
+///
+/// Extracted from [`validate_hermitian_matrix_contents`] so the `exp` dispatch
+/// (issue #577) can ask the question without provoking — and then having to
+/// interpret — an EIGH failure. Same data, same tolerance, no second policy.
+fn hermitian_matrix_contents<D: FactorScalar>(data: &[D], n: usize) -> bool {
+    if D::epsilon() == f32::EPSILON as f64 {
         matrixalgebrakit_hermitian::<D, f32>(data, n)
     } else if D::epsilon() == f64::EPSILON {
         matrixalgebrakit_hermitian::<D, f64>(data, n)
     } else {
         false
-    };
-    if !is_hermitian {
+    }
+}
+
+fn validate_hermitian_matrix_contents<D: FactorScalar>(
+    data: &[D],
+    n: usize,
+) -> Result<(), OperationError> {
+    if !hermitian_matrix_contents(data, n) {
         return Err(OperationError::InvalidArgument {
             message: "eigh requires Hermitian coupled-sector blocks",
         });
@@ -5070,6 +5078,75 @@ pub fn validate_hermitian_regions<D: FactorScalar>(
         validate_hermitian_matrix_contents(matrix, region.rows())?;
     }
     Ok(())
+}
+
+/// Is this an endomorphism whose coupled-sector blocks are all Hermitian?
+///
+/// The `exp` dispatch (issue #577) needs the Hermitian question answered
+/// *separately* from the eigendecomposition: the spectral route stays for
+/// Hermitian input, and everything else goes to blockwise Padé. Inferring it
+/// from a failed EIGH would conflate hermiticity with a backend failure, so
+/// this asks directly, over the same direct-region / packed matricization
+/// split and the same MatrixAlgebraKit tolerance [`eigh_full_dyn`] uses.
+///
+/// A non-endomorphism, a malformed layout or a non-square block is still an
+/// error — only non-hermiticity is `Ok(false)`. Nonfinite entries make
+/// MatrixAlgebraKit's predicate `false`, so they arrive at the Padé route,
+/// which rejects them in its own words.
+///
+/// Cost is `O(Σ_c n_c²)`, one pass over the blocks, against the `O(Σ_c n_c³)`
+/// factorization that follows.
+pub(crate) fn is_hermitian_endomorphism_dyn<R, D>(
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<bool, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let space = input.space().space();
+    if space.homspace().codomain() != space.homspace().domain() {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "eigh requires an endomorphism (codomain == domain)",
+        });
+    }
+    // Why `checked_sector_regions` and not `compact_factor_plan` as
+    // `eigh_full_dyn` does: the plan is `Some` exactly when the regions are
+    // (`build_compact_factor_plan` returns early otherwise), and building it
+    // also builds the factor bond spaces — work a yes/no question must not pay
+    // for on the retained Hermitian route.
+    if let Some(regions) = checked_sector_regions(space.structure(), space.nout())? {
+        for region in regions.iter() {
+            let range = region.range();
+            let matrix = data_region(input.data(), &range)?;
+            validate_hermitian_matrix_shape(matrix, region.rows(), region.cols())?;
+        }
+        for region in regions.iter() {
+            let range = region.range();
+            let matrix = data_region(input.data(), &range)?;
+            if !hermitian_matrix_contents(matrix, region.rows()) {
+                return Ok(false);
+            }
+        }
+        return Ok(true);
+    }
+    let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
+    for matrix in &matricizations {
+        validate_hermitian_matrix_shape(&matrix.data, matrix.rows, matrix.cols)?;
+    }
+    Ok(matricizations
+        .iter()
+        .all(|matrix| hermitian_matrix_contents(&matrix.data, matrix.rows)))
+}
+
+fn data_region<'a, D>(
+    data: &'a [D],
+    range: &std::ops::Range<usize>,
+) -> Result<&'a [D], OperationError> {
+    data.get(range.clone())
+        .ok_or(OperationError::ElementCountMismatch {
+            expected: range.end,
+            actual: data.len(),
+        })
 }
 
 fn checked_sector_regions(

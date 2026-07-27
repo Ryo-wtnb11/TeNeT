@@ -12,9 +12,10 @@ use tenet_tensors::{
 
 use crate::compose::compose_bound_dyn;
 use crate::factorize::{
-    adjoint_bound_factor, eigh_full_dyn, inverse_by_sector_dyn, scale_axis_by_spectrum,
-    svd_compact_factors_dyn, typed_from_bound_factor, BoundDynFactor, BoundDynamicTensorRef,
-    BoundTensorMap, BoundTensorMapRef, FactorScalar, SectorSpectrum, SvdFactorsDyn,
+    adjoint_bound_factor, eigh_full_dyn, inverse_by_sector_dyn, is_hermitian_endomorphism_dyn,
+    scale_axis_by_spectrum, svd_compact_factors_dyn, typed_from_bound_factor, BoundDynFactor,
+    BoundDynamicTensorRef, BoundTensorMap, BoundTensorMapRef, FactorScalar, SectorSpectrum,
+    SvdFactorsDyn,
 };
 
 /// Matrix exponential of a Hermitian endomorphism: `exp(t) = V exp(D) V^H`.
@@ -49,7 +50,23 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
-    spectral_function_dyn(dense, context, input, &f64::exp)
+    // TensorKit's `exp!` (`linalg.jl:420-427`) checks only that the map is an
+    // endomorphism and then runs a general per-block exponential. The Hermitian
+    // spectral route is kept for Hermitian input — it is exact, it is what the
+    // published values of this function have always been, and it costs one
+    // eigendecomposition instead of ~7 GEMMs and a solve — with blockwise Padé
+    // behind it for everything else (issue #577). The predicate is asked
+    // directly rather than inferred from a failed EIGH, so a backend failure is
+    // never mistaken for non-hermiticity.
+    if is_hermitian_endomorphism_dyn(input)? {
+        return spectral_function_dyn(dense, context, input, &f64::exp);
+    }
+    // Blockwise Pade for the general case lands in the next commit; until then
+    // the refusal is reported in exactly the words the eigendecomposition used,
+    // so this step is a pure dispatch extraction with no behaviour change.
+    Err(OperationError::InvalidArgument {
+        message: "eigh requires Hermitian coupled-sector blocks",
+    })
 }
 
 /// Applies a scalar function to a Hermitian endomorphism through its
