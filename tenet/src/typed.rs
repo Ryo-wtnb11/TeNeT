@@ -4583,9 +4583,12 @@ where
         &self.runtime
     }
 
-    /// Number of stored symmetry-allowed blocks: TensorKit
-    /// `length(blocksectors(t))` (`tensors/abstracttensor.jl:331-335`), one
-    /// block per coupled sector.
+    /// Number of stored symmetry-allowed blocks — one per fusion-tree pair of
+    /// the coupled layout (the namespace [`Self::block_fusion_trees`]
+    /// indexes). Finer than TensorKit `length(blocksectors(t))`
+    /// (`tensors/abstracttensor.jl:331-335`), which counts coupled sectors: a
+    /// coupled sector with several tree pairs contributes one TK block but
+    /// several here.
     #[inline]
     pub fn block_count(&self) -> usize {
         self.body.space.space().structure().block_count()
