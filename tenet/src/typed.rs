@@ -136,9 +136,7 @@
 //! What is still absent — among what remains, the entries below are the ones
 //! with a decision behind them rather than a queue position. This facade is
 //! deliberately narrower than the erased [`crate::prelude::Tensor`], which also
-//! carries `left_polar`/`right_polar`, `twist`, `flip`, the unit-leg
-//! insert/remove pair, `absorb`, the structural
-//! `isomorphism`/`isometry`/`unitary` constructors and `rand`/`rand_with_seed`.
+//! carries `twist`, `flip`, the unit-leg insert/remove pair and `absorb`.
 //! Those are ports waiting on nothing but their turn; the ones below are not:
 //!
 //! - The **rest of the matrix-function family** — the trigonometric and
@@ -2392,6 +2390,84 @@ where
         let mut dense = self.runtime.lease_dense();
         let out = tenet_matrixalgebra::right_null_dyn(dense.dense(), &self.bound_ref()?)?;
         Ok(self.wrap_bound_factor(out))
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `left_polar`: the polar decomposition
+    /// `t = w ∘ p`, returned as `(w, p)` — `w` isometric (`w† ∘ w = id` on the
+    /// domain) and `p` Hermitian positive semidefinite.
+    ///
+    /// Factor spaces per TensorKit 0.17
+    /// (`factorizations/matrixalgebrakit.jl:204-208`): `w` lives on the input's
+    /// own space `codomain <- domain`, `p` on `domain <- domain`. TensorKit
+    /// also exposes algorithm kinds for the polars; neither tenet facade does —
+    /// a deliberate narrowing, in parity with the erased
+    /// [`crate::prelude::Tensor::left_polar`]. The erased facade materializes
+    /// an adjoint view before decomposing; this facade has no adjoint views, so
+    /// there is no counterpart to that step here.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::svd_compact`]: the seam's own errors, unfiltered — in
+    /// particular [`Error::Operation`] when some coupled-sector matrix has
+    /// fewer rows than columns (the left polar needs every sector at least as
+    /// tall as it is wide).
+    ///
+    /// # Complexity
+    ///
+    /// `O(Σ_c n_c³)` — sectorwise cubic, no global materialization; the seam
+    /// factorizes each coupled sector on its own. A compact-diagonal payload
+    /// (TensorKit's `DiagonalTensorMap`) materializes through the same
+    /// [`Self::data`] route as [`Self::qr_compact`] first: TensorKit 0.17 has
+    /// no diagonal polar specialization either
+    /// (`factorizations/diagonal.jl:8-14` gives `DiagonalTensorMap` only
+    /// `copy_input` for the polars, so it dispatches dense per block), and the
+    /// issue #613 Group 4 contract requires any compact fast path to be
+    /// individually re-proven — out of scope here.
+    pub fn left_polar(&self) -> Result<(Self, Self), Error> {
+        // Dense lease before the context lease — the polar seam recouples
+        // internally, so unlike QR/LQ/null it takes the context lane; the
+        // lease order matches every existing site on both facades.
+        let mut dense = self.runtime.lease_dense();
+        let mut lease = self.runtime.lease_context()?;
+        let (w, p) = tenet_matrixalgebra::left_polar_dyn(
+            dense.dense(),
+            lease.context().multiplicity_free_lane::<D>(),
+            &self.bound_ref()?,
+        )?;
+        Ok((self.wrap_bound_factor(w), self.wrap_bound_factor(p)))
+    }
+
+    /// TensorKit 0.17 / MatrixAlgebraKit `right_polar`: the polar
+    /// decomposition `t = p ∘ w`, returned as `(p, w)` — `p` Hermitian
+    /// positive semidefinite and `w` a coisometry (`w ∘ w† = id` on the
+    /// codomain).
+    ///
+    /// Factor spaces per TensorKit 0.17
+    /// (`factorizations/matrixalgebrakit.jl:210-214`): `p` on
+    /// `codomain <- codomain`, `w` on the input's own space
+    /// `codomain <- domain`. Everything [`Self::left_polar`] says about
+    /// algorithm kinds, adjoint views and the compact-diagonal route holds
+    /// here unchanged.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::left_polar`], mirrored: [`Error::Operation`] when some
+    /// coupled-sector matrix has fewer columns than rows.
+    ///
+    /// # Complexity
+    ///
+    /// As [`Self::left_polar`]: `O(Σ_c n_c³)`, sectorwise, with a
+    /// compact-diagonal payload materialized first.
+    pub fn right_polar(&self) -> Result<(Self, Self), Error> {
+        // See `left_polar` for the lease order rationale.
+        let mut dense = self.runtime.lease_dense();
+        let mut lease = self.runtime.lease_context()?;
+        let (p, w) = tenet_matrixalgebra::right_polar_dyn(
+            dense.dense(),
+            lease.context().multiplicity_free_lane::<D>(),
+            &self.bound_ref()?,
+        )?;
+        Ok((self.wrap_bound_factor(p), self.wrap_bound_factor(w)))
     }
 
     /// TensorKit 0.17 / MatrixAlgebraKit `eigh_full`: the Hermitian

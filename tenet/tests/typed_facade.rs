@@ -7191,3 +7191,226 @@ fn typed_su2_isomorphism_satisfies_the_identity_law() {
     let id: TensorMap<ExternalSu2, f64> = TensorMap::id(&runtime, [&leg, &leg]).unwrap();
     assert_eq!(roundtrip.data(), id.data());
 }
+
+// ---------------------------------------------------------------------------
+// Slice: typed `left_polar` / `right_polar`, issue #580 PR 2.
+// ---------------------------------------------------------------------------
+
+/// Elementwise closeness at factorization tolerance, relative to the wanted
+/// entry's magnitude (floored at 1).
+fn assert_data_close_f64(got: &[f64], want: &[f64]) {
+    assert_eq!(got.len(), want.len());
+    for (g, w) in got.iter().zip(want) {
+        assert!((g - w).abs() <= 1e-12 * w.abs().max(1.0), "{g} vs {w}");
+    }
+}
+
+/// The c64 sibling of [`assert_data_close_f64`].
+fn assert_data_close_c64(got: &[Complex64], want: &[Complex64]) {
+    assert_eq!(got.len(), want.len());
+    for (g, w) in got.iter().zip(want) {
+        assert!((g - w).norm() <= 1e-12 * w.norm().max(1.0), "{g} vs {w}");
+    }
+}
+
+/// Content-wise leg equality: `GradedSpace` has no `PartialEq` (deliberate,
+/// see its rustdoc), so space equality is asserted through the public
+/// accessors — labels, degeneracies and duality all have to agree.
+fn assert_same_legs<R>(got: &[GradedSpace<R>], want: &[GradedSpace<R>])
+where
+    R: SectorCodec + CheckedFusionAlgebra,
+    R::Sector: std::fmt::Debug + PartialEq,
+{
+    assert_eq!(got.len(), want.len());
+    for (g, w) in got.iter().zip(want) {
+        assert_eq!(g.sectors().unwrap(), w.sectors().unwrap());
+        assert_eq!(g.degeneracies(), w.degeneracies());
+        assert_eq!(g.is_dual(), w.is_dual());
+    }
+}
+
+#[test]
+fn typed_polar_reconstructs_the_input_f64_u1_and_c64_fz2() {
+    // Gate 1: `t = w ∘ p` (left) and `t = p ∘ w` (right) at factorization
+    // tolerance, on both dtypes and on both a bosonic and a fermionic rule.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    let (_, leg) = u1_facade_legs();
+    let tall: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 3).unwrap();
+    let (w, p) = tall.left_polar().unwrap();
+    assert_data_close_f64(w.compose(&p).unwrap().data(), tall.data());
+    let wide: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::rand_with_seed(&runtime, [&leg], [&leg, &leg], 5).unwrap();
+    let (p, w) = wide.right_polar().unwrap();
+    assert_data_close_f64(p.compose(&w).unwrap().data(), wide.data());
+
+    let (_, leg) = fz2_facade_legs();
+    let tall: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 7).unwrap();
+    let (w, p) = tall.left_polar().unwrap();
+    assert_data_close_c64(w.compose(&p).unwrap().data(), tall.data());
+    let wide: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&leg], [&leg, &leg], 11).unwrap();
+    let (p, w) = wide.right_polar().unwrap();
+    assert_data_close_c64(p.compose(&w).unwrap().data(), wide.data());
+}
+
+#[test]
+fn typed_polar_factor_laws_hold() {
+    // Gate 2: `w† ∘ w = id(domain)` for `left_polar` (resp. `w ∘ w† = id` on
+    // the rows for `right_polar`); `p` Hermitian with non-negative spectrum,
+    // read through `eigh_vals`.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    // c64 fermionic left arm: a stray conjugation or sign is visible here.
+    let (_, leg) = fz2_facade_legs();
+    let tall: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 13).unwrap();
+    let (w, p) = tall.left_polar().unwrap();
+    let id: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
+        TensorMap::id(&runtime, [&leg]).unwrap();
+    assert_data_close_c64(w.adjoint().unwrap().compose(&w).unwrap().data(), id.data());
+    assert!(p.is_hermitian(1e-12).unwrap());
+    for entry in p.eigh_vals().unwrap() {
+        assert!(entry.values.iter().all(|&value| value >= -1e-12));
+    }
+
+    // f64 U(1) right arm.
+    let (_, leg) = u1_facade_legs();
+    let wide: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::rand_with_seed(&runtime, [&leg], [&leg, &leg], 17).unwrap();
+    let (p, w) = wide.right_polar().unwrap();
+    let id: TensorMap<tenet::core::U1FusionRule, f64> = TensorMap::id(&runtime, [&leg]).unwrap();
+    assert_data_close_f64(w.compose(&w.adjoint().unwrap()).unwrap().data(), id.data());
+    assert!(p.is_hermitian(1e-12).unwrap());
+    for entry in p.eigh_vals().unwrap() {
+        assert!(entry.values.iter().all(|&value| value >= -1e-12));
+    }
+}
+
+#[test]
+fn typed_polar_factor_spaces_match_tensorkit() {
+    // Gate 3: factor *spaces*, not just shapes — TK 0.17
+    // `factorizations/matrixalgebrakit.jl:204-214`: left `W` lives on
+    // `space(t)` and `P` on `domain ← domain`; right `P` on
+    // `codomain ← codomain` and `Wᴴ` on `space(t)`. A dual leg sits on each
+    // side so a dropped duality flag is visible.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, leg) = u1_facade_legs();
+    let dual = leg.try_dual().unwrap();
+
+    let tall: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::rand_with_seed(&runtime, [&leg, &dual], [&dual], 19).unwrap();
+    let (w, p) = tall.left_polar().unwrap();
+    assert_same_legs(&w.codomain(), &tall.codomain());
+    assert_same_legs(&w.domain(), &tall.domain());
+    assert_same_legs(&p.codomain(), &tall.domain());
+    assert_same_legs(&p.domain(), &tall.domain());
+
+    let wide: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::rand_with_seed(&runtime, [&dual], [&leg, &dual], 23).unwrap();
+    let (p, w) = wide.right_polar().unwrap();
+    assert_same_legs(&p.codomain(), &wide.codomain());
+    assert_same_legs(&p.domain(), &wide.codomain());
+    assert_same_legs(&w.codomain(), &wide.codomain());
+    assert_same_legs(&w.domain(), &wide.domain());
+}
+
+#[test]
+fn typed_polar_wrong_side_rectangular_is_the_erased_error_class() {
+    // Gate 4: the split-2 fixture is tall in every coupled sector, the split-1
+    // one wide — so `right_polar` on the former and `left_polar` on the latter
+    // are the seam's own wrong-side errors, unfiltered, and the same class the
+    // erased facade reports on the same numbers.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    let (erased_tall, typed_tall) = z2_oracle_pair_split(&runtime, 2);
+    let typed_error = typed_tall.right_polar().unwrap_err();
+    let erased_error = erased_tall.right_polar().unwrap_err();
+    assert_eq!(
+        std::mem::discriminant(&typed_error),
+        std::mem::discriminant(&erased_error)
+    );
+
+    let (erased_wide, typed_wide) = z2_oracle_pair_split(&runtime, 1);
+    let typed_error = typed_wide.left_polar().unwrap_err();
+    let erased_error = erased_wide.left_polar().unwrap_err();
+    assert_eq!(
+        std::mem::discriminant(&typed_error),
+        std::mem::discriminant(&erased_error)
+    );
+}
+
+#[test]
+fn typed_and_erased_polar_agree_byte_for_byte() {
+    // Gate 5: same numbers through both facades, byte equality on the
+    // deterministic backend — f64 both directions, c64, and a
+    // compact-diagonal payload (the `s` of `svd_compact`), which the typed
+    // facade materializes through the same route as `qr_compact`.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    let (erased, typed) = z2_oracle_pair_split(&runtime, 2);
+    let (erased_w, erased_p) = erased.left_polar().unwrap();
+    let (typed_w, typed_p) = typed.left_polar().unwrap();
+    assert_eq!(typed_w.data(), erased_w.data());
+    assert_eq!(typed_p.data(), erased_p.data());
+
+    let (erased, typed) = z2_oracle_pair_split(&runtime, 1);
+    let (erased_p, erased_w) = erased.right_polar().unwrap();
+    let (typed_p, typed_w) = typed.right_polar().unwrap();
+    assert_eq!(typed_p.data(), erased_p.data());
+    assert_eq!(typed_w.data(), erased_w.data());
+
+    let (erased, typed) = z2_complex_oracle_pair(&runtime);
+    let (erased_w, erased_p) = erased.left_polar().unwrap();
+    let (typed_w, typed_p) = typed.left_polar().unwrap();
+    assert_eq!(typed_w.data(), erased_w.data_c64());
+    assert_eq!(typed_p.data(), erased_p.data_c64());
+
+    // Diagonal payload: the compact `s` factor is a square bond endomorphism,
+    // so both polars are defined on it; one direction suffices to pin the
+    // materialization route.
+    let (erased, typed) = z2_oracle_pair(&runtime);
+    let erased_s = erased.svd_compact().unwrap().1;
+    let typed_s = typed.svd_compact().unwrap().1;
+    let (erased_w, erased_p) = erased_s.left_polar().unwrap();
+    let (typed_w, typed_p) = typed_s.left_polar().unwrap();
+    assert_eq!(typed_w.data(), erased_w.data());
+    assert_eq!(typed_p.data(), erased_p.data());
+}
+
+#[test]
+fn typed_polar_carries_an_external_provider() {
+    // Gate 5's external-provider leg. The erased facade's rule set is a closed
+    // enum and cannot host `ExternalZ3`, so this is a typed-only law check —
+    // reconstruction plus the isometry law — driving the same context lane an
+    // external provider reaches through `multiplicity_free_lane`.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    // Same legs on both sides (no duals): every coupled-sector matrix is
+    // square, so both polars are defined. `z3_rank_four`'s dual domain is not
+    // usable here — a dual flips each charge, so some coupled sectors come out
+    // wider than tall and `left_polar` rightly refuses them.
+    let wide = z3_leg(&provider, false);
+    let narrow = z3_other_leg(&provider, false);
+    let mut counter = 0.0;
+    let tensor: TensorMap<ExternalZ3, f64> =
+        TensorMap::from_block_fn(&runtime, [&wide, &narrow], [&wide, &narrow], |_, _| {
+            counter += 1.0;
+            counter
+        })
+        .unwrap();
+
+    let (w, p) = tensor.left_polar().unwrap();
+    assert_data_close_f64(w.compose(&p).unwrap().data(), tensor.data());
+    let gram = w.adjoint().unwrap().compose(&w).unwrap();
+    let id: TensorMap<ExternalZ3, f64> = TensorMap::id(&runtime, [&wide, &narrow]).unwrap();
+    assert_data_close_f64(gram.data(), id.data());
+}
