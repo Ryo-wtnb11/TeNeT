@@ -7734,3 +7734,650 @@ fn typed_leg_dim_routes_each_axis_to_its_own_leg() {
         assert_eq!(typed.leg_dim(axis).unwrap(), erased.leg_dim(axis).unwrap());
     }
 }
+
+// ---------------------------------------------------------------------------
+// #580 PR 4: typed catdomain / catcodomain / absorb.
+// ---------------------------------------------------------------------------
+
+/// Fill value from an erased U(1) fusion-tree key: charges weighted by
+/// position, so any reordering of legs, blocks or elements changes the buffer.
+fn u1_erased_fill(key: &tenet::prelude::BlockKey, indices: &[usize]) -> f64 {
+    let pair = key.as_fusion_tree_pair().expect("fusion-tree block");
+    let charge = |id| {
+        f64::from(
+            SectorCodec::decode_sector(&tenet::core::U1FusionRule, id)
+                .expect("built-in codec decodes its own ids")
+                .charge(),
+        )
+    };
+    let mut value = charge(pair.codomain_tree().coupled()) * 1000.0;
+    for (position, &id) in pair.codomain_tree().uncoupled().iter().enumerate() {
+        value += charge(id) * 100.0 * (position + 1) as f64;
+    }
+    for (position, &id) in pair.domain_tree().uncoupled().iter().enumerate() {
+        value += charge(id) * 10.0 * (position + 1) as f64;
+    }
+    value
+        + indices
+            .iter()
+            .enumerate()
+            .map(|(a, &i)| (a + 1) * i)
+            .sum::<usize>() as f64
+}
+
+/// The same value computed from the typed U(1) labels.
+fn u1_typed_fill(
+    sectors: &tenet::typed::BlockFusionTrees<tenet::core::U1Irrep>,
+    indices: &[usize],
+) -> f64 {
+    let mut value = f64::from(sectors.coupled().charge()) * 1000.0;
+    for (position, label) in sectors.codomain_uncoupled().iter().enumerate() {
+        value += f64::from(label.charge()) * 100.0 * (position + 1) as f64;
+    }
+    for (position, label) in sectors.domain_uncoupled().iter().enumerate() {
+        value += f64::from(label.charge()) * 10.0 * (position + 1) as f64;
+    }
+    value
+        + indices
+            .iter()
+            .enumerate()
+            .map(|(a, &i)| (a + 1) * i)
+            .sum::<usize>() as f64
+}
+
+/// Fill value from an erased fZ2 fusion-tree key, same weighting scheme.
+fn fz2_erased_fill(key: &tenet::prelude::BlockKey, indices: &[usize]) -> f64 {
+    let pair = key.as_fusion_tree_pair().expect("fusion-tree block");
+    let parity = |id| {
+        f64::from(
+            SectorCodec::decode_sector(&tenet::core::FermionParityFusionRule, id)
+                .expect("built-in codec decodes its own ids")
+                .parity(),
+        )
+    };
+    let mut value = parity(pair.codomain_tree().coupled()) * 1000.0;
+    for (position, &id) in pair.codomain_tree().uncoupled().iter().enumerate() {
+        value += parity(id) * 100.0 * (position + 1) as f64;
+    }
+    for (position, &id) in pair.domain_tree().uncoupled().iter().enumerate() {
+        value += parity(id) * 10.0 * (position + 1) as f64;
+    }
+    value
+        + indices
+            .iter()
+            .enumerate()
+            .map(|(a, &i)| (a + 1) * i)
+            .sum::<usize>() as f64
+}
+
+/// The same value computed from the typed fZ2 labels.
+fn fz2_typed_fill(
+    sectors: &tenet::typed::BlockFusionTrees<tenet::core::Z2Irrep>,
+    indices: &[usize],
+) -> f64 {
+    let mut value = f64::from(sectors.coupled().parity()) * 1000.0;
+    for (position, label) in sectors.codomain_uncoupled().iter().enumerate() {
+        value += f64::from(label.parity()) * 100.0 * (position + 1) as f64;
+    }
+    for (position, label) in sectors.domain_uncoupled().iter().enumerate() {
+        value += f64::from(label.parity()) * 10.0 * (position + 1) as f64;
+    }
+    value
+        + indices
+            .iter()
+            .enumerate()
+            .map(|(a, &i)| (a + 1) * i)
+            .sum::<usize>() as f64
+}
+
+fn u1_space(pairs: &[(i32, usize)]) -> tenet::prelude::Space {
+    tenet::prelude::Space::u1(pairs.iter().copied())
+}
+
+fn u1_leg(
+    provider: &Arc<tenet::core::U1FusionRule>,
+    pairs: &[(i32, usize)],
+) -> GradedSpace<tenet::core::U1FusionRule> {
+    GradedSpace::try_new(
+        Arc::clone(provider),
+        pairs
+            .iter()
+            .map(|&(charge, degeneracy)| (tenet::core::U1Irrep::new(charge), degeneracy)),
+        false,
+    )
+    .unwrap()
+}
+
+/// One erased/typed U(1) cat operand pair: rank `2 <- 1` with a dual codomain
+/// leg, filled identically through both facades.
+fn u1_cat_pair(
+    runtime: &Runtime,
+    domain_pairs: &[(i32, usize)],
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::U1FusionRule, f64>,
+) {
+    let w1 = u1_space(&[(-1, 1), (0, 2), (1, 1)]);
+    let w2 = u1_space(&[(0, 1), (1, 2)]).dual();
+    let v = u1_space(domain_pairs);
+    let erased =
+        tenet::prelude::Tensor::from_block_fn(runtime, [&w1, &w2], [&v], u1_erased_fill).unwrap();
+
+    let provider = Arc::new(tenet::core::U1FusionRule);
+    let l1 = u1_leg(&provider, &[(-1, 1), (0, 2), (1, 1)]);
+    let l2 = u1_leg(&provider, &[(0, 1), (1, 2)]).try_dual().unwrap();
+    let lv = u1_leg(&provider, domain_pairs);
+    let typed: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::from_block_fn(runtime, [&l1, &l2], [&lv], u1_typed_fill).unwrap();
+    (erased, typed)
+}
+
+#[test]
+fn typed_and_erased_catdomain_agree_byte_for_byte_on_u1() {
+    // What (gate 1): typed catdomain is the erased catdomain — same output
+    // space, same block layout, same bytes — on a U(1) fixture with a dual
+    // codomain leg and *different* sector sets on the two changed legs, so the
+    // direct-sum merge order (sectors unique to either side, sectors shared)
+    // is exercised, not just the same-set fast case.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased_lhs, typed_lhs) = u1_cat_pair(&runtime, &[(-2, 1), (-1, 2), (0, 1), (1, 1)]);
+    let (erased_rhs, typed_rhs) = u1_cat_pair(&runtime, &[(-2, 1), (0, 2), (2, 1)]);
+
+    let erased_joined = erased_lhs.catdomain(&erased_rhs).unwrap();
+    let typed_joined: TensorMap<tenet::core::U1FusionRule, f64> =
+        typed_lhs.catdomain(&typed_rhs).unwrap();
+
+    assert_eq!(typed_joined.data(), erased_joined.data());
+    // The merged changed leg is byte-identical in sector order to the erased
+    // `Space::oplus`: same sectors, same summed degeneracies, same order.
+    let typed_leg = &typed_joined.domain()[0];
+    let erased_leg = &erased_joined.domain_spaces()[0];
+    assert_eq!(
+        typed_leg
+            .sectors()
+            .unwrap()
+            .iter()
+            .map(|sector| sector.charge())
+            .collect::<Vec<_>>(),
+        erased_leg
+            .sectors()
+            .iter()
+            .map(|&(label, _)| match label {
+                tenet::prelude::SectorLabel::U1(charge) => charge,
+                other => panic!("unexpected label {other:?}"),
+            })
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        typed_leg.degeneracies(),
+        erased_leg
+            .sectors()
+            .iter()
+            .map(|&(_, degeneracy)| degeneracy)
+            .collect::<Vec<_>>()
+            .as_slice()
+    );
+}
+
+#[test]
+fn typed_and_erased_catcodomain_agree_byte_for_byte_on_u1_c64() {
+    // What (gate 1): the catcodomain sibling, on c64 payloads — rank `1 <- 2`
+    // with a dual domain leg, different sector sets on the changed codomain
+    // legs. The imaginary part is not proportional to the real one.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let complex = |value: f64| Complex64::new(value, 1.0 + value % 5.0);
+    let provider = Arc::new(tenet::core::U1FusionRule);
+
+    let d1 = u1_space(&[(-1, 1), (0, 2), (1, 1)]);
+    let d2 = u1_space(&[(0, 1), (1, 2)]).dual();
+    let t1 = u1_leg(&provider, &[(-1, 1), (0, 2), (1, 1)]);
+    let t2 = u1_leg(&provider, &[(0, 1), (1, 2)]).try_dual().unwrap();
+
+    let build = |codomain_pairs: &[(i32, usize)]| {
+        let w = u1_space(codomain_pairs);
+        let erased = tenet::prelude::Tensor::from_block_fn(
+            &runtime,
+            [&w],
+            [&d1, &d2],
+            |key: &tenet::prelude::BlockKey, indices: &[usize]| {
+                complex(u1_erased_fill(key, indices))
+            },
+        )
+        .unwrap();
+        let leg = u1_leg(&provider, codomain_pairs);
+        let typed: TensorMap<tenet::core::U1FusionRule, Complex64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&t1, &t2], |sectors, indices| {
+                complex(u1_typed_fill(sectors, indices))
+            })
+            .unwrap();
+        (erased, typed)
+    };
+    let (erased_lhs, typed_lhs) = build(&[(-2, 1), (-1, 2), (0, 1), (1, 1)]);
+    let (erased_rhs, typed_rhs) = build(&[(-2, 1), (0, 2), (2, 1)]);
+
+    let erased_joined = erased_lhs.catcodomain(&erased_rhs).unwrap();
+    let typed_joined: TensorMap<tenet::core::U1FusionRule, Complex64> =
+        typed_lhs.catcodomain(&typed_rhs).unwrap();
+
+    assert_eq!(typed_joined.data(), erased_joined.data_c64());
+}
+
+#[test]
+fn typed_and_erased_cat_agree_on_fz2_with_dual_changed_legs() {
+    // What (gate 1): the fermionic rule, with *dual* changed legs — the
+    // direct sum requires equal duality and must carry it through, and fZ2
+    // exercises a nontrivial twist-bearing rule through the same copy plan.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(tenet::core::FermionParityFusionRule);
+    let w = tenet::prelude::Space::fz2([(0, 2), (1, 1)]).unwrap();
+    let lw = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 1),
+        ],
+        false,
+    )
+    .unwrap();
+    let build = |pairs: &[(u8, usize)]| {
+        let v = tenet::prelude::Space::fz2(pairs.iter().copied())
+            .unwrap()
+            .dual();
+        let erased =
+            tenet::prelude::Tensor::from_block_fn(&runtime, [&w], [&v], fz2_erased_fill).unwrap();
+        let leg = GradedSpace::try_new(
+            Arc::clone(&provider),
+            pairs.iter().map(|&(parity, degeneracy)| {
+                (
+                    if parity == 0 {
+                        tenet::core::Z2Irrep::EVEN
+                    } else {
+                        tenet::core::Z2Irrep::ODD
+                    },
+                    degeneracy,
+                )
+            }),
+            false,
+        )
+        .unwrap()
+        .try_dual()
+        .unwrap();
+        let typed: TensorMap<tenet::core::FermionParityFusionRule, f64> =
+            TensorMap::from_block_fn(&runtime, [&lw], [&leg], fz2_typed_fill).unwrap();
+        (erased, typed)
+    };
+    // Different sector sets: the lhs changed leg has no odd sector.
+    let (erased_lhs, typed_lhs) = build(&[(0, 2)]);
+    let (erased_rhs, typed_rhs) = build(&[(0, 1), (1, 2)]);
+
+    let erased_joined = erased_lhs.catdomain(&erased_rhs).unwrap();
+    let typed_joined: TensorMap<tenet::core::FermionParityFusionRule, f64> =
+        typed_lhs.catdomain(&typed_rhs).unwrap();
+    assert_eq!(typed_joined.data(), erased_joined.data());
+}
+
+#[test]
+fn typed_cat_pins_the_slab_order_by_value() {
+    // What (gate 2): the erased doctest fixtures reproduced typed-side against
+    // hand-computed payloads — adjacent column slabs for catdomain, adjacent
+    // row slabs for catcodomain — so the slab order is pinned by value, not
+    // only by parity with the erased facade.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(tenet::core::U1FusionRule);
+    let w = u1_leg(&provider, &[(0, 2)]);
+    let v1 = u1_leg(&provider, &[(0, 1)]);
+    let v2 = u1_leg(&provider, &[(0, 2)]);
+
+    let a: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::from_block_fn(&runtime, [&w], [&v1], |_, i| (i[0] + 1) as f64).unwrap();
+    let b: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::from_block_fn(&runtime, [&w], [&v2], |_, i| (i[0] + 2 * i[1] + 3) as f64)
+            .unwrap();
+    let joined: TensorMap<tenet::core::U1FusionRule, f64> = a.catdomain(&b).unwrap();
+    // Column-major: lhs column [1, 2], then rhs columns [3, 4] and [5, 6].
+    assert_eq!(joined.data(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+
+    let at: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::from_block_fn(&runtime, [&v1], [&w], |_, i| (i[1] + 1) as f64).unwrap();
+    let bt: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::from_block_fn(&runtime, [&v2], [&w], |_, i| (i[0] + 2 * i[1] + 3) as f64)
+            .unwrap();
+    let stacked: TensorMap<tenet::core::U1FusionRule, f64> = at.catcodomain(&bt).unwrap();
+    // Row slabs: lhs row first within each column.
+    assert_eq!(stacked.data(), &[1.0, 3.0, 4.0, 2.0, 5.0, 6.0]);
+}
+
+/// One erased/typed U(1) absorb operand pair: rank `2 <- 1`, per-axis sector
+/// content chosen by the caller.
+fn u1_absorb_pair(
+    runtime: &Runtime,
+    codomain0: &[(i32, usize)],
+    codomain1: &[(i32, usize)],
+    domain0: &[(i32, usize)],
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::U1FusionRule, f64>,
+) {
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        runtime,
+        [&u1_space(codomain0), &u1_space(codomain1)],
+        [&u1_space(domain0)],
+        u1_erased_fill,
+    )
+    .unwrap();
+    let provider = Arc::new(tenet::core::U1FusionRule);
+    let typed: TensorMap<tenet::core::U1FusionRule, f64> = TensorMap::from_block_fn(
+        runtime,
+        [&u1_leg(&provider, codomain0), &u1_leg(&provider, codomain1)],
+        [&u1_leg(&provider, domain0)],
+        u1_typed_fill,
+    )
+    .unwrap();
+    (erased, typed)
+}
+
+#[test]
+fn typed_and_erased_absorb_agree_byte_for_byte_on_u1() {
+    // What (gate 3): typed absorb is the erased absorb — the common per-axis
+    // prefix of every shared fusion-tree block is copied, the rest of the
+    // destination (including blocks whose coupled sector the source does not
+    // have) is untouched. The destination is larger on some axes/sectors and
+    // smaller on others, so both prefix directions run; sector `2` exists only
+    // in the destination and sector `-2` only in the source, so non-shared
+    // block keys are exercised.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased_destination, typed_destination) = u1_absorb_pair(
+        &runtime,
+        &[(-1, 2), (0, 3), (1, 1), (2, 1)],
+        &[(0, 1), (1, 1)],
+        &[(-1, 1), (0, 2), (1, 2), (2, 1)],
+    );
+    let (erased_source, typed_source) = u1_absorb_pair(
+        &runtime,
+        &[(-2, 1), (-1, 3), (0, 1), (1, 2)],
+        &[(0, 2), (1, 1)],
+        &[(-2, 1), (-1, 2), (0, 1), (1, 3)],
+    );
+
+    let erased_absorbed = erased_destination.absorb(&erased_source).unwrap();
+    let typed_absorbed: TensorMap<tenet::core::U1FusionRule, f64> =
+        typed_destination.absorb(&typed_source).unwrap();
+    assert_eq!(typed_absorbed.data(), erased_absorbed.data());
+    // And in the other direction, so destination-smaller axes also lead.
+    let erased_back = erased_source.absorb(&erased_destination).unwrap();
+    let typed_back: TensorMap<tenet::core::U1FusionRule, f64> =
+        typed_source.absorb(&typed_destination).unwrap();
+    assert_eq!(typed_back.data(), erased_back.data());
+}
+
+#[test]
+fn typed_and_erased_absorb_agree_on_c64() {
+    // What (gate 3): the c64 leg of the absorb parity gate. Mixed f64/c64 is
+    // statically unrepresentable typed-side (equal `D` required); the erased
+    // widening/narrowing arms are out of scope by design.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let complex = |value: f64| Complex64::new(value, 1.0 + value % 5.0);
+    let provider = Arc::new(tenet::core::U1FusionRule);
+    let build = |codomain: &[(i32, usize)], domain: &[(i32, usize)]| {
+        let erased = tenet::prelude::Tensor::from_block_fn(
+            &runtime,
+            [&u1_space(codomain)],
+            [&u1_space(domain)],
+            |key: &tenet::prelude::BlockKey, indices: &[usize]| {
+                complex(u1_erased_fill(key, indices))
+            },
+        )
+        .unwrap();
+        let typed: TensorMap<tenet::core::U1FusionRule, Complex64> = TensorMap::from_block_fn(
+            &runtime,
+            [&u1_leg(&provider, codomain)],
+            [&u1_leg(&provider, domain)],
+            |sectors, indices| complex(u1_typed_fill(sectors, indices)),
+        )
+        .unwrap();
+        (erased, typed)
+    };
+    let (erased_destination, typed_destination) =
+        build(&[(-1, 2), (0, 3), (1, 1)], &[(-1, 1), (0, 2), (1, 2)]);
+    let (erased_source, typed_source) =
+        build(&[(-1, 3), (0, 1), (1, 2)], &[(-1, 2), (0, 3), (1, 1)]);
+
+    let erased_absorbed = erased_destination.absorb(&erased_source).unwrap();
+    let typed_absorbed: TensorMap<tenet::core::U1FusionRule, Complex64> =
+        typed_destination.absorb(&typed_source).unwrap();
+    assert_eq!(typed_absorbed.data(), erased_absorbed.data_c64());
+}
+
+#[test]
+fn typed_absorb_pins_the_common_prefix_by_value() {
+    // What (gate 3): absorb's common-prefix semantics against a hand-computed
+    // payload. Destination block is 2x3, source block is 3x2; the shared
+    // prefix is 2x2, so exactly those four column-major entries change.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(tenet::core::U1FusionRule);
+    let destination: TensorMap<tenet::core::U1FusionRule, f64> = TensorMap::from_block_fn(
+        &runtime,
+        [&u1_leg(&provider, &[(0, 2)])],
+        [&u1_leg(&provider, &[(0, 3)])],
+        |_, i| (10 * (i[0] + 1) + i[1] + 1) as f64,
+    )
+    .unwrap();
+    let source: TensorMap<tenet::core::U1FusionRule, f64> = TensorMap::from_block_fn(
+        &runtime,
+        [&u1_leg(&provider, &[(0, 3)])],
+        [&u1_leg(&provider, &[(0, 2)])],
+        |_, i| -((10 * (i[0] + 1) + i[1] + 1) as f64),
+    )
+    .unwrap();
+    // destination (column-major 2x3): [11, 21, 12, 22, 13, 23]
+    // source (column-major 3x2): [-11, -21, -31, -12, -22, -32]
+    let absorbed: TensorMap<tenet::core::U1FusionRule, f64> = destination.absorb(&source).unwrap();
+    assert_eq!(absorbed.data(), &[-11.0, -21.0, -12.0, -22.0, 13.0, 23.0]);
+}
+
+#[test]
+fn typed_cat_and_absorb_error_classes_match_the_erased_facade() {
+    // What (gate 4): every validation failure reports the erased facade's
+    // error class, in the erased facade's order. For the checks whose
+    // formatting the two facades share (cat's rank/unchanged-side/duality
+    // messages come from the same routine), the full Debug rendering must
+    // match; absorb's rank/duality messages name the receiving type, so those
+    // compare by discriminant.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased_lhs, typed_lhs) = u1_cat_pair(&runtime, &[(0, 1), (1, 1)]);
+
+    // Wrong rank: a multi-leg changed side.
+    let two_legs_erased = tenet::prelude::Tensor::from_block_fn(
+        &runtime,
+        [
+            &u1_space(&[(-1, 1), (0, 2), (1, 1)]),
+            &u1_space(&[(0, 1), (1, 2)]).dual(),
+        ],
+        [&u1_space(&[(0, 1)]), &u1_space(&[(0, 1)])],
+        u1_erased_fill,
+    )
+    .unwrap();
+    let provider = Arc::new(tenet::core::U1FusionRule);
+    let two_legs_typed: TensorMap<tenet::core::U1FusionRule, f64> = TensorMap::from_block_fn(
+        &runtime,
+        [
+            &u1_leg(&provider, &[(-1, 1), (0, 2), (1, 1)]),
+            &u1_leg(&provider, &[(0, 1), (1, 2)]).try_dual().unwrap(),
+        ],
+        [&u1_leg(&provider, &[(0, 1)]), &u1_leg(&provider, &[(0, 1)])],
+        u1_typed_fill,
+    )
+    .unwrap();
+    assert_eq!(
+        format!("{:?}", typed_lhs.catdomain(&two_legs_typed).unwrap_err()),
+        format!("{:?}", erased_lhs.catdomain(&two_legs_erased).unwrap_err())
+    );
+
+    // Mismatched unchanged side: catcodomain over different domains.
+    assert_eq!(
+        format!("{:?}", typed_lhs.catcodomain(&typed_lhs).unwrap_err()),
+        format!("{:?}", erased_lhs.catcodomain(&erased_lhs).unwrap_err())
+    );
+
+    // Duality mismatch on the changed leg: the direct sum refuses.
+    let dual_domain_erased = tenet::prelude::Tensor::from_block_fn(
+        &runtime,
+        [
+            &u1_space(&[(-1, 1), (0, 2), (1, 1)]),
+            &u1_space(&[(0, 1), (1, 2)]).dual(),
+        ],
+        [&u1_space(&[(0, 1), (1, 1)]).dual()],
+        u1_erased_fill,
+    )
+    .unwrap();
+    let dual_domain_typed: TensorMap<tenet::core::U1FusionRule, f64> = TensorMap::from_block_fn(
+        &runtime,
+        [
+            &u1_leg(&provider, &[(-1, 1), (0, 2), (1, 1)]),
+            &u1_leg(&provider, &[(0, 1), (1, 2)]).try_dual().unwrap(),
+        ],
+        [&u1_leg(&provider, &[(0, 1), (1, 1)]).try_dual().unwrap()],
+        u1_typed_fill,
+    )
+    .unwrap();
+    assert_eq!(
+        format!("{:?}", typed_lhs.catdomain(&dual_domain_typed).unwrap_err()),
+        format!(
+            "{:?}",
+            erased_lhs.catdomain(&dual_domain_erased).unwrap_err()
+        )
+    );
+
+    // Absorb rank mismatch: discriminant parity (the message names the type).
+    let typed_rank_error = typed_lhs.absorb(&two_legs_typed).unwrap_err();
+    let erased_rank_error = erased_lhs.absorb(&two_legs_erased).unwrap_err();
+    assert_eq!(
+        std::mem::discriminant(&typed_rank_error),
+        std::mem::discriminant(&erased_rank_error)
+    );
+    assert!(matches!(
+        typed_rank_error,
+        tenet::prelude::Error::InvalidArgument(_)
+    ));
+
+    // Absorb per-leg duality mismatch: discriminant parity.
+    let typed_duality_error = typed_lhs.absorb(&dual_domain_typed).unwrap_err();
+    let erased_duality_error = erased_lhs.absorb(&dual_domain_erased).unwrap_err();
+    assert_eq!(
+        std::mem::discriminant(&typed_duality_error),
+        std::mem::discriminant(&erased_duality_error)
+    );
+
+    // Runtime mismatch, for all three operations.
+    let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let (_, typed_other) = u1_cat_pair(&other_runtime, &[(0, 1), (1, 1)]);
+    for error in [
+        typed_lhs.catdomain(&typed_other).unwrap_err(),
+        typed_lhs.catcodomain(&typed_other).unwrap_err(),
+        typed_lhs.absorb(&typed_other).unwrap_err(),
+    ] {
+        assert!(matches!(error, tenet::prelude::Error::RuntimeMismatch));
+    }
+}
+
+#[test]
+fn typed_cat_and_absorb_reject_a_foreign_rule_identity_first() {
+    // What (gate 4): the rule-identity check is the analogue of the erased
+    // `check_same_execution_world` and fires before any space validation —
+    // two providers of the same Rust type but different identities cannot be
+    // concatenated or absorbed. `RuleMismatch` is the erased class for the
+    // same failure (there: U(1) versus Z2).
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let build = |provider: &Arc<ExternalZ3>| {
+        let leg = GradedSpace::try_new(
+            Arc::clone(provider),
+            [(Z3Charge(0), 1), (Z3Charge(1), 1)],
+            false,
+        )
+        .unwrap();
+        let tensor: TensorMap<ExternalZ3, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
+        tensor
+    };
+    let ours = build(&Arc::new(ExternalZ3::new()));
+    let theirs = build(&Arc::new(ExternalZ3::tagged(7)));
+    for error in [
+        ours.catdomain(&theirs).unwrap_err(),
+        ours.catcodomain(&theirs).unwrap_err(),
+        ours.absorb(&theirs).unwrap_err(),
+    ] {
+        assert!(matches!(error, tenet::prelude::Error::RuleMismatch));
+    }
+}
+
+#[test]
+fn external_z3_cat_and_absorb_hold_by_value() {
+    // What (gate 6): typed-only law/value checks on the external Z3 provider.
+    // No erased parity is possible — the erased facade's rule set is a closed
+    // enum (PR 2 ruling) — so the expected payloads are computed by hand.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let w = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(Z3Charge(0), 1), (Z3Charge(1), 1)],
+        false,
+    )
+    .unwrap();
+    let v1 = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(Z3Charge(0), 1), (Z3Charge(1), 1)],
+        false,
+    )
+    .unwrap();
+    let v2 = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(Z3Charge(1), 1), (Z3Charge(2), 1)],
+        false,
+    )
+    .unwrap();
+    let a: TensorMap<ExternalZ3, f64> =
+        TensorMap::from_block_fn(&runtime, [&w], [&v1], |sectors, _| {
+            1.0 + f64::from(sectors.coupled().0)
+        })
+        .unwrap();
+    let b: TensorMap<ExternalZ3, f64> =
+        TensorMap::from_block_fn(&runtime, [&w], [&v2], |sectors, _| {
+            10.0 + f64::from(sectors.coupled().0)
+        })
+        .unwrap();
+
+    let joined: TensorMap<ExternalZ3, f64> = a.catdomain(&b).unwrap();
+    // Blocks in coupled-sector order: charge 0 holds only the lhs value, the
+    // shared charge 1 holds the lhs column then the rhs column; charge 2 has
+    // no codomain sector, so the merged leg carries it without a block.
+    assert_eq!(joined.data(), &[1.0, 2.0, 11.0]);
+    assert_eq!(
+        joined.domain()[0].sectors().unwrap(),
+        vec![Z3Charge(0), Z3Charge(1), Z3Charge(2)]
+    );
+    assert_eq!(joined.domain()[0].degeneracies(), &[1, 2, 1]);
+
+    // Absorb: destination charge-0 block is 1x1, source block 1x1 — the
+    // shared charge-0 and charge-1 blocks are overwritten; nothing else
+    // exists. Then a non-shared key: absorb from a tensor whose only block is
+    // charge 1.
+    let c: TensorMap<ExternalZ3, f64> =
+        TensorMap::from_block_fn(&runtime, [&w], [&v2], |sectors, _| {
+            100.0 + f64::from(sectors.coupled().0)
+        })
+        .unwrap();
+    let absorbed: TensorMap<ExternalZ3, f64> = a.absorb(&c).unwrap();
+    // a's blocks: charge 0 -> 1.0, charge 1 -> 2.0; c has only charge 1
+    // (value 101.0). The non-shared charge-0 block is untouched.
+    assert_eq!(absorbed.data(), &[1.0, 101.0]);
+}

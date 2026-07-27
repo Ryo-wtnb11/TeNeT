@@ -1078,6 +1078,24 @@ pub(crate) struct CatOperandLayout<'a> {
 }
 
 impl<'a> CatOperandLayout<'a> {
+    /// An owned (non-view) operand: logical and storage layouts coincide.
+    /// This is the only constructor the typed facade needs — it has no
+    /// adjoint views (its `adjoint` is eager).
+    pub(crate) fn owned(
+        structure: &'a Arc<BlockStructure>,
+        nout: usize,
+        nin: usize,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            structure,
+            regions: sector_regions(structure, nout)?,
+            orientation: TensorOrientation::Owned,
+            logical_nout: nout,
+            storage_nout: nout,
+            rank: nout + nin,
+        })
+    }
+
     fn from_view(view: &TensorMetadataView<'a>, regions: Arc<[SectorRegion]>) -> Self {
         Self {
             structure: view.body.space.structure(),
@@ -1220,7 +1238,7 @@ impl CatCopyPlan {
         Ok(())
     }
 
-    fn execute<D: UserScalar>(&self, lhs: &[D], rhs: &[D]) -> Result<Vec<D>, Error> {
+    pub(crate) fn execute<D: UserScalar>(&self, lhs: &[D], rhs: &[D]) -> Result<Vec<D>, Error> {
         let sources = [lhs, rhs];
         let required_len = self.required_len;
         let side = match self.side {
