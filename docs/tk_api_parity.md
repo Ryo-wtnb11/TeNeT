@@ -114,7 +114,7 @@ Added this sweep: `Tensor::repartition`, `Tensor::zeros_like`,
 | `eigh_full` / `eigh_trunc` / `eigh_vals` | has | `Tensor::eigh_full` / `eigh_trunc` / `eigh_vals` | |
 | `eig_full` / `eig_trunc` / `eig_vals` | has | `Tensor::eig_full` / `eig_trunc` / `eig_vals` | Outputs always c64. |
 | `eigen` | has-different-name | `Tensor::eig_full` | |
-| `exp` | has | `Tensor::exp` | **Hermitian endomorphisms only**: `v exp(d) v^H` through the eigendecomposition. TK's `exp` is general per-block Padé (`exp!`, `linalg.jl:420-427`) with no hermiticity requirement; the general seam is #577. |
+| `exp` | has | `Tensor::exp` / `TensorMap::exp` | Dense input: **Hermitian endomorphisms only**, `v exp(d) v^H` through the eigendecomposition. TK's dense `exp` is general per-block Padé (`exp!`, `linalg.jl:420-427`) with no hermiticity requirement; the general seam is #577. Compact diagonal storage takes TK's `exp(::DiagonalTensorMap)` (`diagonal.jl:383-390`) instead: elementwise on the stored values, `O(Σ_c k_c)`, staying compact and — as upstream — with no hermiticity gate, so a nonreal spectrum from `eig_full` is accepted there and refused as a dense matrix of the same values (#576 typed, #578 erased). |
 | (matrix `sqrt` / `inv`) | has | `Tensor::sqrt` / `Tensor::inv` | LinearAlgebra surface; not a distinct TK export. |
 | `ishermitian` | added | `Tensor::is_hermitian` | Non-endomorphism → `false`, not an error. |
 | `isantihermitian` | added | `Tensor::is_antihermitian` | |

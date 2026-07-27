@@ -82,10 +82,10 @@
 //!   [`TensorMap::exp`] is Hermitian-only, a recorded divergence from
 //!   TensorKit), and general endomorphism **`sqrt`** needs a Schur seam
 //!   ([`TensorMap::sqrt`] is the diagonal-bond idiom only). Neither seam exists
-//!   below this facade; both are their own phase. Issue #578 records the
-//!   erased [`crate::prelude::Tensor::exp`]'s remaining complexity-parity gap,
-//!   which the typed [`TensorMap::exp`] does not share: the erased one
-//!   densifies a diagonal payload, this one has an O(rank) arm.
+//!   below this facade; both are their own phase. The erased
+//!   [`crate::prelude::Tensor::exp`] carried a complexity-parity gap against
+//!   this one — it densified a diagonal payload where this facade has an
+//!   O(rank) arm — until issue #578 gave it the same arm.
 //! - **Outer multiplicity** (SU(3) and any other `Generic` provider) is out at
 //!   the admission boundary, not at this layer: every constructor here consumes
 //!   the multiplicity-free checked root. A `Generic` provider needs its own
@@ -2233,10 +2233,10 @@ where
     /// scaling of `V` rather than materialized. Compact input (TensorKit's
     /// `DiagonalTensorMap`): the **O(rank) elementwise arm**, `exp(s_i)` over
     /// the `Σ_c k_c` stored values, staying compact. The erased
-    /// [`crate::prelude::Tensor::exp`] has no such arm — it materializes a
-    /// diagonal payload and eigendecomposes the block-diagonal buffer, which is
-    /// the complexity-parity gap this one closes and issue #578 tracks on the
-    /// erased side.
+    /// [`crate::prelude::Tensor::exp`] has the same arm since issue #578 — it
+    /// used to materialize a diagonal payload and eigendecompose the
+    /// block-diagonal buffer — so the two facades now agree both on complexity
+    /// and on what each storage accepts.
     pub fn exp(&self) -> Result<Self, Error> {
         if let Some(spectrum) = self.spectrum() {
             // Why no hermiticity gate here while the dense arm has one: see the
