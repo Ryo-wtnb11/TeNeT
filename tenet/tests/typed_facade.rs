@@ -5843,3 +5843,203 @@ fn the_remaining_builtin_rules_build_the_same_tensor_on_both_facades() {
         "the value offset must change the fixture"
     );
 }
+
+/// Asserts a nonzero result: a byte comparison of two empty or all-zero
+/// buffers is vacuous, and the product routes are exactly where an
+/// over-restrictive fusion could silently produce one.
+fn assert_nonzero(what: &str, data: &[f64]) {
+    assert!(
+        data.iter().any(|value| *value != 0.0),
+        "{what}: result is empty or all zero, so the byte comparison proves nothing"
+    );
+}
+
+/// The `contract` / `compose` / compact-diagonal oracle matrix, shared by the
+/// three families of [`u1_oracle_pair`] and friends.
+///
+/// `what` names the rule and the axis geometry, so a failure reports which
+/// route diverged rather than only which assertion did.
+fn assert_contract_compose_compact_agree<R>(
+    what: &str,
+    erased: (&tenet::prelude::Tensor, &tenet::prelude::Tensor),
+    typed: (&TensorMap<R, f64>, &TensorMap<R, f64>),
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    // `[p, q] <- [p, q]` against itself on its full domain: `self`'s domain is
+    // `other`'s codomain, so this is the composition geometry — and one of the
+    // two contracted legs is dual, which is where `contract`'s supertrace
+    // twist acts and `compose`'s does not.
+    let (lhs_axes, rhs_axes) = ([2, 3], [0, 1]);
+    // The default output order is `[p, q] <- [p, q]`; this one is
+    // `[q, q] <- [p, p]`. It cannot be undone by coincidence because `p` and
+    // `q` differ in shape, which the leg-shape assertion below re-states.
+    let output_axes = [1, 3, 0, 2];
+
+    let erased_contract = erased
+        .0
+        .contract_ordered(erased.1, &lhs_axes, &rhs_axes, &output_axes)
+        .unwrap_or_else(|error| panic!("{what}: erased contract failed: {error}"));
+    let typed_contract = typed
+        .0
+        .contract(typed.1, &lhs_axes, &rhs_axes, &output_axes)
+        .unwrap_or_else(|error| panic!("{what}: typed contract failed: {error}"));
+    assert_eq!(
+        typed_contract.data(),
+        erased_contract.data(),
+        "{what}: contract with output order {output_axes:?}"
+    );
+    assert_eq!(
+        typed_leg_shapes(&typed_contract),
+        erased_leg_shapes(&erased_contract),
+        "{what}: contract output space with order {output_axes:?}"
+    );
+    assert_nonzero(what, typed_contract.data());
+
+    // The reorder really reorders: same contraction, default order, different
+    // output space and different bytes.
+    let typed_default = typed
+        .0
+        .contract(typed.1, &lhs_axes, &rhs_axes, &[0, 1, 2, 3])
+        .unwrap();
+    assert_ne!(
+        typed_leg_shapes(&typed_default),
+        typed_leg_shapes(&typed_contract),
+        "{what}: the nonidentity output order did not move a leg"
+    );
+    assert_ne!(
+        typed_default.data(),
+        typed_contract.data(),
+        "{what}: the nonidentity output order left the buffer unchanged"
+    );
+
+    let erased_compose = erased
+        .0
+        .compose(erased.1)
+        .unwrap_or_else(|error| panic!("{what}: erased compose failed: {error}"));
+    let typed_compose = typed
+        .0
+        .compose(typed.1)
+        .unwrap_or_else(|error| panic!("{what}: typed compose failed: {error}"));
+    assert_eq!(
+        typed_compose.data(),
+        erased_compose.data(),
+        "{what}: compose"
+    );
+    assert_eq!(
+        typed_leg_shapes(&typed_compose),
+        erased_leg_shapes(&erased_compose),
+        "{what}: compose output space"
+    );
+    assert_nonzero(what, typed_compose.data());
+
+    // One compact-diagonal absorption arm: `u * s` from `svd_compact`, where
+    // `s` is compact diagonal storage on both facades and the contraction is
+    // the proved `t * D` bond scaling rather than a GEMM. `u` is
+    // `[p, q] <- [bond]`, so axis 2 is the bond.
+    let (erased_u, erased_s, _) = erased
+        .0
+        .svd_compact()
+        .unwrap_or_else(|error| panic!("{what}: erased svd_compact failed: {error}"));
+    let (typed_u, typed_s, _) = typed
+        .0
+        .svd_compact()
+        .unwrap_or_else(|error| panic!("{what}: typed svd_compact failed: {error}"));
+    assert_eq!(typed_u.data(), erased_u.data(), "{what}: svd_compact u");
+    assert_eq!(typed_s.data(), erased_s.data(), "{what}: svd_compact s");
+
+    let erased_absorbed = erased_u
+        .contract_ordered(&erased_s, &[2], &[0], &[0, 1, 2])
+        .unwrap();
+    let typed_absorbed = typed_u.contract(&typed_s, &[2], &[0], &[0, 1, 2]).unwrap();
+    assert_eq!(
+        typed_absorbed.data(),
+        erased_absorbed.data(),
+        "{what}: compact-diagonal absorption u * s"
+    );
+    assert_eq!(
+        typed_leg_shapes(&typed_absorbed),
+        typed_leg_shapes(&typed_u),
+        "{what}: absorbing a diagonal must not move a leg"
+    );
+    assert_nonzero(what, typed_absorbed.data());
+    // The absorption is not a copy: `s` is not the identity here.
+    assert_ne!(
+        typed_absorbed.data(),
+        typed_u.data(),
+        "{what}: the diagonal factor was not applied"
+    );
+}
+
+#[test]
+fn typed_and_erased_contract_compose_and_compact_agree_on_u1() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased_a, typed_a) = u1_oracle_pair(&runtime, 1.0);
+    let (erased_b, typed_b) = u1_oracle_pair(&runtime, 100.0);
+    assert_contract_compose_compact_agree(
+        "U1, [p, q] <- [p, q] with q dual",
+        (&erased_a, &erased_b),
+        (&typed_a, &typed_b),
+    );
+}
+
+#[test]
+fn typed_and_erased_contract_compose_and_compact_agree_on_u1_fz2() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased_a, typed_a) = u1_fz2_oracle_pair(&runtime, 1.0);
+    let (erased_b, typed_b) = u1_fz2_oracle_pair(&runtime, 100.0);
+    assert_contract_compose_compact_agree(
+        "U1 x fZ2, [p, q] <- [p, q] with q dual",
+        (&erased_a, &erased_b),
+        (&typed_a, &typed_b),
+    );
+}
+
+#[test]
+fn typed_and_erased_contract_compose_and_compact_agree_on_fz2_u1_su2() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased_a, typed_a) = fz2_u1_su2_oracle_pair(&runtime, 1.0);
+    let (erased_b, typed_b) = fz2_u1_su2_oracle_pair(&runtime, 100.0);
+    assert_contract_compose_compact_agree(
+        "fZ2 x U1 x SU2, [p, q] <- [p, q] with q dual",
+        (&erased_a, &erased_b),
+        (&typed_a, &typed_b),
+    );
+}
+
+#[test]
+fn the_fermionic_product_route_twists_contract_but_not_compose() {
+    // What: on `fZ2 x U(1) x SU(2)` the contracted pair contains a dual leg, so
+    // `contract` applies the supertrace twist there and `compose` does not —
+    // the two must therefore *disagree* on the same axes. Without this the
+    // whole family's byte oracle would still pass with the twist deleted from
+    // both facades at once, since a shared kernel change moves both buffers
+    // together. The bosonic families are the control: there the two agree.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    let (_, fermionic_a) = fz2_u1_su2_oracle_pair(&runtime, 1.0);
+    let (_, fermionic_b) = fz2_u1_su2_oracle_pair(&runtime, 100.0);
+    let twisted = fermionic_a
+        .contract(&fermionic_b, &[2, 3], &[0, 1], &[0, 1, 2, 3])
+        .unwrap();
+    assert_ne!(
+        twisted.data(),
+        fermionic_a.compose(&fermionic_b).unwrap().data(),
+        "fZ2 x U1 x SU2: contract and compose must differ on a dual contracted leg"
+    );
+
+    let (_, bosonic_a) = u1_oracle_pair(&runtime, 1.0);
+    let (_, bosonic_b) = u1_oracle_pair(&runtime, 100.0);
+    assert_eq!(
+        bosonic_a
+            .contract(&bosonic_b, &[2, 3], &[0, 1], &[0, 1, 2, 3])
+            .unwrap()
+            .data(),
+        bosonic_a.compose(&bosonic_b).unwrap().data(),
+        "U1: a bosonic rule has no twist, so the two agree"
+    );
+}
