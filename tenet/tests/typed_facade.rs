@@ -8221,11 +8221,73 @@ fn typed_cat_and_absorb_error_classes_match_the_erased_facade() {
         format!("{:?}", erased_lhs.catdomain(&two_legs_erased).unwrap_err())
     );
 
-    // Mismatched unchanged side: catcodomain over different domains.
+    // Mismatched unchanged side, catdomain: rank `2 <- 1` on both operands
+    // (the one-domain-leg check passes) with different codomain product
+    // spaces, so the codomain-equality check itself is what fires.
+    let other_codomain_erased = tenet::prelude::Tensor::from_block_fn(
+        &runtime,
+        [
+            &u1_space(&[(-1, 1), (0, 3), (1, 1)]),
+            &u1_space(&[(0, 1), (1, 2)]).dual(),
+        ],
+        [&u1_space(&[(0, 1), (1, 1)])],
+        u1_erased_fill,
+    )
+    .unwrap();
+    let other_codomain_typed: TensorMap<tenet::core::U1FusionRule, f64> = TensorMap::from_block_fn(
+        &runtime,
+        [
+            &u1_leg(&provider, &[(-1, 1), (0, 3), (1, 1)]),
+            &u1_leg(&provider, &[(0, 1), (1, 2)]).try_dual().unwrap(),
+        ],
+        [&u1_leg(&provider, &[(0, 1), (1, 1)])],
+        u1_typed_fill,
+    )
+    .unwrap();
+    let typed_codomain_error = typed_lhs.catdomain(&other_codomain_typed).unwrap_err();
     assert_eq!(
-        format!("{:?}", typed_lhs.catcodomain(&typed_lhs).unwrap_err()),
-        format!("{:?}", erased_lhs.catcodomain(&erased_lhs).unwrap_err())
+        format!("{typed_codomain_error:?}"),
+        format!(
+            "{:?}",
+            erased_lhs.catdomain(&other_codomain_erased).unwrap_err()
+        )
     );
+    assert!(format!("{typed_codomain_error:?}").contains("identical codomain product spaces"));
+
+    // Mismatched unchanged side, catcodomain: rank `1 <- 2` on both operands
+    // (the one-codomain-leg check passes) with different domain product
+    // spaces, so the domain-equality check itself is what fires.
+    let stack_pair = |domain1: &[(i32, usize)]| {
+        let erased = tenet::prelude::Tensor::from_block_fn(
+            &runtime,
+            [&u1_space(&[(0, 2), (1, 1)])],
+            [&u1_space(&[(-1, 1), (0, 1), (1, 1)]), &u1_space(domain1)],
+            u1_erased_fill,
+        )
+        .unwrap();
+        let typed: TensorMap<tenet::core::U1FusionRule, f64> = TensorMap::from_block_fn(
+            &runtime,
+            [&u1_leg(&provider, &[(0, 2), (1, 1)])],
+            [
+                &u1_leg(&provider, &[(-1, 1), (0, 1), (1, 1)]),
+                &u1_leg(&provider, domain1),
+            ],
+            u1_typed_fill,
+        )
+        .unwrap();
+        (erased, typed)
+    };
+    let (erased_stack_lhs, typed_stack_lhs) = stack_pair(&[(0, 1), (1, 1)]);
+    let (erased_stack_rhs, typed_stack_rhs) = stack_pair(&[(0, 2), (1, 1)]);
+    let typed_domain_error = typed_stack_lhs.catcodomain(&typed_stack_rhs).unwrap_err();
+    assert_eq!(
+        format!("{typed_domain_error:?}"),
+        format!(
+            "{:?}",
+            erased_stack_lhs.catcodomain(&erased_stack_rhs).unwrap_err()
+        )
+    );
+    assert!(format!("{typed_domain_error:?}").contains("identical domain product spaces"));
 
     // Duality mismatch on the changed leg: the direct sum refuses.
     let dual_domain_erased = tenet::prelude::Tensor::from_block_fn(

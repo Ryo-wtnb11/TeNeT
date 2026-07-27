@@ -3851,7 +3851,7 @@ where
         self.cat(other, CatSide::Domain)
     }
 
-    /// TensorKit `catcodomain(t1, t2)` (`tensors/linalg.jl:498-515`):
+    /// TensorKit `catcodomain(t1, t2)` (`tensors/linalg.jl:498-514`):
     /// concatenate two `1 <- N₂` tensor maps along their sole codomain leg.
     /// The domain product spaces must match exactly (TK 499-501); the two
     /// codomain legs must share duality (TK 503-504) and are combined by
