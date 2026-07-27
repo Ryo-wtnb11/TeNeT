@@ -219,6 +219,17 @@ jobs:
         working-directory: tenet
         env:
           CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
+      # Rustdoc gate (#579): the tenet facade's docs are a maintained public
+      # surface with per-item provenance (tenet/references.md), so broken
+      # intra-doc links or malformed doc markup fail the build here rather
+      # than rotting silently. Doctests themselves already run in the
+      # workspace test step above.
+      - name: Build tenet docs with warnings denied
+        if: needs.changes.outputs.light_rust != 'true'
+        run: cargo doc -p tenet --no-deps
+        working-directory: tenet
+        env:
+          RUSTDOCFLAGS: -D warnings
       - name: Check the backend-selection diagnostic
         run: |
           set -euo pipefail
