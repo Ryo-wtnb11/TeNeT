@@ -5416,6 +5416,137 @@ where
     )
 }
 
+/// Walks the coupled-sector matricization of an endomorphism and replaces each
+/// square block by `apply`'s image of it, writing into a freshly derived
+/// canonical layout.
+///
+/// This is the block-data half of a matrix function that is *not* a spectral
+/// function — the caller supplies only the dense `n x n -> n x n` kernel and
+/// never sees the layout. `init` is handed the largest block order once, before
+/// the loop, so a kernel can size its scratch to `O(max_c n_c²)` and allocate
+/// nothing per sector.
+///
+/// `apply(state, source, n, out, out_leading)` reads the column-major `n x n`
+/// block at `source` (leading dimension `n`) and writes its image into `out`
+/// with leading dimension `out_leading`.
+///
+/// Publication is atomic: the result tensor is built only after every sector
+/// has succeeded, so a failure in the last block leaves no half-written tensor
+/// behind and never mutates the input.
+///
+/// Why the `inverse_*` route compilers are reused rather than copied: they map
+/// source blocks onto the derived output layout under a codomain/domain swap,
+/// and on an endomorphism (`codomain == domain`, checked above) that swap is
+/// the identity — the two tree lists are the same list. Duplicating 80 lines to
+/// spell the identity differently would only give the two copies a chance to
+/// drift.
+pub(crate) fn map_square_sectors_dyn<R, D, S, I, F>(
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    init: I,
+    mut apply: F,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+    I: FnOnce(usize) -> Result<S, OperationError>,
+    F: FnMut(&mut S, &[D], usize, &mut [D], usize) -> Result<(), OperationError>,
+{
+    let source_space = input.space().space();
+    if source_space.homspace().codomain() != source_space.homspace().domain() {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "exp requires an endomorphism (codomain == domain)",
+        });
+    }
+    let output_space = input
+        .space()
+        .derive_from_final_homspace(source_space.homspace().clone())?;
+    let mut output_data = vec![D::zero(); output_space.space().required_len()?];
+
+    let source_regions = checked_sector_regions(source_space.structure(), source_space.nout())?;
+    let output_regions = checked_sector_regions(
+        output_space.space().structure(),
+        output_space.space().nout(),
+    )?
+    .ok_or(OperationError::UnsupportedTensorContractScope {
+        message: "matrix-function derived output requires canonical coupled-sector storage",
+    })?;
+    match source_regions {
+        Some(source) => {
+            let routes = compile_inverse_region_routes(
+                &source,
+                &output_regions,
+                input.data().len(),
+                output_data.len(),
+            )?;
+            let max_order = routes
+                .iter()
+                .map(|route| source[route.source].rows())
+                .max()
+                .unwrap_or(0);
+            let mut state = init(max_order)?;
+            for route in routes {
+                let region = &source[route.source];
+                let order = region.rows();
+                if order == 0 {
+                    continue;
+                }
+                let output = &output_regions[route.output];
+                apply(
+                    &mut state,
+                    &input.data()[region.range()],
+                    order,
+                    &mut output_data[output.range()],
+                    output.rows(),
+                )?;
+            }
+        }
+        None => {
+            let source_matrices =
+                sector_matricizations(source_space.structure(), input.data(), source_space.nout())?;
+            let routes = compile_inverse_matrix_routes(
+                &source_matrices,
+                &output_regions,
+                output_data.len(),
+            )?;
+            let max_order = routes
+                .iter()
+                .map(|route| source_matrices[route.source].rows)
+                .max()
+                .unwrap_or(0);
+            let mut state = init(max_order)?;
+            let mut image = vec![
+                D::zero();
+                max_order
+                    .checked_mul(max_order)
+                    .ok_or(OperationError::ElementCountOverflow)?
+            ];
+            for route in routes {
+                let source = &source_matrices[route.source];
+                if source.rows == 0 {
+                    continue;
+                }
+                apply(&mut state, &source.data, source.rows, &mut image, max_order)?;
+                let output = &output_regions[route.output];
+                reorder_inverse_solution(
+                    &image,
+                    max_order,
+                    &mut output_data[output.range()],
+                    output.rows(),
+                    &route.rows,
+                    &route.cols,
+                );
+            }
+        }
+    }
+
+    BoundDynFactor::from_bound(
+        output_space,
+        output_data,
+        source_space.nout(),
+        source_space.nin(),
+    )
+}
+
 fn compile_inverse_region_routes(
     source: &[CoupledSectorRegion],
     output: &[CoupledSectorRegion],

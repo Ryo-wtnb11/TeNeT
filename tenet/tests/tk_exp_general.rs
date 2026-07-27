@@ -1,3 +1,7 @@
+//! Verbatim `%.17g` TensorKit output below. Trimming the literals to the
+//! shortest round-tripping form would obscure that provenance for no gain.
+#![allow(clippy::excessive_precision)]
+
 //! TensorKit `exp(::AbstractTensorMap)` correspondence for the general
 //! (non-Hermitian) arm of `Tensor::exp` / `TensorMap::exp` (issue #577).
 //!

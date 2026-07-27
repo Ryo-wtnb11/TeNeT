@@ -7097,32 +7097,39 @@ fn exp_of_a_nilpotent_jordan_block_is_the_terminating_series() {
 #[test]
 fn exp_of_a_real_skew_symmetric_block_is_the_analytic_rotation() {
     // What: skew-symmetric is anti-Hermitian, so the eigh gate refuses it while
-    // its exponential is the exact rotation by the same angle.
-    let angle = 0.7_f64;
-    let tensor = u1_block_endomorphism(&[(0, 2, vec![0.0_f64, angle, -angle, 0.0])]);
-    let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    let mut context = default_context();
+    // its exponential is the exact rotation by the same angle — at any angle.
+    // The large one is the value-level gate on scaling and squaring: at
+    // ||A||_1 = 20 the [13/13] approximant is far outside its accuracy range,
+    // so an unscaled evaluation misses the rotation by orders of magnitude.
+    for angle in [0.7_f64, 20.0] {
+        let tensor = u1_block_endomorphism(&[(0, 2, vec![0.0_f64, angle, -angle, 0.0])]);
+        let mut dense = tenet_dense::DefaultDenseExecutor::new();
+        let mut context = default_context();
 
-    let exponential = exp(
-        &mut dense,
-        &mut context,
-        &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
-    )
-    .unwrap();
+        let exponential = exp(
+            &mut dense,
+            &mut context,
+            &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
+        )
+        .unwrap();
 
-    let expected = [
-        [(angle.cos(), 0.0), (-angle.sin(), 0.0)],
-        [(angle.sin(), 0.0), (angle.cos(), 0.0)],
-    ];
-    assert_sector_matrix_matches(
-        &u1_block_matrix(exponential.tensor(), 0),
-        &expected.iter().map(|row| &row[..]).collect::<Vec<_>>(),
-        1e-14,
-        "skew-symmetric rotation",
-    );
+        let expected = [
+            [(angle.cos(), 0.0), (-angle.sin(), 0.0)],
+            [(angle.sin(), 0.0), (angle.cos(), 0.0)],
+        ];
+        assert_sector_matrix_matches(
+            &u1_block_matrix(exponential.tensor(), 0),
+            &expected.iter().map(|row| &row[..]).collect::<Vec<_>>(),
+            1e-13,
+            &format!("skew-symmetric rotation by {angle}"),
+        );
+    }
 }
 
 #[test]
+// Verbatim `%.17g` TensorKit output. Trimming the literals to the shortest
+// round-tripping form would obscure that provenance for no gain.
+#[allow(clippy::excessive_precision)]
 fn exp_of_a_multisector_u1_endomorphism_matches_the_tensorkit_oracle() {
     // What: two coupled sectors of different order, at a scale below and above
     // theta_13, against frozen TensorKit values.
@@ -7203,6 +7210,9 @@ fn exp_of_a_multisector_u1_endomorphism_matches_the_tensorkit_oracle() {
 }
 
 #[test]
+// Verbatim `%.17g` TensorKit output. Trimming the literals to the shortest
+// round-tripping form would obscure that provenance for no gain.
+#[allow(clippy::excessive_precision)]
 fn exp_of_a_complex_nonnormal_u1_endomorphism_matches_the_tensorkit_oracle() {
     // What: c64, nonnormal and non-Hermitian in both the real and imaginary
     // parts — the arm where a real-arithmetic slip in the approximant shows up.

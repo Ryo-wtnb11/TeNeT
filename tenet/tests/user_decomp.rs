@@ -564,7 +564,31 @@ fn public_hermitian_spectral_entries_reject_nonhermitian_f64_and_c64() {
         assert_hermitian_input_error(tensor.eigh_full());
         assert_hermitian_input_error(tensor.eigh_vals());
         assert_hermitian_input_error(tensor.eigh_trunc(&Truncation::Full));
-        assert_hermitian_input_error(tensor.exp());
+        // `exp` left this contract with issue #577: it no longer needs an
+        // eigenbasis, so it takes the same blocks through the general Padé arm.
+        assert!(
+            tensor.exp().is_ok(),
+            "exp still refuses a non-Hermitian block"
+        );
+    }
+
+    // The real block is upper triangular, so its exponential is closed form:
+    // exp([[1, 2], [0, 3]]) = [[e, e³ - e], [0, e³]].
+    let e = std::f64::consts::E;
+    let expected = [e, 0.0, e * e * e - e, e * e * e];
+    for (index, (value, want)) in real
+        .exp()
+        .unwrap()
+        .try_data()
+        .unwrap()
+        .iter()
+        .zip(expected)
+        .enumerate()
+    {
+        assert!(
+            (value - want).abs() < 1e-12,
+            "entry {index}: {value} is not {want}"
+        );
     }
 }
 

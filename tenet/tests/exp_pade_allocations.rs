@@ -1,13 +1,26 @@
 //! Allocation gate for the general (Padé) arm of `exp` (issue #577).
 //!
-//! The design's storage claim is `O(Σ_c n_c²)` for the result and
-//! `O(max_c n_c²)` for scratch — one workspace sized to the largest coupled
-//! sector, reused by every sector, with nothing allocated inside the loop.
+//! The design's storage claim is `O(max_c n_c²)` scratch — one workspace sized
+//! to the *largest* coupled sector, reused by every sector, with nothing
+//! allocated inside the sector loop.
 //!
-//! The gate is differential rather than absolute: adding coupled sectors of the
-//! same order must cost about one output block each. A workspace allocated per
-//! sector — the obvious way to write this kernel wrong — would instead cost ten
-//! blocks each, which is what the bound below rejects.
+//! Measuring that directly is not possible from outside: a call to `exp` also
+//! pays for its own result and for the layout and backend work every route
+//! pays, and the dense backend allocates per GEMM. What *is* separable is the
+//! shape of the total. Allocation at a fixed block order is affine in the
+//! sector count,
+//!
+//! ```text
+//! bytes(sectors) = intercept + sectors * slope
+//! ```
+//!
+//! and the workspace is the whole of the intercept: charged once, so it sits
+//! outside the sector term. Moving it inside the loop — the obvious way to
+//! write this kernel wrong — moves ten blocks from the intercept into the
+//! slope, and sizing it to `Σ_c n_c²` instead of `max_c n_c²` does the same.
+//! The gate therefore reads the intercept off two sector counts and checks that
+//! it is exactly one workspace, at two block orders so that "one workspace" is
+//! also tested against the block order it must scale with.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
@@ -47,25 +60,31 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-const ORDER: usize = 48;
+/// Buffers in the Padé workspace, each `max_c n_c²`.
+const WORKSPACE_BLOCKS: f64 = 10.0;
 
-/// A U(1) endomorphism with `sectors` non-Hermitian blocks of order [`ORDER`].
-fn fixture(sectors: i32) -> Tensor {
+/// Blocks a single added coupled sector may cost: its own output block plus the
+/// dense backend's per-call scratch, and nothing of the workspace.
+const PER_SECTOR_BLOCK_BUDGET: f64 = 26.0;
+
+/// A U(1) endomorphism with `sectors` non-Hermitian blocks of order `order`.
+fn fixture(sectors: i32, order: usize) -> Tensor {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let space = Space::u1((0..sectors).map(|charge| (charge, ORDER)));
+    let space = Space::u1((0..sectors).map(|charge| (charge, order)));
     // Nonsymmetric in the two degeneracy indices, so every block takes the
     // general arm; scaled small so no block needs squaring and the measurement
-    // is not a function of the fill's magnitude.
+    // does not depend on the fill's magnitude.
     Tensor::from_block_fn(&runtime, [&space], [&space], |_, indices| {
         0.01 * (1.0 + indices[0] as f64 - 0.5 * indices[1] as f64)
     })
     .unwrap()
 }
 
-fn measured_exp_bytes(tensor: &Tensor) -> u64 {
-    // Warm the plan and layout caches on a fresh twin, then on the tensor
-    // itself, so the measurement sees only the per-call work.
-    black_box(fixture(1).exp().unwrap());
+fn measured_exp_bytes(sectors: i32, order: usize) -> u64 {
+    let tensor = fixture(sectors, order);
+    // Warm the plan and layout caches on a fresh twin of the same shape, then
+    // on the tensor itself, so the measurement sees only the per-call work.
+    black_box(fixture(sectors, order).exp().unwrap());
     black_box(tensor.exp().unwrap());
     ALLOCATED.store(0, Ordering::Relaxed);
     ENABLED.store(true, Ordering::Release);
@@ -76,26 +95,33 @@ fn measured_exp_bytes(tensor: &Tensor) -> u64 {
 }
 
 #[test]
-fn general_exp_scratch_does_not_grow_with_the_sector_count() {
+fn general_exp_scratch_is_one_workspace_sized_to_the_largest_sector() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
-    let block_bytes = (ORDER * ORDER * std::mem::size_of::<f64>()) as u64;
 
-    let two = measured_exp_bytes(&fixture(2));
-    let eight = measured_exp_bytes(&fixture(8));
-
-    // One workspace of ten blocks exists at all, sized to the largest sector.
-    assert!(
-        two >= 10 * block_bytes,
-        "the Padé workspace looks absent: two sectors allocated only {two} bytes"
-    );
-    // Six extra sectors may cost their six output blocks (plus route and region
-    // metadata, which is O(sector count) and tiny); a per-sector workspace would
-    // cost sixty.
-    let growth = eight - two;
-    assert!(
-        growth <= 12 * block_bytes,
-        "allocation grew by {growth} bytes over six added sectors, more than the \
-         {} bytes an O(max_c n_c²) workspace allows — scratch is per sector",
-        12 * block_bytes
-    );
+    for order in [48usize, 96] {
+        let block_bytes = (order * order * std::mem::size_of::<f64>()) as f64;
+        let two = measured_exp_bytes(2, order) as f64;
+        let four = measured_exp_bytes(4, order) as f64;
+        // bytes(s) = intercept + s * slope, read off two points.
+        let intercept = 2.0 * two - four;
+        let blocks = intercept / block_bytes;
+        assert!(
+            (WORKSPACE_BLOCKS - 1.0..=WORKSPACE_BLOCKS + 1.0).contains(&blocks),
+            "order {order}: the sector-count-independent allocation is {blocks:.2} blocks, \
+             not the {WORKSPACE_BLOCKS} of a single max-sector Padé workspace \
+             (two sectors: {two} bytes, four: {four})"
+        );
+        // And the sector term itself, which a *second* workspace allocated
+        // inside the loop would inflate by ten blocks while leaving the
+        // intercept alone. The per-sector cost is mostly the dense backend's
+        // own scratch for six GEMMs and a solve, so the bound is loose: it
+        // measures 17.5 blocks at order 48 and 21.0 at order 96 on the shipped
+        // executor, against the 27.5 / 31.0 a per-sector workspace would cost.
+        let slope = (four - two) / 2.0 / block_bytes;
+        assert!(
+            slope <= PER_SECTOR_BLOCK_BUDGET,
+            "order {order}: each added sector allocates {slope:.2} blocks, over the \
+             {PER_SECTOR_BLOCK_BUDGET} budget — scratch is being taken per sector"
+        );
+    }
 }

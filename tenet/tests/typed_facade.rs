@@ -4557,10 +4557,28 @@ fn exp_of_a_complex_compact_spectrum_takes_the_complex_elementwise_branch() {
         }
     })
     .unwrap();
-    // Dense storage of the very same matrix: refused, because it is not
-    // Hermitian.
+    // Dense storage of the very same matrix: since issue #577 it is accepted
+    // too, through the general Pade arm — and because this particular matrix is
+    // already diagonal, the two arms must agree entry for entry. Storage no
+    // longer decides *whether* `exp` is defined, only how it is computed.
     assert!(!dense.is_hermitian(1e-9).unwrap());
-    assert!(dense.exp().is_err());
+    let dense_exponential = dense.exp().unwrap();
+    for (index, (source, value)) in dense
+        .data()
+        .iter()
+        .zip(dense_exponential.data())
+        .enumerate()
+    {
+        let expected = if on_diagonal(&dense, index) {
+            source.exp()
+        } else {
+            Complex64::new(0.0, 0.0)
+        };
+        assert!(
+            (value - expected).norm() < 1e-12,
+            "dense entry {index}: {value} is not exp({source})"
+        );
+    }
 
     // Compact storage of the same values: accepted, elementwise.
     let spectrum = dense.eig_full().unwrap().0.scale(Complex64::new(1.0, 0.0));
@@ -4588,11 +4606,15 @@ fn typed_and_erased_compact_exp_agree_on_a_nonreal_spectrum() {
     let runtime = runtime();
     let (erased, typed) = z2_complex_endo_oracle_pair(&runtime);
 
-    assert!(
-        erased.exp().is_err(),
-        "the dense c64 route stopped refusing"
+    // Since issue #577 the dense c64 route accepts these blocks as well, and
+    // the two facades take the same general arm on them. Scaled down first:
+    // this fixture's entries run into the thousands, and `exp` of it overflows
+    // to a NaN that no equality can tell apart from a wrong NaN.
+    assert_eq!(
+        typed.scale(Complex64::new(1e-3, 0.0)).exp().unwrap().data(),
+        erased.scale(1e-3).unwrap().exp().unwrap().data_c64(),
+        "the dense c64 facades disagree on the general arm"
     );
-    assert!(typed.exp().is_err());
 
     let erased_spectrum = erased.eig_full().unwrap().0;
     let typed_spectrum = typed.eig_full().unwrap().0;
