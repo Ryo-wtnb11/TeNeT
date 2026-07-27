@@ -43,7 +43,19 @@ pub trait FactorScalar: DenseRecouplingScalar {
     /// Narrows from `Complex64` (lossy for the single-precision scalars).
     fn from_complex64(value: Complex64) -> Self;
     fn adjoint(self) -> Self;
+    /// LAPACK's `xLAMCH('P')` — `eps * base`, the spacing of one — in the
+    /// *real component* type of `Self`.
     fn epsilon() -> f64;
+    /// LAPACK's `xLAMCH('S')` — the safe minimum, the smallest positive normal
+    /// number — in the *real component* type of `Self`.
+    ///
+    /// Paired with [`FactorScalar::epsilon`] this reproduces the machine bounds
+    /// the reference `gebal` derives (`sgebal.f:330` for the single-precision
+    /// blocks, `dgebal.f:330` for the double), which have to come from the
+    /// component type: the double bounds let the radix loop of a single
+    /// precision block reach a factor around `2^970`, and `from_real` of that
+    /// is `inf` in `f32`.
+    fn safe_minimum() -> f64;
     fn compute_f64_spectrum<E, F>(
         rank: usize,
         scratch: &mut Vec<Self::Real>,
@@ -132,6 +144,10 @@ impl FactorScalar for f32 {
     fn epsilon() -> f64 {
         f32::EPSILON as f64
     }
+
+    fn safe_minimum() -> f64 {
+        f32::MIN_POSITIVE as f64
+    }
 }
 
 impl FactorScalar for f64 {
@@ -164,6 +180,10 @@ impl FactorScalar for f64 {
 
     fn epsilon() -> f64 {
         f64::EPSILON
+    }
+
+    fn safe_minimum() -> f64 {
+        f64::MIN_POSITIVE
     }
 
     fn compute_f64_spectrum<E, F>(
@@ -215,6 +235,10 @@ impl FactorScalar for num_complex::Complex32 {
     fn epsilon() -> f64 {
         f32::EPSILON as f64
     }
+
+    fn safe_minimum() -> f64 {
+        f32::MIN_POSITIVE as f64
+    }
 }
 
 impl FactorScalar for Complex64 {
@@ -247,6 +271,10 @@ impl FactorScalar for Complex64 {
 
     fn epsilon() -> f64 {
         f64::EPSILON
+    }
+
+    fn safe_minimum() -> f64 {
+        f64::MIN_POSITIVE
     }
 
     fn compute_f64_spectrum<E, F>(
@@ -5013,18 +5041,26 @@ fn validate_hermitian_matrix_shape<D>(
     Ok(())
 }
 
-fn validate_hermitian_matrix_contents<D: FactorScalar>(
-    data: &[D],
-    n: usize,
-) -> Result<(), OperationError> {
-    let is_hermitian = if D::epsilon() == f32::EPSILON as f64 {
+/// MatrixAlgebraKit's hermiticity predicate at the working precision of `D`.
+///
+/// Extracted from [`validate_hermitian_matrix_contents`] so the `exp` dispatch
+/// (issue #577) can ask the question without provoking — and then having to
+/// interpret — an EIGH failure. Same data, same tolerance, no second policy.
+fn hermitian_matrix_contents<D: FactorScalar>(data: &[D], n: usize) -> bool {
+    if D::epsilon() == f32::EPSILON as f64 {
         matrixalgebrakit_hermitian::<D, f32>(data, n)
     } else if D::epsilon() == f64::EPSILON {
         matrixalgebrakit_hermitian::<D, f64>(data, n)
     } else {
         false
-    };
-    if !is_hermitian {
+    }
+}
+
+fn validate_hermitian_matrix_contents<D: FactorScalar>(
+    data: &[D],
+    n: usize,
+) -> Result<(), OperationError> {
+    if !hermitian_matrix_contents(data, n) {
         return Err(OperationError::InvalidArgument {
             message: "eigh requires Hermitian coupled-sector blocks",
         });
@@ -5070,6 +5106,75 @@ pub fn validate_hermitian_regions<D: FactorScalar>(
         validate_hermitian_matrix_contents(matrix, region.rows())?;
     }
     Ok(())
+}
+
+/// Is this an endomorphism whose coupled-sector blocks are all Hermitian?
+///
+/// The `exp` dispatch (issue #577) needs the Hermitian question answered
+/// *separately* from the eigendecomposition: the spectral route stays for
+/// Hermitian input, and everything else goes to blockwise Padé. Inferring it
+/// from a failed EIGH would conflate hermiticity with a backend failure, so
+/// this asks directly, over the same direct-region / packed matricization
+/// split and the same MatrixAlgebraKit tolerance [`eigh_full_dyn`] uses.
+///
+/// A non-endomorphism, a malformed layout or a non-square block is still an
+/// error — only non-hermiticity is `Ok(false)`. Nonfinite entries make
+/// MatrixAlgebraKit's predicate `false`, so they arrive at the Padé route,
+/// which rejects them in its own words.
+///
+/// Cost is `O(Σ_c n_c²)`, one pass over the blocks, against the `O(Σ_c n_c³)`
+/// factorization that follows.
+pub(crate) fn is_hermitian_endomorphism_dyn<R, D>(
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<bool, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let space = input.space().space();
+    if space.homspace().codomain() != space.homspace().domain() {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "eigh requires an endomorphism (codomain == domain)",
+        });
+    }
+    // Why `checked_sector_regions` and not `compact_factor_plan` as
+    // `eigh_full_dyn` does: the plan is `Some` exactly when the regions are
+    // (`build_compact_factor_plan` returns early otherwise), and building it
+    // also builds the factor bond spaces — work a yes/no question must not pay
+    // for on the retained Hermitian route.
+    if let Some(regions) = checked_sector_regions(space.structure(), space.nout())? {
+        for region in regions.iter() {
+            let range = region.range();
+            let matrix = data_region(input.data(), &range)?;
+            validate_hermitian_matrix_shape(matrix, region.rows(), region.cols())?;
+        }
+        for region in regions.iter() {
+            let range = region.range();
+            let matrix = data_region(input.data(), &range)?;
+            if !hermitian_matrix_contents(matrix, region.rows()) {
+                return Ok(false);
+            }
+        }
+        return Ok(true);
+    }
+    let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
+    for matrix in &matricizations {
+        validate_hermitian_matrix_shape(&matrix.data, matrix.rows, matrix.cols)?;
+    }
+    Ok(matricizations
+        .iter()
+        .all(|matrix| hermitian_matrix_contents(&matrix.data, matrix.rows)))
+}
+
+fn data_region<'a, D>(
+    data: &'a [D],
+    range: &std::ops::Range<usize>,
+) -> Result<&'a [D], OperationError> {
+    data.get(range.clone())
+        .ok_or(OperationError::ElementCountMismatch {
+            expected: range.end,
+            actual: data.len(),
+        })
 }
 
 fn checked_sector_regions(
@@ -5336,6 +5441,148 @@ where
         output_data,
         source_space.nin(),
         source_space.nout(),
+    )
+}
+
+/// Walks the coupled-sector matricization of an endomorphism and replaces each
+/// square block by `apply`'s image of it, writing into a freshly derived
+/// canonical layout.
+///
+/// This is the block-data half of a matrix function that is *not* a spectral
+/// function — the caller supplies only the dense `n x n -> n x n` kernel and
+/// never sees the layout. `init` is handed the largest block order once, before
+/// the loop, so a kernel can size its scratch to `O(max_c n_c²)` and allocate
+/// nothing per sector.
+///
+/// That bound is the kernel's own. It is also the whole of the scratch on the
+/// canonical direct-region layout, where the blocks are read in place; the
+/// packed fallback below matricizes *every* sector up front and so costs
+/// `O(Σ_c n_c²)` on top of it, whatever the kernel does.
+///
+/// `apply(state, source, n, out, out_leading)` reads the column-major `n x n`
+/// block at `source` (leading dimension `n`) and writes its image into `out`
+/// with leading dimension `out_leading`.
+///
+/// Publication is atomic: the result tensor is built only after every sector
+/// has succeeded, so a failure in the last block leaves no half-written tensor
+/// behind and never mutates the input.
+///
+/// Why the `inverse_*` route compilers are reused rather than copied: they map
+/// source blocks onto the derived output layout under a codomain/domain swap,
+/// and on an endomorphism that swap is the identity — the two tree lists are
+/// the same list. Duplicating 80 lines to spell the identity differently would
+/// only give the two copies a chance to drift.
+///
+/// # Panics
+///
+/// Debug-asserts `codomain == domain`. Refusing a non-endomorphism is the
+/// caller's job, so that the message names the function the user called
+/// (`exp`) rather than whichever helper noticed first.
+pub(crate) fn map_square_sectors_dyn<R, D, S, I, F>(
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    init: I,
+    mut apply: F,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+    I: FnOnce(usize) -> Result<S, OperationError>,
+    F: FnMut(&mut S, &[D], usize, &mut [D], usize) -> Result<(), OperationError>,
+{
+    let source_space = input.space().space();
+    debug_assert_eq!(
+        source_space.homspace().codomain(),
+        source_space.homspace().domain(),
+        "callers refuse a non-endomorphism in their own words first"
+    );
+    let output_space = input
+        .space()
+        .derive_from_final_homspace(source_space.homspace().clone())?;
+    let mut output_data = vec![D::zero(); output_space.space().required_len()?];
+
+    let source_regions = checked_sector_regions(source_space.structure(), source_space.nout())?;
+    // The output layout is derived here, from a homspace this function just
+    // built, so it is canonical by construction whatever the input layout was —
+    // the packed input route below reaches the very same output regions.
+    let output_regions = checked_sector_regions(
+        output_space.space().structure(),
+        output_space.space().nout(),
+    )?
+    .expect("a freshly derived matrix-function layout is canonical");
+    match source_regions {
+        Some(source) => {
+            let routes = compile_inverse_region_routes(
+                &source,
+                &output_regions,
+                input.data().len(),
+                output_data.len(),
+            )?;
+            let max_order = routes
+                .iter()
+                .map(|route| source[route.source].rows())
+                .max()
+                .unwrap_or(0);
+            let mut state = init(max_order)?;
+            for route in routes {
+                let region = &source[route.source];
+                let order = region.rows();
+                if order == 0 {
+                    continue;
+                }
+                let output = &output_regions[route.output];
+                apply(
+                    &mut state,
+                    &input.data()[region.range()],
+                    order,
+                    &mut output_data[output.range()],
+                    output.rows(),
+                )?;
+            }
+        }
+        None => {
+            let source_matrices =
+                sector_matricizations(source_space.structure(), input.data(), source_space.nout())?;
+            let routes = compile_inverse_matrix_routes(
+                &source_matrices,
+                &output_regions,
+                output_data.len(),
+            )?;
+            let max_order = routes
+                .iter()
+                .map(|route| source_matrices[route.source].rows)
+                .max()
+                .unwrap_or(0);
+            let mut state = init(max_order)?;
+            let mut image = vec![
+                D::zero();
+                max_order
+                    .checked_mul(max_order)
+                    .ok_or(OperationError::ElementCountOverflow)?
+            ];
+            for route in routes {
+                let source = &source_matrices[route.source];
+                if source.rows == 0 {
+                    continue;
+                }
+                apply(&mut state, &source.data, source.rows, &mut image, max_order)?;
+                let output = &output_regions[route.output];
+                reorder_inverse_solution(
+                    &image,
+                    max_order,
+                    &mut output_data[output.range()],
+                    output.rows(),
+                    &route.rows,
+                    &route.cols,
+                );
+            }
+        }
+    }
+
+    BoundDynFactor::from_bound(
+        output_space,
+        output_data,
+        source_space.nout(),
+        source_space.nin(),
     )
 }
 

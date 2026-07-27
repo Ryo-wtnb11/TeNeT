@@ -1374,17 +1374,14 @@ fn compact_exp_is_elementwise_and_matches_the_dense_route() {
             );
         }
 
-        // A genuinely complex spectrum. Storage decides what `exp` accepts,
-        // exactly as in TensorKit: the dense route is the Hermitian spectral
-        // function and refuses this matrix, the compact arm is unconditionally
-        // elementwise and does not. Same divergence the typed facade records
-        // (`exp_of_a_complex_compact_spectrum_takes_the_complex_elementwise_branch`).
+        // A genuinely complex spectrum. This used to be where storage decided
+        // what `exp` *accepts* — the dense route was the Hermitian spectral
+        // function and refused the matrix. Issue #577 gave it the general Padé
+        // arm, so storage now decides only how `exp` is computed, and the two
+        // must agree: Padé of a diagonal matrix is the elementwise exponential.
         let source = complex_diagonal(&rt, &space, 578_003);
-        assert!(
-            dense_oracle(&source).exp().is_err(),
-            "the dense route accepted a non-Hermitian exp"
-        );
         let image = source.exp().unwrap();
+        assert_tensor_close(&image, &dense_oracle(&source).exp().unwrap());
         assert_compact_unmaterialized(&image);
         assert_elementwise_exp(&source, &image);
         assert_compact_unmaterialized(&source);

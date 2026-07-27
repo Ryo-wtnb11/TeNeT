@@ -4438,17 +4438,32 @@ fn exp_of_the_identity_is_e_times_the_identity() {
 }
 
 #[test]
-fn exp_rejects_a_non_hermitian_endomorphism() {
-    // What: this facade's `exp` is Hermitian-only — a recorded divergence from
-    // TensorKit, whose `exp` is a general per-block Pade approximant. The
-    // refusal is the visible half of that divergence, so it is pinned.
+fn exp_accepts_a_non_hermitian_endomorphism_on_both_facades() {
+    // What: issue #577 closed the recorded divergence — TensorKit's `exp` is a
+    // general per-block Pade approximant with no hermiticity gate, and so is
+    // this one now. The refusal this test used to pin is gone; what is pinned
+    // instead is that both facades take the same general arm and publish the
+    // same bytes, and that the result is the actual exponential.
     let _guard = cache_lock();
     let runtime = runtime();
     let (erased, typed) = z2_endo_oracle_pair(&runtime);
 
     assert!(!typed.is_hermitian(1e-9).unwrap());
-    assert!(typed.exp().is_err(), "a non-Hermitian exp was accepted");
-    assert!(erased.exp().is_err(), "the erased facade disagrees");
+    let typed_exp = typed.exp().unwrap();
+    assert_eq!(typed_exp.data(), erased.exp().unwrap().data());
+
+    // exp(A) exp(-A) = id, evaluated through the facade's own composition.
+    let inverse = typed.scale(-1.0).exp().unwrap();
+    let identity = TensorMap::<_, f64>::id(&runtime, &typed.domain()).unwrap();
+    let residual = typed_exp
+        .compose(&inverse)
+        .unwrap()
+        .data()
+        .iter()
+        .zip(identity.data())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+    assert!(residual < 1e-11, "exp(A) exp(-A) != id: {residual}");
 }
 
 #[test]
@@ -4542,10 +4557,28 @@ fn exp_of_a_complex_compact_spectrum_takes_the_complex_elementwise_branch() {
         }
     })
     .unwrap();
-    // Dense storage of the very same matrix: refused, because it is not
-    // Hermitian.
+    // Dense storage of the very same matrix: since issue #577 it is accepted
+    // too, through the general Pade arm — and because this particular matrix is
+    // already diagonal, the two arms must agree entry for entry. Storage no
+    // longer decides *whether* `exp` is defined, only how it is computed.
     assert!(!dense.is_hermitian(1e-9).unwrap());
-    assert!(dense.exp().is_err());
+    let dense_exponential = dense.exp().unwrap();
+    for (index, (source, value)) in dense
+        .data()
+        .iter()
+        .zip(dense_exponential.data())
+        .enumerate()
+    {
+        let expected = if on_diagonal(&dense, index) {
+            source.exp()
+        } else {
+            Complex64::new(0.0, 0.0)
+        };
+        assert!(
+            (value - expected).norm() < 1e-12,
+            "dense entry {index}: {value} is not exp({source})"
+        );
+    }
 
     // Compact storage of the same values: accepted, elementwise.
     let spectrum = dense.eig_full().unwrap().0.scale(Complex64::new(1.0, 0.0));
@@ -4573,11 +4606,15 @@ fn typed_and_erased_compact_exp_agree_on_a_nonreal_spectrum() {
     let runtime = runtime();
     let (erased, typed) = z2_complex_endo_oracle_pair(&runtime);
 
-    assert!(
-        erased.exp().is_err(),
-        "the dense c64 route stopped refusing"
+    // Since issue #577 the dense c64 route accepts these blocks as well, and
+    // the two facades take the same general arm on them. Scaled down first:
+    // this fixture's entries run into the thousands, and `exp` of it overflows
+    // to a NaN that no equality can tell apart from a wrong NaN.
+    assert_eq!(
+        typed.scale(Complex64::new(1e-3, 0.0)).exp().unwrap().data(),
+        erased.scale(1e-3).unwrap().exp().unwrap().data_c64(),
+        "the dense c64 facades disagree on the general arm"
     );
-    assert!(typed.exp().is_err());
 
     let erased_spectrum = erased.eig_full().unwrap().0;
     let typed_spectrum = typed.eig_full().unwrap().0;
