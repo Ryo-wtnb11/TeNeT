@@ -6812,3 +6812,792 @@ fn assert_identity_sector_matrices(matrices: &[(SectorId, usize, usize, Vec<f64>
         }
     }
 }
+
+// ============================================================================
+// Issue #577: general (non-Hermitian) matrix exponential.
+//
+// Oracle provenance. Every `*_matches_the_tensorkit_oracle` constant below is
+// TensorKit output for the same tensor, from
+// `~/.julia/packages/TensorKit/6Camk` (0.16.2) on Julia 1.11.6:
+//
+// ```julia
+// V = U1Space(0=>3, 1=>2)
+// t = zeros(T, V <- V)
+// for (c, b) in blocks(t), j in axes(b,2), i in axes(b,1)
+//     re = 0.5 + 0.25*(i-1) - 0.75*(j-1) + 0.125*convert(Int, c.charge)
+//     b[i,j] = (T <: Complex) ? complex(re, 0.125*(i-1) + 0.375*(j-1) - 0.25) : re
+// end
+// b .*= scale
+// exp(t)
+// ```
+//
+// The pinned 0.17.0 tree (`~/.julia/packages/TensorKit/jCjQQ`) was not the
+// resolved version, which does not weaken the oracle: `exp!`
+// (`src/tensors/linalg.jl:420-427`) is character-identical in the two trees and
+// contains no arithmetic — it checks `domain == codomain` and hands every block
+// to `LinearAlgebra.exp!`, so the numbers are Julia stdlib v1.11's, not
+// TensorKit's, in either tree.
+//
+// Fixture certification: the fill is a closed formula in the coupled charge and
+// the two degeneracy indices, and `u1_block_endomorphism` places one fusion
+// tree per coupled sector, so `u1_block_matrix` reads back exactly the matrix
+// Julia's `blocks(t)` iterated over. `exp_fixture_blocks_reproduce_the_oracle_input`
+// pins that correspondence through the pre-existing reader before any exponential
+// is taken.
+// ============================================================================
+
+/// Relative Frobenius agreement with the TensorKit oracle, per the #577 design.
+const EXP_ORACLE_RTOL: f64 = 1e-12;
+
+/// Residual of `exp(A) exp(-A) - 1`, per the #577 design.
+const EXP_INVERSE_RTOL: f64 = 1e-11;
+
+/// The `V = U1Space(0=>3, 1=>2)` oracle fill, in 0-based degeneracy indices.
+fn exp_oracle_fill(charge: i32, row: usize, column: usize, scale: f64) -> f64 {
+    scale * (0.5 + 0.25 * row as f64 - 0.75 * column as f64 + 0.125 * charge as f64)
+}
+
+fn exp_oracle_fill_imaginary(row: usize, column: usize, scale: f64) -> f64 {
+    scale * (0.125 * row as f64 + 0.375 * column as f64 - 0.25)
+}
+
+fn exp_oracle_block<D: FactorScalar>(charge: i32, order: usize, scale: f64) -> Vec<D> {
+    let mut data = vec![D::zero(); order * order];
+    for column in 0..order {
+        for row in 0..order {
+            let real = exp_oracle_fill(charge, row, column, scale);
+            let imaginary = if D::epsilon() == f64::EPSILON && size_of::<D>() == size_of::<f64>() {
+                0.0
+            } else {
+                exp_oracle_fill_imaginary(row, column, scale)
+            };
+            data[row + order * column] = D::from_complex64(Complex64::new(real, imaginary));
+        }
+    }
+    data
+}
+
+fn exp_oracle_tensor<D: FactorScalar>(scale: f64) -> TensorMap<D, 1, 1> {
+    u1_block_endomorphism(&[
+        (0, 3, exp_oracle_block::<D>(0, 3, scale)),
+        (1, 2, exp_oracle_block::<D>(1, 2, scale)),
+    ])
+}
+
+/// Column-major coupled-sector matrix of a single-tree `1 <- 1` U(1) tensor.
+fn u1_block_matrix<D: Copy + Zero>(tensor: &TensorMap<D, 1, 1>, charge: i32) -> Vec<D> {
+    let sector = U1Irrep::new(charge).sector_id();
+    let structure = tensor.structure();
+    let block = (0..structure.block_count())
+        .map(|index| structure.block(index).unwrap())
+        .find(|block| match block.key() {
+            BlockKey::FusionTree(key) => key.codomain_tree().coupled() == sector,
+            _ => false,
+        })
+        .unwrap();
+    let order = block.shape()[0];
+    assert_eq!(block.shape(), &[order, order]);
+    let mut matrix = vec![D::zero(); order * order];
+    for column in 0..order {
+        for row in 0..order {
+            matrix[row + order * column] = tensor.data()
+                [block.offset() + row * block.strides()[0] + column * block.strides()[1]];
+        }
+    }
+    matrix
+}
+
+/// Relative Frobenius comparison against a row-major `(re, im)` oracle block.
+fn assert_sector_matrix_matches<D: FactorScalar>(
+    actual: &[D],
+    expected_rows: &[&[(f64, f64)]],
+    rtol: f64,
+    what: &str,
+) {
+    let order = expected_rows.len();
+    assert_eq!(actual.len(), order * order, "{what}: unexpected block size");
+    let mut residual = 0.0_f64;
+    let mut reference = 0.0_f64;
+    for (row, entries) in expected_rows.iter().enumerate() {
+        assert_eq!(entries.len(), order, "{what}: oracle block is not square");
+        for (column, &(real, imaginary)) in entries.iter().enumerate() {
+            let expected = Complex64::new(real, imaginary);
+            let got = actual[row + order * column].widen_complex();
+            residual += (got - expected).norm_sqr();
+            reference += expected.norm_sqr();
+        }
+    }
+    let relative = residual.sqrt() / reference.sqrt();
+    assert!(
+        relative <= rtol,
+        "{what}: relative Frobenius error {relative:e} exceeds {rtol:e}"
+    );
+}
+
+#[derive(Default)]
+struct MatrixFunctionCallSpy {
+    inner: tenet_dense::DefaultDenseExecutor,
+    eigh_calls: usize,
+    solve_calls: usize,
+    matmul_calls: usize,
+    /// Ordinal of a solve that must fail, for the failure-atomicity gate.
+    fail_solve_number: Option<usize>,
+}
+
+impl DenseExecutor for MatrixFunctionCallSpy {
+    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.svd(input)
+    }
+
+    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.qr(input)
+    }
+
+    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.eigh(input)
+    }
+
+    fn eigh_into(
+        &mut self,
+        input: DenseRead<'_>,
+        values: DenseWrite<'_>,
+        vectors: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        self.eigh_calls += 1;
+        self.inner.eigh_into(input, values, vectors)
+    }
+
+    fn solve_into(
+        &mut self,
+        a: DenseRead<'_>,
+        b: DenseRead<'_>,
+        x: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        self.solve_calls += 1;
+        if self.fail_solve_number == Some(self.solve_calls) {
+            return Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "solve_into",
+                message: "injected sector failure".to_string(),
+            });
+        }
+        self.inner.solve_into(a, b, x)
+    }
+
+    fn dot_general_into(
+        &mut self,
+        output: DenseWrite<'_>,
+        lhs: DenseRead<'_>,
+        rhs: DenseRead<'_>,
+        config: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        self.matmul_calls += 1;
+        self.inner.dot_general_into(output, lhs, rhs, config)
+    }
+}
+
+/// An executor whose selected backend supplies GEMM but no dense solve — the
+/// trait default for `solve_into` is what must reach the caller.
+#[derive(Default)]
+struct SolvelessExecutor {
+    inner: tenet_dense::DefaultDenseExecutor,
+}
+
+impl DenseExecutor for SolvelessExecutor {
+    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.svd(input)
+    }
+
+    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.qr(input)
+    }
+
+    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.eigh(input)
+    }
+
+    fn dot_general_into(
+        &mut self,
+        output: DenseWrite<'_>,
+        lhs: DenseRead<'_>,
+        rhs: DenseRead<'_>,
+        config: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        self.inner.dot_general_into(output, lhs, rhs, config)
+    }
+}
+
+#[test]
+fn exp_fixture_blocks_reproduce_the_oracle_input() {
+    // What: fixture certification. Before any exponential is taken, the blocks
+    // TeNeT stores are the blocks Julia's `blocks(t)` filled — read back with
+    // the pre-existing block reader, not with anything #577 introduced.
+    let tensor = exp_oracle_tensor::<f64>(4.0);
+    for (charge, order) in [(0, 3usize), (1, 2usize)] {
+        let block = u1_block_matrix(&tensor, charge);
+        for column in 0..order {
+            for row in 0..order {
+                assert_eq!(
+                    block[row + order * column],
+                    exp_oracle_fill(charge, row, column, 4.0),
+                    "fixture entry ({row}, {column}) of charge {charge}"
+                );
+            }
+        }
+    }
+    // Julia `opnorm(b, 1)` of the same blocks: 9.0 and 6.0, both above
+    // theta_13, so the fixture exercises the scaling-and-squaring phase.
+    for (charge, order, expected) in [(0, 3usize, 9.0), (1, 2usize, 6.0)] {
+        let block = u1_block_matrix(&tensor, charge);
+        let norm1 = (0..order)
+            .map(|column| {
+                (0..order)
+                    .map(|row| block[row + order * column].abs())
+                    .sum::<f64>()
+            })
+            .fold(0.0_f64, f64::max);
+        assert_eq!(norm1, expected, "one-norm of charge {charge}");
+    }
+}
+
+#[test]
+fn exp_of_a_nilpotent_jordan_block_is_the_terminating_series() {
+    // What: a nonnormal, non-diagonalizable block the spectral route cannot
+    // touch. exp(J) = 1 + J + J^2/2 + J^3/6 exactly, so the approximant, the
+    // scaling choice and the solve are all pinned against closed form.
+    let mut jordan = vec![0.0_f64; 16];
+    for row in 0..3 {
+        jordan[row + 4 * (row + 1)] = 1.0;
+    }
+    let tensor = u1_block_endomorphism(&[(0, 4, jordan)]);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let mut context = default_context();
+
+    let exponential = exp(
+        &mut dense,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
+    )
+    .unwrap();
+
+    let expected = [
+        [(1.0, 0.0), (1.0, 0.0), (0.5, 0.0), (1.0 / 6.0, 0.0)],
+        [(0.0, 0.0), (1.0, 0.0), (1.0, 0.0), (0.5, 0.0)],
+        [(0.0, 0.0), (0.0, 0.0), (1.0, 0.0), (1.0, 0.0)],
+        [(0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (1.0, 0.0)],
+    ];
+    assert_sector_matrix_matches(
+        &u1_block_matrix(exponential.tensor(), 0),
+        &expected.iter().map(|row| &row[..]).collect::<Vec<_>>(),
+        1e-14,
+        "nilpotent Jordan block",
+    );
+}
+
+#[test]
+fn exp_of_a_real_skew_symmetric_block_is_the_analytic_rotation() {
+    // What: skew-symmetric is anti-Hermitian, so the eigh gate refuses it while
+    // its exponential is the exact rotation by the same angle.
+    let angle = 0.7_f64;
+    let tensor = u1_block_endomorphism(&[(0, 2, vec![0.0_f64, angle, -angle, 0.0])]);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let mut context = default_context();
+
+    let exponential = exp(
+        &mut dense,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
+    )
+    .unwrap();
+
+    let expected = [
+        [(angle.cos(), 0.0), (-angle.sin(), 0.0)],
+        [(angle.sin(), 0.0), (angle.cos(), 0.0)],
+    ];
+    assert_sector_matrix_matches(
+        &u1_block_matrix(exponential.tensor(), 0),
+        &expected.iter().map(|row| &row[..]).collect::<Vec<_>>(),
+        1e-14,
+        "skew-symmetric rotation",
+    );
+}
+
+#[test]
+fn exp_of_a_multisector_u1_endomorphism_matches_the_tensorkit_oracle() {
+    // What: two coupled sectors of different order, at a scale below and above
+    // theta_13, against frozen TensorKit values.
+    for (scale, charge_zero, charge_one) in [
+        (
+            1.0,
+            &[
+                [
+                    (0.9849644284568706, 0.0),
+                    (-0.37626016105405391, 0.0),
+                    (-0.73748475056497831, 0.0),
+                ],
+                [
+                    (0.44650857769439511, 0.0),
+                    (0.82943202363305835, 0.0),
+                    (-0.78764453042827864, 0.0),
+                ],
+                [
+                    (0.90805272693191974, 0.0),
+                    (0.035124208320170609, 0.0),
+                    (0.16219568970842124, 0.0),
+                ],
+            ],
+            &[
+                [(1.7819357803578582, 0.0), (-0.18045636327066489, 0.0)],
+                [(1.2631945428946545, 0.0), (1.0601103272751986, 0.0)],
+            ],
+        ),
+        (
+            4.0,
+            &[
+                [
+                    (-0.6308945936141368, 0.0),
+                    (-0.27404909616219597, 0.0),
+                    (1.0827964012897446, 0.0),
+                ],
+                [
+                    (-1.1147351879032152, 0.0),
+                    (0.51577938090254927, 0.0),
+                    (0.14629394970831344, 0.0),
+                ],
+                [
+                    (-0.59857578219229368, 0.0),
+                    (-0.69439214203270549, 0.0),
+                    (0.20979149812688241, 0.0),
+                ],
+            ],
+            &[
+                [(6.8456187388272456, 0.0), (-1.9710572969428048, 0.0)],
+                [(13.797401078599625, 0.0), (-1.0386104489439727, 0.0)],
+            ],
+        ),
+    ] {
+        let tensor = exp_oracle_tensor::<f64>(scale);
+        let mut dense = tenet_dense::DefaultDenseExecutor::new();
+        let mut context = default_context();
+
+        let exponential = exp(
+            &mut dense,
+            &mut context,
+            &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
+        )
+        .unwrap();
+
+        assert_sector_matrix_matches(
+            &u1_block_matrix(exponential.tensor(), 0),
+            &charge_zero.iter().map(|row| &row[..]).collect::<Vec<_>>(),
+            EXP_ORACLE_RTOL,
+            &format!("f64 scale {scale} charge 0"),
+        );
+        assert_sector_matrix_matches(
+            &u1_block_matrix(exponential.tensor(), 1),
+            &charge_one.iter().map(|row| &row[..]).collect::<Vec<_>>(),
+            EXP_ORACLE_RTOL,
+            &format!("f64 scale {scale} charge 1"),
+        );
+    }
+}
+
+#[test]
+fn exp_of_a_complex_nonnormal_u1_endomorphism_matches_the_tensorkit_oracle() {
+    // What: c64, nonnormal and non-Hermitian in both the real and imaginary
+    // parts — the arm where a real-arithmetic slip in the approximant shows up.
+    let tensor = exp_oracle_tensor::<Complex64>(1.0);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
+
+    let exponential = exp(
+        &mut dense,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
+    )
+    .unwrap();
+
+    let charge_zero = [
+        [
+            (0.92690089541443432, -0.1610299101898417),
+            (-0.41081187668012081, -0.030497613725301645),
+            (-0.74852464877467562, 0.10003468273923843),
+        ],
+        [
+            (0.36740563761195039, 0.071261345504936915),
+            (0.73145191286879296, 0.12778526275599536),
+            (-0.9045018118743644, 0.18430918000705374),
+        ],
+        [
+            (0.80791037980946623, 0.30355260119971544),
+            (-0.12628429758229334, 0.28606813923729235),
+            (-0.060478974974053017, 0.26858367727486893),
+        ],
+    ];
+    let charge_one = [
+        [
+            (1.7454107392461176, -0.35809087573900988),
+            (-0.17904543786950494, 0.179045437869505),
+        ],
+        [
+            (1.2533180650865348, -0.17904543786950497),
+            (1.0292289877680976, 0.35809087573900988),
+        ],
+    ];
+    assert_sector_matrix_matches(
+        &u1_block_matrix(exponential.tensor(), 0),
+        &charge_zero.iter().map(|row| &row[..]).collect::<Vec<_>>(),
+        EXP_ORACLE_RTOL,
+        "c64 charge 0",
+    );
+    assert_sector_matrix_matches(
+        &u1_block_matrix(exponential.tensor(), 1),
+        &charge_one.iter().map(|row| &row[..]).collect::<Vec<_>>(),
+        EXP_ORACLE_RTOL,
+        "c64 charge 1",
+    );
+}
+
+#[test]
+fn exp_agrees_between_the_direct_region_and_packed_layouts() {
+    // What: the same blocks reached through the canonical coupled-sector
+    // regions and through the packed matricization fall-back produce the same
+    // tensor — the kernel sees identical matrices on both routes.
+    let tensor = exp_oracle_tensor::<f64>(4.0);
+    let packed = padded_copy(&U1FusionRule, &tensor);
+    assert!(tensor
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .is_some());
+    assert!(packed
+        .structure()
+        .coupled_sector_regions(1)
+        .unwrap()
+        .is_none());
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let mut context = default_context();
+
+    let direct = exp(
+        &mut dense,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
+    )
+    .unwrap();
+    let fallback = exp(
+        &mut dense,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &packed),
+    )
+    .unwrap();
+
+    for charge in [0, 1] {
+        assert_eq!(
+            u1_block_matrix(direct.tensor(), charge),
+            u1_block_matrix(fallback.tensor(), charge),
+            "packed layout changed the exponential of charge {charge}"
+        );
+    }
+}
+
+#[test]
+fn exp_of_a_general_endomorphism_inverts_under_negation() {
+    // What: exp(A) exp(-A) = 1 for a non-Hermitian A, the check that catches a
+    // sign or a transposition the oracle blocks would also have to agree with.
+    let tensor = exp_oracle_tensor::<f64>(1.0);
+    let negated = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+        tensor.data().iter().map(|value| -value).collect(),
+        tensor.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap();
+    let rule = U1FusionRule;
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let mut context = default_context();
+
+    let forward = exp(
+        &mut dense,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
+    )
+    .unwrap();
+    let backward = exp(
+        &mut dense,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(rule), &negated),
+    )
+    .unwrap();
+
+    let identity =
+        crate::compose::compose(&mut context, &rule, forward.tensor(), backward.tensor()).unwrap();
+    for (charge, order) in [(0, 3usize), (1, 2usize)] {
+        let block = u1_block_matrix(&identity, charge);
+        for column in 0..order {
+            for row in 0..order {
+                let expected = if row == column { 1.0 } else { 0.0 };
+                let residual = (block[row + order * column] - expected).abs();
+                assert!(
+                    residual <= EXP_INVERSE_RTOL,
+                    "charge {charge} entry ({row}, {column}) residual {residual:e}"
+                );
+            }
+        }
+    }
+}
+
+/// Hermitian input, frozen before #577 existed (`exp` at aa7d94a on the same
+/// fixture). The general arm must not perturb the retained spectral route by so
+/// much as a rounding step.
+const EXP_HERMITIAN_FROZEN: [f64; 13] = [
+    1.695793746017424,
+    0.209101633618953,
+    -0.24287760062229188,
+    0.209101633618953,
+    0.5660866660365976,
+    0.5602349780947521,
+    -0.2428776006222919,
+    0.5602349780947521,
+    3.6462244050838195,
+    1.4291238712744785,
+    0.5579059518426233,
+    0.5579059518426234,
+    1.0106944073925108,
+];
+
+fn hermitian_exp_fixture() -> TensorMap<f64, 1, 1> {
+    u1_block_endomorphism(&[
+        (
+            0,
+            3,
+            vec![0.5, 0.25, -0.125, 0.25, -0.75, 0.375, -0.125, 0.375, 1.25],
+        ),
+        (1, 2, vec![0.25, 0.5, 0.5, -0.125]),
+    ])
+}
+
+#[test]
+fn exp_of_a_hermitian_endomorphism_keeps_the_eigendecomposition_bit_for_bit() {
+    // What: the retained route, pinned two ways — the dispatch (one EIGH per
+    // sector, no solve, no GEMM) and the published values, byte for byte.
+    let tensor = hermitian_exp_fixture();
+    let mut spy = MatrixFunctionCallSpy::default();
+    let mut context = default_context();
+
+    let exponential = exp(
+        &mut spy,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
+    )
+    .unwrap();
+
+    assert_eq!(
+        spy.eigh_calls, 2,
+        "one eigendecomposition per coupled sector"
+    );
+    assert_eq!(spy.solve_calls, 0, "the Hermitian route must not solve");
+    assert_eq!(spy.matmul_calls, 0, "the Hermitian route must not GEMM");
+    assert_eq!(exponential.tensor().data(), &EXP_HERMITIAN_FROZEN[..]);
+}
+
+#[test]
+fn exp_of_a_general_endomorphism_runs_one_solve_per_sector_and_no_eigh() {
+    // What: the general arm's per-sector budget — six GEMMs and one solve for a
+    // block that needs no squaring, and never an eigendecomposition.
+    let tensor = exp_oracle_tensor::<f64>(1.0);
+    let mut spy = MatrixFunctionCallSpy::default();
+    let mut context = default_context();
+
+    exp(
+        &mut spy,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
+    )
+    .unwrap();
+
+    assert_eq!(spy.eigh_calls, 0, "the general arm must not eigendecompose");
+    assert_eq!(spy.solve_calls, 2, "one solve per nonempty coupled sector");
+    assert_eq!(spy.matmul_calls, 12, "six GEMMs per sector at s = 0");
+}
+
+#[test]
+fn exp_sector_work_scales_with_the_sector_count_and_the_scaling_count() {
+    // What: complexity parity. Doubling the number of equal-size sectors
+    // doubles the block work instead of coupling them into one dense cube, and
+    // a block above theta_13 pays exactly its squarings.
+    let block = |charge| exp_oracle_block::<f64>(charge, 2, 1.0);
+    let two = u1_block_endomorphism(&[(0, 2, block(0)), (1, 2, block(1))]);
+    let four = u1_block_endomorphism(&[
+        (0, 2, block(0)),
+        (1, 2, block(1)),
+        (2, 2, block(2)),
+        (3, 2, block(3)),
+    ]);
+    let mut context = default_context();
+
+    let mut two_spy = MatrixFunctionCallSpy::default();
+    exp(
+        &mut two_spy,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &two),
+    )
+    .unwrap();
+    let mut four_spy = MatrixFunctionCallSpy::default();
+    exp(
+        &mut four_spy,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &four),
+    )
+    .unwrap();
+
+    assert_eq!(four_spy.solve_calls, 2 * two_spy.solve_calls);
+    assert_eq!(four_spy.matmul_calls, 2 * two_spy.matmul_calls);
+
+    // ||A||_1 = 36 for this block, so s = ceil(log2(36 / theta_13)) = 3 and the
+    // squaring loop adds exactly three GEMMs on top of the six.
+    let scaled = u1_block_endomorphism(&[(0, 3, exp_oracle_block::<f64>(0, 3, 16.0))]);
+    let mut scaled_spy = MatrixFunctionCallSpy::default();
+    exp(
+        &mut scaled_spy,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &scaled),
+    )
+    .unwrap();
+    assert_eq!(scaled_spy.matmul_calls, 9);
+    assert_eq!(scaled_spy.solve_calls, 1);
+}
+
+#[test]
+fn exp_reports_unsupported_when_the_executor_cannot_solve() {
+    // What: device storage whose backend supplies GEMM but no solve is refused
+    // in the backend's own words, not silently routed onto the host.
+    let tensor = exp_oracle_tensor::<f64>(1.0);
+    let mut dense = SolvelessExecutor::default();
+    let mut context = default_context();
+
+    let error = exp(
+        &mut dense,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            OperationError::Dense(DenseError::Unsupported {
+                op: "solve_into",
+                ..
+            })
+        ),
+        "unexpected error {error:?}"
+    );
+}
+
+#[test]
+fn exp_rejects_a_non_endomorphism() {
+    // What: TensorKit's own precondition (`domain == codomain`) still holds —
+    // #577 widens which endomorphisms are accepted, not which maps are.
+    let rule = U1FusionRule;
+    let codomain = SectorLeg::new([(U1Irrep::new(0).sector_id(), 3)], false);
+    let domain = SectorLeg::new([(U1Irrep::new(0).sector_id(), 2)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([codomain]),
+        FusionProductSpace::new([domain]),
+    );
+    let shapes = vec![vec![3, 2]; homspace.fusion_tree_keys(&rule).len()];
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims([3], [2]).unwrap(),
+        homspace,
+        &rule,
+        shapes,
+    )
+    .unwrap();
+    let tensor = TensorMap::<f64, 1, 1>::from_vec_with_fusion_space(
+        (0..space.required_len().unwrap())
+            .map(|index| index as f64)
+            .collect(),
+        space,
+    )
+    .unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let mut context = default_context();
+
+    let error = exp(
+        &mut dense,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            OperationError::UnsupportedTensorContractScope {
+                message: "eigh requires an endomorphism (codomain == domain)"
+            }
+        ),
+        "unexpected error {error:?}"
+    );
+}
+
+#[test]
+fn exp_rejects_a_nonfinite_general_block() {
+    // What: a NaN block is not Hermitian to MatrixAlgebraKit's predicate, so it
+    // arrives at the general arm; it must be named there rather than handed to
+    // the backend as a silent NaN.
+    let tensor = u1_block_endomorphism(&[(0, 2, vec![1.0_f64, 0.5, f64::NAN, 2.0])]);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let mut context = default_context();
+
+    let error = exp(
+        &mut dense,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            OperationError::InvalidArgument {
+                message: "exp requires finite coupled-sector blocks"
+            }
+        ),
+        "unexpected error {error:?}"
+    );
+}
+
+#[test]
+fn exp_publishes_nothing_when_a_later_sector_fails() {
+    // What: failure atomicity. A backend failure on the second sector leaves no
+    // tensor and does not touch the input's storage.
+    let tensor = exp_oracle_tensor::<f64>(1.0);
+    let before = tensor.data().to_vec();
+    let mut spy = MatrixFunctionCallSpy {
+        fail_solve_number: Some(2),
+        ..MatrixFunctionCallSpy::default()
+    };
+    let mut context = default_context();
+
+    let error = exp(
+        &mut spy,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            OperationError::Dense(DenseError::Backend {
+                op: "solve_into",
+                ..
+            })
+        ),
+        "unexpected error {error:?}"
+    );
+    assert_eq!(
+        spy.solve_calls, 2,
+        "the failing sector must have been tried"
+    );
+    assert_eq!(tensor.data(), &before[..], "input storage was mutated");
+}

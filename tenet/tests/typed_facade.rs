@@ -4438,17 +4438,32 @@ fn exp_of_the_identity_is_e_times_the_identity() {
 }
 
 #[test]
-fn exp_rejects_a_non_hermitian_endomorphism() {
-    // What: this facade's `exp` is Hermitian-only — a recorded divergence from
-    // TensorKit, whose `exp` is a general per-block Pade approximant. The
-    // refusal is the visible half of that divergence, so it is pinned.
+fn exp_accepts_a_non_hermitian_endomorphism_on_both_facades() {
+    // What: issue #577 closed the recorded divergence — TensorKit's `exp` is a
+    // general per-block Pade approximant with no hermiticity gate, and so is
+    // this one now. The refusal this test used to pin is gone; what is pinned
+    // instead is that both facades take the same general arm and publish the
+    // same bytes, and that the result is the actual exponential.
     let _guard = cache_lock();
     let runtime = runtime();
     let (erased, typed) = z2_endo_oracle_pair(&runtime);
 
     assert!(!typed.is_hermitian(1e-9).unwrap());
-    assert!(typed.exp().is_err(), "a non-Hermitian exp was accepted");
-    assert!(erased.exp().is_err(), "the erased facade disagrees");
+    let typed_exp = typed.exp().unwrap();
+    assert_eq!(typed_exp.data(), erased.exp().unwrap().data());
+
+    // exp(A) exp(-A) = id, evaluated through the facade's own composition.
+    let inverse = typed.scale(-1.0).exp().unwrap();
+    let identity = TensorMap::<_, f64>::id(&runtime, &typed.domain()).unwrap();
+    let residual = typed_exp
+        .compose(&inverse)
+        .unwrap()
+        .data()
+        .iter()
+        .zip(identity.data())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f64, f64::max);
+    assert!(residual < 1e-11, "exp(A) exp(-A) != id: {residual}");
 }
 
 #[test]
