@@ -6043,3 +6043,168 @@ fn the_fermionic_product_route_twists_contract_but_not_compose() {
         "U1: a bosonic rule has no twist, so the two agree"
     );
 }
+
+/// The reduction and factorization half of the oracle matrix.
+///
+/// `dimension_weighted` says whether the family has a coupled sector with
+/// `dim(c) != 1`: `inner` is TensorKit's quantum-dimension-weighted `dot`, so
+/// only there does it differ from a plain sum of squares. Stating it per
+/// family rather than deriving it keeps the fixture honest — if a fixture were
+/// weakened to spin 0 everywhere, this flag would start lying and the test
+/// would fail rather than quietly stop covering the weighted branch.
+fn assert_reductions_and_factorizations_agree<R>(
+    what: &str,
+    dimension_weighted: bool,
+    erased: (&tenet::prelude::Tensor, &tenet::prelude::Tensor),
+    typed: (&TensorMap<R, f64>, &TensorMap<R, f64>),
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    // Neither coefficient is 1 and they differ in sign, so dropping or
+    // swapping one moves the buffer.
+    let erased_sum = erased.0.add(erased.1, 2.0, -3.0).unwrap();
+    let typed_sum = typed.0.add(typed.1, 2.0, -3.0).unwrap();
+    assert_eq!(typed_sum.data(), erased_sum.data(), "{what}: add");
+    assert_nonzero(what, typed_sum.data());
+    assert_ne!(
+        typed.0.add(typed.1, -3.0, 2.0).unwrap().data(),
+        typed_sum.data(),
+        "{what}: add is not symmetric in its coefficients"
+    );
+
+    let typed_scaled = typed.0.scale(-2.5);
+    assert_eq!(
+        typed_scaled.data(),
+        erased.0.scale(-2.5).unwrap().data(),
+        "{what}: scale"
+    );
+    assert_nonzero(what, typed_scaled.data());
+
+    let typed_inner = typed.0.inner(typed.1).unwrap();
+    assert_eq!(
+        typed_inner,
+        erased.0.inner(erased.1).unwrap().re(),
+        "{what}: inner"
+    );
+    assert_ne!(typed_inner, 0.0, "{what}: inner is vacuously zero");
+    // `<t, t>` is the squared weighted norm, which is the identity that pins
+    // this weighting to `norm`'s.
+    let norm = typed.0.norm().unwrap();
+    let self_inner = typed.0.inner(typed.0).unwrap();
+    assert!(
+        (self_inner - norm * norm).abs() < 1e-9 * norm * norm,
+        "{what}: <t, t> != norm^2"
+    );
+    // And the weighting is (or is not) visible against the unweighted sum of
+    // squares, per the family.
+    let unweighted: f64 = typed.0.data().iter().map(|value| value * value).sum();
+    assert_eq!(
+        (self_inner - unweighted).abs() > 1e-9 * unweighted,
+        dimension_weighted,
+        "{what}: dimension weighting expected {dimension_weighted}, \
+         <t, t> = {self_inner}, sum of squares = {unweighted}"
+    );
+
+    let (erased_q, erased_r) = erased.0.qr_compact().unwrap();
+    let (typed_q, typed_r) = typed.0.qr_compact().unwrap();
+    assert_eq!(typed_q.data(), erased_q.data(), "{what}: qr_compact q");
+    assert_eq!(typed_r.data(), erased_r.data(), "{what}: qr_compact r");
+    assert_eq!(
+        typed_leg_shapes(&typed_q),
+        erased_leg_shapes(&erased_q),
+        "{what}: qr_compact q space"
+    );
+    assert_nonzero(what, typed_q.data());
+    assert_nonzero(what, typed_r.data());
+
+    // `left_orth` / `right_orth` are TensorKit 0.17's default kinds (`:qr` and
+    // `:lq`); both facades must agree on the factors *and* on that default.
+    let (erased_v, erased_c) = erased.0.left_orth().unwrap();
+    let (typed_v, typed_c) = typed.0.left_orth().unwrap();
+    assert_eq!(typed_v.data(), erased_v.data(), "{what}: left_orth v");
+    assert_eq!(typed_c.data(), erased_c.data(), "{what}: left_orth c");
+    assert_eq!(typed_v.data(), typed_q.data(), "{what}: left_orth is qr");
+
+    let (erased_c, erased_vh) = erased.0.right_orth().unwrap();
+    let (typed_c, typed_vh) = typed.0.right_orth().unwrap();
+    assert_eq!(typed_c.data(), erased_c.data(), "{what}: right_orth c");
+    assert_eq!(typed_vh.data(), erased_vh.data(), "{what}: right_orth vh");
+    assert_nonzero(what, typed_vh.data());
+
+    // `svd_vals` reports labels typed and raw ids erased, so the typed labels
+    // are re-encoded through the provider's own codec rather than compared by
+    // position: the two facades are free to order the spectrum differently.
+    let mut erased_spectrum: Vec<(SectorId, Vec<f64>)> = erased
+        .0
+        .svd_vals()
+        .unwrap()
+        .into_iter()
+        .map(|entry| (entry.sector, entry.values))
+        .collect();
+    let mut typed_spectrum: Vec<(SectorId, Vec<f64>)> = typed
+        .0
+        .svd_vals()
+        .unwrap()
+        .into_iter()
+        .map(|entry| {
+            (
+                SectorCodec::encode_sector(typed.0.codomain()[0].provider(), &entry.sector)
+                    .unwrap(),
+                entry.values,
+            )
+        })
+        .collect();
+    erased_spectrum.sort_by_key(|(sector, _)| *sector);
+    typed_spectrum.sort_by_key(|(sector, _)| *sector);
+    assert_eq!(typed_spectrum, erased_spectrum, "{what}: svd_vals");
+    assert!(
+        typed_spectrum
+            .iter()
+            .any(|(_, values)| values.iter().any(|value| *value != 0.0)),
+        "{what}: svd_vals is vacuously zero"
+    );
+}
+
+#[test]
+fn typed_and_erased_reductions_and_factorizations_agree_on_u1() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased_a, typed_a) = u1_oracle_pair(&runtime, 1.0);
+    let (erased_b, typed_b) = u1_oracle_pair(&runtime, 100.0);
+    assert_reductions_and_factorizations_agree(
+        "U1, [p, q] <- [p, q] with q dual",
+        false,
+        (&erased_a, &erased_b),
+        (&typed_a, &typed_b),
+    );
+}
+
+#[test]
+fn typed_and_erased_reductions_and_factorizations_agree_on_u1_fz2() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased_a, typed_a) = u1_fz2_oracle_pair(&runtime, 1.0);
+    let (erased_b, typed_b) = u1_fz2_oracle_pair(&runtime, 100.0);
+    assert_reductions_and_factorizations_agree(
+        "U1 x fZ2, [p, q] <- [p, q] with q dual",
+        false,
+        (&erased_a, &erased_b),
+        (&typed_a, &typed_b),
+    );
+}
+
+#[test]
+fn typed_and_erased_reductions_and_factorizations_agree_on_fz2_u1_su2() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased_a, typed_a) = fz2_u1_su2_oracle_pair(&runtime, 1.0);
+    let (erased_b, typed_b) = fz2_u1_su2_oracle_pair(&runtime, 100.0);
+    // The only weighted family here: its SU(2) factor carries spin 1/2 and
+    // spin 1, so `dim(c)` is not identically one.
+    assert_reductions_and_factorizations_agree(
+        "fZ2 x U1 x SU2, [p, q] <- [p, q] with q dual",
+        true,
+        (&erased_a, &erased_b),
+        (&typed_a, &typed_b),
+    );
+}
