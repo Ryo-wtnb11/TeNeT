@@ -112,7 +112,14 @@
 //! [`TensorMap::is_unitary`], [`TensorMap::is_posdef`],
 //! [`TensorMap::project_hermitian`], [`TensorMap::project_antihermitian`]) and
 //! — with issue #576 — the **matrix functions** ([`TensorMap::exp`],
-//! [`TensorMap::inv`], [`TensorMap::pinv`], [`TensorMap::sqrt`]).
+//! [`TensorMap::inv`], [`TensorMap::pinv`], [`TensorMap::sqrt`]) and — with
+//! issue #580 — the **typed inspection, scalar and conversion group**
+//! ([`TensorMap::rank`], [`TensorMap::codomain_rank`],
+//! [`TensorMap::domain_rank`] and their TensorKit aliases `numout` / `numin` /
+//! `numind`, [`TensorMap::leg_dims`], [`TensorMap::leg_dim`],
+//! [`TensorMap::codomain_spaces`], [`TensorMap::domain_spaces`],
+//! [`TensorMap::scalar`], [`TensorMap::zeros_like`], [`TensorMap::to_c64`],
+//! [`TensorMap::re`], [`TensorMap::im`]).
 //!
 //! Issue #570 also gave the facade **compact diagonal storage**: a spectrum
 //! factor — `svd_compact`'s and `svd_trunc`'s `s`, `eigh`/`eig`'s `d` — holds
@@ -3899,6 +3906,103 @@ where
             }),
         }
     }
+}
+
+// Bound-free, like the accessor impl on `GradedSpace<R>`: an element-wise
+// dtype conversion touches the stored payload only — no provider algebra, no
+// layout derivation — so demanding the construction bounds here would be
+// certification without a certificate to check.
+impl<R> TensorMap<R, f64> {
+    /// Widens to a c64 tensor map, imaginary parts zero (TensorKit
+    /// `Base.complex`, `tensors/abstracttensor.jl:696-705`).
+    ///
+    /// Element-wise on the stored payload: a dense payload is widened in
+    /// place-order, a compact spectrum factor maps spectrum-to-spectrum and
+    /// **stays compact** (same as the erased `to_c64_storage` route). One
+    /// `O(stored_len)` output allocation; the space is shared, not re-derived.
+    ///
+    /// Infallible, unlike the erased pair [`crate::prelude::Tensor::to_c64`] /
+    /// `try_to_c64`: that split exists only for device residency, which the
+    /// typed facade does not have — a deliberate narrowing, not a semantic
+    /// difference.
+    pub fn to_c64(&self) -> TensorMap<R, num_complex::Complex64> {
+        let widen = |&value: &f64| num_complex::Complex64::new(value, 0.0);
+        let body = match &*self.body.data {
+            TypedData::Dense(data) => {
+                TypedTensorBody::dense(self.body.space.clone(), data.iter().map(widen).collect())
+            }
+            TypedData::Diagonal(spectrum) => TypedTensorBody::diagonal(
+                self.body.space.clone(),
+                map_spectrum_dtype(spectrum, |value| num_complex::Complex64::new(value, 0.0)),
+            ),
+        };
+        TensorMap {
+            runtime: self.runtime.clone(),
+            body: Arc::new(body),
+        }
+    }
+}
+
+// Typed-first: the erased facade has no `re`/`im` counterpart, so there is no
+// route to extract and cross-facade parity is impossible — the gates are law
+// checks (`re(t) + i·im(t)` rebuilds `t`) instead. TensorKit's real-input
+// branches (`real(t) = t`, `imag(t) = zerovector(t)` for a real scalartype)
+// are statically unrepresentable here: these methods exist on the `Complex64`
+// impl only, and `to_c64().re()` covers the round trip.
+impl<R> TensorMap<R, num_complex::Complex64> {
+    /// The element-wise real part, as an f64 tensor map on the same spaces
+    /// (TensorKit `Base.real`, `tensors/abstracttensor.jl:707-717`:
+    /// blockwise element-wise, result scalartype real).
+    ///
+    /// A compact spectrum factor maps spectrum-to-spectrum and stays compact.
+    /// One `O(stored_len)` output allocation; the space is shared.
+    pub fn re(&self) -> TensorMap<R, f64> {
+        self.map_parts(|value| value.re)
+    }
+
+    /// The element-wise imaginary part, as an f64 tensor map on the same
+    /// spaces (TensorKit `Base.imag`, `tensors/abstracttensor.jl:718-728`).
+    ///
+    /// A compact spectrum factor maps spectrum-to-spectrum and stays compact.
+    /// One `O(stored_len)` output allocation; the space is shared.
+    pub fn im(&self) -> TensorMap<R, f64> {
+        self.map_parts(|value| value.im)
+    }
+
+    /// The shared body of [`Self::re`] / [`Self::im`]: one element-wise
+    /// component map over whichever payload representation is stored.
+    fn map_parts(&self, part: impl Fn(num_complex::Complex64) -> f64) -> TensorMap<R, f64> {
+        let body = match &*self.body.data {
+            TypedData::Dense(data) => TypedTensorBody::dense(
+                self.body.space.clone(),
+                data.iter().map(|&value| part(value)).collect(),
+            ),
+            TypedData::Diagonal(spectrum) => TypedTensorBody::diagonal(
+                self.body.space.clone(),
+                map_spectrum_dtype(spectrum, part),
+            ),
+        };
+        TensorMap {
+            runtime: self.runtime.clone(),
+            body: Arc::new(body),
+        }
+    }
+}
+
+/// [`map_spectrum`]'s cross-dtype sibling: the same sector-and-length
+/// preserving value map, for the conversions whose output dtype differs from
+/// the input's — which is exactly why the two cannot share one signature.
+fn map_spectrum_dtype<A: Copy, B>(
+    spectrum: &[tenet_matrixalgebra::SectorSpectrum<A>],
+    value_of: impl Fn(A) -> B,
+) -> Vec<tenet_matrixalgebra::SectorSpectrum<B>> {
+    spectrum
+        .iter()
+        .map(|entry| tenet_matrixalgebra::SectorSpectrum {
+            sector: entry.sector,
+            values: entry.values.iter().map(|&value| value_of(value)).collect(),
+        })
+        .collect()
 }
 
 /// Representation gates for [`TypedTensorBody`] (#580 PR 0).

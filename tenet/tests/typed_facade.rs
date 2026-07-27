@@ -7621,3 +7621,75 @@ fn typed_zeros_like_keeps_the_spaces_and_zeroes_the_payload() {
     assert_same_legs(&s_zeros.codomain(), &s.codomain());
     assert!(s_zeros.data().iter().all(|&value| value == 0.0));
 }
+
+#[test]
+fn typed_and_erased_to_c64_agree_byte_for_byte() {
+    // Gate 6: the widened payload is the erased one, on a dense payload and on
+    // a compact diagonal payload (`svd_compact`'s `s`), whose dense
+    // materialization must also agree.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    let typed_wide: TensorMap<tenet::core::Z2FusionRule, Complex64> = typed.to_c64();
+    let erased_wide = erased.to_c64();
+    assert_eq!(typed_wide.data(), erased_wide.data_c64());
+
+    let erased_s = erased.svd_compact().unwrap().1;
+    let typed_s: TensorMap<tenet::core::Z2FusionRule, f64> = typed.svd_compact().unwrap().1;
+    let typed_s_wide: TensorMap<tenet::core::Z2FusionRule, Complex64> = typed_s.to_c64();
+    assert_eq!(typed_s_wide.data(), erased_s.to_c64().data_c64());
+}
+
+#[test]
+fn typed_re_im_reconstruct_the_complex_tensor_byte_exactly() {
+    // Gate 6's law checks (erased has no `re`/`im`, so parity is impossible):
+    // `re(t) + i*im(t)` rebuilds `t` byte-exactly through `to_c64` + `add`,
+    // and on a real tensor `re(to_c64(x)) == x`, `im(to_c64(x)) ==
+    // zeros_like(x)`, byte-exactly.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, complex_typed) = z2_complex_oracle_pair(&runtime);
+
+    let real_part: TensorMap<tenet::core::Z2FusionRule, f64> = complex_typed.re();
+    let imag_part: TensorMap<tenet::core::Z2FusionRule, f64> = complex_typed.im();
+    let rebuilt: TensorMap<tenet::core::Z2FusionRule, Complex64> = real_part
+        .to_c64()
+        .add(
+            &imag_part.to_c64(),
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 1.0),
+        )
+        .unwrap();
+    assert_eq!(rebuilt.data(), complex_typed.data());
+
+    let (_, real_typed) = z2_oracle_pair(&runtime);
+    let round_trip: TensorMap<tenet::core::Z2FusionRule, f64> = real_typed.to_c64().re();
+    assert_eq!(round_trip.data(), real_typed.data());
+    let vanished: TensorMap<tenet::core::Z2FusionRule, f64> = real_typed.to_c64().im();
+    assert_eq!(vanished.data(), real_typed.zeros_like().data());
+}
+
+#[test]
+fn typed_re_im_keep_a_compact_spectrum_on_its_bond_space() {
+    // Gate 6's diagonal leg: `re`/`im` of a complex compact spectrum factor
+    // map spectrum-to-spectrum, and the law `re + i*im == t` holds on the
+    // materialized payloads.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, complex_typed) = z2_complex_oracle_pair(&runtime);
+    let s: TensorMap<tenet::core::Z2FusionRule, Complex64> = complex_typed.svd_compact().unwrap().1;
+
+    let real_part: TensorMap<tenet::core::Z2FusionRule, f64> = s.re();
+    let imag_part: TensorMap<tenet::core::Z2FusionRule, f64> = s.im();
+    assert_same_legs(&real_part.codomain(), &s.codomain());
+    let rebuilt: TensorMap<tenet::core::Z2FusionRule, Complex64> = real_part
+        .to_c64()
+        .add(
+            &imag_part.to_c64(),
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 1.0),
+        )
+        .unwrap();
+    assert_eq!(rebuilt.data(), s.data());
+}
