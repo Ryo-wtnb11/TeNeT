@@ -4617,32 +4617,103 @@ mod representation_gates {
         assert_eq!(Arc::strong_count(&tensor.body), 2);
     }
 
+    /// A small fermionic fixture whose codomain leg 0 carries only the even
+    /// sector (θ = 1 everywhere on it) while leg 1 and the domain leg carry
+    /// the odd sector too — so one tensor exposes both twist short-circuit
+    /// answers.
+    fn fz2_fixture() -> TensorMap<tenet_core::FermionParityFusionRule, f64> {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(tenet_core::FermionParityFusionRule);
+        let even_only =
+            GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::EVEN, 2)], false).unwrap();
+        let mixed = GradedSpace::try_new(
+            Arc::clone(&provider),
+            [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 2)],
+            false,
+        )
+        .unwrap();
+        let mut state = 0x5eed_0613u64;
+        TensorMap::from_block_fn(&runtime, [&even_only, &mixed], [&mixed], move |_, _| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((state >> 33) as f64) / (u32::MAX as f64) - 0.5
+        })
+        .unwrap()
+    }
+
     #[test]
-    fn a_body_on_a_different_space_reuses_the_payload_allocation() {
-        // What: the property #580 Group 4 rests on, for a *dense* payload — a
-        // compact `Diagonal` payload is bond-space-only and must be
-        // materialized before any space rewrite (see the `data` field
-        // rationale). A unit-leg insertion builds a body with a rewritten
-        // space and the *same* stored dense values; if that cost a payload
-        // copy the operation could not be O(1). The space here stands in for
-        // the rewritten one — what is under test is that a second body can
-        // hold the first body's payload at all, at pointer cost.
+    fn unit_insert_and_remove_share_the_dense_payload_arc() {
+        // What (#580 PR 5, gate 5): the O(1) property the PR 0 gate
+        // `a_body_on_a_different_space_reuses_the_payload_allocation` proved
+        // by hand-constructing a body, now proved through the real
+        // operations it anticipated — a dense payload's `Arc` is shared
+        // unchanged through an insert→remove round trip, and the fresh
+        // bodies start with cold caches. Supersedes that PR 0 gate: this one
+        // checks everything it did (payload reuse at pointer cost under a
+        // rewritten space) minus the hand-built struct shape, which the real
+        // operations now compile against anyway.
         let tensor = fixture();
-        let payload = Arc::clone(&tensor.body.data);
-        // Hand-constructed body: a struct-shape change surfaces as a compile
-        // error here, not a gate failure. Group 4 (#580) should replace this
-        // with a real same-payload-different-space operation once one exists.
-        let relabelled = TensorMap {
-            runtime: tensor.runtime.clone(),
-            body: Arc::new(TypedTensorBody {
-                space: tensor.body.space.clone(),
-                data: payload,
-                dense_cache: std::sync::OnceLock::new(),
-            }),
-        };
-        assert_eq!(Arc::strong_count(&tensor.body.data), 2);
-        assert!(!Arc::ptr_eq(&tensor.body, &relabelled.body));
-        assert_eq!(tensor.data().as_ptr(), relabelled.data().as_ptr());
+        let inserted = tensor.insert_left_unit(1, false).unwrap();
+        assert!(!Arc::ptr_eq(&tensor.body, &inserted.body));
+        assert!(Arc::ptr_eq(&tensor.body.data, &inserted.body.data));
+        assert!(inserted.body.dense_cache.get().is_none());
+        let removed = inserted.remove_unit(1).unwrap();
+        assert!(Arc::ptr_eq(&tensor.body.data, &removed.body.data));
+        // One payload allocation, three bodies holding it.
+        assert_eq!(Arc::strong_count(&tensor.body.data), 3);
+        assert_eq!(tensor.data().as_ptr(), removed.data().as_ptr());
+    }
+
+    #[test]
+    fn a_compact_payload_materializes_exactly_once_for_the_unit_ops() {
+        // What (#580 PR 5, gate 5): the compact half of the #613 Group 4
+        // contract — a `Diagonal` payload is materialized into a *fresh*
+        // dense payload (one copy, never the body-local `dense_cache`
+        // buffer), and the follow-up remove shares that dense `Arc` rather
+        // than copying again.
+        let s = fixture().svd_compact().unwrap().1;
+        let warmed = s.data().as_ptr(); // warm the body-local cache first
+        let inserted = s.insert_left_unit(0, false).unwrap();
+        assert!(!Arc::ptr_eq(&s.body.data, &inserted.body.data));
+        assert!(matches!(&*inserted.body.data, TypedData::Dense(_)));
+        // Fresh buffer, not the cache the warm-up populated.
+        assert_ne!(inserted.data().as_ptr(), warmed);
+        let removed = inserted.remove_unit(0).unwrap();
+        assert!(Arc::ptr_eq(&inserted.body.data, &removed.body.data));
+    }
+
+    #[test]
+    fn twist_identity_short_circuit_shares_the_whole_body() {
+        // What (#580 PR 5, gate 5): both identity answers allocate nothing —
+        // the bosonic O(1) arm (Z2) and the fermionic per-block scan when no
+        // requested leg touches a twisted sector (fZ2, even-only leg 0) both
+        // return a body-sharing clone; a leg that does touch the odd sector
+        // publishes a new body.
+        let tensor = fixture();
+        let twisted = tensor.twist(&[0, 1]).unwrap();
+        assert!(Arc::ptr_eq(&tensor.body, &twisted.body));
+
+        let fermionic = fz2_fixture();
+        let untouched = fermionic.twist(&[0]).unwrap();
+        assert!(Arc::ptr_eq(&fermionic.body, &untouched.body));
+        let touched = fermionic.twist(&[1]).unwrap();
+        assert!(!Arc::ptr_eq(&fermionic.body, &touched.body));
+    }
+
+    #[test]
+    fn twist_on_a_compact_spectrum_stays_compact() {
+        // What (#580 PR 5, gate 5): the compact twist arm scales
+        // spectrum-per-sector and keeps `TypedData::Diagonal` — the space is
+        // unchanged, so O(Σ_c k_c) storage survives — and its own identity
+        // answer (θ ≡ 1 across the spectrum's sectors) is a body-sharing
+        // clone.
+        let s = fz2_fixture().svd_compact().unwrap().1;
+        let twisted = s.twist(&[0]).unwrap();
+        assert!(matches!(&*twisted.body.data, TypedData::Diagonal(_)));
+        assert!(!Arc::ptr_eq(&s.body.data, &twisted.body.data));
+
+        let bosonic_s = fixture().svd_compact().unwrap().1;
+        let untouched = bosonic_s.twist(&[0]).unwrap();
+        assert!(Arc::ptr_eq(&bosonic_s.body, &untouched.body));
     }
 
     #[test]
