@@ -1673,12 +1673,58 @@ where
         })
     }
 
-    fn codomain_rank(&self) -> usize {
+    /// Number of codomain legs.
+    ///
+    /// Reads the space structure only — no payload is touched and nothing is
+    /// allocated. The TensorKit name is [`Self::numout`]
+    /// (`tensors/abstracttensor.jl:239-241`).
+    #[inline]
+    pub fn codomain_rank(&self) -> usize {
         self.body.space.space().homspace().codomain().len()
     }
 
-    fn rank(&self) -> usize {
-        self.codomain_rank() + self.body.space.space().homspace().domain().len()
+    /// Number of domain legs.
+    ///
+    /// Reads the space structure only — no payload is touched and nothing is
+    /// allocated. The TensorKit name is [`Self::numin`]
+    /// (`tensors/abstracttensor.jl:253-255`).
+    #[inline]
+    pub fn domain_rank(&self) -> usize {
+        self.body.space.space().homspace().domain().len()
+    }
+
+    /// Total number of legs, `codomain_rank() + domain_rank()`.
+    ///
+    /// Reads the space structure only — no payload is touched and nothing is
+    /// allocated. The TensorKit name is [`Self::numind`]
+    /// (`tensors/abstracttensor.jl:267`).
+    #[inline]
+    pub fn rank(&self) -> usize {
+        self.codomain_rank() + self.domain_rank()
+    }
+
+    /// Number of codomain (output) legs. TensorKit `numout`
+    /// (`tensors/abstracttensor.jl:239-241`); alias of
+    /// [`Self::codomain_rank`], exactly as on the erased facade.
+    #[inline]
+    pub fn numout(&self) -> usize {
+        self.codomain_rank()
+    }
+
+    /// Number of domain (input) legs. TensorKit `numin`
+    /// (`tensors/abstracttensor.jl:253-255`); alias of
+    /// [`Self::domain_rank`], exactly as on the erased facade.
+    #[inline]
+    pub fn numin(&self) -> usize {
+        self.domain_rank()
+    }
+
+    /// Total number of legs. TensorKit `numind`
+    /// (`tensors/abstracttensor.jl:267`); alias of [`Self::rank`], exactly as
+    /// on the erased facade.
+    #[inline]
+    pub fn numind(&self) -> usize {
+        self.rank()
     }
 
     /// Contracts `lhs_axes` of `self` with `rhs_axes` of `other` (pairwise, in
@@ -3636,6 +3682,95 @@ where
     /// The domain legs, in axis order.
     pub fn domain(&self) -> Vec<GradedSpace<R>> {
         self.legs(self.body.space.space().homspace().domain())
+    }
+
+    /// The codomain legs, in axis order (TensorKit `codomain(t)`,
+    /// `tensors/abstracttensor.jl:204-214`). Documented alias of
+    /// [`Self::codomain`], carried for cross-facade name parity with the
+    /// erased [`crate::prelude::Tensor::codomain_spaces`].
+    #[inline]
+    pub fn codomain_spaces(&self) -> Vec<GradedSpace<R>> {
+        self.codomain()
+    }
+
+    /// The domain legs, in axis order (TensorKit `domain(t)`,
+    /// `tensors/abstracttensor.jl:217-226`) — the spaces as written, i.e.
+    /// *not* dualized. Documented alias of [`Self::domain`], carried for
+    /// cross-facade name parity with the erased
+    /// [`crate::prelude::Tensor::domain_spaces`].
+    #[inline]
+    pub fn domain_spaces(&self) -> Vec<GradedSpace<R>> {
+        self.domain()
+    }
+
+    /// Quantum-dimension-weighted total dimension of every leg, in flat order
+    /// (codomain legs first, then domain legs) — TensorKit's `dim(space(t,
+    /// i))` per leg (`space(t, i)`: `tensors/abstracttensor.jl:196-201`).
+    /// Contraction planners use it as a size/FLOP proxy, exactly as they use
+    /// the erased [`crate::prelude::Tensor::leg_dims`].
+    ///
+    /// Same rounding formula as the erased facade:
+    /// `Σ_sector round(degeneracy * dim(sector))` per leg. The erased sibling
+    /// needs a dedicated SU(3) branch because its rule set is a closed enum
+    /// whose SU(3) arm speaks a different symbol trait; here the provider
+    /// abstraction carries `dim_scalar` uniformly, so there is deliberately
+    /// **no special case** — fewer branches, identical semantics.
+    ///
+    /// # Complexity
+    ///
+    /// `O(Σ_leg sectors)`; allocates the returned `Vec<usize>` only, never a
+    /// payload.
+    ///
+    /// # Errors
+    ///
+    /// None today; the `Result` keeps the erased signature's shape so the two
+    /// facades stay drop-in for each other.
+    pub fn leg_dims(&self) -> Result<Vec<usize>, Error> {
+        let hom = self.body.space.space().homspace();
+        let provider = self.body.space.provider();
+        Ok(hom
+            .codomain()
+            .legs()
+            .iter()
+            .chain(hom.domain().legs())
+            .map(|leg| Self::weighted_leg_dim(provider, leg))
+            .collect())
+    }
+
+    /// Quantum-dimension-weighted size of one flat leg — one entry of
+    /// [`Self::leg_dims`] without building the whole vector.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when `axis >= rank()`, with the erased
+    /// facade's own message.
+    pub fn leg_dim(&self, axis: usize) -> Result<usize, Error> {
+        let hom = self.body.space.space().homspace();
+        let nout = hom.codomain().len();
+        let leg = if axis < nout {
+            &hom.codomain().legs()[axis]
+        } else if axis < self.rank() {
+            &hom.domain().legs()[axis - nout]
+        } else {
+            return Err(Error::InvalidArgument(format!(
+                "axis {axis} out of range for rank {}",
+                self.rank()
+            )));
+        };
+        Ok(Self::weighted_leg_dim(self.body.space.provider(), leg))
+    }
+
+    /// The erased facade's per-leg reduction, verbatim: quantum dimensions are
+    /// generally irrational (SU(2) `sqrt` products, anyonic golden ratios), so
+    /// the per-sector weight is computed in `f64` and rounded once.
+    fn weighted_leg_dim(provider: &R, leg: &SectorLeg) -> usize {
+        leg.sectors()
+            .iter()
+            .zip(leg.degeneracies())
+            .map(|(&sector, &degeneracy)| {
+                (degeneracy as f64 * provider.dim_scalar(sector)).round() as usize
+            })
+            .sum()
     }
 
     fn legs(&self, product: &FusionProductSpace) -> Vec<GradedSpace<R>> {

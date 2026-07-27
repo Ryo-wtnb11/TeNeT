@@ -7414,3 +7414,106 @@ fn typed_polar_carries_an_external_provider() {
     let id: TensorMap<ExternalZ3, f64> = TensorMap::id(&runtime, [&wide, &narrow]).unwrap();
     assert_data_close_f64(gram.data(), id.data());
 }
+
+// ---------------------------------------------------------------------------
+// Slice: typed inspection, scalar, zeros_like and dtype conversions,
+// issue #580 PR 3.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn typed_rank_accessors_match_the_erased_facade_and_pin_the_aliases() {
+    // Gate 1: ranks on a mixed 2 <- 1 fixture, against the erased sibling,
+    // and the TensorKit-named aliases pinned to the primary names so neither
+    // can drift.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    assert_eq!(typed.codomain_rank(), erased.codomain_rank());
+    assert_eq!(typed.domain_rank(), erased.domain_rank());
+    assert_eq!(typed.rank(), erased.rank());
+    assert_eq!(typed.codomain_rank(), 2);
+    assert_eq!(typed.domain_rank(), 1);
+    assert_eq!(typed.rank(), 3);
+
+    assert_eq!(typed.numout(), typed.codomain_rank());
+    assert_eq!(typed.numin(), typed.domain_rank());
+    assert_eq!(typed.numind(), typed.rank());
+}
+
+#[test]
+fn typed_and_erased_leg_dims_agree_including_quantum_dimensions() {
+    // Gate 2: `leg_dims`/`leg_dim` values against the erased facade on a
+    // built-in abelian rule and on built-in SU(2), whose non-abelian sectors
+    // are what make the quantum-dimension weighting visible (spin-1/2 with
+    // degeneracy 2 contributes 4, not 2).
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    let (erased, typed) = z2_oracle_pair(&runtime);
+    assert_eq!(typed.leg_dims().unwrap(), erased.leg_dims().unwrap());
+    for axis in 0..typed.rank() {
+        assert_eq!(typed.leg_dim(axis).unwrap(), erased.leg_dim(axis).unwrap());
+    }
+
+    let (su2_erased, su2_typed) = su2_oracle_pair(&runtime);
+    assert_eq!(su2_typed.leg_dims().unwrap(), vec![5, 5]);
+    assert_eq!(
+        su2_typed.leg_dims().unwrap(),
+        su2_erased.leg_dims().unwrap()
+    );
+    assert_eq!(
+        su2_typed.leg_dim(1).unwrap(),
+        su2_erased.leg_dim(1).unwrap()
+    );
+}
+
+#[test]
+fn typed_leg_dims_carry_an_external_provider_with_nontrivial_dimensions() {
+    // Gate 2's external-provider leg: `ExternalSu2` reports quantum dimension
+    // 2 for twice-spin 1, so the degeneracy-2 leg weighs 4 — a value the
+    // closed erased rule set cannot host, computed by hand instead.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalSu2);
+    let leg = su2_leg(&provider, false);
+    let tensor: TensorMap<ExternalSu2, f64> = TensorMap::zeros(&runtime, [&leg], [&leg]).unwrap();
+
+    assert_eq!(tensor.leg_dims().unwrap(), vec![4, 4]);
+    assert_eq!(tensor.leg_dim(0).unwrap(), 4);
+    assert_eq!(tensor.leg_dim(1).unwrap(), 4);
+}
+
+#[test]
+fn typed_leg_dim_out_of_range_is_the_erased_error_class() {
+    // Gate 2's error leg: axis == rank is out of range on both facades, with
+    // the same error class.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    let typed_error = typed.leg_dim(3).unwrap_err();
+    let erased_error = erased.leg_dim(3).unwrap_err();
+    assert_eq!(
+        std::mem::discriminant(&typed_error),
+        std::mem::discriminant(&erased_error)
+    );
+    assert!(matches!(
+        typed_error,
+        tenet::prelude::Error::InvalidArgument(_)
+    ));
+}
+
+#[test]
+fn typed_codomain_and_domain_spaces_alias_the_primary_accessors() {
+    // Gate 3: the cross-facade names are documented aliases of
+    // `codomain()`/`domain()` — same legs, content-wise.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, typed) = z2_oracle_pair(&runtime);
+
+    assert_same_legs(&typed.codomain_spaces(), &typed.codomain());
+    assert_same_legs(&typed.domain_spaces(), &typed.domain());
+    assert_eq!(typed.codomain_spaces().len(), 2);
+    assert_eq!(typed.domain_spaces().len(), 1);
+}
