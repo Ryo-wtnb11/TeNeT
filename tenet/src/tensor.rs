@@ -5454,7 +5454,9 @@ impl Tensor {
         // operand. θ = ±1 by charge parity, identity for bosonic rules.
         // SU(N) (Generic) is bosonic and cannot ride the mult-free `with_rule!`
         // binding; short-circuit the twist probe (the diagonal fast path below
-        // never fires for it — SU(N) has no `Data::Diagonal` factors yet).
+        // rides that binding, so it never fires for SU(N) — an SU(3)
+        // `Data::Diagonal` factor, e.g. `svd_trunc`'s `s`, takes the dense
+        // route here).
         if let Some(output) = self.try_contract_diagonal_fast_path(
             rhs,
             lhs_axes,
@@ -8626,8 +8628,9 @@ impl Tensor {
     ///
     /// - [`Error::InvalidArgument`] when `rcond` is not finite or is
     ///   negative — checked before any work, on both storages.
-    /// - [`Error::UnsupportedForRule`] for SU(3) (dense storage; SU(3) has
-    ///   no compact diagonal factors today).
+    /// - [`Error::UnsupportedForRule`] for SU(3) on the dense arm only — a
+    ///   compact-diagonal SU(3) factor (e.g. an SU(3) `svd_trunc` `s`) takes
+    ///   the elementwise arm above, which precedes the rejection.
     /// - [`Error::Operation`] / [`Error::Core`] from the SVD, on the dense
     ///   arm; [`Error::UnsupportedOnDevice`] for a device payload.
     ///
