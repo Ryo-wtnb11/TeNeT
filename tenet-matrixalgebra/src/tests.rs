@@ -7582,25 +7582,6 @@ fn exp_of_a_general_endomorphism_inverts_under_negation() {
     }
 }
 
-/// Hermitian input, frozen before #577 existed (`exp` at aa7d94a on the same
-/// fixture). The general arm must not perturb the retained spectral route by so
-/// much as a rounding step.
-const EXP_HERMITIAN_FROZEN: [f64; 13] = [
-    1.695793746017424,
-    0.209101633618953,
-    -0.24287760062229188,
-    0.209101633618953,
-    0.5660866660365976,
-    0.5602349780947521,
-    -0.2428776006222919,
-    0.5602349780947521,
-    3.6462244050838195,
-    1.4291238712744785,
-    0.5579059518426233,
-    0.5579059518426234,
-    1.0106944073925108,
-];
-
 fn hermitian_exp_fixture() -> TensorMap<f64, 1, 1> {
     u1_block_endomorphism(&[
         (
@@ -7613,9 +7594,17 @@ fn hermitian_exp_fixture() -> TensorMap<f64, 1, 1> {
 }
 
 #[test]
-fn exp_of_a_hermitian_endomorphism_keeps_the_eigendecomposition_bit_for_bit() {
+fn exp_of_a_hermitian_endomorphism_is_the_spectral_route_bit_for_bit() {
     // What: the retained route, pinned two ways — the dispatch (one EIGH per
-    // sector, no solve, no GEMM) and the published values, byte for byte.
+    // sector, no solve, no GEMM) and the published values, byte for byte
+    // against `v exp(d) v^H` computed here on the same backend.
+    //
+    // The reference is computed rather than frozen because a frozen one is a
+    // pin on the platform's LAPACK: the constants this test used to carry were
+    // right on macOS and a few ULP off on Linux, so CI failed on values that
+    // were never the point. Byte-identity against the spectral route is, and it
+    // still catches a reroute onto Pade, whose approximant does not land on the
+    // eigendecomposition's last bits.
     let tensor = hermitian_exp_fixture();
     let mut spy = MatrixFunctionCallSpy::default();
     let mut context = default_context();
@@ -7633,7 +7622,18 @@ fn exp_of_a_hermitian_endomorphism_keeps_the_eigendecomposition_bit_for_bit() {
     );
     assert_eq!(spy.solve_calls, 0, "the Hermitian route must not solve");
     assert_eq!(spy.matmul_calls, 0, "the Hermitian route must not GEMM");
-    assert_eq!(exponential.tensor().data(), &EXP_HERMITIAN_FROZEN[..]);
+
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
+    let spectral = crate::matrix_functions::spectral_function_dyn(
+        &mut dense,
+        &mut context,
+        &bound.as_ref().dynamic(),
+        &f64::exp,
+    )
+    .unwrap();
+    let spectral: BoundTensorMap<_, _, 1, 1> = typed_from_bound_factor(spectral).unwrap();
+    assert_eq!(exponential.tensor().data(), spectral.tensor().data());
 }
 
 #[test]

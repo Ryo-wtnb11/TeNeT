@@ -661,7 +661,11 @@ where
 
 /// Applies a scalar function to a Hermitian endomorphism through its
 /// eigendecomposition: `f(t) = V f(D) V^H`.
-fn spectral_function_dyn<E, RuleKey, BT, BC, R, D>(
+///
+/// Visible to the crate so that the dispatch test can build `exp`'s reference
+/// on whichever backend is running it, instead of pinning constants that are a
+/// few ULP different on another platform's LAPACK.
+pub(crate) fn spectral_function_dyn<E, RuleKey, BT, BC, R, D>(
     dense: &mut E,
     context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
     input: &BoundDynamicTensorRef<'_, R, D>,
