@@ -162,10 +162,11 @@ pub trait ProductFusionRuleExt: FusionRule + Sized {
     /// # Ok::<(), tenet_sectors::FusionAlgebraError>(())
     /// ```
     ///
-    /// See [`tenet::typed`] for the same product driving a `GradedSpace` and a
-    /// `TensorMap`; that layer is where a product symmetry is actually used.
-    ///
-    /// [`tenet::typed`]: ../tenet/typed/index.html
+    /// The `tenet::typed` module documentation carries the same product
+    /// driving a `GradedSpace` and a `TensorMap`; that layer is where a
+    /// product symmetry is actually used. It is not linked from here because
+    /// `tenet-sectors` does not depend on `tenet` — the dependency runs the
+    /// other way.
     fn product<RightRule>(self, right: RightRule) -> ProductFusionRule<Self, RightRule>
     where
         RightRule: FusionRule,
