@@ -123,6 +123,7 @@ single defensible upstream location (the note says why).
 | `typed::EighTrunc` | MatrixAlgebraKit | 0.6.9 | `interface/eigh.jl:39-91` | return-type struct for `eigh_trunc`; field order `d`, `v` as MAK `initialize_output` |
 | `typed::GradedSpace` | TensorKit | 0.17.0 | `spaces/gradedspace.jl:2-29` | the struct this leg type mirrors (docstring 2-25, definition 26-29) |
 | `typed::GradedSpace::degeneracies` | TensorKit | 0.17.0 | `spaces/gradedspace.jl:96-101` | `dim(V, c)` |
+| `typed::GradedSpace::is_dual` | TensorKit | 0.17.0 | `spaces/gradedspace.jl:114` | `isdual(V) = V.dual` — the orientation flag TK's `V'` toggles |
 | `typed::GradedSpace::sectors` | TensorKit | 0.17.0 | `spaces/gradedspace.jl:180-187` | divergence: tenet returns stored labels as-is, TK dualizes stored keys on read when `isdual(V)` |
 | `typed::GradedSpace::truncspace` | TensorKit | 0.17.0 | `factorizations/truncation.jl:261-270` | `findtruncated(_svd)` for `TruncationSpace` — the semantics of the strategy; `truncspace` itself is `factorizations/truncation.jl:23-26` |
 | `typed::GradedSpace::try_dual` | TensorKit | 0.17.0 | `spaces/gradedspace.jl:112` | divergence: TK flips the flag and dualizes lazily on read; tenet rewrites the stored sector table eagerly |
