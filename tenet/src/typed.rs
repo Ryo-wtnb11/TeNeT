@@ -1565,6 +1565,35 @@ where
     /// requested motion needs. The expert layer's own typed errors are the
     /// contract here: re-validating the axes at this layer would be a second
     /// copy of a rule that already exists one call down, free to drift.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let rule = Arc::new(U1FusionRule);
+    /// let v = GradedSpace::try_new(
+    ///     Arc::clone(&rule),
+    ///     [(U1Irrep::new(0), 1), (U1Irrep::new(1), 2)],
+    ///     false,
+    /// )?;
+    /// let w = GradedSpace::try_new(
+    ///     Arc::clone(&rule),
+    ///     [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
+    ///     false,
+    /// )?;
+    /// let t: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&w])?;
+    /// assert_eq!(t.leg_dims()?, [3, 2]);
+    ///
+    /// let swapped = t.permute(&[1], &[0])?;
+    /// assert_eq!(swapped.leg_dims()?, [2, 3]);
+    /// // A bosonic two-leg swap is an involution: swapping back restores the
+    /// // payload exactly.
+    /// assert_eq!(swapped.permute(&[1], &[0])?.data(), t.data());
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
     pub fn permute(&self, codomain_axes: &[usize], domain_axes: &[usize]) -> Result<Self, Error> {
         // Why no identity shortcut (the erased facade shares storage when the
         // axes do not move): the result would be byte-identical either way, so
@@ -1887,6 +1916,29 @@ where
     ///   providers report different rule identities. Those all come back from
     ///   the expert layer, which owns the rules; re-checking them here would
     ///   be a second copy free to drift.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let rule = Arc::new(U1FusionRule);
+    /// let v = GradedSpace::try_new(
+    ///     Arc::clone(&rule),
+    ///     [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+    ///     false,
+    /// )?;
+    /// let t: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
+    /// let id = TensorMap::id(&runtime, [&v])?;
+    ///
+    /// // Contracting the domain leg with the identity's codomain leg is a
+    /// // no-op on the payload; `[0, 1]` keeps the open axes in place.
+    /// let out = t.contract(&id, &[1], &[0], &[0, 1])?;
+    /// assert_eq!(out.data(), t.data());
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
     pub fn contract(
         &self,
         other: &Self,
@@ -2371,6 +2423,34 @@ where
     /// straight from the matrix-algebra seam. As everywhere in this facade
     /// there are no pre-checks here: the seam owns the rules, and a second copy
     /// would be free to drift.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let rule = Arc::new(U1FusionRule);
+    /// let v = GradedSpace::try_new(
+    ///     Arc::clone(&rule),
+    ///     [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)],
+    ///     false,
+    /// )?;
+    /// let t: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
+    ///
+    /// let (u, s, vh) = t.svd_compact()?;
+    /// assert!(u.is_isometric(1e-12)?);
+    /// let rebuilt = u.compose(&s)?.compose(&vh)?;
+    /// let max_err = rebuilt
+    ///     .data()
+    ///     .iter()
+    ///     .zip(t.data())
+    ///     .map(|(a, b)| (a - b).abs())
+    ///     .fold(0.0f64, f64::max);
+    /// assert!(max_err < 1e-12);
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
     pub fn svd_compact(&self) -> Result<(Self, Self, Self), Error> {
         // Dense lease only, matching the erased sibling: a factorization runs
         // entirely on the dense-executor boundary, so leasing the (scarcer)
@@ -2924,6 +3004,34 @@ where
     /// used to materialize a diagonal payload and eigendecompose the
     /// block-diagonal buffer — so the two facades agree on complexity and on
     /// what each storage accepts.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let rule = Arc::new(U1FusionRule);
+    /// let v = GradedSpace::try_new(
+    ///     Arc::clone(&rule),
+    ///     [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+    ///     false,
+    /// )?;
+    ///
+    /// // exp of the zero endomorphism is the identity.
+    /// let zero: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&v], [&v])?;
+    /// let id: TensorMap<_, f64> = TensorMap::id(&runtime, [&v])?;
+    /// let max_err = zero
+    ///     .exp()?
+    ///     .data()
+    ///     .iter()
+    ///     .zip(id.data())
+    ///     .map(|(a, b)| (a - b).abs())
+    ///     .fold(0.0f64, f64::max);
+    /// assert!(max_err < 1e-15);
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
     pub fn exp(&self) -> Result<Self, Error> {
         if let Some(spectrum) = self.spectrum() {
             // Why the spectrum is exponentiated unconditionally while the dense
@@ -3271,6 +3379,27 @@ where
     ///   [`Error::RuleMismatch`] as the erased `check_same_world` would report
     ///   them: the space comparison already covers rule identity, so a
     ///   separate check would only re-report the same disagreement.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use tenet::core::{FermionParityFusionRule, Z2Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let rule = Arc::new(FermionParityFusionRule);
+    /// let v = GradedSpace::try_new(
+    ///     Arc::clone(&rule),
+    ///     [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
+    ///     false,
+    /// )?;
+    /// let t: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
+    ///
+    /// // `1.0 * t + 1.0 * t` doubles every entry, so the norm doubles too.
+    /// let doubled = t.add(&t, 1.0, 1.0)?;
+    /// assert!((doubled.norm()? - 2.0 * t.norm()?).abs() < 1e-12);
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
     pub fn add(&self, other: &Self, alpha: D, beta: D) -> Result<Self, Error> {
         // Runtime first, exactly as `contract` does: crossing runtimes is a
         // trust-boundary violation rather than an algebra error, and the
@@ -4756,6 +4885,28 @@ impl<R> TensorMap<R, f64> {
     /// `try_to_c64`: that split exists only for device residency, which the
     /// typed facade does not have — a deliberate narrowing, not a semantic
     /// difference.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    ///
+    /// let runtime = Runtime::builder().build()?;
+    /// let rule = Arc::new(U1FusionRule);
+    /// let v = GradedSpace::try_new(
+    ///     Arc::clone(&rule),
+    ///     [(U1Irrep::new(0), 1), (U1Irrep::new(1), 2)],
+    ///     false,
+    /// )?;
+    /// let t: TensorMap<_, f64> = TensorMap::rand(&runtime, [&v], [&v])?;
+    ///
+    /// let widened = t.to_c64();
+    /// // The real part round-trips exactly; the imaginary part is zero.
+    /// assert_eq!(widened.re().data(), t.data());
+    /// assert_eq!(widened.im().norm()?, 0.0);
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
     pub fn to_c64(&self) -> TensorMap<R, num_complex::Complex64> {
         let widen = |&value: &f64| num_complex::Complex64::new(value, 0.0);
         let body = match &*self.body.data {
