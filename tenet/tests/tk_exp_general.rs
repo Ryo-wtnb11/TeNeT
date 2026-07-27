@@ -210,3 +210,40 @@ fn general_exp_matches_the_tensorkit_oracle_on_both_facades() {
         "c64: the two facades published different bytes"
     );
 }
+
+/// `A = [0 1e16; 1e-16 0]`, whose exponential is closed form:
+/// `exp(A) = cosh(1) I + sinh(1) A`, because `A² = I`.
+const BALANCE_FIXTURE: [f64; 4] = [0.0, 1e-16, 1e16, 0.0];
+
+#[test]
+fn general_exp_balances_a_badly_scaled_block_like_julia() {
+    // What: Julia's `exp!` runs `LAPACK.gebal!('B', A)` *before* the Padé
+    // evaluation and undoes it afterwards (stdlib v1.11 `dense.jl:677-782`), so
+    // TensorKit parity requires balancing here too. Unbalanced, this block has
+    // `||A||_1 = 1e16` and pays 51 squarings, each one amplifying the
+    // approximant's error; balanced, its norm is ~1.11 and the approximant is
+    // evaluated directly. The exact answer is the same either way, so only the
+    // balancing shows up in the values.
+    let runtime = runtime();
+    let space = Space::u1([(0, 2)]);
+    let tensor = Tensor::from_block_fn(&runtime, [&space], [&space], |_, indices| {
+        BALANCE_FIXTURE[indices[0] + 2 * indices[1]]
+    })
+    .unwrap();
+
+    let exponential = tensor.exp().unwrap();
+
+    let expected = [
+        1.0_f64.cosh(),
+        1.0_f64.sinh() * 1e-16,
+        1.0_f64.sinh() * 1e16,
+        1.0_f64.cosh(),
+    ];
+    for (index, (&actual, &want)) in exponential.data().iter().zip(expected.iter()).enumerate() {
+        let relative = (actual - want).abs() / want.abs();
+        assert!(
+            relative <= 1e-13,
+            "entry {index}: {actual:.17e} differs from {want:.17e} by {relative:e}"
+        );
+    }
+}

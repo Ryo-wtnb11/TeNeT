@@ -7793,6 +7793,115 @@ fn exp_sector_work_scales_with_the_sector_count_and_the_scaling_count() {
 }
 
 #[test]
+fn exp_balances_a_badly_scaled_block_before_the_pade_evaluation() {
+    // What: the balancing step Julia's `exp!` runs before the approximant
+    // (`LAPACK.gebal!('B', A)`, stdlib v1.11 `dense.jl:684`) and undoes after
+    // it, pinned two ways on `A = [0 1e16; 1e-16 0]`, whose square is the
+    // identity and whose exponential is therefore `cosh(1) I + sinh(1) A`.
+    // Unbalanced the block has `||A||_1 = 1e16` and pays 51 squarings, each one
+    // squaring the approximant's error along with it; balanced it has norm
+    // ~1.11, below theta_13, so the *dispatch* — six GEMMs and no squaring —
+    // is the sharpest observable there is.
+    let tensor = u1_block_endomorphism(&[(0, 2, vec![0.0_f64, 1e-16, 1e16, 0.0])]);
+    let mut spy = MatrixFunctionCallSpy::default();
+    let mut context = default_context();
+
+    let exponential = exp(
+        &mut spy,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
+    )
+    .unwrap();
+
+    assert_eq!(
+        spy.matmul_calls, 6,
+        "the balanced block is below theta_13: six GEMMs, no squaring"
+    );
+    let cosh = 1.0_f64.cosh();
+    let sinh = 1.0_f64.sinh();
+    let expected = [
+        [(cosh, 0.0), (sinh * 1e16, 0.0)],
+        [(sinh * 1e-16, 0.0), (cosh, 0.0)],
+    ];
+    assert_sector_matrix_matches(
+        &u1_block_matrix(exponential.tensor(), 0),
+        &expected.iter().map(|row| &row[..]).collect::<Vec<_>>(),
+        1e-14,
+        "balanced [0 1e16; 1e-16 0]",
+    );
+}
+
+#[test]
+// Verbatim `%.17g` Julia output; see `exp_of_a_multisector_u1_endomorphism...`.
+#[allow(clippy::excessive_precision)]
+fn exp_undoes_the_balancing_permutation_and_scaling_like_julia() {
+    // What: the *undo* half of balancing, on a block that exercises both halves
+    // of `gebal('B')` at once — a column that isolates an eigenvalue, so the
+    // permutation moves it to the front, and a badly scaled remainder, so the
+    // diagonal similarity acts on the window behind it. The regression fixture
+    // above needs no permutation and so cannot see an undo applied in the wrong
+    // order; this one can.
+    //
+    // The oracle is Julia 1.11.6 on the same matrix:
+    //
+    // ```julia
+    // d = [1e8, 1.0, 1e-8]
+    // B = [0.0 0.0 1.0; 2.0 3.0 5.0; 1.0 0.0 0.0]
+    // A = [B[i, j] * d[i] / d[j] for i in 1:3, j in 1:3]
+    // LinearAlgebra.LAPACK.gebal!('B', copy(A))  # (2, 3, [2.0, 2^53, 1.0])
+    // exp(A)
+    // ```
+    //
+    // The `gebal!` line is the fixture certification: `ilo, ihi = 2, 3` says
+    // the permutation fired, and `scale[2] = 2^53` says the scaling did. Note
+    // that `exp(A)` is *not* the exact similarity image `d exp(B) d^-1` — it
+    // agrees with it to only eight digits, because balancing equalizes the
+    // window's norms without seeing the isolated column, leaving `||A||_1 ≈
+    // 7e8` and 27 squarings. TeNeT reproduces Julia, not the exact answer.
+    let diagonal = [1e8_f64, 1.0, 1e-8];
+    let rows = [[0.0_f64, 0.0, 1.0], [2.0, 3.0, 5.0], [1.0, 0.0, 0.0]];
+    let mut block = vec![0.0_f64; 9];
+    for (row, entries) in rows.iter().enumerate() {
+        for (column, &entry) in entries.iter().enumerate() {
+            block[row + 3 * column] = entry * diagonal[row] / diagonal[column];
+        }
+    }
+    let tensor = u1_block_endomorphism(&[(0, 3, block)]);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let mut context = default_context();
+
+    let exponential = exp(
+        &mut dense,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
+    )
+    .unwrap();
+
+    let expected = [
+        [1.5430806003234485, 0.0, 1.1752011673750514e16],
+        [
+            2.2998574558586435e-07,
+            20.08553677353343,
+            3778681750.8932686,
+        ],
+        [1.1752011673750516e-16, 0.0, 1.5430806003234485],
+    ];
+    let actual = u1_block_matrix(exponential.tensor(), 0);
+    for (row, entries) in expected.iter().enumerate() {
+        for (column, &want) in entries.iter().enumerate() {
+            let got = actual[row + 3 * column];
+            // The two structural zeros are the permutation's own signature: the
+            // isolated column stays exactly isolated, to the last bit.
+            let residual = (got - want).abs();
+            assert!(
+                residual <= 1e-12 * want.abs(),
+                "entry ({row}, {column}): {got:.17e} differs from Julia's {want:.17e}"
+            );
+        }
+    }
+}
+
+#[test]
 fn exp_reports_unsupported_when_the_executor_cannot_solve() {
     // What: device storage whose backend supplies GEMM but no solve is refused
     // in the backend's own words, not silently routed onto the host.
@@ -7900,7 +8009,16 @@ fn exp_rejects_a_block_whose_column_norm_overflows() {
     // `u32::MAX`; read back as `i32` that is -1, so the block would be scaled
     // *up* and then squared ~4.3e9 times — a finite input that never returns.
     // The overflowing norm has to be refused where it is computed.
-    let tensor = u1_block_endomorphism(&[(0, 2, vec![1e308_f64, 1e308, 1.0, 2.0])]);
+    //
+    // The norm in question is the *balanced* one, since balancing runs first,
+    // so the fixture is one balancing cannot rescue: every entry is within a
+    // factor of five of `f64::MAX`, which puts LAPACK's overflow guards (`ca`
+    // and `ra` against `sfmax2`) in the way of any radix step, and the column
+    // sum stays infinite. A block whose imbalance balancing *can* undo —
+    // `[1e308 1; 1e308 2]`, this fixture before #577's balancing existed — is
+    // no longer refused and is not meant to be: Julia reaches the same finite
+    // balanced norm on it and exponentiates it.
+    let tensor = u1_block_endomorphism(&[(0, 2, vec![1e308_f64, 1e308, 2e307, 1e308])]);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let mut context = default_context();
 

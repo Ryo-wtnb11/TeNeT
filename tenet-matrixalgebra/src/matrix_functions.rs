@@ -104,9 +104,9 @@ const PADE13_B: [f64; 14] = [
 
 /// Scratch for the Padé evaluation, sized once to the largest coupled sector.
 ///
-/// Every buffer is `max_c n_c²`; the sector loop borrows them and allocates
-/// nothing. `image` and `square` are swapped rather than copied during the
-/// squaring phase.
+/// Every matrix buffer is `max_c n_c²` and `balance` is `max_c n_c`; the sector
+/// loop borrows them and allocates nothing. `image` and `square` are swapped
+/// rather than copied during the squaring phase.
 struct Pade13Workspace<D> {
     scaled: Vec<D>,
     power2: Vec<D>,
@@ -118,6 +118,8 @@ struct Pade13Workspace<D> {
     accumulator: Vec<D>,
     image: Vec<D>,
     square: Vec<D>,
+    /// LAPACK `gebal`'s `scale` output for the sector in flight.
+    balance: Vec<f64>,
 }
 
 impl<D: FactorScalar> Pade13Workspace<D> {
@@ -137,6 +139,7 @@ impl<D: FactorScalar> Pade13Workspace<D> {
             accumulator: buffer(),
             image: buffer(),
             square: buffer(),
+            balance: vec![0.0; order],
         })
     }
 }
@@ -148,7 +151,10 @@ impl<D: FactorScalar> Pade13Workspace<D> {
 /// Scaling and Squaring Method for the Matrix Exponential Revisited", SIAM J.
 /// Matrix Anal. Appl. 26(4), 2005.
 ///
-/// Per coupled sector, with `s = max(0, ceil(log2(||A||_1 / theta_13)))` and
+/// Per coupled sector the block is first balanced — LAPACK `gebal('B')`, run
+/// where Julia's `exp!` runs it and undone where Julia undoes it, see
+/// [`balance_in_place`] — and then, with
+/// `s = max(0, ceil(log2(||A||_1 / theta_13)))` over the *balanced* norm and
 /// `B = A / 2^s`:
 ///
 /// ```text
@@ -163,15 +169,20 @@ impl<D: FactorScalar> Pade13Workspace<D> {
 /// with Julia to approximant error, not bit for bit.
 ///
 /// Complexity: `O(Σ_c n_c³)` time — six GEMMs, one solve and `s` squarings per
-/// sector — `O(Σ_c n_c²)` result and `O(max_c n_c²)` scratch, with no
-/// cross-sector coupling and no allocation inside the loop.
+/// sector — and `O(Σ_c n_c²)` result, with no cross-sector coupling and no
+/// allocation inside the sector loop. The Padé workspace is `O(max_c n_c²)`,
+/// sized once to the largest sector; on the canonical direct-region layout that
+/// is the whole of the scratch, while the packed fallback in
+/// [`map_square_sectors_dyn`] matricizes every sector up front and so adds
+/// `O(Σ_c n_c²)` of its own.
 ///
 /// # Errors
 ///
 /// - [`OperationError::InvalidArgument`] for a nonfinite block, which has no
 ///   exponential and would otherwise reach the backend as a silent NaN, or for
-///   a block whose column 1-norm overflows to infinity even though every entry
-///   is finite — the scaling count derived from it is not representable;
+///   a block whose balanced column 1-norm overflows to infinity even though
+///   every entry is finite — the scaling count derived from it is not
+///   representable;
 /// - [`OperationError::Dense`] from the backend, including
 ///   [`tenet_dense::DenseError::Unsupported`] when the selected executor has no
 ///   dense solve. Nothing is published unless every sector succeeded.
@@ -217,23 +228,36 @@ where
         accumulator,
         image,
         square,
+        balance,
     } = workspace;
     let elements = order * order;
 
-    // One pass for both the finiteness gate and the matrix 1-norm: a nonfinite
-    // entry would otherwise pass through the whole approximant as a NaN and
-    // come back as an opaque backend failure or a silently wrong tensor.
+    // The finiteness gate, before anything reads the block: a nonfinite entry
+    // would otherwise pass through balancing and the whole approximant as a NaN
+    // and come back as an opaque backend failure or a silently wrong tensor.
+    for &value in &source[..elements] {
+        let value = value.widen_complex();
+        if !value.re.is_finite() || !value.im.is_finite() {
+            return Err(OperationError::InvalidArgument {
+                message: "exp requires finite coupled-sector blocks",
+            });
+        }
+    }
+
+    // Balance first, exactly where Julia's `exp!` does it (stdlib v1.11
+    // `dense.jl:684`), and undo it after the squaring phase: the 1-norm the
+    // squaring count comes from is the *balanced* norm, so a block that is
+    // merely badly scaled — `[0 1e16; 1e-16 0]`, whose exponential is a
+    // hyperbolic rotation — costs no squarings instead of fifty-one, and does
+    // not lose the digits fifty-one squarings of an approximant cost.
+    scaled[..elements].copy_from_slice(&source[..elements]);
+    let (ilo, ihi) = balance_in_place(&mut scaled[..elements], order, &mut balance[..order]);
+
     let mut norm1 = 0.0_f64;
     for column in 0..order {
         let mut column_sum = 0.0_f64;
         for row in 0..order {
-            let value = source[row + order * column].widen_complex();
-            if !value.re.is_finite() || !value.im.is_finite() {
-                return Err(OperationError::InvalidArgument {
-                    message: "exp requires finite coupled-sector blocks",
-                });
-            }
-            column_sum += value.norm();
+            column_sum += scaled[row + order * column].widen_complex().norm();
         }
         norm1 = norm1.max(column_sum);
     }
@@ -258,8 +282,8 @@ where
     // An exact power of two, so the scaling is exact and the squaring phase
     // undoes it exactly.
     let scale = D::from_real(2.0_f64.powi(-(squarings as i32)));
-    for (destination, &value) in scaled[..elements].iter_mut().zip(source) {
-        *destination = value * scale;
+    for value in &mut scaled[..elements] {
+        *value = *value * scale;
     }
 
     gemm(dense, power2, scaled, scaled, order)?;
@@ -324,6 +348,8 @@ where
         std::mem::swap(image, square);
     }
 
+    unbalance_in_place(&mut image[..elements], order, &balance[..order], ilo, ihi);
+
     for column in 0..order {
         let source_start = order * column;
         let destination_start = output_leading * column;
@@ -331,6 +357,213 @@ where
             .copy_from_slice(&image[source_start..source_start + order]);
     }
     Ok(())
+}
+
+/// `|Re z| + |Im z|`, LAPACK's `CABS1` — the magnitude `gebal` sums and
+/// compares, and plain `abs` on a real block.
+fn abs1<D: FactorScalar>(value: D) -> f64 {
+    let value = value.widen_complex();
+    value.re.abs() + value.im.abs()
+}
+
+/// LAPACK `dgebal`/`zgebal` with `job = 'B'`, in place on a column-major
+/// `order x order` block: the permutation that pushes already-isolated
+/// eigenvalues out of the active window, then the radix-2 diagonal similarity
+/// that equalizes row and column norms inside it.
+///
+/// This is the balancing Julia's `LinearAlgebra.exp!` runs before its Padé
+/// evaluation and undoes after it (stdlib v1.11 `dense.jl:684` and `769-780`),
+/// which is what TensorKit's `exp!` inherits per block, so TeNeT's general arm
+/// runs it too. Both halves of `'B'` are ported because both halves are what
+/// `exp!` asks for and what it undoes.
+///
+/// Returns the **0-based, inclusive** active window `(ilo, ihi)`. `scale` is
+/// LAPACK's dual-purpose output: inside the window, the diagonal factor applied
+/// to that index; outside it, the **1-based** index the position was exchanged
+/// with. The 1-based encoding is LAPACK's and is kept because
+/// [`unbalance_in_place`] reads both meanings out of the one array — including
+/// the corner where a fully isolated block leaves `ilo = ihi = 0` and the lone
+/// window entry is the self-exchange `1`, which the undo then reads as the
+/// harmless scaling factor `1.0`, exactly as Julia does.
+fn balance_in_place<D: FactorScalar>(
+    matrix: &mut [D],
+    order: usize,
+    scale: &mut [f64],
+) -> (usize, usize) {
+    if order == 0 {
+        return (0, 0);
+    }
+    scale.fill(1.0);
+    let mut k = 0usize;
+    let mut l = order - 1;
+
+    // Rows that isolate an eigenvalue, pushed down; then columns that do,
+    // pushed left. The exchanges are partial, as in LAPACK: a column swap
+    // touches rows `0..=l` and a row swap columns `k..`, leaving the already
+    // isolated borders alone.
+    loop {
+        let isolated = (0..=l)
+            .rev()
+            .find(|&j| (0..=l).all(|i| i == j || abs1(matrix[j + order * i]) == 0.0));
+        let Some(j) = isolated else { break };
+        scale[l] = (j + 1) as f64;
+        exchange(matrix, order, j, l, l, k);
+        if l == 0 {
+            return (0, 0);
+        }
+        l -= 1;
+    }
+    loop {
+        let isolated =
+            (k..=l).find(|&j| (k..=l).all(|i| i == j || abs1(matrix[i + order * j]) == 0.0));
+        let Some(j) = isolated else { break };
+        scale[k] = (j + 1) as f64;
+        exchange(matrix, order, j, k, l, k);
+        k += 1;
+    }
+
+    // The iterative scaling, transcribed from `dgebal.f`: at each index, walk
+    // the row and column norms towards each other in factors of the radix while
+    // neither the scaled quantities nor the accumulated factor can overflow or
+    // underflow, and keep the step only if it shrinks their sum by more than
+    // `FACTOR`.
+    const RADIX: f64 = 2.0;
+    const FACTOR: f64 = 0.95;
+    let sfmin1 = f64::MIN_POSITIVE / f64::EPSILON;
+    let sfmax1 = 1.0 / sfmin1;
+    let sfmin2 = sfmin1 * RADIX;
+    let sfmax2 = 1.0 / sfmin2;
+    let mut converged = false;
+    while !converged {
+        converged = true;
+        for i in k..=l {
+            let mut c = 0.0_f64;
+            let mut r = 0.0_f64;
+            for j in k..=l {
+                if j != i {
+                    c += abs1(matrix[j + order * i]);
+                    r += abs1(matrix[i + order * j]);
+                }
+            }
+            let mut ca = (0..=l)
+                .map(|row| abs1(matrix[row + order * i]))
+                .fold(0.0_f64, f64::max);
+            let mut ra = (k..order)
+                .map(|column| abs1(matrix[i + order * column]))
+                .fold(0.0_f64, f64::max);
+            // Guard against a row or column norm that underflowed to zero.
+            if c == 0.0 || r == 0.0 {
+                continue;
+            }
+            let mut g = r / RADIX;
+            let mut f = 1.0_f64;
+            let s = c + r;
+            while c < g && f.max(c).max(ca) < sfmax2 && r.min(g).min(ra) > sfmin2 {
+                f *= RADIX;
+                c *= RADIX;
+                ca *= RADIX;
+                r /= RADIX;
+                g /= RADIX;
+                ra /= RADIX;
+            }
+            g = c / RADIX;
+            while g >= r && r.max(ra) < sfmax2 && f.min(c).min(g).min(ca) > sfmin2 {
+                f /= RADIX;
+                c /= RADIX;
+                g /= RADIX;
+                ca /= RADIX;
+                r *= RADIX;
+                ra *= RADIX;
+            }
+            if c + r >= FACTOR * s {
+                continue;
+            }
+            if f < 1.0 && scale[i] < 1.0 && f * scale[i] <= sfmin1 {
+                continue;
+            }
+            if f > 1.0 && scale[i] > 1.0 && scale[i] >= sfmax1 / f {
+                continue;
+            }
+            scale[i] *= f;
+            converged = false;
+            // `f` is a power of the radix, so both factors are exact and the
+            // similarity introduces no rounding of its own.
+            let row_factor = D::from_real(1.0 / f);
+            let column_factor = D::from_real(f);
+            for column in k..order {
+                matrix[i + order * column] = matrix[i + order * column] * row_factor;
+            }
+            for row in 0..=l {
+                matrix[row + order * i] = matrix[row + order * i] * column_factor;
+            }
+        }
+    }
+    (k, l)
+}
+
+/// LAPACK's partial row/column exchange of `j` and `m`: columns over rows
+/// `0..=rows`, rows over columns `first_column..`.
+fn exchange<D: Copy>(
+    matrix: &mut [D],
+    order: usize,
+    j: usize,
+    m: usize,
+    rows: usize,
+    first_column: usize,
+) {
+    if j == m {
+        return;
+    }
+    for row in 0..=rows {
+        matrix.swap(row + order * j, row + order * m);
+    }
+    for column in first_column..order {
+        matrix.swap(j + order * column, m + order * column);
+    }
+}
+
+/// Undoes [`balance_in_place`] on an exponentiated block, in the order Julia's
+/// `exp!` does it (stdlib v1.11 `dense.jl:769-780`): the diagonal similarity
+/// inside the window first, then the exchanges below it in reverse order and
+/// the ones above it in forward order — each the reverse of the order they were
+/// made in.
+fn unbalance_in_place<D: FactorScalar>(
+    matrix: &mut [D],
+    order: usize,
+    scale: &[f64],
+    ilo: usize,
+    ihi: usize,
+) {
+    for j in ilo..=ihi {
+        // Powers of the radix again, so `1 / s` is exact.
+        let row_factor = D::from_real(scale[j]);
+        let column_factor = D::from_real(1.0 / scale[j]);
+        for i in 0..order {
+            matrix[j + order * i] = matrix[j + order * i] * row_factor;
+        }
+        for i in 0..order {
+            matrix[i + order * j] = matrix[i + order * j] * column_factor;
+        }
+    }
+    for (j, &partner) in scale[..ilo].iter().enumerate().rev() {
+        row_column_swap(matrix, order, j, partner as usize - 1);
+    }
+    for (j, &partner) in scale.iter().enumerate().skip(ihi + 1) {
+        row_column_swap(matrix, order, j, partner as usize - 1);
+    }
+}
+
+/// Julia's `rcswap!`: swap rows `i` and `j` and columns `i` and `j`.
+fn row_column_swap<D: Copy>(matrix: &mut [D], order: usize, i: usize, j: usize) {
+    if i == j {
+        return;
+    }
+    for k in 0..order {
+        matrix.swap(k + order * i, k + order * j);
+    }
+    for k in 0..order {
+        matrix.swap(i + order * k, j + order * k);
+    }
 }
 
 /// `destination = Σ_k coefficient_k * term_k` over `order x order` blocks.
