@@ -365,6 +365,39 @@ impl DiagonalData {
         }
     }
 
+    /// TensorKit `_norm(blocks(t), p, 0)`'s finite-`p` accumulator on compact
+    /// storage (`linalg.jl:262-270`): `Σ_c dim(c) · Σ_i |λ_i|^p`.
+    ///
+    /// Reads the `Σ_c k_c` stored values only. Materializing first would visit
+    /// `Σ_c k_c²` scalars and add `k_c² − k_c` exact zeros per sector, which
+    /// contribute nothing for any `p > 0` — the whole point of the compact arm.
+    fn abs_pow_sum_with(&self, p: f64, dim: impl Fn(SectorId) -> f64) -> f64 {
+        fn accumulate<V: Copy>(
+            spectra: &[SectorSpectrum<V>],
+            p: f64,
+            dim: impl Fn(SectorId) -> f64,
+            magnitude: impl Fn(V) -> f64,
+        ) -> f64 {
+            spectra
+                .iter()
+                .map(|entry| {
+                    dim(entry.sector)
+                        * entry
+                            .values
+                            .iter()
+                            .map(|&value| magnitude(value).powf(p))
+                            .sum::<f64>()
+                })
+                .sum()
+        }
+        match self {
+            Self::RealF64(spectra) | Self::RealC64(spectra) => {
+                accumulate(spectra, p, dim, f64::abs)
+            }
+            Self::C64(spectra) => accumulate(spectra, p, dim, |value: Complex64| value.norm()),
+        }
+    }
+
     /// The largest `|entry|` over all sectors (for `pinv`'s relative cutoff).
     fn max_abs(&self) -> f64 {
         match self {
@@ -6360,6 +6393,107 @@ impl Tensor {
         }
     }
 
+    /// TensorKit `norm(t, p)` for a general exponent
+    /// (`src/tensors/linalg.jl:257-275`):
+    ///
+    /// ```text
+    /// p == Inf     -> maximum entry magnitude over blocks(t)
+    /// finite p > 0 -> (Σ_c dim(c) * norm(block_c, p)^p)^(1/p)
+    /// ```
+    ///
+    /// `norm(block, p)` is Julia's *entrywise* p-norm — including for matrices,
+    /// so this is never an operator norm. Only `p == 2` is the quantum-dimension
+    /// weighted Frobenius norm; every other exponent weights the same `dim(c)`
+    /// against a different power sum.
+    ///
+    /// A separate method rather than an optional argument because Rust has no
+    /// overloading: [`Self::norm`] stays the zero-argument two-norm, and
+    /// `p == 2.0` / `p == f64::INFINITY` delegate to [`Self::norm`] and
+    /// [`Self::norm_inf`] so the three never drift apart.
+    ///
+    /// # Complexity
+    ///
+    /// One pass over the payload: `O(N)` for a dense payload of `N` scalars,
+    /// and `O(Σ_c k_c)` on compact diagonal storage — the stored spectra are
+    /// read directly, never materialized, since the `k_c² − k_c` off-diagonal
+    /// zeros contribute nothing to any `p > 0`.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] for `p` that is NaN, zero, negative, or
+    ///   `-inf`. TensorKit throws `ArgumentError` on the same domain.
+    /// - Whatever [`Self::norm`] reports for a payload whose block structure
+    ///   cannot be walked, plus device-unsupported on CUDA storage.
+    pub fn norm_p(&self, p: f64) -> Result<f64, Error> {
+        // Domain check first, so an invalid `p` is rejected identically on
+        // every storage and rule path instead of only where it happens to be
+        // reached.
+        validate_norm_p(p)?;
+        if p == 2.0 {
+            return self.norm();
+        }
+        if p.is_infinite() {
+            return self.norm_inf();
+        }
+        if let TensorRepr::Adjoint(view) = &self.repr {
+            // `t†` conjugate-transposes each block, which permutes a coupled
+            // sector's entries and conjugates them — neither changes `|x|`, so
+            // the parent's answer is this one. Same delegation `norm` makes.
+            return Self::owned(
+                self.rt.clone(),
+                Arc::clone(&view.parent.space),
+                Arc::clone(&view.parent.data),
+            )
+            .norm_p(p);
+        }
+        #[cfg(feature = "cuda")]
+        if let Data::CudaF64(_) = self.stored_data() {
+            return Err(device_unsupported("norm_p()"));
+        }
+        if let Data::Diagonal(diagonal) = self.stored_data() {
+            let total = if self.rule_kind() == RuleKind::Su3 {
+                let rule = self.su3_rule();
+                diagonal.abs_pow_sum_with(p, |sector| {
+                    let sqrt = rule.sqrt_dim_scalar(sector);
+                    sqrt * sqrt
+                })
+            } else {
+                with_user_rule!(self.ordinary_body().space, rule, {
+                    diagonal.abs_pow_sum_with(p, |sector| rule.dim_scalar(sector))
+                })
+            };
+            return Ok(total.powf(p.recip()));
+        }
+        // SU(N) (Generic) needs its own arm for the same reason `norm` does:
+        // `GenericRigidSymbols` exposes `sqrt_dim`, not `dim`.
+        if self.rule_kind() == RuleKind::Su3 {
+            let rule = self.su3_rule();
+            return with_data!(self, data, {
+                coupled_region_pow_sum(
+                    self.ordinary_body().space.structure(),
+                    self.ordinary_body().space.nout(),
+                    data,
+                    p,
+                    |coupled| {
+                        let sqrt = rule.sqrt_dim_scalar(coupled);
+                        sqrt * sqrt
+                    },
+                )
+            });
+        }
+        with_data!(self, data, {
+            with_user_rule!(self.ordinary_body().space, rule, {
+                coupled_region_pow_sum(
+                    self.ordinary_body().space.structure(),
+                    self.ordinary_body().space.nout(),
+                    data,
+                    p,
+                    |coupled| rule.dim_scalar(coupled),
+                )
+            })
+        })
+    }
+
     /// Returns `factor * self` (real factor, both dtypes). Use
     /// [`Self::scale_c64`] for a complex factor.
     pub fn scale(&self, factor: f64) -> Result<Self, Error> {
@@ -9304,6 +9438,61 @@ where
     Ok(total)
 }
 
+/// TensorKit `_norm`'s domain check on `p` (`linalg.jl:271-274`): only finite
+/// positive `p` and `+Inf` name a norm; TensorKit throws `ArgumentError` for
+/// anything else, which here is [`Error::InvalidArgument`].
+///
+/// `p <= 0.0` is false for NaN, so NaN needs its own test — without it a NaN
+/// `p` would sail through and return NaN instead of being rejected.
+pub(crate) fn validate_norm_p(p: f64) -> Result<(), Error> {
+    if p.is_nan() || p <= 0.0 {
+        return Err(Error::InvalidArgument(format!(
+            "norm_p requires a finite p > 0 or p = inf, got {p}"
+        )));
+    }
+    Ok(())
+}
+
+/// TensorKit `_norm(blocks(t), p, 0)` for finite `p > 0` (`linalg.jl:262-270`):
+/// `(Σ_c dim(c) · Σ_{x ∈ block_c} |x|^p)^(1/p)` over the coupled-sector regions
+/// of one dense payload.
+///
+/// Why no `UniqueFusion` whole-buffer fast path like [`weighted_inner`]'s: that
+/// one exists to reach a single BLAS-shaped dot, and an entrywise `|x|^p`
+/// reduction has no such kernel to reach. The region walk is a partition of the
+/// same buffer, so the element count is identical either way.
+pub(crate) fn coupled_region_pow_sum<D, W>(
+    structure: &BlockStructure,
+    nout: usize,
+    data: &[D],
+    p: f64,
+    mut weight_of: W,
+) -> Result<f64, Error>
+where
+    D: UserScalar,
+    W: FnMut(SectorId) -> f64,
+{
+    let regions = sector_regions(structure, nout)?;
+    if data.len() != structure.required_len()? {
+        return Err(internal_layout_error(
+            "coupled-sector regions do not cover the scalar buffer",
+        ));
+    }
+
+    let mut total = 0.0;
+    for region in regions.iter() {
+        let block = data.get(region.range()).ok_or_else(|| {
+            internal_layout_error("coupled-sector region exceeds the scalar buffer")
+        })?;
+        let partial: f64 = block
+            .iter()
+            .map(|&value| value.widen_complex().norm().powf(p))
+            .sum();
+        total += weight_of(region.coupled()) * partial;
+    }
+    Ok(total.powf(p.recip()))
+}
+
 #[cfg(test)]
 fn odometer_inner_oracle<D, W>(
     structure: &BlockStructure,
@@ -9547,11 +9736,12 @@ fn decide_kept<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
         .iter()
         .zip(&magnitudes)
         .map(|(entry, values)| WeightedSpectrum {
+            sector: entry.sector,
             weight: rule.dim_scalar(entry.sector),
             values,
         })
         .collect();
-    let decision = select_truncation(&weighted, truncation)
+    let decision = select_truncation(&weighted, truncation, &rule.rule_identity())
         .map_err(|err| Error::InvalidArgument(err.to_string()))?;
     if spectra
         .iter()

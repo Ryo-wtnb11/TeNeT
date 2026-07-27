@@ -1,0 +1,432 @@
+//! TensorKit `norm(t, p)` correspondence for `Tensor::norm_p` / `TensorMap::norm_p`
+//! (issue #597, item 2).
+//!
+//! TensorKit 0.17 `src/tensors/linalg.jl:257-275`:
+//!
+//! ```text
+//! p == Inf     -> maximum entry magnitude over blocks(t)
+//! finite p > 0 -> (sum_c dim(c) * norm(block_c, p)^p)^(1/p)
+//! otherwise    -> ArgumentError
+//! ```
+//!
+//! `norm(block, p)` is Julia's *entrywise* p-norm (matrices included), so only
+//! the multiset of a coupled sector's entries and its quantum dimension enter
+//! the result — never the block's shape or the engine's fusion-tree ordering.
+//! That is what makes the oracle below portable between TensorKit's storage and
+//! TeNeT's.
+//!
+//! # Oracle provenance
+//!
+//! The constants are TensorKit 0.17.0 output (`~/.julia/packages/TensorKit/jCjQQ`,
+//! Julia 1.11.6), from a tensor built block-by-block with exactly the fill this
+//! file uses:
+//!
+//! ```julia
+//! realfill(i, j) = 1.0 + 0.5 * (i - 1) - 0.25 * (j - 1)
+//! cplxfill(i, j) = realfill(i, j) + im * (0.5 + 0.125 * (i - 1) + 0.375 * (j - 1))
+//! t = zeros(T, V <- W); for (c, b) in blocks(t), j in axes(b, 2), i in axes(b, 1)
+//!     b[i, j] = fill(i, j)
+//! end
+//! norm(t, p)
+//! ```
+//!
+//! with `V = U1Space(-1 => 2, 0 => 3, 1 => 4)`, `W = U1Space(-1 => 5, 0 => 1, 1 => 2)`
+//! and the SU(2) pair `V = SU2Space(0 => 2, 1//2 => 3, 1 => 4)`,
+//! `W = SU2Space(0 => 5, 1//2 => 1, 1 => 2)`.
+//!
+//! The degeneracies are deliberately all distinct, so no two coupled sectors
+//! carry the same entry multiset: a `dim(c)` weight attached to the wrong
+//! sector changes the answer.
+
+use std::sync::Arc;
+
+use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use tenet::prelude::{Complex64, Dtype, Error, Runtime, Space, Tensor};
+use tenet::typed::{GradedSpace, TensorMap};
+
+/// Relative agreement with the TensorKit oracle. The two engines sum the same
+/// terms in different orders, so exact equality is not the claim; `1e-13` is
+/// far tighter than any weighting or dispatch mistake could survive.
+const RTOL: f64 = 1e-13;
+
+fn runtime() -> Runtime {
+    Runtime::builder().dense_threads(1).build().unwrap()
+}
+
+/// The real fill, in the engine's 0-based degeneracy coordinates.
+///
+/// `1.0 + 0.5 * i - 0.25 * j` hits exactly zero at `(0, 4)`, which the
+/// 5-fold domain sector reaches — so the fixtures also cover a `0^p` term.
+fn real_fill(indices: &[usize]) -> f64 {
+    1.0 + 0.5 * indices[0] as f64 - 0.25 * indices[1] as f64
+}
+
+fn complex_fill(indices: &[usize]) -> Complex64 {
+    Complex64::new(
+        real_fill(indices),
+        0.5 + 0.125 * indices[0] as f64 + 0.375 * indices[1] as f64,
+    )
+}
+
+fn assert_close(actual: f64, expected: f64, what: &str) {
+    assert!(
+        (actual - expected).abs() <= RTOL * expected.abs(),
+        "{what}: got {actual:.17e}, TensorKit says {expected:.17e}"
+    );
+}
+
+// TensorKit 0.17.0 oracle values, indexed as [p = 1, 2, 3, Inf].
+const U1_F64: [f64; 4] = [25.0, 6.2048368229954285, 4.080404211522764, 2.5];
+const U1_C64: [f64; 4] = [
+    36.08814448804253,
+    8.145167278822456,
+    5.0601391475683535,
+    2.6487025125521364,
+];
+const SU2_F64: [f64; 4] = [55.5, 9.656603957913982, 5.588779616741119, 2.5];
+const SU2_C64: [f64; 4] = [
+    70.83774683619109,
+    11.637090486887175,
+    6.51405041399105,
+    2.6487025125521364,
+];
+
+/// The exponents the oracle rows above are indexed by.
+const POWERS: [f64; 4] = [1.0, 2.0, 3.0, f64::INFINITY];
+
+// ---------------------------------------------------------------------------
+// Erased facade
+// ---------------------------------------------------------------------------
+
+fn erased_u1() -> (Space, Space) {
+    (
+        Space::u1([(-1, 2), (0, 3), (1, 4)]),
+        Space::u1([(-1, 5), (0, 1), (1, 2)]),
+    )
+}
+
+fn erased_su2() -> (Space, Space) {
+    (
+        Space::su2([(0, 2), (1, 3), (2, 4)]).unwrap(),
+        Space::su2([(0, 5), (1, 1), (2, 2)]).unwrap(),
+    )
+}
+
+fn erased_cases(rt: &Runtime) -> Vec<(&'static str, Tensor, [f64; 4])> {
+    let (u1_v, u1_w) = erased_u1();
+    let (su2_v, su2_w) = erased_su2();
+    vec![
+        (
+            "u1 f64",
+            Tensor::from_block_fn(rt, [&u1_v], [&u1_w], |_, indices| real_fill(indices)).unwrap(),
+            U1_F64,
+        ),
+        (
+            "u1 c64",
+            Tensor::from_block_fn(rt, [&u1_v], [&u1_w], |_, indices| complex_fill(indices))
+                .unwrap(),
+            U1_C64,
+        ),
+        (
+            "su2 f64",
+            Tensor::from_block_fn(rt, [&su2_v], [&su2_w], |_, indices| real_fill(indices)).unwrap(),
+            SU2_F64,
+        ),
+        (
+            "su2 c64",
+            Tensor::from_block_fn(rt, [&su2_v], [&su2_w], |_, indices| complex_fill(indices))
+                .unwrap(),
+            SU2_C64,
+        ),
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// Typed facade
+// ---------------------------------------------------------------------------
+
+fn typed_u1() -> (GradedSpace<U1FusionRule>, GradedSpace<U1FusionRule>) {
+    let rule = Arc::new(U1FusionRule);
+    let pairs = |entries: [(i32, usize); 3]| {
+        GradedSpace::try_new(
+            Arc::clone(&rule),
+            entries.map(|(charge, deg)| (U1Irrep::new(charge), deg)),
+            false,
+        )
+        .unwrap()
+    };
+    (
+        pairs([(-1, 2), (0, 3), (1, 4)]),
+        pairs([(-1, 5), (0, 1), (1, 2)]),
+    )
+}
+
+fn typed_su2() -> (GradedSpace<SU2FusionRule>, GradedSpace<SU2FusionRule>) {
+    let rule = Arc::new(SU2FusionRule);
+    let pairs = |entries: [(usize, usize); 3]| {
+        GradedSpace::try_new(
+            Arc::clone(&rule),
+            entries.map(|(twice_spin, deg)| (SU2Irrep::from_twice_spin(twice_spin), deg)),
+            false,
+        )
+        .unwrap()
+    };
+    (
+        pairs([(0, 2), (1, 3), (2, 4)]),
+        pairs([(0, 5), (1, 1), (2, 2)]),
+    )
+}
+
+#[test]
+fn the_erased_fixtures_are_the_tensors_tensorkit_measured() {
+    // `norm_p` does not exist yet; what this pins is the *fixture*, which is
+    // the part an oracle table cannot check itself. TensorKit's `norm(t, 2)`
+    // and `norm(t, Inf)` are the two rows the facade can already compute, so
+    // agreement there is what certifies that the tensor built here carries the
+    // same per-sector entry multisets as the one Julia measured — and hence
+    // that the p = 1 and p = 3 rows are usable as oracles for `norm_p`.
+    let rt = runtime();
+    for (name, tensor, oracle) in erased_cases(&rt) {
+        assert_close(
+            tensor.norm().unwrap(),
+            oracle[1],
+            &format!("{name} norm() vs TensorKit norm(t, 2)"),
+        );
+        assert_close(
+            tensor.norm_inf().unwrap(),
+            oracle[3],
+            &format!("{name} norm_inf() vs TensorKit norm(t, Inf)"),
+        );
+    }
+}
+
+#[test]
+fn the_typed_fixtures_are_the_tensors_tensorkit_measured() {
+    // Same certification for the typed facade: it builds its own tensors from
+    // its own leg type, so its fixtures need their own anchor.
+    let rt = runtime();
+    let (u1_v, u1_w) = typed_u1();
+    let (su2_v, su2_w) = typed_su2();
+
+    let u1_f64: TensorMap<U1FusionRule, f64> =
+        TensorMap::from_block_fn(&rt, [&u1_v], [&u1_w], |_, indices| real_fill(indices)).unwrap();
+    let u1_c64: TensorMap<U1FusionRule, Complex64> =
+        TensorMap::from_block_fn(&rt, [&u1_v], [&u1_w], |_, indices| complex_fill(indices))
+            .unwrap();
+    let su2_f64: TensorMap<SU2FusionRule, f64> =
+        TensorMap::from_block_fn(&rt, [&su2_v], [&su2_w], |_, indices| real_fill(indices)).unwrap();
+    let su2_c64: TensorMap<SU2FusionRule, Complex64> =
+        TensorMap::from_block_fn(&rt, [&su2_v], [&su2_w], |_, indices| complex_fill(indices))
+            .unwrap();
+
+    assert_close(u1_f64.norm().unwrap(), U1_F64[1], "typed u1 f64 norm()");
+    assert_close(
+        u1_f64.norm_inf().unwrap(),
+        U1_F64[3],
+        "typed u1 f64 norm_inf()",
+    );
+    assert_close(u1_c64.norm().unwrap(), U1_C64[1], "typed u1 c64 norm()");
+    assert_close(
+        u1_c64.norm_inf().unwrap(),
+        U1_C64[3],
+        "typed u1 c64 norm_inf()",
+    );
+    assert_close(su2_f64.norm().unwrap(), SU2_F64[1], "typed su2 f64 norm()");
+    assert_close(
+        su2_f64.norm_inf().unwrap(),
+        SU2_F64[3],
+        "typed su2 f64 norm_inf()",
+    );
+    assert_close(su2_c64.norm().unwrap(), SU2_C64[1], "typed su2 c64 norm()");
+    assert_close(
+        su2_c64.norm_inf().unwrap(),
+        SU2_C64[3],
+        "typed su2 c64 norm_inf()",
+    );
+}
+
+#[test]
+fn erased_norm_p_matches_tensorkit() {
+    let rt = runtime();
+    for (name, tensor, oracle) in erased_cases(&rt) {
+        for (&p, &expected) in POWERS.iter().zip(&oracle) {
+            assert_close(
+                tensor.norm_p(p).unwrap(),
+                expected,
+                &format!("{name} p={p}"),
+            );
+        }
+    }
+}
+
+#[test]
+fn erased_norm_p_delegates_the_two_and_inf_arms() {
+    // The `p == 2` / `p == Inf` arms are supposed to *be* the existing methods,
+    // not a second implementation of them. Exact equality is the claim here,
+    // which a re-derived power sum would not satisfy.
+    let rt = runtime();
+    for (name, tensor, _) in erased_cases(&rt) {
+        assert_eq!(
+            tensor.norm_p(2.0).unwrap(),
+            tensor.norm().unwrap(),
+            "{name}: p=2 is not norm()"
+        );
+        assert_eq!(
+            tensor.norm_p(f64::INFINITY).unwrap(),
+            tensor.norm_inf().unwrap(),
+            "{name}: p=Inf is not norm_inf()"
+        );
+    }
+}
+
+#[test]
+fn erased_norm_p_rejects_non_positive_and_non_finite_p() {
+    let rt = runtime();
+    let (v, w) = erased_u1();
+    let tensor = Tensor::from_block_fn(&rt, [&v], [&w], |_, indices| real_fill(indices)).unwrap();
+    for p in [f64::NAN, f64::NEG_INFINITY, 0.0, -1.0, -0.5] {
+        assert!(
+            matches!(tensor.norm_p(p), Err(Error::InvalidArgument(_))),
+            "norm_p({p}) must be a typed error, not a panic and not a value"
+        );
+    }
+}
+
+#[test]
+fn typed_norm_p_matches_tensorkit() {
+    let rt = runtime();
+    let (u1_v, u1_w) = typed_u1();
+    let (su2_v, su2_w) = typed_su2();
+
+    let u1_f64: TensorMap<U1FusionRule, f64> =
+        TensorMap::from_block_fn(&rt, [&u1_v], [&u1_w], |_, indices| real_fill(indices)).unwrap();
+    let u1_c64: TensorMap<U1FusionRule, Complex64> =
+        TensorMap::from_block_fn(&rt, [&u1_v], [&u1_w], |_, indices| complex_fill(indices))
+            .unwrap();
+    let su2_f64: TensorMap<SU2FusionRule, f64> =
+        TensorMap::from_block_fn(&rt, [&su2_v], [&su2_w], |_, indices| real_fill(indices)).unwrap();
+    let su2_c64: TensorMap<SU2FusionRule, Complex64> =
+        TensorMap::from_block_fn(&rt, [&su2_v], [&su2_w], |_, indices| complex_fill(indices))
+            .unwrap();
+
+    for (&p, &expected) in POWERS.iter().zip(&U1_F64) {
+        assert_close(
+            u1_f64.norm_p(p).unwrap(),
+            expected,
+            &format!("u1 f64 p={p}"),
+        );
+    }
+    for (&p, &expected) in POWERS.iter().zip(&U1_C64) {
+        assert_close(
+            u1_c64.norm_p(p).unwrap(),
+            expected,
+            &format!("u1 c64 p={p}"),
+        );
+    }
+    for (&p, &expected) in POWERS.iter().zip(&SU2_F64) {
+        assert_close(
+            su2_f64.norm_p(p).unwrap(),
+            expected,
+            &format!("su2 f64 p={p}"),
+        );
+    }
+    for (&p, &expected) in POWERS.iter().zip(&SU2_C64) {
+        assert_close(
+            su2_c64.norm_p(p).unwrap(),
+            expected,
+            &format!("su2 c64 p={p}"),
+        );
+    }
+
+    assert_eq!(
+        su2_c64.norm_p(2.0).unwrap(),
+        su2_c64.norm().unwrap(),
+        "typed p=2 is not norm()"
+    );
+    assert_eq!(
+        su2_c64.norm_p(f64::INFINITY).unwrap(),
+        su2_c64.norm_inf().unwrap(),
+        "typed p=Inf is not norm_inf()"
+    );
+}
+
+#[test]
+fn typed_norm_p_rejects_non_positive_and_non_finite_p() {
+    let rt = runtime();
+    let (v, w) = typed_u1();
+    let tensor: TensorMap<U1FusionRule, f64> =
+        TensorMap::from_block_fn(&rt, [&v], [&w], |_, indices| real_fill(indices)).unwrap();
+    for p in [f64::NAN, f64::NEG_INFINITY, 0.0, -1.0, -0.5] {
+        assert!(
+            matches!(tensor.norm_p(p), Err(Error::InvalidArgument(_))),
+            "norm_p({p}) must be a typed error, not a panic and not a value"
+        );
+    }
+}
+
+/// The compact arm reads `Σ_c k_c` stored values with the same `dim(c)`
+/// weights, so it must agree with the dense answer on a materialized twin.
+/// (The `O(Σ_c k_c)` / zero-materialization half of the claim is asserted by
+/// byte counting in `typed_diagonal_allocations.rs`; this is the value half.)
+#[test]
+fn compact_norm_p_equals_the_dense_answer() {
+    let rt = runtime();
+    let (v, w) = typed_su2();
+    let dense: TensorMap<SU2FusionRule, f64> =
+        TensorMap::from_block_fn(&rt, [&v], [&w], |_, indices| real_fill(indices)).unwrap();
+    let s = dense.svd_compact().unwrap().1;
+
+    // `0 * id + 1 * s` is a value-identical *dense* twin of `s`: `id` on the
+    // bond space is dense, so the sum takes the dense route without disturbing
+    // `s`'s own storage.
+    let twin = TensorMap::id(&rt, &s.domain())
+        .unwrap()
+        .add(&s, 0.0, 1.0)
+        .unwrap();
+
+    for p in [1.0, 2.0, 3.0, 0.5, f64::INFINITY] {
+        assert_close(
+            s.norm_p(p).unwrap(),
+            twin.norm_p(p).unwrap(),
+            &format!("compact vs dense p={p}"),
+        );
+    }
+}
+
+/// The erased facade's compact arm needs its own value gate: it is a separate
+/// implementation from the typed one (`DiagonalData::abs_pow_sum_with` vs the
+/// typed spectrum fold), and the erased allocation fixture is a single U(1)
+/// sector, where every `dim(c)` is one and a dropped weight is invisible.
+///
+/// SU(2) with spins 0, 1/2 and 1 gives `dim(c) ∈ {1, 2, 3}`, and the singular
+/// values of a random tensor differ per sector, so the weights cannot cancel.
+#[test]
+fn erased_compact_norm_p_equals_the_dense_answer_with_nontrivial_quantum_dimensions() {
+    let rt = runtime();
+    let leg = Space::su2([(0, 3), (1, 3), (2, 3)]).unwrap();
+    let source = Tensor::rand_with_seed(&rt, Dtype::F64, [&leg], [&leg], 0x5eed_7000).unwrap();
+    let s = source.svd_compact().unwrap().1;
+
+    // `0 * id + 1 * s` is a value-identical *dense* twin: `id` on the bond
+    // space is dense, so the sum leaves the compact route entirely.
+    let bond = s.space(0).unwrap();
+    let twin = Tensor::id(&rt, Dtype::F64, [&bond])
+        .unwrap()
+        .add(&s, 0.0, 1.0)
+        .unwrap();
+
+    for p in [1.0, 3.0, 0.5] {
+        assert_close(
+            s.norm_p(p).unwrap(),
+            twin.norm_p(p).unwrap(),
+            &format!("erased compact vs dense p={p}"),
+        );
+    }
+    // p = 2 delegates to `norm`, whose compact arm is a different reduction —
+    // pinned here so the two compact routes cannot disagree either.
+    assert_close(
+        s.norm_p(2.0).unwrap(),
+        twin.norm_p(2.0).unwrap(),
+        "erased compact vs dense p=2",
+    );
+}

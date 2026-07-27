@@ -8,6 +8,7 @@ use tenet_core::{
     SU2FusionRule, SU2Irrep, SectorId, SectorLeg, Su2SectorLayout, Su3FusionRule, U1FusionRule,
     U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep,
 };
+use tenet_matrixalgebra::TruncationSpace;
 
 use crate::error::Error;
 
@@ -605,6 +606,38 @@ impl Space {
         }
         let vacuum = with_rule!(self.context.as_ref(), rule, rule.vacuum());
         self.sectors.len() == 1 && self.sectors[0] == (vacuum, 1)
+    }
+
+    /// This space read as a fixed truncation target: TensorKit `truncspace(V)`
+    /// (`src/factorizations/truncation.jl:261-269`).
+    ///
+    /// The resulting [`Truncation::space`] policy keeps exactly `degeneracy(c)`
+    /// values of every coupled sector `c` this space carries, and drops any
+    /// sector it does not carry — TensorKit reads the same `dim(V, c)`, which
+    /// is zero for an absent sector. A request longer than the spectrum offers
+    /// is clamped to it. The dual flag is irrelevant and ignored: a truncation
+    /// target names sector content, not orientation.
+    ///
+    /// The profile records this space's fusion rule, so passing it to a
+    /// factorization of a tensor built on a different rule is a typed error
+    /// rather than a silent truncation to nothing.
+    ///
+    /// [`Truncation::space`]: tenet_matrixalgebra::Truncation::space
+    ///
+    /// # Complexity
+    ///
+    /// `O(k log k)` in the number of sectors (one `BTreeMap` build), and no
+    /// spectrum or payload is touched.
+    pub fn truncspace(&self) -> TruncationSpace {
+        // Why not `with_rule!`: that macro is multiplicity-free only and
+        // `unimplemented!()`s on SU(3). A truncation profile is pure metadata
+        // — no recoupling coefficient is involved — so there is no reason to
+        // exclude the Generic rule here, and `svd_trunc` supports it.
+        let rule = match self.context.as_ref() {
+            UserRuleContext::Su3(rule) => rule.rule_identity(),
+            context => with_rule!(context, rule, rule.rule_identity()),
+        };
+        TruncationSpace::new(rule, self.sectors.iter().copied())
     }
 
     /// Decodes an internal sector id into the user-facing label for this

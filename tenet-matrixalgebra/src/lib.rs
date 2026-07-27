@@ -39,7 +39,8 @@ pub use factorize::{
 };
 pub use matrix_functions::{exp, exp_dyn, inv, inv_direct_dyn, inv_dyn, pinv, pinv_dyn};
 pub use truncation::{
-    select_truncation, Truncation, TruncationDecision, TruncationError, WeightedSpectrum,
+    select_truncation, Truncation, TruncationDecision, TruncationError, TruncationSpace,
+    WeightedSpectrum,
 };
 
 #[doc(hidden)]

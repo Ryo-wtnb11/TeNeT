@@ -77,7 +77,7 @@ pub mod prelude {
     #[allow(deprecated)]
     pub use tenet_core::FusionTreeBlockKey;
     pub use tenet_core::{BlockKey, FusionTreePairKey, MultiplicityIndex, SectorId};
-    pub use tenet_matrixalgebra::{SectorSpectrum, Truncation};
+    pub use tenet_matrixalgebra::{SectorSpectrum, Truncation, TruncationSpace};
 }
 
 /// Formula-first explanation of TeNeT's tensor-map convention, duals,
