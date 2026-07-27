@@ -119,7 +119,9 @@
 //! `numind`, [`TensorMap::leg_dims`], [`TensorMap::leg_dim`],
 //! [`TensorMap::codomain_spaces`], [`TensorMap::domain_spaces`],
 //! [`TensorMap::scalar`], [`TensorMap::zeros_like`], [`TensorMap::to_c64`],
-//! [`TensorMap::re`], [`TensorMap::im`]).
+//! [`TensorMap::re`], [`TensorMap::im`]) and the **concatenation/absorb
+//! group** ([`TensorMap::catdomain`], [`TensorMap::catcodomain`],
+//! [`TensorMap::absorb`]).
 //!
 //! Issue #570 also gave the facade **compact diagonal storage**: a spectrum
 //! factor — `svd_compact`'s and `svd_trunc`'s `s`, `eigh`/`eig`'s `d` — holds
@@ -143,7 +145,7 @@
 //! What is still absent — among what remains, the entries below are the ones
 //! with a decision behind them rather than a queue position. This facade is
 //! deliberately narrower than the erased [`crate::prelude::Tensor`], which also
-//! carries `twist`, `flip`, the unit-leg insert/remove pair and `absorb`.
+//! carries `twist`, `flip` and the unit-leg insert/remove pair.
 //! Those are ports waiting on nothing but their turn; the ones below are not:
 //!
 //! - The **rest of the matrix-function family** — the trigonometric and
@@ -218,8 +220,9 @@ pub use tenet_matrixalgebra::{Truncation, TruncationSpace};
 use tenet_matrixalgebra::{BoundDynFactor, FactorScalar};
 
 use crate::tensor::{
-    apply_fill, coupled_region_pow_sum, sector_regions, validate_norm_p, weighted_inner,
-    weighted_trace, with_planar_axes, Fill, PlanarRequestKind, TensorScalar,
+    absorb_mapped, apply_fill, cat_homspace, compile_cat_plan, coupled_region_pow_sum,
+    internal_layout_error, sector_regions, validate_norm_p, weighted_inner, weighted_trace,
+    with_planar_axes, CatOperandLayout, CatSide, Fill, PlanarRequestKind, TensorScalar,
 };
 use crate::typed_tensor_core::{
     tensorcompose_owned_multiplicity_free, tensorcontract_owned_multiplicity_free,
@@ -3807,6 +3810,218 @@ where
             .dense_data()
             .iter()
             .fold(D::from_real(0.0), |acc, &value| acc + value))
+    }
+
+    /// TensorKit `catdomain(t1, t2)` (`tensors/linalg.jl:479-497`):
+    /// concatenate two `N₁ <- 1` tensor maps along their sole domain leg. The
+    /// codomain product spaces must match exactly (TK lines 480-483); the two
+    /// domain legs must share duality (TK 486-487) and are combined by direct
+    /// sum `V = V1 ⊕ V2` (TK 489); reduced data is copied into adjacent
+    /// column slabs per coupled sector, `self` first (TK 492-495).
+    ///
+    /// Rust uses a method (`t1.catdomain(&t2)`) because binary tensor
+    /// operations in this API are methods; the name and operand order match
+    /// TensorKit's free function, exactly as the erased
+    /// [`crate::prelude::Tensor::catdomain`] does.
+    ///
+    /// Narrowings against the erased sibling, all statically enforced rather
+    /// than semantic differences: both operands share one `D`, so the erased
+    /// mixed-dtype widening arm (`execute_c64`) is unrepresentable — widen
+    /// with [`Self::to_c64`] first; there are no device placements to check;
+    /// and the erased lazy-adjoint fast path has no counterpart because the
+    /// typed [`Self::adjoint`] is eager. A compact diagonal operand is
+    /// materialized dense first (once, into the body cache), as the erased
+    /// route does through its coupled-data materialization.
+    ///
+    /// # Complexity
+    ///
+    /// One output allocation and a single `O(len(self) + len(other))` copy
+    /// pass over the compiled per-sector slab plan — the same plan object the
+    /// erased facade executes.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::RuleMismatch`] on differing provider identities and
+    /// [`Error::RuntimeMismatch`] on differing runtimes, in that order (the
+    /// erased `check_same_execution_world`); then
+    /// [`Error::InvalidArgument`] — with the erased facade's own messages —
+    /// for a multi-leg domain, mismatched codomain product spaces, or changed
+    /// legs of opposite duality.
+    pub fn catdomain(&self, other: &Self) -> Result<Self, Error> {
+        self.cat(other, CatSide::Domain)
+    }
+
+    /// TensorKit `catcodomain(t1, t2)` (`tensors/linalg.jl:498-514`):
+    /// concatenate two `1 <- N₂` tensor maps along their sole codomain leg.
+    /// The domain product spaces must match exactly (TK 499-501); the two
+    /// codomain legs must share duality (TK 503-504) and are combined by
+    /// direct sum (TK 506); reduced data is copied into adjacent row slabs
+    /// per coupled sector, `self` first (TK 507-512).
+    ///
+    /// Method-vs-free-function note, narrowings, complexity and error
+    /// classes: exactly as [`Self::catdomain`], with the codomain and domain
+    /// roles swapped.
+    pub fn catcodomain(&self, other: &Self) -> Result<Self, Error> {
+        self.cat(other, CatSide::Codomain)
+    }
+
+    /// Shared route of [`Self::catdomain`] / [`Self::catcodomain`]: the same
+    /// validation core, copy-plan compiler and executor the erased facade
+    /// uses (`cat_homspace` / `compile_cat_plan` — #580 PR 4), fed with the
+    /// typed bound space's structure and executed on the dense payloads.
+    fn cat(&self, other: &Self, side: CatSide) -> Result<Self, Error> {
+        // Rule identity before runtime: the erased
+        // `check_same_execution_world` order, minus its placement arm (no
+        // devices here). Same rationale as `authority()`: separately
+        // allocated providers of one rule interoperate; different identities
+        // are rejected before any layout work.
+        if self.body.space.provider().rule_identity() != other.body.space.provider().rule_identity()
+        {
+            return Err(Error::RuleMismatch);
+        }
+        if !self.runtime.same_runtime(&other.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        let lhs = self.body.space.space().homspace();
+        let rhs = other.body.space.space().homspace();
+        let (axis, homspace) = cat_homspace(
+            lhs.codomain(),
+            lhs.domain(),
+            rhs.codomain(),
+            rhs.domain(),
+            side,
+        )?;
+        // The same derivation route the erased `from_homspace` takes
+        // (`build_bound_space_like` is `derive_from_final_homspace` on the
+        // authority space); no new space-construction logic.
+        let space = self.body.space.derive_from_final_homspace(homspace)?;
+        let plan = compile_cat_plan(
+            space.space().structure(),
+            space.space().nout(),
+            [
+                CatOperandLayout::owned(
+                    self.body.space.space().structure(),
+                    self.body.space.space().nout(),
+                    self.body.space.space().nin(),
+                )?,
+                CatOperandLayout::owned(
+                    other.body.space.space().structure(),
+                    other.body.space.space().nout(),
+                    other.body.space.space().nin(),
+                )?,
+            ],
+            axis,
+            side,
+        )?
+        // The erased owned route carries the same expectation: an all-owned
+        // pair never declines its layout.
+        .ok_or_else(|| {
+            internal_layout_error("owned concatenation unexpectedly declined its layout")
+        })?;
+        let data = plan.execute(self.dense_data(), other.dense_data())?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody::dense(space, data)),
+        })
+    }
+
+    /// TensorKit `absorb(tdst, tsrc)` (`tensors/linalg.jl:531`, `absorb!`
+    /// 532-545): copies the common per-axis prefix of every shared
+    /// fusion-tree block of `source` into a deep copy of `self` (TK 538-543:
+    /// `min` of the two block shapes per axis). Blocks whose key the source
+    /// does not carry are untouched, so the caller owns the initialization of
+    /// the non-shared region — TK documents the same contract.
+    ///
+    /// The result keeps `self`'s spaces and dtype. Equal `D` is required by
+    /// the signature, so the erased facade's f64→c64 widening and its
+    /// `InexactScalarConversion` narrowing arm are statically
+    /// unrepresentable — widen with [`Self::to_c64`] first. No device
+    /// placements exist here; a compact diagonal payload (on either side) is
+    /// materialized dense first, exactly once, as the erased route does.
+    ///
+    /// # Complexity
+    ///
+    /// One output allocation (the destination clone) plus `O(min-prefix)`
+    /// overwrites per shared block, walked by the same merge-join over sorted
+    /// block keys the erased facade executes (`absorb_mapped`).
+    ///
+    /// # Errors
+    ///
+    /// In the erased facade's order: [`Error::InvalidArgument`] on unequal
+    /// codomain/domain ranks (TK throws its `DimensionError` for the same,
+    /// 533-534), [`Error::RuleMismatch`] on differing provider identities,
+    /// [`Error::RuntimeMismatch`] on differing runtimes, and
+    /// [`Error::InvalidArgument`] when corresponding legs differ in duality.
+    /// The messages name `TensorMap::absorb` where the erased ones name
+    /// `Tensor::absorb` — same shape, honest receiver.
+    pub fn absorb(&self, source: &Self) -> Result<Self, Error> {
+        let destination_space = self.body.space.space();
+        let source_space = source.body.space.space();
+        if destination_space.nout() != source_space.nout()
+            || destination_space.nin() != source_space.nin()
+        {
+            return Err(Error::InvalidArgument(format!(
+                "TensorMap::absorb requires equal codomain/domain ranks, got {}|{} and {}|{}",
+                destination_space.nout(),
+                destination_space.nin(),
+                source_space.nout(),
+                source_space.nin()
+            )));
+        }
+        if self.body.space.provider().rule_identity()
+            != source.body.space.provider().rule_identity()
+        {
+            return Err(Error::RuleMismatch);
+        }
+        if !self.runtime.same_runtime(&source.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        for (destination_leg, source_leg) in destination_space
+            .homspace()
+            .codomain()
+            .legs()
+            .iter()
+            .chain(destination_space.homspace().domain().legs())
+            .zip(
+                source_space
+                    .homspace()
+                    .codomain()
+                    .legs()
+                    .iter()
+                    .chain(source_space.homspace().domain().legs()),
+            )
+        {
+            if destination_leg.is_dual() != source_leg.is_dual() {
+                return Err(Error::InvalidArgument(
+                    "TensorMap::absorb requires corresponding legs to have equal duality"
+                        .to_string(),
+                ));
+            }
+        }
+        let destination_data = self.dense_data();
+        let source_data = source.dense_data();
+        // The erased `validate_absorb_layout` internal guard, minus its
+        // dtype/device arms (unrepresentable here): the dense payloads must
+        // cover their structures before any block walk trusts the offsets.
+        if destination_space.structure().required_len()? != destination_data.len()
+            || source_space.structure().required_len()? != source_data.len()
+        {
+            return Err(internal_layout_error(
+                "absorb block layout does not cover scalar storage",
+            ));
+        }
+        let mut output = destination_data.to_vec();
+        absorb_mapped(
+            destination_space.structure(),
+            &mut output,
+            source_space.structure(),
+            source_data,
+            Ok,
+        )?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody::dense(self.body.space.clone(), output)),
+        })
     }
 
     /// A zero tensor on the same spaces and dtype as `self` (TensorKit

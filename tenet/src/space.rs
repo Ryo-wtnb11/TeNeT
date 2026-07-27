@@ -921,31 +921,11 @@ impl Space {
         if !self.same_rule(other) {
             return Err(Error::RuleMismatch);
         }
-        if self.dual != other.dual {
-            return Err(Error::InvalidArgument(
-                "oplus: cannot direct-sum spaces of opposite duality (dualize one first)".into(),
-            ));
-        }
-        let mut sectors = self.sectors.clone();
-        for &(sector, deg) in &other.sectors {
-            match sectors.iter_mut().find(|(s, _)| *s == sector) {
-                Some(entry) => {
-                    entry.1 = entry.1.checked_add(deg).ok_or_else(|| {
-                        Error::InvalidArgument(format!(
-                            "oplus: degeneracy overflow for sector {sector:?}"
-                        ))
-                    })?;
-                }
-                None => sectors.push((sector, deg)),
-            }
-        }
-        sectors.retain(|&(_, deg)| deg > 0);
-        sectors.sort_by_key(|(sector, _)| *sector);
-        Ok(Space {
-            context: Arc::clone(&self.context),
-            sectors,
-            dual: self.dual,
-        })
+        // `sector_leg`/`from_leg` are verbatim round trips of the stored
+        // `(sector, degeneracy)` pairs and the dual flag, so routing through
+        // the leg-level sum changes no byte of the result.
+        let leg = oplus_sector_legs(&self.sector_leg(), &other.sector_leg())?;
+        Ok(Space::from_leg(Arc::clone(&self.context), &leg))
     }
 
     /// Lowers this space to the expert-layer [`SectorLeg`] (sector,
@@ -963,6 +943,43 @@ impl Space {
             dual: leg.is_dual(),
         }
     }
+}
+
+/// The [`SectorLeg`]-level direct sum under [`Space::oplus`] (#580 PR 4): the
+/// degeneracy of each sector is the sum of its degeneracies in the two
+/// summands, sectors present in only one summand carried over unchanged,
+/// result sorted by [`SectorId`].
+///
+/// Shared on purpose: the erased `oplus` and the typed facade's
+/// `catdomain`/`catcodomain` changed-leg sum must be byte-identical in sector
+/// order — a second copy of this merge would be free to drift from the
+/// slab-order gates that hang on it. Rule identity is the caller's concern
+/// (the erased `oplus` checks it against its own context; the typed cat has
+/// already proven both operands share one provider identity).
+pub(crate) fn oplus_sector_legs(lhs: &SectorLeg, rhs: &SectorLeg) -> Result<SectorLeg, Error> {
+    if lhs.is_dual() != rhs.is_dual() {
+        return Err(Error::InvalidArgument(
+            "oplus: cannot direct-sum spaces of opposite duality (dualize one first)".into(),
+        ));
+    }
+    let mut sectors: Vec<(SectorId, usize)> = lhs.iter().collect();
+    for (sector, deg) in rhs.iter() {
+        match sectors.iter_mut().find(|(s, _)| *s == sector) {
+            Some(entry) => {
+                entry.1 = entry.1.checked_add(deg).ok_or_else(|| {
+                    Error::InvalidArgument(format!(
+                        "oplus: degeneracy overflow for sector {sector:?}"
+                    ))
+                })?;
+            }
+            None => sectors.push((sector, deg)),
+        }
+    }
+    sectors.retain(|&(_, deg)| deg > 0);
+    sectors.sort_by_key(|(sector, _)| *sector);
+    // No duplicates by construction, so `SectorLeg::new` cannot panic; its
+    // sort and zero-drop are no-ops on the already-normalized pairs.
+    Ok(SectorLeg::new(sectors, lhs.is_dual()))
 }
 
 /// Fused sector content of `left ⊗ right`: the degeneracy of an outcome `c`

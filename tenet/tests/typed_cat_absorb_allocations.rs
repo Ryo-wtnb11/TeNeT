@@ -1,0 +1,202 @@
+//! Allocation gates for the typed `catdomain`/`catcodomain`/`absorb`
+//! (#580 PR 4), the way `cat_allocations.rs` / `absorb_allocations.rs` gate
+//! the erased siblings and `typed_diagonal_allocations.rs` gates the typed
+//! compact storage: bytes counted through a global allocator while one warmed
+//! operation runs.
+//!
+//! The claims under gate: each operation performs exactly one output-sized
+//! payload allocation and no per-block allocations, and a compact diagonal
+//! operand is materialized dense exactly once (into the shared body cache),
+//! never once per call.
+
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+use std::hint::black_box;
+use std::sync::Arc;
+
+use tenet::core::{U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep};
+use tenet::prelude::Runtime;
+use tenet::typed::{GradedSpace, TensorMap};
+
+struct CountingAllocator;
+
+thread_local! {
+    static ENABLED: Cell<bool> = const { Cell::new(false) };
+    static ALLOCATED: Cell<u64> = const { Cell::new(0) };
+    static PAYLOAD_BYTES: Cell<usize> = const { Cell::new(0) };
+    static PAYLOAD_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc(layout) };
+        if !pointer.is_null() && ENABLED.get() {
+            ALLOCATED.set(ALLOCATED.get() + layout.size() as u64);
+            if layout.size() == PAYLOAD_BYTES.get() {
+                PAYLOAD_ALLOCATIONS.set(PAYLOAD_ALLOCATIONS.get() + 1);
+            }
+        }
+        pointer
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) };
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
+        if !pointer.is_null() && ENABLED.get() {
+            ALLOCATED.set(ALLOCATED.get() + new_size as u64);
+            if new_size == PAYLOAD_BYTES.get() {
+                PAYLOAD_ALLOCATIONS.set(PAYLOAD_ALLOCATIONS.get() + 1);
+            }
+        }
+        pointer
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+fn measured_allocations<T>(payload_bytes: usize, operation: impl FnOnce() -> T) -> (u64, usize) {
+    ALLOCATED.set(0);
+    PAYLOAD_BYTES.set(payload_bytes);
+    PAYLOAD_ALLOCATIONS.set(0);
+    ENABLED.set(true);
+    let output = black_box(operation());
+    ENABLED.set(false);
+    black_box(output);
+    (ALLOCATED.get(), PAYLOAD_ALLOCATIONS.get())
+}
+
+/// Small fixed allowance for descriptor/layout bookkeeping (copy plans,
+/// derived-space metadata) — the same ceiling the erased gates use.
+const STRUCTURAL_TOLERANCE: u64 = 128 * 1024;
+
+fn u1_leg(provider: &Arc<U1FusionRule>, pairs: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
+    GradedSpace::try_new(
+        Arc::clone(provider),
+        pairs
+            .iter()
+            .map(|&(charge, degeneracy)| (U1Irrep::new(charge), degeneracy)),
+        false,
+    )
+    .unwrap()
+}
+
+fn pseudo_random(state: &mut u64) -> f64 {
+    *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+    ((*state >> 33) as f64) / (u32::MAX as f64) - 0.5
+}
+
+#[test]
+fn typed_cat_uses_one_output_allocation_without_scratch() {
+    // What: a warmed typed catdomain owns exactly one output-sized payload
+    // and no per-block allocations — the plan executes into the single final
+    // buffer, exactly as the erased gate pins for its own route.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let codomain = u1_leg(&provider, &[(0, 127)]);
+    let left = u1_leg(&provider, &[(0, 251)]);
+    let right = u1_leg(&provider, &[(0, 263)]);
+    let mut state = 0x5eed_0580u64;
+    let lhs: TensorMap<U1FusionRule, f64> =
+        TensorMap::from_block_fn(&runtime, [&codomain], [&left], |_, _| {
+            pseudo_random(&mut state)
+        })
+        .unwrap();
+    let mut state = 0x5eed_0581u64;
+    let rhs: TensorMap<U1FusionRule, f64> =
+        TensorMap::from_block_fn(&runtime, [&codomain], [&right], |_, _| {
+            pseudo_random(&mut state)
+        })
+        .unwrap();
+    let warm: TensorMap<U1FusionRule, f64> = lhs.catdomain(&rhs).unwrap();
+    let output_payload = warm.data().len() * std::mem::size_of::<f64>();
+
+    let (allocated, payload_allocations) =
+        measured_allocations(output_payload, || lhs.catdomain(&rhs).unwrap());
+
+    assert_eq!(payload_allocations, 1);
+    assert!(
+        allocated <= output_payload as u64 + STRUCTURAL_TOLERANCE,
+        "typed cat allocated {allocated} B for a {output_payload} B output"
+    );
+}
+
+#[test]
+fn typed_absorb_clones_the_destination_once() {
+    // What: a warmed typed absorb allocates the destination clone and nothing
+    // per block — the merge-join writes prefixes in place.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let mut state = 0x5eed_0582u64;
+    let destination: TensorMap<U1FusionRule, f64> = TensorMap::from_block_fn(
+        &runtime,
+        [&u1_leg(&provider, &[(0, 251)])],
+        [&u1_leg(&provider, &[(0, 127)])],
+        |_, _| pseudo_random(&mut state),
+    )
+    .unwrap();
+    let mut state = 0x5eed_0583u64;
+    let source: TensorMap<U1FusionRule, f64> = TensorMap::from_block_fn(
+        &runtime,
+        [&u1_leg(&provider, &[(0, 263)])],
+        [&u1_leg(&provider, &[(0, 101)])],
+        |_, _| pseudo_random(&mut state),
+    )
+    .unwrap();
+    black_box(destination.absorb(&source).unwrap());
+    let output_payload = destination.data().len() * std::mem::size_of::<f64>();
+
+    let (allocated, payload_allocations) =
+        measured_allocations(output_payload, || destination.absorb(&source).unwrap());
+
+    assert_eq!(payload_allocations, 1);
+    assert!(
+        allocated <= output_payload as u64 + STRUCTURAL_TOLERANCE,
+        "typed absorb allocated {allocated} B for a {output_payload} B destination clone"
+    );
+}
+
+#[test]
+fn typed_cat_materializes_a_compact_operand_exactly_once() {
+    // What: a compact diagonal operand (svd_compact's `s`) is materialized
+    // dense once, into the shared body cache — the first cat pays the
+    // dense-cache allocation, the second cat on the same handle pays only the
+    // output.
+    const DEGENERACY: usize = 128;
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let leg =
+        GradedSpace::try_new(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, DEGENERACY)], false).unwrap();
+    let mut state = 0x5eed_0584u64;
+    let tensor: TensorMap<Z2FusionRule, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| pseudo_random(&mut state))
+            .unwrap();
+    // Warm every layout cache with a throwaway spectrum factor, so the
+    // measured handle below starts with warm layouts but a cold body cache.
+    let warmup: TensorMap<Z2FusionRule, f64> = tensor.svd_compact().unwrap().1;
+    black_box(warmup.catdomain(&warmup).unwrap());
+
+    let s: TensorMap<Z2FusionRule, f64> = tensor.svd_compact().unwrap().1;
+    let dense_payload = DEGENERACY * DEGENERACY * std::mem::size_of::<f64>();
+    let output_payload = 2 * dense_payload;
+
+    let (cold, _) = measured_allocations(output_payload, || s.catdomain(&s).unwrap());
+    assert!(
+        cold >= (dense_payload + output_payload) as u64,
+        "first cat on a compact operand allocated only {cold} B — the dense \
+         materialization ({dense_payload} B) did not happen here, so it must \
+         have been built eagerly at construction"
+    );
+
+    let (warm, payload_allocations) = measured_allocations(output_payload, || {
+        black_box(s.catdomain(&s).unwrap());
+    });
+    assert_eq!(payload_allocations, 1);
+    assert!(
+        warm <= output_payload as u64 + STRUCTURAL_TOLERANCE,
+        "second cat re-materialized the compact operand: {warm} B allocated \
+         for a {output_payload} B output"
+    );
+}
