@@ -7365,8 +7365,9 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
     };
     let bind_lowered = |homspace: FusionTreeHomSpace| {
         let count = homspace
-            .try_fusion_tree_keys_lowered(provider.as_ref())
+            .prepare_fusion_tree_layout_lowered(provider.as_ref())
             .unwrap()
+            .commit()
             .len();
         BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
             Arc::clone(&provider),

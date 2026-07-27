@@ -283,6 +283,7 @@ fn lowered_build_operation_error(error: LoweredFusionTreeBuildError) -> Operatio
     }
 }
 
+#[cfg(test)]
 fn checked_lowered_build_operation_error(error: LoweredFusionTreeBuildError) -> OperationError {
     OperationError::FusionAlgebra(Box::new(error.into_checked_fusion_algebra()))
 }
@@ -1199,9 +1200,10 @@ where
         Self::from_derived(provider, space)
     }
 
-    /// Internal shape-admission bridge using lowered metadata.
-    #[doc(hidden)]
-    pub fn from_degeneracy_shapes_lowered<Shapes>(
+    /// Test-only shape-admission bridge using lowered metadata (#586
+    /// demotion: external callers use the public final-homspace installer).
+    #[cfg(test)]
+    pub(crate) fn from_degeneracy_shapes_lowered<Shapes>(
         provider: Arc<R>,
         homspace: FusionTreeHomSpace,
         shapes: Shapes,
@@ -1283,8 +1285,8 @@ where
     ///
     /// Matching legacy Subset and Complete stamps are revalidated; publication
     /// occurs only after structural, algebraic, and complete-grid proofs pass.
-    #[doc(hidden)]
-    pub fn bind_multiplicity_free_lowered(
+    #[cfg(test)]
+    pub(crate) fn bind_multiplicity_free_lowered(
         mut space: DynamicFusionMapSpace,
         provider: Arc<R>,
     ) -> Result<Self, OperationError>
@@ -3229,8 +3231,9 @@ mod lowered_metadata_tests {
         R: LoweredMultiplicityFreeAlgebra,
     {
         homspace
-            .try_fusion_tree_keys_lowered(rule)
+            .prepare_fusion_tree_layout_lowered(rule)
             .unwrap()
+            .commit()
             .iter()
             .map(|key| {
                 homspace
@@ -4131,8 +4134,9 @@ mod lowered_metadata_tests {
         let homspace =
             FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
         homspace
-            .try_fusion_tree_keys_lowered(&U1FusionRule)
-            .unwrap();
+            .prepare_fusion_tree_layout_lowered(&U1FusionRule)
+            .unwrap()
+            .commit();
         assert!(homspace.existing_id().is_none());
         reset_scratch_publication_observations();
 
@@ -5328,7 +5332,10 @@ mod scratch_cache_tests {
         let half = tenet_core::SU2Irrep::from_twice_spin(1).sector_id();
         let leg = || FusionProductSpace::new([SectorLeg::new([(half, 1)], false)]);
         let hom = FusionTreeHomSpace::new(leg(), leg());
-        let lowered_keys = hom.try_fusion_tree_keys_lowered(provider.as_ref()).unwrap();
+        let lowered_keys = hom
+            .prepare_fusion_tree_layout_lowered(provider.as_ref())
+            .unwrap()
+            .commit();
         let count = lowered_keys.len();
         let bound = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
             Arc::clone(&provider),
