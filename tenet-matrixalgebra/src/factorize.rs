@@ -5436,10 +5436,15 @@ where
 ///
 /// Why the `inverse_*` route compilers are reused rather than copied: they map
 /// source blocks onto the derived output layout under a codomain/domain swap,
-/// and on an endomorphism (`codomain == domain`, checked above) that swap is
-/// the identity — the two tree lists are the same list. Duplicating 80 lines to
-/// spell the identity differently would only give the two copies a chance to
-/// drift.
+/// and on an endomorphism that swap is the identity — the two tree lists are
+/// the same list. Duplicating 80 lines to spell the identity differently would
+/// only give the two copies a chance to drift.
+///
+/// # Panics
+///
+/// Debug-asserts `codomain == domain`. Refusing a non-endomorphism is the
+/// caller's job, so that the message names the function the user called
+/// (`exp`) rather than whichever helper noticed first.
 pub(crate) fn map_square_sectors_dyn<R, D, S, I, F>(
     input: &BoundDynamicTensorRef<'_, R, D>,
     init: I,
@@ -5452,24 +5457,25 @@ where
     F: FnMut(&mut S, &[D], usize, &mut [D], usize) -> Result<(), OperationError>,
 {
     let source_space = input.space().space();
-    if source_space.homspace().codomain() != source_space.homspace().domain() {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: "exp requires an endomorphism (codomain == domain)",
-        });
-    }
+    debug_assert_eq!(
+        source_space.homspace().codomain(),
+        source_space.homspace().domain(),
+        "callers refuse a non-endomorphism in their own words first"
+    );
     let output_space = input
         .space()
         .derive_from_final_homspace(source_space.homspace().clone())?;
     let mut output_data = vec![D::zero(); output_space.space().required_len()?];
 
     let source_regions = checked_sector_regions(source_space.structure(), source_space.nout())?;
+    // The output layout is derived here, from a homspace this function just
+    // built, so it is canonical by construction whatever the input layout was —
+    // the packed input route below reaches the very same output regions.
     let output_regions = checked_sector_regions(
         output_space.space().structure(),
         output_space.space().nout(),
     )?
-    .ok_or(OperationError::UnsupportedTensorContractScope {
-        message: "matrix-function derived output requires canonical coupled-sector storage",
-    })?;
+    .expect("a freshly derived matrix-function layout is canonical");
     match source_regions {
         Some(source) => {
             let routes = compile_inverse_region_routes(

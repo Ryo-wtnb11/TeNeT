@@ -6848,7 +6848,7 @@ fn assert_identity_sector_matrices(matrices: &[(SectorId, usize, usize, Vec<f64>
 //
 // The pinned 0.17.0 tree (`~/.julia/packages/TensorKit/jCjQQ`) was not the
 // resolved version, which does not weaken the oracle: `exp!`
-// (`src/tensors/linalg.jl:420-427`) is character-identical in the two trees and
+// (`src/tensors/linalg.jl:420-428`) is character-identical in the two trees and
 // contains no arithmetic — it checks `domain == codomain` and hands every block
 // to `LinearAlgebra.exp!`, so the numbers are Julia stdlib v1.11's, not
 // TensorKit's, in either tree.
@@ -7859,10 +7859,10 @@ fn exp_rejects_a_non_endomorphism() {
         matches!(
             error,
             OperationError::UnsupportedTensorContractScope {
-                message: "eigh requires an endomorphism (codomain == domain)"
+                message: "exp requires an endomorphism (codomain == domain)"
             }
         ),
-        "unexpected error {error:?}"
+        "an exp caller must be refused in exp's words, not eigh's: {error:?}"
     );
 }
 

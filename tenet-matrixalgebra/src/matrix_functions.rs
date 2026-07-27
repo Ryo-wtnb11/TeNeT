@@ -51,14 +51,24 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
-    // TensorKit's `exp!` (`linalg.jl:420-427`) checks only that the map is an
-    // endomorphism and then runs a general per-block exponential. The Hermitian
-    // spectral route is kept for Hermitian input — it is exact, it is what the
-    // published values of this function have always been, and it costs one
-    // eigendecomposition instead of ~7 GEMMs and a solve — with blockwise Padé
-    // behind it for everything else (issue #577). The predicate is asked
-    // directly rather than inferred from a failed EIGH, so a backend failure is
-    // never mistaken for non-hermiticity.
+    // TensorKit's `exp!` (`linalg.jl:420-428`) checks only that the map is an
+    // endomorphism and then runs a general per-block exponential. Ask that
+    // question here, at the one point both routes pass through, instead of
+    // letting it fall to whichever helper notices first: the dispatch below
+    // reaches `is_hermitian_endomorphism_dyn`, whose refusal names `eigh` —
+    // not the function the caller called.
+    let space = input.space().space();
+    if space.homspace().codomain() != space.homspace().domain() {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "exp requires an endomorphism (codomain == domain)",
+        });
+    }
+    // The Hermitian spectral route is kept for Hermitian input — it is exact,
+    // it is what the published values of this function have always been, and it
+    // costs one eigendecomposition instead of ~7 GEMMs and a solve — with
+    // blockwise Padé behind it for everything else (issue #577). The predicate
+    // is asked directly rather than inferred from a failed EIGH, so a backend
+    // failure is never mistaken for non-hermiticity.
     if is_hermitian_endomorphism_dyn(input)? {
         return spectral_function_dyn(dense, context, input, &f64::exp);
     }
@@ -158,8 +168,6 @@ impl<D: FactorScalar> Pade13Workspace<D> {
 ///
 /// # Errors
 ///
-/// - [`OperationError::UnsupportedTensorContractScope`] for a non-endomorphism
-///   or a layout with no canonical coupled-sector output;
 /// - [`OperationError::InvalidArgument`] for a nonfinite block, which has no
 ///   exponential and would otherwise reach the backend as a silent NaN, or for
 ///   a block whose column 1-norm overflows to infinity even though every entry
