@@ -4201,10 +4201,10 @@ where
 
     /// TensorKit `catdomain(t1, t2)`:
     /// concatenate two `N₁ <- 1` tensor maps along their sole domain leg. The
-    /// codomain product spaces must match exactly (TK lines 480-483); the two
-    /// domain legs must share duality (TK 486-487) and are combined by direct
-    /// sum `V = V1 ⊕ V2` (TK 489); reduced data is copied into adjacent
-    /// column slabs per coupled sector, `self` first (TK 492-495).
+    /// codomain product spaces must match exactly; the two domain legs must
+    /// share duality and are combined by direct sum `V = V1 ⊕ V2`; reduced
+    /// data is copied into adjacent column slabs per coupled sector, `self`
+    /// first.
     ///
     /// Rust uses a method (`t1.catdomain(&t2)`) because binary tensor
     /// operations in this API are methods; the name and operand order match
@@ -4240,10 +4240,9 @@ where
 
     /// TensorKit `catcodomain(t1, t2)`:
     /// concatenate two `1 <- N₂` tensor maps along their sole codomain leg.
-    /// The domain product spaces must match exactly (TK 499-501); the two
-    /// codomain legs must share duality (TK 503-504) and are combined by
-    /// direct sum (TK 506); reduced data is copied into adjacent row slabs
-    /// per coupled sector, `self` first (TK 507-512).
+    /// The domain product spaces must match exactly; the two codomain legs
+    /// must share duality and are combined by direct sum; reduced data is
+    /// copied into adjacent row slabs per coupled sector, `self` first.
     ///
     /// Method-vs-free-function note, narrowings, complexity and error
     /// classes: exactly as [`Self::catdomain`], with the codomain and domain
@@ -4335,8 +4334,8 @@ where
     /// # Errors
     ///
     /// In the erased facade's order: [`Error::InvalidArgument`] on unequal
-    /// codomain/domain ranks (TK throws its `DimensionError` for the same,
-    /// 533-534), [`Error::RuleMismatch`] on differing provider identities,
+    /// codomain/domain ranks (TK throws its `DimensionError` for the same),
+    /// [`Error::RuleMismatch`] on differing provider identities,
     /// [`Error::RuntimeMismatch`] on differing runtimes, and
     /// [`Error::InvalidArgument`] when corresponding legs differ in duality.
     /// The messages name `TensorMap::absorb` where the erased ones name

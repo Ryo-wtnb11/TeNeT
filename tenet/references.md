@@ -61,15 +61,15 @@ here.
 | `typed` (module doc) | TensorKitSectors | 0.3.4 | `product.jl:245-294` | `ProductSector` / Deligne product `⊠` |
 | `typed::GradedSpace::degeneracies` | TensorKit | 0.17.0 | `spaces/gradedspace.jl:96-101` | `dim(V, c)` |
 | `typed::GradedSpace::sectors` | TensorKit | 0.17.0 | `spaces/gradedspace.jl:180-187` | divergence: tenet returns stored labels as-is, TK dualizes stored keys on read when `isdual(V)` |
-| `typed::GradedSpace::truncspace` | TensorKit | 0.17.0 | `factorizations/truncation.jl:261-269` | `findtruncated(_svd)` for `TruncationSpace` — the semantics of the strategy; `truncspace` itself is `factorizations/truncation.jl:23-27` |
+| `typed::GradedSpace::truncspace` | TensorKit | 0.17.0 | `factorizations/truncation.jl:261-270` | `findtruncated(_svd)` for `TruncationSpace` — the semantics of the strategy; `truncspace` itself is `factorizations/truncation.jl:23-26` |
 | `typed::GradedSpace::try_dual` | TensorKit | 0.17.0 | `spaces/gradedspace.jl:112` | divergence: TK flips the flag and dualizes lazily on read; tenet rewrites the stored sector table eagerly |
 | `typed::GradedSpace::try_dual` | TensorKit | 0.17.0 | `spaces/vectorspaces.jl:69-73` | the `dual(dual(V)) == V` contract |
 | `typed::GradedSpace::try_new` | TensorKit | 0.17.0 | `spaces/gradedspace.jl:70-85` | `GradedSpace` / `Vect[I]` constructor family |
-| `typed::TensorMap::absorb` | TensorKit | 0.17.0 | `tensors/linalg.jl:531-545` | `absorb` (531), `absorb!` (532-545); shared-block `min` region copy at 538-543 |
+| `typed::TensorMap::absorb` | TensorKit | 0.17.0 | `tensors/linalg.jl:531-545` | `absorb` (531), `absorb!` (532-545); rank-check `DimensionError` at 533-534; shared-block `min` region copy at 538-543 |
 | `typed::TensorMap::adjoint` | TensorKit | 0.17.0 | `tensors/linalg.jl:218` | eager `adjoint!` into a fresh destination |
 | `typed::TensorMap::block_count` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:331-335` | `length(blocksectors(t))` counts coupled sectors |
-| `typed::TensorMap::catcodomain` | TensorKit | 0.17.0 | `tensors/linalg.jl:498-514` | |
-| `typed::TensorMap::catdomain` | TensorKit | 0.17.0 | `tensors/linalg.jl:479-497` | |
+| `typed::TensorMap::catcodomain` | TensorKit | 0.17.0 | `tensors/linalg.jl:498-514` | domain match 499-500; codomain duality 503-504; direct sum `V = V1 ⊕ V2` 506; per-sector row slabs, `t1` first, 509-512 |
+| `typed::TensorMap::catdomain` | TensorKit | 0.17.0 | `tensors/linalg.jl:479-497` | codomain match 480-483; domain duality 486-487; direct sum `V = V1 ⊕ V2` 489; per-sector column slabs, `t1` first, 492-495 |
 | `typed::TensorMap::codomain_rank` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:239-241` | `numout` |
 | `typed::TensorMap::codomain_spaces` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:204-214` | `codomain(t)` |
 | `typed::TensorMap::contract_ordered` | TensorKit | 0.17.0 | `tensors/tensoroperations.jl:119-146` | `TO.tensorcontract!` and its `pAB` output permutation |
@@ -97,8 +97,8 @@ here.
 | `typed::TensorMap::numout` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:239-241` | |
 | `typed::TensorMap::qr_compact` | TensorKit | 0.17.0 | `factorizations/diagonal.jl:16-28,61-66` | divergence: TK's `DiagonalAlgorithm` QR fast path not adopted (#613 Group 4) |
 | `typed::TensorMap::qr_full` | TensorKit | 0.17.0 | `factorizations/diagonal.jl:16-28,61-66` | same non-adoption as `qr_compact` |
-| `typed::TensorMap::rand` | TensorKit | 0.17.0 | `tensors/tensor.jl:320-407` | the generated `rand`/`randn`/`randexp`/`randisometry` family |
-| `typed::TensorMap::rand_with_seed` | TensorKit | 0.17.0 | `tensors/tensor.jl:320-407` | divergence: TK threads a caller-supplied `rng` (overloads at 363-406 inside the generated block), no integer-seed entry point |
+| `typed::TensorMap::rand` | TensorKit | 0.17.0 | `tensors/tensor.jl:320-408` | the generated `rand`/`randn`/`randexp`/`randisometry` family |
+| `typed::TensorMap::rand_with_seed` | TensorKit | 0.17.0 | `tensors/tensor.jl:320-408` | divergence: TK threads a caller-supplied `rng` (overloads at 363-406 inside the generated block), no integer-seed entry point |
 | `typed::TensorMap::rank` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:267` | `numind` |
 | `typed::TensorMap::re` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:707-717` | `Base.real` |
 | `typed::TensorMap::remove_unit` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:186-197` | |
