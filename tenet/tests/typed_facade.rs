@@ -11,7 +11,7 @@ use tenet::core::{
     complete_hom_space_structure_cache_info, fusion_tree_layout_cache_info, BraidingStyleKind,
     CheckedFusionAlgebra, FusionAlgebraError, FusionRule, FusionStyleKind,
     MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
-    RuleIdentity, SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorVec,
+    ProductFusionRuleExt, RuleIdentity, SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorVec,
 };
 use tenet::prelude::{Complex64, Runtime};
 use tenet::typed::{GradedSpace, TensorMap, Truncation};
@@ -6468,4 +6468,141 @@ fn typed_and_erased_reductions_and_factorizations_agree_on_fz2_u1_su2() {
         (&typed_a, &typed_b),
         &fz2_u1_su2_label,
     );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #610: the generic product provider as the canonical public route.
+//
+// Everything below is written the way a downstream user would have to write
+// it: `ProductFusionRuleExt::product` for the provider, `product_sector` for
+// the label, `tenet::typed` for the space and the tensor. No
+// `tenet::prelude::Space` product constructor appears, so the tests fail —
+// they do not silently reroute — if the fixed erased constructors were the
+// only working path.
+// ---------------------------------------------------------------------------
+
+/// `fZ2 ⊠ U(1)` built from the generic rule product, then put through an
+/// algebraic identity that a wrong block layout or a dropped fermionic sign
+/// would break.
+#[test]
+fn generic_product_provider_drives_the_typed_facade_without_a_fixed_constructor() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    let rule = Arc::new(tenet::core::FermionParityFusionRule.product(tenet::core::U1FusionRule));
+    let label = |parity: tenet::core::Z2Irrep, charge: i32| {
+        tenet::core::product_sector(parity, tenet::core::U1Irrep::new(charge))
+    };
+
+    let p = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [
+            (label(tenet::core::Z2Irrep::EVEN, 0), 2),
+            (label(tenet::core::Z2Irrep::ODD, 1), 1),
+        ],
+        false,
+    )
+    .unwrap();
+    // Dual, because a dual leg is the only place the fermionic braiding sign
+    // can act: without one the identities below hold for a sign-free algebra
+    // too and prove much less.
+    let q = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [
+            (label(tenet::core::Z2Irrep::ODD, -1), 1),
+            (label(tenet::core::Z2Irrep::EVEN, 0), 2),
+        ],
+        true,
+    )
+    .unwrap();
+
+    // A distinct value per element, so any block or element reordering moves
+    // the buffer and the identities below stop holding by coincidence.
+    let mut next = 0.0_f64;
+    let t: TensorMap<_, f64> = TensorMap::from_block_fn(&runtime, [&p, &q], [&p, &q], |_, _| {
+        next += 1.0;
+        next
+    })
+    .unwrap();
+
+    assert!(
+        t.block_count() > 1,
+        "a single block would make the identities below near-vacuous"
+    );
+    let norm = t.norm().unwrap();
+    assert!(norm > 0.0, "zero tensor: the assertions below are vacuous");
+
+    // <t, t> = |t|^2 and tr(t† ∘ t) = |t|^2: three independent code paths
+    // (weighted inner, reduction norm, composition + trace) over the product
+    // provider's own fusion and dual data.
+    assert!((t.inner(&t).unwrap() - norm * norm).abs() < 1e-9 * norm * norm);
+    let gram_trace = t.adjoint().unwrap().compose(&t).unwrap().tr().unwrap();
+    assert!((gram_trace - norm * norm).abs() < 1e-9 * norm * norm);
+}
+
+/// The recursive three-factor spelling: `(fZ2 ⊠ U(1)) ⊠ SU(2)` needs no new
+/// core type, and its factor order and association are structure — of the Rust
+/// type, of the label, and of the [`tenet::core::RuleIdentity`] — never an
+/// automatic equivalence.
+#[test]
+fn nested_three_factor_product_keeps_its_declared_factor_order() {
+    let _guard = cache_lock();
+
+    let left_assoc = Arc::new(
+        tenet::core::FermionParityFusionRule
+            .product(tenet::core::U1FusionRule)
+            .product(SU2FusionRule),
+    );
+    let label = |parity: tenet::core::Z2Irrep, charge: i32, twice_spin: usize| {
+        tenet::core::product_sector(
+            tenet::core::product_sector(parity, tenet::core::U1Irrep::new(charge)),
+            SU2Irrep::from_twice_spin(twice_spin),
+        )
+    };
+
+    let declared = [
+        (label(tenet::core::Z2Irrep::ODD, 1, 1), 1),
+        (label(tenet::core::Z2Irrep::EVEN, 0, 2), 2),
+    ];
+    let v = GradedSpace::try_new(Arc::clone(&left_assoc), declared, false).unwrap();
+
+    // Decoded labels come back nested exactly as declared: parity outermost
+    // left, then charge, with the spin as the outer right factor. Compared as
+    // a set, because a leg is stored in `SectorId` order, not declaration
+    // order.
+    let mut decoded = v.sectors().unwrap();
+    decoded.sort_unstable();
+    let mut expected: Vec<_> = declared.iter().map(|(label, _)| *label).collect();
+    expected.sort_unstable();
+    assert_eq!(decoded, expected);
+    let odd = decoded
+        .iter()
+        .find(|label| *label.left().left() == tenet::core::Z2Irrep::ODD)
+        .expect("the odd-parity label survives the round trip");
+    assert_eq!(*odd.left().right(), tenet::core::U1Irrep::new(1));
+    assert_eq!(*odd.right(), SU2Irrep::from_twice_spin(1));
+
+    // Association is not an equivalence: `fZ2 ⊠ (U(1) ⊠ SU(2))` is a different
+    // provider with a different label type, and the identities do not compare
+    // equal. The label type difference is what makes the line below compile
+    // only when written for the right association.
+    let right_assoc = tenet::core::FermionParityFusionRule
+        .product(tenet::core::U1FusionRule.product(SU2FusionRule));
+    let right_label = tenet::core::product_sector(
+        tenet::core::Z2Irrep::ODD,
+        tenet::core::product_sector(tenet::core::U1Irrep::new(1), SU2Irrep::from_twice_spin(1)),
+    );
+    assert_ne!(
+        left_assoc.rule_identity(),
+        right_assoc.rule_identity(),
+        "left- and right-associated products must stay distinct providers"
+    );
+    assert_eq!(*right_label.left(), tenet::core::Z2Irrep::ODD);
+
+    // Factor order is not an equivalence either: swapping the two factors of
+    // the inner product gives a third distinct provider.
+    let swapped = tenet::core::U1FusionRule
+        .product(tenet::core::FermionParityFusionRule)
+        .product(SU2FusionRule);
+    assert_ne!(left_assoc.rule_identity(), swapped.rule_identity());
 }
