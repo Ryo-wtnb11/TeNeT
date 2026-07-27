@@ -102,6 +102,9 @@ let c_c64 = c.to_c64();                          // c64 には明示 widening
 - `Space`: sector→degeneracy の列 + 双対フラグ。`SectorLeg` の薄い高レベル形。
   rule ごとのコンストラクタ(`Space::u1`, `Space::z2`, `Space::su2`,
   `Space::fz2`, 積は `Space::product`)。
+  (現況追記 #610: 積の正規ルートは `tenet::typed` の generic provider 経路
+  (`ProductFusionRuleExt::product` + `product_sector`)。`Space::product` は
+  互換のために残る固定 erased 版で、拡張機構ではない。)
 - `Tensor`: `{ inner: FusionTensorMap 系(rule 型消去), rt: Arc<Runtime> }`。
   **rank は動的**(const generics はユーザー層に出さない)。storage dtype は
   `f64`/`c64` の enum。混在演算は昇格せず `DtypeMismatch`、必要なら

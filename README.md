@@ -54,6 +54,22 @@ fZ2, SU(2), Fibonacci, and their products; SU(3)'s tabulated rule lives in
 `tenet-core`) are ordinary implementations of those traits, with no privileged
 status in the engine. The crate has zero workspace dependencies.
 
+Products are a provider combinator, not a list of blessed symmetries. A
+product of providers is itself a provider, so
+
+```text
+FermionParityFusionRule.product(U1FusionRule).product(SU2FusionRule)
+```
+
+is `(fZ2 ⊠ U(1)) ⊠ SU(2)` — any ordered product of admitted components,
+recursively nested, without a new `RuleKind`, dispatch arm or `Space`
+constructor. Factor order and association are structure of the Rust type and of
+the `ProductSector` label, never an automatic equivalence: `U(1) ⊠ fZ2` and
+`fZ2 ⊠ U(1)` are both legal and are different types. `tenet::typed`'s module
+documentation carries the compiling example; the erased `Space::product` and
+`Space::fz2_u1_su2` are two fixed conveniences kept for compatibility and are
+not the extension mechanism.
+
 The provider-typed facade `tenet::typed::{GradedSpace<R>, TensorMap<R, D>}` is
 where the architecture is headed: `R` stays concrete, sectors come back as the
 provider's own labels (`SectorCodec::Sector`) instead of opaque `SectorId`s, and

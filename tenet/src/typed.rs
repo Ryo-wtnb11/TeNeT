@@ -14,6 +14,76 @@
 //! [`tenet_core::BlockKey`]. Labels are what [`TensorMap::block_fusion_trees`]
 //! is for.
 //!
+//! # Product symmetries
+//!
+//! A product symmetry needs no new constructor here, and no new type in the
+//! engine. A product of providers *is* a provider — build it with
+//! [`tenet_core::ProductFusionRuleExt::product`] and label it with
+//! [`tenet_core::product_sector`] — so this facade drives `fZ2 ⊠ U(1)`, or any
+//! other ordered product of admitted components, through the same
+//! [`GradedSpace::try_new`] and [`TensorMap::zeros`] as a single symmetry:
+//!
+//! ```
+//! use std::sync::Arc;
+//!
+//! use tenet::core::{
+//!     product_sector, FermionParityFusionRule, ProductFusionRuleExt, U1FusionRule, U1Irrep,
+//!     Z2Irrep,
+//! };
+//! use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
+//!
+//! # fn main() -> Result<(), Error> {
+//! let runtime = Runtime::builder().build()?;
+//! let rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
+//!
+//! let even = product_sector(Z2Irrep::EVEN, U1Irrep::new(0));
+//! let odd = product_sector(Z2Irrep::ODD, U1Irrep::new(1));
+//! let v = GradedSpace::try_new(Arc::clone(&rule), [(even, 2), (odd, 1)], false)?;
+//!
+//! let t: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&v], [&v])?;
+//! assert_eq!(t.block_count(), 2);
+//! assert_eq!(t.block_fusion_trees(0)?.coupled(), &even);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Three or more factors are the same call again, because the product is
+//! itself a provider. The spelling
+//!
+//! ```text
+//! FermionParityFusionRule.product(U1FusionRule).product(SU2FusionRule)
+//! ```
+//!
+//! is the left-associated `(fZ2 ⊠ U(1)) ⊠ SU(2)`, whose labels are
+//! `product_sector(product_sector(parity, charge), spin)` — the label nests in
+//! step with the provider. **Factor order and association are structure, not
+//! an equivalence.** `U(1) ⊠ fZ2` and `fZ2 ⊠ U(1)` are both legal, are
+//! different Rust types with different [`tenet_core::RuleIdentity`]s, and
+//! converting between them is an explicit component swap; nothing here permutes
+//! factors for you. Association is where TeNeT diverges from TensorKit rather
+//! than mirrors it: TK's `⊠` flattens nested products into one
+//! `ProductSector{Tuple{…}}`, so association is unobservable there, while
+//! TeNeT keeps the nesting in the Rust type — see
+//! [`tenet_core::ProductFusionRule`] for the full statement.
+//!
+//! The scope of that claim is this facade's current admission:
+//! `MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra +
+//! SectorCodec`. Complex categorical scalars and anyonic admission are issue
+//! #539; multiplicity-bearing providers (SU(3) and any other `Generic` rule)
+//! need their own admission path, as noted below.
+//!
+//! **`ProductSector` is not `ProductSpace`.** [`tenet_core::ProductSector`] is
+//! a *sector label*: one irrep of a Deligne product category, TensorKit's
+//! `ProductSector` (`TensorKitSectors` 0.3.4, `src/product.jl:245-294`).
+//! TensorKit's `ProductSpace` is the unrelated leg-level notion — an ordered
+//! list of vector spaces forming a tensor's codomain or domain — which this
+//! facade spells as the `[&v, &w]` leg slices passed to every constructor, not
+//! as a public container type.
+//!
+//! The erased [`crate::prelude::Space::product`] and
+//! [`crate::prelude::Space::fz2_u1_su2`] constructors cover two fixed products
+//! for compatibility. They are not the extension mechanism: the route above is.
+//!
 //! # Phase boundary
 //!
 //! This is the phase-6 surface of issue #557: construction
