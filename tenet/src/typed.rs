@@ -647,11 +647,7 @@ where
         .collect();
     Ok(TensorMap {
         runtime: runtime.clone(),
-        body: Arc::new(TypedTensorBody {
-            space,
-            data: TypedData::Diagonal(data),
-            dense_cache: std::sync::OnceLock::new(),
-        }),
+        body: Arc::new(TypedTensorBody::diagonal(space, data)),
     })
 }
 
@@ -812,20 +808,45 @@ where
 /// and its block payload.
 struct TypedTensorBody<R, D> {
     space: BoundDynamicFusionMapSpace<R>,
-    data: TypedData<D>,
+    /// Why the payload carries its own reference count rather than sitting
+    /// inline in the body: an operation that rewrites only the *space* and
+    /// leaves every stored value where it is — inserting or removing a unit
+    /// leg, whose trivial sector adds no block and reorders nothing — must be
+    /// an O(1) metadata edit. Inline, such an operation would have to copy the
+    /// whole `Vec<D>` to build a body with the new space; behind this `Arc` it
+    /// clones a pointer. Clone-then-modify keeps the same property from the
+    /// other side: two `TensorMap`s share one payload until one of them writes.
+    data: Arc<TypedData<D>>,
     /// Materialization of a [`TypedData::Diagonal`] payload into the dense
     /// coupled layout, computed at most once and shared by every clone of this
     /// body — the erased sibling's `compact_dense` cache, without its hand-copy
     /// on each `Tensor` value. Never populated for a dense payload.
+    ///
+    /// Deliberately *not* inside the payload `Arc`: the materialized buffer is
+    /// a function of the payload **and** the space it is laid out on, so a body
+    /// that reuses a payload under a different space must start from an empty
+    /// cache rather than inherit one keyed to the old layout.
     dense_cache: std::sync::OnceLock<Vec<D>>,
 }
 
 impl<R, D> TypedTensorBody<R, D> {
     /// A body holding an already-dense payload.
     fn dense(space: BoundDynamicFusionMapSpace<R>, data: Vec<D>) -> Self {
+        Self::new(space, TypedData::Dense(data))
+    }
+
+    /// A body holding a compact spectrum payload.
+    fn diagonal(
+        space: BoundDynamicFusionMapSpace<R>,
+        spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<D>>,
+    ) -> Self {
+        Self::new(space, TypedData::Diagonal(spectrum))
+    }
+
+    fn new(space: BoundDynamicFusionMapSpace<R>, data: TypedData<D>) -> Self {
         Self {
             space,
-            data: TypedData::Dense(data),
+            data: Arc::new(data),
             dense_cache: std::sync::OnceLock::new(),
         }
     }
@@ -864,7 +885,7 @@ impl<R, D> core::fmt::Debug for TensorMap<R, D> {
             // `{:?}` would make a diagnostic the most expensive call on the type.
             .field(
                 "elements",
-                &match &self.body.data {
+                &match &*self.body.data {
                     TypedData::Dense(data) => data.len(),
                     TypedData::Diagonal(spectrum) => {
                         spectrum.iter().map(|entry| entry.values.len()).sum()
@@ -1075,7 +1096,11 @@ where
             let space = body.space.space();
             sector_regions(space.structure(), space.nout())?
         };
-        let TypedData::Dense(data) = &mut body.data else {
+        // The payload `Arc` is unique for the same reason the body one is: this
+        // tensor was built two statements ago and never handed out.
+        let payload =
+            Arc::get_mut(&mut body.data).expect("a freshly built payload has no other owner");
+        let TypedData::Dense(data) = payload else {
             unreachable!("`build` always produces a dense payload");
         };
         for region in regions.iter() {
@@ -2510,11 +2535,7 @@ where
     fn with_spectrum(&self, spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<D>>) -> Self {
         Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody {
-                space: self.body.space.clone(),
-                data: TypedData::Diagonal(spectrum),
-                dense_cache: std::sync::OnceLock::new(),
-            }),
+            body: Arc::new(TypedTensorBody::diagonal(self.body.space.clone(), spectrum)),
         }
     }
 
@@ -2530,17 +2551,13 @@ where
     ) -> Self {
         Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody {
-                space,
-                data: TypedData::Diagonal(spectrum),
-                dense_cache: std::sync::OnceLock::new(),
-            }),
+            body: Arc::new(TypedTensorBody::diagonal(space, spectrum)),
         }
     }
 
     /// The compact payload, when this tensor has one.
     fn spectrum(&self) -> Option<&[tenet_matrixalgebra::SectorSpectrum<D>]> {
-        match &self.body.data {
+        match &*self.body.data {
             TypedData::Diagonal(spectrum) => Some(spectrum),
             TypedData::Dense(_) => None,
         }
@@ -3277,7 +3294,7 @@ where
     /// invariant break rather than a caller mistake — the same judgement, and
     /// the same `expect`, as the erased `Tensor::materialize_diagonal`.
     fn dense_data(&self) -> &[D] {
-        match &self.body.data {
+        match &*self.body.data {
             TypedData::Dense(data) => data,
             TypedData::Diagonal(spectrum) => self.body.dense_cache.get_or_init(|| {
                 tenet_matrixalgebra::diagonal_bond_data(
