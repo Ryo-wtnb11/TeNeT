@@ -814,10 +814,28 @@ struct TypedTensorBody<R, D> {
     /// leg, whose trivial sector adds no block and reorders nothing — must be
     /// an O(1) metadata edit. Inline, such an operation would have to copy the
     /// whole `Vec<D>` to build a body with the new space; behind this `Arc` it
-    /// clones a pointer. Clone-then-modify keeps the same property from the
+    /// clones a pointer. That O(1)-reuse argument holds for **dense payloads
+    /// only**: `TypedData::Diagonal` is a bond-space-only representation, and
+    /// reusing one under a rewritten non-bond space would leave `spectrum()`
+    /// returning `Some` and send `exp`/`inv`/`pinv`/`scale` down their compact
+    /// elementwise arms on a tensor that is no longer an endomorphism. The
+    /// Group 4 (#580) contract is therefore: materialize a compact payload to
+    /// dense *before* changing the space, exactly as the references do —
+    /// TensorKit 0.17 shares `t.data` only for ordinary `TensorMap` and routes
+    /// `DiagonalTensorMap` through the generic similar+block-copy branch
+    /// (`src/tensors/indexmanipulations.jl:124-136,158-195`), and the erased
+    /// facade materializes `Data::Diagonal` first and only then shares the
+    /// resulting `Arc<Data>` (`tenet/src/tensor.rs:4276-4331`). If Group 4
+    /// wants erased-parity sharing of that materialized buffer, that slice
+    /// must also make the materialized payload shareable — today
+    /// `dense_cache` only lends a borrowed slice, so the buffer cannot be
+    /// installed in a new body at O(1). And `TypedData::Diagonal` must not be
+    /// broadened to non-bond spaces without separately proving every compact
+    /// fast path (`spectrum`/`exp`/`inv`/`pinv`/`scale`).
+    /// Clone-then-modify keeps the same property from the
     /// other side: two *bodies* can share one payload until one of them writes
     /// (today `TensorMap::clone` shares the whole body, so this `Arc` earns
-    /// its keep only once Group 4 operations build new bodies over old
+    /// its keep only once Group 4 operations build new bodies over old dense
     /// payloads). This is also parity, not invention: the erased sibling's
     /// `tensor.rs` `TensorBody { space: Arc<..>, data: Arc<Data> }` has had
     /// exactly this two-`Arc` layout all along, so typed converges onto the
@@ -829,9 +847,12 @@ struct TypedTensorBody<R, D> {
     /// on each `Tensor` value. Never populated for a dense payload.
     ///
     /// Deliberately *not* inside the payload `Arc`: the materialized buffer is
-    /// a function of the payload **and** the space it is laid out on, so a body
-    /// that reuses a payload under a different space must start from an empty
-    /// cache rather than inherit one keyed to the old layout.
+    /// a function of the payload **and** the space it is laid out on, so it
+    /// belongs to the body that owns that pairing — any body sharing the
+    /// payload starts from a cold cache and materializes for itself. (Reusing
+    /// a `Diagonal` payload under a *different* space is not a scenario this
+    /// placement serves: that reuse is forbidden outright — see the `data`
+    /// field rationale on the Group 4 contract.)
     dense_cache: std::sync::OnceLock<Vec<D>>,
 }
 
@@ -3357,11 +3378,14 @@ mod representation_gates {
 
     #[test]
     fn a_body_on_a_different_space_reuses_the_payload_allocation() {
-        // What: the property #580 Group 4 rests on. A unit-leg insertion builds
-        // a body with a rewritten space and the *same* stored values; if that
-        // cost a payload copy the operation could not be O(1). The space here
-        // stands in for the rewritten one — what is under test is that a second
-        // body can hold the first body's payload at all, at pointer cost.
+        // What: the property #580 Group 4 rests on, for a *dense* payload — a
+        // compact `Diagonal` payload is bond-space-only and must be
+        // materialized before any space rewrite (see the `data` field
+        // rationale). A unit-leg insertion builds a body with a rewritten
+        // space and the *same* stored dense values; if that cost a payload
+        // copy the operation could not be O(1). The space here stands in for
+        // the rewritten one — what is under test is that a second body can
+        // hold the first body's payload at all, at pointer cost.
         let tensor = fixture();
         let payload = Arc::clone(&tensor.body.data);
         // Hand-constructed body: a struct-shape change surfaces as a compile
@@ -3398,19 +3422,22 @@ mod representation_gates {
     }
 
     #[test]
-    fn a_reused_payload_does_not_inherit_the_dense_cache() {
-        // What: `dense_data()` materializes per-body, against the body's own
-        // cache. This does *not* gate the struct shape — the fresh `OnceLock`
-        // below is hand-supplied, so any layout keeping the field compiles and
-        // passes. It pins only that a cold cache stays cold until this body
-        // materializes for itself, yielding a distinct buffer.
+    fn the_dense_cache_lives_per_body_not_in_the_payload_arc() {
+        // What: cache placement. `dense_cache` sits in the body, outside the
+        // payload `Arc`, so a body that shares a payload starts with a cold
+        // cache and materializes for itself, yielding a distinct buffer. This
+        // is a same-space check on purpose — it makes no unit-leg claim: a
+        // `Diagonal` payload may never be reused under a rewritten space at
+        // all (see the `data` field rationale on the Group 4 contract). It
+        // does *not* gate the struct shape — the fresh `OnceLock` below is
+        // hand-supplied, so any layout keeping the field compiles and passes.
         let s = fixture().svd_compact().unwrap().1;
         assert!(s.body.dense_cache.get().is_none(), "cache warm at birth");
         let materialized = s.data().as_ptr();
         assert!(s.body.dense_cache.get().is_some());
 
         // Hand-constructed body, same caveat as the gate above: shape changes
-        // become compile errors; swap in a real operation under Group 4 (#580).
+        // become compile errors.
         let reused = TensorMap {
             runtime: s.runtime.clone(),
             body: Arc::new(TypedTensorBody {
