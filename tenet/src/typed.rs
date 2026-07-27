@@ -121,7 +121,9 @@
 //! [`TensorMap::scalar`], [`TensorMap::zeros_like`], [`TensorMap::to_c64`],
 //! [`TensorMap::re`], [`TensorMap::im`]) and the **concatenation/absorb
 //! group** ([`TensorMap::catdomain`], [`TensorMap::catcodomain`],
-//! [`TensorMap::absorb`]).
+//! [`TensorMap::absorb`]) and the **index-unit group** ([`TensorMap::twist`],
+//! [`TensorMap::flip`], [`TensorMap::insert_left_unit`],
+//! [`TensorMap::insert_right_unit`], [`TensorMap::remove_unit`]).
 //!
 //! Issue #570 also gave the facade **compact diagonal storage**: a spectrum
 //! factor — `svd_compact`'s and `svd_trunc`'s `s`, `eigh`/`eig`'s `d` — holds
@@ -143,10 +145,7 @@
 //! opened the seam for every provider, fermionic signs included.
 //!
 //! What is still absent — among what remains, the entries below are the ones
-//! with a decision behind them rather than a queue position. This facade is
-//! deliberately narrower than the erased [`crate::prelude::Tensor`], which also
-//! carries `twist`, `flip` and the unit-leg insert/remove pair.
-//! Those are ports waiting on nothing but their turn; the ones below are not:
+//! with a decision behind them rather than a queue position:
 //!
 //! - The **rest of the matrix-function family** — the trigonometric and
 //!   hyperbolic members, `log`, `sylvester`, the `\` and `/` solves and integer
@@ -193,8 +192,9 @@
 use std::sync::Arc;
 
 use tenet_core::{
-    BlockKey, BlockRef, CheckedFusionAlgebra, FusionProductSpace, FusionTreeHomSpace,
-    MultiplicityFreeRigidSymbols, SectorLeg,
+    validate_unit_layout_correspondence_checked, BlockKey, BlockRef, CanonicalUnitFusionRule,
+    CheckedFusionAlgebra, FusionProductSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
+    SectorLeg, UnitLegInsertion,
 };
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace, OutputAxisOrder,
@@ -220,9 +220,12 @@ pub use tenet_matrixalgebra::{Truncation, TruncationSpace};
 use tenet_matrixalgebra::{BoundDynFactor, FactorScalar};
 
 use crate::tensor::{
-    absorb_mapped, apply_fill, cat_homspace, compile_cat_plan, coupled_region_pow_sum,
-    internal_layout_error, sector_regions, validate_norm_p, weighted_inner, weighted_trace,
-    with_planar_axes, CatOperandLayout, CatSide, Fill, PlanarRequestKind, TensorScalar,
+    absorb_mapped, apply_fill, cat_homspace, check_flip_layout_identity, compile_cat_plan,
+    coupled_region_pow_sum, flip_block_factor, flip_toggled_homspace, internal_layout_error,
+    map_checked_unit_layout_error, reject_unbraided_nonunit_legs, scale_blocks_impl,
+    sector_regions, twist_block_factor, twist_is_identity_over_blocks, validate_norm_p,
+    weighted_inner, weighted_trace, with_planar_axes, CatOperandLayout, CatSide, Fill,
+    PlanarRequestKind, TensorScalar,
 };
 use crate::typed_tensor_core::{
     tensorcompose_owned_multiplicity_free, tensorcontract_owned_multiplicity_free,
@@ -903,18 +906,20 @@ struct TypedTensorBody<R, D> {
     /// `DiagonalTensorMap` through the generic similar+block-copy branch
     /// (`src/tensors/indexmanipulations.jl:124-136,158-195`), and the erased
     /// facade materializes `Data::Diagonal` first and only then shares the
-    /// resulting `Arc<Data>` (`tenet/src/tensor.rs:4276-4331`). If Group 4
-    /// wants erased-parity sharing of that materialized buffer, that slice
-    /// must also make the materialized payload shareable — today
-    /// `dense_cache` only lends a borrowed slice, so the buffer cannot be
-    /// installed in a new body at O(1). And `TypedData::Diagonal` must not be
+    /// resulting `Arc<Data>` (`tenet/src/tensor.rs`
+    /// `materialized_dense_data_arc`). The Group 4 slice (#580 PR 5) holds
+    /// that contract in [`TensorMap::shareable_dense_payload`]: a dense
+    /// payload is shared at pointer cost, a compact one is materialized into
+    /// a *fresh* dense payload (one copy) — never by sharing the body-local
+    /// `dense_cache`, which only lends a borrowed slice tied to this body's
+    /// space/payload pairing. And `TypedData::Diagonal` must not be
     /// broadened to non-bond spaces without separately proving every compact
     /// fast path (`spectrum`/`exp`/`inv`/`pinv`/`scale`).
     /// Clone-then-modify keeps the same property from the
-    /// other side: two *bodies* can share one payload until one of them writes
-    /// (today `TensorMap::clone` shares the whole body, so this `Arc` earns
-    /// its keep only once Group 4 operations build new bodies over old dense
-    /// payloads). This is also parity, not invention: the erased sibling's
+    /// other side: two *bodies* can share one payload until one of them
+    /// writes (the unit-leg operations build new bodies over old dense
+    /// payloads; every write route publishes a new payload instead of
+    /// reaching through the `Arc`). This is also parity, not invention: the erased sibling's
     /// `tensor.rs` `TensorBody { space: Arc<..>, data: Arc<Data> }` has had
     /// exactly this two-`Arc` layout all along, so typed converges onto the
     /// established in-repo shape.
@@ -952,6 +957,18 @@ impl<R, D> TypedTensorBody<R, D> {
         Self {
             space,
             data: Arc::new(data),
+            dense_cache: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// A body installing an already-shared payload under a (usually
+    /// rewritten) space — the unit-leg operations' O(1) dense reuse
+    /// (#580 PR 5). The cache starts cold on purpose: it belongs to the
+    /// body's own space/payload pairing (see the `dense_cache` rationale).
+    fn with_shared_payload(space: BoundDynamicFusionMapSpace<R>, data: Arc<TypedData<D>>) -> Self {
+        Self {
+            space,
+            data,
             dense_cache: std::sync::OnceLock::new(),
         }
     }
@@ -4024,6 +4041,358 @@ where
         })
     }
 
+    /// TensorKit `twist(t, inds)` (`tensors/indexmanipulations.jl:90-97`,
+    /// `twist!` 62-78): multiplies each fusion-tree block by the product over
+    /// `legs` (flat leg indices, codomain first) of the ribbon-twist
+    /// eigenvalue θ of that leg's uncoupled sector. θ = −1 for odd fermionic
+    /// sectors and +1 for every bosonic sector, so this is a no-op on purely
+    /// bosonic legs and an involution (θ² = 1) on fermionic ones.
+    ///
+    /// When the twist is the identity on every stored block — TensorKit
+    /// `has_shared_twist` (`indexmanipulations.jl:34-51`): a bosonic
+    /// provider, or no requested leg touching a twisted sector — the result
+    /// is a body-sharing clone, O(1), exactly as TensorKit's `copy = false`
+    /// default shares `t` (`indexmanipulations.jl:91-93`). A compact
+    /// spectrum factor scales spectrum-per-sector and **stays compact**,
+    /// O(Σ_c k_c) — parity with the erased `Data::Diagonal` fast path, and
+    /// with TensorKit, whose `DiagonalTensorMap` twist stays diagonal
+    /// because `similar` preserves the diagonal storage
+    /// (`tensors/diagonal.jl:84-89`) and `twist!` only scales blocks.
+    /// Otherwise: one scaled copy of the dense payload, O(len), through the
+    /// same per-block walk as the erased facade (`scale_blocks_impl`).
+    ///
+    /// No adjoint arm (this facade's `adjoint` is eager, so there is no lazy
+    /// view to materialize first) and no device arm (the payload is a host
+    /// `Vec<D>` by construction) — deliberate narrowings, not semantic
+    /// differences. The erased route's SU(3) rejection is dead here: the
+    /// multiplicity-free admission bound keeps a `Generic` provider out at
+    /// construction.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when a leg is out of range, with the
+    /// erased facade's own message — reported before the empty-list
+    /// short-circuit, matching the erased validation order. An empty `legs`
+    /// returns an identical clone.
+    pub fn twist(&self, legs: &[usize]) -> Result<Self, Error> {
+        let rank = self.rank();
+        if let Some(&leg) = legs.iter().find(|&&leg| leg >= rank) {
+            return Err(Error::InvalidArgument(format!(
+                "twist leg {leg} out of range for rank {rank}"
+            )));
+        }
+        if legs.is_empty() {
+            return Ok(self.clone());
+        }
+        let provider = self.body.space.provider();
+        // NoBraiding preflight (PR #620 review): before the compact arm and
+        // before any θ evaluation — see `reject_unbraided_nonunit_legs`.
+        reject_unbraided_nonunit_legs(
+            provider,
+            self.body.space.space().homspace(),
+            legs,
+            "twist",
+            true,
+        )?;
+        let nout = self.codomain_rank();
+        if let TypedData::Diagonal(spectrum) = &*self.body.data {
+            // Compact arm, mirroring the erased `scaled_by_sector` route: a
+            // bond space's two legs both carry the block's coupled sector, so
+            // the per-block factor collapses to θ(sector)^|legs|. The space
+            // is unchanged, so the payload may stay compact.
+            let sector_factor = |sector: tenet_core::SectorId| -> f64 {
+                legs.iter().map(|_| provider.twist_scalar(sector)).product()
+            };
+            if spectrum
+                .iter()
+                .all(|entry| sector_factor(entry.sector) == 1.0)
+            {
+                return Ok(self.clone());
+            }
+            let scaled = spectrum
+                .iter()
+                .map(|entry| {
+                    let factor = D::from_real(sector_factor(entry.sector));
+                    tenet_matrixalgebra::SectorSpectrum {
+                        sector: entry.sector,
+                        values: entry.values.iter().map(|&value| value * factor).collect(),
+                    }
+                })
+                .collect();
+            return Ok(self.with_spectrum_on(self.body.space.clone(), scaled));
+        }
+        if twist_is_identity_over_blocks(provider, self.body.space.space().structure(), nout, legs)?
+        {
+            return Ok(self.clone());
+        }
+        let mut data = self.dense_data().to_vec();
+        scale_blocks_impl(self.body.space.space(), &mut data, &|key| match key {
+            BlockKey::FusionTree(key) => twist_block_factor(provider, key, nout, legs),
+            _ => 1.0,
+        })?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody::dense(self.body.space.clone(), data)),
+        })
+    }
+
+    /// TensorKit `flip(t, I)` (`tensors/indexmanipulations.jl:21-29`):
+    /// return a tensor isomorphic to `self` where the duality flag of each
+    /// leg in `legs` (flat indices, codomain first; a leg listed twice is
+    /// flipped twice, sequentially) is toggled,
+    /// `space(t', i) = flip(space(t, i))`. The stored sectors and the block
+    /// layout are unchanged; each fusion-tree block picks up the
+    /// Z-isomorphism phase of `fusiontrees/braiding_manipulations.jl:384-414`
+    /// per flipped leg with uncoupled sector `a` and pre-flip duality `d`
+    /// (χ = Frobenius–Schur phase, θ = ribbon twist; both real for every
+    /// rule in scope): codomain leg → `d ? χ·θ : 1`; domain leg →
+    /// `d ? χ : θ`.
+    ///
+    /// Like TensorKit's, this `flip` is *not* an involution: flipping the
+    /// same leg twice returns to the original spaces but can scale odd
+    /// blocks (e.g. by θ = −1 on fermionic legs); only `flip⁴ = id` in
+    /// general.
+    ///
+    /// One scaled copy of the dense payload into a fresh body, O(len); a
+    /// compact spectrum factor materializes first (the flipped space is no
+    /// longer a bond space, so the result cannot stay compact). The same
+    /// facade narrowings as [`Self::twist`] apply: no adjoint arm, no device
+    /// arm, SU(3) dead at the admission bound.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when a leg is out of range (erased message,
+    /// erased validation order — before the empty-list short-circuit; empty
+    /// `legs` returns an identical clone). Otherwise [`Error::Operation`] /
+    /// [`Error::Core`] from the layout derivation of the toggled hom space.
+    pub fn flip(&self, legs: &[usize]) -> Result<Self, Error> {
+        let rank = self.rank();
+        if let Some(&leg) = legs.iter().find(|&&leg| leg >= rank) {
+            return Err(Error::InvalidArgument(format!(
+                "flip leg {leg} out of range for rank {rank}"
+            )));
+        }
+        if legs.is_empty() {
+            return Ok(self.clone());
+        }
+        let hom = self.body.space.space().homspace();
+        // NoBraiding preflight (PR #620 review): flip's coefficients are
+        // built from the same θ/χ — see `reject_unbraided_nonunit_legs`.
+        reject_unbraided_nonunit_legs(self.body.space.provider(), hom, legs, "flip", false)?;
+        let nout = hom.codomain().len();
+        // Sequential semantics for repeated legs, from the helper shared
+        // with the erased facade (#580 PR 5).
+        let (new_hom, occurrences) = flip_toggled_homspace(hom, legs);
+        let space = self.body.space.derive_from_final_homspace(new_hom)?;
+        check_flip_layout_identity(
+            self.body.space.space().structure(),
+            space.space().structure(),
+        )?;
+        let provider = self.body.space.provider();
+        let mut data = self.dense_data().to_vec();
+        scale_blocks_impl(space.space(), &mut data, &|key| match key {
+            BlockKey::FusionTree(key) => flip_block_factor(provider, key, nout, &occurrences),
+            _ => 1.0,
+        })?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody::dense(space, data)),
+        })
+    }
+
+    /// TensorKit `insertleftunit(t, i; dual)`
+    /// (`tensors/indexmanipulations.jl:124-138`): inserts the canonical unit
+    /// leg — the vacuum with degeneracy one, or its dual — at zero-based
+    /// external slot `position`, following TensorKit's left seam convention
+    /// (the codomain/domain seam belongs to the domain side). The trivial
+    /// sector adds no block and reorders nothing, so the stored values are
+    /// untouched.
+    ///
+    /// O(1) for a dense payload: the new body shares the payload allocation,
+    /// exactly as TensorKit's `copy = false` default shares `t.data` for an
+    /// ordinary `TensorMap` (`indexmanipulations.jl:129-130`). A compact
+    /// spectrum factor materializes into a fresh dense payload first (one
+    /// copy) — the #613 Group 4 contract; TensorKit routes its
+    /// `DiagonalTensorMap` through the generic similar+block-copy branch
+    /// (`indexmanipulations.jl:132-137`) for the same reason.
+    ///
+    /// The `where R: CanonicalUnitFusionRule` bound is the provider's
+    /// certification that its vacuum obeys the canonical unit laws — the
+    /// hom-space transform and the layout validator both demand it, so an
+    /// external provider opts in with one marker impl. No adjoint/device
+    /// arms; SU(3) dead at the admission bound (see [`Self::twist`]).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when `position` exceeds the rank (erased
+    /// message shape, named for this receiver). Otherwise the layout
+    /// derivation's and unit-correspondence validator's own classes,
+    /// mapped exactly as the erased facade maps them.
+    pub fn insert_left_unit(&self, position: usize, dual: bool) -> Result<Self, Error>
+    where
+        R: CanonicalUnitFusionRule,
+    {
+        self.insert_unit(
+            UnitLegInsertion::Left { position, dual },
+            "TensorMap::insert_left_unit",
+        )
+    }
+
+    /// TensorKit `insertrightunit(t, i; dual)`
+    /// (`tensors/indexmanipulations.jl:158-172`): inserts the canonical unit
+    /// leg at zero-based external slot `position`, following TensorKit's
+    /// right seam convention (the codomain/domain seam belongs to the
+    /// codomain side). Everything else — sharing, compact materialization,
+    /// bounds, errors — exactly as [`Self::insert_left_unit`].
+    pub fn insert_right_unit(&self, position: usize, dual: bool) -> Result<Self, Error>
+    where
+        R: CanonicalUnitFusionRule,
+    {
+        self.insert_unit(
+            UnitLegInsertion::Right { position, dual },
+            "TensorMap::insert_right_unit",
+        )
+    }
+
+    /// Shared route of [`Self::insert_left_unit`] /
+    /// [`Self::insert_right_unit`]: the tenet-core hom-space transform, the
+    /// same checked layout-correspondence validator the erased facade runs,
+    /// then a new body over the shared (or once-materialized) payload.
+    fn insert_unit(&self, insertion: UnitLegInsertion, operation: &str) -> Result<Self, Error>
+    where
+        R: CanonicalUnitFusionRule,
+    {
+        let (UnitLegInsertion::Left { position, .. } | UnitLegInsertion::Right { position, .. }) =
+            insertion;
+        if position > self.rank() {
+            return Err(Error::InvalidArgument(format!(
+                "{operation}: position {position} exceeds rank {}",
+                self.rank()
+            )));
+        }
+        let provider = self.body.space.provider();
+        let source_hom = self.body.space.space().homspace();
+        let homspace = match insertion {
+            UnitLegInsertion::Left { position, dual } => {
+                source_hom.insert_left_unit(provider, position, dual)?
+            }
+            UnitLegInsertion::Right { position, dual } => {
+                source_hom.insert_right_unit(provider, position, dual)?
+            }
+        };
+        let destination = self.body.space.derive_from_final_homspace(homspace)?;
+        validate_unit_layout_correspondence_checked(
+            provider,
+            (source_hom, self.body.space.space().structure()),
+            (
+                destination.space().homspace(),
+                destination.space().structure(),
+            ),
+            insertion,
+        )
+        .map_err(map_checked_unit_layout_error)?;
+        let data = self.shareable_dense_payload();
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody::with_shared_payload(destination, data)),
+        })
+    }
+
+    /// TensorKit `removeunit(t, i)`
+    /// (`tensors/indexmanipulations.jl:186-197`): removes the canonical unit
+    /// leg at flat external axis `axis`. The selected leg must contain
+    /// exactly the vacuum sector with degeneracy one. This undoes
+    /// [`Self::insert_left_unit`] / [`Self::insert_right_unit`]; sharing and
+    /// compact materialization exactly as there — a dense insert→remove
+    /// round trip returns to the original spaces on the original payload
+    /// allocation.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when `axis` is out of range or the leg is
+    /// not a canonical unit leg (erased message shapes, named for this
+    /// receiver). Otherwise the layout derivation's and validator's own
+    /// classes, mapped exactly as the erased facade maps them.
+    pub fn remove_unit(&self, axis: usize) -> Result<Self, Error>
+    where
+        R: CanonicalUnitFusionRule,
+    {
+        if axis >= self.rank() {
+            return Err(Error::InvalidArgument(format!(
+                "TensorMap::remove_unit: axis {axis} is out of range for rank {}",
+                self.rank()
+            )));
+        }
+        let provider = self.body.space.provider();
+        let source_hom = self.body.space.space().homspace();
+        let nout = source_hom.codomain().len();
+        let leg = if axis < nout {
+            &source_hom.codomain().legs()[axis]
+        } else {
+            &source_hom.domain().legs()[axis - nout]
+        };
+        if leg.sectors() != [provider.vacuum()] || leg.degeneracy(provider.vacuum()) != Some(1) {
+            return Err(Error::InvalidArgument(format!(
+                "TensorMap::remove_unit: axis {axis} is not a canonical unit leg"
+            )));
+        }
+        // The insertion that this removal undoes, for the correspondence
+        // validator: a codomain leg is the right seam's insertion, a domain
+        // leg the left seam's — same reconstruction as the erased facade.
+        let insertion = if axis < nout {
+            UnitLegInsertion::Right {
+                position: axis,
+                dual: leg.is_dual(),
+            }
+        } else {
+            UnitLegInsertion::Left {
+                position: axis,
+                dual: leg.is_dual(),
+            }
+        };
+        let homspace = source_hom.remove_unit(provider, axis)?;
+        let destination = self.body.space.derive_from_final_homspace(homspace)?;
+        validate_unit_layout_correspondence_checked(
+            provider,
+            (
+                destination.space().homspace(),
+                destination.space().structure(),
+            ),
+            (source_hom, self.body.space.space().structure()),
+            insertion,
+        )
+        .map_err(map_checked_unit_layout_error)?;
+        let data = self.shareable_dense_payload();
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody::with_shared_payload(destination, data)),
+        })
+    }
+
+    /// The payload a space-only rewrite (unit-leg insert/remove) may install
+    /// in its new body: a dense payload is shared at pointer cost; a compact
+    /// spectrum is materialized into a **fresh** dense payload first (one
+    /// copy) — the #613 Group 4 contract. Never the body-local
+    /// `dense_cache`: that buffer belongs to this body's space/payload
+    /// pairing and only lends a borrowed slice (see the
+    /// [`TypedTensorBody::data`] rationale).
+    ///
+    /// Infallible for the reason [`Self::dense_data`] is: the diagonal fill
+    /// is total on a bond space this module built from that same spectrum.
+    fn shareable_dense_payload(&self) -> Arc<TypedData<D>> {
+        match &*self.body.data {
+            TypedData::Dense(_) => Arc::clone(&self.body.data),
+            TypedData::Diagonal(spectrum) => Arc::new(TypedData::Dense(
+                tenet_matrixalgebra::diagonal_bond_data(
+                    self.body.space.space(),
+                    spectrum,
+                    &|value| value,
+                )
+                .expect("diagonal fill is total on the stored bond space"),
+            )),
+        }
+    }
+
     /// A zero tensor on the same spaces and dtype as `self` (TensorKit
     /// `zerovector`, `tensors/vectorinterface.jl:7-20`). Cheapest same-shape
     /// constructor: scales the storage by zero rather than re-deriving the
@@ -4261,32 +4630,103 @@ mod representation_gates {
         assert_eq!(Arc::strong_count(&tensor.body), 2);
     }
 
+    /// A small fermionic fixture whose codomain leg 0 carries only the even
+    /// sector (θ = 1 everywhere on it) while leg 1 and the domain leg carry
+    /// the odd sector too — so one tensor exposes both twist short-circuit
+    /// answers.
+    fn fz2_fixture() -> TensorMap<tenet_core::FermionParityFusionRule, f64> {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(tenet_core::FermionParityFusionRule);
+        let even_only =
+            GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::EVEN, 2)], false).unwrap();
+        let mixed = GradedSpace::try_new(
+            Arc::clone(&provider),
+            [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 2)],
+            false,
+        )
+        .unwrap();
+        let mut state = 0x5eed_0613u64;
+        TensorMap::from_block_fn(&runtime, [&even_only, &mixed], [&mixed], move |_, _| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((state >> 33) as f64) / (u32::MAX as f64) - 0.5
+        })
+        .unwrap()
+    }
+
     #[test]
-    fn a_body_on_a_different_space_reuses_the_payload_allocation() {
-        // What: the property #580 Group 4 rests on, for a *dense* payload — a
-        // compact `Diagonal` payload is bond-space-only and must be
-        // materialized before any space rewrite (see the `data` field
-        // rationale). A unit-leg insertion builds a body with a rewritten
-        // space and the *same* stored dense values; if that cost a payload
-        // copy the operation could not be O(1). The space here stands in for
-        // the rewritten one — what is under test is that a second body can
-        // hold the first body's payload at all, at pointer cost.
+    fn unit_insert_and_remove_share_the_dense_payload_arc() {
+        // What (#580 PR 5, gate 5): the O(1) property the PR 0 gate
+        // `a_body_on_a_different_space_reuses_the_payload_allocation` proved
+        // by hand-constructing a body, now proved through the real
+        // operations it anticipated — a dense payload's `Arc` is shared
+        // unchanged through an insert→remove round trip, and the fresh
+        // bodies start with cold caches. Supersedes that PR 0 gate: this one
+        // checks everything it did (payload reuse at pointer cost under a
+        // rewritten space) minus the hand-built struct shape, which the real
+        // operations now compile against anyway.
         let tensor = fixture();
-        let payload = Arc::clone(&tensor.body.data);
-        // Hand-constructed body: a struct-shape change surfaces as a compile
-        // error here, not a gate failure. Group 4 (#580) should replace this
-        // with a real same-payload-different-space operation once one exists.
-        let relabelled = TensorMap {
-            runtime: tensor.runtime.clone(),
-            body: Arc::new(TypedTensorBody {
-                space: tensor.body.space.clone(),
-                data: payload,
-                dense_cache: std::sync::OnceLock::new(),
-            }),
-        };
-        assert_eq!(Arc::strong_count(&tensor.body.data), 2);
-        assert!(!Arc::ptr_eq(&tensor.body, &relabelled.body));
-        assert_eq!(tensor.data().as_ptr(), relabelled.data().as_ptr());
+        let inserted = tensor.insert_left_unit(1, false).unwrap();
+        assert!(!Arc::ptr_eq(&tensor.body, &inserted.body));
+        assert!(Arc::ptr_eq(&tensor.body.data, &inserted.body.data));
+        assert!(inserted.body.dense_cache.get().is_none());
+        let removed = inserted.remove_unit(1).unwrap();
+        assert!(Arc::ptr_eq(&tensor.body.data, &removed.body.data));
+        // One payload allocation, three bodies holding it.
+        assert_eq!(Arc::strong_count(&tensor.body.data), 3);
+        assert_eq!(tensor.data().as_ptr(), removed.data().as_ptr());
+    }
+
+    #[test]
+    fn a_compact_payload_materializes_exactly_once_for_the_unit_ops() {
+        // What (#580 PR 5, gate 5): the compact half of the #613 Group 4
+        // contract — a `Diagonal` payload is materialized into a *fresh*
+        // dense payload (one copy, never the body-local `dense_cache`
+        // buffer), and the follow-up remove shares that dense `Arc` rather
+        // than copying again.
+        let s = fixture().svd_compact().unwrap().1;
+        let warmed = s.data().as_ptr(); // warm the body-local cache first
+        let inserted = s.insert_left_unit(0, false).unwrap();
+        assert!(!Arc::ptr_eq(&s.body.data, &inserted.body.data));
+        assert!(matches!(&*inserted.body.data, TypedData::Dense(_)));
+        // Fresh buffer, not the cache the warm-up populated.
+        assert_ne!(inserted.data().as_ptr(), warmed);
+        let removed = inserted.remove_unit(0).unwrap();
+        assert!(Arc::ptr_eq(&inserted.body.data, &removed.body.data));
+    }
+
+    #[test]
+    fn twist_identity_short_circuit_shares_the_whole_body() {
+        // What (#580 PR 5, gate 5): both identity answers allocate nothing —
+        // the bosonic O(1) arm (Z2) and the fermionic per-block scan when no
+        // requested leg touches a twisted sector (fZ2, even-only leg 0) both
+        // return a body-sharing clone; a leg that does touch the odd sector
+        // publishes a new body.
+        let tensor = fixture();
+        let twisted = tensor.twist(&[0, 1]).unwrap();
+        assert!(Arc::ptr_eq(&tensor.body, &twisted.body));
+
+        let fermionic = fz2_fixture();
+        let untouched = fermionic.twist(&[0]).unwrap();
+        assert!(Arc::ptr_eq(&fermionic.body, &untouched.body));
+        let touched = fermionic.twist(&[1]).unwrap();
+        assert!(!Arc::ptr_eq(&fermionic.body, &touched.body));
+    }
+
+    #[test]
+    fn twist_on_a_compact_spectrum_stays_compact() {
+        // What (#580 PR 5, gate 5): the compact twist arm scales
+        // spectrum-per-sector and keeps `TypedData::Diagonal` — the space is
+        // unchanged, so O(Σ_c k_c) storage survives — and its own identity
+        // answer (θ ≡ 1 across the spectrum's sectors) is a body-sharing
+        // clone.
+        let s = fz2_fixture().svd_compact().unwrap().1;
+        let twisted = s.twist(&[0]).unwrap();
+        assert!(matches!(&*twisted.body.data, TypedData::Diagonal(_)));
+        assert!(!Arc::ptr_eq(&s.body.data, &twisted.body.data));
+
+        let bosonic_s = fixture().svd_compact().unwrap().1;
+        let untouched = bosonic_s.twist(&[0]).unwrap();
+        assert!(Arc::ptr_eq(&bosonic_s.body, &untouched.body));
     }
 
     #[test]
