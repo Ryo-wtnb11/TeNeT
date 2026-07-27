@@ -8966,3 +8966,193 @@ fn external_z3_twist_flip_and_units_hold_by_value() {
     assert_same_legs(&removed.codomain(), &t.codomain());
     assert_same_legs(&removed.domain(), &t.domain());
 }
+
+// ---------------------------------------------------------------------------
+// #580 PR 5 / PR #620 review: NoBraiding preflight for twist and flip.
+//
+// External NoBraiding provider: planar Z2 (the tenet-core test fixture
+// `PlanarZ2Rule`, rebuilt from the public vocabulary with a codec). The
+// erased facade cannot host it — its rule set is a closed enum of braided
+// built-ins (PR 2 ruling) — so these gates are typed-only; the erased
+// twist/flip still route through the same shared preflight structurally.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+struct PlanarZ2;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct PlanarParity(u8);
+
+impl FusionRule for PlanarZ2 {
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::from_canonical_bytes::<Self>(0x9a2f_0620_0000_0000, Arc::<[u8]>::from(vec![]))
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Unique
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::NoBraiding
+    }
+    fn vacuum(&self) -> SectorId {
+        SectorId::new(0)
+    }
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        core::iter::once(SectorId::new(left.id() ^ right.id())).collect()
+    }
+}
+
+impl MultiplicityFreeFusionRule for PlanarZ2 {}
+
+impl MultiplicityFreeFusionSymbols for PlanarZ2 {
+    type Scalar = f64;
+    fn scalar_one(&self) -> f64 {
+        1.0
+    }
+    fn scalar_conj(&self, value: f64) -> f64 {
+        value
+    }
+    fn f_symbol_scalar(
+        &self,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+    ) -> f64 {
+        1.0
+    }
+    fn r_symbol_scalar(&self, _: SectorId, _: SectorId, _: SectorId) -> f64 {
+        1.0
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for PlanarZ2 {
+    fn dim_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+    fn inv_dim_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+    fn sqrt_dim_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+    fn inv_sqrt_dim_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+    fn twist_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+    fn frobenius_schur_phase_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+}
+
+impl CheckedFusionAlgebra for PlanarZ2 {
+    fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+        Ok(sector)
+    }
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, FusionAlgebraError> {
+        Ok(self.fusion_channels(left, right))
+    }
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, FusionAlgebraError> {
+        Ok(self.nsymbol(left, right, coupled))
+    }
+}
+
+impl SectorCodec for PlanarZ2 {
+    type Sector = PlanarParity;
+    fn encode_sector(&self, value: &Self::Sector) -> Result<SectorId, FusionAlgebraError> {
+        if value.0 < 2 {
+            Ok(SectorId::new(usize::from(value.0)))
+        } else {
+            Err(FusionAlgebraError::UnrepresentableSectorLabel {
+                rule: self.rule_identity(),
+                label: format!("planar parity {}", value.0),
+            })
+        }
+    }
+    fn decode_sector(&self, sector: SectorId) -> Result<Self::Sector, FusionAlgebraError> {
+        if sector.id() < 2 {
+            Ok(PlanarParity(sector.id() as u8))
+        } else {
+            Err(FusionAlgebraError::InvalidSector { sector })
+        }
+    }
+}
+
+#[test]
+fn external_nobraiding_twist_and_flip_reject_nontrivial_sectors() {
+    // What (PR #620 review P2): under `BraidingStyleKind::NoBraiding` the
+    // twist eigenvalue is undefined, so twist/flip on a leg carrying any
+    // non-unit sector must fail — TensorKit `has_shared_twist`
+    // (`tensors/indexmanipulations.jl:34-41`) throws `SectorMismatch` there
+    // — instead of silently applying θ ≡ 1. The compact spectrum arm must
+    // hit the same preflight before its own dispatch.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(PlanarZ2);
+    let mixed = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(PlanarParity(0), 1), (PlanarParity(1), 2)],
+        false,
+    )
+    .unwrap();
+    let t: TensorMap<PlanarZ2, f64> =
+        TensorMap::from_block_fn(&runtime, [&mixed], [&mixed], |sectors, indices| {
+            f64::from(sectors.coupled().0) * 10.0 + (indices[0] * 3 + indices[1]) as f64
+        })
+        .unwrap();
+
+    for error in [t.twist(&[0]).unwrap_err(), t.flip(&[1]).unwrap_err()] {
+        assert!(
+            matches!(error, tenet::typed::Error::InvalidArgument(_)),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("no braiding"), "{error}");
+    }
+    // The compact diagonal arm rejects too: an SVD spectrum factor lives on
+    // the mixed bond space, so its twist must fail before the compact
+    // per-sector scaling ever runs.
+    let s: TensorMap<PlanarZ2, f64> = t.svd_compact().unwrap().1;
+    let compact_error = s.twist(&[0]).unwrap_err();
+    assert!(
+        matches!(compact_error, tenet::typed::Error::InvalidArgument(_)),
+        "{compact_error:?}"
+    );
+}
+
+#[test]
+fn external_nobraiding_twist_and_flip_pass_on_vacuum_only_legs() {
+    // What (PR #620 review P2): the TensorKit carve-out — every requested
+    // leg carrying only the unit sector is legal under NoBraiding
+    // (`indexmanipulations.jl:37-40`): twist is the identity (shared
+    // buffer), flip toggles duality with values unchanged (χ = θ = 1 on the
+    // vacuum).
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(PlanarZ2);
+    let unit_only =
+        GradedSpace::try_new(Arc::clone(&provider), [(PlanarParity(0), 2)], false).unwrap();
+    let t: TensorMap<PlanarZ2, f64> =
+        TensorMap::from_block_fn(&runtime, [&unit_only], [&unit_only], |_, indices| {
+            (indices[0] * 2 + indices[1]) as f64
+        })
+        .unwrap();
+
+    let twisted: TensorMap<PlanarZ2, f64> = t.twist(&[0, 1]).unwrap();
+    assert_eq!(twisted.data().as_ptr(), t.data().as_ptr());
+
+    let flipped: TensorMap<PlanarZ2, f64> = t.flip(&[0]).unwrap();
+    assert_eq!(flipped.data(), t.data());
+    assert!(flipped.codomain()[0].is_dual());
+}

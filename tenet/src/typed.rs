@@ -222,9 +222,10 @@ use tenet_matrixalgebra::{BoundDynFactor, FactorScalar};
 use crate::tensor::{
     absorb_mapped, apply_fill, cat_homspace, check_flip_layout_identity, compile_cat_plan,
     coupled_region_pow_sum, flip_block_factor, flip_toggled_homspace, internal_layout_error,
-    map_checked_unit_layout_error, scale_blocks_impl, sector_regions, twist_block_factor,
-    twist_is_identity_over_blocks, validate_norm_p, weighted_inner, weighted_trace,
-    with_planar_axes, CatOperandLayout, CatSide, Fill, PlanarRequestKind, TensorScalar,
+    map_checked_unit_layout_error, reject_unbraided_nonunit_legs, scale_blocks_impl,
+    sector_regions, twist_block_factor, twist_is_identity_over_blocks, validate_norm_p,
+    weighted_inner, weighted_trace, with_planar_axes, CatOperandLayout, CatSide, Fill,
+    PlanarRequestKind, TensorScalar,
 };
 use crate::typed_tensor_core::{
     tensorcompose_owned_multiplicity_free, tensorcontract_owned_multiplicity_free,
@@ -4084,6 +4085,9 @@ where
             return Ok(self.clone());
         }
         let provider = self.body.space.provider();
+        // NoBraiding preflight (PR #620 review): before the compact arm and
+        // before any θ evaluation — see `reject_unbraided_nonunit_legs`.
+        reject_unbraided_nonunit_legs(provider, self.body.space.space().homspace(), legs, "twist")?;
         let nout = self.codomain_rank();
         if let TypedData::Diagonal(spectrum) = &*self.body.data {
             // Compact arm, mirroring the erased `scaled_by_sector` route: a
@@ -4166,6 +4170,9 @@ where
             return Ok(self.clone());
         }
         let hom = self.body.space.space().homspace();
+        // NoBraiding preflight (PR #620 review): flip's coefficients are
+        // built from the same θ/χ — see `reject_unbraided_nonunit_legs`.
+        reject_unbraided_nonunit_legs(self.body.space.provider(), hom, legs, "flip")?;
         let nout = hom.codomain().len();
         // Sequential semantics for repeated legs, from the helper shared
         // with the erased facade (#580 PR 5).

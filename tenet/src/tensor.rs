@@ -2482,6 +2482,60 @@ fn uncoupled_sector_of_leg(key: &FusionTreePairKey, nout: usize, leg: usize) -> 
     }
 }
 
+/// Shared NoBraiding preflight of both facades' `twist` and `flip` (#580
+/// PR 5, PR #620 review): under [`tenet_core::BraidingStyleKind::NoBraiding`] the
+/// ribbon-twist eigenvalue is undefined, so TensorKit's `has_shared_twist`
+/// (`tensors/indexmanipulations.jl:34-41`) throws `SectorMismatch` unless
+/// every requested leg carries only the unit sector — in which case the
+/// operation is trivially legal. `flip`'s coefficients are built from the
+/// same θ (and χ), so the identical precondition applies there.
+///
+/// Error class: [`Error::InvalidArgument`] rather than
+/// [`Error::UnsupportedForRule`] — the failure depends on the *legs* the
+/// caller named, not on the rule alone (vacuum-only legs succeed), which is
+/// exactly this facade's "invalid user input (axes, sectors, spaces)"
+/// class and mirrors TK's `SectorMismatch`; `UnsupportedForRule` is for
+/// operations a rule cannot run at all (the `reject_unwired_su3`
+/// precedent), and its `&'static str` rule name could not spell an external
+/// provider anyway.
+///
+/// Runs BEFORE any coefficient evaluation and before the compact-diagonal
+/// dispatch on both facades. Dead from the erased facade today — its closed
+/// rule enum is all-braided — but kept in the erased routes as the
+/// structural guard, so a future built-in planar rule cannot miss it.
+pub(crate) fn reject_unbraided_nonunit_legs<R>(
+    rule: &R,
+    hom: &FusionTreeHomSpace,
+    legs: &[usize],
+    operation: &str,
+) -> Result<(), Error>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + ?Sized,
+{
+    if rule.braiding_style() != tenet_core::BraidingStyleKind::NoBraiding {
+        return Ok(());
+    }
+    let nout = hom.codomain().len();
+    for &leg in legs {
+        let sector_leg = if leg < nout {
+            &hom.codomain().legs()[leg]
+        } else {
+            &hom.domain().legs()[leg - nout]
+        };
+        if !sector_leg
+            .sectors()
+            .iter()
+            .all(|&sector| sector == rule.vacuum())
+        {
+            return Err(Error::InvalidArgument(format!(
+                "{operation} leg {leg} carries non-unit sectors but the fusion rule has \
+                 no braiding"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Per-block twist coefficient: the product over `legs` (flat indices,
 /// codomain first) of the ribbon-twist eigenvalue θ of that leg's uncoupled
 /// sector — TensorKit `twist!` (`tensors/indexmanipulations.jl:62-78`,
@@ -4252,6 +4306,14 @@ impl Tensor {
             return Ok(self.clone());
         }
         self.reject_unwired_su3("Tensor::twist")?;
+        with_user_rule!(self.ordinary_body().space, rule, {
+            reject_unbraided_nonunit_legs(
+                rule,
+                self.ordinary_body().space.homspace(),
+                legs,
+                "twist",
+            )
+        })?;
         let nout = self.codomain_rank();
         if let Data::Diagonal(diagonal) = self.stored_data() {
             return with_user_rule!(self.ordinary_body().space, rule, {
@@ -4333,6 +4395,9 @@ impl Tensor {
         }
         self.reject_unwired_su3("Tensor::flip")?;
         let hom = self.ordinary_body().space.homspace();
+        with_user_rule!(self.ordinary_body().space, rule, {
+            reject_unbraided_nonunit_legs(rule, hom, legs, "flip")
+        })?;
         let nout = hom.codomain().len();
         // Sequential semantics for repeated legs (TensorKit flips one index
         // at a time): the shared helper records the duality each occurrence
