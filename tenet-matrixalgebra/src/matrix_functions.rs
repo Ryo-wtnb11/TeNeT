@@ -389,7 +389,7 @@ fn abs1<D: FactorScalar>(value: D) -> f64 {
 /// the corner where a fully isolated block leaves `ilo = ihi = 0` and the lone
 /// window entry is the self-exchange `1`, which the undo then reads as the
 /// harmless scaling factor `1.0`, exactly as Julia does.
-fn balance_in_place<D: FactorScalar>(
+pub(crate) fn balance_in_place<D: FactorScalar>(
     matrix: &mut [D],
     order: usize,
     scale: &mut [f64],
@@ -433,7 +433,11 @@ fn balance_in_place<D: FactorScalar>(
     // `FACTOR`.
     const RADIX: f64 = 2.0;
     const FACTOR: f64 = 0.95;
-    let sfmin1 = f64::MIN_POSITIVE / f64::EPSILON;
+    // `xLAMCH('S') / xLAMCH('P')` of the *component* type (`dgebal.f:330-333`,
+    // `sgebal.f:330-333`), not of `f64` unconditionally: these bounds are what
+    // stops the radix loop, so they decide whether the factor it produces is
+    // representable in `D`.
+    let sfmin1 = D::safe_minimum() / D::epsilon();
     let sfmax1 = 1.0 / sfmin1;
     let sfmin2 = sfmin1 * RADIX;
     let sfmax2 = 1.0 / sfmin2;

@@ -43,7 +43,19 @@ pub trait FactorScalar: DenseRecouplingScalar {
     /// Narrows from `Complex64` (lossy for the single-precision scalars).
     fn from_complex64(value: Complex64) -> Self;
     fn adjoint(self) -> Self;
+    /// LAPACK's `xLAMCH('P')` — `eps * base`, the spacing of one — in the
+    /// *real component* type of `Self`.
     fn epsilon() -> f64;
+    /// LAPACK's `xLAMCH('S')` — the safe minimum, the smallest positive normal
+    /// number — in the *real component* type of `Self`.
+    ///
+    /// Paired with [`FactorScalar::epsilon`] this reproduces the machine bounds
+    /// the reference `gebal` derives (`sgebal.f:330` for the single-precision
+    /// blocks, `dgebal.f:330` for the double), which have to come from the
+    /// component type: the double bounds let the radix loop of a single
+    /// precision block reach a factor around `2^970`, and `from_real` of that
+    /// is `inf` in `f32`.
+    fn safe_minimum() -> f64;
     fn compute_f64_spectrum<E, F>(
         rank: usize,
         scratch: &mut Vec<Self::Real>,
@@ -132,6 +144,10 @@ impl FactorScalar for f32 {
     fn epsilon() -> f64 {
         f32::EPSILON as f64
     }
+
+    fn safe_minimum() -> f64 {
+        f32::MIN_POSITIVE as f64
+    }
 }
 
 impl FactorScalar for f64 {
@@ -164,6 +180,10 @@ impl FactorScalar for f64 {
 
     fn epsilon() -> f64 {
         f64::EPSILON
+    }
+
+    fn safe_minimum() -> f64 {
+        f64::MIN_POSITIVE
     }
 
     fn compute_f64_spectrum<E, F>(
@@ -215,6 +235,10 @@ impl FactorScalar for num_complex::Complex32 {
     fn epsilon() -> f64 {
         f32::EPSILON as f64
     }
+
+    fn safe_minimum() -> f64 {
+        f32::MIN_POSITIVE as f64
+    }
 }
 
 impl FactorScalar for Complex64 {
@@ -247,6 +271,10 @@ impl FactorScalar for Complex64 {
 
     fn epsilon() -> f64 {
         f64::EPSILON
+    }
+
+    fn safe_minimum() -> f64 {
+        f64::MIN_POSITIVE
     }
 
     fn compute_f64_spectrum<E, F>(

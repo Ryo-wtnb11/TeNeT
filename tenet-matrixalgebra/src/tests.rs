@@ -7901,6 +7901,115 @@ fn exp_undoes_the_balancing_permutation_and_scaling_like_julia() {
     }
 }
 
+/// Column-major `order x order` block from row-major rows.
+fn column_major<D: Copy + Zero>(rows: &[&[D]]) -> Vec<D> {
+    let order = rows.len();
+    let mut block = vec![D::zero(); order * order];
+    for (row, entries) in rows.iter().enumerate() {
+        assert_eq!(entries.len(), order);
+        for (column, &entry) in entries.iter().enumerate() {
+            block[row + order * column] = entry;
+        }
+    }
+    block
+}
+
+/// Asserts `balance_in_place` reproduces `LAPACK.gebal!('B', A)`, whose output
+/// is quoted 0-based here: LAPACK's `ilo`/`ihi` are 1-based and inclusive,
+/// TeNeT's are 0-based and inclusive.
+fn assert_gebal_matches<D: FactorScalar>(
+    block: &[D],
+    order: usize,
+    expected_window: (usize, usize),
+    expected_scale: &[f64],
+    what: &str,
+) {
+    let mut matrix = block.to_vec();
+    let mut scale = vec![0.0_f64; order];
+    let window = crate::matrix_functions::balance_in_place(&mut matrix, order, &mut scale);
+    assert_eq!(window, expected_window, "{what}: window");
+    assert_eq!(scale, expected_scale, "{what}: scale");
+}
+
+#[test]
+fn balancing_takes_its_machine_bounds_from_the_single_precision_component() {
+    // What: `sgebal`/`cgebal` derive `SFMIN1` and friends from `SLAMCH`
+    // (`sgebal.f:330`), `dgebal`/`zgebal` from `DLAMCH` (`dgebal.f:330`). Under
+    // the double bounds this fixture's radix loop runs to a factor around
+    // `2^970`, which is `inf` in `f32`; under the single bounds it stops at
+    // `2^102`, which is not.
+    //
+    // Oracle, Julia 1.11.6:
+    //
+    // ```julia
+    // LinearAlgebra.LAPACK.gebal!('B', Float32[0 3f38; 1f-45 0])
+    // # (1, 2, Float32[5.0706024f30, 1.4551915f-11])  # 2^102 and 2^-36
+    // ```
+    //
+    // The same triple certifies `ComplexF32`.
+    let rows: [&[f32]; 2] = [&[0.0, 3e38], &[1e-45, 0.0]];
+    let expected = [2.0_f64.powi(102), 2.0_f64.powi(-36)];
+    assert_gebal_matches(&column_major(&rows), 2, (0, 1), &expected, "f32 edge block");
+
+    let complex = column_major(&rows)
+        .iter()
+        .map(|&entry| Complex32::new(entry, 0.0))
+        .collect::<Vec<_>>();
+    assert_gebal_matches(&complex, 2, (0, 1), &expected, "c32 edge block");
+}
+
+#[test]
+fn exp_of_a_single_precision_block_spanning_the_whole_f32_range() {
+    // What: the P1 regression, through the public facade. Every entry of
+    // `A = [0 3e38; 1e-45 0]` and of its exponential is a finite `f32`, but
+    // balancing with the *double* machine bounds produces a factor that is
+    // `inf` in `f32`, and the Pade evaluation behind it went to all-NaN.
+    //
+    // Oracle, Julia 1.11.6: `exp(Float32[0 3f38; 1f-45 0])` is
+    // `Float32[1.0000002 3.0000004f38; 1.0f-45 1.0000002]`, and the `ComplexF32`
+    // matrix gives the same with zero imaginary parts. The tolerance is a
+    // single-precision one: the oracle is quoted to the eight digits `f32`
+    // carries.
+    let rows: [&[f32]; 2] = [&[0.0, 3e38], &[1e-45, 0.0]];
+    let expected: [&[(f64, f64)]; 2] = [
+        &[(1.0000002, 0.0), (3.0000004e38, 0.0)],
+        &[(1e-45, 0.0), (1.0000002, 0.0)],
+    ];
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let tensor = u1_block_endomorphism(&[(0, 2, column_major(&rows))]);
+    let exponential = exp(
+        &mut dense,
+        &mut TensorContractFusionExecutionContext::<f32, RuleIdentity>::default(),
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
+    )
+    .unwrap();
+    assert_sector_matrix_matches(
+        &u1_block_matrix(exponential.tensor(), 0),
+        &expected,
+        1e-6,
+        "f32 [0 3e38; 1e-45 0]",
+    );
+
+    let complex_block = column_major(&rows)
+        .iter()
+        .map(|&entry| Complex32::new(entry, 0.0))
+        .collect::<Vec<_>>();
+    let tensor = u1_block_endomorphism(&[(0, 2, complex_block)]);
+    let exponential = exp(
+        &mut dense,
+        &mut TensorContractFusionExecutionContext::<Complex32, RuleIdentity>::default(),
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
+    )
+    .unwrap();
+    assert_sector_matrix_matches(
+        &u1_block_matrix(exponential.tensor(), 0),
+        &expected,
+        1e-6,
+        "c32 [0 3e38; 1e-45 0]",
+    );
+}
+
 #[test]
 fn exp_reports_unsupported_when_the_executor_cannot_solve() {
     // What: device storage whose backend supplies GEMM but no solve is refused
