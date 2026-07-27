@@ -3307,3 +3307,107 @@ where
         }
     }
 }
+
+/// Representation gates for [`TypedTensorBody`] (#580 PR 0).
+///
+/// These live inside the module on purpose: the properties under test are the
+/// private layout — which `Arc` holds what — and asserting them from
+/// `tests/` would mean publishing accessors the facade does not otherwise
+/// need. Byte-level neutrality of this layout is *not* re-asserted here; it is
+/// already pinned by the typed-versus-erased oracles in `tests/typed_facade.rs`
+/// across U(1), SU(2), fZ2, Z2, an external provider and both `ProductFusionRule`
+/// orders, and the dense-cache behavior by `tests/typed_diagonal_allocations.rs`.
+#[cfg(test)]
+mod representation_gates {
+    use super::*;
+    use tenet_core::{Z2FusionRule, Z2Irrep};
+
+    fn fixture() -> TensorMap<Z2FusionRule, f64> {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let leg =
+            GradedSpace::try_new(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, 8)], false).unwrap();
+        let mut state = 0x5eed_0580u64;
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], move |_, _| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((state >> 33) as f64) / (u32::MAX as f64) - 0.5
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn clone_copies_no_payload_bytes() {
+        // What: `clone` is O(1) in the payload. Measured structurally rather
+        // than by an allocator, which cannot distinguish "no copy" from "a
+        // copy the size of a warm cache line".
+        let tensor = fixture();
+        let twin = tensor.clone();
+        assert!(Arc::ptr_eq(&tensor.body, &twin.body));
+        assert!(Arc::ptr_eq(&tensor.body.data, &twin.body.data));
+        assert_eq!(tensor.data().as_ptr(), twin.data().as_ptr());
+        // One payload, however many handles reach it.
+        assert_eq!(Arc::strong_count(&tensor.body.data), 1);
+        assert_eq!(Arc::strong_count(&tensor.body), 2);
+    }
+
+    #[test]
+    fn a_body_on_a_different_space_reuses_the_payload_allocation() {
+        // What: the property #580 Group 4 rests on. A unit-leg insertion builds
+        // a body with a rewritten space and the *same* stored values; if that
+        // cost a payload copy the operation could not be O(1). The space here
+        // stands in for the rewritten one — what is under test is that a second
+        // body can hold the first body's payload at all, at pointer cost.
+        let tensor = fixture();
+        let payload = Arc::clone(&tensor.body.data);
+        let relabelled = TensorMap {
+            runtime: tensor.runtime.clone(),
+            body: Arc::new(TypedTensorBody {
+                space: tensor.body.space.clone(),
+                data: payload,
+                dense_cache: std::sync::OnceLock::new(),
+            }),
+        };
+        assert_eq!(Arc::strong_count(&tensor.body.data), 2);
+        assert!(!Arc::ptr_eq(&tensor.body, &relabelled.body));
+        assert_eq!(tensor.data().as_ptr(), relabelled.data().as_ptr());
+    }
+
+    #[test]
+    fn a_written_payload_leaves_the_shared_one_untouched() {
+        // What: clone-then-modify. Sharing is only sound if a write on one
+        // handle cannot be seen through the other — every write route in this
+        // module publishes a new payload rather than reaching through the `Arc`.
+        let tensor = fixture();
+        let twin = tensor.clone();
+        let before: Vec<f64> = tensor.data().to_vec();
+
+        let scaled = twin.scale(2.0);
+
+        assert_eq!(tensor.data(), before.as_slice());
+        assert_eq!(twin.data(), before.as_slice());
+        assert_ne!(scaled.data().as_ptr(), tensor.data().as_ptr());
+        assert!(!Arc::ptr_eq(&scaled.body.data, &tensor.body.data));
+    }
+
+    #[test]
+    fn a_reused_payload_does_not_inherit_the_dense_cache() {
+        // What: why `dense_cache` sits outside the payload `Arc`. A compact
+        // spectrum materializes against the space it is laid out on, so a body
+        // reusing the payload under another space must start cold rather than
+        // serve the previous layout's buffer.
+        let s = fixture().svd_compact().unwrap().1;
+        assert!(s.body.dense_cache.get().is_none(), "cache warm at birth");
+        let materialized = s.data().as_ptr();
+        assert!(s.body.dense_cache.get().is_some());
+
+        let reused = TensorMap {
+            runtime: s.runtime.clone(),
+            body: Arc::new(TypedTensorBody {
+                space: s.body.space.clone(),
+                data: Arc::clone(&s.body.data),
+                dense_cache: std::sync::OnceLock::new(),
+            }),
+        };
+        assert!(reused.body.dense_cache.get().is_none());
+        assert_ne!(reused.data().as_ptr(), materialized);
+    }
+}
