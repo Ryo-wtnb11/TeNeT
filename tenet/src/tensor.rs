@@ -2428,8 +2428,10 @@ pub(crate) fn fill_block_elements<D: UserScalar>(
 /// Scales every fusion-tree block of `data` in place by the real factor
 /// `factor_of(key)` (skipping factor-1 blocks). Backs [`Tensor::twist`] and
 /// [`Tensor::flip`], whose effect on the storage is exactly a per-block
-/// phase.
-fn scale_blocks_impl<D: UserScalar>(
+/// phase. `pub(crate)` so the typed facade's `twist`/`flip` adapters share
+/// this exact scaling walk instead of re-deriving the block addressing
+/// (#580 PR 5).
+pub(crate) fn scale_blocks_impl<D: UserScalar>(
     space: &DynamicFusionMapSpace,
     data: &mut [D],
     factor_of: &dyn Fn(&BlockKey) -> f64,
@@ -2462,6 +2464,183 @@ fn scale_blocks_impl<D: UserScalar>(
                 }
                 indices[axis] = 0;
             }
+        }
+    }
+    Ok(())
+}
+
+/// The uncoupled sector a flat external leg (codomain first) carries on one
+/// fusion-tree block key. Shared addressing of [`twist_block_factor`] and
+/// [`flip_block_factor`].
+fn uncoupled_sector_of_leg(key: &FusionTreePairKey, nout: usize, leg: usize) -> SectorId {
+    if leg < nout {
+        key.codomain_uncoupled()[leg]
+    } else {
+        key.domain_uncoupled()[leg - nout]
+    }
+}
+
+/// Per-block twist coefficient: the product over `legs` (flat indices,
+/// codomain first) of the ribbon-twist eigenvalue θ of that leg's uncoupled
+/// sector — TensorKit `twist!` (`tensors/indexmanipulations.jl:62-78`,
+/// `θ = prod(i -> i <= N₁ ? twist(f₁.uncoupled[i]) : twist(f₂.uncoupled[i - N₁]), inds)`).
+///
+/// One home for the formula, generic over the rigid-symbols trait, so the
+/// erased and typed facades cannot drift apart (#580 PR 5).
+pub(crate) fn twist_block_factor<R>(
+    rule: &R,
+    key: &FusionTreePairKey,
+    nout: usize,
+    legs: &[usize],
+) -> f64
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + ?Sized,
+{
+    legs.iter()
+        .map(|&leg| rule.twist_scalar(uncoupled_sector_of_leg(key, nout, leg)))
+        .product()
+}
+
+/// Whether the twist over `legs` is the identity on every stored block —
+/// TensorKit `has_shared_twist` (`tensors/indexmanipulations.jl:34-51`):
+/// bosonic braiding is all-θ=1 by construction (O(1)); otherwise every
+/// requested leg must carry θ = 1 on every block's uncoupled sector. A `true`
+/// answer licenses the buffer-sharing clone both facades take instead of a
+/// clone-and-scale-by-1.
+pub(crate) fn twist_is_identity_over_blocks<R>(
+    rule: &R,
+    structure: &BlockStructure,
+    nout: usize,
+    legs: &[usize],
+) -> Result<bool, Error>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + ?Sized,
+{
+    if rule.braiding_style().is_bosonic() {
+        return Ok(true);
+    }
+    (0..structure.block_count()).try_fold(true, |noop, index| {
+        let block = structure.block(index)?;
+        Ok::<_, Error>(
+            noop && match block.key() {
+                BlockKey::FusionTree(key) => legs
+                    .iter()
+                    .all(|&leg| rule.twist_scalar(uncoupled_sector_of_leg(key, nout, leg)) == 1.0),
+                _ => true,
+            },
+        )
+    })
+}
+
+/// Per-block flip coefficient: the product over `occurrences` — each a
+/// `(leg, pre-flip duality)` pair in call order — of the Z-isomorphism phase
+/// of TensorKit `flip((f₁, f₂), i)` (`fusiontrees/braiding_manipulations.jl:384-414`,
+/// forward `inv = false` arm, χ and θ real for every rule in scope):
+/// codomain leg → `d ? χ·θ : 1`; domain leg → `d ? χ : θ`.
+///
+/// One home for the formula, generic over the rigid-symbols trait, shared by
+/// the erased and typed facades (#580 PR 5).
+pub(crate) fn flip_block_factor<R>(
+    rule: &R,
+    key: &FusionTreePairKey,
+    nout: usize,
+    occurrences: &[(usize, bool)],
+) -> f64
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + ?Sized,
+{
+    occurrences
+        .iter()
+        .map(|&(leg, dual)| {
+            let sector = uncoupled_sector_of_leg(key, nout, leg);
+            let chi = rule.frobenius_schur_phase_scalar(sector);
+            let theta = rule.twist_scalar(sector);
+            // TensorKit 0.17 flip coefficients (forward, real χ/θ): TK's
+            // domain dual arm is conj(χ), which is χ for the real χ in scope.
+            if leg < nout {
+                if dual {
+                    chi * theta
+                } else {
+                    1.0
+                }
+            } else if dual {
+                chi
+            } else {
+                theta
+            }
+        })
+        .product()
+}
+
+/// Structure half of `flip`, shared by both facades (#580 PR 5): the toggled
+/// hom space (every leg listed an odd number of times in `legs` has its
+/// duality flag flipped) plus the sequential-occurrence record — TensorKit
+/// flips one index at a time (`braiding_manipulations.jl:422-429`), so each
+/// occurrence of a repeated leg sees the duality left by the previous one.
+pub(crate) fn flip_toggled_homspace(
+    hom: &FusionTreeHomSpace,
+    legs: &[usize],
+) -> (FusionTreeHomSpace, Vec<(usize, bool)>) {
+    let nout = hom.codomain().len();
+    let rank = nout + hom.domain().len();
+    let leg_of = |leg: usize| {
+        if leg < nout {
+            &hom.codomain().legs()[leg]
+        } else {
+            &hom.domain().legs()[leg - nout]
+        }
+    };
+    let mut flip_count = vec![0usize; rank];
+    let occurrences: Vec<(usize, bool)> = legs
+        .iter()
+        .map(|&leg| {
+            let dual = leg_of(leg).is_dual() ^ (flip_count[leg] % 2 == 1);
+            flip_count[leg] += 1;
+            (leg, dual)
+        })
+        .collect();
+
+    let toggled_leg = |index: usize, leg: &tenet_core::SectorLeg| {
+        if flip_count[index] % 2 == 1 {
+            tenet_core::SectorLeg::new(leg.iter(), !leg.is_dual())
+        } else {
+            leg.clone()
+        }
+    };
+    let toggled = FusionTreeHomSpace::new(
+        FusionProductSpace::new(
+            hom.codomain()
+                .legs()
+                .iter()
+                .enumerate()
+                .map(|(index, leg)| toggled_leg(index, leg)),
+        ),
+        FusionProductSpace::new(
+            hom.domain()
+                .legs()
+                .iter()
+                .enumerate()
+                .map(|(index, leg)| toggled_leg(nout + index, leg)),
+        ),
+    );
+    (toggled, occurrences)
+}
+
+/// Flipping preserves the stored sectors, so the flipped space must
+/// reproduce the block layout exactly; anything else is a bug. Shared by both
+/// facades' `flip` (#580 PR 5).
+pub(crate) fn check_flip_layout_identity(
+    old_structure: &BlockStructure,
+    new_structure: &BlockStructure,
+) -> Result<(), Error> {
+    if new_structure.block_count() != old_structure.block_count() {
+        return Err(internal_layout_error("flip changed the block count"));
+    }
+    for index in 0..old_structure.block_count() {
+        let old_block = old_structure.block(index)?;
+        let new_block = new_structure.block(index)?;
+        if old_block.offset() != new_block.offset() || old_block.shape() != new_block.shape() {
+            return Err(internal_layout_error("flip changed the block layout"));
         }
     }
     Ok(())
@@ -4086,48 +4265,20 @@ impl Tensor {
                 }
             });
         }
-        // TensorKit `has_shared_twist` (`indexmanipulations.jl`): the twist is
-        // the identity when every requested leg carries theta = 1 on every
-        // block. Bosonic rules are all-theta=1 by construction (O(1)
-        // short-circuit — the Z2/U1/SU2 finite-torus paths); a
-        // fermionic/anyonic tensor still shares its buffer when no requested
-        // leg touches a twisted sector. Either way, skip the whole-buffer
-        // clone-and-scale-by-1 and return the shared data.
+        // TensorKit `has_shared_twist` (`indexmanipulations.jl:34-51`): the
+        // twist is the identity when every requested leg carries theta = 1 on
+        // every block (bosonic rules O(1); a fermionic/anyonic tensor still
+        // shares its buffer when no requested leg touches a twisted sector).
+        // Skip the whole-buffer clone-and-scale-by-1 and return shared data.
         let twist_is_identity = with_user_rule!(self.ordinary_body().space, rule, {
-            rule.braiding_style().is_bosonic() || {
-                let structure = self.ordinary_body().space.structure();
-                (0..structure.block_count()).try_fold(true, |noop, index| {
-                    let block = structure.block(index)?;
-                    Ok::<_, Error>(
-                        noop && match block.key() {
-                            BlockKey::FusionTree(key) => legs.iter().all(|&leg| {
-                                let sector = if leg < nout {
-                                    key.codomain_uncoupled()[leg]
-                                } else {
-                                    key.domain_uncoupled()[leg - nout]
-                                };
-                                rule.twist_scalar(sector) == 1.0
-                            }),
-                            _ => true,
-                        },
-                    )
-                })?
-            }
+            twist_is_identity_over_blocks(rule, self.ordinary_body().space.structure(), nout, legs)?
         });
         if twist_is_identity {
             return Ok(self.clone());
         }
         self.scaled_blocks(&self.ordinary_body().space, &|key| match key {
             BlockKey::FusionTree(key) => with_user_rule!(self.ordinary_body().space, rule, {
-                legs.iter()
-                    .map(|&leg| {
-                        rule.twist_scalar(if leg < nout {
-                            key.codomain_uncoupled()[leg]
-                        } else {
-                            key.domain_uncoupled()[leg - nout]
-                        })
-                    })
-                    .product()
+                twist_block_factor(rule, key, nout, legs)
             }),
             _ => 1.0,
         })
@@ -4181,90 +4332,19 @@ impl Tensor {
         self.reject_unwired_su3("Tensor::flip")?;
         let hom = self.ordinary_body().space.homspace();
         let nout = hom.codomain().len();
-        let leg_of = |leg: usize| {
-            if leg < nout {
-                &hom.codomain().legs()[leg]
-            } else {
-                &hom.domain().legs()[leg - nout]
-            }
-        };
         // Sequential semantics for repeated legs (TensorKit flips one index
-        // at a time): record the duality each occurrence sees.
-        let mut flip_count = vec![0usize; rank];
-        let occurrences: Vec<(usize, bool)> = legs
-            .iter()
-            .map(|&leg| {
-                let dual = leg_of(leg).is_dual() ^ (flip_count[leg] % 2 == 1);
-                flip_count[leg] += 1;
-                (leg, dual)
-            })
-            .collect();
-
-        let toggled_leg = |index: usize, leg: &tenet_core::SectorLeg| {
-            if flip_count[index] % 2 == 1 {
-                tenet_core::SectorLeg::new(leg.iter(), !leg.is_dual())
-            } else {
-                leg.clone()
-            }
-        };
-        let new_hom = FusionTreeHomSpace::new(
-            FusionProductSpace::new(
-                hom.codomain()
-                    .legs()
-                    .iter()
-                    .enumerate()
-                    .map(|(index, leg)| toggled_leg(index, leg)),
-            ),
-            FusionProductSpace::new(
-                hom.domain()
-                    .legs()
-                    .iter()
-                    .enumerate()
-                    .map(|(index, leg)| toggled_leg(nout + index, leg)),
-            ),
-        );
+        // at a time): the shared helper records the duality each occurrence
+        // sees alongside the toggled hom space.
+        let (new_hom, occurrences) = flip_toggled_homspace(hom, legs);
         let new_space = self.ordinary_body().space.from_homspace(new_hom)?;
-        // Flipping preserves the stored sectors, so the flipped space must
-        // reproduce the block layout exactly; anything else is a bug.
-        let old_structure = self.ordinary_body().space.structure();
-        let new_structure = new_space.structure();
-        if new_structure.block_count() != old_structure.block_count() {
-            return Err(internal_layout_error("flip changed the block count"));
-        }
-        for index in 0..old_structure.block_count() {
-            let old_block = old_structure.block(index)?;
-            let new_block = new_structure.block(index)?;
-            if old_block.offset() != new_block.offset() || old_block.shape() != new_block.shape() {
-                return Err(internal_layout_error("flip changed the block layout"));
-            }
-        }
+        check_flip_layout_identity(
+            self.ordinary_body().space.structure(),
+            new_space.structure(),
+        )?;
 
         let flipped = self.scaled_blocks(new_space.raw(), &|key| match key {
             BlockKey::FusionTree(key) => with_user_rule!(self.ordinary_body().space, rule, {
-                occurrences
-                    .iter()
-                    .map(|&(leg, dual)| {
-                        let sector = if leg < nout {
-                            key.codomain_uncoupled()[leg]
-                        } else {
-                            key.domain_uncoupled()[leg - nout]
-                        };
-                        let chi = rule.frobenius_schur_phase_scalar(sector);
-                        let theta = rule.twist_scalar(sector);
-                        // TensorKit 0.17 flip coefficients (forward, real χ/θ).
-                        if leg < nout {
-                            if dual {
-                                chi * theta
-                            } else {
-                                1.0
-                            }
-                        } else if dual {
-                            chi
-                        } else {
-                            theta
-                        }
-                    })
-                    .product()
+                flip_block_factor(rule, key, nout, &occurrences)
             }),
             _ => 1.0,
         })?;
