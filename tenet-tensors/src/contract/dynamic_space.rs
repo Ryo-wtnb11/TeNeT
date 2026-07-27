@@ -659,6 +659,12 @@ impl Eq for DynamicFusionMapSpace {}
 
 /// Internal contraction operand separating categorical and storage authority.
 ///
+/// Naming note (#586): `prelowered` in the `*_prelowered_*` contraction entry
+/// points names THIS lazy-adjoint operand split — logical geometry prepared
+/// separately from parent storage before plan compilation. It is unrelated to
+/// the `*_lowered` layout-staging family (`prepare_fusion_tree_layout_lowered`
+/// cold sector enumeration); the two families collide only in name.
+///
 /// The parent space defines physical storage; orientation derives the logical
 /// HomSpace and user-axis view. Why not retain a logical adjoint space: it is
 /// duplicate authority that can drift from the parent representation.
