@@ -2197,8 +2197,9 @@ where
     }
 
     /// The matrix exponential `exp(t) = Σ_k t^k / k!`, evaluated per coupled
-    /// sector — TensorKit's `exp(::AbstractTensorMap)` (`linalg.jl:419-427`),
-    /// which checks `domain == codomain` and exponentiates every block.
+    /// sector — TensorKit's `exp` (`linalg.jl:44`), which copies and calls
+    /// `exp!` (`linalg.jl:420-428`): check `domain == codomain`, then
+    /// exponentiate every block.
     ///
     /// # Domain
     ///
@@ -2245,9 +2246,11 @@ where
     /// what each storage accepts.
     pub fn exp(&self) -> Result<Self, Error> {
         if let Some(spectrum) = self.spectrum() {
-            // Why no hermiticity gate here while the dense arm has one: see the
-            // rustdoc. TensorKit splits the same way, and a gate would make the
-            // compact arm stricter than the TK function it ports.
+            // Why the spectrum is exponentiated unconditionally while the dense
+            // arm asks about hermiticity: the dense question picks an algorithm
+            // (spectral or Padé), not a domain, and a diagonal is already in its
+            // eigenbasis so neither answer would change what happens here.
+            // TensorKit splits the same way (#576, #578).
             return Ok(self.with_spectrum(map_spectrum(spectrum, |value| Ok(value.exp_value()))?));
         }
         let mut dense = self.runtime.lease_dense();

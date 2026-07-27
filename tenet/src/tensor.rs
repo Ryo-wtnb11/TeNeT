@@ -8142,7 +8142,8 @@ impl Tensor {
     }
 
     /// Matrix exponential per coupled sector (TensorKit `exp`,
-    /// `tensors/linalg.jl:419-427`) — or, on compact diagonal storage, `exp` of
+    /// `tensors/linalg.jl:44`, which copies and calls `exp!` at
+    /// `tensors/linalg.jl:420-428`) — or, on compact diagonal storage, `exp` of
     /// each stored value.
     ///
     /// # Domain, and what storage decides

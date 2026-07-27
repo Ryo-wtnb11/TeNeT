@@ -5,7 +5,8 @@
 //! TensorKit `exp(::AbstractTensorMap)` correspondence for the general
 //! (non-Hermitian) arm of `Tensor::exp` / `TensorMap::exp` (issue #577).
 //!
-//! TensorKit 0.17 `src/tensors/linalg.jl:419-427`:
+//! TensorKit 0.17 `src/tensors/linalg.jl`, `exp` at line 44 and `exp!` at
+//! lines 420-428:
 //!
 //! ```text
 //! exp(t)  = exp!(copy(t))
