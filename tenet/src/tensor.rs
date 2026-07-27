@@ -3739,6 +3739,16 @@ impl Tensor {
     /// Zero tensor of the given [`Dtype`] on `codomain <- domain`
     /// (TensorKit `zeros(Float64, W ← V)` / `zeros(ComplexF64, W ← V)`).
     /// All spaces must share one fusion rule.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] when no leg is given (the fusion rule is
+    ///   inferred from the legs).
+    /// - [`Error::RuleMismatch`] when the legs disagree on the rule identity,
+    ///   reported before any provider algebra runs.
+    /// - [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`]
+    ///   when the provider cannot certify the requested layout. Nothing is
+    ///   published in that case.
     pub fn zeros<'a, C, D>(
         rt: &Runtime,
         dtype: Dtype,
@@ -3762,7 +3772,13 @@ impl Tensor {
     ///
     /// Deterministic per runtime: the n-th `rand`-family call on a given
     /// runtime always produces the same tensor. Use [`Self::rand_with_seed`]
-    /// for an explicit stream.
+    /// for an explicit stream. Note the stream position is drawn *before*
+    /// validation, so a failing call still advances the runtime's seedless
+    /// stream — unlike the typed sibling, which draws after admission.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::zeros`] reports.
     pub fn rand<'a, C, D>(rt: &Runtime, dtype: Dtype, codomain: C, domain: D) -> Result<Self, Error>
     where
         C: IntoIterator<Item = &'a Space>,
@@ -3808,6 +3824,15 @@ impl Tensor {
     /// The fusion-tree `key` labels domain legs with the domain `Space`'s
     /// own sectors (TensorKit's `f2.uncoupled`), not their duals; on both
     /// sides the uncoupled sectors fuse to the tree's coupled sector.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::zeros`] reports; the fill itself is infallible.
+    ///
+    /// # Complexity
+    ///
+    /// One layout admission plus one `O(stored_len)` allocation with one
+    /// `fill` call per symmetry-allowed element.
     pub fn from_block_fn<'a, C, D, S, F>(
         rt: &Runtime,
         codomain: C,
@@ -4200,6 +4225,16 @@ impl Tensor {
     /// fermionic sectors and +1 for every bosonic sector, so this is a no-op
     /// on purely bosonic legs and an involution on fermionic ones.
     ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] when a leg index is out of range, or when
+    ///   the fusion rule has no braiding and a requested leg carries non-unit
+    ///   sectors.
+    /// - [`Error::UnsupportedForRule`] for SU(3).
+    /// - [`Error::UnsupportedOnDevice`] for a device payload.
+    /// - [`Error::Core`] when the stored block layout cannot be walked — an
+    ///   engine invariant, not a caller mistake.
+    ///
     /// ```
     /// use tenet::prelude::*;
     ///
@@ -4284,6 +4319,18 @@ impl Tensor {
     /// same leg twice returns to the original spaces but can scale odd
     /// blocks (e.g. by θ = −1 on fermionic legs); only `flip⁴ = id` in
     /// general.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] when a leg index is out of range, or —
+    ///   stricter than [`Self::twist`] — when the fusion rule has no braiding
+    ///   and *any* leg is requested: a flip always needs the twist and
+    ///   Frobenius-Schur coefficients.
+    /// - [`Error::UnsupportedForRule`] for SU(3).
+    /// - [`Error::UnsupportedOnDevice`] for a device payload.
+    /// - [`Error::Core`] / [`Error::InvalidArgument`] (with a "please report
+    ///   this" message) when the toggled layout does not match the stored one
+    ///   — engine invariants, not caller mistakes.
     ///
     /// ```
     /// use tenet::prelude::*;
@@ -5223,6 +5270,30 @@ impl Tensor {
     /// multiplication of tensor maps (TensorKit `A * B`); use
     /// [`Self::contract`] / `tensor!` when you mean index-notation
     /// contraction (TensorKit `@tensor`). Bosonic results are identical.
+    ///
+    /// # Complexity
+    ///
+    /// Dense operands: one GEMM per coupled sector. A compact-diagonal
+    /// operand (an `s` from [`Self::svd_trunc`], a `d` from
+    /// [`Self::eigh_full`]) takes TensorKit's `DiagonalTensorMap` route
+    /// instead: `t * D` and `D * t` scale one bond axis of `t` in a single
+    /// pass over `t`'s payload with the diagonal never densified, and
+    /// `D * D` multiplies the two spectra elementwise in `O(Σ_c k_c)`,
+    /// staying compact. Operands or destinations the compact arms cannot
+    /// prove fall through to the dense route — same result, different cost.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] when the ranks do not compose (lhs domain
+    ///   rank ≠ rhs codomain rank).
+    /// - [`Error::RuleMismatch`] / [`Error::RuntimeMismatch`] /
+    ///   [`Error::PlacementMismatch`] / [`Error::DtypeMismatch`] when the
+    ///   operands come from different worlds (rule, runtime, placement,
+    ///   scalar type).
+    /// - [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`]
+    ///   from the contraction seam when the composed legs are not mutually
+    ///   dual — the expert layer owns those rules.
+    /// - [`Error::UnsupportedOnDevice`] where [`Self::contract`] reports it.
     #[doc(alias = "mul")]
     #[doc(alias = "matmul")]
     pub fn compose(&self, rhs: &Self) -> Result<Self, Error> {
@@ -5302,6 +5373,31 @@ impl Tensor {
     /// (TensorKit `A * B` / `mul!`), which never does. Bosonic rules are
     /// unaffected; fermionic rules can differ by signs. See the worked
     /// example on [`Self::compose`].
+    ///
+    /// # Complexity
+    ///
+    /// Dense operands: one GEMM per coupled sector. A compact-diagonal
+    /// operand in one of the proven canonical rank-2 bond geometries never
+    /// becomes an `O(d²)` block-diagonal fed to an `O(d²·n)` GEMM: the other
+    /// operand's contracted leg is scaled by the stored spectrum (`O(d·n)`)
+    /// and the result is permuted into the contract output arrangement — the
+    /// same scale-plus-permute structure TensorKit runs. Geometries the
+    /// compact arm has not proven (outer products, scalar-output
+    /// contractions, unproved layouts) densify the diagonal and take the
+    /// ordinary dense route.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::RuleMismatch`] / [`Error::RuntimeMismatch`] /
+    ///   [`Error::PlacementMismatch`] / [`Error::DtypeMismatch`] when the
+    ///   operands come from different worlds.
+    /// - [`Error::InvalidArgument`] when the axis lists differ in length or
+    ///   an axis list is malformed (out of range, repeated).
+    /// - [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`]
+    ///   from the contraction seam when the paired legs are not mutually
+    ///   dual or the provider cannot carry the required recoupling.
+    /// - [`Error::UnsupportedOnDevice`] when a device operand is a lazy
+    ///   adjoint view (materialize with `to_host()` first).
     pub fn contract(
         &self,
         rhs: &Self,
@@ -5358,7 +5454,9 @@ impl Tensor {
         // operand. θ = ±1 by charge parity, identity for bosonic rules.
         // SU(N) (Generic) is bosonic and cannot ride the mult-free `with_rule!`
         // binding; short-circuit the twist probe (the diagonal fast path below
-        // never fires for it — SU(N) has no `Data::Diagonal` factors yet).
+        // rides that binding, so it never fires for SU(N) — an SU(3)
+        // `Data::Diagonal` factor, e.g. `svd_trunc`'s `s`, takes the dense
+        // route here).
         if let Some(output) = self.try_contract_diagonal_fast_path(
             rhs,
             lhs_axes,
@@ -5911,6 +6009,15 @@ impl Tensor {
     /// TensorKit `permute`: re-arranges legs with symmetric braiding.
     /// `codomain_axes` and `domain_axes` list source axis numbers
     /// (`0..rank`, codomain axes first) for the new codomain and domain.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] when
+    /// the axis lists are malformed (out of range, repeated, or not a
+    /// partition of `0..rank`) or the provider cannot support the braiding
+    /// the requested motion needs — the expert layer owns that validation,
+    /// exactly as on the typed sibling. Plus [`Error::UnsupportedOnDevice`]
+    /// for a device payload.
     pub fn permute(&self, codomain_axes: &[usize], domain_axes: &[usize]) -> Result<Self, Error> {
         self.transformed(codomain_axes, domain_axes, TransformKind::Permute)
     }
@@ -5972,6 +6079,13 @@ impl Tensor {
     /// codomain holds `num_codomain` legs and the domain holds the rest. The
     /// boundary order is codomain followed by reversed domain; legs which cross
     /// the boundary are bent without introducing a symmetric braid.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when `num_codomain` exceeds the rank, and
+    /// otherwise as [`Self::permute`]: [`Error::Operation`] /
+    /// [`Error::Core`] / [`Error::FusionAlgebra`] from the expert layer,
+    /// plus [`Error::UnsupportedOnDevice`] for a device payload.
     pub fn repartition(&self, num_codomain: usize) -> Result<Self, Error> {
         if num_codomain == self.codomain_rank() {
             return Ok(self.clone());
@@ -6341,6 +6455,19 @@ impl Tensor {
     /// returned [`Scalar`] variant matches [`Self::dtype`]. This is TensorKit's
     /// positive/ordinary trace; [`Self::trace_pairs`] retains the fermionic
     /// supertrace semantics used by tensor contractions.
+    ///
+    /// # Complexity
+    ///
+    /// One pass over the coupled-block diagonals of a dense payload — no
+    /// recoupling, no destination tensor. Compact diagonal storage is traced
+    /// directly on its `O(Σ_c k_c)` stored spectrum, never materialized.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] when the tensor is not an endomorphism.
+    /// - [`Error::UnsupportedOnDevice`] for a device payload.
+    /// - [`Error::Core`] when the stored block layout cannot be walked — an
+    ///   engine invariant, not a caller mistake.
     pub fn tr(&self) -> Result<Scalar, Error> {
         if let TensorRepr::Adjoint(view) = &self.repr {
             let parent = Self::owned(
@@ -6460,6 +6587,22 @@ impl Tensor {
     /// Frobenius norm, weighted by coupled-sector quantum dimensions
     /// (`norm(t)^2 = sum_c dim(c) * |block_c|^2`), matching TensorKit's
     /// `norm`. Always real, for both dtypes.
+    ///
+    /// # Complexity
+    ///
+    /// One pass over the payload: `O(N)` for a dense payload of `N` scalars,
+    /// `O(Σ_c k_c)` on compact diagonal storage — the stored spectrum is
+    /// reduced directly, never materialized. A lazy adjoint delegates to its
+    /// parent (conjugate-transposing blocks changes no magnitude), so it
+    /// pays no materialization either.
+    ///
+    /// # Errors
+    ///
+    /// No caller-input failure mode: every well-formed tensor — dense,
+    /// compact diagonal, device, lazy adjoint — has a norm. What remains is
+    /// [`Error::Core`] / [`Error::Operation`] when the stored block layout
+    /// cannot be walked or the device reduction fails: engine invariants and
+    /// execution failures, not argument errors.
     pub fn norm(&self) -> Result<f64, Error> {
         if let TensorRepr::Adjoint(view) = &self.repr {
             return Self::owned(
@@ -6728,6 +6871,29 @@ impl Tensor {
     /// Returns `alpha * self + beta * other` (real coefficients, both
     /// dtypes). Both tensors must live on the same spaces (identical hom
     /// space and block layout) and store the same dtype.
+    ///
+    /// TensorKit's counterpart is `VectorInterface.add(ty, tx, α, β)`
+    /// (`tensors/vectorinterface.jl:67-99`, also behind `t1 + t2`), which
+    /// computes `β*ty + α*tx` — a **false friend**: there the first
+    /// coefficient `α` belongs to the *second* argument. Here `alpha`
+    /// belongs to `self` and `beta` to `other`; go by argument order, not
+    /// coefficient names.
+    ///
+    /// # Complexity
+    ///
+    /// One elementwise pass, `O(N)` on dense payloads. Two compact-diagonal
+    /// operands combine spectrum-to-spectrum in `O(Σ_c k_c)` and **stay
+    /// compact**; diagonal + dense allocates only the one owned `O(N)` dense
+    /// result, scattering the spectrum onto its diagonal without densifying
+    /// the diagonal operand separately.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::RuleMismatch`] / [`Error::RuntimeMismatch`] /
+    ///   [`Error::PlacementMismatch`] / [`Error::DtypeMismatch`] when the
+    ///   operands come from different worlds.
+    /// - [`Error::InvalidArgument`] when they do not live on the same space
+    ///   or block layout.
     pub fn add(&self, other: &Self, alpha: f64, beta: f64) -> Result<Self, Error> {
         if self.is_adjoint_view() || other.is_adjoint_view() {
             return self
@@ -7821,6 +7987,27 @@ impl Tensor {
     }
 
     /// Truncated SVD (MatrixAlgebraKit `svd_trunc`); see [`SvdTrunc`].
+    ///
+    /// # Complexity
+    ///
+    /// Sectorwise cubic (one dense SVD per coupled sector); a
+    /// compact-diagonal input is materialized dense first. On host storage
+    /// the returned `s` is held in `O(Σ_c k_c)` compact diagonal storage —
+    /// the `DiagonalTensorMap` TensorKit's own `svd_trunc` returns, not the
+    /// `Σ_c k_c²` block-diagonal buffer — so a downstream `u.compose(&s)` or
+    /// `s.compose(&vh)` takes the bond-scaling path rather than a GEMM. A
+    /// device (`Data::CudaF64`) receiver instead returns `s` as a dense
+    /// `Σ_c k_c²` device block-diagonal, so composing with it is a device
+    /// GEMM, not a bond scaling.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`]
+    /// from the matrix-algebra seam, including a malformed `truncation` —
+    /// the truncation policy is validated where it is applied, not here. On
+    /// a device receiver a malformed `truncation` is instead reported as
+    /// [`Error::InvalidArgument`]: the device route validates it on this
+    /// side of the seam.
     pub fn svd_trunc(&self, truncation: &Truncation) -> Result<SvdTrunc, Error> {
         if self.is_adjoint_view() {
             return self.materialized_tensor()?.svd_trunc(truncation);
@@ -7890,6 +8077,13 @@ impl Tensor {
 
     /// Compact QR `t = q * r` (MatrixAlgebraKit `qr_compact`): `q` has
     /// orthonormal columns per coupled sector.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`]
+    /// straight from the matrix-algebra seam, unfiltered — as everywhere in
+    /// the factorization group there are no pre-checks here; the seam owns
+    /// the rules.
     pub fn qr_compact(&self) -> Result<(Self, Self), Error> {
         if self.is_adjoint_view() {
             return self.materialized_tensor()?.qr_compact();
@@ -8125,6 +8319,28 @@ impl Tensor {
     /// Hermitian coupled blocks. The eigenvalues are real for both dtypes
     /// (TensorKit: real `D`); `d` keeps the input dtype so it composes with
     /// `v` directly.
+    ///
+    /// # Complexity
+    ///
+    /// Sectorwise cubic (one dense EIGH per coupled sector); a
+    /// compact-diagonal input is materialized dense first. On host storage
+    /// the returned `d` is built as `O(Σ_c k_c)` compact diagonal storage
+    /// straight from the spectrum — nothing `O(Σ_c k_c²)` is materialized
+    /// and discarded (#56 item N) — so `v.compose(&d)` takes the
+    /// bond-scaling path. A device (`Data::CudaF64`) receiver instead
+    /// returns `d` as a dense `Σ_c k_c²` device block-diagonal.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::UnsupportedForRule`] for SU(3).
+    /// - [`Error::Operation`] when the tensor is not an endomorphism or its
+    ///   coupled blocks are not Hermitian — the seam is where that surfaces.
+    ///   On a device receiver the endomorphism check runs here instead, ahead
+    ///   of the seam, and reports [`Error::InvalidArgument`]; non-Hermitian
+    ///   blocks still surface as [`Error::Operation`] from the shared
+    ///   validator.
+    /// - [`Error::Core`] / [`Error::FusionAlgebra`] otherwise from the seam,
+    ///   which owns those rules.
     pub fn eigh_full(&self) -> Result<(Self, Self), Error> {
         if self.is_adjoint_view() {
             return self.materialized_tensor()?.eigh_full();
@@ -8411,6 +8627,27 @@ impl Tensor {
 
     /// Moore-Penrose pseudo-inverse `t^+ = v s^+ u^H` (MatrixAlgebraKit
     /// `pinv`) with an `rcond * sigma_max` cutoff on the singular values.
+    ///
+    /// # Complexity
+    ///
+    /// Dense input: one compact SVD, sectorwise cubic, plus a bond scaling
+    /// and one composition. Compact diagonal input skips the SVD entirely —
+    /// its singular values are its `|entry|`s — and applies the
+    /// cutoff-and-reciprocal elementwise in `O(Σ_c k_c)`, staying compact
+    /// (itebd's `l_out.pinv` rides this arm).
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] when `rcond` is not finite or is
+    ///   negative — checked before any work, on both storages.
+    /// - [`Error::UnsupportedForRule`] for SU(3) on the dense arm only — a
+    ///   compact-diagonal SU(3) factor (e.g. an SU(3) `svd_trunc` `s`) takes
+    ///   the elementwise arm above, which precedes the rejection.
+    /// - [`Error::Operation`] / [`Error::Core`] from the SVD, on the dense
+    ///   arm; [`Error::UnsupportedOnDevice`] for a device payload.
+    ///
+    /// There is no singular-input failure: sending the offending directions
+    /// to zero is what a pseudo-inverse is for.
     pub fn pinv(&self, rcond: f64) -> Result<Self, Error> {
         if self.is_adjoint_view() {
             return self.materialized_tensor()?.pinv(rcond);

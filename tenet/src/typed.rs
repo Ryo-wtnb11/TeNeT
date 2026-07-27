@@ -278,11 +278,27 @@ impl<R> GradedSpace<R>
 where
     R: SectorCodec + CheckedFusionAlgebra,
 {
-    /// Builds a leg from `(label, degeneracy)` pairs.
+    /// Builds a leg from `(label, degeneracy)` pairs — TensorKit's
+    /// `GradedSpace` / `Vect[I](c => d, ...; dual)` constructor family
+    /// (`spaces/gradedspace.jl:70-85`).
+    ///
+    /// **Dual-leg convention.** Labels are stored exactly as given —
+    /// `is_dual` only marks the orientation, it never dualizes them. On a
+    /// dual leg that is *not* what TensorKit's constructor-plus-read
+    /// composition reports: `sectors(Vect[U1](1 => 1; dual = true))` is `-1`
+    /// (TK dualizes stored keys on read), while
+    /// `try_new(.., [(1, 1)], true)?.sectors()?` is `1`. A dual leg meant to
+    /// agree with TensorKit must be built from pre-dualized labels, or via
+    /// [`Self::try_dual`], which dualizes at construction.
     ///
     /// Order is irrelevant: the leg stores its sectors in the provider's
     /// [`tenet_core::SectorId`] order. A zero-degeneracy sector is absent from
     /// the result, matching the leg invariant of the erased facade.
+    ///
+    /// # Complexity
+    ///
+    /// `O(k log k)` in the number of pairs: one encode per label plus the two
+    /// duplicate-detection sorts below; no payload is touched.
     ///
     /// # Errors
     ///
@@ -335,7 +351,15 @@ where
     }
 
     /// The sector labels carried by this leg, in the provider's
-    /// [`tenet_core::SectorId`] order.
+    /// [`tenet_core::SectorId`] order — TensorKit `sectors(V)`
+    /// (`spaces/gradedspace.jl:179-186`), with one convention difference:
+    /// the stored labels are returned as-is, never dualized on read, while
+    /// TensorKit dualizes stored keys when `isdual(V)`. A leg from
+    /// [`Self::try_dual`] already stores dual labels, so there the two
+    /// surfaces agree; a leg built by [`Self::try_new`] with `is_dual =
+    /// true` from non-pre-dualized labels does not (see the dual-leg
+    /// convention there). One decode per sector, one `Vec` allocation per
+    /// call.
     ///
     /// The order is the engine's, deliberately: it is the order of
     /// [`Self::degeneracies`] and of every block layout derived from the leg,
@@ -355,7 +379,10 @@ where
             .collect()
     }
 
-    /// Per-sector degeneracies, parallel to [`Self::sectors`].
+    /// Per-sector degeneracies, parallel to [`Self::sectors`] — TensorKit's
+    /// `dim(V, c)` read for every carried sector at once
+    /// (`spaces/gradedspace.jl:96-101`). A borrowed slice: `O(1)`, no decode,
+    /// no allocation.
     #[inline]
     pub fn degeneracies(&self) -> &[usize] {
         self.leg.degeneracies()
@@ -374,7 +401,15 @@ where
     }
 
     /// The conjugate leg: every sector replaced by its dual (degeneracies
-    /// carried along) and the dual flag flipped.
+    /// carried along) and the dual flag flipped — TensorKit `dual(V)` / `V'`
+    /// (`spaces/gradedspace.jl:112`; the `dual(dual(V)) == V` contract is
+    /// `spaces/vectorspaces.jl:69-73`). TensorKit only flips the flag and
+    /// dualizes labels lazily on read; this leg rewrites its stored sector
+    /// table eagerly — `O(k log k)`, one provider dual per sector plus the
+    /// leg constructor's re-sort — and [`Self::sectors`] then reports the
+    /// dual labels just as TK's `sectors(V')` does, provided the source
+    /// leg's stored labels were its external content (see
+    /// [`Self::try_new`]'s dual-leg convention).
     ///
     /// # Errors
     ///
@@ -1113,6 +1148,11 @@ where
     ///   This is reported before any provider algebra runs.
     /// - [`Error::FusionAlgebra`] / [`Error::Operation`] when the provider
     ///   cannot certify the layout. Nothing is published in that case.
+    ///
+    /// # Complexity
+    ///
+    /// One layout admission (the fusion-tree enumeration for the requested
+    /// legs) plus one `O(stored_len)` zeroed payload allocation.
     pub fn zeros<'a, Codomain, Domain>(
         runtime: &Runtime,
         codomain: Codomain,
@@ -1140,6 +1180,13 @@ where
     /// The block labels are decoded once per block, not once per element: the
     /// erased odometer underneath reports the same key for every element of a
     /// block, and the decode is memoized against it.
+    ///
+    /// **No TensorKit counterpart.** TensorKit 0.17 has no callback
+    /// constructor: it builds `undef`/`zeros`/`rand`-style
+    /// (`tensors/tensor.jl`) and fills by mutating `block(t, c)` directly.
+    /// The label-driven callback is a tenet addition, so cross-version
+    /// fixtures can be written against semantic sectors instead of storage
+    /// order.
     ///
     /// # Errors
     ///
@@ -1245,6 +1292,11 @@ where
     /// uniform in `[-1, 1)`) — the typed twin of the erased
     /// [`crate::prelude::Tensor::rand_with_seed`], byte-identical to it for
     /// the same layout and seed since both run the one shared fill.
+    ///
+    /// **No TensorKit counterpart.** TensorKit's `rand` family threads a
+    /// caller-supplied Julia `rng` (`tensors/tensor.jl:320-345`) and has no
+    /// integer-seed entry point of its own; the explicit u64 splitmix64
+    /// stream is a tenet extension for reproducible fixtures.
     ///
     /// Reproducibility is defined for the same TeNeT version and tensor
     /// layout. The stream fills internal storage order, so a sector codec or
@@ -1441,6 +1493,11 @@ where
     /// Everything [`Self::zeros`] reports, plus [`Error::Core`] when the
     /// admitted layout is not the canonical coupled-sector matrix one, which
     /// is an engine invariant rather than a caller mistake.
+    ///
+    /// # Complexity
+    ///
+    /// As [`Self::zeros`] — one layout admission and one `O(stored_len)`
+    /// payload — plus one pass writing each coupled-sector diagonal in place.
     #[doc(alias = "one")]
     pub fn id<'a, S>(runtime: &Runtime, spaces: S) -> Result<Self, Error>
     where
@@ -2422,6 +2479,19 @@ where
     /// # Errors
     ///
     /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    ///
+    /// # Complexity
+    ///
+    /// `O(Σ_c n_c³)` — sectorwise cubic, no global materialization; the seam
+    /// runs one dense QR per coupled-sector matrix. A compact-diagonal
+    /// payload (TensorKit's `DiagonalTensorMap`) is materialized into the
+    /// dense coupled buffer first, through the same [`Self::data`] route as
+    /// [`Self::left_polar`]. TensorKit 0.17 *does* keep a diagonal QR compact
+    /// (MatrixAlgebraKit's `DiagonalAlgorithm`,
+    /// `factorizations/diagonal.jl:16-28,61-66`); that fast path is not
+    /// adopted here — the issue #613 Group 4 contract requires every compact
+    /// fast path to be re-proven individually, the same deferral the polars
+    /// record.
     pub fn qr_compact(&self) -> Result<(Self, Self), Error> {
         let mut dense = self.runtime.lease_dense();
         let (q, r) = tenet_matrixalgebra::qr_compact_dyn(dense.dense(), &self.bound_ref()?)?;
@@ -2434,6 +2504,13 @@ where
     /// # Errors
     ///
     /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    ///
+    /// # Complexity
+    ///
+    /// As [`Self::qr_compact`]: sectorwise cubic, with a compact-diagonal
+    /// payload materialized dense first (TensorKit's `DiagonalAlgorithm`
+    /// covers `qr_full!` too, `factorizations/diagonal.jl:16-28,61-66` —
+    /// same non-adoption, same #613 Group 4 deferral).
     pub fn qr_full(&self) -> Result<(Self, Self), Error> {
         let mut dense = self.runtime.lease_dense();
         let (q, r) = tenet_matrixalgebra::qr_full_dyn(dense.dense(), &self.bound_ref()?)?;
@@ -2446,6 +2523,13 @@ where
     /// # Errors
     ///
     /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    ///
+    /// # Complexity
+    ///
+    /// As [`Self::qr_compact`]: sectorwise cubic, with a compact-diagonal
+    /// payload materialized dense first (TensorKit's `DiagonalAlgorithm`
+    /// covers the LQ pair as well, `factorizations/diagonal.jl:29-41,61-66` —
+    /// same non-adoption, same #613 Group 4 deferral).
     pub fn lq_compact(&self) -> Result<(Self, Self), Error> {
         let mut dense = self.runtime.lease_dense();
         let (l, q) = tenet_matrixalgebra::lq_compact_dyn(dense.dense(), &self.bound_ref()?)?;
@@ -2458,6 +2542,11 @@ where
     /// # Errors
     ///
     /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    ///
+    /// # Complexity
+    ///
+    /// As [`Self::lq_compact`]: sectorwise cubic, compact-diagonal payload
+    /// materialized dense first.
     pub fn lq_full(&self) -> Result<(Self, Self), Error> {
         let mut dense = self.runtime.lease_dense();
         let (l, q) = tenet_matrixalgebra::lq_full_dyn(dense.dense(), &self.bound_ref()?)?;
@@ -2494,9 +2583,30 @@ where
     /// TensorKit 0.17 / MatrixAlgebraKit `left_null`: `n : codomain <- W` with
     /// `n^H * t = 0`.
     ///
+    /// # Null bond
+    ///
+    /// `W` is a fresh non-dual single-leg bond space carrying, per coupled
+    /// sector `c`, the `rows_c − rank_c` null directions; `rank_c` is the
+    /// numerical rank the seam takes from that sector's compact SVD, counting
+    /// `σ > ε(dtype) · max(rows_c, cols_c) · σ_max,c` as nonzero. A sector
+    /// with no null directions is absent from `W`, so `W` is empty for a
+    /// numerically full-rank tensor. Note this is *not*
+    /// TensorKit/MatrixAlgebraKit's default `left_null`, which without a
+    /// truncation argument is QR-based and counts only the structural nullity
+    /// `rows_c − min(rows_c, cols_c)` (MatrixAlgebraKit
+    /// `interface/orthnull.jl`, the `alg::Nothing` mode); the seam's behavior
+    /// corresponds to their SVD mode with a tolerance.
+    ///
     /// # Errors
     ///
     /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    ///
+    /// # Complexity
+    ///
+    /// Sectorwise cubic — one compact SVD per coupled sector plus an
+    /// orthonormal completion of the sectors that keep null directions; a
+    /// compact-diagonal payload is materialized dense first, as for
+    /// [`Self::qr_compact`].
     pub fn left_null(&self) -> Result<Self, Error> {
         let mut dense = self.runtime.lease_dense();
         let out = tenet_matrixalgebra::left_null_dyn(dense.dense(), &self.bound_ref()?)?;
@@ -2506,9 +2616,22 @@ where
     /// TensorKit 0.17 / MatrixAlgebraKit `right_null`: `n : W <- domain` with
     /// `t * n^H = 0`.
     ///
+    /// # Null bond
+    ///
+    /// As [`Self::left_null`], mirrored: `W` is a fresh non-dual single-leg
+    /// bond space with `cols_c − rank_c` directions per coupled sector under
+    /// the same SVD numerical-rank cutoff, sectors with none absent — and the
+    /// same divergence from TensorKit/MatrixAlgebraKit's QR-based default
+    /// applies.
+    ///
     /// # Errors
     ///
     /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    ///
+    /// # Complexity
+    ///
+    /// As [`Self::left_null`]: sectorwise cubic, compact-diagonal payload
+    /// materialized dense first.
     pub fn right_null(&self) -> Result<Self, Error> {
         let mut dense = self.runtime.lease_dense();
         let out = tenet_matrixalgebra::right_null_dyn(dense.dense(), &self.bound_ref()?)?;
@@ -3830,11 +3953,17 @@ where
     }
 
     /// The codomain legs, in axis order.
+    ///
+    /// Allocates: each call builds a fresh `Vec` and clones every leg's
+    /// sector table (the provider travels by `Arc` bump). Hold the result
+    /// rather than re-calling in a loop.
     pub fn codomain(&self) -> Vec<GradedSpace<R>> {
         self.legs(self.body.space.space().homspace().codomain())
     }
 
     /// The domain legs, in axis order.
+    ///
+    /// Allocates per call, exactly as [`Self::codomain`].
     pub fn domain(&self) -> Vec<GradedSpace<R>> {
         self.legs(self.body.space.space().homspace().domain())
     }
