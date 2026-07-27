@@ -3276,6 +3276,21 @@ where
     /// native parallel-list `Index2Tuple` is what the seam takes internally.
     /// One cross-facade vocabulary wins over matching the seam's.
     ///
+    /// # Complexity
+    ///
+    /// Dense storage runs the partial-trace engine over the whole payload. A
+    /// compact spectrum factor traced over its only pair reduces the stored
+    /// spectrum in `O(Σ_c k_c)` without materializing (#604) — the typed twin
+    /// of the erased facade's #585 arm, with the same deliberately narrow
+    /// guard: one pair on a rank-(1,1) source, where the destination tree is
+    /// empty and the coefficient collapses to a per-sector scalar,
+    /// `dim(c) · θ(c)` on a direct traced codomain leg and `dim(c)` on a dual
+    /// one. That twist is what makes this the supertrace and not [`Self::tr`];
+    /// the coefficient is pinned byte-for-byte against the erased compact arm
+    /// and numerically (the engine's summation order differs) against the
+    /// engine route by the oracle sweeps in `tests/typed_facade.rs` and
+    /// `tenet/src/tensor/compact_diagonal_tests.rs`.
+    ///
     /// # Errors
     ///
     /// [`Error::InvalidArgument`] when the pair list is malformed — an axis out
@@ -3322,6 +3337,69 @@ where
             destination_codomain_rank,
         )?;
         let space = self.body.space.derive_from_final_homspace(homspace)?;
+        // Compact arm (#604): the full trace of a rank-(1,1) spectrum factor
+        // over its only pair is a reduction of the stored spectrum, so there
+        // is nothing to materialize — the typed twin of the erased #585 arm in
+        // `tensor.rs`, which owns the long-form rationale. In brief: this is
+        // the *categorical* trace, not `tr()`'s — the engine's
+        // `trace_channel_factor` carries the quantum dimension of the traced
+        // channel and, exactly where the traced leg is *not* dual, its
+        // fermionic twist, which is what makes this the supertrace for a
+        // fermionic rule and the coefficient `dim(c) · θ(c)` rather than
+        // `tr()`'s unconditional `dim(c)`. The guard is this narrow because
+        // with one pair and rank two the destination is the empty tree, so the
+        // traced channel is a single uncoupled sector and the coefficient
+        // collapses to a per-sector scalar; any wider geometry leaves an open
+        // destination tree whose recoupling is not a per-sector scaling.
+        // Today the geometric conditions are implied by the Group 4 contract
+        // (`TypedData::Diagonal` lives on bond spaces only), so they are
+        // defensive parity with the erased guard, not a reachable branch. No
+        // adjoint-view exclusion, unlike erased: this facade's `adjoint` is
+        // eager and keeps compact storage compact, so there is no lazy view to
+        // exclude. The coefficient is not derivable here — it is pinned
+        // against the erased arm and the engine route by the oracle sweeps in
+        // `tests/typed_facade.rs` (`compact_full_trace_*`) and, on the erased
+        // side, `tensor/compact_diagonal_tests.rs`.
+        if let Some(spectrum) = self.spectrum() {
+            if rank == 2 && self.codomain_rank() == 1 && pairs.len() == 1 {
+                let traced_leg_is_dual: bool =
+                    self.body.space.space().homspace().codomain().legs()[0].is_dual();
+                let provider: &R = self.body.space.provider();
+                // Accumulated in `Complex64` and narrowed once through the
+                // #568 `UserScalar` surface, mirroring both the compact `tr`
+                // above and the erased arm's `ordinary_trace_with` — same
+                // per-sector reduction order, so the two facades agree
+                // byte-for-byte. The dtype story is simpler than erased's
+                // three-way `DiagonalData` split: the typed spectrum already
+                // stores `SectorSpectrum<D>`, and the coefficient is the
+                // provider's real scalar, so the result is a plain `D`.
+                let mut total: num_complex::Complex64 = num_complex::Complex64::new(0.0, 0.0);
+                for entry in spectrum {
+                    let coefficient: f64 = if traced_leg_is_dual {
+                        provider.dim_scalar(entry.sector)
+                    } else {
+                        provider.dim_scalar(entry.sector) * provider.twist_scalar(entry.sector)
+                    };
+                    let mut partial: D = D::from_real(0.0);
+                    for &value in &entry.values {
+                        partial = partial + value;
+                    }
+                    total += partial.widen_complex() * coefficient;
+                }
+                // The erased arm's internal check, on the shared derived
+                // space: a fully traced rank-(1,1) destination is one scalar.
+                if space.space().required_len()? != 1 {
+                    return Err(internal_layout_error(
+                        "a fully traced rank-one destination is not a single scalar",
+                    ));
+                }
+                let value: D = D::from_complex64(total);
+                return Ok(Self {
+                    runtime: self.runtime.clone(),
+                    body: Arc::new(TypedTensorBody::dense(space, vec![value])),
+                });
+            }
+        }
         let data = tenet_tensors::tensortrace_fusion_dyn_owned_checked(
             &space,
             &self.body.space,

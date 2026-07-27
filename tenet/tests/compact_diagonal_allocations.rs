@@ -131,6 +131,35 @@ fn diagonal_product_allocation_bytes_scale_linearly() {
         measured_unary_bytes(c64_eig_fixture(), |tensor| tensor.tr().unwrap()),
         0
     );
+
+    // #604 warm-up-blindness audit: `measured_product_bytes` warms on the very
+    // tensor it measures, so a `compose` that materialized its operands would
+    // pay once during the warm-up and measure compact ever after; the `tr`
+    // probes above would read the same cache for free. Assert the absence on
+    // fresh tensors instead — their first `data()` must still owe the dense
+    // buffer. The C64-spectrum `tr` arm gets its own fresh fixture, because
+    // the shared `OnceLock` eig fixture has no un-materialized read left to
+    // spend.
+    let fresh = prepare_fixture(128, Dtype::F64, 827).diagonal;
+    black_box(fresh.compose(&fresh).unwrap());
+    black_box(fresh.tr().unwrap());
+    assert!(
+        measured_bytes(|| fresh.data().len()) >= (128 * 128 * std::mem::size_of::<f64>()) as u64,
+        "compose or tr materialized the spectrum behind our back"
+    );
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = Space::u1([(0, 16)]);
+    let fresh_eig = Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space], 829)
+        .unwrap()
+        .eig_full()
+        .unwrap()
+        .0;
+    black_box(fresh_eig.tr().unwrap());
+    assert!(
+        measured_bytes(|| fresh_eig.data_c64().len())
+            >= (2 * 16 * 16 * std::mem::size_of::<f64>()) as u64,
+        "the C64-spectrum tr materialized its source behind our back"
+    );
 }
 
 #[test]
@@ -196,6 +225,13 @@ fn storage_local_diagonal_operations_do_not_allocate_dense_payloads() {
     black_box(fresh.norm().unwrap());
     black_box(fresh.norm_p(3.0).unwrap());
     black_box(fresh.tr().unwrap());
+    // #604 audit: the O(r)-result operations were missing from this sweep, and
+    // their byte ceilings above are exactly as blind as the reductions' zeros —
+    // a `scale`/`add`/`to_c64` that reached `dense_data()` would have cached
+    // the materialization during `measured_unary_bytes`'s warm-up run.
+    black_box(fresh.scale(0.5).unwrap());
+    black_box(fresh.add(&fresh, 0.75, -0.5).unwrap());
+    black_box(fresh.to_c64());
     assert!(
         measured_bytes(|| fresh.data().len()) >= (128 * 128 * std::mem::size_of::<f64>()) as u64,
         "one of the compact reductions materialized the spectrum behind our back"
@@ -220,6 +256,18 @@ fn diagonal_dense_add_allocates_only_the_dense_result_payload() {
     assert!(
         bytes < (dense_payload * 3 / 2) as u64,
         "diagonal+dense add allocated more than one dense payload: {bytes} bytes"
+    );
+
+    // #604 audit: the ceiling above cannot see a route that materialized the
+    // diagonal operand during `measured_dense_add_bytes`'s same-tensor warm-up
+    // — the measured run would read the cache and allocate only its dense
+    // result. Assert the absence directly on a fresh pair, the way the typed
+    // suite's mixed-add gate does.
+    let fresh = prepare_fixture(degeneracy, Dtype::F64, 831);
+    black_box(fresh.diagonal.add(&fresh.dense, 0.75, -0.5).unwrap());
+    assert!(
+        measured_bytes(|| fresh.diagonal.data().len()) >= dense_payload as u64,
+        "the mixed add materialized the diagonal operand"
     );
 }
 

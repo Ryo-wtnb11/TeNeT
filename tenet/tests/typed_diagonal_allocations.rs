@@ -583,6 +583,57 @@ fn pr3_inspections_allocate_no_payload() {
 }
 
 #[test]
+fn the_full_bond_trace_reduces_the_spectrum_without_materializing() {
+    // What (issue #604): `trace_pairs` over the only pair of a compact bond
+    // factor reduces the stored spectrum in O(Σ_c k_c) — the typed twin of the
+    // erased #585 gate. The warm-up runs on a throwaway twin, never on the
+    // measured tensor: the pre-#604 route reached `dense_data()`, which fills
+    // the *measured* tensor's shared cache, so a same-tensor warm-up would pay
+    // for the materialization once and make the densifying route measure
+    // compact (the warm-up blindness the #585 report documents).
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let ceiling = dense_payload_bytes();
+
+    black_box(spectrum(0x5eed_0081).trace_pairs(&[(0, 1)]).unwrap());
+    let d = spectrum(0x5eed_0081);
+    let bytes = measured_bytes(|| d.trace_pairs(&[(0, 1)]).unwrap());
+    assert!(
+        bytes < ceiling,
+        "compact trace_pairs allocated at least one dense payload: {bytes} bytes"
+    );
+    // The cache-population check: the byte ceiling alone cannot see a route
+    // that densified during someone else's warm-up, so assert the absence
+    // directly — the source must still owe its dense buffer.
+    assert!(
+        measured_bytes(|| d.data().len()) >= ceiling,
+        "compact trace_pairs materialized its source behind our back"
+    );
+
+    // Same on a c64 spectrum: the arm is dtype-generic.
+    let warm = complex_source(0x5eed_0082).svd_compact().unwrap().1;
+    black_box(warm.trace_pairs(&[(0, 1)]).unwrap());
+    let e = complex_source(0x5eed_0082).svd_compact().unwrap().1;
+    let bytes = measured_bytes(|| e.trace_pairs(&[(0, 1)]).unwrap());
+    assert!(
+        bytes < 2 * ceiling,
+        "compact c64 trace_pairs allocated at least one dense payload: {bytes} bytes"
+    );
+    assert!(
+        measured_bytes(|| e.data().len()) >= 2 * ceiling,
+        "compact c64 trace_pairs materialized its source behind our back"
+    );
+
+    // Tracing nothing is the pre-guard clone: no payload either way, and still
+    // no materialization owed.
+    let f = spectrum(0x5eed_0083);
+    black_box(f.trace_pairs(&[]).unwrap());
+    assert!(
+        measured_bytes(|| f.data().len()) >= ceiling,
+        "the empty trace materialized its source"
+    );
+}
+
+#[test]
 fn contract_ordered_keeps_the_contract_compact_storage_outcomes() {
     // What (issue #580 PR 6, gate 3): the `contract_ordered` alias lands on
     // the same compact-storage outcomes `contract` is pinned to above — the

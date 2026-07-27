@@ -5625,6 +5625,432 @@ fn compact_is_posdef_matches_the_forced_dense_route_for_a_hermitian_c64_spectrum
 }
 
 // ---------------------------------------------------------------------------
+// Issue #604: the compact full-pair trace arm. The typed `trace_pairs` used to
+// densify a compact spectrum factor unconditionally; after #585 gave the
+// erased facade a compact arm, that was a live cross-facade parity gap. The
+// value sweep here mirrors the erased oracle sweep in
+// `tenet/src/tensor/compact_diagonal_tests.rs` (`full_rank_one_trace_pairs_*`)
+// — same rules, same orientations, same variants — and adds the erased compact
+// arm itself as a byte-for-byte sibling where the fixture is constructible on
+// both facades. The storage claim lives in `typed_diagonal_allocations.rs`.
+// ---------------------------------------------------------------------------
+
+/// A compact bond factor from identically filled `[v] <- [v]` endomorphisms on
+/// both facades: `svd_compact` of the same bytes yields the same spectrum, so
+/// the erased factor is the byte-for-byte sibling of the typed one. The
+/// counter fill follows the `counter_oracle_pair` precedent (every element
+/// distinct, both facades walk blocks in the same order); the norm assertion
+/// is the dtype-generic stand-in for the dense `data()` comparison the f64
+/// pairs make, so a fixture divergence fails here as a fixture error rather
+/// than implicating the trace arm.
+fn compact_bond_trace_pair<R, D>(
+    runtime: &Runtime,
+    erased_space: &tenet::prelude::Space,
+    typed_leg: &GradedSpace<R>,
+    fill: impl Fn(f64) -> D + Copy,
+) -> (tenet::prelude::Tensor, TensorMap<R, D>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: tenet::prelude::TensorScalar + std::fmt::Debug,
+{
+    let mut next: f64 = 0.0;
+    let erased: tenet::prelude::Tensor = tenet::prelude::Tensor::from_block_fn(
+        runtime,
+        [erased_space],
+        [erased_space],
+        |_: &tenet::prelude::BlockKey, _: &[usize]| {
+            next += 1.0;
+            fill(next)
+        },
+    )
+    .unwrap();
+    let mut next: f64 = 0.0;
+    let typed: TensorMap<R, D> =
+        TensorMap::from_block_fn(runtime, [typed_leg], [typed_leg], |_, _| {
+            next += 1.0;
+            fill(next)
+        })
+        .unwrap();
+    assert!(
+        (typed.norm().unwrap() - erased.norm().unwrap()).abs() <= 1e-12,
+        "the two facades disagree on the fixture itself"
+    );
+    (
+        erased.svd_compact().unwrap().1,
+        typed.svd_compact().unwrap().1,
+    )
+}
+
+/// The typed compact trace against the typed forced-dense engine route, both
+/// pair orders. Close, not byte-for-byte: the engine reduces block by block in
+/// its own order, so this is the value oracle — the byte pin is the erased
+/// sibling in [`assert_compact_full_trace_parity`].
+fn assert_compact_trace_matches_forced_dense<R, D>(
+    label: &str,
+    typed: &TensorMap<R, D>,
+    widen: impl Fn(D) -> Complex64 + Copy,
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: tenet::prelude::TensorScalar + std::fmt::Debug,
+{
+    let dense: TensorMap<R, D> = forced_dense(typed);
+    for pairs in [[(0usize, 1usize)], [(1usize, 0usize)]] {
+        let actual: Complex64 = widen(typed.trace_pairs(&pairs).unwrap().scalar().unwrap());
+        let oracle: Complex64 = widen(dense.trace_pairs(&pairs).unwrap().scalar().unwrap());
+        assert!(
+            (actual - oracle).norm() <= 1e-12 * oracle.norm().max(1.0),
+            "{label} {pairs:?}: compact {actual:?} vs dense route {oracle:?}"
+        );
+    }
+}
+
+/// One compact variant's full trace on both facades — byte for byte against
+/// the erased compact arm (#585), which owns the oracle-pinned coefficient —
+/// plus the typed forced-dense value oracle.
+fn assert_compact_full_trace_parity<R, D>(
+    label: &str,
+    erased: &tenet::prelude::Tensor,
+    typed: &TensorMap<R, D>,
+    widen: impl Fn(D) -> Complex64 + Copy,
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: tenet::prelude::TensorScalar + std::fmt::Debug,
+{
+    for pairs in [[(0usize, 1usize)], [(1usize, 0usize)]] {
+        let actual: Complex64 = widen(typed.trace_pairs(&pairs).unwrap().scalar().unwrap());
+        let sibling: Complex64 = erased
+            .trace_pairs(&pairs)
+            .unwrap()
+            .scalar()
+            .unwrap()
+            .to_c64();
+        assert_eq!(
+            actual, sibling,
+            "{label} {pairs:?}: typed vs erased compact arm"
+        );
+    }
+    assert_compact_trace_matches_forced_dense(label, typed, widen);
+}
+
+/// The erased sweep's variant set, cross-facade: the freshly factorized bond,
+/// the two compact swaps (which dual both legs and so flip the coefficient
+/// orientation), and the adjoint (owned conjugated spectrum on both facades —
+/// not the erased lazy view, which `adjoint` short-circuits for compact
+/// storage).
+fn sweep_compact_trace_variants<R, D>(
+    label: &str,
+    erased_s: &tenet::prelude::Tensor,
+    typed_s: &TensorMap<R, D>,
+    widen: impl Fn(D) -> Complex64 + Copy,
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: tenet::prelude::TensorScalar + std::fmt::Debug,
+{
+    let variants: Vec<(&str, tenet::prelude::Tensor, TensorMap<R, D>)> = vec![
+        ("plain", erased_s.clone(), typed_s.clone()),
+        (
+            "transposed",
+            erased_s.transpose().unwrap(),
+            typed_s.transpose().unwrap(),
+        ),
+        (
+            "permuted",
+            erased_s.permute(&[1], &[0]).unwrap(),
+            typed_s.permute(&[1], &[0]).unwrap(),
+        ),
+        (
+            "adjoint",
+            erased_s.adjoint().unwrap(),
+            typed_s.adjoint().unwrap(),
+        ),
+    ];
+    for (which, erased, typed) in &variants {
+        assert_compact_full_trace_parity(&format!("{label} {which}"), erased, typed, widen);
+    }
+}
+
+#[test]
+fn compact_full_trace_matches_the_forced_dense_and_erased_routes() {
+    // What: the full trace of a rank-(1,1) compact spectrum factor over its
+    // only pair is the same number whichever storage and whichever facade
+    // computes it — U(1), SU(2) (non-unit quantum dimensions), fZ2 (the twist
+    // makes it a supertrace) and the packed U(1) x fZ2 product route, on plain
+    // and dual bond legs, f64 and c64, both pair orders, and on legs the
+    // compact swaps bent themselves.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let real = |value: f64| value;
+    let complex = |value: f64| Complex64::new(value, 0.25 + value % 3.0);
+    let widen_real = |value: f64| Complex64::new(value, 0.0);
+    let widen_complex = |value: Complex64| value;
+
+    for is_dual in [false, true] {
+        let dual_erased = |space: tenet::prelude::Space| {
+            if is_dual {
+                space.try_dual().unwrap()
+            } else {
+                space
+            }
+        };
+
+        // U(1).
+        let erased_space = dual_erased(tenet::prelude::Space::u1([(-1, 2), (0, 3), (1, 2)]));
+        let mut typed_leg: GradedSpace<tenet::core::U1FusionRule> = GradedSpace::try_new(
+            Arc::new(tenet::core::U1FusionRule),
+            [
+                (tenet::core::U1Irrep::new(-1), 2),
+                (tenet::core::U1Irrep::new(0), 3),
+                (tenet::core::U1Irrep::new(1), 2),
+            ],
+            false,
+        )
+        .unwrap();
+        if is_dual {
+            typed_leg = typed_leg.try_dual().unwrap();
+        }
+        let (erased_s, typed_s) =
+            compact_bond_trace_pair(&runtime, &erased_space, &typed_leg, real);
+        sweep_compact_trace_variants(
+            &format!("u1 dual={is_dual} f64"),
+            &erased_s,
+            &typed_s,
+            widen_real,
+        );
+        let (erased_s, typed_s) =
+            compact_bond_trace_pair(&runtime, &erased_space, &typed_leg, complex);
+        sweep_compact_trace_variants(
+            &format!("u1 dual={is_dual} c64"),
+            &erased_s,
+            &typed_s,
+            widen_complex,
+        );
+
+        // SU(2): dim(c) takes the values 1 and 2, so a coefficient-free
+        // reduction cannot pass.
+        let erased_space = dual_erased(tenet::prelude::Space::su2([(0, 2), (1, 3)]).unwrap());
+        let mut typed_leg: GradedSpace<tenet::core::SU2FusionRule> = GradedSpace::try_new(
+            Arc::new(tenet::core::SU2FusionRule),
+            [
+                (SU2Irrep::from_twice_spin(0), 2),
+                (SU2Irrep::from_twice_spin(1), 3),
+            ],
+            false,
+        )
+        .unwrap();
+        if is_dual {
+            typed_leg = typed_leg.try_dual().unwrap();
+        }
+        let (erased_s, typed_s) =
+            compact_bond_trace_pair(&runtime, &erased_space, &typed_leg, real);
+        sweep_compact_trace_variants(
+            &format!("su2 dual={is_dual} f64"),
+            &erased_s,
+            &typed_s,
+            widen_real,
+        );
+        let (erased_s, typed_s) =
+            compact_bond_trace_pair(&runtime, &erased_space, &typed_leg, complex);
+        sweep_compact_trace_variants(
+            &format!("su2 dual={is_dual} c64"),
+            &erased_s,
+            &typed_s,
+            widen_complex,
+        );
+
+        // fZ2: the twist is -1 on the odd sector, so this is where the
+        // supertrace coefficient and its orientation live.
+        let erased_space = dual_erased(tenet::prelude::Space::fz2([(0, 2), (1, 3)]).unwrap());
+        let mut typed_leg: GradedSpace<tenet::core::FermionParityFusionRule> =
+            GradedSpace::try_new(
+                Arc::new(tenet::core::FermionParityFusionRule),
+                [
+                    (tenet::core::Z2Irrep::EVEN, 2),
+                    (tenet::core::Z2Irrep::ODD, 3),
+                ],
+                false,
+            )
+            .unwrap();
+        if is_dual {
+            typed_leg = typed_leg.try_dual().unwrap();
+        }
+        let (erased_s, typed_s) =
+            compact_bond_trace_pair(&runtime, &erased_space, &typed_leg, real);
+        sweep_compact_trace_variants(
+            &format!("fz2 dual={is_dual} f64"),
+            &erased_s,
+            &typed_s,
+            widen_real,
+        );
+        let (erased_s, typed_s) =
+            compact_bond_trace_pair(&runtime, &erased_space, &typed_leg, complex);
+        sweep_compact_trace_variants(
+            &format!("fz2 dual={is_dual} c64"),
+            &erased_s,
+            &typed_s,
+            widen_complex,
+        );
+
+        // U(1) x fZ2, on the erased facade's packed codec (see the #589
+        // section's rule aliases): the product route through
+        // `core_rule_bridge`, where both the charge and the parity factor
+        // must survive into the coefficient.
+        let erased_space =
+            dual_erased(tenet::prelude::Space::product([((0, 0), 2), ((1, 1), 3)]).unwrap());
+        let product_label = |charge: i32, parity: u8| {
+            tenet::core::ProductSector::new(tenet::core::U1Irrep::new(charge), parity_irrep(parity))
+        };
+        let mut typed_leg: GradedSpace<U1Fz2Rule> = GradedSpace::try_new(
+            Arc::new(U1Fz2Rule::new(
+                tenet::core::U1FusionRule,
+                tenet::core::FermionParityFusionRule,
+            )),
+            [(product_label(0, 0), 2), (product_label(1, 1), 3)],
+            false,
+        )
+        .unwrap();
+        if is_dual {
+            typed_leg = typed_leg.try_dual().unwrap();
+        }
+        let (erased_s, typed_s) =
+            compact_bond_trace_pair(&runtime, &erased_space, &typed_leg, real);
+        sweep_compact_trace_variants(
+            &format!("u1xfz2 dual={is_dual} f64"),
+            &erased_s,
+            &typed_s,
+            widen_real,
+        );
+        let (erased_s, typed_s) =
+            compact_bond_trace_pair(&runtime, &erased_space, &typed_leg, complex);
+        sweep_compact_trace_variants(
+            &format!("u1xfz2 dual={is_dual} c64"),
+            &erased_s,
+            &typed_s,
+            widen_complex,
+        );
+    }
+
+    // Genuinely complex stored values (a spectrum has none out of `svd`, and
+    // the adjoint variant only conjugates): a compact complex rotation stays
+    // compact, and the typed forced-dense oracle covers it on the rule where
+    // the twist could interact with the phase. Typed-only — the erased `scale`
+    // takes an f64 factor, so there is no erased sibling to compare bytes with.
+    let erased_space = tenet::prelude::Space::fz2([(0, 2), (1, 3)]).unwrap();
+    let typed_leg: GradedSpace<tenet::core::FermionParityFusionRule> = GradedSpace::try_new(
+        Arc::new(tenet::core::FermionParityFusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 3),
+        ],
+        false,
+    )
+    .unwrap();
+    let (_, typed_s) = compact_bond_trace_pair(&runtime, &erased_space, &typed_leg, complex);
+    let rotated: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
+        typed_s.scale(Complex64::new(0.8, -0.6));
+    assert_compact_trace_matches_forced_dense("fz2 rotated c64", &rotated, widen_complex);
+    assert_compact_trace_matches_forced_dense(
+        "fz2 rotated transposed c64",
+        &rotated.transpose().unwrap(),
+        widen_complex,
+    );
+}
+
+#[test]
+fn compact_full_trace_is_the_supertrace_and_the_transpose_flips_it() {
+    // What: the typed twin of the erased
+    // `full_rank_one_trace_pairs_is_the_supertrace_for_a_fermionic_rule`. On a
+    // single fermion-parity sector, `trace_pairs` and `tr` differ by exactly
+    // the twist: an odd fZ2 bond flips the sign, an even one does not, and the
+    // bosonic Z2 twin of the odd bond pins that the sign is the *twist* and
+    // not the parity label. The transpose duals both bond legs, and the traced
+    // channel is twisted only where its leg is not dual, so the same tensor
+    // traces without the fermionic sign once transposed — which is what kills
+    // a coefficient that reads the sector alone, or one with the dual and
+    // non-dual arms swapped.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    let assert_supertrace =
+        |name: &str, sign: f64, s: &TensorMap<tenet::core::FermionParityFusionRule, f64>| {
+            let positive: f64 = s.tr().unwrap();
+            let traced: f64 = s.trace_pairs(&[(0, 1)]).unwrap().scalar().unwrap();
+            assert_eq!(traced, sign * positive, "{name}");
+            let transposed: TensorMap<tenet::core::FermionParityFusionRule, f64> =
+                s.transpose().unwrap();
+            let transposed_positive: f64 = transposed.tr().unwrap();
+            let transposed_traced: f64 =
+                transposed.trace_pairs(&[(0, 1)]).unwrap().scalar().unwrap();
+            assert_eq!(transposed_traced, transposed_positive, "{name} transposed");
+        };
+
+    for (name, parity, sign) in [
+        ("fz2 even", tenet::core::Z2Irrep::EVEN, 1.0),
+        ("fz2 odd", tenet::core::Z2Irrep::ODD, -1.0),
+    ] {
+        let leg: GradedSpace<tenet::core::FermionParityFusionRule> = GradedSpace::try_new(
+            Arc::new(tenet::core::FermionParityFusionRule),
+            [(parity, 3)],
+            false,
+        )
+        .unwrap();
+        let mut next: f64 = 0.0;
+        let source: TensorMap<tenet::core::FermionParityFusionRule, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| {
+                next += 1.0;
+                next
+            })
+            .unwrap();
+        let s: TensorMap<tenet::core::FermionParityFusionRule, f64> =
+            source.svd_compact().unwrap().1;
+        assert_supertrace(name, sign, &s);
+    }
+
+    // The bosonic twin of the odd fixture: same parity label, twist +1, so the
+    // supertrace *is* the positive trace here.
+    let leg: GradedSpace<tenet::core::Z2FusionRule> = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [(tenet::core::Z2Irrep::ODD, 3)],
+        false,
+    )
+    .unwrap();
+    let mut next: f64 = 0.0;
+    let source: TensorMap<tenet::core::Z2FusionRule, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| {
+            next += 1.0;
+            next
+        })
+        .unwrap();
+    let s: TensorMap<tenet::core::Z2FusionRule, f64> = source.svd_compact().unwrap().1;
+    let positive: f64 = s.tr().unwrap();
+    let traced: f64 = s.trace_pairs(&[(0, 1)]).unwrap().scalar().unwrap();
+    assert_eq!(traced, positive, "z2 odd");
+}
+
+#[test]
+fn compact_trace_boundary_geometries_keep_their_existing_routes() {
+    // What: the compact arm's boundaries. Tracing nothing on a compact factor
+    // returns the source (the pre-guard short-circuit), and a malformed pair
+    // list errors with the erased facade's message *before* the arm can run —
+    // the same validation order as on dense storage. The dense geometries
+    // outside the guard (rank > 2, partial pairs) are pinned by the Phase 5
+    // `trace_pairs` tests above, which this issue must keep green.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, s) = z2_bond_pair(&runtime);
+
+    let untouched: TensorMap<tenet::core::Z2FusionRule, f64> = s.trace_pairs(&[]).unwrap();
+    assert_eq!(untouched.data(), s.data());
+
+    for pairs in [vec![(0usize, 9usize)], vec![(0, 0)], vec![(0, 1), (1, 0)]] {
+        assert!(matches!(
+            s.trace_pairs(&pairs).unwrap_err(),
+            tenet::prelude::Error::InvalidArgument(message)
+                if message.contains("invalid trace pair list")
+        ));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Issue #589: cross-facade byte oracles for the built-in multiplicity-free
 // routes that had none — U(1), U(1) x fZ2, and fZ2 x U(1) x SU(2).
 //
