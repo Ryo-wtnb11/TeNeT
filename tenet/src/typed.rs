@@ -717,11 +717,7 @@ where
         .collect();
     Ok(TensorMap {
         runtime: runtime.clone(),
-        body: Arc::new(TypedTensorBody {
-            space,
-            data: TypedData::Diagonal(data),
-            dense_cache: std::sync::OnceLock::new(),
-        }),
+        body: Arc::new(TypedTensorBody::diagonal(space, data)),
     })
 }
 
@@ -882,20 +878,72 @@ where
 /// and its block payload.
 struct TypedTensorBody<R, D> {
     space: BoundDynamicFusionMapSpace<R>,
-    data: TypedData<D>,
+    /// Why the payload carries its own reference count rather than sitting
+    /// inline in the body: an operation that rewrites only the *space* and
+    /// leaves every stored value where it is — inserting or removing a unit
+    /// leg, whose trivial sector adds no block and reorders nothing — must be
+    /// an O(1) metadata edit. Inline, such an operation would have to copy the
+    /// whole `Vec<D>` to build a body with the new space; behind this `Arc` it
+    /// clones a pointer. That O(1)-reuse argument holds for **dense payloads
+    /// only**: `TypedData::Diagonal` is a bond-space-only representation, and
+    /// reusing one under a rewritten non-bond space would leave `spectrum()`
+    /// returning `Some` and send `exp`/`inv`/`pinv`/`scale` down their compact
+    /// elementwise arms on a tensor that is no longer an endomorphism. The
+    /// Group 4 (#580) contract is therefore: materialize a compact payload to
+    /// dense *before* changing the space, exactly as the references do —
+    /// TensorKit 0.17 shares `t.data` only for ordinary `TensorMap` and routes
+    /// `DiagonalTensorMap` through the generic similar+block-copy branch
+    /// (`src/tensors/indexmanipulations.jl:124-136,158-195`), and the erased
+    /// facade materializes `Data::Diagonal` first and only then shares the
+    /// resulting `Arc<Data>` (`tenet/src/tensor.rs:4276-4331`). If Group 4
+    /// wants erased-parity sharing of that materialized buffer, that slice
+    /// must also make the materialized payload shareable — today
+    /// `dense_cache` only lends a borrowed slice, so the buffer cannot be
+    /// installed in a new body at O(1). And `TypedData::Diagonal` must not be
+    /// broadened to non-bond spaces without separately proving every compact
+    /// fast path (`spectrum`/`exp`/`inv`/`pinv`/`scale`).
+    /// Clone-then-modify keeps the same property from the
+    /// other side: two *bodies* can share one payload until one of them writes
+    /// (today `TensorMap::clone` shares the whole body, so this `Arc` earns
+    /// its keep only once Group 4 operations build new bodies over old dense
+    /// payloads). This is also parity, not invention: the erased sibling's
+    /// `tensor.rs` `TensorBody { space: Arc<..>, data: Arc<Data> }` has had
+    /// exactly this two-`Arc` layout all along, so typed converges onto the
+    /// established in-repo shape.
+    data: Arc<TypedData<D>>,
     /// Materialization of a [`TypedData::Diagonal`] payload into the dense
     /// coupled layout, computed at most once and shared by every clone of this
     /// body — the erased sibling's `compact_dense` cache, without its hand-copy
     /// on each `Tensor` value. Never populated for a dense payload.
+    ///
+    /// Deliberately *not* inside the payload `Arc`: the materialized buffer is
+    /// a function of the payload **and** the space it is laid out on, so it
+    /// belongs to the body that owns that pairing — any body sharing the
+    /// payload starts from a cold cache and materializes for itself. (Reusing
+    /// a `Diagonal` payload under a *different* space is not a scenario this
+    /// placement serves: that reuse is forbidden outright — see the `data`
+    /// field rationale on the Group 4 contract.)
     dense_cache: std::sync::OnceLock<Vec<D>>,
 }
 
 impl<R, D> TypedTensorBody<R, D> {
     /// A body holding an already-dense payload.
     fn dense(space: BoundDynamicFusionMapSpace<R>, data: Vec<D>) -> Self {
+        Self::new(space, TypedData::Dense(data))
+    }
+
+    /// A body holding a compact spectrum payload.
+    fn diagonal(
+        space: BoundDynamicFusionMapSpace<R>,
+        spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<D>>,
+    ) -> Self {
+        Self::new(space, TypedData::Diagonal(spectrum))
+    }
+
+    fn new(space: BoundDynamicFusionMapSpace<R>, data: TypedData<D>) -> Self {
         Self {
             space,
-            data: TypedData::Dense(data),
+            data: Arc::new(data),
             dense_cache: std::sync::OnceLock::new(),
         }
     }
@@ -934,7 +982,7 @@ impl<R, D> core::fmt::Debug for TensorMap<R, D> {
             // `{:?}` would make a diagnostic the most expensive call on the type.
             .field(
                 "elements",
-                &match &self.body.data {
+                &match &*self.body.data {
                     TypedData::Dense(data) => data.len(),
                     TypedData::Diagonal(spectrum) => {
                         spectrum.iter().map(|entry| entry.values.len()).sum()
@@ -1145,7 +1193,11 @@ where
             let space = body.space.space();
             sector_regions(space.structure(), space.nout())?
         };
-        let TypedData::Dense(data) = &mut body.data else {
+        // The payload `Arc` is unique for the same reason the body one is: this
+        // tensor was built two statements ago and never handed out.
+        let payload =
+            Arc::get_mut(&mut body.data).expect("a freshly built payload has no other owner");
+        let TypedData::Dense(data) = payload else {
             unreachable!("`build` always produces a dense payload");
         };
         for region in regions.iter() {
@@ -2580,11 +2632,7 @@ where
     fn with_spectrum(&self, spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<D>>) -> Self {
         Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody {
-                space: self.body.space.clone(),
-                data: TypedData::Diagonal(spectrum),
-                dense_cache: std::sync::OnceLock::new(),
-            }),
+            body: Arc::new(TypedTensorBody::diagonal(self.body.space.clone(), spectrum)),
         }
     }
 
@@ -2600,17 +2648,13 @@ where
     ) -> Self {
         Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody {
-                space,
-                data: TypedData::Diagonal(spectrum),
-                dense_cache: std::sync::OnceLock::new(),
-            }),
+            body: Arc::new(TypedTensorBody::diagonal(space, spectrum)),
         }
     }
 
     /// The compact payload, when this tensor has one.
     fn spectrum(&self) -> Option<&[tenet_matrixalgebra::SectorSpectrum<D>]> {
-        match &self.body.data {
+        match &*self.body.data {
             TypedData::Diagonal(spectrum) => Some(spectrum),
             TypedData::Dense(_) => None,
         }
@@ -3347,7 +3391,7 @@ where
     /// invariant break rather than a caller mistake — the same judgement, and
     /// the same `expect`, as the erased `Tensor::materialize_diagonal`.
     fn dense_data(&self) -> &[D] {
-        match &self.body.data {
+        match &*self.body.data {
             TypedData::Dense(data) => data,
             TypedData::Diagonal(spectrum) => self.body.dense_cache.get_or_init(|| {
                 tenet_matrixalgebra::diagonal_bond_data(
@@ -3358,5 +3402,121 @@ where
                 .expect("diagonal fill is total on the stored bond space")
             }),
         }
+    }
+}
+
+/// Representation gates for [`TypedTensorBody`] (#580 PR 0).
+///
+/// These live inside the module on purpose: the properties under test are the
+/// private layout — which `Arc` holds what — and asserting them from
+/// `tests/` would mean publishing accessors the facade does not otherwise
+/// need. Byte-level neutrality of this layout is *not* re-asserted here; it is
+/// already pinned by the typed-versus-erased oracles in `tests/typed_facade.rs`
+/// across U(1), SU(2), fZ2, Z2, an external provider and both `ProductFusionRule`
+/// orders, and the dense-cache behavior by `tests/typed_diagonal_allocations.rs`.
+#[cfg(test)]
+mod representation_gates {
+    use super::*;
+    use tenet_core::{Z2FusionRule, Z2Irrep};
+
+    fn fixture() -> TensorMap<Z2FusionRule, f64> {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let leg =
+            GradedSpace::try_new(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, 8)], false).unwrap();
+        let mut state = 0x5eed_0580u64;
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], move |_, _| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((state >> 33) as f64) / (u32::MAX as f64) - 0.5
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn clone_copies_no_payload_bytes() {
+        // What: `clone` is O(1) in the payload. Measured structurally rather
+        // than by an allocator, which cannot distinguish "no copy" from "a
+        // copy the size of a warm cache line".
+        let tensor = fixture();
+        let twin = tensor.clone();
+        assert!(Arc::ptr_eq(&tensor.body, &twin.body));
+        assert!(Arc::ptr_eq(&tensor.body.data, &twin.body.data));
+        assert_eq!(tensor.data().as_ptr(), twin.data().as_ptr());
+        // One payload, however many handles reach it.
+        assert_eq!(Arc::strong_count(&tensor.body.data), 1);
+        assert_eq!(Arc::strong_count(&tensor.body), 2);
+    }
+
+    #[test]
+    fn a_body_on_a_different_space_reuses_the_payload_allocation() {
+        // What: the property #580 Group 4 rests on, for a *dense* payload — a
+        // compact `Diagonal` payload is bond-space-only and must be
+        // materialized before any space rewrite (see the `data` field
+        // rationale). A unit-leg insertion builds a body with a rewritten
+        // space and the *same* stored dense values; if that cost a payload
+        // copy the operation could not be O(1). The space here stands in for
+        // the rewritten one — what is under test is that a second body can
+        // hold the first body's payload at all, at pointer cost.
+        let tensor = fixture();
+        let payload = Arc::clone(&tensor.body.data);
+        // Hand-constructed body: a struct-shape change surfaces as a compile
+        // error here, not a gate failure. Group 4 (#580) should replace this
+        // with a real same-payload-different-space operation once one exists.
+        let relabelled = TensorMap {
+            runtime: tensor.runtime.clone(),
+            body: Arc::new(TypedTensorBody {
+                space: tensor.body.space.clone(),
+                data: payload,
+                dense_cache: std::sync::OnceLock::new(),
+            }),
+        };
+        assert_eq!(Arc::strong_count(&tensor.body.data), 2);
+        assert!(!Arc::ptr_eq(&tensor.body, &relabelled.body));
+        assert_eq!(tensor.data().as_ptr(), relabelled.data().as_ptr());
+    }
+
+    #[test]
+    fn a_written_payload_leaves_the_shared_one_untouched() {
+        // What: clone-then-modify. Sharing is only sound if a write on one
+        // handle cannot be seen through the other — every write route in this
+        // module publishes a new payload rather than reaching through the `Arc`.
+        let tensor = fixture();
+        let twin = tensor.clone();
+        let before: Vec<f64> = tensor.data().to_vec();
+
+        let scaled = twin.scale(2.0);
+
+        assert_eq!(tensor.data(), before.as_slice());
+        assert_eq!(twin.data(), before.as_slice());
+        assert_ne!(scaled.data().as_ptr(), tensor.data().as_ptr());
+        assert!(!Arc::ptr_eq(&scaled.body.data, &tensor.body.data));
+    }
+
+    #[test]
+    fn the_dense_cache_lives_per_body_not_in_the_payload_arc() {
+        // What: cache placement. `dense_cache` sits in the body, outside the
+        // payload `Arc`, so a body that shares a payload starts with a cold
+        // cache and materializes for itself, yielding a distinct buffer. This
+        // is a same-space check on purpose — it makes no unit-leg claim: a
+        // `Diagonal` payload may never be reused under a rewritten space at
+        // all (see the `data` field rationale on the Group 4 contract). It
+        // does *not* gate the struct shape — the fresh `OnceLock` below is
+        // hand-supplied, so any layout keeping the field compiles and passes.
+        let s = fixture().svd_compact().unwrap().1;
+        assert!(s.body.dense_cache.get().is_none(), "cache warm at birth");
+        let materialized = s.data().as_ptr();
+        assert!(s.body.dense_cache.get().is_some());
+
+        // Hand-constructed body, same caveat as the gate above: shape changes
+        // become compile errors.
+        let reused = TensorMap {
+            runtime: s.runtime.clone(),
+            body: Arc::new(TypedTensorBody {
+                space: s.body.space.clone(),
+                data: Arc::clone(&s.body.data),
+                dense_cache: std::sync::OnceLock::new(),
+            }),
+        };
+        assert!(reused.body.dense_cache.get().is_none());
+        assert_ne!(reused.data().as_ptr(), materialized);
     }
 }
