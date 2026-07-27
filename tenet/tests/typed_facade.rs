@@ -5706,11 +5706,14 @@ fn fz2_u1_su2_label(
 }
 
 /// `0` even, `1` odd, as every erased fermion-parity constructor spells it.
+// Strict on purpose: the label bridge has to stay injective, or a result-only
+// relabelling (odd `1` rewritten as an out-of-range `3`) folds onto a valid
+// label and escapes the space comparison.
 fn parity_irrep(parity: u8) -> tenet::core::Z2Irrep {
-    if parity == 0 {
-        tenet::core::Z2Irrep::EVEN
-    } else {
-        tenet::core::Z2Irrep::ODD
+    match parity {
+        0 => tenet::core::Z2Irrep::EVEN,
+        1 => tenet::core::Z2Irrep::ODD,
+        other => panic!("not a fermion parity: {other} (SectorLabel parity is exactly 0 or 1)"),
     }
 }
 
