@@ -5617,9 +5617,24 @@ fn u1_block_endomorphism<D>(blocks: &[(i32, usize, Vec<D>)]) -> TensorMap<D, 1, 
 where
     D: Copy + Zero,
 {
+    let blocks = blocks
+        .iter()
+        .map(|(charge, dimension, data)| {
+            (U1Irrep::new(*charge).sector_id(), *dimension, data.clone())
+        })
+        .collect::<Vec<_>>();
+    block_endomorphism(&U1FusionRule, &blocks)
+}
+
+/// `1 <- 1` endomorphism with one fusion tree per coupled sector, on any rule.
+fn block_endomorphism<R, D>(rule: &R, blocks: &[(SectorId, usize, Vec<D>)]) -> TensorMap<D, 1, 1>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: Copy + Zero,
+{
     let sectors = blocks
         .iter()
-        .map(|(charge, dimension, _)| (U1Irrep::new(*charge).sector_id(), *dimension))
+        .map(|(sector, dimension, _)| (*sector, *dimension))
         .collect::<Vec<_>>();
     let leg = SectorLeg::new(sectors.iter().copied(), false);
     let total_dimension = sectors.iter().map(|(_, dimension)| dimension).sum();
@@ -5628,13 +5643,13 @@ where
         FusionProductSpace::new([leg]),
     );
     let shapes = homspace
-        .fusion_tree_keys(&U1FusionRule)
+        .fusion_tree_keys(rule)
         .iter()
         .map(|key| {
-            let sector = key.codomain_tree().coupled();
+            let coupled = key.codomain_tree().coupled();
             let (_, dimension, data) = blocks
                 .iter()
-                .find(|(charge, _, _)| U1Irrep::new(*charge).sector_id() == sector)
+                .find(|(sector, _, _)| *sector == coupled)
                 .unwrap();
             assert_eq!(data.len(), dimension * dimension);
             vec![*dimension, *dimension]
@@ -5643,7 +5658,7 @@ where
     let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<1, 1>::from_dims([total_dimension], [total_dimension]).unwrap(),
         homspace,
-        &U1FusionRule,
+        rule,
         shapes,
     )
     .unwrap();
@@ -5651,10 +5666,10 @@ where
         let BlockKey::FusionTree(tree) = key else {
             return D::zero();
         };
-        let sector = tree.codomain_tree().coupled();
+        let coupled = tree.codomain_tree().coupled();
         let (_, dimension, data) = blocks
             .iter()
-            .find(|(charge, _, _)| U1Irrep::new(*charge).sector_id() == sector)
+            .find(|(sector, _, _)| *sector == coupled)
             .unwrap();
         data[indices[0] + dimension * indices[1]]
     })
@@ -7619,6 +7634,95 @@ fn exp_of_a_hermitian_endomorphism_keeps_the_eigendecomposition_bit_for_bit() {
     assert_eq!(spy.solve_calls, 0, "the Hermitian route must not solve");
     assert_eq!(spy.matmul_calls, 0, "the Hermitian route must not GEMM");
     assert_eq!(exponential.tensor().data(), &EXP_HERMITIAN_FROZEN[..]);
+}
+
+#[test]
+fn exp_of_a_hermitian_c64_endomorphism_takes_the_spectral_route() {
+    // What: the *dispatch*, not the values. The retained Hermitian route is
+    // pinned bit for bit only on U(1)/f64 above, so a hermiticity predicate that
+    // misclassified complex input would silently reroute it onto Pade with
+    // nothing failing. A solve on Hermitian input is the observable.
+    let half = Complex64::new(0.5, 0.0);
+    let charge_zero = vec![
+        half,
+        Complex64::new(0.25, -0.125),
+        Complex64::new(-0.125, 0.375),
+        Complex64::new(0.25, 0.125),
+        Complex64::new(-0.75, 0.0),
+        Complex64::new(0.375, -0.25),
+        Complex64::new(-0.125, -0.375),
+        Complex64::new(0.375, 0.25),
+        Complex64::new(1.25, 0.0),
+    ];
+    let charge_one = vec![
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.25, 0.5),
+        Complex64::new(0.25, -0.5),
+        Complex64::new(-0.75, 0.0),
+    ];
+    let tensor = u1_block_endomorphism(&[(0, 3, charge_zero), (1, 2, charge_one)]);
+    let mut spy = MatrixFunctionCallSpy::default();
+    let mut context = TensorContractFusionExecutionContext::<Complex64, RuleIdentity>::default();
+
+    exp(
+        &mut spy,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
+    )
+    .unwrap();
+
+    assert_eq!(
+        spy.eigh_calls, 2,
+        "one eigendecomposition per coupled sector"
+    );
+    assert_eq!(
+        spy.solve_calls, 0,
+        "a Hermitian c64 input must not reach the Pade solve"
+    );
+}
+
+#[test]
+fn exp_of_a_hermitian_su2_endomorphism_takes_the_spectral_route() {
+    // What: the same dispatch gate on a non-abelian rule, where the coupled
+    // sector matrix carries the recoupling structure the predicate reads.
+    let rule = SU2FusionRule;
+    let symmetric = |a: f64, b: f64, c: f64| vec![a, b, b, c];
+    let blocks = [
+        (
+            SU2Irrep::from_twice_spin(0).sector_id(),
+            2usize,
+            symmetric(0.5, 0.25, -0.75),
+        ),
+        (
+            SU2Irrep::from_twice_spin(1).sector_id(),
+            2usize,
+            symmetric(1.25, -0.375, 0.625),
+        ),
+        (
+            SU2Irrep::from_twice_spin(2).sector_id(),
+            2usize,
+            symmetric(-0.25, 0.5, 0.125),
+        ),
+    ];
+    let tensor = block_endomorphism(&rule, &blocks);
+    let mut spy = MatrixFunctionCallSpy::default();
+    let mut context = default_context();
+
+    exp(
+        &mut spy,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(rule), &tensor),
+    )
+    .unwrap();
+
+    assert_eq!(
+        spy.eigh_calls, 3,
+        "one eigendecomposition per coupled sector"
+    );
+    assert_eq!(
+        spy.solve_calls, 0,
+        "a Hermitian SU(2) input must not reach the Pade solve"
+    );
 }
 
 #[test]
