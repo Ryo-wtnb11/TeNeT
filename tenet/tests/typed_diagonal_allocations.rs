@@ -494,3 +494,90 @@ fn compact_is_posdef_never_builds_or_caches_a_dense_payload() {
         "compact c64 is_posdef materialized the spectrum"
     );
 }
+
+#[test]
+fn pr3_conversions_allocate_one_output_and_stay_compact_on_a_spectrum() {
+    // What (issue #580 PR 3): `zeros_like`, `to_c64` and `re`/`im` are one
+    // element-wise pass — on a compact spectrum factor the result stays
+    // compact (far below one dense payload), and none of them materializes
+    // the source's dense buffer as a side effect.
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let d = spectrum(0x5eed_0021);
+    let complex_d = complex_source(0x5eed_0022).svd_compact().unwrap().1;
+    let ceiling = dense_payload_bytes();
+
+    for (name, bytes) in [
+        ("zeros_like", warmed_bytes(|| d.zeros_like())),
+        ("to_c64", warmed_bytes(|| d.to_c64())),
+        ("re", warmed_bytes(|| complex_d.re())),
+        ("im", warmed_bytes(|| complex_d.im())),
+    ] {
+        assert!(
+            bytes < ceiling,
+            "compact {name} allocated at least one dense payload: {bytes} bytes"
+        );
+    }
+
+    // Neither source was densified behind our back: the first read still has
+    // to build each dense buffer.
+    assert!(
+        measured_bytes(|| d.data().len()) >= ceiling,
+        "a conversion materialized the f64 spectrum as a side effect"
+    );
+    assert!(
+        measured_bytes(|| complex_d.data().len()) >= 2 * ceiling,
+        "a conversion materialized the c64 spectrum as a side effect"
+    );
+}
+
+#[test]
+fn pr3_dense_conversions_allocate_only_their_own_output() {
+    // What (issue #580 PR 3): on a dense payload, `to_c64` allocates its c64
+    // output (twice the f64 bytes) and nothing more; `re`/`im` allocate their
+    // f64 output and nothing more. The ceilings reject any hidden second
+    // payload.
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let tensor = source(0x5eed_0023);
+    let complex_tensor = complex_source(0x5eed_0024);
+    let ceiling = dense_payload_bytes();
+
+    let widen = warmed_bytes(|| tensor.to_c64());
+    assert!(
+        (2 * ceiling..3 * ceiling).contains(&widen),
+        "dense to_c64 did not allocate exactly its own c64 output: {widen} bytes"
+    );
+    for (name, bytes) in [
+        ("re", warmed_bytes(|| complex_tensor.re())),
+        ("im", warmed_bytes(|| complex_tensor.im())),
+    ] {
+        assert!(
+            (ceiling..2 * ceiling).contains(&bytes),
+            "dense {name} did not allocate exactly its own f64 output: {bytes} bytes"
+        );
+    }
+}
+
+#[test]
+fn pr3_inspections_allocate_no_payload() {
+    // What (issue #580 PR 3): the rank family and `leg_dim` read the space
+    // structure and allocate nothing; `leg_dims` owns only its `Vec<usize>`
+    // of rank entries, never a payload.
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let tensor = source(0x5eed_0025);
+
+    for (name, bytes) in [
+        ("rank", warmed_bytes(|| tensor.rank())),
+        ("codomain_rank", warmed_bytes(|| tensor.codomain_rank())),
+        ("domain_rank", warmed_bytes(|| tensor.domain_rank())),
+        ("numind", warmed_bytes(|| tensor.numind())),
+        ("leg_dim", warmed_bytes(|| tensor.leg_dim(0).unwrap())),
+        ("scalar-error", warmed_bytes(|| tensor.scalar().is_err())),
+    ] {
+        // `scalar` on a tensor with legs formats its error message; everything
+        // else is allocation-free. One small ceiling covers both without
+        // letting a payload through.
+        assert!(bytes < 256, "inspection {name} allocated {bytes} bytes");
+    }
+    let dims = warmed_bytes(|| tensor.leg_dims().unwrap());
+    assert!(dims < 256, "leg_dims allocated {dims} bytes");
+}

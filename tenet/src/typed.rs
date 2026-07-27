@@ -112,7 +112,14 @@
 //! [`TensorMap::is_unitary`], [`TensorMap::is_posdef`],
 //! [`TensorMap::project_hermitian`], [`TensorMap::project_antihermitian`]) and
 //! — with issue #576 — the **matrix functions** ([`TensorMap::exp`],
-//! [`TensorMap::inv`], [`TensorMap::pinv`], [`TensorMap::sqrt`]).
+//! [`TensorMap::inv`], [`TensorMap::pinv`], [`TensorMap::sqrt`]) and — with
+//! issue #580 — the **typed inspection, scalar and conversion group**
+//! ([`TensorMap::rank`], [`TensorMap::codomain_rank`],
+//! [`TensorMap::domain_rank`] and their TensorKit aliases `numout` / `numin` /
+//! `numind`, [`TensorMap::leg_dims`], [`TensorMap::leg_dim`],
+//! [`TensorMap::codomain_spaces`], [`TensorMap::domain_spaces`],
+//! [`TensorMap::scalar`], [`TensorMap::zeros_like`], [`TensorMap::to_c64`],
+//! [`TensorMap::re`], [`TensorMap::im`]).
 //!
 //! Issue #570 also gave the facade **compact diagonal storage**: a spectrum
 //! factor — `svd_compact`'s and `svd_trunc`'s `s`, `eigh`/`eig`'s `d` — holds
@@ -1673,12 +1680,58 @@ where
         })
     }
 
-    fn codomain_rank(&self) -> usize {
+    /// Number of codomain legs.
+    ///
+    /// Reads the space structure only — no payload is touched and nothing is
+    /// allocated. The TensorKit name is [`Self::numout`]
+    /// (`tensors/abstracttensor.jl:239-241`).
+    #[inline]
+    pub fn codomain_rank(&self) -> usize {
         self.body.space.space().homspace().codomain().len()
     }
 
-    fn rank(&self) -> usize {
-        self.codomain_rank() + self.body.space.space().homspace().domain().len()
+    /// Number of domain legs.
+    ///
+    /// Reads the space structure only — no payload is touched and nothing is
+    /// allocated. The TensorKit name is [`Self::numin`]
+    /// (`tensors/abstracttensor.jl:253-255`).
+    #[inline]
+    pub fn domain_rank(&self) -> usize {
+        self.body.space.space().homspace().domain().len()
+    }
+
+    /// Total number of legs, `codomain_rank() + domain_rank()`.
+    ///
+    /// Reads the space structure only — no payload is touched and nothing is
+    /// allocated. The TensorKit name is [`Self::numind`]
+    /// (`tensors/abstracttensor.jl:267`).
+    #[inline]
+    pub fn rank(&self) -> usize {
+        self.codomain_rank() + self.domain_rank()
+    }
+
+    /// Number of codomain (output) legs. TensorKit `numout`
+    /// (`tensors/abstracttensor.jl:239-241`); alias of
+    /// [`Self::codomain_rank`], exactly as on the erased facade.
+    #[inline]
+    pub fn numout(&self) -> usize {
+        self.codomain_rank()
+    }
+
+    /// Number of domain (input) legs. TensorKit `numin`
+    /// (`tensors/abstracttensor.jl:253-255`); alias of
+    /// [`Self::domain_rank`], exactly as on the erased facade.
+    #[inline]
+    pub fn numin(&self) -> usize {
+        self.domain_rank()
+    }
+
+    /// Total number of legs. TensorKit `numind`
+    /// (`tensors/abstracttensor.jl:267`); alias of [`Self::rank`], exactly as
+    /// on the erased facade.
+    #[inline]
+    pub fn numind(&self) -> usize {
+        self.rank()
     }
 
     /// Contracts `lhs_axes` of `self` with `rhs_axes` of `other` (pairwise, in
@@ -3638,6 +3691,136 @@ where
         self.legs(self.body.space.space().homspace().domain())
     }
 
+    /// The codomain legs, in axis order (TensorKit `codomain(t)`,
+    /// `tensors/abstracttensor.jl:204-214`). Documented alias of
+    /// [`Self::codomain`], carried for cross-facade name parity with the
+    /// erased [`crate::prelude::Tensor::codomain_spaces`].
+    #[inline]
+    pub fn codomain_spaces(&self) -> Vec<GradedSpace<R>> {
+        self.codomain()
+    }
+
+    /// The domain legs, in axis order (TensorKit `domain(t)`,
+    /// `tensors/abstracttensor.jl:217-226`) — the spaces as written, i.e.
+    /// *not* dualized. Documented alias of [`Self::domain`], carried for
+    /// cross-facade name parity with the erased
+    /// [`crate::prelude::Tensor::domain_spaces`].
+    #[inline]
+    pub fn domain_spaces(&self) -> Vec<GradedSpace<R>> {
+        self.domain()
+    }
+
+    /// Quantum-dimension-weighted total dimension of every leg, in flat order
+    /// (codomain legs first, then domain legs) — TensorKit's `dim(space(t,
+    /// i))` per leg (`space(t, i)`: `tensors/abstracttensor.jl:196-201`).
+    /// Contraction planners use it as a size/FLOP proxy, exactly as they use
+    /// the erased [`crate::prelude::Tensor::leg_dims`].
+    ///
+    /// Same rounding formula as the erased facade:
+    /// `Σ_sector round(degeneracy * dim(sector))` per leg. The erased sibling
+    /// needs a dedicated SU(3) branch because its rule set is a closed enum
+    /// whose SU(3) arm speaks a different symbol trait; here the provider
+    /// abstraction carries `dim_scalar` uniformly, so there is deliberately
+    /// **no special case** — fewer branches, identical semantics.
+    ///
+    /// # Complexity
+    ///
+    /// `O(Σ_leg sectors)`; allocates the returned `Vec<usize>` only, never a
+    /// payload.
+    ///
+    /// # Errors
+    ///
+    /// None today; the `Result` keeps the erased signature's shape so the two
+    /// facades stay drop-in for each other.
+    pub fn leg_dims(&self) -> Result<Vec<usize>, Error> {
+        let hom = self.body.space.space().homspace();
+        let provider = self.body.space.provider();
+        Ok(hom
+            .codomain()
+            .legs()
+            .iter()
+            .chain(hom.domain().legs())
+            .map(|leg| Self::weighted_leg_dim(provider, leg))
+            .collect())
+    }
+
+    /// Quantum-dimension-weighted size of one flat leg — one entry of
+    /// [`Self::leg_dims`] without building the whole vector.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when `axis >= rank()`, with the erased
+    /// facade's own message.
+    pub fn leg_dim(&self, axis: usize) -> Result<usize, Error> {
+        let hom = self.body.space.space().homspace();
+        let nout = hom.codomain().len();
+        let leg = if axis < nout {
+            &hom.codomain().legs()[axis]
+        } else if axis < self.rank() {
+            &hom.domain().legs()[axis - nout]
+        } else {
+            return Err(Error::InvalidArgument(format!(
+                "axis {axis} out of range for rank {}",
+                self.rank()
+            )));
+        };
+        Ok(Self::weighted_leg_dim(self.body.space.provider(), leg))
+    }
+
+    /// The erased facade's per-leg reduction, verbatim: quantum dimensions are
+    /// generally irrational (SU(2) `sqrt` products, anyonic golden ratios), so
+    /// the per-sector weight is computed in `f64` and rounded once.
+    fn weighted_leg_dim(provider: &R, leg: &SectorLeg) -> usize {
+        leg.sectors()
+            .iter()
+            .zip(leg.degeneracies())
+            .map(|(&sector, &degeneracy)| {
+                (degeneracy as f64 * provider.dim_scalar(sector)).round() as usize
+            })
+            .sum()
+    }
+
+    /// The single element of a rank-0 (scalar) tensor, e.g. the result of
+    /// contracting every leg — TensorKit `scalar`
+    /// (`tensors/tensoroperations.jl:446-451`; an empty payload reads as
+    /// zero there too).
+    ///
+    /// Returns `D` directly: the static-dtype counterpart of the erased
+    /// [`crate::prelude::Tensor::scalar`], whose `Scalar` enum exists only
+    /// because its dtype is a runtime property. Not a semantic difference —
+    /// the value is the same sum of the coupled payload.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] on a tensor with legs, with the erased
+    /// facade's own message.
+    pub fn scalar(&self) -> Result<D, Error> {
+        if self.rank() != 0 {
+            return Err(Error::InvalidArgument(format!(
+                "scalar() requires a rank-0 tensor, got rank {}",
+                self.rank()
+            )));
+        }
+        // A rank-0 payload holds at most one element; summing matches the
+        // erased facade and gives the empty payload its zero for free.
+        Ok(self
+            .dense_data()
+            .iter()
+            .fold(D::from_real(0.0), |acc, &value| acc + value))
+    }
+
+    /// A zero tensor on the same spaces and dtype as `self` (TensorKit
+    /// `zerovector`, `tensors/vectorinterface.jl:7-20`). Cheapest same-shape
+    /// constructor: scales the storage by zero rather than re-deriving the
+    /// block structure — exactly the erased
+    /// [`crate::prelude::Tensor::zeros_like`], but infallible because the
+    /// typed [`Self::scale`] is.
+    ///
+    /// Compact diagonal storage is preserved, as it is for every scaling.
+    pub fn zeros_like(&self) -> Self {
+        self.scale(D::from_real(0.0))
+    }
+
     fn legs(&self, product: &FusionProductSpace) -> Vec<GradedSpace<R>> {
         product
             .legs()
@@ -3723,6 +3906,103 @@ where
             }),
         }
     }
+}
+
+// Bound-free, like the accessor impl on `GradedSpace<R>`: an element-wise
+// dtype conversion touches the stored payload only — no provider algebra, no
+// layout derivation — so demanding the construction bounds here would be
+// certification without a certificate to check.
+impl<R> TensorMap<R, f64> {
+    /// Widens to a c64 tensor map, imaginary parts zero (TensorKit
+    /// `Base.complex`, `tensors/abstracttensor.jl:696-705`).
+    ///
+    /// Element-wise on the stored payload: a dense payload is widened in
+    /// place-order, a compact spectrum factor maps spectrum-to-spectrum and
+    /// **stays compact** (same as the erased `to_c64_storage` route). One
+    /// `O(stored_len)` output allocation; the space is shared, not re-derived.
+    ///
+    /// Infallible, unlike the erased pair [`crate::prelude::Tensor::to_c64`] /
+    /// `try_to_c64`: that split exists only for device residency, which the
+    /// typed facade does not have — a deliberate narrowing, not a semantic
+    /// difference.
+    pub fn to_c64(&self) -> TensorMap<R, num_complex::Complex64> {
+        let widen = |&value: &f64| num_complex::Complex64::new(value, 0.0);
+        let body = match &*self.body.data {
+            TypedData::Dense(data) => {
+                TypedTensorBody::dense(self.body.space.clone(), data.iter().map(widen).collect())
+            }
+            TypedData::Diagonal(spectrum) => TypedTensorBody::diagonal(
+                self.body.space.clone(),
+                map_spectrum_dtype(spectrum, |value| num_complex::Complex64::new(value, 0.0)),
+            ),
+        };
+        TensorMap {
+            runtime: self.runtime.clone(),
+            body: Arc::new(body),
+        }
+    }
+}
+
+// Typed-first: the erased facade has no `re`/`im` counterpart, so there is no
+// route to extract and cross-facade parity is impossible — the gates are law
+// checks (`re(t) + i·im(t)` rebuilds `t`) instead. TensorKit's real-input
+// branches (`real(t) = t`, `imag(t) = zerovector(t)` for a real scalartype)
+// are statically unrepresentable here: these methods exist on the `Complex64`
+// impl only, and `to_c64().re()` covers the round trip.
+impl<R> TensorMap<R, num_complex::Complex64> {
+    /// The element-wise real part, as an f64 tensor map on the same spaces
+    /// (TensorKit `Base.real`, `tensors/abstracttensor.jl:707-717`:
+    /// blockwise element-wise, result scalartype real).
+    ///
+    /// A compact spectrum factor maps spectrum-to-spectrum and stays compact.
+    /// One `O(stored_len)` output allocation; the space is shared.
+    pub fn re(&self) -> TensorMap<R, f64> {
+        self.map_parts(|value| value.re)
+    }
+
+    /// The element-wise imaginary part, as an f64 tensor map on the same
+    /// spaces (TensorKit `Base.imag`, `tensors/abstracttensor.jl:718-728`).
+    ///
+    /// A compact spectrum factor maps spectrum-to-spectrum and stays compact.
+    /// One `O(stored_len)` output allocation; the space is shared.
+    pub fn im(&self) -> TensorMap<R, f64> {
+        self.map_parts(|value| value.im)
+    }
+
+    /// The shared body of [`Self::re`] / [`Self::im`]: one element-wise
+    /// component map over whichever payload representation is stored.
+    fn map_parts(&self, part: impl Fn(num_complex::Complex64) -> f64) -> TensorMap<R, f64> {
+        let body = match &*self.body.data {
+            TypedData::Dense(data) => TypedTensorBody::dense(
+                self.body.space.clone(),
+                data.iter().map(|&value| part(value)).collect(),
+            ),
+            TypedData::Diagonal(spectrum) => TypedTensorBody::diagonal(
+                self.body.space.clone(),
+                map_spectrum_dtype(spectrum, part),
+            ),
+        };
+        TensorMap {
+            runtime: self.runtime.clone(),
+            body: Arc::new(body),
+        }
+    }
+}
+
+/// [`map_spectrum`]'s cross-dtype sibling: the same sector-and-length
+/// preserving value map, for the conversions whose output dtype differs from
+/// the input's — which is exactly why the two cannot share one signature.
+fn map_spectrum_dtype<A: Copy, B>(
+    spectrum: &[tenet_matrixalgebra::SectorSpectrum<A>],
+    value_of: impl Fn(A) -> B,
+) -> Vec<tenet_matrixalgebra::SectorSpectrum<B>> {
+    spectrum
+        .iter()
+        .map(|entry| tenet_matrixalgebra::SectorSpectrum {
+            sector: entry.sector,
+            values: entry.values.iter().map(|&value| value_of(value)).collect(),
+        })
+        .collect()
 }
 
 /// Representation gates for [`TypedTensorBody`] (#580 PR 0).
