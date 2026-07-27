@@ -5587,6 +5587,133 @@ type Fz2U1Rule = tenet::core::ProductFusionRule<
 type Fz2U1Su2Rule =
     tenet::core::ProductFusionRule<Fz2U1Rule, tenet::core::SU2FusionRule, Fz2U1Su2Codec>;
 
+/// One `(is_dual, [(label, degeneracy)])` entry per leg, codomain first: the
+/// full labelled space of a tensor, as both facades report it.
+type LabelledLegs<S> = Vec<(bool, Vec<(S, usize)>)>;
+
+/// Asserts that every leg of a *result* — codomain first, then domain — carries
+/// the same `(is_dual, [(label, degeneracy)])` content on both facades.
+///
+/// Why this and not [`typed_leg_shapes`] / [`erased_leg_shapes`]: those two
+/// report the dual flag and the degeneracies only, so they are blind to a
+/// sector *relabelling* that preserves order — an erased product decoder (or an
+/// operation's output-space construction) that named the same block content
+/// with different sectors would keep the degeneracies, the block order and
+/// therefore the bytes, and would pass unnoticed. The fixture-side id
+/// comparison in `counter_oracle_pair` only covers the inputs, so the results
+/// need this.
+///
+/// Labels rather than ids as the meeting point: the two facades speak different
+/// label types ([`SectorLabel`] erased, `R::Sector` typed), and the erased ids
+/// are not public, so `to_label` translates the erased label into the typed
+/// one. Comparing labels rather than encoded ids also means a mismatch is
+/// reported as the two sectors it is, not as two opaque numbers.
+///
+/// The comparison is *ordered*: both facades store a leg in internal sector-id
+/// order, so an order difference is a real disagreement about block layout and
+/// must fail rather than be sorted away.
+fn assert_result_leg_sectors_agree<R, D>(
+    what: &str,
+    which: &str,
+    typed: &TensorMap<R, D>,
+    erased: &tenet::prelude::Tensor,
+    to_label: &dyn Fn(tenet::prelude::SectorLabel) -> R::Sector,
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: tenet::prelude::TensorScalar,
+{
+    let typed_legs: LabelledLegs<R::Sector> = typed
+        .codomain()
+        .iter()
+        .chain(typed.domain().iter())
+        .map(|leg| {
+            let labels = leg
+                .sectors()
+                .unwrap_or_else(|error| panic!("{what}: {which}: typed leg decode: {error}"));
+            (
+                leg.is_dual(),
+                labels
+                    .into_iter()
+                    .zip(leg.degeneracies().iter().copied())
+                    .collect(),
+            )
+        })
+        .collect();
+    let erased_legs: LabelledLegs<R::Sector> = erased
+        .codomain_spaces()
+        .iter()
+        .chain(erased.domain_spaces().iter())
+        .map(|space| {
+            (
+                space.is_dual(),
+                space
+                    .sectors()
+                    .into_iter()
+                    .map(|(label, degeneracy)| (to_label(label), degeneracy))
+                    .collect(),
+            )
+        })
+        .collect();
+    assert_eq!(typed_legs, erased_legs, "{what}: {which} space");
+    // A result with no sectors anywhere would make the equality above vacuous.
+    assert!(
+        typed_legs.iter().any(|(_, sectors)| !sectors.is_empty()),
+        "{what}: {which} has no sectors, so the space comparison proves nothing"
+    );
+}
+
+/// The erased-to-typed label bridge for the U(1) family.
+fn u1_label(label: tenet::prelude::SectorLabel) -> tenet::core::U1Irrep {
+    match label {
+        tenet::prelude::SectorLabel::U1(charge) => tenet::core::U1Irrep::new(charge),
+        other => panic!("not a U(1) sector: {other:?}"),
+    }
+}
+
+/// The erased-to-typed label bridge for the U(1) x fZ2 family.
+fn u1_fz2_label(
+    label: tenet::prelude::SectorLabel,
+) -> tenet::core::ProductSector<tenet::core::U1Irrep, tenet::core::Z2Irrep> {
+    match label {
+        tenet::prelude::SectorLabel::U1FZ2 { charge, parity } => {
+            tenet::core::ProductSector::new(tenet::core::U1Irrep::new(charge), parity_irrep(parity))
+        }
+        other => panic!("not a U(1) x fZ2 sector: {other:?}"),
+    }
+}
+
+/// The erased-to-typed label bridge for the fZ2 x U(1) x SU(2) family.
+fn fz2_u1_su2_label(
+    label: tenet::prelude::SectorLabel,
+) -> tenet::core::ProductSector<
+    tenet::core::ProductSector<tenet::core::Z2Irrep, tenet::core::U1Irrep>,
+    SU2Irrep,
+> {
+    match label {
+        tenet::prelude::SectorLabel::FZ2U1SU2 {
+            parity,
+            charge,
+            twice_spin,
+        } => tenet::core::ProductSector::new(
+            tenet::core::ProductSector::new(
+                parity_irrep(parity),
+                tenet::core::U1Irrep::new(charge),
+            ),
+            SU2Irrep::from_twice_spin(twice_spin),
+        ),
+        other => panic!("not an fZ2 x U(1) x SU(2) sector: {other:?}"),
+    }
+}
+
+/// `0` even, `1` odd, as every erased fermion-parity constructor spells it.
+fn parity_irrep(parity: u8) -> tenet::core::Z2Irrep {
+    if parity == 0 {
+        tenet::core::Z2Irrep::EVEN
+    } else {
+        tenet::core::Z2Irrep::ODD
+    }
+}
+
 /// `[p, q] <- [p, q]` on both facades, filled with a counter starting at
 /// `first_value`.
 ///
@@ -5907,6 +6034,7 @@ fn assert_contract_compose_compact_agree<R>(
     what: &str,
     erased: (&tenet::prelude::Tensor, &tenet::prelude::Tensor),
     typed: (&TensorMap<R, f64>, &TensorMap<R, f64>),
+    to_label: &dyn Fn(tenet::prelude::SectorLabel) -> R::Sector,
 ) where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
@@ -5933,10 +6061,12 @@ fn assert_contract_compose_compact_agree<R>(
         erased_contract.data(),
         "{what}: contract with output order {output_axes:?}"
     );
-    assert_eq!(
-        typed_leg_shapes(&typed_contract),
-        erased_leg_shapes(&erased_contract),
-        "{what}: contract output space with order {output_axes:?}"
+    assert_result_leg_sectors_agree(
+        what,
+        &format!("contract with order {output_axes:?}"),
+        &typed_contract,
+        &erased_contract,
+        to_label,
     );
     assert_nonzero(what, typed_contract.data());
 
@@ -5970,11 +6100,7 @@ fn assert_contract_compose_compact_agree<R>(
         erased_compose.data(),
         "{what}: compose"
     );
-    assert_eq!(
-        typed_leg_shapes(&typed_compose),
-        erased_leg_shapes(&erased_compose),
-        "{what}: compose output space"
-    );
+    assert_result_leg_sectors_agree(what, "compose", &typed_compose, &erased_compose, to_label);
     assert_nonzero(what, typed_compose.data());
 
     // One compact-diagonal absorption arm: `u * s` from `svd_compact`, where
@@ -6006,6 +6132,13 @@ fn assert_contract_compose_compact_agree<R>(
         typed_leg_shapes(&typed_u),
         "{what}: absorbing a diagonal must not move a leg"
     );
+    assert_result_leg_sectors_agree(
+        what,
+        "compact-diagonal absorption u * s",
+        &typed_absorbed,
+        &erased_absorbed,
+        to_label,
+    );
     assert_nonzero(what, typed_absorbed.data());
     // The absorption is not a copy: `s` is not the identity here.
     assert_ne!(
@@ -6025,6 +6158,7 @@ fn typed_and_erased_contract_compose_and_compact_agree_on_u1() {
         "U1, [p, q] <- [p, q] with q dual",
         (&erased_a, &erased_b),
         (&typed_a, &typed_b),
+        &u1_label,
     );
 }
 
@@ -6038,6 +6172,7 @@ fn typed_and_erased_contract_compose_and_compact_agree_on_u1_fz2() {
         "U1 x fZ2, [p, q] <- [p, q] with q dual",
         (&erased_a, &erased_b),
         (&typed_a, &typed_b),
+        &u1_fz2_label,
     );
 }
 
@@ -6051,6 +6186,7 @@ fn typed_and_erased_contract_compose_and_compact_agree_on_fz2_u1_su2() {
         "fZ2 x U1 x SU2, [p, q] <- [p, q] with q dual",
         (&erased_a, &erased_b),
         (&typed_a, &typed_b),
+        &fz2_u1_su2_label,
     );
 }
 
@@ -6135,6 +6271,7 @@ fn assert_reductions_and_factorizations_agree<R>(
     dimension_weighted: bool,
     erased: (&tenet::prelude::Tensor, &tenet::prelude::Tensor),
     typed: (&TensorMap<R, f64>, &TensorMap<R, f64>),
+    to_label: &dyn Fn(tenet::prelude::SectorLabel) -> R::Sector,
 ) where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
@@ -6191,11 +6328,8 @@ fn assert_reductions_and_factorizations_agree<R>(
     let (typed_q, typed_r) = typed.0.qr_compact().unwrap();
     assert_eq!(typed_q.data(), erased_q.data(), "{what}: qr_compact q");
     assert_eq!(typed_r.data(), erased_r.data(), "{what}: qr_compact r");
-    assert_eq!(
-        typed_leg_shapes(&typed_q),
-        erased_leg_shapes(&erased_q),
-        "{what}: qr_compact q space"
-    );
+    assert_result_leg_sectors_agree(what, "qr_compact q", &typed_q, &erased_q, to_label);
+    assert_result_leg_sectors_agree(what, "qr_compact r", &typed_r, &erased_r, to_label);
     assert_nonzero(what, typed_q.data());
     assert_nonzero(what, typed_r.data());
 
@@ -6205,22 +6339,18 @@ fn assert_reductions_and_factorizations_agree<R>(
     let (typed_v, typed_c) = typed.0.left_orth().unwrap();
     assert_eq!(typed_v.data(), erased_v.data(), "{what}: left_orth v");
     assert_eq!(typed_c.data(), erased_c.data(), "{what}: left_orth c");
-    assert_eq!(
-        typed_leg_shapes(&typed_v),
-        erased_leg_shapes(&erased_v),
-        "{what}: left_orth v space"
-    );
-    assert_eq!(
-        typed_leg_shapes(&typed_c),
-        erased_leg_shapes(&erased_c),
-        "{what}: left_orth c space"
-    );
+    assert_result_leg_sectors_agree(what, "left_orth v", &typed_v, &erased_v, to_label);
+    assert_result_leg_sectors_agree(what, "left_orth c", &typed_c, &erased_c, to_label);
     assert_eq!(typed_v.data(), typed_q.data(), "{what}: left_orth is qr");
 
     let (erased_c, erased_vh) = erased.0.right_orth().unwrap();
     let (typed_c, typed_vh) = typed.0.right_orth().unwrap();
     assert_eq!(typed_c.data(), erased_c.data(), "{what}: right_orth c");
     assert_eq!(typed_vh.data(), erased_vh.data(), "{what}: right_orth vh");
+    // The `lq` side had no result-space comparison at all before: matching
+    // bytes alone say nothing about which sectors the new bond leg carries.
+    assert_result_leg_sectors_agree(what, "right_orth c", &typed_c, &erased_c, to_label);
+    assert_result_leg_sectors_agree(what, "right_orth vh", &typed_vh, &erased_vh, to_label);
     assert_nonzero(what, typed_c.data());
     assert_nonzero(what, typed_vh.data());
 
@@ -6269,6 +6399,7 @@ fn typed_and_erased_reductions_and_factorizations_agree_on_u1() {
         false,
         (&erased_a, &erased_b),
         (&typed_a, &typed_b),
+        &u1_label,
     );
 }
 
@@ -6283,6 +6414,7 @@ fn typed_and_erased_reductions_and_factorizations_agree_on_u1_fz2() {
         false,
         (&erased_a, &erased_b),
         (&typed_a, &typed_b),
+        &u1_fz2_label,
     );
 }
 
@@ -6299,5 +6431,6 @@ fn typed_and_erased_reductions_and_factorizations_agree_on_fz2_u1_su2() {
         true,
         (&erased_a, &erased_b),
         (&typed_a, &typed_b),
+        &fz2_u1_su2_label,
     );
 }
