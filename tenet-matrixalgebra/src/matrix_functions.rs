@@ -370,6 +370,99 @@ fn abs1<D: FactorScalar>(value: D) -> f64 {
     value.re.abs() + value.im.abs()
 }
 
+/// `IDAMAX`/`IZAMAX` followed by `ABS` of the element it picked, which is how
+/// `gebal` forms `CA`/`RA` (`dgebal.f:343-346`, `zgebal.f:348-351`).
+///
+/// The two magnitudes are deliberately different and must stay so: `IZAMAX`
+/// *selects* by `CABS1 = |Re| + |Im|`, but `ABS` of the selected element is its
+/// **modulus**. Collapsing both onto `abs1` would inflate every complex `CA`
+/// and `RA` by up to a factor of `sqrt(2)`, which is a factor of the radix in
+/// the loop that consumes them.
+///
+/// `IDAMAX` compares strictly, so ties keep the earliest element; starting the
+/// incumbent key at `-inf` reproduces that, including LAPACK's zero for an
+/// all-zero span.
+fn iamax_modulus<D: FactorScalar>(values: impl Iterator<Item = D>) -> f64 {
+    let mut key = f64::NEG_INFINITY;
+    let mut modulus = 0.0;
+    for value in values {
+        let candidate = abs1(value);
+        if candidate > key {
+            key = candidate;
+            modulus = value.widen_complex().norm();
+        }
+    }
+    modulus
+}
+
+/// `DNRM2`/`DZNRM2`: the Euclidean norm, by Blue's three-accumulator scaling
+/// (`dnrm2.f90:139-197`, `dznrm2.f90` identically over the interleaved real and
+/// imaginary parts), so that a span containing entries near the overflow or
+/// underflow threshold still gets an exact-to-rounding answer instead of `inf`
+/// or `0`.
+///
+/// This is the norm `gebal` measures its rows and columns with
+/// (`dgebal.f:341-342`), not the `abs1` sum: they order pairs of vectors
+/// differently, so the `abs1` sum reaches a different scale vector — on
+/// `[0 4 0; 1 0 1; 1 1 0]`, `[1, 1/2, 1]` instead of LAPACK's `[2, 1, 1]`.
+///
+/// The accumulation is `f64` for every `D`, one step better than the reference
+/// (which works in the component type), because the bounds that gate the
+/// balancing loop already come from the component type via
+/// [`FactorScalar::safe_minimum`]: it is the *factor* that has to be
+/// representable in `D`, not the norms it was derived from.
+fn nrm2<D: FactorScalar>(values: impl Iterator<Item = D>) -> f64 {
+    // Blue's constants for `f64`: `radix^ceiling((minexponent - 1) / 2)` and
+    // friends, `dnrm2.f90:103-110` evaluated at `wp = real64`.
+    let tsml = 2.0_f64.powi(-511);
+    let tbig = 2.0_f64.powi(486);
+    let ssml = 2.0_f64.powi(537);
+    let sbig = 2.0_f64.powi(-538);
+
+    let mut notbig = true;
+    let mut asml = 0.0_f64;
+    let mut amed = 0.0_f64;
+    let mut abig = 0.0_f64;
+    for value in values {
+        let value = value.widen_complex();
+        for ax in [value.re.abs(), value.im.abs()] {
+            if ax > tbig {
+                abig += (ax * sbig) * (ax * sbig);
+                notbig = false;
+            } else if ax < tsml {
+                if notbig {
+                    asml += (ax * ssml) * (ax * ssml);
+                }
+            } else {
+                amed += ax * ax;
+            }
+        }
+    }
+
+    let (scale, sum_of_squares) = if abig > 0.0 {
+        if amed > 0.0 || amed.is_nan() {
+            abig += (amed * sbig) * sbig;
+        }
+        (1.0 / sbig, abig)
+    } else if asml > 0.0 {
+        if amed > 0.0 || amed.is_nan() {
+            let amed = amed.sqrt();
+            let asml = asml.sqrt() / ssml;
+            let (smaller, larger) = if asml > amed {
+                (amed, asml)
+            } else {
+                (asml, amed)
+            };
+            (1.0, larger * larger * (1.0 + (smaller / larger).powi(2)))
+        } else {
+            (1.0 / ssml, asml)
+        }
+    } else {
+        (1.0, amed)
+    };
+    scale * sum_of_squares.sqrt()
+}
+
 /// LAPACK `dgebal`/`zgebal` with `job = 'B'`, in place on a column-major
 /// `order x order` block: the permutation that pushes already-isolated
 /// eigenvalues out of the active window, then the radix-2 diagonal similarity
@@ -445,22 +538,23 @@ pub(crate) fn balance_in_place<D: FactorScalar>(
     while !converged {
         converged = true;
         for i in k..=l {
-            let mut c = 0.0_f64;
-            let mut r = 0.0_f64;
-            for j in k..=l {
-                if j != i {
-                    c += abs1(matrix[j + order * i]);
-                    r += abs1(matrix[i + order * j]);
-                }
-            }
-            let mut ca = (0..=l)
-                .map(|row| abs1(matrix[row + order * i]))
-                .fold(0.0_f64, f64::max);
-            let mut ra = (k..order)
-                .map(|column| abs1(matrix[i + order * column]))
-                .fold(0.0_f64, f64::max);
+            // `dgebal.f:341-346`. The norms span the whole window including the
+            // diagonal — `DNRM2(L-K+1, A(K,I), 1)` is contiguous — while `CA`
+            // and `RA` reach outside it, down every row and along every column
+            // the similarity will touch.
+            let mut c = nrm2((k..=l).map(|row| matrix[row + order * i]));
+            let mut r = nrm2((k..=l).map(|column| matrix[i + order * column]));
+            let mut ca = iamax_modulus((0..=l).map(|row| matrix[row + order * i]));
+            let mut ra = iamax_modulus((k..order).map(|column| matrix[i + order * column]));
             // Guard against a row or column norm that underflowed to zero.
             if c == 0.0 || r == 0.0 {
+                continue;
+            }
+            // `dgebal.f:354-358` bails out on a NaN to avoid an infinite loop.
+            // This signature has no error channel to bail through, so the index
+            // is skipped instead — same effect on termination, since only a
+            // scaling that fired clears `converged`.
+            if (c + ca + r + ra).is_nan() {
                 continue;
             }
             let mut g = r / RADIX;

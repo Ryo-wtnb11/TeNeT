@@ -7956,6 +7956,97 @@ fn assert_gebal_matches<D: FactorScalar>(
 }
 
 #[test]
+fn balancing_measures_rows_and_columns_with_the_euclidean_norm_like_gebal() {
+    // What: `gebal` measures its rows and columns with `DNRM2`
+    // (`dgebal.f:341-342`), not with a sum of `abs1`. The fixture is chosen so
+    // the two disagree — the `abs1` sum reaches `scale = [1, 1/2, 1]` here,
+    // where LAPACK reaches `[2, 1, 1]` — so it is the norm itself under test
+    // and not merely the loop around it.
+    //
+    // Oracle, Julia 1.11.6:
+    //
+    // ```julia
+    // LinearAlgebra.LAPACK.gebal!('B', Float64[0 4 0; 1 0 1; 1 1 0])
+    // # (1, 3, [2.0, 1.0, 1.0])
+    // ```
+    //
+    // `Float32` and `ComplexF64` of the same matrix give the same triple, so
+    // all three are pinned to the one certified answer.
+    let rows: [&[f64]; 3] = [&[0.0, 4.0, 0.0], &[1.0, 0.0, 1.0], &[1.0, 1.0, 0.0]];
+    let block = column_major(&rows);
+    assert_gebal_matches(
+        &block,
+        3,
+        (0, 2),
+        &[2.0, 1.0, 1.0],
+        "f64 [0 4 0; 1 0 1; 1 1 0]",
+    );
+
+    let single = block.iter().map(|&entry| entry as f32).collect::<Vec<_>>();
+    assert_gebal_matches(&single, 3, (0, 2), &[2.0, 1.0, 1.0], "f32 of the same");
+
+    let complex = block
+        .iter()
+        .map(|&entry| Complex64::new(entry, 0.0))
+        .collect::<Vec<_>>();
+    assert_gebal_matches(&complex, 3, (0, 2), &[2.0, 1.0, 1.0], "c64 of the same");
+
+    // And the span is the whole window *including* the diagonal:
+    // `DNRM2(L-K+1, A(K,I), 1)` is contiguous, it does not skip `A(I,I)`.
+    // Dropping the diagonal reaches `[4, 1, 1]` on this second fixture.
+    //
+    // ```julia
+    // LinearAlgebra.LAPACK.gebal!('B', Float64[-4 -1 -9; -1 1 -7; 0 -9 -7])
+    // # (1, 3, [2.0, 1.0, 1.0])
+    // ```
+    let with_diagonal: [&[f64]; 3] = [&[-4.0, -1.0, -9.0], &[-1.0, 1.0, -7.0], &[0.0, -9.0, -7.0]];
+    assert_gebal_matches(
+        &column_major(&with_diagonal),
+        3,
+        (0, 2),
+        &[2.0, 1.0, 1.0],
+        "f64 [-4 -1 -9; -1 1 -7; 0 -9 -7]",
+    );
+}
+
+#[test]
+fn balancing_sizes_a_complex_iamax_element_by_its_modulus() {
+    // What: `zgebal` *selects* `CA`/`RA` with `IZAMAX`, which compares
+    // `|Re| + |Im|`, but then takes the **modulus** of the element it selected
+    // (`zgebal.f:348-351`). The two differ by up to `sqrt(2)`, most of a radix
+    // step, so they can stop the scaling loop one factor of two apart.
+    //
+    // The fixture makes that visible: column 1 isolates an eigenvalue, so the
+    // window starts at row 2 while `CA` still scans row 1, letting the entry
+    // `(3 + 4i) * 1e271` — `abs1` 7e271, modulus 5e271 — dominate `CA` and land
+    // between `sfmax2 / 2` and `sfmax2` after the loop's doublings.
+    //
+    // Oracle, Julia 1.11.6:
+    //
+    // ```julia
+    // A = ComplexF64[7 (3+4im)*1e271 0; 0 0 1e41; 0 1 0]
+    // LinearAlgebra.LAPACK.gebal!('B', copy(A))
+    // # (2, 3, [1.0, 1.4757395258967641e20, 0.5])   # 1.4757...e20 == 2^67
+    // ```
+    //
+    // Sizing `CA`/`RA` by `abs1` instead gives `[1, 2^66, 0.25]`.
+    let huge = Complex64::new(3.0, 4.0) * 1e271;
+    let zero = Complex64::new(0.0, 0.0);
+    let rows: [&[Complex64]; 3] = [
+        &[Complex64::new(7.0, 0.0), huge, zero],
+        &[zero, zero, Complex64::new(1e41, 0.0)],
+        &[zero, Complex64::new(1.0, 0.0), zero],
+    ];
+    assert_gebal_matches(
+        &column_major(&rows),
+        3,
+        (1, 2),
+        &[1.0, 2.0_f64.powi(67), 0.5],
+        "c64 modulus-vs-abs1 fixture",
+    );
+}
+
+#[test]
 fn balancing_takes_its_machine_bounds_from_the_single_precision_component() {
     // What: `sgebal`/`cgebal` derive `SFMIN1` and friends from `SLAMCH`
     // (`sgebal.f:330`), `dgebal`/`zgebal` from `DLAMCH` (`dgebal.f:330`). Under
