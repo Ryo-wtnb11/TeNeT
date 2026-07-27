@@ -132,7 +132,7 @@ Added this sweep: `Tensor::repartition`, `Tensor::zeros_like`,
 | `DiagonalTensorMap` | design-gated | — | Compact diagonal storage exists internally and every reduction on it stays `O(Σ_c k_c)`, but it is only ever *produced* (by `svd_*` / `eigh_*`) — there is no user-facing type or constructor. #593 adds the construction surface. |
 | `diag` / `diagm` / `isdiag` | design-gated | — | Same gate as `DiagonalTensorMap` (`linalg.jl:179-190`): build-from-spectrum, an `is_diagonal` predicate and a spectrum accessor land with #593. |
 | `otimes` (`⊗`, tensor) | design-gated | — | Tensor product of two tensor maps (`linalg.jl:556`). Expressible today as `Tensor::contract` with no shared legs; the named method lands with #595 (Rust cannot spell `⊗`). |
-| `deligneproduct` (`⊠`, tensor) | design-gated | — | Deligne product (`linalg.jl:597`); no analog today. Named `deligne_product` with #595. |
+| `deligneproduct` (`⊠`, tensor) | design-gated | — | Deligne product (`linalg.jl:597`); no analog today. Named `deligne_product` with #595, and constrained by #610: its result must be built over the generic `ProductFusionRule` provider path — never a pairwise erased enum matrix over the built-in rules, never a new fixed product constructor. |
 
 ## Spaces & sectors
 
