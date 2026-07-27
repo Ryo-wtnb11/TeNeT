@@ -9170,3 +9170,364 @@ fn external_nobraiding_vacuum_only_legs_twist_passes_flip_rejects() {
     let unflipped: TensorMap<PlanarZ2, f64> = t.flip(&[]).unwrap();
     assert_eq!(unflipped.data().as_ptr(), t.data().as_ptr());
 }
+
+// ---------------------------------------------------------------------------
+// Issue #580, group 6: `contract_ordered`, the documented alias of `contract`.
+//
+// The typed `contract` already takes the explicit output order, so the alias
+// adds a name, not a route. What these gates pin is exactly that: the alias
+// resolves to `contract` (any drift is a second route), the erased pair's own
+// equivalence holds across facades, and the error surface — including the
+// deliberate both-defect precedence divergence the alias rustdoc records —
+// stays what it is today.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn contract_ordered_is_contract_and_matches_the_erased_pair_on_u1_dual_legs() {
+    // What (gate 2, U(1) + dual leg, f64): the alias against the erased
+    // `contract_ordered` on a non-identity order, and — on the identity order —
+    // against the erased `contract` too, which is the erased pair's own
+    // equivalence restated across the facades.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = u1_oracle_pair(&runtime, 1.0);
+    let (erased_b, typed_b) = u1_oracle_pair(&runtime, 100.0);
+    let (lhs_axes, rhs_axes) = ([2, 3], [0, 1]);
+    let reorder = [1, 3, 0, 2];
+
+    let typed_reordered: TensorMap<tenet::core::U1FusionRule, f64> = typed
+        .contract_ordered(&typed_b, &lhs_axes, &rhs_axes, &reorder)
+        .unwrap();
+    let erased_reordered = erased
+        .contract_ordered(&erased_b, &lhs_axes, &rhs_axes, &reorder)
+        .unwrap();
+    assert_eq!(typed_reordered.data(), erased_reordered.data());
+    assert_nonzero("u1 contract_ordered reordered", typed_reordered.data());
+
+    let typed_identity: TensorMap<tenet::core::U1FusionRule, f64> = typed
+        .contract_ordered(&typed_b, &lhs_axes, &rhs_axes, &[0, 1, 2, 3])
+        .unwrap();
+    // The erased pair's equivalence: `contract` == `contract_ordered` with the
+    // identity order, and the typed alias lands on the same bytes as both.
+    assert_eq!(
+        typed_identity.data(),
+        erased
+            .contract(&erased_b, &lhs_axes, &rhs_axes)
+            .unwrap()
+            .data()
+    );
+    assert_eq!(
+        typed_identity.data(),
+        erased
+            .contract_ordered(&erased_b, &lhs_axes, &rhs_axes, &[0, 1, 2, 3])
+            .unwrap()
+            .data()
+    );
+    // The alias is `contract`, bindings and all — and the reorder reorders, so
+    // an identity-order mutation of the alias cannot pass the gate above.
+    assert_eq!(
+        typed_identity.data(),
+        typed
+            .contract(&typed_b, &lhs_axes, &rhs_axes, &[0, 1, 2, 3])
+            .unwrap()
+            .data()
+    );
+    assert_ne!(typed_identity.data(), typed_reordered.data());
+}
+
+#[test]
+fn contract_ordered_matches_the_erased_sibling_on_fz2_and_on_a_c64_payload() {
+    // What (gate 2, fZ2 + dual leg f64, then Z2 c64): the alias keeps the
+    // fermionic supertrace signs and the complex payload byte-identical to the
+    // erased `contract_ordered`, identity and non-identity orders both.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    // fZ2 through the U(1) x fZ2 family: `[p, q] <- [p, q]` against a second
+    // fixture on the same legs, `q` dual, both parities present on each leg —
+    // so the supertrace twist on the dual contracted leg has somewhere to act.
+    let (erased, typed) = u1_fz2_oracle_pair(&runtime, 1.0);
+    let (erased_b, typed_b) = u1_fz2_oracle_pair(&runtime, 100.0);
+    for output_axes in [&[0usize, 1, 2, 3][..], &[1, 3, 0, 2][..]] {
+        let got: TensorMap<U1Fz2Rule, f64> = typed
+            .contract_ordered(&typed_b, &[2, 3], &[0, 1], output_axes)
+            .unwrap();
+        let expected = erased
+            .contract_ordered(&erased_b, &[2, 3], &[0, 1], output_axes)
+            .unwrap();
+        assert_eq!(got.data(), expected.data(), "u1xfz2 {output_axes:?}");
+        assert_nonzero("u1xfz2 contract_ordered", got.data());
+    }
+
+    let (erased, typed) = z2_complex_oracle_pair(&runtime);
+    for output_axes in [&[0usize, 1, 2, 3][..], &[1, 0, 3, 2][..]] {
+        let got: TensorMap<tenet::core::Z2FusionRule, Complex64> = typed
+            .contract_ordered(&typed, &[2], &[0], output_axes)
+            .unwrap();
+        let expected = erased
+            .contract_ordered(&erased, &[2], &[0], output_axes)
+            .unwrap();
+        assert_eq!(got.data(), expected.data_c64(), "c64 {output_axes:?}");
+        assert!(
+            got.data().iter().any(|value| value.im != 0.0),
+            "c64 {output_axes:?} lost its imaginary part, so it proves nothing"
+        );
+    }
+}
+
+#[test]
+fn contract_ordered_takes_the_compact_diagonal_arm_the_erased_fast_path_takes() {
+    // What (gate 3): a compact-diagonal operand under a non-identity output
+    // order, through the alias name, against the erased `contract_ordered`'s
+    // own diagonal fast path — the reordered rows of `DIAGONAL_CONTRACT_CASES`
+    // plus both `s · s` orders (`[0, 1]` stays compact, `[1, 0]` moves the
+    // surviving bond across the split and is the documented dense-route
+    // decline). The compact-storage outcome itself is pinned where the
+    // `contract` one is, in `tests/typed_diagonal_allocations.rs`.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+    let erased_s = erased.svd_compact().unwrap().1;
+    let typed_s: TensorMap<tenet::core::Z2FusionRule, f64> = typed.svd_compact().unwrap().1;
+    assert_eq!(typed_s.data(), erased_s.data());
+
+    // `t · s` and `s · t`, output order moving the scaled leg.
+    let got: TensorMap<tenet::core::Z2FusionRule, f64> = typed
+        .contract_ordered(&typed_s, &[2], &[0], &[2, 0, 1])
+        .unwrap();
+    let expected = erased_s_case(&erased, &erased_s, true, &[2], &[0], &[2, 0, 1]);
+    assert_eq!(got.data(), expected.data(), "t*s reordered");
+    let got: TensorMap<tenet::core::Z2FusionRule, f64> = typed_s
+        .contract_ordered(&typed, &[1], &[0], &[1, 2, 0])
+        .unwrap();
+    let expected = erased_s_case(&erased, &erased_s, false, &[1], &[0], &[1, 2, 0]);
+    assert_eq!(got.data(), expected.data(), "s*t reordered");
+
+    // `s · s`, both orders.
+    for output_axes in [&[0usize, 1][..], &[1, 0][..]] {
+        let got: TensorMap<tenet::core::Z2FusionRule, f64> = typed_s
+            .contract_ordered(&typed_s, &[1], &[0], output_axes)
+            .unwrap();
+        let expected = erased_s
+            .contract_ordered(&erased_s, &[1], &[0], output_axes)
+            .unwrap();
+        assert_eq!(got.data(), expected.data(), "s*s {output_axes:?}");
+    }
+}
+
+/// One erased-side case of the diagonal geometry: `t · s` or `s · t`.
+fn erased_s_case(
+    erased: &tenet::prelude::Tensor,
+    erased_s: &tenet::prelude::Tensor,
+    spectrum_on_the_right: bool,
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+    output_axes: &[usize],
+) -> tenet::prelude::Tensor {
+    if spectrum_on_the_right {
+        erased
+            .contract_ordered(erased_s, lhs_axes, rhs_axes, output_axes)
+            .unwrap()
+    } else {
+        erased_s
+            .contract_ordered(erased, lhs_axes, rhs_axes, output_axes)
+            .unwrap()
+    }
+}
+
+#[test]
+fn contract_ordered_error_classes_and_their_both_defect_precedence() {
+    // What (gate 4): every single-defect fixture is refused with the class the
+    // typed `contract` documents (the delegation is total), equal to the erased
+    // `contract_ordered`'s error where the two facades share the class exactly.
+    // The both-defect fixture pins the deliberate precedence divergence the
+    // alias rustdoc records: typed (expert layer) reports the output-order
+    // defect first, erased validates the contracted spaces first
+    // (tensor.rs "Why not report pAB first").
+    let _guard = cache_lock();
+    let second = runtime();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    // Facade-owned pre-validation differs in class (typed delegates, erased
+    // wraps as `InvalidArgument`): pin each side's own class per fixture.
+    let cases: &[(&str, &[usize], &[usize], &[usize], &str)] = &[
+        (
+            "len mismatch",
+            &[2],
+            &[0, 1],
+            &[0, 1, 2, 3],
+            "ContractAxisCountMismatch",
+        ),
+        (
+            "lhs out of range",
+            &[9],
+            &[0],
+            &[0, 1, 2, 3],
+            "InvalidAxisSet",
+        ),
+        (
+            "rhs out of range",
+            &[2],
+            &[9],
+            &[0, 1, 2, 3],
+            "InvalidAxisSet",
+        ),
+        (
+            "output wrong length",
+            &[2],
+            &[0],
+            &[0, 1, 2],
+            "InvalidPermutation",
+        ),
+        (
+            "output duplicate",
+            &[2],
+            &[0],
+            &[0, 0, 1, 2],
+            "InvalidPermutation",
+        ),
+        (
+            "output out of range",
+            &[2],
+            &[0],
+            &[0, 1, 2, 9],
+            "InvalidPermutation",
+        ),
+    ];
+    for &(name, lhs_axes, rhs_axes, output_axes, class) in cases {
+        let typed_error = typed
+            .contract_ordered(&typed, lhs_axes, rhs_axes, output_axes)
+            .unwrap_err();
+        assert!(
+            matches!(typed_error, tenet::typed::Error::Operation(_)),
+            "{name}: {typed_error:?}"
+        );
+        assert!(
+            format!("{typed_error:?}").contains(class),
+            "{name}: {typed_error:?} does not carry {class}"
+        );
+        assert!(
+            erased
+                .contract_ordered(&erased, lhs_axes, rhs_axes, output_axes)
+                .is_err(),
+            "{name}: the erased sibling accepted the defect"
+        );
+    }
+
+    // Mismatched contracted legs: the one single-defect fixture whose error is
+    // the erased one bit for bit — both facades surface the expert layer's.
+    let narrow_leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 2),
+        ],
+        false,
+    )
+    .unwrap();
+    let typed_narrow: TensorMap<tenet::core::Z2FusionRule, f64> = TensorMap::from_block_fn(
+        &runtime,
+        [&narrow_leg, &narrow_leg],
+        [&narrow_leg],
+        typed_fill_value,
+    )
+    .unwrap();
+    let narrow_space = tenet::prelude::Space::z2([(0, 2), (1, 2)]);
+    let erased_narrow = tenet::prelude::Tensor::from_block_fn(
+        &runtime,
+        [&narrow_space, &narrow_space],
+        [&narrow_space],
+        erased_fill_value,
+    )
+    .unwrap();
+    let typed_error = typed
+        .contract_ordered(&typed_narrow, &[2], &[0], &[0, 1, 2, 3])
+        .unwrap_err();
+    let erased_error = erased
+        .contract_ordered(&erased_narrow, &[2], &[0], &[0, 1, 2, 3])
+        .unwrap_err();
+    assert!(
+        format!("{typed_error:?}").contains("LegDegeneracyMismatch"),
+        "{typed_error:?}"
+    );
+    assert_eq!(typed_error, erased_error);
+
+    // Both defects at once: mismatched legs AND a non-permutation output order.
+    let typed_both = typed
+        .contract_ordered(&typed_narrow, &[2], &[0], &[0, 0, 1, 2])
+        .unwrap_err();
+    let erased_both = erased
+        .contract_ordered(&erased_narrow, &[2], &[0], &[0, 0, 1, 2])
+        .unwrap_err();
+    assert!(
+        format!("{typed_both:?}").contains("InvalidPermutation"),
+        "typed both-defect precedence moved: {typed_both:?}"
+    );
+    assert!(
+        format!("{erased_both:?}").contains("LegDegeneracyMismatch"),
+        "erased both-defect precedence moved: {erased_both:?}"
+    );
+
+    // Runtime mismatch outranks everything on both facades.
+    let (erased_second, typed_second) = z2_oracle_pair(&second);
+    assert!(matches!(
+        typed
+            .contract_ordered(&typed_second, &[2], &[0], &[0, 1, 2, 3])
+            .unwrap_err(),
+        tenet::typed::Error::RuntimeMismatch
+    ));
+    assert!(erased
+        .contract_ordered(&erased_second, &[2], &[0], &[0, 1, 2, 3])
+        .is_err());
+
+    // Rule-identity mismatch stays the expert layer's rejection through the
+    // alias name too.
+    let first = Arc::new(ExternalZ3::tagged(0));
+    let second_rule = Arc::new(ExternalZ3::tagged(1));
+    let lhs = counting_z3(
+        &runtime,
+        &z3_dense_leg(&first, 2),
+        &z3_dense_leg(&first, 3),
+        1.0,
+    );
+    let rhs = counting_z3(
+        &runtime,
+        &z3_dense_leg(&second_rule, 3),
+        &z3_dense_leg(&second_rule, 4),
+        1.0,
+    );
+    assert!(lhs.contract_ordered(&rhs, &[1], &[0], &[0, 1]).is_err());
+}
+
+#[test]
+fn contract_ordered_on_the_external_z3_provider_matches_the_hand_product() {
+    // What (gate 5): a typed-only ordered-contraction value check on the
+    // external provider (closed-enum ruling: the erased facade cannot spell
+    // Z3, so there is no cross-facade oracle here). Same fixture as the
+    // `contract` hand-product gate: `output_axes = [1, 0]` is the transpose of
+    // the 2x3 · 3x4 counting product, `[0, 1]` the product itself.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let (rows, shared, columns) = (
+        z3_dense_leg(&provider, 2),
+        z3_dense_leg(&provider, 3),
+        z3_dense_leg(&provider, 4),
+    );
+    let lhs = counting_z3(&runtime, &rows, &shared, 1.0);
+    let rhs = counting_z3(&runtime, &shared, &columns, 7.0);
+
+    let transposed: TensorMap<ExternalZ3, f64> =
+        lhs.contract_ordered(&rhs, &[1], &[0], &[1, 0]).unwrap();
+    assert_eq!(
+        transposed.data(),
+        [76.0, 103.0, 130.0, 157.0, 100.0, 136.0, 172.0, 208.0]
+    );
+    let identity: TensorMap<ExternalZ3, f64> =
+        lhs.contract_ordered(&rhs, &[1], &[0], &[0, 1]).unwrap();
+    assert_eq!(
+        identity.data(),
+        [76.0, 100.0, 103.0, 136.0, 130.0, 172.0, 157.0, 208.0]
+    );
+}
