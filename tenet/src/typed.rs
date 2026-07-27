@@ -1020,13 +1020,14 @@ where
         Ok(authority.provider_arc())
     }
 
-    fn build(
-        runtime: &Runtime,
+    /// Validation half of [`Self::build`]: admits the bound layout without
+    /// touching any payload. Split out so [`Self::rand`] can draw its stream
+    /// position strictly *after* every fallible stage has passed.
+    fn build_space(
         provider: Arc<R>,
         codomain: &[&GradedSpace<R>],
         domain: &[&GradedSpace<R>],
-        fill: Fill<'_, D>,
-    ) -> Result<Self, Error> {
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Error> {
         let hom = FusionTreeHomSpace::new(
             FusionProductSpace::new(codomain.iter().map(|leg| leg.leg().clone())),
             FusionProductSpace::new(domain.iter().map(|leg| leg.leg().clone())),
@@ -1035,14 +1036,32 @@ where
         // encoded paths that may panic on an external provider's unrepresentable
         // value. The checked root publishes no layout, cache, or admission state
         // until every fallible stage has passed.
-        let space = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_checked(
-            provider, hom,
-        )?;
+        BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_checked(provider, hom)
+            .map_err(Into::into)
+    }
+
+    /// Payload half of [`Self::build`]: fills a freshly admitted layout.
+    fn fill_space(
+        runtime: &Runtime,
+        space: BoundDynamicFusionMapSpace<R>,
+        fill: Fill<'_, D>,
+    ) -> Result<Self, Error> {
         let data = apply_fill(space.space(), fill)?;
         Ok(Self {
             runtime: runtime.clone(),
             body: Arc::new(TypedTensorBody::dense(space, data)),
         })
+    }
+
+    fn build(
+        runtime: &Runtime,
+        provider: Arc<R>,
+        codomain: &[&GradedSpace<R>],
+        domain: &[&GradedSpace<R>],
+        fill: Fill<'_, D>,
+    ) -> Result<Self, Error> {
+        let space = Self::build_space(provider, codomain, domain)?;
+        Self::fill_space(runtime, space, fill)
     }
 
     /// Zero tensor map on `codomain <- domain` (TensorKit `zeros(T, W <- V)`).
@@ -1150,6 +1169,223 @@ where
         built
     }
 
+    /// Random tensor map on `codomain <- domain` (TensorKit `rand(T, W ← V)`,
+    /// `src/tensors/tensor.jl:320-407`): entries (real and imaginary parts for
+    /// a `Complex64` payload) uniform in `[-1, 1)`, drawn from the runtime's
+    /// deterministic splitmix64 stream. The payload dtype comes from `D`, so
+    /// no dtype token is needed.
+    ///
+    /// Deterministic per runtime: the n-th `rand`-family call on a given
+    /// runtime always produces the same tensor. Unlike the erased
+    /// [`crate::prelude::Tensor::rand`], which draws its stream position
+    /// before validating the spaces, this constructor draws only *after* the
+    /// layout is admitted — a failing call does not advance the runtime's
+    /// random stream, so error handling cannot silently shift every later
+    /// seedless `rand`. Use [`Self::rand_with_seed`] for an explicit stream.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::zeros`] reports; nothing (including the stream
+    /// position) is published in that case.
+    ///
+    /// # Complexity
+    ///
+    /// One `O(stored_len)` payload allocation and fill.
+    pub fn rand<'a, C, M>(runtime: &Runtime, codomain: C, domain: M) -> Result<Self, Error>
+    where
+        C: IntoIterator<Item = &'a GradedSpace<R>>,
+        M: IntoIterator<Item = &'a GradedSpace<R>>,
+        R: 'a,
+    {
+        let codomain: Vec<&GradedSpace<R>> = codomain.into_iter().collect();
+        let domain: Vec<&GradedSpace<R>> = domain.into_iter().collect();
+        let legs: Vec<&GradedSpace<R>> = codomain.iter().chain(&domain).copied().collect();
+        let provider = Arc::clone(Self::authority(&legs)?);
+        let space = Self::build_space(provider, &codomain, &domain)?;
+        // The stream position is drawn here, strictly after every fallible
+        // validation stage: see the rustdoc contract above.
+        Self::fill_space(runtime, space, Fill::Rand(runtime.next_rand_seed()))
+    }
+
+    /// Random tensor map with an explicit seed (splitmix64 stream, entries
+    /// uniform in `[-1, 1)`) — the typed twin of the erased
+    /// [`crate::prelude::Tensor::rand_with_seed`], byte-identical to it for
+    /// the same layout and seed since both run the one shared fill.
+    ///
+    /// Reproducibility is defined for the same TeNeT version and tensor
+    /// layout. The stream fills internal storage order, so a sector codec or
+    /// block-layout migration can produce a different semantic tensor from
+    /// the same seed. Cross-version fixtures should use
+    /// [`Self::from_block_fn`] with semantic labels.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::zeros`] reports.
+    ///
+    /// # Complexity
+    ///
+    /// One `O(stored_len)` payload allocation and fill.
+    pub fn rand_with_seed<'a, C, M>(
+        runtime: &Runtime,
+        codomain: C,
+        domain: M,
+        seed: u64,
+    ) -> Result<Self, Error>
+    where
+        C: IntoIterator<Item = &'a GradedSpace<R>>,
+        M: IntoIterator<Item = &'a GradedSpace<R>>,
+        R: 'a,
+    {
+        let codomain: Vec<&GradedSpace<R>> = codomain.into_iter().collect();
+        let domain: Vec<&GradedSpace<R>> = domain.into_iter().collect();
+        let legs: Vec<&GradedSpace<R>> = codomain.iter().chain(&domain).copied().collect();
+        let provider = Arc::clone(Self::authority(&legs)?);
+        Self::build(runtime, provider, &codomain, &domain, Fill::Rand(seed))
+    }
+
+    /// The fused external sector content of one side of a structural
+    /// constructor — the typed counterpart of the erased `Space::fuse_all`
+    /// (TensorKit `fuse`, `spaces/gradedspace.jl:150-158`), on the one shared
+    /// provider-generic fold. Duality is dropped exactly as there: stored
+    /// sector content is already external.
+    ///
+    /// No SU(3) `UnsupportedForRule` guard, unlike the erased `Space::fuse`:
+    /// the typed facade's `R` bound is `MultiplicityFreeRigidSymbols`, which
+    /// the SU(3) provider does not implement, so an SU(3) rule cannot reach
+    /// this fold from the typed surface at all — the guard would be dead
+    /// code here. A multiplicity-carrying *external* provider is likewise
+    /// excluded by the same bound; the fold's `N`-symbol weighting is still
+    /// correct for it, so nothing depends on the exclusion.
+    fn fused_content(
+        provider: &R,
+        legs: &[&GradedSpace<R>],
+    ) -> Result<Vec<(tenet_core::SectorId, usize)>, Error> {
+        let (first, rest) = legs.split_first().ok_or_else(|| {
+            // Same class as the erased `Space::fuse_all` on an empty side.
+            Error::InvalidArgument("fuse_all needs at least one space".into())
+        })?;
+        let mut fused: Vec<(tenet_core::SectorId, usize)> = first.leg().iter().collect();
+        for leg in rest {
+            let pairs: Vec<(tenet_core::SectorId, usize)> = leg.leg().iter().collect();
+            fused = crate::space::fuse_sector_content(provider, &fused, &pairs)?;
+        }
+        Ok(fused)
+    }
+
+    /// Shared body of the structural constructors: checks the fused fit,
+    /// builds zeros and writes the (partial) identity into every
+    /// coupled-sector matrix — the same route as [`Self::id`], which is the
+    /// same route as the erased `Tensor::structural`.
+    fn structural<'a, C, M>(
+        runtime: &Runtime,
+        codomain: C,
+        domain: M,
+        embed: bool,
+        what: &str,
+    ) -> Result<Self, Error>
+    where
+        C: IntoIterator<Item = &'a GradedSpace<R>>,
+        M: IntoIterator<Item = &'a GradedSpace<R>>,
+        R: 'a,
+    {
+        let codomain: Vec<&GradedSpace<R>> = codomain.into_iter().collect();
+        let domain: Vec<&GradedSpace<R>> = domain.into_iter().collect();
+        let legs: Vec<&GradedSpace<R>> = codomain.iter().chain(&domain).copied().collect();
+        let provider = Arc::clone(Self::authority(&legs)?);
+        let fused_codomain = Self::fused_content(&provider, &codomain)?;
+        let fused_domain = Self::fused_content(&provider, &domain)?;
+        let fits = if embed {
+            // TensorKit `domain ≾ codomain`: sectorwise embeddable.
+            fused_domain
+                .iter()
+                .all(|&(sector, deg)| fused_codomain.iter().any(|&(s, d)| s == sector && d >= deg))
+        } else {
+            // TensorKit `domain ≅ codomain`: identical fused sector content
+            // (both sides are SectorId-sorted, so slice equality is content
+            // equality).
+            fused_codomain == fused_domain
+        };
+        if !fits {
+            // Same message shape as the erased `Tensor::structural`, so the
+            // two facades stay diagnosable side by side.
+            return Err(Error::InvalidArgument(format!(
+                "{what}: codomain and domain are not {} (fused sector content differs)",
+                if embed {
+                    "isometrically embeddable"
+                } else {
+                    "isomorphic"
+                }
+            )));
+        }
+        let mut tensor = Self::build(runtime, provider, &codomain, &domain, Fill::Zeros)?;
+        Self::write_identity_blocks(&mut tensor)?;
+        Ok(tensor)
+    }
+
+    /// The canonical structural isomorphism `codomain <- domain` (TensorKit
+    /// `isomorphism(W ← V)`, `src/tensors/linalg.jl:102-109`): every
+    /// coupled-sector block is the identity matrix, which requires the fused
+    /// codomain and domain to carry identical sector content.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::zeros`] reports, plus [`Error::InvalidArgument`]
+    /// when the fused codomain and domain differ in sector content
+    /// (TensorKit's `SpaceMismatch` on `domain ≅ codomain`).
+    ///
+    /// # Complexity
+    ///
+    /// One fused-content fold over the legs plus one `O(stored_len)` payload.
+    pub fn isomorphism<'a, C, M>(runtime: &Runtime, codomain: C, domain: M) -> Result<Self, Error>
+    where
+        C: IntoIterator<Item = &'a GradedSpace<R>>,
+        M: IntoIterator<Item = &'a GradedSpace<R>>,
+        R: 'a,
+    {
+        Self::structural(runtime, codomain, domain, false, "isomorphism")
+    }
+
+    /// TensorKit `unitary(W ← V)` (`src/tensors/linalg.jl:129-132`): identical
+    /// to [`Self::isomorphism`] — TensorKit only adds a Euclidean
+    /// inner-product check, which every tenet fusion rule satisfies.
+    ///
+    /// # Errors and complexity
+    ///
+    /// Exactly [`Self::isomorphism`]'s.
+    pub fn unitary<'a, C, M>(runtime: &Runtime, codomain: C, domain: M) -> Result<Self, Error>
+    where
+        C: IntoIterator<Item = &'a GradedSpace<R>>,
+        M: IntoIterator<Item = &'a GradedSpace<R>>,
+        R: 'a,
+    {
+        Self::structural(runtime, codomain, domain, false, "unitary")
+    }
+
+    /// The canonical isometry `codomain <- domain` (TensorKit
+    /// `isometry(W ← V)`, `src/tensors/linalg.jl:149-158`): each
+    /// coupled-sector block is the partial identity (the first `cols` columns
+    /// of the identity), so `t† ∘ t = id(domain)`. Requires the domain to
+    /// embed isometrically in the codomain (sectorwise
+    /// `deg_domain <= deg_codomain` on the fused content).
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::zeros`] reports, plus [`Error::InvalidArgument`]
+    /// when the fused domain does not embed sectorwise into the fused
+    /// codomain (TensorKit's `SpaceMismatch` on `domain ≾ codomain`).
+    ///
+    /// # Complexity
+    ///
+    /// One fused-content fold over the legs plus one `O(stored_len)` payload.
+    pub fn isometry<'a, C, M>(runtime: &Runtime, codomain: C, domain: M) -> Result<Self, Error>
+    where
+        C: IntoIterator<Item = &'a GradedSpace<R>>,
+        M: IntoIterator<Item = &'a GradedSpace<R>>,
+        R: 'a,
+    {
+        Self::structural(runtime, codomain, domain, true, "isometry")
+    }
+
     /// The identity endomorphism on `spaces <- spaces` (TensorKit `id(V)`):
     /// every coupled-sector block is the identity matrix.
     ///
@@ -1180,11 +1416,19 @@ where
         let spaces: Vec<&GradedSpace<R>> = spaces.into_iter().collect();
         let provider = Arc::clone(Self::authority(&spaces)?);
         let mut identity = Self::build(runtime, provider, &spaces, &spaces, Fill::Zeros)?;
+        Self::write_identity_blocks(&mut identity)?;
+        Ok(identity)
+    }
+
+    /// Writes the (partial) identity into every coupled-sector matrix of a
+    /// freshly built zero tensor — TensorKit's `one!` per block
+    /// (`tensors/linalg.jl:102-158`), shared by [`Self::id`] and the
+    /// structural constructors.
+    fn write_identity_blocks(tensor: &mut Self) -> Result<(), Error> {
         // The zero fill is written into, not replaced: `build` has just
         // allocated the payload and nothing else holds the body yet, so the
         // diagonal goes in place rather than into a second buffer.
-        let body =
-            Arc::get_mut(&mut identity.body).expect("a freshly built body has no other owner");
+        let body = Arc::get_mut(&mut tensor.body).expect("a freshly built body has no other owner");
         // Same coupled-sector region walk and same diagonal addressing as the
         // erased `Tensor::structural`, on the shared helper: the two build the
         // same tensor, and a second copy of the offset arithmetic would be free
@@ -1205,7 +1449,7 @@ where
                 data[region.range().start + i * (region.rows() + 1)] = D::from_real(1.0);
             }
         }
-        Ok(identity)
+        Ok(())
     }
 
     /// TensorKit `permute`: re-arranges legs with symmetric braiding.
