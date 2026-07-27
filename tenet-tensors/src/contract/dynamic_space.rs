@@ -359,20 +359,28 @@ where
     }
 }
 
-pub(crate) fn lowered_metadata_dispatcher<R>(
+/// Shared checked-metadata dispatch, parameterized by the layout primer.
+///
+/// Why not collapse the lowered dispatcher onto the checked one directly:
+/// primer provenance differs (the sealed built-in lowered codec vs an
+/// external provider that certifies only `CheckedFusionAlgebra`) and so does
+/// its error mapping; everything else — checked permute/contract/select
+/// homspace derivation, checked outward legs — is common and lives here.
+fn checked_metadata_dispatch_with_primer<R>(
     rule: &R,
     request: MetadataRequest<'_>,
+    primer: impl Fn(&R, &FusionTreeHomSpace) -> Result<PreparedLayoutKeys, OperationError>,
 ) -> Result<MetadataOutput, OperationError>
 where
-    R: LoweredMultiplicityFreeAlgebra + CheckedFusionAlgebra,
+    R: CheckedFusionAlgebra,
 {
     let prepare = |homspace: FusionTreeHomSpace| {
-        let prepared = lowered_layout_primer(rule, &homspace)?;
+        let prepared = primer(rule, &homspace)?;
         Ok(MetadataOutput::HomSpace { homspace, prepared })
     };
     match request {
         MetadataRequest::Prepare { homspace } => {
-            lowered_layout_primer(rule, homspace).map(MetadataOutput::Prepared)
+            primer(rule, homspace).map(MetadataOutput::Prepared)
         }
         MetadataRequest::Permute {
             homspace,
@@ -415,6 +423,16 @@ where
             tensor,
         } => checked_outward_leg(rule, homspace, axis, dualize, tensor).map(MetadataOutput::Leg),
     }
+}
+
+pub(crate) fn lowered_metadata_dispatcher<R>(
+    rule: &R,
+    request: MetadataRequest<'_>,
+) -> Result<MetadataOutput, OperationError>
+where
+    R: LoweredMultiplicityFreeAlgebra + CheckedFusionAlgebra,
+{
+    checked_metadata_dispatch_with_primer(rule, request, lowered_layout_primer)
 }
 
 /// Checked external-provider sibling of [`lowered_layout_primer`]: stages a
@@ -440,55 +458,7 @@ pub(crate) fn checked_metadata_dispatcher<R>(
 where
     R: MultiplicityFreeFusionRule + CheckedFusionAlgebra,
 {
-    let prepare = |homspace: FusionTreeHomSpace| {
-        let prepared = checked_layout_primer(rule, &homspace)?;
-        Ok(MetadataOutput::HomSpace { homspace, prepared })
-    };
-    match request {
-        MetadataRequest::Prepare { homspace } => {
-            checked_layout_primer(rule, homspace).map(MetadataOutput::Prepared)
-        }
-        MetadataRequest::Permute {
-            homspace,
-            codomain_axes,
-            domain_axes,
-        } => homspace
-            .try_permute_checked(rule, codomain_axes, domain_axes)
-            .map_err(checked_metadata_operation_error)
-            .and_then(prepare),
-        MetadataRequest::Contract {
-            lhs,
-            rhs,
-            lhs_axes,
-            rhs_axes,
-            output_axes,
-            dst_codomain_rank,
-        } => FusionTreeHomSpace::try_tensorcontract_homspace_checked(
-            rule,
-            lhs,
-            rhs,
-            lhs_axes,
-            rhs_axes,
-            output_axes,
-            dst_codomain_rank,
-        )
-        .map_err(checked_metadata_operation_error)
-        .and_then(prepare),
-        MetadataRequest::Select {
-            homspace,
-            codomain_axes,
-            domain_axes,
-        } => homspace
-            .try_select_checked(rule, codomain_axes, domain_axes)
-            .map_err(checked_metadata_operation_error)
-            .and_then(prepare),
-        MetadataRequest::OutwardLeg {
-            homspace,
-            axis,
-            dualize,
-            tensor,
-        } => checked_outward_leg(rule, homspace, axis, dualize, tensor).map(MetadataOutput::Leg),
-    }
+    checked_metadata_dispatch_with_primer(rule, request, checked_layout_primer)
 }
 
 fn encoded_outward_leg<R>(
