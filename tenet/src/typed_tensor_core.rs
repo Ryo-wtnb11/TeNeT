@@ -198,6 +198,39 @@ pub(crate) fn is_rank_one_diagonal_swap(
         )
 }
 
+// Test-only observability at the two owned multiplicity-free seams, in the
+// erased facade's `ORDERED_CONTRACT_FUSED_ROUTE` style (`tensor.rs`): armed
+// thread-locals that count executions of the seam the current thread runs
+// through. Both facades route here — the erased host fusion path calls
+// `tensorcontract_owned_multiplicity_free` too — so a gate over these counters
+// pins "one fused contraction, no separate permute transform" without a
+// facade-side hook. Observability only: nothing behavioral reads them.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static CONTRACT_SEAM_CALLS: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+    pub(crate) static TREE_TRANSFORM_SEAM_CALLS: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn observe_contract_seam_call() {
+    CONTRACT_SEAM_CALLS.with(|observation| {
+        if let Some(calls) = observation.get() {
+            observation.set(Some(calls + 1));
+        }
+    });
+}
+
+#[cfg(test)]
+fn observe_tree_transform_seam_call() {
+    TREE_TRANSFORM_SEAM_CALLS.with(|observation| {
+        if let Some(calls) = observation.get() {
+            observation.set(Some(calls + 1));
+        }
+    });
+}
+
 /// Executes one owned multiplicity-free transform from a validated provider
 /// binding. The caller keeps user-layer dispatch and representation policy;
 /// this helper owns only typed destination derivation and the direct/fallback
@@ -211,6 +244,8 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
     D: UserScalar,
 {
+    #[cfg(test)]
+    observe_tree_transform_seam_call();
     let destination = input.space().transformed_multiplicity_free(&operation)?;
     let dst_space = destination.space();
     if let Some(data) = context
@@ -254,6 +289,8 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
     D: UserScalar,
 {
+    #[cfg(test)]
+    observe_contract_seam_call();
     let destination = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
         lhs.space(),
         rhs.space(),
@@ -529,6 +566,80 @@ mod tests {
         assert_eq!(
             data,
             [76.0, 103.0, 130.0, 157.0, 100.0, 136.0, 172.0, 208.0]
+        );
+    }
+
+    /// A rank-3 Z2 tensor map built through the typed facade, so the gate
+    /// below measures the whole typed route, not this module in isolation.
+    fn typed_z2_facade_tensor() -> (
+        crate::typed::Runtime,
+        crate::typed::TensorMap<Z2FusionRule, f64>,
+    ) {
+        let runtime = crate::typed::Runtime::builder().build().unwrap();
+        let leg = crate::typed::GradedSpace::try_new(
+            Arc::new(Z2FusionRule),
+            [
+                (tenet_core::Z2Irrep::EVEN, 2),
+                (tenet_core::Z2Irrep::ODD, 3),
+            ],
+            false,
+        )
+        .unwrap();
+        let tensor =
+            crate::typed::TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, indices| {
+                (indices[0] * 7 + indices[1] * 3 + indices[2]) as f64 + 1.0
+            })
+            .unwrap();
+        (runtime, tensor)
+    }
+
+    /// Arms both seam counters, runs `operation`, and returns
+    /// `(contract seam calls, tree-transform seam calls)`.
+    fn seam_calls<T>(operation: impl FnOnce() -> T) -> (usize, usize) {
+        super::CONTRACT_SEAM_CALLS.with(|observation| observation.set(Some(0)));
+        super::TREE_TRANSFORM_SEAM_CALLS.with(|observation| observation.set(Some(0)));
+        let _output = operation();
+        (
+            super::CONTRACT_SEAM_CALLS
+                .with(|observation| observation.replace(None))
+                .unwrap(),
+            super::TREE_TRANSFORM_SEAM_CALLS
+                .with(|observation| observation.replace(None))
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn typed_ordered_contract_is_one_fused_seam_call_and_no_permute_transform() {
+        // What (#580 group 6, gate 1): a typed `contract_ordered` with a
+        // non-identity output order runs the fused contraction seam exactly
+        // once and never a separate permute transform — the typed sibling of
+        // the erased `ORDERED_CONTRACT_FUSED_ROUTE` gate in `tensor.rs`.
+        let (_runtime, tensor) = typed_z2_facade_tensor();
+
+        // Negative control: the counters can see the sequential shape at all.
+        // A contract followed by a public permute is one fused call plus one
+        // transform, which is what a regressed contract-then-permute alias
+        // would look like.
+        let (fused, transforms) = seam_calls(|| {
+            tensor
+                .contract(&tensor, &[2], &[0], &[0, 1, 2, 3])
+                .unwrap()
+                .permute(&[1, 0], &[3, 2])
+                .unwrap()
+        });
+        assert_eq!((fused, transforms), (1, 1));
+
+        // The gate: the non-identity order is folded into the one fused call.
+        let (fused, transforms) = seam_calls(|| {
+            tensor
+                .contract_ordered(&tensor, &[2], &[0], &[1, 0, 3, 2])
+                .unwrap()
+        });
+        assert_eq!(
+            (fused, transforms),
+            (1, 0),
+            "ordered contract must be one fused contraction, not contract-then-permute"
         );
     }
 }
