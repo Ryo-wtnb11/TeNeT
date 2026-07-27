@@ -1288,3 +1288,174 @@ fn compact_is_posdef_matches_the_dense_route_and_never_materializes() {
     }
     assert_compact_unmaterialized(&skewed);
 }
+
+/// Asserts `image` is the elementwise `exp` of the compact `source`, variant
+/// for variant. The variant pairing is half the assertion: `RealC64 -> C64`
+/// would double the stored payload of a real spectrum inside a c64 tensor, and
+/// a dense materialization comparison could not see it.
+fn assert_elementwise_exp(source: &Tensor, image: &Tensor) {
+    fn real(source: &[SectorSpectrum<f64>], image: &[SectorSpectrum<f64>]) {
+        assert_eq!(source.len(), image.len());
+        for (source, image) in source.iter().zip(image) {
+            assert_eq!(source.sector, image.sector);
+            assert_eq!(source.values.len(), image.values.len());
+            for (&source, &image) in source.values.iter().zip(&image.values) {
+                assert!(
+                    (image - source.exp()).abs() < 1e-11,
+                    "{image} is not exp({source})"
+                );
+            }
+        }
+    }
+    match (source.stored_data(), image.stored_data()) {
+        (
+            Data::Diagonal(DiagonalData::RealF64(source)),
+            Data::Diagonal(DiagonalData::RealF64(image)),
+        )
+        | (
+            Data::Diagonal(DiagonalData::RealC64(source)),
+            Data::Diagonal(DiagonalData::RealC64(image)),
+        ) => real(source, image),
+        (Data::Diagonal(DiagonalData::C64(source)), Data::Diagonal(DiagonalData::C64(image))) => {
+            assert_eq!(source.len(), image.len());
+            for (source, image) in source.iter().zip(image) {
+                assert_eq!(source.sector, image.sector);
+                assert_eq!(source.values.len(), image.values.len());
+                for (&source, &image) in source.values.iter().zip(&image.values) {
+                    assert!(
+                        (image - source.exp()).norm() < 1e-11,
+                        "{image} is not exp({source})"
+                    );
+                }
+            }
+        }
+        pair => panic!("exp did not preserve the compact variant: {pair:?}"),
+    }
+}
+
+#[test]
+fn compact_exp_is_elementwise_and_matches_the_dense_route() {
+    // What: issue #578. TensorKit's `exp(::DiagonalTensorMap)`
+    // (`tensors/diagonal.jl:383-390`) is elementwise on the stored values and
+    // stays diagonal; the erased facade used to densify and run the Hermitian
+    // eigendecomposition on the block-diagonal buffer. The values must not
+    // move — the densified twin is the oracle — while the storage does.
+    let rt = Runtime::builder().dense_threads(1).build().unwrap();
+    for space in [
+        Space::u1([(-2, 1), (1, 3)]),
+        Space::fz2([(0, 2), (1, 3)]).unwrap(),
+        Space::su2([(0, 2), (1, 3), (2, 1)]).unwrap(),
+        product_space(),
+    ] {
+        // An f64 SVD spectrum and its c64 sibling (`RealC64`: a real spectrum
+        // inside a complex tensor). Both are Hermitian as matrices, so the
+        // dense route accepts them and can serve as the value oracle.
+        for source in [
+            real_diagonal(&rt, &space, 578_001),
+            real_c64_diagonal(&rt, &space, 578_002),
+        ] {
+            let dense = dense_oracle(&source);
+            let image = source.exp().unwrap();
+            assert_compact_unmaterialized(&image);
+            assert_tensor_close(&image, &dense.exp().unwrap());
+            assert_elementwise_exp(&source, &image);
+            // The source is untouched: same values, still compact, and never
+            // materialized behind our back.
+            assert_compact_unmaterialized(&source);
+            assert_tensor_close(&source, &dense);
+
+            // A later compact contraction still folds to a bond scaling
+            // instead of a GEMM, and `exp(s) * exp(s) = exp(2s)` there.
+            let squared = image.compose(&image).unwrap();
+            assert_compact_unmaterialized(&squared);
+            assert_tensor_close(
+                &squared,
+                &dense.exp().unwrap().compose(&dense.exp().unwrap()).unwrap(),
+            );
+        }
+
+        // A genuinely complex spectrum. Storage decides what `exp` accepts,
+        // exactly as in TensorKit: the dense route is the Hermitian spectral
+        // function and refuses this matrix, the compact arm is unconditionally
+        // elementwise and does not. Same divergence the typed facade records
+        // (`exp_of_a_complex_compact_spectrum_takes_the_complex_elementwise_branch`).
+        let source = complex_diagonal(&rt, &space, 578_003);
+        assert!(
+            dense_oracle(&source).exp().is_err(),
+            "the dense route accepted a non-Hermitian exp"
+        );
+        let image = source.exp().unwrap();
+        assert_compact_unmaterialized(&image);
+        assert_elementwise_exp(&source, &image);
+        assert_compact_unmaterialized(&source);
+    }
+}
+
+#[test]
+fn compact_su3_exp_stays_compact_before_the_unwired_su3_rejection() {
+    // What: the compact arm sits *before* `reject_unwired_su3` in `exp`, and
+    // must: a Generic SU(3) spectrum has no dense route at all (the firewall
+    // refuses it, see `su3_panic_firewall.rs`), so ordering the arm after the
+    // rejection would turn an operation that is pure elementwise arithmetic on
+    // stored values — needing no fusion wiring whatsoever — into an error.
+    // Same placement as the `inv`/`pinv` compact arms.
+    let rt = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = Space::su3([((1, 0), 2), ((0, 1), 2), ((1, 1), 2)]).unwrap();
+    for dtype in [Dtype::F64, Dtype::C64] {
+        let source = su3_diagonal(&rt, dtype, &space, 578_031);
+        let image = source.exp().unwrap();
+        assert_compact_unmaterialized(&image);
+        assert_eq!(image.dtype(), source.dtype());
+        assert_elementwise_exp(&source, &image);
+        assert_compact_unmaterialized(&source);
+    }
+}
+
+#[test]
+fn exp_of_an_adjoint_conjugates_the_spectrum_and_never_reaches_an_adjoint_view() {
+    // What: the `is_adjoint_view` materialization guard at the top of `exp`.
+    // Both of `exp`'s arms below it read `ordinary_body()`, which panics on a
+    // view, so the guard is what makes `exp` defined on an adjoint at all.
+    let rt = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = product_space();
+
+    // Compact side: `adjoint` of compact storage short-circuits to an owned
+    // conjugated spectrum, so `exp` sees an ordinary compact tensor and is
+    // elementwise on the conjugated values.
+    let source = complex_diagonal(&rt, &space, 578_041);
+    let adjoint = source.adjoint().unwrap();
+    assert!(!adjoint.is_adjoint_view());
+    let image = adjoint.exp().unwrap();
+    assert_compact_unmaterialized(&image);
+    assert_elementwise_exp(&adjoint, &image);
+    let (
+        Data::Diagonal(DiagonalData::C64(source_values)),
+        Data::Diagonal(DiagonalData::C64(image_values)),
+    ) = (source.stored_data(), image.stored_data())
+    else {
+        panic!("expected compact c64 spectra")
+    };
+    assert_eq!(source_values.len(), image_values.len());
+    for (source, image) in source_values.iter().zip(image_values) {
+        assert_eq!(source.sector, image.sector);
+        assert_eq!(source.values.len(), image.values.len());
+        for (&source, &image) in source.values.iter().zip(&image.values) {
+            assert!(
+                (image - source.conj().exp()).norm() < 1e-11,
+                "{image} is not exp(conj({source}))"
+            );
+        }
+    }
+    assert_compact_unmaterialized(&source);
+
+    // Dense side: a genuine adjoint view. Without the guard this reaches
+    // `exp_impl` and panics instead of exponentiating the adjoint.
+    let random = Tensor::rand_with_seed(&rt, Dtype::C64, [&space], [&space], 578_042).unwrap();
+    let hermitian = random.adjoint().unwrap().compose(&random).unwrap();
+    let view = hermitian.adjoint().unwrap();
+    assert!(view.is_adjoint_view());
+    assert_tensor_close(
+        &view.exp().unwrap(),
+        &view.materialized_tensor().unwrap().exp().unwrap(),
+    );
+}
