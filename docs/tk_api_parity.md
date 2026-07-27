@@ -154,7 +154,7 @@ Added this sweep: `Tensor::repartition`, `Tensor::zeros_like`,
 | `sectortype` / `spacetype` | N/A | — | The concrete sector/rule type is erased at the user layer; `SectorLabel` enumerates it instead. |
 | `field` | N/A | — | Scalar field is carried by the `Dtype` token (`F64`/`C64`). |
 | `unitspace` | has | `Space::unitspace` | Trivial-unit space for the receiver's rule; what `insert_left_unit` / `insert_right_unit` insert. |
-| `isunitspace` | has | `Space::isunitspace` | `tenet/src/space.rs:602`. Sector content only (exactly the vacuum with degeneracy one); the dual flag is ignored, as in TK. |
+| `isunitspace` | has | `Space::isunitspace` | `tenet/src/space.rs::Space::isunitspace`. Sector content only (exactly the vacuum with degeneracy one); the dual flag is ignored, as in TK. |
 | `insertleftunit` / `insertrightunit` / `removeunit` (space) | N/A | — | TK's unit helpers operate on `ProductSpace` / `HomSpace` / tensors (`spaces/vectorspaces.jl:298-307`) — they insert or drop a *slot*. TeNeT's `Space` is one elementary graded leg with no slot list, so same-named `Space` methods would model the wrong object. The tensor-level analogs are `tenet/src/tensor.rs::Tensor::insert_left_unit` / `insert_right_unit` / `remove_unit`. Revisit only if a public factor-preserving product-space type is ever introduced. |
 | `zerospace` | design-gated | — | No zero-space constructor on the facade. |
 | `infimum` / `supremum` / `isisomorphic` / `ismonomorphic` / `isepimorphic` | design-gated | — | Space-lattice predicates; no facade surface. |
