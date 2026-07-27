@@ -2236,8 +2236,13 @@ where
     /// eigendecomposition per coupled sector plus one composition, with
     /// `exp(D)` folded into a column scaling of `V` rather than materialized;
     /// or six GEMMs, one solve and `s = max(0, ceil(log2(||A_c||_1 / theta_13)))`
-    /// squarings per sector, over `O(max_c n_c²)` scratch reused across
-    /// sectors. Neither route couples sectors. Compact input (TensorKit's
+    /// squarings per sector — over the balanced block, so a badly scaled one
+    /// pays for its true magnitude and not its scaling — with an
+    /// `O(max_c n_c²)` Padé workspace reused across sectors. That workspace is
+    /// the whole of the scratch on the canonical layout; a payload whose
+    /// coupled sectors are not laid out in contiguous regions takes a fallback
+    /// that matricizes them all first, adding `O(Σ_c n_c²)`. Neither route
+    /// couples sectors. Compact input (TensorKit's
     /// `DiagonalTensorMap`): the **O(rank) elementwise arm**, `exp(s_i)` over
     /// the `Σ_c k_c` stored values, staying compact. The erased
     /// [`crate::prelude::Tensor::exp`] has the same arm since issue #578 — it

@@ -1,8 +1,12 @@
 //! Allocation gate for the general (Padé) arm of `exp` (issue #577).
 //!
-//! The design's storage claim is `O(max_c n_c²)` scratch — one workspace sized
-//! to the *largest* coupled sector, reused by every sector, with nothing
-//! allocated inside the sector loop.
+//! The design's storage claim is an `O(max_c n_c²)` workspace — sized to the
+//! *largest* coupled sector, reused by every sector, with nothing allocated
+//! inside the sector loop. On the canonical direct-region layout the fixture
+//! below builds, that workspace is the whole of the scratch; the fallback for
+//! a payload whose sectors are not contiguous regions matricizes all of them
+//! first and costs `O(Σ_c n_c²)` besides, which is not what this gate
+//! measures.
 //!
 //! Measuring that directly is not possible from outside: a call to `exp` also
 //! pays for its own result and for the layout and backend work every route

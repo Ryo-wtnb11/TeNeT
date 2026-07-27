@@ -5426,6 +5426,11 @@ where
 /// the loop, so a kernel can size its scratch to `O(max_c n_c²)` and allocate
 /// nothing per sector.
 ///
+/// That bound is the kernel's own. It is also the whole of the scratch on the
+/// canonical direct-region layout, where the blocks are read in place; the
+/// packed fallback below matricizes *every* sector up front and so costs
+/// `O(Σ_c n_c²)` on top of it, whatever the kernel does.
+///
 /// `apply(state, source, n, out, out_leading)` reads the column-major `n x n`
 /// block at `source` (leading dimension `n`) and writes its image into `out`
 /// with leading dimension `out_leading`.

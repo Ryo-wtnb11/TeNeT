@@ -19,7 +19,11 @@ use crate::factorize::{
     BoundTensorMapRef, FactorScalar, SectorSpectrum, SvdFactorsDyn,
 };
 
-/// Matrix exponential of a Hermitian endomorphism: `exp(t) = V exp(D) V^H`.
+/// Matrix exponential of any endomorphism (TensorKit `exp!`, which checks only
+/// `domain == codomain`). Hermitian input takes the spectral route
+/// `exp(t) = V exp(D) V^H`; everything else takes blockwise scaling-and-squaring
+/// Padé [13/13] (Higham 2005) around LAPACK `gebal('B')` balancing, the
+/// algorithm behind the `LinearAlgebra.exp!` TensorKit calls.
 pub fn exp<E, RuleKey, BT, BC, R, D, const N: usize>(
     dense: &mut E,
     context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,

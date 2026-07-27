@@ -8170,9 +8170,13 @@ impl Tensor {
     /// Dense input: `O(Σ_c n_c³)` on both routes — one Hermitian
     /// eigendecomposition per coupled sector plus the composition that
     /// reassembles `v exp(d) v^H`, or six GEMMs, one solve and
-    /// `s = max(0, ceil(log2(||A_c||_1 / theta_13)))` squarings per sector over
-    /// `O(max_c n_c²)` scratch that every sector reuses. Sectors are never
-    /// coupled. Compact input: `O(Σ_c k_c)` time and storage over the stored
+    /// `s = max(0, ceil(log2(||A_c||_1 / theta_13)))` squarings per sector —
+    /// over the balanced block, so a badly scaled one pays for its true
+    /// magnitude and not its scaling — with an `O(max_c n_c²)` Padé workspace
+    /// that every sector reuses. That workspace is the whole of the scratch on
+    /// the canonical layout; a payload whose coupled sectors are not laid out
+    /// in contiguous regions takes a fallback that matricizes them all first,
+    /// adding `O(Σ_c n_c²)`. Sectors are never coupled. Compact input: `O(Σ_c k_c)` time and storage over the stored
     /// spectra, with no dense buffer, no EIGH and no GEMM — the result stays
     /// compact, so a following `compose` is still a bond scaling (issue #578).
     ///
