@@ -7310,6 +7310,219 @@ fn exp_agrees_between_the_direct_region_and_packed_layouts() {
     }
 }
 
+// ============================================================================
+// Multi-tree coupled sectors.
+//
+// Every fixture above places exactly one fusion tree per coupled sector, so a
+// permutation of whole tree-aligned row blocks inside a sector is invisible to
+// them: the sector matrix has only one block to permute. `tsvd_test_tensor` at
+// rank 2 <- 2 with three U(1) charges and degeneracy 2 gives coupled sectors
+// carrying one, two and three trees (orders 4, 8, 12), so the tree layout
+// inside a sector matrix has something to get wrong. The oracle below is the
+// defining series, which shares no scaling rule, no Padé table, no solve and no
+// squaring loop with the implementation, and is read back through the
+// pre-existing `coupled_sector_regions` reader.
+// ============================================================================
+
+/// Scale of the multi-tree fixture. Chosen so the largest sector 1-norm sits
+/// just above `theta_13` — the squaring phase runs, and the series oracle is
+/// still deep inside its convergent range at 60 terms.
+const EXP_MULTITREE_SCALE: f64 = 0.3;
+
+/// Entrywise agreement with the series oracle, relative to the largest entry of
+/// the sector. Loose next to the Padé error because the series is summed in the
+/// fixture's own (non-normal) basis; still orders of magnitude below any
+/// misplaced tree block, which moves entries by O(1).
+const EXP_MULTITREE_TOL: f64 = 1e-11;
+
+/// `exp(A)` by its defining series `Σ_k A^k / k!`, summed to `terms`.
+///
+/// Deliberately shares nothing with the implementation: no scaling, no
+/// squaring, no Padé coefficients, no dense solve — only GEMM by hand.
+fn taylor_exp(matrix: &[f64], order: usize, terms: usize) -> Vec<f64> {
+    let mut result = vec![0.0_f64; order * order];
+    let mut term = vec![0.0_f64; order * order];
+    for index in 0..order {
+        term[index + order * index] = 1.0;
+        result[index + order * index] = 1.0;
+    }
+    let mut next = vec![0.0_f64; order * order];
+    for step in 1..=terms {
+        for column in 0..order {
+            for row in 0..order {
+                let mut sum = 0.0_f64;
+                for inner in 0..order {
+                    sum += term[row + order * inner] * matrix[inner + order * column];
+                }
+                next[row + order * column] = sum / step as f64;
+            }
+        }
+        term.copy_from_slice(&next);
+        for (accumulated, &value) in result.iter_mut().zip(term.iter()) {
+            *accumulated += value;
+        }
+    }
+    result
+}
+
+/// Column-major coupled-sector matrices of a canonical layout, read through the
+/// pre-existing region reader.
+fn coupled_sector_matrices<const NOUT: usize, const NIN: usize>(
+    tensor: &TensorMap<f64, NOUT, NIN>,
+) -> Vec<(SectorId, usize, Vec<f64>)> {
+    tensor
+        .structure()
+        .coupled_sector_regions(NOUT)
+        .unwrap()
+        .expect("canonical coupled-sector storage")
+        .iter()
+        .map(|region| {
+            assert_eq!(
+                region.rows(),
+                region.cols(),
+                "endomorphism sector must be square"
+            );
+            (
+                region.coupled(),
+                region.rows(),
+                tensor.data()[region.range()].to_vec(),
+            )
+        })
+        .collect()
+}
+
+/// Rank 2 <- 2 U(1) endomorphism whose coupled sectors carry one, two and three
+/// fusion trees, scaled into the oracle's comfortable range.
+fn exp_multitree_fixture() -> TensorMap<f64, 2, 2> {
+    let sectors: Vec<SectorId> = (0..3).map(|c| U1Irrep::new(c).sector_id()).collect();
+    let tensor = tsvd_test_tensor(&U1FusionRule, &sectors);
+    TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
+        tensor
+            .data()
+            .iter()
+            .map(|value| value * EXP_MULTITREE_SCALE)
+            .collect(),
+        tensor.fusion_space().unwrap().as_ref().clone(),
+    )
+    .unwrap()
+}
+
+/// Entrywise comparison of a whole tensor's sectors against the series oracle.
+fn assert_multitree_exp_matches_the_series(
+    exponential: &TensorMap<f64, 2, 2>,
+    sources: &[(SectorId, usize, Vec<f64>)],
+    what: &str,
+) {
+    let images = coupled_sector_matrices(exponential);
+    assert_eq!(images.len(), sources.len(), "{what}: sector count changed");
+    for ((sector, order, source), (image_sector, image_order, image)) in
+        sources.iter().zip(images.iter())
+    {
+        assert_eq!(
+            (sector, order),
+            (image_sector, image_order),
+            "{what}: layout"
+        );
+        let expected = taylor_exp(source, *order, 60);
+        let tolerance = EXP_MULTITREE_TOL * expected.iter().fold(1.0_f64, |m, v| m.max(v.abs()));
+        for column in 0..*order {
+            for row in 0..*order {
+                let index = row + order * column;
+                let residual = (image[index] - expected[index]).abs();
+                assert!(
+                    residual <= tolerance,
+                    "{what}: sector {sector:?} entry ({row}, {column}) is {} against series {}, \
+                     residual {residual:e}",
+                    image[index],
+                    expected[index]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn exp_of_a_multi_tree_sector_matches_the_series_entrywise() {
+    // What: the tree layout *inside* a coupled sector. Permuting whole
+    // tree-aligned row blocks of a multi-tree sector preserves every norm, the
+    // sector count, the solve count and the round trip through exp(-A), so only
+    // an entrywise comparison against an independently computed exponential of
+    // the *same* source matrix can see it.
+    let tensor = exp_multitree_fixture();
+    let sources = coupled_sector_matrices(&tensor);
+    // Certify the fixture actually is multi-tree, and that it exercises the
+    // general arm at a scale where squaring happens.
+    assert_eq!(
+        sources
+            .iter()
+            .map(|(_, order, _)| *order)
+            .collect::<Vec<_>>(),
+        vec![4, 8, 12, 8, 4],
+        "fixture no longer has one-, two- and three-tree coupled sectors"
+    );
+    let widest = sources
+        .iter()
+        .map(|(_, order, matrix)| {
+            (0..*order)
+                .map(|column| {
+                    (0..*order)
+                        .map(|row| matrix[row + order * column].abs())
+                        .sum::<f64>()
+                })
+                .fold(0.0_f64, f64::max)
+        })
+        .fold(0.0_f64, f64::max);
+    assert!(
+        // theta_13 = 5.3719..., so this window means s >= 1.
+        widest > 5.372 && widest < 12.0,
+        "fixture 1-norm {widest} is outside the scaling-and-squaring window"
+    );
+
+    let mut spy = MatrixFunctionCallSpy::default();
+    let mut context = default_context();
+    let exponential = exp(
+        &mut spy,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
+    )
+    .unwrap();
+    assert_eq!(spy.eigh_calls, 0, "the fixture must reach the general arm");
+    assert_eq!(spy.solve_calls, sources.len(), "one solve per sector");
+
+    assert_multitree_exp_matches_the_series(exponential.tensor(), &sources, "direct regions");
+}
+
+#[test]
+fn exp_of_a_multi_tree_sector_matches_the_series_through_the_packed_layout() {
+    // What: the same gate on the matricization fall-back, where the sector
+    // matrix is assembled tree by tree and written back through
+    // `reorder_inverse_solution` — the route that has to rebuild the tree
+    // layout rather than inherit it.
+    let tensor = exp_multitree_fixture();
+    let packed = padded_copy(&U1FusionRule, &tensor);
+    assert!(
+        packed
+            .structure()
+            .coupled_sector_regions(2)
+            .unwrap()
+            .is_none(),
+        "the padded copy must take the matricization fall-back"
+    );
+    let sources = coupled_sector_matrices(&tensor);
+
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let mut context = default_context();
+    let exponential = exp(
+        &mut dense,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &packed),
+    )
+    .unwrap();
+
+    // The output layout is always canonical, so the same reader applies.
+    assert_multitree_exp_matches_the_series(exponential.tensor(), &sources, "packed layout");
+}
+
 #[test]
 fn exp_of_a_general_endomorphism_inverts_under_negation() {
     // What: exp(A) exp(-A) = 1 for a non-Hermitian A, the check that catches a
