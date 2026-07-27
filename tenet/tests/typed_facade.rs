@@ -6503,9 +6503,10 @@ fn generic_product_provider_drives_the_typed_facade_without_a_fixed_constructor(
         false,
     )
     .unwrap();
-    // Dual, because a dual leg is the only place the fermionic braiding sign
-    // can act: without one the identities below hold for a sign-free algebra
-    // too and prove much less.
+    // Dual, so the dual-flag path — admission, dual sector resolution, block
+    // layout, composition — runs on a product provider. The identities below
+    // are sign-consistent and hold for either flag, so this leg is coverage of
+    // that path, not a probe that makes them sign-sensitive.
     let q = GradedSpace::try_new(
         Arc::clone(&rule),
         [
@@ -6568,15 +6569,22 @@ fn nested_three_factor_product_keeps_its_declared_factor_order() {
 
     // Decoded labels come back nested exactly as declared: parity outermost
     // left, then charge, with the spin as the outer right factor. Compared as
-    // a set, because a leg is stored in `SectorId` order, not declaration
-    // order.
-    let mut decoded = v.sectors().unwrap();
+    // `(label, degeneracy)` pairs — labels alone would not catch a label ↔
+    // degeneracy mispairing — and as a set, because a leg is stored in
+    // `SectorId` order, not declaration order.
+    let mut decoded: Vec<_> = v
+        .sectors()
+        .unwrap()
+        .into_iter()
+        .zip(v.degeneracies().iter().copied())
+        .collect();
     decoded.sort_unstable();
-    let mut expected: Vec<_> = declared.iter().map(|(label, _)| *label).collect();
+    let mut expected = declared.to_vec();
     expected.sort_unstable();
     assert_eq!(decoded, expected);
     let odd = decoded
         .iter()
+        .map(|(label, _)| label)
         .find(|label| *label.left().left() == tenet::core::Z2Irrep::ODD)
         .expect("the odd-parity label survives the round trip");
     assert_eq!(*odd.left().right(), tenet::core::U1Irrep::new(1));
