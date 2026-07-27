@@ -6761,7 +6761,9 @@ fn rand_and_isomorphism_build_on_an_external_provider() {
     let f: TensorMap<ExternalZ3, f64> =
         TensorMap::isomorphism(&runtime, [&leg, &dual], [&dual, &leg]).unwrap();
     let roundtrip = f.adjoint().unwrap().compose(&f).unwrap();
-    let id = TensorMap::id(&runtime, [&dual, &leg]).unwrap();
+    // Explicit `D`: under cuda,cpu-faer serde_json adds a `PartialEq` impl
+    // that makes the `assert_eq!` unable to pin `D` on its own (E0283).
+    let id: TensorMap<ExternalZ3, f64> = TensorMap::id(&runtime, [&dual, &leg]).unwrap();
     assert_eq!(roundtrip.data(), id.data());
 }
 
@@ -6780,7 +6782,10 @@ fn typed_isomorphism_satisfies_the_identity_law_on_a_builtin_rule() {
     let f: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::isomorphism(&runtime, [&dual, &leg], [&leg, &dual]).unwrap();
     let roundtrip = f.adjoint().unwrap().compose(&f).unwrap();
-    let id = TensorMap::id(&runtime, [&leg, &dual]).unwrap();
+    // Explicit `D` for the cuda,cpu-faer feature set (see the ExternalZ3
+    // identity-law test above).
+    let id: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::id(&runtime, [&leg, &dual]).unwrap();
     assert_eq!(roundtrip.data(), id.data());
 }
 
@@ -6831,7 +6836,9 @@ fn typed_isometry_embeds_and_satisfies_the_identity_law() {
     let w: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::isometry(&runtime, [&big], [&small]).unwrap();
     let roundtrip = w.adjoint().unwrap().compose(&w).unwrap();
-    let id = TensorMap::id(&runtime, [&small]).unwrap();
+    // Explicit `D` for the cuda,cpu-faer feature set (see the ExternalZ3
+    // identity-law test above).
+    let id: TensorMap<tenet::core::U1FusionRule, f64> = TensorMap::id(&runtime, [&small]).unwrap();
     assert_eq!(roundtrip.data(), id.data());
 }
 
@@ -7179,6 +7186,8 @@ fn typed_su2_isomorphism_satisfies_the_identity_law() {
     let f: TensorMap<ExternalSu2, f64> =
         TensorMap::isomorphism(&runtime, [&leg, &leg], [&leg, &leg]).unwrap();
     let roundtrip = f.adjoint().unwrap().compose(&f).unwrap();
-    let id = TensorMap::id(&runtime, [&leg, &leg]).unwrap();
+    // Explicit `D` for the cuda,cpu-faer feature set (see the ExternalZ3
+    // identity-law test above).
+    let id: TensorMap<ExternalSu2, f64> = TensorMap::id(&runtime, [&leg, &leg]).unwrap();
     assert_eq!(roundtrip.data(), id.data());
 }
