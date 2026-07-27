@@ -593,7 +593,9 @@ fn device_unsupported(what: &str) -> Error {
     ))
 }
 
-fn map_checked_unit_layout_error(error: CheckedFusionSpaceError) -> Error {
+/// `pub(crate)` so the typed facade's unit-leg adapters map the checked
+/// validator's failures to exactly the erased error classes (#580 PR 5).
+pub(crate) fn map_checked_unit_layout_error(error: CheckedFusionSpaceError) -> Error {
     match error {
         CheckedFusionSpaceError::Core(error) => Error::Core(error),
         CheckedFusionSpaceError::FusionAlgebra(error) => Error::FusionAlgebra(error),
