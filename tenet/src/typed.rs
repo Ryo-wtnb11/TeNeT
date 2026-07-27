@@ -282,6 +282,15 @@ where
     /// `GradedSpace` / `Vect[I](c => d, ...; dual)` constructor family
     /// (`spaces/gradedspace.jl:70-85`).
     ///
+    /// **Dual-leg convention.** Labels are stored exactly as given —
+    /// `is_dual` only marks the orientation, it never dualizes them. On a
+    /// dual leg that is *not* what TensorKit's constructor-plus-read
+    /// composition reports: `sectors(Vect[U1](1 => 1; dual = true))` is `-1`
+    /// (TK dualizes stored keys on read), while
+    /// `try_new(.., [(1, 1)], true)?.sectors()?` is `1`. A dual leg meant to
+    /// agree with TensorKit must be built from pre-dualized labels, or via
+    /// [`Self::try_dual`], which dualizes at construction.
+    ///
     /// Order is irrelevant: the leg stores its sectors in the provider's
     /// [`tenet_core::SectorId`] order. A zero-degeneracy sector is absent from
     /// the result, matching the leg invariant of the erased facade.
@@ -343,11 +352,14 @@ where
 
     /// The sector labels carried by this leg, in the provider's
     /// [`tenet_core::SectorId`] order — TensorKit `sectors(V)`
-    /// (`spaces/gradedspace.jl:179-186`). TensorKit stores base-sector dims
-    /// and dualizes them on read for a dual space; this leg stores its
-    /// external sector content directly ([`Self::try_dual`] rewrites it
-    /// eagerly), so the two report the same labels either way. One decode per
-    /// sector, one `Vec` allocation per call.
+    /// (`spaces/gradedspace.jl:179-186`), with one convention difference:
+    /// the stored labels are returned as-is, never dualized on read, while
+    /// TensorKit dualizes stored keys when `isdual(V)`. A leg from
+    /// [`Self::try_dual`] already stores dual labels, so there the two
+    /// surfaces agree; a leg built by [`Self::try_new`] with `is_dual =
+    /// true` from non-pre-dualized labels does not (see the dual-leg
+    /// convention there). One decode per sector, one `Vec` allocation per
+    /// call.
     ///
     /// The order is the engine's, deliberately: it is the order of
     /// [`Self::degeneracies`] and of every block layout derived from the leg,
@@ -393,8 +405,11 @@ where
     /// (`spaces/gradedspace.jl:112`; the `dual(dual(V)) == V` contract is
     /// `spaces/vectorspaces.jl:69-73`). TensorKit only flips the flag and
     /// dualizes labels lazily on read; this leg rewrites its stored sector
-    /// table eagerly, `O(k)` with one provider dual per sector, and the two
-    /// then report the same content.
+    /// table eagerly — `O(k log k)`, one provider dual per sector plus the
+    /// leg constructor's re-sort — and [`Self::sectors`] then reports the
+    /// dual labels just as TK's `sectors(V')` does, provided the source
+    /// leg's stored labels were its external content (see
+    /// [`Self::try_new`]'s dual-leg convention).
     ///
     /// # Errors
     ///

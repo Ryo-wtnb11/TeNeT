@@ -7991,17 +7991,23 @@ impl Tensor {
     /// # Complexity
     ///
     /// Sectorwise cubic (one dense SVD per coupled sector); a
-    /// compact-diagonal input is materialized dense first. The returned `s`
-    /// is held in `O(Σ_c k_c)` compact diagonal storage — the
-    /// `DiagonalTensorMap` TensorKit's own `svd_trunc` returns, not the
+    /// compact-diagonal input is materialized dense first. On host storage
+    /// the returned `s` is held in `O(Σ_c k_c)` compact diagonal storage —
+    /// the `DiagonalTensorMap` TensorKit's own `svd_trunc` returns, not the
     /// `Σ_c k_c²` block-diagonal buffer — so a downstream `u.compose(&s)` or
-    /// `s.compose(&vh)` takes the bond-scaling path rather than a GEMM.
+    /// `s.compose(&vh)` takes the bond-scaling path rather than a GEMM. A
+    /// device (`Data::CudaF64`) receiver instead returns `s` as a dense
+    /// `Σ_c k_c²` device block-diagonal, so composing with it is a device
+    /// GEMM, not a bond scaling.
     ///
     /// # Errors
     ///
     /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`]
     /// from the matrix-algebra seam, including a malformed `truncation` —
-    /// the truncation policy is validated where it is applied, not here.
+    /// the truncation policy is validated where it is applied, not here. On
+    /// a device receiver a malformed `truncation` is instead reported as
+    /// [`Error::InvalidArgument`]: the device route validates it on this
+    /// side of the seam.
     pub fn svd_trunc(&self, truncation: &Truncation) -> Result<SvdTrunc, Error> {
         if self.is_adjoint_view() {
             return self.materialized_tensor()?.svd_trunc(truncation);
@@ -8317,16 +8323,22 @@ impl Tensor {
     /// # Complexity
     ///
     /// Sectorwise cubic (one dense EIGH per coupled sector); a
-    /// compact-diagonal input is materialized dense first. The returned `d`
-    /// is built as `O(Σ_c k_c)` compact diagonal storage straight from the
-    /// spectrum — nothing `O(Σ_c k_c²)` is materialized and discarded
-    /// (#56 item N) — so `v.compose(&d)` takes the bond-scaling path.
+    /// compact-diagonal input is materialized dense first. On host storage
+    /// the returned `d` is built as `O(Σ_c k_c)` compact diagonal storage
+    /// straight from the spectrum — nothing `O(Σ_c k_c²)` is materialized
+    /// and discarded (#56 item N) — so `v.compose(&d)` takes the
+    /// bond-scaling path. A device (`Data::CudaF64`) receiver instead
+    /// returns `d` as a dense `Σ_c k_c²` device block-diagonal.
     ///
     /// # Errors
     ///
     /// - [`Error::UnsupportedForRule`] for SU(3).
     /// - [`Error::Operation`] when the tensor is not an endomorphism or its
     ///   coupled blocks are not Hermitian — the seam is where that surfaces.
+    ///   On a device receiver the endomorphism check runs here instead, ahead
+    ///   of the seam, and reports [`Error::InvalidArgument`]; non-Hermitian
+    ///   blocks still surface as [`Error::Operation`] from the shared
+    ///   validator.
     /// - [`Error::Core`] / [`Error::FusionAlgebra`] otherwise from the seam,
     ///   which owns those rules.
     pub fn eigh_full(&self) -> Result<(Self, Self), Error> {
