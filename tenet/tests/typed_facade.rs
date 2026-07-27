@@ -7693,3 +7693,44 @@ fn typed_re_im_keep_a_compact_spectrum_on_its_bond_space() {
         .unwrap();
     assert_eq!(rebuilt.data(), s.data());
 }
+
+#[test]
+fn typed_leg_dim_routes_each_axis_to_its_own_leg() {
+    // Gate 2's axis-routing leg: every earlier fixture has homogeneous leg
+    // dimensions, so a leg_dim that reads the wrong leg (e.g. domain[0] for
+    // the last codomain axis) still passes them. Three pairwise-distinct
+    // dimensions in a 2 <- 1 split make any misrouting visible, per axis and
+    // against the erased facade.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(tenet::core::Z2FusionRule);
+    let z2_pairs = |even: usize, odd: usize| {
+        [
+            (tenet::core::Z2Irrep::EVEN, even),
+            (tenet::core::Z2Irrep::ODD, odd),
+        ]
+    };
+    let a = GradedSpace::try_new(Arc::clone(&provider), z2_pairs(2, 3), false).unwrap();
+    let b = GradedSpace::try_new(Arc::clone(&provider), z2_pairs(1, 1), false).unwrap();
+    let c = GradedSpace::try_new(Arc::clone(&provider), z2_pairs(3, 4), false).unwrap();
+    let typed: TensorMap<tenet::core::Z2FusionRule, f64> =
+        TensorMap::zeros(&runtime, [&a, &b], [&c]).unwrap();
+    let erased = tenet::prelude::Tensor::zeros(
+        &runtime,
+        tenet::prelude::Dtype::F64,
+        [
+            &tenet::prelude::Space::z2([(0, 2), (1, 3)]),
+            &tenet::prelude::Space::z2([(0, 1), (1, 1)]),
+        ],
+        [&tenet::prelude::Space::z2([(0, 3), (1, 4)])],
+    )
+    .unwrap();
+
+    let dims = typed.leg_dims().unwrap();
+    assert_eq!(dims, vec![5, 2, 7]);
+    assert_eq!(dims, erased.leg_dims().unwrap());
+    for (axis, &dim) in dims.iter().enumerate() {
+        assert_eq!(typed.leg_dim(axis).unwrap(), dim);
+        assert_eq!(typed.leg_dim(axis).unwrap(), erased.leg_dim(axis).unwrap());
+    }
+}

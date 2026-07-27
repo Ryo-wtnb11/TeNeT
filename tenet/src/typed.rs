@@ -3782,7 +3782,7 @@ where
 
     /// The single element of a rank-0 (scalar) tensor, e.g. the result of
     /// contracting every leg — TensorKit `scalar`
-    /// (`tensors/tensoroperations.jl:445-450`; an empty payload reads as
+    /// (`tensors/tensoroperations.jl:446-451`; an empty payload reads as
     /// zero there too).
     ///
     /// Returns `D` directly: the static-dtype counterpart of the erased
