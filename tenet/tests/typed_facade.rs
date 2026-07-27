@@ -4563,6 +4563,38 @@ fn exp_of_a_complex_compact_spectrum_takes_the_complex_elementwise_branch() {
     }
 }
 
+#[test]
+fn typed_and_erased_compact_exp_agree_on_a_nonreal_spectrum() {
+    // What: issue #578 gives the erased facade the same compact `exp` arm, so
+    // the typed one — the value oracle, since it never densifies — and its
+    // erased sibling now agree value for value on a spectrum the Hermitian
+    // dense route refuses on either facade.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_complex_endo_oracle_pair(&runtime);
+
+    assert!(
+        erased.exp().is_err(),
+        "the dense c64 route stopped refusing"
+    );
+    assert!(typed.exp().is_err());
+
+    let erased_spectrum = erased.eig_full().unwrap().0;
+    let typed_spectrum = typed.eig_full().unwrap().0;
+    assert!(
+        typed_spectrum.data().iter().any(|v| v.im.abs() > 1e-6),
+        "the spectrum must be off the real axis for this to test anything"
+    );
+    // Byte-for-byte: both arms are `Complex64::exp` over the same C64 spectrum,
+    // which `typed_and_erased_eig_agree_on_a_complex_payload_and_conjugate_the_adjoint`
+    // already pins as identical. (The `RealC64` last-ulp gap documented on
+    // `UserScalar::sqrt_value` is a division story; `exp` has no divide.)
+    assert_eq!(
+        typed_spectrum.exp().unwrap().data(),
+        erased_spectrum.exp().unwrap().try_data_c64().unwrap()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Phase 6 (issue #576), slice 4: `sqrt`.
 // ---------------------------------------------------------------------------

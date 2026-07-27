@@ -262,3 +262,61 @@ fn full_rank_one_trace_pairs_allocation_bytes_scale_linearly() {
         "compact c64 trace_pairs allocated at least one dense payload: {complex} bytes"
     );
 }
+
+/// Bytes one compact `exp` costs on a *fresh* diagonal, plus the same follow-up
+/// the `trace_pairs` gate uses: the warm-up runs on a throwaway twin so the
+/// process-global caches are hot while the measured tensor still owes its dense
+/// buffer (the old `measured_unary_bytes` warm-up could not see a route that
+/// materialized, because it materialized the very tensor it then measured).
+fn measured_fresh_exp_bytes(degeneracy: usize, dtype: Dtype, seed: u64) -> u64 {
+    let warmup = prepare_fixture(degeneracy, dtype, seed);
+    black_box(warmup.diagonal.exp().unwrap());
+    let fixture = prepare_fixture(degeneracy, dtype, seed);
+    measured_bytes(|| fixture.diagonal.exp().unwrap())
+}
+
+#[test]
+fn diagonal_exp_allocation_bytes_scale_linearly() {
+    // What: issue #578. `exp` on compact storage is elementwise over the
+    // `Σ_c k_c` stored values, so it allocates its O(r) result and nothing
+    // else — no dense payload, no eigendecomposition factors.
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let small = measured_fresh_exp_bytes(64, Dtype::F64, 817);
+    let large = measured_fresh_exp_bytes(128, Dtype::F64, 819);
+    assert!(
+        large <= small * 4,
+        "allocation growth is not O(d): d=64 used {small} bytes, d=128 used {large} bytes"
+    );
+    assert!(
+        large < (128 * 128 * std::mem::size_of::<f64>()) as u64,
+        "compact exp allocated at least one dense payload: {large} bytes"
+    );
+    let complex = measured_fresh_exp_bytes(128, Dtype::C64, 821);
+    assert!(
+        complex < (2 * 128 * 128 * std::mem::size_of::<f64>()) as u64,
+        "compact c64 exp allocated at least one dense payload: {complex} bytes"
+    );
+
+    // Neither the source nor the image was materialized on the way: each one's
+    // *first* `data()` must still have to build the dense buffer. On the old
+    // dense route the source paid for it inside `exp` and cached it, and the
+    // image came back dense already, so both reads would be free.
+    let dense_payload = (128 * 128 * std::mem::size_of::<f64>()) as u64;
+    let source = prepare_fixture(128, Dtype::F64, 823).diagonal;
+    let image = source.exp().unwrap();
+    assert!(
+        measured_bytes(|| source.data().len()) >= dense_payload,
+        "exp materialized its source behind our back"
+    );
+    assert!(
+        measured_bytes(|| image.data().len()) >= dense_payload,
+        "exp returned a materialized image"
+    );
+
+    let complex_source = prepare_fixture(128, Dtype::C64, 825).diagonal;
+    let complex_image = complex_source.exp().unwrap();
+    assert!(
+        measured_bytes(|| complex_image.data_c64().len()) >= 2 * dense_payload,
+        "c64 exp returned a materialized image"
+    );
+}

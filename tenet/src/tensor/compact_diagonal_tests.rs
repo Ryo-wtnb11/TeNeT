@@ -1288,3 +1288,105 @@ fn compact_is_posdef_matches_the_dense_route_and_never_materializes() {
     }
     assert_compact_unmaterialized(&skewed);
 }
+
+/// Asserts `image` is the elementwise `exp` of the compact `source`, variant
+/// for variant. The variant pairing is half the assertion: `RealC64 -> C64`
+/// would double the stored payload of a real spectrum inside a c64 tensor, and
+/// a dense materialization comparison could not see it.
+fn assert_elementwise_exp(source: &Tensor, image: &Tensor) {
+    fn real(source: &[SectorSpectrum<f64>], image: &[SectorSpectrum<f64>]) {
+        assert_eq!(source.len(), image.len());
+        for (source, image) in source.iter().zip(image) {
+            assert_eq!(source.sector, image.sector);
+            assert_eq!(source.values.len(), image.values.len());
+            for (&source, &image) in source.values.iter().zip(&image.values) {
+                assert!(
+                    (image - source.exp()).abs() < 1e-11,
+                    "{image} is not exp({source})"
+                );
+            }
+        }
+    }
+    match (source.stored_data(), image.stored_data()) {
+        (
+            Data::Diagonal(DiagonalData::RealF64(source)),
+            Data::Diagonal(DiagonalData::RealF64(image)),
+        )
+        | (
+            Data::Diagonal(DiagonalData::RealC64(source)),
+            Data::Diagonal(DiagonalData::RealC64(image)),
+        ) => real(source, image),
+        (Data::Diagonal(DiagonalData::C64(source)), Data::Diagonal(DiagonalData::C64(image))) => {
+            assert_eq!(source.len(), image.len());
+            for (source, image) in source.iter().zip(image) {
+                assert_eq!(source.sector, image.sector);
+                assert_eq!(source.values.len(), image.values.len());
+                for (&source, &image) in source.values.iter().zip(&image.values) {
+                    assert!(
+                        (image - source.exp()).norm() < 1e-11,
+                        "{image} is not exp({source})"
+                    );
+                }
+            }
+        }
+        pair => panic!("exp did not preserve the compact variant: {pair:?}"),
+    }
+}
+
+#[test]
+fn compact_exp_is_elementwise_and_matches_the_dense_route() {
+    // What: issue #578. TensorKit's `exp(::DiagonalTensorMap)`
+    // (`tensors/diagonal.jl:383-390`) is elementwise on the stored values and
+    // stays diagonal; the erased facade used to densify and run the Hermitian
+    // eigendecomposition on the block-diagonal buffer. The values must not
+    // move — the densified twin is the oracle — while the storage does.
+    let rt = Runtime::builder().dense_threads(1).build().unwrap();
+    for space in [
+        Space::u1([(-2, 1), (1, 3)]),
+        Space::fz2([(0, 2), (1, 3)]).unwrap(),
+        Space::su2([(0, 2), (1, 3), (2, 1)]).unwrap(),
+        product_space(),
+    ] {
+        // An f64 SVD spectrum and its c64 sibling (`RealC64`: a real spectrum
+        // inside a complex tensor). Both are Hermitian as matrices, so the
+        // dense route accepts them and can serve as the value oracle.
+        for source in [
+            real_diagonal(&rt, &space, 578_001),
+            real_c64_diagonal(&rt, &space, 578_002),
+        ] {
+            let dense = dense_oracle(&source);
+            let image = source.exp().unwrap();
+            assert_compact_unmaterialized(&image);
+            assert_tensor_close(&image, &dense.exp().unwrap());
+            assert_elementwise_exp(&source, &image);
+            // The source is untouched: same values, still compact, and never
+            // materialized behind our back.
+            assert_compact_unmaterialized(&source);
+            assert_tensor_close(&source, &dense);
+
+            // A later compact contraction still folds to a bond scaling
+            // instead of a GEMM, and `exp(s) * exp(s) = exp(2s)` there.
+            let squared = image.compose(&image).unwrap();
+            assert_compact_unmaterialized(&squared);
+            assert_tensor_close(
+                &squared,
+                &dense.exp().unwrap().compose(&dense.exp().unwrap()).unwrap(),
+            );
+        }
+
+        // A genuinely complex spectrum. Storage decides what `exp` accepts,
+        // exactly as in TensorKit: the dense route is the Hermitian spectral
+        // function and refuses this matrix, the compact arm is unconditionally
+        // elementwise and does not. Same divergence the typed facade records
+        // (`exp_of_a_complex_compact_spectrum_takes_the_complex_elementwise_branch`).
+        let source = complex_diagonal(&rt, &space, 578_003);
+        assert!(
+            dense_oracle(&source).exp().is_err(),
+            "the dense route accepted a non-Hermitian exp"
+        );
+        let image = source.exp().unwrap();
+        assert_compact_unmaterialized(&image);
+        assert_elementwise_exp(&source, &image);
+        assert_compact_unmaterialized(&source);
+    }
+}
