@@ -8170,6 +8170,17 @@ impl Tensor {
     /// input: `O(Σ_c k_c)` time and storage over the stored spectra, with no
     /// dense buffer, no EIGH and no GEMM — the result stays compact, so a
     /// following `compose` is still a bond scaling (issue #578).
+    ///
+    /// # Errors
+    ///
+    /// The compact arm is infallible: any tensor that holds compact diagonal
+    /// storage is an admissible input, on every rule. The dense arm reports
+    ///
+    /// - [`Error::Operation`] wrapping an `InvalidArgument` for a payload that
+    ///   is not a Hermitian endomorphism — the eigendecomposition the spectral
+    ///   formula needs is only defined there;
+    /// - [`Error::UnsupportedForRule`] for an SU(3) payload, whose dense
+    ///   matrix-function seam is not wired.
     pub fn exp(&self) -> Result<Self, Error> {
         if self.is_adjoint_view() {
             return self.materialized_tensor()?.exp();
