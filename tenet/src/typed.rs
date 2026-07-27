@@ -3286,7 +3286,8 @@ where
     /// empty and the coefficient collapses to a per-sector scalar,
     /// `dim(c) · θ(c)` on a direct traced codomain leg and `dim(c)` on a dual
     /// one. That twist is what makes this the supertrace and not [`Self::tr`];
-    /// the coefficient is pinned byte-for-byte against the erased arm and the
+    /// the coefficient is pinned byte-for-byte against the erased compact arm
+    /// and numerically (the engine's summation order differs) against the
     /// engine route by the oracle sweeps in `tests/typed_facade.rs` and
     /// `tenet/src/tensor/compact_diagonal_tests.rs`.
     ///
