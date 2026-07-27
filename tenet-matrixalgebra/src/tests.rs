@@ -7577,6 +7577,35 @@ fn exp_rejects_a_nonfinite_general_block() {
 }
 
 #[test]
+fn exp_rejects_a_block_whose_column_norm_overflows() {
+    // What: every entry is finite but the column 1-norm is not. The squaring
+    // count is `ceil(log2(inf / theta_13))` cast to `u32`, which saturates to
+    // `u32::MAX`; read back as `i32` that is -1, so the block would be scaled
+    // *up* and then squared ~4.3e9 times — a finite input that never returns.
+    // The overflowing norm has to be refused where it is computed.
+    let tensor = u1_block_endomorphism(&[(0, 2, vec![1e308_f64, 1e308, 1.0, 2.0])]);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let mut context = default_context();
+
+    let error = exp(
+        &mut dense,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &tensor),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            OperationError::InvalidArgument {
+                message: "exp requires coupled-sector blocks with a finite 1-norm"
+            }
+        ),
+        "unexpected error {error:?}"
+    );
+}
+
+#[test]
 fn exp_publishes_nothing_when_a_later_sector_fails() {
     // What: failure atomicity. A backend failure on the second sector leaves no
     // tensor and does not touch the input's storage.

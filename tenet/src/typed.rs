@@ -2220,7 +2220,9 @@ where
     ///
     /// - [`Error::Operation`] when the input is not an endomorphism
     ///   (`codomain != domain`), when a general block holds a nonfinite entry,
-    ///   or when the backend fails — including an executor that supplies no
+    ///   when a general block's column 1-norm overflows to infinity although
+    ///   every entry of it is finite, or when the backend fails — including an
+    ///   executor that supplies no
     ///   dense solve, which the Padé route needs and which surfaces as
     ///   `DenseError::Unsupported`. Nothing is published unless every coupled
     ///   sector succeeded.

@@ -8181,8 +8181,10 @@ impl Tensor {
     /// storage is an admissible input, on every rule. The dense arm reports
     ///
     /// - [`Error::Operation`] wrapping an `InvalidArgument` for a payload that
-    ///   is not an endomorphism (`codomain != domain`), or for a nonfinite
-    ///   entry in a block bound for the general route;
+    ///   is not an endomorphism (`codomain != domain`), for a nonfinite entry
+    ///   in a block bound for the general route, or for such a block whose
+    ///   column 1-norm overflows to infinity although every entry of it is
+    ///   finite;
     /// - [`Error::Operation`] wrapping a `Dense` failure from the backend,
     ///   including `DenseError::Unsupported` when the selected executor has no
     ///   dense solve — the general route needs one, and there is no implicit

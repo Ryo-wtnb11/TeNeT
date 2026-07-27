@@ -161,7 +161,9 @@ impl<D: FactorScalar> Pade13Workspace<D> {
 /// - [`OperationError::UnsupportedTensorContractScope`] for a non-endomorphism
 ///   or a layout with no canonical coupled-sector output;
 /// - [`OperationError::InvalidArgument`] for a nonfinite block, which has no
-///   exponential and would otherwise reach the backend as a silent NaN;
+///   exponential and would otherwise reach the backend as a silent NaN, or for
+///   a block whose column 1-norm overflows to infinity even though every entry
+///   is finite — the scaling count derived from it is not representable;
 /// - [`OperationError::Dense`] from the backend, including
 ///   [`tenet_dense::DenseError::Unsupported`] when the selected executor has no
 ///   dense solve. Nothing is published unless every sector succeeded.
@@ -226,6 +228,18 @@ where
             column_sum += value.norm();
         }
         norm1 = norm1.max(column_sum);
+    }
+    // Finite entries do not imply a finite norm: two entries near `f64::MAX` in
+    // one column sum to infinity. The squaring count below is a saturating cast
+    // — `ceil(log2(inf / theta_13)) as u32` is `u32::MAX`, whose `i32` reading
+    // is -1 — so an infinite norm would scale the block *up* and then square it
+    // ~4.3e9 times, turning a finite input into a hang. TeNeT already refuses
+    // nonfinite blocks by policy; a norm that is not representable is the same
+    // refusal one derivation later.
+    if !norm1.is_finite() {
+        return Err(OperationError::InvalidArgument {
+            message: "exp requires coupled-sector blocks with a finite 1-norm",
+        });
     }
 
     let squarings = if norm1 > PADE13_THETA {
