@@ -2577,7 +2577,7 @@ where
 /// Structure half of `flip`, shared by both facades (#580 PR 5): the toggled
 /// hom space (every leg listed an odd number of times in `legs` has its
 /// duality flag flipped) plus the sequential-occurrence record — TensorKit
-/// flips one index at a time (`braiding_manipulations.jl:422-429`), so each
+/// flips one index at a time (`braiding_manipulations.jl:422-430`), so each
 /// occurrence of a repeated leg sees the duality left by the previous one.
 pub(crate) fn flip_toggled_homspace(
     hom: &FusionTreeHomSpace,

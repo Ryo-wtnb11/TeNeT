@@ -4197,7 +4197,7 @@ where
     ///
     /// O(1) for a dense payload: the new body shares the payload allocation,
     /// exactly as TensorKit's `copy = false` default shares `t.data` for an
-    /// ordinary `TensorMap` (`indexmanipulations.jl:130-131`). A compact
+    /// ordinary `TensorMap` (`indexmanipulations.jl:129-130`). A compact
     /// spectrum factor materializes into a fresh dense payload first (one
     /// copy) — the #613 Group 4 contract; TensorKit routes its
     /// `DiagonalTensorMap` through the generic similar+block-copy branch

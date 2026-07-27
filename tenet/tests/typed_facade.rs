@@ -8656,6 +8656,33 @@ fn typed_flip_and_twist_pin_the_erased_doctest_fixture_by_value() {
 }
 
 #[test]
+fn typed_and_erased_multi_leg_dense_twist_is_the_per_leg_product_by_value() {
+    // What (gate 2, reviewer P2-1): the multi-leg DENSE twist coefficient
+    // pinned by hand-computed value, independent of cross-facade parity — a
+    // mutation that drops the per-leg product in the shared
+    // `twist_block_factor` (e.g. keeping only the first leg's θ) survives
+    // every parity gate, because both facades route through the one helper.
+    // Fixture: fZ2 `V <- V`, even block 2.0, odd block 3.0, θ(odd) = −1;
+    // both legs carry the block's coupled sector.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = fz2_doctest_pair(&runtime);
+    // One leg: θ bites, the odd block negates (sanity that the factor is
+    // live at all on this fixture).
+    let one: TensorMap<tenet::core::FermionParityFusionRule, f64> = typed.twist(&[0]).unwrap();
+    assert_eq!(one.data(), &[2.0, -3.0]);
+    // Two *different* legs: the odd block scales by θ·θ = (−1)² = +1 — the
+    // per-leg product, not a single factor.
+    let both: TensorMap<tenet::core::FermionParityFusionRule, f64> = typed.twist(&[0, 1]).unwrap();
+    assert_eq!(both.data(), &[2.0, 3.0]);
+    assert_eq!(erased.twist(&[0, 1]).unwrap().data(), &[2.0, 3.0]);
+    // The same leg listed twice: identity by value, for the same θ² reason.
+    let twice: TensorMap<tenet::core::FermionParityFusionRule, f64> = typed.twist(&[1, 1]).unwrap();
+    assert_eq!(twice.data(), &[2.0, 3.0]);
+    assert_eq!(erased.twist(&[1, 1]).unwrap().data(), &[2.0, 3.0]);
+}
+
+#[test]
 fn typed_flip_is_a_fourth_root_of_identity_and_flip_squared_scales_odd_blocks() {
     // What (gate 2): the TensorKit non-involution law on the typed facade —
     // flip² returns to the original spaces but scales the odd block by
