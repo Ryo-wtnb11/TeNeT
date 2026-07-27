@@ -1390,3 +1390,72 @@ fn compact_exp_is_elementwise_and_matches_the_dense_route() {
         assert_compact_unmaterialized(&source);
     }
 }
+
+#[test]
+fn compact_su3_exp_stays_compact_before_the_unwired_su3_rejection() {
+    // What: the compact arm sits *before* `reject_unwired_su3` in `exp`, and
+    // must: a Generic SU(3) spectrum has no dense route at all (the firewall
+    // refuses it, see `su3_panic_firewall.rs`), so ordering the arm after the
+    // rejection would turn an operation that is pure elementwise arithmetic on
+    // stored values — needing no fusion wiring whatsoever — into an error.
+    // Same placement as the `inv`/`pinv` compact arms.
+    let rt = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = Space::su3([((1, 0), 2), ((0, 1), 2), ((1, 1), 2)]).unwrap();
+    for dtype in [Dtype::F64, Dtype::C64] {
+        let source = su3_diagonal(&rt, dtype, &space, 578_031);
+        let image = source.exp().unwrap();
+        assert_compact_unmaterialized(&image);
+        assert_eq!(image.dtype(), source.dtype());
+        assert_elementwise_exp(&source, &image);
+        assert_compact_unmaterialized(&source);
+    }
+}
+
+#[test]
+fn exp_of_an_adjoint_conjugates_the_spectrum_and_never_reaches_an_adjoint_view() {
+    // What: the `is_adjoint_view` materialization guard at the top of `exp`.
+    // Both of `exp`'s arms below it read `ordinary_body()`, which panics on a
+    // view, so the guard is what makes `exp` defined on an adjoint at all.
+    let rt = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = product_space();
+
+    // Compact side: `adjoint` of compact storage short-circuits to an owned
+    // conjugated spectrum, so `exp` sees an ordinary compact tensor and is
+    // elementwise on the conjugated values.
+    let source = complex_diagonal(&rt, &space, 578_041);
+    let adjoint = source.adjoint().unwrap();
+    assert!(!adjoint.is_adjoint_view());
+    let image = adjoint.exp().unwrap();
+    assert_compact_unmaterialized(&image);
+    assert_elementwise_exp(&adjoint, &image);
+    let (
+        Data::Diagonal(DiagonalData::C64(source_values)),
+        Data::Diagonal(DiagonalData::C64(image_values)),
+    ) = (source.stored_data(), image.stored_data())
+    else {
+        panic!("expected compact c64 spectra")
+    };
+    assert_eq!(source_values.len(), image_values.len());
+    for (source, image) in source_values.iter().zip(image_values) {
+        assert_eq!(source.sector, image.sector);
+        assert_eq!(source.values.len(), image.values.len());
+        for (&source, &image) in source.values.iter().zip(&image.values) {
+            assert!(
+                (image - source.conj().exp()).norm() < 1e-11,
+                "{image} is not exp(conj({source}))"
+            );
+        }
+    }
+    assert_compact_unmaterialized(&source);
+
+    // Dense side: a genuine adjoint view. Without the guard this reaches
+    // `exp_impl` and panics instead of exponentiating the adjoint.
+    let random = Tensor::rand_with_seed(&rt, Dtype::C64, [&space], [&space], 578_042).unwrap();
+    let hermitian = random.adjoint().unwrap().compose(&random).unwrap();
+    let view = hermitian.adjoint().unwrap();
+    assert!(view.is_adjoint_view());
+    assert_tensor_close(
+        &view.exp().unwrap(),
+        &view.materialized_tensor().unwrap().exp().unwrap(),
+    );
+}
