@@ -8,6 +8,34 @@ use crate::{
     SectorId, SectorVec, TensorKitProductCodec,
 };
 
+/// The Deligne product `Left ⊠ Right` of two providers: one fusion rule over
+/// [`ProductSector<L, R>`](ProductSector) labels whose fusion, dual, F/R and
+/// dimension data are the componentwise combination of its factors'.
+///
+/// This is the generic product mechanism. Any ordered pair of providers is a
+/// product, and because a `ProductFusionRule` is itself a provider, three or
+/// more factors are the same construction applied again — no new type, enum
+/// arm or dispatch branch per physical symmetry. Build one with
+/// [`ProductFusionRuleExt::product`], which is where the worked example lives.
+///
+/// `Codec` decides how a component id pair is packed into one
+/// [`SectorId`](crate::SectorId); the default
+/// [`TensorKitProductCodec`](crate::TensorKitProductCodec) works for any pair
+/// of providers, and a fixed-width
+/// [`PackedProductCodec`](crate::PackedProductCodec) is available where the
+/// component ranges are known. The codec is an id-packing choice only: two
+/// rules that differ solely in `Codec` label the same category, but they are
+/// different Rust types and report different
+/// [`RuleIdentity`](crate::RuleIdentity)s, so tensors built on them do not mix.
+///
+/// TensorKit correspondence: `ProductSector` in TensorKitSectors 0.3.4
+/// (`src/product.jl:245-294`), documented in TensorKit 0.17.0
+/// `docs/src/man/sectors.md:468-506`. TensorKit's convenience aliases
+/// `FermionNumber = U1Irrep ⊠ FermionParity` and
+/// `FermionSpin = SU2Irrep ⊠ FermionParity` (`src/fermions.jl:71-102`) are
+/// *not* a universal factor-order rule: each exists because it enforces an
+/// extra invariant (parity tied to the charge, respectively to the spin), not
+/// because that order is canonical.
 #[derive(Clone, Debug)]
 pub struct ProductFusionRule<LeftRule, RightRule, Codec = TensorKitProductCodec> {
     left: LeftRule,
@@ -84,7 +112,60 @@ pub const fn product_fusion_rule_with_codec<LeftRule, RightRule, Codec>(
     ProductFusionRule::new(left, right)
 }
 
+/// `⊠` for providers: gives every [`FusionRule`] a `.product(other)` method.
+///
+/// Blanket-implemented, so it applies to a provider defined outside this
+/// workspace exactly as it applies to a built-in one. Import the trait to use
+/// the method (`use tenet::core::ProductFusionRuleExt;`) — without it in
+/// scope, `.product(…)` resolves to [`Iterator::product`] and the error
+/// message is about iterators.
 pub trait ProductFusionRuleExt: FusionRule + Sized {
+    /// The ordered product `self ⊠ right`, with the default
+    /// [`TensorKitProductCodec`](crate::TensorKitProductCodec).
+    ///
+    /// This is the canonical way to obtain a product symmetry. Labels are
+    /// built the same way with
+    /// [`product_sector`](crate::product_sector), and the two nest in step:
+    ///
+    /// ```
+    /// use tenet_sectors::{
+    ///     product_sector, FermionParityFusionRule, FusionRule, ProductFusionRuleExt,
+    ///     SU2FusionRule, SU2Irrep, SectorCodec, U1FusionRule, U1Irrep, Z2Irrep,
+    /// };
+    ///
+    /// // Two factors: fZ2 ⊠ U(1). The `SectorCodec::` prefix disambiguates
+    /// // against `ProductFusionRule`'s inherent id-level `encode_sector` /
+    /// // `decode_sector`, which speak component `SectorId`s rather than
+    /// // labels; callers of `tenet::typed` never write either by hand.
+    /// let rule = FermionParityFusionRule.product(U1FusionRule);
+    /// let odd = product_sector(Z2Irrep::ODD, U1Irrep::new(1));
+    /// let id = SectorCodec::encode_sector(&rule, &odd)?;
+    /// assert_eq!(SectorCodec::decode_sector(&rule, id)?, odd);
+    ///
+    /// // Three factors: the same call again, left-associated as
+    /// // (fZ2 ⊠ U(1)) ⊠ SU(2). Nothing new is needed at the core.
+    /// let rule = FermionParityFusionRule
+    ///     .product(U1FusionRule)
+    ///     .product(SU2FusionRule);
+    /// let label = product_sector(odd, SU2Irrep::from_twice_spin(1));
+    /// let id = SectorCodec::encode_sector(&rule, &label)?;
+    /// assert_eq!(SectorCodec::decode_sector(&rule, id)?, label);
+    ///
+    /// // Factor order and association are structure, not an equivalence:
+    /// // U(1) ⊠ fZ2 is a different Rust type with a different identity, and
+    /// // converting between the two is an explicit component swap.
+    /// let swapped = U1FusionRule.product(FermionParityFusionRule);
+    /// assert_ne!(
+    ///     FermionParityFusionRule.product(U1FusionRule).rule_identity(),
+    ///     swapped.rule_identity(),
+    /// );
+    /// # Ok::<(), tenet_sectors::FusionAlgebraError>(())
+    /// ```
+    ///
+    /// See [`tenet::typed`] for the same product driving a `GradedSpace` and a
+    /// `TensorMap`; that layer is where a product symmetry is actually used.
+    ///
+    /// [`tenet::typed`]: ../tenet/typed/index.html
     fn product<RightRule>(self, right: RightRule) -> ProductFusionRule<Self, RightRule>
     where
         RightRule: FusionRule,
