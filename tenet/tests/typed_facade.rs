@@ -5547,3 +5547,299 @@ fn compact_is_posdef_matches_the_forced_dense_route_for_a_hermitian_c64_spectrum
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Issue #589: cross-facade byte oracles for the built-in multiplicity-free
+// routes that had none — U(1), U(1) x fZ2, and fZ2 x U(1) x SU(2).
+//
+// The erased dispatch has one arm per built-in rule (`UserBoundSpace` in
+// `tenet/src/tensor.rs`), so a rule with no oracle here is a whole dispatch arm
+// nobody compares against the typed facade. Z2, fZ2 and SU(2) are covered
+// above; these three are the remainder, and the two product rules are the only
+// routes that go through the packed product codec and
+// `core_rule_bridge`'s product `LoweredMultiplicityFreeAlgebra`.
+//
+// The rule aliases below are test-local and deliberately mirror
+// `tenet/src/space.rs`'s `pub(crate)` ones element for element: the erased
+// facade picks a *specific* codec (packed, not the `ProductFusionRule` default
+// Cantor one), and a typed fixture built on any other codec would name
+// different sector ids and so would not be the same tensor at all.
+// ---------------------------------------------------------------------------
+
+type U1Fz2Codec =
+    tenet::core::PackedProductCodec<tenet::core::U1SectorLayout, tenet::core::Fz2SectorLayout>;
+type Fz2U1Codec =
+    tenet::core::PackedProductCodec<tenet::core::Fz2SectorLayout, tenet::core::U1SectorLayout>;
+type Fz2U1Layout =
+    tenet::core::ProductSectorLayout<tenet::core::Fz2SectorLayout, tenet::core::U1SectorLayout>;
+type Fz2U1Su2Codec = tenet::core::PackedProductCodec<Fz2U1Layout, tenet::core::Su2SectorLayout>;
+
+type U1Fz2Rule = tenet::core::ProductFusionRule<
+    tenet::core::U1FusionRule,
+    tenet::core::FermionParityFusionRule,
+    U1Fz2Codec,
+>;
+type Fz2U1Rule = tenet::core::ProductFusionRule<
+    tenet::core::FermionParityFusionRule,
+    tenet::core::U1FusionRule,
+    Fz2U1Codec,
+>;
+type Fz2U1Su2Rule =
+    tenet::core::ProductFusionRule<Fz2U1Rule, tenet::core::SU2FusionRule, Fz2U1Su2Codec>;
+
+/// `[p, q] <- [p, q]` on both facades, filled with a counter starting at
+/// `first_value`.
+///
+/// Why this one geometry for all three families: it is simultaneously a
+/// composition (`self`'s domain *is* `other`'s codomain, so `compose` and a
+/// two-axis `contract` are both legal on the same pair, which is what pins the
+/// fermionic twist), square enough for every factorization, and rank 4, so a
+/// nonidentity output order has somewhere to move a leg.
+///
+/// Why a plain counter rather than a label-derived fill: every element is then
+/// distinct, so any reordering of blocks or of elements within a block moves
+/// the buffer — and the two facades produce the same buffer *only* if they
+/// walk blocks and elements in the same order, which the assertion below turns
+/// into a precondition of every test downstream. `first_value` exists so a
+/// second operand on the same space carries different values; `add` and
+/// `contract` against a copy of `self` would otherwise be symmetric in their
+/// operands and could not see a swap.
+///
+/// Why `p != q` in every family: with two distinct legs, permuting them is
+/// visible in the leg shapes, so a nonidentity output order cannot be undone
+/// by coincidence. One of the two is dual, because a dual leg is the only
+/// place a fermionic twist can act.
+fn counter_oracle_pair<R>(
+    runtime: &Runtime,
+    erased_legs: (&tenet::prelude::Space, &tenet::prelude::Space),
+    typed_legs: (&GradedSpace<R>, &GradedSpace<R>),
+    first_value: f64,
+) -> (tenet::prelude::Tensor, TensorMap<R, f64>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    let mut next = first_value - 1.0;
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        runtime,
+        [erased_legs.0, erased_legs.1],
+        [erased_legs.0, erased_legs.1],
+        |_: &tenet::prelude::BlockKey, _: &[usize]| {
+            next += 1.0;
+            next
+        },
+    )
+    .unwrap();
+    let mut next = first_value - 1.0;
+    let typed = TensorMap::from_block_fn(
+        runtime,
+        [typed_legs.0, typed_legs.1],
+        [typed_legs.0, typed_legs.1],
+        |_, _| {
+            next += 1.0;
+            next
+        },
+    )
+    .unwrap();
+    assert_eq!(typed.data(), erased.data());
+    assert!(!typed.data().is_empty());
+    assert_eq!(typed_leg_shapes(&typed), erased_leg_shapes(&erased));
+    (erased, typed)
+}
+
+/// The U(1) oracle pair. `p` carries three charges with unequal degeneracies
+/// and `q` two, so the two legs are distinguishable by shape alone; `q` is
+/// dual, so the charge balance of a block is not symmetric under swapping the
+/// legs either.
+fn u1_oracle_pair(
+    runtime: &Runtime,
+    first_value: f64,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::U1FusionRule, f64>,
+) {
+    let erased_p = tenet::prelude::Space::u1([(-1, 1), (0, 2), (1, 1)]);
+    let erased_q = tenet::prelude::Space::u1([(0, 1), (1, 2)])
+        .try_dual()
+        .unwrap();
+    let rule = Arc::new(tenet::core::U1FusionRule);
+    let typed_p = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [
+            (tenet::core::U1Irrep::new(-1), 1),
+            (tenet::core::U1Irrep::new(0), 2),
+            (tenet::core::U1Irrep::new(1), 1),
+        ],
+        false,
+    )
+    .unwrap();
+    // Built through `try_dual` rather than with `is_dual = true`, exactly as
+    // the erased leg is: the dual flips the sector labels too, and stating the
+    // dualized labels by hand here would be a second, drift-prone copy of that.
+    let typed_q = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [
+            (tenet::core::U1Irrep::new(0), 1),
+            (tenet::core::U1Irrep::new(1), 2),
+        ],
+        false,
+    )
+    .unwrap()
+    .try_dual()
+    .unwrap();
+    counter_oracle_pair(
+        runtime,
+        (&erased_p, &erased_q),
+        (&typed_p, &typed_q),
+        first_value,
+    )
+}
+
+/// The U(1) x fZ2 oracle pair. Both legs mix the two fermion parities with
+/// nonzero U(1) charge, so neither the parity factor nor the charge factor is
+/// constant on a leg — a product route that dropped either component would
+/// still produce a nonempty layout, but not this one.
+fn u1_fz2_oracle_pair(
+    runtime: &Runtime,
+    first_value: f64,
+) -> (tenet::prelude::Tensor, TensorMap<U1Fz2Rule, f64>) {
+    let erased_p = tenet::prelude::Space::product([((0, 0), 1), ((1, 1), 2)]).unwrap();
+    let erased_q = tenet::prelude::Space::product([((-1, 1), 1), ((0, 0), 2), ((1, 1), 1)])
+        .unwrap()
+        .try_dual()
+        .unwrap();
+    let rule = Arc::new(U1Fz2Rule::new(
+        tenet::core::U1FusionRule,
+        tenet::core::FermionParityFusionRule,
+    ));
+    let label = |charge: i32, parity: u8| {
+        tenet::core::ProductSector::new(
+            tenet::core::U1Irrep::new(charge),
+            if parity == 0 {
+                tenet::core::Z2Irrep::EVEN
+            } else {
+                tenet::core::Z2Irrep::ODD
+            },
+        )
+    };
+    let typed_p = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [(label(0, 0), 1), (label(1, 1), 2)],
+        false,
+    )
+    .unwrap();
+    let typed_q = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [(label(-1, 1), 1), (label(0, 0), 2), (label(1, 1), 1)],
+        false,
+    )
+    .unwrap()
+    .try_dual()
+    .unwrap();
+    counter_oracle_pair(
+        runtime,
+        (&erased_p, &erased_q),
+        (&typed_p, &typed_q),
+        first_value,
+    )
+}
+
+/// The fZ2 x U(1) x SU(2) oracle pair: the only route that exercises the
+/// fermionic twist and the quantum-dimension weights at once.
+///
+/// Every one of the three factors is deliberately nonconstant across the two
+/// legs: both parities appear (so the twist has somewhere to act), the charges
+/// are `-1, 0, 1, 2` (so the U(1) balance is not automatic), and the spins are
+/// `0, 1/2, 1` (so `dim(c)` takes the values 1, 2 and 3 and a weight-free
+/// `inner` cannot pass). A fixture with, say, spin 0 everywhere would satisfy
+/// every byte comparison here with the weights removed.
+fn fz2_u1_su2_oracle_pair(
+    runtime: &Runtime,
+    first_value: f64,
+) -> (tenet::prelude::Tensor, TensorMap<Fz2U1Su2Rule, f64>) {
+    let erased_p = tenet::prelude::Space::fz2_u1_su2([((0, 0, 0), 1), ((1, 1, 1), 2)]).unwrap();
+    let erased_q =
+        tenet::prelude::Space::fz2_u1_su2([((1, -1, 1), 1), ((0, 0, 2), 1), ((0, 2, 0), 2)])
+            .unwrap()
+            .try_dual()
+            .unwrap();
+    let rule = Arc::new(Fz2U1Su2Rule::new(
+        Fz2U1Rule::new(
+            tenet::core::FermionParityFusionRule,
+            tenet::core::U1FusionRule,
+        ),
+        SU2FusionRule,
+    ));
+    let label = |parity: u8, charge: i32, twice_spin: usize| {
+        tenet::core::ProductSector::new(
+            tenet::core::ProductSector::new(
+                if parity == 0 {
+                    tenet::core::Z2Irrep::EVEN
+                } else {
+                    tenet::core::Z2Irrep::ODD
+                },
+                tenet::core::U1Irrep::new(charge),
+            ),
+            SU2Irrep::from_twice_spin(twice_spin),
+        )
+    };
+    let typed_p = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [(label(0, 0, 0), 1), (label(1, 1, 1), 2)],
+        false,
+    )
+    .unwrap();
+    let typed_q = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [
+            (label(1, -1, 1), 1),
+            (label(0, 0, 2), 1),
+            (label(0, 2, 0), 2),
+        ],
+        false,
+    )
+    .unwrap()
+    .try_dual()
+    .unwrap();
+    counter_oracle_pair(
+        runtime,
+        (&erased_p, &erased_q),
+        (&typed_p, &typed_q),
+        first_value,
+    )
+}
+
+#[test]
+fn the_remaining_builtin_rules_build_the_same_tensor_on_both_facades() {
+    // What: the three fixtures are usable as oracles at all — same legs, same
+    // dual flags, same degeneracies, same block order, same bytes. Every other
+    // test in this section presumes it, and `counter_oracle_pair` asserts it,
+    // so this test is the one place that failure is reported as a *fixture*
+    // failure rather than as a failure of the operation under test.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    let (u1_erased, u1_typed) = u1_oracle_pair(&runtime, 1.0);
+    let (fz2_erased, fz2_typed) = u1_fz2_oracle_pair(&runtime, 1.0);
+    let (su2_erased, su2_typed) = fz2_u1_su2_oracle_pair(&runtime, 1.0);
+
+    // The legs are distinguishable by shape in every family, which is what
+    // makes a permuted output order detectable further down.
+    for shapes in [
+        typed_leg_shapes(&u1_typed),
+        typed_leg_shapes(&fz2_typed),
+        typed_leg_shapes(&su2_typed),
+    ] {
+        assert_ne!(shapes[0], shapes[1], "the two legs must differ: {shapes:?}");
+        assert!(shapes[1].0, "the second leg must be dual: {shapes:?}");
+    }
+    // The three providers are different types, so these cannot be one loop.
+    assert_eq!(u1_typed.data(), u1_erased.data());
+    assert_eq!(fz2_typed.data(), fz2_erased.data());
+    assert_eq!(su2_typed.data(), su2_erased.data());
+    // A second operand on the same space really does carry other values.
+    assert_ne!(
+        u1_oracle_pair(&runtime, 100.0).1.data(),
+        u1_typed.data(),
+        "the value offset must change the fixture"
+    );
+}
