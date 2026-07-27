@@ -6481,9 +6481,11 @@ fn typed_and_erased_reductions_and_factorizations_agree_on_fz2_u1_su2() {
 // only working path.
 // ---------------------------------------------------------------------------
 
-/// `fZ2 ⊠ U(1)` built from the generic rule product, then put through an
-/// algebraic identity that a wrong block layout or a dropped fermionic sign
-/// would break.
+/// `fZ2 ⊠ U(1)` built from the generic rule product, then run through a typed
+/// operation chain: this is a public-path claim, not a sign or permutation
+/// detector. Fermionic sign detection is owned by
+/// `the_fermionic_product_compose_is_contract_against_a_twisted_right_operand`
+/// earlier in this file.
 #[test]
 fn generic_product_provider_drives_the_typed_facade_without_a_fixed_constructor() {
     let _guard = cache_lock();
@@ -6517,8 +6519,8 @@ fn generic_product_provider_drives_the_typed_facade_without_a_fixed_constructor(
     )
     .unwrap();
 
-    // A distinct value per element, so any block or element reordering moves
-    // the buffer and the identities below stop holding by coincidence.
+    // A distinct value per element, so multiple blocks are exercised
+    // nontrivially.
     let mut next = 0.0_f64;
     let t: TensorMap<_, f64> = TensorMap::from_block_fn(&runtime, [&p, &q], [&p, &q], |_, _| {
         next += 1.0;
