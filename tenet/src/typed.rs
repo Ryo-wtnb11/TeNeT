@@ -278,11 +278,18 @@ impl<R> GradedSpace<R>
 where
     R: SectorCodec + CheckedFusionAlgebra,
 {
-    /// Builds a leg from `(label, degeneracy)` pairs.
+    /// Builds a leg from `(label, degeneracy)` pairs — TensorKit's
+    /// `GradedSpace` / `Vect[I](c => d, ...; dual)` constructor family
+    /// (`spaces/gradedspace.jl:70-85`).
     ///
     /// Order is irrelevant: the leg stores its sectors in the provider's
     /// [`tenet_core::SectorId`] order. A zero-degeneracy sector is absent from
     /// the result, matching the leg invariant of the erased facade.
+    ///
+    /// # Complexity
+    ///
+    /// `O(k log k)` in the number of pairs: one encode per label plus the two
+    /// duplicate-detection sorts below; no payload is touched.
     ///
     /// # Errors
     ///
@@ -335,7 +342,12 @@ where
     }
 
     /// The sector labels carried by this leg, in the provider's
-    /// [`tenet_core::SectorId`] order.
+    /// [`tenet_core::SectorId`] order — TensorKit `sectors(V)`
+    /// (`spaces/gradedspace.jl:179-186`). TensorKit stores base-sector dims
+    /// and dualizes them on read for a dual space; this leg stores its
+    /// external sector content directly ([`Self::try_dual`] rewrites it
+    /// eagerly), so the two report the same labels either way. One decode per
+    /// sector, one `Vec` allocation per call.
     ///
     /// The order is the engine's, deliberately: it is the order of
     /// [`Self::degeneracies`] and of every block layout derived from the leg,
@@ -355,7 +367,10 @@ where
             .collect()
     }
 
-    /// Per-sector degeneracies, parallel to [`Self::sectors`].
+    /// Per-sector degeneracies, parallel to [`Self::sectors`] — TensorKit's
+    /// `dim(V, c)` read for every carried sector at once
+    /// (`spaces/gradedspace.jl:96-101`). A borrowed slice: `O(1)`, no decode,
+    /// no allocation.
     #[inline]
     pub fn degeneracies(&self) -> &[usize] {
         self.leg.degeneracies()
@@ -374,7 +389,12 @@ where
     }
 
     /// The conjugate leg: every sector replaced by its dual (degeneracies
-    /// carried along) and the dual flag flipped.
+    /// carried along) and the dual flag flipped — TensorKit `dual(V)` / `V'`
+    /// (`spaces/gradedspace.jl:112`; the `dual(dual(V)) == V` contract is
+    /// `spaces/vectorspaces.jl:69-73`). TensorKit only flips the flag and
+    /// dualizes labels lazily on read; this leg rewrites its stored sector
+    /// table eagerly, `O(k)` with one provider dual per sector, and the two
+    /// then report the same content.
     ///
     /// # Errors
     ///
@@ -1113,6 +1133,11 @@ where
     ///   This is reported before any provider algebra runs.
     /// - [`Error::FusionAlgebra`] / [`Error::Operation`] when the provider
     ///   cannot certify the layout. Nothing is published in that case.
+    ///
+    /// # Complexity
+    ///
+    /// One layout admission (the fusion-tree enumeration for the requested
+    /// legs) plus one `O(stored_len)` zeroed payload allocation.
     pub fn zeros<'a, Codomain, Domain>(
         runtime: &Runtime,
         codomain: Codomain,
@@ -1140,6 +1165,13 @@ where
     /// The block labels are decoded once per block, not once per element: the
     /// erased odometer underneath reports the same key for every element of a
     /// block, and the decode is memoized against it.
+    ///
+    /// **No TensorKit counterpart.** TensorKit 0.17 has no callback
+    /// constructor: it builds `undef`/`zeros`/`rand`-style
+    /// (`tensors/tensor.jl`) and fills by mutating `block(t, c)` directly.
+    /// The label-driven callback is a tenet addition, so cross-version
+    /// fixtures can be written against semantic sectors instead of storage
+    /// order.
     ///
     /// # Errors
     ///
@@ -1245,6 +1277,11 @@ where
     /// uniform in `[-1, 1)`) — the typed twin of the erased
     /// [`crate::prelude::Tensor::rand_with_seed`], byte-identical to it for
     /// the same layout and seed since both run the one shared fill.
+    ///
+    /// **No TensorKit counterpart.** TensorKit's `rand` family threads a
+    /// caller-supplied Julia `rng` (`tensors/tensor.jl:320-345`) and has no
+    /// integer-seed entry point of its own; the explicit u64 splitmix64
+    /// stream is a tenet extension for reproducible fixtures.
     ///
     /// Reproducibility is defined for the same TeNeT version and tensor
     /// layout. The stream fills internal storage order, so a sector codec or
@@ -1441,6 +1478,11 @@ where
     /// Everything [`Self::zeros`] reports, plus [`Error::Core`] when the
     /// admitted layout is not the canonical coupled-sector matrix one, which
     /// is an engine invariant rather than a caller mistake.
+    ///
+    /// # Complexity
+    ///
+    /// As [`Self::zeros`] — one layout admission and one `O(stored_len)`
+    /// payload — plus one pass writing each coupled-sector diagonal in place.
     #[doc(alias = "one")]
     pub fn id<'a, S>(runtime: &Runtime, spaces: S) -> Result<Self, Error>
     where
@@ -3896,11 +3938,17 @@ where
     }
 
     /// The codomain legs, in axis order.
+    ///
+    /// Allocates: each call builds a fresh `Vec` and clones every leg's
+    /// sector table (the provider travels by `Arc` bump). Hold the result
+    /// rather than re-calling in a loop.
     pub fn codomain(&self) -> Vec<GradedSpace<R>> {
         self.legs(self.body.space.space().homspace().codomain())
     }
 
     /// The domain legs, in axis order.
+    ///
+    /// Allocates per call, exactly as [`Self::codomain`].
     pub fn domain(&self) -> Vec<GradedSpace<R>> {
         self.legs(self.body.space.space().homspace().domain())
     }
