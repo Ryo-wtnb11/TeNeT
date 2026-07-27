@@ -5726,7 +5726,11 @@ impl Tensor {
                         D::from_real(0.0),
                     )
                 } else if !lhs_is_adjoint && !rhs_is_adjoint {
-                    D::ctx_of($contexts).tensorcontract_fusion_dyn_into_lowered(
+                    // E1 (#586): the plain entry point. The `_lowered` context
+                    // twin was a verbatim delegate to this call; the lowered
+                    // cold staging travels with the bound spaces' layout
+                    // capability, not with the entry-point name.
+                    D::ctx_of($contexts).tensorcontract_fusion_dyn_into(
                         $dst,
                         &mut data,
                         $lhs_storage,
