@@ -581,3 +581,53 @@ fn pr3_inspections_allocate_no_payload() {
     let dims = warmed_bytes(|| tensor.leg_dims().unwrap());
     assert!(dims < 256, "leg_dims allocated {dims} bytes");
 }
+
+#[test]
+fn contract_ordered_keeps_the_contract_compact_storage_outcomes() {
+    // What (issue #580 PR 6, gate 3): the `contract_ordered` alias lands on
+    // the same compact-storage outcomes `contract` is pinned to above — the
+    // geometries the typed `contract` rustdoc documents, spelled through the
+    // alias name so an alias drift onto a densifying route is caught here.
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+
+    // `s · s` with the identity order stays compact end to end: the whole
+    // contraction costs less than one dense payload, and both the operand and
+    // the result still owe their materialization afterwards.
+    let d = spectrum(0x5eed_0061);
+    let bytes = warmed_bytes(|| d.contract_ordered(&d, &[1], &[0], &[0, 1]).unwrap());
+    assert!(
+        bytes < dense_payload_bytes(),
+        "ordered s * s allocated at least one dense payload: {bytes} bytes"
+    );
+    assert!(
+        measured_bytes(|| d.data().len()) >= dense_payload_bytes(),
+        "ordered s * s materialized its operand"
+    );
+    let product = d.contract_ordered(&d, &[1], &[0], &[0, 1]).unwrap();
+    assert!(
+        measured_bytes(|| product.data().len()) >= dense_payload_bytes(),
+        "ordered s * s densified its result"
+    );
+
+    // `s · s` with `[1, 0]` moves the surviving bond across the
+    // codomain/domain split, which the rustdoc documents as the dense-route
+    // decline: the result carries a dense payload, so its first `data()` has
+    // nothing left to materialize.
+    let e = spectrum(0x5eed_0062);
+    black_box(e.contract_ordered(&e, &[1], &[0], &[1, 0]).unwrap());
+    let swapped = e.contract_ordered(&e, &[1], &[0], &[1, 0]).unwrap();
+    assert!(
+        measured_bytes(|| swapped.data().len()) < dense_payload_bytes(),
+        "ordered s * s with the bond-crossing order still owes a materialization, so it kept a compact payload the documented decline should have refused"
+    );
+
+    // `t · s` under a non-identity order is still the scaling arm: the
+    // spectrum operand stays compact afterwards.
+    let f = spectrum(0x5eed_0063);
+    let dense = source(0x5eed_0064);
+    black_box(dense.contract_ordered(&f, &[1], &[0], &[1, 0]).unwrap());
+    assert!(
+        measured_bytes(|| f.data().len()) >= dense_payload_bytes(),
+        "ordered t * s materialized the spectrum"
+    );
+}

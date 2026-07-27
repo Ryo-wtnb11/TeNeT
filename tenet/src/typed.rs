@@ -94,7 +94,8 @@
 //! the index-manipulation and contraction operations
 //! ([`TensorMap::permute`], [`TensorMap::braid`], [`TensorMap::transpose`],
 //! [`TensorMap::transpose_axes`], [`TensorMap::repartition`],
-//! [`TensorMap::contract`], [`TensorMap::compose`]), the scalar operations
+//! [`TensorMap::contract`], [`TensorMap::contract_ordered`],
+//! [`TensorMap::compose`]), the scalar operations
 //! ([`TensorMap::add`], [`TensorMap::scale`], [`TensorMap::norm`],
 //! [`TensorMap::norm_inf`], [`TensorMap::normalize`], [`TensorMap::inner`],
 //! [`TensorMap::dot`], [`TensorMap::tr`], [`TensorMap::trace_pairs`],
@@ -1865,6 +1866,47 @@ where
             runtime: self.runtime.clone(),
             body: Arc::new(TypedTensorBody::dense(space, data)),
         })
+    }
+
+    /// Documented alias of [`Self::contract`]: same arguments, same
+    /// semantics, same compact fast paths and complexity, same errors — the
+    /// delegation is total, so everything is stated there once.
+    ///
+    /// It exists for cross-facade name parity. The erased facade spells the
+    /// operation as a pair — [`crate::prelude::Tensor::contract`] (implicit
+    /// identity output order) and [`crate::prelude::Tensor::contract_ordered`]
+    /// (explicit `output_axes`) — while this facade's [`Self::contract`]
+    /// always takes the order explicitly, so it *is* the ordered route and
+    /// this alias only lets the erased pair's name resolve here too.
+    ///
+    /// **TensorKit correspondence.** TensorKit has no `contract_ordered`
+    /// entry point either: the counterpart of `output_axes` is
+    /// `tensorcontract!`'s `pAB` output permutation (`TO.tensorcontract!`,
+    /// `tensors/tensoroperations.jl:119-146`; the destination structure is
+    /// `permute(compose(sA, sB), pAB)`, `tensoroperations.jl:159-167`). The
+    /// erased [`crate::prelude::Tensor::contract_ordered`] is the sibling
+    /// reference for the erased-side semantics.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::contract`]'s. One deliberate divergence from the
+    /// erased sibling on inputs carrying *two* defects — mismatched
+    /// contracted legs *and* a bad output order: the erased
+    /// `contract_ordered` validates the contracted spaces before inspecting
+    /// the output order (its documented "why not report `pAB` first" choice),
+    /// while this facade delegates all validation to the expert layer, which
+    /// reports the output-order defect first. The precedence is pinned in
+    /// tests as it stands; re-checking the spaces here to force a match would
+    /// be a second copy of the rules, free to drift.
+    #[inline]
+    pub fn contract_ordered(
+        &self,
+        other: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+    ) -> Result<Self, Error> {
+        self.contract(other, lhs_axes, rhs_axes, output_axes)
     }
 
     /// Categorical composition of two tensor maps, TensorKit `A * B` / `mul!`:
