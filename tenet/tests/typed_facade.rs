@@ -7517,3 +7517,107 @@ fn typed_codomain_and_domain_spaces_alias_the_primary_accessors() {
     assert_eq!(typed.codomain_spaces().len(), 2);
     assert_eq!(typed.domain_spaces().len(), 1);
 }
+
+#[test]
+fn typed_and_erased_scalar_agree_on_a_full_contraction() {
+    // Gate 4: the rank-0 result of a full trace reads back the same value
+    // through both facades; the typed one comes back as a bare `D` rather
+    // than the erased `Scalar` enum.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+
+    let typed_value: f64 = typed.trace_pairs(&[(0, 1)]).unwrap().scalar().unwrap();
+    let erased_value: f64 = erased
+        .trace_pairs(&[(0, 1)])
+        .unwrap()
+        .scalar()
+        .unwrap()
+        .try_f64()
+        .unwrap();
+    assert_eq!(typed_value, erased_value);
+}
+
+#[test]
+fn typed_scalar_reads_a_complex_full_contraction() {
+    // Gate 4's c64 leg: a complex endomorphism traced to rank 0, against the
+    // erased sibling built from the same fill.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let complex = |value: f64| Complex64::new(value, 1.0 + value % 5.0);
+    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        &runtime,
+        [&space],
+        [&space],
+        |key: &tenet::prelude::BlockKey, indices: &[usize]| {
+            complex(erased_fill_value(key, indices))
+        },
+    )
+    .unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 3),
+        ],
+        false,
+    )
+    .unwrap();
+    let typed: TensorMap<tenet::core::Z2FusionRule, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |sectors, indices| {
+            complex(typed_fill_value(sectors, indices))
+        })
+        .unwrap();
+
+    let typed_value: Complex64 = typed.trace_pairs(&[(0, 1)]).unwrap().scalar().unwrap();
+    let erased_value: Complex64 = erased
+        .trace_pairs(&[(0, 1)])
+        .unwrap()
+        .scalar()
+        .unwrap()
+        .to_c64();
+    assert_eq!(typed_value, erased_value);
+}
+
+#[test]
+fn typed_scalar_on_a_tensor_with_legs_is_the_erased_error_class() {
+    // Gate 4's error leg: `scalar()` on a rank-3 tensor errors with the same
+    // class on both facades.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_oracle_pair(&runtime);
+
+    let typed_error = typed.scalar().unwrap_err();
+    let erased_error = erased.scalar().unwrap_err();
+    assert_eq!(
+        std::mem::discriminant(&typed_error),
+        std::mem::discriminant(&erased_error)
+    );
+    assert!(matches!(
+        typed_error,
+        tenet::prelude::Error::InvalidArgument(_)
+    ));
+}
+
+#[test]
+fn typed_zeros_like_keeps_the_spaces_and_zeroes_the_payload() {
+    // Gate 5: same legs, all-zero payload, dtype preserved statically by the
+    // annotated binding. The compact-payload behavior is pinned by the
+    // allocation gates in `typed_diagonal_allocations.rs`.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, typed) = z2_oracle_pair(&runtime);
+
+    let zeros: TensorMap<tenet::core::Z2FusionRule, f64> = typed.zeros_like();
+    assert_same_legs(&zeros.codomain(), &typed.codomain());
+    assert_same_legs(&zeros.domain(), &typed.domain());
+    assert_eq!(zeros.data().len(), typed.data().len());
+    assert!(zeros.data().iter().all(|&value| value == 0.0));
+
+    // A compact spectrum factor stays on its bond space with a zero spectrum.
+    let s: TensorMap<tenet::core::Z2FusionRule, f64> = typed.svd_compact().unwrap().1;
+    let s_zeros: TensorMap<tenet::core::Z2FusionRule, f64> = s.zeros_like();
+    assert_same_legs(&s_zeros.codomain(), &s.codomain());
+    assert!(s_zeros.data().iter().all(|&value| value == 0.0));
+}

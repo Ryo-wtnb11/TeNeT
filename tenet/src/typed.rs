@@ -3773,6 +3773,47 @@ where
             .sum()
     }
 
+    /// The single element of a rank-0 (scalar) tensor, e.g. the result of
+    /// contracting every leg — TensorKit `scalar`
+    /// (`tensors/tensoroperations.jl:445-450`; an empty payload reads as
+    /// zero there too).
+    ///
+    /// Returns `D` directly: the static-dtype counterpart of the erased
+    /// [`crate::prelude::Tensor::scalar`], whose `Scalar` enum exists only
+    /// because its dtype is a runtime property. Not a semantic difference —
+    /// the value is the same sum of the coupled payload.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] on a tensor with legs, with the erased
+    /// facade's own message.
+    pub fn scalar(&self) -> Result<D, Error> {
+        if self.rank() != 0 {
+            return Err(Error::InvalidArgument(format!(
+                "scalar() requires a rank-0 tensor, got rank {}",
+                self.rank()
+            )));
+        }
+        // A rank-0 payload holds at most one element; summing matches the
+        // erased facade and gives the empty payload its zero for free.
+        Ok(self
+            .dense_data()
+            .iter()
+            .fold(D::from_real(0.0), |acc, &value| acc + value))
+    }
+
+    /// A zero tensor on the same spaces and dtype as `self` (TensorKit
+    /// `zerovector`, `tensors/vectorinterface.jl:7-20`). Cheapest same-shape
+    /// constructor: scales the storage by zero rather than re-deriving the
+    /// block structure — exactly the erased
+    /// [`crate::prelude::Tensor::zeros_like`], but infallible because the
+    /// typed [`Self::scale`] is.
+    ///
+    /// Compact diagonal storage is preserved, as it is for every scaling.
+    pub fn zeros_like(&self) -> Self {
+        self.scale(D::from_real(0.0))
+    }
+
     fn legs(&self, product: &FusionProductSpace) -> Vec<GradedSpace<R>> {
         product
             .legs()
