@@ -2422,6 +2422,19 @@ where
     /// # Errors
     ///
     /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    ///
+    /// # Complexity
+    ///
+    /// `O(Σ_c n_c³)` — sectorwise cubic, no global materialization; the seam
+    /// runs one dense QR per coupled-sector matrix. A compact-diagonal
+    /// payload (TensorKit's `DiagonalTensorMap`) is materialized into the
+    /// dense coupled buffer first, through the same [`Self::data`] route as
+    /// [`Self::left_polar`]. TensorKit 0.17 *does* keep a diagonal QR compact
+    /// (MatrixAlgebraKit's `DiagonalAlgorithm`,
+    /// `factorizations/diagonal.jl:16-28,61-66`); that fast path is not
+    /// adopted here — the issue #613 Group 4 contract requires every compact
+    /// fast path to be re-proven individually, the same deferral the polars
+    /// record.
     pub fn qr_compact(&self) -> Result<(Self, Self), Error> {
         let mut dense = self.runtime.lease_dense();
         let (q, r) = tenet_matrixalgebra::qr_compact_dyn(dense.dense(), &self.bound_ref()?)?;
@@ -2434,6 +2447,13 @@ where
     /// # Errors
     ///
     /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    ///
+    /// # Complexity
+    ///
+    /// As [`Self::qr_compact`]: sectorwise cubic, with a compact-diagonal
+    /// payload materialized dense first (TensorKit's `DiagonalAlgorithm`
+    /// covers `qr_full!` too, `factorizations/diagonal.jl:16-28,61-66` —
+    /// same non-adoption, same #613 Group 4 deferral).
     pub fn qr_full(&self) -> Result<(Self, Self), Error> {
         let mut dense = self.runtime.lease_dense();
         let (q, r) = tenet_matrixalgebra::qr_full_dyn(dense.dense(), &self.bound_ref()?)?;
@@ -2446,6 +2466,13 @@ where
     /// # Errors
     ///
     /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    ///
+    /// # Complexity
+    ///
+    /// As [`Self::qr_compact`]: sectorwise cubic, with a compact-diagonal
+    /// payload materialized dense first (TensorKit's `DiagonalAlgorithm`
+    /// covers the LQ pair as well, `factorizations/diagonal.jl:29-41,61-66` —
+    /// same non-adoption, same #613 Group 4 deferral).
     pub fn lq_compact(&self) -> Result<(Self, Self), Error> {
         let mut dense = self.runtime.lease_dense();
         let (l, q) = tenet_matrixalgebra::lq_compact_dyn(dense.dense(), &self.bound_ref()?)?;
@@ -2458,6 +2485,11 @@ where
     /// # Errors
     ///
     /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    ///
+    /// # Complexity
+    ///
+    /// As [`Self::lq_compact`]: sectorwise cubic, compact-diagonal payload
+    /// materialized dense first.
     pub fn lq_full(&self) -> Result<(Self, Self), Error> {
         let mut dense = self.runtime.lease_dense();
         let (l, q) = tenet_matrixalgebra::lq_full_dyn(dense.dense(), &self.bound_ref()?)?;
@@ -2494,9 +2526,30 @@ where
     /// TensorKit 0.17 / MatrixAlgebraKit `left_null`: `n : codomain <- W` with
     /// `n^H * t = 0`.
     ///
+    /// # Null bond
+    ///
+    /// `W` is a fresh non-dual single-leg bond space carrying, per coupled
+    /// sector `c`, the `rows_c − rank_c` null directions; `rank_c` is the
+    /// numerical rank the seam takes from that sector's compact SVD, counting
+    /// `σ > ε(dtype) · max(rows_c, cols_c) · σ_max,c` as nonzero. A sector
+    /// with no null directions is absent from `W`, so `W` is empty for a
+    /// numerically full-rank tensor. Note this is *not*
+    /// TensorKit/MatrixAlgebraKit's default `left_null`, which without a
+    /// truncation argument is QR-based and counts only the structural nullity
+    /// `rows_c − min(rows_c, cols_c)` (MatrixAlgebraKit
+    /// `interface/orthnull.jl`, the `alg::Nothing` mode); the seam's behavior
+    /// corresponds to their SVD mode with a tolerance.
+    ///
     /// # Errors
     ///
     /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    ///
+    /// # Complexity
+    ///
+    /// Sectorwise cubic — one compact SVD per coupled sector plus an
+    /// orthonormal completion of the sectors that keep null directions; a
+    /// compact-diagonal payload is materialized dense first, as for
+    /// [`Self::qr_compact`].
     pub fn left_null(&self) -> Result<Self, Error> {
         let mut dense = self.runtime.lease_dense();
         let out = tenet_matrixalgebra::left_null_dyn(dense.dense(), &self.bound_ref()?)?;
@@ -2506,9 +2559,22 @@ where
     /// TensorKit 0.17 / MatrixAlgebraKit `right_null`: `n : W <- domain` with
     /// `t * n^H = 0`.
     ///
+    /// # Null bond
+    ///
+    /// As [`Self::left_null`], mirrored: `W` is a fresh non-dual single-leg
+    /// bond space with `cols_c − rank_c` directions per coupled sector under
+    /// the same SVD numerical-rank cutoff, sectors with none absent — and the
+    /// same divergence from TensorKit/MatrixAlgebraKit's QR-based default
+    /// applies.
+    ///
     /// # Errors
     ///
     /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
+    ///
+    /// # Complexity
+    ///
+    /// As [`Self::left_null`]: sectorwise cubic, compact-diagonal payload
+    /// materialized dense first.
     pub fn right_null(&self) -> Result<Self, Error> {
         let mut dense = self.runtime.lease_dense();
         let out = tenet_matrixalgebra::right_null_dyn(dense.dense(), &self.bound_ref()?)?;
