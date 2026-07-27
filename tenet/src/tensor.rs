@@ -5752,7 +5752,7 @@ impl Tensor {
                     } else {
                         tenet_tensors::FusionOperand::direct($rhs_storage.space())
                     };
-                    D::ctx_of($contexts).tensorcontract_fusion_dyn_prelowered_into_lowered(
+                    D::ctx_of($contexts).tensorcontract_fusion_dyn_prelowered_into(
                         $dst,
                         &mut data,
                         lhs,

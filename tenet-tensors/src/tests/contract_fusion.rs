@@ -7588,7 +7588,7 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
         let execute_lazy =
             |context: &mut TensorContractFusionExecutionContext<f64, TripleRuleKey>,
              output: &mut [f64]| {
-                context.tensorcontract_fusion_dyn_prelowered_into_lowered(
+                context.tensorcontract_fusion_dyn_prelowered_into(
                     &lazy_dst,
                     output,
                     FusionOperand::adjoint(lowered_lhs.space()),

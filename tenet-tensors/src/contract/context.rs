@@ -3,10 +3,9 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use tenet_core::{
-    BlockStructure, CheckedFusionAlgebra, CoreError, FusionRule, FusionTensorMapSpace,
-    HostReadableStorage, HostWritableStorage, LoweredMultiplicityFreeAlgebra,
-    MultiplicityFreeRigidSymbols, Placement, ScratchStorage, SimilarStorage, TensorMap,
-    TensorStorage,
+    BlockStructure, CoreError, FusionRule, FusionTensorMapSpace, HostReadableStorage,
+    HostWritableStorage, MultiplicityFreeRigidSymbols, Placement, ScratchStorage, SimilarStorage,
+    TensorMap, TensorStorage,
 };
 
 use crate::cache::{
@@ -34,7 +33,6 @@ use super::dynamic_space::{
 use super::fusion::FusionContractOrientation;
 use super::fusion::{
     prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical,
-    prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer_canonical,
     prepare_tensorcontract_fusion_plan_dyn_raw_canonical, tensorcontract_fusion_structure,
     tensorcontract_fusion_structure_dyn_prelowered, FusionContractPlan,
     EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST, SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
@@ -61,25 +59,6 @@ where
 {
     prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical(rule, dst, lhs, rhs, axes, primer)
         .map(Arc::new)
-}
-
-fn lowered_prelowered_plan_builder<R>(
-    rule: &R,
-    dst: &DynamicFusionMapSpace,
-    lhs: &FusionOperandLayout<'_>,
-    rhs: &FusionOperandLayout<'_>,
-    axes: TensorContractSpec<'_>,
-    primer: LayoutKeyBuilder<R>,
-) -> Result<Arc<FusionContractPlan>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + LoweredMultiplicityFreeAlgebra
-        + CheckedFusionAlgebra,
-{
-    prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer_canonical(
-        rule, dst, lhs, rhs, axes, primer,
-    )
-    .map(Arc::new)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -969,43 +948,6 @@ where
             beta,
             dst_space.layout_primer(),
             prelowered_plan_builder::<R>,
-        )
-    }
-
-    /// Built-in multiplicity-free sibling of the validated prelowered seam.
-    #[doc(hidden)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn tensorcontract_fusion_dyn_prelowered_into_lowered<R>(
-        &mut self,
-        dst_space: &BoundDynamicFusionMapSpace<R>,
-        dst_data: &mut [D],
-        lhs: FusionOperand<'_>,
-        lhs_data: &[D],
-        rhs: FusionOperand<'_>,
-        rhs_data: &[D],
-        axes: TensorContractSpec<'_>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>
-            + LoweredMultiplicityFreeAlgebra
-            + CheckedFusionAlgebra
-            + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
-    {
-        self.tensorcontract_fusion_dyn_prelowered_into_core(
-            dst_space,
-            dst_data,
-            lhs,
-            lhs_data,
-            rhs,
-            rhs_data,
-            axes,
-            alpha,
-            beta,
-            dst_space.layout_primer(),
-            lowered_prelowered_plan_builder::<R>,
         )
     }
 

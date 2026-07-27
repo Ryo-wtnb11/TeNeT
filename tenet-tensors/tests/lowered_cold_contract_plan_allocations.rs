@@ -205,7 +205,7 @@ fn run_route() -> RouteRun {
     // The `_lowered` context twin (a verbatim delegate) was removed by the
     // #586 sweep after E1 proved entry parity; the plain entry is the erased
     // facade's production route and the one this guard pins.
-    let mut run =
+    let run =
         |output: &mut [f64],
          context: &mut TensorContractFusionExecutionContext<f64, RuleIdentity>| {
             context
