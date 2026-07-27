@@ -87,7 +87,10 @@
 //! # Phase boundary
 //!
 //! This is the phase-6 surface of issue #557: construction
-//! ([`TensorMap::zeros`], [`TensorMap::from_block_fn`], [`TensorMap::id`]),
+//! ([`TensorMap::zeros`], [`TensorMap::from_block_fn`], [`TensorMap::id`],
+//! [`TensorMap::rand`], [`TensorMap::rand_with_seed`],
+//! [`TensorMap::isomorphism`], [`TensorMap::unitary`],
+//! [`TensorMap::isometry`]),
 //! inspection ([`TensorMap::codomain`], [`TensorMap::domain`],
 //! [`TensorMap::block_fusion_trees`], [`TensorMap::block`],
 //! [`TensorMap::block_count`], [`TensorMap::data`], [`TensorMap::runtime`]),
@@ -97,14 +100,18 @@
 //! [`TensorMap::contract`], [`TensorMap::contract_ordered`],
 //! [`TensorMap::compose`]), the scalar operations
 //! ([`TensorMap::add`], [`TensorMap::scale`], [`TensorMap::norm`],
-//! [`TensorMap::norm_inf`], [`TensorMap::normalize`], [`TensorMap::inner`],
+//! [`TensorMap::norm_inf`], [`TensorMap::norm_p`], [`TensorMap::normalize`],
+//! [`TensorMap::inner`],
 //! [`TensorMap::dot`], [`TensorMap::tr`], [`TensorMap::trace_pairs`],
 //! [`TensorMap::adjoint`]), the factorizations ([`TensorMap::svd_compact`],
 //! [`TensorMap::svd_full`], [`TensorMap::svd_trunc`], [`TensorMap::svd_vals`],
 //! [`TensorMap::qr_compact`], [`TensorMap::qr_full`],
 //! [`TensorMap::lq_compact`], [`TensorMap::lq_full`],
+//! [`TensorMap::left_polar`], [`TensorMap::right_polar`],
 //! [`TensorMap::left_orth`], [`TensorMap::right_orth`],
-//! [`TensorMap::left_null`], [`TensorMap::right_null`]) and — with issue #570
+//! [`TensorMap::left_null`], [`TensorMap::right_null`], with
+//! [`GradedSpace::truncspace`] naming a fixed truncation target) and — with
+//! issue #570
 //! — the **eigendecompositions** ([`TensorMap::eigh_full`],
 //! [`TensorMap::eigh_trunc`], [`TensorMap::eigh_vals`],
 //! [`TensorMap::eig_full`], [`TensorMap::eig_trunc`], [`TensorMap::eig_vals`])
@@ -133,8 +140,9 @@
 //! property and not a type: no signature mentions it, [`TensorMap::data`] still
 //! reports the dense buffer (materialized once, on demand, shared by every
 //! clone), and the operations that can exploit it — [`TensorMap::compose`],
-//! [`TensorMap::scale`], [`TensorMap::add`], [`TensorMap::adjoint`] and the
-//! reductions — do so silently. The ones that cannot say so in their own
+//! [`TensorMap::scale`], [`TensorMap::add`], [`TensorMap::adjoint`],
+//! [`TensorMap::trace_pairs`] on its full-pair arm, and the reductions — do so
+//! silently. The ones that cannot say so in their own
 //! documentation: [`TensorMap::permute`] and its family, and
 //! [`TensorMap::contract`].
 //!
@@ -3576,7 +3584,7 @@ where
 
     /// TensorKit `normalize`: `self / norm(self)`, the unit-norm tensor
     /// pointing the same way. The norm is [`Self::norm`]'s, so the result
-    /// satisfies `t.normalize()?.norm()? == 1`.
+    /// satisfies `t.normalize()?.norm()? == 1` up to floating point.
     ///
     /// Like TensorKit, a zero-norm tensor is not special-cased: normalizing it
     /// divides by zero and yields non-finite entries. Guard the caller if that
@@ -4575,7 +4583,12 @@ where
         &self.runtime
     }
 
-    /// Number of stored symmetry-allowed blocks.
+    /// Number of stored symmetry-allowed blocks — one per fusion-tree pair of
+    /// the coupled layout (the namespace [`Self::block_fusion_trees`]
+    /// indexes). Finer than TensorKit `length(blocksectors(t))`
+    /// (`tensors/abstracttensor.jl:331-335`), which counts coupled sectors: a
+    /// coupled sector with several tree pairs contributes one TK block but
+    /// several here.
     #[inline]
     pub fn block_count(&self) -> usize {
         self.body.space.space().structure().block_count()
@@ -4585,6 +4598,11 @@ where
     ///
     /// Individual blocks address this buffer through their own offset and
     /// strides.
+    ///
+    /// On a compact spectrum factor (the module doc's compact-storage
+    /// contract) the first call pays the materialization: the `Σ_c k_c` stored
+    /// values are expanded into the `Σ_c k_c²` dense block-diagonal buffer,
+    /// cached once per body and shared by every clone.
     #[inline]
     pub fn data(&self) -> &[D] {
         self.dense_data()

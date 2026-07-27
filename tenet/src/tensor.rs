@@ -2,7 +2,18 @@
 //!
 //! A [`Tensor`] stores one enum-erased provider-bound dynamic fusion space plus
 //! flat scalar storage (`f64` or `Complex64`, chosen at construction) in the
-//! TensorKit-equivalent coupled-sector matrix layout. The scalar type is
+//! TensorKit-equivalent coupled-sector matrix layout. Not every payload is
+//! that dense buffer: a spectrum factor (SVD `s`, eigh/eig `d`) holds compact
+//! [`Data::Diagonal`] per-sector values — `Σ_c k_c` instead of `Σ_c k_c²`,
+//! TensorKit's `DiagonalTensorMap` — materialized into the dense layout only
+//! at the `coupled_data` boundary, and with the `cuda` feature a payload may
+//! live in device storage instead of a host `Vec`. On host-dense payloads
+//! [`Tensor::adjoint`] is lazy: it returns a view sharing the parent buffer
+//! in O(1), and consumers not lowered for the view materialize one shared
+//! owned adjoint on demand (compact spectra are adjointed directly, without
+//! the view; a device payload's view stays metadata-lazy, and a consumer not
+//! lowered for it errors rather than materializing on the host).
+//! The scalar type is
 //! erased behind an internal storage enum; rank is fully dynamic (no ceiling),
 //! matching TensorKit's `tensorcontract!`. CPU operations briefly acquire a
 //! per-operation context and/or executor lease, then run with that resource
