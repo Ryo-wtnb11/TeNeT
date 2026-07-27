@@ -869,23 +869,7 @@ impl Space {
             });
         }
         let fused = with_rule!(self.context.as_ref(), rule, {
-            fn fuse_sectors<R: CheckedFusionAlgebra>(
-                rule: &R,
-                left: &[(SectorId, usize)],
-                right: &[(SectorId, usize)],
-            ) -> Result<Vec<(SectorId, usize)>, tenet_core::FusionAlgebraError> {
-                let mut out = std::collections::BTreeMap::<SectorId, usize>::new();
-                for &(a, deg_a) in left {
-                    for &(b, deg_b) in right {
-                        for c in rule.try_fusion_channels(a, b)? {
-                            *out.entry(c).or_insert(0) +=
-                                rule.try_nsymbol(a, b, c)? * deg_a * deg_b;
-                        }
-                    }
-                }
-                Ok(out.into_iter().collect())
-            }
-            fuse_sectors(rule, &self.sectors, &other.sectors)
+            fuse_sector_content(rule, &self.sectors, &other.sectors)
         })?;
         Ok(Self {
             context: Arc::clone(&self.context),
@@ -979,6 +963,32 @@ impl Space {
             dual: leg.is_dual(),
         }
     }
+}
+
+/// Fused sector content of `left ⊗ right`: the degeneracy of an outcome `c`
+/// is `sum over (a, b) with c in a ⊗ b of deg_a * deg_b * N^c_ab`, sorted by
+/// [`SectorId`] (TensorKit `fuse(V₁, V₂)`, `spaces/gradedspace.jl:150-158`).
+///
+/// Provider-generic on purpose: this is the one fusion fold shared by the
+/// erased [`Space::fuse`] and the typed structural constructors'
+/// isomorphic/embeddable checks — a second copy of the fold would be free to
+/// drift from the byte-compared sibling. Inputs are *external* sector
+/// content; duality is the caller's concern (both callers drop it, exactly as
+/// TensorKit's `fuse` does).
+pub(crate) fn fuse_sector_content<R: CheckedFusionAlgebra + ?Sized>(
+    rule: &R,
+    left: &[(SectorId, usize)],
+    right: &[(SectorId, usize)],
+) -> Result<Vec<(SectorId, usize)>, tenet_core::FusionAlgebraError> {
+    let mut out = std::collections::BTreeMap::<SectorId, usize>::new();
+    for &(a, deg_a) in left {
+        for &(b, deg_b) in right {
+            for c in rule.try_fusion_channels(a, b)? {
+                *out.entry(c).or_insert(0) += rule.try_nsymbol(a, b, c)? * deg_a * deg_b;
+            }
+        }
+    }
+    Ok(out.into_iter().collect())
 }
 
 #[cfg(test)]
