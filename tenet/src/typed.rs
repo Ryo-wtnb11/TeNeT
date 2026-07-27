@@ -1248,6 +1248,14 @@ where
     /// (TensorKit `fuse`, `spaces/gradedspace.jl:150-158`), on the one shared
     /// provider-generic fold. Duality is dropped exactly as there: stored
     /// sector content is already external.
+    ///
+    /// No SU(3) `UnsupportedForRule` guard, unlike the erased `Space::fuse`:
+    /// the typed facade's `R` bound is `MultiplicityFreeRigidSymbols`, which
+    /// the SU(3) provider does not implement, so an SU(3) rule cannot reach
+    /// this fold from the typed surface at all — the guard would be dead
+    /// code here. A multiplicity-carrying *external* provider is likewise
+    /// excluded by the same bound; the fold's `N`-symbol weighting is still
+    /// correct for it, so nothing depends on the exclusion.
     fn fused_content(
         provider: &R,
         legs: &[&GradedSpace<R>],
