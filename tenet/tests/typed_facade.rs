@@ -5619,27 +5619,64 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
     let mut next = first_value - 1.0;
+    let mut erased_blocks: Vec<(Vec<SectorId>, Vec<SectorId>)> = Vec::new();
     let erased = tenet::prelude::Tensor::from_block_fn(
         runtime,
         [erased_legs.0, erased_legs.1],
         [erased_legs.0, erased_legs.1],
-        |_: &tenet::prelude::BlockKey, _: &[usize]| {
+        |key: &tenet::prelude::BlockKey, _: &[usize]| {
+            let pair = key.as_fusion_tree_pair().expect("fusion-tree block");
+            let ids = (
+                pair.codomain_uncoupled().to_vec(),
+                pair.domain_uncoupled().to_vec(),
+            );
+            if erased_blocks.last() != Some(&ids) {
+                erased_blocks.push(ids);
+            }
             next += 1.0;
             next
         },
     )
     .unwrap();
     let mut next = first_value - 1.0;
+    let mut typed_blocks: Vec<(Vec<SectorId>, Vec<SectorId>)> = Vec::new();
     let typed = TensorMap::from_block_fn(
         runtime,
         [typed_legs.0, typed_legs.1],
         [typed_legs.0, typed_legs.1],
-        |_, _| {
+        |sectors, _| {
+            let encode = |labels: &[R::Sector]| {
+                labels
+                    .iter()
+                    .map(|label| {
+                        SectorCodec::encode_sector(typed_legs.0.provider(), label).unwrap()
+                    })
+                    .collect::<Vec<SectorId>>()
+            };
+            let ids = (
+                encode(sectors.codomain_uncoupled()),
+                encode(sectors.domain_uncoupled()),
+            );
+            if typed_blocks.last() != Some(&ids) {
+                typed_blocks.push(ids);
+            }
             next += 1.0;
             next
         },
     )
     .unwrap();
+    // Labels before bytes: `erased_leg_shapes` can only report degeneracies, so
+    // every space assertion in this section is blind to a sector *renumbering*
+    // — a codec that names the same content with different ids produces the
+    // same degeneracies, the same block order, and therefore the same counter
+    // fill. Re-encoding the typed labels through the provider's own codec and
+    // comparing the id sequences block for block is what closes that hole, and
+    // it belongs here rather than in one test so that a mismatch is reported as
+    // a fixture failure.
+    assert_eq!(
+        typed_blocks, erased_blocks,
+        "the two facades disagree on the sector content or the block order"
+    );
     assert_eq!(typed.data(), erased.data());
     assert!(!typed.data().is_empty());
     assert_eq!(typed_leg_shapes(&typed), erased_leg_shapes(&erased));
