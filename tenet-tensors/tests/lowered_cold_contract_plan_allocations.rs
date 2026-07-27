@@ -8,9 +8,10 @@
 //!    the candidate sector product — and builds the layout exactly once
 //!    (a committed layout makes the second prepare a cache lookup).
 //! 2. The erased-contract fusion route's cold plan build: the E1 baseline.
-//!    While both context entries exist, the `_lowered` delegate and the plain
-//!    twin must be allocation- and cache-statistics-identical; after E1 the
-//!    plain entry is the production route and this test is its guard.
+//!    While both context entries existed this compared the `_lowered`
+//!    delegate against the plain twin (E1 evidence: byte-identical); with the
+//!    delegate removed, the plain entry is the production route and this
+//!    test pins its cold/warm plan-build behavior.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -185,7 +186,6 @@ fn contract_fixture() -> ContractFixture {
 }
 
 struct RouteRun {
-    output: Vec<f64>,
     cold_bytes: usize,
     cold_allocations: usize,
     warm_bytes: usize,
@@ -195,47 +195,32 @@ struct RouteRun {
     warm_hits: usize,
 }
 
-fn run_route(lowered_entry: bool) -> RouteRun {
+fn run_route() -> RouteRun {
     reset_all_caches();
     let fixture = contract_fixture();
     let axes = || TensorContractSpec::new(&[0], &[2], OutputAxisOrder::from_axes(&[2, 0, 3, 1]));
     let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     context.set_cache_policy(OperationCachePolicy::TaskLocal);
     let mut output = vec![0.0; fixture.dst.space().required_len().unwrap()];
+    // The `_lowered` context twin (a verbatim delegate) was removed by the
+    // #586 sweep after E1 proved entry parity; the plain entry is the erased
+    // facade's production route and the one this guard pins.
     let mut run =
         |output: &mut [f64],
          context: &mut TensorContractFusionExecutionContext<f64, RuleIdentity>| {
-            // ponytail: the lowered arm dies with the twin in the sweep's removal
-            // commit; the plain arm then remains as the production-route guard.
-            if lowered_entry {
-                context
-                    .tensorcontract_fusion_dyn_into_lowered(
-                        &fixture.dst,
-                        output,
-                        &fixture.lhs,
-                        &fixture.lhs_data,
-                        &fixture.rhs,
-                        &fixture.rhs_data,
-                        axes(),
-                        1.0,
-                        0.0,
-                    )
-                    .unwrap();
-            } else {
-                context
-                    .tensorcontract_fusion_dyn_into(
-                        &fixture.dst,
-                        output,
-                        &fixture.lhs,
-                        &fixture.lhs_data,
-                        &fixture.rhs,
-                        &fixture.rhs_data,
-                        axes(),
-                        1.0,
-                        0.0,
-                    )
-                    .unwrap();
-            }
+            context
+                .tensorcontract_fusion_dyn_into(
+                    &fixture.dst,
+                    output,
+                    &fixture.lhs,
+                    &fixture.lhs_data,
+                    &fixture.rhs,
+                    &fixture.rhs_data,
+                    axes(),
+                    1.0,
+                    0.0,
+                )
+                .unwrap();
         };
     let ((), cold_bytes, cold_allocations) = measured(|| run(&mut output, &mut context));
     let cold_misses = context.dynamic_fusion_space_cache_misses();
@@ -244,7 +229,6 @@ fn run_route(lowered_entry: bool) -> RouteRun {
     let ((), warm_bytes, _) = measured(|| run(&mut warm_output, &mut context));
     assert_eq!(warm_output, output);
     RouteRun {
-        output,
         cold_bytes,
         cold_allocations,
         warm_bytes,
@@ -256,38 +240,37 @@ fn run_route(lowered_entry: bool) -> RouteRun {
 }
 
 #[test]
-fn cold_contract_plan_build_parity_between_lowered_and_plain_entries() {
+fn cold_contract_plan_build_stays_cached_after_first_run() {
     // Discard one run: the first contraction in the process pays a one-time
-    // warmup (lazy statics, thread-local init) that is route-independent and
-    // would otherwise skew whichever arm runs first.
-    let _ = run_route(false);
-    let lowered = run_route(true);
-    let plain = run_route(false);
+    // warmup (lazy statics, thread-local init) that would otherwise skew the
+    // repeat-stability comparison below.
+    let _ = run_route();
+    let first = run_route();
+    let second = run_route();
 
     // The fixture must exercise the fusion plan-build route, not the
     // direct-core fast path: a cold run misses the dynamic fusion space
     // cache, a warm run hits it without new misses.
-    assert!(lowered.cold_misses >= 3, "fixture took the core fast path");
-    assert_eq!(lowered.warm_misses, lowered.cold_misses);
-    assert!(lowered.warm_hits > lowered.cold_hits);
+    assert!(first.cold_misses >= 3, "fixture took the core fast path");
+    assert_eq!(first.warm_misses, first.cold_misses);
+    assert!(first.warm_hits > first.cold_hits);
     assert!(
-        lowered.warm_bytes < lowered.cold_bytes,
+        first.warm_bytes < first.cold_bytes,
         "warm run rebuilt the cold plan: warm {} bytes vs cold {} bytes",
-        lowered.warm_bytes,
-        lowered.cold_bytes
+        first.warm_bytes,
+        first.cold_bytes
     );
 
-    // E1 pass bar: exact public output equality plus no additional cold
-    // layout/plan-build allocation relative to the lowered baseline.
-    assert_eq!(plain.output, lowered.output);
-    assert_eq!(plain.cold_misses, lowered.cold_misses);
-    assert_eq!(plain.cold_hits, lowered.cold_hits);
-    assert_eq!(plain.warm_misses, lowered.warm_misses);
-    assert_eq!(plain.warm_hits, lowered.warm_hits);
+    // Cold plan-build allocation is deterministic run to run: the relative
+    // baseline any future entry-point change must reproduce (E1 held this
+    // between the lowered delegate and the plain entry before the delegate
+    // was removed).
     assert_eq!(
-        (plain.cold_bytes, plain.cold_allocations),
-        (lowered.cold_bytes, lowered.cold_allocations),
-        "plain entry changed cold plan-build allocation vs lowered baseline"
+        (second.cold_bytes, second.cold_allocations),
+        (first.cold_bytes, first.cold_allocations),
+        "cold plan-build allocation became nondeterministic"
     );
-    assert_eq!(plain.warm_bytes, lowered.warm_bytes);
+    assert_eq!(second.warm_bytes, first.warm_bytes);
+    assert_eq!(second.cold_misses, first.cold_misses);
+    assert_eq!(second.warm_hits, first.warm_hits);
 }

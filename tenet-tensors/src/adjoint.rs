@@ -9,8 +9,7 @@ use std::sync::Arc;
 
 use tenet_core::{
     BlockKey, BlockStructure, CoreError, FusionRule, FusionTensorMapSpace, FusionTreeHomSpace,
-    FusionTreePairKey, LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols, TensorMap,
-    TensorMapSpace,
+    FusionTreePairKey, MultiplicityFreeRigidSymbols, TensorMap, TensorMapSpace,
 };
 
 use crate::contract::{
@@ -350,21 +349,6 @@ where
     Ok((output, data))
 }
 
-#[doc(hidden)]
-pub fn adjoint_bound_dyn_lowered<R, D>(
-    space: &BoundDynamicFusionMapSpace<R>,
-    data: &[D],
-) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
-    D: Copy + num_traits::Zero + Clone + ConjugateValue,
-{
-    let (output, data) =
-        adjoint_dyn_with_primer(space.provider(), space.space(), data, space.layout_primer())?;
-    let output = BoundDynamicFusionMapSpace::from_derived_like(space, output)?;
-    Ok((output, data))
-}
-
 /// Generic dynamic-rank adjoint that retains the exact provider allocation of
 /// its checked source space.
 pub fn adjoint_bound_dyn_generic<R, D>(
@@ -388,18 +372,6 @@ pub fn adjoint_bound_space_dyn<R>(
 ) -> Result<BoundDynamicFusionMapSpace<R>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-{
-    let output =
-        adjoint_space_dyn_with_primer(space.provider(), space.space(), space.layout_primer())?;
-    BoundDynamicFusionMapSpace::from_derived_like(space, output)
-}
-
-#[doc(hidden)]
-pub fn adjoint_bound_space_dyn_lowered<R>(
-    space: &BoundDynamicFusionMapSpace<R>,
-) -> Result<BoundDynamicFusionMapSpace<R>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
 {
     let output =
         adjoint_space_dyn_with_primer(space.provider(), space.space(), space.layout_primer())?;

@@ -1386,21 +1386,6 @@ where
         Self::from_derived_like(lhs, space)
     }
 
-    #[doc(hidden)]
-    pub fn contracted_multiplicity_free_lowered(
-        lhs: &Self,
-        rhs: &Self,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-    ) -> Result<Self, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>
-            + LoweredMultiplicityFreeAlgebra
-            + CheckedFusionAlgebra,
-    {
-        Self::contracted_multiplicity_free(lhs, rhs, lhs_axes, rhs_axes)
-    }
-
     /// Builds a checked contraction result directly in the requested output
     /// order while retaining the exact lhs provider allocation.
     ///
@@ -1427,22 +1412,6 @@ where
             lhs.layout_build.dispatch,
         )?;
         Self::from_derived_like(lhs, space)
-    }
-
-    #[doc(hidden)]
-    pub fn contracted_multiplicity_free_ordered_lowered(
-        lhs: &Self,
-        rhs: &Self,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_order: OutputAxisOrder<'_>,
-    ) -> Result<Self, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>
-            + LoweredMultiplicityFreeAlgebra
-            + CheckedFusionAlgebra,
-    {
-        Self::contracted_multiplicity_free_ordered(lhs, rhs, lhs_axes, rhs_axes, output_order)
     }
 
     /// Validates contraction compatibility without building a coupled result
@@ -1592,17 +1561,6 @@ where
             self.layout_build.dispatch,
         )?;
         Self::from_derived_like(self, space)
-    }
-
-    #[doc(hidden)]
-    pub fn transformed_multiplicity_free_lowered(
-        &self,
-        operation: &TreeTransformOperation,
-    ) -> Result<Self, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
-    {
-        self.transformed_multiplicity_free(operation)
     }
 
     /// Generic tree-transform result retaining the source provider proof.
@@ -4332,7 +4290,7 @@ mod lowered_metadata_tests {
         reset_scratch_publication_observations();
 
         let error = source
-            .transformed_multiplicity_free_lowered(&TreeTransformOperation::permute([], [0]))
+            .transformed_multiplicity_free(&TreeTransformOperation::permute([], [0]))
             .unwrap_err();
 
         assert_eq!(
@@ -4377,9 +4335,8 @@ mod lowered_metadata_tests {
         .unwrap();
         reset_scratch_publication_observations();
 
-        let error =
-            BoundDynamicFusionMapSpace::contracted_multiplicity_free_lowered(&lhs, &rhs, &[], &[])
-                .unwrap_err();
+        let error = BoundDynamicFusionMapSpace::contracted_multiplicity_free(&lhs, &rhs, &[], &[])
+            .unwrap_err();
 
         assert_eq!(
             error,
@@ -4511,7 +4468,7 @@ mod lowered_metadata_tests {
         .unwrap();
 
         let error = source
-            .transformed_multiplicity_free_lowered(&TreeTransformOperation::permute([], [1]))
+            .transformed_multiplicity_free(&TreeTransformOperation::permute([], [1]))
             .unwrap_err();
         assert_eq!(
             error,
@@ -4567,13 +4524,11 @@ mod lowered_metadata_tests {
         )
         .unwrap();
         let operation = TreeTransformOperation::permute([1], [0]);
-        let lowered_transform = lowered
-            .transformed_multiplicity_free_lowered(&operation)
-            .unwrap();
+        let lowered_transform = lowered.transformed_multiplicity_free(&operation).unwrap();
         let encoded_transform = encoded.transformed_multiplicity_free(&operation).unwrap();
         assert_eq!(lowered_transform.space(), encoded_transform.space());
 
-        let lowered_dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_lowered(
+        let lowered_dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free(
             &lowered,
             &lowered,
             &[1],
