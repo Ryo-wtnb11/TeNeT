@@ -5799,6 +5799,18 @@ fn fz2_u1_su2_oracle_pair(
             .unwrap()
             .try_dual()
             .unwrap();
+    let (typed_p, typed_q) = fz2_u1_su2_typed_legs();
+    counter_oracle_pair(
+        runtime,
+        (&erased_p, &erased_q),
+        (&typed_p, &typed_q),
+        first_value,
+    )
+}
+
+/// The typed half of [`fz2_u1_su2_oracle_pair`]'s legs, shared with the twist
+/// identity test below, which has to rebuild the right operand leg for leg.
+fn fz2_u1_su2_typed_legs() -> (GradedSpace<Fz2U1Su2Rule>, GradedSpace<Fz2U1Su2Rule>) {
     let rule = Arc::new(Fz2U1Su2Rule::new(
         Fz2U1Rule::new(
             tenet::core::FermionParityFusionRule,
@@ -5837,12 +5849,7 @@ fn fz2_u1_su2_oracle_pair(
     .unwrap()
     .try_dual()
     .unwrap();
-    counter_oracle_pair(
-        runtime,
-        (&erased_p, &erased_q),
-        (&typed_p, &typed_q),
-        first_value,
-    )
+    (typed_p, typed_q)
 }
 
 #[test]
@@ -6048,23 +6055,57 @@ fn typed_and_erased_contract_compose_and_compact_agree_on_fz2_u1_su2() {
 }
 
 #[test]
-fn the_fermionic_product_route_twists_contract_but_not_compose() {
-    // What: on `fZ2 x U(1) x SU(2)` the contracted pair contains a dual leg, so
-    // `contract` applies the supertrace twist there and `compose` does not —
-    // the two must therefore *disagree* on the same axes. Without this the
-    // whole family's byte oracle would still pass with the twist deleted from
-    // both facades at once, since a shared kernel change moves both buffers
-    // together. The bosonic families are the control: there the two agree.
+fn the_fermionic_product_compose_is_contract_against_a_twisted_right_operand() {
+    // What: the exact relation on `fZ2 x U(1) x SU(2)`,
+    // `compose(a, b) == contract(a, twist(b, b's dual codomain legs))`. The
+    // weaker `contract != compose` would pin only that *a* twist exists, not
+    // which legs it acts on nor with which sign; this form pins all three, and
+    // it is stated inside the product family so the suite does not lean on the
+    // plain-fZ2 test above for it. A cross-facade byte oracle cannot do this
+    // job at all: a twist deleted from a shared kernel moves both buffers
+    // together. The bosonic family is the control — theta is one there, so the
+    // twisted operand is the operand and the two contractions agree.
     let _guard = cache_lock();
     let runtime = runtime();
 
     let (_, fermionic_a) = fz2_u1_su2_oracle_pair(&runtime, 1.0);
     let (_, fermionic_b) = fz2_u1_su2_oracle_pair(&runtime, 100.0);
-    let twisted = fermionic_a
-        .contract(&fermionic_b, &[2, 3], &[0, 1], &[0, 1, 2, 3])
-        .unwrap();
+    // `b`'s codomain is `[p, q]` and only `q` is dual, so theta acts on
+    // codomain leg 1 alone — a "twist every contracted leg" reading would
+    // multiply leg 0 too and fail here. Theta comes from the rule rather than
+    // from an assumed `(-1)^F`: the product's twist is the product of its
+    // factors', and hard-coding the parity sign here would quietly assume the
+    // U(1) and SU(2) factors contribute one.
+    let (leg_p, leg_q) = fz2_u1_su2_typed_legs();
+    let rule = leg_p.provider().clone();
+    let mut next = 99.0;
+    let twisted_b = TensorMap::from_block_fn(
+        &runtime,
+        [&leg_p, &leg_q],
+        [&leg_p, &leg_q],
+        |sectors, _| {
+            next += 1.0;
+            let dual_leg = SectorCodec::encode_sector(&rule, &sectors.codomain_uncoupled()[1])
+                .expect("the fixture's own labels encode");
+            next * MultiplicityFreeRigidSymbols::twist_scalar(&rule, dual_leg)
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        fermionic_a.compose(&fermionic_b).unwrap().data(),
+        fermionic_a
+            .contract(&twisted_b, &[2, 3], &[0, 1], &[0, 1, 2, 3])
+            .unwrap()
+            .data(),
+        "fZ2 x U1 x SU2: compose is contract against the twisted right operand"
+    );
+    // And the twist is not vacuous: without it the two contractions differ.
     assert_ne!(
-        twisted.data(),
+        fermionic_a
+            .contract(&fermionic_b, &[2, 3], &[0, 1], &[0, 1, 2, 3])
+            .unwrap()
+            .data(),
         fermionic_a.compose(&fermionic_b).unwrap().data(),
         "fZ2 x U1 x SU2: contract and compose must differ on a dual contracted leg"
     );
@@ -6118,11 +6159,15 @@ fn assert_reductions_and_factorizations_agree<R>(
     assert_nonzero(what, typed_scaled.data());
 
     let typed_inner = typed.0.inner(typed.1).unwrap();
+    let erased_inner = erased.0.inner(erased.1).unwrap();
+    // The erased facade always widens to a `Scalar`; on an f64 payload the
+    // imaginary part must be exactly zero, or `.re()` would be hiding it.
     assert_eq!(
-        typed_inner,
-        erased.0.inner(erased.1).unwrap().re(),
-        "{what}: inner"
+        erased_inner.im(),
+        0.0,
+        "{what}: inner grew an imaginary part"
     );
+    assert_eq!(typed_inner, erased_inner.re(), "{what}: inner");
     assert_ne!(typed_inner, 0.0, "{what}: inner is vacuously zero");
     // `<t, t>` is the squared weighted norm, which is the identity that pins
     // this weighting to `norm`'s.
@@ -6160,12 +6205,23 @@ fn assert_reductions_and_factorizations_agree<R>(
     let (typed_v, typed_c) = typed.0.left_orth().unwrap();
     assert_eq!(typed_v.data(), erased_v.data(), "{what}: left_orth v");
     assert_eq!(typed_c.data(), erased_c.data(), "{what}: left_orth c");
+    assert_eq!(
+        typed_leg_shapes(&typed_v),
+        erased_leg_shapes(&erased_v),
+        "{what}: left_orth v space"
+    );
+    assert_eq!(
+        typed_leg_shapes(&typed_c),
+        erased_leg_shapes(&erased_c),
+        "{what}: left_orth c space"
+    );
     assert_eq!(typed_v.data(), typed_q.data(), "{what}: left_orth is qr");
 
     let (erased_c, erased_vh) = erased.0.right_orth().unwrap();
     let (typed_c, typed_vh) = typed.0.right_orth().unwrap();
     assert_eq!(typed_c.data(), erased_c.data(), "{what}: right_orth c");
     assert_eq!(typed_vh.data(), erased_vh.data(), "{what}: right_orth vh");
+    assert_nonzero(what, typed_c.data());
     assert_nonzero(what, typed_vh.data());
 
     // `svd_vals` reports labels typed and raw ids erased, so the typed labels
