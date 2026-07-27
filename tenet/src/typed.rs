@@ -74,7 +74,7 @@
 //!
 //! **`ProductSector` is not `ProductSpace`.** [`tenet_core::ProductSector`] is
 //! a *sector label*: one irrep of a Deligne product category, TensorKit's
-//! `ProductSector` (`TensorKitSectors` 0.3.4, `src/product.jl:245-294`).
+//! `ProductSector` (from `TensorKitSectors`).
 //! TensorKit's `ProductSpace` is the unrelated leg-level notion — an ordered
 //! list of vector spaces forming a tensor's codomain or domain — which this
 //! facade spells as the `[&v, &w]` leg slices passed to every constructor, not
@@ -279,8 +279,7 @@ where
     R: SectorCodec + CheckedFusionAlgebra,
 {
     /// Builds a leg from `(label, degeneracy)` pairs — TensorKit's
-    /// `GradedSpace` / `Vect[I](c => d, ...; dual)` constructor family
-    /// (`spaces/gradedspace.jl:70-85`).
+    /// `GradedSpace` / `Vect[I](c => d, ...; dual)` constructor family.
     ///
     /// **Dual-leg convention.** Labels are stored exactly as given —
     /// `is_dual` only marks the orientation, it never dualizes them. On a
@@ -351,8 +350,7 @@ where
     }
 
     /// The sector labels carried by this leg, in the provider's
-    /// [`tenet_core::SectorId`] order — TensorKit `sectors(V)`
-    /// (`spaces/gradedspace.jl:179-186`), with one convention difference:
+    /// [`tenet_core::SectorId`] order — TensorKit `sectors(V)`, with one convention difference:
     /// the stored labels are returned as-is, never dualized on read, while
     /// TensorKit dualizes stored keys when `isdual(V)`. A leg from
     /// [`Self::try_dual`] already stores dual labels, so there the two
@@ -380,8 +378,7 @@ where
     }
 
     /// Per-sector degeneracies, parallel to [`Self::sectors`] — TensorKit's
-    /// `dim(V, c)` read for every carried sector at once
-    /// (`spaces/gradedspace.jl:96-101`). A borrowed slice: `O(1)`, no decode,
+    /// `dim(V, c)` read for every carried sector at once. A borrowed slice: `O(1)`, no decode,
     /// no allocation.
     #[inline]
     pub fn degeneracies(&self) -> &[usize] {
@@ -401,9 +398,9 @@ where
     }
 
     /// The conjugate leg: every sector replaced by its dual (degeneracies
-    /// carried along) and the dual flag flipped — TensorKit `dual(V)` / `V'`
-    /// (`spaces/gradedspace.jl:112`; the `dual(dual(V)) == V` contract is
-    /// `spaces/vectorspaces.jl:69-73`). TensorKit only flips the flag and
+    /// carried along) and the dual flag flipped — TensorKit `dual(V)` / `V'`,
+    /// which must satisfy the `dual(dual(V)) == V` contract of TensorKit's
+    /// `dual(::VectorSpace)`. TensorKit only flips the flag and
     /// dualizes labels lazily on read; this leg rewrites its stored sector
     /// table eagerly — `O(k log k)`, one provider dual per sector plus the
     /// leg constructor's re-sort — and [`Self::sectors`] then reports the
@@ -424,8 +421,7 @@ where
         })
     }
 
-    /// This leg read as a fixed truncation target: TensorKit `truncspace(V)`
-    /// (`src/factorizations/truncation.jl:261-269`).
+    /// This leg read as a fixed truncation target: TensorKit `truncspace(V)`.
     ///
     /// The resulting [`Truncation::space`] policy keeps exactly this leg's
     /// degeneracy for every coupled sector it carries, and drops any sector it
@@ -1250,8 +1246,8 @@ where
         built
     }
 
-    /// Random tensor map on `codomain <- domain` (TensorKit `rand(T, W ← V)`,
-    /// `src/tensors/tensor.jl:320-407`): entries (real and imaginary parts for
+    /// Random tensor map on `codomain <- domain` (TensorKit
+    /// `rand(T, W ← V)`): entries (real and imaginary parts for
     /// a `Complex64` payload) uniform in `[-1, 1)`, drawn from the runtime's
     /// deterministic splitmix64 stream. The payload dtype comes from `D`, so
     /// no dtype token is needed.
@@ -1294,7 +1290,7 @@ where
     /// the same layout and seed since both run the one shared fill.
     ///
     /// **No TensorKit counterpart.** TensorKit's `rand` family threads a
-    /// caller-supplied Julia `rng` (`tensors/tensor.jl:320-345`) and has no
+    /// caller-supplied Julia `rng` and has no
     /// integer-seed entry point of its own; the explicit u64 splitmix64
     /// stream is a tenet extension for reproducible fixtures.
     ///
@@ -1409,7 +1405,7 @@ where
     }
 
     /// The canonical structural isomorphism `codomain <- domain` (TensorKit
-    /// `isomorphism(W ← V)`, `src/tensors/linalg.jl:102-109`): every
+    /// `isomorphism(W ← V)`): every
     /// coupled-sector block is the identity matrix, which requires the fused
     /// codomain and domain to carry identical sector content.
     ///
@@ -1431,7 +1427,7 @@ where
         Self::structural(runtime, codomain, domain, false, "isomorphism")
     }
 
-    /// TensorKit `unitary(W ← V)` (`src/tensors/linalg.jl:129-132`): identical
+    /// TensorKit `unitary(W ← V)`: identical
     /// to [`Self::isomorphism`] — TensorKit only adds a Euclidean
     /// inner-product check, which every tenet fusion rule satisfies.
     ///
@@ -1448,7 +1444,7 @@ where
     }
 
     /// The canonical isometry `codomain <- domain` (TensorKit
-    /// `isometry(W ← V)`, `src/tensors/linalg.jl:149-158`): each
+    /// `isometry(W ← V)`): each
     /// coupled-sector block is the partial identity (the first `cols` columns
     /// of the identity), so `t† ∘ t = id(domain)`. Requires the domain to
     /// embed isometrically in the codomain (sectorwise
@@ -1769,8 +1765,7 @@ where
     /// Number of codomain legs.
     ///
     /// Reads the space structure only — no payload is touched and nothing is
-    /// allocated. The TensorKit name is [`Self::numout`]
-    /// (`tensors/abstracttensor.jl:239-241`).
+    /// allocated. The TensorKit name is [`Self::numout`].
     #[inline]
     pub fn codomain_rank(&self) -> usize {
         self.body.space.space().homspace().codomain().len()
@@ -1779,8 +1774,7 @@ where
     /// Number of domain legs.
     ///
     /// Reads the space structure only — no payload is touched and nothing is
-    /// allocated. The TensorKit name is [`Self::numin`]
-    /// (`tensors/abstracttensor.jl:253-255`).
+    /// allocated. The TensorKit name is [`Self::numin`].
     #[inline]
     pub fn domain_rank(&self) -> usize {
         self.body.space.space().homspace().domain().len()
@@ -1789,31 +1783,27 @@ where
     /// Total number of legs, `codomain_rank() + domain_rank()`.
     ///
     /// Reads the space structure only — no payload is touched and nothing is
-    /// allocated. The TensorKit name is [`Self::numind`]
-    /// (`tensors/abstracttensor.jl:267`).
+    /// allocated. The TensorKit name is [`Self::numind`].
     #[inline]
     pub fn rank(&self) -> usize {
         self.codomain_rank() + self.domain_rank()
     }
 
-    /// Number of codomain (output) legs. TensorKit `numout`
-    /// (`tensors/abstracttensor.jl:239-241`); alias of
+    /// Number of codomain (output) legs. TensorKit `numout`; alias of
     /// [`Self::codomain_rank`], exactly as on the erased facade.
     #[inline]
     pub fn numout(&self) -> usize {
         self.codomain_rank()
     }
 
-    /// Number of domain (input) legs. TensorKit `numin`
-    /// (`tensors/abstracttensor.jl:253-255`); alias of
+    /// Number of domain (input) legs. TensorKit `numin`; alias of
     /// [`Self::domain_rank`], exactly as on the erased facade.
     #[inline]
     pub fn numin(&self) -> usize {
         self.domain_rank()
     }
 
-    /// Total number of legs. TensorKit `numind`
-    /// (`tensors/abstracttensor.jl:267`); alias of [`Self::rank`], exactly as
+    /// Total number of legs. TensorKit `numind`; alias of [`Self::rank`], exactly as
     /// on the erased facade.
     #[inline]
     pub fn numind(&self) -> usize {
@@ -1946,9 +1936,9 @@ where
     ///
     /// **TensorKit correspondence.** TensorKit has no `contract_ordered`
     /// entry point either: the counterpart of `output_axes` is
-    /// `tensorcontract!`'s `pAB` output permutation (`TO.tensorcontract!`,
-    /// `tensors/tensoroperations.jl:119-146`; the destination structure is
-    /// `permute(compose(sA, sB), pAB)`, `tensoroperations.jl:159-167`). The
+    /// `tensorcontract!`'s `pAB` output permutation (`TO.tensorcontract!`;
+    /// the destination structure is `permute(compose(sA, sB), pAB)`, per
+    /// `tensorcontract_structure`). The
     /// erased [`crate::prelude::Tensor::contract_ordered`] is the sibling
     /// reference for the erased-side semantics.
     ///
@@ -2487,8 +2477,7 @@ where
     /// payload (TensorKit's `DiagonalTensorMap`) is materialized into the
     /// dense coupled buffer first, through the same [`Self::data`] route as
     /// [`Self::left_polar`]. TensorKit 0.17 *does* keep a diagonal QR compact
-    /// (MatrixAlgebraKit's `DiagonalAlgorithm`,
-    /// `factorizations/diagonal.jl:16-28,61-66`); that fast path is not
+    /// (MatrixAlgebraKit's `DiagonalAlgorithm`); that fast path is not
     /// adopted here — the issue #613 Group 4 contract requires every compact
     /// fast path to be re-proven individually, the same deferral the polars
     /// record.
@@ -2509,8 +2498,8 @@ where
     ///
     /// As [`Self::qr_compact`]: sectorwise cubic, with a compact-diagonal
     /// payload materialized dense first (TensorKit's `DiagonalAlgorithm`
-    /// covers `qr_full!` too, `factorizations/diagonal.jl:16-28,61-66` —
-    /// same non-adoption, same #613 Group 4 deferral).
+    /// covers `qr_full!` too — same non-adoption, same #613 Group 4
+    /// deferral).
     pub fn qr_full(&self) -> Result<(Self, Self), Error> {
         let mut dense = self.runtime.lease_dense();
         let (q, r) = tenet_matrixalgebra::qr_full_dyn(dense.dense(), &self.bound_ref()?)?;
@@ -2528,8 +2517,8 @@ where
     ///
     /// As [`Self::qr_compact`]: sectorwise cubic, with a compact-diagonal
     /// payload materialized dense first (TensorKit's `DiagonalAlgorithm`
-    /// covers the LQ pair as well, `factorizations/diagonal.jl:29-41,61-66` —
-    /// same non-adoption, same #613 Group 4 deferral).
+    /// covers the LQ pair as well — same non-adoption, same #613 Group 4
+    /// deferral).
     pub fn lq_compact(&self) -> Result<(Self, Self), Error> {
         let mut dense = self.runtime.lease_dense();
         let (l, q) = tenet_matrixalgebra::lq_compact_dyn(dense.dense(), &self.bound_ref()?)?;
@@ -2642,8 +2631,7 @@ where
     /// `t = w ∘ p`, returned as `(w, p)` — `w` isometric (`w† ∘ w = id` on the
     /// domain) and `p` Hermitian positive semidefinite.
     ///
-    /// Factor spaces per TensorKit 0.17
-    /// (`factorizations/matrixalgebrakit.jl:204-208`): `w` lives on the input's
+    /// Factor spaces per TensorKit 0.17: `w` lives on the input's
     /// own space `codomain <- domain`, `p` on `domain <- domain`. TensorKit
     /// also exposes algorithm kinds for the polars; neither tenet facade does —
     /// a deliberate narrowing, in parity with the erased
@@ -2664,9 +2652,9 @@ where
     /// factorizes each coupled sector on its own. A compact-diagonal payload
     /// (TensorKit's `DiagonalTensorMap`) materializes through the same
     /// [`Self::data`] route as [`Self::qr_compact`] first: TensorKit 0.17 has
-    /// no diagonal polar specialization either
-    /// (`factorizations/diagonal.jl:8-14` gives `DiagonalTensorMap` only
-    /// `copy_input` for the polars, so it dispatches dense per block), and the
+    /// no diagonal polar specialization either (its `DiagonalAlgorithm`
+    /// table gives `DiagonalTensorMap` only `copy_input` for the polars, so
+    /// it dispatches dense per block), and the
     /// issue #613 Group 4 contract requires any compact fast path to be
     /// individually re-proven — out of scope here.
     pub fn left_polar(&self) -> Result<(Self, Self), Error> {
@@ -2688,8 +2676,7 @@ where
     /// positive semidefinite and `w` a coisometry (`w ∘ w† = id` on the
     /// codomain).
     ///
-    /// Factor spaces per TensorKit 0.17
-    /// (`factorizations/matrixalgebrakit.jl:210-214`): `p` on
+    /// Factor spaces per TensorKit 0.17: `p` on
     /// `codomain <- codomain`, `w` on the input's own space
     /// `codomain <- domain`. Everything [`Self::left_polar`] says about
     /// algorithm kinds, adjoint views and the compact-diagonal route holds
@@ -2885,8 +2872,8 @@ where
     }
 
     /// The matrix exponential `exp(t) = Σ_k t^k / k!`, evaluated per coupled
-    /// sector — TensorKit's `exp` (`linalg.jl:44`), which copies and calls
-    /// `exp!` (`linalg.jl:420-428`): check `domain == codomain`, then
+    /// sector — TensorKit's `exp`, which copies and calls
+    /// `exp!`: check `domain == codomain`, then
     /// exponentiate every block.
     ///
     /// # Domain
@@ -3548,8 +3535,7 @@ where
     /// conjugate-transposes every block. Real payloads are transposed only;
     /// c64 entries are conjugated as well.
     ///
-    /// Eager, into a fresh destination — TensorKit's own `adjoint!`
-    /// (`linalg.jl:218`), so this is a TK-sanctioned form rather than a
+    /// Eager, into a fresh destination — TensorKit's own `adjoint!`, so this is a TK-sanctioned form rather than a
     /// divergence. The erased [`crate::prelude::Tensor::adjoint`] is instead
     /// the analogue of TensorKit's lazy `AdjointTensorMap` view: same result,
     /// different point at which the work is paid. Only the eager seam is
@@ -3641,8 +3627,7 @@ where
             .fold(0.0, f64::max))
     }
 
-    /// TensorKit `norm(t, p)` for a general exponent
-    /// (`src/tensors/linalg.jl:257-275`):
+    /// TensorKit `norm(t, p)` for a general exponent:
     ///
     /// ```text
     /// p == Inf     -> maximum entry magnitude over blocks(t)
@@ -3968,8 +3953,8 @@ where
         self.legs(self.body.space.space().homspace().domain())
     }
 
-    /// The codomain legs, in axis order (TensorKit `codomain(t)`,
-    /// `tensors/abstracttensor.jl:204-214`). Documented alias of
+    /// The codomain legs, in axis order (TensorKit `codomain(t)`).
+    /// Documented alias of
     /// [`Self::codomain`], carried for cross-facade name parity with the
     /// erased [`crate::prelude::Tensor::codomain_spaces`].
     #[inline]
@@ -3977,8 +3962,8 @@ where
         self.codomain()
     }
 
-    /// The domain legs, in axis order (TensorKit `domain(t)`,
-    /// `tensors/abstracttensor.jl:217-226`) — the spaces as written, i.e.
+    /// The domain legs, in axis order (TensorKit `domain(t)`) — the
+    /// spaces as written, i.e.
     /// *not* dualized. Documented alias of [`Self::domain`], carried for
     /// cross-facade name parity with the erased
     /// [`crate::prelude::Tensor::domain_spaces`].
@@ -3989,7 +3974,7 @@ where
 
     /// Quantum-dimension-weighted total dimension of every leg, in flat order
     /// (codomain legs first, then domain legs) — TensorKit's `dim(space(t,
-    /// i))` per leg (`space(t, i)`: `tensors/abstracttensor.jl:196-201`).
+    /// i))` per leg.
     /// Contraction planners use it as a size/FLOP proxy, exactly as they use
     /// the erased [`crate::prelude::Tensor::leg_dims`].
     ///
@@ -4058,9 +4043,8 @@ where
     }
 
     /// The single element of a rank-0 (scalar) tensor, e.g. the result of
-    /// contracting every leg — TensorKit `scalar`
-    /// (`tensors/tensoroperations.jl:446-451`; an empty payload reads as
-    /// zero there too).
+    /// contracting every leg — TensorKit `scalar` (an empty payload reads
+    /// as zero there too).
     ///
     /// Returns `D` directly: the static-dtype counterpart of the erased
     /// [`crate::prelude::Tensor::scalar`], whose `Scalar` enum exists only
@@ -4086,7 +4070,7 @@ where
             .fold(D::from_real(0.0), |acc, &value| acc + value))
     }
 
-    /// TensorKit `catdomain(t1, t2)` (`tensors/linalg.jl:479-497`):
+    /// TensorKit `catdomain(t1, t2)`:
     /// concatenate two `N₁ <- 1` tensor maps along their sole domain leg. The
     /// codomain product spaces must match exactly (TK lines 480-483); the two
     /// domain legs must share duality (TK 486-487) and are combined by direct
@@ -4125,7 +4109,7 @@ where
         self.cat(other, CatSide::Domain)
     }
 
-    /// TensorKit `catcodomain(t1, t2)` (`tensors/linalg.jl:498-514`):
+    /// TensorKit `catcodomain(t1, t2)`:
     /// concatenate two `1 <- N₂` tensor maps along their sole codomain leg.
     /// The domain product spaces must match exactly (TK 499-501); the two
     /// codomain legs must share duality (TK 503-504) and are combined by
@@ -4199,10 +4183,10 @@ where
         })
     }
 
-    /// TensorKit `absorb(tdst, tsrc)` (`tensors/linalg.jl:531`, `absorb!`
-    /// 532-545): copies the common per-axis prefix of every shared
-    /// fusion-tree block of `source` into a deep copy of `self` (TK 538-543:
-    /// `min` of the two block shapes per axis). Blocks whose key the source
+    /// TensorKit `absorb(tdst, tsrc)` (which copies and delegates to
+    /// `absorb!`): copies the common per-axis prefix of every shared
+    /// fusion-tree block of `source` into a deep copy of `self` (TK takes
+    /// the `min` of the two block shapes per axis). Blocks whose key the source
     /// does not carry are untouched, so the caller owns the initialization of
     /// the non-shared region — TK documents the same contract.
     ///
@@ -4298,23 +4282,23 @@ where
         })
     }
 
-    /// TensorKit `twist(t, inds)` (`tensors/indexmanipulations.jl:90-97`,
-    /// `twist!` 62-78): multiplies each fusion-tree block by the product over
+    /// TensorKit `twist(t, inds)` (and its in-place `twist!`): multiplies
+    /// each fusion-tree block by the product over
     /// `legs` (flat leg indices, codomain first) of the ribbon-twist
     /// eigenvalue θ of that leg's uncoupled sector. θ = −1 for odd fermionic
     /// sectors and +1 for every bosonic sector, so this is a no-op on purely
     /// bosonic legs and an involution (θ² = 1) on fermionic ones.
     ///
     /// When the twist is the identity on every stored block — TensorKit
-    /// `has_shared_twist` (`indexmanipulations.jl:34-51`): a bosonic
+    /// `has_shared_twist`: a bosonic
     /// provider, or no requested leg touching a twisted sector — the result
     /// is a body-sharing clone, O(1), exactly as TensorKit's `copy = false`
-    /// default shares `t` (`indexmanipulations.jl:91-93`). A compact
+    /// default shares `t`. A compact
     /// spectrum factor scales spectrum-per-sector and **stays compact**,
     /// O(Σ_c k_c) — parity with the erased `Data::Diagonal` fast path, and
     /// with TensorKit, whose `DiagonalTensorMap` twist stays diagonal
     /// because `similar` preserves the diagonal storage
-    /// (`tensors/diagonal.jl:84-89`) and `twist!` only scales blocks.
+    /// and `twist!` only scales blocks.
     /// Otherwise: one scaled copy of the dense payload, O(len), through the
     /// same per-block walk as the erased facade (`scale_blocks_impl`).
     ///
@@ -4393,13 +4377,13 @@ where
         })
     }
 
-    /// TensorKit `flip(t, I)` (`tensors/indexmanipulations.jl:21-29`):
+    /// TensorKit `flip(t, I)`:
     /// return a tensor isomorphic to `self` where the duality flag of each
     /// leg in `legs` (flat indices, codomain first; a leg listed twice is
     /// flipped twice, sequentially) is toggled,
     /// `space(t', i) = flip(space(t, i))`. The stored sectors and the block
     /// layout are unchanged; each fusion-tree block picks up the
-    /// Z-isomorphism phase of `fusiontrees/braiding_manipulations.jl:384-414`
+    /// Z-isomorphism phase of TensorKit's fusion-tree `flip`
     /// per flipped leg with uncoupled sector `a` and pre-flip duality `d`
     /// (χ = Frobenius–Schur phase, θ = ribbon twist; both real for every
     /// rule in scope): codomain leg → `d ? χ·θ : 1`; domain leg →
@@ -4457,8 +4441,7 @@ where
         })
     }
 
-    /// TensorKit `insertleftunit(t, i; dual)`
-    /// (`tensors/indexmanipulations.jl:124-138`): inserts the canonical unit
+    /// TensorKit `insertleftunit(t, i; dual)`: inserts the canonical unit
     /// leg — the vacuum with degeneracy one, or its dual — at zero-based
     /// external slot `position`, following TensorKit's left seam convention
     /// (the codomain/domain seam belongs to the domain side). The trivial
@@ -4467,11 +4450,11 @@ where
     ///
     /// O(1) for a dense payload: the new body shares the payload allocation,
     /// exactly as TensorKit's `copy = false` default shares `t.data` for an
-    /// ordinary `TensorMap` (`indexmanipulations.jl:129-130`). A compact
+    /// ordinary `TensorMap`. A compact
     /// spectrum factor materializes into a fresh dense payload first (one
     /// copy) — the #613 Group 4 contract; TensorKit routes its
     /// `DiagonalTensorMap` through the generic similar+block-copy branch
-    /// (`indexmanipulations.jl:132-137`) for the same reason.
+    /// for the same reason.
     ///
     /// The `where R: CanonicalUnitFusionRule` bound is the provider's
     /// certification that its vacuum obeys the canonical unit laws — the
@@ -4495,8 +4478,7 @@ where
         )
     }
 
-    /// TensorKit `insertrightunit(t, i; dual)`
-    /// (`tensors/indexmanipulations.jl:158-172`): inserts the canonical unit
+    /// TensorKit `insertrightunit(t, i; dual)`: inserts the canonical unit
     /// leg at zero-based external slot `position`, following TensorKit's
     /// right seam convention (the codomain/domain seam belongs to the
     /// codomain side). Everything else — sharing, compact materialization,
@@ -4555,8 +4537,7 @@ where
         })
     }
 
-    /// TensorKit `removeunit(t, i)`
-    /// (`tensors/indexmanipulations.jl:186-197`): removes the canonical unit
+    /// TensorKit `removeunit(t, i)`: removes the canonical unit
     /// leg at flat external axis `axis`. The selected leg must contain
     /// exactly the vacuum sector with degeneracy one. This undoes
     /// [`Self::insert_left_unit`] / [`Self::insert_right_unit`]; sharing and
@@ -4651,7 +4632,7 @@ where
     }
 
     /// A zero tensor on the same spaces and dtype as `self` (TensorKit
-    /// `zerovector`, `tensors/vectorinterface.jl:7-20`). Cheapest same-shape
+    /// `zerovector`). Cheapest same-shape
     /// constructor: scales the storage by zero rather than re-deriving the
     /// block structure — exactly the erased
     /// [`crate::prelude::Tensor::zeros_like`], but infallible because the
@@ -4714,8 +4695,7 @@ where
 
     /// Number of stored symmetry-allowed blocks — one per fusion-tree pair of
     /// the coupled layout (the namespace [`Self::block_fusion_trees`]
-    /// indexes). Finer than TensorKit `length(blocksectors(t))`
-    /// (`tensors/abstracttensor.jl:331-335`), which counts coupled sectors: a
+    /// indexes). Finer than TensorKit `length(blocksectors(t))`, which counts coupled sectors: a
     /// coupled sector with several tree pairs contributes one TK block but
     /// several here.
     #[inline]
@@ -4765,7 +4745,7 @@ where
 // certification without a certificate to check.
 impl<R> TensorMap<R, f64> {
     /// Widens to a c64 tensor map, imaginary parts zero (TensorKit
-    /// `Base.complex`, `tensors/abstracttensor.jl:696-705`).
+    /// `Base.complex`).
     ///
     /// Element-wise on the stored payload: a dense payload is widened in
     /// place-order, a compact spectrum factor maps spectrum-to-spectrum and
@@ -4802,8 +4782,8 @@ impl<R> TensorMap<R, f64> {
 // impl only, and `to_c64().re()` covers the round trip.
 impl<R> TensorMap<R, num_complex::Complex64> {
     /// The element-wise real part, as an f64 tensor map on the same spaces
-    /// (TensorKit `Base.real`, `tensors/abstracttensor.jl:707-717`:
-    /// blockwise element-wise, result scalartype real).
+    /// (TensorKit `Base.real`: blockwise element-wise, result scalartype
+    /// real).
     ///
     /// A compact spectrum factor maps spectrum-to-spectrum and stays compact.
     /// One `O(stored_len)` output allocation; the space is shared.
@@ -4812,7 +4792,7 @@ impl<R> TensorMap<R, num_complex::Complex64> {
     }
 
     /// The element-wise imaginary part, as an f64 tensor map on the same
-    /// spaces (TensorKit `Base.imag`, `tensors/abstracttensor.jl:718-728`).
+    /// spaces (TensorKit `Base.imag`).
     ///
     /// A compact spectrum factor maps spectrum-to-spectrum and stays compact.
     /// One `O(stored_len)` output allocation; the space is shared.

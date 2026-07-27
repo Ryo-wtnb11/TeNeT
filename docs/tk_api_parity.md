@@ -1,10 +1,16 @@
 # TensorKit 0.17 user-API parity
 
 One row per **user-facing** TensorKit 0.17.0 export (from `TensorKit.jl`'s
-`export` lists), mapped to the TeNeT user layer (`tenet::prelude` —
-`Tensor`, `Space`, `Runtime`, and the factorization return types). This is the
-lookup surface: a TensorKit user finds the function they reach for under its
-0.17 name here, or the rationale for why TeNeT spells or gates it differently.
+`export` lists), mapped primarily to the erased facade of the TeNeT user
+layer (`tenet::prelude` — `Tensor`, `Space`, `Runtime`, and the factorization
+return types). This is the lookup surface: a TensorKit user finds the
+function they reach for under its 0.17 name here, or the rationale for why
+TeNeT spells or gates it differently.
+
+Per-item upstream `file:line` provenance for the public rustdoc of both
+facades (erased and `tenet::typed`) lives in
+[`tenet/references.md`](../tenet/references.md), against pinned upstream
+revisions.
 
 Reference source: `TensorKit v0.17.0` at
 `~/.julia/packages/TensorKit/jCjQQ/src`. Names are the TK 0.17 canon

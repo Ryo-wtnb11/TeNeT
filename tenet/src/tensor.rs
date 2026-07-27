@@ -4096,9 +4096,8 @@ impl Tensor {
         })
     }
 
-    /// The identity endomorphism on `spaces <- spaces` (TensorKit `id(V)`,
-    /// `tensors/linalg.jl:75-82`): every coupled-sector block is the
-    /// identity matrix.
+    /// The identity endomorphism on `spaces <- spaces` (TensorKit `id(V)`):
+    /// every coupled-sector block is the identity matrix.
     ///
     /// ```
     /// use tenet::prelude::*;
@@ -4119,7 +4118,7 @@ impl Tensor {
     }
 
     /// The canonical structural isomorphism `codomain <- domain` (TensorKit
-    /// `isomorphism(W ← V)`, `tensors/linalg.jl:102-109`): every
+    /// `isomorphism(W ← V)`): every
     /// coupled-sector block is the identity matrix, which requires the fused
     /// codomain and domain to carry identical sector content. The
     /// finite-torus norm fuser is `isomorphism(fuse(dual(l) ⊗ l) ←
@@ -4157,7 +4156,7 @@ impl Tensor {
         )
     }
 
-    /// TensorKit `unitary(W ← V)` (`tensors/linalg.jl:129-132`): identical
+    /// TensorKit `unitary(W ← V)`: identical
     /// to [`Self::isomorphism`] — TensorKit only adds a Euclidean
     /// inner-product check, which every tenet fusion rule satisfies.
     pub fn unitary<'a, C, D>(
@@ -4181,7 +4180,7 @@ impl Tensor {
     }
 
     /// The canonical isometry `codomain <- domain` (TensorKit
-    /// `isometry(W ← V)`, `tensors/linalg.jl:149-158`): each coupled-sector
+    /// `isometry(W ← V)`): each coupled-sector
     /// block is the partial identity (the first `cols` columns of the
     /// identity), so `t† ∘ t = id(domain)`. Requires the domain to embed
     /// isometrically in the codomain (sectorwise `deg_domain <=
@@ -4218,7 +4217,7 @@ impl Tensor {
         )
     }
 
-    /// TensorKit `twist(t, inds)` (`tensors/indexmanipulations.jl:62-97`):
+    /// TensorKit `twist(t, inds)`:
     /// multiplies each fusion-tree block by the product over `legs` (flat
     /// leg indices, codomain first) of the ribbon-twist eigenvalue θ of that
     /// leg's uncoupled sector on the block's fusion tree. θ = −1 for odd
@@ -4304,13 +4303,13 @@ impl Tensor {
         })
     }
 
-    /// TensorKit `flip(t, I)` (`tensors/indexmanipulations.jl:8-29`): return
+    /// TensorKit `flip(t, I)`: return
     /// a tensor isomorphic to `self` where the duality flag of each leg in
     /// `legs` (flat indices, codomain first; a leg listed twice is flipped
     /// twice, sequentially) is toggled, `space(t', i) = flip(space(t, i))`.
     /// The stored sectors and the block layout are unchanged; each
     /// fusion-tree block picks up the Z-isomorphism phase of
-    /// `fusiontrees/braiding_manipulations.jl:384-414` per flipped leg with
+    /// TensorKit's fusion-tree `flip` per flipped leg with
     /// uncoupled sector `a` and pre-flip duality `d` (χ = Frobenius-Schur
     /// phase, θ = ribbon twist; both real for every rule in scope):
     /// codomain leg → `d ? χ·θ : 1`; domain leg → `d ? χ : θ`.
@@ -5244,7 +5243,7 @@ impl Tensor {
     /// fermionic supertrace twist is inserted on dual composed legs.
     /// [`Self::contract`] and the `tensor!` macro are TensorKit's
     /// `tensorcontract!` / `@tensor`: dual contracted legs **are** twisted
-    /// (TensorKit `tensoroperations.jl:388-420` twists only in
+    /// (TensorKit twists only in
     /// `blas_contract!`, never in `mul!`). For bosonic rules the two agree
     /// exactly; for fermionic rules (fZ2 and products containing it) they
     /// can differ by signs. Worked example — the odd sector flips sign:
@@ -6721,8 +6720,7 @@ impl Tensor {
         }
     }
 
-    /// TensorKit `norm(t, p)` for a general exponent
-    /// (`src/tensors/linalg.jl:257-275`):
+    /// TensorKit `norm(t, p)` for a general exponent:
     ///
     /// ```text
     /// p == Inf     -> maximum entry magnitude over blocks(t)
@@ -6873,7 +6871,7 @@ impl Tensor {
     /// space and block layout) and store the same dtype.
     ///
     /// TensorKit's counterpart is `VectorInterface.add(ty, tx, α, β)`
-    /// (`tensors/vectorinterface.jl:67-99`, also behind `t1 + t2`), which
+    /// (also behind `t1 + t2`), which
     /// computes `β*ty + α*tx` — a **false friend**: there the first
     /// coefficient `α` belongs to the *second* argument. Here `alpha`
     /// belongs to `self` and `beta` to `other`; go by argument order, not
@@ -8515,9 +8513,8 @@ impl Tensor {
         })
     }
 
-    /// Matrix exponential per coupled sector (TensorKit `exp`,
-    /// `tensors/linalg.jl:44`, which copies and calls `exp!` at
-    /// `tensors/linalg.jl:420-428`) — or, on compact diagonal storage, `exp` of
+    /// Matrix exponential per coupled sector (TensorKit `exp`, which copies
+    /// and calls `exp!`) — or, on compact diagonal storage, `exp` of
     /// each stored value.
     ///
     /// # Domain, and what storage decides
@@ -8531,8 +8528,7 @@ impl Tensor {
     ///   (Higham 2005), which is what the `LinearAlgebra.exp!` behind
     ///   TensorKit's own `exp!` runs. Nothing is symmetrized on the way.
     ///
-    /// The **compact** arm is TensorKit's `exp(::DiagonalTensorMap)`
-    /// (`tensors/diagonal.jl:383-390`), which is unconditionally elementwise,
+    /// The **compact** arm is TensorKit's `exp(::DiagonalTensorMap)`, which is unconditionally elementwise,
     /// and so is this one: a diagonal's exponential is elementwise whether or
     /// not its spectrum is real. Storage therefore decides *how* `exp` is
     /// computed, not whether it is defined — a genuinely complex spectrum from
@@ -8684,7 +8680,7 @@ impl Tensor {
 
     /// Elementwise square root of a diagonal bond tensor, i.e. the
     /// TensorKit 0.17 `sqrt(::DiagonalTensorMap)` idiom
-    /// (`tensors/diagonal.jl:384-390`: `sqrt.(d.data)` on the diagonal)
+    /// (`sqrt.(d.data)` on the diagonal)
     /// used to split singular values as `√S · √S = S` in Vidal-gauge /
     /// gate-application updates.
     ///
