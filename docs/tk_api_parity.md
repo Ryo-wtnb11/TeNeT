@@ -145,7 +145,7 @@ Added this sweep: `Tensor::repartition`, `Tensor::zeros_like`,
 | `reduceddim` | has-different-name | `Space::degeneracy` | Reduced (per-sector) dimension. |
 | `dims` (tensor legs) | has-different-name | `Tensor::leg_dims` / `leg_dim` | |
 | `fuse` | has | `Space::fuse` / `fuse_all` | Collapses the factors into one graded leg, as TK's `fuse` does. |
-| `otimes` (`⊗`, space) | design-gated | — | TK's space-level `⊗` builds a **factor-preserving** `ProductSpace`, which `Space::fuse` is not: fusing is lossy about the factors. TeNeT has no public product-space type, so there is nothing to return (see #595). |
+| `otimes` (`⊗`, space) | design-gated | — | TK's space-level `⊗` builds a **factor-preserving** `ProductSpace`, which `Space::fuse` is not: fusing is lossy about the factors. TeNeT has no public product-space type, so there is nothing to return (see #595). Unrelated to TK's `ProductSector` / TeNeT's `ProductSector`, which is a *sector label* in a Deligne product category, not a list of legs. |
 | `oplus` (`⊕`) | added | `Space::oplus` | Per-sector degeneracy sum; rule + duality guarded. |
 | `ominus` (`⊖`) | design-gated | — | Space subtraction; niche, needs a negativity guard. |
 | `flip` (space) | has-different-name | `Space::dual` | For an elementary space, `flip` and `dual` give isomorphic spaces; the twist-carrying distinction is internal to the fusion machinery. |
@@ -162,15 +162,18 @@ Added this sweep: `Tensor::repartition`, `Tensor::zeros_like`,
 
 ### Sector types
 
-Sector types are not a public TeNeT type: a rule is chosen by which `Space`
-constructor is called, and read back as a `SectorLabel`.
+Sector types are not a public type of the *erased* user layer: a rule is chosen
+by which `Space` constructor is called, and read back as a `SectorLabel`. The
+provider-typed facade is the exception the rest of this section is measured
+against — `tenet::typed::GradedSpace<R>` keeps the provider type and reports
+`SectorCodec::Sector` labels, so a sector type is public there.
 
 | TK 0.17 | Status | TeNeT | Notes |
 |---|---|---|---|
 | `Z2Irrep` / `U1Irrep` / `SU2Irrep` | has-different-name | `Space::z2` / `Space::u1` / `Space::su2` | Labels round-trip through `SectorLabel::Z2` / `U1` / `SU2`. |
 | `FermionParity` | has-different-name | `Space::fz2` | Fermionic Z2; carries the braiding sign. |
 | `SUNIrrep{3}` | has-different-name | `Space::su3` | Outer-multiplicity rule; `(p, q)` labels read back through `Space::su3_sectors` (they do not fit `SectorLabel`). |
-| `ProductSector` (`⊠` of sectors) | has-different-name | `Space::product` / `Space::fz2_u1_su2` | Fixed product providers rather than an open sector-product type. |
+| `ProductSector` (`⊠` of sectors) | has-different-name | `ProductFusionRuleExt::product` + `product_sector` (typed facade) | The canonical route, and as open as TK's `⊠`: any ordered product of admitted providers, recursively nested, no new constructor. Factor order and association are Rust-type/label structure, never an automatic equivalence. `Space::product` / `Space::fz2_u1_su2` are two fixed erased conveniences kept for compatibility, not the extension mechanism (#610). |
 | `ZNIrrep{N}` (`N > 2`) | design-gated | — | Nothing exists between `Z2` and `U(1)`: Z_N clock models, parafermions and Z_N gauge sectors all need one `FusionRule` + `SectorCodec` impl plus a `Space` constructor (#591). |
 | `CU1Irrep` | design-gated | — | O(2) / broken-SU(2) sectors; same gate as `ZNIrrep{N}` (#591). |
 

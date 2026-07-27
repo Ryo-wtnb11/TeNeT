@@ -11,6 +11,13 @@ The built-in `Space::product` and `Space::fz2_u1_su2` constructors use a
 fixed-width, association-independent packed product codec. This replaces the
 earlier nested Cantor-pairing IDs used by the built-in user layer.
 
+These two are fixed compatibility conveniences; the canonical route to a
+product symmetry is the typed facade's generic provider product (see
+`tenet::typed`), which defaults to `TensorKitProductCodec` instead. A provider
+differing only in its codec labels the same category with different numeric IDs
+and a different `RuleIdentity` — which is exactly why those IDs are not a wire
+format.
+
 The migration preserves:
 
 - sector labels and degeneracies;

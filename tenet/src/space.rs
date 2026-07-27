@@ -407,6 +407,15 @@ impl Space {
     /// degeneracy)` pairs, using the association-independent packed
     /// product-sector encoding.
     ///
+    /// **A fixed built-in convenience, not the extension mechanism.** This
+    /// constructor names one product; it is kept for compatibility and no
+    /// further fixed product variants or order-reversed siblings will be
+    /// added. The canonical route to a product symmetry — any ordered product
+    /// of admitted providers, recursively nested, with no new constructor — is
+    /// the typed facade: [`crate::typed`] documents it, built on
+    /// [`tenet_core::ProductFusionRuleExt::product`] and
+    /// [`tenet_core::product_sector`].
+    ///
     /// Internal numeric IDs intentionally differ from the earlier 0.1
     /// Cantor-coded built-in IDs. Labels and algebraic semantics are unchanged;
     /// raw `usize` sector IDs are not a stable wire format.
@@ -447,6 +456,11 @@ impl Space {
     /// twice_spin), degeneracy)` pairs (`parity`: `0` even / `1` odd,
     /// `twice_spin = 2j`), encoded with the association-independent packed
     /// product layout `fZ2[1] | U1[32] | SU2[8]`.
+    ///
+    /// **A fixed built-in convenience, not the extension mechanism**, for the
+    /// same reason as [`Self::product`]: a third, fourth or reordered factor
+    /// is a `.product(…)` call on the typed facade ([`crate::typed`]), not
+    /// another constructor here.
     ///
     /// Internal numeric IDs intentionally differ from the earlier 0.1
     /// Cantor-coded built-in IDs. Labels and algebraic semantics are unchanged;
