@@ -7832,7 +7832,7 @@ fn exp_balances_a_badly_scaled_block_before_the_pade_evaluation() {
 }
 
 #[test]
-// Verbatim `%.17g` Julia output; see `exp_of_a_multisector_u1_endomorphism...`.
+// `%.17g` of a 400-bit BigFloat oracle; see the comment below.
 #[allow(clippy::excessive_precision)]
 fn exp_undoes_the_balancing_permutation_and_scaling_like_julia() {
     // What: the *undo* half of balancing, on a block that exercises both halves
@@ -7842,22 +7842,37 @@ fn exp_undoes_the_balancing_permutation_and_scaling_like_julia() {
     // above needs no permutation and so cannot see an undo applied in the wrong
     // order; this one can.
     //
-    // The oracle is Julia 1.11.6 on the same matrix:
+    // That both halves fired is asserted directly on `balance_in_place`, against
+    // Julia 1.11.6:
     //
     // ```julia
     // d = [1e8, 1.0, 1e-8]
     // B = [0.0 0.0 1.0; 2.0 3.0 5.0; 1.0 0.0 0.0]
     // A = [B[i, j] * d[i] / d[j] for i in 1:3, j in 1:3]
-    // LinearAlgebra.LAPACK.gebal!('B', copy(A))  # (2, 3, [2.0, 2^53, 1.0])
-    // exp(A)
+    // LinearAlgebra.LAPACK.gebal!('B', copy(A))
+    // # (2, 3, [2.0, 9.007199254740992e15, 1.0])       # 9.007...e15 == 2^53
     // ```
     //
-    // The `gebal!` line is the fixture certification: `ilo, ihi = 2, 3` says
-    // the permutation fired, and `scale[2] = 2^53` says the scaling did. Note
-    // that `exp(A)` is *not* the exact similarity image `d exp(B) d^-1` — it
-    // agrees with it to only eight digits, because balancing equalizes the
-    // window's norms without seeing the isolated column, leaving `||A||_1 ≈
-    // 7e8` and 27 squarings. TeNeT reproduces Julia, not the exact answer.
+    // `ilo, ihi = 2, 3` is the permutation, `scale[2] = 2^53` the scaling.
+    //
+    // The *values* are checked against an exact oracle rather than against a
+    // recorded `exp(A)`: `A = D B D^-1`, so `exp(A) = D exp(B) D^-1` entry by
+    // entry, and `exp(B)` is available in closed form — its `{1,3}` corner is
+    // `[cosh 1, sinh 1; sinh 1, cosh 1]`, its `(2,2)` entry `e^3`, and the two
+    // remaining entries are the integrals `e^3 (7 (1 - e^-2) -/+ 1.5 (1 - e^-4)) / 4`.
+    // The constants below are that oracle to 17 digits, cross-checked against a
+    // 400-bit BigFloat scaling-and-squaring Taylor evaluation of `exp(B)` in
+    // Julia. Recording a `Float64` `exp(A)` instead is what broke CI: the
+    // fixture's own conditioning makes the answer platform-dependent in the
+    // ninth digit, so no recorded double is portable at a tight tolerance.
+    //
+    // The tolerance is that conditioning, made explicit: balancing equalizes the
+    // window's norms without seeing the isolated column, so the balanced block
+    // still has `||A||_1 ~ 7e8` and takes 27 squarings, each of which roughly
+    // doubles the relative error. `2^27 * eps ~ 3.0e-8` bounds it; `1e-7` is
+    // that bound with a factor of three of room. Julia's own answer sits at
+    // 2.24e-8 on macOS and 2.15e-8 on Linux, i.e. the *whole* macOS/Linux spread
+    // is 1.1e-9, two orders inside the gate. The structural zeros stay EXACT.
     let diagonal = [1e8_f64, 1.0, 1e-8];
     let rows = [[0.0_f64, 0.0, 1.0], [2.0, 3.0, 5.0], [1.0, 0.0, 0.0]];
     let mut block = vec![0.0_f64; 9];
@@ -7866,6 +7881,14 @@ fn exp_undoes_the_balancing_permutation_and_scaling_like_julia() {
             block[row + 3 * column] = entry * diagonal[row] / diagonal[column];
         }
     }
+    assert_gebal_matches(
+        &block,
+        3,
+        (1, 2),
+        &[2.0, 2.0_f64.powi(53), 1.0],
+        "the permuting-and-scaling fixture",
+    );
+
     let tensor = u1_block_endomorphism(&[(0, 3, block)]);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
     let mut context = default_context();
@@ -7878,24 +7901,25 @@ fn exp_undoes_the_balancing_permutation_and_scaling_like_julia() {
     .unwrap();
 
     let expected = [
-        [1.5430806003234485, 0.0, 1.1752011673750514e16],
+        [1.5430806348152437_f64, 0.0, 1.1752011936438014e16],
         [
-            2.2998574558586435e-07,
-            20.08553677353343,
-            3778681750.8932686,
+            2.2998574860019004e-07,
+            20.085536923187668,
+            3778681797.1531172,
         ],
-        [1.1752011673750516e-16, 0.0, 1.5430806003234485],
+        [1.1752011936438015e-16, 0.0, 1.5430806348152437],
     ];
     let actual = u1_block_matrix(exponential.tensor(), 0);
     for (row, entries) in expected.iter().enumerate() {
         for (column, &want) in entries.iter().enumerate() {
             let got = actual[row + 3 * column];
             // The two structural zeros are the permutation's own signature: the
-            // isolated column stays exactly isolated, to the last bit.
-            let residual = (got - want).abs();
+            // isolated column stays exactly isolated, to the last bit. Every
+            // other entry gets the squaring-error budget derived above.
+            let tolerance = if want == 0.0 { 0.0 } else { 1e-7 * want.abs() };
             assert!(
-                residual <= 1e-12 * want.abs(),
-                "entry ({row}, {column}): {got:.17e} differs from Julia's {want:.17e}"
+                (got - want).abs() <= tolerance,
+                "entry ({row}, {column}): {got:.17e} differs from the oracle's {want:.17e}"
             );
         }
     }
