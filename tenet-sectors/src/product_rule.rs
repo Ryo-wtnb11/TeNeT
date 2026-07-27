@@ -36,6 +36,19 @@ use crate::{
 /// *not* a universal factor-order rule: each exists because it enforces an
 /// extra invariant (parity tied to the charge, respectively to the spin), not
 /// because that order is canonical.
+///
+/// One deliberate divergence from that correspondence: TensorKit's `⊠`
+/// *flattens*, so `(A ⊠ B) ⊠ C` and `A ⊠ (B ⊠ C)` are the same
+/// `ProductSector{Tuple{A,B,C}}` and association is unobservable there.
+/// TeNeT keeps the nesting in the Rust type — `ProductFusionRule<ProductFusionRule<A, B>, C>`
+/// over `ProductSector<ProductSector<A, B>, C>` labels — so the two
+/// associations are distinct types with distinct
+/// [`RuleIdentity`](crate::RuleIdentity)s, and converting between them is an
+/// explicit relabel. Only the numeric ids can agree: a
+/// [`PackedProductCodec`](crate::PackedProductCodec) layout is
+/// association-independent by construction (see its own documentation), and
+/// that numeric equality deliberately does not authorize mixing tensors across
+/// the two providers.
 #[derive(Clone, Debug)]
 pub struct ProductFusionRule<LeftRule, RightRule, Codec = TensorKitProductCodec> {
     left: LeftRule,

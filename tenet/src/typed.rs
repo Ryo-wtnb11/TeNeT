@@ -61,7 +61,11 @@
 //! an equivalence.** `U(1) ⊠ fZ2` and `fZ2 ⊠ U(1)` are both legal, are
 //! different Rust types with different [`tenet_core::RuleIdentity`]s, and
 //! converting between them is an explicit component swap; nothing here permutes
-//! factors for you.
+//! factors for you. Association is where TeNeT diverges from TensorKit rather
+//! than mirrors it: TK's `⊠` flattens nested products into one
+//! `ProductSector{Tuple{…}}`, so association is unobservable there, while
+//! TeNeT keeps the nesting in the Rust type — see
+//! [`tenet_core::ProductFusionRule`] for the full statement.
 //!
 //! The scope of that claim is this facade's current admission:
 //! `MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra +
