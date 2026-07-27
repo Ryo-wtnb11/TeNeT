@@ -1238,142 +1238,51 @@ impl CatCopyPlan {
         Ok(())
     }
 
+    /// Why there is no generic strided fallback behind the prover (#618
+    /// investigation result): `compile_cat_plan` cannot emit a plan the
+    /// fast-path prover (`validate_owned_cat`) declines — it iterates
+    /// canonical coupled-sector regions, which `coupled_sector_regions`
+    /// proves tile storage contiguously in block order, pushes per-region
+    /// copies in strict source order, and re-checks the prover's side
+    /// equations itself; the one geometry that would break the codomain
+    /// column count needs a zero-degeneracy sector, which `Space`
+    /// normalizes away before any tensor exists; and the adjoint-view
+    /// route's conjugate strided copies are proven geometry (measured to
+    /// take the fast path). The former fallback loop was unreachable and
+    /// test-dead, so a future declining geometry must surface loudly here
+    /// instead of silently taking an untested slow path.
     pub(crate) fn execute<D: UserScalar>(&self, lhs: &[D], rhs: &[D]) -> Result<Vec<D>, Error> {
-        let sources = [lhs, rhs];
-        let required_len = self.required_len;
         let side = match self.side {
             CatSide::Domain => OwnedCatSide::Domain,
             CatSide::Codomain => OwnedCatSide::Codomain,
         };
-        if let Some(output) =
-            tenet_tensors::try_cat_owned_raw(required_len, side, &self.copies, sources)
-        {
-            return Ok(output);
-        }
-        self.preflight([lhs.len(), rhs.len()])?;
-        let mut output = vec![D::from_real(0.0); required_len];
-        for copy in &self.copies {
-            let shape = [copy.rows(), copy.cols()];
-            let source_strides = [copy.source_row_stride(), copy.source_column_stride()];
-            let destination_strides = [1, copy.destination_leading_dimension()];
-            if copy.conjugate() {
-                // Why not copy_into: the strided kernel transposes views but
-                // does not conjugate complex values.
-                copy_cat_mapped(&mut output, sources[copy.source()], copy, |value| {
-                    FactorScalar::adjoint(value)
-                });
-            } else {
-                tenet_tensors::copy_into(
-                    BlockViewMut::new(
-                        &mut output,
-                        &shape,
-                        &destination_strides,
-                        copy.destination_offset(),
-                    )?,
-                    BlockView::new(
-                        sources[copy.source()],
-                        &shape,
-                        &source_strides,
-                        copy.source_offset(),
-                    )?,
-                )?;
-            }
-        }
-        Ok(output)
+        tenet_tensors::try_cat_owned_raw(self.required_len, side, &self.copies, [lhs, rhs])
+            .ok_or_else(|| {
+                internal_layout_error(
+                    "cat copy plan declined by the fast-path prover; no known geometry reaches \
+                     this",
+                )
+            })
     }
 
+    /// Mixed-dtype sibling of [`Self::execute`]; the same #618 rationale
+    /// applies — a prover decline is an internal invariant violation.
     fn execute_c64(
         &self,
         lhs: CatC64Source<'_>,
         rhs: CatC64Source<'_>,
     ) -> Result<Vec<Complex64>, Error> {
-        let sources = [lhs, rhs];
-        let required_len = self.required_len;
-        let source_lengths = sources.map(|source| match source {
-            CatC64Source::F64(values) => values.len(),
-            CatC64Source::C64(values) => values.len(),
-        });
         let side = match self.side {
             CatSide::Domain => OwnedCatSide::Domain,
             CatSide::Codomain => OwnedCatSide::Codomain,
         };
-        if let Some(output) =
-            tenet_tensors::try_cat_owned_c64_raw(required_len, side, &self.copies, sources)
-        {
-            return Ok(output);
-        }
-        self.preflight(source_lengths)?;
-        let mut output = vec![Complex64::new(0.0, 0.0); required_len];
-        for copy in &self.copies {
-            match sources[copy.source()] {
-                CatC64Source::C64(source) => {
-                    if copy.conjugate() {
-                        copy_cat_mapped(&mut output, source, copy, |value| value.conj());
-                    } else {
-                        let shape = [copy.rows(), copy.cols()];
-                        let source_strides =
-                            [copy.source_row_stride(), copy.source_column_stride()];
-                        let destination_strides = [1, copy.destination_leading_dimension()];
-                        tenet_tensors::copy_into(
-                            BlockViewMut::new(
-                                &mut output,
-                                &shape,
-                                &destination_strides,
-                                copy.destination_offset(),
-                            )?,
-                            BlockView::new(source, &shape, &source_strides, copy.source_offset())?,
-                        )?;
-                    }
-                }
-                CatC64Source::F64(source) => {
-                    if copy.conjugate() {
-                        copy_cat_mapped(&mut output, source, copy, |value| {
-                            Complex64::new(value, 0.0)
-                        });
-                    } else {
-                        for column in 0..copy.cols() {
-                            let source_start = column
-                                .checked_mul(copy.source_column_stride())
-                                .and_then(|offset| copy.source_offset().checked_add(offset))
-                                .ok_or_else(|| {
-                                    internal_layout_error("mixed cat source offset overflow")
-                                })?;
-                            let destination_start = column
-                                .checked_mul(copy.destination_leading_dimension())
-                                .and_then(|offset| copy.destination_offset().checked_add(offset))
-                                .ok_or_else(|| {
-                                    internal_layout_error("mixed cat destination offset overflow")
-                                })?;
-                            let source_end =
-                                source_start.checked_add(copy.rows()).ok_or_else(|| {
-                                    internal_layout_error("mixed cat source extent overflow")
-                                })?;
-                            let destination_end =
-                                destination_start.checked_add(copy.rows()).ok_or_else(|| {
-                                    internal_layout_error("mixed cat destination extent overflow")
-                                })?;
-                            let source_column =
-                                source.get(source_start..source_end).ok_or_else(|| {
-                                    internal_layout_error("mixed cat source slab is out of bounds")
-                                })?;
-                            let destination_column = output
-                                .get_mut(destination_start..destination_end)
-                                .ok_or_else(|| {
-                                    internal_layout_error(
-                                        "mixed cat destination slab is out of bounds",
-                                    )
-                                })?;
-                            for (destination, &source) in
-                                destination_column.iter_mut().zip(source_column)
-                            {
-                                *destination = Complex64::new(source, 0.0);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Ok(output)
+        tenet_tensors::try_cat_owned_c64_raw(self.required_len, side, &self.copies, [lhs, rhs])
+            .ok_or_else(|| {
+                internal_layout_error(
+                    "cat copy plan declined by the fast-path prover; no known geometry reaches \
+                     this",
+                )
+            })
     }
 }
 
@@ -2018,26 +1927,6 @@ where
         source_offset,
         map,
     )
-}
-
-fn copy_cat_mapped<D, S>(
-    destination: &mut [D],
-    source: &[S],
-    copy: &OwnedCatCopy,
-    mut map: impl FnMut(S) -> D,
-) where
-    S: Copy,
-{
-    for column in 0..copy.cols() {
-        for row in 0..copy.rows() {
-            let source_index = copy.source_offset()
-                + row * copy.source_row_stride()
-                + column * copy.source_column_stride();
-            let destination_index =
-                copy.destination_offset() + row + column * copy.destination_leading_dimension();
-            destination[destination_index] = map(source[source_index]);
-        }
-    }
 }
 
 fn preflight_cat_copy(
@@ -10768,6 +10657,43 @@ mod unit_layout_tensor_tests {
 
 #[cfg(test)]
 mod compact_diagonal_tests;
+
+/// #618: a cat copy plan the fast-path prover declines is an internal
+/// error, not a silent slow path. The plan is constructed directly because
+/// no public-API cat can decline (see the `execute` rationale comment);
+/// reversed region order is the minimal unproven geometry.
+#[cfg(test)]
+mod cat_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn declined_plan_is_an_internal_layout_error() {
+        let plan = CatCopyPlan {
+            required_len: 10,
+            copies: vec![
+                // Region 4..10 listed before region 0..4: the prover rejects
+                // the reversed tiling (`region_start != covered_end`).
+                OwnedCatCopy::new(0, 2, 4, [2, 1], [1, 2], 2, 4..10, false),
+                OwnedCatCopy::new(1, 2, 6, [2, 2], [2, 1], 2, 4..10, false),
+                OwnedCatCopy::new(0, 0, 0, [2, 1], [1, 2], 2, 0..4, false),
+                OwnedCatCopy::new(1, 0, 2, [2, 1], [1, 2], 2, 0..4, false),
+            ],
+            side: CatSide::Domain,
+        };
+        let lhs: [f64; 4] = [1.0, 2.0, 3.0, 4.0];
+        let rhs: [f64; 6] = [5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let error = plan.execute(&lhs, &rhs).unwrap_err();
+        match error {
+            Error::InvalidArgument(message) => {
+                assert!(
+                    message.contains("declined by the fast-path prover"),
+                    "unexpected internal error message: {message}"
+                );
+            }
+            other => panic!("expected the internal layout error class, got {other:?}"),
+        }
+    }
+}
 
 #[cfg(test)]
 mod runtime_detached_tests {
