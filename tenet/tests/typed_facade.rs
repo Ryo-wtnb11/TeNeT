@@ -5579,3 +5579,893 @@ fn compact_is_posdef_matches_the_forced_dense_route_for_a_hermitian_c64_spectrum
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Issue #589: cross-facade byte oracles for the built-in multiplicity-free
+// routes that had none — U(1), U(1) x fZ2, and fZ2 x U(1) x SU(2).
+//
+// The erased dispatch has one arm per built-in rule (`UserBoundSpace` in
+// `tenet/src/tensor.rs`), so a rule with no oracle here is a whole dispatch arm
+// nobody compares against the typed facade. Z2, fZ2 and SU(2) are covered
+// above; these three are the remainder, and the two product rules are the only
+// routes that go through the packed product codec and
+// `core_rule_bridge`'s product `LoweredMultiplicityFreeAlgebra`.
+//
+// The rule aliases below are test-local and deliberately mirror
+// `tenet/src/space.rs`'s `pub(crate)` ones element for element: the erased
+// facade picks a *specific* codec (packed, not the `ProductFusionRule` default
+// Cantor one), and a typed fixture built on any other codec would name
+// different sector ids and so would not be the same tensor at all.
+// ---------------------------------------------------------------------------
+
+type U1Fz2Codec =
+    tenet::core::PackedProductCodec<tenet::core::U1SectorLayout, tenet::core::Fz2SectorLayout>;
+type Fz2U1Codec =
+    tenet::core::PackedProductCodec<tenet::core::Fz2SectorLayout, tenet::core::U1SectorLayout>;
+type Fz2U1Layout =
+    tenet::core::ProductSectorLayout<tenet::core::Fz2SectorLayout, tenet::core::U1SectorLayout>;
+type Fz2U1Su2Codec = tenet::core::PackedProductCodec<Fz2U1Layout, tenet::core::Su2SectorLayout>;
+
+type U1Fz2Rule = tenet::core::ProductFusionRule<
+    tenet::core::U1FusionRule,
+    tenet::core::FermionParityFusionRule,
+    U1Fz2Codec,
+>;
+type Fz2U1Rule = tenet::core::ProductFusionRule<
+    tenet::core::FermionParityFusionRule,
+    tenet::core::U1FusionRule,
+    Fz2U1Codec,
+>;
+type Fz2U1Su2Rule =
+    tenet::core::ProductFusionRule<Fz2U1Rule, tenet::core::SU2FusionRule, Fz2U1Su2Codec>;
+
+/// One `(is_dual, [(label, degeneracy)])` entry per leg, codomain first: the
+/// full labelled space of a tensor, as both facades report it.
+type LabelledLegs<S> = Vec<(bool, Vec<(S, usize)>)>;
+
+/// Asserts that every leg of a *result* — codomain first, then domain — carries
+/// the same `(is_dual, [(label, degeneracy)])` content on both facades.
+///
+/// Why this and not [`typed_leg_shapes`] / [`erased_leg_shapes`]: those two
+/// report the dual flag and the degeneracies only, so they are blind to a
+/// sector *relabelling* that preserves order — an erased product decoder (or an
+/// operation's output-space construction) that named the same block content
+/// with different sectors would keep the degeneracies, the block order and
+/// therefore the bytes, and would pass unnoticed. The fixture-side id
+/// comparison in `counter_oracle_pair` only covers the inputs, so the results
+/// need this.
+///
+/// Labels rather than ids as the meeting point: the two facades speak different
+/// label types ([`SectorLabel`] erased, `R::Sector` typed), and the erased ids
+/// are not public, so `to_label` translates the erased label into the typed
+/// one. Comparing labels rather than encoded ids also means a mismatch is
+/// reported as the two sectors it is, not as two opaque numbers.
+///
+/// The comparison is *ordered*: both facades store a leg in internal sector-id
+/// order, so an order difference is a real disagreement about block layout and
+/// must fail rather than be sorted away.
+fn assert_result_leg_sectors_agree<R, D>(
+    what: &str,
+    which: &str,
+    typed: &TensorMap<R, D>,
+    erased: &tenet::prelude::Tensor,
+    to_label: &dyn Fn(tenet::prelude::SectorLabel) -> R::Sector,
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: tenet::prelude::TensorScalar,
+{
+    let typed_legs: LabelledLegs<R::Sector> = typed
+        .codomain()
+        .iter()
+        .chain(typed.domain().iter())
+        .map(|leg| {
+            let labels = leg
+                .sectors()
+                .unwrap_or_else(|error| panic!("{what}: {which}: typed leg decode: {error}"));
+            (
+                leg.is_dual(),
+                labels
+                    .into_iter()
+                    .zip(leg.degeneracies().iter().copied())
+                    .collect(),
+            )
+        })
+        .collect();
+    let erased_legs: LabelledLegs<R::Sector> = erased
+        .codomain_spaces()
+        .iter()
+        .chain(erased.domain_spaces().iter())
+        .map(|space| {
+            (
+                space.is_dual(),
+                space
+                    .sectors()
+                    .into_iter()
+                    .map(|(label, degeneracy)| (to_label(label), degeneracy))
+                    .collect(),
+            )
+        })
+        .collect();
+    assert_eq!(typed_legs, erased_legs, "{what}: {which} space");
+    // A result with no sectors anywhere would make the equality above vacuous.
+    assert!(
+        typed_legs.iter().any(|(_, sectors)| !sectors.is_empty()),
+        "{what}: {which} has no sectors, so the space comparison proves nothing"
+    );
+}
+
+/// The erased-to-typed label bridge for the U(1) family.
+fn u1_label(label: tenet::prelude::SectorLabel) -> tenet::core::U1Irrep {
+    match label {
+        tenet::prelude::SectorLabel::U1(charge) => tenet::core::U1Irrep::new(charge),
+        other => panic!("not a U(1) sector: {other:?}"),
+    }
+}
+
+/// The erased-to-typed label bridge for the U(1) x fZ2 family.
+fn u1_fz2_label(
+    label: tenet::prelude::SectorLabel,
+) -> tenet::core::ProductSector<tenet::core::U1Irrep, tenet::core::Z2Irrep> {
+    match label {
+        tenet::prelude::SectorLabel::U1FZ2 { charge, parity } => {
+            tenet::core::ProductSector::new(tenet::core::U1Irrep::new(charge), parity_irrep(parity))
+        }
+        other => panic!("not a U(1) x fZ2 sector: {other:?}"),
+    }
+}
+
+/// The erased-to-typed label bridge for the fZ2 x U(1) x SU(2) family.
+fn fz2_u1_su2_label(
+    label: tenet::prelude::SectorLabel,
+) -> tenet::core::ProductSector<
+    tenet::core::ProductSector<tenet::core::Z2Irrep, tenet::core::U1Irrep>,
+    SU2Irrep,
+> {
+    match label {
+        tenet::prelude::SectorLabel::FZ2U1SU2 {
+            parity,
+            charge,
+            twice_spin,
+        } => tenet::core::ProductSector::new(
+            tenet::core::ProductSector::new(
+                parity_irrep(parity),
+                tenet::core::U1Irrep::new(charge),
+            ),
+            SU2Irrep::from_twice_spin(twice_spin),
+        ),
+        other => panic!("not an fZ2 x U(1) x SU(2) sector: {other:?}"),
+    }
+}
+
+/// `0` even, `1` odd, as every erased fermion-parity constructor spells it.
+// Strict on purpose: the label bridge has to stay injective, or a result-only
+// relabelling (odd `1` rewritten as an out-of-range `3`) folds onto a valid
+// label and escapes the space comparison.
+fn parity_irrep(parity: u8) -> tenet::core::Z2Irrep {
+    match parity {
+        0 => tenet::core::Z2Irrep::EVEN,
+        1 => tenet::core::Z2Irrep::ODD,
+        other => panic!("not a fermion parity: {other} (SectorLabel parity is exactly 0 or 1)"),
+    }
+}
+
+/// `[p, q] <- [p, q]` on both facades, filled with a counter starting at
+/// `first_value`.
+///
+/// Why this one geometry for all three families: it is simultaneously a
+/// composition (`self`'s domain *is* `other`'s codomain, so `compose` and a
+/// two-axis `contract` are both legal on the same pair, which is what pins the
+/// fermionic twist), square enough for every factorization, and rank 4, so a
+/// nonidentity output order has somewhere to move a leg.
+///
+/// Why a plain counter rather than a label-derived fill: every element is then
+/// distinct, so any reordering of blocks or of elements within a block moves
+/// the buffer — and the two facades produce the same buffer *only* if they
+/// walk blocks and elements in the same order, which the assertion below turns
+/// into a precondition of every test downstream. `first_value` exists so a
+/// second operand on the same space carries different values; `add` and
+/// `contract` against a copy of `self` would otherwise be symmetric in their
+/// operands and could not see a swap.
+///
+/// Why `p != q` in every family: with two distinct legs, permuting them is
+/// visible in the leg shapes, so a nonidentity output order cannot be undone
+/// by coincidence. One of the two is dual, because a dual leg is the only
+/// place a fermionic twist can act.
+fn counter_oracle_pair<R>(
+    runtime: &Runtime,
+    erased_legs: (&tenet::prelude::Space, &tenet::prelude::Space),
+    typed_legs: (&GradedSpace<R>, &GradedSpace<R>),
+    first_value: f64,
+) -> (tenet::prelude::Tensor, TensorMap<R, f64>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    let mut next = first_value - 1.0;
+    let mut erased_blocks: Vec<(Vec<SectorId>, Vec<SectorId>)> = Vec::new();
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        runtime,
+        [erased_legs.0, erased_legs.1],
+        [erased_legs.0, erased_legs.1],
+        |key: &tenet::prelude::BlockKey, _: &[usize]| {
+            let pair = key.as_fusion_tree_pair().expect("fusion-tree block");
+            let ids = (
+                pair.codomain_uncoupled().to_vec(),
+                pair.domain_uncoupled().to_vec(),
+            );
+            if erased_blocks.last() != Some(&ids) {
+                erased_blocks.push(ids);
+            }
+            next += 1.0;
+            next
+        },
+    )
+    .unwrap();
+    let mut next = first_value - 1.0;
+    let mut typed_blocks: Vec<(Vec<SectorId>, Vec<SectorId>)> = Vec::new();
+    let typed = TensorMap::from_block_fn(
+        runtime,
+        [typed_legs.0, typed_legs.1],
+        [typed_legs.0, typed_legs.1],
+        |sectors, _| {
+            let encode = |labels: &[R::Sector]| {
+                labels
+                    .iter()
+                    .map(|label| {
+                        SectorCodec::encode_sector(typed_legs.0.provider(), label).unwrap()
+                    })
+                    .collect::<Vec<SectorId>>()
+            };
+            let ids = (
+                encode(sectors.codomain_uncoupled()),
+                encode(sectors.domain_uncoupled()),
+            );
+            if typed_blocks.last() != Some(&ids) {
+                typed_blocks.push(ids);
+            }
+            next += 1.0;
+            next
+        },
+    )
+    .unwrap();
+    // Labels before bytes: `erased_leg_shapes` can only report degeneracies, so
+    // every space assertion in this section is blind to a sector *renumbering*
+    // — a codec that names the same content with different ids produces the
+    // same degeneracies, the same block order, and therefore the same counter
+    // fill. Re-encoding the typed labels through the provider's own codec and
+    // comparing the id sequences block for block is what closes that hole, and
+    // it belongs here rather than in one test so that a mismatch is reported as
+    // a fixture failure.
+    assert_eq!(
+        typed_blocks, erased_blocks,
+        "the two facades disagree on the sector content or the block order"
+    );
+    assert_eq!(typed.data(), erased.data());
+    assert!(!typed.data().is_empty());
+    assert_eq!(typed_leg_shapes(&typed), erased_leg_shapes(&erased));
+    (erased, typed)
+}
+
+/// The U(1) oracle pair. `p` carries three charges with unequal degeneracies
+/// and `q` two, so the two legs are distinguishable by shape alone; `q` is
+/// dual, so the charge balance of a block is not symmetric under swapping the
+/// legs either.
+fn u1_oracle_pair(
+    runtime: &Runtime,
+    first_value: f64,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::U1FusionRule, f64>,
+) {
+    let erased_p = tenet::prelude::Space::u1([(-1, 1), (0, 2), (1, 1)]);
+    let erased_q = tenet::prelude::Space::u1([(0, 1), (1, 2)])
+        .try_dual()
+        .unwrap();
+    let rule = Arc::new(tenet::core::U1FusionRule);
+    let typed_p = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [
+            (tenet::core::U1Irrep::new(-1), 1),
+            (tenet::core::U1Irrep::new(0), 2),
+            (tenet::core::U1Irrep::new(1), 1),
+        ],
+        false,
+    )
+    .unwrap();
+    // Built through `try_dual` rather than with `is_dual = true`, exactly as
+    // the erased leg is: the dual flips the sector labels too, and stating the
+    // dualized labels by hand here would be a second, drift-prone copy of that.
+    let typed_q = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [
+            (tenet::core::U1Irrep::new(0), 1),
+            (tenet::core::U1Irrep::new(1), 2),
+        ],
+        false,
+    )
+    .unwrap()
+    .try_dual()
+    .unwrap();
+    counter_oracle_pair(
+        runtime,
+        (&erased_p, &erased_q),
+        (&typed_p, &typed_q),
+        first_value,
+    )
+}
+
+/// The U(1) x fZ2 oracle pair. Both legs mix the two fermion parities with
+/// nonzero U(1) charge, so neither the parity factor nor the charge factor is
+/// constant on a leg — a product route that dropped either component would
+/// still produce a nonempty layout, but not this one.
+fn u1_fz2_oracle_pair(
+    runtime: &Runtime,
+    first_value: f64,
+) -> (tenet::prelude::Tensor, TensorMap<U1Fz2Rule, f64>) {
+    let erased_p = tenet::prelude::Space::product([((0, 0), 1), ((1, 1), 2)]).unwrap();
+    let erased_q = tenet::prelude::Space::product([((-1, 1), 1), ((0, 0), 2), ((1, 1), 1)])
+        .unwrap()
+        .try_dual()
+        .unwrap();
+    let rule = Arc::new(U1Fz2Rule::new(
+        tenet::core::U1FusionRule,
+        tenet::core::FermionParityFusionRule,
+    ));
+    let label = |charge: i32, parity: u8| {
+        tenet::core::ProductSector::new(
+            tenet::core::U1Irrep::new(charge),
+            if parity == 0 {
+                tenet::core::Z2Irrep::EVEN
+            } else {
+                tenet::core::Z2Irrep::ODD
+            },
+        )
+    };
+    let typed_p = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [(label(0, 0), 1), (label(1, 1), 2)],
+        false,
+    )
+    .unwrap();
+    let typed_q = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [(label(-1, 1), 1), (label(0, 0), 2), (label(1, 1), 1)],
+        false,
+    )
+    .unwrap()
+    .try_dual()
+    .unwrap();
+    counter_oracle_pair(
+        runtime,
+        (&erased_p, &erased_q),
+        (&typed_p, &typed_q),
+        first_value,
+    )
+}
+
+/// The fZ2 x U(1) x SU(2) oracle pair: the only route that exercises the
+/// fermionic twist and the quantum-dimension weights at once.
+///
+/// Every one of the three factors is deliberately nonconstant across the two
+/// legs: both parities appear (so the twist has somewhere to act), the charges
+/// are `-1, 0, 1, 2` (so the U(1) balance is not automatic), and the spins are
+/// `0, 1/2, 1` (so `dim(c)` takes the values 1, 2 and 3 and a weight-free
+/// `inner` cannot pass). A fixture with, say, spin 0 everywhere would satisfy
+/// every byte comparison here with the weights removed.
+fn fz2_u1_su2_oracle_pair(
+    runtime: &Runtime,
+    first_value: f64,
+) -> (tenet::prelude::Tensor, TensorMap<Fz2U1Su2Rule, f64>) {
+    let erased_p = tenet::prelude::Space::fz2_u1_su2([((0, 0, 0), 1), ((1, 1, 1), 2)]).unwrap();
+    let erased_q =
+        tenet::prelude::Space::fz2_u1_su2([((1, -1, 1), 1), ((0, 0, 2), 1), ((0, 2, 0), 2)])
+            .unwrap()
+            .try_dual()
+            .unwrap();
+    let (typed_p, typed_q) = fz2_u1_su2_typed_legs();
+    counter_oracle_pair(
+        runtime,
+        (&erased_p, &erased_q),
+        (&typed_p, &typed_q),
+        first_value,
+    )
+}
+
+/// The typed half of [`fz2_u1_su2_oracle_pair`]'s legs, shared with the twist
+/// identity test below, which has to rebuild the right operand leg for leg.
+fn fz2_u1_su2_typed_legs() -> (GradedSpace<Fz2U1Su2Rule>, GradedSpace<Fz2U1Su2Rule>) {
+    let rule = Arc::new(Fz2U1Su2Rule::new(
+        Fz2U1Rule::new(
+            tenet::core::FermionParityFusionRule,
+            tenet::core::U1FusionRule,
+        ),
+        SU2FusionRule,
+    ));
+    let label = |parity: u8, charge: i32, twice_spin: usize| {
+        tenet::core::ProductSector::new(
+            tenet::core::ProductSector::new(
+                if parity == 0 {
+                    tenet::core::Z2Irrep::EVEN
+                } else {
+                    tenet::core::Z2Irrep::ODD
+                },
+                tenet::core::U1Irrep::new(charge),
+            ),
+            SU2Irrep::from_twice_spin(twice_spin),
+        )
+    };
+    let typed_p = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [(label(0, 0, 0), 1), (label(1, 1, 1), 2)],
+        false,
+    )
+    .unwrap();
+    let typed_q = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [
+            (label(1, -1, 1), 1),
+            (label(0, 0, 2), 1),
+            (label(0, 2, 0), 2),
+        ],
+        false,
+    )
+    .unwrap()
+    .try_dual()
+    .unwrap();
+    (typed_p, typed_q)
+}
+
+#[test]
+fn the_remaining_builtin_rules_build_the_same_tensor_on_both_facades() {
+    // What: the three fixtures are usable as oracles at all — same legs, same
+    // dual flags, same degeneracies, same block order, same bytes. Every other
+    // test in this section presumes it, and `counter_oracle_pair` asserts it,
+    // so this test is the one place that failure is reported as a *fixture*
+    // failure rather than as a failure of the operation under test.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    let (u1_erased, u1_typed) = u1_oracle_pair(&runtime, 1.0);
+    let (fz2_erased, fz2_typed) = u1_fz2_oracle_pair(&runtime, 1.0);
+    let (su2_erased, su2_typed) = fz2_u1_su2_oracle_pair(&runtime, 1.0);
+
+    // The legs are distinguishable by shape in every family, which is what
+    // makes a permuted output order detectable further down.
+    for shapes in [
+        typed_leg_shapes(&u1_typed),
+        typed_leg_shapes(&fz2_typed),
+        typed_leg_shapes(&su2_typed),
+    ] {
+        assert_ne!(shapes[0], shapes[1], "the two legs must differ: {shapes:?}");
+        assert!(shapes[1].0, "the second leg must be dual: {shapes:?}");
+    }
+    // The three providers are different types, so these cannot be one loop.
+    assert_eq!(u1_typed.data(), u1_erased.data());
+    assert_eq!(fz2_typed.data(), fz2_erased.data());
+    assert_eq!(su2_typed.data(), su2_erased.data());
+    // A second operand on the same space really does carry other values.
+    assert_ne!(
+        u1_oracle_pair(&runtime, 100.0).1.data(),
+        u1_typed.data(),
+        "the value offset must change the fixture"
+    );
+}
+
+/// Asserts a nonzero result: a byte comparison of two empty or all-zero
+/// buffers is vacuous, and the product routes are exactly where an
+/// over-restrictive fusion could silently produce one.
+fn assert_nonzero(what: &str, data: &[f64]) {
+    assert!(
+        data.iter().any(|value| *value != 0.0),
+        "{what}: result is empty or all zero, so the byte comparison proves nothing"
+    );
+}
+
+/// The `contract` / `compose` / compact-diagonal oracle matrix, shared by the
+/// three families of [`u1_oracle_pair`] and friends.
+///
+/// `what` names the rule and the axis geometry, so a failure reports which
+/// route diverged rather than only which assertion did.
+fn assert_contract_compose_compact_agree<R>(
+    what: &str,
+    erased: (&tenet::prelude::Tensor, &tenet::prelude::Tensor),
+    typed: (&TensorMap<R, f64>, &TensorMap<R, f64>),
+    to_label: &dyn Fn(tenet::prelude::SectorLabel) -> R::Sector,
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    // `[p, q] <- [p, q]` against itself on its full domain: `self`'s domain is
+    // `other`'s codomain, so this is the composition geometry — and one of the
+    // two contracted legs is dual, which is where `contract`'s supertrace
+    // twist acts and `compose`'s does not.
+    let (lhs_axes, rhs_axes) = ([2, 3], [0, 1]);
+    // The default output order is `[p, q] <- [p, q]`; this one is
+    // `[q, q] <- [p, p]`. It cannot be undone by coincidence because `p` and
+    // `q` differ in shape, which the leg-shape assertion below re-states.
+    let output_axes = [1, 3, 0, 2];
+
+    let erased_contract = erased
+        .0
+        .contract_ordered(erased.1, &lhs_axes, &rhs_axes, &output_axes)
+        .unwrap_or_else(|error| panic!("{what}: erased contract failed: {error}"));
+    let typed_contract = typed
+        .0
+        .contract(typed.1, &lhs_axes, &rhs_axes, &output_axes)
+        .unwrap_or_else(|error| panic!("{what}: typed contract failed: {error}"));
+    assert_eq!(
+        typed_contract.data(),
+        erased_contract.data(),
+        "{what}: contract with output order {output_axes:?}"
+    );
+    assert_result_leg_sectors_agree(
+        what,
+        &format!("contract with order {output_axes:?}"),
+        &typed_contract,
+        &erased_contract,
+        to_label,
+    );
+    assert_nonzero(what, typed_contract.data());
+
+    // The reorder really reorders: same contraction, default order, different
+    // output space and different bytes.
+    let typed_default = typed
+        .0
+        .contract(typed.1, &lhs_axes, &rhs_axes, &[0, 1, 2, 3])
+        .unwrap();
+    assert_ne!(
+        typed_leg_shapes(&typed_default),
+        typed_leg_shapes(&typed_contract),
+        "{what}: the nonidentity output order did not move a leg"
+    );
+    assert_ne!(
+        typed_default.data(),
+        typed_contract.data(),
+        "{what}: the nonidentity output order left the buffer unchanged"
+    );
+
+    let erased_compose = erased
+        .0
+        .compose(erased.1)
+        .unwrap_or_else(|error| panic!("{what}: erased compose failed: {error}"));
+    let typed_compose = typed
+        .0
+        .compose(typed.1)
+        .unwrap_or_else(|error| panic!("{what}: typed compose failed: {error}"));
+    assert_eq!(
+        typed_compose.data(),
+        erased_compose.data(),
+        "{what}: compose"
+    );
+    assert_result_leg_sectors_agree(what, "compose", &typed_compose, &erased_compose, to_label);
+    assert_nonzero(what, typed_compose.data());
+
+    // One compact-diagonal absorption arm: `u * s` from `svd_compact`, where
+    // `s` is compact diagonal storage on both facades and the contraction is
+    // the proved `t * D` bond scaling rather than a GEMM. `u` is
+    // `[p, q] <- [bond]`, so axis 2 is the bond.
+    let (erased_u, erased_s, _) = erased
+        .0
+        .svd_compact()
+        .unwrap_or_else(|error| panic!("{what}: erased svd_compact failed: {error}"));
+    let (typed_u, typed_s, _) = typed
+        .0
+        .svd_compact()
+        .unwrap_or_else(|error| panic!("{what}: typed svd_compact failed: {error}"));
+    assert_eq!(typed_u.data(), erased_u.data(), "{what}: svd_compact u");
+    assert_eq!(typed_s.data(), erased_s.data(), "{what}: svd_compact s");
+
+    let erased_absorbed = erased_u
+        .contract_ordered(&erased_s, &[2], &[0], &[0, 1, 2])
+        .unwrap();
+    let typed_absorbed = typed_u.contract(&typed_s, &[2], &[0], &[0, 1, 2]).unwrap();
+    assert_eq!(
+        typed_absorbed.data(),
+        erased_absorbed.data(),
+        "{what}: compact-diagonal absorption u * s"
+    );
+    assert_eq!(
+        typed_leg_shapes(&typed_absorbed),
+        typed_leg_shapes(&typed_u),
+        "{what}: absorbing a diagonal must not move a leg"
+    );
+    assert_result_leg_sectors_agree(
+        what,
+        "compact-diagonal absorption u * s",
+        &typed_absorbed,
+        &erased_absorbed,
+        to_label,
+    );
+    assert_nonzero(what, typed_absorbed.data());
+    // The absorption is not a copy: `s` is not the identity here.
+    assert_ne!(
+        typed_absorbed.data(),
+        typed_u.data(),
+        "{what}: the diagonal factor was not applied"
+    );
+}
+
+#[test]
+fn typed_and_erased_contract_compose_and_compact_agree_on_u1() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased_a, typed_a) = u1_oracle_pair(&runtime, 1.0);
+    let (erased_b, typed_b) = u1_oracle_pair(&runtime, 100.0);
+    assert_contract_compose_compact_agree(
+        "U1, [p, q] <- [p, q] with q dual",
+        (&erased_a, &erased_b),
+        (&typed_a, &typed_b),
+        &u1_label,
+    );
+}
+
+#[test]
+fn typed_and_erased_contract_compose_and_compact_agree_on_u1_fz2() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased_a, typed_a) = u1_fz2_oracle_pair(&runtime, 1.0);
+    let (erased_b, typed_b) = u1_fz2_oracle_pair(&runtime, 100.0);
+    assert_contract_compose_compact_agree(
+        "U1 x fZ2, [p, q] <- [p, q] with q dual",
+        (&erased_a, &erased_b),
+        (&typed_a, &typed_b),
+        &u1_fz2_label,
+    );
+}
+
+#[test]
+fn typed_and_erased_contract_compose_and_compact_agree_on_fz2_u1_su2() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased_a, typed_a) = fz2_u1_su2_oracle_pair(&runtime, 1.0);
+    let (erased_b, typed_b) = fz2_u1_su2_oracle_pair(&runtime, 100.0);
+    assert_contract_compose_compact_agree(
+        "fZ2 x U1 x SU2, [p, q] <- [p, q] with q dual",
+        (&erased_a, &erased_b),
+        (&typed_a, &typed_b),
+        &fz2_u1_su2_label,
+    );
+}
+
+#[test]
+fn the_fermionic_product_compose_is_contract_against_a_twisted_right_operand() {
+    // What: the exact relation on `fZ2 x U(1) x SU(2)`,
+    // `compose(a, b) == contract(a, twist(b, b's dual codomain legs))`. The
+    // weaker `contract != compose` would pin only that *a* twist exists, not
+    // which legs it acts on nor with which sign; this form pins all three, and
+    // it is stated inside the product family so the suite does not lean on the
+    // plain-fZ2 test above for it. A cross-facade byte oracle cannot do this
+    // job at all: a twist deleted from a shared kernel moves both buffers
+    // together. The bosonic family is the control — theta is one there, so the
+    // twisted operand is the operand and the two contractions agree.
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    let (_, fermionic_a) = fz2_u1_su2_oracle_pair(&runtime, 1.0);
+    let (_, fermionic_b) = fz2_u1_su2_oracle_pair(&runtime, 100.0);
+    // `b`'s codomain is `[p, q]` and only `q` is dual, so theta acts on
+    // codomain leg 1 alone — a "twist every contracted leg" reading would
+    // multiply leg 0 too and fail here. Theta comes from the rule rather than
+    // from an assumed `(-1)^F`: the product's twist is the product of its
+    // factors', and hard-coding the parity sign here would quietly assume the
+    // U(1) and SU(2) factors contribute one.
+    let (leg_p, leg_q) = fz2_u1_su2_typed_legs();
+    let rule = leg_p.provider().clone();
+    let mut next = 99.0;
+    let twisted_b = TensorMap::from_block_fn(
+        &runtime,
+        [&leg_p, &leg_q],
+        [&leg_p, &leg_q],
+        |sectors, _| {
+            next += 1.0;
+            let dual_leg = SectorCodec::encode_sector(&rule, &sectors.codomain_uncoupled()[1])
+                .expect("the fixture's own labels encode");
+            next * MultiplicityFreeRigidSymbols::twist_scalar(&rule, dual_leg)
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        fermionic_a.compose(&fermionic_b).unwrap().data(),
+        fermionic_a
+            .contract(&twisted_b, &[2, 3], &[0, 1], &[0, 1, 2, 3])
+            .unwrap()
+            .data(),
+        "fZ2 x U1 x SU2: compose is contract against the twisted right operand"
+    );
+    // And the twist is not vacuous: without it the two contractions differ.
+    assert_ne!(
+        fermionic_a
+            .contract(&fermionic_b, &[2, 3], &[0, 1], &[0, 1, 2, 3])
+            .unwrap()
+            .data(),
+        fermionic_a.compose(&fermionic_b).unwrap().data(),
+        "fZ2 x U1 x SU2: contract and compose must differ on a dual contracted leg"
+    );
+
+    let (_, bosonic_a) = u1_oracle_pair(&runtime, 1.0);
+    let (_, bosonic_b) = u1_oracle_pair(&runtime, 100.0);
+    assert_eq!(
+        bosonic_a
+            .contract(&bosonic_b, &[2, 3], &[0, 1], &[0, 1, 2, 3])
+            .unwrap()
+            .data(),
+        bosonic_a.compose(&bosonic_b).unwrap().data(),
+        "U1: a bosonic rule has no twist, so the two agree"
+    );
+}
+
+/// The reduction and factorization half of the oracle matrix.
+///
+/// `dimension_weighted` says whether the family has a coupled sector with
+/// `dim(c) != 1`: `inner` is TensorKit's quantum-dimension-weighted `dot`, so
+/// only there does it differ from a plain sum of squares. Stating it per
+/// family rather than deriving it keeps the fixture honest — if a fixture were
+/// weakened to spin 0 everywhere, this flag would start lying and the test
+/// would fail rather than quietly stop covering the weighted branch.
+fn assert_reductions_and_factorizations_agree<R>(
+    what: &str,
+    dimension_weighted: bool,
+    erased: (&tenet::prelude::Tensor, &tenet::prelude::Tensor),
+    typed: (&TensorMap<R, f64>, &TensorMap<R, f64>),
+    to_label: &dyn Fn(tenet::prelude::SectorLabel) -> R::Sector,
+) where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    // Neither coefficient is 1 and they differ in sign, so dropping or
+    // swapping one moves the buffer.
+    let erased_sum = erased.0.add(erased.1, 2.0, -3.0).unwrap();
+    let typed_sum = typed.0.add(typed.1, 2.0, -3.0).unwrap();
+    assert_eq!(typed_sum.data(), erased_sum.data(), "{what}: add");
+    assert_nonzero(what, typed_sum.data());
+    assert_ne!(
+        typed.0.add(typed.1, -3.0, 2.0).unwrap().data(),
+        typed_sum.data(),
+        "{what}: add is not symmetric in its coefficients"
+    );
+
+    let typed_scaled = typed.0.scale(-2.5);
+    assert_eq!(
+        typed_scaled.data(),
+        erased.0.scale(-2.5).unwrap().data(),
+        "{what}: scale"
+    );
+    assert_nonzero(what, typed_scaled.data());
+
+    let typed_inner = typed.0.inner(typed.1).unwrap();
+    let erased_inner = erased.0.inner(erased.1).unwrap();
+    // The erased facade always widens to a `Scalar`; on an f64 payload the
+    // imaginary part must be exactly zero, or `.re()` would be hiding it.
+    assert_eq!(
+        erased_inner.im(),
+        0.0,
+        "{what}: inner grew an imaginary part"
+    );
+    assert_eq!(typed_inner, erased_inner.re(), "{what}: inner");
+    assert_ne!(typed_inner, 0.0, "{what}: inner is vacuously zero");
+    // `<t, t>` is the squared weighted norm, which is the identity that pins
+    // this weighting to `norm`'s.
+    let norm = typed.0.norm().unwrap();
+    let self_inner = typed.0.inner(typed.0).unwrap();
+    assert!(
+        (self_inner - norm * norm).abs() < 1e-9 * norm * norm,
+        "{what}: <t, t> != norm^2"
+    );
+    // And the weighting is (or is not) visible against the unweighted sum of
+    // squares, per the family.
+    let unweighted: f64 = typed.0.data().iter().map(|value| value * value).sum();
+    assert_eq!(
+        (self_inner - unweighted).abs() > 1e-9 * unweighted,
+        dimension_weighted,
+        "{what}: dimension weighting expected {dimension_weighted}, \
+         <t, t> = {self_inner}, sum of squares = {unweighted}"
+    );
+
+    let (erased_q, erased_r) = erased.0.qr_compact().unwrap();
+    let (typed_q, typed_r) = typed.0.qr_compact().unwrap();
+    assert_eq!(typed_q.data(), erased_q.data(), "{what}: qr_compact q");
+    assert_eq!(typed_r.data(), erased_r.data(), "{what}: qr_compact r");
+    assert_result_leg_sectors_agree(what, "qr_compact q", &typed_q, &erased_q, to_label);
+    assert_result_leg_sectors_agree(what, "qr_compact r", &typed_r, &erased_r, to_label);
+    assert_nonzero(what, typed_q.data());
+    assert_nonzero(what, typed_r.data());
+
+    // `left_orth` / `right_orth` are TensorKit 0.17's default kinds (`:qr` and
+    // `:lq`); both facades must agree on the factors *and* on that default.
+    let (erased_v, erased_c) = erased.0.left_orth().unwrap();
+    let (typed_v, typed_c) = typed.0.left_orth().unwrap();
+    assert_eq!(typed_v.data(), erased_v.data(), "{what}: left_orth v");
+    assert_eq!(typed_c.data(), erased_c.data(), "{what}: left_orth c");
+    assert_result_leg_sectors_agree(what, "left_orth v", &typed_v, &erased_v, to_label);
+    assert_result_leg_sectors_agree(what, "left_orth c", &typed_c, &erased_c, to_label);
+    assert_eq!(typed_v.data(), typed_q.data(), "{what}: left_orth is qr");
+
+    let (erased_c, erased_vh) = erased.0.right_orth().unwrap();
+    let (typed_c, typed_vh) = typed.0.right_orth().unwrap();
+    assert_eq!(typed_c.data(), erased_c.data(), "{what}: right_orth c");
+    assert_eq!(typed_vh.data(), erased_vh.data(), "{what}: right_orth vh");
+    // The `lq` side had no result-space comparison at all before: matching
+    // bytes alone say nothing about which sectors the new bond leg carries.
+    assert_result_leg_sectors_agree(what, "right_orth c", &typed_c, &erased_c, to_label);
+    assert_result_leg_sectors_agree(what, "right_orth vh", &typed_vh, &erased_vh, to_label);
+    assert_nonzero(what, typed_c.data());
+    assert_nonzero(what, typed_vh.data());
+
+    // `svd_vals` reports labels typed and raw ids erased, so the typed labels
+    // are re-encoded through the provider's own codec rather than compared by
+    // position: the two facades are free to order the spectrum differently.
+    let mut erased_spectrum: Vec<(SectorId, Vec<f64>)> = erased
+        .0
+        .svd_vals()
+        .unwrap()
+        .into_iter()
+        .map(|entry| (entry.sector, entry.values))
+        .collect();
+    let mut typed_spectrum: Vec<(SectorId, Vec<f64>)> = typed
+        .0
+        .svd_vals()
+        .unwrap()
+        .into_iter()
+        .map(|entry| {
+            (
+                SectorCodec::encode_sector(typed.0.codomain()[0].provider(), &entry.sector)
+                    .unwrap(),
+                entry.values,
+            )
+        })
+        .collect();
+    erased_spectrum.sort_by_key(|(sector, _)| *sector);
+    typed_spectrum.sort_by_key(|(sector, _)| *sector);
+    assert_eq!(typed_spectrum, erased_spectrum, "{what}: svd_vals");
+    assert!(
+        typed_spectrum
+            .iter()
+            .any(|(_, values)| values.iter().any(|value| *value != 0.0)),
+        "{what}: svd_vals is vacuously zero"
+    );
+}
+
+#[test]
+fn typed_and_erased_reductions_and_factorizations_agree_on_u1() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased_a, typed_a) = u1_oracle_pair(&runtime, 1.0);
+    let (erased_b, typed_b) = u1_oracle_pair(&runtime, 100.0);
+    assert_reductions_and_factorizations_agree(
+        "U1, [p, q] <- [p, q] with q dual",
+        false,
+        (&erased_a, &erased_b),
+        (&typed_a, &typed_b),
+        &u1_label,
+    );
+}
+
+#[test]
+fn typed_and_erased_reductions_and_factorizations_agree_on_u1_fz2() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased_a, typed_a) = u1_fz2_oracle_pair(&runtime, 1.0);
+    let (erased_b, typed_b) = u1_fz2_oracle_pair(&runtime, 100.0);
+    assert_reductions_and_factorizations_agree(
+        "U1 x fZ2, [p, q] <- [p, q] with q dual",
+        false,
+        (&erased_a, &erased_b),
+        (&typed_a, &typed_b),
+        &u1_fz2_label,
+    );
+}
+
+#[test]
+fn typed_and_erased_reductions_and_factorizations_agree_on_fz2_u1_su2() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased_a, typed_a) = fz2_u1_su2_oracle_pair(&runtime, 1.0);
+    let (erased_b, typed_b) = fz2_u1_su2_oracle_pair(&runtime, 100.0);
+    // The only weighted family here: its SU(2) factor carries spin 1/2 and
+    // spin 1, so `dim(c)` is not identically one.
+    assert_reductions_and_factorizations_agree(
+        "fZ2 x U1 x SU2, [p, q] <- [p, q] with q dual",
+        true,
+        (&erased_a, &erased_b),
+        (&typed_a, &typed_b),
+        &fz2_u1_su2_label,
+    );
+}
