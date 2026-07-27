@@ -30,8 +30,7 @@
 //!     product_sector, FermionParityFusionRule, ProductFusionRuleExt, U1FusionRule, U1Irrep,
 //!     Z2Irrep,
 //! };
-//! use tenet::prelude::{Error, Runtime};
-//! use tenet::typed::{GradedSpace, TensorMap};
+//! use tenet::typed::{Error, GradedSpace, Runtime, TensorMap};
 //!
 //! # fn main() -> Result<(), Error> {
 //! let runtime = Runtime::builder().build()?;
