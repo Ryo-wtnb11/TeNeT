@@ -770,7 +770,7 @@ mod tests {
     };
     use crate::{
         CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionRule, MultiplicityFreeFusionSymbols,
-        SectorId,
+        SectorCodec, SectorId,
     };
 
     fn assert_canonical_unit<R>(rule: &R, sector: SectorId)
@@ -862,5 +862,38 @@ mod tests {
             rule.try_dual_sector(SectorId::new(3)),
             Err(crate::FusionAlgebraError::InvalidSector { .. })
         ));
+    }
+
+    #[test]
+    fn zn_boundary_labels_fuse_and_symbols_are_canonical() {
+        for modulus in [1, 2, 3, 17, u32::MAX] {
+            let rule = ZNFusionRule::new(modulus).unwrap();
+            for charge in [i64::MIN, -1, 0, 1, i64::MAX] {
+                let sector = rule.irrep(charge);
+                assert_eq!(
+                    rule.try_dual_sector(rule.try_dual_sector(sector.into()).unwrap())
+                        .unwrap(),
+                    sector.into()
+                );
+                assert_eq!(rule.decode_sector(sector.into()).unwrap(), sector);
+            }
+            let a = rule.irrep(u32::MAX as i64);
+            let b = rule.irrep(1);
+            let fused = rule.try_fusion_channels(a.into(), b.into()).unwrap()[0];
+            assert_eq!(fused, rule.irrep((u32::MAX as u64 + 1) as i64).into());
+            assert_eq!(
+                rule.f_symbol_scalar(a.into(), b.into(), rule.vacuum(), fused, a.into(), b.into()),
+                1.0
+            );
+            assert_eq!(rule.r_symbol_scalar(a.into(), b.into(), fused), 1.0);
+        }
+        assert_ne!(
+            ZNFusionRule::new(3).unwrap().rule_identity(),
+            ZNFusionRule::new(4).unwrap().rule_identity()
+        );
+        assert_eq!(
+            ZNFusionRule::new(3).unwrap().rule_identity(),
+            ZNFusionRule::new(3).unwrap().rule_identity()
+        );
     }
 }
