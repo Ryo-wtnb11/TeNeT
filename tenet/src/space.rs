@@ -812,10 +812,10 @@ impl Space {
     ///
     /// # Panics
     ///
-    /// Panics on an SU(3) space: its `(p, q)` irreps do not fit the
-    /// [`SectorLabel`] enum without a breaking `Su3` variant. Use the fallible
-    /// [`Self::try_sectors`] (typed [`Error::UnsupportedForRule`]) to probe, or
-    /// [`Self::su3_sectors`] to read the concrete `(p, q)` labels.
+    /// Panics on SU(3), Z_N, or CU(1) spaces: their labels do not fit the
+    /// closed [`SectorLabel`] enum. Use [`Self::try_sectors`] to receive an
+    /// [`Error::UnsupportedForRule`], then read the concrete labels with
+    /// [`Self::su3_sectors`], [`Self::zn_sectors`], or [`Self::cu1_sectors`].
     pub fn sectors(&self) -> Vec<(SectorLabel, usize)> {
         self.sectors
             .iter()
@@ -890,9 +890,9 @@ impl Space {
     }
 
     /// Fallible sibling of [`Self::sectors`]: `Ok` with byte-identical content
-    /// on every multiplicity-free rule, [`Error::UnsupportedForRule`] on SU(3)
-    /// (whose `(p, q)` irreps do not fit [`SectorLabel`]). Read SU(3) sectors
-    /// with [`Self::su3_sectors`] instead.
+    /// when labels fit [`SectorLabel`], or [`Error::UnsupportedForRule`] for
+    /// SU(3), Z_N, and CU(1). Read those labels with [`Self::su3_sectors`],
+    /// [`Self::zn_sectors`], and [`Self::cu1_sectors`], respectively.
     ///
     /// A separate method rather than changing [`Self::sectors`] to return
     /// `Result`: that signature change breaks every multiplicity-free caller,

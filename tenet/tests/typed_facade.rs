@@ -1225,6 +1225,60 @@ fn cu1_c64_adjoint_materialization_matches_the_typed_contract() {
 }
 
 #[test]
+fn cu1_c64_lazy_adjoint_contract_ordered_matches_typed_values_and_spaces() {
+    // What: the erased ordinary-plus-lazy-adjoint contraction takes the
+    // prelowered CU(1) dispatch seam and agrees with the typed facade in both
+    // payload and ordered external legs.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = cu1_complex_oracle_pair(&runtime);
+    let erased_adjoint = erased.adjoint().unwrap();
+    let typed_adjoint = typed.adjoint().unwrap();
+    let order = [5, 1, 3, 0, 4, 2];
+
+    let erased = erased
+        .contract_ordered(&erased_adjoint, &[3], &[0], &order)
+        .unwrap();
+    let typed = typed.contract(&typed_adjoint, &[3], &[0], &order).unwrap();
+
+    assert_data_close_c64(typed.data(), erased.try_data_c64().unwrap());
+    for (typed_leg, erased_leg) in typed
+        .codomain_spaces()
+        .into_iter()
+        .chain(typed.domain_spaces())
+        .zip(
+            erased
+                .codomain_spaces()
+                .iter()
+                .chain(erased.domain_spaces().iter()),
+        )
+    {
+        let erased_sectors = erased_leg
+            .cu1_sectors()
+            .unwrap()
+            .into_iter()
+            .map(|((charge, sector), _)| match (charge, sector) {
+                (0, 0) => CU1Irrep::VACUUM,
+                (0, 1) => CU1Irrep::PSEUDOSCALAR,
+                (charge, 2) => CU1Irrep::from_twice_charge(charge),
+                _ => unreachable!("Space::cu1 validates its labels"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(typed_leg.is_dual(), erased_leg.is_dual());
+        assert_eq!(typed_leg.sectors().unwrap(), erased_sectors);
+        assert_eq!(
+            typed_leg.degeneracies(),
+            erased_leg
+                .cu1_sectors()
+                .unwrap()
+                .into_iter()
+                .map(|(_, degeneracy)| degeneracy)
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
 fn cu1_otimes_matches_the_typed_facade_for_real_and_complex_payloads() {
     let _guard = cache_lock();
     let runtime = runtime();

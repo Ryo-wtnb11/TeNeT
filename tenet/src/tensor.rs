@@ -6112,6 +6112,11 @@ impl Tensor {
                 UserBoundSpace::U1(rhs_storage),
             ) => contract_bound!(&mut context.mf, dst, lhs_storage, rhs_storage),
             (
+                UserBoundSpace::CU1(dst),
+                UserBoundSpace::CU1(lhs_storage),
+                UserBoundSpace::CU1(rhs_storage),
+            ) => contract_bound!(&mut context.mf, dst, lhs_storage, rhs_storage),
+            (
                 UserBoundSpace::Z2(dst),
                 UserBoundSpace::Z2(lhs_storage),
                 UserBoundSpace::Z2(rhs_storage),
@@ -9299,8 +9304,9 @@ impl TensorExecutionContext {
                 Data::F64(rhs_data),
                 Scalar::F64(alpha),
             ) => {
-                // SU(3)'s generic plan omits destinations with no GEMM, while
-                // built-in plans fully overwrite and should avoid the fill.
+                // SU(3)'s generic plan and CU(1)'s lowered plan can omit
+                // structurally zero destinations. Clear those layouts before
+                // replay; other built-in plans overwrite every storage slot.
                 if matches!(rule_kind, RuleKind::CU1 | RuleKind::Su3) {
                     dst_data.fill(0.0);
                 }
