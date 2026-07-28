@@ -3121,6 +3121,9 @@ impl UserBoundSpace {
             (Self::Z2(lhs), Self::Z2(rhs)) => {
                 contract!(lhs, rhs, Z2, contracted_multiplicity_free)
             }
+            (Self::ZN(lhs), Self::ZN(rhs)) => {
+                contract!(lhs, rhs, ZN, contracted_multiplicity_free)
+            }
             (Self::FZ2(lhs), Self::FZ2(rhs)) => {
                 contract!(lhs, rhs, FZ2, contracted_multiplicity_free)
             }
@@ -3203,6 +3206,7 @@ impl UserBoundSpace {
         match (self, rhs) {
             (Self::U1(lhs), Self::U1(rhs)) => contract!(lhs, rhs, U1),
             (Self::Z2(lhs), Self::Z2(rhs)) => contract!(lhs, rhs, Z2),
+            (Self::ZN(lhs), Self::ZN(rhs)) => contract!(lhs, rhs, ZN),
             (Self::FZ2(lhs), Self::FZ2(rhs)) => contract!(lhs, rhs, FZ2),
             (Self::SU2(lhs), Self::SU2(rhs)) => contract!(lhs, rhs, SU2),
             (Self::U1FZ2(lhs), Self::U1FZ2(rhs)) => contract!(lhs, rhs, U1FZ2),
@@ -3230,6 +3234,7 @@ impl UserBoundSpace {
         match (self, rhs) {
             (Self::U1(lhs), Self::U1(rhs)) => validate!(lhs, rhs),
             (Self::Z2(lhs), Self::Z2(rhs)) => validate!(lhs, rhs),
+            (Self::ZN(lhs), Self::ZN(rhs)) => validate!(lhs, rhs),
             (Self::FZ2(lhs), Self::FZ2(rhs)) => validate!(lhs, rhs),
             (Self::SU2(lhs), Self::SU2(rhs)) => validate!(lhs, rhs),
             (Self::U1FZ2(lhs), Self::U1FZ2(rhs)) => validate!(lhs, rhs),
@@ -3371,6 +3376,9 @@ impl UserBoundSpace {
                 Arc::ptr_eq(space.provider_arc(), provider)
             }
             (Self::Z2(space), UserRuleContext::Z2(provider)) => {
+                Arc::ptr_eq(space.provider_arc(), provider)
+            }
+            (Self::ZN(space), UserRuleContext::ZN(provider)) => {
                 Arc::ptr_eq(space.provider_arc(), provider)
             }
             (Self::FZ2(space), UserRuleContext::FZ2(provider)) => {
