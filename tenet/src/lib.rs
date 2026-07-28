@@ -53,8 +53,8 @@ pub use tensor::RuntimeDetachedTensor;
 /// User-layer API: [`prelude::Runtime`], [`prelude::Space`], and
 /// [`prelude::Tensor`], plus the handful of expert-layer types their
 /// signatures mention. `use tenet::prelude::*;` is the intended import for
-/// everyday tensor code; the expert layer stays available through the
-/// curated [`operations`] and [`matrixalgebra`] facades.
+/// everyday tensor code; expert APIs stay available through [`core`], [`dense`],
+/// and the curated [`operations`] and [`matrixalgebra`] facades.
 pub mod prelude {
     pub use crate::default;
     pub use crate::error::Error;
@@ -101,11 +101,10 @@ pub mod dense {
 /// Curated expert operations and context types used by documented workflows.
 pub mod operations {
     pub use tenet_tensors::{
-        braid_into, permute_into, tensoradd_into, tensorcontract_fusion_into,
-        tensorcontract_into, tensortrace_into, transpose_into, BoundDynamicFusionMapSpace,
-        DynamicFusionMapSpace, OperationError, OutputAxisOrder, TensorContractFusionExecutionContext,
-        TensorContractSpec, TensorTraceAxisSpec, TreeTransformExecutionContext,
-        TreeTransformOperation,
+        braid_into, permute_into, tensoradd_into, tensorcontract_fusion_into, tensorcontract_into,
+        tensortrace_into, transpose_into, BoundDynamicFusionMapSpace, DynamicFusionMapSpace,
+        OperationError, OutputAxisOrder, TensorContractFusionExecutionContext, TensorContractSpec,
+        TensorTraceAxisSpec, TreeTransformExecutionContext, TreeTransformOperation,
     };
 }
 
