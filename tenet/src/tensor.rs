@@ -6900,6 +6900,7 @@ impl Tensor {
         }
         let data = match (&dst_bound, source.space.as_ref()) {
             (UserBoundSpace::U1(dst), UserBoundSpace::U1(src)) => trace_bound!(dst, src),
+            (UserBoundSpace::CU1(dst), UserBoundSpace::CU1(src)) => trace_bound!(dst, src),
             (UserBoundSpace::Z2(dst), UserBoundSpace::Z2(src)) => trace_bound!(dst, src),
             (UserBoundSpace::ZN(dst), UserBoundSpace::ZN(src)) => trace_bound!(dst, src),
             (UserBoundSpace::FZ2(dst), UserBoundSpace::FZ2(src)) => trace_bound!(dst, src),
