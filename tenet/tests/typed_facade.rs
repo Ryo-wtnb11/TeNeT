@@ -1147,6 +1147,47 @@ fn z2_complex_oracle_pair(
     (erased, typed)
 }
 
+/// CU(1) rank-three recoupling fixture shared by the erased and typed facades.
+fn cu1_oracle_pair(runtime: &Runtime) -> (tenet::prelude::Tensor, TensorMap<CU1FusionRule, f64>) {
+    let space = tenet::prelude::Space::cu1([((1, 2), 1)]).unwrap();
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        runtime,
+        [&space, &space, &space],
+        [&space],
+        |_, _| 1.0,
+    )
+    .unwrap();
+    let rule = Arc::new(CU1FusionRule);
+    let leg = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [(CU1Irrep::from_twice_charge(1), 1)],
+        false,
+    )
+    .unwrap();
+    let typed = TensorMap::from_block_fn(runtime, [&leg, &leg, &leg], [&leg], |_, _| 1.0).unwrap();
+    (erased, typed)
+}
+
+#[test]
+fn cu1_typed_and_erased_rank_three_permute_match_the_published_gauge() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = cu1_oracle_pair(&runtime);
+    assert_eq!(erased.data(), [1.0, 1.0, 1.0]);
+    assert_eq!(typed.data(), erased.data());
+    let erased = erased.permute(&[2, 0, 1], &[3]).unwrap();
+    let typed = typed.permute(&[2, 0, 1], &[3]).unwrap();
+    let expected = [2.0_f64.sqrt() / 2.0, -2.0_f64.sqrt() / 2.0, 2.0_f64.sqrt()];
+    assert_eq!(erased.data().len(), 3);
+    assert_eq!(typed.data().len(), 3);
+    for ((erased, typed), expected) in erased.data().iter().zip(typed.data()).zip(expected) {
+        assert!((erased - expected).abs() <= 1e-12, "{erased} vs {expected}");
+        assert!((typed - expected).abs() <= 1e-12, "{typed} vs {expected}");
+    }
+    assert_eq!(typed.codomain().len(), 3);
+    assert_eq!(typed.domain().len(), 1);
+}
+
 #[test]
 fn typed_and_erased_permute_agree_byte_for_byte_on_a_builtin_rule() {
     // What: the typed permute is the erased permute, not a lookalike — same
