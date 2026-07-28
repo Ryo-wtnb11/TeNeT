@@ -10221,9 +10221,25 @@ fn cu1_typed_rank_three_permutation_uses_the_nontrivial_associator_gauge() {
     let leg = GradedSpace::try_new(Arc::clone(&rule), [(q, 1)], false).unwrap();
     let tensor: TensorMap<CU1FusionRule, f64> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg, &leg], [&leg], |_, _| 1.0).unwrap();
+    assert_eq!(tensor.codomain().len(), 3);
+    assert_eq!(tensor.domain().len(), 1);
+    assert!(tensor
+        .codomain()
+        .iter()
+        .chain(tensor.domain().iter())
+        .all(|space| space.degeneracies() == [1]));
+    assert_eq!(tensor.data(), [1.0, 1.0, 1.0]);
     let permuted = tensor.permute(&[2, 0, 1], &[3]).unwrap();
-    assert!(!permuted.data().is_empty());
-    assert!(permuted.data().iter().any(|value| value.abs() > 0.0));
+    assert_eq!(permuted.codomain().len(), 3);
+    assert_eq!(permuted.domain().len(), 1);
+    for (got, expected) in
+        permuted
+            .data()
+            .iter()
+            .zip([2.0_f64.sqrt() / 2.0, -2.0_f64.sqrt() / 2.0, 2.0_f64.sqrt()])
+    {
+        assert!((got - expected).abs() <= 1e-12, "{got} vs {expected}");
+    }
 }
 
 // ---------------------------------------------------------------------------
