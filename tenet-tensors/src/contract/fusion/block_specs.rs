@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use tenet_core::{
-    multiplicity_free_permute_tree_pair, BlockKey, BraidingStyleKind, CoreError,
-    FusionProductSpace, FusionRule, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey,
-    FusionTreePairKey, MultiplicityFreeRigidSymbols, SectorId, SectorLeg, TensorMap, TensorStorage,
+    multiplicity_free_permute_tree_pair, BlockKey, BraidingStyleKind, CoreError, FusionRule,
+    FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
+    MultiplicityFreeRigidSymbols, SectorId, TensorMap, TensorStorage,
 };
 
 use crate::lowering::lower_tensorcontract_adjoint_axes;
@@ -30,21 +30,9 @@ fn dual_sector<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    let homspace = FusionTreeHomSpace::new(
-        FusionProductSpace::new([SectorLeg::new([(sector, 1)], false)]),
-        FusionProductSpace::new([]),
-    );
-    match primer(
-        rule,
-        MetadataRequest::OutwardLeg {
-            homspace: &homspace,
-            axis: 0,
-            dualize: true,
-            tensor: "contraction source",
-        },
-    )? {
-        MetadataOutput::Leg(leg) => Ok(leg.sectors()[0]),
-        _ => unreachable!("metadata dispatcher returned a non-leg response"),
+    match primer(rule, MetadataRequest::DualSector { sector })? {
+        MetadataOutput::Sector(dual) => Ok(dual),
+        _ => unreachable!("metadata dispatcher returned a non-sector response"),
     }
 }
 

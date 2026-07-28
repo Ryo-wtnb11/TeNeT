@@ -1251,7 +1251,7 @@ where
     let primer = primer.unwrap_or(encoded_layout_primer::<R>);
     let expected_homspace = match primer(
         rule,
-        MetadataRequest::Contract {
+        MetadataRequest::ContractHomSpace {
             lhs: lhs.homspace(),
             rhs: rhs.homspace(),
             lhs_axes: axes.lhs_contracting_axes(),
@@ -1260,8 +1260,8 @@ where
             dst_codomain_rank: dst.nout(),
         },
     )? {
-        MetadataOutput::HomSpace { homspace, .. } => homspace,
-        _ => unreachable!("metadata dispatcher returned a non-HomSpace response"),
+        MetadataOutput::UnpreparedHomSpace(homspace) => homspace,
+        _ => unreachable!("metadata dispatcher returned a prepared HomSpace response"),
     };
     if &expected_homspace != dst.homspace() {
         return Err(OperationError::StructureMismatch { tensor: "dst" });
@@ -1361,16 +1361,21 @@ mod tests {
 
     std::thread_local! {
         static REJECT_NEXT_PROBE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-        static OPERAND_PRIMER_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        static OPERAND_PREFLIGHT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
-    fn rejecting_operand_primer(
+    fn rejecting_contract_preflight(
         _rule: &U1FusionRule,
-        _request: MetadataRequest<'_>,
+        request: MetadataRequest<'_>,
     ) -> Result<MetadataOutput, crate::OperationError> {
-        OPERAND_PRIMER_CALLS.set(OPERAND_PRIMER_CALLS.get() + 1);
+        OPERAND_PREFLIGHT_CALLS.set(OPERAND_PREFLIGHT_CALLS.get() + 1);
+        if !matches!(request, MetadataRequest::ContractHomSpace { .. }) {
+            return Err(crate::OperationError::InvalidArgument {
+                message: "operand plan prepared a layout during preflight",
+            });
+        }
         Err(crate::OperationError::InvalidArgument {
-            message: "encoded operand plan called supplied primer",
+            message: "operand plan called bound contract preflight",
         })
     }
 
@@ -1471,8 +1476,8 @@ mod tests {
 
     #[test]
     fn operand_plan_preserves_the_bound_layout_capability() {
-        // What: prelowered candidate planning reaches the bound metadata
-        // dispatcher instead of silently substituting encoded operations.
+        // What: prelowered candidate planning reaches the bound dispatcher
+        // exactly once through an unprepared contraction-HomSpace request.
         let rule = U1FusionRule;
         let lhs_typed = single_sector_typed_space(&rule, [2, 3, 4, 5]);
         let rhs_typed = single_sector_typed_space(&rule, [5, 4, 6, 7]);
@@ -1487,7 +1492,7 @@ mod tests {
             .unwrap();
         let axes = || TensorContractSpec::with_default_output_order(&[2, 3], &[1, 0]);
 
-        OPERAND_PRIMER_CALLS.set(0);
+        OPERAND_PREFLIGHT_CALLS.set(0);
         assert_eq!(
             prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical(
                 &rule,
@@ -1495,14 +1500,14 @@ mod tests {
                 &lhs_layout,
                 &rhs_layout,
                 axes(),
-                rejecting_operand_primer,
+                rejecting_contract_preflight,
             )
             .unwrap_err(),
             crate::OperationError::InvalidArgument {
-                message: "encoded operand plan called supplied primer",
+                message: "operand plan called bound contract preflight",
             }
         );
-        assert!(OPERAND_PRIMER_CALLS.get() > 0);
+        assert_eq!(OPERAND_PREFLIGHT_CALLS.get(), 1);
     }
 
     #[test]

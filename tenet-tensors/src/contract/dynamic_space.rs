@@ -8,7 +8,7 @@ use tenet_core::{
     FusionSpaceAdmission, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
     FusionTreePairKey, FusionTreePairOrientation, LoweredFusionTreeBuildError,
     LoweredMultiplicityFreeAlgebra, MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols,
-    OrientedFusionTreeHomSpace, PreparedFusionTreeLayout, SectorLeg,
+    OrientedFusionTreeHomSpace, PreparedFusionTreeLayout, SectorId, SectorLeg,
     StructurallyValidatedFusionTreeSubset,
 };
 
@@ -75,6 +75,17 @@ pub(crate) enum MetadataRequest<'a> {
         output_axes: &'a [usize],
         dst_codomain_rank: usize,
     },
+    ContractHomSpace {
+        lhs: &'a FusionTreeHomSpace,
+        rhs: &'a FusionTreeHomSpace,
+        lhs_axes: &'a [usize],
+        rhs_axes: &'a [usize],
+        output_axes: &'a [usize],
+        dst_codomain_rank: usize,
+    },
+    DualSector {
+        sector: SectorId,
+    },
     Select {
         homspace: &'a FusionTreeHomSpace,
         codomain_axes: &'a [usize],
@@ -94,6 +105,8 @@ pub(crate) enum MetadataOutput {
         homspace: FusionTreeHomSpace,
         prepared: PreparedLayoutKeys,
     },
+    UnpreparedHomSpace(FusionTreeHomSpace),
+    Sector(SectorId),
     Leg(SectorLeg),
 }
 
@@ -342,6 +355,25 @@ where
         )
         .map(derived)
         .map_err(OperationError::from_core_preserving_context),
+        MetadataRequest::ContractHomSpace {
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+            dst_codomain_rank,
+        } => FusionTreeHomSpace::tensorcontract_homspace(
+            rule,
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+            dst_codomain_rank,
+        )
+        .map(MetadataOutput::UnpreparedHomSpace)
+        .map_err(OperationError::from_core_preserving_context),
+        MetadataRequest::DualSector { sector } => Ok(MetadataOutput::Sector(rule.dual(sector))),
         MetadataRequest::Select {
             homspace,
             codomain_axes,
@@ -408,6 +440,28 @@ where
         )
         .map_err(checked_metadata_operation_error)
         .and_then(prepare),
+        MetadataRequest::ContractHomSpace {
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+            dst_codomain_rank,
+        } => FusionTreeHomSpace::try_tensorcontract_homspace_checked(
+            rule,
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+            dst_codomain_rank,
+        )
+        .map(MetadataOutput::UnpreparedHomSpace)
+        .map_err(checked_metadata_operation_error),
+        MetadataRequest::DualSector { sector } => rule
+            .try_dual_sector(sector)
+            .map(MetadataOutput::Sector)
+            .map_err(|error| OperationError::FusionAlgebra(Box::new(error))),
         MetadataRequest::Select {
             homspace,
             codomain_axes,
