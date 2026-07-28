@@ -785,10 +785,7 @@ impl Space {
     /// Z_N sector content as canonical `(charge, degeneracy)` pairs.
     pub fn zn_sectors(&self) -> Result<Vec<(u32, usize)>, Error> {
         let UserRuleContext::ZN(rule) = self.context.as_ref() else {
-            return Err(Error::UnsupportedForRule {
-                operation: "Space::zn_sectors",
-                rule: "not Z_N",
-            });
+            return Err(Error::RuleMismatch);
         };
         Ok(self
             .sectors
@@ -804,6 +801,21 @@ impl Space {
             .collect())
     }
 
+    /// Returns the degeneracy of a Z_N charge, or `None` when absent.
+    pub fn zn_degeneracy(&self, charge: u32) -> Result<Option<usize>, Error> {
+        let UserRuleContext::ZN(rule) = self.context.as_ref() else {
+            return Err(Error::RuleMismatch);
+        };
+        let sector = rule
+            .decode_sector(SectorId::new(charge as usize))
+            .map_err(|e| Error::FusionAlgebra(Box::new(e)))?;
+        Ok(self
+            .sectors
+            .iter()
+            .find(|&&(id, _)| id == sector.into())
+            .map(|&(_, deg)| deg))
+    }
+
     /// Fallible sibling of [`Self::sectors`]: `Ok` with byte-identical content
     /// on every multiplicity-free rule, [`Error::UnsupportedForRule`] on SU(3)
     /// (whose `(p, q)` irreps do not fit [`SectorLabel`]). Read SU(3) sectors
@@ -813,10 +825,14 @@ impl Space {
     /// `Result`: that signature change breaks every multiplicity-free caller,
     /// a breaking change disproportionate to closing one SU(3) panic surface.
     pub fn try_sectors(&self) -> Result<Vec<(SectorLabel, usize)>, Error> {
-        if self.rule_kind() == RuleKind::Su3 {
+        if matches!(self.rule_kind(), RuleKind::Su3 | RuleKind::ZN) {
             return Err(Error::UnsupportedForRule {
                 operation: "Space::try_sectors",
-                rule: "SU(3)",
+                rule: if self.rule_kind() == RuleKind::ZN {
+                    "Z_N"
+                } else {
+                    "SU(3)"
+                },
             });
         }
         Ok(self.sectors())
@@ -1057,6 +1073,15 @@ pub(crate) fn fuse_sector_content<R: CheckedFusionAlgebra + ?Sized>(
 #[cfg(test)]
 mod provider_context_tests {
     use super::*;
+
+    #[test]
+    fn zn_space_roundtrips_and_reports_degeneracy() {
+        let space = Space::zn(3, [(-1, 2), (1, 4)]).unwrap();
+        assert_eq!(space.zn_sectors().unwrap(), vec![(1, 4), (2, 2)]);
+        assert_eq!(space.zn_degeneracy(2).unwrap(), Some(2));
+        assert_eq!(space.zn_degeneracy(0).unwrap(), None);
+        assert!(space.try_sectors().is_err());
+    }
 
     #[test]
     fn separately_constructed_builtin_spaces_compare_by_semantic_identity() {

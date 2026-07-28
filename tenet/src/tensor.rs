@@ -3036,6 +3036,7 @@ fn validate_axis_permutation(axes: &[usize], rank: usize) -> Result<(), Error> {
 enum UserBoundSpace {
     U1(BoundDynamicFusionMapSpace<tenet_core::U1FusionRule>),
     Z2(BoundDynamicFusionMapSpace<tenet_core::Z2FusionRule>),
+    ZN(BoundDynamicFusionMapSpace<tenet_core::ZNFusionRule>),
     FZ2(BoundDynamicFusionMapSpace<tenet_core::FermionParityFusionRule>),
     SU2(BoundDynamicFusionMapSpace<tenet_core::SU2FusionRule>),
     U1FZ2(BoundDynamicFusionMapSpace<U1Fz2Rule>),
@@ -3077,6 +3078,7 @@ macro_rules! impl_into_user_bound {
 
 impl_into_user_bound!(tenet_core::U1FusionRule, U1, U1);
 impl_into_user_bound!(tenet_core::Z2FusionRule, Z2, Z2);
+impl_into_user_bound!(tenet_core::ZNFusionRule, ZN, ZN);
 impl_into_user_bound!(tenet_core::FermionParityFusionRule, FZ2, FZ2);
 impl_into_user_bound!(tenet_core::SU2FusionRule, SU2, SU2);
 impl_into_user_bound!(U1Fz2Rule, U1FZ2, U1FZ2);
@@ -3245,6 +3247,7 @@ impl UserBoundSpace {
         match self {
             Self::U1(space) => transform!(space, U1, transformed_multiplicity_free),
             Self::Z2(space) => transform!(space, Z2, transformed_multiplicity_free),
+            Self::ZN(space) => transform!(space, ZN, transformed_multiplicity_free),
             Self::FZ2(space) => transform!(space, FZ2, transformed_multiplicity_free),
             Self::SU2(space) => transform!(space, SU2, transformed_multiplicity_free),
             Self::U1FZ2(space) => transform!(space, U1FZ2, transformed_multiplicity_free),
@@ -3266,6 +3269,7 @@ impl UserBoundSpace {
         match self {
             Self::U1(space) => build!(space, U1),
             Self::Z2(space) => build!(space, Z2),
+            Self::ZN(space) => build!(space, ZN),
             Self::FZ2(space) => build!(space, FZ2),
             Self::SU2(space) => build!(space, SU2),
             Self::U1FZ2(space) => build!(space, U1FZ2),
@@ -3290,6 +3294,7 @@ impl UserBoundSpace {
         match self {
             Self::U1(space) => build!(space, U1),
             Self::Z2(space) => build!(space, Z2),
+            Self::ZN(space) => build!(space, ZN),
             Self::FZ2(space) => build!(space, FZ2),
             Self::SU2(space) => build!(space, SU2),
             Self::U1FZ2(space) => build!(space, U1FZ2),
@@ -3307,6 +3312,7 @@ impl UserBoundSpace {
         match self {
             UserBoundSpace::U1(space) => space.space(),
             UserBoundSpace::Z2(space) => space.space(),
+            UserBoundSpace::ZN(space) => space.space(),
             UserBoundSpace::FZ2(space) => space.space(),
             UserBoundSpace::SU2(space) => space.space(),
             UserBoundSpace::U1FZ2(space) => space.space(),
@@ -3319,6 +3325,7 @@ impl UserBoundSpace {
         match self {
             UserBoundSpace::U1(space) => UserRuleContext::U1(Arc::clone(space.provider_arc())),
             UserBoundSpace::Z2(space) => UserRuleContext::Z2(Arc::clone(space.provider_arc())),
+            UserBoundSpace::ZN(space) => UserRuleContext::ZN(Arc::clone(space.provider_arc())),
             UserBoundSpace::FZ2(space) => UserRuleContext::FZ2(Arc::clone(space.provider_arc())),
             UserBoundSpace::SU2(space) => UserRuleContext::SU2(Arc::clone(space.provider_arc())),
             UserBoundSpace::U1FZ2(space) => {
@@ -3335,6 +3342,7 @@ impl UserBoundSpace {
         match self {
             UserBoundSpace::U1(_) => RuleKind::U1,
             UserBoundSpace::Z2(_) => RuleKind::Z2,
+            UserBoundSpace::ZN(_) => RuleKind::ZN,
             UserBoundSpace::FZ2(_) => RuleKind::FZ2,
             UserBoundSpace::SU2(_) => RuleKind::SU2,
             UserBoundSpace::U1FZ2(_) => RuleKind::U1FZ2,
@@ -3347,6 +3355,7 @@ impl UserBoundSpace {
         match self {
             UserBoundSpace::U1(space) => space.provider().rule_identity(),
             UserBoundSpace::Z2(space) => space.provider().rule_identity(),
+            UserBoundSpace::ZN(space) => space.provider().rule_identity(),
             UserBoundSpace::FZ2(space) => space.provider().rule_identity(),
             UserBoundSpace::SU2(space) => space.provider().rule_identity(),
             UserBoundSpace::U1FZ2(space) => space.provider().rule_identity(),
@@ -3397,6 +3406,7 @@ macro_rules! with_bound_multiplicity_free {
         match $space.as_ref() {
             UserBoundSpace::U1($bound) => $body,
             UserBoundSpace::Z2($bound) => $body,
+            UserBoundSpace::ZN($bound) => $body,
             UserBoundSpace::FZ2($bound) => $body,
             UserBoundSpace::SU2($bound) => $body,
             UserBoundSpace::U1FZ2($bound) => $body,
@@ -3420,6 +3430,10 @@ macro_rules! with_user_rule {
                 $body
             }
             UserBoundSpace::Z2(bound) => {
+                let $rule = bound.provider();
+                $body
+            }
+            UserBoundSpace::ZN(bound) => {
                 let $rule = bound.provider();
                 $body
             }
@@ -3454,6 +3468,10 @@ macro_rules! with_bound_ctx {
                 $body
             }
             UserBoundSpace::Z2($bound) => {
+                let $ctxs = &mut $state.mf;
+                $body
+            }
+            UserBoundSpace::ZN($bound) => {
                 let $ctxs = &mut $state.mf;
                 $body
             }
@@ -3751,12 +3769,7 @@ impl Tensor {
         let (space, data) = match context.as_ref() {
             UserRuleContext::U1(provider) => build!(provider, U1),
             UserRuleContext::Z2(provider) => build!(provider, Z2),
-            UserRuleContext::ZN(_) => {
-                return Err(Error::UnsupportedForRule {
-                    operation: "Tensor::from_block_fn",
-                    rule: "Z_N",
-                })
-            }
+            UserRuleContext::ZN(provider) => build!(provider, ZN),
             UserRuleContext::FZ2(provider) => build!(provider, FZ2),
             UserRuleContext::SU2(provider) => build!(provider, SU2),
             UserRuleContext::U1FZ2(provider) => build!(provider, U1FZ2),
@@ -4211,11 +4224,8 @@ impl Tensor {
             UserRuleContext::Z2(provider) => {
                 UserBoundSpace::Z2(build_bound_space(Arc::clone(provider), hom)?)
             }
-            UserRuleContext::ZN(_) => {
-                return Err(Error::UnsupportedForRule {
-                    operation: "Tensor::diagonal",
-                    rule: "Z_N",
-                })
+            UserRuleContext::ZN(provider) => {
+                UserBoundSpace::ZN(build_bound_space(Arc::clone(provider), hom)?)
             }
             UserRuleContext::FZ2(provider) => {
                 UserBoundSpace::FZ2(build_bound_space(Arc::clone(provider), hom)?)
@@ -4863,6 +4873,12 @@ impl Tensor {
             }
             (UserBoundSpace::Z2(space), Data::C64(data)) => {
                 materialize!(space, Z2, adjoint_bound_dyn, data, C64)
+            }
+            (UserBoundSpace::ZN(space), Data::F64(data)) => {
+                materialize!(space, ZN, adjoint_bound_dyn, data, F64)
+            }
+            (UserBoundSpace::ZN(space), Data::C64(data)) => {
+                materialize!(space, ZN, adjoint_bound_dyn, data, C64)
             }
             (UserBoundSpace::FZ2(space), Data::F64(data)) => {
                 materialize!(space, FZ2, adjoint_bound_dyn, data, F64)
@@ -10158,6 +10174,7 @@ fn dispatch_permute_into_ref<D: UserScalar>(
     match authority {
         UserBoundSpace::U1(space) => apply!(&mut context.mf, space.provider()),
         UserBoundSpace::Z2(space) => apply!(&mut context.mf, space.provider()),
+        UserBoundSpace::ZN(space) => apply!(&mut context.mf, space.provider()),
         UserBoundSpace::FZ2(space) => apply!(&mut context.mf, space.provider()),
         UserBoundSpace::SU2(space) => apply!(&mut context.mf, space.provider()),
         UserBoundSpace::U1FZ2(space) => apply!(&mut context.mf, space.provider()),
@@ -14189,6 +14206,14 @@ mod tk_user_api_tests {
         let zero = Tensor::zeros(&rt, Dtype::F64, [&v], [&v]).unwrap();
         assert!(zero.is_hermitian(1e-12).unwrap());
         assert!(!zero.is_posdef(1e-12).unwrap());
+    }
+
+    #[test]
+    fn zn_erased_zero_tensor_composes() {
+        let rt = Runtime::builder().build().unwrap();
+        let v = Space::zn(3, [(0, 1), (1, 1)]).unwrap();
+        let zero = Tensor::zeros(&rt, Dtype::F64, [&v], [&v]).unwrap();
+        assert_eq!(zero.norm().unwrap(), 0.0);
     }
 
     #[test]
