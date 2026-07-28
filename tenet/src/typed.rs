@@ -198,7 +198,7 @@
 //! provider that reports an invalid or unrepresentable algebra fails with a
 //! typed error and publishes no layout, cache, or admission state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tenet_core::{
@@ -610,6 +610,10 @@ where
     };
     let codomain = embed_legs(source.codomain())?;
     let domain = embed_legs(source.domain())?;
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new(codomain.iter().map(|leg| leg.leg().clone())),
+        FusionProductSpace::new(domain.iter().map(|leg| leg.leg().clone())),
+    );
     let mut blocks = HashMap::with_capacity(source.block_count());
     for index in 0..source.block_count() {
         let key = source.block_fusion_trees(index)?;
@@ -623,6 +627,27 @@ where
             ),
         );
     }
+    // Stage (do not publish) the product layout and prove that canonical-unit
+    // projection is a bijection onto the source blocks. The callback below can
+    // therefore not discover `missing_block` only after target admission.
+    let prepared = homspace.prepare_fusion_tree_layout_checked(provider.as_ref())?;
+    let mut projected = HashSet::with_capacity(prepared.keys().len());
+    for key in prepared.keys() {
+        let labelled =
+            decode_block_fusion_trees(provider.as_ref(), &BlockKey::FusionTree(key.clone()))?;
+        let source_key = map_block_fusion_trees(&labelled, &project);
+        if !blocks.contains_key(&source_key) || !projected.insert(source_key) {
+            return Err(Error::InvalidArgument(
+                "canonical-unit product embedding did not preserve source blocks".to_string(),
+            ));
+        }
+    }
+    if projected.len() != blocks.len() {
+        return Err(Error::InvalidArgument(
+            "canonical-unit product embedding did not preserve source blocks".to_string(),
+        ));
+    }
+
     let data = source.dense_data();
     let mut missing_block = false;
     let built = TensorMap::from_block_fn(

@@ -1516,6 +1516,221 @@ fn typed_deligne_product_rejects_a_component_identity_mismatch() {
     ));
 }
 
+#[test]
+fn typed_deligne_product_checks_runtime_before_both_component_identities() {
+    let _guard = cache_lock();
+    let first = runtime();
+    let second = runtime();
+    let left_rule = Arc::new(ExternalZ3::tagged(0));
+    let right_rule = Arc::new(ExternalZ3::tagged(2));
+    let lhs = counting_z3(
+        &first,
+        &z3_dense_leg(&left_rule, 1),
+        &z3_dense_leg(&left_rule, 1),
+        2.0,
+    );
+    let rhs = counting_z3(
+        &second,
+        &z3_dense_leg(&right_rule, 1),
+        &z3_dense_leg(&right_rule, 1),
+        3.0,
+    );
+    let wrong_both = Arc::new(ExternalZ3::tagged(1).product(ExternalZ3::tagged(3)));
+
+    assert!(matches!(
+        lhs.deligne_product(&rhs, wrong_both).unwrap_err(),
+        tenet::prelude::Error::RuntimeMismatch
+    ));
+
+    let rhs = counting_z3(
+        &first,
+        &z3_dense_leg(&right_rule, 1),
+        &z3_dense_leg(&right_rule, 1),
+        3.0,
+    );
+    let wrong_right = Arc::new(ExternalZ3::tagged(0).product(ExternalZ3::tagged(3)));
+    assert!(matches!(
+        lhs.deligne_product(&rhs, wrong_right).unwrap_err(),
+        tenet::prelude::Error::RuleMismatch
+    ));
+}
+
+#[test]
+fn typed_deligne_product_preserves_duals_multiblocks_and_complex_values() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let u1_rule = Arc::new(tenet::core::U1FusionRule);
+    let fz2_rule = Arc::new(tenet::core::FermionParityFusionRule);
+    let charge_cod = GradedSpace::try_new(
+        Arc::clone(&u1_rule),
+        [
+            (tenet::core::U1Irrep::new(-1), 1),
+            (tenet::core::U1Irrep::new(1), 1),
+        ],
+        false,
+    )
+    .unwrap();
+    let charge_dom = GradedSpace::try_new(
+        Arc::clone(&u1_rule),
+        [
+            (tenet::core::U1Irrep::new(-1), 1),
+            (tenet::core::U1Irrep::new(1), 1),
+        ],
+        true,
+    )
+    .unwrap();
+    let parity_cod = GradedSpace::try_new(
+        Arc::clone(&fz2_rule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 1),
+            (tenet::core::Z2Irrep::ODD, 1),
+        ],
+        true,
+    )
+    .unwrap();
+    let parity_dom = GradedSpace::try_new(
+        Arc::clone(&fz2_rule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 1),
+            (tenet::core::Z2Irrep::ODD, 1),
+        ],
+        false,
+    )
+    .unwrap();
+    let lhs: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&charge_cod], [&charge_dom], |sectors, _| {
+            Complex64::new(sectors.coupled().charge() as f64, 2.0)
+        })
+        .unwrap();
+    let rhs: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&parity_cod], [&parity_dom], |sectors, _| {
+            if *sectors.coupled() == tenet::core::Z2Irrep::EVEN {
+                Complex64::new(3.0, -1.0)
+            } else {
+                Complex64::new(-2.0, 4.0)
+            }
+        })
+        .unwrap();
+    let product = Arc::new(tenet::core::U1FusionRule.product(tenet::core::FermionParityFusionRule));
+
+    let actual = lhs.deligne_product(&rhs, product).unwrap();
+    let codomain = actual.codomain_spaces();
+    let domain = actual.domain_spaces();
+    let expected =
+        TensorMap::from_block_fn(&runtime, codomain.iter(), domain.iter(), |sectors, _| {
+            let codomain = sectors.codomain_uncoupled();
+            let domain = sectors.domain_uncoupled();
+            if codomain[0].left() == domain[0].left() && codomain[1].right() == domain[1].right() {
+                let lhs = Complex64::new(codomain[0].left().charge() as f64, 2.0);
+                let rhs = if *codomain[1].right() == tenet::core::Z2Irrep::EVEN {
+                    Complex64::new(3.0, -1.0)
+                } else {
+                    Complex64::new(-2.0, 4.0)
+                };
+                lhs * rhs
+            } else {
+                Complex64::new(0.0, 0.0)
+            }
+        })
+        .unwrap();
+
+    assert_eq!(actual.data(), expected.data());
+    assert!(actual.block_count() > 1);
+    assert_eq!(
+        codomain
+            .into_iter()
+            .chain(domain)
+            .map(|space| space.is_dual())
+            .collect::<Vec<_>>(),
+        [false, true, true, false]
+    );
+}
+
+#[test]
+fn typed_deligne_product_accepts_a_nondefault_product_codec() {
+    type Codec =
+        tenet::core::PackedProductCodec<tenet::core::U1SectorLayout, tenet::core::Fz2SectorLayout>;
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let u1_rule = Arc::new(tenet::core::U1FusionRule);
+    let fz2_rule = Arc::new(tenet::core::FermionParityFusionRule);
+    let charge = GradedSpace::try_new(
+        Arc::clone(&u1_rule),
+        [(tenet::core::U1Irrep::new(2), 1)],
+        false,
+    )
+    .unwrap();
+    let parity = GradedSpace::try_new(
+        Arc::clone(&fz2_rule),
+        [(tenet::core::Z2Irrep::ODD, 1)],
+        false,
+    )
+    .unwrap();
+    let lhs = TensorMap::from_block_fn(&runtime, [&charge], [&charge], |_, _| 2.0).unwrap();
+    let rhs = TensorMap::from_block_fn(&runtime, [&parity], [&parity], |_, _| 5.0).unwrap();
+    let product = Arc::new(tenet::core::ProductFusionRule::<_, _, Codec>::new(
+        tenet::core::U1FusionRule,
+        tenet::core::FermionParityFusionRule,
+    ));
+
+    let result = lhs.deligne_product(&rhs, product).unwrap();
+
+    assert_eq!(result.data(), [10.0]);
+    assert_eq!(
+        result.codomain_spaces()[0].sectors().unwrap(),
+        [tenet::core::product_sector(
+            tenet::core::U1Irrep::new(2),
+            tenet::core::Z2Irrep::EVEN
+        )]
+    );
+}
+
+#[test]
+fn typed_deligne_product_maps_component_innerlines_into_the_product_tree() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let u1_rule = Arc::new(tenet::core::U1FusionRule);
+    let fz2_rule = Arc::new(tenet::core::FermionParityFusionRule);
+    let charges = [1, 2, 3].map(|charge| {
+        GradedSpace::try_new(
+            Arc::clone(&u1_rule),
+            [(tenet::core::U1Irrep::new(charge), 1)],
+            false,
+        )
+        .unwrap()
+    });
+    let charge_total = GradedSpace::try_new(
+        Arc::clone(&u1_rule),
+        [(tenet::core::U1Irrep::new(6), 1)],
+        false,
+    )
+    .unwrap();
+    let odd = GradedSpace::try_new(
+        Arc::clone(&fz2_rule),
+        [(tenet::core::Z2Irrep::ODD, 1)],
+        false,
+    )
+    .unwrap();
+    let lhs =
+        TensorMap::from_block_fn(&runtime, charges.iter(), [&charge_total], |_, _| 2.0).unwrap();
+    let rhs = TensorMap::from_block_fn(&runtime, [&odd, &odd, &odd], [&odd], |_, _| 3.0).unwrap();
+    let product = Arc::new(tenet::core::U1FusionRule.product(tenet::core::FermionParityFusionRule));
+
+    let result = lhs.deligne_product(&rhs, product).unwrap();
+    let block = result.block_fusion_trees(0).unwrap();
+
+    assert_eq!(result.data(), [6.0]);
+    assert_eq!(
+        block.codomain_innerlines(),
+        [
+            tenet::core::product_sector(tenet::core::U1Irrep::new(3), tenet::core::Z2Irrep::EVEN),
+            tenet::core::product_sector(tenet::core::U1Irrep::new(6), tenet::core::Z2Irrep::EVEN),
+            tenet::core::product_sector(tenet::core::U1Irrep::new(6), tenet::core::Z2Irrep::ODD),
+            tenet::core::product_sector(tenet::core::U1Irrep::new(6), tenet::core::Z2Irrep::EVEN),
+        ]
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Phase 3, slice 4: non-regression gates.
 // ---------------------------------------------------------------------------
