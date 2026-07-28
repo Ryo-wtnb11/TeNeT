@@ -14297,6 +14297,24 @@ mod tk_user_api_tests {
     }
 
     #[test]
+    fn zn3_nonselfdual_compose_routes_both_dual_channels() {
+        let rt = Runtime::builder().build().unwrap();
+        let v = Space::zn(3, [(1, 1), (2, 1)]).unwrap();
+        let vd = v.dual();
+        let lhs = Tensor::from_block_fn(&rt, [&v], [&vd], |key, _| match key {
+            BlockKey::FusionTree(key) if key.codomain_uncoupled()[0].id() == 1 => 2.0,
+            _ => 3.0,
+        })
+        .unwrap();
+        let rhs = Tensor::from_block_fn(&rt, [&vd], [&v], |key, _| match key {
+            BlockKey::FusionTree(key) if key.codomain_uncoupled()[0].id() == 2 => 5.0,
+            _ => 7.0,
+        })
+        .unwrap();
+        assert_eq!(lhs.compose(&rhs).unwrap().data(), &[14.0, 15.0]);
+    }
+
+    #[test]
     fn hermitian_projectors_split_a_general_endomorphism() {
         // What: t = project_hermitian(t) + project_antihermitian(t), and each
         // part satisfies its predicate.

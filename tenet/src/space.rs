@@ -802,13 +802,11 @@ impl Space {
     }
 
     /// Returns the degeneracy of a Z_N charge, or `None` when absent.
-    pub fn zn_degeneracy(&self, charge: u32) -> Result<Option<usize>, Error> {
+    pub fn zn_degeneracy(&self, charge: i64) -> Result<Option<usize>, Error> {
         let UserRuleContext::ZN(rule) = self.context.as_ref() else {
             return Err(Error::RuleMismatch);
         };
-        let sector = rule
-            .decode_sector(SectorId::new(charge as usize))
-            .map_err(|e| Error::FusionAlgebra(Box::new(e)))?;
+        let sector = rule.irrep(charge);
         Ok(self
             .sectors
             .iter()
