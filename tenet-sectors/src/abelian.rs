@@ -31,9 +31,22 @@ impl From<ZNIrrep> for SectorId {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Debug)]
 pub struct ZNFusionRule {
     modulus: std::num::NonZeroU32,
+    identity: RuleIdentity,
+}
+
+impl PartialEq for ZNFusionRule {
+    fn eq(&self, other: &Self) -> bool {
+        self.modulus == other.modulus
+    }
+}
+impl Eq for ZNFusionRule {}
+impl std::hash::Hash for ZNFusionRule {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.modulus.hash(state);
+    }
 }
 
 impl ZNFusionRule {
@@ -44,7 +57,12 @@ impl ZNFusionRule {
                 label: "Z_N modulus must be nonzero".into(),
             });
         };
-        Ok(Self { modulus })
+        let bytes: std::sync::Arc<[u8]> = modulus.get().to_le_bytes().to_vec().into();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&modulus.get(), &mut hasher);
+        let identity =
+            RuleIdentity::from_canonical_bytes::<Self>(std::hash::Hasher::finish(&hasher), bytes);
+        Ok(Self { modulus, identity })
     }
 
     pub const fn modulus(&self) -> u32 {
@@ -65,18 +83,11 @@ impl ZNFusionRule {
             None => Err(FusionAlgebraError::InvalidSector { sector }),
         }
     }
-
-    fn identity(&self) -> RuleIdentity {
-        let bytes: std::sync::Arc<[u8]> = self.modulus().to_le_bytes().to_vec().into();
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        std::hash::Hash::hash(&self.modulus(), &mut hasher);
-        RuleIdentity::from_canonical_bytes::<Self>(std::hash::Hasher::finish(&hasher), bytes)
-    }
 }
 
 impl FusionRule for ZNFusionRule {
     fn rule_identity(&self) -> RuleIdentity {
-        self.identity()
+        self.identity.clone()
     }
     fn fusion_style(&self) -> FusionStyleKind {
         FusionStyleKind::Unique

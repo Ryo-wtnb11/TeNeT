@@ -14204,18 +14204,34 @@ mod tk_user_api_tests {
         let rt = Runtime::builder().build().unwrap();
         let v = Space::u1([(0, 2), (1, 1)]);
         let zero = Tensor::zeros(&rt, Dtype::F64, [&v], [&v]).unwrap();
+        let zero2 = Tensor::zeros(&rt, Dtype::F64, [&v], [&v]).unwrap();
+        assert_eq!(
+            zero.rule_authority_space().identity(),
+            zero2.rule_authority_space().identity()
+        );
         assert!(zero.is_hermitian(1e-12).unwrap());
         assert!(!zero.is_posdef(1e-12).unwrap());
     }
 
     #[test]
-    fn zn_erased_zero_tensor_composes() {
+    fn zn_erased_nonzero_tensor_transposes_with_sector_routing() {
         let rt = Runtime::builder().build().unwrap();
-        let v = Space::zn(3, [(0, 1), (1, 1)]).unwrap();
-        let zero = Tensor::zeros(&rt, Dtype::F64, [&v], [&v]).unwrap();
-        assert_eq!(zero.norm().unwrap(), 0.0);
-        let transposed = zero.transpose().unwrap();
-        assert_eq!(transposed.data(), zero.data());
+        let v = Space::zn(3, [(0, 1), (1, 2)]).unwrap();
+        let tensor = Tensor::from_block_fn(&rt, [&v], [&v], |key, _| match key {
+            BlockKey::FusionTree(key) => key.codomain_uncoupled()[0].id() as f64 + 1.0,
+            _ => 1.0,
+        })
+        .unwrap();
+        let transposed = tensor.transpose().unwrap();
+        assert_eq!(
+            transposed.codomain_spaces()[0].zn_sectors().unwrap(),
+            vec![(0, 1), (2, 2)]
+        );
+        assert_eq!(
+            transposed.domain_spaces()[0].zn_sectors().unwrap(),
+            vec![(0, 1), (2, 2)]
+        );
+        assert_eq!(transposed.data(), tensor.data());
     }
 
     #[test]
