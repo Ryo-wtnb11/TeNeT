@@ -107,17 +107,40 @@ fn powi_typed_and_erased_c64_agree_including_i32_min_identity() {
         );
     }
 
-    let erased_identity = Tensor::diagonal(
+    let erased_roots = Tensor::diagonal(
         &runtime,
         Dtype::C64,
         &space,
-        vec![vec![Scalar::C64(one)]; 2],
+        [
+            vec![Scalar::C64(Complex64::new(-1.0, 0.0))],
+            vec![Scalar::C64(Complex64::new(0.0, 1.0))],
+        ],
     )
     .unwrap();
-    let typed_identity = TensorMap::diagonal(
+    let typed_roots = TensorMap::diagonal(
         &runtime,
         &bond,
         [
+            SectorSpectrum {
+                sector: Z2Irrep::EVEN,
+                values: vec![Complex64::new(-1.0, 0.0)],
+            },
+            SectorSpectrum {
+                sector: Z2Irrep::ODD,
+                values: vec![Complex64::new(0.0, 1.0)],
+            },
+        ],
+    )
+    .unwrap();
+    let erased_min = erased_roots.powi(i32::MIN).unwrap();
+    let typed_min = typed_roots.powi(i32::MIN).unwrap();
+    assert_eq!(
+        erased_min.diagonal_spectrum().unwrap(),
+        Some(vec![vec![Scalar::C64(one)], vec![Scalar::C64(one)]])
+    );
+    assert_eq!(
+        typed_min.diagonal_spectrum().unwrap(),
+        Some(vec![
             SectorSpectrum {
                 sector: Z2Irrep::EVEN,
                 values: vec![one],
@@ -126,13 +149,9 @@ fn powi_typed_and_erased_c64_agree_including_i32_min_identity() {
                 sector: Z2Irrep::ODD,
                 values: vec![one],
             },
-        ],
-    )
-    .unwrap();
-    assert_eq!(
-        typed_identity.powi(i32::MIN).unwrap().data(),
-        erased_identity.powi(i32::MIN).unwrap().data_c64()
+        ])
     );
+    assert_eq!(typed_min.data(), erased_min.data_c64());
 }
 
 #[test]
@@ -184,4 +203,42 @@ fn powi_rejects_non_endomorphisms_and_singular_negative_powers() {
         typed_singular.powi(-1),
         Err(Error::InvalidArgument(_))
     ));
+}
+
+#[test]
+fn dense_powi_matches_hand_computed_matrix_powers() {
+    let runtime = Runtime::builder().build().unwrap();
+    let space = Space::z2([(0, 2)]);
+    let provider = Arc::new(Z2FusionRule);
+    let bond = GradedSpace::try_new(provider, [(Z2Irrep::EVEN, 2)], false).unwrap();
+    let matrix = [[2.0, 1.0], [0.0, 3.0]];
+    let erased =
+        Tensor::from_block_fn(&runtime, [&space], [&space], |_, i| matrix[i[0]][i[1]]).unwrap();
+    let typed =
+        TensorMap::from_block_fn(&runtime, [&bond], [&bond], |_, i| matrix[i[0]][i[1]]).unwrap();
+    let square = [[4.0, 5.0], [0.0, 9.0]];
+    let expected_square =
+        Tensor::from_block_fn(&runtime, [&space], [&space], |_, i| square[i[0]][i[1]]).unwrap();
+    let inverse = [[0.5, -1.0 / 6.0], [0.0, 1.0 / 3.0]];
+    let expected_inverse =
+        Tensor::from_block_fn(&runtime, [&space], [&space], |_, i| inverse[i[0]][i[1]]).unwrap();
+    let identity = Tensor::id(&runtime, Dtype::F64, [&space]).unwrap();
+
+    let erased_zero = erased.powi(0).unwrap();
+    let typed_zero = typed.powi(0).unwrap();
+    assert_ne!(erased_zero.data(), erased.data());
+    assert_ne!(typed_zero.data(), typed.data());
+    assert_eq!(erased_zero.data(), identity.data());
+    assert_eq!(typed_zero.data(), identity.data());
+    assert_eq!(erased.powi(2).unwrap().data(), expected_square.data());
+    assert_eq!(typed.powi(2).unwrap().data(), expected_square.data());
+
+    for actual in [
+        erased.powi(-1).unwrap().data(),
+        typed.powi(-1).unwrap().data(),
+    ] {
+        for (actual, expected) in actual.iter().zip(expected_inverse.data()) {
+            assert!((actual - expected).abs() < 1e-14);
+        }
+    }
 }

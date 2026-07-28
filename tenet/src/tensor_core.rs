@@ -679,6 +679,11 @@ mod tests {
         .unwrap();
         assert_eq!(power, 3_u64.pow(13));
         assert_eq!(compositions, 5);
+        let trace = pow_by_squaring("a".to_string(), 13, |left, right| {
+            Ok::<_, ()>(format!("({left}*{right})"))
+        })
+        .unwrap();
+        assert_eq!(trace, "((a*((a*a)*(a*a)))*(((a*a)*(a*a))*((a*a)*(a*a))))");
 
         compositions = 0;
         assert_eq!(
