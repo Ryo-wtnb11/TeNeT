@@ -3,7 +3,7 @@ use std::{cell::Cell, error::Error, fmt};
 use tenet_core::{
     block_structure_intern_cache_info, complete_hom_space_structure_cache_info,
     fusion_tree_layout_cache_info, BraidingStyleKind, CheckedGenericFusion,
-    CheckedGenericStructureError, CoupledSectorFold, FusionProductSpace, FusionRule,
+    CheckedGenericStructureError, CoreError, CoupledSectorFold, FusionProductSpace, FusionRule,
     FusionStyleKind, FusionTreeHomSpace, InfallibleGeneric, RuleIdentity, SectorId, SectorLeg,
     SectorVec, Su3FusionRule,
 };
@@ -134,6 +134,36 @@ impl CheckedGenericFusion for DefaultFoldToy {
     }
 }
 
+struct TaintedFoldToy(Toy);
+impl CheckedGenericFusion for TaintedFoldToy {
+    type Error = ToyError;
+    fn vacuum(&self) -> SectorId {
+        self.0.vacuum()
+    }
+    fn try_dual(&self, s: SectorId) -> Result<SectorId, ToyError> {
+        self.0.try_dual(s)
+    }
+    fn try_fusion_channels(&self, a: SectorId, b: SectorId) -> Result<SectorVec, ToyError> {
+        self.0.try_fusion_channels(a, b)
+    }
+    fn try_fusion_channels_in_table(
+        &self,
+        a: SectorId,
+        b: SectorId,
+    ) -> Result<SectorVec, ToyError> {
+        self.0.try_fusion_channels_in_table(a, b)
+    }
+    fn try_coupled_sector_fold(&self, _: &[SectorId]) -> Result<CoupledSectorFold, ToyError> {
+        Ok(CoupledSectorFold {
+            tainted: vec![SectorId::new(1)],
+            ..Default::default()
+        })
+    }
+    fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, ToyError> {
+        self.0.try_nsymbol(a, b, c)
+    }
+}
+
 fn hom() -> FusionTreeHomSpace {
     let leg = |dual| SectorLeg::new([(SectorId::new(1), 1)], dual);
     FusionTreeHomSpace::new(
@@ -151,6 +181,22 @@ fn checked_generic_default_fold_keeps_channel_failure_live() {
         error,
         CheckedGenericStructureError::Provider(ToyError(Failure::Channel))
     ));
+}
+
+#[test]
+fn checked_generic_tainted_fold_error_is_provider_neutral() {
+    let error = hom()
+        .fusion_tree_keys_generic_for_coupled_checked(
+            &TaintedFoldToy(Toy::new(Failure::None)),
+            SectorId::new(1),
+        )
+        .unwrap_err();
+    let CheckedGenericStructureError::Core(CoreError::FusionOutsideTable { message }) = error
+    else {
+        panic!("expected an outside-table structural error");
+    };
+    assert!(message.contains("generic fusion provider"));
+    assert!(!message.contains("SU(3)"));
 }
 
 #[test]
@@ -364,4 +410,29 @@ fn checked_adapter_pins_tensor_kit_su3_generic_boundaries() {
             vertices
         );
     }
+}
+
+#[test]
+fn checked_generic_per_coupled_cartesian_order_is_domain_outer() {
+    let rule = Su3FusionRule::new();
+    let checked = InfallibleGeneric::new(&rule);
+    let eight = rule.sector_of(1, 1).unwrap();
+    let leg = || SectorLeg::new([(eight, 1)], false);
+    let hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(), leg()]),
+        FusionProductSpace::new([leg(), leg()]),
+    );
+    assert_eq!(
+        hom.fusion_tree_keys_generic_for_coupled_checked(&checked, eight)
+            .unwrap()
+            .iter()
+            .map(|key| {
+                (
+                    key.codomain_vertices()[0].get(),
+                    key.domain_vertices()[0].get(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![(1, 1), (2, 1), (1, 2), (2, 2)]
+    );
 }

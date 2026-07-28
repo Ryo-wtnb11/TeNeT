@@ -694,11 +694,11 @@ struct FusionTreeHomSpaceLayoutData {
 fn generic_keys_for_coupled_from_groups(
     codomain: &[CoupledFusionTrees], codomain_fold: &CoupledSectorFold,
     domain: &[CoupledFusionTrees], domain_fold: &CoupledSectorFold, coupled: SectorId,
+    outside_table_error: impl Fn(&str, &CoupledSectorFold, SectorId) -> CoreError,
 ) -> Result<Vec<FusionTreePairKey>, CoreError> {
     for (side, fold) in [("codomain", codomain_fold), ("domain", domain_fold)] {
         if fold.poisoned || fold.tainted.contains(&coupled) {
-            return Err(CoreError::FusionOutsideTable { message: format!(
-                "SU(3) coupled sector {coupled:?} on the {side} side requires                          out-of-table intermediates (dim<=27 cut); extend the table                          (Stage B3c). {}", fusion_fold_error_message(side, fold)) });
+            return Err(outside_table_error(side, fold, coupled));
         }
     }
     let codomain = codomain.iter().find(|g| g.coupled == coupled).map_or(&[][..], |g| g.trees.as_slice());
@@ -2961,7 +2961,19 @@ impl FusionTreeHomSpace {
         let (codomain, codomain_fold) =
             fusion_trees_by_coupled_for_space_generic(rule, self.codomain());
         let (domain, domain_fold) = fusion_trees_by_coupled_for_space_generic(rule, self.domain());
-        generic_keys_for_coupled_from_groups(&codomain, &codomain_fold, &domain, &domain_fold, coupled)
+        generic_keys_for_coupled_from_groups(
+            &codomain,
+            &codomain_fold,
+            &domain,
+            &domain_fold,
+            coupled,
+            |side, fold, coupled| CoreError::FusionOutsideTable {
+                message: format!(
+                    "SU(3) coupled sector {coupled:?} on the {side} side requires                          out-of-table intermediates (dim<=27 cut); extend the table                          (Stage B3c). {}",
+                    fusion_fold_error_message(side, fold),
+                ),
+            },
+        )
     }
 
     /// Checked counterpart of [`Self::fusion_tree_keys_generic_for_coupled`].
@@ -2977,7 +2989,19 @@ impl FusionTreeHomSpace {
             fusion_trees_by_coupled_for_space_generic_checked(rule, self.codomain())?;
         let (domain, domain_fold) =
             fusion_trees_by_coupled_for_space_generic_checked(rule, self.domain())?;
-        generic_keys_for_coupled_from_groups(&codomain, &codomain_fold, &domain, &domain_fold, coupled).map_err(Into::into)
+        generic_keys_for_coupled_from_groups(
+            &codomain,
+            &codomain_fold,
+            &domain,
+            &domain_fold,
+            coupled,
+            |side, fold, coupled| CoreError::FusionOutsideTable {
+                message: format!(
+                    "generic fusion provider cannot exactly represent coupled sector {coupled:?} on the {side} side ({fold:?}); block dimensions are either exact or an error, never truncated.",
+                ),
+            },
+        )
+        .map_err(Into::into)
     }
 
     pub fn sector_structure<R>(&self, rule: &R) -> Result<SectorStructure, CoreError>
