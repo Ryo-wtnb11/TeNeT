@@ -21,6 +21,7 @@ use smallvec::SmallVec;
 pub use tenet_sectors::{
     product_fusion_rule, product_fusion_rule_with_codec, product_sector, BraidingStyleKind,
     CU1FusionRule, CU1Irrep, CanonicalUnitFusionRule, CheckedFusionAlgebra, CheckedGenericFusion,
+    CheckedGenericRigidSymbols,
     CoupledSectorFold, FermionParityFusionRule, FibonacciFusionRule, FusionAlgebraError,
     FusionRule, FusionStyleKind, Fz2SectorLayout, GenericBraidScalar, GenericFArray,
     GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols, InfallibleGeneric,
