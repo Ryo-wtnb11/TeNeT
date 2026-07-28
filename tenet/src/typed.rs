@@ -2198,7 +2198,24 @@ where
         })
     }
 
-    /// Deligne product through an explicit ordered product provider.
+    /// TensorKit `deligneproduct`: embeds `self` as `(a, 𝟙)` and `other` as
+    /// `(𝟙, b)` in the supplied ordered product category, then combines the
+    /// embedded tensors with the F-only [`Self::otimes`] route.
+    ///
+    /// This operation is typed-only and keeps the payload type `D` unchanged.
+    /// The caller supplies the exact [`ProductFusionRule`], including its
+    /// component providers and codec; both component [`RuleIdentity`] values
+    /// must match the operands, and the codec participates in the product
+    /// identity. [`CanonicalUnitFusionRule`] is required for both components
+    /// because TeNeT stores no separate unitor data. Factor order and nested
+    /// association are preserved exactly rather than reassociated or swapped.
+    ///
+    /// Validation reports [`Error::RuntimeMismatch`] before component
+    /// [`Error::RuleMismatch`]. Both vacuum embeddings, codec decodes, and
+    /// source/target fusion-tree bijections are prepared before either
+    /// embedded `TensorMap` or layout is published. After that transaction
+    /// succeeds, the operation builds the two embedded tensors by copying
+    /// their dense data (materializing a compact operand when necessary).
     pub fn deligne_product<R2, C>(
         &self,
         other: &TensorMap<R2, D>,
