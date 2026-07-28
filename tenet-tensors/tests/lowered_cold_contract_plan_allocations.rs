@@ -15,7 +15,7 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tenet_core::{FusionProductSpace, FusionTreeHomSpace, SectorLeg, U1FusionRule, U1Irrep};
 use tenet_tensors::{
@@ -48,6 +48,10 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static GLOBAL: CountingAllocator = CountingAllocator;
 
+// Why not rely on thread-local allocation counters alone: cache resets and
+// plan compilation mutate shared process-global state.
+static GLOBAL_CACHE_RESET_LOCK: Mutex<()> = Mutex::new(());
+
 fn measured<T>(operation: impl FnOnce() -> T) -> (T, usize, usize) {
     ALLOCATIONS.set(0);
     BYTES.set(0);
@@ -74,6 +78,10 @@ fn chain_homspace(sector_count: i32) -> FusionTreeHomSpace {
 
 #[test]
 fn cold_lowered_enumeration_streams_and_builds_once() {
+    let _global_cache_guard = GLOBAL_CACHE_RESET_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
     // Streaming: admitted keys grow linearly with the sector count while the
     // candidate space (codomain x domain sector pairs) grows quadratically.
     // An eager whole-table regression would push per-key bytes at N=64 far
@@ -241,6 +249,10 @@ fn run_route() -> RouteRun {
 
 #[test]
 fn cold_contract_plan_build_stays_cached_after_first_run() {
+    let _global_cache_guard = GLOBAL_CACHE_RESET_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
     // Discard one run: the first contraction in the process pays a one-time
     // warmup (lazy statics, thread-local init) that would otherwise skew the
     // repeat-stability comparison below.
