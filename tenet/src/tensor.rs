@@ -12781,6 +12781,10 @@ mod adjoint_parent_view_tests {
         // recoupling coefficients, fermionic signs, and crossed output order.
         assert_lazy_contract_matches_eager_oracle(Space::u1([(-2, 1), (-1, 2), (1, 3)]), 261_201);
         assert_lazy_contract_matches_eager_oracle(
+            Space::zn(3, [(0, 2), (1, 3), (2, 1)]).unwrap(),
+            261_206,
+        );
+        assert_lazy_contract_matches_eager_oracle(
             Space::su2([(0, 2), (1, 3), (2, 1)]).unwrap(),
             261_211,
         );
