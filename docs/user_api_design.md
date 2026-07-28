@@ -1,4 +1,4 @@
-# ユーザー層 API 設計メモ
+# Rule-erased ユーザー層 API 設計メモ
 
 作成日: 2026-07-04。前提: `tensorkit_compatibility_table.md` の P0-P2 実施済み。
 
@@ -18,7 +18,19 @@
    パーサは公開 API に出さない)。N 体は planner(greedy / opt-einsum-path / cotengra)が
    順序を自動選択。
 
-## 目標ユーザーコード
+## 二つの peer facade (2026-07-28)
+
+- `tenet::prelude::{Tensor, Space, Runtime}` は built-in provider 向けの
+  rule-erased facade、`tenet::typed::{TensorMap<R, D>, GradedSpace<R>}` は
+  downstream provider 向けの provider-/scalar-typed facade である。どちらも
+  `Runtime` を共有する peer であり、片方がもう片方を wrap したり、公開共通 trait
+  を持ったりしない。
+- 両者は private admitted-layout/operation seam へ lower する。compact diagonal は
+  private storage であり、SVD/eigendecomposition の spectrum factor は必要になるまで
+  dense materialization しない。共有化は transform/contract/compact の一部に留まり、
+  それ以外の収束は typed Generic/SU(3) admission 後の課題である。
+
+## erased facade の目標ユーザーコード
 
 ```rust
 use tenet::prelude::*;
@@ -97,7 +109,7 @@ let c_c64 = c.to_c64();                          // c64 には明示 widening
   コンパイル時に検査できる。Space の一致は実行時検査(低レイヤの既存
   ゲートがそのまま担う)。
 
-## 型設計
+## erased facade の型設計
 
 - `Space`: sector→degeneracy の列 + 双対フラグ。`SectorLeg` の薄い高レベル形。
   rule ごとのコンストラクタ(`Space::u1`, `Space::z2`, `Space::su2`,
@@ -120,12 +132,13 @@ let c_c64 = c.to_c64();                          // c64 には明示 widening
 ## 層の関係
 
 ```text
-ユーザー層   Tensor / Space / Runtime          (このメモ)
+ユーザー層   erased: Tensor / Space / Runtime / tensor!
+             typed: TensorMap<R, D> / GradedSpace<R> (peer)
 expert 層    tensorcontract_into / permute_into / svd_compact ...(既存)
-内部実行層   eager resolution / explicit prepared / backend   (既存)
+内部実行層   private admitted layout / operation / backend
 ```
 
-ユーザー層は expert 層の呼び出しだけで実装し、内部実行層に直接触れない。
+両 facade は expert/private seam を通じて実装し、内部実行層に直接触れない。
 
 ## 実施順
 
