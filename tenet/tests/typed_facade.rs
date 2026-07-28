@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tenet::core::{
     complete_hom_space_structure_cache_info, fusion_tree_layout_cache_info, BraidingStyleKind,
-    CheckedFusionAlgebra, FusionAlgebraError, FusionRule, FusionStyleKind,
+    CU1FusionRule, CU1Irrep, CheckedFusionAlgebra, FusionAlgebraError, FusionRule, FusionStyleKind,
     MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
     ProductFusionRuleExt, RuleIdentity, SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorVec,
 };
@@ -10206,6 +10206,40 @@ fn external_nobraiding_vacuum_only_legs_twist_passes_flip_rejects() {
 
     let unflipped: TensorMap<PlanarZ2, f64> = t.flip(&[]).unwrap();
     assert_eq!(unflipped.data().as_ptr(), t.data().as_ptr());
+}
+
+#[test]
+fn cu1_typed_rank_three_permutation_pins_the_gauge_contract_and_recoupling_values() {
+    // What: CU(1) does not certify a trivial associator gauge, and this
+    // rank-three charged fixture independently pins its recoupled payload.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let rule = Arc::new(CU1FusionRule);
+    assert!(!rule.has_trivial_associator_gauge());
+    let q = CU1Irrep::from_twice_charge(1);
+    let leg = GradedSpace::try_new(Arc::clone(&rule), [(q, 1)], false).unwrap();
+    let tensor: TensorMap<CU1FusionRule, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg, &leg], [&leg], |_, _| 1.0).unwrap();
+    assert_eq!(tensor.codomain().len(), 3);
+    assert_eq!(tensor.domain().len(), 1);
+    assert!(tensor
+        .codomain()
+        .iter()
+        .chain(tensor.domain().iter())
+        .all(|space| space.degeneracies() == [1]));
+    assert_eq!(tensor.data(), [1.0, 1.0, 1.0]);
+    let permuted = tensor.permute(&[2, 0, 1], &[3]).unwrap();
+    assert_eq!(permuted.codomain().len(), 3);
+    assert_eq!(permuted.domain().len(), 1);
+    assert_eq!(permuted.data().len(), 3);
+    for (got, expected) in
+        permuted
+            .data()
+            .iter()
+            .zip([2.0_f64.sqrt() / 2.0, -2.0_f64.sqrt() / 2.0, 2.0_f64.sqrt()])
+    {
+        assert!((got - expected).abs() <= 1e-12, "{got} vs {expected}");
+    }
 }
 
 // ---------------------------------------------------------------------------
