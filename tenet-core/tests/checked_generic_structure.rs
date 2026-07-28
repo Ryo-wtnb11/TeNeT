@@ -29,22 +29,45 @@ impl std::error::Error for ToyError {}
 struct Toy {
     fail: Failure,
     calls: Cell<usize>,
+    skips: Cell<usize>,
 }
 impl Toy {
     fn new(fail: Failure) -> Self {
         Self {
             fail,
             calls: Cell::new(0),
+            skips: Cell::new(0),
+        }
+    }
+    fn late_nsymbol(skip: usize) -> Self {
+        Self {
+            fail: Failure::Multiplicity,
+            calls: Cell::new(0),
+            skips: Cell::new(skip),
         }
     }
     fn hit(&self, at: Failure) -> Result<(), ToyError> {
         self.calls.set(self.calls.get() + 1);
-        if self.fail == at {
+        if self.fail == at && self.skips.get() == 0 {
             Err(ToyError(at))
         } else {
+            if self.fail == at {
+                self.skips.set(self.skips.get() - 1);
+            }
             Ok(())
         }
     }
+}
+
+#[test]
+fn checked_generic_late_nsymbol_failure_propagates() {
+    let error = hom()
+        .fusion_tree_keys_generic_checked(&Toy::late_nsymbol(2))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        CheckedGenericStructureError::Provider(ToyError(Failure::Multiplicity))
+    ));
 }
 impl CheckedGenericFusion for Toy {
     type Error = ToyError;
@@ -86,12 +109,47 @@ impl CheckedGenericFusion for Toy {
     }
 }
 
+struct DefaultFoldToy(Toy);
+impl CheckedGenericFusion for DefaultFoldToy {
+    type Error = ToyError;
+    fn vacuum(&self) -> SectorId {
+        self.0.vacuum()
+    }
+    fn try_dual(&self, s: SectorId) -> Result<SectorId, ToyError> {
+        self.0.try_dual(s)
+    }
+    fn try_fusion_channels(&self, a: SectorId, b: SectorId) -> Result<SectorVec, ToyError> {
+        self.0.try_fusion_channels(a, b)
+    }
+    fn try_fusion_channels_in_table(
+        &self,
+        a: SectorId,
+        b: SectorId,
+    ) -> Result<SectorVec, ToyError> {
+        self.0.try_fusion_channels_in_table(a, b)
+    }
+    fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, ToyError> {
+        self.0.try_nsymbol(a, b, c)
+    }
+}
+
 fn hom() -> FusionTreeHomSpace {
     let leg = |dual| SectorLeg::new([(SectorId::new(1), 1)], dual);
     FusionTreeHomSpace::new(
         FusionProductSpace::new([leg(false), leg(true), leg(false)]),
         FusionProductSpace::new([leg(false)]),
     )
+}
+
+#[test]
+fn checked_generic_default_fold_keeps_channel_failure_live() {
+    let error = hom()
+        .fusion_tree_keys_generic_checked(&DefaultFoldToy(Toy::new(Failure::Channel)))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        CheckedGenericStructureError::Provider(ToyError(Failure::Channel))
+    ));
 }
 
 #[test]
