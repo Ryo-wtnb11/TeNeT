@@ -515,9 +515,6 @@ impl<Scalar> GenericRMatrix<Scalar> {
 pub trait CheckedGenericFusion {
     type Error: std::error::Error + Send + Sync + 'static;
 
-    fn rule_identity(&self) -> RuleIdentity;
-    fn fusion_style(&self) -> FusionStyleKind;
-    fn braiding_style(&self) -> BraidingStyleKind;
     fn vacuum(&self) -> SectorId;
     fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error>;
     fn try_fusion_channels(
@@ -533,7 +530,27 @@ pub trait CheckedGenericFusion {
     fn try_coupled_sector_fold(
         &self,
         effective: &[SectorId],
-    ) -> Result<CoupledSectorFold, Self::Error>;
+    ) -> Result<CoupledSectorFold, Self::Error> {
+        let mut acc = match effective.first() {
+            None => vec![self.vacuum()],
+            Some(&first) => vec![first],
+        };
+        for &last in effective.iter().skip(1) {
+            let mut next = Vec::new();
+            for front in acc {
+                next.extend(self.try_fusion_channels(front, last)?);
+            }
+            next.sort_unstable();
+            next.dedup();
+            acc = next;
+        }
+        acc.sort_unstable();
+        acc.dedup();
+        Ok(CoupledSectorFold {
+            clean: acc,
+            ..CoupledSectorFold::default()
+        })
+    }
     fn try_nsymbol(
         &self,
         left: SectorId,
@@ -558,18 +575,6 @@ impl<'a, R> InfallibleGeneric<'a, R> {
 impl<R: FusionRule> CheckedGenericFusion for InfallibleGeneric<'_, R> {
     type Error = Infallible;
 
-    fn rule_identity(&self) -> RuleIdentity {
-        self.0.rule_identity()
-    }
-
-    fn fusion_style(&self) -> FusionStyleKind {
-        self.0.fusion_style()
-    }
-
-    fn braiding_style(&self) -> BraidingStyleKind {
-        self.0.braiding_style()
-    }
-
     fn vacuum(&self) -> SectorId {
         self.0.vacuum()
     }
@@ -583,11 +588,7 @@ impl<R: FusionRule> CheckedGenericFusion for InfallibleGeneric<'_, R> {
         left: SectorId,
         right: SectorId,
     ) -> Result<SectorVec, Self::Error> {
-        // A bounded legacy table may deliberately panic for a full channel
-        // query outside its representable frontier. Generic structural walks
-        // have already classified the candidate as clean, so its in-table
-        // channels are the complete tree-relevant set.
-        Ok(self.0.fusion_channels_in_table(left, right))
+        Ok(self.0.fusion_channels(left, right))
     }
 
     fn try_fusion_channels_in_table(

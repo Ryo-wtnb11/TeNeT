@@ -1,10 +1,10 @@
-use std::{cell::Cell, fmt};
+use std::{cell::Cell, error::Error, fmt};
 
 use tenet_core::{
-    complete_hom_space_structure_cache_info, fusion_tree_layout_cache_info, BraidingStyleKind,
-    CheckedGenericFusion, CheckedGenericStructureError, CoupledSectorFold, FusionProductSpace,
-    FusionStyleKind, FusionTreeHomSpace, InfallibleGeneric, RuleIdentity, SectorId, SectorLeg,
-    SectorVec, Su3FusionRule,
+    block_structure_intern_cache_info, complete_hom_space_structure_cache_info,
+    fusion_tree_layout_cache_info, CheckedGenericFusion, CheckedGenericStructureError,
+    CoupledSectorFold, FusionProductSpace, FusionTreeHomSpace, InfallibleGeneric, SectorId,
+    SectorLeg, SectorVec, Su3FusionRule,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,15 +48,6 @@ impl Toy {
 }
 impl CheckedGenericFusion for Toy {
     type Error = ToyError;
-    fn rule_identity(&self) -> RuleIdentity {
-        RuleIdentity::of_type::<Self>()
-    }
-    fn fusion_style(&self) -> FusionStyleKind {
-        FusionStyleKind::Generic
-    }
-    fn braiding_style(&self) -> BraidingStyleKind {
-        BraidingStyleKind::Bosonic
-    }
     fn vacuum(&self) -> SectorId {
         SectorId::new(0)
     }
@@ -115,18 +106,26 @@ fn checked_generic_structure_preserves_order_and_never_publishes_on_provider_fai
         let before = (
             fusion_tree_layout_cache_info(),
             complete_hom_space_structure_cache_info(),
+            block_structure_intern_cache_info(),
         );
         let error = hom()
-            .fusion_tree_keys_generic_checked(&Toy::new(fail))
+            .coupled_subblock_structure_from_leg_degeneracies_generic_checked(&Toy::new(fail))
             .unwrap_err();
         assert!(
             matches!(error, CheckedGenericStructureError::Provider(ToyError(actual)) if actual == fail)
         );
         assert_eq!(
+            error
+                .source()
+                .and_then(|source| source.downcast_ref::<ToyError>()),
+            Some(&ToyError(fail))
+        );
+        assert_eq!(
             before,
             (
                 fusion_tree_layout_cache_info(),
-                complete_hom_space_structure_cache_info()
+                complete_hom_space_structure_cache_info(),
+                block_structure_intern_cache_info()
             )
         );
     }
@@ -136,7 +135,26 @@ fn checked_generic_structure_preserves_order_and_never_publishes_on_provider_fai
     assert_eq!(keys.len(), 4);
     assert_eq!(keys[0].codomain_tree().vertices()[0].get(), 1);
     assert_eq!(keys[1].codomain_tree().vertices()[0].get(), 2);
+    assert_eq!(
+        keys.iter()
+            .map(|key| (
+                key.codomain_tree().vertices()[0].get(),
+                key.codomain_tree().vertices()[1].get()
+            ))
+            .collect::<Vec<_>>(),
+        vec![(1, 1), (2, 1), (1, 2), (2, 2)]
+    );
     assert_eq!(keys[0].codomain_tree().innerlines(), &[SectorId::new(1)]);
+    let structure = hom()
+        .coupled_subblock_structure_from_leg_degeneracies_generic_checked(&Toy::new(Failure::None))
+        .unwrap();
+    assert_eq!(structure.block_count(), keys.len());
+    for (index, key) in keys.iter().enumerate() {
+        assert_eq!(
+            structure.block(index).unwrap().key().as_fusion_tree_pair(),
+            Some(key)
+        );
+    }
 }
 
 #[test]
