@@ -3,10 +3,11 @@
 use std::sync::Arc;
 
 use tenet_core::{
-    CheckedFusionAlgebra, FermionParityFusionRule, FusionAlgebraError, FusionRule, Fz2SectorLayout,
-    PackedProductCodec, ProductFusionRule, ProductSectorCodec, ProductSectorLayout, RuleIdentity,
-    SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorLeg, Su2SectorLayout, Su3FusionRule,
-    U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep, ZNFusionRule,
+    CU1FusionRule, CU1Irrep, CheckedFusionAlgebra, FermionParityFusionRule, FusionAlgebraError,
+    FusionRule, Fz2SectorLayout, PackedProductCodec, ProductFusionRule, ProductSectorCodec,
+    ProductSectorLayout, RuleIdentity, SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorLeg,
+    Su2SectorLayout, Su3FusionRule, U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep,
+    ZNFusionRule,
 };
 use tenet_matrixalgebra::TruncationSpace;
 
@@ -62,6 +63,7 @@ pub enum SectorLabel {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub(crate) enum RuleKind {
     U1,
+    CU1,
     Z2,
     ZN,
     FZ2,
@@ -119,6 +121,7 @@ pub(crate) type Fz2U1Su2Rule = ProductFusionRule<Fz2U1Rule, SU2FusionRule, Fz2U1
 #[derive(Clone, Debug)]
 pub(crate) enum UserRuleContext {
     U1(Arc<U1FusionRule>),
+    CU1(Arc<CU1FusionRule>),
     Z2(Arc<Z2FusionRule>),
     ZN(Arc<ZNFusionRule>),
     FZ2(Arc<FermionParityFusionRule>),
@@ -132,6 +135,7 @@ impl UserRuleContext {
     pub(crate) fn kind(&self) -> RuleKind {
         match self {
             Self::U1(_) => RuleKind::U1,
+            Self::CU1(_) => RuleKind::CU1,
             Self::Z2(_) => RuleKind::Z2,
             Self::ZN(_) => RuleKind::ZN,
             Self::FZ2(_) => RuleKind::FZ2,
@@ -145,6 +149,7 @@ impl UserRuleContext {
     pub(crate) fn identity(&self) -> RuleIdentity {
         match self {
             Self::U1(rule) => rule.rule_identity(),
+            Self::CU1(rule) => rule.rule_identity(),
             Self::Z2(rule) => rule.rule_identity(),
             Self::ZN(rule) => rule.rule_identity(),
             Self::FZ2(rule) => rule.rule_identity(),
@@ -176,6 +181,10 @@ macro_rules! with_rule {
     ($context:expr, $rule:ident, $body:expr) => {
         match $context {
             $crate::space::UserRuleContext::U1(provider) => {
+                let $rule = provider.as_ref();
+                $body
+            }
+            $crate::space::UserRuleContext::CU1(provider) => {
                 let $rule = provider.as_ref();
                 $body
             }
@@ -299,6 +308,36 @@ impl Space {
                 .map(|(charge, deg)| (U1Irrep::new(charge).sector_id(), deg))
                 .collect(),
         )
+    }
+
+    /// TensorKit CU(1) / O(2) space from `((twice_charge, s), degeneracy)`.
+    /// Valid labels are `(0,0)`, `(0,1)`, and `(q,2)` for `q > 0`.
+    pub fn cu1<I>(sectors: I) -> Result<Self, Error>
+    where
+        I: IntoIterator<Item = ((u32, u8), usize)>,
+    {
+        let rule = CU1FusionRule;
+        let sectors = sectors
+            .into_iter()
+            .map(|((twice_charge, s), deg)| {
+                let irrep = match (twice_charge, s) {
+                    (0, 0) => Some(CU1Irrep::VACUUM),
+                    (0, 1) => Some(CU1Irrep::PSEUDOSCALAR),
+                    (charge, 2) => CU1Irrep::try_from_twice_charge(charge),
+                    _ => None,
+                }
+                .ok_or_else(|| FusionAlgebraError::UnrepresentableSectorLabel {
+                    rule: rule.rule_identity(),
+                    label: format!("CU(1) sector ({twice_charge}, {s})"),
+                })?;
+                Ok((irrep.into(), deg))
+            })
+            .collect::<Result<Vec<_>, FusionAlgebraError>>()
+            .map_err(|error| Error::FusionAlgebra(Box::new(error)))?;
+        Ok(Self::new(
+            Arc::new(UserRuleContext::CU1(Arc::new(rule))),
+            sectors,
+        ))
     }
 
     /// Z2-graded space from `(parity, degeneracy)` pairs. Numeric labels are
@@ -685,6 +724,7 @@ impl Space {
                     .expect("invalid U1 sector id")
                     .charge(),
             ),
+            RuleKind::CU1 => unimplemented!("CU(1) labels use Space::cu1_sectors"),
             RuleKind::Z2 => SectorLabel::Z2(
                 Z2Irrep::from_sector_id(sector)
                     .expect("invalid Z2 sector id")
@@ -732,6 +772,7 @@ impl Space {
     fn encode_sector(&self, label: SectorLabel) -> Option<SectorId> {
         match (self.rule_kind(), label) {
             (RuleKind::U1, SectorLabel::U1(charge)) => Some(U1Irrep::new(charge).sector_id()),
+            (RuleKind::CU1, _) => None,
             (RuleKind::Z2, SectorLabel::Z2(parity)) => Some(Z2Irrep::new(parity).sector_id()),
             (RuleKind::ZN, _) => None,
             (RuleKind::FZ2, SectorLabel::FZ2(parity)) => {
@@ -814,6 +855,40 @@ impl Space {
             .map(|&(_, deg)| deg))
     }
 
+    /// CU(1) sector content as canonical `((twice_charge, s), degeneracy)` pairs.
+    pub fn cu1_sectors(&self) -> Result<Vec<((u32, u8), usize)>, Error> {
+        let UserRuleContext::CU1(rule) = self.context.as_ref() else {
+            return Err(Error::RuleMismatch);
+        };
+        Ok(self
+            .sectors
+            .iter()
+            .map(|&(id, deg)| {
+                let irrep = rule.decode_sector(id).expect("validated CU(1) sector");
+                ((irrep.twice_charge(), irrep.conjugation_sector()), deg)
+            })
+            .collect())
+    }
+
+    /// Returns the degeneracy of one valid CU(1) label, or `None` when absent.
+    pub fn cu1_degeneracy(&self, label: (u32, u8)) -> Result<Option<usize>, Error> {
+        let UserRuleContext::CU1(_) = self.context.as_ref() else {
+            return Err(Error::RuleMismatch);
+        };
+        let irrep = match label {
+            (0, 0) => Some(CU1Irrep::VACUUM),
+            (0, 1) => Some(CU1Irrep::PSEUDOSCALAR),
+            (charge, 2) => CU1Irrep::try_from_twice_charge(charge),
+            _ => None,
+        };
+        Ok(irrep.and_then(|irrep| {
+            self.sectors
+                .iter()
+                .find(|&&(id, _)| id == irrep.into())
+                .map(|&(_, deg)| deg)
+        }))
+    }
+
     /// Fallible sibling of [`Self::sectors`]: `Ok` with byte-identical content
     /// on every multiplicity-free rule, [`Error::UnsupportedForRule`] on SU(3)
     /// (whose `(p, q)` irreps do not fit [`SectorLabel`]). Read SU(3) sectors
@@ -823,13 +898,16 @@ impl Space {
     /// `Result`: that signature change breaks every multiplicity-free caller,
     /// a breaking change disproportionate to closing one SU(3) panic surface.
     pub fn try_sectors(&self) -> Result<Vec<(SectorLabel, usize)>, Error> {
-        if matches!(self.rule_kind(), RuleKind::Su3 | RuleKind::ZN) {
+        if matches!(
+            self.rule_kind(),
+            RuleKind::Su3 | RuleKind::ZN | RuleKind::CU1
+        ) {
             return Err(Error::UnsupportedForRule {
                 operation: "Space::try_sectors",
-                rule: if self.rule_kind() == RuleKind::ZN {
-                    "Z_N"
-                } else {
-                    "SU(3)"
+                rule: match self.rule_kind() {
+                    RuleKind::ZN => "Z_N",
+                    RuleKind::CU1 => "CU(1)",
+                    _ => "SU(3)",
                 },
             });
         }
@@ -1079,6 +1157,23 @@ mod provider_context_tests {
         assert_eq!(space.zn_degeneracy(2).unwrap(), Some(2));
         assert_eq!(space.zn_degeneracy(0).unwrap(), None);
         assert!(space.try_sectors().is_err());
+    }
+
+    #[test]
+    fn cu1_space_validates_labels_and_uses_its_dedicated_readback() {
+        let space = Space::cu1([((0, 0), 2), ((0, 1), 3), ((1, 2), 4)]).unwrap();
+        assert_eq!(
+            space.cu1_sectors().unwrap(),
+            vec![((0, 0), 2), ((0, 1), 3), ((1, 2), 4)]
+        );
+        assert_eq!(space.cu1_degeneracy((1, 2)).unwrap(), Some(4));
+        assert_eq!(space.cu1_degeneracy((2, 2)).unwrap(), None);
+        assert!(matches!(
+            space.try_sectors(),
+            Err(Error::UnsupportedForRule { .. })
+        ));
+        assert!(Space::cu1([((0, 2), 1)]).is_err());
+        assert!(Space::cu1([((1, 1), 1)]).is_err());
     }
 
     #[test]
