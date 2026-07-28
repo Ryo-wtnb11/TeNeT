@@ -9527,12 +9527,6 @@ where
         }
         2 => {
             // Base vertex `e0 ⊗ e1 → coupled`, labels 1..=N(e0,e1,coupled).
-            let channels = rule
-                .try_fusion_channels(effective[0], effective[1])
-                .map_err(CheckedGenericStructureError::Provider)?;
-            if !channels.contains(&coupled) {
-                return Ok(());
-            }
             let n = rule
                 .try_nsymbol(effective[0], effective[1], coupled)
                 .map_err(CheckedGenericStructureError::Provider)?;
