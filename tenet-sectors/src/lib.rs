@@ -17,7 +17,9 @@ mod algebra;
 pub use algebra::*;
 
 mod abelian;
-pub use abelian::{FermionParityFusionRule, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep};
+pub use abelian::{
+    FermionParityFusionRule, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep, ZNFusionRule, ZNIrrep,
+};
 
 mod fibonacci;
 pub use fibonacci::FibonacciFusionRule;
