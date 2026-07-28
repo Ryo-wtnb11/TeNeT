@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tenet::core::{
     complete_hom_space_structure_cache_info, fusion_tree_layout_cache_info, BraidingStyleKind,
-    CheckedFusionAlgebra, FusionAlgebraError, FusionRule, FusionStyleKind,
+    CU1FusionRule, CU1Irrep, CheckedFusionAlgebra, FusionAlgebraError, FusionRule, FusionStyleKind,
     MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
     ProductFusionRuleExt, RuleIdentity, SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorVec,
 };
@@ -10206,6 +10206,24 @@ fn external_nobraiding_vacuum_only_legs_twist_passes_flip_rejects() {
 
     let unflipped: TensorMap<PlanarZ2, f64> = t.flip(&[]).unwrap();
     assert_eq!(unflipped.data().as_ptr(), t.data().as_ptr());
+}
+
+#[test]
+fn cu1_typed_rank_three_permutation_uses_the_nontrivial_associator_gauge() {
+    // What: TensorKit CU(1)'s published F gauge is not trivial. A rank-three
+    // charged permutation must therefore take the recoupling route, not the
+    // direct symmetric-braiding shortcut reserved for certified trivial F.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let rule = Arc::new(CU1FusionRule);
+    assert!(!rule.has_trivial_associator_gauge());
+    let q = CU1Irrep::from_twice_charge(1);
+    let leg = GradedSpace::try_new(Arc::clone(&rule), [(q, 1)], false).unwrap();
+    let tensor: TensorMap<CU1FusionRule, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg, &leg], [&leg], |_, _| 1.0).unwrap();
+    let permuted = tensor.permute(&[2, 0, 1], &[3]).unwrap();
+    assert!(!permuted.data().is_empty());
+    assert!(permuted.data().iter().any(|value| value.abs() > 0.0));
 }
 
 // ---------------------------------------------------------------------------

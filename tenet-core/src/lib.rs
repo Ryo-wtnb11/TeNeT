@@ -20,15 +20,16 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 pub use tenet_sectors::{
     product_fusion_rule, product_fusion_rule_with_codec, product_sector, BraidingStyleKind,
-    CanonicalUnitFusionRule, CheckedFusionAlgebra, CoupledSectorFold, FermionParityFusionRule,
-    FibonacciFusionRule, FusionAlgebraError, FusionRule, FusionStyleKind, Fz2SectorLayout,
-    GenericBraidScalar, GenericFArray, GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols,
-    MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
-    PackedProductCodec, PackedSectorLayout, ProductFusionRule, ProductFusionRuleExt, ProductSector,
-    ProductSectorCodec, ProductSectorCodecError, ProductSectorComponent, ProductSectorLayout,
-    RuleIdentity, SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorVec, Su2SectorLayout,
-    SymbolShapeError, TensorKitProductCodec, U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule,
-    Z2Irrep, ZNFusionRule, ZNIrrep, SU2_MAX_DOUBLED_SPIN,
+    CU1FusionRule, CU1Irrep, CanonicalUnitFusionRule, CheckedFusionAlgebra, CoupledSectorFold,
+    FermionParityFusionRule, FibonacciFusionRule, FusionAlgebraError, FusionRule, FusionStyleKind,
+    Fz2SectorLayout, GenericBraidScalar, GenericFArray, GenericFusionSymbols, GenericRMatrix,
+    GenericRigidSymbols, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, PackedProductCodec, PackedSectorLayout, ProductFusionRule,
+    ProductFusionRuleExt, ProductSector, ProductSectorCodec, ProductSectorCodecError,
+    ProductSectorComponent, ProductSectorLayout, RuleIdentity, SU2FusionRule, SU2Irrep,
+    SectorCodec, SectorId, SectorVec, Su2SectorLayout, SymbolShapeError, TensorKitProductCodec,
+    U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep, ZNFusionRule, ZNIrrep,
+    CU1_MAX_TWICE_CHARGE, SU2_MAX_DOUBLED_SPIN,
 };
 
 mod core_rule_bridge;

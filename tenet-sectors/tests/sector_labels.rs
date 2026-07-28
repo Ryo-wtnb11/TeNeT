@@ -1,11 +1,11 @@
 use std::collections::BTreeSet;
 
 use tenet_sectors::{
-    product_sector, BraidingStyleKind, CheckedFusionAlgebra, FermionParityFusionRule,
-    FusionAlgebraError, FusionRule, FusionStyleKind, Fz2SectorLayout, PackedProductCodec,
-    ProductFusionRule, ProductSector, ProductSectorCodecError, RuleIdentity, SU2FusionRule,
-    SU2Irrep, SectorCodec, SectorId, SectorVec, U1FusionRule, U1Irrep, U1SectorLayout,
-    Z2FusionRule, Z2Irrep, SU2_MAX_DOUBLED_SPIN,
+    product_sector, BraidingStyleKind, CU1FusionRule, CU1Irrep, CheckedFusionAlgebra,
+    FermionParityFusionRule, FusionAlgebraError, FusionRule, FusionStyleKind, Fz2SectorLayout,
+    PackedProductCodec, ProductFusionRule, ProductSector, ProductSectorCodecError, RuleIdentity,
+    SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorVec, U1FusionRule, U1Irrep,
+    U1SectorLayout, Z2FusionRule, Z2Irrep, CU1_MAX_TWICE_CHARGE, SU2_MAX_DOUBLED_SPIN,
 };
 
 #[test]
@@ -148,6 +148,16 @@ fn builtin_codecs_decode_every_id_their_own_algebra_reaches() {
         2,
     );
     assert_decode_total(
+        &CU1FusionRule,
+        [
+            CU1Irrep::VACUUM,
+            CU1Irrep::PSEUDOSCALAR,
+            CU1Irrep::from_twice_charge(1),
+            CU1Irrep::from_twice_charge(CU1_MAX_TWICE_CHARGE),
+        ],
+        2,
+    );
+    assert_decode_total(
         &U1Fz2Rule::default(),
         [
             product_sector(U1Irrep::new(1), Z2Irrep::ODD),
@@ -161,6 +171,35 @@ fn builtin_codecs_decode_every_id_their_own_algebra_reaches() {
     // and the closure must be generated through the checked primitives. The
     // external-provider side of this law is covered by the typed facade tests,
     // whose providers do certify `CheckedFusionAlgebra`.
+}
+
+#[test]
+fn cu1_codec_and_checked_overflow_preserve_the_tensor_kit_boundary() {
+    let rule = CU1FusionRule;
+    assert_round_trip(
+        &rule,
+        [
+            CU1Irrep::VACUUM,
+            CU1Irrep::PSEUDOSCALAR,
+            CU1Irrep::from_twice_charge(1),
+            CU1Irrep::from_twice_charge(CU1_MAX_TWICE_CHARGE),
+        ],
+    );
+    assert!(CU1Irrep::try_from_twice_charge(0).is_none());
+    assert!(CU1Irrep::try_from_twice_charge(u32::MAX).is_none());
+    let edge: SectorId = CU1Irrep::from_twice_charge(CU1_MAX_TWICE_CHARGE).into();
+    assert_eq!(
+        rule.try_fusion_channels(edge, edge),
+        Err(FusionAlgebraError::FusionNotRepresentable {
+            left: edge,
+            right: edge
+        })
+    );
+    #[cfg(target_pointer_width = "64")]
+    assert!(matches!(
+        rule.decode_sector(SectorId::new(u32::MAX as usize + 1)),
+        Err(FusionAlgebraError::InvalidSector { .. })
+    ));
 }
 
 #[test]

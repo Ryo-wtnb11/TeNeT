@@ -21,6 +21,9 @@ pub use abelian::{
     FermionParityFusionRule, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep, ZNFusionRule, ZNIrrep,
 };
 
+mod cu1;
+pub use cu1::{CU1FusionRule, CU1Irrep, CU1_MAX_TWICE_CHARGE};
+
 mod fibonacci;
 pub use fibonacci::FibonacciFusionRule;
 
