@@ -1023,6 +1023,7 @@ where
                 &lhs_layout,
                 &rhs_layout,
                 axes,
+                layout_primer,
             ) {
                 Ok(structure) => Ok(Some(Arc::new(structure))),
                 Err(OperationError::UnsupportedTensorContractScope {
@@ -1088,8 +1089,8 @@ where
     /// Nothing on this path decodes typed sectors: the operand preparation,
     /// [`compile_composition_plan`] and the execution are all bounded at the
     /// multiplicity-free rigid symbols, so an externally defined provider
-    /// composes here. [`Self::tensorcompose_fusion_dyn_into_lowered`] is the
-    /// built-in sibling, exactly as for the contraction pair.
+    /// composes here. The bound space's layout capability selects encoded,
+    /// lowered, or checked metadata preparation.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn tensorcompose_fusion_dyn_into<R>(

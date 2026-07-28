@@ -11700,6 +11700,31 @@ mod adjoint_parent_view_tests {
         SELECTED_RESULT_LAYOUT_BUILDS.with(|builds| builds.set(None));
     }
 
+    #[test]
+    fn lazy_u1_contract_requiring_dynamic_tree_reports_dual_overflow_without_unwinding() {
+        // What: a public lazy-adjoint contraction whose layout requires the
+        // dynamic-tree fallback preserves the finite U(1) algebra error.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let minimum = Space::u1([(i32::MIN, 1)]);
+        let zero = Space::u1([(0, 1)]);
+        let parent = Tensor::zeros(&runtime, Dtype::F64, [&minimum, &zero], [&minimum]).unwrap();
+        let rhs = Tensor::zeros(&runtime, Dtype::F64, [&minimum, &zero], [&minimum]).unwrap();
+        let lazy = parent.adjoint().unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            lazy.contract(&rhs, &[1], &[0])
+        }));
+
+        assert_eq!(
+            result
+                .expect("lazy contraction must not unwind")
+                .unwrap_err(),
+            Error::FusionAlgebra(Box::new(FusionAlgebraError::U1DualOverflow {
+                charge: i32::MIN,
+            }))
+        );
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+    }
+
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn product_trace_preserves_nested_u1_dual_failure() {

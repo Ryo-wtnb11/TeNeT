@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use tenet_core::{
-    multiplicity_free_permute_tree_pair, BlockKey, BraidingStyleKind, CoreError, FusionRule,
-    FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
-    MultiplicityFreeRigidSymbols, SectorId, TensorMap, TensorStorage,
+    multiplicity_free_permute_tree_pair, BlockKey, BraidingStyleKind, CoreError,
+    FusionProductSpace, FusionRule, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey,
+    FusionTreePairKey, MultiplicityFreeRigidSymbols, SectorId, SectorLeg, TensorMap, TensorStorage,
 };
 
 use crate::lowering::lower_tensorcontract_adjoint_axes;
@@ -11,7 +11,8 @@ use crate::OperationError;
 use tenet_operations::TensorContractSpec;
 
 use super::super::dynamic_space::{
-    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperandLayout,
+    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperandLayout, LayoutKeyBuilder,
+    MetadataOutput, MetadataRequest,
 };
 use super::super::fusion_block::validate_fusion_contract_rule;
 use super::super::structure::{
@@ -21,18 +22,58 @@ use super::super::structure::{
 /// Every sector on every fusion tree of `space` equals its own dual. Used to
 /// gate the Structure route's conjugate (categorical-adjoint) block matching,
 /// which is only correct for self-dual symmetries.
-fn all_sectors_self_dual<R>(rule: &R, homspace: &FusionTreeHomSpace) -> bool
+fn dual_sector<R>(
+    rule: &R,
+    sector: SectorId,
+    primer: LayoutKeyBuilder<R>,
+) -> Result<SectorId, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    let tree_self_dual = |tree: &FusionTreeKey| {
-        tree.uncoupled().iter().all(|&s| rule.dual(s) == s)
-            && rule.dual(tree.coupled()) == tree.coupled()
-    };
-    homspace
-        .fusion_tree_keys(rule)
-        .iter()
-        .all(|key| tree_self_dual(key.codomain_tree()) && tree_self_dual(key.domain_tree()))
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(sector, 1)], false)]),
+        FusionProductSpace::new([]),
+    );
+    match primer(
+        rule,
+        MetadataRequest::OutwardLeg {
+            homspace: &homspace,
+            axis: 0,
+            dualize: true,
+            tensor: "contraction source",
+        },
+    )? {
+        MetadataOutput::Leg(leg) => Ok(leg.sectors()[0]),
+        _ => unreachable!("metadata dispatcher returned a non-leg response"),
+    }
+}
+
+fn all_sectors_self_dual<R>(
+    rule: &R,
+    homspace: &FusionTreeHomSpace,
+    primer: Option<LayoutKeyBuilder<R>>,
+) -> Result<bool, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    for key in homspace.fusion_tree_keys(rule).iter() {
+        for tree in [key.codomain_tree(), key.domain_tree()] {
+            for &sector in tree
+                .uncoupled()
+                .iter()
+                .chain(std::iter::once(&tree.coupled()))
+            {
+                let dual = match primer {
+                    Some(primer) => dual_sector(rule, sector, primer)?,
+                    None => rule.dual(sector),
+                };
+                if dual != sector {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
 }
 
 trait ContractBlockSource {
@@ -192,8 +233,8 @@ where
     // storage and maps only referenced blocks; the legacy seam derives the same
     // logical geometry before execution. Both are verified against the eager
     // `adjoint_dyn` oracle for U(1).
-    if (axes.lhs_conjugate() && !all_sectors_self_dual(rule, lhs.homspace()))
-        || (axes.rhs_conjugate() && !all_sectors_self_dual(rule, rhs.homspace()))
+    if (axes.lhs_conjugate() && !all_sectors_self_dual(rule, lhs.homspace(), None)?)
+        || (axes.rhs_conjugate() && !all_sectors_self_dual(rule, rhs.homspace(), None)?)
     {
         return Err(OperationError::UnsupportedTensorContractScope {
             message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
@@ -233,13 +274,14 @@ pub(crate) fn tensorcontract_fusion_structure_dyn_prelowered<R>(
     lhs: &FusionOperandLayout<'_>,
     rhs: &FusionOperandLayout<'_>,
     axes: TensorContractSpec<'_>,
+    primer: LayoutKeyBuilder<R>,
 ) -> Result<TensorContractStructure, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     dst.validate_rule(rule)?;
-    if (axes.lhs_conjugate() && !all_sectors_self_dual(rule, lhs.homspace()))
-        || (axes.rhs_conjugate() && !all_sectors_self_dual(rule, rhs.homspace()))
+    if (axes.lhs_conjugate() && !all_sectors_self_dual(rule, lhs.homspace(), Some(primer))?)
+        || (axes.rhs_conjugate() && !all_sectors_self_dual(rule, rhs.homspace(), Some(primer))?)
     {
         return Err(OperationError::UnsupportedTensorContractScope {
             message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
