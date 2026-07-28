@@ -14214,6 +14214,8 @@ mod tk_user_api_tests {
         let v = Space::zn(3, [(0, 1), (1, 1)]).unwrap();
         let zero = Tensor::zeros(&rt, Dtype::F64, [&v], [&v]).unwrap();
         assert_eq!(zero.norm().unwrap(), 0.0);
+        let transposed = zero.transpose().unwrap();
+        assert_eq!(transposed.data(), zero.data());
     }
 
     #[test]
