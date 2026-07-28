@@ -74,6 +74,10 @@ fn leg() -> GradedSpace<Z2FusionRule> {
     GradedSpace::try_new(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, DEGENERACY)], false).unwrap()
 }
 
+fn leg_with(degeneracy: usize) -> GradedSpace<Z2FusionRule> {
+    GradedSpace::try_new(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, degeneracy)], false).unwrap()
+}
+
 fn pseudo_random(state: &mut u64) -> f64 {
     *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
     ((*state >> 33) as f64) / (u32::MAX as f64) - 0.5
@@ -104,6 +108,53 @@ fn measured_bytes<T>(operation: impl FnOnce() -> T) -> u64 {
     ENABLED.store(false, Ordering::Release);
     black_box(output);
     ALLOCATED.load(Ordering::Relaxed)
+}
+
+fn constructed_diagonal(degeneracy: usize) -> TensorMap<Z2FusionRule, f64> {
+    let bond = leg_with(degeneracy);
+    TensorMap::diagonal(
+        runtime(),
+        &bond,
+        [tenet::typed::SectorSpectrum {
+            sector: Z2Irrep::EVEN,
+            values: vec![1.0; degeneracy],
+        }],
+    )
+    .unwrap()
+}
+
+#[test]
+fn public_diagonal_constructor_and_readback_stay_compact_until_data() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    black_box(constructed_diagonal(64));
+    black_box(constructed_diagonal(DEGENERACY));
+    let small = measured_bytes(|| constructed_diagonal(64));
+    let large = measured_bytes(|| constructed_diagonal(DEGENERACY));
+    assert!(
+        large <= small * 3,
+        "typed constructor growth is not O(d): {small}, {large}"
+    );
+    assert!(
+        large < dense_payload_bytes(),
+        "typed constructor allocated a dense payload: {large}"
+    );
+    let small_diagonal = constructed_diagonal(64);
+    let diagonal = constructed_diagonal(DEGENERACY);
+    let small_readback = measured_bytes(|| small_diagonal.diagonal_spectrum().unwrap().unwrap());
+    let readback = measured_bytes(|| diagonal.diagonal_spectrum().unwrap().unwrap());
+    assert!(
+        readback <= small_readback * 3,
+        "typed readback growth is not O(d): {small_readback}, {readback}"
+    );
+    assert!(
+        readback < dense_payload_bytes(),
+        "typed readback allocated a dense payload: {readback}"
+    );
+    assert!(
+        measured_bytes(|| diagonal.data().len()) >= dense_payload_bytes(),
+        "typed constructor or readback materialized the dense payload"
+    );
+    assert_eq!(measured_bytes(|| diagonal.data().len()), 0);
 }
 
 #[test]

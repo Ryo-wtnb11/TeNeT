@@ -4118,6 +4118,212 @@ impl Tensor {
         Self::structural(rt, dtype, spaces.clone(), spaces, false, "id")
     }
 
+    /// Builds a compact diagonal tensor `bond <- bond` from canonical sector-order values.
+    ///
+    /// This is TeNeT's immutable, type-erased counterpart of TensorKit's
+    /// `DiagonalTensorMap` / `diagm` (`tensors/diagonal.jl`): it stores only
+    /// `Σ_c k_c` values, not the dense `Σ_c k_c²` diagonal blocks. The vectors
+    /// are positional in [`Space::sectors`] order (or [`Space::su3_sectors`]
+    /// for SU(3)); their order is therefore not inferred from their values.
+    ///
+    /// Every vector must have its sector's exact degeneracy and every scalar
+    /// must match `dtype` exactly. Validation completes before layout admission.
+    /// Multiplicity-free rules use the checked admission root; the erased SU(3)
+    /// lane uses its existing Generic admission root, which is not that checked
+    /// multiplicity-free contract. Both retain the supplied leg, including its
+    /// dual flag.
+    ///
+    /// # Complexity
+    ///
+    /// Construction stores `O(Σ_c k_c)` values. Dense storage is first allocated
+    /// only by [`Self::data`] or [`Self::data_c64`].
+    pub fn diagonal<I>(
+        rt: &Runtime,
+        dtype: Dtype,
+        bond: &Space,
+        sector_values: I,
+    ) -> Result<Self, Error>
+    where
+        I: IntoIterator<Item = Vec<Scalar>>,
+    {
+        let values: Vec<Vec<Scalar>> = sector_values.into_iter().collect();
+        if values.len() != bond.sectors.len() {
+            return Err(Error::InvalidArgument(
+                "diagonal spectrum sector count does not match bond".into(),
+            ));
+        }
+        for ((_, degeneracy), values) in bond.sectors.iter().zip(&values) {
+            if values.len() != *degeneracy {
+                return Err(Error::InvalidArgument(
+                    "diagonal spectrum length does not match bond degeneracy".into(),
+                ));
+            }
+            if values.iter().any(|value| {
+                !matches!(
+                    (dtype, value),
+                    (Dtype::F64, Scalar::F64(_)) | (Dtype::C64, Scalar::C64(_))
+                )
+            }) {
+                return Err(Error::DtypeMismatch);
+            }
+        }
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([bond.sector_leg()]),
+            FusionProductSpace::new([bond.sector_leg()]),
+        );
+        let space = match bond.rule_context().as_ref() {
+            UserRuleContext::U1(provider) => {
+                UserBoundSpace::U1(build_bound_space(Arc::clone(provider), hom)?)
+            }
+            UserRuleContext::Z2(provider) => {
+                UserBoundSpace::Z2(build_bound_space(Arc::clone(provider), hom)?)
+            }
+            UserRuleContext::FZ2(provider) => {
+                UserBoundSpace::FZ2(build_bound_space(Arc::clone(provider), hom)?)
+            }
+            UserRuleContext::SU2(provider) => {
+                UserBoundSpace::SU2(build_bound_space(Arc::clone(provider), hom)?)
+            }
+            UserRuleContext::U1FZ2(provider) => {
+                UserBoundSpace::U1FZ2(build_bound_space(Arc::clone(provider), hom)?)
+            }
+            UserRuleContext::FZ2U1SU2(provider) => {
+                UserBoundSpace::FZ2U1SU2(build_bound_space(Arc::clone(provider), hom)?)
+            }
+            UserRuleContext::Su3(provider) => {
+                UserBoundSpace::Su3(build_bound_space_generic(Arc::clone(provider), hom)?)
+            }
+        };
+        let data = match dtype {
+            Dtype::F64 => DiagonalData::RealF64(
+                bond.sectors
+                    .iter()
+                    .zip(values)
+                    .map(|(&(sector, _), values)| {
+                        Ok(SectorSpectrum {
+                            sector,
+                            values: values
+                                .into_iter()
+                                .map(|value| value.try_f64())
+                                .collect::<Result<_, _>>()?,
+                        })
+                    })
+                    .collect::<Result<_, Error>>()?,
+            ),
+            Dtype::C64 => DiagonalData::C64(
+                bond.sectors
+                    .iter()
+                    .zip(values)
+                    .map(|(&(sector, _), values)| SectorSpectrum {
+                        sector,
+                        values: values.into_iter().map(Scalar::to_c64).collect(),
+                    })
+                    .collect(),
+            ),
+        };
+        Ok(Self::owned(
+            rt.clone(),
+            Arc::new(space),
+            Arc::new(Data::Diagonal(data)),
+        ))
+    }
+
+    /// Returns compact diagonal values in the tensor's public dtype without materializing.
+    ///
+    /// This is TeNeT's `diag` readback. It returns [`None`] for dense storage;
+    /// otherwise vectors are returned in the canonical bond-sector order and
+    /// cost `O(Σ_c k_c)`. A complex tensor with internally real compact values
+    /// returns [`Scalar::C64`] values with zero imaginary part.
+    pub fn diagonal_spectrum(&self) -> Result<Option<Vec<Vec<Scalar>>>, Error> {
+        Ok(match self.stored_data() {
+            Data::Diagonal(DiagonalData::RealF64(spectrum)) => Some(
+                spectrum
+                    .iter()
+                    .map(|entry| entry.values.iter().copied().map(Scalar::F64).collect())
+                    .collect(),
+            ),
+            Data::Diagonal(DiagonalData::RealC64(spectrum)) => Some(
+                spectrum
+                    .iter()
+                    .map(|entry| {
+                        entry
+                            .values
+                            .iter()
+                            .copied()
+                            .map(|value| Scalar::C64(Complex64::new(value, 0.0)))
+                            .collect()
+                    })
+                    .collect(),
+            ),
+            Data::Diagonal(DiagonalData::C64(spectrum)) => Some(
+                spectrum
+                    .iter()
+                    .map(|entry| entry.values.iter().copied().map(Scalar::C64).collect())
+                    .collect(),
+            ),
+            _ => None,
+        })
+    }
+
+    /// Tests rank-one host tensors for blockwise diagonality.
+    ///
+    /// This is TensorKit's `isdiag` at `tol = 0` for finite data. Positive
+    /// tolerance accepts `max_offdiag <= tol * max(norm_inf, 1)`. Negative or
+    /// non-finite tolerances are errors before any rank or storage shortcut;
+    /// device tensors return the existing unsupported-on-device error.
+    pub fn is_diagonal(&self, tol: f64) -> Result<bool, Error> {
+        if !tol.is_finite() || tol < 0.0 {
+            return Err(Error::InvalidArgument(
+                "diagonal tolerance must be finite and nonnegative".into(),
+            ));
+        }
+        if matches!(self.stored_data(), Data::Diagonal(_)) {
+            return Ok(true);
+        }
+        if self.rank() != 2 || self.numout() != 1 || self.numin() != 1 {
+            return Ok(false);
+        }
+        if self.placement() != Placement::Host {
+            #[cfg(feature = "cuda")]
+            return Err(device_unsupported("is_diagonal()"));
+            #[cfg(not(feature = "cuda"))]
+            return Err(Error::PlacementMismatch);
+        }
+        let body = self.materialized_body()?;
+        let mut norm = 0.0_f64;
+        let mut offdiag = 0.0_f64;
+        macro_rules! scan {
+            ($data:expr) => {{
+                for index in 0..body.space.structure().block_count() {
+                    let block = body.space.structure().block(index)?;
+                    for row in 0..block.shape()[0] {
+                        for col in 0..block.shape()[1] {
+                            let value = $data[block.offset()
+                                + row * block.strides()[0]
+                                + col * block.strides()[1]]
+                                .abs_value();
+                            norm = norm.max(value);
+                            if row != col {
+                                if !value.is_finite() {
+                                    return Ok(false);
+                                }
+                                offdiag = offdiag.max(value);
+                            }
+                        }
+                    }
+                }
+            }};
+        }
+        match body.data.as_ref() {
+            Data::F64(data) => scan!(data),
+            Data::C64(data) => scan!(data),
+            Data::Diagonal(_) => unreachable!("compact storage returned above"),
+            #[cfg(feature = "cuda")]
+            Data::CudaF64(_) => return Err(device_unsupported("is_diagonal()")),
+        }
+        Ok(offdiag <= tol * norm.max(1.0))
+    }
+
     /// The canonical structural isomorphism `codomain <- domain` (TensorKit
     /// `isomorphism(W ← V)`): every
     /// coupled-sector block is the identity matrix, which requires the fused

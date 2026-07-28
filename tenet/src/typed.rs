@@ -742,7 +742,8 @@ where
 pub struct SectorSpectrum<S, V = f64> {
     /// The coupled sector, in the provider's own labels.
     pub sector: S,
-    /// That sector's values, descending by magnitude.
+    /// That sector's values. Public diagonal construction preserves this order;
+    /// factorization outputs separately use descending magnitude order.
     pub values: Vec<V>,
 }
 
@@ -1222,6 +1223,113 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
 {
+    /// Builds a compact diagonal map `bond <- bond` from labelled sector values.
+    ///
+    /// TeNeT's typed counterpart of TensorKit `DiagonalTensorMap` / `diagm`
+    /// stores `O(Σ_c k_c)` values. Input labels may be permuted, but must name
+    /// every nonzero bond sector exactly once; output is canonicalized to the
+    /// bond's engine-sector order. Each vector must equal that sector's
+    /// degeneracy. All validation precedes checked layout admission, and the
+    /// supplied dual flag is preserved.
+    pub fn diagonal<I>(runtime: &Runtime, bond: &GradedSpace<R>, spectra: I) -> Result<Self, Error>
+    where
+        I: IntoIterator<Item = SectorSpectrum<R::Sector, D>>,
+    {
+        let mut supplied = HashMap::new();
+        for entry in spectra {
+            let sector = bond.provider().encode_sector(&entry.sector)?;
+            if supplied.insert(sector, entry.values).is_some() {
+                return Err(Error::InvalidArgument(
+                    "diagonal spectrum has a duplicate sector".into(),
+                ));
+            }
+        }
+        let mut spectrum = Vec::with_capacity(bond.degeneracies().len());
+        for (&sector, &degeneracy) in bond.leg().sectors().iter().zip(bond.degeneracies()) {
+            let values = supplied.remove(&sector).ok_or_else(|| {
+                Error::InvalidArgument("diagonal spectrum is missing a bond sector".into())
+            })?;
+            if values.len() != degeneracy {
+                return Err(Error::InvalidArgument(
+                    "diagonal spectrum length does not match bond degeneracy".into(),
+                ));
+            }
+            spectrum.push(tenet_matrixalgebra::SectorSpectrum { sector, values });
+        }
+        if !supplied.is_empty() {
+            return Err(Error::InvalidArgument(
+                "diagonal spectrum contains an unknown bond sector".into(),
+            ));
+        }
+        let space = Self::build_space(Arc::clone(bond.provider_arc()), &[bond], &[bond])?;
+        Ok(Self {
+            runtime: runtime.clone(),
+            body: Arc::new(TypedTensorBody::diagonal(space, spectrum)),
+        })
+    }
+
+    /// Returns the compact diagonal spectrum without materializing dense data.
+    ///
+    /// This is typed `diag` readback: [`None`] means the tensor is dense;
+    /// otherwise it clones only the `O(Σ_c k_c)` compact values in canonical
+    /// bond-sector order.
+    pub fn diagonal_spectrum(&self) -> Result<Option<Vec<SectorSpectrum<R::Sector, D>>>, Error> {
+        self.spectrum()
+            .map(|spectrum| {
+                spectrum
+                    .iter()
+                    .map(|entry| {
+                        Ok(SectorSpectrum {
+                            sector: self.body.space.provider().decode_sector(entry.sector)?,
+                            values: entry.values.clone(),
+                        })
+                    })
+                    .collect()
+            })
+            .transpose()
+    }
+
+    /// Tests a rank-one map for blockwise diagonality without materializing compact storage.
+    ///
+    /// This matches TensorKit `isdiag` for finite data at `tol = 0`; positive
+    /// tolerance uses `max_offdiag <= tol * max(norm_inf, 1)`. Negative and
+    /// non-finite tolerances are rejected before every shortcut.
+    pub fn is_diagonal(&self, tol: f64) -> Result<bool, Error> {
+        if !tol.is_finite() || tol < 0.0 {
+            return Err(Error::InvalidArgument(
+                "diagonal tolerance must be finite and nonnegative".into(),
+            ));
+        }
+        if self.spectrum().is_some() {
+            return Ok(true);
+        }
+        if self.rank() != 2 || self.numout() != 1 || self.numin() != 1 {
+            return Ok(false);
+        }
+        let data = self.dense_data();
+        let mut norm = 0.0_f64;
+        let mut offdiag = 0.0_f64;
+        for index in 0..self.body.space.space().structure().block_count() {
+            let block = self.body.space.space().structure().block(index)?;
+            for row in 0..block.shape()[0] {
+                for col in 0..block.shape()[1] {
+                    let value = data
+                        [block.offset() + row * block.strides()[0] + col * block.strides()[1]]
+                        .widen_complex()
+                        .norm();
+                    norm = norm.max(value);
+                    if row != col {
+                        if !value.is_finite() {
+                            return Ok(false);
+                        }
+                        offdiag = offdiag.max(value);
+                    }
+                }
+            }
+        }
+        Ok(offdiag <= tol * norm.max(1.0))
+    }
+
     /// The provider that owns the layout, after proving every leg agrees on
     /// the rule identity.
     fn authority<'a>(legs: &[&'a GradedSpace<R>]) -> Result<&'a Arc<R>, Error> {
