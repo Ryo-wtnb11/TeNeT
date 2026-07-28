@@ -358,7 +358,16 @@ where
                 .cloned(),
         ),
     );
-    let destination = lhs.space().derive_from_final_homspace(homspace)?;
+    let prepared_destination = homspace
+        .prepare_fusion_tree_layout_checked(rule)
+        .map_err(|error| tenet_tensors::OperationError::FusionAlgebra(Box::new(error)))?;
+    let destination_indices = prepared_destination
+        .keys()
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, key)| (key, index))
+        .collect::<HashMap<_, _>>();
 
     struct Contribution {
         lhs: usize,
@@ -368,7 +377,6 @@ where
     }
     let lhs_structure = lhs.space().space().structure();
     let rhs_structure = rhs.space().space().structure();
-    let dst_structure = destination.space().structure();
     let mut contributions = Vec::new();
     for lhs_index in 0..lhs_structure.block_count() {
         let BlockKey::FusionTree(lhs_key) = lhs_structure.block(lhs_index)?.key() else {
@@ -408,10 +416,11 @@ where
                 for (codomain, codomain_coefficient) in &codomain {
                     for (domain, domain_coefficient) in &domain {
                         let key = FusionTreePairKey::pair(codomain.clone(), domain.clone());
-                        let destination_index = dst_structure
-                            .find_block_index_by_fusion_tree_pair(&key)
-                            .ok_or_else(|| tenet_tensors::OperationError::MissingBlockKey {
-                                key: Box::new(BlockKey::FusionTree(key)),
+                        let destination_index =
+                            destination_indices.get(&key).copied().ok_or_else(|| {
+                                tenet_tensors::OperationError::MissingBlockKey {
+                                    key: Box::new(BlockKey::FusionTree(key)),
+                                }
                             })?;
                         contributions.push(Contribution {
                             lhs: lhs_index,
@@ -426,8 +435,25 @@ where
         }
     }
 
-    // All categorical work and exact destination-key validation precedes the
-    // allocation. Multiple recoupling paths deliberately accumulate below.
+    // Checked provider work and exact destination-key validation precede
+    // destination admission. Only deterministic prepared-key replay remains.
+    let destination = lhs.space().derive_from_final_homspace(homspace)?;
+    let dst_structure = destination.space().structure();
+    if dst_structure.block_count() != prepared_destination.keys().len()
+        || prepared_destination
+            .keys()
+            .iter()
+            .enumerate()
+            .any(|(index, key)| {
+                dst_structure.find_block_index_by_fusion_tree_pair(key) != Some(index)
+            })
+    {
+        return Err(tenet_tensors::OperationError::StructureMismatch {
+            tensor: "tensor-product destination",
+        });
+    }
+
+    // Multiple recoupling paths deliberately accumulate below.
     let mut data = vec![D::from_real(0.0); destination.space().required_len()?];
     let lhs_nout = lhs.space().space().nout();
     let rhs_nout = rhs.space().space().nout();
@@ -474,14 +500,17 @@ fn scatter_tensor_product_block<D: UserScalar>(
     destination: tenet_core::BlockRef<'_>,
     coefficient: f64,
 ) -> Result<(), tenet_tensors::OperationError> {
-    let expected_shape = lhs.shape()[..lhs_nout]
+    if !destination
+        .shape()
         .iter()
-        .chain(&rhs.shape()[..rhs_nout])
-        .chain(&lhs.shape()[lhs_nout..])
-        .chain(&rhs.shape()[rhs_nout..])
         .copied()
-        .collect::<Vec<_>>();
-    if destination.shape() != expected_shape {
+        .eq(lhs.shape()[..lhs_nout]
+            .iter()
+            .chain(&rhs.shape()[..rhs_nout])
+            .chain(&lhs.shape()[lhs_nout..])
+            .chain(&rhs.shape()[rhs_nout..])
+            .copied())
+    {
         return Err(tenet_tensors::OperationError::StructureMismatch {
             tensor: "tensor-product destination",
         });
@@ -490,9 +519,10 @@ fn scatter_tensor_product_block<D: UserScalar>(
     let lhs_count = lhs.element_count()?;
     let rhs_count = rhs.element_count()?;
     let mut lhs_coordinates = vec![0; lhs.shape().len()];
+    let mut rhs_coordinates = vec![0; rhs.shape().len()];
     for _ in 0..lhs_count {
         let lhs_position = block_position(lhs.offset(), lhs.strides(), &lhs_coordinates);
-        let mut rhs_coordinates = vec![0; rhs.shape().len()];
+        rhs_coordinates.fill(0);
         for _ in 0..rhs_count {
             let rhs_position = block_position(rhs.offset(), rhs.strides(), &rhs_coordinates);
             let destination_position = destination.offset()
