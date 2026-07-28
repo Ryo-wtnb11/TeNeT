@@ -239,6 +239,8 @@ pub trait CheckedFusionAlgebra: FusionRule {
     /// returned sector is representable by this provider. Failure preserves
     /// the exact cause for an invalid input or an unrepresentable generated
     /// channel.
+    /// Complete mathematical channels. A bounded provider may reject this
+    /// query when its finite table cannot represent the full product.
     fn try_fusion_channels(
         &self,
         left: SectorId,
@@ -522,6 +524,8 @@ pub trait CheckedGenericFusion {
         left: SectorId,
         right: SectorId,
     ) -> Result<SectorVec, Self::Error>;
+    /// Representable table channels only; this is distinct from the complete
+    /// channel query above for bounded providers.
     fn try_fusion_channels_in_table(
         &self,
         left: SectorId,

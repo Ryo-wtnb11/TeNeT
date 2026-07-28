@@ -2,9 +2,10 @@ use std::{cell::Cell, error::Error, fmt};
 
 use tenet_core::{
     block_structure_intern_cache_info, complete_hom_space_structure_cache_info,
-    fusion_tree_layout_cache_info, CheckedGenericFusion, CheckedGenericStructureError,
-    CoupledSectorFold, FusionProductSpace, FusionTreeHomSpace, InfallibleGeneric, SectorId,
-    SectorLeg, SectorVec, Su3FusionRule,
+    fusion_tree_layout_cache_info, BraidingStyleKind, CheckedGenericFusion,
+    CheckedGenericStructureError, CoupledSectorFold, FusionProductSpace, FusionRule,
+    FusionStyleKind, FusionTreeHomSpace, InfallibleGeneric, RuleIdentity, SectorId, SectorLeg,
+    SectorVec, Su3FusionRule,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -215,22 +216,41 @@ fn checked_generic_structure_preserves_order_and_never_publishes_on_provider_fai
     }
 }
 
+struct ChannelSpy;
+impl FusionRule for ChannelSpy {
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::of_type::<Self>()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Generic
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Bosonic
+    }
+    fn vacuum(&self) -> SectorId {
+        SectorId::new(0)
+    }
+    fn fusion_channels(&self, _: SectorId, _: SectorId) -> SectorVec {
+        SectorVec::from_iter([SectorId::new(9)])
+    }
+    fn fusion_channels_in_table(&self, _: SectorId, _: SectorId) -> SectorVec {
+        SectorVec::from_iter([SectorId::new(4)])
+    }
+}
 #[test]
-fn infallible_adapter_keeps_su3_generic_tree_order() {
-    let rule = Su3FusionRule::new();
-    let eight = rule.sector_of(1, 1).unwrap();
-    let space = FusionTreeHomSpace::new(
-        FusionProductSpace::new([
-            SectorLeg::new([(eight, 1)], false),
-            SectorLeg::new([(eight, 1)], false),
-        ]),
-        FusionProductSpace::new([]),
+fn infallible_generic_distinguishes_full_and_in_table_channels() {
+    let checked = InfallibleGeneric::new(&ChannelSpy);
+    assert_eq!(
+        checked
+            .try_fusion_channels(SectorId::new(1), SectorId::new(2))
+            .unwrap(),
+        SectorVec::from_iter([SectorId::new(9)])
     );
     assert_eq!(
-        space.fusion_tree_keys_generic(&rule).unwrap(),
-        space
-            .fusion_tree_keys_generic_checked(&InfallibleGeneric::new(&rule))
-            .unwrap()
+        checked
+            .try_fusion_channels_in_table(SectorId::new(1), SectorId::new(2))
+            .unwrap(),
+        SectorVec::from_iter([SectorId::new(4)])
     );
 }
 
@@ -324,4 +344,24 @@ fn checked_adapter_pins_tensor_kit_su3_generic_boundaries() {
         .unwrap_err()
         .to_string()
         .contains("cannot represent this space exactly"));
+    for (coupled, vertices) in [
+        (5usize, vec![1usize]),
+        (16, vec![1, 2]),
+        (6, vec![1]),
+        (7, vec![1]),
+    ] {
+        let c = SectorId::new(coupled);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(t27), leg(eight)]),
+            FusionProductSpace::new([leg(c)]),
+        );
+        assert_eq!(
+            hom.fusion_tree_keys_generic_for_coupled_checked(&checked, c)
+                .unwrap()
+                .iter()
+                .map(|k| k.codomain_vertices()[0].get())
+                .collect::<Vec<_>>(),
+            vertices
+        );
+    }
 }
