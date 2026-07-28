@@ -659,9 +659,9 @@ The user layer is a thin, rule-erased face over four expert modules:
   context/cache types the [`prelude::Runtime`] wraps
   ([`operations::TensorContractFusionExecutionContext`]).
 - [`dense`] — the dense block execution boundary (GEMM etc.).
-- [`matrixalgebra`] — factorizations and matrix functions; the
-  `Tensor` decomposition methods pass through to the `*_dyn` entry points
-  here.
+- [`matrixalgebra`] — the curated typed `svd_compact` workflow and its bound
+  input/result types. Broader unstable factorization and dynamic workflows
+  require a direct `tenet-matrixalgebra` dependency.
 - `tenet-network` (separate crate) — the `tensor!` macro, the label
   planner (`NetworkIR`, greedy and optional `opt-einsum-path`
   optimizers, slicing types), and the pairwise executor over `Tensor`.
@@ -673,11 +673,12 @@ first.
 
 ### Two expert APIs
 
-**Typed const-generic API** (`core::TensorMap<T, NOUT, NIN>` +
-[`operations`] `*_into` functions): rank is in the type, outputs are
-preallocated, contexts are explicit. Use it when the rank is statically
-known and you want zero per-call allocation surprises or custom
-context/cache management. Example — a plain dense matrix product:
+**Typed const-generic API** (`core::TensorMap<T, NOUT, NIN>` plus the curated
+[`operations`] functions `tensorcontract_into`, `tensoradd_into`,
+`tensortrace_into`, `permute_into`, `braid_into`, and `transpose_into`): rank
+is in the type and outputs are preallocated. For broader unstable `_into`
+families, depend directly on `tenet-tensors`. Example — a plain dense matrix
+product:
 
 ```rust
 use tenet::core::{TensorMap, TensorMapSpace};
@@ -701,14 +702,11 @@ tensorcontract_into(
 assert_eq!(c.data(), &[19.0, 43.0, 22.0, 50.0]);
 ```
 
-**Dynamic `_dyn` API** (`tensorcontract_fusion_dyn_into`,
-`tree_transform_dyn_into`, and the `matrixalgebra::*_dyn` functions): rank is
-a runtime value with no ceiling. Provider-sensitive matrix algebra takes a
-validated [`matrixalgebra::BoundDynamicTensorRef`], which borrows a
-[`operations::BoundDynamicFusionMapSpace`] together with its flat data. The
-fusion provider is therefore inherited from the space rather than supplied as
-an independent argument. This is exactly what [`prelude::Tensor`] calls; drop
-to it when you need dynamic rank without the user layer's runtime erasure.
+**Dynamic API** (`TensorContractFusionExecutionContext::tensorcontract_fusion_dyn_into`
+and `TreeTransformExecutionContext::tree_transform_dyn_into`): rank is a runtime
+value with no ceiling. The curated matrix-algebra facade exposes typed
+`svd_compact` and its bound input/result types; use `tenet-matrixalgebra` directly
+for broader unstable dynamic workflows.
 
 ### If you are coming from TensorKit
 
@@ -719,7 +717,7 @@ to it when you need dynamic rank without the user layer's runtime erasure.
 | `V'` (dual space) | [`prelude::Space::dual`] | dual flag + dualized sectors on [`core::SectorLeg`] |
 | `@tensor` | `tensor!` (crate `tenet-network`) | planner IR -> pairwise [`operations::tensorcontract_fusion_into`] |
 | `permute` / `braid` / `transpose` | [`prelude::Tensor`] methods of the same names | [`operations::permute_into`] / `braid_into` / `transpose_into` |
-| SVD / QR / LQ / orthogonalization / eigensolvers | [`prelude::Tensor`] methods with the TensorKit 0.17 names | [`matrixalgebra`] typed + `_dyn` functions |
+| SVD / QR / LQ / orthogonalization / eigensolvers | [`prelude::Tensor`] methods with the TensorKit 0.17 names | curated [`matrixalgebra::svd_compact`] typed workflow; broader unstable APIs are in `tenet-matrixalgebra` |
 | `dot` / `norm` / `axpby` | [`prelude::Tensor::inner`] / `norm` / `add` / `scale` | weighted block inner products |
 | implicit global caches | [`prelude::Runtime`] | [`operations::TensorContractFusionExecutionContext`], tree-transform caches, dense executor |
 | hom space / fusion-tree basis | (implicit in `Tensor` construction) | [`core::FusionTreeHomSpace`], [`core::FusionTensorMapSpace`] |
