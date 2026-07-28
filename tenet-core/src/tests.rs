@@ -13729,6 +13729,26 @@ mod tests {
         }
     }
 
+    impl CheckedGenericFusion for UnitaryToyOmRule {
+        type Error = std::convert::Infallible;
+        fn fusion_style(&self) -> FusionStyleKind { FusionStyleKind::Generic }
+        fn braiding_style(&self) -> BraidingStyleKind { BraidingStyleKind::Bosonic }
+        fn vacuum(&self) -> SectorId { FusionRule::vacuum(self) }
+        fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> { Ok(sector) }
+        fn try_fusion_channels(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.fusion_channels(a,b)) }
+        fn try_fusion_channels_in_table(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.fusion_channels_in_table(a,b)) }
+        fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> { Ok(self.nsymbol(a,b,c)) }
+    }
+
+    impl CheckedGenericRigidSymbols for UnitaryToyOmRule {
+        type Scalar = f64;
+        fn try_sqrt_dim_scalar(&mut self, _: SectorId) -> Result<f64, Self::Error> { Ok(1.0) }
+        fn try_inv_sqrt_dim_scalar(&mut self, _: SectorId) -> Result<f64, Self::Error> { Ok(1.0) }
+        fn try_frobenius_schur_phase_scalar(&mut self, _: SectorId) -> Result<f64, Self::Error> { Ok(1.0) }
+        fn try_f_symbol_generic(&mut self, a: SectorId,b: SectorId,c: SectorId,d: SectorId,e: SectorId,f: SectorId) -> Result<GenericFArray<f64>, Self::Error> { Ok(self.f_symbol_generic(a,b,c,d,e,f)) }
+        fn try_r_symbol_generic(&mut self, a: SectorId,b: SectorId,c: SectorId) -> Result<GenericRMatrix<f64>, Self::Error> { Ok(self.r_symbol_generic(a,b,c)) }
+    }
+
     // Rank-2 tree [a, a] -> c with a single OM vertex label `vertex`.
     fn unitary_rank2_tree(vertex: usize) -> FusionTreeKey {
         let a = SectorId::new(UnitaryToyOmRule::A);
@@ -13748,6 +13768,16 @@ mod tests {
             [c],
             [MultiplicityIndex::new(vertex1).expect("test multiplicity label is one-based"), MultiplicityIndex::ONE],
         )
+    }
+
+    #[test]
+    fn checked_generic_artin_matches_legacy_outer_and_inner_rows() {
+        let mut rule = UnitaryToyOmRule;
+        for (tree, index) in [(unitary_rank2_tree(1), 0), (unitary_rank3_tree(1), 1)] {
+            let legacy = generic_artin_braid_at_with_inverse(&rule, &tree, index, false).unwrap();
+            let checked = generic_artin_braid_at_with_inverse_checked(&mut rule, &tree, index, false).unwrap();
+            assert_eq!(checked, legacy);
+        }
     }
 
     // Braid at `index` (inv=false) then braid every output at `index`
