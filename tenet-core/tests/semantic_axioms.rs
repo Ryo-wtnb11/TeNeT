@@ -541,7 +541,7 @@ fn tensorkit_symbol_values_cu1() {
         ([q, q, r, r, op, q], 2.0_f64.sqrt() / 2.0),
         ([q, r, q, r, q, t], 1.0),
         ([q, r, q, r, q, q], 0.0),
-        // One representative of every remaining published F branch. IDs are
+        // One representative of every remaining non-trivial sign family. IDs are
         // deliberately literal so the fixture also catches a codec swap.
         (
             [

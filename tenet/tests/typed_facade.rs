@@ -10209,10 +10209,9 @@ fn external_nobraiding_vacuum_only_legs_twist_passes_flip_rejects() {
 }
 
 #[test]
-fn cu1_typed_rank_three_permutation_uses_the_nontrivial_associator_gauge() {
-    // What: TensorKit CU(1)'s published F gauge is not trivial. A rank-three
-    // charged permutation must therefore take the recoupling route, not the
-    // direct symmetric-braiding shortcut reserved for certified trivial F.
+fn cu1_typed_rank_three_permutation_pins_the_gauge_contract_and_recoupling_values() {
+    // What: CU(1) does not certify a trivial associator gauge, and this
+    // rank-three charged fixture independently pins its recoupled payload.
     let _guard = cache_lock();
     let runtime = runtime();
     let rule = Arc::new(CU1FusionRule);
@@ -10232,6 +10231,7 @@ fn cu1_typed_rank_three_permutation_uses_the_nontrivial_associator_gauge() {
     let permuted = tensor.permute(&[2, 0, 1], &[3]).unwrap();
     assert_eq!(permuted.codomain().len(), 3);
     assert_eq!(permuted.domain().len(), 1);
+    assert_eq!(permuted.data().len(), 3);
     for (got, expected) in
         permuted
             .data()

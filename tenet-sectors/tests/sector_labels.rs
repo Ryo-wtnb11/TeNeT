@@ -202,6 +202,33 @@ fn cu1_codec_and_checked_overflow_preserve_the_tensor_kit_boundary() {
     ));
 }
 
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn cu1_checked_validation_preserves_the_shared_error_precedence() {
+    // What: checked fusion validates left then right; checked nsymbol first
+    // validates the requested coupled sector, then left then right. This
+    // mirrors the SU(2) checked-provider contract and makes diagnostics
+    // deterministic when more than one input is invalid.
+    let rule = CU1FusionRule;
+    let invalid = SectorId::new(u32::MAX as usize + 1);
+    let later_invalid = SectorId::new(u32::MAX as usize + 2);
+    let op: SectorId = CU1Irrep::VACUUM.into();
+    assert_eq!(
+        rule.try_fusion_channels(invalid, later_invalid),
+        Err(FusionAlgebraError::InvalidSector { sector: invalid })
+    );
+    assert_eq!(
+        rule.try_nsymbol(invalid, op, later_invalid),
+        Err(FusionAlgebraError::InvalidSector {
+            sector: later_invalid
+        })
+    );
+    assert_eq!(
+        rule.try_nsymbol(op, invalid, op),
+        Err(FusionAlgebraError::InvalidSector { sector: invalid })
+    );
+}
+
 #[test]
 fn u1_codec_round_trips_every_boundary_charge() {
     // What: the label domain is the full i32 charge range, including both
