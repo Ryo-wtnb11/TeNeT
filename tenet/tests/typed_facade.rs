@@ -1390,6 +1390,616 @@ fn typed_and_erased_contract_agree_byte_for_byte_on_a_builtin_rule() {
     assert!(typed_contracted.data().iter().any(|&value| value != 0.0));
 }
 
+#[test]
+fn otimes_keeps_tensor_map_sides_and_matches_both_facades() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased_lhs, typed_lhs) = z2_oracle_pair_split(&runtime, 1);
+    let (erased_rhs, typed_rhs) = z2_oracle_pair_split(&runtime, 2);
+
+    let erased = erased_lhs.otimes(&erased_rhs).unwrap();
+    let typed = typed_lhs.otimes(&typed_rhs).unwrap();
+
+    assert_eq!((typed.numout(), typed.numin()), (3, 3));
+    assert_eq!(typed.data(), erased.data());
+    assert_eq!(
+        typed
+            .codomain_spaces()
+            .into_iter()
+            .chain(typed.domain_spaces())
+            .map(|leg| (leg.is_dual(), leg.degeneracies().to_vec()))
+            .collect::<Vec<_>>(),
+        erased_leg_shapes(&erased)
+    );
+}
+
+#[test]
+fn otimes_rejects_runtime_and_rule_identity_mismatches() {
+    let _guard = cache_lock();
+    let first = runtime();
+    let second = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let lhs = counting_z3(
+        &first,
+        &z3_dense_leg(&provider, 2),
+        &z3_dense_leg(&provider, 3),
+        1.0,
+    );
+    let other_runtime = counting_z3(
+        &second,
+        &z3_dense_leg(&provider, 2),
+        &z3_dense_leg(&provider, 3),
+        1.0,
+    );
+    assert!(matches!(
+        lhs.otimes(&other_runtime).unwrap_err(),
+        tenet::prelude::Error::RuntimeMismatch
+    ));
+
+    let other_rule = Arc::new(ExternalZ3::tagged(1));
+    let other_rule = counting_z3(
+        &first,
+        &z3_dense_leg(&other_rule, 2),
+        &z3_dense_leg(&other_rule, 3),
+        1.0,
+    );
+    assert!(lhs.otimes(&other_rule).is_err());
+}
+
+// TensorKitSectors `anyons.jl` PlanarTrivial: one simple object, unique
+// fusion, no braiding, N = F = 1, and the object is the canonical unit.
+#[derive(Clone, Copy)]
+struct PlanarTrivial;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct PlanarTrivialSector;
+
+impl FusionRule for PlanarTrivial {
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::of_type::<Self>()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Unique
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::NoBraiding
+    }
+    fn vacuum(&self) -> SectorId {
+        SectorId::new(0)
+    }
+    fn dual(&self, sector: SectorId) -> SectorId {
+        sector
+    }
+    fn fusion_channels(&self, _: SectorId, _: SectorId) -> SectorVec {
+        core::iter::once(SectorId::new(0)).collect()
+    }
+}
+
+impl MultiplicityFreeFusionRule for PlanarTrivial {}
+impl tenet::core::CanonicalUnitFusionRule for PlanarTrivial {}
+
+impl MultiplicityFreeFusionSymbols for PlanarTrivial {
+    type Scalar = f64;
+    fn scalar_one(&self) -> f64 {
+        1.0
+    }
+    fn scalar_conj(&self, value: f64) -> f64 {
+        value
+    }
+    fn f_symbol_scalar(
+        &self,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+    ) -> f64 {
+        1.0
+    }
+    fn r_symbol_scalar(&self, _: SectorId, _: SectorId, _: SectorId) -> f64 {
+        panic!("PlanarTrivial has no R symbol")
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for PlanarTrivial {
+    fn dim_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+    fn inv_dim_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+    fn sqrt_dim_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+    fn inv_sqrt_dim_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+    fn twist_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+    fn frobenius_schur_phase_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+}
+
+impl CheckedFusionAlgebra for PlanarTrivial {
+    fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+        if sector == SectorId::new(0) {
+            Ok(sector)
+        } else {
+            Err(FusionAlgebraError::InvalidSector { sector })
+        }
+    }
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, FusionAlgebraError> {
+        self.try_dual_sector(left)?;
+        self.try_dual_sector(right)?;
+        Ok(self.fusion_channels(left, right))
+    }
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, FusionAlgebraError> {
+        self.try_dual_sector(left)?;
+        self.try_dual_sector(right)?;
+        self.try_dual_sector(coupled)?;
+        Ok(1)
+    }
+}
+
+impl SectorCodec for PlanarTrivial {
+    type Sector = PlanarTrivialSector;
+    fn encode_sector(&self, _: &Self::Sector) -> Result<SectorId, FusionAlgebraError> {
+        Ok(SectorId::new(0))
+    }
+    fn decode_sector(&self, sector: SectorId) -> Result<Self::Sector, FusionAlgebraError> {
+        self.try_dual_sector(sector)?;
+        Ok(PlanarTrivialSector)
+    }
+}
+
+#[test]
+fn otimes_matches_tensorkit_planar_trivial_without_requesting_braiding() {
+    // What: the #595 NoBraiding oracle is TensorKit's own PlanarTrivial
+    // category. The previous contract-plus-output-permute route reached its
+    // NoBraiding boundary; the monoidal merge succeeds without an R symbol.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(PlanarTrivial);
+    let lhs_cod =
+        GradedSpace::try_new(Arc::clone(&provider), [(PlanarTrivialSector, 2)], false).unwrap();
+    let lhs_dom =
+        GradedSpace::try_new(Arc::clone(&provider), [(PlanarTrivialSector, 3)], true).unwrap();
+    let rhs_cod =
+        GradedSpace::try_new(Arc::clone(&provider), [(PlanarTrivialSector, 4)], true).unwrap();
+    let rhs_dom =
+        GradedSpace::try_new(Arc::clone(&provider), [(PlanarTrivialSector, 2)], false).unwrap();
+    let lhs: TensorMap<PlanarTrivial, f64> =
+        TensorMap::from_block_fn(&runtime, [&lhs_cod], [&lhs_dom], |_, indices| {
+            (1 + indices[0] + 10 * indices[1]) as f64
+        })
+        .unwrap();
+    let rhs: TensorMap<PlanarTrivial, f64> =
+        TensorMap::from_block_fn(&runtime, [&rhs_cod], [&rhs_dom], |_, indices| {
+            (2 + indices[0] + 10 * indices[1]) as f64
+        })
+        .unwrap();
+    let expected: TensorMap<PlanarTrivial, f64> = TensorMap::from_block_fn(
+        &runtime,
+        [&lhs_cod, &rhs_cod],
+        [&lhs_dom, &rhs_dom],
+        |_, indices| {
+            (1 + indices[0] + 10 * indices[2]) as f64 * (2 + indices[1] + 10 * indices[3]) as f64
+        },
+    )
+    .unwrap();
+
+    // The pre-#595 lowering encoded the same operation as empty-axis
+    // contraction plus this interleaving output permutation. NoBraiding still
+    // rejects that braid-requiring route.
+    assert!(lhs.contract(&rhs, &[], &[], &[0, 2, 1, 3]).is_err());
+
+    let actual = lhs.otimes(&rhs).unwrap();
+
+    assert_eq!(actual.data(), expected.data());
+    assert_eq!(
+        actual
+            .codomain_spaces()
+            .into_iter()
+            .chain(actual.domain_spaces())
+            .map(|space| space.is_dual())
+            .collect::<Vec<_>>(),
+        [false, true, true, false]
+    );
+}
+
+#[test]
+fn otimes_fz2_complex_oracle_has_no_crossing_phase() {
+    // Built-in TensorKit-equivalent FermionParity semantics: complex payload
+    // multiplication is sign-free because otimes performs no leg crossing.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let rule = Arc::new(tenet::core::FermionParityFusionRule);
+    let leg = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 1),
+            (tenet::core::Z2Irrep::ODD, 1),
+        ],
+        false,
+    )
+    .unwrap();
+    let lhs: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |sectors, _| {
+            if *sectors.coupled() == tenet::core::Z2Irrep::EVEN {
+                Complex64::new(2.0, 1.0)
+            } else {
+                Complex64::new(-3.0, 2.0)
+            }
+        })
+        .unwrap();
+    let rhs: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |sectors, _| {
+            if *sectors.coupled() == tenet::core::Z2Irrep::EVEN {
+                Complex64::new(5.0, -1.0)
+            } else {
+                Complex64::new(1.0, 4.0)
+            }
+        })
+        .unwrap();
+    let expected: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |sectors, _| {
+            let codomain = sectors.codomain_uncoupled();
+            let domain = sectors.domain_uncoupled();
+            if codomain != domain {
+                return Complex64::new(0.0, 0.0);
+            }
+            let lhs = if codomain[0] == tenet::core::Z2Irrep::EVEN {
+                Complex64::new(2.0, 1.0)
+            } else {
+                Complex64::new(-3.0, 2.0)
+            };
+            let rhs = if codomain[1] == tenet::core::Z2Irrep::EVEN {
+                Complex64::new(5.0, -1.0)
+            } else {
+                Complex64::new(1.0, 4.0)
+            };
+            lhs * rhs
+        })
+        .unwrap();
+
+    assert_eq!(lhs.otimes(&rhs).unwrap().data(), expected.data());
+}
+
+#[test]
+fn typed_deligne_product_uses_the_explicit_component_order() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let u1_rule = Arc::new(tenet::core::U1FusionRule);
+    let fz2_rule = Arc::new(tenet::core::FermionParityFusionRule);
+    let charge = GradedSpace::try_new(
+        Arc::clone(&u1_rule),
+        [(tenet::core::U1Irrep::new(1), 1)],
+        false,
+    )
+    .unwrap();
+    let parity = GradedSpace::try_new(
+        Arc::clone(&fz2_rule),
+        [(tenet::core::Z2Irrep::ODD, 1)],
+        false,
+    )
+    .unwrap();
+    let lhs = TensorMap::from_block_fn(&runtime, [&charge], [&charge], |_, _| 2.0).unwrap();
+    let rhs = TensorMap::from_block_fn(&runtime, [&parity], [&parity], |_, _| 3.0).unwrap();
+    let product = Arc::new(tenet::core::U1FusionRule.product(tenet::core::FermionParityFusionRule));
+
+    let result = lhs.deligne_product(&rhs, product).unwrap();
+
+    assert_eq!((result.numout(), result.numin()), (2, 2));
+    assert_eq!(result.data(), [6.0]);
+    let codomain = result.codomain_spaces();
+    assert_eq!(
+        codomain[0].sectors().unwrap(),
+        [tenet::core::product_sector(
+            tenet::core::U1Irrep::new(1),
+            tenet::core::Z2Irrep::EVEN
+        )]
+    );
+    assert_eq!(
+        codomain[1].sectors().unwrap(),
+        [tenet::core::product_sector(
+            tenet::core::U1Irrep::new(0),
+            tenet::core::Z2Irrep::ODD
+        )]
+    );
+}
+
+#[test]
+fn typed_deligne_product_rejects_a_component_identity_mismatch() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let lhs_rule = Arc::new(ExternalZ3::tagged(0));
+    let lhs = counting_z3(
+        &runtime,
+        &z3_dense_leg(&lhs_rule, 1),
+        &z3_dense_leg(&lhs_rule, 1),
+        2.0,
+    );
+    let u1_rule = Arc::new(tenet::core::U1FusionRule);
+    let u1 = GradedSpace::try_new(
+        Arc::clone(&u1_rule),
+        [(tenet::core::U1Irrep::new(0), 1)],
+        false,
+    )
+    .unwrap();
+    let rhs = TensorMap::from_block_fn(&runtime, [&u1], [&u1], |_, _| 3.0).unwrap();
+    let wrong = Arc::new(ExternalZ3::tagged(1).product(tenet::core::U1FusionRule));
+
+    assert!(matches!(
+        lhs.deligne_product(&rhs, wrong).unwrap_err(),
+        tenet::prelude::Error::RuleMismatch
+    ));
+}
+
+#[test]
+fn typed_deligne_product_checks_runtime_before_both_component_identities() {
+    let _guard = cache_lock();
+    let first = runtime();
+    let second = runtime();
+    let left_rule = Arc::new(ExternalZ3::tagged(0));
+    let right_rule = Arc::new(ExternalZ3::tagged(2));
+    let lhs = counting_z3(
+        &first,
+        &z3_dense_leg(&left_rule, 1),
+        &z3_dense_leg(&left_rule, 1),
+        2.0,
+    );
+    let rhs = counting_z3(
+        &second,
+        &z3_dense_leg(&right_rule, 1),
+        &z3_dense_leg(&right_rule, 1),
+        3.0,
+    );
+    let wrong_both = Arc::new(ExternalZ3::tagged(1).product(ExternalZ3::tagged(3)));
+
+    assert!(matches!(
+        lhs.deligne_product(&rhs, wrong_both).unwrap_err(),
+        tenet::prelude::Error::RuntimeMismatch
+    ));
+
+    let rhs = counting_z3(
+        &first,
+        &z3_dense_leg(&right_rule, 1),
+        &z3_dense_leg(&right_rule, 1),
+        3.0,
+    );
+    let wrong_right = Arc::new(ExternalZ3::tagged(0).product(ExternalZ3::tagged(3)));
+    assert!(matches!(
+        lhs.deligne_product(&rhs, wrong_right).unwrap_err(),
+        tenet::prelude::Error::RuleMismatch
+    ));
+}
+
+#[test]
+fn typed_deligne_product_preserves_duals_multiblocks_and_complex_values() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let u1_rule = Arc::new(tenet::core::U1FusionRule);
+    let fz2_rule = Arc::new(tenet::core::FermionParityFusionRule);
+    let charge_cod = GradedSpace::try_new(
+        Arc::clone(&u1_rule),
+        [
+            (tenet::core::U1Irrep::new(-1), 1),
+            (tenet::core::U1Irrep::new(1), 1),
+        ],
+        false,
+    )
+    .unwrap();
+    let charge_dom = GradedSpace::try_new(
+        Arc::clone(&u1_rule),
+        [
+            (tenet::core::U1Irrep::new(-1), 1),
+            (tenet::core::U1Irrep::new(1), 1),
+        ],
+        true,
+    )
+    .unwrap();
+    let parity_cod = GradedSpace::try_new(
+        Arc::clone(&fz2_rule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 1),
+            (tenet::core::Z2Irrep::ODD, 1),
+        ],
+        true,
+    )
+    .unwrap();
+    let parity_dom = GradedSpace::try_new(
+        Arc::clone(&fz2_rule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 1),
+            (tenet::core::Z2Irrep::ODD, 1),
+        ],
+        false,
+    )
+    .unwrap();
+    let lhs: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&charge_cod], [&charge_dom], |sectors, _| {
+            Complex64::new(sectors.coupled().charge() as f64, 2.0)
+        })
+        .unwrap();
+    let rhs: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&parity_cod], [&parity_dom], |sectors, _| {
+            if *sectors.coupled() == tenet::core::Z2Irrep::EVEN {
+                Complex64::new(3.0, -1.0)
+            } else {
+                Complex64::new(-2.0, 4.0)
+            }
+        })
+        .unwrap();
+    let product = Arc::new(tenet::core::U1FusionRule.product(tenet::core::FermionParityFusionRule));
+
+    let actual = lhs.deligne_product(&rhs, product).unwrap();
+    let codomain = actual.codomain_spaces();
+    let domain = actual.domain_spaces();
+    let expected =
+        TensorMap::from_block_fn(&runtime, codomain.iter(), domain.iter(), |sectors, _| {
+            let codomain = sectors.codomain_uncoupled();
+            let domain = sectors.domain_uncoupled();
+            if codomain[0].left() == domain[0].left() && codomain[1].right() == domain[1].right() {
+                let lhs = Complex64::new(codomain[0].left().charge() as f64, 2.0);
+                let rhs = if *codomain[1].right() == tenet::core::Z2Irrep::EVEN {
+                    Complex64::new(3.0, -1.0)
+                } else {
+                    Complex64::new(-2.0, 4.0)
+                };
+                lhs * rhs
+            } else {
+                Complex64::new(0.0, 0.0)
+            }
+        })
+        .unwrap();
+
+    assert_eq!(actual.data(), expected.data());
+    assert!(actual.block_count() > 1);
+    assert_eq!(
+        codomain
+            .into_iter()
+            .chain(domain)
+            .map(|space| space.is_dual())
+            .collect::<Vec<_>>(),
+        [false, true, true, false]
+    );
+}
+
+#[test]
+fn typed_deligne_product_accepts_a_nondefault_product_codec() {
+    type Codec =
+        tenet::core::PackedProductCodec<tenet::core::U1SectorLayout, tenet::core::Fz2SectorLayout>;
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let u1_rule = Arc::new(tenet::core::U1FusionRule);
+    let fz2_rule = Arc::new(tenet::core::FermionParityFusionRule);
+    let charge = GradedSpace::try_new(
+        Arc::clone(&u1_rule),
+        [(tenet::core::U1Irrep::new(2), 1)],
+        false,
+    )
+    .unwrap();
+    let parity = GradedSpace::try_new(
+        Arc::clone(&fz2_rule),
+        [(tenet::core::Z2Irrep::ODD, 1)],
+        false,
+    )
+    .unwrap();
+    let lhs = TensorMap::from_block_fn(&runtime, [&charge], [&charge], |_, _| 2.0).unwrap();
+    let rhs = TensorMap::from_block_fn(&runtime, [&parity], [&parity], |_, _| 5.0).unwrap();
+    let product = Arc::new(tenet::core::ProductFusionRule::<_, _, Codec>::new(
+        tenet::core::U1FusionRule,
+        tenet::core::FermionParityFusionRule,
+    ));
+
+    let result = lhs.deligne_product(&rhs, product).unwrap();
+
+    assert_eq!(result.data(), [10.0]);
+    assert_eq!(
+        result.codomain_spaces()[0].sectors().unwrap(),
+        [tenet::core::product_sector(
+            tenet::core::U1Irrep::new(2),
+            tenet::core::Z2Irrep::EVEN
+        )]
+    );
+}
+
+#[test]
+fn typed_deligne_product_maps_component_innerlines_into_the_product_tree() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let u1_rule = Arc::new(tenet::core::U1FusionRule);
+    let fz2_rule = Arc::new(tenet::core::FermionParityFusionRule);
+    let charges = [1, 2, 3].map(|charge| {
+        GradedSpace::try_new(
+            Arc::clone(&u1_rule),
+            [(tenet::core::U1Irrep::new(charge), 1)],
+            false,
+        )
+        .unwrap()
+    });
+    let charge_total = GradedSpace::try_new(
+        Arc::clone(&u1_rule),
+        [(tenet::core::U1Irrep::new(6), 1)],
+        false,
+    )
+    .unwrap();
+    let odd = GradedSpace::try_new(
+        Arc::clone(&fz2_rule),
+        [(tenet::core::Z2Irrep::ODD, 1)],
+        false,
+    )
+    .unwrap();
+    let lhs =
+        TensorMap::from_block_fn(&runtime, charges.iter(), [&charge_total], |_, _| 2.0).unwrap();
+    let rhs = TensorMap::from_block_fn(&runtime, [&odd, &odd, &odd], [&odd], |_, _| 3.0).unwrap();
+    let product = Arc::new(tenet::core::U1FusionRule.product(tenet::core::FermionParityFusionRule));
+
+    let result = lhs.deligne_product(&rhs, product).unwrap();
+    let block = result.block_fusion_trees(0).unwrap();
+
+    assert_eq!(result.data(), [6.0]);
+    assert_eq!(
+        block.codomain_innerlines(),
+        [
+            tenet::core::product_sector(tenet::core::U1Irrep::new(3), tenet::core::Z2Irrep::EVEN),
+            tenet::core::product_sector(tenet::core::U1Irrep::new(6), tenet::core::Z2Irrep::EVEN),
+            tenet::core::product_sector(tenet::core::U1Irrep::new(6), tenet::core::Z2Irrep::ODD),
+            tenet::core::product_sector(tenet::core::U1Irrep::new(6), tenet::core::Z2Irrep::EVEN),
+        ]
+    );
+}
+
+#[test]
+fn typed_deligne_product_prepares_both_embeddings_before_publishing_either() {
+    type WrongCodec =
+        tenet::core::PackedProductCodec<tenet::core::U1SectorLayout, tenet::core::Fz2SectorLayout>;
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let rule = Arc::new(tenet::core::U1FusionRule);
+    let charge_one = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [(tenet::core::U1Irrep::new(1), 1)],
+        false,
+    )
+    .unwrap();
+    let lhs = TensorMap::from_block_fn(&runtime, [&charge_one], [&charge_one], |_, _| 2.0).unwrap();
+    let rhs = TensorMap::from_block_fn(&runtime, [&charge_one], [&charge_one], |_, _| 3.0).unwrap();
+    let product = Arc::new(tenet::core::ProductFusionRule::<
+        tenet::core::U1FusionRule,
+        tenet::core::U1FusionRule,
+        WrongCodec,
+    >::new(
+        tenet::core::U1FusionRule, tenet::core::U1FusionRule
+    ));
+    let before = (
+        fusion_tree_layout_cache_info(),
+        complete_hom_space_structure_cache_info(),
+    );
+
+    assert!(lhs.deligne_product(&rhs, product).is_err());
+
+    assert_eq!(
+        (
+            fusion_tree_layout_cache_info(),
+            complete_hom_space_structure_cache_info(),
+        ),
+        before
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Phase 3, slice 4: non-regression gates.
 // ---------------------------------------------------------------------------
@@ -9428,6 +10038,7 @@ impl FusionRule for PlanarZ2 {
 }
 
 impl MultiplicityFreeFusionRule for PlanarZ2 {}
+impl tenet::core::CanonicalUnitFusionRule for PlanarZ2 {}
 
 impl MultiplicityFreeFusionSymbols for PlanarZ2 {
     type Scalar = f64;

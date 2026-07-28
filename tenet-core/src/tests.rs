@@ -1430,6 +1430,48 @@ mod tests {
     }
 
     #[test]
+    fn merge_fusion_trees_treats_rank_zero_as_the_tensor_unit() {
+        let unit = FusionTreeKey::try_from_sector_ids([], 0, [], [], []).unwrap();
+        let tree =
+            FusionTreeKey::try_from_sector_ids([1, 0], 1, [true, false], [], [1]).unwrap();
+
+        for (lhs, rhs) in [(&unit, &tree), (&tree, &unit)] {
+            let terms =
+                merge_fusion_trees_multiplicity_free(&Z2FusionRule, lhs, rhs, SectorId::new(1))
+                    .unwrap();
+            assert_eq!(terms, vec![(tree.clone(), 1.0)]);
+        }
+    }
+
+    #[test]
+    fn merge_fusion_trees_pins_nontrivial_su2_f_coefficients() {
+        // What: merging a spin-1 tree into three spin-1/2 leaves is a genuine
+        // associator expansion, not a pointed-rule relabelling.
+        let lhs =
+            FusionTreeKey::try_from_sector_ids([1, 1], 2, [false, false], [], [1]).unwrap();
+        let rhs =
+            FusionTreeKey::try_from_sector_ids([1, 1, 1], 1, [false; 3], [0], [1, 1]).unwrap();
+
+        let terms =
+            merge_fusion_trees_multiplicity_free(&SU2FusionRule, &lhs, &rhs, SectorId::new(1))
+                .unwrap();
+
+        assert_eq!(terms.len(), 2);
+        assert_eq!(
+            terms
+                .iter()
+                .map(|(tree, _)| tree.innerlines().to_vec())
+                .collect::<Vec<_>>(),
+            [
+                vec![SectorId::new(2), SectorId::new(1), SectorId::new(2)],
+                vec![SectorId::new(2), SectorId::new(3), SectorId::new(2)],
+            ]
+        );
+        assert!((terms[0].1 + 1.0 / 3.0_f64.sqrt()).abs() < 1.0e-14);
+        assert!((terms[1].1 - (2.0 / 3.0_f64).sqrt()).abs() < 1.0e-14);
+    }
+
+    #[test]
     fn unique_artin_braid_first_uses_r_symbol_for_first_crossing() {
         let tree = FusionTreeKey::try_from_sector_ids([1, 1], 0, [false, true], [], [1]).unwrap();
 

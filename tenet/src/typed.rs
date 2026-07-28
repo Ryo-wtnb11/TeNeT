@@ -198,12 +198,13 @@
 //! provider that reports an invalid or unrepresentable algebra fails with a
 //! typed error and publishes no layout, cache, or admission state.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use tenet_core::{
     validate_unit_layout_correspondence_checked, BlockKey, BlockRef, CanonicalUnitFusionRule,
     CheckedFusionAlgebra, FusionProductSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
-    SectorLeg, UnitLegInsertion,
+    ProductFusionRule, ProductSector, ProductSectorCodec, SectorLeg, UnitLegInsertion,
 };
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace, OutputAxisOrder,
@@ -238,7 +239,7 @@ use crate::tensor::{
 };
 use crate::tensor_core::{
     tensorcompose_owned_multiplicity_free, tensorcontract_owned_multiplicity_free,
-    tree_transform_owned_multiplicity_free,
+    tensorproduct_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
 };
 
 /// One tensor leg: a provider plus the sector-to-degeneracy map of that axis
@@ -560,6 +561,164 @@ where
         domain_uncoupled: decode_sectors(provider, domain.uncoupled())?,
         domain_innerlines: decode_sectors(provider, domain.innerlines())?,
     })
+}
+
+fn map_block_fusion_trees<A, B>(
+    source: &BlockFusionTrees<A>,
+    map: impl Fn(&A) -> B,
+) -> BlockFusionTrees<B> {
+    BlockFusionTrees {
+        coupled: map(&source.coupled),
+        codomain_uncoupled: source.codomain_uncoupled.iter().map(&map).collect(),
+        codomain_innerlines: source.codomain_innerlines.iter().map(&map).collect(),
+        domain_uncoupled: source.domain_uncoupled.iter().map(&map).collect(),
+        domain_innerlines: source.domain_innerlines.iter().map(map).collect(),
+    }
+}
+
+struct PreparedProductOperand<'a, S, P, D>
+where
+    P: SectorCodec,
+{
+    source: &'a TensorMap<S, D>,
+    codomain: Vec<GradedSpace<P>>,
+    domain: Vec<GradedSpace<P>>,
+    blocks: HashMap<BlockFusionTrees<P::Sector>, (usize, Vec<usize>, Vec<usize>)>,
+}
+
+fn prepare_product_operand<S, P, D>(
+    source: &TensorMap<S, D>,
+    provider: Arc<P>,
+    embed: impl Fn(S::Sector) -> P::Sector,
+    project: impl Fn(&P::Sector) -> S::Sector,
+) -> Result<PreparedProductOperand<'_, S, P, D>, Error>
+where
+    S: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + CanonicalUnitFusionRule,
+    P: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + CanonicalUnitFusionRule,
+    D: TensorScalar,
+{
+    let embed_legs = |legs: Vec<GradedSpace<S>>| -> Result<Vec<GradedSpace<P>>, Error> {
+        legs.into_iter()
+            .map(|leg| {
+                let sectors = leg.sectors()?;
+                GradedSpace::try_new(
+                    Arc::clone(&provider),
+                    sectors
+                        .into_iter()
+                        .zip(leg.degeneracies().iter().copied())
+                        .map(|(sector, degeneracy)| (embed(sector), degeneracy)),
+                    leg.is_dual(),
+                )
+            })
+            .collect()
+    };
+    let codomain = embed_legs(source.codomain())?;
+    let domain = embed_legs(source.domain())?;
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new(codomain.iter().map(|leg| leg.leg().clone())),
+        FusionProductSpace::new(domain.iter().map(|leg| leg.leg().clone())),
+    );
+    let mut blocks = HashMap::with_capacity(source.block_count());
+    for index in 0..source.block_count() {
+        let key = source.block_fusion_trees(index)?;
+        let block = source.block(index)?;
+        blocks.insert(
+            key,
+            (
+                block.offset(),
+                block.shape().to_vec(),
+                block.strides().to_vec(),
+            ),
+        );
+    }
+    // Stage (do not publish) the product layout and prove that canonical-unit
+    // projection is a bijection onto the source blocks. The callback below can
+    // therefore not discover `missing_block` only after target admission.
+    let prepared = homspace.prepare_fusion_tree_layout_checked(provider.as_ref())?;
+    let mut projected = HashSet::with_capacity(prepared.keys().len());
+    let mut target_blocks = HashMap::with_capacity(prepared.keys().len());
+    for key in prepared.keys() {
+        let labelled =
+            decode_block_fusion_trees(provider.as_ref(), &BlockKey::FusionTree(key.clone()))?;
+        let source_key = map_block_fusion_trees(&labelled, &project);
+        let Some(layout) = blocks.get(&source_key).cloned() else {
+            return Err(Error::InvalidArgument(
+                "canonical-unit product embedding did not preserve source blocks".to_string(),
+            ));
+        };
+        if !projected.insert(source_key) || target_blocks.insert(labelled, layout).is_some() {
+            return Err(Error::InvalidArgument(
+                "canonical-unit product embedding did not preserve source blocks".to_string(),
+            ));
+        }
+    }
+    if projected.len() != blocks.len() {
+        return Err(Error::InvalidArgument(
+            "canonical-unit product embedding did not preserve source blocks".to_string(),
+        ));
+    }
+
+    Ok(PreparedProductOperand {
+        source,
+        codomain,
+        domain,
+        blocks: target_blocks,
+    })
+}
+
+impl<S, P, D> PreparedProductOperand<'_, S, P, D>
+where
+    S: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    P: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + CanonicalUnitFusionRule,
+    D: TensorScalar,
+{
+    fn commit(self) -> Result<TensorMap<P, D>, Error> {
+        let data = self.source.dense_data();
+        let blocks = self.blocks;
+        let source = self.source;
+        let codomain = self.codomain;
+        let domain = self.domain;
+        let mut missing_block = false;
+        let built = TensorMap::from_block_fn(
+            source.runtime(),
+            codomain.iter(),
+            domain.iter(),
+            |key, indices| {
+                let Some((offset, shape, strides)) = blocks.get(key) else {
+                    missing_block = true;
+                    return D::from_real(0.0);
+                };
+                if indices.len() != shape.len()
+                    || indices.iter().zip(shape).any(|(&index, &dim)| index >= dim)
+                {
+                    missing_block = true;
+                    return D::from_real(0.0);
+                }
+                let position = indices
+                    .iter()
+                    .zip(strides)
+                    .fold(*offset, |position, (&index, &stride)| {
+                        position + index * stride
+                    });
+                data[position]
+            },
+        )?;
+        if missing_block {
+            return Err(Error::InvalidArgument(
+                "canonical-unit product embedding did not preserve a source block".to_string(),
+            ));
+        }
+        Ok(built)
+    }
 }
 
 /// One coupled sector's factorization spectrum, labelled through the provider:
@@ -2014,6 +2173,91 @@ where
         output_axes: &[usize],
     ) -> Result<Self, Error> {
         self.contract(other, lhs_axes, rhs_axes, output_axes)
+    }
+
+    /// Tensor product in one category, ordered as
+    /// `codomain(self), codomain(other); domain(self), domain(other)`.
+    ///
+    /// The two codomain trees and the two domain trees are merged
+    /// independently with F moves. No legs cross and no R symbol is needed,
+    /// including for a `NoBraiding` provider.
+    pub fn otimes(&self, other: &Self) -> Result<Self, Error>
+    where
+        R: CanonicalUnitFusionRule,
+    {
+        if !self.runtime.same_runtime(&other.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        let (space, data) = tensorproduct_owned_multiplicity_free(
+            BoundDynamicTensorRef::try_new(&self.body.space, self.dense_data())?,
+            BoundDynamicTensorRef::try_new(&other.body.space, other.dense_data())?,
+        )?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody::dense(space, data)),
+        })
+    }
+
+    /// TensorKit `deligneproduct`: embeds `self` as `(a, 𝟙)` and `other` as
+    /// `(𝟙, b)` in the supplied ordered product category, then combines the
+    /// embedded tensors with the F-only [`Self::otimes`] route.
+    ///
+    /// This operation is typed-only and keeps the payload type `D` unchanged.
+    /// The caller supplies the exact [`ProductFusionRule`], including its
+    /// component providers and codec; both component [`tenet_core::RuleIdentity`] values
+    /// must match the operands, and the codec participates in the product
+    /// identity. [`CanonicalUnitFusionRule`] is required for both components
+    /// because TeNeT stores no separate unitor data. Factor order and nested
+    /// association are preserved exactly rather than reassociated or swapped.
+    ///
+    /// Validation reports [`Error::RuntimeMismatch`] before component
+    /// [`Error::RuleMismatch`]. Both vacuum embeddings, codec decodes, and
+    /// source/target fusion-tree bijections are prepared before either
+    /// embedded `TensorMap` or layout is published. After that transaction
+    /// succeeds, the operation builds the two embedded tensors by copying
+    /// their dense data (materializing a compact operand when necessary).
+    pub fn deligne_product<R2, C>(
+        &self,
+        other: &TensorMap<R2, D>,
+        product: Arc<ProductFusionRule<R, R2, C>>,
+    ) -> Result<TensorMap<ProductFusionRule<R, R2, C>, D>, Error>
+    where
+        R: CanonicalUnitFusionRule,
+        R2: MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec
+            + CanonicalUnitFusionRule,
+        C: ProductSectorCodec + Sync + 'static,
+    {
+        if !self.runtime.same_runtime(&other.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        if product.left_rule().rule_identity() != self.body.space.provider().rule_identity()
+            || product.right_rule().rule_identity() != other.body.space.provider().rule_identity()
+        {
+            return Err(Error::RuleMismatch);
+        }
+        let left_vacuum = product
+            .left_rule()
+            .decode_sector(product.left_rule().vacuum())?;
+        let right_vacuum = product
+            .right_rule()
+            .decode_sector(product.right_rule().vacuum())?;
+        let left = prepare_product_operand(
+            self,
+            Arc::clone(&product),
+            |sector| ProductSector::new(sector, right_vacuum.clone()),
+            |sector| sector.left().clone(),
+        )?;
+        let right = prepare_product_operand(
+            other,
+            product,
+            |sector| ProductSector::new(left_vacuum.clone(), sector),
+            |sector| sector.right().clone(),
+        )?;
+        let left = left.commit()?;
+        let right = right.commit()?;
+        left.otimes(&right)
     }
 
     /// Categorical composition of two tensor maps, TensorKit `A * B` / `mul!`:
