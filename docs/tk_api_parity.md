@@ -222,7 +222,9 @@ against — `tenet::typed::GradedSpace<R>` keeps the provider type and reports
 ## Notes on deliberate omissions
 
 - **Bang (`!`) methods.** TeNeT's user layer is immutable and `Result`-typed;
-  the expert layer (`tenet::operations::*_into`) carries the in-place surface.
+  the curated expert facade retains `tensorcontract_into`, `tensoradd_into`,
+  `tensortrace_into`, `permute_into`, `braid_into`, and `transpose_into`.
+  Broader unstable `_into` families require a direct `tenet-tensors` dependency.
 - **Sector / space *type* introspection** (`sectortype`, `spacetype`,
   `storagetype`) is intentionally erased: `Tensor` and `Space` are rule- and
   storage-generic at the user layer, dispatching internally. `SectorLabel` and
