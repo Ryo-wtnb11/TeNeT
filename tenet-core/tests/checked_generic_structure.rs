@@ -233,3 +233,95 @@ fn infallible_adapter_keeps_su3_generic_tree_order() {
             .unwrap()
     );
 }
+
+#[test]
+fn checked_adapter_pins_tensor_kit_su3_generic_boundaries() {
+    let rule = Su3FusionRule::new();
+    let checked = InfallibleGeneric::new(&rule);
+    let eight = rule.sector_of(1, 1).unwrap();
+    let t27 = rule.sector_of(2, 2).unwrap();
+    let leg = |s| SectorLeg::new([(s, 1)], false);
+    let rank2 = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(eight), leg(eight)]),
+        FusionProductSpace::new([SectorLeg::new(
+            [
+                (SectorId::new(0), 1),
+                (SectorId::new(5), 1),
+                (SectorId::new(6), 1),
+                (SectorId::new(7), 1),
+                (SectorId::new(16), 1),
+            ],
+            false,
+        )]),
+    );
+    assert_eq!(
+        rank2
+            .fusion_tree_keys_generic_checked(&checked)
+            .unwrap()
+            .iter()
+            .map(|k| (k.coupled().id(), k.codomain_vertices()[0].get()))
+            .collect::<Vec<_>>(),
+        vec![(0, 1), (5, 1), (5, 2), (6, 1), (7, 1), (16, 1)]
+    );
+    let oracle: [(usize, &[(usize, usize, usize)]); 5] = [
+        (0, &[(5, 1, 1), (5, 2, 1)]),
+        (
+            5,
+            &[
+                (0, 1, 1),
+                (5, 1, 1),
+                (5, 2, 1),
+                (5, 1, 2),
+                (5, 2, 2),
+                (16, 1, 1),
+                (6, 1, 1),
+                (7, 1, 1),
+            ],
+        ),
+        (6, &[(5, 1, 1), (5, 2, 1), (16, 1, 1), (6, 1, 1)]),
+        (7, &[(5, 1, 1), (5, 2, 1), (16, 1, 1), (7, 1, 1)]),
+        (
+            16,
+            &[
+                (5, 1, 1),
+                (5, 2, 1),
+                (16, 1, 1),
+                (16, 1, 2),
+                (6, 1, 1),
+                (7, 1, 1),
+            ],
+        ),
+    ];
+    let mut total = 0;
+    for (c, expected) in oracle {
+        let c = SectorId::new(c);
+        let hom = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(eight), leg(eight), leg(eight)]),
+            FusionProductSpace::new([leg(c)]),
+        );
+        let got = hom
+            .fusion_tree_keys_generic_for_coupled_checked(&checked, c)
+            .unwrap()
+            .iter()
+            .map(|k| {
+                (
+                    k.codomain_tree().innerlines()[0].id(),
+                    k.codomain_tree().vertices()[0].get(),
+                    k.codomain_tree().vertices()[1].get(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(got, expected);
+        total += got.len();
+    }
+    assert_eq!(total, 24);
+    let frontier = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(t27), leg(eight)]),
+        FusionProductSpace::new([leg(eight)]),
+    );
+    assert!(frontier
+        .fusion_tree_keys_generic_checked(&checked)
+        .unwrap_err()
+        .to_string()
+        .contains("cannot represent this space exactly"));
+}
