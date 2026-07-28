@@ -121,9 +121,9 @@ pub use tensortrace::{
 pub use tree_context::TreeTransformExecutionContext;
 pub use tree_transform::{
     build_all_codomain_tree_transform_group_plan, build_generic_tree_pair_transform_group_plan,
-    build_tree_pair_transform_group_plan, build_tree_transform_group_plan,
+    build_tree_pair_transform_group_plan, build_tree_transform_group_plan, CheckedGenericPlanError,
     RuntimeTreeTransformCacheInfo, RuntimeTreeTransformStore, TreePairTransformCache,
-    CheckedGenericPlanError, TreeTransformBlockSpec, TreeTransformCache, TreeTransformCacheStats,
+    TreeTransformBlockSpec, TreeTransformCache, TreeTransformCacheStats,
     TreeTransformGroupBlockSpec, TreeTransformGroupPlan, TreeTransformKeyBlockSpec,
     TreeTransformOperation, TreeTransformOperationKind, TreeTransformRuleCacheKey,
 };

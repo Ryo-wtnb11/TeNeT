@@ -38,6 +38,199 @@ impl<E: std::error::Error + 'static> std::error::Error for CheckedGenericStructu
     }
 }
 
+/// Fallible Generic-symbol access error used internally by checked row
+/// lowering.  A shape mismatch is TeNeT validation, not a provider failure.
+#[doc(hidden)]
+#[derive(Debug)]
+pub enum CheckedGenericSymbolError<E> {
+    Provider(E),
+    Shape {
+        symbol: &'static str,
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+    },
+    Core(CoreError),
+}
+
+impl<E> From<CoreError> for CheckedGenericSymbolError<E> {
+    fn from(error: CoreError) -> Self {
+        Self::Core(error)
+    }
+}
+
+impl<E: fmt::Display> fmt::Display for CheckedGenericSymbolError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Provider(error) => error.fmt(formatter),
+            Self::Shape {
+                symbol,
+                expected,
+                actual,
+            } => write!(formatter, "{symbol} shape mismatch: expected {expected:?}, got {actual:?}"),
+            Self::Core(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for CheckedGenericSymbolError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Provider(error) => Some(error),
+            Self::Core(error) => Some(error),
+            Self::Shape { .. } => None,
+        }
+    }
+}
+
+fn checked_generic_f_symbol<C>(
+    rule: &mut C,
+    a: SectorId,
+    b: SectorId,
+    c: SectorId,
+    d: SectorId,
+    e: SectorId,
+    f: SectorId,
+) -> Result<GenericFArray<C::Scalar>, CheckedGenericSymbolError<C::Error>>
+where
+    C: CheckedGenericRigidSymbols,
+{
+    let expected = [
+        rule.try_nsymbol(a, b, e),
+        rule.try_nsymbol(e, c, d),
+        rule.try_nsymbol(b, c, f),
+        rule.try_nsymbol(a, f, d),
+    ]
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(CheckedGenericSymbolError::Provider)?;
+    let symbol = rule
+        .try_f_symbol_generic(a, b, c, d, e, f)
+        .map_err(CheckedGenericSymbolError::Provider)?;
+    let (mu, nu, kappa, lambda) = symbol.shape();
+    let actual = vec![mu, nu, kappa, lambda];
+    if actual != expected {
+        return Err(CheckedGenericSymbolError::Shape {
+            symbol: "F",
+            expected,
+            actual,
+        });
+    }
+    Ok(symbol)
+}
+
+fn checked_generic_r_symbol<C>(
+    rule: &mut C,
+    a: SectorId,
+    b: SectorId,
+    c: SectorId,
+) -> Result<GenericRMatrix<C::Scalar>, CheckedGenericSymbolError<C::Error>>
+where
+    C: CheckedGenericRigidSymbols,
+{
+    let expected = [
+        rule.try_nsymbol(a, b, c),
+        rule.try_nsymbol(b, a, c),
+    ]
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(CheckedGenericSymbolError::Provider)?;
+    let symbol = rule
+        .try_r_symbol_generic(a, b, c)
+        .map_err(CheckedGenericSymbolError::Provider)?;
+    let (rows, cols) = symbol.shape();
+    let actual = vec![rows, cols];
+    if actual != expected {
+        return Err(CheckedGenericSymbolError::Shape {
+            symbol: "R",
+            expected,
+            actual,
+        });
+    }
+    Ok(symbol)
+}
+
+fn checked_generic_b_symbol<C>(
+    rule: &mut C,
+    a: SectorId,
+    b: SectorId,
+    c: SectorId,
+) -> Result<GenericRMatrix<C::Scalar>, CheckedGenericSymbolError<C::Error>>
+where
+    C: CheckedGenericRigidSymbols,
+{
+    let rows = rule
+        .try_nsymbol(a, b, c)
+        .map_err(CheckedGenericSymbolError::Provider)?;
+    let dual_b = rule
+        .try_dual(b)
+        .map_err(CheckedGenericSymbolError::Provider)?;
+    let cols = rule
+        .try_nsymbol(c, dual_b, a)
+        .map_err(CheckedGenericSymbolError::Provider)?;
+    let vacuum = rule.vacuum();
+    let f = checked_generic_f_symbol(rule, a, b, dual_b, a, c, vacuum)?;
+    let factor = rule
+        .try_sqrt_dim_scalar(a)
+        .map_err(CheckedGenericSymbolError::Provider)?
+        * rule
+            .try_sqrt_dim_scalar(b)
+            .map_err(CheckedGenericSymbolError::Provider)?
+        * rule
+            .try_inv_sqrt_dim_scalar(c)
+            .map_err(CheckedGenericSymbolError::Provider)?;
+    let mut data = Vec::with_capacity(rows * cols);
+    for mu in 0..rows {
+        for nu in 0..cols {
+            data.push(factor.clone() * f.get(mu, nu, 0, 0).clone());
+        }
+    }
+    Ok(GenericRMatrix::new(data, rows, cols))
+}
+
+fn checked_generic_a_symbol<C>(
+    rule: &mut C,
+    a: SectorId,
+    b: SectorId,
+    c: SectorId,
+) -> Result<GenericRMatrix<C::Scalar>, CheckedGenericSymbolError<C::Error>>
+where
+    C: CheckedGenericRigidSymbols,
+{
+    let rows = rule
+        .try_nsymbol(a, b, c)
+        .map_err(CheckedGenericSymbolError::Provider)?;
+    let dual_a = rule
+        .try_dual(a)
+        .map_err(CheckedGenericSymbolError::Provider)?;
+    let cols = rule
+        .try_nsymbol(dual_a, c, b)
+        .map_err(CheckedGenericSymbolError::Provider)?;
+    let vacuum = rule.vacuum();
+    let f = checked_generic_f_symbol(rule, dual_a, a, b, b, vacuum, c)?;
+    let factor = rule
+        .try_sqrt_dim_scalar(a)
+        .map_err(CheckedGenericSymbolError::Provider)?
+        * rule
+            .try_sqrt_dim_scalar(b)
+            .map_err(CheckedGenericSymbolError::Provider)?
+        * rule
+            .try_inv_sqrt_dim_scalar(c)
+            .map_err(CheckedGenericSymbolError::Provider)?;
+    let fs = rule
+        .try_frobenius_schur_phase_scalar(a)
+        .map_err(CheckedGenericSymbolError::Provider)?;
+    let mut data = Vec::with_capacity(rows * cols);
+    for kappa in 0..rows {
+        for lambda in 0..cols {
+            data.push(
+                factor.clone()
+                    * (fs.clone() * f.get(0, 0, kappa, lambda).clone()).braid_conj(),
+            );
+        }
+    }
+    Ok(GenericRMatrix::new(data, rows, cols))
+}
+
 fn validate_multiplicity_free_execution_style<R>(rule: &R) -> Result<(), CoreError>
 where
     R: FusionRule,

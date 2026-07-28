@@ -11,8 +11,8 @@ pub use operation::{
 };
 pub use plan::{
     build_all_codomain_tree_transform_group_plan, build_generic_tree_pair_transform_group_plan,
-    build_tree_pair_transform_group_plan, build_tree_transform_group_plan, TreeTransformBlockSpec,
-    CheckedGenericPlanError, TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
+    build_tree_pair_transform_group_plan, build_tree_transform_group_plan, CheckedGenericPlanError,
+    TreeTransformBlockSpec, TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
     TreeTransformKeyBlockSpec,
 };
 #[cfg(test)]

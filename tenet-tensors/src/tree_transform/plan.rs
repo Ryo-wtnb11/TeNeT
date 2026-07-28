@@ -59,7 +59,10 @@ impl<E: core::fmt::Display> core::fmt::Display for CheckedGenericPlanError<E> {
                 symbol,
                 expected,
                 actual,
-            } => write!(f, "{symbol} shape mismatch: expected {expected:?}, got {actual:?}"),
+            } => write!(
+                f,
+                "{symbol} shape mismatch: expected {expected:?}, got {actual:?}"
+            ),
             Self::Core(error) => error.fmt(f),
             Self::Operation(error) => error.fmt(f),
         }

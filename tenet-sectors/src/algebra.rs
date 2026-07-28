@@ -579,10 +579,7 @@ pub trait CheckedGenericRigidSymbols: CheckedGenericFusion {
     type Scalar: GenericBraidScalar + Send + Sync;
 
     fn try_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error>;
-    fn try_inv_sqrt_dim_scalar(
-        &mut self,
-        sector: SectorId,
-    ) -> Result<Self::Scalar, Self::Error>;
+    fn try_inv_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error>;
     fn try_frobenius_schur_phase_scalar(
         &mut self,
         sector: SectorId,
@@ -680,10 +677,7 @@ where
         Ok(self.0.sqrt_dim_scalar(sector))
     }
 
-    fn try_inv_sqrt_dim_scalar(
-        &mut self,
-        sector: SectorId,
-    ) -> Result<Self::Scalar, Self::Error> {
+    fn try_inv_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
         Ok(self.0.inv_sqrt_dim_scalar(sector))
     }
 
