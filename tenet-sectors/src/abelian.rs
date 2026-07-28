@@ -87,6 +87,12 @@ impl FusionRule for ZNFusionRule {
     fn vacuum(&self) -> SectorId {
         self.irrep(0).into()
     }
+    fn dual(&self, sector: SectorId) -> SectorId {
+        let sector = self
+            .checked(sector)
+            .expect("Z_N dual received an invalid sector");
+        self.irrep(-(sector.charge as i64)).into()
+    }
     fn supports_unitary_braid_dagger(&self) -> bool {
         true
     }
