@@ -3751,6 +3751,12 @@ impl Tensor {
         let (space, data) = match context.as_ref() {
             UserRuleContext::U1(provider) => build!(provider, U1),
             UserRuleContext::Z2(provider) => build!(provider, Z2),
+            UserRuleContext::ZN(_) => {
+                return Err(Error::UnsupportedForRule {
+                    operation: "Tensor::from_block_fn",
+                    rule: "Z_N",
+                })
+            }
             UserRuleContext::FZ2(provider) => build!(provider, FZ2),
             UserRuleContext::SU2(provider) => build!(provider, SU2),
             UserRuleContext::U1FZ2(provider) => build!(provider, U1FZ2),
@@ -4204,6 +4210,12 @@ impl Tensor {
             }
             UserRuleContext::Z2(provider) => {
                 UserBoundSpace::Z2(build_bound_space(Arc::clone(provider), hom)?)
+            }
+            UserRuleContext::ZN(_) => {
+                return Err(Error::UnsupportedForRule {
+                    operation: "Tensor::diagonal",
+                    rule: "Z_N",
+                })
             }
             UserRuleContext::FZ2(provider) => {
                 UserBoundSpace::FZ2(build_bound_space(Arc::clone(provider), hom)?)
