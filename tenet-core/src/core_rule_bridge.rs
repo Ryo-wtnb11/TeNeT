@@ -5,8 +5,8 @@ use crate::{
     FermionParityFusionRule, FibonacciFusionRule, FusionAlgebraError, FusionTreePairKey,
     MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, PackedProductCodec,
     PackedSectorLayout, ProductFusionRule, ProductSector, ProductSectorCodec,
-    ProductSectorCodecError, SU2FusionRule, SU2Irrep, SectorId, U1FusionRule, U1Irrep,
-    Z2FusionRule, Z2Irrep,
+    ProductSectorCodecError, SU2FusionRule, SU2Irrep, SectorCodec, SectorId, U1FusionRule, U1Irrep,
+    Z2FusionRule, Z2Irrep, ZNFusionRule, ZNIrrep,
 };
 
 // Why not tenet-sectors: these traits and errors define FusionTree lowering
@@ -475,6 +475,57 @@ impl LoweredMultiplicityFreeAlgebra for U1FusionRule {
         left.checked_fuse(right)
             .map(|expected| usize::from(coupled == expected))
             .map_err(LoweredFusionTreeBuildError::fusion_algebra)
+    }
+}
+
+impl lowered_multiplicity_free_sealed::Sealed for ZNFusionRule {}
+
+impl LoweredMultiplicityFreeAlgebra for ZNFusionRule {
+    type Sector = ZNIrrep;
+
+    fn try_decode_lowered(
+        &self,
+        sector: SectorId,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        self.decode_sector(sector)
+            .map_err(LoweredFusionTreeBuildError::fusion_algebra)
+    }
+    fn try_encode_lowered(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<SectorId, LoweredFusionTreeBuildError> {
+        self.encode_sector(&sector)
+            .map_err(LoweredFusionTreeBuildError::fusion_algebra)
+    }
+    fn try_lowered_vacuum(&self) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Ok(self.irrep(0))
+    }
+    fn try_lowered_dual(
+        &self,
+        sector: Self::Sector,
+    ) -> Result<Self::Sector, LoweredFusionTreeBuildError> {
+        Ok(self.irrep(-(sector.charge() as i64)))
+    }
+    fn try_for_each_lowered_channel<F>(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        emit: &mut F,
+    ) -> Result<(), LoweredFusionTreeBuildError>
+    where
+        F: FnMut(Self::Sector) -> Result<(), LoweredFusionTreeBuildError>,
+    {
+        emit(self.irrep((left.charge() as u64 + right.charge() as u64) as i64))
+    }
+    fn try_lowered_nsymbol(
+        &self,
+        left: Self::Sector,
+        right: Self::Sector,
+        coupled: Self::Sector,
+    ) -> Result<usize, LoweredFusionTreeBuildError> {
+        Ok(usize::from(
+            coupled == self.irrep((left.charge() as u64 + right.charge() as u64) as i64),
+        ))
     }
 }
 

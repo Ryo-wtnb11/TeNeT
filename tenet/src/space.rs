@@ -5,8 +5,8 @@ use std::sync::Arc;
 use tenet_core::{
     CheckedFusionAlgebra, FermionParityFusionRule, FusionAlgebraError, FusionRule, Fz2SectorLayout,
     PackedProductCodec, ProductFusionRule, ProductSectorCodec, ProductSectorLayout, RuleIdentity,
-    SU2FusionRule, SU2Irrep, SectorId, SectorLeg, Su2SectorLayout, Su3FusionRule, U1FusionRule,
-    U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep,
+    SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorLeg, Su2SectorLayout, Su3FusionRule,
+    U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep, ZNFusionRule,
 };
 use tenet_matrixalgebra::TruncationSpace;
 
@@ -63,6 +63,7 @@ pub enum SectorLabel {
 pub(crate) enum RuleKind {
     U1,
     Z2,
+    ZN,
     FZ2,
     SU2,
     U1FZ2,
@@ -119,6 +120,7 @@ pub(crate) type Fz2U1Su2Rule = ProductFusionRule<Fz2U1Rule, SU2FusionRule, Fz2U1
 pub(crate) enum UserRuleContext {
     U1(Arc<U1FusionRule>),
     Z2(Arc<Z2FusionRule>),
+    ZN(Arc<ZNFusionRule>),
     FZ2(Arc<FermionParityFusionRule>),
     SU2(Arc<SU2FusionRule>),
     U1FZ2(Arc<U1Fz2Rule>),
@@ -131,6 +133,7 @@ impl UserRuleContext {
         match self {
             Self::U1(_) => RuleKind::U1,
             Self::Z2(_) => RuleKind::Z2,
+            Self::ZN(_) => RuleKind::ZN,
             Self::FZ2(_) => RuleKind::FZ2,
             Self::SU2(_) => RuleKind::SU2,
             Self::U1FZ2(_) => RuleKind::U1FZ2,
@@ -143,6 +146,7 @@ impl UserRuleContext {
         match self {
             Self::U1(rule) => rule.rule_identity(),
             Self::Z2(rule) => rule.rule_identity(),
+            Self::ZN(rule) => rule.rule_identity(),
             Self::FZ2(rule) => rule.rule_identity(),
             Self::SU2(rule) => rule.rule_identity(),
             Self::U1FZ2(rule) => rule.rule_identity(),
@@ -176,6 +180,10 @@ macro_rules! with_rule {
                 $body
             }
             $crate::space::UserRuleContext::Z2(provider) => {
+                let $rule = provider.as_ref();
+                $body
+            }
+            $crate::space::UserRuleContext::ZN(provider) => {
                 let $rule = provider.as_ref();
                 $body
             }
@@ -313,6 +321,20 @@ impl Space {
                 .map(|(parity, deg)| (Z2Irrep::new(parity).sector_id(), deg))
                 .collect(),
         )
+    }
+
+    /// Z_N-graded space from `(charge, degeneracy)` pairs.
+    pub fn zn<I>(modulus: u32, charges: I) -> Result<Self, Error>
+    where
+        I: IntoIterator<Item = (i64, usize)>,
+    {
+        let rule =
+            Arc::new(ZNFusionRule::new(modulus).map_err(|e| Error::FusionAlgebra(Box::new(e)))?);
+        let sectors = charges
+            .into_iter()
+            .map(|(charge, deg)| (rule.irrep(charge).into(), deg))
+            .collect();
+        Ok(Self::new(Arc::new(UserRuleContext::ZN(rule)), sectors))
     }
 
     /// Fermion-parity-graded space from `(parity, degeneracy)` pairs
@@ -668,6 +690,7 @@ impl Space {
                     .expect("invalid Z2 sector id")
                     .parity(),
             ),
+            RuleKind::ZN => unimplemented!("Z_N labels use Space::zn_sectors"),
             RuleKind::FZ2 => SectorLabel::FZ2(sector.id() as u8),
             RuleKind::SU2 => SectorLabel::SU2 {
                 twice_spin: SU2Irrep::from_sector_id(sector).twice_spin(),
@@ -710,6 +733,7 @@ impl Space {
         match (self.rule_kind(), label) {
             (RuleKind::U1, SectorLabel::U1(charge)) => Some(U1Irrep::new(charge).sector_id()),
             (RuleKind::Z2, SectorLabel::Z2(parity)) => Some(Z2Irrep::new(parity).sector_id()),
+            (RuleKind::ZN, _) => None,
             (RuleKind::FZ2, SectorLabel::FZ2(parity)) => {
                 Z2Irrep::from_sector_id(SectorId::new(usize::from(parity))).map(Into::into)
             }
@@ -758,6 +782,38 @@ impl Space {
             .collect()
     }
 
+    /// Z_N sector content as canonical `(charge, degeneracy)` pairs.
+    pub fn zn_sectors(&self) -> Result<Vec<(u32, usize)>, Error> {
+        let UserRuleContext::ZN(rule) = self.context.as_ref() else {
+            return Err(Error::RuleMismatch);
+        };
+        Ok(self
+            .sectors
+            .iter()
+            .map(|&(id, deg)| {
+                (
+                    rule.decode_sector(id)
+                        .expect("validated Z_N sector")
+                        .charge(),
+                    deg,
+                )
+            })
+            .collect())
+    }
+
+    /// Returns the degeneracy of a Z_N charge, or `None` when absent.
+    pub fn zn_degeneracy(&self, charge: i64) -> Result<Option<usize>, Error> {
+        let UserRuleContext::ZN(rule) = self.context.as_ref() else {
+            return Err(Error::RuleMismatch);
+        };
+        let sector = rule.irrep(charge);
+        Ok(self
+            .sectors
+            .iter()
+            .find(|&&(id, _)| id == sector.into())
+            .map(|&(_, deg)| deg))
+    }
+
     /// Fallible sibling of [`Self::sectors`]: `Ok` with byte-identical content
     /// on every multiplicity-free rule, [`Error::UnsupportedForRule`] on SU(3)
     /// (whose `(p, q)` irreps do not fit [`SectorLabel`]). Read SU(3) sectors
@@ -767,10 +823,14 @@ impl Space {
     /// `Result`: that signature change breaks every multiplicity-free caller,
     /// a breaking change disproportionate to closing one SU(3) panic surface.
     pub fn try_sectors(&self) -> Result<Vec<(SectorLabel, usize)>, Error> {
-        if self.rule_kind() == RuleKind::Su3 {
+        if matches!(self.rule_kind(), RuleKind::Su3 | RuleKind::ZN) {
             return Err(Error::UnsupportedForRule {
                 operation: "Space::try_sectors",
-                rule: "SU(3)",
+                rule: if self.rule_kind() == RuleKind::ZN {
+                    "Z_N"
+                } else {
+                    "SU(3)"
+                },
             });
         }
         Ok(self.sectors())
@@ -1011,6 +1071,15 @@ pub(crate) fn fuse_sector_content<R: CheckedFusionAlgebra + ?Sized>(
 #[cfg(test)]
 mod provider_context_tests {
     use super::*;
+
+    #[test]
+    fn zn_space_roundtrips_and_reports_degeneracy() {
+        let space = Space::zn(3, [(-1, 2), (1, 4)]).unwrap();
+        assert_eq!(space.zn_sectors().unwrap(), vec![(1, 4), (2, 2)]);
+        assert_eq!(space.zn_degeneracy(2).unwrap(), Some(2));
+        assert_eq!(space.zn_degeneracy(0).unwrap(), None);
+        assert!(space.try_sectors().is_err());
+    }
 
     #[test]
     fn separately_constructed_builtin_spaces_compare_by_semantic_identity() {

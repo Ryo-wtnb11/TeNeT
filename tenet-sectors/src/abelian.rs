@@ -9,6 +9,215 @@ pub struct Z2Irrep {
     parity: u8,
 }
 
+/// Irreducible sector of the finite cyclic group Z_N.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct ZNIrrep {
+    charge: u32,
+}
+
+impl ZNIrrep {
+    pub const fn charge(self) -> u32 {
+        self.charge
+    }
+
+    pub const fn sector_id(self) -> SectorId {
+        SectorId::new(self.charge as usize)
+    }
+}
+
+impl From<ZNIrrep> for SectorId {
+    fn from(value: ZNIrrep) -> Self {
+        value.sector_id()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ZNFusionRule {
+    modulus: std::num::NonZeroU32,
+    identity: RuleIdentity,
+}
+
+impl PartialEq for ZNFusionRule {
+    fn eq(&self, other: &Self) -> bool {
+        self.modulus == other.modulus
+    }
+}
+impl Eq for ZNFusionRule {}
+impl std::hash::Hash for ZNFusionRule {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.modulus.hash(state);
+    }
+}
+
+impl ZNFusionRule {
+    pub fn new(modulus: u32) -> Result<Self, FusionAlgebraError> {
+        let Some(modulus) = std::num::NonZeroU32::new(modulus) else {
+            return Err(FusionAlgebraError::UnrepresentableSectorLabel {
+                rule: RuleIdentity::of_type::<Self>(),
+                label: "Z_N modulus must be nonzero".into(),
+            });
+        };
+        let bytes: std::sync::Arc<[u8]> = modulus.get().to_le_bytes().to_vec().into();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&modulus.get(), &mut hasher);
+        let identity =
+            RuleIdentity::from_canonical_bytes::<Self>(std::hash::Hasher::finish(&hasher), bytes);
+        Ok(Self { modulus, identity })
+    }
+
+    pub const fn modulus(&self) -> u32 {
+        self.modulus.get()
+    }
+
+    pub fn irrep(&self, charge: i64) -> ZNIrrep {
+        let n = self.modulus() as i64;
+        ZNIrrep {
+            charge: charge.rem_euclid(n) as u32,
+        }
+    }
+
+    fn checked(&self, sector: SectorId) -> Result<ZNIrrep, FusionAlgebraError> {
+        let charge = u32::try_from(sector.id()).ok();
+        match charge.filter(|&charge| charge < self.modulus()) {
+            Some(charge) => Ok(ZNIrrep { charge }),
+            None => Err(FusionAlgebraError::InvalidSector { sector }),
+        }
+    }
+}
+
+impl FusionRule for ZNFusionRule {
+    fn rule_identity(&self) -> RuleIdentity {
+        self.identity.clone()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Unique
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Bosonic
+    }
+    fn vacuum(&self) -> SectorId {
+        self.irrep(0).into()
+    }
+    fn dual(&self, sector: SectorId) -> SectorId {
+        let sector = self
+            .checked(sector)
+            .expect("Z_N dual received an invalid sector");
+        self.irrep(-(sector.charge as i64)).into()
+    }
+    fn supports_unitary_braid_dagger(&self) -> bool {
+        true
+    }
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        let left = self
+            .checked(left)
+            .expect("Z_N fusion received an invalid sector");
+        let right = self
+            .checked(right)
+            .expect("Z_N fusion received an invalid sector");
+        core::iter::once(
+            self.irrep((left.charge as u64 + right.charge as u64) as i64)
+                .into(),
+        )
+        .collect()
+    }
+}
+
+impl CheckedFusionAlgebra for ZNFusionRule {
+    fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+        let sector = self.checked(sector)?;
+        Ok(self.irrep(-(sector.charge as i64)).into())
+    }
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, FusionAlgebraError> {
+        let left = self.checked(left)?;
+        let right = self.checked(right)?;
+        Ok(core::iter::once(
+            self.irrep((left.charge as u64 + right.charge as u64) as i64)
+                .into(),
+        )
+        .collect())
+    }
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, FusionAlgebraError> {
+        self.checked(coupled)?;
+        Ok(usize::from(
+            coupled == self.try_fusion_channels(left, right)?[0],
+        ))
+    }
+}
+
+impl SectorCodec for ZNFusionRule {
+    type Sector = ZNIrrep;
+    fn encode_sector(&self, value: &Self::Sector) -> Result<SectorId, FusionAlgebraError> {
+        if value.charge < self.modulus() {
+            Ok((*value).into())
+        } else {
+            Err(FusionAlgebraError::InvalidSector {
+                sector: value.sector_id(),
+            })
+        }
+    }
+    fn decode_sector(&self, id: SectorId) -> Result<Self::Sector, FusionAlgebraError> {
+        self.checked(id)
+    }
+}
+
+impl MultiplicityFreeFusionRule for ZNFusionRule {}
+impl CanonicalUnitFusionRule for ZNFusionRule {}
+impl MultiplicityFreeFusionSymbols for ZNFusionRule {
+    type Scalar = f64;
+    fn has_trivial_associator_gauge(&self) -> bool {
+        true
+    }
+    fn scalar_one(&self) -> Self::Scalar {
+        1.0
+    }
+    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+        value
+    }
+    fn f_symbol_scalar(
+        &self,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+    ) -> Self::Scalar {
+        1.0
+    }
+    fn r_symbol_scalar(&self, _: SectorId, _: SectorId, _: SectorId) -> Self::Scalar {
+        1.0
+    }
+}
+impl MultiplicityFreeRigidSymbols for ZNFusionRule {
+    fn dim_scalar(&self, _: SectorId) -> Self::Scalar {
+        1.0
+    }
+    fn inv_dim_scalar(&self, _: SectorId) -> Self::Scalar {
+        1.0
+    }
+    fn sqrt_dim_scalar(&self, _: SectorId) -> Self::Scalar {
+        1.0
+    }
+    fn inv_sqrt_dim_scalar(&self, _: SectorId) -> Self::Scalar {
+        1.0
+    }
+    fn twist_scalar(&self, _: SectorId) -> Self::Scalar {
+        1.0
+    }
+    fn frobenius_schur_phase_scalar(&self, _: SectorId) -> Self::Scalar {
+        1.0
+    }
+}
+
 impl Z2Irrep {
     pub const EVEN: Self = Self { parity: 0 };
     pub const ODD: Self = Self { parity: 1 };
@@ -557,9 +766,12 @@ impl MultiplicityFreeRigidSymbols for U1FusionRule {
 mod tests {
     use super::{
         u1_charge_from_zigzag_u32, u1_charge_to_zigzag_u32, FermionParityFusionRule, U1FusionRule,
-        U1Irrep, Z2FusionRule, Z2Irrep,
+        U1Irrep, Z2FusionRule, Z2Irrep, ZNFusionRule,
     };
-    use crate::{CanonicalUnitFusionRule, FusionRule, MultiplicityFreeFusionSymbols, SectorId};
+    use crate::{
+        CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionRule, MultiplicityFreeFusionSymbols,
+        SectorCodec, SectorId,
+    };
 
     fn assert_canonical_unit<R>(rule: &R, sector: SectorId)
     where
@@ -627,5 +839,68 @@ mod tests {
             assert_eq!(sector.id(), encoded as usize);
             assert_eq!(U1Irrep::from_sector_id(sector), Some(U1Irrep::new(charge)));
         }
+    }
+
+    #[test]
+    fn zn_fuses_wraps_and_identity_contains_modulus() {
+        let a = ZNFusionRule::new(3).unwrap();
+        let b = ZNFusionRule::new(4).unwrap();
+        assert_eq!(a.irrep(-1).charge(), 2);
+        assert_eq!(
+            a.try_fusion_channels(a.irrep(2).into(), a.irrep(2).into())
+                .unwrap()[0],
+            a.irrep(1).into()
+        );
+        assert_ne!(a.rule_identity(), b.rule_identity());
+        assert!(ZNFusionRule::new(0).is_err());
+    }
+
+    #[test]
+    fn zn_checked_rejects_out_of_domain_sector() {
+        let rule = ZNFusionRule::new(3).unwrap();
+        assert!(matches!(
+            rule.try_dual_sector(SectorId::new(3)),
+            Err(crate::FusionAlgebraError::InvalidSector { .. })
+        ));
+    }
+
+    #[test]
+    fn zn_boundary_labels_fuse_and_symbols_are_canonical() {
+        for modulus in [1, 2, 3, 17, u32::MAX] {
+            let rule = ZNFusionRule::new(modulus).unwrap();
+            for charge in [i64::MIN, -1, 0, 1, i64::MAX] {
+                let sector = rule.irrep(charge);
+                assert_eq!(
+                    rule.try_dual_sector(rule.try_dual_sector(sector.into()).unwrap())
+                        .unwrap(),
+                    sector.into()
+                );
+                assert_eq!(rule.decode_sector(sector.into()).unwrap(), sector);
+            }
+            let a = rule.irrep(u32::MAX as i64);
+            let b = rule.irrep(1);
+            let fused = rule.try_fusion_channels(a.into(), b.into()).unwrap()[0];
+            assert_eq!(fused, rule.irrep((u32::MAX as u64 + 1) as i64).into());
+            if modulus == u32::MAX {
+                let edge = rule.irrep((u32::MAX - 1) as i64);
+                assert_eq!(
+                    rule.try_fusion_channels(edge.into(), edge.into()).unwrap()[0],
+                    rule.irrep((u32::MAX - 2) as i64).into()
+                );
+            }
+            assert_eq!(
+                rule.f_symbol_scalar(a.into(), b.into(), rule.vacuum(), fused, a.into(), b.into()),
+                1.0
+            );
+            assert_eq!(rule.r_symbol_scalar(a.into(), b.into(), fused), 1.0);
+        }
+        assert_ne!(
+            ZNFusionRule::new(3).unwrap().rule_identity(),
+            ZNFusionRule::new(4).unwrap().rule_identity()
+        );
+        assert_eq!(
+            ZNFusionRule::new(3).unwrap().rule_identity(),
+            ZNFusionRule::new(3).unwrap().rule_identity()
+        );
     }
 }

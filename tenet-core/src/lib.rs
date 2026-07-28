@@ -28,7 +28,7 @@ pub use tenet_sectors::{
     ProductSectorCodec, ProductSectorCodecError, ProductSectorComponent, ProductSectorLayout,
     RuleIdentity, SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorVec, Su2SectorLayout,
     SymbolShapeError, TensorKitProductCodec, U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule,
-    Z2Irrep, SU2_MAX_DOUBLED_SPIN,
+    Z2Irrep, ZNFusionRule, ZNIrrep, SU2_MAX_DOUBLED_SPIN,
 };
 
 mod core_rule_bridge;
