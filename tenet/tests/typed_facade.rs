@@ -1731,6 +1731,44 @@ fn typed_deligne_product_maps_component_innerlines_into_the_product_tree() {
     );
 }
 
+#[test]
+fn typed_deligne_product_prepares_both_embeddings_before_publishing_either() {
+    type WrongCodec =
+        tenet::core::PackedProductCodec<tenet::core::U1SectorLayout, tenet::core::Fz2SectorLayout>;
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let rule = Arc::new(tenet::core::U1FusionRule);
+    let charge_one = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [(tenet::core::U1Irrep::new(1), 1)],
+        false,
+    )
+    .unwrap();
+    let lhs = TensorMap::from_block_fn(&runtime, [&charge_one], [&charge_one], |_, _| 2.0).unwrap();
+    let rhs = TensorMap::from_block_fn(&runtime, [&charge_one], [&charge_one], |_, _| 3.0).unwrap();
+    let product = Arc::new(tenet::core::ProductFusionRule::<
+        tenet::core::U1FusionRule,
+        tenet::core::U1FusionRule,
+        WrongCodec,
+    >::new(
+        tenet::core::U1FusionRule, tenet::core::U1FusionRule
+    ));
+    let before = (
+        fusion_tree_layout_cache_info(),
+        complete_hom_space_structure_cache_info(),
+    );
+
+    assert!(lhs.deligne_product(&rhs, product).is_err());
+
+    assert_eq!(
+        (
+            fusion_tree_layout_cache_info(),
+            complete_hom_space_structure_cache_info(),
+        ),
+        before
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Phase 3, slice 4: non-regression gates.
 // ---------------------------------------------------------------------------

@@ -576,12 +576,22 @@ fn map_block_fusion_trees<A, B>(
     }
 }
 
-fn embed_product_operand<S, P, D>(
+struct PreparedProductOperand<'a, S, P, D>
+where
+    P: SectorCodec,
+{
+    source: &'a TensorMap<S, D>,
+    codomain: Vec<GradedSpace<P>>,
+    domain: Vec<GradedSpace<P>>,
+    blocks: HashMap<BlockFusionTrees<P::Sector>, (usize, Vec<usize>, Vec<usize>)>,
+}
+
+fn prepare_product_operand<S, P, D>(
     source: &TensorMap<S, D>,
     provider: Arc<P>,
     embed: impl Fn(S::Sector) -> P::Sector,
     project: impl Fn(&P::Sector) -> S::Sector,
-) -> Result<TensorMap<P, D>, Error>
+) -> Result<PreparedProductOperand<'_, S, P, D>, Error>
 where
     S: MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
@@ -632,11 +642,17 @@ where
     // therefore not discover `missing_block` only after target admission.
     let prepared = homspace.prepare_fusion_tree_layout_checked(provider.as_ref())?;
     let mut projected = HashSet::with_capacity(prepared.keys().len());
+    let mut target_blocks = HashMap::with_capacity(prepared.keys().len());
     for key in prepared.keys() {
         let labelled =
             decode_block_fusion_trees(provider.as_ref(), &BlockKey::FusionTree(key.clone()))?;
         let source_key = map_block_fusion_trees(&labelled, &project);
-        if !blocks.contains_key(&source_key) || !projected.insert(source_key) {
+        let Some(layout) = blocks.get(&source_key).cloned() else {
+            return Err(Error::InvalidArgument(
+                "canonical-unit product embedding did not preserve source blocks".to_string(),
+            ));
+        };
+        if !projected.insert(source_key) || target_blocks.insert(labelled, layout).is_some() {
             return Err(Error::InvalidArgument(
                 "canonical-unit product embedding did not preserve source blocks".to_string(),
             ));
@@ -648,39 +664,61 @@ where
         ));
     }
 
-    let data = source.dense_data();
-    let mut missing_block = false;
-    let built = TensorMap::from_block_fn(
-        source.runtime(),
-        codomain.iter(),
-        domain.iter(),
-        |key, indices| {
-            let source_key = map_block_fusion_trees(key, &project);
-            let Some((offset, shape, strides)) = blocks.get(&source_key) else {
-                missing_block = true;
-                return D::from_real(0.0);
-            };
-            if indices.len() != shape.len()
-                || indices.iter().zip(shape).any(|(&index, &dim)| index >= dim)
-            {
-                missing_block = true;
-                return D::from_real(0.0);
-            }
-            let position = indices
-                .iter()
-                .zip(strides)
-                .fold(*offset, |position, (&index, &stride)| {
-                    position + index * stride
-                });
-            data[position]
-        },
-    )?;
-    if missing_block {
-        return Err(Error::InvalidArgument(
-            "canonical-unit product embedding did not preserve a source block".to_string(),
-        ));
+    Ok(PreparedProductOperand {
+        source,
+        codomain,
+        domain,
+        blocks: target_blocks,
+    })
+}
+
+impl<S, P, D> PreparedProductOperand<'_, S, P, D>
+where
+    S: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    P: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + CanonicalUnitFusionRule,
+    D: TensorScalar,
+{
+    fn commit(self) -> Result<TensorMap<P, D>, Error> {
+        let data = self.source.dense_data();
+        let blocks = self.blocks;
+        let source = self.source;
+        let codomain = self.codomain;
+        let domain = self.domain;
+        let mut missing_block = false;
+        let built = TensorMap::from_block_fn(
+            source.runtime(),
+            codomain.iter(),
+            domain.iter(),
+            |key, indices| {
+                let Some((offset, shape, strides)) = blocks.get(key) else {
+                    missing_block = true;
+                    return D::from_real(0.0);
+                };
+                if indices.len() != shape.len()
+                    || indices.iter().zip(shape).any(|(&index, &dim)| index >= dim)
+                {
+                    missing_block = true;
+                    return D::from_real(0.0);
+                }
+                let position = indices
+                    .iter()
+                    .zip(strides)
+                    .fold(*offset, |position, (&index, &stride)| {
+                        position + index * stride
+                    });
+                data[position]
+            },
+        )?;
+        if missing_block {
+            return Err(Error::InvalidArgument(
+                "canonical-unit product embedding did not preserve a source block".to_string(),
+            ));
+        }
+        Ok(built)
     }
-    Ok(built)
 }
 
 /// One coupled sector's factorization spectrum, labelled through the provider:
@@ -2185,18 +2223,20 @@ where
         let right_vacuum = product
             .right_rule()
             .decode_sector(product.right_rule().vacuum())?;
-        let left = embed_product_operand(
+        let left = prepare_product_operand(
             self,
             Arc::clone(&product),
             |sector| ProductSector::new(sector, right_vacuum.clone()),
             |sector| sector.left().clone(),
         )?;
-        let right = embed_product_operand(
+        let right = prepare_product_operand(
             other,
             product,
             |sector| ProductSector::new(left_vacuum.clone(), sector),
             |sector| sector.right().clone(),
         )?;
+        let left = left.commit()?;
+        let right = right.commit()?;
         left.otimes(&right)
     }
 
