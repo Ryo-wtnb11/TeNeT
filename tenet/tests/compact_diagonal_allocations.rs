@@ -119,7 +119,7 @@ fn public_diagonal_constructor_and_readback_stay_compact_until_data() {
     let small = measured_bytes(|| constructed_diagonal(&runtime, 64));
     let large = measured_bytes(|| constructed_diagonal(&runtime, 128));
     assert!(
-        large <= small * 4,
+        large <= small * 3,
         "constructor growth is not O(d): {small}, {large}"
     );
     assert!(
@@ -127,8 +127,14 @@ fn public_diagonal_constructor_and_readback_stay_compact_until_data() {
         "constructor allocated a dense payload: {large}"
     );
 
+    let small_diagonal = constructed_diagonal(&runtime, 64);
     let diagonal = constructed_diagonal(&runtime, 128);
+    let small_readback = measured_bytes(|| small_diagonal.diagonal_spectrum().unwrap().unwrap());
     let readback = measured_bytes(|| diagonal.diagonal_spectrum().unwrap().unwrap());
+    assert!(
+        readback <= small_readback * 3,
+        "readback growth is not O(d): {small_readback}, {readback}"
+    );
     assert!(
         readback < (128 * 128 * std::mem::size_of::<f64>()) as u64,
         "readback allocated a dense payload: {readback}"

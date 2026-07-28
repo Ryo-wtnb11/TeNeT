@@ -131,15 +131,21 @@ fn public_diagonal_constructor_and_readback_stay_compact_until_data() {
     let small = measured_bytes(|| constructed_diagonal(64));
     let large = measured_bytes(|| constructed_diagonal(DEGENERACY));
     assert!(
-        large <= small * 4,
+        large <= small * 3,
         "typed constructor growth is not O(d): {small}, {large}"
     );
     assert!(
         large < dense_payload_bytes(),
         "typed constructor allocated a dense payload: {large}"
     );
+    let small_diagonal = constructed_diagonal(64);
     let diagonal = constructed_diagonal(DEGENERACY);
+    let small_readback = measured_bytes(|| small_diagonal.diagonal_spectrum().unwrap().unwrap());
     let readback = measured_bytes(|| diagonal.diagonal_spectrum().unwrap().unwrap());
+    assert!(
+        readback <= small_readback * 3,
+        "typed readback growth is not O(d): {small_readback}, {readback}"
+    );
     assert!(
         readback < dense_payload_bytes(),
         "typed readback allocated a dense payload: {readback}"
