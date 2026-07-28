@@ -30,6 +30,11 @@ The TeNeT user layer is **immutable / `Result`-returning**: every in-place
 TensorKit `foo!` / `foo!!` bang method maps to the out-of-place `foo` row and
 is not separately listed unless its semantics differ.
 
+The `tenet::operations` and `tenet::matrixalgebra` modules are curated
+expert facades, not full implementation-crate re-exports. APIs outside those
+allow-lists remain available through direct `tenet-tensors` or
+`tenet-matrixalgebra` dependencies; see [the migration note](api_migration_587.md).
+
 ## Summary counts
 
 Counts are table rows; a few rows bundle several closely-related exports

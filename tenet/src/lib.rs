@@ -54,7 +54,7 @@ pub use tensor::RuntimeDetachedTensor;
 /// [`prelude::Tensor`], plus the handful of expert-layer types their
 /// signatures mention. `use tenet::prelude::*;` is the intended import for
 /// everyday tensor code; the expert layer stays available through the
-/// [`core`], [`operations`], [`dense`], and [`matrixalgebra`] modules.
+/// curated [`operations`] and [`matrixalgebra`] facades.
 pub mod prelude {
     pub use crate::default;
     pub use crate::error::Error;
@@ -98,15 +98,20 @@ pub mod dense {
     pub use tenet_dense::*;
 }
 
-/// Expert layer: contraction / tree-transform / trace execution and the
-/// context and cache types the [`prelude::Runtime`] wraps. Re-export of
-/// `tenet-tensors`.
+/// Curated expert operations and context types used by documented workflows.
 pub mod operations {
-    pub use tenet_tensors::*;
+    pub use tenet_tensors::{
+        braid_into, permute_into, tensoradd_into, tensorcontract_fusion_into,
+        tensorcontract_into, tensortrace_into, transpose_into, BoundDynamicFusionMapSpace,
+        DynamicFusionMapSpace, OperationError, OutputAxisOrder, TensorContractFusionExecutionContext,
+        TensorContractSpec, TensorTraceAxisSpec, TreeTransformExecutionContext,
+        TreeTransformOperation,
+    };
 }
 
-/// Expert layer: factorizations and matrix functions the [`prelude::Tensor`]
-/// decomposition methods pass through to. Re-export of `tenet-matrixalgebra`.
+/// Curated factorization types and entry points.
 pub mod matrixalgebra {
-    pub use tenet_matrixalgebra::*;
+    pub use tenet_matrixalgebra::{
+        svd_compact, BoundTensorMap, BoundTensorMapRef, SectorSpectrum, SvdCompact,
+    };
 }

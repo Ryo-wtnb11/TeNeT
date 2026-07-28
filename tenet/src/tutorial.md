@@ -701,14 +701,11 @@ tensorcontract_into(
 assert_eq!(c.data(), &[19.0, 43.0, 22.0, 50.0]);
 ```
 
-**Dynamic `_dyn` API** (`tensorcontract_fusion_dyn_into`,
-`tree_transform_dyn_into`, and the `matrixalgebra::*_dyn` functions): rank is
-a runtime value with no ceiling. Provider-sensitive matrix algebra takes a
-validated [`matrixalgebra::BoundDynamicTensorRef`], which borrows a
-[`operations::BoundDynamicFusionMapSpace`] together with its flat data. The
-fusion provider is therefore inherited from the space rather than supplied as
-an independent argument. This is exactly what [`prelude::Tensor`] calls; drop
-to it when you need dynamic rank without the user layer's runtime erasure.
+**Dynamic API** (`TensorContractFusionExecutionContext::tensorcontract_fusion_dyn_into`
+and `TreeTransformExecutionContext::tree_transform_dyn_into`): rank is a runtime
+value with no ceiling. The curated matrix-algebra facade exposes typed
+`svd_compact` and its bound input/result types; use `tenet-matrixalgebra` directly
+for broader unstable dynamic workflows.
 
 ### If you are coming from TensorKit
 
