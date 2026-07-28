@@ -60,7 +60,7 @@ use crate::error::Error;
 use crate::runtime::{rule_lanes, Ctx, Ctxs, Runtime, RuntimeExecutionConfig, RuntimeIdentity};
 use crate::space::{Fz2U1Su2Rule, RuleKind, Space, U1Fz2Rule, UserRuleContext};
 use crate::tensor_core::{
-    tensorcontract_owned_multiplicity_free, tensorproduct_owned_multiplicity_free,
+    pow_by_squaring, tensorcontract_owned_multiplicity_free, tensorproduct_owned_multiplicity_free,
     tree_transform_owned_multiplicity_free,
 };
 
@@ -421,6 +421,33 @@ impl DiagonalData {
                 .iter()
                 .flat_map(|e| e.values.iter())
                 .fold(0.0f64, |m, &v| m.max(v.norm())),
+        }
+    }
+
+    /// Compact `one(d)`: preserve each sector and degeneracy, replacing values
+    /// by the multiplicative identity.
+    fn ones_like(&self) -> DiagonalData {
+        fn real(spectra: &[SectorSpectrum<f64>]) -> Vec<SectorSpectrum<f64>> {
+            spectra
+                .iter()
+                .map(|entry| SectorSpectrum {
+                    sector: entry.sector,
+                    values: vec![1.0; entry.values.len()],
+                })
+                .collect()
+        }
+        match self {
+            Self::RealF64(spectra) => Self::RealF64(real(spectra)),
+            Self::RealC64(spectra) => Self::RealC64(real(spectra)),
+            Self::C64(spectra) => Self::C64(
+                spectra
+                    .iter()
+                    .map(|entry| SectorSpectrum {
+                        sector: entry.sector,
+                        values: vec![Complex64::new(1.0, 0.0); entry.values.len()],
+                    })
+                    .collect(),
+            ),
         }
     }
 
@@ -5566,6 +5593,33 @@ impl Tensor {
             }
         }
         self.contract(rhs, &lhs_axes, &rhs_axes)
+    }
+
+    /// Integer tensor-map power (TensorKit `t ^ p`), using `O(log |p|)`
+    /// compositions. Zero returns the multiplicative identity (staying compact
+    /// for compact input); negative powers invert once.
+    ///
+    /// Returns [`Error::InvalidArgument`] unless this is an endomorphism.
+    pub fn powi(&self, exponent: i32) -> Result<Self, Error> {
+        let metadata = self.metadata();
+        if metadata.codomain().legs() != metadata.domain().legs() {
+            return Err(Error::InvalidArgument(
+                "powi() requires an endomorphism (domain == codomain)".to_string(),
+            ));
+        }
+        if exponent == 0 {
+            if let Some(diagonal) = self.diagonal_data() {
+                return Ok(self.with_diagonal(diagonal.ones_like()));
+            }
+            return Self::id(&self.rt, self.dtype(), &self.domain_spaces());
+        }
+
+        let power = if exponent < 0 {
+            self.inv()?
+        } else {
+            self.clone()
+        };
+        pow_by_squaring(power, exponent.unsigned_abs(), Self::compose)
     }
 
     /// Contracts `lhs_axes` of `self` with `rhs_axes` of `rhs` (pairwise, in

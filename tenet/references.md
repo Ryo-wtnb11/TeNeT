@@ -76,6 +76,7 @@ single defensible upstream location (the note says why).
 | `Tensor::id` | TensorKit | 0.17.0 | `tensors/linalg.jl:75-82` | both facades (identical claim on the erased and typed item) |
 | `Tensor::inner` | TensorKit | 0.17.0 | `tensors/vectorinterface.jl:114-123` | `VectorInterface.inner`, quantum-dimension weighted; TK `dot` alias at `tensors/linalg.jl:255`; both facades (identical claim on the erased and typed item) |
 | `Tensor::inv` | TensorKit | 0.17.0 | `tensors/linalg.jl:375-387` | both facades (identical claim on the erased and typed item) |
+| `Tensor::powi` | TensorKit | 0.17.0 | `tensors/linalg.jl:45-47` | both facades (identical claim on the erased and typed item) |
 | `Tensor::is_antihermitian` | TensorKit | 0.17.0 | `factorizations/factorizations.jl:72-76` | per coupled block via MAK `isantihermitian` (`common/matrixproperties.jl:90-102`); both facades (identical claim on the erased and typed item) |
 | `Tensor::is_hermitian` | TensorKit | 0.17.0 | `factorizations/factorizations.jl:67-71` | `LinearAlgebra.ishermitian` alias at 77; per coupled block via MAK `ishermitian` (`common/matrixproperties.jl:66-78`); both facades (identical claim on the erased and typed item) |
 | `Tensor::is_isometric` | MatrixAlgebraKit | 0.6.9 | `common/matrixproperties.jl:1-21` | TK applies it per coupled block (`factorizations/factorizations.jl:97-100`, `is_left_isometric`); both facades (identical claim on the erased and typed item) |

@@ -238,7 +238,7 @@ use crate::tensor::{
     PlanarRequestKind, TensorScalar,
 };
 use crate::tensor_core::{
-    tensorcompose_owned_multiplicity_free, tensorcontract_owned_multiplicity_free,
+    pow_by_squaring, tensorcompose_owned_multiplicity_free, tensorcontract_owned_multiplicity_free,
     tensorproduct_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
 };
 
@@ -2444,6 +2444,32 @@ where
             runtime: self.runtime.clone(),
             body: Arc::new(TypedTensorBody::dense(space, data)),
         })
+    }
+
+    /// Integer tensor-map power (TensorKit `t ^ p`), using `O(log |p|)`
+    /// compositions. Zero returns the multiplicative identity (staying compact
+    /// for compact input); negative powers invert once.
+    ///
+    /// Returns [`Error::InvalidArgument`] unless this is an endomorphism.
+    pub fn powi(&self, exponent: i32) -> Result<Self, Error> {
+        if !self.is_endomorphism() {
+            return Err(Error::InvalidArgument(
+                "powi() requires an endomorphism (domain == codomain)".to_string(),
+            ));
+        }
+        if exponent == 0 {
+            if let Some(spectrum) = self.spectrum() {
+                return Ok(self.with_spectrum(map_spectrum(spectrum, |_| Ok(D::from_real(1.0)))?));
+            }
+            return Self::id(&self.runtime, &self.domain());
+        }
+
+        let power = if exponent < 0 {
+            self.inv()?
+        } else {
+            self.clone()
+        };
+        pow_by_squaring(power, exponent.unsigned_abs(), Self::compose)
     }
 
     /// The compact arms of [`Self::compose`], or `None` when the operands or

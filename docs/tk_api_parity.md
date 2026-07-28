@@ -42,10 +42,10 @@ Counts are table rows; a few rows bundle several closely-related exports
 
 | Status | Rows |
 |---|---|
-| has | 44 |
+| has | 45 |
 | has-different-name | 26 |
 | added (this sweep) | 14 |
-| design-gated | 24 |
+| design-gated | 23 |
 | N/A | 8 |
 
 Added this sweep: `Tensor::repartition`, `Tensor::zeros_like`,
@@ -139,7 +139,7 @@ Added this sweep: `Tensor::repartition`, `Tensor::zeros_like`,
 | `cond` | design-gated | — | Composes from `svd_vals` (max/min ratio) at the call site. |
 | `sylvester` | design-gated | — | Sylvester-equation solver; no linear-solver surface on the facade. |
 | `\` / `/` | design-gated | — | Per-block linear solves (`linalg.jl:397-417`), the honest primitive behind environment fitting and seam solves. `pinv` + `compose` is today's worse-conditioned workaround; named methods land with #594. |
-| `^` (integer power) | design-gated | — | Power-by-squaring over `compose` / `inv` (`linalg.jl:44-47`); rides along with #594. |
+| `^` (integer power) | has | `Tensor::powi` / `TensorMap::powi` | Power-by-squaring over `compose` / `inv` (`linalg.jl:45-47`). |
 | `DiagonalTensorMap` | has-different-name | compact `Tensor` / `TensorMap` storage | No public diagonal type is added. `Tensor::diagonal` / `TensorMap::diagonal` publish the existing compact `DiagonalData` / `TypedData::Diagonal` representation directly, and `diagonal_spectrum` reads it back without materializing. Multiplicity-free construction uses checked admission; the erased SU(3) Generic lane uses its distinct existing Generic root, not the multiplicity-free checked contract. |
 | `diag` / `diagm` / `isdiag` | has-different-name | `diagonal` / `diagonal_spectrum` / `is_diagonal` | `diagonal` takes one value vector per bond sector (labelled in the typed facade, canonical positional order in the erased facade). `is_diagonal(0.0)` matches TensorKit exact finite-data `isdiag`; positive tolerances use `max_offdiag <= tol * max(norm_inf, 1)`. |
 | `otimes` (`⊗`, tensor) | has-multiplicity-free | `Tensor::otimes` / `typed::TensorMap::otimes` | Tensor product in one category (`linalg.jl:556`), with exact external order `cod(A), cod(B); dom(A), dom(B)`. Codomain trees and domain trees are merged independently with checked F moves; no legs cross, no R symbol is evaluated, and no dense Kronecker temporary is built. Rank-zero operands require `CanonicalUnitFusionRule`, which certifies the unit coefficient. Erased SU(3) is rejected: its outer multiplicities require a separate generic tree-merge kernel. |
