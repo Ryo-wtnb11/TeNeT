@@ -808,6 +808,7 @@ where
 /// each value through `to_scalar`. Only the
 /// per-block diagonal is written; the rest stays zero. Bit-for-bit identical to
 /// the fill inside the former monolithic `diagonal_bond_tensor_dyn`.
+#[doc(hidden)]
 pub fn diagonal_bond_data<D, V>(
     space: &DynamicFusionMapSpace,
     spectrum: &[SectorSpectrum<V>],
