@@ -236,7 +236,7 @@ use crate::tensor::{
     weighted_inner, weighted_trace, with_planar_axes, CatOperandLayout, CatSide, Fill,
     PlanarRequestKind, TensorScalar,
 };
-use crate::typed_tensor_core::{
+use crate::tensor_core::{
     tensorcompose_owned_multiplicity_free, tensorcontract_owned_multiplicity_free,
     tree_transform_owned_multiplicity_free,
 };
@@ -1761,13 +1761,13 @@ where
         // why. TensorKit 0.17 `src/tensors/diagonal.jl:215-242` makes the same
         // split.
         if let Some(spectrum) = self.spectrum() {
-            if crate::typed_tensor_core::is_rank_one_diagonal_swap(
+            if crate::tensor_core::is_rank_one_diagonal_swap(
                 self.codomain_rank(),
                 self.rank() - self.codomain_rank(),
                 &operation,
             ) {
                 let destination = self.body.space.transformed_multiplicity_free(&operation)?;
-                let transformed = crate::typed_tensor_core::transform_rank_one_diagonal_spectrum(
+                let transformed = crate::tensor_core::transform_rank_one_diagonal_spectrum(
                     self.body.space.provider(),
                     self.body.space.space(),
                     destination.space(),
@@ -4025,9 +4025,7 @@ where
         // compact — `is_hermitian` and `norm` both read the spectrum — so this
         // is the last step that reached `dense_data()`.
         if let Some(spectrum) = self.spectrum() {
-            return Ok(crate::typed_tensor_core::compact_is_posdef(
-                spectrum, threshold,
-            ));
+            return Ok(crate::tensor_core::compact_is_posdef(spectrum, threshold));
         }
         Ok(self
             .eigh_vals()?

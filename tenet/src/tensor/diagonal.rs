@@ -4,7 +4,7 @@ use tenet_matrixalgebra::{FactorScalar, SectorSpectrum};
 use tenet_tensors::{DynamicFusionMapSpace, TreeTransformOperation};
 
 use super::{Data, DiagonalData, Error, UserScalar};
-use crate::typed_tensor_core::{compact_is_posdef, transform_rank_one_diagonal_spectrum};
+use crate::tensor_core::{compact_is_posdef, transform_rank_one_diagonal_spectrum};
 
 fn map_spectra<I: Copy, O>(
     spectra: &[SectorSpectrum<I>],
@@ -49,11 +49,11 @@ fn zip_spectra<L: Copy, R: Copy, O>(
 
 impl DiagonalData {
     /// The dtype wrapper over
-    /// [`crate::typed_tensor_core::transform_rank_one_diagonal_spectrum`]: the
+    /// [`crate::tensor_core::transform_rank_one_diagonal_spectrum`]: the
     /// erased storage is a three-way dtype enum, the transform is not, so the
     /// only thing this adds is the match. The guard on which geometries reach
     /// here lives in `Tensor::transformed`, which asks
-    /// [`crate::typed_tensor_core::is_rank_one_diagonal_swap`].
+    /// [`crate::tensor_core::is_rank_one_diagonal_swap`].
     pub(super) fn transformed_rank_one_swap<R>(
         &self,
         rule: &R,
@@ -86,7 +86,7 @@ impl DiagonalData {
     }
 
     /// The dtype wrapper over
-    /// [`crate::typed_tensor_core::compact_is_posdef`]; see there for why the
+    /// [`crate::tensor_core::compact_is_posdef`]; see there for why the
     /// real part is the right reading and why the comparison is strict.
     pub(super) fn is_posdef(&self, threshold: f64) -> bool {
         match self {

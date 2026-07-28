@@ -59,7 +59,7 @@ use tenet_tensors::{
 use crate::error::Error;
 use crate::runtime::{rule_lanes, Ctx, Ctxs, Runtime, RuntimeExecutionConfig, RuntimeIdentity};
 use crate::space::{Fz2U1Su2Rule, RuleKind, Space, U1Fz2Rule, UserRuleContext};
-use crate::typed_tensor_core::{
+use crate::tensor_core::{
     tensorcontract_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
 };
 
@@ -6193,7 +6193,7 @@ impl Tensor {
             // existing dense fallback. The geometry test is shared with the
             // typed facade so the two cannot drift apart on which swaps are
             // compact.
-            let is_rank_one_swap = crate::typed_tensor_core::is_rank_one_diagonal_swap(
+            let is_rank_one_swap = crate::tensor_core::is_rank_one_diagonal_swap(
                 self.codomain_rank(),
                 self.domain_rank(),
                 &operation,
