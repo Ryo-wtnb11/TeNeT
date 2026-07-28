@@ -1,6 +1,7 @@
 use core::fmt;
 use core::marker::PhantomData;
 use core::ops::{Add, Mul};
+use std::convert::Infallible;
 
 use num_complex::Complex64;
 
@@ -501,6 +502,116 @@ impl<Scalar> GenericRMatrix<Scalar> {
 
     pub fn get(&self, row: usize, col: usize) -> &Scalar {
         &self.data[row * self.cols + col]
+    }
+}
+
+/// Fallible categorical input for Generic-fusion structural construction.
+///
+/// This trait is intentionally independent of [`FusionRule`]. Generated
+/// providers can therefore reject an unavailable sector or bounded-table
+/// lookup without first manufacturing a value for the infallible legacy path.
+/// Symbol and rigidity queries are deliberately absent: structural admission
+/// does not inspect F/R/A/B data.
+pub trait CheckedGenericFusion {
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    fn rule_identity(&self) -> RuleIdentity;
+    fn fusion_style(&self) -> FusionStyleKind;
+    fn braiding_style(&self) -> BraidingStyleKind;
+    fn vacuum(&self) -> SectorId;
+    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error>;
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error>;
+    fn try_fusion_channels_in_table(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error>;
+    fn try_coupled_sector_fold(
+        &self,
+        effective: &[SectorId],
+    ) -> Result<CoupledSectorFold, Self::Error>;
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, Self::Error>;
+}
+
+/// Checked structural view of an existing infallible Generic provider.
+///
+/// A wrapper, rather than a blanket implementation on `R`, leaves a future
+/// fallible provider free to implement [`CheckedGenericFusion`] without a
+/// coherence conflict with the legacy traits.
+pub struct InfallibleGeneric<'a, R>(&'a R);
+
+impl<'a, R> InfallibleGeneric<'a, R> {
+    pub fn new(rule: &'a R) -> Self {
+        Self(rule)
+    }
+}
+
+impl<R: FusionRule> CheckedGenericFusion for InfallibleGeneric<'_, R> {
+    type Error = Infallible;
+
+    fn rule_identity(&self) -> RuleIdentity {
+        self.0.rule_identity()
+    }
+
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.0.fusion_style()
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.0.braiding_style()
+    }
+
+    fn vacuum(&self) -> SectorId {
+        self.0.vacuum()
+    }
+
+    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+        Ok(self.0.dual(sector))
+    }
+
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        // A bounded legacy table may deliberately panic for a full channel
+        // query outside its representable frontier. Generic structural walks
+        // have already classified the candidate as clean, so its in-table
+        // channels are the complete tree-relevant set.
+        Ok(self.0.fusion_channels_in_table(left, right))
+    }
+
+    fn try_fusion_channels_in_table(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        Ok(self.0.fusion_channels_in_table(left, right))
+    }
+
+    fn try_coupled_sector_fold(
+        &self,
+        effective: &[SectorId],
+    ) -> Result<CoupledSectorFold, Self::Error> {
+        Ok(self.0.coupled_sector_fold(effective))
+    }
+
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, Self::Error> {
+        Ok(self.0.nsymbol(left, right, coupled))
     }
 }
 

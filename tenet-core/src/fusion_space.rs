@@ -2717,6 +2717,24 @@ impl FusionTreeHomSpace {
         BlockStructure::from_parts(sector, degeneracy).map(BlockStructure::into_shared)
     }
 
+    /// Checked Generic-fusion structural staging from this HomSpace's leg
+    /// degeneracies. No layout or complete-HomSpace cache is consulted or
+    /// populated until the fallible provider walk has succeeded.
+    pub fn coupled_subblock_structure_from_leg_degeneracies_generic_checked<R>(
+        &self,
+        rule: &R,
+    ) -> Result<Arc<BlockStructure>, CheckedGenericStructureError<R::Error>>
+    where
+        R: CheckedGenericFusion,
+    {
+        let layout = self.fusion_tree_layout_data_generic_checked(rule)?;
+        let (sector, degeneracy) =
+            coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
+        BlockStructure::from_parts(sector, degeneracy)
+            .map(BlockStructure::into_shared)
+            .map_err(Into::into)
+    }
+
     #[cfg(test)]
     fn degeneracy_shape_for_key(
         &self,
@@ -2857,6 +2875,21 @@ impl FusionTreeHomSpace {
         Ok(self.fusion_tree_layout_data_generic(rule)?.keys.to_vec())
     }
 
+    /// Checked Generic-fusion sibling of [`Self::fusion_tree_keys_generic`].
+    ///
+    /// All channel, dual, multiplicity, bounded-table, and fold queries finish
+    /// before this method returns keys. Generic layouts are ephemeral, so a
+    /// provider error cannot retain a layout-cache or complete-space entry.
+    pub fn fusion_tree_keys_generic_checked<R>(
+        &self,
+        rule: &R,
+    ) -> Result<Vec<FusionTreePairKey>, CheckedGenericStructureError<R::Error>>
+    where
+        R: CheckedGenericFusion,
+    {
+        Ok(self.fusion_tree_layout_data_generic_checked(rule)?.keys.to_vec())
+    }
+
     fn fusion_tree_layout_data_generic<R>(
         &self,
         rule: &R,
@@ -2864,14 +2897,31 @@ impl FusionTreeHomSpace {
     where
         R: FusionRule,
     {
+        let checked = InfallibleGeneric::new(rule);
+        match self.fusion_tree_layout_data_generic_checked(&checked) {
+            Ok(data) => Ok(data),
+            Err(CheckedGenericStructureError::Provider(never)) => match never {},
+            Err(CheckedGenericStructureError::Core(error)) => Err(error),
+        }
+    }
+
+    fn fusion_tree_layout_data_generic_checked<R>(
+        &self,
+        rule: &R,
+    ) -> Result<FusionTreeHomSpaceLayoutData, CheckedGenericStructureError<R::Error>>
+    where
+        R: CheckedGenericFusion,
+    {
         let (codomain, codomain_fold) =
-            fusion_trees_by_coupled_for_space_generic(rule, self.codomain());
-        let (domain, domain_fold) = fusion_trees_by_coupled_for_space_generic(rule, self.domain());
+            fusion_trees_by_coupled_for_space_generic_checked(rule, self.codomain())?;
+        let (domain, domain_fold) =
+            fusion_trees_by_coupled_for_space_generic_checked(rule, self.domain())?;
         for (side, fold) in [("codomain", &codomain_fold), ("domain", &domain_fold)] {
             if !fold.is_fully_clean() {
                 return Err(CoreError::FusionOutsideTable {
                     message: fusion_fold_error_message(side, fold),
-                });
+                }
+                .into());
             }
         }
         Ok(fusion_tree_layout_data_from_groups(&codomain, &domain))

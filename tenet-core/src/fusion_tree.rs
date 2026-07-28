@@ -4,6 +4,40 @@ struct CoupledFusionTrees {
     trees: Vec<FusionTreeKey>,
 }
 
+/// Expert error returned by checked Generic-fusion structural construction.
+///
+/// The provider source remains typed; core structural errors retain their
+/// established variants instead of being flattened into a string envelope.
+#[derive(Debug)]
+pub enum CheckedGenericStructureError<E> {
+    Provider(E),
+    Core(CoreError),
+}
+
+impl<E> From<CoreError> for CheckedGenericStructureError<E> {
+    fn from(error: CoreError) -> Self {
+        Self::Core(error)
+    }
+}
+
+impl<E: fmt::Display> fmt::Display for CheckedGenericStructureError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Provider(error) => error.fmt(formatter),
+            Self::Core(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for CheckedGenericStructureError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Provider(error) => Some(error),
+            Self::Core(error) => Some(error),
+        }
+    }
+}
+
 fn validate_multiplicity_free_execution_style<R>(rule: &R) -> Result<(), CoreError>
 where
     R: FusionRule,
@@ -677,6 +711,26 @@ fn fusion_trees_by_coupled_for_space_generic<R>(
 where
     R: FusionRule,
 {
+    let checked = InfallibleGeneric::new(rule);
+    match fusion_trees_by_coupled_for_space_generic_checked(&checked, space) {
+        Ok(result) => result,
+        Err(CheckedGenericStructureError::Provider(never)) => match never {},
+        Err(CheckedGenericStructureError::Core(error)) => {
+            // The legacy API only reports the bounded-table failure after the
+            // aggregate is built. All other core failures are impossible for
+            // a structurally valid legacy FusionRule walk.
+            panic!("legacy Generic structural walk failed unexpectedly: {error}")
+        }
+    }
+}
+
+fn fusion_trees_by_coupled_for_space_generic_checked<R>(
+    rule: &R,
+    space: &FusionProductSpace,
+) -> Result<(Vec<CoupledFusionTrees>, CoupledSectorFold), CheckedGenericStructureError<R::Error>>
+where
+    R: CheckedGenericFusion,
+{
     let mut grouped = Vec::<CoupledFusionTrees>::new();
     let mut index: FxHashMap<SectorId, usize> = FxHashMap::default();
     let mut aggregate = CoupledSectorFold::default();
@@ -684,8 +738,7 @@ where
     let mut uncoupled = Vec::with_capacity(space.len());
     let mut is_dual = Vec::with_capacity(space.len());
     let mut effective = Vec::with_capacity(space.len());
-    let result: Result<(), std::convert::Infallible> =
-        space.try_visit_selected_leg_tuples(&mut |tuple| {
+    space.try_visit_selected_leg_tuples(&mut |tuple| {
             // `effective_sectors` is the uncoupled sectors verbatim (it ignores the
             // rule); inlined here to avoid its mult-free bound.
             uncoupled.clear();
@@ -698,15 +751,17 @@ where
             }
             let frozen_uncoupled: Arc<[SectorId]> = uncoupled.clone().into();
             let frozen_is_dual: Arc<[bool]> = is_dual.clone().into();
-            let fold = rule.coupled_sector_fold(&effective);
+            let fold = rule
+                .try_coupled_sector_fold(&effective)
+                .map_err(CheckedGenericStructureError::Provider)?;
             for &coupled in &fold.clean {
-                let trees = collect_generic_fusion_trees_for_coupled_frozen(
+                let trees = collect_generic_fusion_trees_for_coupled_frozen_checked(
                     rule,
                     &frozen_uncoupled,
                     &frozen_is_dual,
                     &effective,
                     coupled,
-                );
+                )?;
                 match index.get(&coupled) {
                     Some(&i) => grouped[i].trees.extend(trees),
                     None => {
@@ -719,12 +774,8 @@ where
             aggregate.tainted.extend(fold.tainted);
             aggregate.out_of_table.extend(fold.out_of_table);
             aggregate.poisoned |= fold.poisoned;
-            Ok(())
-        });
-    match result {
-        Ok(()) => {}
-        Err(never) => match never {},
-    }
+            Ok::<(), CheckedGenericStructureError<R::Error>>(())
+        })?;
     aggregate.tainted.sort_unstable();
     aggregate.tainted.dedup();
     aggregate.out_of_table.sort();
@@ -744,7 +795,7 @@ where
     // Drop tree groups of sectors that lost their clean status across tuples.
     grouped.retain(|group| aggregate.clean.contains(&group.coupled));
     grouped.sort_by_key(|group| group.coupled);
-    (grouped, aggregate)
+    Ok((grouped, aggregate))
 }
 
 /// Shared codomain×domain merge on equal coupled sectors (the generic sibling
@@ -9358,13 +9409,20 @@ fn collect_generic_fusion_trees_for_coupled<R>(
 where
     R: FusionRule,
 {
-    collect_generic_fusion_trees_for_coupled_frozen(
-        rule,
+    let checked = InfallibleGeneric::new(rule);
+    match collect_generic_fusion_trees_for_coupled_frozen_checked(
+        &checked,
         &Arc::from(uncoupled),
         &Arc::from(is_dual),
         effective,
         coupled,
-    )
+    ) {
+        Ok(trees) => trees,
+        Err(CheckedGenericStructureError::Provider(never)) => match never {},
+        Err(CheckedGenericStructureError::Core(error)) => {
+            panic!("legacy Generic tree enumeration failed unexpectedly: {error}")
+        }
+    }
 }
 
 fn collect_generic_fusion_trees_for_coupled_frozen<R>(
@@ -9377,6 +9435,32 @@ fn collect_generic_fusion_trees_for_coupled_frozen<R>(
 where
     R: FusionRule,
 {
+    let checked = InfallibleGeneric::new(rule);
+    match collect_generic_fusion_trees_for_coupled_frozen_checked(
+        &checked,
+        uncoupled,
+        is_dual,
+        effective,
+        coupled,
+    ) {
+        Ok(trees) => trees,
+        Err(CheckedGenericStructureError::Provider(never)) => match never {},
+        Err(CheckedGenericStructureError::Core(error)) => {
+            panic!("legacy Generic tree enumeration failed unexpectedly: {error}")
+        }
+    }
+}
+
+fn collect_generic_fusion_trees_for_coupled_frozen_checked<R>(
+    rule: &R,
+    uncoupled: &Arc<[SectorId]>,
+    is_dual: &Arc<[bool]>,
+    effective: &[SectorId],
+    coupled: SectorId,
+) -> Result<Vec<FusionTreeKey>, CheckedGenericStructureError<R::Error>>
+where
+    R: CheckedGenericFusion,
+{
     let mut out = Vec::new();
     // `inner_rev` / `vtx_rev` accumulate outermost-first as the walk descends
     // (the top vertex/innerline is pushed first); the stored key wants
@@ -9384,7 +9468,7 @@ where
     // `visit_fusion_trees`, extended to vertex labels.
     let mut inner_rev: Vec<SectorId> = Vec::new();
     let mut vtx_rev: Vec<usize> = Vec::new();
-    visit_generic_fusion_trees(
+    visit_generic_fusion_trees_checked(
         rule,
         effective,
         coupled,
@@ -9409,8 +9493,8 @@ where
                 )
             );
         },
-    );
-    out
+    )?;
+    Ok(out)
 }
 
 /// Recursive walker for [`collect_generic_fusion_trees_for_coupled`]. Mirrors
@@ -9418,15 +9502,16 @@ where
 /// vertex it iterates `1..=Nsymbol(...)` and records the 1-based label. Vertex
 /// labels are stored in [`MultiplicityIndex`] using the same one-based
 /// convention that [`mu_index`] decodes.
-fn visit_generic_fusion_trees<R, F>(
+fn visit_generic_fusion_trees_checked<R, F>(
     rule: &R,
     effective: &[SectorId],
     coupled: SectorId,
     inner_rev: &mut Vec<SectorId>,
     vtx_rev: &mut Vec<usize>,
     emit: &mut F,
-) where
-    R: FusionRule,
+) -> Result<(), CheckedGenericStructureError<R::Error>>
+where
+    R: CheckedGenericFusion,
     F: FnMut(&[SectorId], &[usize]),
 {
     match effective.len() {
@@ -9442,7 +9527,15 @@ fn visit_generic_fusion_trees<R, F>(
         }
         2 => {
             // Base vertex `e0 ⊗ e1 → coupled`, labels 1..=N(e0,e1,coupled).
-            let n = rule.nsymbol(effective[0], effective[1], coupled);
+            let channels = rule
+                .try_fusion_channels(effective[0], effective[1])
+                .map_err(CheckedGenericStructureError::Provider)?;
+            if !channels.contains(&coupled) {
+                return Ok(());
+            }
+            let n = rule
+                .try_nsymbol(effective[0], effective[1], coupled)
+                .map_err(CheckedGenericStructureError::Provider)?;
             for label in 1..=n {
                 vtx_rev.push(label);
                 emit(inner_rev, vtx_rev);
@@ -9459,28 +9552,37 @@ fn visit_generic_fusion_trees<R, F>(
             // (tainted/escaped are an Err upstream), and clean sectors have no
             // tree through a frontier inner line — skipping frontier
             // `front_coupled` candidates drops only provably-dead branches.
-            for front_coupled in rule.fusion_channels_in_table(coupled, rule.dual(last)) {
-                let n_last = rule.nsymbol(front_coupled, last, coupled);
+            let dual_last = rule
+                .try_dual(last)
+                .map_err(CheckedGenericStructureError::Provider)?;
+            for front_coupled in rule
+                .try_fusion_channels_in_table(coupled, dual_last)
+                .map_err(CheckedGenericStructureError::Provider)?
+            {
+                let n_last = rule
+                    .try_nsymbol(front_coupled, last, coupled)
+                    .map_err(CheckedGenericStructureError::Provider)?;
                 if n_last == 0 {
                     continue;
                 }
                 inner_rev.push(front_coupled);
                 for label in 1..=n_last {
                     vtx_rev.push(label);
-                    visit_generic_fusion_trees(
+                    visit_generic_fusion_trees_checked(
                         rule,
                         front_effective,
                         front_coupled,
                         inner_rev,
                         vtx_rev,
                         emit,
-                    );
+                    )?;
                     vtx_rev.pop();
                 }
                 inner_rev.pop();
             }
         }
     }
+    Ok(())
 }
 
 #[inline]
