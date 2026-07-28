@@ -2204,7 +2204,7 @@ where
     ///
     /// This operation is typed-only and keeps the payload type `D` unchanged.
     /// The caller supplies the exact [`ProductFusionRule`], including its
-    /// component providers and codec; both component [`RuleIdentity`] values
+    /// component providers and codec; both component [`tenet_core::RuleIdentity`] values
     /// must match the operands, and the codec participates in the product
     /// identity. [`CanonicalUnitFusionRule`] is required for both components
     /// because TeNeT stores no separate unitor data. Factor order and nested
