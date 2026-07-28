@@ -8,7 +8,7 @@ use tenet_core::{
     FusionSpaceAdmission, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
     FusionTreePairKey, FusionTreePairOrientation, LoweredFusionTreeBuildError,
     LoweredMultiplicityFreeAlgebra, MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols,
-    OrientedFusionTreeHomSpace, PreparedFusionTreeLayout, SectorLeg,
+    OrientedFusionTreeHomSpace, PreparedFusionTreeLayout, SectorId, SectorLeg,
     StructurallyValidatedFusionTreeSubset,
 };
 
@@ -75,6 +75,17 @@ pub(crate) enum MetadataRequest<'a> {
         output_axes: &'a [usize],
         dst_codomain_rank: usize,
     },
+    ContractHomSpace {
+        lhs: &'a FusionTreeHomSpace,
+        rhs: &'a FusionTreeHomSpace,
+        lhs_axes: &'a [usize],
+        rhs_axes: &'a [usize],
+        output_axes: &'a [usize],
+        dst_codomain_rank: usize,
+    },
+    DualSector {
+        sector: SectorId,
+    },
     Select {
         homspace: &'a FusionTreeHomSpace,
         codomain_axes: &'a [usize],
@@ -94,6 +105,8 @@ pub(crate) enum MetadataOutput {
         homspace: FusionTreeHomSpace,
         prepared: PreparedLayoutKeys,
     },
+    UnpreparedHomSpace(FusionTreeHomSpace),
+    Sector(SectorId),
     Leg(SectorLeg),
 }
 
@@ -283,6 +296,7 @@ fn lowered_build_operation_error(error: LoweredFusionTreeBuildError) -> Operatio
     }
 }
 
+#[cfg(test)]
 fn checked_lowered_build_operation_error(error: LoweredFusionTreeBuildError) -> OperationError {
     OperationError::FusionAlgebra(Box::new(error.into_checked_fusion_algebra()))
 }
@@ -341,6 +355,25 @@ where
         )
         .map(derived)
         .map_err(OperationError::from_core_preserving_context),
+        MetadataRequest::ContractHomSpace {
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+            dst_codomain_rank,
+        } => FusionTreeHomSpace::tensorcontract_homspace(
+            rule,
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+            dst_codomain_rank,
+        )
+        .map(MetadataOutput::UnpreparedHomSpace)
+        .map_err(OperationError::from_core_preserving_context),
+        MetadataRequest::DualSector { sector } => Ok(MetadataOutput::Sector(rule.dual(sector))),
         MetadataRequest::Select {
             homspace,
             codomain_axes,
@@ -358,20 +391,28 @@ where
     }
 }
 
-pub(crate) fn lowered_metadata_dispatcher<R>(
+/// Shared checked-metadata dispatch, parameterized by the layout primer.
+///
+/// Why not collapse the lowered dispatcher onto the checked one directly:
+/// primer provenance differs (the sealed built-in lowered codec vs an
+/// external provider that certifies only `CheckedFusionAlgebra`) and so does
+/// its error mapping; everything else — checked permute/contract/select
+/// homspace derivation, checked outward legs — is common and lives here.
+fn checked_metadata_dispatch_with_primer<R>(
     rule: &R,
     request: MetadataRequest<'_>,
+    primer: impl Fn(&R, &FusionTreeHomSpace) -> Result<PreparedLayoutKeys, OperationError>,
 ) -> Result<MetadataOutput, OperationError>
 where
-    R: LoweredMultiplicityFreeAlgebra + CheckedFusionAlgebra,
+    R: CheckedFusionAlgebra,
 {
     let prepare = |homspace: FusionTreeHomSpace| {
-        let prepared = lowered_layout_primer(rule, &homspace)?;
+        let prepared = primer(rule, &homspace)?;
         Ok(MetadataOutput::HomSpace { homspace, prepared })
     };
     match request {
         MetadataRequest::Prepare { homspace } => {
-            lowered_layout_primer(rule, homspace).map(MetadataOutput::Prepared)
+            primer(rule, homspace).map(MetadataOutput::Prepared)
         }
         MetadataRequest::Permute {
             homspace,
@@ -399,6 +440,28 @@ where
         )
         .map_err(checked_metadata_operation_error)
         .and_then(prepare),
+        MetadataRequest::ContractHomSpace {
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+            dst_codomain_rank,
+        } => FusionTreeHomSpace::try_tensorcontract_homspace_checked(
+            rule,
+            lhs,
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+            dst_codomain_rank,
+        )
+        .map(MetadataOutput::UnpreparedHomSpace)
+        .map_err(checked_metadata_operation_error),
+        MetadataRequest::DualSector { sector } => rule
+            .try_dual_sector(sector)
+            .map(MetadataOutput::Sector)
+            .map_err(|error| OperationError::FusionAlgebra(Box::new(error))),
         MetadataRequest::Select {
             homspace,
             codomain_axes,
@@ -414,6 +477,16 @@ where
             tensor,
         } => checked_outward_leg(rule, homspace, axis, dualize, tensor).map(MetadataOutput::Leg),
     }
+}
+
+pub(crate) fn lowered_metadata_dispatcher<R>(
+    rule: &R,
+    request: MetadataRequest<'_>,
+) -> Result<MetadataOutput, OperationError>
+where
+    R: LoweredMultiplicityFreeAlgebra + CheckedFusionAlgebra,
+{
+    checked_metadata_dispatch_with_primer(rule, request, lowered_layout_primer)
 }
 
 /// Checked external-provider sibling of [`lowered_layout_primer`]: stages a
@@ -439,55 +512,7 @@ pub(crate) fn checked_metadata_dispatcher<R>(
 where
     R: MultiplicityFreeFusionRule + CheckedFusionAlgebra,
 {
-    let prepare = |homspace: FusionTreeHomSpace| {
-        let prepared = checked_layout_primer(rule, &homspace)?;
-        Ok(MetadataOutput::HomSpace { homspace, prepared })
-    };
-    match request {
-        MetadataRequest::Prepare { homspace } => {
-            checked_layout_primer(rule, homspace).map(MetadataOutput::Prepared)
-        }
-        MetadataRequest::Permute {
-            homspace,
-            codomain_axes,
-            domain_axes,
-        } => homspace
-            .try_permute_checked(rule, codomain_axes, domain_axes)
-            .map_err(checked_metadata_operation_error)
-            .and_then(prepare),
-        MetadataRequest::Contract {
-            lhs,
-            rhs,
-            lhs_axes,
-            rhs_axes,
-            output_axes,
-            dst_codomain_rank,
-        } => FusionTreeHomSpace::try_tensorcontract_homspace_checked(
-            rule,
-            lhs,
-            rhs,
-            lhs_axes,
-            rhs_axes,
-            output_axes,
-            dst_codomain_rank,
-        )
-        .map_err(checked_metadata_operation_error)
-        .and_then(prepare),
-        MetadataRequest::Select {
-            homspace,
-            codomain_axes,
-            domain_axes,
-        } => homspace
-            .try_select_checked(rule, codomain_axes, domain_axes)
-            .map_err(checked_metadata_operation_error)
-            .and_then(prepare),
-        MetadataRequest::OutwardLeg {
-            homspace,
-            axis,
-            dualize,
-            tensor,
-        } => checked_outward_leg(rule, homspace, axis, dualize, tensor).map(MetadataOutput::Leg),
-    }
+    checked_metadata_dispatch_with_primer(rule, request, checked_layout_primer)
 }
 
 fn encoded_outward_leg<R>(
@@ -687,6 +712,12 @@ impl PartialEq for DynamicFusionMapSpace {
 impl Eq for DynamicFusionMapSpace {}
 
 /// Internal contraction operand separating categorical and storage authority.
+///
+/// Naming note (#586): `prelowered` in the `*_prelowered_*` contraction entry
+/// points names THIS lazy-adjoint operand split — logical geometry prepared
+/// separately from parent storage before plan compilation. It is unrelated to
+/// the `*_lowered` layout-staging family (`prepare_fusion_tree_layout_lowered`
+/// cold sector enumeration); the two families collide only in name.
 ///
 /// The parent space defines physical storage; orientation derives the logical
 /// HomSpace and user-axis view. Why not retain a logical adjoint space: it is
@@ -1199,9 +1230,10 @@ where
         Self::from_derived(provider, space)
     }
 
-    /// Internal shape-admission bridge using lowered metadata.
-    #[doc(hidden)]
-    pub fn from_degeneracy_shapes_lowered<Shapes>(
+    /// Test-only shape-admission bridge using lowered metadata (#586
+    /// demotion: external callers use the public final-homspace installer).
+    #[cfg(test)]
+    pub(crate) fn from_degeneracy_shapes_lowered<Shapes>(
         provider: Arc<R>,
         homspace: FusionTreeHomSpace,
         shapes: Shapes,
@@ -1283,8 +1315,8 @@ where
     ///
     /// Matching legacy Subset and Complete stamps are revalidated; publication
     /// occurs only after structural, algebraic, and complete-grid proofs pass.
-    #[doc(hidden)]
-    pub fn bind_multiplicity_free_lowered(
+    #[cfg(test)]
+    pub(crate) fn bind_multiplicity_free_lowered(
         mut space: DynamicFusionMapSpace,
         provider: Arc<R>,
     ) -> Result<Self, OperationError>
@@ -1386,21 +1418,6 @@ where
         Self::from_derived_like(lhs, space)
     }
 
-    #[doc(hidden)]
-    pub fn contracted_multiplicity_free_lowered(
-        lhs: &Self,
-        rhs: &Self,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-    ) -> Result<Self, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>
-            + LoweredMultiplicityFreeAlgebra
-            + CheckedFusionAlgebra,
-    {
-        Self::contracted_multiplicity_free(lhs, rhs, lhs_axes, rhs_axes)
-    }
-
     /// Builds a checked contraction result directly in the requested output
     /// order while retaining the exact lhs provider allocation.
     ///
@@ -1427,22 +1444,6 @@ where
             lhs.layout_build.dispatch,
         )?;
         Self::from_derived_like(lhs, space)
-    }
-
-    #[doc(hidden)]
-    pub fn contracted_multiplicity_free_ordered_lowered(
-        lhs: &Self,
-        rhs: &Self,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_order: OutputAxisOrder<'_>,
-    ) -> Result<Self, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>
-            + LoweredMultiplicityFreeAlgebra
-            + CheckedFusionAlgebra,
-    {
-        Self::contracted_multiplicity_free_ordered(lhs, rhs, lhs_axes, rhs_axes, output_order)
     }
 
     /// Validates contraction compatibility without building a coupled result
@@ -1592,17 +1593,6 @@ where
             self.layout_build.dispatch,
         )?;
         Self::from_derived_like(self, space)
-    }
-
-    #[doc(hidden)]
-    pub fn transformed_multiplicity_free_lowered(
-        &self,
-        operation: &TreeTransformOperation,
-    ) -> Result<Self, OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64> + LoweredMultiplicityFreeAlgebra,
-    {
-        self.transformed_multiplicity_free(operation)
     }
 
     /// Generic tree-transform result retaining the source provider proof.
@@ -2096,43 +2086,6 @@ impl DynamicFusionMapSpace {
             .homspace()
             .permute(rule, codomain_axes, domain_axes)
             .map_err(OperationError::from_core_preserving_context)?;
-        let (required_len, source_structure_matches) = homspace
-            .coupled_subblock_layout_probe_uncached(rule, self.structure())
-            .map_err(OperationError::from_core_preserving_context)?;
-        Ok(TransformedLayoutProbe {
-            nout: codomain_axes.len(),
-            homspace,
-            required_len,
-            source_structure_matches,
-        })
-    }
-
-    /// Checked lowered probe used by plan scoring. Why not replace the
-    /// infallible probe: encoded and custom callers intentionally retain the
-    /// legacy `FusionRule` contract, while lowered plans can surface typed
-    /// metadata failures before publishing a candidate.
-    pub(crate) fn transformed_layout_probe_with_primer<R>(
-        &self,
-        rule: &R,
-        operation: &TreeTransformOperation,
-        primer: LayoutKeyBuilder<R>,
-    ) -> Result<TransformedLayoutProbe, OperationError>
-    where
-        R: LoweredMultiplicityFreeAlgebra + CheckedFusionAlgebra,
-    {
-        self.validate_rule(rule)?;
-        let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
-        let (homspace, _) = match primer(
-            rule,
-            MetadataRequest::Permute {
-                homspace: self.homspace(),
-                codomain_axes,
-                domain_axes,
-            },
-        )? {
-            MetadataOutput::HomSpace { homspace, prepared } => (homspace, prepared),
-            _ => unreachable!("checked metadata primer returned non-HomSpace response"),
-        };
         let (required_len, source_structure_matches) = homspace
             .coupled_subblock_layout_probe_uncached(rule, self.structure())
             .map_err(OperationError::from_core_preserving_context)?;
@@ -3308,8 +3261,9 @@ mod lowered_metadata_tests {
         R: LoweredMultiplicityFreeAlgebra,
     {
         homspace
-            .try_fusion_tree_keys_lowered(rule)
+            .prepare_fusion_tree_layout_lowered(rule)
             .unwrap()
+            .commit()
             .iter()
             .map(|key| {
                 homspace
@@ -4210,8 +4164,9 @@ mod lowered_metadata_tests {
         let homspace =
             FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
         homspace
-            .try_fusion_tree_keys_lowered(&U1FusionRule)
-            .unwrap();
+            .prepare_fusion_tree_layout_lowered(&U1FusionRule)
+            .unwrap()
+            .commit();
         assert!(homspace.existing_id().is_none());
         reset_scratch_publication_observations();
 
@@ -4332,7 +4287,7 @@ mod lowered_metadata_tests {
         reset_scratch_publication_observations();
 
         let error = source
-            .transformed_multiplicity_free_lowered(&TreeTransformOperation::permute([], [0]))
+            .transformed_multiplicity_free(&TreeTransformOperation::permute([], [0]))
             .unwrap_err();
 
         assert_eq!(
@@ -4377,9 +4332,8 @@ mod lowered_metadata_tests {
         .unwrap();
         reset_scratch_publication_observations();
 
-        let error =
-            BoundDynamicFusionMapSpace::contracted_multiplicity_free_lowered(&lhs, &rhs, &[], &[])
-                .unwrap_err();
+        let error = BoundDynamicFusionMapSpace::contracted_multiplicity_free(&lhs, &rhs, &[], &[])
+            .unwrap_err();
 
         assert_eq!(
             error,
@@ -4388,111 +4342,6 @@ mod lowered_metadata_tests {
             }))
         );
         assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
-    }
-
-    #[test]
-    fn lowered_plan_scoring_reports_exact_u1_min_failure_without_publication() {
-        // What: candidate scoring checks a boundary-crossing U1 MIN operand
-        // through its bound strategy and returns the typed cause before admission.
-        let _guard = CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        crate::reset_global_operation_caches();
-        tenet_core::reset_core_intern_tables();
-        let provider = Arc::new(U1FusionRule);
-        let min = U1Irrep::new(i32::MIN).sector_id();
-        let scalar_homspace =
-            || FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
-        let lhs = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
-            Arc::clone(&provider),
-            FusionTreeHomSpace::new(
-                FusionProductSpace::new([SectorLeg::new([(min, 1)], false)]),
-                FusionProductSpace::new([]),
-            ),
-            Vec::<Vec<usize>>::new(),
-        )
-        .unwrap();
-        let rhs = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
-            Arc::clone(&provider),
-            FusionTreeHomSpace::new(
-                FusionProductSpace::new([]),
-                FusionProductSpace::new([SectorLeg::new([(min, 1)], false)]),
-            ),
-            Vec::<Vec<usize>>::new(),
-        )
-        .unwrap();
-        let dst = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
-            provider,
-            scalar_homspace(),
-            [Vec::<usize>::new()],
-        )
-        .unwrap();
-        reset_scratch_publication_observations();
-
-        let error = crate::contract::fusion::prepare_tensorcontract_fusion_plan_dyn_lowered(
-            &dst,
-            &lhs,
-            &rhs,
-            tenet_operations::TensorContractSpec::with_default_output_order(&[0], &[0]),
-        )
-        .unwrap_err();
-
-        assert_eq!(
-            error,
-            OperationError::FusionAlgebra(Box::new(FusionAlgebraError::U1DualOverflow {
-                charge: i32::MIN,
-            }))
-        );
-        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
-    }
-
-    #[cfg(target_pointer_width = "64")]
-    #[test]
-    fn lowered_plan_scoring_reports_exact_product_odd_min_failure() {
-        // What: candidate scoring preserves the nested U1 cause carried by an
-        // fZ2-odd product leg instead of entering infallible product dualization.
-        let provider = Arc::new(Fz2U1Rule::new(FermionParityFusionRule, U1FusionRule));
-        let odd_min =
-            Fz2U1Codec::encode(Z2Irrep::ODD.sector_id(), U1Irrep::new(i32::MIN).sector_id());
-        let lhs = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
-            Arc::clone(&provider),
-            FusionTreeHomSpace::new(
-                FusionProductSpace::new([SectorLeg::new([(odd_min, 1)], false)]),
-                FusionProductSpace::new([]),
-            ),
-            Vec::<Vec<usize>>::new(),
-        )
-        .unwrap();
-        let rhs = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
-            Arc::clone(&provider),
-            FusionTreeHomSpace::new(
-                FusionProductSpace::new([]),
-                FusionProductSpace::new([SectorLeg::new([(odd_min, 1)], false)]),
-            ),
-            Vec::<Vec<usize>>::new(),
-        )
-        .unwrap();
-        let dst = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
-            provider,
-            FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([])),
-            [Vec::<usize>::new()],
-        )
-        .unwrap();
-
-        let error = crate::contract::fusion::prepare_tensorcontract_fusion_plan_dyn_lowered(
-            &dst,
-            &lhs,
-            &rhs,
-            tenet_operations::TensorContractSpec::with_default_output_order(&[0], &[0]),
-        )
-        .unwrap_err();
-
-        assert_eq!(
-            error,
-            OperationError::FusionAlgebra(Box::new(FusionAlgebraError::U1DualOverflow {
-                charge: i32::MIN,
-            }))
-        );
     }
 
     #[test]
@@ -4511,7 +4360,7 @@ mod lowered_metadata_tests {
         .unwrap();
 
         let error = source
-            .transformed_multiplicity_free_lowered(&TreeTransformOperation::permute([], [1]))
+            .transformed_multiplicity_free(&TreeTransformOperation::permute([], [1]))
             .unwrap_err();
         assert_eq!(
             error,
@@ -4567,13 +4416,11 @@ mod lowered_metadata_tests {
         )
         .unwrap();
         let operation = TreeTransformOperation::permute([1], [0]);
-        let lowered_transform = lowered
-            .transformed_multiplicity_free_lowered(&operation)
-            .unwrap();
+        let lowered_transform = lowered.transformed_multiplicity_free(&operation).unwrap();
         let encoded_transform = encoded.transformed_multiplicity_free(&operation).unwrap();
         assert_eq!(lowered_transform.space(), encoded_transform.space());
 
-        let lowered_dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_lowered(
+        let lowered_dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free(
             &lowered,
             &lowered,
             &[1],
@@ -5515,7 +5362,10 @@ mod scratch_cache_tests {
         let half = tenet_core::SU2Irrep::from_twice_spin(1).sector_id();
         let leg = || FusionProductSpace::new([SectorLeg::new([(half, 1)], false)]);
         let hom = FusionTreeHomSpace::new(leg(), leg());
-        let lowered_keys = hom.try_fusion_tree_keys_lowered(provider.as_ref()).unwrap();
+        let lowered_keys = hom
+            .prepare_fusion_tree_layout_lowered(provider.as_ref())
+            .unwrap()
+            .commit();
         let count = lowered_keys.len();
         let bound = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
             Arc::clone(&provider),

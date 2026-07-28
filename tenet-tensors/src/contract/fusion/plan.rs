@@ -1,7 +1,5 @@
 use tenet_core::{
-    CheckedFusionAlgebra, CheckedFusionSpaceError, FusionRule, FusionSpaceAdmission,
-    FusionTensorMapSpace, FusionTreeHomSpace, LoweredMultiplicityFreeAlgebra,
-    MultiplicityFreeRigidSymbols,
+    FusionSpaceAdmission, FusionTensorMapSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
 };
 
 use crate::lowering::lower_tensorcontract_adjoint_axes;
@@ -9,70 +7,10 @@ use crate::{OperationError, TreeTransformOperation, TreeTransformOperationKind};
 use tenet_operations::{OutputAxisOrder, TensorContractSpec, TensorContractSpecOwned};
 
 use super::super::dynamic_space::{
-    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperandLayout, LayoutKeyBuilder,
-    TransformedLayoutProbe,
+    encoded_layout_primer, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperandLayout,
+    LayoutKeyBuilder, MetadataOutput, MetadataRequest, TransformedLayoutProbe,
 };
 use super::super::structure::TensorContractAxisPlan;
-
-type HomSpaceBuilder<R> = fn(
-    &R,
-    &FusionTreeHomSpace,
-    &FusionTreeHomSpace,
-    &[usize],
-    &[usize],
-    &[usize],
-    usize,
-) -> Result<FusionTreeHomSpace, OperationError>;
-
-fn encoded_homspace_builder<R: FusionRule>(
-    rule: &R,
-    lhs: &FusionTreeHomSpace,
-    rhs: &FusionTreeHomSpace,
-    lhs_axes: &[usize],
-    rhs_axes: &[usize],
-    output_axes: &[usize],
-    dst_rank: usize,
-) -> Result<FusionTreeHomSpace, OperationError> {
-    FusionTreeHomSpace::tensorcontract_homspace(
-        rule,
-        lhs,
-        rhs,
-        lhs_axes,
-        rhs_axes,
-        output_axes,
-        dst_rank,
-    )
-    .map_err(OperationError::from_core_preserving_context)
-}
-
-fn lowered_homspace_builder<R: LoweredMultiplicityFreeAlgebra + CheckedFusionAlgebra>(
-    rule: &R,
-    lhs: &FusionTreeHomSpace,
-    rhs: &FusionTreeHomSpace,
-    lhs_axes: &[usize],
-    rhs_axes: &[usize],
-    output_axes: &[usize],
-    dst_rank: usize,
-) -> Result<FusionTreeHomSpace, OperationError> {
-    FusionTreeHomSpace::try_tensorcontract_homspace_checked(
-        rule,
-        lhs,
-        rhs,
-        lhs_axes,
-        rhs_axes,
-        output_axes,
-        dst_rank,
-    )
-    .map_err(|error| match error {
-        CheckedFusionSpaceError::Core(error) => {
-            OperationError::from_core_preserving_context(*error)
-        }
-        CheckedFusionSpaceError::FusionAlgebra(error) => OperationError::FusionAlgebra(error),
-        _ => OperationError::InvalidArgument {
-            message: "unknown checked fusion metadata error",
-        },
-    })
-}
 
 #[cfg(test)]
 std::thread_local! {
@@ -442,57 +380,6 @@ where
     )
 }
 
-#[cfg(test)]
-pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_lowered<R>(
-    dst: &BoundDynamicFusionMapSpace<R>,
-    lhs: &BoundDynamicFusionMapSpace<R>,
-    rhs: &BoundDynamicFusionMapSpace<R>,
-    axes: TensorContractSpec<'_>,
-) -> Result<FusionContractPlan, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + LoweredMultiplicityFreeAlgebra
-        + CheckedFusionAlgebra,
-{
-    let rule = lhs.provider();
-    dst.space().validate_rule(rule)?;
-    lhs.space().validate_rule(rule)?;
-    rhs.space().validate_rule(rule)?;
-    let lowered_axes = lower_tensorcontract_adjoint_axes(
-        lhs.space().nout(),
-        lhs.space().nin(),
-        rhs.space().nout(),
-        rhs.space().nin(),
-        axes,
-    )?;
-    let lhs_adjoint;
-    let lhs_space = if axes.lhs_conjugate() {
-        lhs_adjoint = lhs.space().adjoint_view()?;
-        &lhs_adjoint
-    } else {
-        lhs.space()
-    };
-    let rhs_adjoint;
-    let rhs_space = if axes.rhs_conjugate() {
-        rhs_adjoint = rhs.space().adjoint_view()?;
-        &rhs_adjoint
-    } else {
-        rhs.space()
-    };
-    select_tensorcontract_fusion_plan_from_spaces_with_probe(
-        rule,
-        dst.space(),
-        lhs_space,
-        rhs_space,
-        lowered_axes.as_spec(),
-        lowered_axes.lhs_storage_conjugate(),
-        lowered_axes.rhs_storage_conjugate(),
-        lowered_layout_probe::<R>,
-        lowered_homspace_builder::<R>,
-        Some(dst.layout_primer()),
-    )
-}
-
 pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_raw<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
@@ -592,18 +479,15 @@ where
         lhs,
         rhs,
         axes,
-        |rule, source: &FusionOperandLayout<'_>, operation, _| {
-            if source.is_direct() {
-                encoded_layout_probe(rule, source.storage_space(), operation, None)
-            } else {
-                source.transformed_layout_probe(
-                    rule,
-                    operation,
-                    super::super::dynamic_space::encoded_layout_primer::<R>,
-                )
-            }
+        |rule, source: &FusionOperandLayout<'_>, operation, primer| {
+            source.transformed_layout_probe(
+                rule,
+                operation,
+                primer.ok_or(OperationError::InvalidArgument {
+                    message: "prelowered plan requires a layout primer",
+                })?,
+            )
         },
-        encoded_homspace_builder::<R>,
         primer,
     )
 }
@@ -753,14 +637,7 @@ where
     } else {
         rhs
     };
-    validate_tensorcontract_fusion_plan_inputs(
-        rule,
-        dst,
-        lhs,
-        rhs,
-        lowered_axes.as_spec(),
-        encoded_homspace_builder::<R>,
-    )?;
+    validate_tensorcontract_fusion_plan_inputs(rule, dst, lhs, rhs, lowered_axes.as_spec(), None)?;
     compile_tensorcontract_fusion_plan_from_spaces(
         dst,
         lhs,
@@ -810,7 +687,6 @@ where
         lowered_axes.lhs_storage_conjugate(),
         lowered_axes.rhs_storage_conjugate(),
         encoded_layout_probe::<R>,
-        encoded_homspace_builder::<R>,
         None,
         &CACHED_ORIENTATIONS,
     )
@@ -839,7 +715,6 @@ where
         lhs_source_conjugate,
         rhs_source_conjugate,
         encoded_layout_probe::<R>,
-        encoded_homspace_builder::<R>,
         None,
         orientations,
     )
@@ -856,14 +731,13 @@ fn fusion_contract_candidate_facts_from_spaces_with_probe<R>(
     lhs_source_conjugate: bool,
     rhs_source_conjugate: bool,
     probe: LayoutProbeBuilder<R>,
-    homspace_builder: HomSpaceBuilder<R>,
     primer: Option<LayoutKeyBuilder<R>>,
     orientations: &[FusionContractOrientation],
 ) -> Result<Vec<FusionContractCandidateFacts>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    validate_tensorcontract_fusion_plan_inputs(rule, dst, lhs, rhs, axes, homspace_builder)?;
+    validate_tensorcontract_fusion_plan_inputs(rule, dst, lhs, rhs, axes, primer)?;
     orientations
         .iter()
         .flat_map(|&orientation| {
@@ -969,22 +843,6 @@ where
     space.transformed_layout_probe(rule, operation)
 }
 
-fn lowered_layout_probe<R>(
-    rule: &R,
-    space: &DynamicFusionMapSpace,
-    operation: &TreeTransformOperation,
-    primer: Option<LayoutKeyBuilder<R>>,
-) -> Result<TransformedLayoutProbe, OperationError>
-where
-    R: LoweredMultiplicityFreeAlgebra + CheckedFusionAlgebra,
-{
-    space.transformed_layout_probe_with_primer(
-        rule,
-        operation,
-        primer.expect("lowered layout probe requires metadata primer"),
-    )
-}
-
 #[cfg(test)]
 fn select_tensorcontract_fusion_plan_from_spaces_with_probe<R>(
     rule: &R,
@@ -995,7 +853,6 @@ fn select_tensorcontract_fusion_plan_from_spaces_with_probe<R>(
     lhs_source_conjugate: bool,
     rhs_source_conjugate: bool,
     probe: LayoutProbeBuilder<R>,
-    homspace_builder: HomSpaceBuilder<R>,
     primer: Option<LayoutKeyBuilder<R>>,
 ) -> Result<FusionContractPlan, OperationError>
 where
@@ -1010,7 +867,6 @@ where
         lhs_source_conjugate,
         rhs_source_conjugate,
         probe,
-        homspace_builder,
         primer,
         &FORWARD_ORIENTATIONS,
     )
@@ -1026,7 +882,6 @@ fn select_tensorcontract_fusion_plan_from_spaces_with_probe_and_orientations<R, 
     lhs_source_conjugate: bool,
     rhs_source_conjugate: bool,
     probe: P,
-    homspace_builder: HomSpaceBuilder<R>,
     primer: Option<LayoutKeyBuilder<R>>,
     orientations: &[FusionContractOrientation],
 ) -> Result<FusionContractPlan, OperationError>
@@ -1041,7 +896,7 @@ where
         ) -> Result<TransformedLayoutProbe, OperationError>
         + Copy,
 {
-    validate_tensorcontract_fusion_plan_inputs(rule, dst, lhs, rhs, axes, homspace_builder)?;
+    validate_tensorcontract_fusion_plan_inputs(rule, dst, lhs, rhs, axes, primer)?;
     let candidates =
         contracted_axis_order_candidates(axes.lhs_contracting_axes(), axes.rhs_contracting_axes());
     let complete = matches!(dst.admission(), FusionSpaceAdmission::Complete(_))
@@ -1121,41 +976,6 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer_canonical<R>(
-    rule: &R,
-    dst: &DynamicFusionMapSpace,
-    lhs: &FusionOperandLayout<'_>,
-    rhs: &FusionOperandLayout<'_>,
-    axes: TensorContractSpec<'_>,
-    primer: LayoutKeyBuilder<R>,
-) -> Result<FusionContractPlan, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + LoweredMultiplicityFreeAlgebra
-        + CheckedFusionAlgebra,
-{
-    prepare_tensorcontract_fusion_plan_from_operands(
-        rule,
-        dst,
-        lhs,
-        rhs,
-        axes,
-        |rule, source: &FusionOperandLayout<'_>, operation, primer| {
-            let primer = primer.ok_or(OperationError::InvalidArgument {
-                message: "lowered prelowered plan requires a layout primer",
-            })?;
-            if source.is_direct() {
-                lowered_layout_probe(rule, source.storage_space(), operation, Some(primer))
-            } else {
-                source.transformed_layout_probe(rule, operation, primer)
-            }
-        },
-        lowered_homspace_builder::<R>,
-        primer,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 fn prepare_tensorcontract_fusion_plan_from_operands<R, P>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
@@ -1163,7 +983,6 @@ fn prepare_tensorcontract_fusion_plan_from_operands<R, P>(
     rhs: &FusionOperandLayout<'_>,
     axes: TensorContractSpec<'_>,
     probe: P,
-    homspace_builder: HomSpaceBuilder<R>,
     primer: LayoutKeyBuilder<R>,
 ) -> Result<FusionContractPlan, OperationError>
 where
@@ -1198,7 +1017,6 @@ where
         lhs.storage_conjugate(),
         rhs.storage_conjugate(),
         probe,
-        homspace_builder,
         Some(primer),
         &CACHED_ORIENTATIONS,
     )
@@ -1421,7 +1239,7 @@ fn validate_tensorcontract_fusion_plan_inputs<R, S>(
     lhs: &S,
     rhs: &S,
     axes: TensorContractSpec<'_>,
-    homspace_builder: HomSpaceBuilder<R>,
+    primer: Option<LayoutKeyBuilder<R>>,
 ) -> Result<(), OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -1430,15 +1248,21 @@ where
     #[cfg(test)]
     CONTRACT_PREFLIGHT_CALLS.set(CONTRACT_PREFLIGHT_CALLS.get() + 1);
     let axis_plan = TensorContractAxisPlan::compile(lhs.rank(), rhs.rank(), dst.rank(), axes)?;
-    let expected_homspace = homspace_builder(
+    let primer = primer.unwrap_or(encoded_layout_primer::<R>);
+    let expected_homspace = match primer(
         rule,
-        lhs.homspace(),
-        rhs.homspace(),
-        axes.lhs_contracting_axes(),
-        axes.rhs_contracting_axes(),
-        axis_plan.output_axes.as_slice(),
-        dst.nout(),
-    )?;
+        MetadataRequest::ContractHomSpace {
+            lhs: lhs.homspace(),
+            rhs: rhs.homspace(),
+            lhs_axes: axes.lhs_contracting_axes(),
+            rhs_axes: axes.rhs_contracting_axes(),
+            output_axes: axis_plan.output_axes.as_slice(),
+            dst_codomain_rank: dst.nout(),
+        },
+    )? {
+        MetadataOutput::UnpreparedHomSpace(homspace) => homspace,
+        _ => unreachable!("metadata dispatcher returned a prepared HomSpace response"),
+    };
     if &expected_homspace != dst.homspace() {
         return Err(OperationError::StructureMismatch { tensor: "dst" });
     }
@@ -1520,15 +1344,12 @@ mod tests {
         candidate_build_calls, contracted_axis_order_candidates,
         prepare_tensorcontract_fusion_candidate_facts_dyn_raw,
         prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical,
-        prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer_canonical,
         prepare_tensorcontract_fusion_plan_dyn_raw,
         prepare_tensorcontract_fusion_plan_dyn_raw_canonical,
         prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation,
         reset_candidate_build_calls, reset_candidate_score_calls, FusionContractOrientation,
     };
-    use crate::contract::dynamic_space::{
-        encoded_layout_primer, lowered_metadata_dispatcher, MetadataOutput, MetadataRequest,
-    };
+    use crate::contract::dynamic_space::{encoded_layout_primer, MetadataOutput, MetadataRequest};
     use crate::contract::{DynamicFusionMapSpace, FusionOperand};
     use crate::{TreeTransformOperation, TreeTransformOperationKind};
     use std::sync::Arc;
@@ -1540,25 +1361,22 @@ mod tests {
 
     std::thread_local! {
         static REJECT_NEXT_PROBE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-        static OPERAND_PRIMER_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        static OPERAND_PREFLIGHT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
-    fn rejecting_operand_primer(
+    fn rejecting_contract_preflight(
         _rule: &U1FusionRule,
-        _request: MetadataRequest<'_>,
-    ) -> Result<MetadataOutput, crate::OperationError> {
-        OPERAND_PRIMER_CALLS.set(OPERAND_PRIMER_CALLS.get() + 1);
-        Err(crate::OperationError::InvalidArgument {
-            message: "encoded operand plan called supplied primer",
-        })
-    }
-
-    fn counting_lowered_operand_primer(
-        rule: &U1FusionRule,
         request: MetadataRequest<'_>,
     ) -> Result<MetadataOutput, crate::OperationError> {
-        OPERAND_PRIMER_CALLS.set(OPERAND_PRIMER_CALLS.get() + 1);
-        lowered_metadata_dispatcher(rule, request)
+        OPERAND_PREFLIGHT_CALLS.set(OPERAND_PREFLIGHT_CALLS.get() + 1);
+        if !matches!(request, MetadataRequest::ContractHomSpace { .. }) {
+            return Err(crate::OperationError::InvalidArgument {
+                message: "operand plan prepared a layout during preflight",
+            });
+        }
+        Err(crate::OperationError::InvalidArgument {
+            message: "operand plan called bound contract preflight",
+        })
     }
 
     fn reject_next_probe(
@@ -1657,7 +1475,9 @@ mod tests {
     }
 
     #[test]
-    fn operand_plan_uses_the_route_specific_layout_primer() {
+    fn operand_plan_preserves_the_bound_layout_capability() {
+        // What: prelowered candidate planning reaches the bound dispatcher
+        // exactly once through an unprepared contraction-HomSpace request.
         let rule = U1FusionRule;
         let lhs_typed = single_sector_typed_space(&rule, [2, 3, 4, 5]);
         let rhs_typed = single_sector_typed_space(&rule, [5, 4, 6, 7]);
@@ -1672,28 +1492,22 @@ mod tests {
             .unwrap();
         let axes = || TensorContractSpec::with_default_output_order(&[2, 3], &[1, 0]);
 
-        OPERAND_PRIMER_CALLS.set(0);
-        prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical(
-            &rule,
-            &dst,
-            &lhs_layout,
-            &rhs_layout,
-            axes(),
-            rejecting_operand_primer,
-        )
-        .unwrap();
-        assert_eq!(OPERAND_PRIMER_CALLS.get(), 0);
-
-        prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer_canonical(
-            &rule,
-            &dst,
-            &lhs_layout,
-            &rhs_layout,
-            axes(),
-            counting_lowered_operand_primer,
-        )
-        .unwrap();
-        assert!(OPERAND_PRIMER_CALLS.get() > 0);
+        OPERAND_PREFLIGHT_CALLS.set(0);
+        assert_eq!(
+            prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical(
+                &rule,
+                &dst,
+                &lhs_layout,
+                &rhs_layout,
+                axes(),
+                rejecting_contract_preflight,
+            )
+            .unwrap_err(),
+            crate::OperationError::InvalidArgument {
+                message: "operand plan called bound contract preflight",
+            }
+        );
+        assert_eq!(OPERAND_PREFLIGHT_CALLS.get(), 1);
     }
 
     #[test]
@@ -1916,7 +1730,6 @@ mod tests {
             false,
             false,
             reject_next_probe,
-            super::encoded_homspace_builder,
             None,
         )
         .unwrap();

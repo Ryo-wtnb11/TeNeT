@@ -3,10 +3,9 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use tenet_core::{
-    BlockStructure, CheckedFusionAlgebra, CoreError, FusionRule, FusionTensorMapSpace,
-    HostReadableStorage, HostWritableStorage, LoweredMultiplicityFreeAlgebra,
-    MultiplicityFreeRigidSymbols, Placement, ScratchStorage, SimilarStorage, TensorMap,
-    TensorStorage,
+    BlockStructure, CoreError, FusionRule, FusionTensorMapSpace, HostReadableStorage,
+    HostWritableStorage, MultiplicityFreeRigidSymbols, Placement, ScratchStorage, SimilarStorage,
+    TensorMap, TensorStorage,
 };
 
 use crate::cache::{
@@ -34,7 +33,6 @@ use super::dynamic_space::{
 use super::fusion::FusionContractOrientation;
 use super::fusion::{
     prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical,
-    prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer_canonical,
     prepare_tensorcontract_fusion_plan_dyn_raw_canonical, tensorcontract_fusion_structure,
     tensorcontract_fusion_structure_dyn_prelowered, FusionContractPlan,
     EXPLICIT_OUTPUT_TRANSFORM_REQUIRES_CORE_DST, SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
@@ -61,25 +59,6 @@ where
 {
     prepare_tensorcontract_fusion_plan_dyn_prelowered_canonical(rule, dst, lhs, rhs, axes, primer)
         .map(Arc::new)
-}
-
-fn lowered_prelowered_plan_builder<R>(
-    rule: &R,
-    dst: &DynamicFusionMapSpace,
-    lhs: &FusionOperandLayout<'_>,
-    rhs: &FusionOperandLayout<'_>,
-    axes: TensorContractSpec<'_>,
-    primer: LayoutKeyBuilder<R>,
-) -> Result<Arc<FusionContractPlan>, OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>
-        + LoweredMultiplicityFreeAlgebra
-        + CheckedFusionAlgebra,
-{
-    prepare_tensorcontract_fusion_plan_dyn_prelowered_with_primer_canonical(
-        rule, dst, lhs, rhs, axes, primer,
-    )
-    .map(Arc::new)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -826,34 +805,6 @@ where
         )
     }
 
-    /// Built-in multiplicity-free sibling that carries typed sectors through
-    /// cold layout enumeration before encoding reusable block keys.
-    #[doc(hidden)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn tensorcontract_fusion_dyn_into_lowered<R>(
-        &mut self,
-        dst_space: &BoundDynamicFusionMapSpace<R>,
-        dst_data: &mut [D],
-        lhs_space: &BoundDynamicFusionMapSpace<R>,
-        lhs_data: &[D],
-        rhs_space: &BoundDynamicFusionMapSpace<R>,
-        rhs_data: &[D],
-        axes: TensorContractSpec<'_>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>
-            + LoweredMultiplicityFreeAlgebra
-            + CheckedFusionAlgebra
-            + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
-    {
-        self.tensorcontract_fusion_dyn_into(
-            dst_space, dst_data, lhs_space, lhs_data, rhs_space, rhs_data, axes, alpha, beta,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     #[allow(dead_code)]
     pub(crate) fn tensorcontract_fusion_dyn_into_raw<R>(
@@ -1000,43 +951,6 @@ where
         )
     }
 
-    /// Built-in multiplicity-free sibling of the validated prelowered seam.
-    #[doc(hidden)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn tensorcontract_fusion_dyn_prelowered_into_lowered<R>(
-        &mut self,
-        dst_space: &BoundDynamicFusionMapSpace<R>,
-        dst_data: &mut [D],
-        lhs: FusionOperand<'_>,
-        lhs_data: &[D],
-        rhs: FusionOperand<'_>,
-        rhs_data: &[D],
-        axes: TensorContractSpec<'_>,
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>
-            + LoweredMultiplicityFreeAlgebra
-            + CheckedFusionAlgebra
-            + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
-    {
-        self.tensorcontract_fusion_dyn_prelowered_into_core(
-            dst_space,
-            dst_data,
-            lhs,
-            lhs_data,
-            rhs,
-            rhs_data,
-            axes,
-            alpha,
-            beta,
-            dst_space.layout_primer(),
-            lowered_prelowered_plan_builder::<R>,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn tensorcontract_fusion_dyn_prelowered_into_core<R>(
         &mut self,
@@ -1109,6 +1023,7 @@ where
                 &lhs_layout,
                 &rhs_layout,
                 axes,
+                layout_primer,
             ) {
                 Ok(structure) => Ok(Some(Arc::new(structure))),
                 Err(OperationError::UnsupportedTensorContractScope {
@@ -1174,8 +1089,8 @@ where
     /// Nothing on this path decodes typed sectors: the operand preparation,
     /// [`compile_composition_plan`] and the execution are all bounded at the
     /// multiplicity-free rigid symbols, so an externally defined provider
-    /// composes here. [`Self::tensorcompose_fusion_dyn_into_lowered`] is the
-    /// built-in sibling, exactly as for the contraction pair.
+    /// composes here. The bound space's layout capability selects encoded,
+    /// lowered, or checked metadata preparation.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn tensorcompose_fusion_dyn_into<R>(
@@ -1245,36 +1160,6 @@ where
             rhs_data,
             alpha,
             beta,
-        )
-    }
-
-    /// Built-in multiplicity-free sibling of the composition seam. Precedent:
-    /// [`Self::tensorcontract_fusion_dyn_into_lowered`] is the same
-    /// passthrough — composition never needed the lowered decode.
-    #[doc(hidden)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn tensorcompose_fusion_dyn_into_lowered<R>(
-        &mut self,
-        dst_space: &BoundDynamicFusionMapSpace<R>,
-        dst_data: &mut [D],
-        lhs: FusionOperand<'_>,
-        lhs_data: &[D],
-        rhs: FusionOperand<'_>,
-        rhs_data: &[D],
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        alpha: D,
-        beta: D,
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>
-            + LoweredMultiplicityFreeAlgebra
-            + CheckedFusionAlgebra
-            + TreeTransformRuleCacheKey<Key = RuleKey>,
-        D: DenseRecouplingScalar + RecouplingCoefficientAction<f64>,
-    {
-        self.tensorcompose_fusion_dyn_into(
-            dst_space, dst_data, lhs, lhs_data, rhs, rhs_data, lhs_axes, rhs_axes, alpha, beta,
         )
     }
 

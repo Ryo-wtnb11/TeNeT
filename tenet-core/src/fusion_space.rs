@@ -2446,8 +2446,10 @@ impl FusionTreeHomSpace {
         Arc::clone(&self.cached_fusion_tree_layout(rule).keys)
     }
 
-    #[doc(hidden)]
-    pub fn try_fusion_tree_keys_lowered<R>(
+    /// Test-only convenience over [`Self::prepare_fusion_tree_layout_lowered`]
+    /// (#586 demotion: external callers use the prepare API directly).
+    #[cfg(test)]
+    pub(crate) fn try_fusion_tree_keys_lowered<R>(
         &self,
         rule: &R,
     ) -> Result<Arc<[FusionTreePairKey]>, LoweredFusionTreeBuildError>

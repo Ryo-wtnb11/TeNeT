@@ -2436,7 +2436,7 @@ fn bosonic_tensorcompose_matches_ordinary_contract() {
     let mut context = crate::TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     let mut ordinary = vec![0.0; dst.required_len().unwrap()];
     context
-        .tensorcontract_fusion_dyn_into_lowered(
+        .tensorcontract_fusion_dyn_into(
             &dst_bound,
             &mut ordinary,
             &source_bound,
@@ -2452,7 +2452,7 @@ fn bosonic_tensorcompose_matches_ordinary_contract() {
 
     let mut composed = vec![0.0; dst.required_len().unwrap()];
     context
-        .tensorcompose_fusion_dyn_into_lowered(
+        .tensorcompose_fusion_dyn_into(
             &dst_bound,
             &mut composed,
             crate::FusionOperand::direct(&source),
@@ -2572,7 +2572,7 @@ fn tensorcompose_fusion_preflights_all_extents_before_mutating_destination() {
 
     let mut valid = vec![0.0; dst.required_len().unwrap()];
     context
-        .tensorcompose_fusion_dyn_into_lowered(
+        .tensorcompose_fusion_dyn_into(
             &dst_bound,
             &mut valid,
             operand,
@@ -2589,7 +2589,7 @@ fn tensorcompose_fusion_preflights_all_extents_before_mutating_destination() {
     let mut destination = vec![7.0; dst.required_len().unwrap()];
     let before = destination.clone();
     let error = context
-        .tensorcompose_fusion_dyn_into_lowered(
+        .tensorcompose_fusion_dyn_into(
             &dst_bound,
             &mut destination,
             operand,
@@ -2608,7 +2608,7 @@ fn tensorcompose_fusion_preflights_all_extents_before_mutating_destination() {
     let mut short_destination = vec![9.0; dst.required_len().unwrap() - 1];
     let before = short_destination.clone();
     let error = context
-        .tensorcompose_fusion_dyn_into_lowered(
+        .tensorcompose_fusion_dyn_into(
             &dst_bound,
             &mut short_destination,
             operand,
@@ -2668,7 +2668,7 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
     let mut context = crate::TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
     let mut contracted = vec![0.0; dst.required_len().unwrap()];
     context
-        .tensorcontract_fusion_dyn_into_lowered(
+        .tensorcontract_fusion_dyn_into(
             &dst_bound,
             &mut contracted,
             &lhs_bound,
@@ -2685,7 +2685,7 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
     let compose = |context: &mut crate::TensorContractFusionExecutionContext<f64, RuleIdentity>| {
         let mut output = vec![0.0; dst.required_len().unwrap()];
         context
-            .tensorcompose_fusion_dyn_into_lowered(
+            .tensorcompose_fusion_dyn_into(
                 &dst_bound,
                 &mut output,
                 crate::FusionOperand::direct(&lhs),
@@ -7365,8 +7365,9 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
     };
     let bind_lowered = |homspace: FusionTreeHomSpace| {
         let count = homspace
-            .try_fusion_tree_keys_lowered(provider.as_ref())
+            .prepare_fusion_tree_layout_lowered(provider.as_ref())
             .unwrap()
+            .commit()
             .len();
         BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
             Arc::clone(&provider),
@@ -7410,7 +7411,7 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
     .unwrap();
     reset_global_operation_caches();
     tenet_core::reset_core_intern_tables();
-    let lowered_dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered_lowered(
+    let lowered_dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
         &lowered_lhs,
         &lowered_rhs,
         direct_axes.lhs_contracting_axes(),
@@ -7451,7 +7452,7 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
             TensorContractFusionExecutionContext::<f64, TripleRuleKey>::default();
         lowered_context.set_cache_policy(policy);
         lowered_context
-            .tensorcontract_fusion_dyn_into_lowered(
+            .tensorcontract_fusion_dyn_into(
                 &lowered_dst,
                 &mut lowered,
                 &lowered_lhs,
@@ -7469,7 +7470,7 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
         assert!(cold_misses >= 3);
         let mut warm = vec![0.0; lowered.len()];
         lowered_context
-            .tensorcontract_fusion_dyn_into_lowered(
+            .tensorcontract_fusion_dyn_into(
                 &lowered_dst,
                 &mut warm,
                 &lowered_lhs,
@@ -7501,7 +7502,7 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
     let (eager_lhs, eager_lhs_data) = crate::adjoint_bound_dyn(&encoded_lhs, &lhs_data).unwrap();
     reset_global_operation_caches();
     tenet_core::reset_core_intern_tables();
-    let lazy_lhs = crate::adjoint_bound_space_dyn_lowered(&lowered_lhs).unwrap();
+    let lazy_lhs = crate::adjoint_bound_space_dyn(&lowered_lhs).unwrap();
     assert_eq!(eager_lhs.space(), lazy_lhs.space());
     let lazy_axes = TensorContractSpec::new_with_conjugation(
         &[1],
@@ -7522,7 +7523,7 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
     .unwrap();
     reset_global_operation_caches();
     tenet_core::reset_core_intern_tables();
-    let lazy_dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered_lowered(
+    let lazy_dst = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
         &lazy_lhs,
         &lowered_rhs,
         lazy_axes.lhs_contracting_axes(),
@@ -7588,7 +7589,7 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
         let execute_lazy =
             |context: &mut TensorContractFusionExecutionContext<f64, TripleRuleKey>,
              output: &mut [f64]| {
-                context.tensorcontract_fusion_dyn_prelowered_into_lowered(
+                context.tensorcontract_fusion_dyn_prelowered_into(
                     &lazy_dst,
                     output,
                     FusionOperand::adjoint(lowered_lhs.space()),

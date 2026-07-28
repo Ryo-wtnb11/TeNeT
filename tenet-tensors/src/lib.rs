@@ -25,8 +25,8 @@ mod tree_transform;
 pub use tenet_core::RuleIdentity;
 
 pub use adjoint::{
-    adjoint, adjoint_bound_dyn, adjoint_bound_dyn_generic, adjoint_bound_dyn_lowered,
-    adjoint_bound_space_dyn, adjoint_bound_space_dyn_generic, adjoint_bound_space_dyn_lowered,
+    adjoint, adjoint_bound_dyn, adjoint_bound_dyn_generic, adjoint_bound_space_dyn,
+    adjoint_bound_space_dyn_generic,
 };
 pub use backend_trace::TensorTraceOperationsBackend;
 pub use bound_tensor::BoundDynamicTensorRef;

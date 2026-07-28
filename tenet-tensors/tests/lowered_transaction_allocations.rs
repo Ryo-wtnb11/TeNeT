@@ -37,20 +37,18 @@ fn lowered_scratch_hit_matches_encoded_hit_allocation_and_identity() {
     let provider = Arc::new(U1FusionRule);
     let homspace =
         FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
-    let cold = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
+    let cold = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_lowered(
         Arc::clone(&provider),
         homspace,
-        [Vec::<usize>::new()],
     )
     .unwrap();
 
     let lowered_homspace = cold.space().homspace().clone();
     ALLOCATIONS.set(0);
     COUNTING.set(true);
-    let lowered = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
+    let lowered = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_lowered(
         Arc::clone(&provider),
         lowered_homspace,
-        [Vec::<usize>::new()],
     )
     .unwrap();
     COUNTING.set(false);
@@ -59,10 +57,9 @@ fn lowered_scratch_hit_matches_encoded_hit_allocation_and_identity() {
     let encoded_homspace = cold.space().homspace().clone();
     ALLOCATIONS.set(0);
     COUNTING.set(true);
-    let encoded = BoundDynamicFusionMapSpace::from_degeneracy_shapes(
+    let encoded = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
         provider,
         encoded_homspace,
-        [Vec::<usize>::new()],
     )
     .unwrap();
     COUNTING.set(false);

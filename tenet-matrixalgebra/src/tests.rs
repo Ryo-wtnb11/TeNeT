@@ -5331,19 +5331,12 @@ fn lowered_z2_binding<const NOUT: usize, const NIN: usize>(
     let provider = Arc::new(Z2FusionRule);
     let raw = dyn_space_of(tensor).unwrap();
     let hom = raw.homspace().clone();
-    hom.try_fusion_tree_keys_lowered(provider.as_ref()).unwrap();
-    let shapes = hom
-        .fusion_tree_keys(provider.as_ref())
-        .iter()
-        .map(|key| {
-            let index = raw
-                .structure()
-                .find_block_index_by_key(&BlockKey::FusionTree(key.clone()))
-                .unwrap();
-            raw.structure().block(index).unwrap().shape().to_vec()
-        })
-        .collect::<Vec<_>>();
-    BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(provider, hom, shapes).unwrap()
+    // Why not caller-supplied per-tree shapes: the #586 sweep narrowed the
+    // shape-admission bridge to tenet-tensors; the kept public installer
+    // derives the identical blocks from the final homspace's leg
+    // degeneracies for these dense-leg fixtures.
+    BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_lowered(provider, hom)
+        .unwrap()
 }
 
 #[test]
