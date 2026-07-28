@@ -71,7 +71,7 @@ documentation carries the compiling example; the erased `Space::product` and
 not the extension mechanism.
 
 TeNeT has two peer user facades. The provider-typed
-[`tenet::typed`](https://docs.rs/tenet/latest/tenet/typed/index.html) facade
+[`tenet::typed`](tenet/src/typed.rs) facade
 (`GradedSpace<R>`, `TensorMap<R, D>`) keeps `R` concrete, returns the provider's
 own labels (`SectorCodec::Sector`), and separates payload dtype `D` (`f64` /
 `Complex64`) from the categorical coefficient scalar. It ships construction,
