@@ -1731,6 +1731,141 @@ where
     Ok((front_tree, tail_tree))
 }
 
+/// Merge two standard fusion trees without exchanging their external legs.
+///
+/// This is TensorKit's `merge(f₁, f₂, c, 1)` for a multiplicity-free rule:
+/// the two coupled sectors are fused to `coupled`, then only inverse
+/// associators are used to restore the left-associated standard tree. In
+/// particular this operation never evaluates an R symbol and is valid for
+/// [`BraidingStyleKind::NoBraiding`] providers.
+///
+/// Both inputs and the requested fusion channel are validated through the
+/// checked algebra before any recoupling symbols are evaluated.
+pub fn merge_fusion_trees_multiplicity_free<R>(
+    rule: &R,
+    lhs: &FusionTreeKey,
+    rhs: &FusionTreeKey,
+    coupled: SectorId,
+) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CheckedFusionSpaceError>
+where
+    R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra,
+    R::Scalar: Clone + Mul<Output = R::Scalar>,
+{
+    lhs.validate_for_rule_checked(rule)?;
+    rhs.validate_for_rule_checked(rule)?;
+    let multiplicity = rule.try_nsymbol(lhs.coupled(), rhs.coupled(), coupled)?;
+    if multiplicity != 1 {
+        return Err(CoreError::FusionChannelCount {
+            left: lhs.coupled(),
+            right: rhs.coupled(),
+            count: multiplicity,
+        }
+        .into());
+    }
+
+    // Rank-zero trees are the tensor unit. Handling them structurally also
+    // avoids manufacturing and then deleting a synthetic vacuum leaf.
+    if lhs.uncoupled().is_empty() {
+        return Ok(vec![(rhs.clone(), rule.scalar_one())]);
+    }
+    if rhs.uncoupled().is_empty() {
+        return Ok(vec![(lhs.clone(), rule.scalar_one())]);
+    }
+
+    multiplicity_free_multi_fmove_inv_tree(rule, lhs.coupled(), coupled, rhs, false)?
+        .into_iter()
+        .map(|(tail, coefficient)| {
+            join_fusion_tree_front_checked(rule, lhs, &tail)
+                .map(|merged| (merged, coefficient))
+        })
+        .collect()
+}
+
+/// Replace the first, non-dual leaf of `tail` by `front`.
+///
+/// This is the checked inverse of [`split_fusion_tree`] at the corresponding
+/// front rank. It is intentionally private: tensor product is the only caller
+/// that needs this narrower structural operation.
+fn join_fusion_tree_front_checked<R>(
+    rule: &R,
+    front: &FusionTreeKey,
+    tail: &FusionTreeKey,
+) -> Result<FusionTreeKey, CheckedFusionSpaceError>
+where
+    R: CheckedFusionAlgebra,
+{
+    front.validate_for_rule_checked(rule)?;
+    tail.validate_for_rule_checked(rule)?;
+    let Some(&boundary) = tail.uncoupled().first() else {
+        return Err(CoreError::MalformedFusionTree {
+            message: "fusion-tree front join requires a non-empty tail",
+        }
+        .into());
+    };
+    if boundary != front.coupled() {
+        return Err(CoreError::SectorMismatch {
+            expected: front.coupled(),
+            actual: boundary,
+        }
+        .into());
+    }
+    if tail.is_dual()[0] {
+        return Err(CoreError::MalformedFusionTree {
+            message: "fusion-tree front join requires a non-dual boundary leaf",
+        }
+        .into());
+    }
+
+    let merged = match (front.uncoupled().len(), tail.uncoupled().len()) {
+        (0, _) => {
+            return Err(CoreError::MalformedFusionTree {
+                message: "fusion-tree front join requires a non-empty front",
+            }
+            .into());
+        }
+        (1, _) => {
+            let mut is_dual = tail.is_dual().to_vec();
+            is_dual[0] = front.is_dual()[0];
+            FusionTreeKey::new(
+                tail.uncoupled().to_vec(),
+                tail.coupled(),
+                is_dual,
+                tail.innerlines().to_vec(),
+                tail.vertices().to_vec(),
+            )
+        }
+        (_, 1) => front.clone(),
+        (_, _) => {
+            let mut uncoupled =
+                Vec::with_capacity(front.uncoupled().len() + tail.uncoupled().len() - 1);
+            uncoupled.extend_from_slice(front.uncoupled());
+            uncoupled.extend_from_slice(&tail.uncoupled()[1..]);
+            let mut is_dual =
+                Vec::with_capacity(front.is_dual().len() + tail.is_dual().len() - 1);
+            is_dual.extend_from_slice(front.is_dual());
+            is_dual.extend_from_slice(&tail.is_dual()[1..]);
+            let mut innerlines =
+                Vec::with_capacity(front.innerlines().len() + 1 + tail.innerlines().len());
+            innerlines.extend_from_slice(front.innerlines());
+            innerlines.push(front.coupled());
+            innerlines.extend_from_slice(tail.innerlines());
+            let mut vertices =
+                Vec::with_capacity(front.vertices().len() + tail.vertices().len());
+            vertices.extend_from_slice(front.vertices());
+            vertices.extend_from_slice(tail.vertices());
+            FusionTreeKey::new(
+                uncoupled,
+                tail.coupled(),
+                is_dual,
+                innerlines,
+                vertices,
+            )
+        }
+    };
+    merged.validate_for_rule_checked(rule)?;
+    Ok(merged)
+}
+
 fn validate_fusion_tree_key_shape(tree: &FusionTreeKey) -> Result<(), CoreError> {
     let rank = tree.uncoupled().len();
     if tree.is_dual().len() != rank {
