@@ -13749,6 +13749,43 @@ mod tests {
         fn try_r_symbol_generic(&mut self, a: SectorId,b: SectorId,c: SectorId) -> Result<GenericRMatrix<f64>, Self::Error> { Ok(self.r_symbol_generic(a,b,c)) }
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ArtinSpyError { F, R }
+    impl std::fmt::Display for ArtinSpyError { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{self:?}") } }
+    impl std::error::Error for ArtinSpyError {}
+
+    struct ArtinSpy {
+        inner: UnitaryToyOmRule,
+        f_calls: std::cell::Cell<usize>,
+        r_calls: std::cell::Cell<usize>,
+        fail_f: Option<usize>,
+        fail_r: Option<usize>,
+        bad_f: bool,
+        bad_r: bool,
+    }
+    impl ArtinSpy {
+        fn new() -> Self { Self { inner: UnitaryToyOmRule, f_calls: std::cell::Cell::new(0), r_calls: std::cell::Cell::new(0), fail_f: None, fail_r: None, bad_f: false, bad_r: false } }
+        fn trip(counter: &std::cell::Cell<usize>, fail: Option<usize>, error: ArtinSpyError) -> Result<(), ArtinSpyError> { let n = counter.get()+1; counter.set(n); if fail == Some(n) { Err(error) } else { Ok(()) } }
+    }
+    impl CheckedGenericFusion for ArtinSpy {
+        type Error = ArtinSpyError;
+        fn fusion_style(&self) -> FusionStyleKind { FusionRule::fusion_style(&self.inner) }
+        fn braiding_style(&self) -> BraidingStyleKind { FusionRule::braiding_style(&self.inner) }
+        fn vacuum(&self) -> SectorId { FusionRule::vacuum(&self.inner) }
+        fn try_dual(&self, s: SectorId) -> Result<SectorId, Self::Error> { Ok(s) }
+        fn try_fusion_channels(&self,a:SectorId,b:SectorId)->Result<SectorVec,Self::Error>{Ok(self.inner.fusion_channels(a,b))}
+        fn try_fusion_channels_in_table(&self,a:SectorId,b:SectorId)->Result<SectorVec,Self::Error>{Ok(self.inner.fusion_channels_in_table(a,b))}
+        fn try_nsymbol(&self,a:SectorId,b:SectorId,c:SectorId)->Result<usize,Self::Error>{Ok(self.inner.nsymbol(a,b,c))}
+    }
+    impl CheckedGenericRigidSymbols for ArtinSpy {
+        type Scalar=f64;
+        fn try_sqrt_dim_scalar(&mut self,_:SectorId)->Result<f64,Self::Error>{Ok(1.0)}
+        fn try_inv_sqrt_dim_scalar(&mut self,_:SectorId)->Result<f64,Self::Error>{Ok(1.0)}
+        fn try_frobenius_schur_phase_scalar(&mut self,_:SectorId)->Result<f64,Self::Error>{Ok(1.0)}
+        fn try_f_symbol_generic(&mut self,a:SectorId,b:SectorId,c:SectorId,d:SectorId,e:SectorId,f:SectorId)->Result<GenericFArray<f64>,Self::Error>{Self::trip(&self.f_calls,self.fail_f,ArtinSpyError::F)?; let x=self.inner.f_symbol_generic(a,b,c,d,e,f); if self.bad_f { Ok(GenericFArray::new(x.data().to_vec(), (1,1,x.data().len(),1))) } else { Ok(x) }}
+        fn try_r_symbol_generic(&mut self,a:SectorId,b:SectorId,c:SectorId)->Result<GenericRMatrix<f64>,Self::Error>{Self::trip(&self.r_calls,self.fail_r,ArtinSpyError::R)?; let x=self.inner.r_symbol_generic(a,b,c); if self.bad_r { Ok(GenericRMatrix::new(x.data().to_vec(), 1,x.data().len())) } else { Ok(x) }}
+    }
+
     // Rank-2 tree [a, a] -> c with a single OM vertex label `vertex`.
     fn unitary_rank2_tree(vertex: usize) -> FusionTreeKey {
         let a = SectorId::new(UnitaryToyOmRule::A);
@@ -13778,6 +13815,28 @@ mod tests {
             let checked = generic_artin_braid_at_with_inverse_checked(&mut rule, &tree, index, false).unwrap();
             assert_eq!(checked, legacy);
         }
+    }
+
+    #[test]
+    fn checked_generic_artin_calls_only_required_symbols_and_preserves_failures() {
+        let mut outer = ArtinSpy::new();
+        generic_artin_braid_at_with_inverse_checked(&mut outer, &unitary_rank2_tree(1), 0, false).unwrap();
+        assert_eq!((outer.f_calls.get(), outer.r_calls.get()), (0, 1));
+        let mut inner = ArtinSpy::new();
+        generic_artin_braid_at_with_inverse_checked(&mut inner, &unitary_rank3_tree(1), 1, false).unwrap();
+        assert!(inner.f_calls.get() > 0 && inner.r_calls.get() > 0);
+        let mut fail_r = ArtinSpy { fail_r: Some(1), ..ArtinSpy::new() };
+        assert!(matches!(generic_artin_braid_at_with_inverse_checked(&mut fail_r, &unitary_rank2_tree(1), 0, false), Err(CheckedGenericSymbolError::Provider(ArtinSpyError::R))));
+        let mut fail_f = ArtinSpy { fail_f: Some(1), ..ArtinSpy::new() };
+        assert!(matches!(generic_artin_braid_at_with_inverse_checked(&mut fail_f, &unitary_rank3_tree(1), 1, false), Err(CheckedGenericSymbolError::Provider(ArtinSpyError::F))));
+    }
+
+    #[test]
+    fn checked_generic_artin_rejects_categorical_symbol_shapes_before_indexing() {
+        let mut bad_r = ArtinSpy { bad_r: true, ..ArtinSpy::new() };
+        assert!(matches!(generic_artin_braid_at_with_inverse_checked(&mut bad_r, &unitary_rank2_tree(1), 0, false), Err(CheckedGenericSymbolError::Shape { symbol: "R", .. })));
+        let mut bad_f = ArtinSpy { bad_f: true, ..ArtinSpy::new() };
+        assert!(matches!(generic_artin_braid_at_with_inverse_checked(&mut bad_f, &unitary_rank3_tree(1), 1, false), Err(CheckedGenericSymbolError::Shape { symbol: "F", .. })));
     }
 
     // Braid at `index` (inv=false) then braid every output at `index`
