@@ -1446,6 +1446,76 @@ fn otimes_rejects_runtime_and_rule_identity_mismatches() {
     assert!(lhs.otimes(&other_rule).is_err());
 }
 
+#[test]
+fn typed_deligne_product_uses_the_explicit_component_order() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let u1_rule = Arc::new(tenet::core::U1FusionRule);
+    let fz2_rule = Arc::new(tenet::core::FermionParityFusionRule);
+    let charge = GradedSpace::try_new(
+        Arc::clone(&u1_rule),
+        [(tenet::core::U1Irrep::new(1), 1)],
+        false,
+    )
+    .unwrap();
+    let parity = GradedSpace::try_new(
+        Arc::clone(&fz2_rule),
+        [(tenet::core::Z2Irrep::ODD, 1)],
+        false,
+    )
+    .unwrap();
+    let lhs = TensorMap::from_block_fn(&runtime, [&charge], [&charge], |_, _| 2.0).unwrap();
+    let rhs = TensorMap::from_block_fn(&runtime, [&parity], [&parity], |_, _| 3.0).unwrap();
+    let product = Arc::new(tenet::core::U1FusionRule.product(tenet::core::FermionParityFusionRule));
+
+    let result = lhs.deligne_product(&rhs, product).unwrap();
+
+    assert_eq!((result.numout(), result.numin()), (2, 2));
+    assert_eq!(result.data(), [6.0]);
+    let codomain = result.codomain_spaces();
+    assert_eq!(
+        codomain[0].sectors().unwrap(),
+        [tenet::core::product_sector(
+            tenet::core::U1Irrep::new(1),
+            tenet::core::Z2Irrep::EVEN
+        )]
+    );
+    assert_eq!(
+        codomain[1].sectors().unwrap(),
+        [tenet::core::product_sector(
+            tenet::core::U1Irrep::new(0),
+            tenet::core::Z2Irrep::ODD
+        )]
+    );
+}
+
+#[test]
+fn typed_deligne_product_rejects_a_component_identity_mismatch() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let lhs_rule = Arc::new(ExternalZ3::tagged(0));
+    let lhs = counting_z3(
+        &runtime,
+        &z3_dense_leg(&lhs_rule, 1),
+        &z3_dense_leg(&lhs_rule, 1),
+        2.0,
+    );
+    let u1_rule = Arc::new(tenet::core::U1FusionRule);
+    let u1 = GradedSpace::try_new(
+        Arc::clone(&u1_rule),
+        [(tenet::core::U1Irrep::new(0), 1)],
+        false,
+    )
+    .unwrap();
+    let rhs = TensorMap::from_block_fn(&runtime, [&u1], [&u1], |_, _| 3.0).unwrap();
+    let wrong = Arc::new(ExternalZ3::tagged(1).product(tenet::core::U1FusionRule));
+
+    assert!(matches!(
+        lhs.deligne_product(&rhs, wrong).unwrap_err(),
+        tenet::prelude::Error::RuleMismatch
+    ));
+}
+
 // ---------------------------------------------------------------------------
 // Phase 3, slice 4: non-regression gates.
 // ---------------------------------------------------------------------------

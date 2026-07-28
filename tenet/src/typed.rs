@@ -198,12 +198,13 @@
 //! provider that reports an invalid or unrepresentable algebra fails with a
 //! typed error and publishes no layout, cache, or admission state.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tenet_core::{
     validate_unit_layout_correspondence_checked, BlockKey, BlockRef, CanonicalUnitFusionRule,
     CheckedFusionAlgebra, FusionProductSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
-    SectorLeg, UnitLegInsertion,
+    ProductFusionRule, ProductSector, ProductSectorCodec, SectorLeg, UnitLegInsertion,
 };
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace, OutputAxisOrder,
@@ -561,6 +562,101 @@ where
         domain_uncoupled: decode_sectors(provider, domain.uncoupled())?,
         domain_innerlines: decode_sectors(provider, domain.innerlines())?,
     })
+}
+
+fn map_block_fusion_trees<A, B>(
+    source: &BlockFusionTrees<A>,
+    map: impl Fn(&A) -> B,
+) -> BlockFusionTrees<B> {
+    BlockFusionTrees {
+        coupled: map(&source.coupled),
+        codomain_uncoupled: source.codomain_uncoupled.iter().map(&map).collect(),
+        codomain_innerlines: source.codomain_innerlines.iter().map(&map).collect(),
+        domain_uncoupled: source.domain_uncoupled.iter().map(&map).collect(),
+        domain_innerlines: source.domain_innerlines.iter().map(map).collect(),
+    }
+}
+
+fn embed_product_operand<S, P, D>(
+    source: &TensorMap<S, D>,
+    provider: Arc<P>,
+    embed: impl Fn(S::Sector) -> P::Sector,
+    project: impl Fn(&P::Sector) -> S::Sector,
+) -> Result<TensorMap<P, D>, Error>
+where
+    S: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + CanonicalUnitFusionRule,
+    P: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + CanonicalUnitFusionRule,
+    D: TensorScalar,
+{
+    let embed_legs = |legs: Vec<GradedSpace<S>>| -> Result<Vec<GradedSpace<P>>, Error> {
+        legs.into_iter()
+            .map(|leg| {
+                let sectors = leg.sectors()?;
+                GradedSpace::try_new(
+                    Arc::clone(&provider),
+                    sectors
+                        .into_iter()
+                        .zip(leg.degeneracies().iter().copied())
+                        .map(|(sector, degeneracy)| (embed(sector), degeneracy)),
+                    leg.is_dual(),
+                )
+            })
+            .collect()
+    };
+    let codomain = embed_legs(source.codomain())?;
+    let domain = embed_legs(source.domain())?;
+    let mut blocks = HashMap::with_capacity(source.block_count());
+    for index in 0..source.block_count() {
+        let key = source.block_fusion_trees(index)?;
+        let block = source.block(index)?;
+        blocks.insert(
+            key,
+            (
+                block.offset(),
+                block.shape().to_vec(),
+                block.strides().to_vec(),
+            ),
+        );
+    }
+    let data = source.dense_data();
+    let mut missing_block = false;
+    let built = TensorMap::from_block_fn(
+        source.runtime(),
+        codomain.iter(),
+        domain.iter(),
+        |key, indices| {
+            let source_key = map_block_fusion_trees(key, &project);
+            let Some((offset, shape, strides)) = blocks.get(&source_key) else {
+                missing_block = true;
+                return D::from_real(0.0);
+            };
+            if indices.len() != shape.len()
+                || indices.iter().zip(shape).any(|(&index, &dim)| index >= dim)
+            {
+                missing_block = true;
+                return D::from_real(0.0);
+            }
+            let position = indices
+                .iter()
+                .zip(strides)
+                .fold(*offset, |position, (&index, &stride)| {
+                    position + index * stride
+                });
+            data[position]
+        },
+    )?;
+    if missing_block {
+        return Err(Error::InvalidArgument(
+            "canonical-unit product embedding did not preserve a source block".to_string(),
+        ));
+    }
+    Ok(built)
 }
 
 /// One coupled sector's factorization spectrum, labelled through the provider:
@@ -2041,6 +2137,49 @@ where
             runtime: self.runtime.clone(),
             body: Arc::new(TypedTensorBody::dense(space, data)),
         })
+    }
+
+    /// Deligne product through an explicit ordered product provider.
+    pub fn deligne_product<R2, C>(
+        &self,
+        other: &TensorMap<R2, D>,
+        product: Arc<ProductFusionRule<R, R2, C>>,
+    ) -> Result<TensorMap<ProductFusionRule<R, R2, C>, D>, Error>
+    where
+        R: CanonicalUnitFusionRule,
+        R2: MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec
+            + CanonicalUnitFusionRule,
+        C: ProductSectorCodec + Sync + 'static,
+    {
+        if !self.runtime.same_runtime(&other.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        if product.left_rule().rule_identity() != self.body.space.provider().rule_identity()
+            || product.right_rule().rule_identity() != other.body.space.provider().rule_identity()
+        {
+            return Err(Error::RuleMismatch);
+        }
+        let left_vacuum = product
+            .left_rule()
+            .decode_sector(product.left_rule().vacuum())?;
+        let right_vacuum = product
+            .right_rule()
+            .decode_sector(product.right_rule().vacuum())?;
+        let left = embed_product_operand(
+            self,
+            Arc::clone(&product),
+            |sector| ProductSector::new(sector, right_vacuum.clone()),
+            |sector| sector.left().clone(),
+        )?;
+        let right = embed_product_operand(
+            other,
+            product,
+            |sector| ProductSector::new(left_vacuum.clone(), sector),
+            |sector| sector.right().clone(),
+        )?;
+        left.otimes(&right)
     }
 
     /// Categorical composition of two tensor maps, TensorKit `A * B` / `mul!`:
