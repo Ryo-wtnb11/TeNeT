@@ -6012,8 +6012,29 @@ impl Tensor {
 
     /// Tensor product in one category, ordered as
     /// `codomain(self), codomain(rhs); domain(self), domain(rhs)`.
+    ///
+    /// For multiplicity-free rules the two codomain trees and the two domain
+    /// trees are merged independently with F moves, without an R symbol or a
+    /// dense Kronecker temporary.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnsupportedForRule`] for SU(3), whose outer multiplicities
+    /// require a separate generic tree-merge kernel, and
+    /// [`Error::UnsupportedOnDevice`] for device storage.
     pub fn otimes(&self, rhs: &Self) -> Result<Self, Error> {
         self.check_same_world(rhs)?;
+        if self.rule_kind() == RuleKind::Su3 {
+            return Err(Error::UnsupportedForRule {
+                operation: "Tensor::otimes",
+                rule: "SU(3)",
+            });
+        }
+        if self.placement() != Placement::Host {
+            return Err(Error::UnsupportedOnDevice(
+                "Tensor::otimes requires host storage".to_string(),
+            ));
+        }
         if self.is_adjoint_view() || rhs.is_adjoint_view() {
             return self.scale(1.0)?.otimes(&rhs.scale(1.0)?);
         }
@@ -6025,7 +6046,7 @@ impl Tensor {
                 .otimes(&rhs.densified_if_diagonal());
         }
 
-        if self.rule_kind() != RuleKind::Su3 && self.placement() == Placement::Host {
+        {
             macro_rules! product {
                 ($variant:ident, $data:ident, $lhs:expr, $lhs_data:expr, $rhs:expr, $rhs_data:expr) => {{
                     let (space, data) = tensorproduct_owned_multiplicity_free(
@@ -6093,17 +6114,9 @@ impl Tensor {
             }
         }
 
-        // SU(3) remains on the generic-fusion fallback; its multiplicity
-        // indices require the generic merge kernel, outside this
-        // multiplicity-free implementation.
-        let output_axes = (0..self.codomain_rank())
-            .chain(self.rank()..self.rank() + rhs.codomain_rank())
-            .chain(self.codomain_rank()..self.rank())
-            .chain(self.rank() + rhs.codomain_rank()..self.rank() + rhs.rank())
-            .collect::<Vec<_>>();
-        let dst_nout = self.codomain_rank() + rhs.codomain_rank();
-        let contracted = self.contract(rhs, &[], &[])?;
-        contracted.permute(&output_axes[..dst_nout], &output_axes[dst_nout..])
+        Err(Error::InvalidArgument(
+            "tensor-product host dispatch does not match tensor storage".to_string(),
+        ))
     }
 
     /// TensorKit `permute`: re-arranges legs with symmetric braiding.

@@ -43,6 +43,21 @@ fn su3_tensor_leg_dimensions_feed_network_planners() {
 }
 
 #[test]
+fn su3_otimes_is_explicitly_gated_on_the_missing_generic_merge() {
+    let rt = Runtime::builder().build().unwrap();
+    let v = v();
+    let tensor = Tensor::zeros(&rt, Dtype::F64, [&v], [&v]).unwrap();
+
+    assert!(matches!(
+        tensor.otimes(&tensor).unwrap_err(),
+        Error::UnsupportedForRule {
+            operation: "Tensor::otimes",
+            rule: "SU(3)",
+        }
+    ));
+}
+
+#[test]
 fn su3_sector_readback_is_nonbreaking() {
     // Stage B3c-2: SU(3) read-back rides dedicated `(p, q)` accessors, NOT an
     // `SectorLabel::Su3` variant — the public enum (and every downstream
