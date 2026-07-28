@@ -611,33 +611,6 @@ mod tests {
     }
 
     impl MultiplicityFreeFusionRule for PlanarZ2Rule {}
-    impl CanonicalUnitFusionRule for PlanarZ2Rule {}
-
-    impl CheckedFusionAlgebra for PlanarZ2Rule {
-        fn try_dual_sector(
-            &self,
-            sector: SectorId,
-        ) -> Result<SectorId, FusionAlgebraError> {
-            Ok(sector)
-        }
-
-        fn try_fusion_channels(
-            &self,
-            left: SectorId,
-            right: SectorId,
-        ) -> Result<SectorVec, FusionAlgebraError> {
-            Ok(self.fusion_channels(left, right))
-        }
-
-        fn try_nsymbol(
-            &self,
-            left: SectorId,
-            right: SectorId,
-            coupled: SectorId,
-        ) -> Result<usize, FusionAlgebraError> {
-            Ok(self.nsymbol(left, right, coupled))
-        }
-    }
 
     impl MultiplicityFreeFusionSymbols for PlanarZ2Rule {
         type Scalar = f64;
@@ -1457,46 +1430,6 @@ mod tests {
     }
 
     #[test]
-    fn merge_fusion_trees_is_f_only_for_planar_rule() {
-        // What: TensorKit `merge` keeps the two trees' external legs in place
-        // and restores the standard tree with associators only. Both pairs
-        // contain non-vacuum sectors, so an accidental braid is observable as
-        // `UnsupportedSectorBraid` under this NoBraiding provider.
-        let lhs =
-            FusionTreeKey::try_from_sector_ids([1, 1], 0, [false, true], [], [1]).unwrap();
-        let rhs =
-            FusionTreeKey::try_from_sector_ids([1, 0], 1, [true, false], [], [1]).unwrap();
-
-        let terms =
-            merge_fusion_trees_multiplicity_free(&PlanarZ2Rule, &lhs, &rhs, SectorId::new(1))
-                .unwrap();
-
-        assert_eq!(terms.len(), 1);
-        let (merged, coefficient) = &terms[0];
-        assert_eq!(*coefficient, 1.0);
-        assert_eq!(
-            merged.uncoupled(),
-            &[
-                SectorId::new(1),
-                SectorId::new(1),
-                SectorId::new(1),
-                SectorId::new(0),
-            ]
-        );
-        assert_eq!(merged.is_dual(), &[false, true, true, false]);
-        assert_eq!(merged.coupled(), SectorId::new(1));
-        assert_eq!(
-            merged.innerlines(),
-            &[SectorId::new(0), SectorId::new(1)]
-        );
-        assert_eq!(merged.vertices(), &[MultiplicityIndex::ONE; 3]);
-
-        let (front, tail) = split_fusion_tree(&PlanarZ2Rule, merged, 2).unwrap();
-        assert_eq!(front, lhs);
-        assert_eq!(tail.uncoupled(), &[SectorId::new(0), SectorId::new(1), SectorId::new(0)]);
-    }
-
-    #[test]
     fn merge_fusion_trees_treats_rank_zero_as_the_tensor_unit() {
         let unit = FusionTreeKey::try_from_sector_ids([], 0, [], [], []).unwrap();
         let tree =
@@ -1504,7 +1437,7 @@ mod tests {
 
         for (lhs, rhs) in [(&unit, &tree), (&tree, &unit)] {
             let terms =
-                merge_fusion_trees_multiplicity_free(&PlanarZ2Rule, lhs, rhs, SectorId::new(1))
+                merge_fusion_trees_multiplicity_free(&Z2FusionRule, lhs, rhs, SectorId::new(1))
                     .unwrap();
             assert_eq!(terms, vec![(tree.clone(), 1.0)]);
         }

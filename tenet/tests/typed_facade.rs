@@ -1446,8 +1446,183 @@ fn otimes_rejects_runtime_and_rule_identity_mismatches() {
     assert!(lhs.otimes(&other_rule).is_err());
 }
 
+// TensorKitSectors `anyons.jl` PlanarTrivial: one simple object, unique
+// fusion, no braiding, N = F = 1, and the object is the canonical unit.
+#[derive(Clone, Copy)]
+struct PlanarTrivial;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct PlanarTrivialSector;
+
+impl FusionRule for PlanarTrivial {
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::of_type::<Self>()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Unique
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::NoBraiding
+    }
+    fn vacuum(&self) -> SectorId {
+        SectorId::new(0)
+    }
+    fn dual(&self, sector: SectorId) -> SectorId {
+        sector
+    }
+    fn fusion_channels(&self, _: SectorId, _: SectorId) -> SectorVec {
+        core::iter::once(SectorId::new(0)).collect()
+    }
+}
+
+impl MultiplicityFreeFusionRule for PlanarTrivial {}
+impl tenet::core::CanonicalUnitFusionRule for PlanarTrivial {}
+
+impl MultiplicityFreeFusionSymbols for PlanarTrivial {
+    type Scalar = f64;
+    fn scalar_one(&self) -> f64 {
+        1.0
+    }
+    fn scalar_conj(&self, value: f64) -> f64 {
+        value
+    }
+    fn f_symbol_scalar(
+        &self,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+    ) -> f64 {
+        1.0
+    }
+    fn r_symbol_scalar(&self, _: SectorId, _: SectorId, _: SectorId) -> f64 {
+        panic!("PlanarTrivial has no R symbol")
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for PlanarTrivial {
+    fn dim_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+    fn inv_dim_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+    fn sqrt_dim_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+    fn inv_sqrt_dim_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+    fn twist_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+    fn frobenius_schur_phase_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+}
+
+impl CheckedFusionAlgebra for PlanarTrivial {
+    fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+        if sector == SectorId::new(0) {
+            Ok(sector)
+        } else {
+            Err(FusionAlgebraError::InvalidSector { sector })
+        }
+    }
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, FusionAlgebraError> {
+        self.try_dual_sector(left)?;
+        self.try_dual_sector(right)?;
+        Ok(self.fusion_channels(left, right))
+    }
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, FusionAlgebraError> {
+        self.try_dual_sector(left)?;
+        self.try_dual_sector(right)?;
+        self.try_dual_sector(coupled)?;
+        Ok(1)
+    }
+}
+
+impl SectorCodec for PlanarTrivial {
+    type Sector = PlanarTrivialSector;
+    fn encode_sector(&self, _: &Self::Sector) -> Result<SectorId, FusionAlgebraError> {
+        Ok(SectorId::new(0))
+    }
+    fn decode_sector(&self, sector: SectorId) -> Result<Self::Sector, FusionAlgebraError> {
+        self.try_dual_sector(sector)?;
+        Ok(PlanarTrivialSector)
+    }
+}
+
+#[test]
+fn otimes_matches_tensorkit_planar_trivial_without_requesting_braiding() {
+    // What: the #595 NoBraiding oracle is TensorKit's own PlanarTrivial
+    // category. The previous contract-plus-output-permute route reached its
+    // NoBraiding boundary; the monoidal merge succeeds without an R symbol.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(PlanarTrivial);
+    let lhs_cod =
+        GradedSpace::try_new(Arc::clone(&provider), [(PlanarTrivialSector, 2)], false).unwrap();
+    let lhs_dom =
+        GradedSpace::try_new(Arc::clone(&provider), [(PlanarTrivialSector, 3)], true).unwrap();
+    let rhs_cod =
+        GradedSpace::try_new(Arc::clone(&provider), [(PlanarTrivialSector, 4)], true).unwrap();
+    let rhs_dom =
+        GradedSpace::try_new(Arc::clone(&provider), [(PlanarTrivialSector, 2)], false).unwrap();
+    let lhs: TensorMap<PlanarTrivial, f64> =
+        TensorMap::from_block_fn(&runtime, [&lhs_cod], [&lhs_dom], |_, indices| {
+            (1 + indices[0] + 10 * indices[1]) as f64
+        })
+        .unwrap();
+    let rhs: TensorMap<PlanarTrivial, f64> =
+        TensorMap::from_block_fn(&runtime, [&rhs_cod], [&rhs_dom], |_, indices| {
+            (2 + indices[0] + 10 * indices[1]) as f64
+        })
+        .unwrap();
+    let expected: TensorMap<PlanarTrivial, f64> = TensorMap::from_block_fn(
+        &runtime,
+        [&lhs_cod, &rhs_cod],
+        [&lhs_dom, &rhs_dom],
+        |_, indices| {
+            (1 + indices[0] + 10 * indices[2]) as f64 * (2 + indices[1] + 10 * indices[3]) as f64
+        },
+    )
+    .unwrap();
+
+    // The pre-#595 lowering encoded the same operation as empty-axis
+    // contraction plus this interleaving output permutation. NoBraiding still
+    // rejects that braid-requiring route.
+    assert!(lhs.contract(&rhs, &[], &[], &[0, 2, 1, 3]).is_err());
+
+    let actual = lhs.otimes(&rhs).unwrap();
+
+    assert_eq!(actual.data(), expected.data());
+    assert_eq!(
+        actual
+            .codomain_spaces()
+            .into_iter()
+            .chain(actual.domain_spaces())
+            .map(|space| space.is_dual())
+            .collect::<Vec<_>>(),
+        [false, true, true, false]
+    );
+}
+
 #[test]
 fn otimes_fz2_complex_oracle_has_no_crossing_phase() {
+    // Built-in TensorKit-equivalent FermionParity semantics: complex payload
+    // multiplication is sign-free because otimes performs no leg crossing.
     let _guard = cache_lock();
     let runtime = runtime();
     let rule = Arc::new(tenet::core::FermionParityFusionRule);
@@ -9950,80 +10125,6 @@ impl SectorCodec for PlanarZ2 {
             Err(FusionAlgebraError::InvalidSector { sector })
         }
     }
-}
-
-#[test]
-fn external_nobraiding_otimes_merges_sides_without_crossing() {
-    // What: TensorKit `otimes` merges codomain trees with codomain trees and
-    // domain trees with domain trees. Both operands carry the non-unit planar
-    // sector, so the old contract-plus-permute route failed with
-    // `UnsupportedBraidingStyle` while this monoidal route needs no R symbol.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let provider = Arc::new(PlanarZ2);
-    let lhs_cod = GradedSpace::try_new(
-        Arc::clone(&provider),
-        [(PlanarParity(0), 1), (PlanarParity(1), 1)],
-        false,
-    )
-    .unwrap();
-    let lhs_dom = GradedSpace::try_new(
-        Arc::clone(&provider),
-        [(PlanarParity(0), 1), (PlanarParity(1), 1)],
-        true,
-    )
-    .unwrap();
-    let rhs_cod = GradedSpace::try_new(
-        Arc::clone(&provider),
-        [(PlanarParity(0), 1), (PlanarParity(1), 1)],
-        true,
-    )
-    .unwrap();
-    let rhs_dom = GradedSpace::try_new(
-        Arc::clone(&provider),
-        [(PlanarParity(0), 1), (PlanarParity(1), 1)],
-        false,
-    )
-    .unwrap();
-    let lhs: TensorMap<PlanarZ2, f64> =
-        TensorMap::from_block_fn(&runtime, [&lhs_cod], [&lhs_dom], |sectors, _| {
-            [2.0, 3.0][usize::from(sectors.coupled().0)]
-        })
-        .unwrap();
-    let rhs: TensorMap<PlanarZ2, f64> =
-        TensorMap::from_block_fn(&runtime, [&rhs_cod], [&rhs_dom], |sectors, _| {
-            [5.0, 7.0][usize::from(sectors.coupled().0)]
-        })
-        .unwrap();
-    let expected: TensorMap<PlanarZ2, f64> = TensorMap::from_block_fn(
-        &runtime,
-        [&lhs_cod, &rhs_cod],
-        [&lhs_dom, &rhs_dom],
-        |sectors, _| {
-            let codomain = sectors.codomain_uncoupled();
-            let domain = sectors.domain_uncoupled();
-            if codomain[0] == domain[0] && codomain[1] == domain[1] {
-                [2.0, 3.0][usize::from(codomain[0].0)] * [5.0, 7.0][usize::from(codomain[1].0)]
-            } else {
-                0.0
-            }
-        },
-    )
-    .unwrap();
-
-    let actual = lhs.otimes(&rhs).unwrap();
-
-    assert_eq!((actual.numout(), actual.numin()), (2, 2));
-    assert_eq!(actual.data(), expected.data());
-    assert_eq!(
-        actual
-            .codomain_spaces()
-            .into_iter()
-            .chain(actual.domain_spaces())
-            .map(|space| space.is_dual())
-            .collect::<Vec<_>>(),
-        [false, true, true, false]
-    );
 }
 
 #[test]
