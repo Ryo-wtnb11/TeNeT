@@ -99,6 +99,48 @@ fn measured_dense_add_bytes(fixture: &Fixture) -> u64 {
     measured_bytes(|| fixture.diagonal.add(&fixture.dense, 0.75, -0.5).unwrap())
 }
 
+fn constructed_diagonal(runtime: &Runtime, degeneracy: usize) -> Tensor {
+    let bond = Space::u1([(0, degeneracy)]);
+    Tensor::diagonal(
+        runtime,
+        Dtype::F64,
+        &bond,
+        [vec![Scalar::F64(1.0); degeneracy]],
+    )
+    .unwrap()
+}
+
+#[test]
+fn public_diagonal_constructor_and_readback_stay_compact_until_data() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    black_box(constructed_diagonal(&runtime, 64));
+    black_box(constructed_diagonal(&runtime, 128));
+    let small = measured_bytes(|| constructed_diagonal(&runtime, 64));
+    let large = measured_bytes(|| constructed_diagonal(&runtime, 128));
+    assert!(
+        large <= small * 4,
+        "constructor growth is not O(d): {small}, {large}"
+    );
+    assert!(
+        large < (128 * 128 * std::mem::size_of::<f64>()) as u64,
+        "constructor allocated a dense payload: {large}"
+    );
+
+    let diagonal = constructed_diagonal(&runtime, 128);
+    let readback = measured_bytes(|| diagonal.diagonal_spectrum().unwrap().unwrap());
+    assert!(
+        readback < (128 * 128 * std::mem::size_of::<f64>()) as u64,
+        "readback allocated a dense payload: {readback}"
+    );
+    let dense = (128 * 128 * std::mem::size_of::<f64>()) as u64;
+    assert!(
+        measured_bytes(|| diagonal.data().len()) >= dense,
+        "constructor or readback materialized the dense payload"
+    );
+    assert_eq!(measured_bytes(|| diagonal.data().len()), 0);
+}
+
 /// A compact diagonal product stores one value per bond basis state. Comparing
 /// two sizes makes the gate insensitive to fixed cache/metadata allocations
 /// while rejecting the old dense d-by-d materialization.

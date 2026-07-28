@@ -1224,6 +1224,13 @@ where
     D: TensorScalar,
 {
     /// Builds a compact diagonal map `bond <- bond` from labelled sector values.
+    ///
+    /// TeNeT's typed counterpart of TensorKit `DiagonalTensorMap` / `diagm`
+    /// stores `O(Σ_c k_c)` values. Input labels may be permuted, but must name
+    /// every nonzero bond sector exactly once; output is canonicalized to the
+    /// bond's engine-sector order. Each vector must equal that sector's
+    /// degeneracy. All validation precedes checked layout admission, and the
+    /// supplied dual flag is preserved.
     pub fn diagonal<I>(runtime: &Runtime, bond: &GradedSpace<R>, spectra: I) -> Result<Self, Error>
     where
         I: IntoIterator<Item = SectorSpectrum<R::Sector, D>>,
@@ -1262,6 +1269,10 @@ where
     }
 
     /// Returns the compact diagonal spectrum without materializing dense data.
+    ///
+    /// This is typed `diag` readback: [`None`] means the tensor is dense;
+    /// otherwise it clones only the `O(Σ_c k_c)` compact values in canonical
+    /// bond-sector order.
     pub fn diagonal_spectrum(&self) -> Result<Option<Vec<SectorSpectrum<R::Sector, D>>>, Error> {
         self.spectrum()
             .map(|spectrum| {
@@ -1279,6 +1290,10 @@ where
     }
 
     /// Tests a rank-one map for blockwise diagonality without materializing compact storage.
+    ///
+    /// This matches TensorKit `isdiag` for finite data at `tol = 0`; positive
+    /// tolerance uses `max_offdiag <= tol * max(norm_inf, 1)`. Negative and
+    /// non-finite tolerances are rejected before every shortcut.
     pub fn is_diagonal(&self, tol: f64) -> Result<bool, Error> {
         if !tol.is_finite() || tol < 0.0 {
             return Err(Error::InvalidArgument(

@@ -29,16 +29,10 @@ fn erased_diagonal_preserves_canonical_positions_and_dual_leg() {
     assert_eq!(tensor.domain_spaces()[0], bond);
     assert!(tensor.is_diagonal(0.0).unwrap());
     assert_eq!(tensor.diagonal_spectrum().unwrap().unwrap(), values);
+    let mut wrong_dtype = values.clone();
+    wrong_dtype[0][0] = Scalar::F64(1.0);
     assert!(matches!(
-        Tensor::diagonal(
-            &runtime,
-            Dtype::F64,
-            &bond,
-            [
-                vec![Scalar::C64(Complex64::new(1.0, 0.0))],
-                vec![Scalar::F64(2.0)]
-            ]
-        ),
+        Tensor::diagonal(&runtime, Dtype::C64, &bond, wrong_dtype),
         Err(Error::DtypeMismatch)
     ));
 
@@ -83,13 +77,24 @@ fn erased_su3_and_real_c64_readback_stay_compact() {
 
     let v = Space::u1([(0, 2)]);
     let source = Tensor::from_block_fn(&runtime, [&v], [&v], |_, index| {
-        Complex64::new((index[0] + index[1]) as f64, 0.0)
+        Complex64::new(
+            if index[0] == index[1] {
+                (index[0] + 1) as f64
+            } else {
+                0.0
+            },
+            0.0,
+        )
     })
     .unwrap();
     let (diagonal, _) = source.eigh_full().unwrap();
-    assert!(diagonal.diagonal_spectrum().unwrap().unwrap()[0]
-        .iter()
-        .all(|value| matches!(value, Scalar::C64(_))));
+    assert_eq!(
+        diagonal.diagonal_spectrum().unwrap().unwrap()[0],
+        vec![
+            Scalar::C64(Complex64::new(2.0, 0.0)),
+            Scalar::C64(Complex64::new(1.0, 0.0))
+        ]
+    );
 }
 
 #[test]
@@ -140,6 +145,36 @@ fn typed_diagonal_canonicalizes_labels_and_dense_predicate_handles_nonfinite_off
         [
             SectorSpectrum {
                 sector: SU2Irrep::from_twice_spin(0),
+                values: vec![1.0],
+            },
+            SectorSpectrum {
+                sector: SU2Irrep::from_twice_spin(2),
+                values: vec![3.0],
+            },
+        ],
+    )
+    .is_err());
+    assert!(TensorMap::<SU2FusionRule, f64>::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: SU2Irrep::from_twice_spin(0),
+                values: vec![1.0, 2.0],
+            },
+            SectorSpectrum {
+                sector: SU2Irrep::from_twice_spin(4),
+                values: vec![3.0],
+            },
+        ],
+    )
+    .is_err());
+    assert!(TensorMap::<SU2FusionRule, f64>::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: SU2Irrep::from_twice_spin(0),
                 values: vec![1.0, 2.0],
             },
             SectorSpectrum {
@@ -160,5 +195,30 @@ fn typed_diagonal_canonicalizes_labels_and_dense_predicate_handles_nonfinite_off
     })
     .unwrap();
     assert!(!dense.is_diagonal(1.0).unwrap());
+    let finite = Tensor::from_block_fn(&runtime, [&v], [&v], |_, index| {
+        if index[0] == index[1] {
+            4.0
+        } else if index == [0, 1] {
+            0.25
+        } else {
+            0.0
+        }
+    })
+    .unwrap();
+    assert!(!finite.is_diagonal(0.05).unwrap());
+    assert!(finite.is_diagonal(0.1).unwrap());
+    let exact = Tensor::id(&runtime, Dtype::F64, [&v]).unwrap();
+    assert!(exact.is_diagonal(0.0).unwrap());
+    let inf = Tensor::from_block_fn(&runtime, [&v], [&v], |_, index| {
+        if index == [1, 0] {
+            f64::INFINITY
+        } else {
+            0.0
+        }
+    })
+    .unwrap();
+    assert!(!inf.is_diagonal(1.0).unwrap());
     assert!(dense.is_diagonal(-1.0).is_err());
+    let vector = Tensor::zeros(&runtime, Dtype::F64, [&v], []).unwrap();
+    assert!(vector.is_diagonal(f64::NAN).is_err());
 }

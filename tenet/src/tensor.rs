@@ -4119,6 +4119,24 @@ impl Tensor {
     }
 
     /// Builds a compact diagonal tensor `bond <- bond` from canonical sector-order values.
+    ///
+    /// This is TeNeT's immutable, type-erased counterpart of TensorKit's
+    /// `DiagonalTensorMap` / `diagm` (`tensors/diagonal.jl`): it stores only
+    /// `Σ_c k_c` values, not the dense `Σ_c k_c²` diagonal blocks. The vectors
+    /// are positional in [`Space::sectors`] order (or [`Space::su3_sectors`]
+    /// for SU(3)); their order is therefore not inferred from their values.
+    ///
+    /// Every vector must have its sector's exact degeneracy and every scalar
+    /// must match `dtype` exactly. Validation completes before layout admission.
+    /// Multiplicity-free rules use the checked admission root; the erased SU(3)
+    /// lane uses its existing Generic admission root, which is not that checked
+    /// multiplicity-free contract. Both retain the supplied leg, including its
+    /// dual flag.
+    ///
+    /// # Complexity
+    ///
+    /// Construction stores `O(Σ_c k_c)` values. Dense storage is first allocated
+    /// only by [`Self::data`] or [`Self::data_c64`].
     pub fn diagonal<I>(
         rt: &Runtime,
         dtype: Dtype,
@@ -4211,6 +4229,11 @@ impl Tensor {
     }
 
     /// Returns compact diagonal values in the tensor's public dtype without materializing.
+    ///
+    /// This is TeNeT's `diag` readback. It returns [`None`] for dense storage;
+    /// otherwise vectors are returned in the canonical bond-sector order and
+    /// cost `O(Σ_c k_c)`. A complex tensor with internally real compact values
+    /// returns [`Scalar::C64`] values with zero imaginary part.
     pub fn diagonal_spectrum(&self) -> Result<Option<Vec<Vec<Scalar>>>, Error> {
         Ok(match self.stored_data() {
             Data::Diagonal(DiagonalData::RealF64(spectrum)) => Some(
@@ -4243,6 +4266,11 @@ impl Tensor {
     }
 
     /// Tests rank-one host tensors for blockwise diagonality.
+    ///
+    /// This is TensorKit's `isdiag` at `tol = 0` for finite data. Positive
+    /// tolerance accepts `max_offdiag <= tol * max(norm_inf, 1)`. Negative or
+    /// non-finite tolerances are errors before any rank or storage shortcut;
+    /// device tensors return the existing unsupported-on-device error.
     pub fn is_diagonal(&self, tol: f64) -> Result<bool, Error> {
         if !tol.is_finite() || tol < 0.0 {
             return Err(Error::InvalidArgument(
