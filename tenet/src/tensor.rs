@@ -6408,6 +6408,9 @@ impl Tensor {
                 (UserBoundSpace::U1(a), Data::F64(ad), UserBoundSpace::U1(b), Data::F64(bd)) => {
                     product!(U1, F64, a, ad, b, bd)
                 }
+                (UserBoundSpace::CU1(a), Data::F64(ad), UserBoundSpace::CU1(b), Data::F64(bd)) => {
+                    product!(CU1, F64, a, ad, b, bd)
+                }
                 (UserBoundSpace::Z2(a), Data::F64(ad), UserBoundSpace::Z2(b), Data::F64(bd)) => {
                     product!(Z2, F64, a, ad, b, bd)
                 }
@@ -6434,6 +6437,9 @@ impl Tensor {
                 ) => product!(FZ2U1SU2, F64, a, ad, b, bd),
                 (UserBoundSpace::U1(a), Data::C64(ad), UserBoundSpace::U1(b), Data::C64(bd)) => {
                     product!(U1, C64, a, ad, b, bd)
+                }
+                (UserBoundSpace::CU1(a), Data::C64(ad), UserBoundSpace::CU1(b), Data::C64(bd)) => {
+                    product!(CU1, C64, a, ad, b, bd)
                 }
                 (UserBoundSpace::Z2(a), Data::C64(ad), UserBoundSpace::Z2(b), Data::C64(bd)) => {
                     product!(Z2, C64, a, ad, b, bd)

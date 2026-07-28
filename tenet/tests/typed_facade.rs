@@ -1225,6 +1225,28 @@ fn cu1_c64_adjoint_materialization_matches_the_typed_contract() {
 }
 
 #[test]
+fn cu1_otimes_matches_the_typed_facade_for_real_and_complex_payloads() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased_left, typed_left) = cu1_oracle_pair(&runtime);
+    let (erased_right, typed_right) = cu1_oracle_pair(&runtime);
+    assert_eq!(
+        typed_left.otimes(&typed_right).unwrap().data(),
+        erased_left.otimes(&erased_right).unwrap().data()
+    );
+    let (erased_left, typed_left) = cu1_complex_oracle_pair(&runtime);
+    let (erased_right, typed_right) = cu1_complex_oracle_pair(&runtime);
+    assert_eq!(
+        typed_left.otimes(&typed_right).unwrap().data(),
+        erased_left
+            .otimes(&erased_right)
+            .unwrap()
+            .try_data_c64()
+            .unwrap()
+    );
+}
+
+#[test]
 fn typed_and_erased_permute_agree_byte_for_byte_on_a_builtin_rule() {
     // What: the typed permute is the erased permute, not a lookalike — same
     // destination layout, same block order, same bytes. A non-identity order is
