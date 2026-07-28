@@ -691,6 +691,23 @@ struct FusionTreeHomSpaceLayoutData {
     sectors: Vec<FusionTreeCoupledSectorLayout>,
 }
 
+fn generic_keys_for_coupled_from_groups(
+    codomain: &[CoupledFusionTrees], codomain_fold: &CoupledSectorFold,
+    domain: &[CoupledFusionTrees], domain_fold: &CoupledSectorFold, coupled: SectorId,
+) -> Result<Vec<FusionTreePairKey>, CoreError> {
+    for (side, fold) in [("codomain", codomain_fold), ("domain", domain_fold)] {
+        if fold.poisoned || fold.tainted.contains(&coupled) {
+            return Err(CoreError::FusionOutsideTable { message: format!(
+                "SU(3) coupled sector {coupled:?} on the {side} side requires                          out-of-table intermediates (dim<=27 cut); extend the table                          (Stage B3c). {}", fusion_fold_error_message(side, fold)) });
+        }
+    }
+    let codomain = codomain.iter().find(|g| g.coupled == coupled).map_or(&[][..], |g| g.trees.as_slice());
+    let domain = domain.iter().find(|g| g.coupled == coupled).map_or(&[][..], |g| g.trees.as_slice());
+    let mut keys = Vec::with_capacity(codomain.len() * domain.len());
+    for domain_tree in domain { for codomain_tree in codomain { keys.push(FusionTreePairKey::pair(codomain_tree.clone(), domain_tree.clone())); } }
+    Ok(keys)
+}
+
 #[derive(Clone, Debug)]
 struct FusionTreeHomSpaceLayout {
     id: FusionTreeLayoutId,
@@ -2944,35 +2961,7 @@ impl FusionTreeHomSpace {
         let (codomain, codomain_fold) =
             fusion_trees_by_coupled_for_space_generic(rule, self.codomain());
         let (domain, domain_fold) = fusion_trees_by_coupled_for_space_generic(rule, self.domain());
-        for (side, fold) in [("codomain", &codomain_fold), ("domain", &domain_fold)] {
-            if fold.poisoned || fold.tainted.contains(&coupled) {
-                return Err(CoreError::FusionOutsideTable {
-                    message: format!(
-                        "SU(3) coupled sector {coupled:?} on the {side} side requires                          out-of-table intermediates (dim<=27 cut); extend the table                          (Stage B3c). {}",
-                        fusion_fold_error_message(side, fold)
-                    ),
-                });
-            }
-        }
-        let pick = |groups: &[CoupledFusionTrees]| -> Vec<FusionTreeKey> {
-            groups
-                .iter()
-                .find(|group| group.coupled == coupled)
-                .map(|group| group.trees.clone())
-                .unwrap_or_default()
-        };
-        let codomain_trees = pick(&codomain);
-        let domain_trees = pick(&domain);
-        let mut keys = Vec::with_capacity(codomain_trees.len() * domain_trees.len());
-        for domain_tree in &domain_trees {
-            for codomain_tree in &codomain_trees {
-                keys.push(FusionTreePairKey::pair(
-                    codomain_tree.clone(),
-                    domain_tree.clone(),
-                ));
-            }
-        }
-        Ok(keys)
+        generic_keys_for_coupled_from_groups(&codomain, &codomain_fold, &domain, &domain_fold, coupled)
     }
 
     /// Checked counterpart of [`Self::fusion_tree_keys_generic_for_coupled`].
@@ -2988,30 +2977,7 @@ impl FusionTreeHomSpace {
             fusion_trees_by_coupled_for_space_generic_checked(rule, self.codomain())?;
         let (domain, domain_fold) =
             fusion_trees_by_coupled_for_space_generic_checked(rule, self.domain())?;
-        for (side, fold) in [("codomain", &codomain_fold), ("domain", &domain_fold)] {
-            if fold.poisoned || fold.tainted.contains(&coupled) {
-                return Err(CoreError::FusionOutsideTable {
-                    message: format!(
-                        "Generic coupled sector {coupled:?} on the {side} side is not exactly representable: {}",
-                        fusion_fold_error_message(side, fold)
-                    ),
-                }
-                .into());
-            }
-        }
-        let pick = |groups: &[CoupledFusionTrees]| -> Vec<FusionTreeKey> {
-            groups.iter().find(|group| group.coupled == coupled)
-                .map(|group| group.trees.clone()).unwrap_or_default()
-        };
-        let codomain_trees = pick(&codomain);
-        let domain_trees = pick(&domain);
-        let mut keys = Vec::with_capacity(codomain_trees.len() * domain_trees.len());
-        for domain_tree in &domain_trees {
-            for codomain_tree in &codomain_trees {
-                keys.push(FusionTreePairKey::pair(codomain_tree.clone(), domain_tree.clone()));
-            }
-        }
-        Ok(keys)
+        generic_keys_for_coupled_from_groups(&codomain, &codomain_fold, &domain, &domain_fold, coupled).map_err(Into::into)
     }
 
     pub fn sector_structure<R>(&self, rule: &R) -> Result<SectorStructure, CoreError>
