@@ -881,6 +881,13 @@ mod tests {
             let b = rule.irrep(1);
             let fused = rule.try_fusion_channels(a.into(), b.into()).unwrap()[0];
             assert_eq!(fused, rule.irrep((u32::MAX as u64 + 1) as i64).into());
+            if modulus == u32::MAX {
+                let edge = rule.irrep((u32::MAX - 1) as i64);
+                assert_eq!(
+                    rule.try_fusion_channels(edge.into(), edge.into()).unwrap()[0],
+                    rule.irrep((u32::MAX - 2) as i64).into()
+                );
+            }
             assert_eq!(
                 rule.f_symbol_scalar(a.into(), b.into(), rule.vacuum(), fused, a.into(), b.into()),
                 1.0

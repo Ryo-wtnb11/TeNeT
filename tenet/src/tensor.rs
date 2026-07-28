@@ -14320,6 +14320,10 @@ mod tk_user_api_tests {
         })
         .unwrap();
         assert_eq!(lhs.compose(&rhs).unwrap().data(), &[14.0, 15.0]);
+        assert_eq!(
+            lhs.contract(&rhs, &[1], &[0]).unwrap().data(),
+            &[14.0, 15.0]
+        );
     }
 
     #[test]
