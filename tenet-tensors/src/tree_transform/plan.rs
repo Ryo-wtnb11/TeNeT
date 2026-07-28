@@ -27,6 +27,56 @@ pub use tenet_operations::transform_plan::{
     TreeTransformKeyBlockSpec,
 };
 
+/// Error from fallible Generic-fusion plan compilation.
+///
+/// Provider failures preserve their concrete source.  Symbol-shape failures
+/// are TeNeT validation failures, rather than provider failures: a returned
+/// F/R block exists but does not have the categorical dimensions required by
+/// its sector tuple.
+#[derive(Debug)]
+pub enum CheckedGenericPlanError<E> {
+    Provider(E),
+    SymbolShape {
+        symbol: &'static str,
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+    },
+    Core(CoreError),
+    Operation(OperationError),
+}
+
+impl<E> From<CoreError> for CheckedGenericPlanError<E> {
+    fn from(error: CoreError) -> Self {
+        Self::Core(error)
+    }
+}
+
+impl<E: core::fmt::Display> core::fmt::Display for CheckedGenericPlanError<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Provider(error) => error.fmt(f),
+            Self::SymbolShape {
+                symbol,
+                expected,
+                actual,
+            } => write!(f, "{symbol} shape mismatch: expected {expected:?}, got {actual:?}"),
+            Self::Core(error) => error.fmt(f),
+            Self::Operation(error) => error.fmt(f),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for CheckedGenericPlanError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Provider(error) => Some(error),
+            Self::Core(error) => Some(error),
+            Self::Operation(error) => Some(error),
+            Self::SymbolShape { .. } => None,
+        }
+    }
+}
+
 #[cfg(test)]
 std::thread_local! {
     static MULTIPLICITY_FREE_CAPABILITY_VALIDATIONS: std::cell::Cell<usize> = const {

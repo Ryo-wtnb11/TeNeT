@@ -12,7 +12,8 @@ pub use operation::{
 pub use plan::{
     build_all_codomain_tree_transform_group_plan, build_generic_tree_pair_transform_group_plan,
     build_tree_pair_transform_group_plan, build_tree_transform_group_plan, TreeTransformBlockSpec,
-    TreeTransformGroupBlockSpec, TreeTransformGroupPlan, TreeTransformKeyBlockSpec,
+    CheckedGenericPlanError, TreeTransformGroupBlockSpec, TreeTransformGroupPlan,
+    TreeTransformKeyBlockSpec,
 };
 #[cfg(test)]
 pub(crate) use plan::{
