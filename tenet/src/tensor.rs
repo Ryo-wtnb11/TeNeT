@@ -5989,6 +5989,9 @@ impl Tensor {
                 (UserBoundSpace::U1(lhs), UserBoundSpace::U1(rhs)) => {
                     contract_owned!(U1, lhs, rhs)
                 }
+                (UserBoundSpace::CU1(lhs), UserBoundSpace::CU1(rhs)) => {
+                    contract_owned!(CU1, lhs, rhs)
+                }
                 (UserBoundSpace::Z2(lhs), UserBoundSpace::Z2(rhs)) => {
                     contract_owned!(Z2, lhs, rhs)
                 }
@@ -6222,6 +6225,9 @@ impl Tensor {
             rhs.ordinary_body().space.as_ref(),
         ) {
             (UserBoundSpace::U1(dst), UserBoundSpace::U1(lhs), UserBoundSpace::U1(rhs)) => {
+                contract_cuda_bound!(&mut state.mf, dst, lhs, rhs)
+            }
+            (UserBoundSpace::CU1(dst), UserBoundSpace::CU1(lhs), UserBoundSpace::CU1(rhs)) => {
                 contract_cuda_bound!(&mut state.mf, dst, lhs, rhs)
             }
             (UserBoundSpace::Z2(dst), UserBoundSpace::Z2(lhs), UserBoundSpace::Z2(rhs)) => {
@@ -9295,7 +9301,7 @@ impl TensorExecutionContext {
             ) => {
                 // SU(3)'s generic plan omits destinations with no GEMM, while
                 // built-in plans fully overwrite and should avoid the fill.
-                if rule_kind == RuleKind::Su3 {
+                if matches!(rule_kind, RuleKind::CU1 | RuleKind::Su3) {
                     dst_data.fill(0.0);
                 }
                 dispatch_contract_into(
@@ -9320,7 +9326,7 @@ impl TensorExecutionContext {
                 Data::C64(rhs_data),
                 Scalar::C64(alpha),
             ) => {
-                if rule_kind == RuleKind::Su3 {
+                if matches!(rule_kind, RuleKind::CU1 | RuleKind::Su3) {
                     dst_data.fill(Complex64::new(0.0, 0.0));
                 }
                 dispatch_contract_into(
@@ -10013,6 +10019,25 @@ fn dispatch_contract_into<D: UserScalar>(
             UserBoundSpace::Z2(dst),
             UserBoundSpace::Z2(lhs_space),
             UserBoundSpace::Z2(rhs_space),
+        ) => contract_into_bound(
+            &mut context.mf,
+            dst,
+            dst_data,
+            lhs_space,
+            lhs_data,
+            rhs_space,
+            rhs_data,
+            lhs_axes,
+            rhs_axes,
+            output_order,
+            alpha,
+            beta,
+        ),
+        (
+            UserBoundSpace::CU1(_),
+            UserBoundSpace::CU1(dst),
+            UserBoundSpace::CU1(lhs_space),
+            UserBoundSpace::CU1(rhs_space),
         ) => contract_into_bound(
             &mut context.mf,
             dst,
