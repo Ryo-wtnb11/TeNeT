@@ -1168,6 +1168,31 @@ fn cu1_oracle_pair(runtime: &Runtime) -> (tenet::prelude::Tensor, TensorMap<CU1F
     (erased, typed)
 }
 
+fn cu1_complex_oracle_pair(
+    runtime: &Runtime,
+) -> (tenet::prelude::Tensor, TensorMap<CU1FusionRule, Complex64>) {
+    let space = tenet::prelude::Space::cu1([((1, 2), 1)]).unwrap();
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        runtime,
+        [&space, &space, &space],
+        [&space],
+        |_, _| Complex64::new(1.0, 2.0),
+    )
+    .unwrap();
+    let rule = Arc::new(CU1FusionRule);
+    let leg = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [(CU1Irrep::from_twice_charge(1), 1)],
+        false,
+    )
+    .unwrap();
+    let typed = TensorMap::from_block_fn(runtime, [&leg, &leg, &leg], [&leg], |_, _| {
+        Complex64::new(1.0, 2.0)
+    })
+    .unwrap();
+    (erased, typed)
+}
+
 #[test]
 fn cu1_typed_and_erased_rank_three_permute_match_the_published_gauge() {
     let _guard = cache_lock();
@@ -1186,6 +1211,17 @@ fn cu1_typed_and_erased_rank_three_permute_match_the_published_gauge() {
     }
     assert_eq!(typed.codomain().len(), 3);
     assert_eq!(typed.domain().len(), 1);
+}
+
+#[test]
+fn cu1_c64_adjoint_materialization_matches_the_typed_contract() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = cu1_complex_oracle_pair(&runtime);
+    let typed_adjoint = typed.adjoint().unwrap();
+    let erased_adjoint = erased.adjoint().unwrap();
+    assert_eq!(typed_adjoint.data(), erased_adjoint.try_data_c64().unwrap());
+    assert_eq!(typed_adjoint.adjoint().unwrap().data(), typed.data());
 }
 
 #[test]
