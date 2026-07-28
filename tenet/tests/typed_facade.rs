@@ -1447,6 +1447,62 @@ fn otimes_rejects_runtime_and_rule_identity_mismatches() {
 }
 
 #[test]
+fn otimes_fz2_complex_oracle_has_no_crossing_phase() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let rule = Arc::new(tenet::core::FermionParityFusionRule);
+    let leg = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 1),
+            (tenet::core::Z2Irrep::ODD, 1),
+        ],
+        false,
+    )
+    .unwrap();
+    let lhs: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |sectors, _| {
+            if *sectors.coupled() == tenet::core::Z2Irrep::EVEN {
+                Complex64::new(2.0, 1.0)
+            } else {
+                Complex64::new(-3.0, 2.0)
+            }
+        })
+        .unwrap();
+    let rhs: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |sectors, _| {
+            if *sectors.coupled() == tenet::core::Z2Irrep::EVEN {
+                Complex64::new(5.0, -1.0)
+            } else {
+                Complex64::new(1.0, 4.0)
+            }
+        })
+        .unwrap();
+    let expected: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |sectors, _| {
+            let codomain = sectors.codomain_uncoupled();
+            let domain = sectors.domain_uncoupled();
+            if codomain != domain {
+                return Complex64::new(0.0, 0.0);
+            }
+            let lhs = if codomain[0] == tenet::core::Z2Irrep::EVEN {
+                Complex64::new(2.0, 1.0)
+            } else {
+                Complex64::new(-3.0, 2.0)
+            };
+            let rhs = if codomain[1] == tenet::core::Z2Irrep::EVEN {
+                Complex64::new(5.0, -1.0)
+            } else {
+                Complex64::new(1.0, 4.0)
+            };
+            lhs * rhs
+        })
+        .unwrap();
+
+    assert_eq!(lhs.otimes(&rhs).unwrap().data(), expected.data());
+}
+
+#[test]
 fn typed_deligne_product_uses_the_explicit_component_order() {
     let _guard = cache_lock();
     let runtime = runtime();

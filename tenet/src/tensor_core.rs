@@ -632,16 +632,88 @@ mod tests {
     use std::sync::Arc;
 
     use tenet_core::{
-        BraidingStyleKind, FusionProductSpace, FusionRule, FusionStyleKind,
-        MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
-        RuleIdentity, SectorId, SectorLeg, SectorVec, Z2FusionRule,
+        BlockKey, BlockSpec, BlockStructure, BraidingStyleKind, FusionProductSpace, FusionRule,
+        FusionStyleKind, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
+        MultiplicityFreeRigidSymbols, RuleIdentity, SectorId, SectorLeg, SectorVec, Z2FusionRule,
     };
     use tenet_tensors::{
         BoundDynamicFusionMapSpace, BoundDynamicTensorRef, OutputAxisOrder, TreeTransformOperation,
     };
 
-    use super::{tensorcontract_owned_multiplicity_free, tree_transform_owned_multiplicity_free};
+    use super::{
+        scatter_tensor_product_block, tensorcontract_owned_multiplicity_free,
+        tree_transform_owned_multiplicity_free,
+    };
     use crate::runtime::Ctx;
+
+    #[test]
+    fn tensor_product_scatter_accumulates_asymmetric_strided_blocks() {
+        // What: two contributions to one destination add rather than
+        // overwrite. The gapped source layouts make a contiguous-slice
+        // shortcut fail, and the unequal shapes pin the external order.
+        let lhs_structure = BlockStructure::from_blocks(vec![BlockSpec::with_key(
+            BlockKey::trivial(),
+            vec![2, 3],
+            vec![2, 5],
+            0,
+        )
+        .unwrap()])
+        .unwrap();
+        let rhs_structure = BlockStructure::from_blocks(vec![BlockSpec::with_key(
+            BlockKey::trivial(),
+            vec![4, 2],
+            vec![1, 7],
+            0,
+        )
+        .unwrap()])
+        .unwrap();
+        let destination_structure = BlockStructure::trivial(&[2, 4, 3, 2]).unwrap();
+        let lhs_block = lhs_structure.only_block().unwrap();
+        let rhs_block = rhs_structure.only_block().unwrap();
+        let destination_block = destination_structure.only_block().unwrap();
+        let mut lhs = vec![f64::NAN; 13];
+        let mut rhs = vec![f64::NAN; 11];
+        for j in 0..3 {
+            for i in 0..2 {
+                lhs[i * 2 + j * 5] = (1 + i + 10 * j) as f64;
+            }
+        }
+        for j in 0..2 {
+            for i in 0..4 {
+                rhs[i + j * 7] = (2 + i + 10 * j) as f64;
+            }
+        }
+        let mut actual = vec![0.0; 48];
+        for _ in 0..2 {
+            scatter_tensor_product_block(
+                &lhs,
+                lhs_block,
+                1,
+                &rhs,
+                rhs_block,
+                1,
+                &mut actual,
+                destination_block,
+                0.5,
+            )
+            .unwrap();
+        }
+
+        let mut expected = vec![0.0; 48];
+        for rhs_domain in 0..2 {
+            for lhs_domain in 0..3 {
+                for rhs_codomain in 0..4 {
+                    for lhs_codomain in 0..2 {
+                        let position =
+                            lhs_codomain + 2 * rhs_codomain + 8 * lhs_domain + 24 * rhs_domain;
+                        expected[position] = (1 + lhs_codomain + 10 * lhs_domain) as f64
+                            * (2 + rhs_codomain + 10 * rhs_domain) as f64;
+                    }
+                }
+            }
+        }
+        assert_eq!(actual, expected);
+    }
 
     /// Deliberately outside the user-layer rule enum: this exercises the typed
     /// core with a provider an application can define without `LoweredMultiplicityFreeAlgebra`.
