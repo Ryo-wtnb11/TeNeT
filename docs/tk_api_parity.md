@@ -160,7 +160,7 @@ Added this sweep: `Tensor::repartition`, `Tensor::zeros_like`,
 | `oplus` (`⊕`) | added | `Space::oplus` | Per-sector degeneracy sum; rule + duality guarded. |
 | `ominus` (`⊖`) | design-gated | — | Space subtraction; niche, needs a negativity guard. |
 | `flip` (space) | has-different-name | `Space::dual` | For an elementary space, `flip` and `dual` give isomorphic spaces; the twist-carrying distinction is internal to the fusion machinery. |
-| `sectors` | has | `Space::sectors` / `try_sectors` / `su3_sectors` | |
+| `sectors` | has | `Space::sectors` / `try_sectors` / `su3_sectors` / `zn_sectors` / `cu1_sectors` | `SectorLabel` is closed, so `try_sectors` reports `UnsupportedForRule` for SU(3), Z_N, and CU(1); use their dedicated readbacks. |
 | `hassector` | added | `Space::has_sector` | Boolean membership (SU(3) via `su3_degeneracy`). |
 | `sectortype` / `spacetype` | N/A | — | The concrete sector/rule type is erased at the user layer; `SectorLabel` enumerates it instead. |
 | `field` | N/A | — | Scalar field is carried by the `Dtype` token (`F64`/`C64`). |
@@ -186,7 +186,7 @@ against — `tenet::typed::GradedSpace<R>` keeps the provider type and reports
 | `SUNIrrep{3}` | has-different-name | `Space::su3` | Outer-multiplicity rule; `(p, q)` labels read back through `Space::su3_sectors` (they do not fit `SectorLabel`). |
 | `ProductSector` (`⊠` of sectors) | has-different-name | `ProductFusionRuleExt::product` + `product_sector` (typed facade) | The canonical route, and as open as TK's `⊠` in what it admits: any ordered product of admitted providers, recursively nested, no new constructor. It is *not* identical in association — TK's `⊠` flattens, so `(A ⊠ B) ⊠ C` and `A ⊠ (B ⊠ C)` are the same `ProductSector{Tuple{A,B,C}}` there, while TeNeT keeps the nesting: factor order and association are Rust-type/label structure, never an automatic equivalence. `Space::product` / `Space::fz2_u1_su2` are two fixed erased conveniences kept for compatibility, not the extension mechanism (#610). |
 | `ZNIrrep{N}` | implemented | `Space::zn`, `zn_sectors`, `zn_degeneracy` | Generic checked Z_N provider for N>=1; typed and erased lowering paths are available. `try_sectors` remains fallible because `SectorLabel` is a closed enum. (#591) |
-| `CU1Irrep` | design-gated | — | O(2) / broken-SU(2) sectors; same gate as `ZNIrrep{N}` (#591). |
+| `CU1Irrep` | implemented | `Space::cu1`, `cu1_sectors`, `cu1_degeneracy` | Checked O(2) / broken-SU(2) provider with typed and erased lowering, including complex lazy-adjoint contractions. `try_sectors` is fallible because `SectorLabel` is a closed enum. (#637) |
 
 ## Block access & conversion
 

@@ -3035,6 +3035,7 @@ fn validate_axis_permutation(axes: &[usize], rank: usize) -> Result<(), Error> {
 #[derive(Debug)]
 enum UserBoundSpace {
     U1(BoundDynamicFusionMapSpace<tenet_core::U1FusionRule>),
+    CU1(BoundDynamicFusionMapSpace<tenet_core::CU1FusionRule>),
     Z2(BoundDynamicFusionMapSpace<tenet_core::Z2FusionRule>),
     ZN(BoundDynamicFusionMapSpace<tenet_core::ZNFusionRule>),
     FZ2(BoundDynamicFusionMapSpace<tenet_core::FermionParityFusionRule>),
@@ -3077,6 +3078,7 @@ macro_rules! impl_into_user_bound {
 }
 
 impl_into_user_bound!(tenet_core::U1FusionRule, U1, U1);
+impl_into_user_bound!(tenet_core::CU1FusionRule, CU1, CU1);
 impl_into_user_bound!(tenet_core::Z2FusionRule, Z2, Z2);
 impl_into_user_bound!(tenet_core::ZNFusionRule, ZN, ZN);
 impl_into_user_bound!(tenet_core::FermionParityFusionRule, FZ2, FZ2);
@@ -3117,6 +3119,9 @@ impl UserBoundSpace {
         match (self, rhs) {
             (Self::U1(lhs), Self::U1(rhs)) => {
                 contract!(lhs, rhs, U1, contracted_multiplicity_free)
+            }
+            (Self::CU1(lhs), Self::CU1(rhs)) => {
+                contract!(lhs, rhs, CU1, contracted_multiplicity_free)
             }
             (Self::Z2(lhs), Self::Z2(rhs)) => {
                 contract!(lhs, rhs, Z2, contracted_multiplicity_free)
@@ -3205,6 +3210,7 @@ impl UserBoundSpace {
         }
         match (self, rhs) {
             (Self::U1(lhs), Self::U1(rhs)) => contract!(lhs, rhs, U1),
+            (Self::CU1(lhs), Self::CU1(rhs)) => contract!(lhs, rhs, CU1),
             (Self::Z2(lhs), Self::Z2(rhs)) => contract!(lhs, rhs, Z2),
             (Self::ZN(lhs), Self::ZN(rhs)) => contract!(lhs, rhs, ZN),
             (Self::FZ2(lhs), Self::FZ2(rhs)) => contract!(lhs, rhs, FZ2),
@@ -3233,6 +3239,7 @@ impl UserBoundSpace {
         }
         match (self, rhs) {
             (Self::U1(lhs), Self::U1(rhs)) => validate!(lhs, rhs),
+            (Self::CU1(lhs), Self::CU1(rhs)) => validate!(lhs, rhs),
             (Self::Z2(lhs), Self::Z2(rhs)) => validate!(lhs, rhs),
             (Self::ZN(lhs), Self::ZN(rhs)) => validate!(lhs, rhs),
             (Self::FZ2(lhs), Self::FZ2(rhs)) => validate!(lhs, rhs),
@@ -3251,6 +3258,7 @@ impl UserBoundSpace {
         }
         match self {
             Self::U1(space) => transform!(space, U1, transformed_multiplicity_free),
+            Self::CU1(space) => transform!(space, CU1, transformed_multiplicity_free),
             Self::Z2(space) => transform!(space, Z2, transformed_multiplicity_free),
             Self::ZN(space) => transform!(space, ZN, transformed_multiplicity_free),
             Self::FZ2(space) => transform!(space, FZ2, transformed_multiplicity_free),
@@ -3273,6 +3281,7 @@ impl UserBoundSpace {
         }
         match self {
             Self::U1(space) => build!(space, U1),
+            Self::CU1(space) => build!(space, CU1),
             Self::Z2(space) => build!(space, Z2),
             Self::ZN(space) => build!(space, ZN),
             Self::FZ2(space) => build!(space, FZ2),
@@ -3298,6 +3307,7 @@ impl UserBoundSpace {
         }
         match self {
             Self::U1(space) => build!(space, U1),
+            Self::CU1(space) => build!(space, CU1),
             Self::Z2(space) => build!(space, Z2),
             Self::ZN(space) => build!(space, ZN),
             Self::FZ2(space) => build!(space, FZ2),
@@ -3316,6 +3326,7 @@ impl UserBoundSpace {
     fn raw(&self) -> &DynamicFusionMapSpace {
         match self {
             UserBoundSpace::U1(space) => space.space(),
+            UserBoundSpace::CU1(space) => space.space(),
             UserBoundSpace::Z2(space) => space.space(),
             UserBoundSpace::ZN(space) => space.space(),
             UserBoundSpace::FZ2(space) => space.space(),
@@ -3329,6 +3340,7 @@ impl UserBoundSpace {
     fn context(&self) -> UserRuleContext {
         match self {
             UserBoundSpace::U1(space) => UserRuleContext::U1(Arc::clone(space.provider_arc())),
+            UserBoundSpace::CU1(space) => UserRuleContext::CU1(Arc::clone(space.provider_arc())),
             UserBoundSpace::Z2(space) => UserRuleContext::Z2(Arc::clone(space.provider_arc())),
             UserBoundSpace::ZN(space) => UserRuleContext::ZN(Arc::clone(space.provider_arc())),
             UserBoundSpace::FZ2(space) => UserRuleContext::FZ2(Arc::clone(space.provider_arc())),
@@ -3346,6 +3358,7 @@ impl UserBoundSpace {
     fn kind(&self) -> RuleKind {
         match self {
             UserBoundSpace::U1(_) => RuleKind::U1,
+            UserBoundSpace::CU1(_) => RuleKind::CU1,
             UserBoundSpace::Z2(_) => RuleKind::Z2,
             UserBoundSpace::ZN(_) => RuleKind::ZN,
             UserBoundSpace::FZ2(_) => RuleKind::FZ2,
@@ -3359,6 +3372,7 @@ impl UserBoundSpace {
     fn identity(&self) -> tenet_core::RuleIdentity {
         match self {
             UserBoundSpace::U1(space) => space.provider().rule_identity(),
+            UserBoundSpace::CU1(space) => space.provider().rule_identity(),
             UserBoundSpace::Z2(space) => space.provider().rule_identity(),
             UserBoundSpace::ZN(space) => space.provider().rule_identity(),
             UserBoundSpace::FZ2(space) => space.provider().rule_identity(),
@@ -3373,6 +3387,9 @@ impl UserBoundSpace {
     fn provider_matches_context_allocation(&self, context: &UserRuleContext) -> bool {
         match (self, context) {
             (Self::U1(space), UserRuleContext::U1(provider)) => {
+                Arc::ptr_eq(space.provider_arc(), provider)
+            }
+            (Self::CU1(space), UserRuleContext::CU1(provider)) => {
                 Arc::ptr_eq(space.provider_arc(), provider)
             }
             (Self::Z2(space), UserRuleContext::Z2(provider)) => {
@@ -3413,6 +3430,7 @@ macro_rules! with_bound_multiplicity_free {
     ($space:expr, $bound:ident, $body:expr) => {
         match $space.as_ref() {
             UserBoundSpace::U1($bound) => $body,
+            UserBoundSpace::CU1($bound) => $body,
             UserBoundSpace::Z2($bound) => $body,
             UserBoundSpace::ZN($bound) => $body,
             UserBoundSpace::FZ2($bound) => $body,
@@ -3434,6 +3452,10 @@ macro_rules! with_user_rule {
     ($space:expr, $rule:ident, $body:expr) => {
         match $space.as_ref() {
             UserBoundSpace::U1(bound) => {
+                let $rule = bound.provider();
+                $body
+            }
+            UserBoundSpace::CU1(bound) => {
                 let $rule = bound.provider();
                 $body
             }
@@ -3472,6 +3494,10 @@ macro_rules! with_bound_ctx {
     ($space:expr, $state:expr, $bound:ident, $ctxs:ident, $body:expr) => {
         match $space.as_ref() {
             UserBoundSpace::U1($bound) => {
+                let $ctxs = &mut $state.mf;
+                $body
+            }
+            UserBoundSpace::CU1($bound) => {
                 let $ctxs = &mut $state.mf;
                 $body
             }
@@ -3776,6 +3802,7 @@ impl Tensor {
         }
         let (space, data) = match context.as_ref() {
             UserRuleContext::U1(provider) => build!(provider, U1),
+            UserRuleContext::CU1(provider) => build!(provider, CU1),
             UserRuleContext::Z2(provider) => build!(provider, Z2),
             UserRuleContext::ZN(provider) => build!(provider, ZN),
             UserRuleContext::FZ2(provider) => build!(provider, FZ2),
@@ -4228,6 +4255,9 @@ impl Tensor {
         let space = match bond.rule_context().as_ref() {
             UserRuleContext::U1(provider) => {
                 UserBoundSpace::U1(build_bound_space(Arc::clone(provider), hom)?)
+            }
+            UserRuleContext::CU1(provider) => {
+                UserBoundSpace::CU1(build_bound_space(Arc::clone(provider), hom)?)
             }
             UserRuleContext::Z2(provider) => {
                 UserBoundSpace::Z2(build_bound_space(Arc::clone(provider), hom)?)
@@ -4875,6 +4905,12 @@ impl Tensor {
             }
             (UserBoundSpace::U1(space), Data::C64(data)) => {
                 materialize!(space, U1, adjoint_bound_dyn, data, C64)
+            }
+            (UserBoundSpace::CU1(space), Data::F64(data)) => {
+                materialize!(space, CU1, adjoint_bound_dyn, data, F64)
+            }
+            (UserBoundSpace::CU1(space), Data::C64(data)) => {
+                materialize!(space, CU1, adjoint_bound_dyn, data, C64)
             }
             (UserBoundSpace::Z2(space), Data::F64(data)) => {
                 materialize!(space, Z2, adjoint_bound_dyn, data, F64)
@@ -5953,6 +5989,9 @@ impl Tensor {
                 (UserBoundSpace::U1(lhs), UserBoundSpace::U1(rhs)) => {
                     contract_owned!(U1, lhs, rhs)
                 }
+                (UserBoundSpace::CU1(lhs), UserBoundSpace::CU1(rhs)) => {
+                    contract_owned!(CU1, lhs, rhs)
+                }
                 (UserBoundSpace::Z2(lhs), UserBoundSpace::Z2(rhs)) => {
                     contract_owned!(Z2, lhs, rhs)
                 }
@@ -6073,6 +6112,11 @@ impl Tensor {
                 UserBoundSpace::U1(rhs_storage),
             ) => contract_bound!(&mut context.mf, dst, lhs_storage, rhs_storage),
             (
+                UserBoundSpace::CU1(dst),
+                UserBoundSpace::CU1(lhs_storage),
+                UserBoundSpace::CU1(rhs_storage),
+            ) => contract_bound!(&mut context.mf, dst, lhs_storage, rhs_storage),
+            (
                 UserBoundSpace::Z2(dst),
                 UserBoundSpace::Z2(lhs_storage),
                 UserBoundSpace::Z2(rhs_storage),
@@ -6186,6 +6230,9 @@ impl Tensor {
             rhs.ordinary_body().space.as_ref(),
         ) {
             (UserBoundSpace::U1(dst), UserBoundSpace::U1(lhs), UserBoundSpace::U1(rhs)) => {
+                contract_cuda_bound!(&mut state.mf, dst, lhs, rhs)
+            }
+            (UserBoundSpace::CU1(dst), UserBoundSpace::CU1(lhs), UserBoundSpace::CU1(rhs)) => {
                 contract_cuda_bound!(&mut state.mf, dst, lhs, rhs)
             }
             (UserBoundSpace::Z2(dst), UserBoundSpace::Z2(lhs), UserBoundSpace::Z2(rhs)) => {
@@ -6372,6 +6419,9 @@ impl Tensor {
                 (UserBoundSpace::U1(a), Data::F64(ad), UserBoundSpace::U1(b), Data::F64(bd)) => {
                     product!(U1, F64, a, ad, b, bd)
                 }
+                (UserBoundSpace::CU1(a), Data::F64(ad), UserBoundSpace::CU1(b), Data::F64(bd)) => {
+                    product!(CU1, F64, a, ad, b, bd)
+                }
                 (UserBoundSpace::Z2(a), Data::F64(ad), UserBoundSpace::Z2(b), Data::F64(bd)) => {
                     product!(Z2, F64, a, ad, b, bd)
                 }
@@ -6398,6 +6448,9 @@ impl Tensor {
                 ) => product!(FZ2U1SU2, F64, a, ad, b, bd),
                 (UserBoundSpace::U1(a), Data::C64(ad), UserBoundSpace::U1(b), Data::C64(bd)) => {
                     product!(U1, C64, a, ad, b, bd)
+                }
+                (UserBoundSpace::CU1(a), Data::C64(ad), UserBoundSpace::CU1(b), Data::C64(bd)) => {
+                    product!(CU1, C64, a, ad, b, bd)
                 }
                 (UserBoundSpace::Z2(a), Data::C64(ad), UserBoundSpace::Z2(b), Data::C64(bd)) => {
                     product!(Z2, C64, a, ad, b, bd)
@@ -6858,6 +6911,7 @@ impl Tensor {
         }
         let data = match (&dst_bound, source.space.as_ref()) {
             (UserBoundSpace::U1(dst), UserBoundSpace::U1(src)) => trace_bound!(dst, src),
+            (UserBoundSpace::CU1(dst), UserBoundSpace::CU1(src)) => trace_bound!(dst, src),
             (UserBoundSpace::Z2(dst), UserBoundSpace::Z2(src)) => trace_bound!(dst, src),
             (UserBoundSpace::ZN(dst), UserBoundSpace::ZN(src)) => trace_bound!(dst, src),
             (UserBoundSpace::FZ2(dst), UserBoundSpace::FZ2(src)) => trace_bound!(dst, src),
@@ -9250,9 +9304,10 @@ impl TensorExecutionContext {
                 Data::F64(rhs_data),
                 Scalar::F64(alpha),
             ) => {
-                // SU(3)'s generic plan omits destinations with no GEMM, while
-                // built-in plans fully overwrite and should avoid the fill.
-                if rule_kind == RuleKind::Su3 {
+                // SU(3)'s generic plan and CU(1)'s lowered plan can omit
+                // structurally zero destinations. Clear those layouts before
+                // replay; other built-in plans overwrite every storage slot.
+                if matches!(rule_kind, RuleKind::CU1 | RuleKind::Su3) {
                     dst_data.fill(0.0);
                 }
                 dispatch_contract_into(
@@ -9277,7 +9332,7 @@ impl TensorExecutionContext {
                 Data::C64(rhs_data),
                 Scalar::C64(alpha),
             ) => {
-                if rule_kind == RuleKind::Su3 {
+                if matches!(rule_kind, RuleKind::CU1 | RuleKind::Su3) {
                     dst_data.fill(Complex64::new(0.0, 0.0));
                 }
                 dispatch_contract_into(
@@ -9985,6 +10040,25 @@ fn dispatch_contract_into<D: UserScalar>(
             beta,
         ),
         (
+            UserBoundSpace::CU1(_),
+            UserBoundSpace::CU1(dst),
+            UserBoundSpace::CU1(lhs_space),
+            UserBoundSpace::CU1(rhs_space),
+        ) => contract_into_bound(
+            &mut context.mf,
+            dst,
+            dst_data,
+            lhs_space,
+            lhs_data,
+            rhs_space,
+            rhs_data,
+            lhs_axes,
+            rhs_axes,
+            output_order,
+            alpha,
+            beta,
+        ),
+        (
             UserBoundSpace::ZN(_),
             UserBoundSpace::ZN(dst),
             UserBoundSpace::ZN(lhs_space),
@@ -10218,6 +10292,7 @@ fn dispatch_permute_into_ref<D: UserScalar>(
     }
     match authority {
         UserBoundSpace::U1(space) => apply!(&mut context.mf, space.provider()),
+        UserBoundSpace::CU1(space) => apply!(&mut context.mf, space.provider()),
         UserBoundSpace::Z2(space) => apply!(&mut context.mf, space.provider()),
         UserBoundSpace::ZN(space) => apply!(&mut context.mf, space.provider()),
         UserBoundSpace::FZ2(space) => apply!(&mut context.mf, space.provider()),

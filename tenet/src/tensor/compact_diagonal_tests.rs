@@ -1124,6 +1124,10 @@ fn full_rank_one_trace_pairs_matches_the_dense_route_on_every_rule() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let spaces = [
         ("u1", Space::u1([(-1, 2), (0, 3), (1, 2)])),
+        (
+            "cu1",
+            Space::cu1([((0, 0), 2), ((0, 1), 3), ((1, 2), 2)]).unwrap(),
+        ),
         ("su2", Space::su2([(0, 2), (1, 3)]).unwrap()),
         ("fz2", Space::fz2([(0, 2), (1, 3)]).unwrap()),
         ("product", product_space()),

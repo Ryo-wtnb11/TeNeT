@@ -1147,6 +1147,159 @@ fn z2_complex_oracle_pair(
     (erased, typed)
 }
 
+/// CU(1) rank-three recoupling fixture shared by the erased and typed facades.
+fn cu1_oracle_pair(runtime: &Runtime) -> (tenet::prelude::Tensor, TensorMap<CU1FusionRule, f64>) {
+    let space = tenet::prelude::Space::cu1([((1, 2), 1)]).unwrap();
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        runtime,
+        [&space, &space, &space],
+        [&space],
+        |_, _| 1.0,
+    )
+    .unwrap();
+    let rule = Arc::new(CU1FusionRule);
+    let leg = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [(CU1Irrep::from_twice_charge(1), 1)],
+        false,
+    )
+    .unwrap();
+    let typed = TensorMap::from_block_fn(runtime, [&leg, &leg, &leg], [&leg], |_, _| 1.0).unwrap();
+    (erased, typed)
+}
+
+fn cu1_complex_oracle_pair(
+    runtime: &Runtime,
+) -> (tenet::prelude::Tensor, TensorMap<CU1FusionRule, Complex64>) {
+    let space = tenet::prelude::Space::cu1([((1, 2), 1)]).unwrap();
+    let erased = tenet::prelude::Tensor::from_block_fn(
+        runtime,
+        [&space, &space, &space],
+        [&space],
+        |_, _| Complex64::new(1.0, 2.0),
+    )
+    .unwrap();
+    let rule = Arc::new(CU1FusionRule);
+    let leg = GradedSpace::try_new(
+        Arc::clone(&rule),
+        [(CU1Irrep::from_twice_charge(1), 1)],
+        false,
+    )
+    .unwrap();
+    let typed = TensorMap::from_block_fn(runtime, [&leg, &leg, &leg], [&leg], |_, _| {
+        Complex64::new(1.0, 2.0)
+    })
+    .unwrap();
+    (erased, typed)
+}
+
+#[test]
+fn cu1_typed_and_erased_rank_three_permute_match_the_published_gauge() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = cu1_oracle_pair(&runtime);
+    assert_eq!(erased.data(), [1.0, 1.0, 1.0]);
+    assert_eq!(typed.data(), erased.data());
+    let erased = erased.permute(&[2, 0, 1], &[3]).unwrap();
+    let typed = typed.permute(&[2, 0, 1], &[3]).unwrap();
+    let expected = [2.0_f64.sqrt() / 2.0, -2.0_f64.sqrt() / 2.0, 2.0_f64.sqrt()];
+    assert_eq!(erased.data().len(), 3);
+    assert_eq!(typed.data().len(), 3);
+    for ((erased, typed), expected) in erased.data().iter().zip(typed.data()).zip(expected) {
+        assert!((erased - expected).abs() <= 1e-12, "{erased} vs {expected}");
+        assert!((typed - expected).abs() <= 1e-12, "{typed} vs {expected}");
+    }
+    assert_eq!(typed.codomain().len(), 3);
+    assert_eq!(typed.domain().len(), 1);
+}
+
+#[test]
+fn cu1_c64_adjoint_materialization_matches_the_typed_contract() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = cu1_complex_oracle_pair(&runtime);
+    let typed_adjoint = typed.adjoint().unwrap();
+    let erased_adjoint = erased.adjoint().unwrap();
+    assert_eq!(typed_adjoint.data(), erased_adjoint.try_data_c64().unwrap());
+    assert_eq!(typed_adjoint.adjoint().unwrap().data(), typed.data());
+}
+
+#[test]
+fn cu1_c64_lazy_adjoint_contract_ordered_matches_typed_values_and_spaces() {
+    // What: the erased ordinary-plus-lazy-adjoint contraction takes the
+    // prelowered CU(1) dispatch seam and agrees with the typed facade in both
+    // payload and ordered external legs.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = cu1_complex_oracle_pair(&runtime);
+    let erased_adjoint = erased.adjoint().unwrap();
+    let typed_adjoint = typed.adjoint().unwrap();
+    let order = [5, 1, 3, 0, 4, 2];
+
+    let erased = erased
+        .contract_ordered(&erased_adjoint, &[3], &[0], &order)
+        .unwrap();
+    let typed = typed.contract(&typed_adjoint, &[3], &[0], &order).unwrap();
+
+    assert_data_close_c64(typed.data(), erased.try_data_c64().unwrap());
+    for (typed_leg, erased_leg) in typed
+        .codomain_spaces()
+        .into_iter()
+        .chain(typed.domain_spaces())
+        .zip(
+            erased
+                .codomain_spaces()
+                .iter()
+                .chain(erased.domain_spaces().iter()),
+        )
+    {
+        let erased_sectors = erased_leg
+            .cu1_sectors()
+            .unwrap()
+            .into_iter()
+            .map(|((charge, sector), _)| match (charge, sector) {
+                (0, 0) => CU1Irrep::VACUUM,
+                (0, 1) => CU1Irrep::PSEUDOSCALAR,
+                (charge, 2) => CU1Irrep::from_twice_charge(charge),
+                _ => unreachable!("Space::cu1 validates its labels"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(typed_leg.is_dual(), erased_leg.is_dual());
+        assert_eq!(typed_leg.sectors().unwrap(), erased_sectors);
+        assert_eq!(
+            typed_leg.degeneracies(),
+            erased_leg
+                .cu1_sectors()
+                .unwrap()
+                .into_iter()
+                .map(|(_, degeneracy)| degeneracy)
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn cu1_otimes_matches_the_typed_facade_for_real_and_complex_payloads() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased_left, typed_left) = cu1_oracle_pair(&runtime);
+    let (erased_right, typed_right) = cu1_oracle_pair(&runtime);
+    assert_eq!(
+        typed_left.otimes(&typed_right).unwrap().data(),
+        erased_left.otimes(&erased_right).unwrap().data()
+    );
+    let (erased_left, typed_left) = cu1_complex_oracle_pair(&runtime);
+    let (erased_right, typed_right) = cu1_complex_oracle_pair(&runtime);
+    assert_eq!(
+        typed_left.otimes(&typed_right).unwrap().data(),
+        erased_left
+            .otimes(&erased_right)
+            .unwrap()
+            .try_data_c64()
+            .unwrap()
+    );
+}
+
 #[test]
 fn typed_and_erased_permute_agree_byte_for_byte_on_a_builtin_rule() {
     // What: the typed permute is the erased permute, not a lookalike — same

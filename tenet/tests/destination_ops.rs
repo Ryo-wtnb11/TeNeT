@@ -52,6 +52,72 @@ fn permute_overwrite_into_matches_owned_c64() {
 }
 
 #[test]
+fn cu1_destination_contract_and_permute_match_owned_routes() {
+    // What: CU(1)'s erased dispatcher reaches both destination-writing seams.
+    let runtime = Runtime::builder().build().unwrap();
+    let space = Space::cu1([((1, 2), 1)]).unwrap();
+    let lhs = Tensor::rand_with_seed(
+        &runtime,
+        Dtype::F64,
+        [&space, &space, &space],
+        [&space],
+        30_114,
+    )
+    .unwrap();
+    let rhs = Tensor::rand_with_seed(
+        &runtime,
+        Dtype::F64,
+        [&space, &space, &space],
+        [&space],
+        30_115,
+    )
+    .unwrap();
+    let contracted = lhs.contract(&rhs, &[3], &[0]).unwrap();
+    let mut contract_destination = contracted.scale(f64::NAN).unwrap();
+    let source =
+        Tensor::rand_with_seed(&runtime, Dtype::C64, [&space, &space], [&space], 30_116).unwrap();
+    let permuted = source.permute(&[2, 0], &[1]).unwrap();
+    let mut permute_destination = permuted
+        .scale_c64(Complex64::new(f64::NAN, f64::NAN))
+        .unwrap();
+    let mut context = TensorExecutionContext::default();
+
+    context
+        .contract_overwrite_into(
+            &mut contract_destination,
+            &lhs,
+            &rhs,
+            &[3],
+            &[0],
+            Scalar::F64(-0.75),
+        )
+        .unwrap();
+    context
+        .permute_overwrite_into(
+            &mut permute_destination,
+            &source,
+            &[2, 0],
+            &[1],
+            Scalar::C64(Complex64::new(0.5, -0.25)),
+        )
+        .unwrap();
+
+    assert_close(
+        contract_destination.data(),
+        contracted.scale(-0.75).unwrap().data(),
+        1e-12,
+    );
+    assert_close_c64(
+        permute_destination.data_c64(),
+        permuted
+            .scale_c64(Complex64::new(0.5, -0.25))
+            .unwrap()
+            .data_c64(),
+        1e-12,
+    );
+}
+
+#[test]
 fn planar_overwrite_into_matches_owned_odd_fz2_and_rejects_before_mutation() {
     // What: planar destination APIs preserve the established odd-fermion
     // transpose/repartition semantics, while malformed axes do not write.
