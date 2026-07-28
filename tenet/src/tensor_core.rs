@@ -1,6 +1,10 @@
 use std::collections::HashMap;
 
-use tenet_core::{BlockKey, MultiplicityFreeRigidSymbols, PreparedTreePairOperation, RuleIdentity};
+use tenet_core::{
+    merge_fusion_trees_multiplicity_free, BlockKey, CheckedFusionAlgebra, CheckedFusionSpaceError,
+    CoreError, FusionProductSpace, FusionTreeHomSpace, FusionTreePairKey,
+    MultiplicityFreeRigidSymbols, PreparedTreePairOperation, RuleIdentity,
+};
 use tenet_matrixalgebra::SectorSpectrum;
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace, FusionOperand,
@@ -10,19 +14,6 @@ use tenet_tensors::{
 
 use crate::runtime::Ctx;
 use crate::tensor::{internal_layout_error, UserScalar};
-
-pub(crate) fn tensor_product_output_axes(
-    lhs_nout: usize,
-    lhs_rank: usize,
-    rhs_nout: usize,
-    rhs_rank: usize,
-) -> Vec<usize> {
-    (0..lhs_nout)
-        .chain(lhs_rank..lhs_rank + rhs_nout)
-        .chain(lhs_nout..lhs_rank)
-        .chain(lhs_rank + rhs_nout..lhs_rank + rhs_rank)
-        .collect()
-}
 
 /// Transforms a compact diagonal spectrum through a rank-(1,1) leg swap
 /// without ever building the `Σ_c k_c²` dense payload — TensorKit 0.17
@@ -326,41 +317,238 @@ where
     Ok((destination, data))
 }
 
-/// Empty-axis tensor product with an explicit output split.
+/// TensorKit tensor product: merge codomain trees with codomain trees and
+/// domain trees with domain trees, without crossing either pair of legs.
 pub(crate) fn tensorproduct_owned_multiplicity_free<R, D>(
-    context: &mut Ctx<D, RuleIdentity>,
     lhs: BoundDynamicTensorRef<'_, R, D>,
     rhs: BoundDynamicTensorRef<'_, R, D>,
-    output_order: OutputAxisOrder<'_>,
-    dst_nout: usize,
 ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), tenet_tensors::OperationError>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + TreeTransformRuleCacheKey<Key = RuleIdentity>,
     D: UserScalar,
 {
-    #[cfg(test)]
-    observe_contract_seam_call();
-    let destination = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered_with_nout(
-        lhs.space(),
-        rhs.space(),
-        &[],
-        &[],
-        output_order,
-        dst_nout,
-    )?;
+    let rule = lhs.space().provider();
+    if rule.rule_identity() != rhs.space().provider().rule_identity() {
+        return Err(tenet_tensors::OperationError::Core(
+            CoreError::FusionRuleMismatch {
+                expected: rule.rule_identity(),
+                actual: rhs.space().provider().rule_identity(),
+            },
+        ));
+    }
+    let lhs_hom = lhs.space().space().homspace();
+    let rhs_hom = rhs.space().space().homspace();
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new(
+            lhs_hom
+                .codomain()
+                .legs()
+                .iter()
+                .chain(rhs_hom.codomain().legs())
+                .cloned(),
+        ),
+        FusionProductSpace::new(
+            lhs_hom
+                .domain()
+                .legs()
+                .iter()
+                .chain(rhs_hom.domain().legs())
+                .cloned(),
+        ),
+    );
+    let destination = lhs.space().derive_from_final_homspace(homspace)?;
+
+    struct Contribution {
+        lhs: usize,
+        rhs: usize,
+        destination: usize,
+        coefficient: f64,
+    }
+    let lhs_structure = lhs.space().space().structure();
+    let rhs_structure = rhs.space().space().structure();
+    let dst_structure = destination.space().structure();
+    let mut contributions = Vec::new();
+    for lhs_index in 0..lhs_structure.block_count() {
+        let BlockKey::FusionTree(lhs_key) = lhs_structure.block(lhs_index)?.key() else {
+            return Err(tenet_tensors::OperationError::ExpectedFusionTreeBlock {
+                tensor: "lhs",
+                index: lhs_index,
+            });
+        };
+        for rhs_index in 0..rhs_structure.block_count() {
+            let BlockKey::FusionTree(rhs_key) = rhs_structure.block(rhs_index)?.key() else {
+                return Err(tenet_tensors::OperationError::ExpectedFusionTreeBlock {
+                    tensor: "rhs",
+                    index: rhs_index,
+                });
+            };
+            for coupled in rule
+                .try_fusion_channels(
+                    lhs_key.codomain_tree().coupled(),
+                    rhs_key.codomain_tree().coupled(),
+                )
+                .map_err(|error| tenet_tensors::OperationError::FusionAlgebra(Box::new(error)))?
+            {
+                let codomain = merge_fusion_trees_multiplicity_free(
+                    rule,
+                    lhs_key.codomain_tree(),
+                    rhs_key.codomain_tree(),
+                    coupled,
+                )
+                .map_err(tensor_product_checked_error)?;
+                let domain = merge_fusion_trees_multiplicity_free(
+                    rule,
+                    lhs_key.domain_tree(),
+                    rhs_key.domain_tree(),
+                    coupled,
+                )
+                .map_err(tensor_product_checked_error)?;
+                for (codomain, codomain_coefficient) in &codomain {
+                    for (domain, domain_coefficient) in &domain {
+                        let key = FusionTreePairKey::pair(codomain.clone(), domain.clone());
+                        let destination_index = dst_structure
+                            .find_block_index_by_fusion_tree_pair(&key)
+                            .ok_or_else(|| tenet_tensors::OperationError::MissingBlockKey {
+                                key: Box::new(BlockKey::FusionTree(key)),
+                            })?;
+                        contributions.push(Contribution {
+                            lhs: lhs_index,
+                            rhs: rhs_index,
+                            destination: destination_index,
+                            coefficient: *codomain_coefficient
+                                * rule.scalar_conj(*domain_coefficient),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // All categorical work and exact destination-key validation precedes the
+    // allocation. Multiple recoupling paths deliberately accumulate below.
     let mut data = vec![D::from_real(0.0); destination.space().required_len()?];
-    context.tensorcontract_fusion_dyn_into(
-        &destination,
-        &mut data,
-        lhs.space(),
-        lhs.data(),
-        rhs.space(),
-        rhs.data(),
-        TensorContractSpec::new(&[], &[], output_order),
-        D::from_real(1.0),
-        D::from_real(0.0),
-    )?;
+    let lhs_nout = lhs.space().space().nout();
+    let rhs_nout = rhs.space().space().nout();
+    for contribution in contributions {
+        let lhs_block = lhs_structure.block(contribution.lhs)?;
+        let rhs_block = rhs_structure.block(contribution.rhs)?;
+        let dst_block = dst_structure.block(contribution.destination)?;
+        scatter_tensor_product_block(
+            lhs.data(),
+            lhs_block,
+            lhs_nout,
+            rhs.data(),
+            rhs_block,
+            rhs_nout,
+            &mut data,
+            dst_block,
+            contribution.coefficient,
+        )?;
+    }
     Ok((destination, data))
+}
+
+fn tensor_product_checked_error(error: CheckedFusionSpaceError) -> tenet_tensors::OperationError {
+    match error {
+        CheckedFusionSpaceError::Core(error) => tenet_tensors::OperationError::Core(*error),
+        CheckedFusionSpaceError::FusionAlgebra(error) => {
+            tenet_tensors::OperationError::FusionAlgebra(error)
+        }
+        _ => tenet_tensors::OperationError::InvalidArgument {
+            message: "unknown checked fusion-tree merge error",
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scatter_tensor_product_block<D: UserScalar>(
+    lhs_data: &[D],
+    lhs: tenet_core::BlockRef<'_>,
+    lhs_nout: usize,
+    rhs_data: &[D],
+    rhs: tenet_core::BlockRef<'_>,
+    rhs_nout: usize,
+    destination_data: &mut [D],
+    destination: tenet_core::BlockRef<'_>,
+    coefficient: f64,
+) -> Result<(), tenet_tensors::OperationError> {
+    let expected_shape = lhs.shape()[..lhs_nout]
+        .iter()
+        .chain(&rhs.shape()[..rhs_nout])
+        .chain(&lhs.shape()[lhs_nout..])
+        .chain(&rhs.shape()[rhs_nout..])
+        .copied()
+        .collect::<Vec<_>>();
+    if destination.shape() != expected_shape {
+        return Err(tenet_tensors::OperationError::StructureMismatch {
+            tensor: "tensor-product destination",
+        });
+    }
+
+    let lhs_count = lhs.element_count()?;
+    let rhs_count = rhs.element_count()?;
+    let mut lhs_coordinates = vec![0; lhs.shape().len()];
+    for _ in 0..lhs_count {
+        let lhs_position = block_position(lhs.offset(), lhs.strides(), &lhs_coordinates);
+        let mut rhs_coordinates = vec![0; rhs.shape().len()];
+        for _ in 0..rhs_count {
+            let rhs_position = block_position(rhs.offset(), rhs.strides(), &rhs_coordinates);
+            let destination_position = destination.offset()
+                + lhs_coordinates[..lhs_nout]
+                    .iter()
+                    .zip(&destination.strides()[..lhs_nout])
+                    .map(|(&index, &stride)| index * stride)
+                    .sum::<usize>()
+                + rhs_coordinates[..rhs_nout]
+                    .iter()
+                    .zip(&destination.strides()[lhs_nout..lhs_nout + rhs_nout])
+                    .map(|(&index, &stride)| index * stride)
+                    .sum::<usize>()
+                + lhs_coordinates[lhs_nout..]
+                    .iter()
+                    .zip(
+                        &destination.strides()[lhs_nout + rhs_nout
+                            ..lhs_nout + rhs_nout + lhs.shape().len() - lhs_nout],
+                    )
+                    .map(|(&index, &stride)| index * stride)
+                    .sum::<usize>()
+                + rhs_coordinates[rhs_nout..]
+                    .iter()
+                    .zip(
+                        &destination.strides()
+                            [lhs_nout + rhs_nout + lhs.shape().len() - lhs_nout..],
+                    )
+                    .map(|(&index, &stride)| index * stride)
+                    .sum::<usize>();
+            let value =
+                (lhs_data[lhs_position] * rhs_data[rhs_position]).scale_by_coefficient(coefficient);
+            destination_data[destination_position] = destination_data[destination_position] + value;
+            increment_coordinates(&mut rhs_coordinates, rhs.shape());
+        }
+        increment_coordinates(&mut lhs_coordinates, lhs.shape());
+    }
+    Ok(())
+}
+
+fn block_position(offset: usize, strides: &[usize], coordinates: &[usize]) -> usize {
+    offset
+        + coordinates
+            .iter()
+            .zip(strides)
+            .map(|(&index, &stride)| index * stride)
+            .sum::<usize>()
+}
+
+fn increment_coordinates(coordinates: &mut [usize], shape: &[usize]) {
+    for (coordinate, &extent) in coordinates.iter_mut().zip(shape) {
+        *coordinate += 1;
+        if *coordinate < extent {
+            return;
+        }
+        *coordinate = 0;
+    }
 }
 
 /// Categorical composition (TensorKit `A * B` / `mul!`) of two owned

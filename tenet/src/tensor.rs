@@ -60,8 +60,8 @@ use crate::error::Error;
 use crate::runtime::{rule_lanes, Ctx, Ctxs, Runtime, RuntimeExecutionConfig, RuntimeIdentity};
 use crate::space::{Fz2U1Su2Rule, RuleKind, Space, U1Fz2Rule, UserRuleContext};
 use crate::tensor_core::{
-    tensor_product_output_axes, tensorcontract_owned_multiplicity_free,
-    tensorproduct_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
+    tensorcontract_owned_multiplicity_free, tensorproduct_owned_multiplicity_free,
+    tree_transform_owned_multiplicity_free,
 };
 
 mod diagonal;
@@ -6025,24 +6025,12 @@ impl Tensor {
                 .otimes(&rhs.densified_if_diagonal());
         }
 
-        let output_axes = tensor_product_output_axes(
-            self.codomain_rank(),
-            self.rank(),
-            rhs.codomain_rank(),
-            rhs.rank(),
-        );
-        let dst_nout = self.codomain_rank() + rhs.codomain_rank();
         if self.rule_kind() != RuleKind::Su3 && self.placement() == Placement::Host {
-            let mut lease = self.rt.lease_context()?;
-            let context = lease.context();
             macro_rules! product {
                 ($variant:ident, $data:ident, $lhs:expr, $lhs_data:expr, $rhs:expr, $rhs_data:expr) => {{
                     let (space, data) = tensorproduct_owned_multiplicity_free(
-                        context.multiplicity_free_lane::<_>(),
                         BoundDynamicTensorRef::try_new($lhs, $lhs_data)?,
                         BoundDynamicTensorRef::try_new($rhs, $rhs_data)?,
-                        OutputAxisOrder::from_axes(&output_axes),
-                        dst_nout,
                     )?;
                     return self.with_bound(UserBoundSpace::$variant(space), Data::$data(data));
                 }};
@@ -6105,6 +6093,15 @@ impl Tensor {
             }
         }
 
+        // SU(3) remains on the generic-fusion fallback; its multiplicity
+        // indices require the generic merge kernel, outside this
+        // multiplicity-free implementation.
+        let output_axes = (0..self.codomain_rank())
+            .chain(self.rank()..self.rank() + rhs.codomain_rank())
+            .chain(self.codomain_rank()..self.rank())
+            .chain(self.rank() + rhs.codomain_rank()..self.rank() + rhs.rank())
+            .collect::<Vec<_>>();
+        let dst_nout = self.codomain_rank() + rhs.codomain_rank();
         let contracted = self.contract(rhs, &[], &[])?;
         contracted.permute(&output_axes[..dst_nout], &output_axes[dst_nout..])
     }

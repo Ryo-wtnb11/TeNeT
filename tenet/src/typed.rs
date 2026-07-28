@@ -238,9 +238,8 @@ use crate::tensor::{
     PlanarRequestKind, TensorScalar,
 };
 use crate::tensor_core::{
-    tensor_product_output_axes, tensorcompose_owned_multiplicity_free,
-    tensorcontract_owned_multiplicity_free, tensorproduct_owned_multiplicity_free,
-    tree_transform_owned_multiplicity_free,
+    tensorcompose_owned_multiplicity_free, tensorcontract_owned_multiplicity_free,
+    tensorproduct_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
 };
 
 /// One tensor leg: a provider plus the sector-to-degeneracy map of that axis
@@ -2119,19 +2118,9 @@ where
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }
-        let output_axes = tensor_product_output_axes(
-            self.codomain_rank(),
-            self.rank(),
-            other.codomain_rank(),
-            other.rank(),
-        );
-        let mut lease = self.runtime.lease_context()?;
         let (space, data) = tensorproduct_owned_multiplicity_free(
-            lease.context().multiplicity_free_lane::<D>(),
             BoundDynamicTensorRef::try_new(&self.body.space, self.dense_data())?,
             BoundDynamicTensorRef::try_new(&other.body.space, other.dense_data())?,
-            OutputAxisOrder::from_axes(&output_axes),
-            self.codomain_rank() + other.codomain_rank(),
         )?;
         Ok(Self {
             runtime: self.runtime.clone(),

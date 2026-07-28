@@ -9643,6 +9643,80 @@ impl SectorCodec for PlanarZ2 {
 }
 
 #[test]
+fn external_nobraiding_otimes_merges_sides_without_crossing() {
+    // What: TensorKit `otimes` merges codomain trees with codomain trees and
+    // domain trees with domain trees. Both operands carry the non-unit planar
+    // sector, so the old contract-plus-permute route failed with
+    // `UnsupportedBraidingStyle` while this monoidal route needs no R symbol.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(PlanarZ2);
+    let lhs_cod = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(PlanarParity(0), 1), (PlanarParity(1), 1)],
+        false,
+    )
+    .unwrap();
+    let lhs_dom = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(PlanarParity(0), 1), (PlanarParity(1), 1)],
+        true,
+    )
+    .unwrap();
+    let rhs_cod = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(PlanarParity(0), 1), (PlanarParity(1), 1)],
+        true,
+    )
+    .unwrap();
+    let rhs_dom = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(PlanarParity(0), 1), (PlanarParity(1), 1)],
+        false,
+    )
+    .unwrap();
+    let lhs: TensorMap<PlanarZ2, f64> =
+        TensorMap::from_block_fn(&runtime, [&lhs_cod], [&lhs_dom], |sectors, _| {
+            [2.0, 3.0][usize::from(sectors.coupled().0)]
+        })
+        .unwrap();
+    let rhs: TensorMap<PlanarZ2, f64> =
+        TensorMap::from_block_fn(&runtime, [&rhs_cod], [&rhs_dom], |sectors, _| {
+            [5.0, 7.0][usize::from(sectors.coupled().0)]
+        })
+        .unwrap();
+    let expected: TensorMap<PlanarZ2, f64> = TensorMap::from_block_fn(
+        &runtime,
+        [&lhs_cod, &rhs_cod],
+        [&lhs_dom, &rhs_dom],
+        |sectors, _| {
+            let codomain = sectors.codomain_uncoupled();
+            let domain = sectors.domain_uncoupled();
+            if codomain[0] == domain[0] && codomain[1] == domain[1] {
+                [2.0, 3.0][usize::from(codomain[0].0)] * [5.0, 7.0][usize::from(codomain[1].0)]
+            } else {
+                0.0
+            }
+        },
+    )
+    .unwrap();
+
+    let actual = lhs.otimes(&rhs).unwrap();
+
+    assert_eq!((actual.numout(), actual.numin()), (2, 2));
+    assert_eq!(actual.data(), expected.data());
+    assert_eq!(
+        actual
+            .codomain_spaces()
+            .into_iter()
+            .chain(actual.domain_spaces())
+            .map(|space| space.is_dual())
+            .collect::<Vec<_>>(),
+        [false, true, true, false]
+    );
+}
+
+#[test]
 fn external_nobraiding_twist_and_flip_reject_nontrivial_sectors() {
     // What (PR #620 review P2): under `BraidingStyleKind::NoBraiding` the
     // twist eigenvalue is undefined, so twist/flip on a leg carrying any
