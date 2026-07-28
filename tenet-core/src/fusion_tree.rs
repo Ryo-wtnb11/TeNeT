@@ -1748,7 +1748,7 @@ pub fn merge_fusion_trees_multiplicity_free<R>(
     coupled: SectorId,
 ) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CheckedFusionSpaceError>
 where
-    R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra,
+    R: MultiplicityFreeRigidSymbols + CheckedFusionAlgebra + CanonicalUnitFusionRule,
     R::Scalar: Clone + Mul<Output = R::Scalar>,
 {
     lhs.validate_for_rule_checked(rule)?;
@@ -1763,8 +1763,9 @@ where
         .into());
     }
 
-    // Rank-zero trees are the tensor unit. Handling them structurally also
-    // avoids manufacturing and then deleting a synthetic vacuum leaf.
+    // The CanonicalUnitFusionRule bound is the proof that these rank-zero
+    // branches have unit coefficient. Handling them structurally also avoids
+    // manufacturing and then deleting a synthetic vacuum leaf.
     if lhs.uncoupled().is_empty() {
         return Ok(vec![(rhs.clone(), rule.scalar_one())]);
     }

@@ -2181,7 +2181,10 @@ where
     /// The two codomain trees and the two domain trees are merged
     /// independently with F moves. No legs cross and no R symbol is needed,
     /// including for a `NoBraiding` provider.
-    pub fn otimes(&self, other: &Self) -> Result<Self, Error> {
+    pub fn otimes(&self, other: &Self) -> Result<Self, Error>
+    where
+        R: CanonicalUnitFusionRule,
+    {
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }

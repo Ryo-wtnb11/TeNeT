@@ -611,6 +611,7 @@ mod tests {
     }
 
     impl MultiplicityFreeFusionRule for PlanarZ2Rule {}
+    impl CanonicalUnitFusionRule for PlanarZ2Rule {}
 
     impl CheckedFusionAlgebra for PlanarZ2Rule {
         fn try_dual_sector(

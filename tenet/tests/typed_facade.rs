@@ -9807,6 +9807,7 @@ impl FusionRule for PlanarZ2 {
 }
 
 impl MultiplicityFreeFusionRule for PlanarZ2 {}
+impl tenet::core::CanonicalUnitFusionRule for PlanarZ2 {}
 
 impl MultiplicityFreeFusionSymbols for PlanarZ2 {
     type Scalar = f64;

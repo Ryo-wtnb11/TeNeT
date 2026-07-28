@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use tenet_core::{
-    merge_fusion_trees_multiplicity_free, BlockKey, CheckedFusionAlgebra, CheckedFusionSpaceError,
-    CoreError, FusionProductSpace, FusionTreeHomSpace, FusionTreePairKey,
+    merge_fusion_trees_multiplicity_free, BlockKey, CanonicalUnitFusionRule, CheckedFusionAlgebra,
+    CheckedFusionSpaceError, CoreError, FusionProductSpace, FusionTreeHomSpace, FusionTreePairKey,
     MultiplicityFreeRigidSymbols, PreparedTreePairOperation, RuleIdentity,
 };
 use tenet_matrixalgebra::SectorSpectrum;
@@ -326,6 +326,7 @@ pub(crate) fn tensorproduct_owned_multiplicity_free<R, D>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
+        + CanonicalUnitFusionRule
         + TreeTransformRuleCacheKey<Key = RuleIdentity>,
     D: UserScalar,
 {
