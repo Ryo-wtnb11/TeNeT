@@ -70,29 +70,20 @@ documentation carries the compiling example; the erased `Space::product` and
 `Space::fz2_u1_su2` are two fixed conveniences kept for compatibility and are
 not the extension mechanism.
 
-The provider-typed facade `tenet::typed::{GradedSpace<R>, TensorMap<R, D>}` is
-where the architecture is headed: `R` stays concrete, sectors come back as the
-provider's own labels (`SectorCodec::Sector`) instead of opaque `SectorId`s, and
-the payload dtype `D` (`f64` / `Complex64`) is independent of the provider's
-categorical coefficient scalar — the separation TensorKit makes between a
-tensor's `T` and its sector type. Construction goes exclusively through a
-transactional checked admission path, so a provider that reports an invalid or
-unrepresentable algebra fails with a typed error and publishes no layout, cache
-or admission state.
+TeNeT has two peer user facades. The provider-typed
+[`tenet::typed`](tenet/src/typed.rs) facade
+(`GradedSpace<R>`, `TensorMap<R, D>`) keeps `R` concrete, returns the provider's
+own labels (`SectorCodec::Sector`), and separates payload dtype `D` (`f64` /
+`Complex64`) from the categorical coefficient scalar. It ships construction,
+inspection, transforms and contractions, scalar/reduction operations,
+factorizations and matrix functions, and compact-diagonal paths. Construction
+uses transactional checked admission, so an invalid or unrepresentable algebra
+publishes no layout, cache, or admission state.
 
-That facade is deliberately small today: construction and inspection only
-(`zeros`, `from_block_fn`, leg/block accessors). Direct transform and
-contraction on `TensorMap` are in progress, and the operation surface gets its
-own review before it grows — which is also why `tenet::typed` is not in the
-prelude yet.
-
-The erased `Runtime` / `Space` / `Tensor` / `tensor!` layer is the ergonomic
-and compatibility wrapper over the built-in symmetries. It is mature, fully
-functional, and by a wide margin the richest surface — decompositions,
-contraction planning, fermionic signs, SU(3), CUDA paths — so it is what you
-should use today. It is the convenience layer, not the architectural direction:
-it erases the rule behind a fixed built-in set, which is exactly what the typed
-facade exists to stop doing.
+The rule-erased `Runtime` / `Space` / `Tensor` / `tensor!` facade is its peer
+for built-in providers. It owns runtime dtype and placement dispatch,
+lazy-adjoint state, `tensor!`, CUDA paths, and built-in Generic/SU(3) support.
+Neither facade replaces or wraps the other.
 
 SU(2) representation algebra itself is not reimplemented here: `tenet-sectors`
 delegates 3j/6j, F/R and Frobenius-Schur coefficients plus their caches to the
@@ -306,9 +297,9 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
 
 ## Current Limitations
 
-- The typed facade constructs and inspects tensor maps; it does not transform or
-  contract them yet, and it does not convert to or from the erased `Tensor`.
-  Anything algorithmic runs on the erased layer today.
+- The typed facade is host-only and admits checked multiplicity-free providers.
+  It has no conversion to or from the erased `Tensor`; Generic/SU(3), device
+  placement, and `tensor!` remain erased-facade gaps.
 - Execution crates reject a no-default-features build because their convenience
   APIs require a concrete executor. Use `tenet-sectors` / `tenet-core` for
   backend-free types, or enable a CPU feature or `provider-inject` for the full
