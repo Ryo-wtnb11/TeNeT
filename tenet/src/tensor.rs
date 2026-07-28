@@ -5948,6 +5948,9 @@ impl Tensor {
                 (UserBoundSpace::Z2(lhs), UserBoundSpace::Z2(rhs)) => {
                     contract_owned!(Z2, lhs, rhs)
                 }
+                (UserBoundSpace::ZN(lhs), UserBoundSpace::ZN(rhs)) => {
+                    contract_owned!(ZN, lhs, rhs)
+                }
                 (UserBoundSpace::FZ2(lhs), UserBoundSpace::FZ2(rhs)) => {
                     contract_owned!(FZ2, lhs, rhs)
                 }
@@ -6067,6 +6070,11 @@ impl Tensor {
                 UserBoundSpace::Z2(rhs_storage),
             ) => contract_bound!(&mut context.mf, dst, lhs_storage, rhs_storage),
             (
+                UserBoundSpace::ZN(dst),
+                UserBoundSpace::ZN(lhs_storage),
+                UserBoundSpace::ZN(rhs_storage),
+            ) => contract_bound!(&mut context.mf, dst, lhs_storage, rhs_storage),
+            (
                 UserBoundSpace::FZ2(dst),
                 UserBoundSpace::FZ2(lhs_storage),
                 UserBoundSpace::FZ2(rhs_storage),
@@ -6173,6 +6181,9 @@ impl Tensor {
                 contract_cuda_bound!(&mut state.mf, dst, lhs, rhs)
             }
             (UserBoundSpace::Z2(dst), UserBoundSpace::Z2(lhs), UserBoundSpace::Z2(rhs)) => {
+                contract_cuda_bound!(&mut state.mf, dst, lhs, rhs)
+            }
+            (UserBoundSpace::ZN(dst), UserBoundSpace::ZN(lhs), UserBoundSpace::ZN(rhs)) => {
                 contract_cuda_bound!(&mut state.mf, dst, lhs, rhs)
             }
             (UserBoundSpace::FZ2(dst), UserBoundSpace::FZ2(lhs), UserBoundSpace::FZ2(rhs)) => {
@@ -6356,6 +6367,9 @@ impl Tensor {
                 (UserBoundSpace::Z2(a), Data::F64(ad), UserBoundSpace::Z2(b), Data::F64(bd)) => {
                     product!(Z2, F64, a, ad, b, bd)
                 }
+                (UserBoundSpace::ZN(a), Data::F64(ad), UserBoundSpace::ZN(b), Data::F64(bd)) => {
+                    product!(ZN, F64, a, ad, b, bd)
+                }
                 (UserBoundSpace::FZ2(a), Data::F64(ad), UserBoundSpace::FZ2(b), Data::F64(bd)) => {
                     product!(FZ2, F64, a, ad, b, bd)
                 }
@@ -6379,6 +6393,9 @@ impl Tensor {
                 }
                 (UserBoundSpace::Z2(a), Data::C64(ad), UserBoundSpace::Z2(b), Data::C64(bd)) => {
                     product!(Z2, C64, a, ad, b, bd)
+                }
+                (UserBoundSpace::ZN(a), Data::C64(ad), UserBoundSpace::ZN(b), Data::C64(bd)) => {
+                    product!(ZN, C64, a, ad, b, bd)
                 }
                 (UserBoundSpace::FZ2(a), Data::C64(ad), UserBoundSpace::FZ2(b), Data::C64(bd)) => {
                     product!(FZ2, C64, a, ad, b, bd)
@@ -6834,6 +6851,7 @@ impl Tensor {
         let data = match (&dst_bound, source.space.as_ref()) {
             (UserBoundSpace::U1(dst), UserBoundSpace::U1(src)) => trace_bound!(dst, src),
             (UserBoundSpace::Z2(dst), UserBoundSpace::Z2(src)) => trace_bound!(dst, src),
+            (UserBoundSpace::ZN(dst), UserBoundSpace::ZN(src)) => trace_bound!(dst, src),
             (UserBoundSpace::FZ2(dst), UserBoundSpace::FZ2(src)) => trace_bound!(dst, src),
             (UserBoundSpace::SU2(dst), UserBoundSpace::SU2(src)) => trace_bound!(dst, src),
             (UserBoundSpace::U1FZ2(dst), UserBoundSpace::U1FZ2(src)) => {
@@ -9944,6 +9962,25 @@ fn dispatch_contract_into<D: UserScalar>(
             UserBoundSpace::Z2(dst),
             UserBoundSpace::Z2(lhs_space),
             UserBoundSpace::Z2(rhs_space),
+        ) => contract_into_bound(
+            &mut context.mf,
+            dst,
+            dst_data,
+            lhs_space,
+            lhs_data,
+            rhs_space,
+            rhs_data,
+            lhs_axes,
+            rhs_axes,
+            output_order,
+            alpha,
+            beta,
+        ),
+        (
+            UserBoundSpace::ZN(_),
+            UserBoundSpace::ZN(dst),
+            UserBoundSpace::ZN(lhs_space),
+            UserBoundSpace::ZN(rhs_space),
         ) => contract_into_bound(
             &mut context.mf,
             dst,
@@ -14232,6 +14269,31 @@ mod tk_user_api_tests {
             vec![(0, 1), (2, 2)]
         );
         assert_eq!(transposed.data(), tensor.data());
+    }
+
+    #[test]
+    fn zn_erased_compose_matches_sector_oracle() {
+        let rt = Runtime::builder().build().unwrap();
+        let v = Space::zn(2, [(0, 1), (1, 1)]).unwrap();
+        let vd = v.dual();
+        let lhs = Tensor::from_block_fn(&rt, [&v], [&vd], |key, _| {
+            if matches!(key, BlockKey::FusionTree(key) if key.codomain_uncoupled()[0].id() == 0) {
+                2.0
+            } else {
+                3.0
+            }
+        })
+        .unwrap();
+        let rhs = Tensor::from_block_fn(&rt, [&vd], [&v], |key, _| {
+            if matches!(key, BlockKey::FusionTree(key) if key.codomain_uncoupled()[0].id() == 0) {
+                5.0
+            } else {
+                7.0
+            }
+        })
+        .unwrap();
+        let composed = lhs.compose(&rhs).unwrap();
+        assert_eq!(composed.data(), &[10.0, 21.0]);
     }
 
     #[test]
