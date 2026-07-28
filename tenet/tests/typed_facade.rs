@@ -1390,6 +1390,62 @@ fn typed_and_erased_contract_agree_byte_for_byte_on_a_builtin_rule() {
     assert!(typed_contracted.data().iter().any(|&value| value != 0.0));
 }
 
+#[test]
+fn otimes_keeps_tensor_map_sides_and_matches_both_facades() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased_lhs, typed_lhs) = z2_oracle_pair_split(&runtime, 1);
+    let (erased_rhs, typed_rhs) = z2_oracle_pair_split(&runtime, 2);
+
+    let erased = erased_lhs.otimes(&erased_rhs).unwrap();
+    let typed = typed_lhs.otimes(&typed_rhs).unwrap();
+
+    assert_eq!((typed.numout(), typed.numin()), (3, 3));
+    assert_eq!(typed.data(), erased.data());
+    assert_eq!(
+        typed
+            .codomain_spaces()
+            .into_iter()
+            .chain(typed.domain_spaces())
+            .map(|leg| (leg.is_dual(), leg.degeneracies().to_vec()))
+            .collect::<Vec<_>>(),
+        erased_leg_shapes(&erased)
+    );
+}
+
+#[test]
+fn otimes_rejects_runtime_and_rule_identity_mismatches() {
+    let _guard = cache_lock();
+    let first = runtime();
+    let second = runtime();
+    let provider = Arc::new(ExternalZ3::new());
+    let lhs = counting_z3(
+        &first,
+        &z3_dense_leg(&provider, 2),
+        &z3_dense_leg(&provider, 3),
+        1.0,
+    );
+    let other_runtime = counting_z3(
+        &second,
+        &z3_dense_leg(&provider, 2),
+        &z3_dense_leg(&provider, 3),
+        1.0,
+    );
+    assert!(matches!(
+        lhs.otimes(&other_runtime).unwrap_err(),
+        tenet::prelude::Error::RuntimeMismatch
+    ));
+
+    let other_rule = Arc::new(ExternalZ3::tagged(1));
+    let other_rule = counting_z3(
+        &first,
+        &z3_dense_leg(&other_rule, 2),
+        &z3_dense_leg(&other_rule, 3),
+        1.0,
+    );
+    assert!(lhs.otimes(&other_rule).is_err());
+}
+
 // ---------------------------------------------------------------------------
 // Phase 3, slice 4: non-regression gates.
 // ---------------------------------------------------------------------------

@@ -11,6 +11,19 @@ use tenet_tensors::{
 use crate::runtime::Ctx;
 use crate::tensor::{internal_layout_error, UserScalar};
 
+pub(crate) fn tensor_product_output_axes(
+    lhs_nout: usize,
+    lhs_rank: usize,
+    rhs_nout: usize,
+    rhs_rank: usize,
+) -> Vec<usize> {
+    (0..lhs_nout)
+        .chain(lhs_rank..lhs_rank + rhs_nout)
+        .chain(lhs_nout..lhs_rank)
+        .chain(lhs_rank + rhs_nout..lhs_rank + rhs_rank)
+        .collect()
+}
+
 /// Transforms a compact diagonal spectrum through a rank-(1,1) leg swap
 /// without ever building the `Σ_c k_c²` dense payload — TensorKit 0.17
 /// `src/tensors/diagonal.jl:215-242`, where `permute`/`transpose` of a
@@ -307,6 +320,43 @@ where
         rhs.space(),
         rhs.data(),
         TensorContractSpec::new(lhs_axes, rhs_axes, output_order),
+        D::from_real(1.0),
+        D::from_real(0.0),
+    )?;
+    Ok((destination, data))
+}
+
+/// Empty-axis tensor product with an explicit output split.
+pub(crate) fn tensorproduct_owned_multiplicity_free<R, D>(
+    context: &mut Ctx<D, RuleIdentity>,
+    lhs: BoundDynamicTensorRef<'_, R, D>,
+    rhs: BoundDynamicTensorRef<'_, R, D>,
+    output_order: OutputAxisOrder<'_>,
+    dst_nout: usize,
+) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), tenet_tensors::OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
+    D: UserScalar,
+{
+    #[cfg(test)]
+    observe_contract_seam_call();
+    let destination = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered_with_nout(
+        lhs.space(),
+        rhs.space(),
+        &[],
+        &[],
+        output_order,
+        dst_nout,
+    )?;
+    let mut data = vec![D::from_real(0.0); destination.space().required_len()?];
+    context.tensorcontract_fusion_dyn_into(
+        &destination,
+        &mut data,
+        lhs.space(),
+        lhs.data(),
+        rhs.space(),
+        rhs.data(),
+        TensorContractSpec::new(&[], &[], output_order),
         D::from_real(1.0),
         D::from_real(0.0),
     )?;

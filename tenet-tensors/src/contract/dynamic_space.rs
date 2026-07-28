@@ -1446,6 +1446,56 @@ where
         Self::from_derived_like(lhs, space)
     }
 
+    /// Builds a checked ordered contraction result with an explicit
+    /// codomain/domain split.
+    pub fn contracted_multiplicity_free_ordered_with_nout(
+        lhs: &Self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_order: OutputAxisOrder<'_>,
+        dst_nout: usize,
+    ) -> Result<Self, OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        Self::validate_shared_provider(lhs, rhs)?;
+        let axes = TensorContractSpec::new(lhs_axes, rhs_axes, output_order);
+        let output_rank = lhs
+            .space
+            .rank()
+            .checked_sub(lhs_axes.len())
+            .and_then(|rank| {
+                rhs.space
+                    .rank()
+                    .checked_sub(rhs_axes.len())
+                    .and_then(|rhs_rank| rank.checked_add(rhs_rank))
+            })
+            .ok_or(OperationError::RankMismatch {
+                expected: lhs_axes.len() + rhs_axes.len(),
+                actual: lhs.space.rank() + rhs.space.rank(),
+            })?;
+        if dst_nout > output_rank {
+            return Err(OperationError::RankMismatch {
+                expected: output_rank,
+                actual: dst_nout,
+            });
+        }
+        let axis_plan =
+            TensorContractAxisPlan::compile(lhs.space.rank(), rhs.space.rank(), output_rank, axes)?;
+        let space = DynamicFusionMapSpace::contracted_space_from_plan(
+            lhs.provider.as_ref(),
+            &lhs.space,
+            &rhs.space,
+            axes,
+            &axis_plan,
+            dst_nout,
+            output_rank - dst_nout,
+            lhs.layout_build.dispatch,
+        )?;
+        Self::from_derived_like(lhs, space)
+    }
+
     /// Validates contraction compatibility without building a coupled result
     /// layout. Used to retain historical contraction-before-pAB error order.
     pub fn validate_contracted_homspace_multiplicity_free(

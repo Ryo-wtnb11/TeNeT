@@ -237,7 +237,8 @@ use crate::tensor::{
     PlanarRequestKind, TensorScalar,
 };
 use crate::tensor_core::{
-    tensorcompose_owned_multiplicity_free, tensorcontract_owned_multiplicity_free,
+    tensor_product_output_axes, tensorcompose_owned_multiplicity_free,
+    tensorcontract_owned_multiplicity_free, tensorproduct_owned_multiplicity_free,
     tree_transform_owned_multiplicity_free,
 };
 
@@ -2014,6 +2015,32 @@ where
         output_axes: &[usize],
     ) -> Result<Self, Error> {
         self.contract(other, lhs_axes, rhs_axes, output_axes)
+    }
+
+    /// Tensor product in one category, ordered as
+    /// `codomain(self), codomain(other); domain(self), domain(other)`.
+    pub fn otimes(&self, other: &Self) -> Result<Self, Error> {
+        if !self.runtime.same_runtime(&other.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        let output_axes = tensor_product_output_axes(
+            self.codomain_rank(),
+            self.rank(),
+            other.codomain_rank(),
+            other.rank(),
+        );
+        let mut lease = self.runtime.lease_context()?;
+        let (space, data) = tensorproduct_owned_multiplicity_free(
+            lease.context().multiplicity_free_lane::<D>(),
+            BoundDynamicTensorRef::try_new(&self.body.space, self.dense_data())?,
+            BoundDynamicTensorRef::try_new(&other.body.space, other.dense_data())?,
+            OutputAxisOrder::from_axes(&output_axes),
+            self.codomain_rank() + other.codomain_rank(),
+        )?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            body: Arc::new(TypedTensorBody::dense(space, data)),
+        })
     }
 
     /// Categorical composition of two tensor maps, TensorKit `A * B` / `mul!`:

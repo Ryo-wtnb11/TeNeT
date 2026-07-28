@@ -60,7 +60,8 @@ use crate::error::Error;
 use crate::runtime::{rule_lanes, Ctx, Ctxs, Runtime, RuntimeExecutionConfig, RuntimeIdentity};
 use crate::space::{Fz2U1Su2Rule, RuleKind, Space, U1Fz2Rule, UserRuleContext};
 use crate::tensor_core::{
-    tensorcontract_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
+    tensor_product_output_axes, tensorcontract_owned_multiplicity_free,
+    tensorproduct_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
 };
 
 mod diagonal;
@@ -6007,6 +6008,105 @@ impl Tensor {
             rhs_axes,
             OutputAxisOrder::from_axes(output_axes),
         )
+    }
+
+    /// Tensor product in one category, ordered as
+    /// `codomain(self), codomain(rhs); domain(self), domain(rhs)`.
+    pub fn otimes(&self, rhs: &Self) -> Result<Self, Error> {
+        self.check_same_world(rhs)?;
+        if self.is_adjoint_view() || rhs.is_adjoint_view() {
+            return self.scale(1.0)?.otimes(&rhs.scale(1.0)?);
+        }
+        if matches!(self.stored_data(), Data::Diagonal(_))
+            || matches!(rhs.stored_data(), Data::Diagonal(_))
+        {
+            return self
+                .densified_if_diagonal()
+                .otimes(&rhs.densified_if_diagonal());
+        }
+
+        let output_axes = tensor_product_output_axes(
+            self.codomain_rank(),
+            self.rank(),
+            rhs.codomain_rank(),
+            rhs.rank(),
+        );
+        let dst_nout = self.codomain_rank() + rhs.codomain_rank();
+        if self.rule_kind() != RuleKind::Su3 && self.placement() == Placement::Host {
+            let mut lease = self.rt.lease_context()?;
+            let context = lease.context();
+            macro_rules! product {
+                ($variant:ident, $data:ident, $lhs:expr, $lhs_data:expr, $rhs:expr, $rhs_data:expr) => {{
+                    let (space, data) = tensorproduct_owned_multiplicity_free(
+                        context.multiplicity_free_lane::<_>(),
+                        BoundDynamicTensorRef::try_new($lhs, $lhs_data)?,
+                        BoundDynamicTensorRef::try_new($rhs, $rhs_data)?,
+                        OutputAxisOrder::from_axes(&output_axes),
+                        dst_nout,
+                    )?;
+                    return self.with_bound(UserBoundSpace::$variant(space), Data::$data(data));
+                }};
+            }
+            match (
+                self.ordinary_body().space.as_ref(),
+                self.stored_data(),
+                rhs.ordinary_body().space.as_ref(),
+                rhs.stored_data(),
+            ) {
+                (UserBoundSpace::U1(a), Data::F64(ad), UserBoundSpace::U1(b), Data::F64(bd)) => {
+                    product!(U1, F64, a, ad, b, bd)
+                }
+                (UserBoundSpace::Z2(a), Data::F64(ad), UserBoundSpace::Z2(b), Data::F64(bd)) => {
+                    product!(Z2, F64, a, ad, b, bd)
+                }
+                (UserBoundSpace::FZ2(a), Data::F64(ad), UserBoundSpace::FZ2(b), Data::F64(bd)) => {
+                    product!(FZ2, F64, a, ad, b, bd)
+                }
+                (UserBoundSpace::SU2(a), Data::F64(ad), UserBoundSpace::SU2(b), Data::F64(bd)) => {
+                    product!(SU2, F64, a, ad, b, bd)
+                }
+                (
+                    UserBoundSpace::U1FZ2(a),
+                    Data::F64(ad),
+                    UserBoundSpace::U1FZ2(b),
+                    Data::F64(bd),
+                ) => product!(U1FZ2, F64, a, ad, b, bd),
+                (
+                    UserBoundSpace::FZ2U1SU2(a),
+                    Data::F64(ad),
+                    UserBoundSpace::FZ2U1SU2(b),
+                    Data::F64(bd),
+                ) => product!(FZ2U1SU2, F64, a, ad, b, bd),
+                (UserBoundSpace::U1(a), Data::C64(ad), UserBoundSpace::U1(b), Data::C64(bd)) => {
+                    product!(U1, C64, a, ad, b, bd)
+                }
+                (UserBoundSpace::Z2(a), Data::C64(ad), UserBoundSpace::Z2(b), Data::C64(bd)) => {
+                    product!(Z2, C64, a, ad, b, bd)
+                }
+                (UserBoundSpace::FZ2(a), Data::C64(ad), UserBoundSpace::FZ2(b), Data::C64(bd)) => {
+                    product!(FZ2, C64, a, ad, b, bd)
+                }
+                (UserBoundSpace::SU2(a), Data::C64(ad), UserBoundSpace::SU2(b), Data::C64(bd)) => {
+                    product!(SU2, C64, a, ad, b, bd)
+                }
+                (
+                    UserBoundSpace::U1FZ2(a),
+                    Data::C64(ad),
+                    UserBoundSpace::U1FZ2(b),
+                    Data::C64(bd),
+                ) => product!(U1FZ2, C64, a, ad, b, bd),
+                (
+                    UserBoundSpace::FZ2U1SU2(a),
+                    Data::C64(ad),
+                    UserBoundSpace::FZ2U1SU2(b),
+                    Data::C64(bd),
+                ) => product!(FZ2U1SU2, C64, a, ad, b, bd),
+                _ => {}
+            }
+        }
+
+        let contracted = self.contract(rhs, &[], &[])?;
+        contracted.permute(&output_axes[..dst_nout], &output_axes[dst_nout..])
     }
 
     /// TensorKit `permute`: re-arranges legs with symmetric braiding.
