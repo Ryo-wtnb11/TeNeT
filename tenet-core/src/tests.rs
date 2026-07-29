@@ -1482,6 +1482,42 @@ mod tests {
     }
 
     #[test]
+    fn generic_rank_two_su3_merge_matches_pinned_tensorkit() {
+        // TensorKit 0.16.2 / SUNRepresentations 0.4.0: merge((8,8)->8,
+        // μ=2, (3,3bar)->8, 8, root μ).  This enters the checked F loop and
+        // pins the retained front vertex before generated tail vertices.
+        let rule = Su3FusionRule::new();
+        let id = |p, q| rule.sector_of(p, q).unwrap();
+        let (a, b, eight) = (id(1, 0), id(0, 1), id(1, 1));
+        let lhs = FusionTreeKey::new(
+            [eight, eight], eight, [false, false], [], [MultiplicityIndex::new(2).unwrap()],
+        );
+        let rhs = FusionTreeKey::new([a, b], eight, [false, false], [], [MultiplicityIndex::ONE]);
+        for (root, coefficients) in [
+            (1, [0.5976143046671962, 0.26726124191242406, 0.755928946018454]),
+            (2, [-0.13363062095621195, -0.8964214570007942, 0.42257712736425784]),
+        ] {
+            let terms = merge_fusion_trees_generic(
+                &rule, &lhs, &rhs, eight, MultiplicityIndex::new(root).unwrap(),
+            ).unwrap();
+            let expected = [(id(2, 1), coefficients[0]), (id(1, 0), coefficients[1]), (id(0, 2), coefficients[2])];
+            assert_eq!(terms.len(), expected.len());
+            for (term, coefficient) in &terms {
+                assert_eq!(term.uncoupled(), &[eight, eight, a, b]);
+                assert_eq!(term.coupled(), eight);
+                assert_eq!(term.is_dual(), &[false; 4]);
+                let expected_coefficient = expected.iter().find_map(|(inner, coefficient)|
+                    (*inner == term.innerlines()[1]).then_some(*coefficient),
+                ).expect("TensorKit oracle covers every emitted inner line");
+                assert_eq!(term.innerlines()[0], eight);
+                assert_eq!(term.vertices().iter().map(|mu| mu.get()).collect::<Vec<_>>(), [2, 1, 1]);
+                assert!((coefficient - expected_coefficient).abs() < 1e-12, "{coefficient} != {expected_coefficient}");
+            }
+        }
+    }
+
+
+    #[test]
     fn merge_fusion_trees_pins_nontrivial_su2_f_coefficients() {
         // What: merging a spin-1 tree into three spin-1/2 leaves is a genuine
         // associator expansion, not a pointed-rule relabelling.
