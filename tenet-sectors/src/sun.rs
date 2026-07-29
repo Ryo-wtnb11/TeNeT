@@ -331,6 +331,12 @@ fn binomial(n: usize, k: usize, cap: usize) -> Capped {
     }
 }
 
+const _: () = assert!(usize::BITS <= 64);
+
+// Why not arbitrary precision: for a valid grade g > 0 with r parts,
+// B=C(g+r-1,r)<=M. The largest prefix upper is
+// U=C(g+r-1,r-1)=B*r/g<=M²<2¹²⁸ for M=usize::MAX; later states decrease.
+// A count-before value overflowing u128 is therefore already greater than M.
 fn binomial_u128(n: usize, k: usize) -> Option<u128> {
     if k > n {
         return Some(0);
