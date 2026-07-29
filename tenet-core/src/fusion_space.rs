@@ -1551,6 +1551,33 @@ impl<'a> OrientedLegView<'a> {
             Ok(self.source.clone())
         }
     }
+
+    fn try_materialize_generic<R>(
+        self,
+        rule: &R,
+    ) -> Result<SectorLeg, CheckedGenericStructureError<R::Error>>
+    where
+        R: CheckedGenericFusion,
+    {
+        if !self.dualize {
+            return Ok(self.source.clone());
+        }
+        let sectors = self
+            .source
+            .iter()
+            .map(|(sector, degeneracy)| {
+                rule.try_dual(sector)
+                    .map(|dual| (dual, degeneracy))
+                    .map_err(CheckedGenericStructureError::Provider)
+            })
+            .collect::<Result<SmallVec<[(SectorId, usize); 8]>, _>>()?;
+        SectorLeg::try_new(sectors, !self.source.is_dual()).map_err(|_| {
+            CoreError::MalformedFusionTree {
+                message: "checked Generic dual is not injective on one tensor leg",
+            }
+            .into()
+        })
+    }
 }
 
 struct HomSpaceDescriptor<'a> {
@@ -1619,6 +1646,31 @@ impl<'a> HomSpaceDescriptor<'a> {
             .iter()
             .copied()
             .map(|view| view.try_materialize(rule))
+            .collect::<Result<SmallVec<[SectorLeg; 8]>, _>>()?;
+        Ok(FusionTreeHomSpace::new(
+            FusionProductSpace::new(codomain),
+            FusionProductSpace::new(domain),
+        ))
+    }
+
+    fn try_materialize_generic<R>(
+        &self,
+        rule: &R,
+    ) -> Result<FusionTreeHomSpace, CheckedGenericStructureError<R::Error>>
+    where
+        R: CheckedGenericFusion,
+    {
+        let codomain = self
+            .codomain()
+            .iter()
+            .copied()
+            .map(|view| view.try_materialize_generic(rule))
+            .collect::<Result<SmallVec<[SectorLeg; 8]>, _>>()?;
+        let domain = self
+            .domain()
+            .iter()
+            .copied()
+            .map(|view| view.try_materialize_generic(rule))
             .collect::<Result<SmallVec<[SectorLeg; 8]>, _>>()?;
         Ok(FusionTreeHomSpace::new(
             FusionProductSpace::new(codomain),
@@ -2357,6 +2409,26 @@ impl FusionTreeHomSpace {
         descriptor.try_materialize(rule).map_err(Into::into)
     }
 
+    /// Checked Generic sibling of [`Self::permute`] that uses the provider's
+    /// fallible dual operation without requiring [`FusionRule`].
+    #[doc(hidden)]
+    pub fn try_permute_generic_checked<R>(
+        &self,
+        rule: &R,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+    ) -> Result<Self, CheckedGenericStructureError<R::Error>>
+    where
+        R: CheckedGenericFusion,
+    {
+        let mut axes = SmallVec::<[usize; 8]>::new();
+        axes.extend_from_slice(codomain_axes);
+        axes.extend_from_slice(domain_axes);
+        validate_permutation_inline(&axes, self.rank())?;
+        let descriptor = self.select_descriptor(codomain_axes, domain_axes)?;
+        descriptor.try_materialize_generic(rule)
+    }
+
     fn select_descriptor<'a>(
         &'a self,
         codomain_axes: &[usize],
@@ -2744,12 +2816,27 @@ impl FusionTreeHomSpace {
     where
         R: CheckedGenericFusion,
     {
+        Ok(self
+            .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(rule)?
+            .commit()
+            .into_shared())
+    }
+
+    /// Stage checked Generic block metadata without entering the block
+    /// interner. This is the transaction input used by owned checked
+    /// transforms before their categorical plan is known to succeed.
+    #[doc(hidden)]
+    pub fn prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked<R>(
+        &self,
+        rule: &R,
+    ) -> Result<PreparedBlockStructure, CheckedGenericStructureError<R::Error>>
+    where
+        R: CheckedGenericFusion,
+    {
         let layout = self.fusion_tree_layout_data_generic_checked(rule)?;
         let (sector, degeneracy) =
             coupled_subblock_parts_from_leg_degeneracies(self, &layout)?;
-        BlockStructure::from_parts(sector, degeneracy)
-            .map(BlockStructure::into_shared)
-            .map_err(Into::into)
+        PreparedBlockStructure::from_parts(sector, degeneracy).map_err(Into::into)
     }
 
     #[cfg(test)]

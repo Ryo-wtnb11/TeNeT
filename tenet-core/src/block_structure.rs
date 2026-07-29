@@ -1579,23 +1579,7 @@ fn intern_block_structure_content(
 ) -> Arc<BlockStructureContent> {
     #[cfg(test)]
     BLOCK_STRUCTURE_INTERN_CALLS.set(BLOCK_STRUCTURE_INTERN_CALLS.get() + 1);
-    let mut blocks = Vec::with_capacity(sector.block_count());
-    for index in 0..sector.block_count() {
-        let sector_key = sector
-            .key(index)
-            .expect("validated block structure sector index");
-        let block = degeneracy
-            .block(index)
-            .expect("validated block structure degeneracy index");
-        blocks.push(BlockStructureContentBlock {
-            key: sector_key.clone(),
-            shape: block.shape().iter().copied().collect(),
-            strides: block.strides().iter().copied().collect(),
-            offset: block.offset(),
-        });
-    }
-
-    let blocks = Arc::<[BlockStructureContentBlock]>::from(blocks);
+    let blocks = block_structure_content_blocks(&sector, &degeneracy);
     let key = BlockStructureInternKey {
         rank: sector.rank(),
         blocks: Arc::clone(&blocks),
@@ -1620,6 +1604,28 @@ fn intern_block_structure_content(
             required_len,
         })
     })
+}
+
+fn block_structure_content_blocks(
+    sector: &SectorStructure,
+    degeneracy: &DegeneracyStructure,
+) -> Arc<[BlockStructureContentBlock]> {
+    let mut blocks = Vec::with_capacity(sector.block_count());
+    for index in 0..sector.block_count() {
+        let sector_key = sector
+            .key(index)
+            .expect("validated block structure sector index");
+        let block = degeneracy
+            .block(index)
+            .expect("validated block structure degeneracy index");
+        blocks.push(BlockStructureContentBlock {
+            key: sector_key.clone(),
+            shape: block.shape().iter().copied().collect(),
+            strides: block.strides().iter().copied().collect(),
+            offset: block.offset(),
+        });
+    }
+    blocks.into()
 }
 
 type BlockStructureArcTable = lru::LruCache<usize, Weak<BlockStructure>, rustc_hash::FxBuildHasher>;
@@ -1721,10 +1727,16 @@ impl BlockStructure {
     }
 }
 
-struct PreparedBlockStructure {
+/// Fully validated block metadata that has not entered the global interner.
+///
+/// The borrowed preview is suitable for fallible plan compilation. Call
+/// [`Self::commit`] only after all later validation has succeeded.
+#[doc(hidden)]
+pub struct PreparedBlockStructure {
     sector: SectorStructure,
     degeneracy: DegeneracyStructure,
     required_len: usize,
+    preview: OnceLock<BlockStructure>,
 }
 
 impl PreparedBlockStructure {
@@ -1763,10 +1775,33 @@ impl PreparedBlockStructure {
             sector,
             degeneracy,
             required_len,
+            preview: OnceLock::new(),
         })
     }
 
-    fn commit(self) -> BlockStructure {
+    /// Borrow an uninterned structure for validation and plan compilation.
+    #[doc(hidden)]
+    pub fn structure(&self) -> &BlockStructure {
+        self.preview.get_or_init(|| {
+            let blocks = block_structure_content_blocks(&self.sector, &self.degeneracy);
+            BlockStructure::from_content(Arc::new(BlockStructureContent {
+                id: BLOCK_STRUCTURE_CONTENT_ID.fetch_add(1, Ordering::Relaxed),
+                sector: self.sector.clone(),
+                degeneracy: self.degeneracy.clone(),
+                blocks,
+                required_len: self.required_len,
+            }))
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn required_len(&self) -> usize {
+        self.required_len
+    }
+
+    /// Publish the validated structure through the existing interner.
+    #[doc(hidden)]
+    pub fn commit(self) -> BlockStructure {
         BlockStructure::from_content(intern_block_structure_content(
             self.sector,
             self.degeneracy,

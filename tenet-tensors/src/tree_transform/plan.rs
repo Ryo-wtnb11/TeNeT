@@ -60,6 +60,15 @@ impl<E> From<OperationError> for CheckedGenericPlanError<E> {
     }
 }
 
+impl<E> From<CheckedGenericStructureError<E>> for CheckedGenericPlanError<E> {
+    fn from(error: CheckedGenericStructureError<E>) -> Self {
+        match error {
+            CheckedGenericStructureError::Provider(error) => Self::Provider(error),
+            CheckedGenericStructureError::Core(error) => Self::Core(error),
+        }
+    }
+}
+
 fn map_checked_generic_symbol_error<E>(
     error: CheckedGenericSymbolError<E>,
 ) -> CheckedGenericPlanError<E> {
@@ -81,10 +90,7 @@ fn map_checked_generic_symbol_error<E>(
 fn map_checked_generic_structure_error<E>(
     error: CheckedGenericStructureError<E>,
 ) -> CheckedGenericPlanError<E> {
-    match error {
-        CheckedGenericStructureError::Provider(error) => CheckedGenericPlanError::Provider(error),
-        CheckedGenericStructureError::Core(error) => CheckedGenericPlanError::Core(error),
-    }
+    error.into()
 }
 
 impl<E: core::fmt::Display> core::fmt::Display for CheckedGenericPlanError<E> {
@@ -318,6 +324,17 @@ where
     Ok(CheckedGenericTreePairPreflight {
         structure: src_structure,
     })
+}
+
+pub(crate) fn validate_checked_generic_tree_pair_plan_preflight<P>(
+    provider: &P,
+    operation: &TreeTransformOperation,
+    src_structure: &BlockStructure,
+) -> Result<(), CheckedGenericPlanError<P::Error>>
+where
+    P: CheckedGenericFusion,
+{
+    validate_checked_generic_tree_pair_preflight(provider, operation, src_structure).map(|_| ())
 }
 
 pub(crate) struct LocallyValidatedAllCodomainFusionTreeBlockStructure<'rule, 'structure, R> {

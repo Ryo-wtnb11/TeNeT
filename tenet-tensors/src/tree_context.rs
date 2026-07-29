@@ -4,15 +4,18 @@ use std::sync::Arc;
 
 use num_traits::Zero;
 use tenet_core::{
-    BlockStructure, GenericBraidScalar, GenericRigidSymbols, HostReadableStorage,
-    HostWritableStorage, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, Placement,
-    ScratchStorage, SimilarStorage, TensorMap,
+    BlockStructure, CheckedGenericRigidSymbols, GenericBraidScalar, GenericRigidSymbols,
+    HostReadableStorage, HostWritableStorage, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, Placement, ScratchStorage, SimilarStorage, TensorMap,
 };
 
 use crate::cache::OperationCachePolicy;
+use crate::contract::DynamicFusionMapSpace;
 use crate::storage_scratch::StorageTreeTransformWorkspace;
 use crate::tree_transform::{
-    TreeTransformCache, TreeTransformOperation, TreeTransformRuleCacheKey,
+    build_checked_generic_tree_pair_transform_group_plan,
+    validate_checked_generic_tree_pair_plan_preflight, CheckedGenericPlanError, TreeTransformCache,
+    TreeTransformOperation, TreeTransformRuleCacheKey,
 };
 use crate::{
     RecouplingCoefficientAction, ReportsPlacement, TreeTransformReplayProfile,
@@ -23,6 +26,61 @@ use tenet_operations::tree_transform_structure_with_storage_workspace_strided_ke
 use tenet_operations::OperationError;
 use tenet_operations::TreeTransformScalar;
 use tenet_operations::{DenseTreeTransformOperations, TreeTransformBackend};
+
+/// Applies one checked Generic permute or braid and returns its owned output.
+///
+/// Provider queries and replay compilation finish against an uninterned
+/// destination preview. The destination structure becomes visible only after
+/// those fallible stages succeed.
+#[doc(hidden)]
+pub fn tree_transform_dyn_owned_checked_generic<P, D>(
+    provider: &mut P,
+    operation: TreeTransformOperation,
+    src_space: &DynamicFusionMapSpace,
+    src_data: &[D],
+    alpha: D,
+) -> Result<(DynamicFusionMapSpace, Vec<D>), CheckedGenericPlanError<P::Error>>
+where
+    P: CheckedGenericRigidSymbols,
+    P::Scalar: GenericBraidScalar + Copy + Zero + Sync,
+    D: crate::DenseRecouplingScalar
+        + RecouplingCoefficientAction<P::Scalar>
+        + crate::ConjugateValue,
+{
+    let expected = src_space.required_len()?;
+    if src_data.len() != expected {
+        return Err(OperationError::ElementCountMismatch {
+            expected,
+            actual: src_data.len(),
+        }
+        .into());
+    }
+    let identity = src_space.validate_transformed_generic_checked_identity(provider)?;
+    validate_checked_generic_tree_pair_plan_preflight(provider, &operation, src_space.structure())?;
+    let prepared = src_space.prepare_transformed_generic_checked(provider, &operation, identity)?;
+    let plan = build_checked_generic_tree_pair_transform_group_plan(
+        provider,
+        operation,
+        src_space.structure(),
+    )?;
+    let replay = plan.compile_structures(prepared.structure(), src_space.structure())?;
+    let mut dst_data = vec![D::zero(); prepared.required_len()];
+
+    let dst_space = prepared.commit();
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = Default::default();
+    backend.tree_transform_structure_into_raw(
+        &mut workspace,
+        &replay,
+        dst_space.structure(),
+        src_space.structure(),
+        &mut dst_data,
+        src_data,
+        alpha,
+        D::zero(),
+    )?;
+    Ok((dst_space, dst_data))
+}
 
 #[allow(clippy::too_many_arguments)]
 #[inline]

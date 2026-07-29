@@ -72,6 +72,9 @@ fn checked_generic_late_nsymbol_failure_propagates() {
 }
 impl CheckedGenericFusion for Toy {
     type Error = ToyError;
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::of_type::<Self>()
+    }
     fn fusion_style(&self) -> FusionStyleKind {
         FusionStyleKind::Generic
     }
@@ -119,6 +122,9 @@ impl CheckedGenericFusion for Toy {
 struct DefaultFoldToy(Toy);
 impl CheckedGenericFusion for DefaultFoldToy {
     type Error = ToyError;
+    fn rule_identity(&self) -> RuleIdentity {
+        self.0.rule_identity()
+    }
     fn fusion_style(&self) -> FusionStyleKind {
         self.0.fusion_style()
     }
@@ -149,6 +155,9 @@ impl CheckedGenericFusion for DefaultFoldToy {
 struct TaintedFoldToy(Toy);
 impl CheckedGenericFusion for TaintedFoldToy {
     type Error = ToyError;
+    fn rule_identity(&self) -> RuleIdentity {
+        self.0.rule_identity()
+    }
     fn fusion_style(&self) -> FusionStyleKind {
         self.0.fusion_style()
     }
