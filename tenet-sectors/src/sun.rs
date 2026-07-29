@@ -1,8 +1,11 @@
 use std::fmt;
 use std::sync::Arc;
 
+use num_traits::ToPrimitive;
+
 use crate::{
-    BraidingStyleKind, CheckedGenericFusion, FusionStyleKind, RuleIdentity, SectorId, SectorVec,
+    BraidingStyleKind, CheckedGenericFusion, CheckedGenericRigidSymbols, FusionStyleKind,
+    GenericFArray, GenericRMatrix, RuleIdentity, SectorId, SectorVec, SymbolShapeError,
 };
 
 const CODEC_VERSION: &[u8] = b"tenet:sun:dynkin:graded-total-then-lex:v1";
@@ -41,6 +44,22 @@ pub enum SUNFusionRuleError {
     DecodeOverflow {
         sector: SectorId,
     },
+    DimensionNotRepresentable {
+        sector: SectorId,
+    },
+    UnexpectedFShape {
+        expected: [usize; 4],
+        found: [usize; 4],
+    },
+    UnexpectedRShape {
+        expected: [usize; 2],
+        found: [usize; 2],
+    },
+    MalformedSymbolData(SymbolShapeError),
+    InvalidPivotalPhase {
+        sector: SectorId,
+        value: f64,
+    },
     Racah(racah::sun::SunError),
 }
 
@@ -73,6 +92,23 @@ impl fmt::Display for SUNFusionRuleError {
                     sector.id()
                 )
             }
+            Self::DimensionNotRepresentable { sector } => write!(
+                f,
+                "exact dimension for SectorId {} is not a finite positive f64",
+                sector.id()
+            ),
+            Self::UnexpectedFShape { expected, found } => {
+                write!(f, "Racah F shape {found:?} does not match {expected:?}")
+            }
+            Self::UnexpectedRShape { expected, found } => {
+                write!(f, "Racah R shape {found:?} does not match {expected:?}")
+            }
+            Self::MalformedSymbolData(error) => write!(f, "malformed Racah symbol data: {error}"),
+            Self::InvalidPivotalPhase { sector, value } => write!(
+                f,
+                "F-derived pivotal phase for SectorId {} is invalid ({value})",
+                sector.id()
+            ),
             Self::Racah(error) => write!(f, "Racah SU(N) error: {error}"),
         }
     }
@@ -82,6 +118,7 @@ impl std::error::Error for SUNFusionRuleError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::LabelAllocation { source, .. } => Some(source),
+            Self::MalformedSymbolData(error) => Some(error),
             Self::Racah(error) => Some(error),
             _ => None,
         }
@@ -215,6 +252,9 @@ impl SUNFusionRule {
         bytes.extend_from_slice(&(usize::BITS).to_le_bytes());
         bytes.extend_from_slice(&self.n.to_le_bytes());
         bytes.extend_from_slice(b":generic:bosonic:racah-sun");
+        bytes.extend_from_slice(
+            b":rigid=f64-finite-exact-dim:f-axes=mu-nu-kappa-lambda:r-axes=mu-nu:pivotal=f-sign-0000",
+        );
         bytes.extend_from_slice(racah::sun::sun_authority_fingerprint());
         Arc::from(bytes)
     }
@@ -222,6 +262,14 @@ impl SUNFusionRule {
     fn irrep(&self, sector: SectorId) -> Result<racah::sun::Irrep, SUNFusionRuleError> {
         let labels = self.decode_dynkin(sector)?;
         racah::sun::Irrep::from_dynkin(&labels).map_err(SUNFusionRuleError::Racah)
+    }
+
+    fn dim_scalar(&self, sector: SectorId) -> Result<f64, SUNFusionRuleError> {
+        self.irrep(sector)?
+            .dim()
+            .to_f64()
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .ok_or(SUNFusionRuleError::DimensionNotRepresentable { sector })
     }
 }
 
@@ -280,6 +328,94 @@ impl CheckedGenericFusion for SUNFusionRule {
         let product = racah::sun::directproduct(&self.irrep(left)?, &self.irrep(right)?)
             .map_err(SUNFusionRuleError::Racah)?;
         Ok(product.get(&self.irrep(coupled)?).copied().unwrap_or(0) as usize)
+    }
+}
+
+impl CheckedGenericRigidSymbols for SUNFusionRule {
+    type Scalar = f64;
+
+    fn try_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<f64, Self::Error> {
+        Ok(self.dim_scalar(sector)?.sqrt())
+    }
+
+    fn try_inv_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<f64, Self::Error> {
+        Ok(self.dim_scalar(sector)?.sqrt().recip())
+    }
+
+    fn try_frobenius_schur_phase_scalar(&mut self, sector: SectorId) -> Result<f64, Self::Error> {
+        let a = self.irrep(sector)?;
+        let dual = a.dual();
+        let unit = racah::sun::Irrep::trivial(self.n).map_err(SUNFusionRuleError::Racah)?;
+        let block = racah::sun::f_symbol(&a, &dual, &a, &a, &unit, &unit)
+            .map_err(SUNFusionRuleError::Racah)?;
+        if block.dims() != [1, 1, 1, 1] {
+            return Err(SUNFusionRuleError::UnexpectedFShape {
+                expected: [1, 1, 1, 1],
+                found: block.dims(),
+            });
+        }
+        let coefficient = block.at(0, 0, 0, 0);
+        if !coefficient.is_finite() || coefficient == 0.0 {
+            return Err(SUNFusionRuleError::InvalidPivotalPhase {
+                sector,
+                value: coefficient,
+            });
+        }
+        Ok(coefficient.signum())
+    }
+
+    fn try_f_symbol_generic(
+        &mut self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> Result<GenericFArray<f64>, Self::Error> {
+        let expected = [
+            self.try_nsymbol(a, b, e)?,
+            self.try_nsymbol(e, c, d)?,
+            self.try_nsymbol(b, c, f)?,
+            self.try_nsymbol(a, f, d)?,
+        ];
+        let block = racah::sun::f_symbol(
+            &self.irrep(a)?,
+            &self.irrep(b)?,
+            &self.irrep(c)?,
+            &self.irrep(d)?,
+            &self.irrep(e)?,
+            &self.irrep(f)?,
+        )
+        .map_err(SUNFusionRuleError::Racah)?;
+        if block.dims() != expected {
+            return Err(SUNFusionRuleError::UnexpectedFShape {
+                expected,
+                found: block.dims(),
+            });
+        }
+        GenericFArray::try_new(
+            block.data().to_vec(),
+            (expected[0], expected[1], expected[2], expected[3]),
+        )
+        .map_err(SUNFusionRuleError::MalformedSymbolData)
+    }
+
+    fn try_r_symbol_generic(
+        &mut self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+    ) -> Result<GenericRMatrix<f64>, Self::Error> {
+        let expected = [self.try_nsymbol(a, b, c)?, self.try_nsymbol(b, a, c)?];
+        let block = racah::sun::r_symbol(&self.irrep(a)?, &self.irrep(b)?, &self.irrep(c)?)
+            .map_err(SUNFusionRuleError::Racah)?;
+        let found = [block.dim(), block.dim()];
+        if found != expected {
+            return Err(SUNFusionRuleError::UnexpectedRShape { expected, found });
+        }
+        GenericRMatrix::try_new(block.data().to_vec(), expected[0], expected[1])
+            .map_err(SUNFusionRuleError::MalformedSymbolData)
     }
 }
 
@@ -459,6 +595,9 @@ mod tests {
         expected.extend_from_slice(&usize::BITS.to_le_bytes());
         expected.extend_from_slice(&3usize.to_le_bytes());
         expected.extend_from_slice(b":generic:bosonic:racah-sun");
+        expected.extend_from_slice(
+            b":rigid=f64-finite-exact-dim:f-axes=mu-nu-kappa-lambda:r-axes=mu-nu:pivotal=f-sign-0000",
+        );
         expected.extend_from_slice(racah::sun::sun_authority_fingerprint());
         assert_eq!(original.as_ref(), expected);
         let mut changed = original.to_vec();
@@ -520,5 +659,106 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn su3_rigid_symbols_match_sunrepresentations_fixtures() {
+        let mut rule = SUNFusionRule::new(3).unwrap();
+        let three = rule.encode_dynkin(&[1, 0]).unwrap();
+        let anti_three = rule.encode_dynkin(&[0, 1]).unwrap();
+        let eight = rule.encode_dynkin(&[1, 1]).unwrap();
+
+        for (sector, dimension) in [(three, 3.0), (anti_three, 3.0), (eight, 8.0)] {
+            let sqrt = rule.try_sqrt_dim_scalar(sector).unwrap();
+            assert!((sqrt * sqrt - dimension).abs() < 1e-12);
+            assert!((sqrt * rule.try_inv_sqrt_dim_scalar(sector).unwrap() - 1.0).abs() < 1e-12);
+            assert_ne!(rule.try_frobenius_schur_phase_scalar(sector).unwrap(), 0.0);
+        }
+
+        let f = rule
+            .try_f_symbol_generic(eight, eight, eight, eight, eight, eight)
+            .unwrap();
+        assert_eq!(f.shape(), (2, 2, 2, 2));
+        for (index, expected) in [
+            ((0, 0, 0, 0), 0.857_142_857_142_856),
+            ((0, 0, 1, 1), -0.142_857_142_857_142_63),
+            ((0, 1, 1, 1), -0.383_325_938_999_963_37),
+            ((1, 1, 1, 1), 0.628_571_428_571_427_4),
+        ] {
+            let (mu, nu, kappa, lambda) = index;
+            assert!((*f.get(mu, nu, kappa, lambda) - expected).abs() < 1e-12);
+        }
+
+        let twenty_seven = rule.encode_dynkin(&[2, 2]).unwrap();
+        let asymmetric = rule
+            .try_f_symbol_generic(
+                twenty_seven,
+                twenty_seven,
+                anti_three,
+                anti_three,
+                eight,
+                rule.encode_dynkin(&[3, 1]).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(asymmetric.shape(), (2, 1, 1, 1));
+        assert!((*asymmetric.get(1, 0, 0, 0) - 0.797_724_035_217_465_4).abs() < 1e-12);
+
+        let r = rule.try_r_symbol_generic(eight, eight, eight).unwrap();
+        assert_eq!(r.shape(), (2, 2));
+        for (index, expected) in [
+            ((0, 0), -0.285_714_285_714_285_3),
+            ((0, 1), 0.958_314_847_499_908_8),
+            ((1, 0), 0.958_314_847_499_908_9),
+            ((1, 1), 0.285_714_285_714_285_53),
+        ] {
+            assert!((*r.get(index.0, index.1) - expected).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn su4_adjoint_rigid_shape_smoke() {
+        let mut rule = SUNFusionRule::new(4).unwrap();
+        let adjoint = rule.encode_dynkin(&[1, 0, 1]).unwrap();
+        assert_eq!(rule.dim_scalar(adjoint).unwrap(), 15.0);
+        assert_eq!(
+            rule.try_f_symbol_generic(adjoint, adjoint, adjoint, adjoint, adjoint, adjoint)
+                .unwrap()
+                .shape(),
+            (2, 2, 2, 2)
+        );
+        assert_eq!(
+            rule.try_r_symbol_generic(adjoint, adjoint, adjoint)
+                .unwrap()
+                .shape(),
+            (2, 2)
+        );
+    }
+
+    #[test]
+    fn rigid_failures_remain_typed() {
+        let mut rule = SUNFusionRule::new(3).unwrap();
+        let three = rule.encode_dynkin(&[1, 0]).unwrap();
+        let eight = rule.encode_dynkin(&[1, 1]).unwrap();
+        assert!(matches!(
+            rule.try_r_symbol_generic(three, three, eight),
+            Err(SUNFusionRuleError::Racah(
+                racah::sun::SunError::ZeroFusionChannel { .. }
+            ))
+        ));
+        assert!(matches!(
+            rule.try_f_symbol_generic(three, three, three, three, eight, three),
+            Err(SUNFusionRuleError::Racah(
+                racah::sun::SunError::ZeroFusionChannel { .. }
+            ))
+        ));
+
+        let rule = SUNFusionRule::new(78).unwrap();
+        let mut labels = vec![0; 77];
+        labels[36] = 19;
+        let sector = rule.encode_dynkin(&labels).unwrap();
+        assert!(matches!(
+            rule.dim_scalar(sector),
+            Err(SUNFusionRuleError::DimensionNotRepresentable { .. })
+        ));
     }
 }
