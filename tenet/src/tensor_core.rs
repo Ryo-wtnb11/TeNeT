@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use tenet_core::{
     merge_fusion_trees_generic, merge_fusion_trees_multiplicity_free, BlockKey,
     CanonicalUnitFusionRule, CheckedFusionAlgebra, CheckedFusionSpaceError, CoreError,
-    FusionProductSpace, FusionTreeHomSpace, FusionTreePairKey, GenericRigidSymbols,
-    MultiplicityFreeRigidSymbols, PreparedTreePairOperation, RuleIdentity,
+    FusionProductSpace, FusionTreeHomSpace, FusionTreePairKey, GenericBraidScalar,
+    GenericRigidSymbols, MultiplicityFreeRigidSymbols, PreparedTreePairOperation, RuleIdentity,
 };
 use tenet_matrixalgebra::SectorSpectrum;
 use tenet_tensors::{
@@ -614,7 +614,8 @@ where
                                 lhs: lhs_index,
                                 rhs: rhs_index,
                                 destination,
-                                coefficient: *codomain_coefficient * *domain_coefficient,
+                                coefficient: *codomain_coefficient
+                                    * domain_coefficient.braid_conj(),
                             });
                         }
                     }
