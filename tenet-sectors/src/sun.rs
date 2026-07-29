@@ -525,6 +525,20 @@ mod tests {
     }
 
     #[test]
+    fn checked_rigid_dimension_accepts_the_largest_su2_dynkin_label() {
+        let mut rule = SUNFusionRule::new(2).unwrap();
+        let sector = rule.encode_dynkin(&[i64::MAX]).unwrap();
+        let expected_dimension = 2.0_f64.powi(63);
+        let sqrt_dimension = rule.try_sqrt_dim_scalar(sector).unwrap();
+
+        assert_eq!(sqrt_dimension, expected_dimension.sqrt());
+        assert_eq!(
+            rule.try_inv_sqrt_dim_scalar(sector).unwrap(),
+            sqrt_dimension.recip()
+        );
+    }
+
+    #[test]
     fn codec_handles_bounded_binomial_cancellation() {
         if usize::BITS != 64 {
             return;
@@ -775,12 +789,12 @@ mod tests {
             ))
         ));
 
-        let rule = SUNFusionRule::new(78).unwrap();
+        let mut rule = SUNFusionRule::new(78).unwrap();
         let mut labels = vec![0; 77];
         labels[36] = 19;
         let sector = rule.encode_dynkin(&labels).unwrap();
         assert!(matches!(
-            rule.dim_scalar(sector),
+            rule.try_sqrt_dim_scalar(sector),
             Err(SUNFusionRuleError::DimensionNotRepresentable { .. })
         ));
     }
