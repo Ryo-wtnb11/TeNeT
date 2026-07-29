@@ -3042,6 +3042,139 @@ mod bound_invariant_tests {
     }
 
     #[test]
+    #[allow(clippy::arc_with_non_send_sync)] // The bound API requires Arc; these local guard spies use Cell counters.
+    fn checked_generic_bound_guards_preserve_typed_errors_before_commit() {
+        let homspace = || FusionTreeHomSpace::from_sector_ids([(0, 1), (0, 1)], [(0, 1)]);
+
+        let wrong_root_style = Arc::new(CheckedGenericSpy::new());
+        wrong_root_style.style.set(FusionStyleKind::Unique);
+        let error = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+            Arc::clone(&wrong_root_style),
+            homspace(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CheckedGenericStructureError::Core(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Generic,
+                actual: FusionStyleKind::Unique,
+            })
+        ));
+        assert_eq!(wrong_root_style.calls.get(), 0);
+
+        let mut failing_root = CheckedGenericSpy::new();
+        failing_root.fail_at = Some(1);
+        let failing_root = Arc::new(failing_root);
+        let error = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+            Arc::clone(&failing_root),
+            homspace(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CheckedGenericStructureError::Provider(CheckedGenericSpyError(1))
+        ));
+
+        let source_provider = Arc::new(CheckedGenericSpy::new());
+        let source = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+            Arc::clone(&source_provider),
+            homspace(),
+        )
+        .unwrap();
+
+        let mut wrong_identity = CheckedGenericSpy::new();
+        wrong_identity.identity = RuleIdentity::of_type::<Z2FusionRule>();
+        let error = source
+            .prepare_final_homspace_generic_with_checked(&wrong_identity, homspace())
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error,
+            CheckedGenericStructureError::Core(CoreError::FusionRuleMismatch { .. })
+        ));
+        assert_eq!(wrong_identity.calls.get(), 0);
+
+        let wrong_checker_style = CheckedGenericSpy::new();
+        wrong_checker_style.style.set(FusionStyleKind::Unique);
+        let error = source
+            .prepare_final_homspace_generic_with_checked(&wrong_checker_style, homspace())
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error,
+            CheckedGenericStructureError::Core(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Generic,
+                actual: FusionStyleKind::Unique,
+            })
+        ));
+        assert_eq!(wrong_checker_style.calls.get(), 0);
+
+        let mut failing_checker = CheckedGenericSpy::new();
+        failing_checker.fail_at = Some(1);
+        let error = source
+            .prepare_final_homspace_generic_with_checked(&failing_checker, homspace())
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error,
+            CheckedGenericStructureError::Provider(CheckedGenericSpyError(1))
+        ));
+
+        let checker = CheckedGenericSpy::new();
+        let prepared = source
+            .prepare_final_homspace_generic_with_checked(&checker, homspace())
+            .unwrap();
+        let legacy = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+            Arc::new(CheckedGenericSpy::new()),
+            homspace(),
+        )
+        .unwrap();
+        let error = legacy
+            .commit_final_homspace_generic_bound_checked(prepared)
+            .unwrap_err();
+        assert!(matches!(error, OperationError::StructureMismatch { .. }));
+
+        let mut prepared = source
+            .prepare_final_homspace_generic_with_checked(&checker, homspace())
+            .unwrap();
+        prepared.identity = RuleIdentity::of_type::<Z2FusionRule>();
+        let error = source
+            .commit_final_homspace_generic_bound_checked(prepared)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::FusionRuleMismatch { .. })
+        ));
+
+        let prepared = source
+            .prepare_final_homspace_generic_with_checked(&checker, homspace())
+            .unwrap();
+        // Contract-violating adversarial mutation proves the defensive final style guard.
+        source_provider.style.set(FusionStyleKind::Unique);
+        let error = source
+            .commit_final_homspace_generic_bound_checked(prepared)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Generic,
+                actual: FusionStyleKind::Unique,
+            })
+        ));
+        source_provider.style.set(FusionStyleKind::Generic);
+
+        let prepared = source
+            .prepare_final_homspace_generic_with_checked(&checker, homspace())
+            .unwrap();
+        let output = source
+            .commit_final_homspace_generic_bound_checked(prepared)
+            .unwrap();
+        assert!(Arc::ptr_eq(output.provider_arc(), &source_provider));
+        assert!(std::ptr::eq(output.provider(), source_provider.as_ref()));
+        assert_eq!(output.space().homspace(), &homspace());
+    }
+
+    #[test]
     #[allow(clippy::arc_with_non_send_sync)] // The bound API requires Arc; the single-threaded spy uses Cell counters.
     fn checked_generic_preparation_rejects_legacy_binding_before_checker_queries() {
         let source_provider = Arc::new(CheckedGenericSpy::new());
