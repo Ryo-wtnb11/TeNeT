@@ -8379,15 +8379,21 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
     const ISOLATED: &str = "TENET_CHECKED_GENERIC_OWNED_FAILURE_ISOLATED";
     // What: exact global-cache snapshots run outside the parallel unit-test process.
     if std::env::var_os(ISOLATED).is_none() {
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "tests::tree_transform_plan::checked_generic_owned_failure_does_not_publish_destination_state",
             ])
             .env(ISOLATED, "1")
-            .status()
+            .output()
             .unwrap();
-        assert!(status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
+            "isolated test did not execute exactly once: {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status
+        );
         return;
     }
 
