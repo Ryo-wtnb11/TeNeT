@@ -4,11 +4,12 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use tenet_core::{
-    BlockKey, BlockStructure, CheckedFusionAlgebra, CheckedFusionSpaceError, CoreError, FusionRule,
-    FusionSpaceAdmission, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
-    FusionTreePairKey, FusionTreePairOrientation, LoweredFusionTreeBuildError,
-    LoweredMultiplicityFreeAlgebra, MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols,
-    OrientedFusionTreeHomSpace, PreparedFusionTreeLayout, SectorId, SectorLeg,
+    BlockKey, BlockStructure, CheckedFusionAlgebra, CheckedFusionSpaceError, CheckedGenericFusion,
+    CheckedGenericStructureError, CoreError, FusionRule, FusionSpaceAdmission, FusionStyleKind,
+    FusionTensorMapSpace, FusionTreeHomSpace, FusionTreePairKey, FusionTreePairOrientation,
+    LoweredFusionTreeBuildError, LoweredMultiplicityFreeAlgebra, MultiplicityFreeFusionRule,
+    MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace, PreparedBlockStructure,
+    PreparedFusionTreeLayout, RuleIdentity, SectorId, SectorLeg,
     StructurallyValidatedFusionTreeSubset,
 };
 
@@ -1125,6 +1126,34 @@ pub struct BoundDynamicFusionMapSpace<R> {
 /// identity or retaining an arbitrary provider allocation.
 pub struct ValidatedDynamicFusionLayout(DynamicFusionMapSpace);
 
+pub(crate) struct PreparedCheckedGenericDynamicSpace {
+    nout: usize,
+    nin: usize,
+    homspace: FusionTreeHomSpace,
+    structure: PreparedBlockStructure,
+    identity: RuleIdentity,
+}
+
+impl PreparedCheckedGenericDynamicSpace {
+    pub(crate) fn structure(&self) -> &BlockStructure {
+        self.structure.structure()
+    }
+
+    pub(crate) fn required_len(&self) -> usize {
+        self.structure.required_len()
+    }
+
+    pub(crate) fn commit(self) -> DynamicFusionMapSpace {
+        DynamicFusionMapSpace {
+            nout: self.nout,
+            nin: self.nin,
+            homspace: Arc::new(self.homspace),
+            subblock_structure: self.structure.commit().into_shared(),
+            admission: FusionSpaceAdmission::Complete(self.identity),
+        }
+    }
+}
+
 impl ValidatedDynamicFusionLayout {
     /// Flat storage length required by this validated layout.
     ///
@@ -2174,6 +2203,42 @@ impl DynamicFusionMapSpace {
         debug_assert_eq!(nout, homspace.codomain().len());
         debug_assert_eq!(nin, homspace.domain().len());
         Self::from_final_homspace_generic(rule, homspace)
+    }
+
+    pub(crate) fn prepare_transformed_generic_checked<R>(
+        &self,
+        rule: &R,
+        operation: &TreeTransformOperation,
+    ) -> Result<PreparedCheckedGenericDynamicSpace, CheckedGenericStructureError<R::Error>>
+    where
+        R: CheckedGenericFusion,
+    {
+        let expected = match &self.admission {
+            FusionSpaceAdmission::Complete(identity) => identity.clone(),
+            _ => {
+                return Err(CoreError::MalformedFusionTree {
+                    message: "checked Generic owned transform requires a Complete source layout",
+                }
+                .into())
+            }
+        };
+        let actual = rule.rule_identity();
+        if expected != actual {
+            return Err(CoreError::FusionRuleMismatch { expected, actual }.into());
+        }
+        let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
+        let homspace =
+            self.homspace()
+                .try_permute_generic_checked(rule, codomain_axes, domain_axes)?;
+        let structure = homspace
+            .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(rule)?;
+        Ok(PreparedCheckedGenericDynamicSpace {
+            nout: codomain_axes.len(),
+            nin: domain_axes.len(),
+            homspace,
+            structure,
+            identity: actual,
+        })
     }
 
     /// Space of the contraction result in the default output order (`lhs`

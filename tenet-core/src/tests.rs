@@ -13731,6 +13731,7 @@ mod tests {
 
     impl CheckedGenericFusion for UnitaryToyOmRule {
         type Error = std::convert::Infallible;
+        fn rule_identity(&self) -> RuleIdentity { FusionRule::rule_identity(self) }
         fn fusion_style(&self) -> FusionStyleKind { FusionStyleKind::Generic }
         fn braiding_style(&self) -> BraidingStyleKind { BraidingStyleKind::Bosonic }
         fn vacuum(&self) -> SectorId { FusionRule::vacuum(self) }
@@ -13770,6 +13771,7 @@ mod tests {
     }
     impl CheckedGenericFusion for ArtinSpy {
         type Error = ArtinSpyError;
+        fn rule_identity(&self) -> RuleIdentity { FusionRule::rule_identity(&self.inner) }
         fn fusion_style(&self) -> FusionStyleKind { FusionRule::fusion_style(&self.inner) }
         fn braiding_style(&self) -> BraidingStyleKind { FusionRule::braiding_style(&self.inner) }
         fn vacuum(&self) -> SectorId { FusionRule::vacuum(&self.inner) }
@@ -14615,6 +14617,10 @@ mod tests {
     impl CheckedGenericFusion for A4BendRule {
         type Error = std::convert::Infallible;
 
+        fn rule_identity(&self) -> RuleIdentity {
+            FusionRule::rule_identity(self)
+        }
+
         fn fusion_style(&self) -> FusionStyleKind {
             FusionRule::fusion_style(self)
         }
@@ -14781,6 +14787,10 @@ mod tests {
 
     impl CheckedGenericFusion for CheckedA4Spy {
         type Error = RigidSpyError;
+
+        fn rule_identity(&self) -> RuleIdentity {
+            FusionRule::rule_identity(&A4BendRule)
+        }
 
         fn fusion_style(&self) -> FusionStyleKind {
             FusionStyleKind::Generic
@@ -20047,5 +20057,32 @@ mod tests {
             assert_eq!(error, expected);
             assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
         }
+    }
+
+    #[test]
+    fn checked_generic_block_structure_preview_stays_uninterned_until_commit() {
+        let _guard = crate::test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_core_intern_tables();
+        let rule = Su3FusionRule::new();
+        let eight = rule.sector_of(1, 1).unwrap();
+        let homspace = FusionTreeHomSpace::from_sector_ids(
+            [(eight.id(), 2), (eight.id(), 3)],
+            [(eight.id(), 5)],
+        );
+        let checked = InfallibleGeneric::new(&rule);
+        let prepared = homspace
+            .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(&checked)
+            .unwrap();
+        let before = block_structure_intern_cache_info();
+
+        assert_eq!(prepared.structure().block_count(), 2);
+        assert_eq!(prepared.required_len(), 60);
+        assert_eq!(block_structure_intern_cache_info(), before);
+
+        let committed = prepared.commit();
+        assert_eq!(committed.block_count(), 2);
+        assert_eq!(block_structure_intern_cache_info().entries(), 1);
     }
 }

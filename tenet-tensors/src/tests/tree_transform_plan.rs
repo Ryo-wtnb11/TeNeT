@@ -7769,6 +7769,10 @@ impl<'a, R> CheckedPlanSpy<'a, R> {
 impl<R: FusionRule> CheckedGenericFusion for CheckedPlanSpy<'_, R> {
     type Error = CheckedPlanSpyError;
 
+    fn rule_identity(&self) -> tenet_core::RuleIdentity {
+        self.rule.rule_identity()
+    }
+
     fn fusion_style(&self) -> FusionStyleKind {
         self.fusion_style
             .unwrap_or_else(|| self.rule.fusion_style())
@@ -8237,6 +8241,19 @@ fn su3_rank3_outer_multiplicity_pairs(rule: &tenet_core::Su3FusionRule) -> Vec<F
         .to_vec()
 }
 
+fn su3_rank3_dynamic_space(
+    rule: &tenet_core::Su3FusionRule,
+) -> crate::contract::DynamicFusionMapSpace {
+    let eight = rule.sector_of(1, 1).unwrap();
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new(
+            [2usize, 3].map(|degeneracy| SectorLeg::new([(eight, degeneracy)], false)),
+        ),
+        FusionProductSpace::new([SectorLeg::new([(eight, 5)], false)]),
+    );
+    crate::contract::DynamicFusionMapSpace::from_final_homspace_generic(rule, homspace).unwrap()
+}
+
 #[test]
 fn checked_generic_rank3_plan_matches_legacy_rows_coefficients_and_order() {
     use tenet_core::{InfallibleGeneric, Su3FusionRule};
@@ -8278,6 +8295,158 @@ fn checked_generic_rank3_plan_matches_legacy_rows_coefficients_and_order() {
             );
         }
     }
+}
+
+#[test]
+fn checked_generic_owned_transform_matches_legacy_for_r_and_inner_f_r() {
+    use tenet_core::{InfallibleGeneric, Su3FusionRule};
+
+    let rule = Su3FusionRule::new();
+    let src_space = su3_rank3_dynamic_space(&rule);
+    let src_data = (0..src_space.required_len().unwrap())
+        .map(|index| index as f64 - 7.5)
+        .collect::<Vec<_>>();
+    let source_before = src_space.clone();
+    let data_before = src_data.clone();
+
+    for operation in [
+        TreeTransformOperation::permute([1, 0], [2]),
+        TreeTransformOperation::braid([0, 2], [1], [0, 1], [2]),
+    ] {
+        let mut checked = InfallibleGeneric::new(&rule);
+        let (actual_space, actual_data) = crate::tree_transform_dyn_owned_checked_generic(
+            &mut checked,
+            operation.clone(),
+            &src_space,
+            &src_data,
+            1.25,
+        )
+        .unwrap();
+
+        let expected_space = src_space.transformed_generic(&rule, &operation).unwrap();
+        let mut expected_data = vec![0.0; expected_space.required_len().unwrap()];
+        TreeTransformExecutionContext::<f64, tenet_core::RuleIdentity>::default()
+            .tree_transform_dyn_into_generic(
+                &rule,
+                operation,
+                expected_space.structure(),
+                src_space.structure(),
+                &mut expected_data,
+                &src_data,
+                1.25,
+                0.0,
+            )
+            .unwrap();
+
+        assert_eq!(actual_space, expected_space);
+        assert_eq!(actual_data, expected_data);
+        assert_eq!(src_space, source_before);
+        assert_eq!(src_data, data_before);
+    }
+}
+
+#[test]
+fn checked_generic_owned_failure_does_not_publish_destination_state() {
+    use tenet_core::{
+        block_structure_intern_cache_info, complete_hom_space_structure_cache_info,
+        fusion_tree_layout_cache_info, Su3FusionRule,
+    };
+
+    let _guard = crate::test_support::CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let rule = Su3FusionRule::new();
+    let src_space = su3_rank3_dynamic_space(&rule);
+    let src_data = vec![1.0; src_space.required_len().unwrap()];
+    let source_before = src_space.clone();
+    let data_before = src_data.clone();
+    let operation = TreeTransformOperation::braid([0, 2], [1], [0, 1], [2]);
+    let store = RuntimeTreeTransformStore::<f64>::default();
+
+    for failure in [
+        Err((CheckedPlanCall::Dual, 1)),
+        Err((CheckedPlanCall::N, 1)),
+        Err((CheckedPlanCall::SqrtDim, 1)),
+        Err((CheckedPlanCall::InvSqrtDim, 1)),
+        Err((CheckedPlanCall::F, 2)),
+        Err((CheckedPlanCall::R, 2)),
+        Ok(MalformedCheckedSymbol::F),
+        Ok(MalformedCheckedSymbol::R),
+    ] {
+        let layout_before = fusion_tree_layout_cache_info();
+        let complete_before = complete_hom_space_structure_cache_info();
+        let interner_before = block_structure_intern_cache_info();
+        let runtime_before = store.info();
+        let mut provider = CheckedPlanSpy::new(&rule);
+        match failure {
+            Err((call, nth)) => provider.fail = Some((call, nth)),
+            Ok(symbol) => provider.malformed = Some(symbol),
+        }
+
+        let error = crate::tree_transform_dyn_owned_checked_generic(
+            &mut provider,
+            operation.clone(),
+            &src_space,
+            &src_data,
+            1.0,
+        )
+        .unwrap_err();
+        match failure {
+            Err((call, _)) => assert!(matches!(
+                error,
+                CheckedGenericPlanError::Provider(CheckedPlanSpyError(found)) if found == call
+            )),
+            Ok(MalformedCheckedSymbol::F) => assert!(matches!(
+                error,
+                CheckedGenericPlanError::SymbolShape { symbol: "F", .. }
+            )),
+            Ok(MalformedCheckedSymbol::R) => assert!(matches!(
+                error,
+                CheckedGenericPlanError::SymbolShape { symbol: "R", .. }
+            )),
+        }
+        assert_eq!(fusion_tree_layout_cache_info(), layout_before);
+        assert_eq!(complete_hom_space_structure_cache_info(), complete_before);
+        assert_eq!(block_structure_intern_cache_info(), interner_before);
+        assert_eq!(store.info(), runtime_before);
+        assert_eq!(src_space, source_before);
+        assert_eq!(src_data, data_before);
+    }
+
+    let dense_rule = DenseGenericRule;
+    let dense_homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([
+            SectorLeg::new([(SectorId::new(1), 7)], false),
+            SectorLeg::new([(SectorId::new(1), 11)], true),
+        ]),
+        FusionProductSpace::new([SectorLeg::new([(SectorId::new(1), 13)], false)]),
+    );
+    let dense_space = crate::contract::DynamicFusionMapSpace::from_final_homspace_generic(
+        &dense_rule,
+        dense_homspace,
+    )
+    .unwrap();
+    let dense_data = vec![1.0; dense_space.required_len().unwrap()];
+    let layout_before = fusion_tree_layout_cache_info();
+    let complete_before = complete_hom_space_structure_cache_info();
+    let interner_before = block_structure_intern_cache_info();
+    let mut provider = CheckedPlanSpy::new(&dense_rule);
+    provider.fail = Some((CheckedPlanCall::FrobeniusSchur, 1));
+    let error = crate::tree_transform_dyn_owned_checked_generic(
+        &mut provider,
+        TreeTransformOperation::permute([1, 0], [2]),
+        &dense_space,
+        &dense_data,
+        1.0,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        CheckedGenericPlanError::Provider(CheckedPlanSpyError(CheckedPlanCall::FrobeniusSchur))
+    ));
+    assert_eq!(fusion_tree_layout_cache_info(), layout_before);
+    assert_eq!(complete_hom_space_structure_cache_info(), complete_before);
+    assert_eq!(block_structure_intern_cache_info(), interner_before);
 }
 
 #[test]

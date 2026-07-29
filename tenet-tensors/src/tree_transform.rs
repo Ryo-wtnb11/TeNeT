@@ -32,5 +32,6 @@ pub(crate) use plan::{
 };
 pub(crate) use plan::{
     build_generic_tree_pair_transform_group_plan_validated,
-    compile_multiplicity_free_tree_pair_structure, validate_generic_tree_pair_preflight,
+    compile_multiplicity_free_tree_pair_structure,
+    validate_checked_generic_tree_pair_plan_preflight, validate_generic_tree_pair_preflight,
 };
