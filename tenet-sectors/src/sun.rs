@@ -713,6 +713,29 @@ mod tests {
         ] {
             assert!((*r.get(index.0, index.1) - expected).abs() < 1e-12);
         }
+
+        let left = rule.encode_dynkin(&[2, 2]).unwrap();
+        let right = rule.encode_dynkin(&[2, 3]).unwrap();
+        let asymmetric_r = rule.try_r_symbol_generic(left, right, right).unwrap();
+        assert_eq!(asymmetric_r.shape(), (3, 3));
+        for (index, expected) in [
+            ((0, 1), -0.439_764_978_446_187_45),
+            ((1, 0), -0.374_954_863_181_616_1),
+            ((0, 2), 0.887_615_402_640_999_9),
+            ((2, 0), 0.916_876_867_332_670_7),
+        ] {
+            assert!((*asymmetric_r.get(index.0, index.1) - expected).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn su2_fundamental_pivotal_phase_matches_f_gauge() {
+        let mut rule = SUNFusionRule::new(2).unwrap();
+        let fundamental = rule.encode_dynkin(&[1]).unwrap();
+        assert_eq!(
+            rule.try_frobenius_schur_phase_scalar(fundamental).unwrap(),
+            -1.0
+        );
     }
 
     #[test]
