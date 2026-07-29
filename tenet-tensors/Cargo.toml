@@ -18,6 +18,7 @@ blas-openblas = ["tenet-dense/blas-openblas", "tenet-operations/blas-openblas"]
 blas-mkl = ["tenet-dense/blas-mkl", "tenet-operations/blas-mkl"]
 provider-inject = ["tenet-dense/provider-inject", "tenet-operations/provider-inject"]
 cuda = ["tenet-dense/cuda", "tenet-operations/cuda"]
+racah-generated = ["tenet-sectors/racah-generated"]
 
 [dependencies]
 tenet-core = { path = "../tenet-core" }

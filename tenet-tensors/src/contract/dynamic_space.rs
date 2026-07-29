@@ -114,8 +114,9 @@ pub(crate) enum MetadataOutput {
 pub(crate) type LayoutKeyBuilder<R> =
     for<'a> fn(&R, MetadataRequest<'a>) -> Result<MetadataOutput, OperationError>;
 
-struct LayoutBuildCapability<R> {
-    dispatch: LayoutKeyBuilder<R>,
+enum LayoutBuildCapability<R> {
+    Legacy(LayoutKeyBuilder<R>),
+    CheckedGeneric,
 }
 
 impl<R> Copy for LayoutBuildCapability<R> {}
@@ -132,8 +133,15 @@ where
     R: FusionRule,
 {
     const fn encoded() -> Self {
-        Self {
-            dispatch: encoded_layout_primer::<R>,
+        Self::Legacy(encoded_layout_primer::<R>)
+    }
+
+    fn legacy_dispatch(self) -> LayoutKeyBuilder<R> {
+        match self {
+            Self::Legacy(dispatch) => dispatch,
+            Self::CheckedGeneric => {
+                unreachable!("checked Generic bindings do not use legacy metadata dispatch")
+            }
         }
     }
 
@@ -148,7 +156,7 @@ where
         rule: &R,
         homspace: &FusionTreeHomSpace,
     ) -> Result<PreparedLayoutKeys, OperationError> {
-        match (self.dispatch)(rule, MetadataRequest::Prepare { homspace })? {
+        match (self.legacy_dispatch())(rule, MetadataRequest::Prepare { homspace })? {
             MetadataOutput::Prepared(prepared) => Ok(prepared),
             _ => unreachable!("metadata dispatcher returned a non-prepare response"),
         }
@@ -161,7 +169,7 @@ where
         codomain_axes: &[usize],
         domain_axes: &[usize],
     ) -> Result<(FusionTreeHomSpace, PreparedLayoutKeys), OperationError> {
-        match (self.dispatch)(
+        match (self.legacy_dispatch())(
             rule,
             MetadataRequest::Permute {
                 homspace,
@@ -184,7 +192,7 @@ where
         output_axes: &[usize],
         dst_codomain_rank: usize,
     ) -> Result<(FusionTreeHomSpace, PreparedLayoutKeys), OperationError> {
-        match (self.dispatch)(
+        match (self.legacy_dispatch())(
             rule,
             MetadataRequest::Contract {
                 lhs,
@@ -207,7 +215,7 @@ where
         codomain_axes: &[usize],
         domain_axes: &[usize],
     ) -> Result<(FusionTreeHomSpace, PreparedLayoutKeys), OperationError> {
-        match (self.dispatch)(
+        match (self.legacy_dispatch())(
             rule,
             MetadataRequest::Select {
                 homspace,
@@ -228,7 +236,7 @@ where
         dualize: bool,
         tensor: &'static str,
     ) -> Result<SectorLeg, OperationError> {
-        match (self.dispatch)(
+        match (self.legacy_dispatch())(
             rule,
             MetadataRequest::OutwardLeg {
                 homspace,
@@ -248,9 +256,7 @@ where
     R: LoweredMultiplicityFreeAlgebra + CheckedFusionAlgebra,
 {
     const fn lowered() -> Self {
-        Self {
-            dispatch: lowered_metadata_dispatcher::<R>,
-        }
+        Self::Legacy(lowered_metadata_dispatcher::<R>)
     }
 }
 
@@ -259,9 +265,7 @@ where
     R: MultiplicityFreeFusionRule + CheckedFusionAlgebra,
 {
     const fn checked() -> Self {
-        Self {
-            dispatch: checked_metadata_dispatcher::<R>,
-        }
+        Self::Legacy(checked_metadata_dispatcher::<R>)
     }
 }
 
@@ -917,7 +921,7 @@ impl<'a> FusionOperandLayout<'a> {
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     {
         let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
-        let capability = LayoutBuildCapability { dispatch: primer };
+        let capability = LayoutBuildCapability::Legacy(primer);
         let (homspace, prepared) =
             capability.permute(rule, self.homspace(), codomain_axes, domain_axes)?;
         DynamicFusionMapSpace::from_final_homspace_with_prepared(rule, homspace, prepared)
@@ -1208,6 +1212,156 @@ impl<R> fmt::Debug for BoundDynamicFusionMapSpace<R> {
     }
 }
 
+impl<R> BoundDynamicFusionMapSpace<R> {
+    #[inline]
+    /// Read-only access to the validated dynamic layout for expert planning
+    /// and diagnostics. The provider remains attached to this binding.
+    pub fn space(&self) -> &DynamicFusionMapSpace {
+        &self.space
+    }
+
+    #[inline]
+    pub fn provider(&self) -> &R {
+        self.provider.as_ref()
+    }
+
+    #[inline]
+    pub fn provider_arc(&self) -> &Arc<R> {
+        &self.provider
+    }
+}
+
+impl<R> BoundDynamicFusionMapSpace<R>
+where
+    R: CheckedGenericFusion,
+{
+    fn validate_checked_generic_style(
+        provider: &R,
+    ) -> Result<(), CheckedGenericStructureError<R::Error>> {
+        let actual = provider.fusion_style();
+        if actual == FusionStyleKind::Generic {
+            Ok(())
+        } else {
+            Err(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Generic,
+                actual,
+            }
+            .into())
+        }
+    }
+
+    /// Builds a complete checked Generic root and retains its exact provider allocation.
+    ///
+    /// Equal [`RuleIdentity`] values denote one logically immutable
+    /// catalog/gauge authority; internal warm-cache state may differ without
+    /// changing any structural or symbol answer.
+    pub fn from_final_homspace_generic_checked(
+        provider: Arc<R>,
+        homspace: FusionTreeHomSpace,
+    ) -> Result<Self, CheckedGenericStructureError<R::Error>> {
+        Self::validate_checked_generic_style(provider.as_ref())?;
+        let identity = provider.rule_identity();
+        let nout = homspace.codomain().len();
+        let nin = homspace.domain().len();
+        let structure = homspace
+            .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(
+                provider.as_ref(),
+            )?;
+        Ok(Self {
+            space: PreparedCheckedGenericDynamicSpace {
+                nout,
+                nin,
+                homspace,
+                structure,
+                identity,
+            }
+            .commit(),
+            provider,
+            layout_build: LayoutBuildCapability::CheckedGeneric,
+        })
+    }
+
+    /// Stages one checked Generic final HomSpace without publishing its layout.
+    #[doc(hidden)]
+    pub fn prepare_final_homspace_generic_with_checked<P>(
+        &self,
+        provider: &P,
+        homspace: FusionTreeHomSpace,
+    ) -> Result<PreparedCheckedGenericDynamicSpace, CheckedGenericStructureError<P::Error>>
+    where
+        P: CheckedGenericFusion,
+    {
+        if !matches!(self.layout_build, LayoutBuildCapability::CheckedGeneric) {
+            return Err(CoreError::MalformedFusionTree {
+                message: "checked Generic preparation requires a checked provider binding",
+            }
+            .into());
+        }
+        let expected = self
+            .space
+            .admission()
+            .rule_identity()
+            .expect("checked Generic binding is complete")
+            .clone();
+        let actual = provider.rule_identity();
+        if expected != actual {
+            return Err(CoreError::FusionRuleMismatch { expected, actual }.into());
+        }
+        let actual_style = provider.fusion_style();
+        if actual_style != FusionStyleKind::Generic {
+            return Err(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Generic,
+                actual: actual_style,
+            }
+            .into());
+        }
+        let nout = homspace.codomain().len();
+        let nin = homspace.domain().len();
+        let structure = homspace
+            .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(provider)?;
+        Ok(PreparedCheckedGenericDynamicSpace {
+            nout,
+            nin,
+            homspace,
+            structure,
+            identity: actual,
+        })
+    }
+
+    /// Commits a checked Generic final HomSpace under the source provider allocation.
+    #[doc(hidden)]
+    pub fn commit_final_homspace_generic_bound_checked(
+        &self,
+        prepared: PreparedCheckedGenericDynamicSpace,
+    ) -> Result<Self, OperationError> {
+        if !matches!(self.layout_build, LayoutBuildCapability::CheckedGeneric) {
+            return Err(OperationError::StructureMismatch {
+                tensor: "checked Generic provider binding",
+            });
+        }
+        let expected = prepared.identity.clone();
+        let actual = self.provider.rule_identity();
+        if expected != actual {
+            return Err(OperationError::from_core_preserving_context(
+                CoreError::FusionRuleMismatch { expected, actual },
+            ));
+        }
+        if self.provider.fusion_style() != FusionStyleKind::Generic {
+            return Err(OperationError::from_core_preserving_context(
+                CoreError::UnsupportedFusionStyle {
+                    expected: FusionStyleKind::Generic,
+                    actual: self.provider.fusion_style(),
+                },
+            ));
+        }
+        Ok(Self {
+            space: prepared.commit(),
+            provider: Arc::clone(&self.provider),
+            layout_build: LayoutBuildCapability::CheckedGeneric,
+        })
+    }
+}
+
 impl<R> BoundDynamicFusionMapSpace<R>
 where
     R: FusionRule,
@@ -1445,7 +1599,7 @@ where
             &lhs.space,
             &rhs.space,
             axes,
-            lhs.layout_build.dispatch,
+            lhs.layout_build.legacy_dispatch(),
         )?;
         Self::from_derived_like(lhs, space)
     }
@@ -1473,7 +1627,7 @@ where
             &lhs.space,
             &rhs.space,
             axes,
-            lhs.layout_build.dispatch,
+            lhs.layout_build.legacy_dispatch(),
         )?;
         Self::from_derived_like(lhs, space)
     }
@@ -1496,7 +1650,7 @@ where
             &rhs.space,
             lhs_axes,
             rhs_axes,
-            lhs.layout_build.dispatch,
+            lhs.layout_build.legacy_dispatch(),
         )
     }
 
@@ -1677,7 +1831,7 @@ where
         let space = self.space.transformed_with_primer(
             self.provider.as_ref(),
             operation,
-            self.layout_build.dispatch,
+            self.layout_build.legacy_dispatch(),
         )?;
         Self::from_derived_like(self, space)
     }
@@ -1724,23 +1878,6 @@ where
         Self::bind_subset_with_keys(space, provider, keys)
     }
 
-    #[inline]
-    /// Read-only access to the validated dynamic layout for expert planning
-    /// and diagnostics. The provider remains attached to this binding.
-    pub fn space(&self) -> &DynamicFusionMapSpace {
-        &self.space
-    }
-
-    #[inline]
-    pub fn provider(&self) -> &R {
-        self.provider.as_ref()
-    }
-
-    #[inline]
-    pub fn provider_arc(&self) -> &Arc<R> {
-        &self.provider
-    }
-
     /// Whether codomain and domain have the same reduced dimension in every
     /// coupled sector under this bound provider.
     pub fn codomain_isomorphic_to_domain(&self) -> Result<bool, OperationError> {
@@ -1762,12 +1899,12 @@ where
     }
 
     pub(crate) fn layout_primer(&self) -> LayoutKeyBuilder<R> {
-        self.layout_build.dispatch
+        self.layout_build.legacy_dispatch()
     }
 
     #[cfg(test)]
     pub(crate) fn with_test_layout_primer(mut self, primer: LayoutKeyBuilder<R>) -> Self {
-        self.layout_build = LayoutBuildCapability { dispatch: primer };
+        self.layout_build = LayoutBuildCapability::Legacy(primer);
         self
     }
 
@@ -2148,7 +2285,7 @@ impl DynamicFusionMapSpace {
         let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
         let nout = codomain_axes.len();
         let nin = domain_axes.len();
-        let capability = LayoutBuildCapability { dispatch: primer };
+        let capability = LayoutBuildCapability::Legacy(primer);
         let (homspace, prepared) =
             capability.permute(rule, source.homspace(), codomain_axes, domain_axes)?;
         debug_assert_eq!(nout, homspace.codomain().len());
@@ -2515,7 +2652,7 @@ impl DynamicFusionMapSpace {
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     {
-        LayoutBuildCapability { dispatch: primer }.contract(
+        LayoutBuildCapability::Legacy(primer).contract(
             rule,
             lhs.homspace(),
             rhs.homspace(),
@@ -2683,10 +2820,10 @@ mod bound_invariant_tests {
         block_structure_intern_cache_info, complete_hom_space_structure_cache_info,
         fusion_tree_layout_cache_info, reset_core_intern_tables, BlockSpec, BraidingStyleKind,
         CoupledSectorFold, FermionParityFusionRule, FusionAlgebraError, FusionProductSpace,
-        FusionTreePairKey, Fz2SectorLayout, PackedProductCodec, ProductFusionRule,
-        ProductSectorCodec, ProductSectorLayout, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
-        SectorVec, Su2SectorLayout, Su3FusionRule, TensorMapSpace, U1FusionRule, U1Irrep,
-        U1SectorLayout, Z2FusionRule, Z2Irrep,
+        FusionTreePairKey, Fz2SectorLayout, InfallibleGeneric, PackedProductCodec,
+        ProductFusionRule, ProductSectorCodec, ProductSectorLayout, SU2FusionRule, SU2Irrep,
+        SectorId, SectorLeg, SectorVec, Su2SectorLayout, Su3FusionRule, TensorMapSpace,
+        U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep,
     };
 
     type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
@@ -2876,6 +3013,193 @@ mod bound_invariant_tests {
     }
 
     #[test]
+    #[allow(clippy::arc_with_non_send_sync)] // Bound ownership requires Arc; this local equality checker borrows a non-Sync rule.
+    fn checked_generic_equal_identity_checker_commits_under_source_arc() {
+        let rule = Su3FusionRule::new();
+        let eight = rule.sector_of(1, 1).unwrap();
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(eight, 1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(eight, 1)], false)]),
+        );
+        let source_provider = Arc::new(InfallibleGeneric::new(&rule));
+        let checker_provider = Arc::new(InfallibleGeneric::new(&rule));
+        assert!(!Arc::ptr_eq(&source_provider, &checker_provider));
+        let source = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+            Arc::clone(&source_provider),
+            homspace.clone(),
+        )
+        .unwrap();
+
+        let prepared = source
+            .prepare_final_homspace_generic_with_checked(checker_provider.as_ref(), homspace)
+            .unwrap();
+        let output = source
+            .commit_final_homspace_generic_bound_checked(prepared)
+            .unwrap();
+
+        assert!(Arc::ptr_eq(output.provider_arc(), &source_provider));
+        assert!(!Arc::ptr_eq(output.provider_arc(), &checker_provider));
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)] // The bound API requires Arc; these local guard spies use Cell counters.
+    fn checked_generic_bound_guards_preserve_typed_errors_before_commit() {
+        let homspace = || FusionTreeHomSpace::from_sector_ids([(0, 1), (0, 1)], [(0, 1)]);
+
+        let wrong_root_style = Arc::new(CheckedGenericSpy::new());
+        wrong_root_style.style.set(FusionStyleKind::Unique);
+        let error = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+            Arc::clone(&wrong_root_style),
+            homspace(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CheckedGenericStructureError::Core(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Generic,
+                actual: FusionStyleKind::Unique,
+            })
+        ));
+        assert_eq!(wrong_root_style.calls.get(), 0);
+
+        let mut failing_root = CheckedGenericSpy::new();
+        failing_root.fail_at = Some(1);
+        let failing_root = Arc::new(failing_root);
+        let error = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+            Arc::clone(&failing_root),
+            homspace(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CheckedGenericStructureError::Provider(CheckedGenericSpyError(1))
+        ));
+
+        let source_provider = Arc::new(CheckedGenericSpy::new());
+        let source = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+            Arc::clone(&source_provider),
+            homspace(),
+        )
+        .unwrap();
+
+        let mut wrong_identity = CheckedGenericSpy::new();
+        wrong_identity.identity = RuleIdentity::of_type::<Z2FusionRule>();
+        let error = source
+            .prepare_final_homspace_generic_with_checked(&wrong_identity, homspace())
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error,
+            CheckedGenericStructureError::Core(CoreError::FusionRuleMismatch { .. })
+        ));
+        assert_eq!(wrong_identity.calls.get(), 0);
+
+        let wrong_checker_style = CheckedGenericSpy::new();
+        wrong_checker_style.style.set(FusionStyleKind::Unique);
+        let error = source
+            .prepare_final_homspace_generic_with_checked(&wrong_checker_style, homspace())
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error,
+            CheckedGenericStructureError::Core(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Generic,
+                actual: FusionStyleKind::Unique,
+            })
+        ));
+        assert_eq!(wrong_checker_style.calls.get(), 0);
+
+        let mut failing_checker = CheckedGenericSpy::new();
+        failing_checker.fail_at = Some(1);
+        let error = source
+            .prepare_final_homspace_generic_with_checked(&failing_checker, homspace())
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error,
+            CheckedGenericStructureError::Provider(CheckedGenericSpyError(1))
+        ));
+
+        let checker = CheckedGenericSpy::new();
+        let prepared = source
+            .prepare_final_homspace_generic_with_checked(&checker, homspace())
+            .unwrap();
+        let legacy = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+            Arc::new(CheckedGenericSpy::new()),
+            homspace(),
+        )
+        .unwrap();
+        let error = legacy
+            .commit_final_homspace_generic_bound_checked(prepared)
+            .unwrap_err();
+        assert!(matches!(error, OperationError::StructureMismatch { .. }));
+
+        let mut prepared = source
+            .prepare_final_homspace_generic_with_checked(&checker, homspace())
+            .unwrap();
+        prepared.identity = RuleIdentity::of_type::<Z2FusionRule>();
+        let error = source
+            .commit_final_homspace_generic_bound_checked(prepared)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::FusionRuleMismatch { .. })
+        ));
+
+        let prepared = source
+            .prepare_final_homspace_generic_with_checked(&checker, homspace())
+            .unwrap();
+        // Contract-violating adversarial mutation proves the defensive final style guard.
+        source_provider.style.set(FusionStyleKind::Unique);
+        let error = source
+            .commit_final_homspace_generic_bound_checked(prepared)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Generic,
+                actual: FusionStyleKind::Unique,
+            })
+        ));
+        source_provider.style.set(FusionStyleKind::Generic);
+
+        let prepared = source
+            .prepare_final_homspace_generic_with_checked(&checker, homspace())
+            .unwrap();
+        let output = source
+            .commit_final_homspace_generic_bound_checked(prepared)
+            .unwrap();
+        assert!(Arc::ptr_eq(output.provider_arc(), &source_provider));
+        assert!(std::ptr::eq(output.provider(), source_provider.as_ref()));
+        assert_eq!(output.space().homspace(), &homspace());
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)] // The bound API requires Arc; the single-threaded spy uses Cell counters.
+    fn checked_generic_preparation_rejects_legacy_binding_before_checker_queries() {
+        let source_provider = Arc::new(CheckedGenericSpy::new());
+        let checker = CheckedGenericSpy::new();
+        let homspace = FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]);
+        let source = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+            source_provider,
+            homspace.clone(),
+        )
+        .unwrap();
+
+        let error = match source.prepare_final_homspace_generic_with_checked(&checker, homspace) {
+            Ok(_) => panic!("legacy binding was accepted as checked authority"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            CheckedGenericStructureError::Core(CoreError::MalformedFusionTree { .. })
+        ));
+        assert_eq!(checker.calls.get(), 0);
+    }
+
+    #[test]
+    #[allow(clippy::arc_with_non_send_sync)] // The bound API requires Arc; the isolated spy uses Cell counters.
     fn checked_generic_bound_space_commits_the_staged_layout_without_reenumeration() {
         const ISOLATED: &str = "TENET_CHECKED_GENERIC_BOUND_SPACE_ISOLATED";
         if std::env::var_os(ISOLATED).is_none() {

@@ -88,29 +88,29 @@ trait GenericFRAccess {
     fn fusion_style(&self) -> FusionStyleKind;
     fn braiding_style(&self) -> BraidingStyleKind;
     fn vacuum(&self) -> SectorId;
-    fn try_nsymbol(&mut self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error>;
-    fn try_fusion_channels_in_table(&mut self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error>;
-    fn try_f_symbol_generic(&mut self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, Self::Error>;
-    fn try_r_symbol_generic(&mut self, a: SectorId, b: SectorId, c: SectorId) -> Result<GenericRMatrix<Self::Scalar>, Self::Error>;
+    fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error>;
+    fn try_fusion_channels_in_table(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error>;
+    fn try_f_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, Self::Error>;
+    fn try_r_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<GenericRMatrix<Self::Scalar>, Self::Error>;
 }
 
 trait GenericRigidAccess: GenericFRAccess {
-    fn try_dual(&mut self, sector: SectorId) -> Result<SectorId, Self::Error>;
-    fn try_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error>;
-    fn try_inv_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error>;
+    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error>;
+    fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error>;
+    fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error>;
     fn try_frobenius_schur_phase_scalar(
-        &mut self,
+        &self,
         sector: SectorId,
     ) -> Result<Self::Scalar, Self::Error>;
     fn try_b_symbol_generic(
-        &mut self,
+        &self,
         a: SectorId,
         b: SectorId,
         c: SectorId,
     ) -> Result<GenericRMatrix<Self::Scalar>, CheckedGenericSymbolError<Self::Error>>;
     #[allow(dead_code)]
     fn try_a_symbol_generic(
-        &mut self,
+        &self,
         a: SectorId,
         b: SectorId,
         c: SectorId,
@@ -129,10 +129,10 @@ where
     fn fusion_style(&self) -> FusionStyleKind { self.0.fusion_style() }
     fn braiding_style(&self) -> BraidingStyleKind { self.0.braiding_style() }
     fn vacuum(&self) -> SectorId { self.0.vacuum() }
-    fn try_nsymbol(&mut self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> { Ok(self.0.nsymbol(a, b, c)) }
-    fn try_fusion_channels_in_table(&mut self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.0.fusion_channels_in_table(a, b)) }
-    fn try_f_symbol_generic(&mut self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, Self::Error> { Ok(self.0.f_symbol_generic(a,b,c,d,e,f)) }
-    fn try_r_symbol_generic(&mut self, a: SectorId, b: SectorId, c: SectorId) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> { Ok(self.0.r_symbol_generic(a,b,c)) }
+    fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> { Ok(self.0.nsymbol(a, b, c)) }
+    fn try_fusion_channels_in_table(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.0.fusion_channels_in_table(a, b)) }
+    fn try_f_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, Self::Error> { Ok(self.0.f_symbol_generic(a,b,c,d,e,f)) }
+    fn try_r_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> { Ok(self.0.r_symbol_generic(a,b,c)) }
 }
 
 impl<P: CheckedGenericRigidSymbols> GenericFRAccess for P {
@@ -141,10 +141,10 @@ impl<P: CheckedGenericRigidSymbols> GenericFRAccess for P {
     fn fusion_style(&self) -> FusionStyleKind { CheckedGenericFusion::fusion_style(self) }
     fn braiding_style(&self) -> BraidingStyleKind { CheckedGenericFusion::braiding_style(self) }
     fn vacuum(&self) -> SectorId { CheckedGenericFusion::vacuum(self) }
-    fn try_nsymbol(&mut self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> { CheckedGenericFusion::try_nsymbol(self,a,b,c) }
-    fn try_fusion_channels_in_table(&mut self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { CheckedGenericFusion::try_fusion_channels_in_table(self,a,b) }
-    fn try_f_symbol_generic(&mut self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, Self::Error> { CheckedGenericRigidSymbols::try_f_symbol_generic(self,a,b,c,d,e,f) }
-    fn try_r_symbol_generic(&mut self, a: SectorId, b: SectorId, c: SectorId) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> { CheckedGenericRigidSymbols::try_r_symbol_generic(self,a,b,c) }
+    fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> { CheckedGenericFusion::try_nsymbol(self,a,b,c) }
+    fn try_fusion_channels_in_table(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { CheckedGenericFusion::try_fusion_channels_in_table(self,a,b) }
+    fn try_f_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, Self::Error> { CheckedGenericRigidSymbols::try_f_symbol_generic(self,a,b,c,d,e,f) }
+    fn try_r_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> { CheckedGenericRigidSymbols::try_r_symbol_generic(self,a,b,c) }
 }
 
 struct InfallibleGenericRigid<'a, R>(&'a R);
@@ -159,10 +159,10 @@ where
     fn fusion_style(&self) -> FusionStyleKind { self.0.fusion_style() }
     fn braiding_style(&self) -> BraidingStyleKind { self.0.braiding_style() }
     fn vacuum(&self) -> SectorId { self.0.vacuum() }
-    fn try_nsymbol(&mut self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> { Ok(self.0.nsymbol(a, b, c)) }
-    fn try_fusion_channels_in_table(&mut self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.0.fusion_channels_in_table(a, b)) }
-    fn try_f_symbol_generic(&mut self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, Self::Error> { Ok(self.0.f_symbol_generic(a,b,c,d,e,f)) }
-    fn try_r_symbol_generic(&mut self, a: SectorId, b: SectorId, c: SectorId) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> { Ok(self.0.r_symbol_generic(a,b,c)) }
+    fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> { Ok(self.0.nsymbol(a, b, c)) }
+    fn try_fusion_channels_in_table(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.0.fusion_channels_in_table(a, b)) }
+    fn try_f_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, Self::Error> { Ok(self.0.f_symbol_generic(a,b,c,d,e,f)) }
+    fn try_r_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> { Ok(self.0.r_symbol_generic(a,b,c)) }
 }
 
 impl<R> GenericRigidAccess for InfallibleGenericRigid<'_, R>
@@ -170,27 +170,27 @@ where
     R: GenericRigidSymbols,
     R::Scalar: GenericBraidScalar,
 {
-    fn try_dual(&mut self, sector: SectorId) -> Result<SectorId, Self::Error> {
+    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
         Ok(self.0.dual(sector))
     }
 
-    fn try_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+    fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
         Ok(self.0.sqrt_dim_scalar(sector))
     }
 
-    fn try_inv_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+    fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
         Ok(self.0.inv_sqrt_dim_scalar(sector))
     }
 
     fn try_frobenius_schur_phase_scalar(
-        &mut self,
+        &self,
         sector: SectorId,
     ) -> Result<Self::Scalar, Self::Error> {
         Ok(self.0.frobenius_schur_phase_scalar(sector))
     }
 
     fn try_b_symbol_generic(
-        &mut self,
+        &self,
         a: SectorId,
         b: SectorId,
         c: SectorId,
@@ -199,7 +199,7 @@ where
     }
 
     fn try_a_symbol_generic(
-        &mut self,
+        &self,
         a: SectorId,
         b: SectorId,
         c: SectorId,
@@ -209,27 +209,27 @@ where
 }
 
 impl<P: CheckedGenericRigidSymbols> GenericRigidAccess for P {
-    fn try_dual(&mut self, sector: SectorId) -> Result<SectorId, Self::Error> {
+    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
         CheckedGenericFusion::try_dual(self, sector)
     }
 
-    fn try_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+    fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
         CheckedGenericRigidSymbols::try_sqrt_dim_scalar(self, sector)
     }
 
-    fn try_inv_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+    fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
         CheckedGenericRigidSymbols::try_inv_sqrt_dim_scalar(self, sector)
     }
 
     fn try_frobenius_schur_phase_scalar(
-        &mut self,
+        &self,
         sector: SectorId,
     ) -> Result<Self::Scalar, Self::Error> {
         CheckedGenericRigidSymbols::try_frobenius_schur_phase_scalar(self, sector)
     }
 
     fn try_b_symbol_generic(
-        &mut self,
+        &self,
         a: SectorId,
         b: SectorId,
         c: SectorId,
@@ -238,7 +238,7 @@ impl<P: CheckedGenericRigidSymbols> GenericRigidAccess for P {
     }
 
     fn try_a_symbol_generic(
-        &mut self,
+        &self,
         a: SectorId,
         b: SectorId,
         c: SectorId,
@@ -303,7 +303,7 @@ fn map_checked_generic_structure_error<E>(
 }
 
 fn checked_generic_f_symbol<C>(
-    rule: &mut C,
+    rule: &C,
     a: SectorId,
     b: SectorId,
     c: SectorId,
@@ -339,7 +339,7 @@ where
 }
 
 fn checked_generic_r_symbol<C>(
-    rule: &mut C,
+    rule: &C,
     a: SectorId,
     b: SectorId,
     c: SectorId,
@@ -370,7 +370,7 @@ where
 }
 
 fn checked_generic_b_symbol<C>(
-    rule: &mut C,
+    rule: &C,
     a: SectorId,
     b: SectorId,
     c: SectorId,
@@ -408,7 +408,7 @@ where
 }
 
 fn checked_generic_a_symbol<C>(
-    rule: &mut C,
+    rule: &C,
     a: SectorId,
     b: SectorId,
     c: SectorId,
@@ -2251,7 +2251,7 @@ where
 /// `root_vertex` is the one shared outer-multiplicity label for both halves of
 /// tensor-map `otimes`.  This is F-only: merging does not exchange legs.
 pub fn merge_fusion_trees_generic_checked<C>(
-    rule: &mut C,
+    rule: &C,
     lhs: &FusionTreeKey,
     rhs: &FusionTreeKey,
     coupled: SectorId,
@@ -8958,7 +8958,7 @@ where
 }
 
 fn generic_artin_braid_at_with_inverse_checked<C>(
-    rule: &mut C,
+    rule: &C,
     tree: &FusionTreeKey,
     index: usize,
     inverse: bool,
@@ -9325,7 +9325,7 @@ where
 }
 
 fn generic_braid_tree_result<C>(
-    rule: &mut C,
+    rule: &C,
     tree: &FusionTreeKey,
     permutation: &[usize],
     levels: &[usize],
@@ -9684,7 +9684,7 @@ where
 
 #[cfg(test)]
 fn generic_bendright_tree_pair_checked<C>(
-    rule: &mut C,
+    rule: &C,
     tree_pair: &FusionTreePairKey,
 ) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
 where
@@ -9696,7 +9696,7 @@ where
 }
 
 fn generic_bendright_tree_pair_result<C>(
-    rule: &mut C,
+    rule: &C,
     tree_pair: &FusionTreePairKey,
 ) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
 where
@@ -9895,7 +9895,7 @@ where
 
 #[cfg(test)]
 fn generic_bendleft_tree_pair_checked<C>(
-    rule: &mut C,
+    rule: &C,
     tree_pair: &FusionTreePairKey,
 ) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
 where
@@ -9907,7 +9907,7 @@ where
 }
 
 fn generic_bendleft_tree_pair_result<C>(
-    rule: &mut C,
+    rule: &C,
     tree_pair: &FusionTreePairKey,
 ) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
 where
@@ -10045,7 +10045,7 @@ where
 /// Structural validation completes before the first F, dimension, or pivotal
 /// query, and provider failures retain their typed source.
 pub fn generic_repartition_tree_pair_checked<C>(
-    rule: &mut C,
+    rule: &C,
     tree_pair: &FusionTreePairKey,
     target_codomain_rank: usize,
 ) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
@@ -10067,7 +10067,7 @@ where
 }
 
 fn generic_repartition_tree_pair_result<C>(
-    rule: &mut C,
+    rule: &C,
     tree_pair: &FusionTreePairKey,
     target_codomain_rank: usize,
 ) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
@@ -10444,7 +10444,7 @@ where
 }
 
 fn generic_multi_associator_checked<C>(
-    rule: &mut C,
+    rule: &C,
     long: &FusionTreeKey,
     short: &FusionTreeKey,
 ) -> Result<Option<Vec<C::Scalar>>, CheckedGenericSymbolError<C::Error>>
@@ -10494,7 +10494,7 @@ where
 }
 
 fn generic_multi_fmove_inv_tree_checked<C>(
-    rule: &mut C,
+    rule: &C,
     leading: SectorId,
     coupled: SectorId,
     tree: &FusionTreeKey,
@@ -11100,7 +11100,7 @@ where
 }
 
 fn generic_braid_tree_pair_result<C>(
-    rule: &mut C,
+    rule: &C,
     tree_pair: &FusionTreePairKey,
     target_codomain_rank: usize,
     permutation: &[usize],
@@ -11143,7 +11143,7 @@ where
 
 /// Checked Generic-fusion braid on a full tree pair.
 pub fn generic_braid_tree_pair_checked<C>(
-    rule: &mut C,
+    rule: &C,
     tree_pair: &FusionTreePairKey,
     codomain_permutation: &[usize],
     domain_permutation: &[usize],
@@ -11238,7 +11238,7 @@ where
 
 /// Checked Generic-fusion permutation on a full tree pair.
 pub fn generic_permute_tree_pair_checked<C>(
-    rule: &mut C,
+    rule: &C,
     tree_pair: &FusionTreePairKey,
     codomain_permutation: &[usize],
     domain_permutation: &[usize],

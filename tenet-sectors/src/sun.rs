@@ -334,15 +334,15 @@ impl CheckedGenericFusion for SUNFusionRule {
 impl CheckedGenericRigidSymbols for SUNFusionRule {
     type Scalar = f64;
 
-    fn try_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<f64, Self::Error> {
+    fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
         Ok(self.dim_scalar(sector)?.sqrt())
     }
 
-    fn try_inv_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<f64, Self::Error> {
+    fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
         Ok(self.dim_scalar(sector)?.sqrt().recip())
     }
 
-    fn try_frobenius_schur_phase_scalar(&mut self, sector: SectorId) -> Result<f64, Self::Error> {
+    fn try_frobenius_schur_phase_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
         let a = self.irrep(sector)?;
         let dual = a.dual();
         let unit = racah::sun::Irrep::trivial(self.n).map_err(SUNFusionRuleError::Racah)?;
@@ -365,7 +365,7 @@ impl CheckedGenericRigidSymbols for SUNFusionRule {
     }
 
     fn try_f_symbol_generic(
-        &mut self,
+        &self,
         a: SectorId,
         b: SectorId,
         c: SectorId,
@@ -402,7 +402,7 @@ impl CheckedGenericRigidSymbols for SUNFusionRule {
     }
 
     fn try_r_symbol_generic(
-        &mut self,
+        &self,
         a: SectorId,
         b: SectorId,
         c: SectorId,

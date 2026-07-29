@@ -10,7 +10,7 @@ use tenet_core::{
 };
 
 use crate::cache::OperationCachePolicy;
-use crate::contract::DynamicFusionMapSpace;
+use crate::contract::BoundDynamicFusionMapSpace;
 use crate::storage_scratch::StorageTreeTransformWorkspace;
 use crate::tree_transform::{
     build_checked_generic_tree_pair_transform_group_plan,
@@ -33,13 +33,13 @@ use tenet_operations::{DenseTreeTransformOperations, TreeTransformBackend};
 /// destination preview. The destination structure becomes visible only after
 /// those fallible stages succeed.
 #[doc(hidden)]
+#[allow(clippy::type_complexity)]
 pub fn tree_transform_dyn_owned_checked_generic<P, D>(
-    provider: &mut P,
     operation: TreeTransformOperation,
-    src_space: &DynamicFusionMapSpace,
+    src_space: &BoundDynamicFusionMapSpace<P>,
     src_data: &[D],
     alpha: D,
-) -> Result<(DynamicFusionMapSpace, Vec<D>), CheckedGenericPlanError<P::Error>>
+) -> Result<(BoundDynamicFusionMapSpace<P>, Vec<D>), CheckedGenericPlanError<P::Error>>
 where
     P: CheckedGenericRigidSymbols,
     P::Scalar: GenericBraidScalar + Copy + Zero + Sync,
@@ -47,7 +47,9 @@ where
         + RecouplingCoefficientAction<P::Scalar>
         + crate::ConjugateValue,
 {
-    let expected = src_space.required_len()?;
+    let source = src_space.space();
+    let provider = src_space.provider();
+    let expected = source.required_len()?;
     if src_data.len() != expected {
         return Err(OperationError::ElementCountMismatch {
             expected,
@@ -55,30 +57,38 @@ where
         }
         .into());
     }
-    let identity = src_space.validate_transformed_generic_checked_identity(provider)?;
-    validate_checked_generic_tree_pair_plan_preflight(provider, &operation, src_space.structure())?;
-    let prepared = src_space.prepare_transformed_generic_checked(provider, &operation, identity)?;
+    let identity = source.validate_transformed_generic_checked_identity(provider)?;
+    if provider.fusion_style() != tenet_core::FusionStyleKind::Generic {
+        return Err(tenet_core::CoreError::UnsupportedFusionStyle {
+            expected: tenet_core::FusionStyleKind::Generic,
+            actual: provider.fusion_style(),
+        }
+        .into());
+    }
+    validate_checked_generic_tree_pair_plan_preflight(provider, &operation, source.structure())?;
+    let prepared = source.prepare_transformed_generic_checked(provider, &operation, identity)?;
     let plan = build_checked_generic_tree_pair_transform_group_plan(
         provider,
         operation,
-        src_space.structure(),
+        source.structure(),
     )?;
-    let replay = plan.compile_structures(prepared.structure(), src_space.structure())?;
+    let replay = plan.compile_structures(prepared.structure(), source.structure())?;
     let mut dst_data = vec![D::zero(); prepared.required_len()];
+    let dst_preview = Arc::new(prepared.structure().clone());
 
-    let dst_space = prepared.commit();
     let mut backend = DenseTreeTransformOperations::default();
     let mut workspace = Default::default();
     backend.tree_transform_structure_into_raw(
         &mut workspace,
         &replay,
-        dst_space.structure(),
-        src_space.structure(),
+        &dst_preview,
+        source.structure(),
         &mut dst_data,
         src_data,
         alpha,
         D::zero(),
     )?;
+    let dst_space = src_space.commit_final_homspace_generic_bound_checked(prepared)?;
     Ok((dst_space, dst_data))
 }
 
