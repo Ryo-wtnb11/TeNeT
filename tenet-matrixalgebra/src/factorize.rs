@@ -1695,29 +1695,6 @@ pub(crate) struct PreparedGenericCompactFactorPlan {
     routes: Arc<[CompactFactorRoute]>,
 }
 
-fn canonical_source_regions_generic_checked<R, P>(
-    input: &BoundDynamicFusionMapSpace<R>,
-    provider: &P,
-) -> Result<Option<Arc<[CoupledSectorRegion]>>, CheckedGenericFactorPlanError<P::Error>>
-where
-    R: FusionRule,
-    P: CheckedGenericFusion,
-{
-    let space = input.space();
-    let canonical_source =
-        input.prepare_final_homspace_generic_checked(provider, space.homspace().clone())?;
-    let Some(regions) = checked_sector_regions(space.structure(), space.nout())? else {
-        return Ok(None);
-    };
-    let canonical_source_regions =
-        checked_sector_regions(canonical_source.structure(), space.nout())?.ok_or(
-            OperationError::UnsupportedTensorContractScope {
-                message: "checked Generic source is not a coupled-sector matrix layout",
-            },
-        )?;
-    Ok((regions.as_ref() == canonical_source_regions.as_ref()).then_some(regions))
-}
-
 fn compact_factor_plan<R>(
     input: &BoundDynamicFusionMapSpace<R>,
 ) -> Result<Option<Arc<CompactFactorPlan>>, OperationError>
@@ -1751,7 +1728,7 @@ where
     P: CheckedGenericFusion,
 {
     let space = input.space();
-    let Some(regions) = canonical_source_regions_generic_checked(input, provider)? else {
+    let Some(regions) = checked_sector_regions(space.structure(), space.nout())? else {
         return Ok(None);
     };
     let source = Arc::new(MatricizationPlan {
@@ -5412,6 +5389,29 @@ fn checked_sector_regions(
         .map_err(OperationError::from_core_preserving_context)
 }
 
+fn canonical_generic_sector_regions(
+    structure: &BlockStructure,
+    nout: usize,
+) -> Result<Option<Arc<[CoupledSectorRegion]>>, OperationError> {
+    let Some(regions) = checked_sector_regions(structure, nout)? else {
+        return Ok(None);
+    };
+    let sectors_are_ordered = regions
+        .windows(2)
+        .all(|pair| pair[0].coupled() < pair[1].coupled());
+    let trees_are_ordered = regions.iter().all(|region| {
+        region
+            .row_trees()
+            .windows(2)
+            .all(|pair| pair[0].tree() < pair[1].tree())
+            && region
+                .col_trees()
+                .windows(2)
+                .all(|pair| pair[0].tree() < pair[1].tree())
+    });
+    Ok((sectors_are_ordered && trees_are_ordered).then_some(regions))
+}
+
 fn value_matricizations<'a, D>(
     structure: &BlockStructure,
     data: &'a [D],
@@ -6543,12 +6543,7 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
-    let checked = InfallibleGeneric::new(input.space().provider());
-    let regions = match canonical_source_regions_generic_checked(input.space(), &checked) {
-        Ok(regions) => regions,
-        Err(CheckedGenericFactorPlanError::Provider(never)) => match never {},
-        Err(CheckedGenericFactorPlanError::Operation(error)) => return Err(error),
-    };
+    let regions = canonical_generic_sector_regions(space.structure(), space.nout())?;
     let matricizations = match regions {
         Some(regions) => ValueMatricizations::Regions {
             data: input.data(),
