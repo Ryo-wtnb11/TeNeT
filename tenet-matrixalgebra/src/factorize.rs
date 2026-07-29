@@ -18,7 +18,7 @@ use tenet_dense::{DenseError, DenseExecutor, DenseTensor, DenseView, DenseViewMu
 pub use tenet_tensors::BoundDynamicTensorRef;
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, DenseBlockScalar, DenseRecouplingScalar, DynamicFusionMapSpace,
-    ValidatedDynamicFusionLayout,
+    PreparedCheckedGenericDynamicSpace, ValidatedDynamicFusionLayout,
 };
 
 use crate::truncation::{select_truncation, Truncation, WeightedSpectrum};
@@ -1686,10 +1686,10 @@ impl<E> From<OperationError> for CheckedGenericFactorPlanError<E> {
     }
 }
 
-struct PreparedGenericCompactFactorPlan {
+pub(crate) struct PreparedGenericCompactFactorPlan {
     source: Arc<MatricizationPlan>,
-    left_hom: FusionTreeHomSpace,
-    right_hom: FusionTreeHomSpace,
+    left: PreparedCheckedGenericDynamicSpace,
+    right: PreparedCheckedGenericDynamicSpace,
     left_regions: Arc<[CoupledSectorRegion]>,
     right_regions: Arc<[CoupledSectorRegion]>,
     routes: Arc<[CompactFactorRoute]>,
@@ -1704,22 +1704,8 @@ where
     P: CheckedGenericFusion,
 {
     let space = input.space();
-    if provider.rule_identity() != input.provider().rule_identity() {
-        return Err(OperationError::Core(CoreError::FusionRuleMismatch {
-            expected: input.provider().rule_identity(),
-            actual: provider.rule_identity(),
-        })
-        .into());
-    }
-    if provider.fusion_style() != tenet_core::FusionStyleKind::Generic {
-        return Err(OperationError::InvalidArgument {
-            message: "generic compact factorization requires Generic fusion style",
-        }
-        .into());
-    }
-    let canonical_source = space
-        .homspace()
-        .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(provider)?;
+    let canonical_source =
+        input.prepare_final_homspace_generic_checked(provider, space.homspace().clone())?;
     let Some(regions) = checked_sector_regions(space.structure(), space.nout())? else {
         return Ok(None);
     };
@@ -1789,30 +1775,26 @@ where
         FusionProductSpace::new([new_leg]),
         space.homspace().domain().clone(),
     );
-    let left_structure = left_hom
-        .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(provider)?;
-    let right_structure = right_hom
-        .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(provider)?;
-    let left_regions =
-        checked_sector_regions(left_structure.structure(), left_hom.codomain().len())?.ok_or(
-            OperationError::UnsupportedTensorContractScope {
-                message: "compact left factor is not a coupled-sector matrix layout",
-            },
-        )?;
-    let right_regions =
-        checked_sector_regions(right_structure.structure(), right_hom.codomain().len())?.ok_or(
-            OperationError::UnsupportedTensorContractScope {
-                message: "compact right factor is not a coupled-sector matrix layout",
-            },
-        )?;
+    let left = input.prepare_final_homspace_generic_checked(provider, left_hom)?;
+    let right = input.prepare_final_homspace_generic_checked(provider, right_hom)?;
+    let left_regions = checked_sector_regions(left.structure(), space.nout())?.ok_or(
+        OperationError::UnsupportedTensorContractScope {
+            message: "compact left factor is not a coupled-sector matrix layout",
+        },
+    )?;
+    let right_regions = checked_sector_regions(right.structure(), 1)?.ok_or(
+        OperationError::UnsupportedTensorContractScope {
+            message: "compact right factor is not a coupled-sector matrix layout",
+        },
+    )?;
     if !source_factor_tree_extents_match(&source.regions, &left_regions, &right_regions) {
         return Ok(None);
     }
     let routes = compile_compact_factor_routes(&source.regions, &left_regions, &right_regions)?;
     Ok(Some(PreparedGenericCompactFactorPlan {
         source,
-        left_hom,
-        right_hom,
+        left,
+        right,
         left_regions,
         right_regions,
         routes,
@@ -1852,14 +1834,8 @@ where
 {
     #[cfg(test)]
     GENERIC_FACTOR_PLAN_FINISH_CALLS.with(|calls| calls.set(calls.get() + 1));
-    let left = BoundDynamicFusionMapSpace::from_final_homspace_generic(
-        Arc::clone(input.provider_arc()),
-        prepared.left_hom,
-    )?;
-    let right = BoundDynamicFusionMapSpace::from_final_homspace_generic(
-        Arc::clone(input.provider_arc()),
-        prepared.right_hom,
-    )?;
+    let left = input.commit_final_homspace_generic_checked(prepared.left)?;
+    let right = input.commit_final_homspace_generic_checked(prepared.right)?;
     let left_regions = checked_sector_regions(left.space().structure(), left.space().nout())?
         .ok_or(OperationError::UnsupportedTensorContractScope {
             message: "compact left factor is not a coupled-sector matrix layout",
@@ -1902,12 +1878,23 @@ pub(crate) fn generic_factor_plan_finish_calls() -> usize {
 pub(crate) fn prepare_compact_factor_plan_generic_checked_for_test<R, P>(
     input: &BoundDynamicFusionMapSpace<R>,
     provider: &P,
-) -> Result<bool, CheckedGenericFactorPlanError<P::Error>>
+) -> Result<Option<PreparedGenericCompactFactorPlan>, CheckedGenericFactorPlanError<P::Error>>
 where
     R: FusionRule,
     P: CheckedGenericFusion,
 {
-    prepare_compact_factor_plan_generic_checked(input, provider).map(|plan| plan.is_some())
+    prepare_compact_factor_plan_generic_checked(input, provider)
+}
+
+#[cfg(test)]
+pub(crate) fn finish_compact_factor_plan_generic_for_test<R>(
+    input: &BoundDynamicFusionMapSpace<R>,
+    prepared: PreparedGenericCompactFactorPlan,
+) -> Result<bool, OperationError>
+where
+    R: FusionRule,
+{
+    finish_compact_factor_plan_generic(input, prepared).map(|plan| plan.is_some())
 }
 
 fn build_compact_factor_plan<R>(

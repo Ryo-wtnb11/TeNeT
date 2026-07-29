@@ -1316,14 +1316,22 @@ fn checked_generic_plan_late_failure_precedes_dense_calls_and_publication() {
         fail_at: usize::MAX,
         calls: Cell::new(0),
     };
-    assert!(
+    let prepared =
         crate::factorize::prepare_compact_factor_plan_generic_checked_for_test(&space, &complete)
             .unwrap()
-    );
+            .expect("canonical checked plan");
     let final_call = complete.calls.get();
     assert!(
         final_call > 1,
         "fixture must fail after earlier checked queries"
+    );
+    assert!(
+        crate::factorize::finish_compact_factor_plan_generic_for_test(&space, prepared).unwrap()
+    );
+    assert_eq!(
+        complete.calls.get(),
+        final_call,
+        "commit must not enumerate the provider again"
     );
 
     let failing = LateGenericSpy {
@@ -1333,9 +1341,12 @@ fn checked_generic_plan_late_failure_precedes_dense_calls_and_publication() {
     };
     let dense = SvdCallSpy::default();
     crate::factorize::reset_generic_factor_plan_finish_calls();
-    let error =
-        crate::factorize::prepare_compact_factor_plan_generic_checked_for_test(&space, &failing)
-            .unwrap_err();
+    let error = match crate::factorize::prepare_compact_factor_plan_generic_checked_for_test(
+        &space, &failing,
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("late provider failure must abort checked preparation"),
+    };
 
     assert!(matches!(
         error,
