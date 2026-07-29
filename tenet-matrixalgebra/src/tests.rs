@@ -1307,9 +1307,9 @@ fn generic_compact_factorizations_use_canonical_regions_without_pack_or_scatter(
 }
 
 #[test]
-fn checked_generic_plan_late_failure_precedes_dense_calls_and_publication() {
+fn checked_generic_plan_late_failure_precedes_finish_and_output_commit() {
     // What: the final provider query can fail while source and earlier factor
-    // metadata are valid, without entering dense execution or factor commit.
+    // metadata are valid, before the finish phase commits factor metadata.
     let (space, _data) = su3_om_factorization_input();
     let complete = LateGenericSpy {
         rule: space.provider(),
@@ -1339,7 +1339,6 @@ fn checked_generic_plan_late_failure_precedes_dense_calls_and_publication() {
         fail_at: final_call,
         calls: Cell::new(0),
     };
-    let dense = SvdCallSpy::default();
     crate::factorize::reset_generic_factor_plan_finish_calls();
     let error = match crate::factorize::prepare_compact_factor_plan_generic_checked_for_test(
         &space, &failing,
@@ -1353,7 +1352,6 @@ fn checked_generic_plan_late_failure_precedes_dense_calls_and_publication() {
         crate::factorize::CheckedGenericFactorPlanError::Provider(LateGenericError(call))
             if call == final_call
     ));
-    assert_eq!(dense.svd_calls, 0);
     assert_eq!(crate::factorize::generic_factor_plan_finish_calls(), 0);
 }
 

@@ -1811,28 +1811,23 @@ where
 {
     #[cfg(test)]
     GENERIC_FACTOR_PLAN_FINISH_CALLS.with(|calls| calls.set(calls.get() + 1));
-    let left = input.commit_final_homspace_generic_checked(prepared.left)?;
-    let right = input.commit_final_homspace_generic_checked(prepared.right)?;
-    let left_regions = checked_sector_regions(left.space().structure(), left.space().nout())?
-        .ok_or(OperationError::UnsupportedTensorContractScope {
-            message: "compact left factor is not a coupled-sector matrix layout",
-        })?;
-    let right_regions = checked_sector_regions(right.space().structure(), right.space().nout())?
-        .ok_or(OperationError::UnsupportedTensorContractScope {
-            message: "compact right factor is not a coupled-sector matrix layout",
-        })?;
-    if left_regions.as_ref() != prepared.left_regions.as_ref()
-        || right_regions.as_ref() != prepared.right_regions.as_ref()
-    {
-        return Ok(None);
-    }
+    let PreparedGenericCompactFactorPlan {
+        source,
+        left,
+        right,
+        left_regions,
+        right_regions,
+        routes,
+    } = prepared;
+    let left = input.commit_final_homspace_generic_checked(left)?;
+    let right = input.commit_final_homspace_generic_checked(right)?;
     Ok(Some(Arc::new(CompactFactorPlan {
-        source: prepared.source,
+        source,
         left_layout: left.validated_layout(),
         right_layout: right.validated_layout(),
         left_regions,
         right_regions,
-        routes: prepared.routes,
+        routes,
     })))
 }
 
