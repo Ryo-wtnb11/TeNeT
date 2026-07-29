@@ -268,6 +268,27 @@ fn mixed_placement_contract_is_placement_error() {
     let err = a.absorb(&b_dev).unwrap_err();
     assert!(matches!(err, Error::PlacementMismatch), "got {err:?}");
 
+    let host_lazy = a.adjoint().unwrap();
+    let device_lazy = b_dev.adjoint().unwrap();
+    let err = host_lazy.add(&device_lazy, 1.0, 1.0).unwrap_err();
+    assert!(matches!(err, Error::PlacementMismatch), "got {err:?}");
+    for err in [
+        device_lazy.scale(0.5).unwrap_err(),
+        device_lazy
+            .scale_c64(num_complex::Complex64::new(0.5, 0.25))
+            .unwrap_err(),
+        device_lazy.add(&device_lazy, 1.0, 1.0).unwrap_err(),
+        device_lazy
+            .add_c64(
+                &device_lazy,
+                num_complex::Complex64::new(1.0, 0.5),
+                num_complex::Complex64::new(-0.5, 0.25),
+            )
+            .unwrap_err(),
+    ] {
+        assert!(matches!(err, Error::UnsupportedOnDevice(_)), "got {err:?}");
+    }
+
     // What: runtime validation wins when placement also differs.
     let other_rt = Runtime::builder().cuda(0).build().unwrap();
     let other_dev = Tensor::rand(&other_rt, Dtype::F64, [&v], [&v])

@@ -16,6 +16,7 @@ mod cache;
 mod contract;
 mod facade;
 mod lowering;
+mod oriented_elementwise;
 mod tensortrace;
 #[cfg(test)]
 mod test_support;
@@ -64,6 +65,10 @@ pub use contract::{
 pub use facade::{
     braid_into, braid_into_with, braid_into_with_context, permute_into, permute_into_with,
     permute_into_with_context, transpose_into, transpose_into_with, transpose_into_with_context,
+};
+#[doc(hidden)]
+pub use oriented_elementwise::{
+    oriented_fusion_add_into, oriented_fusion_inner, validate_oriented_fusion_layout,
 };
 // Stage B3a: Generic-fusion (outer-multiplicity) facade siblings.
 pub use facade::{

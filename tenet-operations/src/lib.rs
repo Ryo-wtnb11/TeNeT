@@ -57,6 +57,10 @@ pub use host_scalar_kernels::{
     tensoradd_raw_strided_kernel_trusted, tensortrace_raw_strided_kernel,
     tensortrace_raw_strided_kernel_add_with_coefficient,
 };
+#[doc(hidden)]
+pub use host_scalar_kernels::{
+    bilinear_raw_strided_kernel_mapped, tensoradd_raw_strided_kernel_mapped,
+};
 pub use kernel_adapter::{BakedFusedLayout, HostKernelAdapter, StridedHostKernelAdapter};
 pub use placement::ReportsPlacement;
 pub use profile::{TensorContractFusionProfile, TensorContractFusionRoute};

@@ -265,6 +265,28 @@ fn axpy_into<D: UserScalar, V: Copy>(
     })
 }
 
+pub(super) fn axpy_diagonal_into(
+    space: &DynamicFusionMapSpace,
+    dense: &mut Data,
+    diagonal: &DiagonalData,
+    factor: Complex64,
+) -> Result<(), Error> {
+    match (dense, diagonal) {
+        (Data::F64(dense), DiagonalData::RealF64(spectrum)) if factor.im == 0.0 => {
+            axpy_into(space, dense, spectrum, factor.re, |value| value)
+        }
+        (Data::C64(dense), DiagonalData::RealC64(spectrum)) => {
+            axpy_into(space, dense, spectrum, factor, |value| {
+                Complex64::new(value, 0.0)
+            })
+        }
+        (Data::C64(dense), DiagonalData::C64(spectrum)) => {
+            axpy_into(space, dense, spectrum, factor, |value| value)
+        }
+        _ => Err(Error::DtypeMismatch),
+    }
+}
+
 pub(super) fn axpby_dense_real(
     space: &DynamicFusionMapSpace,
     dense: &Data,
@@ -366,6 +388,137 @@ where
     Ok(total)
 }
 
+fn oriented_dense_inner_with_weight_impl<D, V>(
+    logical: &DynamicFusionMapSpace,
+    diagonal: &[SectorSpectrum<V>],
+    parent: &DynamicFusionMapSpace,
+    parent_data: &[D],
+    diagonal_first: bool,
+    weight: impl Fn(SectorId) -> f64,
+    map: impl Fn(V) -> D,
+) -> Result<Complex64, Error>
+where
+    D: UserScalar,
+    V: Copy,
+{
+    let mut total = Complex64::new(0.0, 0.0);
+    for logical_index in 0..logical.structure().block_count() {
+        let logical_block = logical.structure().block(logical_index)?;
+        let BlockKey::FusionTree(logical_key) = logical_block.key() else {
+            continue;
+        };
+        let sector = logical_key.codomain_tree().coupled();
+        let Ok(spectrum_index) = diagonal.binary_search_by_key(&sector, |entry| entry.sector)
+        else {
+            continue;
+        };
+        let parent_index = parent
+            .structure()
+            .find_block_index_by_adjoint_fusion_tree_pair(logical_key)
+            .ok_or_else(|| {
+                Error::InvalidArgument(
+                    "tensors live on different spaces or block layouts".to_string(),
+                )
+            })?;
+        let parent_block = parent.structure().block(parent_index)?;
+        let rows =
+            logical_block.shape().first().copied().ok_or_else(|| {
+                super::internal_layout_error("compact inner block has no row axis")
+            })?;
+        let cols = logical_block.shape().get(1).copied().ok_or_else(|| {
+            super::internal_layout_error("compact inner block has no column axis")
+        })?;
+        let row_stride = parent_block.strides().first().copied().ok_or_else(|| {
+            super::internal_layout_error("compact inner parent has no row stride")
+        })?;
+        let column_stride = parent_block
+            .strides()
+            .get(parent.nout())
+            .copied()
+            .ok_or_else(|| {
+                super::internal_layout_error("compact inner parent has no column stride")
+            })?;
+        let diagonal_stride = row_stride.checked_add(column_stride).ok_or_else(|| {
+            super::internal_layout_error("compact inner parent diagonal stride overflow")
+        })?;
+        let spectrum = diagonal.get(spectrum_index).ok_or_else(|| {
+            super::internal_layout_error("compact inner spectrum index is out of bounds")
+        })?;
+        let count = rows.min(cols);
+        let mut partial = D::from_real(0.0);
+        for diagonal_index in 0..count {
+            let diagonal_value = map(*spectrum.values.get(diagonal_index).ok_or_else(|| {
+                super::internal_layout_error("compact inner spectrum is shorter than its block")
+            })?);
+            let parent_position = parent_block
+                .offset()
+                .checked_add(diagonal_index.checked_mul(diagonal_stride).ok_or_else(|| {
+                    super::internal_layout_error("compact inner parent diagonal offset overflow")
+                })?)
+                .ok_or_else(|| {
+                    super::internal_layout_error("compact inner parent position overflow")
+                })?;
+            let parent_value = *parent_data.get(parent_position).ok_or_else(|| {
+                super::internal_layout_error("compact inner parent position is out of bounds")
+            })?;
+            partial = partial
+                + if diagonal_first {
+                    FactorScalar::adjoint(diagonal_value) * FactorScalar::adjoint(parent_value)
+                } else {
+                    parent_value * diagonal_value
+                };
+        }
+        total += partial.widen_complex() * weight(sector);
+    }
+    Ok(total)
+}
+
+pub(super) fn oriented_dense_inner_with_weight(
+    logical: &DynamicFusionMapSpace,
+    diagonal: &DiagonalData,
+    parent: &DynamicFusionMapSpace,
+    parent_data: &Data,
+    diagonal_first: bool,
+    weight: impl Fn(SectorId) -> f64,
+) -> Result<Complex64, Error> {
+    match (diagonal, parent_data) {
+        (DiagonalData::RealF64(diagonal), Data::F64(parent_data)) => {
+            oriented_dense_inner_with_weight_impl(
+                logical,
+                diagonal,
+                parent,
+                parent_data,
+                diagonal_first,
+                weight,
+                |value| value,
+            )
+        }
+        (DiagonalData::RealC64(diagonal), Data::C64(parent_data)) => {
+            oriented_dense_inner_with_weight_impl(
+                logical,
+                diagonal,
+                parent,
+                parent_data,
+                diagonal_first,
+                weight,
+                |value| Complex64::new(value, 0.0),
+            )
+        }
+        (DiagonalData::C64(diagonal), Data::C64(parent_data)) => {
+            oriented_dense_inner_with_weight_impl(
+                logical,
+                diagonal,
+                parent,
+                parent_data,
+                diagonal_first,
+                weight,
+                |value| value,
+            )
+        }
+        _ => Err(Error::DtypeMismatch),
+    }
+}
+
 pub(super) fn compact_inner_with_weight<D, L, Rhs>(
     lhs: &[SectorSpectrum<L>],
     rhs: &[SectorSpectrum<Rhs>],
@@ -393,4 +546,65 @@ where
         total += partial.widen_complex() * weight(lhs.sector);
     }
     Some(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tenet_core::{
+        BlockSpec, BlockStructure, FusionProductSpace, FusionTensorMapSpace, FusionTreeHomSpace,
+        SectorLeg, TensorMapSpace, Z2FusionRule,
+    };
+
+    #[test]
+    fn oriented_compact_inner_rejects_singleton_stride_overflow_without_panicking() {
+        let vacuum = SectorId::new(0);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(vacuum, 1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(vacuum, 1)], false)]),
+        );
+        let logical = FusionTensorMapSpace::from_degeneracy_shapes(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            homspace.clone(),
+            &Z2FusionRule,
+            [vec![1, 1]],
+        )
+        .unwrap();
+        let logical = DynamicFusionMapSpace::from_typed(&logical);
+        let logical_block = logical.structure().only_block().unwrap();
+        let parent_structure = BlockStructure::from_blocks_with_rank(
+            2,
+            vec![BlockSpec::with_key(
+                logical_block.key().clone(),
+                vec![1, 1],
+                vec![usize::MAX, 1],
+                0,
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let parent = FusionTensorMapSpace::new_unbound(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            homspace,
+            parent_structure,
+        )
+        .unwrap();
+        let parent = DynamicFusionMapSpace::from_typed(&parent);
+        let diagonal = [SectorSpectrum {
+            sector: vacuum,
+            values: vec![1.0],
+        }];
+
+        let error = oriented_dense_inner_with_weight_impl(
+            &logical,
+            &diagonal,
+            &parent,
+            &[2.0],
+            true,
+            |_| 1.0,
+            |value| value,
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::InvalidArgument(_)), "{error:?}");
+    }
 }

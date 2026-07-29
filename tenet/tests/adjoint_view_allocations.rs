@@ -96,6 +96,98 @@ fn adjoint_involution_does_not_allocate() {
 }
 
 #[test]
+fn lazy_scale_and_add_allocate_only_one_input_sized_payload() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = Space::u1((-4..=4).map(|charge| (charge, 8)));
+    let parent =
+        Tensor::rand_with_seed(&runtime, Dtype::C64, [&space, &space], [&space], 666_401).unwrap();
+    let other_parent =
+        Tensor::rand_with_seed(&runtime, Dtype::C64, [&space, &space], [&space], 666_402).unwrap();
+    let owned =
+        Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space, &space], 666_403).unwrap();
+    let payload_bytes = parent.try_data_c64().unwrap().len() as u64 * 16;
+
+    let warm = parent.adjoint().unwrap();
+    let warm_other = other_parent.adjoint().unwrap();
+    black_box(warm.scale(0.5).unwrap());
+    black_box(warm.add(&owned, 0.5, -0.25).unwrap());
+    black_box(warm.add(&warm_other, 0.5, -0.25).unwrap());
+
+    let scale_lazy = parent.adjoint().unwrap();
+    let mixed_lazy = parent.adjoint().unwrap();
+    let pair_lazy = parent.adjoint().unwrap();
+    let other_pair_lazy = other_parent.adjoint().unwrap();
+    for (_, bytes) in [
+        measure(|| {
+            black_box(scale_lazy.scale(0.5).unwrap());
+        }),
+        measure(|| {
+            black_box(mixed_lazy.add(&owned, 0.5, -0.25).unwrap());
+        }),
+        measure(|| {
+            black_box(pair_lazy.add(&other_pair_lazy, 0.5, -0.25).unwrap());
+        }),
+    ] {
+        assert!(
+            bytes >= payload_bytes && bytes < 2 * payload_bytes,
+            "expected one payload allocation ({payload_bytes} bytes), observed {bytes} bytes"
+        );
+    }
+    for lazy in [&scale_lazy, &mixed_lazy, &pair_lazy, &other_pair_lazy] {
+        let (_, bytes) = measure(|| {
+            black_box(lazy.try_data_c64().unwrap().len());
+        });
+        assert!(
+            bytes >= payload_bytes,
+            "the operation materialized its lazy operand"
+        );
+    }
+}
+
+#[test]
+fn mixed_lazy_add_has_no_rank_dependent_stride_allocation() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let mut reference = None;
+    for rank in [8, 10, 12] {
+        let space = Space::u1([(0, 1)]);
+        let codomain = std::iter::repeat_n(&space, rank / 2).collect::<Vec<_>>();
+        let parent = Tensor::rand_with_seed(
+            &runtime,
+            Dtype::C64,
+            codomain.clone(),
+            codomain.clone(),
+            666_500 + rank as u64,
+        )
+        .unwrap();
+        let owned = Tensor::rand_with_seed(
+            &runtime,
+            Dtype::C64,
+            codomain.clone(),
+            codomain,
+            666_600 + rank as u64,
+        )
+        .unwrap();
+        black_box(parent.adjoint().unwrap().add(&owned, 0.5, -0.25).unwrap());
+        let lazy = parent.adjoint().unwrap();
+        let cost = measure(|| {
+            black_box(lazy.add(&owned, 0.5, -0.25).unwrap());
+        });
+        assert_eq!(
+            cost,
+            *reference.get_or_insert(cost),
+            "rank={rank} must not heap-allocate stride metadata"
+        );
+        assert!(
+            measure(|| {
+                black_box(lazy.try_data_c64().unwrap().len());
+            })
+            .0 > 0,
+            "the mixed add materialized its lazy operand"
+        );
+    }
+}
+
+#[test]
 fn identity_adjoint_transform_cost_is_independent_of_rank_and_block_count() {
     // What: identity permute, braid, and repartition share the lazy view with
     // zero allocations across increasing rank and U1 sector counts.
