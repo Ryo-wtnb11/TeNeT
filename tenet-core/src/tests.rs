@@ -13917,6 +13917,22 @@ mod tests {
         assert!(matches!(generic_artin_braid_at_with_inverse_checked(&mut bad_f, &unitary_rank3_tree(1), 1, false), Err(CheckedGenericSymbolError::Shape { symbol: "F", .. })));
     }
 
+    #[test]
+    fn checked_generic_merge_rejects_a_malformed_f_before_emitting_terms() {
+        let mut rule = ArtinSpy { bad_f: true, ..ArtinSpy::new() };
+        let lhs = unitary_rank3_tree(1);
+        let rhs = unitary_rank2_tree(1);
+        let result = merge_fusion_trees_generic_checked(
+                &mut rule,
+                &lhs,
+                &rhs,
+                SectorId::new(UnitaryToyOmRule::A),
+                MultiplicityIndex::ONE,
+            );
+        assert!(matches!(result, Err(CheckedGenericSymbolError::Shape { symbol: "F", .. })), "{result:?}");
+        assert!(rule.f_calls.get() > 0);
+    }
+
     // Braid at `index` (inv=false) then braid every output at `index`
     // (inv=true), summing coefficients per final tree. TensorKit's inverse
     // identity: this must equal the input tree with coefficient 1.
