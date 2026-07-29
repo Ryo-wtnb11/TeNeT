@@ -5908,6 +5908,26 @@ mod checked_admission_tests {
 
     #[test]
     fn checked_bind_failure_preserves_subset_admission_and_caches() {
+        const ISOLATED: &str = "TENET_CHECKED_BIND_FAILURE_ISOLATED";
+        if std::env::var_os(ISOLATED).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "contract::dynamic_space::checked_admission_tests::checked_bind_failure_preserves_subset_admission_and_caches",
+                ])
+                .env(ISOLATED, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
+                "isolated test did not execute exactly once: {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                output.status
+            );
+            return;
+        }
+
         // What: a checked bind fails transactionally at every checked stage —
         // structural-proof algebra (channels, nsymbol) and the prepare leg-dual
         // guard — keeping the caller's Subset admission and both cache snapshots
