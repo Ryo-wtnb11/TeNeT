@@ -30,6 +30,11 @@ pub use fibonacci::FibonacciFusionRule;
 mod su2;
 pub use su2::{SU2FusionRule, SU2Irrep, SU2_MAX_DOUBLED_SPIN};
 
+#[cfg(feature = "racah-generated")]
+mod sun;
+#[cfg(feature = "racah-generated")]
+pub use sun::{SUNFusionRule, SUNFusionRuleError};
+
 mod product_rule;
 pub use product_rule::{
     product_fusion_rule, product_fusion_rule_with_codec, ProductFusionRule, ProductFusionRuleExt,

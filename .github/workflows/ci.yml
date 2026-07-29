@@ -126,7 +126,9 @@ jobs:
   # cotengra-python is build + unit tests only — its one test that shells
   # out to Python (`runs_installed_cotengra_when_requested`) early-returns
   # unless `TENET_RUN_COTENGRA_PYTHON_TEST` is set, so no Python env is
-  # needed here.
+  # needed here. Only racah-generated pins the reviewed Tenferro revision:
+  # Racah resolves its git dependencies through TeNeT's root patch. The
+  # existing rows continue to test Tenferro main.
   feature-contract:
     name: feature contract (${{ matrix.name }})
     runs-on: ubuntu-latest
@@ -134,8 +136,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: opt-path, features: "opt-path,cpu-faer" }
-          - { name: cotengra-python, features: "cotengra-python,cpu-faer" }
+          - { name: opt-path, package: tenet-network, features: "opt-path,cpu-faer", tenferro_ref: main }
+          - { name: cotengra-python, package: tenet-network, features: "cotengra-python,cpu-faer", tenferro_ref: main }
+          - { name: racah-generated, package: tenet-sectors, features: racah-generated, tenferro_ref: 68855c2b65b5adc42dccca9bac04fd136a8f14c8 }
     steps:
       - uses: actions/checkout@v4
         with:
@@ -143,7 +146,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: tensor4all/tenferro-rs
-          ref: main
+          ref: ${{ matrix.tenferro_ref }}
           path: tenferro-rs
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -153,7 +156,7 @@ jobs:
       - uses: ./tenet/.github/actions/cargo-build-script-cache
         with:
           key: feature-${{ matrix.name }}
-      - run: cargo test -p tenet-network --no-default-features --features "${{ matrix.features }}"
+      - run: cargo test -p "${{ matrix.package }}" --no-default-features --features "${{ matrix.features }}"
         working-directory: tenet
         env:
           CARGO_PROFILE_TEST_DEBUG: ${{ env.CI_HEAVY_TEST_DEBUG }}
