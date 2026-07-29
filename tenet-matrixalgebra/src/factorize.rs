@@ -1703,23 +1703,6 @@ where
         FusionProductSpace::new([new_leg]),
         space.homspace().domain().clone(),
     );
-    let checked = tenet_core::InfallibleGeneric::new(input.provider());
-    left_hom
-        .fusion_tree_keys_generic_checked(&checked)
-        .map_err(|error| match error {
-            tenet_core::CheckedGenericStructureError::Provider(never) => match never {},
-            tenet_core::CheckedGenericStructureError::Core(error) => {
-                OperationError::from_core_preserving_context(error)
-            }
-        })?;
-    right_hom
-        .fusion_tree_keys_generic_checked(&checked)
-        .map_err(|error| match error {
-            tenet_core::CheckedGenericStructureError::Provider(never) => match never {},
-            tenet_core::CheckedGenericStructureError::Core(error) => {
-                OperationError::from_core_preserving_context(error)
-            }
-        })?;
     let left = BoundDynamicFusionMapSpace::from_final_homspace_generic(
         Arc::clone(input.provider_arc()),
         left_hom,
