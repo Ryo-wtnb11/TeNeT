@@ -1444,6 +1444,80 @@ mod tests {
     }
 
     #[test]
+    fn generic_merge_keeps_the_selected_su3_root_vertex() {
+        // TensorKit 0.16.2 `merge(f₁, f₂, c, μ)`: 8 ⊗ 8 → 8 has two
+        // outer-multiplicity vertices, and each selected μ emits its own key.
+        let rule = Su3FusionRule::new();
+        let eight = rule.sector_of_label(&[1, 1]).unwrap();
+        let tree = FusionTreeKey::new(vec![eight], eight, vec![false], vec![], vec![]);
+        for vertex in [1, 2] {
+            let terms = merge_fusion_trees_generic(
+                &rule,
+                &tree,
+                &tree,
+                eight,
+                MultiplicityIndex::new(vertex).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(terms.len(), 1);
+            assert_eq!(terms[0].0.uncoupled(), &[eight, eight]);
+            assert_eq!(terms[0].0.coupled(), eight);
+            assert_eq!(terms[0].0.vertices(), &[MultiplicityIndex::new(vertex).unwrap()]);
+            assert_eq!(terms[0].1, 1.0);
+        }
+    }
+
+    #[test]
+    fn generic_merge_treats_rank_zero_as_the_tensor_unit() {
+        let rule = Su3FusionRule::new();
+        let eight = rule.sector_of_label(&[1, 1]).unwrap();
+        let unit = FusionTreeKey::new(vec![], rule.vacuum(), vec![], vec![], vec![]);
+        let tree = FusionTreeKey::new(vec![eight], eight, vec![false], vec![], vec![]);
+        for (lhs, rhs) in [(&unit, &tree), (&tree, &unit)] {
+            assert_eq!(
+                merge_fusion_trees_generic(&rule, lhs, rhs, eight, MultiplicityIndex::ONE).unwrap(),
+                vec![(tree.clone(), 1.0)],
+            );
+        }
+    }
+
+    #[test]
+    fn generic_rank_two_su3_merge_matches_pinned_tensorkit() {
+        // TensorKit 0.16.2 / SUNRepresentations 0.4.0: merge((8,8)->8,
+        // μ=2, (3,3bar)->8, 8, root μ).  This enters the checked F loop and
+        // pins the retained front vertex before generated tail vertices.
+        let rule = Su3FusionRule::new();
+        let id = |p, q| rule.sector_of(p, q).unwrap();
+        let (a, b, eight) = (id(1, 0), id(0, 1), id(1, 1));
+        let lhs = FusionTreeKey::new(
+            [eight, eight], eight, [false, false], [], [MultiplicityIndex::new(2).unwrap()],
+        );
+        let rhs = FusionTreeKey::new([a, b], eight, [false, false], [], [MultiplicityIndex::ONE]);
+        for (root, coefficients) in [
+            (1, [0.5976143046671962, 0.26726124191242406, 0.755928946018454]),
+            (2, [-0.13363062095621195, -0.8964214570007942, 0.42257712736425784]),
+        ] {
+            let terms = merge_fusion_trees_generic(
+                &rule, &lhs, &rhs, eight, MultiplicityIndex::new(root).unwrap(),
+            ).unwrap();
+            let expected = [(id(2, 1), coefficients[0]), (id(1, 0), coefficients[1]), (id(0, 2), coefficients[2])];
+            assert_eq!(terms.len(), expected.len());
+            for (term, coefficient) in &terms {
+                assert_eq!(term.uncoupled(), &[eight, eight, a, b]);
+                assert_eq!(term.coupled(), eight);
+                assert_eq!(term.is_dual(), &[false; 4]);
+                let expected_coefficient = expected.iter().find_map(|(inner, coefficient)|
+                    (*inner == term.innerlines()[1]).then_some(*coefficient),
+                ).expect("TensorKit oracle covers every emitted inner line");
+                assert_eq!(term.innerlines()[0], eight);
+                assert_eq!(term.vertices().iter().map(|mu| mu.get()).collect::<Vec<_>>(), [2, 1, 1]);
+                assert!((coefficient - expected_coefficient).abs() < 1e-12, "{coefficient} != {expected_coefficient}");
+            }
+        }
+    }
+
+
+    #[test]
     fn merge_fusion_trees_pins_nontrivial_su2_f_coefficients() {
         // What: merging a spin-1 tree into three spin-1/2 leaves is a genuine
         // associator expansion, not a pointed-rule relabelling.
@@ -13841,6 +13915,22 @@ mod tests {
         assert!(matches!(generic_artin_braid_at_with_inverse_checked(&mut bad_r, &unitary_rank2_tree(1), 0, false), Err(CheckedGenericSymbolError::Shape { symbol: "R", .. })));
         let mut bad_f = ArtinSpy { bad_f: true, ..ArtinSpy::new() };
         assert!(matches!(generic_artin_braid_at_with_inverse_checked(&mut bad_f, &unitary_rank3_tree(1), 1, false), Err(CheckedGenericSymbolError::Shape { symbol: "F", .. })));
+    }
+
+    #[test]
+    fn checked_generic_merge_rejects_a_malformed_f_before_emitting_terms() {
+        let mut rule = ArtinSpy { bad_f: true, ..ArtinSpy::new() };
+        let lhs = unitary_rank3_tree(1);
+        let rhs = unitary_rank2_tree(1);
+        let result = merge_fusion_trees_generic_checked(
+                &mut rule,
+                &lhs,
+                &rhs,
+                SectorId::new(UnitaryToyOmRule::A),
+                MultiplicityIndex::ONE,
+            );
+        assert!(matches!(result, Err(CheckedGenericSymbolError::Shape { symbol: "F", .. })), "{result:?}");
+        assert!(rule.f_calls.get() > 0);
     }
 
     // Braid at `index` (inv=false) then braid every output at `index`
