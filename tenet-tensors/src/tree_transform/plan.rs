@@ -1823,31 +1823,13 @@ where
     }
 }
 
-/// Generic-fusion (outer-multiplicity) tree-pair plan compile — the Stage B2c
-/// dispatch receptacle for SU(3)/SO(N≥7)/Sp(N) rules. Parallel entry to
-/// `build_multiplicity_free_tree_pair_transform_group_plan`: non-identity groups
-/// are compiled as one ordered block map over full tree-pair keys, while the
-/// identity path keeps the existing identity assembly.
+/// Compile a Generic-fusion permute or braid plan through fallible categorical
+/// queries.
 ///
-/// This is a SEPARATE entry rather than a runtime branch inside the mult-free
-/// builder because the two are disjoint at the type level:
-/// `GenericRigidSymbols` and `MultiplicityFreeRigidSymbols` are never both
-/// implemented by a real rule, so a mult-free rule can never name this
-/// function's bound, let alone reach its row-generation body. Both paths do
-/// intentionally share group-spec assembly, including structural monomial
-/// lowering, while retaining separate fusion-style guards and symbol APIs.
-/// Why not call this a byte-for-byte or blanket zero-cost guarantee: changes to
-/// the shared assembler are expected to affect both paths; the guarantee is
-/// that multiplicity-free rules never execute generic F/R-symbol logic. The
-/// provider-owned [`FusionStyleKind`] gate below defends against a
-/// `GenericRigidSymbols` implementation that reports a multiplicity-free
-/// style. Fusion style is not duplicated in individual tree keys.
-///
-/// # Provider-domain precondition
-///
-/// Fusion-tree block keys in `src_structure` follow
-/// [`tenet_core::FusionTreeKey::validate_for_rule`]'s provider-domain
-/// precondition.
+/// The complete source structure is admitted before the first rigidity or F/R
+/// lookup. A failure returns no plan, and this standalone entry does not access
+/// the Runtime transform store. Checked Generic transpose is intentionally
+/// outside this entry's scope.
 pub fn build_checked_generic_tree_pair_transform_group_plan<P>(
     provider: &mut P,
     operation: TreeTransformOperation,
@@ -1895,6 +1877,31 @@ where
     Ok(TreeTransformGroupPlan::new(specs))
 }
 
+/// Generic-fusion (outer-multiplicity) tree-pair plan compile — the Stage B2c
+/// dispatch receptacle for SU(3)/SO(N≥7)/Sp(N) rules. Parallel entry to
+/// `build_multiplicity_free_tree_pair_transform_group_plan`: non-identity groups
+/// are compiled as one ordered block map over full tree-pair keys, while the
+/// identity path keeps the existing identity assembly.
+///
+/// This is a SEPARATE entry rather than a runtime branch inside the mult-free
+/// builder because the two are disjoint at the type level:
+/// `GenericRigidSymbols` and `MultiplicityFreeRigidSymbols` are never both
+/// implemented by a real rule, so a mult-free rule can never name this
+/// function's bound, let alone reach its row-generation body. Both paths do
+/// intentionally share group-spec assembly, including structural monomial
+/// lowering, while retaining separate fusion-style guards and symbol APIs.
+/// Why not call this a byte-for-byte or blanket zero-cost guarantee: changes to
+/// the shared assembler are expected to affect both paths; the guarantee is
+/// that multiplicity-free rules never execute generic F/R-symbol logic. The
+/// provider-owned [`FusionStyleKind`] gate below defends against a
+/// `GenericRigidSymbols` implementation that reports a multiplicity-free
+/// style. Fusion style is not duplicated in individual tree keys.
+///
+/// # Provider-domain precondition
+///
+/// Fusion-tree block keys in `src_structure` follow
+/// [`tenet_core::FusionTreeKey::validate_for_rule`]'s provider-domain
+/// precondition.
 pub fn build_generic_tree_pair_transform_group_plan<R>(
     rule: &R,
     operation: TreeTransformOperation,
