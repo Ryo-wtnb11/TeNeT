@@ -1672,6 +1672,81 @@ where
     build_compact_factor_plan(input, input.validated_layout())
 }
 
+fn compact_factor_plan_generic<R>(
+    input: &BoundDynamicFusionMapSpace<R>,
+) -> Result<Option<Arc<CompactFactorPlan>>, OperationError>
+where
+    R: FusionRule,
+{
+    let space = input.space();
+    let Some(regions) = checked_sector_regions(space.structure(), space.nout())? else {
+        return Ok(None);
+    };
+    let source = Arc::new(MatricizationPlan {
+        layout: input.validated_layout(),
+        regions,
+    });
+    let ranks = source
+        .regions
+        .iter()
+        .map(|region| SectorRank {
+            sector: region_sector(region),
+            kept: region.rows().min(region.cols()),
+        })
+        .collect::<Vec<_>>();
+    let new_leg = SectorLeg::new(ranks.iter().map(|rank| (rank.sector, rank.kept)), false);
+    let left_hom = FusionTreeHomSpace::new(
+        space.homspace().codomain().clone(),
+        FusionProductSpace::new([new_leg.clone()]),
+    );
+    let right_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([new_leg]),
+        space.homspace().domain().clone(),
+    );
+    let checked = tenet_core::InfallibleGeneric::new(input.provider());
+    left_hom
+        .fusion_tree_keys_generic_checked(&checked)
+        .map_err(|error| match error {
+            tenet_core::CheckedGenericStructureError::Provider(never) => match never {},
+            tenet_core::CheckedGenericStructureError::Core(error) => {
+                OperationError::from_core_preserving_context(error)
+            }
+        })?;
+    right_hom
+        .fusion_tree_keys_generic_checked(&checked)
+        .map_err(|error| match error {
+            tenet_core::CheckedGenericStructureError::Provider(never) => match never {},
+            tenet_core::CheckedGenericStructureError::Core(error) => {
+                OperationError::from_core_preserving_context(error)
+            }
+        })?;
+    let left = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::clone(input.provider_arc()),
+        left_hom,
+    )?;
+    let right = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::clone(input.provider_arc()),
+        right_hom,
+    )?;
+    let left_regions = checked_sector_regions(left.space().structure(), left.space().nout())?
+        .ok_or(OperationError::UnsupportedTensorContractScope {
+            message: "compact left factor is not a coupled-sector matrix layout",
+        })?;
+    let right_regions = checked_sector_regions(right.space().structure(), right.space().nout())?
+        .ok_or(OperationError::UnsupportedTensorContractScope {
+            message: "compact right factor is not a coupled-sector matrix layout",
+        })?;
+    let routes = compile_compact_factor_routes(&source.regions, &left_regions, &right_regions)?;
+    Ok(Some(Arc::new(CompactFactorPlan {
+        source,
+        left_layout: left.validated_layout(),
+        right_layout: right.validated_layout(),
+        left_regions,
+        right_regions,
+        routes,
+    })))
+}
+
 fn build_compact_factor_plan<R>(
     input: &BoundDynamicFusionMapSpace<R>,
     source_layout: ValidatedDynamicFusionLayout,
@@ -1795,7 +1870,7 @@ fn svd_compact_direct_regions<E, R, D>(
 ) -> Result<SvdFactorsDyn<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: FusionRule,
     D: FactorScalar,
 {
     let space = input.space().space();
@@ -4306,7 +4381,7 @@ fn qr_compact_direct_regions<E, R, D>(
 ) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: FusionRule,
     D: FactorScalar,
 {
     let space = input.space().space();
@@ -4444,7 +4519,7 @@ fn lq_compact_direct_regions<E, R, D>(
 ) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: FusionRule,
     D: FactorScalar,
 {
     let space = input.space().space();
@@ -6154,8 +6229,13 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
+    if let Some(plan) = compact_factor_plan_generic(input.space())? {
+        return svd_compact_direct_regions(dense, input, &plan);
+    }
     let matricizations =
         sector_matricizations_generic(space.structure(), input.data(), space.nout())?;
+    #[cfg(test)]
+    record_compact_svd_input_pack(&matricizations);
 
     let ranks = matricizations
         .iter()
@@ -6252,6 +6332,11 @@ where
             &vt_workspace,
             max_rank,
         )?;
+        #[cfg(test)]
+        {
+            record_compact_svd_output_scatter::<D>(matrix.rows * rank);
+            record_compact_svd_output_scatter::<D>(rank * matrix.cols);
+        }
     }
 
     let u = BoundDynFactor::from_bound(u_space, u_data, space.nout(), 1)?;
@@ -6308,14 +6393,14 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
-    let matricizations =
-        sector_matricizations_generic(space.structure(), input.data(), space.nout())?;
+    let matricizations = value_matricizations(space.structure(), input.data(), space.nout())?;
     let mut singular_values = Vec::with_capacity(matricizations.len());
-    for matrix in &matricizations {
+    for index in 0..matricizations.len() {
+        let matrix = matricizations.get(index)?;
         let rank = matrix.rows.min(matrix.cols);
         let input_shape = [matrix.rows, matrix.cols];
         let input_strides = [1usize, matrix.rows];
-        let input = DenseView::new(&matrix.data, &input_shape, &input_strides, 0)
+        let input = DenseView::new(matrix.data, &input_shape, &input_strides, 0)
             .map_err(OperationError::Dense)?;
         let s_tensor = dense
             .svd_vals(D::dense_read(input))
@@ -6640,7 +6725,12 @@ where
 {
     let provider = input.space().provider_arc();
     let space = input.space().space();
+    if let Some(plan) = compact_factor_plan_generic(input.space())? {
+        return qr_compact_direct_regions(dense, input, &plan);
+    }
     let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())?;
+    #[cfg(test)]
+    record_compact_qr_input_pack(&matrices);
     let mut pairs = Vec::with_capacity(matrices.len());
     for matrix in &matrices {
         let rank = matrix.rows.min(matrix.cols);
@@ -6670,6 +6760,11 @@ where
             rank,
             matrix.cols,
         );
+        #[cfg(test)]
+        {
+            record_compact_qr_output_scatter::<D>(q.len());
+            record_compact_qr_output_scatter::<D>(r.len());
+        }
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: rank,
@@ -6694,7 +6789,12 @@ where
 {
     let provider = input.space().provider_arc();
     let space = input.space().space();
+    if let Some(plan) = compact_factor_plan_generic(input.space())? {
+        return lq_compact_direct_regions(dense, input, &plan);
+    }
     let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())?;
+    #[cfg(test)]
+    record_compact_lq_input_pack(&matrices);
     let mut pairs = Vec::with_capacity(matrices.len());
     for matrix in &matrices {
         let rank = matrix.rows.min(matrix.cols);
@@ -6725,6 +6825,11 @@ where
             rank,
             matrix.rows,
         );
+        #[cfg(test)]
+        {
+            record_compact_lq_output_scatter::<D>(r_prime.len());
+            record_compact_lq_output_scatter::<D>(q_prime.len());
+        }
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: rank,
