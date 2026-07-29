@@ -1126,7 +1126,8 @@ pub struct BoundDynamicFusionMapSpace<R> {
 /// identity or retaining an arbitrary provider allocation.
 pub struct ValidatedDynamicFusionLayout(DynamicFusionMapSpace);
 
-pub(crate) struct PreparedCheckedGenericDynamicSpace {
+#[doc(hidden)]
+pub struct PreparedCheckedGenericDynamicSpace {
     nout: usize,
     nin: usize,
     homspace: FusionTreeHomSpace,
@@ -1135,11 +1136,13 @@ pub(crate) struct PreparedCheckedGenericDynamicSpace {
 }
 
 impl PreparedCheckedGenericDynamicSpace {
-    pub(crate) fn structure(&self) -> &BlockStructure {
+    #[doc(hidden)]
+    pub fn structure(&self) -> &BlockStructure {
         self.structure.structure()
     }
 
-    pub(crate) fn required_len(&self) -> usize {
+    #[doc(hidden)]
+    pub fn required_len(&self) -> usize {
         self.structure.required_len()
     }
 
@@ -1606,6 +1609,61 @@ where
         let space =
             DynamicFusionMapSpace::from_final_homspace_generic(provider.as_ref(), homspace)?;
         Self::from_derived(provider, space)
+    }
+
+    /// Stages one checked Generic final HomSpace without publishing its layout.
+    #[doc(hidden)]
+    pub fn prepare_final_homspace_generic_checked<P>(
+        &self,
+        provider: &P,
+        homspace: FusionTreeHomSpace,
+    ) -> Result<PreparedCheckedGenericDynamicSpace, CheckedGenericStructureError<P::Error>>
+    where
+        P: CheckedGenericFusion,
+    {
+        let expected = self.provider.rule_identity();
+        let actual = provider.rule_identity();
+        if expected != actual {
+            return Err(CoreError::FusionRuleMismatch { expected, actual }.into());
+        }
+        for actual in [self.provider.fusion_style(), provider.fusion_style()] {
+            if actual != FusionStyleKind::Generic {
+                return Err(CoreError::UnsupportedFusionStyle {
+                    expected: FusionStyleKind::Generic,
+                    actual,
+                }
+                .into());
+            }
+        }
+        let nout = homspace.codomain().len();
+        let nin = homspace.domain().len();
+        let structure = homspace
+            .prepare_coupled_subblock_structure_from_leg_degeneracies_generic_checked(provider)?;
+        Ok(PreparedCheckedGenericDynamicSpace {
+            nout,
+            nin,
+            homspace,
+            structure,
+            identity: actual,
+        })
+    }
+
+    /// Commits a checked Generic final HomSpace under this exact provider.
+    #[doc(hidden)]
+    pub fn commit_final_homspace_generic_checked(
+        &self,
+        prepared: PreparedCheckedGenericDynamicSpace,
+    ) -> Result<Self, OperationError> {
+        let expected = prepared.identity.clone();
+        let actual = self.provider.rule_identity();
+        if expected != actual {
+            return Err(OperationError::from_core_preserving_context(
+                CoreError::FusionRuleMismatch { expected, actual },
+            ));
+        }
+        validate_generic_provider_style(self.provider.as_ref())?;
+        let space = prepared.commit();
+        Self::from_derived_with_capability(Arc::clone(&self.provider), space, self.layout_build)
     }
 
     /// Tree-transform result retaining the source provider proof.
@@ -2620,11 +2678,14 @@ mod bound_invariant_tests {
     use super::*;
     use crate::tests::GenericMultiplicityRule;
     use crate::BoundDynamicTensorRef;
+    use std::cell::Cell;
     use tenet_core::{
-        reset_core_intern_tables, BlockSpec, FermionParityFusionRule, FusionAlgebraError,
-        FusionProductSpace, FusionTreePairKey, Fz2SectorLayout, PackedProductCodec,
-        ProductFusionRule, ProductSectorCodec, ProductSectorLayout, SU2FusionRule, SU2Irrep,
-        SectorId, SectorLeg, Su2SectorLayout, Su3FusionRule, TensorMapSpace, U1FusionRule, U1Irrep,
+        block_structure_intern_cache_info, complete_hom_space_structure_cache_info,
+        fusion_tree_layout_cache_info, reset_core_intern_tables, BlockSpec, BraidingStyleKind,
+        CoupledSectorFold, FermionParityFusionRule, FusionAlgebraError, FusionProductSpace,
+        FusionTreePairKey, Fz2SectorLayout, PackedProductCodec, ProductFusionRule,
+        ProductSectorCodec, ProductSectorLayout, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
+        SectorVec, Su2SectorLayout, Su3FusionRule, TensorMapSpace, U1FusionRule, U1Irrep,
         U1SectorLayout, Z2FusionRule, Z2Irrep,
     };
 
@@ -2659,6 +2720,318 @@ mod bound_invariant_tests {
             [vec![1, 1], vec![1, 1]],
         )
         .unwrap()
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct CheckedGenericSpyError(usize);
+
+    impl fmt::Display for CheckedGenericSpyError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(formatter, "checked Generic query {} failed", self.0)
+        }
+    }
+
+    impl std::error::Error for CheckedGenericSpyError {}
+
+    struct CheckedGenericSpy {
+        identity: RuleIdentity,
+        style: Cell<FusionStyleKind>,
+        calls: Cell<usize>,
+        fail_at: Option<usize>,
+    }
+
+    impl CheckedGenericSpy {
+        fn new() -> Self {
+            Self {
+                identity: RuleIdentity::of_type::<Self>(),
+                style: Cell::new(FusionStyleKind::Generic),
+                calls: Cell::new(0),
+                fail_at: None,
+            }
+        }
+
+        fn hit(&self) -> Result<(), CheckedGenericSpyError> {
+            let call = self.calls.get() + 1;
+            self.calls.set(call);
+            if self.fail_at == Some(call) {
+                Err(CheckedGenericSpyError(call))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl FusionRule for CheckedGenericSpy {
+        fn rule_identity(&self) -> RuleIdentity {
+            self.identity.clone()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            self.style.get()
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn dual(&self, sector: SectorId) -> SectorId {
+            self.calls.set(self.calls.get() + 1);
+            sector
+        }
+
+        fn fusion_channels(&self, _: SectorId, _: SectorId) -> SectorVec {
+            self.calls.set(self.calls.get() + 1);
+            [SectorId::new(0)].into_iter().collect()
+        }
+
+        fn fusion_channels_in_table(&self, _: SectorId, _: SectorId) -> SectorVec {
+            self.calls.set(self.calls.get() + 1);
+            [SectorId::new(0)].into_iter().collect()
+        }
+
+        fn coupled_sector_fold(&self, _: &[SectorId]) -> CoupledSectorFold {
+            self.calls.set(self.calls.get() + 1);
+            CoupledSectorFold {
+                clean: vec![SectorId::new(0)],
+                ..Default::default()
+            }
+        }
+
+        fn nsymbol(&self, _: SectorId, _: SectorId, _: SectorId) -> usize {
+            self.calls.set(self.calls.get() + 1);
+            2
+        }
+    }
+
+    impl CheckedGenericFusion for CheckedGenericSpy {
+        type Error = CheckedGenericSpyError;
+
+        fn rule_identity(&self) -> RuleIdentity {
+            self.identity.clone()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            self.style.get()
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+            self.hit()?;
+            Ok(sector)
+        }
+
+        fn try_fusion_channels(
+            &self,
+            left: SectorId,
+            right: SectorId,
+        ) -> Result<SectorVec, Self::Error> {
+            let _ = (left, right);
+            self.hit()?;
+            Ok([SectorId::new(0)].into_iter().collect())
+        }
+
+        fn try_fusion_channels_in_table(
+            &self,
+            left: SectorId,
+            right: SectorId,
+        ) -> Result<SectorVec, Self::Error> {
+            let _ = (left, right);
+            self.hit()?;
+            Ok([SectorId::new(0)].into_iter().collect())
+        }
+
+        fn try_coupled_sector_fold(
+            &self,
+            effective: &[SectorId],
+        ) -> Result<CoupledSectorFold, Self::Error> {
+            let _ = effective;
+            self.hit()?;
+            Ok(CoupledSectorFold {
+                clean: vec![SectorId::new(0)],
+                ..Default::default()
+            })
+        }
+
+        fn try_nsymbol(
+            &self,
+            left: SectorId,
+            right: SectorId,
+            coupled: SectorId,
+        ) -> Result<usize, Self::Error> {
+            let _ = (left, right, coupled);
+            self.hit()?;
+            Ok(2)
+        }
+    }
+
+    #[test]
+    fn checked_generic_bound_space_commits_the_staged_layout_without_reenumeration() {
+        const ISOLATED: &str = "TENET_CHECKED_GENERIC_BOUND_SPACE_ISOLATED";
+        if std::env::var_os(ISOLATED).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "contract::dynamic_space::bound_invariant_tests::checked_generic_bound_space_commits_the_staged_layout_without_reenumeration",
+                ])
+                .env(ISOLATED, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                output.status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
+                "isolated test did not execute exactly once: {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                output.status
+            );
+            return;
+        }
+
+        reset_core_intern_tables();
+        let provider = Arc::new(CheckedGenericSpy::new());
+        let source_hom = FusionTreeHomSpace::from_sector_ids([(0, 1)], [(0, 1)]);
+        let source = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+            Arc::clone(&provider),
+            source_hom,
+        )
+        .unwrap();
+        provider.calls.set(0);
+        let final_hom = || FusionTreeHomSpace::from_sector_ids([(0, 2), (0, 3)], [(0, 5)]);
+        let snapshots = || {
+            (
+                fusion_tree_layout_cache_info(),
+                complete_hom_space_structure_cache_info(),
+                block_structure_intern_cache_info(),
+            )
+        };
+
+        for (identity, style) in [
+            (
+                RuleIdentity::of_type::<Z2FusionRule>(),
+                FusionStyleKind::Generic,
+            ),
+            (
+                FusionRule::rule_identity(provider.as_ref()),
+                FusionStyleKind::Unique,
+            ),
+        ] {
+            let mut spy = CheckedGenericSpy::new();
+            spy.identity = identity;
+            spy.style.set(style);
+            let before = snapshots();
+            let error = source
+                .prepare_final_homspace_generic_checked(&spy, final_hom())
+                .err()
+                .unwrap();
+            assert!(matches!(
+                error,
+                CheckedGenericStructureError::Core(
+                    CoreError::FusionRuleMismatch { .. } | CoreError::UnsupportedFusionStyle { .. }
+                )
+            ));
+            assert_eq!(spy.calls.get(), 0);
+            assert_eq!(provider.calls.get(), 0);
+            assert_eq!(snapshots(), before);
+        }
+
+        let before_prepare = snapshots();
+        let spy = CheckedGenericSpy::new();
+        let prepared = source
+            .prepare_final_homspace_generic_checked(&spy, final_hom())
+            .unwrap();
+        let prepare_calls = spy.calls.get();
+        assert!(prepare_calls > 0);
+        assert_eq!(provider.calls.get(), 0);
+        let preview = prepared.structure().clone();
+        let required_len = prepared.required_len();
+        assert_eq!(snapshots(), before_prepare);
+
+        let before_commit = snapshots();
+        let committed = source
+            .commit_final_homspace_generic_checked(prepared)
+            .unwrap();
+        assert_eq!(spy.calls.get(), prepare_calls);
+        assert_eq!(provider.calls.get(), 0);
+        assert!(Arc::ptr_eq(committed.provider_arc(), &provider));
+        assert_eq!(committed.space().structure().as_ref(), &preview);
+        assert_eq!(committed.space().required_len().unwrap(), required_len);
+        assert_eq!(committed.space().homspace(), &final_hom());
+        assert!(matches!(
+            committed.space().admission(),
+            FusionSpaceAdmission::Complete(_)
+        ));
+        assert_eq!(
+            block_structure_intern_cache_info().entries(),
+            before_commit.2.entries() + 1
+        );
+
+        let complete = CheckedGenericSpy::new();
+        let complete_calls = {
+            let _staged = source
+                .prepare_final_homspace_generic_checked(&complete, final_hom())
+                .unwrap();
+            complete.calls.get()
+        };
+        let mut failing = CheckedGenericSpy::new();
+        failing.fail_at = Some(complete_calls);
+        let before_failure = snapshots();
+        let error = source
+            .prepare_final_homspace_generic_checked(&failing, final_hom())
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error,
+            CheckedGenericStructureError::Provider(CheckedGenericSpyError(call))
+                if call == complete_calls
+        ));
+        assert_eq!(failing.calls.get(), complete_calls);
+        assert_eq!(provider.calls.get(), 0);
+        assert_eq!(snapshots(), before_failure);
+
+        let spy = CheckedGenericSpy::new();
+        let prepared = source
+            .prepare_final_homspace_generic_checked(&spy, final_hom())
+            .unwrap();
+        provider.style.set(FusionStyleKind::Unique);
+        let before_style_rejected_commit = snapshots();
+        let error = source
+            .commit_final_homspace_generic_checked(prepared)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Generic,
+                actual: FusionStyleKind::Unique,
+            })
+        ));
+        assert_eq!(provider.calls.get(), 0);
+        assert_eq!(snapshots(), before_style_rejected_commit);
+        provider.style.set(FusionStyleKind::Generic);
+
+        let spy = CheckedGenericSpy::new();
+        let mut corrupted = source
+            .prepare_final_homspace_generic_checked(&spy, final_hom())
+            .unwrap();
+        corrupted.identity = RuleIdentity::of_type::<Z2FusionRule>();
+        let before_rejected_commit = snapshots();
+        let error = source
+            .commit_final_homspace_generic_checked(corrupted)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::FusionRuleMismatch { .. })
+        ));
+        assert_eq!(snapshots(), before_rejected_commit);
     }
 
     #[test]
