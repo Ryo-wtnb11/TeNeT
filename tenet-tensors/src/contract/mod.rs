@@ -58,7 +58,8 @@ pub(crate) use dynamic_space::{
     MetadataRequest,
 };
 pub use dynamic_space::{
-    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand, ValidatedDynamicFusionLayout,
+    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
+    PreparedCheckedGenericDynamicSpace, ValidatedDynamicFusionLayout,
 };
 #[cfg(test)]
 pub(crate) use fusion::{
