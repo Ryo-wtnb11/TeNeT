@@ -127,6 +127,179 @@ where
     )
 }
 
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn tensoradd_raw_strided_kernel_mapped<T, D, S>(
+    dst_data: &mut [T],
+    src_data: &[T],
+    shape: &[usize],
+    dst_stride: D,
+    src_stride: S,
+    dst_offset: isize,
+    src_offset: isize,
+    source_conjugate: bool,
+    alpha: T,
+    beta: T,
+) -> Result<(), OperationError>
+where
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + PartialEq + Zero + One + ConjugateValue,
+    D: Copy + Fn(usize) -> Result<isize, OperationError>,
+    S: Copy + Fn(usize) -> Result<isize, OperationError>,
+{
+    validate_raw_strided_bounds_mapped(dst_data.len(), shape, dst_stride, dst_offset)?;
+    validate_raw_strided_bounds_mapped(src_data.len(), shape, src_stride, src_offset)?;
+    raw_strided_combine_loop_mapped(
+        dst_data,
+        src_data,
+        shape,
+        dst_stride,
+        src_stride,
+        dst_offset,
+        src_offset,
+        source_conjugate,
+        raw_strided_action(alpha, beta),
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn bilinear_raw_strided_kernel_mapped<T, L, R>(
+    lhs_data: &[T],
+    rhs_data: &[T],
+    shape: &[usize],
+    lhs_stride: L,
+    rhs_stride: R,
+    lhs_offset: isize,
+    rhs_offset: isize,
+    lhs_conjugate: bool,
+    rhs_conjugate: bool,
+) -> Result<T, OperationError>
+where
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + Zero + ConjugateValue,
+    L: Copy + Fn(usize) -> Result<isize, OperationError>,
+    R: Copy + Fn(usize) -> Result<isize, OperationError>,
+{
+    validate_raw_strided_bounds_mapped(lhs_data.len(), shape, lhs_stride, lhs_offset)?;
+    validate_raw_strided_bounds_mapped(rhs_data.len(), shape, rhs_stride, rhs_offset)?;
+    let len = crate::strided::element_count(shape)?;
+    if len == 0 {
+        return Ok(T::zero());
+    }
+    if shape.is_empty() {
+        return Ok(
+            lhs_data[checked_offset_to_index(lhs_offset)?].maybe_conj(lhs_conjugate)
+                * rhs_data[checked_offset_to_index(rhs_offset)?].maybe_conj(rhs_conjugate),
+        );
+    }
+    bilinear_raw_strided_recurse_mapped(
+        shape.len() - 1,
+        lhs_data,
+        rhs_data,
+        shape,
+        lhs_stride,
+        rhs_stride,
+        lhs_offset,
+        rhs_offset,
+        lhs_conjugate,
+        rhs_conjugate,
+    )
+}
+
+fn validate_raw_strided_bounds_mapped<F>(
+    len: usize,
+    shape: &[usize],
+    stride: F,
+    offset: isize,
+) -> Result<(), OperationError>
+where
+    F: Fn(usize) -> Result<isize, OperationError>,
+{
+    if shape.contains(&0) {
+        return Ok(());
+    }
+    let mut min_offset = offset;
+    let mut max_offset = offset;
+    for (axis, &dim) in shape.iter().enumerate() {
+        if dim <= 1 {
+            continue;
+        }
+        let dim = isize::try_from(dim - 1).map_err(|_| OperationError::ElementCountOverflow)?;
+        let end = stride(axis)?
+            .checked_mul(dim)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        if end >= 0 {
+            max_offset = max_offset
+                .checked_add(end)
+                .ok_or(OperationError::ElementCountOverflow)?;
+        } else {
+            min_offset = min_offset
+                .checked_add(end)
+                .ok_or(OperationError::ElementCountOverflow)?;
+        }
+    }
+    if min_offset < 0 {
+        return Err(OperationError::OffsetOverflow { value: usize::MAX });
+    }
+    let max_offset = checked_offset_to_index(max_offset)?;
+    if max_offset >= len {
+        return Err(OperationError::OffsetOverflow { value: max_offset });
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bilinear_raw_strided_recurse_mapped<T, L, R>(
+    axis: usize,
+    lhs_data: &[T],
+    rhs_data: &[T],
+    shape: &[usize],
+    lhs_stride: L,
+    rhs_stride: R,
+    lhs_base: isize,
+    rhs_base: isize,
+    lhs_conjugate: bool,
+    rhs_conjugate: bool,
+) -> Result<T, OperationError>
+where
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + Zero + ConjugateValue,
+    L: Copy + Fn(usize) -> Result<isize, OperationError>,
+    R: Copy + Fn(usize) -> Result<isize, OperationError>,
+{
+    let mut sum = T::zero();
+    if axis == 0 {
+        let lhs_stride = lhs_stride(0)?;
+        let rhs_stride = rhs_stride(0)?;
+        for index in 0..shape[0] {
+            let lhs_index =
+                checked_offset_to_index(checked_strided_offset(lhs_base, index, lhs_stride)?)?;
+            let rhs_index =
+                checked_offset_to_index(checked_strided_offset(rhs_base, index, rhs_stride)?)?;
+            sum = sum
+                + lhs_data[lhs_index].maybe_conj(lhs_conjugate)
+                    * rhs_data[rhs_index].maybe_conj(rhs_conjugate);
+        }
+        return Ok(sum);
+    }
+    let lhs_axis_stride = lhs_stride(axis)?;
+    let rhs_axis_stride = rhs_stride(axis)?;
+    for index in 0..shape[axis] {
+        sum = sum
+            + bilinear_raw_strided_recurse_mapped(
+                axis - 1,
+                lhs_data,
+                rhs_data,
+                shape,
+                lhs_stride,
+                rhs_stride,
+                checked_strided_offset(lhs_base, index, lhs_axis_stride)?,
+                checked_strided_offset(rhs_base, index, rhs_axis_stride)?,
+                lhs_conjugate,
+                rhs_conjugate,
+            )?;
+    }
+    Ok(sum)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn tensoradd_raw_strided_conjugating_kernel<T>(
     zero_strides: &mut Vec<isize>,
@@ -609,13 +782,13 @@ where
         return Ok(());
     }
 
-    raw_strided_combine_recurse(
+    raw_strided_combine_recurse_mapped(
         shape.len() - 1,
         dst_data,
         src_data,
         shape,
-        dst_strides,
-        src_strides,
+        |axis| Ok(dst_strides[axis]),
+        |axis| Ok(src_strides[axis]),
         dst_offset,
         src_offset,
         source_conjugate,
@@ -624,13 +797,58 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn raw_strided_combine_recurse<T>(
+fn raw_strided_combine_loop_mapped<T, D, S>(
+    dst_data: &mut [T],
+    src_data: &[T],
+    shape: &[usize],
+    dst_stride: D,
+    src_stride: S,
+    dst_offset: isize,
+    src_offset: isize,
+    source_conjugate: bool,
+    action: RawStridedAction<T>,
+) -> Result<(), OperationError>
+where
+    T: Copy + Add<T, Output = T> + Mul<T, Output = T> + ConjugateValue,
+    D: Copy + Fn(usize) -> Result<isize, OperationError>,
+    S: Copy + Fn(usize) -> Result<isize, OperationError>,
+{
+    let len = crate::strided::element_count(shape)?;
+    if len == 0 {
+        return Ok(());
+    }
+    if shape.is_empty() {
+        let dst_index = checked_offset_to_index(dst_offset)?;
+        let src_index = checked_offset_to_index(src_offset)?;
+        apply_raw_strided_action(
+            &mut dst_data[dst_index],
+            src_data[src_index].maybe_conj(source_conjugate),
+            action,
+        );
+        return Ok(());
+    }
+    raw_strided_combine_recurse_mapped(
+        shape.len() - 1,
+        dst_data,
+        src_data,
+        shape,
+        dst_stride,
+        src_stride,
+        dst_offset,
+        src_offset,
+        source_conjugate,
+        action,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn raw_strided_combine_recurse_mapped<T, D, S>(
     axis: usize,
     dst_data: &mut [T],
     src_data: &[T],
     shape: &[usize],
-    dst_strides: &[isize],
-    src_strides: &[isize],
+    dst_stride: D,
+    src_stride: S,
     dst_base: isize,
     src_base: isize,
     source_conjugate: bool,
@@ -638,13 +856,17 @@ fn raw_strided_combine_recurse<T>(
 ) -> Result<(), OperationError>
 where
     T: Copy + Add<T, Output = T> + Mul<T, Output = T> + ConjugateValue,
+    D: Copy + Fn(usize) -> Result<isize, OperationError>,
+    S: Copy + Fn(usize) -> Result<isize, OperationError>,
 {
     if axis == 0 {
+        let dst_stride = dst_stride(0)?;
+        let src_stride = src_stride(0)?;
         for index in 0..shape[0] {
             let dst_index =
-                checked_offset_to_index(checked_strided_offset(dst_base, index, dst_strides[0])?)?;
+                checked_offset_to_index(checked_strided_offset(dst_base, index, dst_stride)?)?;
             let src_index =
-                checked_offset_to_index(checked_strided_offset(src_base, index, src_strides[0])?)?;
+                checked_offset_to_index(checked_strided_offset(src_base, index, src_stride)?)?;
             apply_raw_strided_action(
                 &mut dst_data[dst_index],
                 src_data[src_index].maybe_conj(source_conjugate),
@@ -654,16 +876,18 @@ where
         return Ok(());
     }
 
+    let dst_axis_stride = dst_stride(axis)?;
+    let src_axis_stride = src_stride(axis)?;
     for index in 0..shape[axis] {
-        raw_strided_combine_recurse(
+        raw_strided_combine_recurse_mapped(
             axis - 1,
             dst_data,
             src_data,
             shape,
-            dst_strides,
-            src_strides,
-            checked_strided_offset(dst_base, index, dst_strides[axis])?,
-            checked_strided_offset(src_base, index, src_strides[axis])?,
+            dst_stride,
+            src_stride,
+            checked_strided_offset(dst_base, index, dst_axis_stride)?,
+            checked_strided_offset(src_base, index, src_axis_stride)?,
             source_conjugate,
             action,
         )?;
@@ -763,6 +987,7 @@ fn strided_linear_offset(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use num_complex::Complex64;
 
     // What: the offset helper family's Result must stay pointer-small so the
     // per-element non-contiguous combine/scale loop pays no 536-byte sret move
@@ -784,5 +1009,93 @@ mod tests {
         // A negative offset cannot be a usize index -> OffsetOverflow{usize::MAX}.
         let err: OperationError = checked_offset_to_index(-1).unwrap_err().into();
         assert_eq!(err, OperationError::OffsetOverflow { value: usize::MAX });
+    }
+
+    #[test]
+    fn bilinear_kernel_handles_independent_conjugation_and_padding() {
+        let lhs = [
+            Complex64::new(99.0, 0.0),
+            Complex64::new(1.0, 2.0),
+            Complex64::new(3.0, -1.0),
+            Complex64::new(98.0, 0.0),
+            Complex64::new(-2.0, 0.5),
+            Complex64::new(4.0, 3.0),
+        ];
+        let rhs = [
+            Complex64::new(5.0, -1.0),
+            Complex64::new(97.0, 0.0),
+            Complex64::new(2.0, 4.0),
+            Complex64::new(-3.0, 2.0),
+            Complex64::new(96.0, 0.0),
+            Complex64::new(1.0, -2.0),
+        ];
+        let shape = [2, 2];
+        let lhs_strides = [1, 3];
+        let rhs_strides = [2, 3];
+        let lhs_values = [lhs[1], lhs[2], lhs[4], lhs[5]];
+        let rhs_values = [rhs[0], rhs[2], rhs[3], rhs[5]];
+        for (lhs_conjugate, rhs_conjugate) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let expected = lhs_values.iter().copied().zip(rhs_values).fold(
+                Complex64::new(0.0, 0.0),
+                |sum, (lhs, rhs)| {
+                    sum + lhs.maybe_conj(lhs_conjugate) * rhs.maybe_conj(rhs_conjugate)
+                },
+            );
+            assert_eq!(
+                bilinear_raw_strided_kernel_mapped(
+                    &lhs,
+                    &rhs,
+                    &shape,
+                    |axis| Ok(lhs_strides[axis]),
+                    |axis| Ok(rhs_strides[axis]),
+                    1,
+                    0,
+                    lhs_conjugate,
+                    rhs_conjugate,
+                )
+                .unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn bilinear_kernel_validates_each_view_before_reading() {
+        assert_eq!(
+            bilinear_raw_strided_kernel_mapped(
+                &[1.0],
+                &[2.0],
+                &[2],
+                |_| Ok(1),
+                |_| Ok(1),
+                0,
+                0,
+                false,
+                false,
+            )
+            .unwrap_err(),
+            OperationError::OffsetOverflow { value: 1 }
+        );
+    }
+
+    #[test]
+    fn bilinear_kernel_accepts_checked_negative_strides() {
+        assert_eq!(
+            bilinear_raw_strided_kernel_mapped(
+                &[1.0, 2.0, 3.0],
+                &[4.0, 5.0, 6.0],
+                &[3],
+                |_| Ok(-1),
+                |_| Ok(1),
+                2,
+                0,
+                false,
+                false,
+            )
+            .unwrap(),
+            3.0 * 4.0 + 2.0 * 5.0 + 1.0 * 6.0
+        );
     }
 }

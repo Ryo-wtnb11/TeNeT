@@ -66,7 +66,8 @@ use crate::tensor_core::{
 
 mod diagonal;
 use diagonal::{
-    axpby_dense_c64, axpby_dense_real, compact_inner_with_weight, dense_inner_with_weight,
+    axpby_dense_c64, axpby_dense_real, axpy_diagonal_into, compact_inner_with_weight,
+    dense_inner_with_weight, oriented_dense_inner_with_weight,
 };
 
 #[cfg(test)]
@@ -665,6 +666,7 @@ fn map_trace_preflight_error(error: OperationError) -> Error {
 /// sealing [`TensorScalar`].
 pub trait UserScalar: FactorScalar + RecouplingCoefficientAction<f64> {
     fn lift(data: Vec<Self>) -> Data;
+    fn data_slice(data: &Data) -> Option<&[Self]>;
     fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
         ctxs: &mut Ctxs<Key>,
     ) -> &mut Ctx<Self, Key>;
@@ -726,6 +728,13 @@ impl UserScalar for f64 {
         Data::F64(data)
     }
 
+    fn data_slice(data: &Data) -> Option<&[Self]> {
+        match data {
+            Data::F64(data) => Some(data),
+            _ => None,
+        }
+    }
+
     fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
         ctxs: &mut Ctxs<Key>,
     ) -> &mut Ctx<Self, Key> {
@@ -763,6 +772,13 @@ impl UserScalar for f64 {
 impl UserScalar for Complex64 {
     fn lift(data: Vec<Self>) -> Data {
         Data::C64(data)
+    }
+
+    fn data_slice(data: &Data) -> Option<&[Self]> {
+        match data {
+            Data::C64(data) => Some(data),
+            _ => None,
+        }
     }
 
     fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
@@ -3673,6 +3689,82 @@ impl Tensor {
         }
     }
 
+    fn parent_tensor_for_lowering(&self) -> Self {
+        let body = self.parent_body_for_lowering();
+        Self::owned(
+            self.rt.clone(),
+            Arc::clone(&body.space),
+            Arc::clone(&body.data),
+        )
+    }
+
+    fn parent_layout_supports_inner_identity(&self) -> Result<bool, Error> {
+        let parent = self.parent_body_for_lowering();
+        Ok(parent
+            .space
+            .structure()
+            .coupled_sector_regions(parent.space.nout())?
+            .is_some())
+    }
+
+    fn oriented_add_adjoint<D: UserScalar>(
+        &self,
+        other: &Self,
+        alpha: D,
+        beta: D,
+    ) -> Result<Self, Error> {
+        debug_assert!(self.is_adjoint_view() ^ other.is_adjoint_view());
+        let (logical, parent, logical_factor, adjoint_factor) = if self.is_adjoint_view() {
+            (
+                other.parent_body_for_lowering(),
+                self.parent_body_for_lowering(),
+                beta,
+                alpha,
+            )
+        } else {
+            (
+                self.parent_body_for_lowering(),
+                other.parent_body_for_lowering(),
+                alpha,
+                beta,
+            )
+        };
+        let parent_operand = tenet_tensors::FusionOperand::adjoint(parent.space.raw());
+        let data = if let Data::Diagonal(diagonal) = logical.data.as_ref() {
+            let mut data = oriented_add_data(
+                logical.space.raw(),
+                parent_operand,
+                parent.data.as_ref(),
+                parent_operand,
+                parent.data.as_ref(),
+                adjoint_factor,
+                D::from_real(0.0),
+            )?;
+            axpy_diagonal_into(
+                logical.space.raw(),
+                &mut data,
+                diagonal,
+                logical_factor.widen_complex(),
+            )?;
+            data
+        } else {
+            oriented_add_data(
+                logical.space.raw(),
+                tenet_tensors::FusionOperand::direct(logical.space.raw()),
+                logical.data.as_ref(),
+                parent_operand,
+                parent.data.as_ref(),
+                logical_factor,
+                adjoint_factor,
+            )?
+        };
+        Ok(Self::owned(
+            self.rt.clone(),
+            Arc::clone(&logical.space),
+            Arc::new(data),
+        ))
+    }
+
     fn ordinary_body(&self) -> &TensorBody {
         // Why not return the adjoint parent: its space and bytes describe a
         // different tensor, which is exactly the incoherent pair this split
@@ -5752,18 +5844,17 @@ impl Tensor {
         // non-self-dual coupled-sector mislabel was the historical bug; SU(3) is
         // non-self-dual (3 <-> 3̄), so we route it through the mislabel-proof
         // eager materialization (`materialize_adjoint`, generic block-relabel)
-        // instead. `scale(1.0)` reads `coupled_data` — the materialization point —
-        // and returns an ordinary (non-lazy) tensor, so both operands then take
-        // the direct core/compose GEMM with no conjugate flag. Gated on `Su3` to
+        // instead. Both operands then take the direct core/compose GEMM with no
+        // conjugate flag. Gated on `Su3` to
         // keep the mult-free seam byte-for-byte unchanged (the χ32 guarantee).
         if self.rule_kind() == RuleKind::Su3 && (self.is_adjoint_view() || rhs.is_adjoint_view()) {
             let lhs = if self.is_adjoint_view() {
-                self.scale(1.0)?
+                self.materialized_tensor()?
             } else {
                 self.clone()
             };
             let rhs = if rhs.is_adjoint_view() {
-                rhs.scale(1.0)?
+                rhs.materialized_tensor()?
             } else {
                 rhs.clone()
             };
@@ -6381,7 +6472,17 @@ impl Tensor {
             ));
         }
         if self.is_adjoint_view() || rhs.is_adjoint_view() {
-            return self.scale(1.0)?.otimes(&rhs.scale(1.0)?);
+            let lhs = if self.is_adjoint_view() {
+                self.materialized_tensor()?
+            } else {
+                self.clone()
+            };
+            let rhs = if rhs.is_adjoint_view() {
+                rhs.materialized_tensor()?
+            } else {
+                rhs.clone()
+            };
+            return lhs.otimes(&rhs);
         }
         if matches!(self.stored_data(), Data::Diagonal(_))
             || matches!(rhs.stored_data(), Data::Diagonal(_))
@@ -7311,6 +7412,13 @@ impl Tensor {
     /// Returns `factor * self` (real factor, both dtypes). Use
     /// [`Self::scale_c64`] for a complex factor.
     pub fn scale(&self, factor: f64) -> Result<Self, Error> {
+        if self.is_adjoint_view() {
+            #[cfg(feature = "cuda")]
+            if matches!(self.stored_data(), Data::CudaF64(_)) {
+                return Err(device_unsupported("materializing an adjoint device tensor"));
+            }
+            return self.parent_tensor_for_lowering().scale(factor)?.adjoint();
+        }
         // Scaling a diagonal stays diagonal (O(rank)); itebd normalizes λ this
         // way, and keeping it diagonal lets the next contract scale the bond.
         if let Data::Diagonal(diagonal) = self.stored_data() {
@@ -7336,6 +7444,19 @@ impl Tensor {
     /// [`Error::DtypeMismatch`] on f64 tensors (widen with
     /// [`Self::to_c64`] first).
     pub fn scale_c64(&self, factor: Complex64) -> Result<Self, Error> {
+        if self.is_adjoint_view() {
+            #[cfg(feature = "cuda")]
+            if matches!(self.stored_data(), Data::CudaF64(_)) {
+                return Err(device_unsupported("materializing an adjoint device tensor"));
+            }
+            if self.dtype() != Dtype::C64 {
+                return Err(Error::DtypeMismatch);
+            }
+            return self
+                .parent_tensor_for_lowering()
+                .scale_c64(factor.conj())?
+                .adjoint();
+        }
         if let Data::Diagonal(diagonal) = self.stored_data() {
             return Ok(self.with_diagonal(diagonal.scaled_c64(factor)?));
         }
@@ -7382,9 +7503,27 @@ impl Tensor {
     ///   or block layout.
     pub fn add(&self, other: &Self, alpha: f64, beta: f64) -> Result<Self, Error> {
         if self.is_adjoint_view() || other.is_adjoint_view() {
-            return self
-                .materialized_tensor()?
-                .add(&other.materialized_tensor()?, alpha, beta);
+            self.check_same_logical_space(other)?;
+            #[cfg(feature = "cuda")]
+            if matches!(self.stored_data(), Data::CudaF64(_))
+                || matches!(other.stored_data(), Data::CudaF64(_))
+            {
+                return Err(device_unsupported("materializing an adjoint device tensor"));
+            }
+            if self.is_adjoint_view() && other.is_adjoint_view() {
+                return self
+                    .parent_tensor_for_lowering()
+                    .add(&other.parent_tensor_for_lowering(), alpha, beta)?
+                    .adjoint();
+            }
+            return match self.dtype() {
+                Dtype::F64 => self.oriented_add_adjoint(other, alpha, beta),
+                Dtype::C64 => self.oriented_add_adjoint(
+                    other,
+                    Complex64::new(alpha, 0.0),
+                    Complex64::new(beta, 0.0),
+                ),
+            };
         }
         self.check_same_space(other)?;
         match (self.diagonal_data(), other.diagonal_data()) {
@@ -7448,9 +7587,28 @@ impl Tensor {
     /// tensors must be c64 (widen with [`Self::to_c64`] first).
     pub fn add_c64(&self, other: &Self, alpha: Complex64, beta: Complex64) -> Result<Self, Error> {
         if self.is_adjoint_view() || other.is_adjoint_view() {
-            return self
-                .materialized_tensor()?
-                .add_c64(&other.materialized_tensor()?, alpha, beta);
+            self.check_same_world(other)?;
+            #[cfg(feature = "cuda")]
+            if matches!(self.stored_data(), Data::CudaF64(_))
+                || matches!(other.stored_data(), Data::CudaF64(_))
+            {
+                return Err(device_unsupported("materializing an adjoint device tensor"));
+            }
+            if self.dtype() != Dtype::C64 {
+                return Err(Error::DtypeMismatch);
+            }
+            self.check_same_logical_space(other)?;
+            if self.is_adjoint_view() && other.is_adjoint_view() {
+                return self
+                    .parent_tensor_for_lowering()
+                    .add_c64(
+                        &other.parent_tensor_for_lowering(),
+                        alpha.conj(),
+                        beta.conj(),
+                    )?
+                    .adjoint();
+            }
+            return self.oriented_add_adjoint(other, alpha, beta);
         }
         self.check_same_space(other)?;
         match (self.diagonal_data(), other.diagonal_data()) {
@@ -7508,9 +7666,96 @@ impl Tensor {
     /// dtype.
     pub fn inner(&self, other: &Self) -> Result<Scalar, Error> {
         if self.is_adjoint_view() || other.is_adjoint_view() {
-            return self
-                .materialized_tensor()?
-                .inner(&other.materialized_tensor()?);
+            self.check_same_logical_space(other)?;
+            #[cfg(feature = "cuda")]
+            if matches!(self.stored_data(), Data::CudaF64(_))
+                || matches!(other.stored_data(), Data::CudaF64(_))
+            {
+                return Err(device_unsupported("materializing an adjoint device tensor"));
+            }
+            if self.is_adjoint_view()
+                && other.is_adjoint_view()
+                && self.parent_layout_supports_inner_identity()?
+                && other.parent_layout_supports_inner_identity()?
+            {
+                return other
+                    .parent_tensor_for_lowering()
+                    .inner(&self.parent_tensor_for_lowering());
+            }
+            let lhs = self.metadata();
+            let rhs = other.metadata();
+            let (logical, lhs_operand, rhs_operand, swap_dense_data) =
+                oriented_inner_layout(&lhs, &rhs);
+            macro_rules! reduce {
+                ($weight:expr) => {
+                    match (lhs.body.data.as_ref(), rhs.body.data.as_ref()) {
+                        (Data::Diagonal(diagonal), parent_data) => {
+                            oriented_dense_inner_with_weight(
+                                lhs.body.space.raw(),
+                                diagonal,
+                                rhs.body.space.raw(),
+                                parent_data,
+                                true,
+                                $weight,
+                            )
+                            .map(|value| match self.dtype() {
+                                Dtype::F64 => Scalar::F64(value.re),
+                                Dtype::C64 => Scalar::C64(value),
+                            })
+                        }
+                        (parent_data, Data::Diagonal(diagonal)) => {
+                            oriented_dense_inner_with_weight(
+                                rhs.body.space.raw(),
+                                diagonal,
+                                lhs.body.space.raw(),
+                                parent_data,
+                                false,
+                                $weight,
+                            )
+                            .map(|value| match self.dtype() {
+                                Dtype::F64 => Scalar::F64(value.re),
+                                Dtype::C64 => Scalar::C64(value),
+                            })
+                        }
+                        (Data::F64(lhs_data), Data::F64(rhs_data)) => oriented_dense_inner(
+                            logical,
+                            lhs_operand,
+                            lhs_data,
+                            rhs_operand,
+                            rhs_data,
+                            swap_dense_data,
+                            $weight,
+                        )
+                        .map(|value| Scalar::F64(value.re)),
+                        (Data::C64(lhs_data), Data::C64(rhs_data)) => oriented_dense_inner(
+                            logical,
+                            lhs_operand,
+                            lhs_data,
+                            rhs_operand,
+                            rhs_data,
+                            swap_dense_data,
+                            $weight,
+                        )
+                        .map(Scalar::C64),
+                        #[cfg(feature = "cuda")]
+                        (Data::CudaF64(_), Data::CudaF64(_)) => {
+                            Err(device_unsupported("inner() with one lazy adjoint"))
+                        }
+                        _ => Err(Error::DtypeMismatch),
+                    }
+                };
+            }
+            return if self.rule_kind() == RuleKind::Su3 {
+                let rule = self.su3_rule();
+                reduce!(|sector| {
+                    let sqrt = rule.sqrt_dim_scalar(sector);
+                    sqrt * sqrt
+                })
+            } else {
+                with_user_rule!(self.rule_authority_space(), rule, {
+                    reduce!(|sector| rule.dim_scalar(sector))
+                })
+            };
         }
         self.check_same_space(other)?;
         match (self.diagonal_data(), other.diagonal_data()) {
@@ -7882,6 +8127,38 @@ impl Tensor {
             return Err(Error::InvalidArgument(
                 "tensors live on different spaces or block layouts".to_string(),
             ));
+        }
+        Ok(())
+    }
+
+    fn check_same_logical_space(&self, other: &Self) -> Result<(), Error> {
+        self.check_same_world(other)?;
+        let lhs = self.metadata();
+        let rhs = other.metadata();
+        if lhs.codomain() != rhs.codomain() || lhs.domain() != rhs.domain() {
+            return Err(logical_space_mismatch());
+        }
+        match (lhs.orientation, rhs.orientation) {
+            (TensorOrientation::Owned, TensorOrientation::Owned)
+            | (TensorOrientation::Adjoint, TensorOrientation::Adjoint) => {
+                if lhs.body.space != rhs.body.space {
+                    return Err(logical_space_mismatch());
+                }
+            }
+            (TensorOrientation::Owned, TensorOrientation::Adjoint) => {
+                tenet_tensors::validate_oriented_fusion_layout(
+                    lhs.body.space.structure(),
+                    tenet_tensors::FusionOperand::adjoint(rhs.body.space.raw()),
+                )
+                .map_err(|_| logical_space_mismatch())?;
+            }
+            (TensorOrientation::Adjoint, TensorOrientation::Owned) => {
+                tenet_tensors::validate_oriented_fusion_layout(
+                    rhs.body.space.structure(),
+                    tenet_tensors::FusionOperand::adjoint(lhs.body.space.raw()),
+                )
+                .map_err(|_| logical_space_mismatch())?;
+            }
         }
         Ok(())
     }
@@ -10445,6 +10722,99 @@ where
     Ok(total)
 }
 
+fn logical_space_mismatch() -> Error {
+    Error::InvalidArgument("tensors live on different spaces or block layouts".to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn oriented_add_data<D: UserScalar>(
+    destination: &DynamicFusionMapSpace,
+    lhs: tenet_tensors::FusionOperand<'_>,
+    lhs_data: &Data,
+    rhs: tenet_tensors::FusionOperand<'_>,
+    rhs_data: &Data,
+    alpha: D,
+    beta: D,
+) -> Result<Data, Error> {
+    let lhs_data = D::data_slice(lhs_data).ok_or(Error::DtypeMismatch)?;
+    let rhs_data = D::data_slice(rhs_data).ok_or(Error::DtypeMismatch)?;
+    let mut output = vec![D::from_real(0.0); destination.structure().required_len()?];
+    tenet_tensors::oriented_fusion_add_into(
+        destination.structure(),
+        &mut output,
+        lhs,
+        lhs_data,
+        rhs,
+        rhs_data,
+        alpha,
+        beta,
+    )?;
+    Ok(D::lift(output))
+}
+
+fn oriented_inner_layout<'a>(
+    lhs: &TensorMetadataView<'a>,
+    rhs: &TensorMetadataView<'a>,
+) -> (
+    &'a BlockStructure,
+    tenet_tensors::FusionOperand<'a>,
+    tenet_tensors::FusionOperand<'a>,
+    bool,
+) {
+    match (lhs.orientation, rhs.orientation) {
+        (TensorOrientation::Adjoint, TensorOrientation::Adjoint) => (
+            lhs.body.space.structure(),
+            tenet_tensors::FusionOperand::direct(rhs.body.space.raw()),
+            tenet_tensors::FusionOperand::direct(lhs.body.space.raw()),
+            true,
+        ),
+        (lhs_orientation, rhs_orientation) => (
+            if matches!(lhs_orientation, TensorOrientation::Owned) {
+                lhs.body.space.structure()
+            } else {
+                rhs.body.space.structure()
+            },
+            if matches!(lhs_orientation, TensorOrientation::Adjoint) {
+                tenet_tensors::FusionOperand::adjoint(lhs.body.space.raw())
+            } else {
+                tenet_tensors::FusionOperand::direct(lhs.body.space.raw())
+            },
+            if matches!(rhs_orientation, TensorOrientation::Adjoint) {
+                tenet_tensors::FusionOperand::adjoint(rhs.body.space.raw())
+            } else {
+                tenet_tensors::FusionOperand::direct(rhs.body.space.raw())
+            },
+            false,
+        ),
+    }
+}
+
+fn oriented_dense_inner<D: UserScalar>(
+    logical: &BlockStructure,
+    lhs_operand: tenet_tensors::FusionOperand<'_>,
+    lhs_data: &[D],
+    rhs_operand: tenet_tensors::FusionOperand<'_>,
+    rhs_data: &[D],
+    swap_data: bool,
+    weight: impl Fn(SectorId) -> f64,
+) -> Result<Complex64, Error> {
+    let (lhs_data, rhs_data) = if swap_data {
+        (rhs_data, lhs_data)
+    } else {
+        (lhs_data, rhs_data)
+    };
+    tenet_tensors::oriented_fusion_inner(
+        logical,
+        lhs_operand,
+        lhs_data,
+        rhs_operand,
+        rhs_data,
+        |sector| D::from_real(weight(sector)),
+    )
+    .map(FactorScalar::widen_complex)
+    .map_err(Error::from)
+}
+
 /// TensorKit `_norm`'s domain check on `p` (`linalg.jl:271-274`): only finite
 /// positive `p` and `+Inf` name a norm; TensorKit throws `ArgumentError` for
 /// anything else, which here is [`Error::InvalidArgument`].
@@ -11727,6 +12097,10 @@ mod adjoint_parent_view_tests {
     use super::*;
     use tenet_core::FusionAlgebraError;
 
+    fn assert_scalar_close(actual: Scalar, expected: Scalar) {
+        assert!((actual.to_c64() - expected.to_c64()).norm() < 1e-11);
+    }
+
     fn assert_close(actual: &Tensor, expected: &Tensor) {
         assert_eq!(actual.codomain_spaces(), expected.codomain_spaces());
         assert_eq!(actual.domain_spaces(), expected.domain_spaces());
@@ -11794,6 +12168,202 @@ mod adjoint_parent_view_tests {
             &round_trip.ordinary_body().space,
             &source.ordinary_body().space
         ));
+    }
+
+    fn assert_elementary_adjoint_operations(space: Space, dtype: Dtype, seed: u64) {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let parent_a =
+            Tensor::rand_with_seed(&runtime, dtype, [&space, &space], [&space], seed).unwrap();
+        let parent_b =
+            Tensor::rand_with_seed(&runtime, dtype, [&space, &space], [&space], seed + 1).unwrap();
+        let owned =
+            Tensor::rand_with_seed(&runtime, dtype, [&space], [&space, &space], seed + 2).unwrap();
+        let eager_a = parent_a.adjoint().unwrap().materialized_tensor().unwrap();
+        let eager_b = parent_b.adjoint().unwrap().materialized_tensor().unwrap();
+        let lazy_a = parent_a.adjoint().unwrap();
+        let lazy_b = parent_b.adjoint().unwrap();
+
+        assert_close(
+            &lazy_a.scale(-1.25).unwrap(),
+            &eager_a.scale(-1.25).unwrap(),
+        );
+        assert_close(
+            &lazy_a.add(&lazy_b, 0.75, -1.5).unwrap(),
+            &eager_a.add(&eager_b, 0.75, -1.5).unwrap(),
+        );
+        for (lhs, rhs, eager_lhs, eager_rhs) in [
+            (&lazy_a, &owned, &eager_a, &owned),
+            (&owned, &lazy_a, &owned, &eager_a),
+        ] {
+            assert_close(
+                &lhs.add(rhs, 0.75, -1.5).unwrap(),
+                &eager_lhs.add(eager_rhs, 0.75, -1.5).unwrap(),
+            );
+            assert_scalar_close(lhs.inner(rhs).unwrap(), eager_lhs.inner(eager_rhs).unwrap());
+        }
+        assert_scalar_close(
+            lazy_a.inner(&lazy_b).unwrap(),
+            eager_a.inner(&eager_b).unwrap(),
+        );
+
+        if dtype == Dtype::C64 {
+            let alpha = Complex64::new(0.75, -0.5);
+            let beta = Complex64::new(-1.5, 0.25);
+            assert_close(
+                &lazy_a.scale_c64(alpha).unwrap(),
+                &eager_a.scale_c64(alpha).unwrap(),
+            );
+            assert_close(
+                &lazy_a.add_c64(&lazy_b, alpha, beta).unwrap(),
+                &eager_a.add_c64(&eager_b, alpha, beta).unwrap(),
+            );
+            assert_close(
+                &lazy_a.add_c64(&owned, alpha, beta).unwrap(),
+                &eager_a.add_c64(&owned, alpha, beta).unwrap(),
+            );
+            assert_close(
+                &owned.add_c64(&lazy_a, alpha, beta).unwrap(),
+                &owned.add_c64(&eager_a, alpha, beta).unwrap(),
+            );
+        }
+        assert!(!lazy_a.has_cached_materialization());
+        assert!(!lazy_b.has_cached_materialization());
+    }
+
+    #[test]
+    fn elementary_adjoint_operations_match_eager_rule_oracles_without_materializing_inputs() {
+        let spaces = [
+            Space::u1([(-1, 2), (0, 1), (1, 3)]),
+            Space::su2([(0, 2), (1, 3), (2, 1)]).unwrap(),
+            Space::fz2([(0, 2), (1, 3)]).unwrap(),
+            Space::fz2_u1_su2([((0, 0, 0), 2), ((1, -1, 1), 2), ((1, 1, 1), 1)]).unwrap(),
+        ];
+        for (space_index, space) in spaces.into_iter().enumerate() {
+            for (dtype_index, dtype) in [Dtype::F64, Dtype::C64].into_iter().enumerate() {
+                assert_elementary_adjoint_operations(
+                    space.clone(),
+                    dtype,
+                    666_000 + 10 * space_index as u64 + dtype_index as u64,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compact_diagonal_and_lazy_dense_elementary_operations_stay_compact_aware() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let space = Space::u1([(-1, 2), (0, 3), (1, 1)]);
+        for (dtype, seed) in [(Dtype::F64, 666_101), (Dtype::C64, 666_102)] {
+            let parent = Tensor::rand_with_seed(&runtime, dtype, [&space], [&space], seed).unwrap();
+            let diagonal = parent.svd_compact().unwrap().1;
+            let eager = parent.adjoint().unwrap().materialized_tensor().unwrap();
+            let lazy = parent.adjoint().unwrap();
+
+            assert_close(
+                &lazy.add(&diagonal, 0.75, -1.25).unwrap(),
+                &eager.add(&diagonal, 0.75, -1.25).unwrap(),
+            );
+            assert_close(
+                &diagonal.add(&lazy, 0.75, -1.25).unwrap(),
+                &diagonal.add(&eager, 0.75, -1.25).unwrap(),
+            );
+            assert_scalar_close(
+                lazy.inner(&diagonal).unwrap(),
+                eager.inner(&diagonal).unwrap(),
+            );
+            assert_scalar_close(
+                diagonal.inner(&lazy).unwrap(),
+                diagonal.inner(&eager).unwrap(),
+            );
+            if dtype == Dtype::C64 {
+                let alpha = Complex64::new(0.5, -0.25);
+                let beta = Complex64::new(-1.0, 0.75);
+                assert_close(
+                    &lazy.add_c64(&diagonal, alpha, beta).unwrap(),
+                    &eager.add_c64(&diagonal, alpha, beta).unwrap(),
+                );
+                assert_close(
+                    &diagonal.add_c64(&lazy, alpha, beta).unwrap(),
+                    &diagonal.add_c64(&eager, alpha, beta).unwrap(),
+                );
+            }
+            assert!(!lazy.has_cached_materialization());
+            assert!(!diagonal.has_cached_materialization());
+        }
+    }
+
+    #[test]
+    fn elementary_adjoint_errors_precede_materialization_and_result_publication() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let u1 = Space::u1([(0, 2), (1, 1)]);
+        let other_u1 = Space::u1([(0, 1), (1, 2)]);
+        let z2 = Space::z2([(0, 2), (1, 1)]);
+        let lazy = Tensor::rand_with_seed(&runtime, Dtype::C64, [&u1], [&u1], 666_201)
+            .unwrap()
+            .adjoint()
+            .unwrap();
+        let cases = [
+            (
+                Tensor::rand_with_seed(&runtime, Dtype::C64, [&z2], [&z2], 666_202).unwrap(),
+                Error::RuleMismatch,
+            ),
+            (
+                Tensor::rand_with_seed(&other_runtime, Dtype::C64, [&u1], [&u1], 666_203).unwrap(),
+                Error::RuntimeMismatch,
+            ),
+            (
+                Tensor::rand_with_seed(&runtime, Dtype::F64, [&u1], [&u1], 666_204).unwrap(),
+                Error::DtypeMismatch,
+            ),
+            (
+                Tensor::rand_with_seed(&runtime, Dtype::C64, [&other_u1], [&other_u1], 666_205)
+                    .unwrap(),
+                Error::InvalidArgument(
+                    "tensors live on different spaces or block layouts".to_string(),
+                ),
+            ),
+        ];
+        for (other, expected) in cases {
+            assert_eq!(lazy.add(&other, 1.0, 1.0).unwrap_err(), expected);
+            assert_eq!(
+                lazy.add_c64(&other, Complex64::new(1.0, 0.5), Complex64::new(-0.5, 0.25),)
+                    .unwrap_err(),
+                expected
+            );
+            assert_eq!(lazy.inner(&other).unwrap_err(), expected);
+            assert!(!lazy.has_cached_materialization());
+        }
+
+        let simultaneous =
+            Tensor::rand_with_seed(&other_runtime, Dtype::F64, [&z2], [&z2], 666_206).unwrap();
+        assert_eq!(
+            lazy.add(&simultaneous, 1.0, 1.0).unwrap_err(),
+            Error::RuleMismatch
+        );
+
+        let f64_lazy = Tensor::rand_with_seed(&runtime, Dtype::F64, [&u1], [&u1], 666_207)
+            .unwrap()
+            .adjoint()
+            .unwrap();
+        assert_eq!(
+            f64_lazy.scale_c64(Complex64::new(1.0, 0.5)).unwrap_err(),
+            Error::DtypeMismatch
+        );
+        let f64_wrong_space =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&other_u1], [&other_u1], 666_208)
+                .unwrap();
+        assert_eq!(
+            f64_lazy
+                .add_c64(
+                    &f64_wrong_space,
+                    Complex64::new(1.0, 0.5),
+                    Complex64::new(-0.5, 0.25),
+                )
+                .unwrap_err(),
+            Error::DtypeMismatch
+        );
+        assert!(!f64_lazy.has_cached_materialization());
     }
 
     #[test]
@@ -12148,6 +12718,43 @@ mod adjoint_parent_view_tests {
         assert_close(&actual, &expected);
         assert_eq!(parent.data_c64(), source);
         assert_eq!(lazy.adjoint_body_builds(), 0);
+
+        let owned = eager.scale_c64(Complex64::new(-0.25, 0.5)).unwrap();
+        let scale_factor = Complex64::new(0.75, -0.5);
+        let scaled = lazy.scale_c64(scale_factor).unwrap();
+        assert!(scaled.is_adjoint_view());
+        assert_close(
+            &scaled.parent_tensor_for_lowering(),
+            &parent.scale_c64(scale_factor.conj()).unwrap(),
+        );
+        assert_close(
+            &lazy
+                .add_c64(
+                    &owned,
+                    Complex64::new(0.5, -0.25),
+                    Complex64::new(-1.0, 0.75),
+                )
+                .unwrap(),
+            &eager
+                .add_c64(
+                    &owned,
+                    Complex64::new(0.5, -0.25),
+                    Complex64::new(-1.0, 0.75),
+                )
+                .unwrap(),
+        );
+        assert_scalar_close(lazy.inner(&owned).unwrap(), eager.inner(&owned).unwrap());
+        assert_scalar_close(owned.inner(&lazy).unwrap(), owned.inner(&eager).unwrap());
+        let alpha = Complex64::new(0.5, -0.25);
+        let beta = Complex64::new(-1.0, 0.75);
+        let added = lazy.add_c64(&lazy, alpha, beta).unwrap();
+        assert!(added.is_adjoint_view());
+        assert_close(
+            &added.parent_tensor_for_lowering(),
+            &parent.add_c64(&parent, alpha.conj(), beta.conj()).unwrap(),
+        );
+        assert_scalar_close(lazy.inner(&lazy).unwrap(), eager.inner(&eager).unwrap());
+        assert!(!lazy.has_cached_materialization());
     }
 
     #[test]

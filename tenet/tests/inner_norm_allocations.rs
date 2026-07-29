@@ -73,3 +73,45 @@ fn warmed_non_abelian_inner_and_norm_do_not_allocate() {
     assert_eq!(inner_allocations, 0);
     assert_eq!(norm_allocations, 0);
 }
+
+#[test]
+fn warmed_lazy_adjoint_inner_does_not_allocate_in_mixed_or_double_orientation() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = Space::fz2_u1_su2([
+        ((0, -2, 0), 4),
+        ((0, 1, 2), 3),
+        ((1, -1, 1), 4),
+        ((1, 2, 3), 2),
+    ])
+    .unwrap();
+    let lhs_parent =
+        Tensor::rand_with_seed(&runtime, Dtype::C64, [&space, &space], [&space], 666_301).unwrap();
+    let rhs_parent =
+        Tensor::rand_with_seed(&runtime, Dtype::C64, [&space, &space], [&space], 666_302).unwrap();
+    let owned =
+        Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space, &space], 666_303).unwrap();
+    let warm_lhs = lhs_parent.adjoint().unwrap();
+    let warm_rhs = rhs_parent.adjoint().unwrap();
+    black_box(warm_lhs.inner(&owned).unwrap());
+    black_box(owned.inner(&warm_lhs).unwrap());
+    black_box(warm_lhs.inner(&warm_rhs).unwrap());
+
+    let lhs_mixed_left = lhs_parent.adjoint().unwrap();
+    let lhs_mixed_right = lhs_parent.adjoint().unwrap();
+    let lhs_double = lhs_parent.adjoint().unwrap();
+    let rhs_double = rhs_parent.adjoint().unwrap();
+    for (value, allocations) in [
+        measured(|| lhs_mixed_left.inner(&owned).unwrap()),
+        measured(|| owned.inner(&lhs_mixed_right).unwrap()),
+        measured(|| lhs_double.inner(&rhs_double).unwrap()),
+    ] {
+        black_box(value);
+        assert_eq!(allocations, 0);
+    }
+    for lazy in [&lhs_mixed_left, &lhs_mixed_right, &lhs_double, &rhs_double] {
+        assert!(
+            measured(|| lazy.try_data_c64().unwrap().len()).1 > 0,
+            "inner materialized its lazy operand"
+        );
+    }
+}
