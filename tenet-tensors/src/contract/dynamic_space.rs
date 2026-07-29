@@ -2735,7 +2735,7 @@ mod bound_invariant_tests {
 
     struct CheckedGenericSpy {
         identity: RuleIdentity,
-        style: FusionStyleKind,
+        style: Cell<FusionStyleKind>,
         calls: Cell<usize>,
         fail_at: Option<usize>,
     }
@@ -2744,7 +2744,7 @@ mod bound_invariant_tests {
         fn new() -> Self {
             Self {
                 identity: RuleIdentity::of_type::<Self>(),
-                style: FusionStyleKind::Generic,
+                style: Cell::new(FusionStyleKind::Generic),
                 calls: Cell::new(0),
                 fail_at: None,
             }
@@ -2767,7 +2767,7 @@ mod bound_invariant_tests {
         }
 
         fn fusion_style(&self) -> FusionStyleKind {
-            self.style
+            self.style.get()
         }
 
         fn braiding_style(&self) -> BraidingStyleKind {
@@ -2815,7 +2815,7 @@ mod bound_invariant_tests {
         }
 
         fn fusion_style(&self) -> FusionStyleKind {
-            self.style
+            self.style.get()
         }
 
         fn braiding_style(&self) -> BraidingStyleKind {
@@ -2927,7 +2927,7 @@ mod bound_invariant_tests {
         ] {
             let mut spy = CheckedGenericSpy::new();
             spy.identity = identity;
-            spy.style = style;
+            spy.style.set(style);
             let before = snapshots();
             let error = source
                 .prepare_final_homspace_generic_checked(&spy, final_hom())
@@ -2997,6 +2997,26 @@ mod bound_invariant_tests {
         assert_eq!(failing.calls.get(), complete_calls);
         assert_eq!(provider.calls.get(), 0);
         assert_eq!(snapshots(), before_failure);
+
+        let spy = CheckedGenericSpy::new();
+        let prepared = source
+            .prepare_final_homspace_generic_checked(&spy, final_hom())
+            .unwrap();
+        provider.style.set(FusionStyleKind::Unique);
+        let before_style_rejected_commit = snapshots();
+        let error = source
+            .commit_final_homspace_generic_checked(prepared)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Generic,
+                actual: FusionStyleKind::Unique,
+            })
+        ));
+        assert_eq!(provider.calls.get(), 0);
+        assert_eq!(snapshots(), before_style_rejected_commit);
+        provider.style.set(FusionStyleKind::Generic);
 
         let spy = CheckedGenericSpy::new();
         let mut corrupted = source
