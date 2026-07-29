@@ -512,6 +512,12 @@ impl<Scalar> GenericRMatrix<Scalar> {
 /// lookup without first manufacturing a value for the infallible legacy path.
 /// Symbol and rigidity queries are deliberately absent: structural admission
 /// does not inspect F/R/A/B data.
+///
+/// For a fixed [`RuleIdentity`], all mathematical answers must be logically
+/// immutable and independent of query order or concurrent interleaving.
+/// Interior warm caches may change performance, but never catalog/gauge
+/// semantics. This permits one operation to use shared `&self` queries and
+/// equal-identity provider allocations as the same mathematical authority.
 pub trait CheckedGenericFusion {
     type Error: std::error::Error + Send + Sync + 'static;
 
@@ -578,17 +584,21 @@ pub trait CheckedGenericFusion {
 /// source all the way to the plan boundary.  A/B moves are deliberately not
 /// provider methods: their matrices are derived from these primitives after
 /// TeNeT validates the categorical F/R shapes.
+///
+/// Implementations inherit [`CheckedGenericFusion`]'s logical-immutability
+/// contract: F/R and rigidity answers for one identity are stable across
+/// query order and concurrency even when internal warm state changes.
 pub trait CheckedGenericRigidSymbols: CheckedGenericFusion {
     type Scalar: GenericBraidScalar + Send + Sync;
 
-    fn try_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error>;
-    fn try_inv_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error>;
+    fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error>;
+    fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error>;
     fn try_frobenius_schur_phase_scalar(
-        &mut self,
+        &self,
         sector: SectorId,
     ) -> Result<Self::Scalar, Self::Error>;
     fn try_f_symbol_generic(
-        &mut self,
+        &self,
         a: SectorId,
         b: SectorId,
         c: SectorId,
@@ -597,7 +607,7 @@ pub trait CheckedGenericRigidSymbols: CheckedGenericFusion {
         f: SectorId,
     ) -> Result<GenericFArray<Self::Scalar>, Self::Error>;
     fn try_r_symbol_generic(
-        &mut self,
+        &self,
         a: SectorId,
         b: SectorId,
         c: SectorId,
@@ -680,23 +690,23 @@ where
 {
     type Scalar = R::Scalar;
 
-    fn try_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+    fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
         Ok(self.0.sqrt_dim_scalar(sector))
     }
 
-    fn try_inv_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+    fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
         Ok(self.0.inv_sqrt_dim_scalar(sector))
     }
 
     fn try_frobenius_schur_phase_scalar(
-        &mut self,
+        &self,
         sector: SectorId,
     ) -> Result<Self::Scalar, Self::Error> {
         Ok(self.0.frobenius_schur_phase_scalar(sector))
     }
 
     fn try_f_symbol_generic(
-        &mut self,
+        &self,
         a: SectorId,
         b: SectorId,
         c: SectorId,
@@ -708,7 +718,7 @@ where
     }
 
     fn try_r_symbol_generic(
-        &mut self,
+        &self,
         a: SectorId,
         b: SectorId,
         c: SectorId,

@@ -1,4 +1,4 @@
-use tenet_core::{CoreError, FusionRule};
+use tenet_core::CoreError;
 
 use crate::{BoundDynamicFusionMapSpace, OperationError};
 
@@ -9,10 +9,7 @@ pub struct BoundDynamicTensorRef<'a, R, D> {
     data: &'a [D],
 }
 
-impl<'a, R, D> BoundDynamicTensorRef<'a, R, D>
-where
-    R: FusionRule,
-{
+impl<'a, R, D> BoundDynamicTensorRef<'a, R, D> {
     /// Validates that `data` is exactly the flat storage for `space`.
     pub fn try_new(
         space: &'a BoundDynamicFusionMapSpace<R>,

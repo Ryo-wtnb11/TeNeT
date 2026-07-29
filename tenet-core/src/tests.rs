@@ -13817,11 +13817,11 @@ mod tests {
 
     impl CheckedGenericRigidSymbols for UnitaryToyOmRule {
         type Scalar = f64;
-        fn try_sqrt_dim_scalar(&mut self, _: SectorId) -> Result<f64, Self::Error> { Ok(1.0) }
-        fn try_inv_sqrt_dim_scalar(&mut self, _: SectorId) -> Result<f64, Self::Error> { Ok(1.0) }
-        fn try_frobenius_schur_phase_scalar(&mut self, _: SectorId) -> Result<f64, Self::Error> { Ok(1.0) }
-        fn try_f_symbol_generic(&mut self, a: SectorId,b: SectorId,c: SectorId,d: SectorId,e: SectorId,f: SectorId) -> Result<GenericFArray<f64>, Self::Error> { Ok(self.f_symbol_generic(a,b,c,d,e,f)) }
-        fn try_r_symbol_generic(&mut self, a: SectorId,b: SectorId,c: SectorId) -> Result<GenericRMatrix<f64>, Self::Error> { Ok(self.r_symbol_generic(a,b,c)) }
+        fn try_sqrt_dim_scalar(&self, _: SectorId) -> Result<f64, Self::Error> { Ok(1.0) }
+        fn try_inv_sqrt_dim_scalar(&self, _: SectorId) -> Result<f64, Self::Error> { Ok(1.0) }
+        fn try_frobenius_schur_phase_scalar(&self, _: SectorId) -> Result<f64, Self::Error> { Ok(1.0) }
+        fn try_f_symbol_generic(&self, a: SectorId,b: SectorId,c: SectorId,d: SectorId,e: SectorId,f: SectorId) -> Result<GenericFArray<f64>, Self::Error> { Ok(self.f_symbol_generic(a,b,c,d,e,f)) }
+        fn try_r_symbol_generic(&self, a: SectorId,b: SectorId,c: SectorId) -> Result<GenericRMatrix<f64>, Self::Error> { Ok(self.r_symbol_generic(a,b,c)) }
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13856,11 +13856,11 @@ mod tests {
     }
     impl CheckedGenericRigidSymbols for ArtinSpy {
         type Scalar=f64;
-        fn try_sqrt_dim_scalar(&mut self,_:SectorId)->Result<f64,Self::Error>{self.rigid_calls.set(self.rigid_calls.get()+1);Ok(1.0)}
-        fn try_inv_sqrt_dim_scalar(&mut self,_:SectorId)->Result<f64,Self::Error>{self.rigid_calls.set(self.rigid_calls.get()+1);Ok(1.0)}
-        fn try_frobenius_schur_phase_scalar(&mut self,_:SectorId)->Result<f64,Self::Error>{self.rigid_calls.set(self.rigid_calls.get()+1);Ok(1.0)}
-        fn try_f_symbol_generic(&mut self,a:SectorId,b:SectorId,c:SectorId,d:SectorId,e:SectorId,f:SectorId)->Result<GenericFArray<f64>,Self::Error>{Self::trip(&self.f_calls,self.fail_f,ArtinSpyError::F)?; let x=self.inner.f_symbol_generic(a,b,c,d,e,f); if self.bad_f { Ok(GenericFArray::new(x.data().to_vec(), (1,1,x.data().len(),1))) } else { Ok(x) }}
-        fn try_r_symbol_generic(&mut self,a:SectorId,b:SectorId,c:SectorId)->Result<GenericRMatrix<f64>,Self::Error>{Self::trip(&self.r_calls,self.fail_r,ArtinSpyError::R)?; let x=self.inner.r_symbol_generic(a,b,c); if self.bad_r { Ok(GenericRMatrix::new(x.data().to_vec(), 1,x.data().len())) } else { Ok(x) }}
+        fn try_sqrt_dim_scalar(&self,_:SectorId)->Result<f64,Self::Error>{self.rigid_calls.set(self.rigid_calls.get()+1);Ok(1.0)}
+        fn try_inv_sqrt_dim_scalar(&self,_:SectorId)->Result<f64,Self::Error>{self.rigid_calls.set(self.rigid_calls.get()+1);Ok(1.0)}
+        fn try_frobenius_schur_phase_scalar(&self,_:SectorId)->Result<f64,Self::Error>{self.rigid_calls.set(self.rigid_calls.get()+1);Ok(1.0)}
+        fn try_f_symbol_generic(&self,a:SectorId,b:SectorId,c:SectorId,d:SectorId,e:SectorId,f:SectorId)->Result<GenericFArray<f64>,Self::Error>{Self::trip(&self.f_calls,self.fail_f,ArtinSpyError::F)?; let x=self.inner.f_symbol_generic(a,b,c,d,e,f); if self.bad_f { Ok(GenericFArray::new(x.data().to_vec(), (1,1,x.data().len(),1))) } else { Ok(x) }}
+        fn try_r_symbol_generic(&self,a:SectorId,b:SectorId,c:SectorId)->Result<GenericRMatrix<f64>,Self::Error>{Self::trip(&self.r_calls,self.fail_r,ArtinSpyError::R)?; let x=self.inner.r_symbol_generic(a,b,c); if self.bad_r { Ok(GenericRMatrix::new(x.data().to_vec(), 1,x.data().len())) } else { Ok(x) }}
     }
 
     // Rank-2 tree [a, a] -> c with a single OM vertex label `vertex`.
@@ -14757,21 +14757,21 @@ mod tests {
         type Scalar = f64;
 
         fn try_sqrt_dim_scalar(
-            &mut self,
+            &self,
             sector: SectorId,
         ) -> Result<Self::Scalar, Self::Error> {
             Ok(GenericRigidSymbols::sqrt_dim_scalar(self, sector))
         }
 
         fn try_inv_sqrt_dim_scalar(
-            &mut self,
+            &self,
             sector: SectorId,
         ) -> Result<Self::Scalar, Self::Error> {
             Ok(GenericRigidSymbols::inv_sqrt_dim_scalar(self, sector))
         }
 
         fn try_frobenius_schur_phase_scalar(
-            &mut self,
+            &self,
             sector: SectorId,
         ) -> Result<Self::Scalar, Self::Error> {
             Ok(GenericRigidSymbols::frobenius_schur_phase_scalar(
@@ -14780,7 +14780,7 @@ mod tests {
         }
 
         fn try_f_symbol_generic(
-            &mut self,
+            &self,
             a: SectorId,
             b: SectorId,
             c: SectorId,
@@ -14794,7 +14794,7 @@ mod tests {
         }
 
         fn try_r_symbol_generic(
-            &mut self,
+            &self,
             a: SectorId,
             b: SectorId,
             c: SectorId,
@@ -14935,7 +14935,7 @@ mod tests {
         type Scalar = f64;
 
         fn try_sqrt_dim_scalar(
-            &mut self,
+            &self,
             sector: SectorId,
         ) -> Result<Self::Scalar, Self::Error> {
             Self::trip(&self.sqrt_calls, self.fail_sqrt, RigidSpyError::Sqrt)?;
@@ -14943,7 +14943,7 @@ mod tests {
         }
 
         fn try_inv_sqrt_dim_scalar(
-            &mut self,
+            &self,
             sector: SectorId,
         ) -> Result<Self::Scalar, Self::Error> {
             Self::trip(
@@ -14958,7 +14958,7 @@ mod tests {
         }
 
         fn try_frobenius_schur_phase_scalar(
-            &mut self,
+            &self,
             sector: SectorId,
         ) -> Result<Self::Scalar, Self::Error> {
             Self::trip(&self.fs_calls, self.fail_fs, RigidSpyError::Fs)?;
@@ -14969,7 +14969,7 @@ mod tests {
         }
 
         fn try_f_symbol_generic(
-            &mut self,
+            &self,
             a: SectorId,
             b: SectorId,
             c: SectorId,
@@ -15001,7 +15001,7 @@ mod tests {
         }
 
         fn try_r_symbol_generic(
-            &mut self,
+            &self,
             a: SectorId,
             b: SectorId,
             c: SectorId,

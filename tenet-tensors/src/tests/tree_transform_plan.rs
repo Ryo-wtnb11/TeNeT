@@ -7731,11 +7731,11 @@ impl std::error::Error for CheckedPlanSpyError {}
 
 struct CheckedPlanSpy<'a, R> {
     rule: &'a R,
-    identity: Option<tenet_core::RuleIdentity>,
-    fusion_style: Option<FusionStyleKind>,
-    braiding_style: Option<BraidingStyleKind>,
-    fail: Option<(CheckedPlanCall, usize)>,
-    malformed: Option<MalformedCheckedSymbol>,
+    identity: std::cell::RefCell<Option<tenet_core::RuleIdentity>>,
+    fusion_style: std::cell::Cell<Option<FusionStyleKind>>,
+    braiding_style: std::cell::Cell<Option<BraidingStyleKind>>,
+    fail: std::cell::Cell<Option<(CheckedPlanCall, usize)>>,
+    malformed: std::cell::Cell<Option<MalformedCheckedSymbol>>,
     calls: std::cell::Cell<[usize; CheckedPlanCall::COUNT]>,
 }
 
@@ -7743,11 +7743,11 @@ impl<'a, R> CheckedPlanSpy<'a, R> {
     fn new(rule: &'a R) -> Self {
         Self {
             rule,
-            identity: None,
-            fusion_style: None,
-            braiding_style: None,
-            fail: None,
-            malformed: None,
+            identity: std::cell::RefCell::new(None),
+            fusion_style: std::cell::Cell::new(None),
+            braiding_style: std::cell::Cell::new(None),
+            fail: std::cell::Cell::new(None),
+            malformed: std::cell::Cell::new(None),
             calls: std::cell::Cell::new([0; CheckedPlanCall::COUNT]),
         }
     }
@@ -7756,7 +7756,7 @@ impl<'a, R> CheckedPlanSpy<'a, R> {
         let mut calls = self.calls.get();
         calls[call.index()] += 1;
         self.calls.set(calls);
-        if self.fail == Some((call, calls[call.index()])) {
+        if self.fail.get() == Some((call, calls[call.index()])) {
             Err(CheckedPlanSpyError(call))
         } else {
             Ok(())
@@ -7773,17 +7773,20 @@ impl<R: FusionRule> CheckedGenericFusion for CheckedPlanSpy<'_, R> {
 
     fn rule_identity(&self) -> tenet_core::RuleIdentity {
         self.identity
+            .borrow()
             .clone()
             .unwrap_or_else(|| self.rule.rule_identity())
     }
 
     fn fusion_style(&self) -> FusionStyleKind {
         self.fusion_style
+            .get()
             .unwrap_or_else(|| self.rule.fusion_style())
     }
 
     fn braiding_style(&self) -> BraidingStyleKind {
         self.braiding_style
+            .get()
             .unwrap_or_else(|| self.rule.braiding_style())
     }
 
@@ -7830,18 +7833,18 @@ where
 {
     type Scalar = R::Scalar;
 
-    fn try_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+    fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
         self.trip(CheckedPlanCall::SqrtDim)?;
         Ok(self.rule.sqrt_dim_scalar(sector))
     }
 
-    fn try_inv_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+    fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
         self.trip(CheckedPlanCall::InvSqrtDim)?;
         Ok(self.rule.inv_sqrt_dim_scalar(sector))
     }
 
     fn try_frobenius_schur_phase_scalar(
-        &mut self,
+        &self,
         sector: SectorId,
     ) -> Result<Self::Scalar, Self::Error> {
         self.trip(CheckedPlanCall::FrobeniusSchur)?;
@@ -7849,7 +7852,7 @@ where
     }
 
     fn try_f_symbol_generic(
-        &mut self,
+        &self,
         a: SectorId,
         b: SectorId,
         c: SectorId,
@@ -7859,7 +7862,7 @@ where
     ) -> Result<GenericFArray<Self::Scalar>, Self::Error> {
         self.trip(CheckedPlanCall::F)?;
         let symbol = self.rule.f_symbol_generic(a, b, c, d, e, f);
-        if self.malformed == Some(MalformedCheckedSymbol::F) {
+        if self.malformed.get() == Some(MalformedCheckedSymbol::F) {
             Ok(GenericFArray::new(
                 symbol.data().to_vec(),
                 (1, 1, symbol.data().len(), 1),
@@ -7870,14 +7873,14 @@ where
     }
 
     fn try_r_symbol_generic(
-        &mut self,
+        &self,
         a: SectorId,
         b: SectorId,
         c: SectorId,
     ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> {
         self.trip(CheckedPlanCall::R)?;
         let symbol = self.rule.r_symbol_generic(a, b, c);
-        if self.malformed == Some(MalformedCheckedSymbol::R) {
+        if self.malformed.get() == Some(MalformedCheckedSymbol::R) {
             Ok(GenericRMatrix::new(
                 symbol.data().to_vec(),
                 1,
@@ -7886,6 +7889,108 @@ where
         } else {
             Ok(symbol)
         }
+    }
+}
+
+struct SynchronizedCheckedSu3 {
+    rule: tenet_core::Su3FusionRule,
+    calls: std::sync::Mutex<usize>,
+}
+
+impl SynchronizedCheckedSu3 {
+    fn new() -> Self {
+        Self {
+            rule: tenet_core::Su3FusionRule::new(),
+            calls: std::sync::Mutex::new(0),
+        }
+    }
+
+    fn hit(&self) {
+        *self.calls.lock().unwrap() += 1;
+    }
+}
+
+impl CheckedGenericFusion for SynchronizedCheckedSu3 {
+    type Error = std::convert::Infallible;
+
+    fn rule_identity(&self) -> tenet_core::RuleIdentity {
+        self.rule.rule_identity()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.rule.fusion_style()
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.rule.braiding_style()
+    }
+    fn vacuum(&self) -> SectorId {
+        self.rule.vacuum()
+    }
+    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+        self.hit();
+        Ok(self.rule.dual(sector))
+    }
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        self.hit();
+        Ok(self.rule.fusion_channels(left, right))
+    }
+    fn try_fusion_channels_in_table(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        self.hit();
+        Ok(self.rule.fusion_channels_in_table(left, right))
+    }
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, Self::Error> {
+        self.hit();
+        Ok(self.rule.nsymbol(left, right, coupled))
+    }
+}
+
+impl CheckedGenericRigidSymbols for SynchronizedCheckedSu3 {
+    type Scalar = f64;
+
+    fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
+        self.hit();
+        Ok(self.rule.sqrt_dim_scalar(sector))
+    }
+    fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
+        self.hit();
+        Ok(self.rule.inv_sqrt_dim_scalar(sector))
+    }
+    fn try_frobenius_schur_phase_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
+        self.hit();
+        Ok(self.rule.frobenius_schur_phase_scalar(sector))
+    }
+    fn try_f_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> Result<GenericFArray<f64>, Self::Error> {
+        self.hit();
+        Ok(self.rule.f_symbol_generic(a, b, c, d, e, f))
+    }
+    fn try_r_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+    ) -> Result<GenericRMatrix<f64>, Self::Error> {
+        self.hit();
+        Ok(self.rule.r_symbol_generic(a, b, c))
     }
 }
 
@@ -8282,9 +8387,9 @@ fn checked_generic_rank3_plan_matches_legacy_rows_coefficients_and_order() {
         let legacy =
             build_generic_tree_pair_transform_group_plan(&rule, operation.clone(), &structure)
                 .unwrap();
-        let mut checked_rule = InfallibleGeneric::new(&rule);
+        let checked_rule = InfallibleGeneric::new(&rule);
         let checked = build_checked_generic_tree_pair_transform_group_plan(
-            &mut checked_rule,
+            &checked_rule,
             operation,
             &structure,
         )
@@ -8311,6 +8416,13 @@ fn checked_generic_owned_transform_matches_legacy_for_r_and_inner_f_r() {
     let src_data = (0..src_space.required_len().unwrap())
         .map(|index| index as f64)
         .collect::<Vec<_>>();
+    let provider = Arc::new(InfallibleGeneric::new(&rule));
+    let bound_src = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        src_space.homspace().clone(),
+    )
+    .unwrap();
+    assert_eq!(bound_src.space(), &src_space);
     let source_before = src_space.clone();
     let data_before = src_data.clone();
 
@@ -8321,11 +8433,9 @@ fn checked_generic_owned_transform_matches_legacy_for_r_and_inner_f_r() {
             "inner_f_r.flat=",
         ),
     ] {
-        let mut checked = InfallibleGeneric::new(&rule);
         let (actual_space, actual_data) = crate::tree_transform_dyn_owned_checked_generic(
-            &mut checked,
             operation.clone(),
-            &src_space,
+            &bound_src,
             &src_data,
             1.0,
         )
@@ -8346,7 +8456,8 @@ fn checked_generic_owned_transform_matches_legacy_for_r_and_inner_f_r() {
             )
             .unwrap();
 
-        assert_eq!(actual_space, expected_space);
+        assert_eq!(actual_space.space(), &expected_space);
+        assert!(Arc::ptr_eq(actual_space.provider_arc(), &provider));
         assert_eq!(actual_data, expected_data);
         let oracle = TENSORKIT_ORACLE
             .lines()
@@ -8369,7 +8480,140 @@ fn checked_generic_owned_transform_matches_legacy_for_r_and_inner_f_r() {
     assert!(TENSORKIT_ORACLE.contains("SUNRepresentations_version=0.4.0"));
 }
 
+#[cfg(feature = "racah-generated")]
 #[test]
+fn racah_generated_sun_adjoint_checked_bound_round_trips() {
+    use tenet_sectors::SUNFusionRule;
+
+    fn repartition(source_nout: usize, target_nout: usize) -> TreeTransformOperation {
+        let mut axes = (0..source_nout)
+            .chain((source_nout..3).rev())
+            .collect::<Vec<_>>();
+        axes[target_nout..].reverse();
+        let (codomain, domain) = axes.split_at(target_nout);
+        TreeTransformOperation::transpose(codomain.iter().copied(), domain.iter().copied())
+    }
+
+    fn snapshot(
+        rule: &SUNFusionRule,
+        space: &crate::BoundDynamicFusionMapSpace<SUNFusionRule>,
+    ) -> Vec<(Vec<Vec<i64>>, Vec<MultiplicityIndex>)> {
+        let structure = space.space().structure();
+        (0..structure.block_count())
+            .map(|index| {
+                let block = structure.block(index).unwrap();
+                let BlockKey::FusionTree(pair) = block.key() else {
+                    unreachable!()
+                };
+                let mut labels = Vec::new();
+                let mut vertices = Vec::new();
+                for tree in [pair.codomain_tree(), pair.domain_tree()] {
+                    labels.extend(
+                        tree.uncoupled()
+                            .iter()
+                            .chain(tree.innerlines())
+                            .chain(std::iter::once(&tree.coupled()))
+                            .map(|&sector| rule.decode_dynkin(sector).unwrap()),
+                    );
+                    vertices.extend_from_slice(tree.vertices());
+                }
+                (labels, vertices)
+            })
+            .collect()
+    }
+
+    for (n, adjoint_labels) in [(3, &[1, 1][..]), (4, &[1, 0, 1][..])] {
+        let provider = Arc::new(SUNFusionRule::new(n).unwrap());
+        let adjoint = provider.encode_dynkin(adjoint_labels).unwrap();
+        assert_eq!(provider.try_nsymbol(adjoint, adjoint, adjoint).unwrap(), 2);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new(
+                [1usize, 1].map(|degeneracy| SectorLeg::new([(adjoint, degeneracy)], false)),
+            ),
+            FusionProductSpace::new([SectorLeg::new([(adjoint, 1)], false)]),
+        );
+        let source = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+            Arc::clone(&provider),
+            homspace,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(source.clone().provider_arc(), &provider));
+        let source_snapshot = snapshot(provider.as_ref(), &source);
+        let source_data = (0..source.space().required_len().unwrap())
+            .map(|index| index as f64 + 1.0)
+            .collect::<Vec<_>>();
+
+        let mut operations = vec![(
+            TreeTransformOperation::permute([1, 0], [2]),
+            TreeTransformOperation::permute([1, 0], [2]),
+        )];
+        operations.extend((0..=3).map(|target| (repartition(2, target), repartition(target, 2))));
+        for (forward, backward) in operations {
+            let (moved, moved_data) = crate::tree_transform_dyn_owned_checked_generic(
+                forward,
+                &source,
+                &source_data,
+                1.0,
+            )
+            .unwrap();
+            assert!(Arc::ptr_eq(moved.provider_arc(), &provider));
+            assert_eq!(moved_data.len(), moved.space().required_len().unwrap());
+            let (round_trip, round_trip_data) =
+                crate::tree_transform_dyn_owned_checked_generic(backward, &moved, &moved_data, 1.0)
+                    .unwrap();
+            assert_eq!(round_trip.space(), source.space());
+            assert_eq!(snapshot(provider.as_ref(), &round_trip), source_snapshot);
+            assert!(Arc::ptr_eq(round_trip.provider_arc(), &provider));
+            assert_eq!(round_trip_data.len(), source_data.len());
+            for (actual, expected) in round_trip_data.iter().zip(&source_data) {
+                assert!((actual - expected).abs() <= 1e-10);
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_generic_shared_provider_builds_identical_plans_concurrently() {
+    let oracle_rule = tenet_core::Su3FusionRule::new();
+    let raw = su3_rank3_dynamic_space(&oracle_rule);
+    let data = (0..raw.required_len().unwrap())
+        .map(|index| index as f64)
+        .collect::<Vec<_>>();
+    let provider = Arc::new(SynchronizedCheckedSu3::new());
+    let source = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        raw.homspace().clone(),
+    )
+    .unwrap();
+    *provider.calls.lock().unwrap() = 0;
+    let operation = TreeTransformOperation::braid([0, 2], [1], [0, 1], [2]);
+
+    let outputs = std::thread::scope(|scope| {
+        (0..4)
+            .map(|_| {
+                let source = source.clone();
+                let operation = operation.clone();
+                let data = &data;
+                scope.spawn(move || {
+                    crate::tree_transform_dyn_owned_checked_generic(operation, &source, data, 1.0)
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    for output in outputs.iter().skip(1) {
+        assert_eq!(output.0.space(), outputs[0].0.space());
+        assert_eq!(output.1, outputs[0].1);
+        assert!(Arc::ptr_eq(output.0.provider_arc(), &provider));
+    }
+    assert!(*provider.calls.lock().unwrap() > 0);
+}
+
+#[test]
+#[allow(clippy::arc_with_non_send_sync)] // The API requires Arc; this single-threaded spy uses Cells for deterministic failures.
 fn checked_generic_owned_failure_does_not_publish_destination_state() {
     use tenet_core::{
         block_structure_intern_cache_info, complete_hom_space_structure_cache_info,
@@ -8408,42 +8652,40 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
     let operation = TreeTransformOperation::braid([0, 2], [1], [0, 1], [2]);
     let store = RuntimeTreeTransformStore::<f64>::default();
 
-    for identity in [
-        None,
+    for mismatch in [
         Some(tenet_core::RuleIdentity::of_type::<DenseGenericRule>()),
+        None,
     ] {
-        let is_unbound = identity.is_none();
-        let test_space = if is_unbound {
-            let unbound = FusionTensorMapSpace::new_unbound(
-                TensorMapSpace::<2, 1>::from_dims([2, 3], [5]).unwrap(),
-                src_space.homspace().clone(),
-                src_space.structure().as_ref().clone(),
-            )
-            .unwrap();
-            crate::contract::DynamicFusionMapSpace::from_typed(&unbound)
+        let style_mismatch = mismatch.is_none();
+        let provider = Arc::new(CheckedPlanSpy::new(&rule));
+        let test_space = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+            Arc::clone(&provider),
+            src_space.homspace().clone(),
+        )
+        .unwrap();
+        provider.calls.set([0; CheckedPlanCall::COUNT]);
+        if let Some(identity) = mismatch {
+            *provider.identity.borrow_mut() = Some(identity);
         } else {
-            src_space.clone()
-        };
+            provider.fusion_style.set(Some(FusionStyleKind::Unique));
+        }
+        provider.fail.set(Some((CheckedPlanCall::N, 1)));
         let layout_before = fusion_tree_layout_cache_info();
         let complete_before = complete_hom_space_structure_cache_info();
         let interner_before = block_structure_intern_cache_info();
         let runtime_before = store.info();
-        let mut provider = CheckedPlanSpy::new(&rule);
-        provider.identity = identity;
-        provider.fail = Some((CheckedPlanCall::N, 1));
 
         let error = crate::tree_transform_dyn_owned_checked_generic(
-            &mut provider,
             operation.clone(),
             &test_space,
             &src_data,
             1.0,
         )
         .unwrap_err();
-        if is_unbound {
+        if style_mismatch {
             assert!(matches!(
                 error,
-                CheckedGenericPlanError::Core(CoreError::MalformedFusionTree { .. })
+                CheckedGenericPlanError::Core(CoreError::UnsupportedFusionStyle { .. })
             ));
         } else {
             assert!(matches!(
@@ -8470,20 +8712,25 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
         Ok(MalformedCheckedSymbol::F),
         Ok(MalformedCheckedSymbol::R),
     ] {
+        let provider = Arc::new(CheckedPlanSpy::new(&rule));
+        let bound_src = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+            Arc::clone(&provider),
+            src_space.homspace().clone(),
+        )
+        .unwrap();
+        provider.calls.set([0; CheckedPlanCall::COUNT]);
+        match failure {
+            Err((call, nth)) => provider.fail.set(Some((call, nth))),
+            Ok(symbol) => provider.malformed.set(Some(symbol)),
+        }
         let layout_before = fusion_tree_layout_cache_info();
         let complete_before = complete_hom_space_structure_cache_info();
         let interner_before = block_structure_intern_cache_info();
         let runtime_before = store.info();
-        let mut provider = CheckedPlanSpy::new(&rule);
-        match failure {
-            Err((call, nth)) => provider.fail = Some((call, nth)),
-            Ok(symbol) => provider.malformed = Some(symbol),
-        }
 
         let error = crate::tree_transform_dyn_owned_checked_generic(
-            &mut provider,
             operation.clone(),
-            &src_space,
+            &bound_src,
             &src_data,
             1.0,
         )
@@ -8518,19 +8765,21 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
         ]),
         FusionProductSpace::new([SectorLeg::new([(SectorId::new(1), 13)], false)]),
     );
-    let dense_space = crate::contract::DynamicFusionMapSpace::from_final_homspace_generic(
-        &dense_rule,
+    let provider = Arc::new(CheckedPlanSpy::new(&dense_rule));
+    let dense_space = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
         dense_homspace,
     )
     .unwrap();
-    let dense_data = vec![1.0; dense_space.required_len().unwrap()];
+    let dense_data = vec![1.0; dense_space.space().required_len().unwrap()];
+    provider.calls.set([0; CheckedPlanCall::COUNT]);
     let layout_before = fusion_tree_layout_cache_info();
     let complete_before = complete_hom_space_structure_cache_info();
     let interner_before = block_structure_intern_cache_info();
-    let mut provider = CheckedPlanSpy::new(&dense_rule);
-    provider.fail = Some((CheckedPlanCall::FrobeniusSchur, 1));
+    provider
+        .fail
+        .set(Some((CheckedPlanCall::FrobeniusSchur, 1)));
     let error = crate::tree_transform_dyn_owned_checked_generic(
-        &mut provider,
         TreeTransformOperation::permute([1, 0], [2]),
         &dense_space,
         &dense_data,
@@ -8569,16 +8818,13 @@ fn checked_generic_plan_preserves_provider_sources_and_rejects_bad_f_r_shapes() 
         (r_only.clone(), CheckedPlanCall::R),
         (inner_f_r.clone(), CheckedPlanCall::F),
     ] {
-        let mut provider = CheckedPlanSpy::new(&rule);
+        let provider = CheckedPlanSpy::new(&rule);
         // Fail after the first lookup has succeeded: compilation must still
         // return no partially assembled plan.
-        provider.fail = Some((call, 2));
-        let error = build_checked_generic_tree_pair_transform_group_plan(
-            &mut provider,
-            operation,
-            &structure,
-        )
-        .unwrap_err();
+        provider.fail.set(Some((call, 2)));
+        let error =
+            build_checked_generic_tree_pair_transform_group_plan(&provider, operation, &structure)
+                .unwrap_err();
         assert!(matches!(
             error,
             CheckedGenericPlanError::Provider(CheckedPlanSpyError(found)) if found == call
@@ -8597,14 +8843,11 @@ fn checked_generic_plan_preserves_provider_sources_and_rejects_bad_f_r_shapes() 
         (r_only, MalformedCheckedSymbol::R, "R"),
         (inner_f_r, MalformedCheckedSymbol::F, "F"),
     ] {
-        let mut provider = CheckedPlanSpy::new(&rule);
-        provider.malformed = Some(malformed);
-        let error = build_checked_generic_tree_pair_transform_group_plan(
-            &mut provider,
-            operation,
-            &structure,
-        )
-        .unwrap_err();
+        let provider = CheckedPlanSpy::new(&rule);
+        provider.malformed.set(Some(malformed));
+        let error =
+            build_checked_generic_tree_pair_transform_group_plan(&provider, operation, &structure)
+                .unwrap_err();
         assert!(matches!(
             error,
             CheckedGenericPlanError::SymbolShape {
@@ -8632,11 +8875,15 @@ fn checked_generic_plan_rejects_style_before_structure_or_symbol_queries() {
     .unwrap();
     let operation = TreeTransformOperation::permute([1, 0, 2], []);
 
-    let mut wrong_fusion_style = CheckedPlanSpy::new(&rule);
-    wrong_fusion_style.fusion_style = Some(FusionStyleKind::Simple);
-    wrong_fusion_style.braiding_style = Some(BraidingStyleKind::NoBraiding);
+    let wrong_fusion_style = CheckedPlanSpy::new(&rule);
+    wrong_fusion_style
+        .fusion_style
+        .set(Some(FusionStyleKind::Simple));
+    wrong_fusion_style
+        .braiding_style
+        .set(Some(BraidingStyleKind::NoBraiding));
     let error = build_checked_generic_tree_pair_transform_group_plan(
-        &mut wrong_fusion_style,
+        &wrong_fusion_style,
         operation.clone(),
         &structure,
     )
@@ -8652,10 +8899,12 @@ fn checked_generic_plan_rejects_style_before_structure_or_symbol_queries() {
 
     // "Planar" providers have `NoBraiding`: a permutation is rejected before
     // either structural N/dual access or any F/R/rigidity lookup.
-    let mut planar = CheckedPlanSpy::new(&rule);
-    planar.braiding_style = Some(BraidingStyleKind::NoBraiding);
+    let planar = CheckedPlanSpy::new(&rule);
+    planar
+        .braiding_style
+        .set(Some(BraidingStyleKind::NoBraiding));
     let error =
-        build_checked_generic_tree_pair_transform_group_plan(&mut planar, operation, &structure)
+        build_checked_generic_tree_pair_transform_group_plan(&planar, operation, &structure)
             .unwrap_err();
     assert!(matches!(
         error,
@@ -8666,12 +8915,40 @@ fn checked_generic_plan_rejects_style_before_structure_or_symbol_queries() {
     ));
     assert_eq!(planar.calls.get(), [0; CheckedPlanCall::COUNT]);
 
-    let mut second_tree_fails_structure = CheckedPlanSpy::new(&rule);
+    let cyclic = CheckedPlanSpy::new(&rule);
+    let error = build_checked_generic_tree_pair_transform_group_plan(
+        &cyclic,
+        TreeTransformOperation::transpose([2], [1, 0]),
+        &structure,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        CheckedGenericPlanError::Operation(OperationError::UnsupportedTreeTransformScope { .. })
+    ));
+    assert_eq!(cyclic.calls.get(), [0; CheckedPlanCall::COUNT]);
+
+    let empty_cyclic = CheckedPlanSpy::new(&rule);
+    let error = build_checked_generic_tree_pair_transform_group_plan(
+        &empty_cyclic,
+        TreeTransformOperation::transpose([2], [1, 0]),
+        &BlockStructure::empty(3),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        CheckedGenericPlanError::Operation(OperationError::UnsupportedTreeTransformScope { .. })
+    ));
+    assert_eq!(empty_cyclic.calls.get(), [0; CheckedPlanCall::COUNT]);
+
+    let second_tree_fails_structure = CheckedPlanSpy::new(&rule);
     // Each rank-3 tree has two vertices. Failure 3 is therefore the first N
     // query of the second source tree in the all-source structural preflight.
-    second_tree_fails_structure.fail = Some((CheckedPlanCall::N, 3));
+    second_tree_fails_structure
+        .fail
+        .set(Some((CheckedPlanCall::N, 3)));
     let error = build_checked_generic_tree_pair_transform_group_plan(
-        &mut second_tree_fails_structure,
+        &second_tree_fails_structure,
         TreeTransformOperation::permute([1, 0, 2], []),
         &structure,
     )
@@ -8708,10 +8985,10 @@ fn checked_generic_plan_repartition_queries_checked_rigid_primitives() {
         CheckedPlanCall::F,
         CheckedPlanCall::R,
     ] {
-        let mut provider = CheckedPlanSpy::new(&rule);
-        provider.fail = Some((call, 1));
+        let provider = CheckedPlanSpy::new(&rule);
+        provider.fail.set(Some((call, 1)));
         let error = build_checked_generic_tree_pair_transform_group_plan(
-            &mut provider,
+            &provider,
             operation.clone(),
             &structure,
         )
@@ -8722,9 +8999,8 @@ fn checked_generic_plan_repartition_queries_checked_rigid_primitives() {
         ));
     }
 
-    let mut provider = CheckedPlanSpy::new(&rule);
-    build_checked_generic_tree_pair_transform_group_plan(&mut provider, operation, &structure)
-        .unwrap();
+    let provider = CheckedPlanSpy::new(&rule);
+    build_checked_generic_tree_pair_transform_group_plan(&provider, operation, &structure).unwrap();
     for call in [
         CheckedPlanCall::Dual,
         CheckedPlanCall::N,
