@@ -108,6 +108,7 @@ trait GenericRigidAccess: GenericFRAccess {
         b: SectorId,
         c: SectorId,
     ) -> Result<GenericRMatrix<Self::Scalar>, CheckedGenericSymbolError<Self::Error>>;
+    #[allow(dead_code)]
     fn try_a_symbol_generic(
         &mut self,
         a: SectorId,
@@ -9525,6 +9526,7 @@ where
     }
 }
 
+#[cfg(test)]
 fn generic_bendright_tree_pair_checked<C>(
     rule: &mut C,
     tree_pair: &FusionTreePairKey,
@@ -9734,6 +9736,7 @@ where
     }
 }
 
+#[cfg(test)]
 fn generic_bendleft_tree_pair_checked<C>(
     rule: &mut C,
     tree_pair: &FusionTreePairKey,
@@ -9879,7 +9882,11 @@ where
     }
 }
 
-fn generic_repartition_tree_pair_checked<C>(
+/// Checked Generic-fusion repartition for a mutable fallible provider.
+///
+/// Structural validation completes before the first F, dimension, or pivotal
+/// query, and provider failures retain their typed source.
+pub fn generic_repartition_tree_pair_checked<C>(
     rule: &mut C,
     tree_pair: &FusionTreePairKey,
     target_codomain_rank: usize,
