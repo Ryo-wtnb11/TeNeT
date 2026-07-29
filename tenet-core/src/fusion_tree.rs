@@ -247,10 +247,12 @@ impl<P: CheckedGenericRigidSymbols> GenericRigidAccess for P {
     }
 }
 
-fn validate_checked_generic_tree_pair<C>(
+/// Validate a Generic fusion-tree pair without requiring the infallible
+/// [`FusionRule`] contract.
+pub fn validate_generic_fusion_tree_pair_checked<C>(
     rule: &C,
     tree_pair: &FusionTreePairKey,
-) -> Result<(), CheckedGenericSymbolError<C::Error>>
+) -> Result<(), CheckedGenericStructureError<C::Error>>
 where
     C: CheckedGenericFusion,
 {
@@ -280,13 +282,24 @@ where
         }
         validate_fusion_tree_vertices(tree, |left, right, coupled| {
             rule.try_fusion_channels(left, right)
-                .map_err(CheckedGenericSymbolError::Provider)?;
+                .map_err(CheckedGenericStructureError::Provider)?;
             rule.try_nsymbol(left, right, coupled)
-                .map_err(CheckedGenericSymbolError::Provider)
+                .map_err(CheckedGenericStructureError::Provider)
         })?;
     }
     validate_fusion_tree_pair_coupled(tree_pair.codomain_tree(), tree_pair.domain_tree())?;
     Ok(())
+}
+
+fn map_checked_generic_structure_error<E>(
+    error: CheckedGenericStructureError<E>,
+) -> CheckedGenericSymbolError<E> {
+    match error {
+        CheckedGenericStructureError::Provider(error) => {
+            CheckedGenericSymbolError::Provider(error)
+        }
+        CheckedGenericStructureError::Core(error) => CheckedGenericSymbolError::Core(error),
+    }
 }
 
 fn checked_generic_f_symbol<C>(
@@ -8803,6 +8816,7 @@ where
 /// unchanged — rather than being derived here. Applying the `inverse=true`
 /// braid to every output of the `inverse=false` braid recovers the original
 /// tree with coefficient 1 (unit F/R), which the tests check.
+#[cfg(test)]
 fn generic_artin_braid_at_with_inverse<R>(
     rule: &R,
     tree: &FusionTreeKey,
@@ -9178,18 +9192,39 @@ where
     R: GenericFusionSymbols,
     R::Scalar: GenericBraidScalar,
 {
+    let mut checked = InfallibleGenericFR(rule);
+    match generic_braid_tree_result(&mut checked, tree, permutation, levels, swaps) {
+        Ok(rows) => Ok(rows),
+        Err(CheckedGenericSymbolError::Provider(never)) => match never {},
+        Err(CheckedGenericSymbolError::Core(error)) => Err(error),
+        Err(CheckedGenericSymbolError::Shape { .. }) => {
+            unreachable!("infallible Generic symbols must be categorical")
+        }
+    }
+}
+
+fn generic_braid_tree_result<C>(
+    rule: &mut C,
+    tree: &FusionTreeKey,
+    permutation: &[usize],
+    levels: &[usize],
+    swaps: &[usize],
+) -> Result<Vec<(FusionTreeKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+where
+    C: GenericFRAccess,
+{
     let rank = tree.uncoupled().len();
     if permutation.iter().copied().eq(0..rank) {
-        return Ok(vec![(tree.clone(), R::Scalar::braid_one())]);
+        return Ok(vec![(tree.clone(), C::Scalar::braid_one())]);
     }
-    let mut current = vec![(tree.clone(), R::Scalar::braid_one())];
+    let mut current = vec![(tree.clone(), C::Scalar::braid_one())];
     let mut current_levels = levels.to_vec();
     for &swap in swaps {
         let inverse = current_levels[swap] > current_levels[swap + 1];
         let mut next_terms = FusionTermAccumulator::new();
         for (tree, coefficient) in current {
             for (next_tree, step_coefficient) in
-                generic_artin_braid_at_with_inverse(rule, &tree, swap, inverse)?
+                generic_artin_braid_at_with_inverse_checked(rule, &tree, swap, inverse)?
             {
                 next_terms.push(next_tree, coefficient.clone() * step_coefficient);
             }
@@ -9534,7 +9569,8 @@ fn generic_bendright_tree_pair_checked<C>(
 where
     C: CheckedGenericRigidSymbols,
 {
-    validate_checked_generic_tree_pair(rule, tree_pair)?;
+    validate_generic_fusion_tree_pair_checked(rule, tree_pair)
+        .map_err(map_checked_generic_structure_error)?;
     generic_bendright_tree_pair_result(rule, tree_pair)
 }
 
@@ -9744,7 +9780,8 @@ fn generic_bendleft_tree_pair_checked<C>(
 where
     C: CheckedGenericRigidSymbols,
 {
-    validate_checked_generic_tree_pair(rule, tree_pair)?;
+    validate_generic_fusion_tree_pair_checked(rule, tree_pair)
+        .map_err(map_checked_generic_structure_error)?;
     generic_bendleft_tree_pair_result(rule, tree_pair)
 }
 
@@ -9903,7 +9940,8 @@ where
         }
         .into());
     }
-    validate_checked_generic_tree_pair(rule, tree_pair)?;
+    validate_generic_fusion_tree_pair_checked(rule, tree_pair)
+        .map_err(map_checked_generic_structure_error)?;
     generic_repartition_tree_pair_result(rule, tree_pair, target_codomain_rank)
 }
 
@@ -10717,51 +10755,11 @@ where
     }
 }
 
-/// Generic-fusion sibling of [`multiplicity_free_repartition_terms`]: repartition
-/// a whole term list to `target_codomain_rank` legs, composing the bend
-/// coefficient matrices. Same accumulate-and-compose loop, different rule bound.
-fn generic_repartition_terms<R>(
-    rule: &R,
-    terms: Vec<(FusionTreePairKey, R::Scalar)>,
-    target_codomain_rank: usize,
-) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
-where
-    R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
-{
-    let mut current = terms;
-    let Some((first_key, _)) = current.first() else {
-        return Ok(current);
-    };
-    let total_rank =
-        first_key.codomain_tree().uncoupled().len() + first_key.domain_tree().uncoupled().len();
-    if target_codomain_rank > total_rank {
-        return Err(CoreError::DimensionMismatch {
-            expected: total_rank,
-            actual: target_codomain_rank,
-        });
-    }
-    let mut current_codomain_rank = first_key.codomain_tree().uncoupled().len();
-    while current_codomain_rank < target_codomain_rank {
-        current = compose_generic_tree_pair_terms(rule, current, |rule, key| {
-            generic_bendleft_tree_pair(rule, key)
-        })?;
-        current_codomain_rank += 1;
-    }
-    while current_codomain_rank > target_codomain_rank {
-        current = compose_generic_tree_pair_terms(rule, current, |rule, key| {
-            generic_bendright_tree_pair(rule, key)
-        })?;
-        current_codomain_rank -= 1;
-    }
-    Ok(current)
-}
-
 /// Generic-fusion `braid` on a full tree pair: bend everything into the codomain,
 /// braid there, bend back — the TensorKit `braid`/`fsbraid` decomposition.
 /// Structural twin of [`multiplicity_free_braid_tree_pair`] (:829): the only
 /// difference is the primitive family (`generic_repartition_tree_pair` /
-/// `generic_braid_tree` / `generic_repartition_terms`) and the `braid_one` seed;
+/// `generic_braid_tree`) and the `braid_one` seed;
 /// no new recoupling formula is introduced.
 /// `tree_pair` follows [`FusionTreePairKey::validate_for_rule`]'s
 /// provider-domain precondition.
@@ -10877,15 +10875,44 @@ where
     R: GenericRigidSymbols,
     R::Scalar: GenericBraidScalar,
 {
-    let rule = tree_pair.rule;
+    let mut checked = InfallibleGenericRigid(tree_pair.rule);
+    match generic_braid_tree_pair_result(
+        &mut checked,
+        tree_pair.key,
+        target_codomain_rank,
+        permutation,
+        levels,
+        swaps,
+        identity,
+    ) {
+        Ok(rows) => Ok(rows),
+        Err(CheckedGenericSymbolError::Provider(never)) => match never {},
+        Err(CheckedGenericSymbolError::Core(error)) => Err(error),
+        Err(CheckedGenericSymbolError::Shape { .. }) => {
+            unreachable!("infallible Generic symbols must be categorical")
+        }
+    }
+}
+
+fn generic_braid_tree_pair_result<C>(
+    rule: &mut C,
+    tree_pair: &FusionTreePairKey,
+    target_codomain_rank: usize,
+    permutation: &[usize],
+    levels: &[usize],
+    swaps: &[usize],
+    identity: bool,
+) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+where
+    C: GenericRigidAccess,
+{
     if identity {
-        return Ok(vec![(tree_pair.key.clone(), R::Scalar::braid_one())]);
+        return Ok(vec![(tree_pair.clone(), C::Scalar::braid_one())]);
     }
     let all_rank = permutation.len();
-    let mut current =
-        generic_repartition_tree_pair_unchecked(rule, tree_pair.key, all_rank)?;
-    current = compose_generic_tree_pair_terms(rule, current, |rule, key| {
-        generic_braid_tree_unchecked(
+    let mut current = generic_repartition_tree_pair_result(rule, tree_pair, all_rank)?;
+    current = compose_generic_tree_pair_terms_result(current, |key| {
+        generic_braid_tree_result(
             rule,
             key.codomain_tree(),
             permutation,
@@ -10904,7 +10931,73 @@ where
                     .collect::<Vec<_>>()
             })
     })?;
-    generic_repartition_terms(rule, current, target_codomain_rank)
+    compose_generic_tree_pair_terms_result(current, |key| {
+        generic_repartition_tree_pair_result(rule, key, target_codomain_rank)
+    })
+}
+
+/// Checked Generic-fusion braid on a full tree pair.
+pub fn generic_braid_tree_pair_checked<C>(
+    rule: &mut C,
+    tree_pair: &FusionTreePairKey,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+    codomain_levels: &[usize],
+    domain_levels: &[usize],
+) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+where
+    C: CheckedGenericRigidSymbols,
+{
+    let codomain_rank = tree_pair.codomain_tree().uncoupled().len();
+    let domain_rank = tree_pair.domain_tree().uncoupled().len();
+    if codomain_levels.len() != codomain_rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: codomain_rank,
+            actual: codomain_levels.len(),
+        }
+        .into());
+    }
+    if domain_levels.len() != domain_rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: domain_rank,
+            actual: domain_levels.len(),
+        }
+        .into());
+    }
+    if !rule.fusion_style().has_multiplicity() {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Generic,
+            actual: rule.fusion_style(),
+        }
+        .into());
+    }
+    validate_generic_fusion_tree_pair_checked(rule, tree_pair)
+        .map_err(map_checked_generic_structure_error)?;
+    let permutation = linearize_tree_pair_permutation(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    )?;
+    let swaps = permutation_to_adjacent_swaps(&permutation, codomain_rank + domain_rank)?;
+    let identity = tree_pair_axis_map_is_identity(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    );
+    let mut levels = Vec::with_capacity(codomain_rank + domain_rank);
+    levels.extend_from_slice(codomain_levels);
+    levels.extend(domain_levels.iter().rev().copied());
+    generic_braid_tree_pair_result(
+        rule,
+        tree_pair,
+        codomain_permutation.len(),
+        &permutation,
+        &levels,
+        &swaps,
+        identity,
+    )
 }
 
 /// Generic-fusion `permute` = [`generic_braid_tree_pair`] with the identity
@@ -10936,6 +11029,37 @@ where
     }
     let validated = validate_fusion_tree_pair_for_rule(rule, tree_pair)?;
     generic_permute_tree_pair_proven(validated, codomain_permutation, domain_permutation)
+}
+
+/// Checked Generic-fusion permutation on a full tree pair.
+pub fn generic_permute_tree_pair_checked<C>(
+    rule: &mut C,
+    tree_pair: &FusionTreePairKey,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+where
+    C: CheckedGenericRigidSymbols,
+{
+    if !rule.braiding_style().is_symmetric() {
+        return Err(CoreError::UnsupportedBraidingStyle {
+            expected: "symmetric braiding",
+            actual: rule.braiding_style(),
+        }
+        .into());
+    }
+    let codomain_rank = tree_pair.codomain_tree().uncoupled().len();
+    let domain_rank = tree_pair.domain_tree().uncoupled().len();
+    let codomain_levels = (0..codomain_rank).collect::<Vec<_>>();
+    let domain_levels = (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
+    generic_braid_tree_pair_checked(
+        rule,
+        tree_pair,
+        codomain_permutation,
+        domain_permutation,
+        &codomain_levels,
+        &domain_levels,
+    )
 }
 
 pub(crate) fn generic_permute_tree_pair_proven<R>(
