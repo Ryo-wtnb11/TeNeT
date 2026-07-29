@@ -8376,6 +8376,21 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
         fusion_tree_layout_cache_info, Su3FusionRule,
     };
 
+    const ISOLATED: &str = "TENET_CHECKED_GENERIC_OWNED_FAILURE_ISOLATED";
+    // What: exact global-cache snapshots run outside the parallel unit-test process.
+    if std::env::var_os(ISOLATED).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::tree_transform_plan::checked_generic_owned_failure_does_not_publish_destination_state",
+            ])
+            .env(ISOLATED, "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
