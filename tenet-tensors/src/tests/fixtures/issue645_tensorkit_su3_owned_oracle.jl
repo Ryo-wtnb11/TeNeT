@@ -1,3 +1,6 @@
+# From the repository root, regenerate in a clean depot with:
+# JULIA_DEPOT_PATH="$(mktemp -d)" julia --project=tenet-tensors/src/tests/fixtures -e 'using Pkg; Pkg.instantiate(); include("tenet-tensors/src/tests/fixtures/issue645_tensorkit_su3_owned_oracle.jl")'
+
 using TensorKit
 using SUNRepresentations
 
