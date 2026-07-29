@@ -17,11 +17,30 @@ pub struct SUNFusionRule {
 /// Failure at the SU(N) label/provider boundary.
 #[derive(Debug)]
 pub enum SUNFusionRuleError {
-    InvalidRank { n: usize },
-    LabelLength { expected: usize, found: usize },
-    NegativeLabel { index: usize, value: i64 },
-    UnrepresentableLabel { labels: Vec<i64> },
-    DecodeOverflow { sector: SectorId },
+    InvalidRank {
+        n: usize,
+    },
+    RankNotRepresentable {
+        n: usize,
+    },
+    LabelAllocation {
+        len: usize,
+        source: std::collections::TryReserveError,
+    },
+    LabelLength {
+        expected: usize,
+        found: usize,
+    },
+    NegativeLabel {
+        index: usize,
+        value: i64,
+    },
+    UnrepresentableLabel {
+        labels: Vec<i64>,
+    },
+    DecodeOverflow {
+        sector: SectorId,
+    },
     Racah(racah::sun::SunError),
 }
 
@@ -29,6 +48,12 @@ impl fmt::Display for SUNFusionRuleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidRank { n } => write!(f, "SU(N) requires N >= 2, got {n}"),
+            Self::RankNotRepresentable { n } => {
+                write!(f, "SU({n}) Dynkin labels exceed this platform's Vec limit")
+            }
+            Self::LabelAllocation { len, .. } => {
+                write!(f, "could not allocate {len} SU(N) Dynkin labels")
+            }
             Self::LabelLength { expected, found } => {
                 write!(f, "expected {expected} Dynkin labels, got {found}")
             }
@@ -56,6 +81,7 @@ impl fmt::Display for SUNFusionRuleError {
 impl std::error::Error for SUNFusionRuleError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::LabelAllocation { source, .. } => Some(source),
             Self::Racah(error) => Some(error),
             _ => None,
         }
@@ -66,6 +92,9 @@ impl SUNFusionRule {
     pub fn new(n: usize) -> Result<Self, SUNFusionRuleError> {
         if n < 2 {
             return Err(SUNFusionRuleError::InvalidRank { n });
+        }
+        if n - 1 > isize::MAX as usize / size_of::<i64>() {
+            return Err(SUNFusionRuleError::RankNotRepresentable { n });
         }
         Ok(Self { n })
     }
@@ -97,12 +126,14 @@ impl SUNFusionRule {
         let mut remaining = grade;
         for (index, &label) in labels.iter().enumerate() {
             let tail = self.n - 2 - index;
-            rank =
-                rank.checked_add(prefix_count(remaining, tail, label, usize::MAX).map_err(
-                    |_| SUNFusionRuleError::UnrepresentableLabel {
-                        labels: labels.iter().map(|&x| x as i64).collect(),
-                    },
-                )?)
+            rank = rank
+                .checked_add(
+                    prefix_count(remaining, tail, label, usize::MAX)
+                        .and_then(Capped::exact)
+                        .ok_or_else(|| SUNFusionRuleError::UnrepresentableLabel {
+                            labels: labels.iter().map(|&x| x as i64).collect(),
+                        })?,
+                )
                 .ok_or_else(|| SUNFusionRuleError::UnrepresentableLabel {
                     labels: labels.iter().map(|&x| x as i64).collect(),
                 })?;
@@ -135,21 +166,24 @@ impl SUNFusionRule {
         };
         let mut residual = id - before;
         let mut remaining = grade;
-        let mut labels = Vec::with_capacity(r);
+        let mut labels = Vec::new();
+        labels
+            .try_reserve_exact(r)
+            .map_err(|source| SUNFusionRuleError::LabelAllocation { len: r, source })?;
         for index in 0..r {
             let tail = r - index - 1;
             let mut low = 0usize;
             let mut high = remaining;
             while low < high {
                 let mid = low + (high - low).div_ceil(2);
-                let count = prefix_count(remaining, tail, mid, residual)?;
-                if count <= residual {
-                    low = mid;
-                } else {
-                    high = mid - 1;
+                match prefix_count(remaining, tail, mid, residual) {
+                    Some(Capped::Exact(count)) if count <= residual => low = mid,
+                    _ => high = mid - 1,
                 }
             }
-            let skipped = prefix_count(remaining, tail, low, residual)?;
+            let skipped = prefix_count(remaining, tail, low, residual)
+                .and_then(Capped::exact)
+                .ok_or(SUNFusionRuleError::DecodeOverflow { sector })?;
             residual -= skipped;
             labels.push(
                 i64::try_from(low).map_err(|_| SUNFusionRuleError::DecodeOverflow { sector })?,
@@ -273,68 +307,54 @@ fn count_before_grade(grade: usize, parts: usize, cap: usize) -> Capped {
     }
 }
 
-fn prefix_count(
-    remaining: usize,
-    tail: usize,
-    labels_before: usize,
-    cap: usize,
-) -> Result<usize, SUNFusionRuleError> {
+fn prefix_count(remaining: usize, tail: usize, labels_before: usize, cap: usize) -> Option<Capped> {
     if labels_before == 0 || tail == 0 {
-        return Ok(usize::from(labels_before > remaining));
+        return Some(Capped::Exact(usize::from(labels_before > remaining)));
     }
-    let upper = exact_binomial(
-        remaining
-            .checked_add(tail)
-            .ok_or_else(|| SUNFusionRuleError::UnrepresentableLabel { labels: Vec::new() })?,
+    let upper = binomial_u128(remaining.checked_add(tail)?, tail)?;
+    let lower = binomial_u128(
+        remaining.checked_sub(labels_before)?.checked_add(tail)?,
         tail,
     )?;
-    let lower = exact_binomial(
-        remaining
-            .checked_sub(labels_before)
-            .and_then(|value| value.checked_add(tail))
-            .ok_or_else(|| SUNFusionRuleError::UnrepresentableLabel { labels: Vec::new() })?,
-        tail,
-    )?;
-    let difference = upper
-        .checked_sub(lower)
-        .ok_or_else(|| SUNFusionRuleError::UnrepresentableLabel { labels: Vec::new() })?;
-    Ok(difference.min(cap.saturating_add(1)))
-}
-
-fn exact_binomial(n: usize, k: usize) -> Result<usize, SUNFusionRuleError> {
-    match binomial(n, k, usize::MAX) {
-        Capped::Exact(value) => Ok(value),
-        Capped::Exceeded => Err(SUNFusionRuleError::DecodeOverflow {
-            sector: SectorId::new(usize::MAX),
-        }),
-    }
+    let difference = upper.checked_sub(lower)?;
+    Some(if difference > cap as u128 {
+        Capped::Exceeded
+    } else {
+        Capped::Exact(difference as usize)
+    })
 }
 
 fn binomial(n: usize, k: usize, cap: usize) -> Capped {
-    if k > n {
-        return Capped::Exact(0);
+    match binomial_u128(n, k) {
+        Some(value) if value <= cap as u128 => Capped::Exact(value as usize),
+        _ => Capped::Exceeded,
     }
-    let k = k.min(n - k);
-    let mut result = 1usize;
-    for i in 1..=k {
-        let mut numerator = n - k + i;
-        let mut denominator = i;
-        let divisor = gcd(numerator, denominator);
-        numerator /= divisor;
-        denominator /= divisor;
-        let divisor = gcd(result, denominator);
-        result /= divisor;
-        denominator /= divisor;
-        debug_assert_eq!(denominator, 1);
-        match result.checked_mul(numerator) {
-            Some(value) if value <= cap => result = value,
-            _ => return Capped::Exceeded,
-        }
-    }
-    Capped::Exact(result)
 }
 
-const fn gcd(mut left: usize, mut right: usize) -> usize {
+fn binomial_u128(n: usize, k: usize) -> Option<u128> {
+    if k > n {
+        return Some(0);
+    }
+    let k = k.min(n - k);
+    let mut result = 1u128;
+    for i in 1..=k {
+        let mut numerator = (n - k + i) as u128;
+        let mut denominator = i as u128;
+        let divisor = gcd_u128(numerator, denominator);
+        numerator /= divisor;
+        denominator /= divisor;
+        let divisor = gcd_u128(result, denominator);
+        result /= divisor;
+        denominator /= divisor;
+        if denominator != 1 {
+            return None;
+        }
+        result = result.checked_mul(numerator)?;
+    }
+    Some(result)
+}
+
+const fn gcd_u128(mut left: u128, mut right: u128) -> u128 {
     while right != 0 {
         let remainder = left % right;
         left = right;
@@ -363,6 +383,19 @@ mod tests {
     }
 
     #[test]
+    fn codec_handles_bounded_binomial_cancellation() {
+        if usize::BITS != 64 {
+            return;
+        }
+        let rule = SUNFusionRule::new(39).unwrap();
+        let sector = SectorId::new(usize::try_from(17_876_288_714_431_443_296u64).unwrap());
+        let mut expected = vec![0; 38];
+        expected[37] = 31;
+        assert_eq!(rule.decode_dynkin(sector).unwrap(), expected);
+        assert_eq!(rule.encode_dynkin(&expected).unwrap(), sector);
+    }
+
+    #[test]
     fn validation_and_identity_are_typed_and_stable() {
         assert!(matches!(
             SUNFusionRule::new(1),
@@ -381,6 +414,32 @@ mod tests {
             rule.encode_dynkin(&[i64::MAX, i64::MAX]),
             Err(SUNFusionRuleError::UnrepresentableLabel { .. })
         ));
+        assert!(matches!(
+            SUNFusionRule::new(usize::MAX),
+            Err(SUNFusionRuleError::RankNotRepresentable { .. })
+        ));
+        if usize::BITS == 64 {
+            let max_rank = isize::MAX as usize / size_of::<i64>() + 1;
+            let rule = SUNFusionRule::new(max_rank).unwrap();
+            assert!(matches!(
+                rule.decode_dynkin(rule.vacuum()),
+                Err(SUNFusionRuleError::LabelAllocation { .. })
+            ));
+        }
+        for n in [3, 4] {
+            let rule = SUNFusionRule::new(n).unwrap();
+            let labels = rule.decode_dynkin(SectorId::new(usize::MAX)).unwrap();
+            assert_eq!(
+                rule.encode_dynkin(&labels).unwrap(),
+                SectorId::new(usize::MAX)
+            );
+        }
+        assert!(matches!(
+            SUNFusionRule::new(2)
+                .unwrap()
+                .decode_dynkin(SectorId::new(usize::MAX)),
+            Err(SUNFusionRuleError::DecodeOverflow { .. })
+        ));
         assert_eq!(
             rule.rule_identity(),
             SUNFusionRule::new(3).unwrap().rule_identity()
@@ -390,6 +449,12 @@ mod tests {
             SUNFusionRule::new(4).unwrap().rule_identity()
         );
         let original = rule.identity_bytes();
+        let mut expected = b"tenet:sun:dynkin:graded-total-then-lex:v1".to_vec();
+        expected.extend_from_slice(&usize::BITS.to_le_bytes());
+        expected.extend_from_slice(&3usize.to_le_bytes());
+        expected.extend_from_slice(b":generic:bosonic:racah-sun");
+        expected.extend_from_slice(racah::sun::sun_authority_fingerprint());
+        assert_eq!(original.as_ref(), expected);
         let mut changed = original.to_vec();
         changed[0] ^= 1;
         assert_ne!(
@@ -412,9 +477,42 @@ mod tests {
             rule.try_dual(rule.encode_dynkin(&[2, 1]).unwrap()).unwrap(),
             rule.encode_dynkin(&[1, 2]).unwrap()
         );
-        assert!(rule
-            .try_fusion_channels(eight, eight)
-            .unwrap()
-            .contains(&eight));
+        let channels = rule.try_fusion_channels(eight, eight).unwrap();
+        assert_eq!(
+            channels
+                .iter()
+                .map(|sector| sector.id())
+                .collect::<Vec<_>>(),
+            [0, 4, 6, 9, 12]
+        );
+        assert_eq!(
+            channels
+                .iter()
+                .map(|&sector| rule.decode_dynkin(sector).unwrap())
+                .collect::<Vec<_>>(),
+            [[0, 0], [1, 1], [0, 3], [3, 0], [2, 2]]
+        );
+        assert_eq!(
+            rule.try_fusion_channels_in_table(eight, eight).unwrap(),
+            channels
+        );
+        for (labels, multiplicity) in [
+            ([0, 0], 1),
+            ([1, 1], 2),
+            ([0, 3], 1),
+            ([3, 0], 1),
+            ([2, 2], 1),
+        ] {
+            assert_eq!(
+                rule.try_nsymbol(eight, eight, rule.encode_dynkin(&labels).unwrap())
+                    .unwrap(),
+                multiplicity
+            );
+        }
+        assert_eq!(
+            rule.try_nsymbol(eight, eight, rule.encode_dynkin(&[1, 0]).unwrap())
+                .unwrap(),
+            0
+        );
     }
 }
