@@ -2246,6 +2246,127 @@ where
         .collect()
 }
 
+/// Checked Generic-fusion counterpart of [`merge_fusion_trees_multiplicity_free`].
+///
+/// `root_vertex` is the one shared outer-multiplicity label for both halves of
+/// tensor-map `otimes`.  This is F-only: merging does not exchange legs.
+pub fn merge_fusion_trees_generic_checked<C>(
+    rule: &mut C,
+    lhs: &FusionTreeKey,
+    rhs: &FusionTreeKey,
+    coupled: SectorId,
+    root_vertex: MultiplicityIndex,
+) -> Result<GenericTreeTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
+where
+    C: CheckedGenericRigidSymbols,
+{
+    if !rule.fusion_style().has_multiplicity() {
+        return Err(CheckedGenericSymbolError::Core(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Generic,
+            actual: rule.fusion_style(),
+        }));
+    }
+    validate_generic_fusion_tree_pair_checked(rule, &FusionTreePairKey::pair(lhs.clone(), lhs.clone()))
+        .map_err(map_checked_generic_structure_error)?;
+    validate_generic_fusion_tree_pair_checked(rule, &FusionTreePairKey::pair(rhs.clone(), rhs.clone()))
+        .map_err(map_checked_generic_structure_error)?;
+    let n = rule
+        .try_nsymbol(lhs.coupled(), rhs.coupled(), coupled)
+        .map_err(CheckedGenericSymbolError::Provider)?;
+    if root_vertex.get() == 0 || root_vertex.get() > n {
+        return Err(CheckedGenericSymbolError::Core(CoreError::MalformedFusionTree {
+            message: "tensor-product root vertex exceeds Nsymbol",
+        }));
+    }
+    if lhs.uncoupled().is_empty() {
+        return Ok(vec![(rhs.clone(), C::Scalar::braid_one())]);
+    }
+    if rhs.uncoupled().is_empty() {
+        return Ok(vec![(lhs.clone(), C::Scalar::braid_one())]);
+    }
+    let terms = generic_multi_fmove_inv_tree_checked(
+        rule,
+        lhs.coupled(),
+        coupled,
+        rhs,
+        false,
+    )?;
+    terms
+        .into_iter()
+        .map(|(tail, coefficients)| {
+            let coefficient = coefficients
+                .get(root_vertex.get() - 1)
+                .cloned()
+                .ok_or(CheckedGenericSymbolError::Core(CoreError::MalformedFusionTree {
+                    message: "tensor-product root vertex coefficient is absent",
+                }))?;
+            if coefficient.braid_is_zero() {
+                return Ok(None);
+            }
+            join_fusion_tree_front_generic_checked(rule, lhs, &tail)
+                .map(|merged| Some((merged, coefficient)))
+        })
+        .filter_map(Result::transpose)
+        .collect()
+}
+
+/// Infallible-provider entry point for the checked Generic merge path.
+pub fn merge_fusion_trees_generic<R>(
+    rule: &R,
+    lhs: &FusionTreeKey,
+    rhs: &FusionTreeKey,
+    coupled: SectorId,
+    root_vertex: MultiplicityIndex,
+) -> Result<GenericTreeTerms<R::Scalar>, CoreError>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar + Send + Sync,
+{
+    let mut checked = InfallibleGeneric::new(rule);
+    match merge_fusion_trees_generic_checked(&mut checked, lhs, rhs, coupled, root_vertex) {
+        Ok(terms) => Ok(terms),
+        Err(CheckedGenericSymbolError::Provider(never)) => match never {},
+        Err(CheckedGenericSymbolError::Shape { symbol, expected, actual }) => {
+            Err(CoreError::MalformedFusionTree { message: if symbol == "F" && expected != actual { "Generic F-symbol shape mismatch" } else { "Generic symbol shape mismatch" } })
+        }
+        Err(CheckedGenericSymbolError::Core(error)) => Err(error),
+    }
+}
+
+fn join_fusion_tree_front_generic_checked<C>(
+    rule: &C,
+    front: &FusionTreeKey,
+    tail: &FusionTreeKey,
+) -> Result<FusionTreeKey, CheckedGenericSymbolError<C::Error>>
+where
+    C: CheckedGenericFusion,
+{
+    let boundary = *tail.uncoupled().first().ok_or(CheckedGenericSymbolError::Core(
+        CoreError::MalformedFusionTree { message: "fusion-tree front join requires a non-empty tail" },
+    ))?;
+    if boundary != front.coupled() || tail.is_dual()[0] {
+        return Err(CheckedGenericSymbolError::Core(CoreError::MalformedFusionTree {
+            message: "Generic fusion-tree front join has an invalid boundary",
+        }));
+    }
+    let merged = match (front.uncoupled().len(), tail.uncoupled().len()) {
+        (1, _) => FusionTreeKey::new(tail.uncoupled().to_vec(), tail.coupled(), {
+            let mut dual = tail.is_dual().to_vec(); dual[0] = front.is_dual()[0]; dual
+        }, tail.innerlines().to_vec(), tail.vertices().to_vec()),
+        (_, 1) => front.clone(),
+        (_, _) => {
+            let mut uncoupled = front.uncoupled().to_vec(); uncoupled.extend_from_slice(&tail.uncoupled()[1..]);
+            let mut dual = front.is_dual().to_vec(); dual.extend_from_slice(&tail.is_dual()[1..]);
+            let mut inner = front.innerlines().to_vec(); inner.push(front.coupled()); inner.extend_from_slice(tail.innerlines());
+            let mut vertices = front.vertices().to_vec(); vertices.extend_from_slice(tail.vertices());
+            FusionTreeKey::new(uncoupled, tail.coupled(), dual, inner, vertices)
+        }
+    };
+    validate_generic_fusion_tree_pair_checked(rule, &FusionTreePairKey::pair(merged.clone(), merged.clone()))
+        .map_err(map_checked_generic_structure_error)?;
+    Ok(merged)
+}
+
 /// Replace the first, non-dual leaf of `tail` by `front`.
 ///
 /// This is the checked inverse of [`split_fusion_tree`] at the corresponding
@@ -10002,6 +10123,7 @@ where
 /// keep the tree-function signatures readable and satisfy
 /// `clippy::type_complexity`.
 type GenericFmoveTerms<S> = Vec<(FusionTreeKey, Vec<S>)>;
+type GenericTreeTerms<S> = Vec<(FusionTreeKey, S)>;
 
 /// Enumerate every standard-form fusion tree with the given `uncoupled` legs,
 /// `is_dual` flags and `coupled` sector, INCLUDING all outer-multiplicity
@@ -10319,6 +10441,89 @@ where
         coeff = next;
     }
     Ok(Some(coeff))
+}
+
+fn generic_multi_associator_checked<C>(
+    rule: &mut C,
+    long: &FusionTreeKey,
+    short: &FusionTreeKey,
+) -> Result<Option<Vec<C::Scalar>>, CheckedGenericSymbolError<C::Error>>
+where
+    C: CheckedGenericRigidSymbols,
+{
+    let rank = long.uncoupled().len();
+    if short.uncoupled().len() + 1 != rank
+        || long.uncoupled()[1..] != *short.uncoupled()
+        || long.is_dual()[1..] != *short.is_dual()
+    { return Ok(None); }
+    if rank == 2 {
+        let n = rule.try_nsymbol(long.uncoupled()[0], long.uncoupled()[1], long.coupled())
+            .map_err(CheckedGenericSymbolError::Provider)?;
+        let mut values = vec![C::Scalar::braid_zero(); n];
+        let slot = values.get_mut(mu_index(long, 0)?).ok_or(CheckedGenericSymbolError::Core(
+            CoreError::MalformedFusionTree { message: "multi_associator: vertex label exceeds Nsymbol" },
+        ))?;
+        *slot = C::Scalar::braid_one();
+        return Ok(Some(values));
+    }
+    let first = long.uncoupled()[0];
+    let mut values = vec![C::Scalar::braid_one()];
+    for k in 2..rank {
+        let right = long.uncoupled()[k];
+        let (middle_left, middle_right) = fusion_tree_vertex_neighbors(long, k)?;
+        let (short_left, short_right) = fusion_tree_vertex_neighbors(short, k - 1)?;
+        if rule.try_nsymbol(first, short_right, middle_right)
+            .map_err(CheckedGenericSymbolError::Provider)? == 0 { return Ok(None); }
+        let f = checked_generic_f_symbol(rule, first, short_left, right, middle_right, middle_left, short_right)?;
+        let mut next = vec![C::Scalar::braid_zero(); f.shape().3];
+        let nu = mu_index(long, k - 1)?;
+        let kappa = mu_index(short, k - 2)?;
+        if k == 2 {
+            let mu = mu_index(long, 0)?;
+            for (lambda, value) in next.iter_mut().enumerate() { *value = f.get(mu, nu, kappa, lambda).clone() * values[0].clone(); }
+        } else {
+            for (lambda, value) in next.iter_mut().enumerate() {
+                for (mu, coefficient) in values.iter().enumerate() {
+                    *value = value.clone() + f.get(mu, nu, kappa, lambda).clone() * coefficient.clone();
+                }
+            }
+        }
+        values = next;
+    }
+    Ok(Some(values))
+}
+
+fn generic_multi_fmove_inv_tree_checked<C>(
+    rule: &mut C,
+    leading: SectorId,
+    coupled: SectorId,
+    tree: &FusionTreeKey,
+    leading_is_dual: bool,
+) -> Result<GenericFmoveTerms<C::Scalar>, CheckedGenericSymbolError<C::Error>>
+where
+    C: CheckedGenericRigidSymbols,
+{
+    if rule.try_nsymbol(leading, tree.coupled(), coupled)
+        .map_err(CheckedGenericSymbolError::Provider)? == 0 {
+        return Err(CheckedGenericSymbolError::Core(CoreError::SectorMismatch { expected: coupled, actual: tree.coupled() }));
+    }
+    let mut uncoupled = Vec::with_capacity(tree.uncoupled().len() + 1);
+    uncoupled.push(leading); uncoupled.extend_from_slice(tree.uncoupled());
+    let mut dual = Vec::with_capacity(tree.is_dual().len() + 1);
+    dual.push(leading_is_dual); dual.extend_from_slice(tree.is_dual());
+    let frozen_uncoupled: Arc<[SectorId]> = Arc::from(uncoupled);
+    let frozen_dual: Arc<[bool]> = Arc::from(dual);
+    let effective = frozen_uncoupled.to_vec();
+    let candidates = collect_generic_fusion_trees_for_coupled_frozen_checked(
+        rule, &frozen_uncoupled, &frozen_dual, &effective, coupled,
+    ).map_err(map_checked_generic_structure_error)?;
+    let mut terms = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        if let Some(values) = generic_multi_associator_checked(rule, &candidate, tree)? {
+            terms.push((candidate, values.into_iter().map(|value| value.braid_conj()).collect()));
+        }
+    }
+    Ok(terms)
 }
 
 /// Generic-fusion `multi_Fmove`: recouple a splitting tree to split off its

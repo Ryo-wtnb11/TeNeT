@@ -1444,6 +1444,44 @@ mod tests {
     }
 
     #[test]
+    fn generic_merge_keeps_the_selected_su3_root_vertex() {
+        // TensorKit 0.16.2 `merge(f₁, f₂, c, μ)`: 8 ⊗ 8 → 8 has two
+        // outer-multiplicity vertices, and each selected μ emits its own key.
+        let rule = Su3FusionRule::new();
+        let eight = rule.sector_of_label(&[1, 1]).unwrap();
+        let tree = FusionTreeKey::new(vec![eight], eight, vec![false], vec![], vec![]);
+        for vertex in [1, 2] {
+            let terms = merge_fusion_trees_generic(
+                &rule,
+                &tree,
+                &tree,
+                eight,
+                MultiplicityIndex::new(vertex).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(terms.len(), 1);
+            assert_eq!(terms[0].0.uncoupled(), &[eight, eight]);
+            assert_eq!(terms[0].0.coupled(), eight);
+            assert_eq!(terms[0].0.vertices(), &[MultiplicityIndex::new(vertex).unwrap()]);
+            assert_eq!(terms[0].1, 1.0);
+        }
+    }
+
+    #[test]
+    fn generic_merge_treats_rank_zero_as_the_tensor_unit() {
+        let rule = Su3FusionRule::new();
+        let eight = rule.sector_of_label(&[1, 1]).unwrap();
+        let unit = FusionTreeKey::new(vec![], rule.vacuum(), vec![], vec![], vec![]);
+        let tree = FusionTreeKey::new(vec![eight], eight, vec![false], vec![], vec![]);
+        for (lhs, rhs) in [(&unit, &tree), (&tree, &unit)] {
+            assert_eq!(
+                merge_fusion_trees_generic(&rule, lhs, rhs, eight, MultiplicityIndex::ONE).unwrap(),
+                vec![(tree.clone(), 1.0)],
+            );
+        }
+    }
+
+    #[test]
     fn merge_fusion_trees_pins_nontrivial_su2_f_coefficients() {
         // What: merging a spin-1 tree into three spin-1/2 leaves is a genuine
         // associator expansion, not a pointed-rule relabelling.

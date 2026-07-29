@@ -15,6 +15,14 @@ fn v() -> Space {
     Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap()
 }
 
+fn eight() -> Space {
+    Space::su3([((1, 1), 1)]).unwrap()
+}
+
+fn vertex(tree: &tenet_core::FusionTreeKey) -> usize {
+    tree.vertices().first().map(|mu| mu.get()).unwrap_or(0)
+}
+
 #[test]
 fn su3_space_construction_and_dim() {
     let v = v();
@@ -43,18 +51,40 @@ fn su3_tensor_leg_dimensions_feed_network_planners() {
 }
 
 #[test]
-fn su3_otimes_is_explicitly_gated_on_the_missing_generic_merge() {
+fn su3_otimes_merges_generic_trees_without_braiding() {
     let rt = Runtime::builder().build().unwrap();
     let v = v();
-    let tensor = Tensor::zeros(&rt, Dtype::F64, [&v], [&v]).unwrap();
+    let lhs = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 17).unwrap();
+    let rhs = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 29).unwrap();
+    let product = lhs.otimes(&rhs).unwrap();
 
-    assert!(matches!(
-        tensor.otimes(&tensor).unwrap_err(),
-        Error::UnsupportedForRule {
-            operation: "Tensor::otimes",
-            rule: "SU(3)",
+    assert_eq!(product.rank(), 4);
+    assert_eq!(product.leg_dims().unwrap(), vec![v.dim(); 4]);
+    assert!(!product.data().is_empty());
+}
+
+#[test]
+fn su3_otimes_uses_one_shared_outer_multiplicity_label() {
+    // Pinned TensorKit 0.16.2 semantics: for 8 ⊗ 8 → 8, the same root μ
+    // labels the codomain and domain merge.  Thus only diagonal (μ, μ) blocks
+    // receive the scalar 2 * 3; the two off-diagonal OM blocks are zero.
+    let rt = Runtime::builder().build().unwrap();
+    let e = eight();
+    let lhs = Tensor::from_block_fn(&rt, [&e], [&e], |_, _| 2.0).unwrap();
+    let rhs = Tensor::from_block_fn(&rt, [&e], [&e], |_, _| 3.0).unwrap();
+    let actual = lhs.otimes(&rhs).unwrap();
+    let expected = Tensor::from_block_fn(&rt, [&e, &e], [&e, &e], |key, _| match key {
+        BlockKey::FusionTree(tree) => {
+            if vertex(tree.codomain_tree()) == vertex(tree.domain_tree()) {
+                6.0
+            } else {
+                0.0
+            }
         }
-    ));
+        _ => 0.0,
+    })
+    .unwrap();
+    assert_eq!(actual.data(), expected.data());
 }
 
 #[test]
