@@ -8,17 +8,17 @@ use std::cell::Cell;
 use num_complex::Complex64;
 use num_traits::{Float, Zero};
 use tenet_core::{
-    BlockKey, BlockStructure, CoreError, CoupledSectorRegion, CoupledTreeExtent,
-    FusionProductSpace, FusionRule, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey,
-    GenericRigidSymbols, MultiplicityFreeRigidSymbols, SectorId, SectorLeg, TensorMap,
-    TensorMapSpace,
+    BlockKey, BlockStructure, CheckedGenericFusion, CheckedGenericStructureError, CoreError,
+    CoupledSectorRegion, CoupledTreeExtent, FusionProductSpace, FusionRule, FusionTensorMapSpace,
+    FusionTreeHomSpace, FusionTreeKey, GenericRigidSymbols, InfallibleGeneric,
+    MultiplicityFreeRigidSymbols, SectorId, SectorLeg, TensorMap, TensorMapSpace,
 };
 use tenet_dense::{DenseError, DenseExecutor, DenseTensor, DenseView, DenseViewMut};
 
 pub use tenet_tensors::BoundDynamicTensorRef;
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, DenseBlockScalar, DenseRecouplingScalar, DynamicFusionMapSpace,
-    ValidatedDynamicFusionLayout,
+    PreparedCheckedGenericDynamicSpace, ValidatedDynamicFusionLayout,
 };
 
 use crate::truncation::{select_truncation, Truncation, WeightedSpectrum};
@@ -1663,6 +1663,38 @@ pub(crate) struct CompactFactorPlan {
     routes: Arc<[CompactFactorRoute]>,
 }
 
+#[derive(Debug)]
+pub(crate) enum CheckedGenericFactorPlanError<E> {
+    Provider(E),
+    Operation(OperationError),
+}
+
+impl<E> From<CheckedGenericStructureError<E>> for CheckedGenericFactorPlanError<E> {
+    fn from(error: CheckedGenericStructureError<E>) -> Self {
+        match error {
+            CheckedGenericStructureError::Provider(error) => Self::Provider(error),
+            CheckedGenericStructureError::Core(error) => {
+                Self::Operation(OperationError::from_core_preserving_context(error))
+            }
+        }
+    }
+}
+
+impl<E> From<OperationError> for CheckedGenericFactorPlanError<E> {
+    fn from(error: OperationError) -> Self {
+        Self::Operation(error)
+    }
+}
+
+pub(crate) struct PreparedGenericCompactFactorPlan {
+    source: Arc<MatricizationPlan>,
+    left: PreparedCheckedGenericDynamicSpace,
+    right: PreparedCheckedGenericDynamicSpace,
+    left_regions: Arc<[CoupledSectorRegion]>,
+    right_regions: Arc<[CoupledSectorRegion]>,
+    routes: Arc<[CompactFactorRoute]>,
+}
+
 fn compact_factor_plan<R>(
     input: &BoundDynamicFusionMapSpace<R>,
 ) -> Result<Option<Arc<CompactFactorPlan>>, OperationError>
@@ -1670,6 +1702,171 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     build_compact_factor_plan(input, input.validated_layout())
+}
+
+fn compact_factor_plan_generic<R>(
+    input: &BoundDynamicFusionMapSpace<R>,
+) -> Result<Option<Arc<CompactFactorPlan>>, OperationError>
+where
+    R: FusionRule,
+{
+    let checked = InfallibleGeneric::new(input.provider());
+    match prepare_compact_factor_plan_generic_checked(input, &checked) {
+        Ok(Some(prepared)) => finish_compact_factor_plan_generic(input, prepared),
+        Ok(None) => Ok(None),
+        Err(CheckedGenericFactorPlanError::Provider(never)) => match never {},
+        Err(CheckedGenericFactorPlanError::Operation(error)) => Err(error),
+    }
+}
+
+fn prepare_compact_factor_plan_generic_checked<R, P>(
+    input: &BoundDynamicFusionMapSpace<R>,
+    provider: &P,
+) -> Result<Option<PreparedGenericCompactFactorPlan>, CheckedGenericFactorPlanError<P::Error>>
+where
+    R: FusionRule,
+    P: CheckedGenericFusion,
+{
+    let space = input.space();
+    let Some(regions) = checked_sector_regions(space.structure(), space.nout())? else {
+        return Ok(None);
+    };
+    let source = Arc::new(MatricizationPlan {
+        layout: input.validated_layout(),
+        regions,
+    });
+    let ranks = source
+        .regions
+        .iter()
+        .map(|region| SectorRank {
+            sector: region_sector(region),
+            kept: region.rows().min(region.cols()),
+        })
+        .collect::<Vec<_>>();
+    let new_leg = SectorLeg::new(ranks.iter().map(|rank| (rank.sector, rank.kept)), false);
+    let left_hom = FusionTreeHomSpace::new(
+        space.homspace().codomain().clone(),
+        FusionProductSpace::new([new_leg.clone()]),
+    );
+    let right_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([new_leg]),
+        space.homspace().domain().clone(),
+    );
+    let left = input.prepare_final_homspace_generic_checked(provider, left_hom)?;
+    let right = input.prepare_final_homspace_generic_checked(provider, right_hom)?;
+    let left_regions = checked_sector_regions(left.structure(), space.nout())?.ok_or(
+        OperationError::UnsupportedTensorContractScope {
+            message: "compact left factor is not a coupled-sector matrix layout",
+        },
+    )?;
+    let right_regions = checked_sector_regions(right.structure(), 1)?.ok_or(
+        OperationError::UnsupportedTensorContractScope {
+            message: "compact right factor is not a coupled-sector matrix layout",
+        },
+    )?;
+    if !source_factor_tree_extents_match(&source.regions, &left_regions, &right_regions) {
+        return Ok(None);
+    }
+    let routes = compile_compact_factor_routes(&source.regions, &left_regions, &right_regions)?;
+    Ok(Some(PreparedGenericCompactFactorPlan {
+        source,
+        left,
+        right,
+        left_regions,
+        right_regions,
+        routes,
+    }))
+}
+
+fn source_factor_tree_extents_match(
+    source: &[CoupledSectorRegion],
+    left: &[CoupledSectorRegion],
+    right: &[CoupledSectorRegion],
+) -> bool {
+    let Ok(left_by_sector) = sector_region_index_map(left) else {
+        return false;
+    };
+    let Ok(right_by_sector) = sector_region_index_map(right) else {
+        return false;
+    };
+    source.iter().all(|source_region| {
+        let sector = source_region.coupled();
+        let Some(&left_index) = left_by_sector.get(&sector) else {
+            return false;
+        };
+        let Some(&right_index) = right_by_sector.get(&sector) else {
+            return false;
+        };
+        source_region.row_trees() == left[left_index].row_trees()
+            && source_region.col_trees() == right[right_index].col_trees()
+    })
+}
+
+fn finish_compact_factor_plan_generic<R>(
+    input: &BoundDynamicFusionMapSpace<R>,
+    prepared: PreparedGenericCompactFactorPlan,
+) -> Result<Option<Arc<CompactFactorPlan>>, OperationError>
+where
+    R: FusionRule,
+{
+    #[cfg(test)]
+    GENERIC_FACTOR_PLAN_FINISH_CALLS.with(|calls| calls.set(calls.get() + 1));
+    let PreparedGenericCompactFactorPlan {
+        source,
+        left,
+        right,
+        left_regions,
+        right_regions,
+        routes,
+    } = prepared;
+    let left = input.commit_final_homspace_generic_checked(left)?;
+    let right = input.commit_final_homspace_generic_checked(right)?;
+    Ok(Some(Arc::new(CompactFactorPlan {
+        source,
+        left_layout: left.validated_layout(),
+        right_layout: right.validated_layout(),
+        left_regions,
+        right_regions,
+        routes,
+    })))
+}
+
+#[cfg(test)]
+thread_local! {
+    static GENERIC_FACTOR_PLAN_FINISH_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_generic_factor_plan_finish_calls() {
+    GENERIC_FACTOR_PLAN_FINISH_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn generic_factor_plan_finish_calls() -> usize {
+    GENERIC_FACTOR_PLAN_FINISH_CALLS.with(Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn prepare_compact_factor_plan_generic_checked_for_test<R, P>(
+    input: &BoundDynamicFusionMapSpace<R>,
+    provider: &P,
+) -> Result<Option<PreparedGenericCompactFactorPlan>, CheckedGenericFactorPlanError<P::Error>>
+where
+    R: FusionRule,
+    P: CheckedGenericFusion,
+{
+    prepare_compact_factor_plan_generic_checked(input, provider)
+}
+
+#[cfg(test)]
+pub(crate) fn finish_compact_factor_plan_generic_for_test<R>(
+    input: &BoundDynamicFusionMapSpace<R>,
+    prepared: PreparedGenericCompactFactorPlan,
+) -> Result<bool, OperationError>
+where
+    R: FusionRule,
+{
+    finish_compact_factor_plan_generic(input, prepared).map(|plan| plan.is_some())
 }
 
 fn build_compact_factor_plan<R>(
@@ -1795,7 +1992,7 @@ fn svd_compact_direct_regions<E, R, D>(
 ) -> Result<SvdFactorsDyn<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: FusionRule,
     D: FactorScalar,
 {
     let space = input.space().space();
@@ -4306,7 +4503,7 @@ fn qr_compact_direct_regions<E, R, D>(
 ) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: FusionRule,
     D: FactorScalar,
 {
     let space = input.space().space();
@@ -4444,7 +4641,7 @@ fn lq_compact_direct_regions<E, R, D>(
 ) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), OperationError>
 where
     E: DenseExecutor + ?Sized,
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    R: FusionRule,
     D: FactorScalar,
 {
     let space = input.space().space();
@@ -5185,6 +5382,29 @@ fn checked_sector_regions(
     structure
         .coupled_sector_regions(nout)
         .map_err(OperationError::from_core_preserving_context)
+}
+
+fn canonical_generic_sector_regions(
+    structure: &BlockStructure,
+    nout: usize,
+) -> Result<Option<Arc<[CoupledSectorRegion]>>, OperationError> {
+    let Some(regions) = checked_sector_regions(structure, nout)? else {
+        return Ok(None);
+    };
+    let sectors_are_ordered = regions
+        .windows(2)
+        .all(|pair| pair[0].coupled() < pair[1].coupled());
+    let trees_are_ordered = regions.iter().all(|region| {
+        region
+            .row_trees()
+            .windows(2)
+            .all(|pair| pair[0].tree() < pair[1].tree())
+            && region
+                .col_trees()
+                .windows(2)
+                .all(|pair| pair[0].tree() < pair[1].tree())
+    });
+    Ok((sectors_are_ordered && trees_are_ordered).then_some(regions))
 }
 
 fn value_matricizations<'a, D>(
@@ -6154,8 +6374,13 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
+    if let Some(plan) = compact_factor_plan_generic(input.space())? {
+        return svd_compact_direct_regions(dense, input, &plan);
+    }
     let matricizations =
         sector_matricizations_generic(space.structure(), input.data(), space.nout())?;
+    #[cfg(test)]
+    record_compact_svd_input_pack(&matricizations);
 
     let ranks = matricizations
         .iter()
@@ -6252,6 +6477,11 @@ where
             &vt_workspace,
             max_rank,
         )?;
+        #[cfg(test)]
+        {
+            record_compact_svd_output_scatter::<D>(matrix.rows * rank);
+            record_compact_svd_output_scatter::<D>(rank * matrix.cols);
+        }
     }
 
     let u = BoundDynFactor::from_bound(u_space, u_data, space.nout(), 1)?;
@@ -6308,14 +6538,29 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
-    let matricizations =
-        sector_matricizations_generic(space.structure(), input.data(), space.nout())?;
+    let regions = canonical_generic_sector_regions(space.structure(), space.nout())?;
+    let matricizations = match regions {
+        Some(regions) => ValueMatricizations::Regions {
+            data: input.data(),
+            regions,
+        },
+        None => {
+            #[cfg(test)]
+            record_values_matricization_fallback();
+            ValueMatricizations::Packed(sector_matricizations_generic(
+                space.structure(),
+                input.data(),
+                space.nout(),
+            )?)
+        }
+    };
     let mut singular_values = Vec::with_capacity(matricizations.len());
-    for matrix in &matricizations {
+    for index in 0..matricizations.len() {
+        let matrix = matricizations.get(index)?;
         let rank = matrix.rows.min(matrix.cols);
         let input_shape = [matrix.rows, matrix.cols];
         let input_strides = [1usize, matrix.rows];
-        let input = DenseView::new(&matrix.data, &input_shape, &input_strides, 0)
+        let input = DenseView::new(matrix.data, &input_shape, &input_strides, 0)
             .map_err(OperationError::Dense)?;
         let s_tensor = dense
             .svd_vals(D::dense_read(input))
@@ -6640,7 +6885,12 @@ where
 {
     let provider = input.space().provider_arc();
     let space = input.space().space();
+    if let Some(plan) = compact_factor_plan_generic(input.space())? {
+        return qr_compact_direct_regions(dense, input, &plan);
+    }
     let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())?;
+    #[cfg(test)]
+    record_compact_qr_input_pack(&matrices);
     let mut pairs = Vec::with_capacity(matrices.len());
     for matrix in &matrices {
         let rank = matrix.rows.min(matrix.cols);
@@ -6670,6 +6920,11 @@ where
             rank,
             matrix.cols,
         );
+        #[cfg(test)]
+        {
+            record_compact_qr_output_scatter::<D>(q.len());
+            record_compact_qr_output_scatter::<D>(r.len());
+        }
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: rank,
@@ -6694,7 +6949,12 @@ where
 {
     let provider = input.space().provider_arc();
     let space = input.space().space();
+    if let Some(plan) = compact_factor_plan_generic(input.space())? {
+        return lq_compact_direct_regions(dense, input, &plan);
+    }
     let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())?;
+    #[cfg(test)]
+    record_compact_lq_input_pack(&matrices);
     let mut pairs = Vec::with_capacity(matrices.len());
     for matrix in &matrices {
         let rank = matrix.rows.min(matrix.cols);
@@ -6725,6 +6985,11 @@ where
             rank,
             matrix.rows,
         );
+        #[cfg(test)]
+        {
+            record_compact_lq_output_scatter::<D>(r_prime.len());
+            record_compact_lq_output_scatter::<D>(q_prime.len());
+        }
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: rank,

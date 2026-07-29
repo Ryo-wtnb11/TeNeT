@@ -1,12 +1,13 @@
 use tenet_core::{
-    product_fusion_rule, BlockKey, BlockSpec, BlockStructure, BraidingStyleKind, CoreError,
-    FermionParityFusionRule, FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace,
-    FusionTreeHomSpace, FusionTreeKey, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
+    product_fusion_rule, BlockKey, BlockSpec, BlockStructure, BraidingStyleKind,
+    CheckedGenericFusion, CoreError, CoupledSectorFold, FermionParityFusionRule,
+    FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
+    FusionTreeKey, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
     MultiplicityFreeRigidSymbols, RuleIdentity, SU2FusionRule, SU2Irrep, SectorId, SectorLeg,
-    SectorVec, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
+    SectorVec, Su3FusionRule, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
 };
 use tenet_tensors::{
-    BoundDynamicFusionMapSpace, OperationError, OutputAxisOrder,
+    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, OperationError, OutputAxisOrder,
     TensorContractFusionExecutionContext, TensorContractSpec, TreeTransformRuleCacheKey,
 };
 
@@ -17,7 +18,7 @@ use crate::factorize::{
 use crate::*;
 use num_complex::{Complex32, Complex64};
 use num_traits::Zero;
-use std::sync::Arc;
+use std::{cell::Cell, fmt, sync::Arc};
 use tenet_dense::{
     DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseTensor, DenseWrite,
 };
@@ -985,6 +986,445 @@ fn compact_lq_canonical_layout_uses_only_bounded_adjoint_copies() {
         probe.final_adjoint_copy_bytes,
         (left.data().len() + right.data().len()) * std::mem::size_of::<f64>()
     );
+}
+
+fn su3_om_factorization_input() -> (BoundDynamicFusionMapSpace<Su3FusionRule>, Vec<f64>) {
+    let provider = Arc::new(Su3FusionRule::new());
+    let eight = provider.sector_of(1, 1).unwrap();
+    let codomain_left = SectorLeg::new([(eight, 2)], false);
+    let unit_leg = SectorLeg::new([(eight, 1)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([codomain_left, unit_leg.clone()]),
+        FusionProductSpace::new([unit_leg.clone(), unit_leg]),
+    );
+    let space =
+        BoundDynamicFusionMapSpace::from_final_homspace_generic(provider, homspace).unwrap();
+    let len = space.space().required_len().unwrap();
+    let mut data = vec![0.0; len];
+    let regions = space
+        .space()
+        .structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .unwrap();
+    for (sector_index, region) in regions.iter().enumerate() {
+        for column in 0..region.cols() {
+            for row in 0..region.rows() {
+                data[region.range().start + row + region.rows() * column] =
+                    10.0 * (sector_index + 1) as f64 + 0.5 * (row + 1) as f64
+                        - 0.125 * (column + 1) as f64;
+            }
+        }
+    }
+    (space, data)
+}
+
+fn bind_su3_om_structure_copy(
+    source: &BoundDynamicFusionMapSpace<Su3FusionRule>,
+    source_data: &[f64],
+    structure: BlockStructure,
+) -> (BoundDynamicFusionMapSpace<Su3FusionRule>, Vec<f64>) {
+    let source_structure = source.space().structure();
+    let typed_space = FusionTensorMapSpace::new_unbound(
+        TensorMapSpace::<2, 2>::from_dims([2, 1], [1, 1]).unwrap(),
+        source.space().homspace().clone(),
+        structure,
+    )
+    .unwrap()
+    .try_bind_rule(source.provider())
+    .unwrap();
+    let tensor = TensorMap::<f64, 2, 2>::from_block_fn_with_fusion_space(
+        typed_space,
+        0.0,
+        |key, indices| {
+            let source_index = source_structure
+                .find_block_index_by_key(key)
+                .expect("expert copy preserves every key");
+            let block = source_structure.block(source_index).unwrap();
+            let position = block.offset()
+                + indices
+                    .iter()
+                    .zip(block.strides())
+                    .map(|(&index, &stride)| index * stride)
+                    .sum::<usize>();
+            source_data[position]
+        },
+    )
+    .unwrap();
+    let dynamic = DynamicFusionMapSpace::from_typed(tensor.fusion_space().unwrap());
+    let bound =
+        BoundDynamicFusionMapSpace::bind_generic(dynamic, Arc::clone(source.provider_arc()))
+            .unwrap();
+    (bound, tensor.data().to_vec())
+}
+
+fn reverse_su3_om_tree_order(
+    source: &BoundDynamicFusionMapSpace<Su3FusionRule>,
+    source_data: &[f64],
+) -> (BoundDynamicFusionMapSpace<Su3FusionRule>, Vec<f64>) {
+    let source_structure = source.space().structure();
+    let mut blocks = Vec::with_capacity(source_structure.block_count());
+    for region in source_structure
+        .coupled_sector_regions(source.space().nout())
+        .unwrap()
+        .unwrap()
+        .iter()
+    {
+        let mut sector_blocks = (0..source_structure.block_count())
+            .filter_map(|index| {
+                let block = source_structure.block(index).unwrap();
+                let BlockKey::FusionTree(key) = block.key() else {
+                    return None;
+                };
+                (key.codomain_tree().coupled() == region.coupled())
+                    .then(|| (key.clone(), block.shape().to_vec()))
+            })
+            .collect::<Vec<_>>();
+        sector_blocks.reverse();
+        blocks.extend(sector_blocks);
+    }
+    let structure = BlockStructure::coupled_sector_matrix_with_keys(
+        source.provider(),
+        source.space().nout(),
+        source.space().rank(),
+        blocks,
+    )
+    .unwrap();
+    assert!(
+        structure
+            .coupled_sector_regions(source.space().nout())
+            .unwrap()
+            .is_some(),
+        "regression requires a contiguous but noncanonical expert layout"
+    );
+    bind_su3_om_structure_copy(source, source_data, structure)
+}
+
+fn padded_su3_om_copy(
+    source: &BoundDynamicFusionMapSpace<Su3FusionRule>,
+    source_data: &[f64],
+) -> (BoundDynamicFusionMapSpace<Su3FusionRule>, Vec<f64>) {
+    let source_structure = source.space().structure();
+    let mut offset = 1usize;
+    let mut blocks = Vec::with_capacity(source_structure.block_count());
+    for index in 0..source_structure.block_count() {
+        let block = source_structure.block(index).unwrap();
+        blocks.push(
+            BlockSpec::column_major_with_key(block.key().clone(), block.shape().to_vec(), offset)
+                .unwrap(),
+        );
+        offset += block.shape().iter().product::<usize>() + 1;
+    }
+    let structure = BlockStructure::from_blocks_with_rank(source.space().rank(), blocks).unwrap();
+    assert!(structure
+        .coupled_sector_regions(source.space().nout())
+        .unwrap()
+        .is_none());
+    bind_su3_om_structure_copy(source, source_data, structure)
+}
+
+fn assert_generic_factor_spaces_match<R>(
+    actual: &BoundDynFactor<R, f64>,
+    expected: &BoundDynFactor<R, f64>,
+) where
+    R: FusionRule,
+{
+    let actual_space = actual.space().space();
+    let expected_space = expected.space().space();
+    assert_eq!(actual_space.homspace(), expected_space.homspace());
+    assert_eq!(
+        actual_space.structure().block_count(),
+        expected_space.structure().block_count()
+    );
+    for index in 0..actual_space.structure().block_count() {
+        let actual_block = actual_space.structure().block(index).unwrap();
+        let expected_block = expected_space.structure().block(index).unwrap();
+        assert_eq!(actual_block.key(), expected_block.key());
+        assert_eq!(actual_block.shape(), expected_block.shape());
+        assert_eq!(actual_block.strides(), expected_block.strides());
+        assert_eq!(actual_block.offset(), expected_block.offset());
+    }
+}
+
+fn assert_generic_factors_match<R>(
+    actual: &BoundDynFactor<R, f64>,
+    expected: &BoundDynFactor<R, f64>,
+) where
+    R: FusionRule,
+{
+    assert_generic_factor_spaces_match(actual, expected);
+    assert_eq!(actual.data().len(), expected.data().len());
+    for (&actual, &expected) in actual.data().iter().zip(expected.data()) {
+        assert!((actual - expected).abs() < 1.0e-12);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LateGenericError(usize);
+
+impl fmt::Display for LateGenericError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "late Generic provider failure at call {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for LateGenericError {}
+
+struct LateGenericSpy<'a> {
+    rule: &'a Su3FusionRule,
+    fail_at: usize,
+    calls: Cell<usize>,
+}
+
+impl LateGenericSpy<'_> {
+    fn call<T>(&self, value: impl FnOnce() -> T) -> Result<T, LateGenericError> {
+        let call = self.calls.get() + 1;
+        self.calls.set(call);
+        if call == self.fail_at {
+            Err(LateGenericError(call))
+        } else {
+            Ok(value())
+        }
+    }
+}
+
+impl CheckedGenericFusion for LateGenericSpy<'_> {
+    type Error = LateGenericError;
+
+    fn rule_identity(&self) -> RuleIdentity {
+        self.rule.rule_identity()
+    }
+
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.rule.fusion_style()
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.rule.braiding_style()
+    }
+
+    fn vacuum(&self) -> SectorId {
+        self.rule.vacuum()
+    }
+
+    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+        self.call(|| self.rule.dual(sector))
+    }
+
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        self.call(|| self.rule.fusion_channels(left, right))
+    }
+
+    fn try_fusion_channels_in_table(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        self.call(|| self.rule.fusion_channels_in_table(left, right))
+    }
+
+    fn try_coupled_sector_fold(
+        &self,
+        effective: &[SectorId],
+    ) -> Result<CoupledSectorFold, Self::Error> {
+        self.call(|| self.rule.coupled_sector_fold(effective))
+    }
+
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, Self::Error> {
+        self.call(|| self.rule.nsymbol(left, right, coupled))
+    }
+}
+
+#[test]
+fn generic_compact_factorizations_use_canonical_regions_without_pack_or_scatter() {
+    // What: canonical SU(3) OM storage uses borrowed source regions and final
+    // factor regions for SVD, QR, and LQ; values-only SVD does not repack.
+    let (space, data) = su3_om_factorization_input();
+    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    crate::factorize::reset_values_matricization_fallbacks();
+    svd_vals_dyn_generic(&mut dense, &input).unwrap();
+    assert_eq!(crate::factorize::values_matricization_fallbacks(), 0);
+
+    crate::factorize::reset_compact_svd_copy_probe();
+    svd_compact_factors_dyn_generic(&mut dense, &input).unwrap();
+    assert_eq!(
+        crate::factorize::compact_svd_copy_probe(),
+        crate::factorize::CompactSvdCopyProbe::default()
+    );
+
+    crate::factorize::reset_compact_svd_copy_probe();
+    let truncated = svd_trunc_factors_dyn_generic(
+        &mut dense,
+        &input,
+        &Truncation::Tolerance {
+            atol: 1.0e9,
+            rtol: 0.0,
+        },
+    )
+    .unwrap();
+    assert!(truncated.2.is_empty(), "the truncation must remove values");
+    assert_eq!(
+        crate::factorize::compact_svd_copy_probe(),
+        crate::factorize::CompactSvdCopyProbe::default()
+    );
+
+    crate::factorize::reset_compact_qr_copy_probe();
+    qr_compact_dyn_generic(&mut dense, &input).unwrap();
+    assert_eq!(
+        crate::factorize::compact_qr_copy_probe(),
+        crate::factorize::CompactQrCopyProbe::default()
+    );
+
+    crate::factorize::reset_compact_lq_copy_probe();
+    let (left, right) = lq_compact_dyn_generic(&mut dense, &input).unwrap();
+    let probe = crate::factorize::compact_lq_copy_probe();
+    assert_eq!(probe.input_pack_bytes, 0);
+    assert_eq!(probe.output_scatter_bytes, 0);
+    assert_eq!(probe.scratch_buffer_count, 3);
+    assert_eq!(
+        probe.adjoint_scratch_fill_bytes,
+        std::mem::size_of_val(data.as_slice())
+    );
+    assert_eq!(
+        probe.final_adjoint_copy_bytes,
+        (left.data().len() + right.data().len()) * std::mem::size_of::<f64>()
+    );
+}
+
+#[test]
+fn checked_generic_plan_late_failure_precedes_finish_and_output_commit() {
+    // What: the final provider query can fail while source and earlier factor
+    // metadata are valid, before the finish phase commits factor metadata.
+    let (space, _data) = su3_om_factorization_input();
+    let complete = LateGenericSpy {
+        rule: space.provider(),
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    };
+    let prepared =
+        crate::factorize::prepare_compact_factor_plan_generic_checked_for_test(&space, &complete)
+            .unwrap()
+            .expect("canonical checked plan");
+    let final_call = complete.calls.get();
+    assert!(
+        final_call > 1,
+        "fixture must fail after earlier checked queries"
+    );
+    assert!(
+        crate::factorize::finish_compact_factor_plan_generic_for_test(&space, prepared).unwrap()
+    );
+    assert_eq!(
+        complete.calls.get(),
+        final_call,
+        "commit must not enumerate the provider again"
+    );
+
+    let failing = LateGenericSpy {
+        rule: space.provider(),
+        fail_at: final_call,
+        calls: Cell::new(0),
+    };
+    crate::factorize::reset_generic_factor_plan_finish_calls();
+    let error = match crate::factorize::prepare_compact_factor_plan_generic_checked_for_test(
+        &space, &failing,
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("late provider failure must abort checked preparation"),
+    };
+
+    assert!(matches!(
+        error,
+        crate::factorize::CheckedGenericFactorPlanError::Provider(LateGenericError(call))
+            if call == final_call
+    ));
+    assert_eq!(crate::factorize::generic_factor_plan_finish_calls(), 0);
+}
+
+#[test]
+fn generic_compact_factorizations_retain_noncanonical_copy_fallback() {
+    // What: an expert noncanonical SU(3) view still uses the explicit
+    // pack-and-scatter compatibility path for all compact factorizations.
+    let (space, data) = su3_om_factorization_input();
+    let (fallback_space, fallback_data) = reverse_su3_om_tree_order(&space, &data);
+    let input = BoundDynamicTensorRef::try_new(&fallback_space, &fallback_data).unwrap();
+    let canonical_input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    crate::factorize::reset_values_matricization_fallbacks();
+    let fallback_values = svd_vals_dyn_generic(&mut dense, &input).unwrap();
+    assert!(crate::factorize::values_matricization_fallbacks() > 0);
+    let canonical_values = svd_vals_dyn_generic(&mut dense, &canonical_input).unwrap();
+    assert_real_spectra_close(&fallback_values, &canonical_values);
+
+    crate::factorize::reset_compact_svd_copy_probe();
+    let fallback_svd = svd_compact_factors_dyn_generic(&mut dense, &input).unwrap();
+    let svd = crate::factorize::compact_svd_copy_probe();
+    assert!(svd.input_pack_bytes > 0);
+    assert!(svd.output_scatter_bytes > 0);
+    let canonical_svd = svd_compact_factors_dyn_generic(&mut dense, &canonical_input).unwrap();
+    assert_generic_factor_spaces_match(&fallback_svd.0, &canonical_svd.0);
+    assert_generic_factor_spaces_match(&fallback_svd.1, &canonical_svd.1);
+    assert_real_spectra_close(&fallback_svd.2, &canonical_svd.2);
+
+    crate::factorize::reset_compact_qr_copy_probe();
+    let fallback_qr = qr_compact_dyn_generic(&mut dense, &input).unwrap();
+    let qr = crate::factorize::compact_qr_copy_probe();
+    assert!(qr.input_pack_bytes > 0);
+    assert!(qr.output_scatter_bytes > 0);
+    let canonical_qr = qr_compact_dyn_generic(&mut dense, &canonical_input).unwrap();
+    assert_generic_factor_spaces_match(&fallback_qr.0, &canonical_qr.0);
+    assert_generic_factor_spaces_match(&fallback_qr.1, &canonical_qr.1);
+
+    crate::factorize::reset_compact_lq_copy_probe();
+    let fallback_lq = lq_compact_dyn_generic(&mut dense, &input).unwrap();
+    let lq = crate::factorize::compact_lq_copy_probe();
+    assert!(lq.input_pack_bytes > 0);
+    assert!(lq.output_scatter_bytes > 0);
+    let canonical_lq = lq_compact_dyn_generic(&mut dense, &canonical_input).unwrap();
+    assert_generic_factor_spaces_match(&fallback_lq.0, &canonical_lq.0);
+    assert_generic_factor_spaces_match(&fallback_lq.1, &canonical_lq.1);
+}
+
+#[test]
+fn generic_direct_factors_match_canonical_order_packed_oracle() {
+    // What: asymmetric SU(3) OM direct factors preserve the complete
+    // key/vertex order and canonical gauge of the old packed implementation.
+    let (space, data) = su3_om_factorization_input();
+    let (packed_space, packed_data) = padded_su3_om_copy(&space, &data);
+    let direct = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let packed = BoundDynamicTensorRef::try_new(&packed_space, &packed_data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let direct_svd = svd_compact_factors_dyn_generic(&mut dense, &direct).unwrap();
+    let packed_svd = svd_compact_factors_dyn_generic(&mut dense, &packed).unwrap();
+    assert_generic_factors_match(&direct_svd.0, &packed_svd.0);
+    assert_generic_factors_match(&direct_svd.1, &packed_svd.1);
+    assert_real_spectra_close(&direct_svd.2, &packed_svd.2);
+
+    let direct_qr = qr_compact_dyn_generic(&mut dense, &direct).unwrap();
+    let packed_qr = qr_compact_dyn_generic(&mut dense, &packed).unwrap();
+    assert_generic_factors_match(&direct_qr.0, &packed_qr.0);
+    assert_generic_factors_match(&direct_qr.1, &packed_qr.1);
+
+    let direct_lq = lq_compact_dyn_generic(&mut dense, &direct).unwrap();
+    let packed_lq = lq_compact_dyn_generic(&mut dense, &packed).unwrap();
+    assert_generic_factors_match(&direct_lq.0, &packed_lq.0);
+    assert_generic_factors_match(&direct_lq.1, &packed_lq.1);
 }
 
 #[test]
