@@ -14740,6 +14740,7 @@ mod tests {
         fail_fs: Option<usize>,
         bad_b_f: bool,
         bad_a_f: bool,
+        non_diagonal_b: bool,
     }
 
     impl CheckedA4Spy {
@@ -14759,6 +14760,7 @@ mod tests {
                 fail_fs: None,
                 bad_b_f: false,
                 bad_a_f: false,
+                non_diagonal_b: false,
             }
         }
 
@@ -14878,7 +14880,16 @@ mod tests {
             Self::trip(&self.f_calls, self.fail_f, RigidSpyError::F)?;
             let symbol =
                 GenericFusionSymbols::f_symbol_generic(&A4BendRule, a, b, c, d, e, f);
-            if self.bad_b_f && (a.id(), b.id(), c.id(), d.id(), e.id(), f.id()) == (3, 3, 3, 3, 3, 0) {
+            if self.non_diagonal_b
+                && (a.id(), b.id(), c.id(), d.id(), e.id(), f.id()) == (3, 3, 3, 3, 3, 0)
+            {
+                Ok(GenericFArray::new(
+                    vec![0.3, 0.7, 0.9, 0.1],
+                    (2, 2, 1, 1),
+                ))
+            } else if self.bad_b_f
+                && (a.id(), b.id(), c.id(), d.id(), e.id(), f.id()) == (3, 3, 3, 3, 3, 0)
+            {
                 Ok(GenericFArray::new(symbol.data().to_vec(), (1, 4, 1, 1)))
             } else if self.bad_a_f
                 && (a.id(), b.id(), c.id(), d.id(), e.id(), f.id()) == (3, 3, 3, 3, 0, 3)
@@ -15060,6 +15071,23 @@ mod tests {
         assert_eq!(rule.sqrt_calls.get(), 3);
         assert_eq!(rule.inv_sqrt_calls.get(), 2);
         assert_eq!(rule.fs_calls.get(), 1);
+    }
+
+    #[test]
+    fn checked_generic_bend_stores_the_b_column_as_the_output_vertex() {
+        let mut rule = CheckedA4Spy {
+            non_diagonal_b: true,
+            ..CheckedA4Spy::new()
+        };
+        let out =
+            generic_bendright_tree_pair_checked(&mut rule, &a4_pair_rank2(1)).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out.iter()
+                .map(|(key, _)| key.domain_tree().vertices()[0].get())
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
     }
 
     #[test]
