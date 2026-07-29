@@ -5,13 +5,15 @@ use std::{collections::hash_map::Entry, sync::Arc};
 
 use num_traits::Zero;
 use tenet_core::{
-    generic_braid_tree_pair_block_ordered, generic_permute_tree_pair_block_ordered,
-    generic_transpose_tree_pair_block_ordered,
+    generic_braid_tree_pair_block_ordered, generic_braid_tree_pair_checked,
+    generic_permute_tree_pair_block_ordered, generic_permute_tree_pair_checked,
+    generic_transpose_tree_pair_block_ordered, validate_generic_fusion_tree_pair_checked,
     multiplicity_free_braid_tree_pair_block_ordered_indexed,
     multiplicity_free_transpose_tree_pair_block_ordered_indexed, BlockKey, BlockKeyKind,
-    BlockStructure, CoreError, FusionRule, FusionStyleKind, FusionTreeBlockGroup, FusionTreeKey,
-    FusionTreePairKey, FusionTreePairOrientation, GenericBraidScalar, GenericRigidSymbols,
-    LocallyValidatedFusionTreeBlockStructure, MultiplicityFreeFusionSymbols,
+    BlockStructure, CheckedGenericFusion, CheckedGenericRigidSymbols, CheckedGenericStructureError,
+    CheckedGenericSymbolError, CoreError, FusionRule, FusionStyleKind, FusionTreeBlockGroup,
+    FusionTreeKey, FusionTreePairKey, FusionTreePairOrientation, GenericBraidScalar,
+    GenericRigidSymbols, LocallyValidatedFusionTreeBlockStructure, MultiplicityFreeFusionSymbols,
     MultiplicityFreeRigidSymbols, OrderedBlockLinearMap, OrderedBlockLinearStorage,
     PreparedTreePairOperation,
 };
@@ -48,6 +50,39 @@ pub enum CheckedGenericPlanError<E> {
 impl<E> From<CoreError> for CheckedGenericPlanError<E> {
     fn from(error: CoreError) -> Self {
         Self::Core(error)
+    }
+}
+
+impl<E> From<OperationError> for CheckedGenericPlanError<E> {
+    fn from(error: OperationError) -> Self {
+        Self::Operation(error)
+    }
+}
+
+fn map_checked_generic_symbol_error<E>(
+    error: CheckedGenericSymbolError<E>,
+) -> CheckedGenericPlanError<E> {
+    match error {
+        CheckedGenericSymbolError::Provider(error) => CheckedGenericPlanError::Provider(error),
+        CheckedGenericSymbolError::Shape {
+            symbol,
+            expected,
+            actual,
+        } => CheckedGenericPlanError::SymbolShape {
+            symbol,
+            expected,
+            actual,
+        },
+        CheckedGenericSymbolError::Core(error) => CheckedGenericPlanError::Core(error),
+    }
+}
+
+fn map_checked_generic_structure_error<E>(
+    error: CheckedGenericStructureError<E>,
+) -> CheckedGenericPlanError<E> {
+    match error {
+        CheckedGenericStructureError::Provider(error) => CheckedGenericPlanError::Provider(error),
+        CheckedGenericStructureError::Core(error) => CheckedGenericPlanError::Core(error),
     }
 }
 
@@ -225,6 +260,63 @@ where
     validate_tree_transform_operation_syntax(operation, src_structure)?;
     LocallyValidatedFusionTreeBlockStructure::try_new(rule, src_structure)
         .map_err(OperationError::from_core_preserving_context)
+}
+
+struct CheckedGenericTreePairPreflight<'structure> {
+    structure: &'structure BlockStructure,
+}
+
+fn validate_checked_generic_tree_pair_preflight<'structure, P>(
+    provider: &P,
+    operation: &TreeTransformOperation,
+    src_structure: &'structure BlockStructure,
+) -> Result<CheckedGenericTreePairPreflight<'structure>, CheckedGenericPlanError<P::Error>>
+where
+    P: CheckedGenericFusion,
+{
+    if !provider.fusion_style().has_multiplicity() {
+        return Err(CheckedGenericPlanError::Operation(
+            OperationError::UnsupportedFusionStyle {
+                operation: Box::new(operation.clone()),
+                style: provider.fusion_style(),
+            },
+        ));
+    }
+    if matches!(operation.kind(), TreeTransformOperationKind::Transpose) {
+        return Err(CheckedGenericPlanError::Operation(
+            OperationError::UnsupportedTreeTransformScope {
+                operation: Box::new(operation.clone()),
+                message: "checked Generic lowering supports explicit Permute or Braid operations",
+            },
+        ));
+    }
+    if operation.requires_symmetric_braiding() && !provider.braiding_style().is_symmetric() {
+        return Err(CheckedGenericPlanError::Operation(
+            OperationError::UnsupportedBraidingStyle {
+                operation: Box::new(operation.clone()),
+                style: provider.braiding_style(),
+            },
+        ));
+    }
+    validate_tree_transform_rank_syntax(operation, src_structure.rank())?;
+    validate_fusion_tree_key_namespace(src_structure)?;
+    validate_tree_transform_operation_syntax(operation, src_structure)?;
+    for index in 0..src_structure.block_count() {
+        let block = src_structure.block(index)?;
+        let BlockKey::FusionTree(key) = block.key() else {
+            return Err(CheckedGenericPlanError::Operation(
+                OperationError::ExpectedFusionTreeBlock {
+                    tensor: "src",
+                    index,
+                },
+            ));
+        };
+        validate_generic_fusion_tree_pair_checked(provider, key)
+            .map_err(map_checked_generic_structure_error)?;
+    }
+    Ok(CheckedGenericTreePairPreflight {
+        structure: src_structure,
+    })
 }
 
 pub(crate) struct LocallyValidatedAllCodomainFusionTreeBlockStructure<'rule, 'structure, R> {
@@ -1755,6 +1847,53 @@ where
 /// Fusion-tree block keys in `src_structure` follow
 /// [`tenet_core::FusionTreeKey::validate_for_rule`]'s provider-domain
 /// precondition.
+pub fn build_checked_generic_tree_pair_transform_group_plan<P>(
+    provider: &mut P,
+    operation: TreeTransformOperation,
+    src_structure: &BlockStructure,
+) -> Result<TreeTransformGroupPlan<P::Scalar>, CheckedGenericPlanError<P::Error>>
+where
+    P: CheckedGenericRigidSymbols,
+    P::Scalar: GenericBraidScalar + Zero,
+{
+    let source_proof =
+        validate_checked_generic_tree_pair_preflight(provider, &operation, src_structure)?;
+    let source_axes = operation_source_axes(&operation);
+    let mut specs = Vec::new();
+    for group in source_proof.structure.fusion_tree_group_slice() {
+        let mut rows_for = |_: usize, source: &FusionTreePairKey| {
+            let rows = match operation.kind() {
+                TreeTransformOperationKind::Permute => generic_permute_tree_pair_checked(
+                    provider,
+                    source,
+                    operation.codomain_permutation(),
+                    operation.domain_permutation(),
+                ),
+                TreeTransformOperationKind::Braid => generic_braid_tree_pair_checked(
+                    provider,
+                    source,
+                    operation.codomain_permutation(),
+                    operation.domain_permutation(),
+                    operation.codomain_levels(),
+                    operation.domain_levels(),
+                ),
+                TreeTransformOperationKind::Transpose => {
+                    unreachable!("checked Generic preflight rejects transpose")
+                }
+            }
+            .map_err(map_checked_generic_symbol_error)?;
+            Ok::<_, CheckedGenericPlanError<P::Error>>(Arc::new(rows))
+        };
+        specs.extend(assemble_tree_pair_group_specs_result(
+            source_proof.structure,
+            group,
+            &source_axes,
+            &mut rows_for,
+        )?);
+    }
+    Ok(TreeTransformGroupPlan::new(specs))
+}
+
 pub fn build_generic_tree_pair_transform_group_plan<R>(
     rule: &R,
     operation: TreeTransformOperation,
@@ -1916,6 +2055,20 @@ where
     T: Clone + Add<Output = T> + Zero,
     F: FnMut(usize, &FusionTreePairKey) -> Result<Arc<Vec<(FusionTreePairKey, T)>>, OperationError>,
 {
+    assemble_tree_pair_group_specs_result(src_structure, group, source_axes, rows_for)
+}
+
+fn assemble_tree_pair_group_specs_result<T, E, F>(
+    src_structure: &BlockStructure,
+    group: &FusionTreeBlockGroup,
+    source_axes: &Arc<[usize]>,
+    rows_for: &mut F,
+) -> Result<Vec<TreeTransformGroupBlockSpec<T>>, E>
+where
+    T: Clone + Add<Output = T> + Zero,
+    E: From<CoreError> + From<OperationError>,
+    F: FnMut(usize, &FusionTreePairKey) -> Result<Arc<Vec<(FusionTreePairKey, T)>>, E>,
+{
     #[cfg(test)]
     LEGACY_TREE_PAIR_ASSEMBLY_CALLS.set(LEGACY_TREE_PAIR_ASSEMBLY_CALLS.get() + 1);
 
@@ -1934,7 +2087,8 @@ where
             return Err(OperationError::ExpectedFusionTreeBlock {
                 tensor: "src",
                 index: src_block_index,
-            });
+            }
+            .into());
         };
         src_keys.push(src_key.clone());
 
@@ -1974,14 +2128,15 @@ where
         return Ok(direct_specs);
     }
     if dst_keys.is_empty() {
-        return Err(OperationError::EmptyTransformBlock);
+        return Err(OperationError::EmptyTransformBlock.into());
     }
 
     Ok(vec![TreeTransformGroupBlockSpec::try_multi(
         dst_keys,
         src_keys,
         rows.into_coefficients(),
-    )?
+    )
+    .map_err(E::from)?
     .with_shared_source_axes(Arc::clone(source_axes))])
 }
 
