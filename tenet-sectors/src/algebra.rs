@@ -515,6 +515,8 @@ impl<Scalar> GenericRMatrix<Scalar> {
 pub trait CheckedGenericFusion {
     type Error: std::error::Error + Send + Sync + 'static;
 
+    fn fusion_style(&self) -> FusionStyleKind;
+    fn braiding_style(&self) -> BraidingStyleKind;
     fn vacuum(&self) -> SectorId;
     fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error>;
     /// Return the complete mathematical channel set. A bounded provider may
@@ -565,6 +567,40 @@ pub trait CheckedGenericFusion {
     ) -> Result<usize, Self::Error>;
 }
 
+/// Fallible categorical symbol access for Generic-fusion plan lowering.
+///
+/// This extends [`CheckedGenericFusion`] with only the data needed to compile
+/// Generic permute, repartition, and braid rows.  The provider's error type is
+/// the structural provider error, so a failed symbol lookup keeps its typed
+/// source all the way to the plan boundary.  A/B moves are deliberately not
+/// provider methods: their matrices are derived from these primitives after
+/// TeNeT validates the categorical F/R shapes.
+pub trait CheckedGenericRigidSymbols: CheckedGenericFusion {
+    type Scalar: GenericBraidScalar + Send + Sync;
+
+    fn try_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error>;
+    fn try_inv_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error>;
+    fn try_frobenius_schur_phase_scalar(
+        &mut self,
+        sector: SectorId,
+    ) -> Result<Self::Scalar, Self::Error>;
+    fn try_f_symbol_generic(
+        &mut self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> Result<GenericFArray<Self::Scalar>, Self::Error>;
+    fn try_r_symbol_generic(
+        &mut self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+    ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error>;
+}
+
 /// Checked structural view of an existing infallible Generic provider.
 ///
 /// A wrapper, rather than a blanket implementation on `R`, leaves a future
@@ -580,6 +616,14 @@ impl<'a, R> InfallibleGeneric<'a, R> {
 
 impl<R: FusionRule> CheckedGenericFusion for InfallibleGeneric<'_, R> {
     type Error = Infallible;
+
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.0.fusion_style()
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.0.braiding_style()
+    }
 
     fn vacuum(&self) -> SectorId {
         self.0.vacuum()
@@ -619,6 +663,50 @@ impl<R: FusionRule> CheckedGenericFusion for InfallibleGeneric<'_, R> {
         coupled: SectorId,
     ) -> Result<usize, Self::Error> {
         Ok(self.0.nsymbol(left, right, coupled))
+    }
+}
+
+impl<R> CheckedGenericRigidSymbols for InfallibleGeneric<'_, R>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar + Send + Sync,
+{
+    type Scalar = R::Scalar;
+
+    fn try_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.0.sqrt_dim_scalar(sector))
+    }
+
+    fn try_inv_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.0.inv_sqrt_dim_scalar(sector))
+    }
+
+    fn try_frobenius_schur_phase_scalar(
+        &mut self,
+        sector: SectorId,
+    ) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.0.frobenius_schur_phase_scalar(sector))
+    }
+
+    fn try_f_symbol_generic(
+        &mut self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> Result<GenericFArray<Self::Scalar>, Self::Error> {
+        Ok(self.0.f_symbol_generic(a, b, c, d, e, f))
+    }
+
+    fn try_r_symbol_generic(
+        &mut self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+    ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> {
+        Ok(self.0.r_symbol_generic(a, b, c))
     }
 }
 

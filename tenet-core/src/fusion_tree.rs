@@ -38,6 +38,419 @@ impl<E: std::error::Error + 'static> std::error::Error for CheckedGenericStructu
     }
 }
 
+/// Fallible Generic-symbol access error used internally by checked row
+/// lowering.  A shape mismatch is TeNeT validation, not a provider failure.
+#[doc(hidden)]
+#[derive(Debug)]
+pub enum CheckedGenericSymbolError<E> {
+    Provider(E),
+    Shape {
+        symbol: &'static str,
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+    },
+    Core(CoreError),
+}
+
+impl<E> From<CoreError> for CheckedGenericSymbolError<E> {
+    fn from(error: CoreError) -> Self {
+        Self::Core(error)
+    }
+}
+
+impl<E: fmt::Display> fmt::Display for CheckedGenericSymbolError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Provider(error) => error.fmt(formatter),
+            Self::Shape {
+                symbol,
+                expected,
+                actual,
+            } => write!(formatter, "{symbol} shape mismatch: expected {expected:?}, got {actual:?}"),
+            Self::Core(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for CheckedGenericSymbolError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Provider(error) => Some(error),
+            Self::Core(error) => Some(error),
+            Self::Shape { .. } => None,
+        }
+    }
+}
+
+trait GenericFRAccess {
+    type Scalar: GenericBraidScalar;
+    type Error;
+    fn fusion_style(&self) -> FusionStyleKind;
+    fn braiding_style(&self) -> BraidingStyleKind;
+    fn vacuum(&self) -> SectorId;
+    fn try_nsymbol(&mut self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error>;
+    fn try_fusion_channels_in_table(&mut self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error>;
+    fn try_f_symbol_generic(&mut self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, Self::Error>;
+    fn try_r_symbol_generic(&mut self, a: SectorId, b: SectorId, c: SectorId) -> Result<GenericRMatrix<Self::Scalar>, Self::Error>;
+}
+
+trait GenericRigidAccess: GenericFRAccess {
+    fn try_dual(&mut self, sector: SectorId) -> Result<SectorId, Self::Error>;
+    fn try_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error>;
+    fn try_inv_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error>;
+    fn try_frobenius_schur_phase_scalar(
+        &mut self,
+        sector: SectorId,
+    ) -> Result<Self::Scalar, Self::Error>;
+    fn try_b_symbol_generic(
+        &mut self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+    ) -> Result<GenericRMatrix<Self::Scalar>, CheckedGenericSymbolError<Self::Error>>;
+    #[allow(dead_code)]
+    fn try_a_symbol_generic(
+        &mut self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+    ) -> Result<GenericRMatrix<Self::Scalar>, CheckedGenericSymbolError<Self::Error>>;
+}
+
+struct InfallibleGenericFR<'a, R>(&'a R);
+
+impl<R> GenericFRAccess for InfallibleGenericFR<'_, R>
+where
+    R: GenericFusionSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    type Scalar = R::Scalar;
+    type Error = std::convert::Infallible;
+    fn fusion_style(&self) -> FusionStyleKind { self.0.fusion_style() }
+    fn braiding_style(&self) -> BraidingStyleKind { self.0.braiding_style() }
+    fn vacuum(&self) -> SectorId { self.0.vacuum() }
+    fn try_nsymbol(&mut self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> { Ok(self.0.nsymbol(a, b, c)) }
+    fn try_fusion_channels_in_table(&mut self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.0.fusion_channels_in_table(a, b)) }
+    fn try_f_symbol_generic(&mut self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, Self::Error> { Ok(self.0.f_symbol_generic(a,b,c,d,e,f)) }
+    fn try_r_symbol_generic(&mut self, a: SectorId, b: SectorId, c: SectorId) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> { Ok(self.0.r_symbol_generic(a,b,c)) }
+}
+
+impl<P: CheckedGenericRigidSymbols> GenericFRAccess for P {
+    type Scalar = P::Scalar;
+    type Error = P::Error;
+    fn fusion_style(&self) -> FusionStyleKind { CheckedGenericFusion::fusion_style(self) }
+    fn braiding_style(&self) -> BraidingStyleKind { CheckedGenericFusion::braiding_style(self) }
+    fn vacuum(&self) -> SectorId { CheckedGenericFusion::vacuum(self) }
+    fn try_nsymbol(&mut self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> { CheckedGenericFusion::try_nsymbol(self,a,b,c) }
+    fn try_fusion_channels_in_table(&mut self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { CheckedGenericFusion::try_fusion_channels_in_table(self,a,b) }
+    fn try_f_symbol_generic(&mut self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, Self::Error> { CheckedGenericRigidSymbols::try_f_symbol_generic(self,a,b,c,d,e,f) }
+    fn try_r_symbol_generic(&mut self, a: SectorId, b: SectorId, c: SectorId) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> { CheckedGenericRigidSymbols::try_r_symbol_generic(self,a,b,c) }
+}
+
+struct InfallibleGenericRigid<'a, R>(&'a R);
+
+impl<R> GenericFRAccess for InfallibleGenericRigid<'_, R>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    type Scalar = R::Scalar;
+    type Error = std::convert::Infallible;
+    fn fusion_style(&self) -> FusionStyleKind { self.0.fusion_style() }
+    fn braiding_style(&self) -> BraidingStyleKind { self.0.braiding_style() }
+    fn vacuum(&self) -> SectorId { self.0.vacuum() }
+    fn try_nsymbol(&mut self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> { Ok(self.0.nsymbol(a, b, c)) }
+    fn try_fusion_channels_in_table(&mut self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.0.fusion_channels_in_table(a, b)) }
+    fn try_f_symbol_generic(&mut self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, Self::Error> { Ok(self.0.f_symbol_generic(a,b,c,d,e,f)) }
+    fn try_r_symbol_generic(&mut self, a: SectorId, b: SectorId, c: SectorId) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> { Ok(self.0.r_symbol_generic(a,b,c)) }
+}
+
+impl<R> GenericRigidAccess for InfallibleGenericRigid<'_, R>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: GenericBraidScalar,
+{
+    fn try_dual(&mut self, sector: SectorId) -> Result<SectorId, Self::Error> {
+        Ok(self.0.dual(sector))
+    }
+
+    fn try_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.0.sqrt_dim_scalar(sector))
+    }
+
+    fn try_inv_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.0.inv_sqrt_dim_scalar(sector))
+    }
+
+    fn try_frobenius_schur_phase_scalar(
+        &mut self,
+        sector: SectorId,
+    ) -> Result<Self::Scalar, Self::Error> {
+        Ok(self.0.frobenius_schur_phase_scalar(sector))
+    }
+
+    fn try_b_symbol_generic(
+        &mut self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+    ) -> Result<GenericRMatrix<Self::Scalar>, CheckedGenericSymbolError<Self::Error>> {
+        Ok(self.0.b_symbol_generic(a, b, c))
+    }
+
+    fn try_a_symbol_generic(
+        &mut self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+    ) -> Result<GenericRMatrix<Self::Scalar>, CheckedGenericSymbolError<Self::Error>> {
+        Ok(self.0.a_symbol_generic(a, b, c))
+    }
+}
+
+impl<P: CheckedGenericRigidSymbols> GenericRigidAccess for P {
+    fn try_dual(&mut self, sector: SectorId) -> Result<SectorId, Self::Error> {
+        CheckedGenericFusion::try_dual(self, sector)
+    }
+
+    fn try_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        CheckedGenericRigidSymbols::try_sqrt_dim_scalar(self, sector)
+    }
+
+    fn try_inv_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        CheckedGenericRigidSymbols::try_inv_sqrt_dim_scalar(self, sector)
+    }
+
+    fn try_frobenius_schur_phase_scalar(
+        &mut self,
+        sector: SectorId,
+    ) -> Result<Self::Scalar, Self::Error> {
+        CheckedGenericRigidSymbols::try_frobenius_schur_phase_scalar(self, sector)
+    }
+
+    fn try_b_symbol_generic(
+        &mut self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+    ) -> Result<GenericRMatrix<Self::Scalar>, CheckedGenericSymbolError<Self::Error>> {
+        checked_generic_b_symbol(self, a, b, c)
+    }
+
+    fn try_a_symbol_generic(
+        &mut self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+    ) -> Result<GenericRMatrix<Self::Scalar>, CheckedGenericSymbolError<Self::Error>> {
+        checked_generic_a_symbol(self, a, b, c)
+    }
+}
+
+/// Validate a Generic fusion-tree pair without requiring the infallible
+/// [`FusionRule`] contract.
+pub fn validate_generic_fusion_tree_pair_checked<C>(
+    rule: &C,
+    tree_pair: &FusionTreePairKey,
+) -> Result<(), CheckedGenericStructureError<C::Error>>
+where
+    C: CheckedGenericFusion,
+{
+    if !rule.fusion_style().has_multiplicity() {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Generic,
+            actual: rule.fusion_style(),
+        }
+        .into());
+    }
+    for tree in [tree_pair.codomain_tree(), tree_pair.domain_tree()] {
+        validate_fusion_tree_key_shape(tree)?;
+        match tree.uncoupled().len() {
+            0 if tree.coupled() != rule.vacuum() => {
+                return Err(CoreError::MalformedFusionTree {
+                    message: "rank-0 fusion tree coupled sector must equal the vacuum",
+                }
+                .into());
+            }
+            1 if Some(tree.coupled()) != tree.uncoupled().first().copied() => {
+                return Err(CoreError::MalformedFusionTree {
+                    message: "rank-1 fusion tree coupled sector must equal its uncoupled sector",
+                }
+                .into());
+            }
+            _ => {}
+        }
+        validate_fusion_tree_vertices(tree, |left, right, coupled| {
+            rule.try_fusion_channels(left, right)
+                .map_err(CheckedGenericStructureError::Provider)?;
+            rule.try_nsymbol(left, right, coupled)
+                .map_err(CheckedGenericStructureError::Provider)
+        })?;
+    }
+    validate_fusion_tree_pair_coupled(tree_pair.codomain_tree(), tree_pair.domain_tree())?;
+    Ok(())
+}
+
+fn map_checked_generic_structure_error<E>(
+    error: CheckedGenericStructureError<E>,
+) -> CheckedGenericSymbolError<E> {
+    match error {
+        CheckedGenericStructureError::Provider(error) => {
+            CheckedGenericSymbolError::Provider(error)
+        }
+        CheckedGenericStructureError::Core(error) => CheckedGenericSymbolError::Core(error),
+    }
+}
+
+fn checked_generic_f_symbol<C>(
+    rule: &mut C,
+    a: SectorId,
+    b: SectorId,
+    c: SectorId,
+    d: SectorId,
+    e: SectorId,
+    f: SectorId,
+) -> Result<GenericFArray<C::Scalar>, CheckedGenericSymbolError<C::Error>>
+where
+    C: GenericFRAccess,
+{
+    let expected = [
+        rule.try_nsymbol(a, b, e),
+        rule.try_nsymbol(e, c, d),
+        rule.try_nsymbol(b, c, f),
+        rule.try_nsymbol(a, f, d),
+    ]
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(CheckedGenericSymbolError::Provider)?;
+    let symbol = rule
+        .try_f_symbol_generic(a, b, c, d, e, f)
+        .map_err(CheckedGenericSymbolError::Provider)?;
+    let (mu, nu, kappa, lambda) = symbol.shape();
+    let actual = vec![mu, nu, kappa, lambda];
+    if actual != expected {
+        return Err(CheckedGenericSymbolError::Shape {
+            symbol: "F",
+            expected,
+            actual,
+        });
+    }
+    Ok(symbol)
+}
+
+fn checked_generic_r_symbol<C>(
+    rule: &mut C,
+    a: SectorId,
+    b: SectorId,
+    c: SectorId,
+) -> Result<GenericRMatrix<C::Scalar>, CheckedGenericSymbolError<C::Error>>
+where
+    C: GenericFRAccess,
+{
+    let expected = [
+        rule.try_nsymbol(a, b, c),
+        rule.try_nsymbol(b, a, c),
+    ]
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(CheckedGenericSymbolError::Provider)?;
+    let symbol = rule
+        .try_r_symbol_generic(a, b, c)
+        .map_err(CheckedGenericSymbolError::Provider)?;
+    let (rows, cols) = symbol.shape();
+    let actual = vec![rows, cols];
+    if actual != expected {
+        return Err(CheckedGenericSymbolError::Shape {
+            symbol: "R",
+            expected,
+            actual,
+        });
+    }
+    Ok(symbol)
+}
+
+fn checked_generic_b_symbol<C>(
+    rule: &mut C,
+    a: SectorId,
+    b: SectorId,
+    c: SectorId,
+) -> Result<GenericRMatrix<C::Scalar>, CheckedGenericSymbolError<C::Error>>
+where
+    C: CheckedGenericRigidSymbols,
+{
+    let rows = rule
+        .try_nsymbol(a, b, c)
+        .map_err(CheckedGenericSymbolError::Provider)?;
+    let dual_b = rule
+        .try_dual(b)
+        .map_err(CheckedGenericSymbolError::Provider)?;
+    let cols = rule
+        .try_nsymbol(c, dual_b, a)
+        .map_err(CheckedGenericSymbolError::Provider)?;
+    let vacuum = rule.vacuum();
+    let f = checked_generic_f_symbol(rule, a, b, dual_b, a, c, vacuum)?;
+    let factor = rule
+        .try_sqrt_dim_scalar(a)
+        .map_err(CheckedGenericSymbolError::Provider)?
+        * rule
+            .try_sqrt_dim_scalar(b)
+            .map_err(CheckedGenericSymbolError::Provider)?
+        * rule
+            .try_inv_sqrt_dim_scalar(c)
+            .map_err(CheckedGenericSymbolError::Provider)?;
+    let mut data = Vec::with_capacity(rows * cols);
+    for mu in 0..rows {
+        for nu in 0..cols {
+            data.push(factor.clone() * f.get(mu, nu, 0, 0).clone());
+        }
+    }
+    Ok(GenericRMatrix::new(data, rows, cols))
+}
+
+fn checked_generic_a_symbol<C>(
+    rule: &mut C,
+    a: SectorId,
+    b: SectorId,
+    c: SectorId,
+) -> Result<GenericRMatrix<C::Scalar>, CheckedGenericSymbolError<C::Error>>
+where
+    C: CheckedGenericRigidSymbols,
+{
+    let rows = rule
+        .try_nsymbol(a, b, c)
+        .map_err(CheckedGenericSymbolError::Provider)?;
+    let dual_a = rule
+        .try_dual(a)
+        .map_err(CheckedGenericSymbolError::Provider)?;
+    let cols = rule
+        .try_nsymbol(dual_a, c, b)
+        .map_err(CheckedGenericSymbolError::Provider)?;
+    let vacuum = rule.vacuum();
+    let f = checked_generic_f_symbol(rule, dual_a, a, b, b, vacuum, c)?;
+    let factor = rule
+        .try_sqrt_dim_scalar(a)
+        .map_err(CheckedGenericSymbolError::Provider)?
+        * rule
+            .try_sqrt_dim_scalar(b)
+            .map_err(CheckedGenericSymbolError::Provider)?
+        * rule
+            .try_inv_sqrt_dim_scalar(c)
+            .map_err(CheckedGenericSymbolError::Provider)?;
+    let fs = rule
+        .try_frobenius_schur_phase_scalar(a)
+        .map_err(CheckedGenericSymbolError::Provider)?;
+    let mut data = Vec::with_capacity(rows * cols);
+    for kappa in 0..rows {
+        for lambda in 0..cols {
+            data.push(
+                factor.clone()
+                    * (fs.clone() * f.get(0, 0, kappa, lambda).clone()).braid_conj(),
+            );
+        }
+    }
+    Ok(GenericRMatrix::new(data, rows, cols))
+}
+
 fn validate_multiplicity_free_execution_style<R>(rule: &R) -> Result<(), CoreError>
 where
     R: FusionRule,
@@ -4092,7 +4505,7 @@ fn compose_generic_block_terms<R, F, I>(
     mut transform: F,
 ) -> Result<(Vec<FusionTreePairKey>, DenseColumns<R::Scalar>), CoreError>
 where
-    R: GenericRigidSymbols,
+    R: GenericFusionSymbols,
     R::Scalar: GenericBraidScalar,
     F: FnMut(&R, &FusionTreePairKey) -> Result<I, CoreError>,
     I: IntoIterator<Item = (FusionTreePairKey, R::Scalar)>,
@@ -4140,7 +4553,7 @@ fn seed_generic_tree_pair_block<R>(
     src_keys: &[FusionTreePairKey],
 ) -> Result<(Vec<FusionTreePairKey>, DenseColumns<R::Scalar>), CoreError>
 where
-    R: GenericRigidSymbols,
+    R: GenericFusionSymbols,
     R::Scalar: GenericBraidScalar,
 {
     if rule.fusion_style() != FusionStyleKind::Generic {
@@ -7505,7 +7918,8 @@ where
             if vertices.len() <= index {
                 return Err(CoreError::MalformedFusionTree {
                     message: "unit braid past the first adjacent pair requires adjacent vertices",
-                });
+                }
+                .into());
             }
             vertices.swap(index - 1, index);
         }
@@ -8402,6 +8816,7 @@ where
 /// unchanged — rather than being derived here. Applying the `inverse=true`
 /// braid to every output of the `inverse=false` braid recovers the original
 /// tree with coefficient 1 (unit F/R), which the tests check.
+#[cfg(test)]
 fn generic_artin_braid_at_with_inverse<R>(
     rule: &R,
     tree: &FusionTreeKey,
@@ -8412,6 +8827,24 @@ where
     R: GenericFusionSymbols,
     R::Scalar: GenericBraidScalar,
 {
+    let mut checked = InfallibleGenericFR(rule);
+    match generic_artin_braid_at_with_inverse_checked(&mut checked, tree, index, inverse) {
+        Ok(rows) => Ok(rows),
+        Err(CheckedGenericSymbolError::Provider(never)) => match never {},
+        Err(CheckedGenericSymbolError::Core(error)) => Err(error),
+        Err(CheckedGenericSymbolError::Shape { .. }) => unreachable!("infallible Generic symbols must be categorical"),
+    }
+}
+
+fn generic_artin_braid_at_with_inverse_checked<C>(
+    rule: &mut C,
+    tree: &FusionTreeKey,
+    index: usize,
+    inverse: bool,
+) -> Result<Vec<(FusionTreeKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+where
+    C: GenericFRAccess,
+{
     // Entry gate: Generic-fusion only. `has_multiplicity()` is exactly the
     // `FusionStyle(I) isa GenericFusion` predicate TensorKit branches on
     // (braiding_manipulations.jl:137,170). Mult-free rules must use the
@@ -8420,12 +8853,13 @@ where
         return Err(CoreError::UnsupportedFusionStyle {
             expected: FusionStyleKind::Generic,
             actual: rule.fusion_style(),
-        });
+        }
+        .into());
     }
 
     let rank = tree.uncoupled().len();
     if index + 1 >= rank {
-        return Err(CoreError::InvalidBraidIndex { index, rank });
+        return Err(CoreError::InvalidBraidIndex { index, rank }.into());
     }
 
     // a, b = uncoupled[i], uncoupled[i+1]; swap them into uncoupled′, isdual′
@@ -8461,7 +8895,8 @@ where
             if vertices.len() <= index {
                 return Err(CoreError::MalformedFusionTree {
                     message: "unit braid past the first adjacent pair requires adjacent vertices",
-                });
+                }
+                .into());
             }
             vertices.swap(index - 1, index);
             (Arc::from(innerlines), Arc::from(vertices))
@@ -8476,7 +8911,7 @@ where
                 innerlines,
                 vertices,
             ),
-            R::Scalar::braid_one(),
+            C::Scalar::braid_one(),
         )]);
     }
 
@@ -8487,7 +8922,8 @@ where
             left,
             right,
             style: rule.braiding_style(),
-        });
+        }
+        .into());
     }
 
     if index == 0 {
@@ -8509,13 +8945,15 @@ where
         // Rmat = inv ? Rsymbol(b,a,c)' : Rsymbol(a,b,c)  (:139). We fetch the
         // *un-adjointed* base and take the adjoint at the element read below.
         let rmat = if inverse {
-            rule.r_symbol_generic(right, left, coupled)
+            checked_generic_r_symbol(rule, right, left, coupled)?
         } else {
-            rule.r_symbol_generic(left, right, coupled)
+            checked_generic_r_symbol(rule, left, right, coupled)?
         };
         // ν ranges over the output vertex = the columns of Rmat (:140). The
         // adjoint flips the shape back, so that count is N(b,a,c) either way.
-        let n_nu = rule.nsymbol(right, left, coupled);
+        let n_nu = rule
+            .try_nsymbol(right, left, coupled)
+            .map_err(CheckedGenericSymbolError::Provider)?;
         let mut out = Vec::with_capacity(n_nu);
         for nu0 in 0..n_nu {
             // R = Rmat[μ, ν]  (:141). For the adjoint, Rmat[μ,ν] = conj(base[ν,μ]).
@@ -8572,34 +9010,41 @@ where
     // on structures whose sectors the coupled fold admitted as clean, and a
     // nonzero frontier-c′ term would be a full-SU(3) tree through an
     // out-of-table inner line — contradicting cleanness.
-    for c_prime in rule.fusion_channels_in_table(a, d) {
-        if rule.nsymbol(c_prime, b, e) == 0 {
+    for c_prime in rule
+        .try_fusion_channels_in_table(a, d)
+        .map_err(CheckedGenericSymbolError::Provider)?
+    {
+        if rule
+            .try_nsymbol(c_prime, b, e)
+            .map_err(CheckedGenericSymbolError::Provider)?
+            == 0
+        {
             continue;
         }
         // Rmat1 = inv ? Rsymbol(d,c,e)' : Rsymbol(c,d,e)   (:172)
         // Rmat2 = inv ? Rsymbol(d,a,c')' : Rsymbol(a,d,c')  (:173)
         // Fmat = Fsymbol(d,a,b,e,c',c)                      (:174)
         let rmat1 = if inverse {
-            rule.r_symbol_generic(d, c, e)
+            checked_generic_r_symbol(rule, d, c, e)?
         } else {
-            rule.r_symbol_generic(c, d, e)
+            checked_generic_r_symbol(rule, c, d, e)?
         };
         let rmat2 = if inverse {
-            rule.r_symbol_generic(d, a, c_prime)
+            checked_generic_r_symbol(rule, d, a, c_prime)?
         } else {
-            rule.r_symbol_generic(a, d, c_prime)
+            checked_generic_r_symbol(rule, a, d, c_prime)?
         };
-        let fmat = rule.f_symbol_generic(d, a, b, e, c_prime, c);
+        let fmat = checked_generic_f_symbol(rule, d, a, b, e, c_prime, c)?;
         // Output vertex ranges σ ∈ 1:N(a,d,c'), λ ∈ 1:N(c',b,e)  (:177-178);
         // inner-sum ranges ρ ∈ 1:N(d,c,e), κ ∈ 1:N(d,a,c')  (:180).
-        let n_sigma = rule.nsymbol(a, d, c_prime);
-        let n_lambda = rule.nsymbol(c_prime, b, e);
-        let n_rho = rule.nsymbol(d, c, e);
-        let n_kappa = rule.nsymbol(d, a, c_prime);
+        let n_sigma = rule.try_nsymbol(a, d, c_prime).map_err(CheckedGenericSymbolError::Provider)?;
+        let n_lambda = rule.try_nsymbol(c_prime, b, e).map_err(CheckedGenericSymbolError::Provider)?;
+        let n_rho = rule.try_nsymbol(d, c, e).map_err(CheckedGenericSymbolError::Provider)?;
+        let n_kappa = rule.try_nsymbol(d, a, c_prime).map_err(CheckedGenericSymbolError::Provider)?;
         for sigma0 in 0..n_sigma {
             for lambda0 in 0..n_lambda {
                 // coeff = zero(oneT)  (:179)
-                let mut coeff = R::Scalar::braid_zero();
+                let mut coeff = C::Scalar::braid_zero();
                 for rho0 in 0..n_rho {
                     for kappa0 in 0..n_kappa {
                         // coeff += Rmat1[ν,ρ] * conj(Fmat[κ,λ,μ,ρ]) * conj(Rmat2[σ,κ])
@@ -8635,7 +9080,8 @@ where
                 if vertices.len() <= index {
                     return Err(CoreError::MalformedFusionTree {
                         message: "non-first Generic braid requires adjacent vertices",
-                    });
+                    }
+                    .into());
                 }
                 vertices[index - 1] = MultiplicityIndex::new(sigma0 + 1)
                     .expect("enumerated Generic multiplicity labels are one-based");
@@ -8746,18 +9192,39 @@ where
     R: GenericFusionSymbols,
     R::Scalar: GenericBraidScalar,
 {
+    let mut checked = InfallibleGenericFR(rule);
+    match generic_braid_tree_result(&mut checked, tree, permutation, levels, swaps) {
+        Ok(rows) => Ok(rows),
+        Err(CheckedGenericSymbolError::Provider(never)) => match never {},
+        Err(CheckedGenericSymbolError::Core(error)) => Err(error),
+        Err(CheckedGenericSymbolError::Shape { .. }) => {
+            unreachable!("infallible Generic symbols must be categorical")
+        }
+    }
+}
+
+fn generic_braid_tree_result<C>(
+    rule: &mut C,
+    tree: &FusionTreeKey,
+    permutation: &[usize],
+    levels: &[usize],
+    swaps: &[usize],
+) -> Result<Vec<(FusionTreeKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+where
+    C: GenericFRAccess,
+{
     let rank = tree.uncoupled().len();
     if permutation.iter().copied().eq(0..rank) {
-        return Ok(vec![(tree.clone(), R::Scalar::braid_one())]);
+        return Ok(vec![(tree.clone(), C::Scalar::braid_one())]);
     }
-    let mut current = vec![(tree.clone(), R::Scalar::braid_one())];
+    let mut current = vec![(tree.clone(), C::Scalar::braid_one())];
     let mut current_levels = levels.to_vec();
     for &swap in swaps {
         let inverse = current_levels[swap] > current_levels[swap + 1];
         let mut next_terms = FusionTermAccumulator::new();
         for (tree, coefficient) in current {
             for (next_tree, step_coefficient) in
-                generic_artin_braid_at_with_inverse(rule, &tree, swap, inverse)?
+                generic_artin_braid_at_with_inverse_checked(rule, &tree, swap, inverse)?
             {
                 next_terms.push(next_tree, coefficient.clone() * step_coefficient);
             }
@@ -9083,13 +9550,45 @@ where
     R: GenericRigidSymbols,
     R::Scalar: GenericBraidScalar,
 {
+    let mut checked = InfallibleGenericRigid(rule);
+    match generic_bendright_tree_pair_result(&mut checked, tree_pair) {
+        Ok(rows) => Ok(rows),
+        Err(CheckedGenericSymbolError::Provider(never)) => match never {},
+        Err(CheckedGenericSymbolError::Core(error)) => Err(error),
+        Err(CheckedGenericSymbolError::Shape { .. }) => {
+            unreachable!("infallible Generic symbols must be categorical")
+        }
+    }
+}
+
+#[cfg(test)]
+fn generic_bendright_tree_pair_checked<C>(
+    rule: &mut C,
+    tree_pair: &FusionTreePairKey,
+) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+where
+    C: CheckedGenericRigidSymbols,
+{
+    validate_generic_fusion_tree_pair_checked(rule, tree_pair)
+        .map_err(map_checked_generic_structure_error)?;
+    generic_bendright_tree_pair_result(rule, tree_pair)
+}
+
+fn generic_bendright_tree_pair_result<C>(
+    rule: &mut C,
+    tree_pair: &FusionTreePairKey,
+) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+where
+    C: GenericRigidAccess,
+{
     let codomain = tree_pair.codomain_tree();
     let domain = tree_pair.domain_tree();
     let codomain_rank = codomain.uncoupled().len();
     if codomain_rank == 0 {
         return Err(CoreError::MalformedFusionTree {
             message: "bendright requires at least one codomain leg",
-        });
+        }
+        .into());
     }
 
     let coupled = codomain.coupled();
@@ -9098,7 +9597,8 @@ where
         if domain_coupled != coupled {
             return Err(CoreError::MalformedFusionTree {
                 message: "fusion tree pair requires matching coupled sectors",
-            });
+            }
+            .into());
         }
     }
 
@@ -9121,6 +9621,9 @@ where
             message: "codomain tree is missing a duality flag",
         },
     )?;
+    let domain_bent_sector = rule
+        .try_dual(bent_sector)
+        .map_err(CheckedGenericSymbolError::Provider)?;
 
     // New codomain tree: drop the last leg (TK `_bendright_treepair` :41-45).
     let cod_inner = codomain.innerlines();
@@ -9150,7 +9653,7 @@ where
         .uncoupled()
         .iter()
         .copied()
-        .chain(std::iter::once(rule.dual(bent_sector)))
+        .chain(std::iter::once(domain_bent_sector))
         .collect::<Vec<_>>()
         .into();
     let domain_is_dual: Arc<[bool]> = domain
@@ -9170,16 +9673,25 @@ where
 
     // coeff₀ = √dim(c)·(1/√dim(a)); ·conj(κ_{dual(b)}) if the bent leg is dual
     // (TK :89-92, same placement as the mult-free bend :2424-2429).
-    let mut coeff0 = rule.sqrt_dim_scalar(coupled) * rule.inv_sqrt_dim_scalar(left_coupled);
+    let mut coeff0 = rule
+        .try_sqrt_dim_scalar(coupled)
+        .map_err(CheckedGenericSymbolError::Provider)?
+        * rule
+            .try_inv_sqrt_dim_scalar(left_coupled)
+            .map_err(CheckedGenericSymbolError::Provider)?;
     if bent_is_dual {
+        let dual_bent_sector = rule
+            .try_dual(bent_sector)
+            .map_err(CheckedGenericSymbolError::Provider)?;
         coeff0 = coeff0
             * rule
-                .frobenius_schur_phase_scalar(rule.dual(bent_sector))
+                .try_frobenius_schur_phase_scalar(dual_bent_sector)
+                .map_err(CheckedGenericSymbolError::Provider)?
                 .braid_conj();
     }
 
     // Bmat = Bsymbol(a, b, c)  (TK :98); μ = N₁>1 ? vertices[end] : 1  (TK :99).
-    let bmat = rule.b_symbol_generic(left_coupled, bent_sector, coupled);
+    let bmat = rule.try_b_symbol_generic(left_coupled, bent_sector, coupled)?;
     let mu0 = if codomain_rank > 1 {
         mu_index(codomain, codomain_rank - 2)?
     } else {
@@ -9187,7 +9699,14 @@ where
     };
 
     let (_, cols) = bmat.shape();
-    let mut out: Vec<(FusionTreePairKey, R::Scalar)> = Vec::new();
+    if mu0 >= bmat.shape().0 {
+        return Err(CheckedGenericSymbolError::Shape {
+            symbol: "B",
+            expected: vec![mu0 + 1, cols],
+            actual: vec![bmat.shape().0, cols],
+        });
+    }
+    let mut out: Vec<(FusionTreePairKey, C::Scalar)> = Vec::new();
     for nu0 in 0..cols {
         // coeff = coeff₀ · Bmat[μ, ν]  (TK :105); iszero → skip  (TK :106).
         let coeff = coeff0.clone() * bmat.get(mu0, nu0).clone();
@@ -9242,11 +9761,42 @@ where
     R: GenericRigidSymbols,
     R::Scalar: GenericBraidScalar,
 {
+    let mut checked = InfallibleGenericRigid(rule);
+    match generic_bendleft_tree_pair_result(&mut checked, tree_pair) {
+        Ok(rows) => Ok(rows),
+        Err(CheckedGenericSymbolError::Provider(never)) => match never {},
+        Err(CheckedGenericSymbolError::Core(error)) => Err(error),
+        Err(CheckedGenericSymbolError::Shape { .. }) => {
+            unreachable!("infallible Generic symbols must be categorical")
+        }
+    }
+}
+
+#[cfg(test)]
+fn generic_bendleft_tree_pair_checked<C>(
+    rule: &mut C,
+    tree_pair: &FusionTreePairKey,
+) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+where
+    C: CheckedGenericRigidSymbols,
+{
+    validate_generic_fusion_tree_pair_checked(rule, tree_pair)
+        .map_err(map_checked_generic_structure_error)?;
+    generic_bendleft_tree_pair_result(rule, tree_pair)
+}
+
+fn generic_bendleft_tree_pair_result<C>(
+    rule: &mut C,
+    tree_pair: &FusionTreePairKey,
+) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+where
+    C: GenericRigidAccess,
+{
     let swapped = FusionTreePairKey::pair(
         tree_pair.domain_tree().clone(),
         tree_pair.codomain_tree().clone(),
     );
-    Ok(generic_bendright_tree_pair(rule, &swapped)?
+    Ok(generic_bendright_tree_pair_result(rule, &swapped)?
         .into_iter()
         .map(|(bent, coefficient)| {
             (
@@ -9272,9 +9822,21 @@ where
     F: FnMut(&R, &FusionTreePairKey) -> Result<I, CoreError>,
     I: IntoIterator<Item = (FusionTreePairKey, R::Scalar)>,
 {
+    compose_generic_tree_pair_terms_result(terms, |key| transform(rule, key))
+}
+
+fn compose_generic_tree_pair_terms_result<S, E, F, I>(
+    terms: Vec<(FusionTreePairKey, S)>,
+    mut transform: F,
+) -> Result<Vec<(FusionTreePairKey, S)>, E>
+where
+    S: GenericBraidScalar,
+    F: FnMut(&FusionTreePairKey) -> Result<I, E>,
+    I: IntoIterator<Item = (FusionTreePairKey, S)>,
+{
     let mut output = FusionTermAccumulator::new();
     for (key, coefficient) in terms {
-        for (next_key, next_coefficient) in transform(rule, &key)? {
+        for (next_key, next_coefficient) in transform(&key)? {
             output.push(next_key, coefficient.clone() * next_coefficient);
         }
     }
@@ -9326,7 +9888,15 @@ where
     R::Scalar: GenericBraidScalar,
 {
     let rule = tree_pair.rule;
-    generic_repartition_tree_pair_unchecked(rule, tree_pair.key, target_codomain_rank)
+    let mut checked = InfallibleGenericRigid(rule);
+    match generic_repartition_tree_pair_result(&mut checked, tree_pair.key, target_codomain_rank) {
+        Ok(rows) => Ok(rows),
+        Err(CheckedGenericSymbolError::Provider(never)) => match never {},
+        Err(CheckedGenericSymbolError::Core(error)) => Err(error),
+        Err(CheckedGenericSymbolError::Shape { .. }) => {
+            unreachable!("infallible Generic symbols must be categorical")
+        }
+    }
 }
 
 fn generic_repartition_tree_pair_unchecked<R>(
@@ -9338,18 +9908,63 @@ where
     R: GenericRigidSymbols,
     R::Scalar: GenericBraidScalar,
 {
-    let mut current = vec![(tree_pair.clone(), R::Scalar::braid_one())];
+    let mut checked = InfallibleGenericRigid(rule);
+    match generic_repartition_tree_pair_result(&mut checked, tree_pair, target_codomain_rank) {
+        Ok(rows) => Ok(rows),
+        Err(CheckedGenericSymbolError::Provider(never)) => match never {},
+        Err(CheckedGenericSymbolError::Core(error)) => Err(error),
+        Err(CheckedGenericSymbolError::Shape { .. }) => {
+            unreachable!("infallible Generic symbols must be categorical")
+        }
+    }
+}
+
+/// Checked Generic-fusion repartition for a mutable fallible provider.
+///
+/// Structural validation completes before the first F, dimension, or pivotal
+/// query, and provider failures retain their typed source.
+pub fn generic_repartition_tree_pair_checked<C>(
+    rule: &mut C,
+    tree_pair: &FusionTreePairKey,
+    target_codomain_rank: usize,
+) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+where
+    C: CheckedGenericRigidSymbols,
+{
+    let total_rank =
+        tree_pair.codomain_tree().uncoupled().len() + tree_pair.domain_tree().uncoupled().len();
+    if target_codomain_rank > total_rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: total_rank,
+            actual: target_codomain_rank,
+        }
+        .into());
+    }
+    validate_generic_fusion_tree_pair_checked(rule, tree_pair)
+        .map_err(map_checked_generic_structure_error)?;
+    generic_repartition_tree_pair_result(rule, tree_pair, target_codomain_rank)
+}
+
+fn generic_repartition_tree_pair_result<C>(
+    rule: &mut C,
+    tree_pair: &FusionTreePairKey,
+    target_codomain_rank: usize,
+) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+where
+    C: GenericRigidAccess,
+{
+    let mut current = vec![(tree_pair.clone(), C::Scalar::braid_one())];
     let mut current_codomain_rank = tree_pair.codomain_tree().uncoupled().len();
     // N = numout - target > 0 ⇒ bendright; < 0 ⇒ bendleft (TK :492).
     while current_codomain_rank < target_codomain_rank {
-        current = compose_generic_tree_pair_terms(rule, current, |rule, key| {
-            generic_bendleft_tree_pair(rule, key)
+        current = compose_generic_tree_pair_terms_result(current, |key| {
+            generic_bendleft_tree_pair_result(rule, key)
         })?;
         current_codomain_rank += 1;
     }
     while current_codomain_rank > target_codomain_rank {
-        current = compose_generic_tree_pair_terms(rule, current, |rule, key| {
-            generic_bendright_tree_pair(rule, key)
+        current = compose_generic_tree_pair_terms_result(current, |key| {
+            generic_bendright_tree_pair_result(rule, key)
         })?;
         current_codomain_rank -= 1;
     }
@@ -10140,51 +10755,11 @@ where
     }
 }
 
-/// Generic-fusion sibling of [`multiplicity_free_repartition_terms`]: repartition
-/// a whole term list to `target_codomain_rank` legs, composing the bend
-/// coefficient matrices. Same accumulate-and-compose loop, different rule bound.
-fn generic_repartition_terms<R>(
-    rule: &R,
-    terms: Vec<(FusionTreePairKey, R::Scalar)>,
-    target_codomain_rank: usize,
-) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
-where
-    R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
-{
-    let mut current = terms;
-    let Some((first_key, _)) = current.first() else {
-        return Ok(current);
-    };
-    let total_rank =
-        first_key.codomain_tree().uncoupled().len() + first_key.domain_tree().uncoupled().len();
-    if target_codomain_rank > total_rank {
-        return Err(CoreError::DimensionMismatch {
-            expected: total_rank,
-            actual: target_codomain_rank,
-        });
-    }
-    let mut current_codomain_rank = first_key.codomain_tree().uncoupled().len();
-    while current_codomain_rank < target_codomain_rank {
-        current = compose_generic_tree_pair_terms(rule, current, |rule, key| {
-            generic_bendleft_tree_pair(rule, key)
-        })?;
-        current_codomain_rank += 1;
-    }
-    while current_codomain_rank > target_codomain_rank {
-        current = compose_generic_tree_pair_terms(rule, current, |rule, key| {
-            generic_bendright_tree_pair(rule, key)
-        })?;
-        current_codomain_rank -= 1;
-    }
-    Ok(current)
-}
-
 /// Generic-fusion `braid` on a full tree pair: bend everything into the codomain,
 /// braid there, bend back — the TensorKit `braid`/`fsbraid` decomposition.
 /// Structural twin of [`multiplicity_free_braid_tree_pair`] (:829): the only
 /// difference is the primitive family (`generic_repartition_tree_pair` /
-/// `generic_braid_tree` / `generic_repartition_terms`) and the `braid_one` seed;
+/// `generic_braid_tree`) and the `braid_one` seed;
 /// no new recoupling formula is introduced.
 /// `tree_pair` follows [`FusionTreePairKey::validate_for_rule`]'s
 /// provider-domain precondition.
@@ -10300,15 +10875,44 @@ where
     R: GenericRigidSymbols,
     R::Scalar: GenericBraidScalar,
 {
-    let rule = tree_pair.rule;
+    let mut checked = InfallibleGenericRigid(tree_pair.rule);
+    match generic_braid_tree_pair_result(
+        &mut checked,
+        tree_pair.key,
+        target_codomain_rank,
+        permutation,
+        levels,
+        swaps,
+        identity,
+    ) {
+        Ok(rows) => Ok(rows),
+        Err(CheckedGenericSymbolError::Provider(never)) => match never {},
+        Err(CheckedGenericSymbolError::Core(error)) => Err(error),
+        Err(CheckedGenericSymbolError::Shape { .. }) => {
+            unreachable!("infallible Generic symbols must be categorical")
+        }
+    }
+}
+
+fn generic_braid_tree_pair_result<C>(
+    rule: &mut C,
+    tree_pair: &FusionTreePairKey,
+    target_codomain_rank: usize,
+    permutation: &[usize],
+    levels: &[usize],
+    swaps: &[usize],
+    identity: bool,
+) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+where
+    C: GenericRigidAccess,
+{
     if identity {
-        return Ok(vec![(tree_pair.key.clone(), R::Scalar::braid_one())]);
+        return Ok(vec![(tree_pair.clone(), C::Scalar::braid_one())]);
     }
     let all_rank = permutation.len();
-    let mut current =
-        generic_repartition_tree_pair_unchecked(rule, tree_pair.key, all_rank)?;
-    current = compose_generic_tree_pair_terms(rule, current, |rule, key| {
-        generic_braid_tree_unchecked(
+    let mut current = generic_repartition_tree_pair_result(rule, tree_pair, all_rank)?;
+    current = compose_generic_tree_pair_terms_result(current, |key| {
+        generic_braid_tree_result(
             rule,
             key.codomain_tree(),
             permutation,
@@ -10327,7 +10931,73 @@ where
                     .collect::<Vec<_>>()
             })
     })?;
-    generic_repartition_terms(rule, current, target_codomain_rank)
+    compose_generic_tree_pair_terms_result(current, |key| {
+        generic_repartition_tree_pair_result(rule, key, target_codomain_rank)
+    })
+}
+
+/// Checked Generic-fusion braid on a full tree pair.
+pub fn generic_braid_tree_pair_checked<C>(
+    rule: &mut C,
+    tree_pair: &FusionTreePairKey,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+    codomain_levels: &[usize],
+    domain_levels: &[usize],
+) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+where
+    C: CheckedGenericRigidSymbols,
+{
+    let codomain_rank = tree_pair.codomain_tree().uncoupled().len();
+    let domain_rank = tree_pair.domain_tree().uncoupled().len();
+    if codomain_levels.len() != codomain_rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: codomain_rank,
+            actual: codomain_levels.len(),
+        }
+        .into());
+    }
+    if domain_levels.len() != domain_rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: domain_rank,
+            actual: domain_levels.len(),
+        }
+        .into());
+    }
+    if !rule.fusion_style().has_multiplicity() {
+        return Err(CoreError::UnsupportedFusionStyle {
+            expected: FusionStyleKind::Generic,
+            actual: rule.fusion_style(),
+        }
+        .into());
+    }
+    validate_generic_fusion_tree_pair_checked(rule, tree_pair)
+        .map_err(map_checked_generic_structure_error)?;
+    let permutation = linearize_tree_pair_permutation(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    )?;
+    let swaps = permutation_to_adjacent_swaps(&permutation, codomain_rank + domain_rank)?;
+    let identity = tree_pair_axis_map_is_identity(
+        codomain_permutation,
+        domain_permutation,
+        codomain_rank,
+        domain_rank,
+    );
+    let mut levels = Vec::with_capacity(codomain_rank + domain_rank);
+    levels.extend_from_slice(codomain_levels);
+    levels.extend(domain_levels.iter().rev().copied());
+    generic_braid_tree_pair_result(
+        rule,
+        tree_pair,
+        codomain_permutation.len(),
+        &permutation,
+        &levels,
+        &swaps,
+        identity,
+    )
 }
 
 /// Generic-fusion `permute` = [`generic_braid_tree_pair`] with the identity
@@ -10359,6 +11029,37 @@ where
     }
     let validated = validate_fusion_tree_pair_for_rule(rule, tree_pair)?;
     generic_permute_tree_pair_proven(validated, codomain_permutation, domain_permutation)
+}
+
+/// Checked Generic-fusion permutation on a full tree pair.
+pub fn generic_permute_tree_pair_checked<C>(
+    rule: &mut C,
+    tree_pair: &FusionTreePairKey,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+) -> Result<Vec<(FusionTreePairKey, C::Scalar)>, CheckedGenericSymbolError<C::Error>>
+where
+    C: CheckedGenericRigidSymbols,
+{
+    if !rule.braiding_style().is_symmetric() {
+        return Err(CoreError::UnsupportedBraidingStyle {
+            expected: "symmetric braiding",
+            actual: rule.braiding_style(),
+        }
+        .into());
+    }
+    let codomain_rank = tree_pair.codomain_tree().uncoupled().len();
+    let domain_rank = tree_pair.domain_tree().uncoupled().len();
+    let codomain_levels = (0..codomain_rank).collect::<Vec<_>>();
+    let domain_levels = (codomain_rank..codomain_rank + domain_rank).collect::<Vec<_>>();
+    generic_braid_tree_pair_checked(
+        rule,
+        tree_pair,
+        codomain_permutation,
+        domain_permutation,
+        &codomain_levels,
+        &domain_levels,
+    )
 }
 
 pub(crate) fn generic_permute_tree_pair_proven<R>(

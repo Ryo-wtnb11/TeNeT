@@ -72,6 +72,12 @@ fn checked_generic_late_nsymbol_failure_propagates() {
 }
 impl CheckedGenericFusion for Toy {
     type Error = ToyError;
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Generic
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Bosonic
+    }
     fn vacuum(&self) -> SectorId {
         SectorId::new(0)
     }
@@ -113,6 +119,12 @@ impl CheckedGenericFusion for Toy {
 struct DefaultFoldToy(Toy);
 impl CheckedGenericFusion for DefaultFoldToy {
     type Error = ToyError;
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.0.fusion_style()
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.0.braiding_style()
+    }
     fn vacuum(&self) -> SectorId {
         self.0.vacuum()
     }
@@ -137,6 +149,12 @@ impl CheckedGenericFusion for DefaultFoldToy {
 struct TaintedFoldToy(Toy);
 impl CheckedGenericFusion for TaintedFoldToy {
     type Error = ToyError;
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.0.fusion_style()
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.0.braiding_style()
+    }
     fn vacuum(&self) -> SectorId {
         self.0.vacuum()
     }

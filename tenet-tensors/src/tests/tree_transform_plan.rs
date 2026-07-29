@@ -7537,8 +7537,9 @@ fn tree_transform_replay_dispatches_through_kernel_adapter() {
 // table; the recoupling math itself is proven in tenet-core's B2c tests.
 // ======================================================================
 use tenet_core::{
-    generic_braid_tree_pair, generic_permute_tree_pair, generic_transpose_tree_pair, GenericFArray,
-    GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols,
+    generic_braid_tree_pair, generic_permute_tree_pair, generic_transpose_tree_pair,
+    CheckedGenericFusion, CheckedGenericRigidSymbols, GenericFArray, GenericFusionSymbols,
+    GenericRMatrix, GenericRigidSymbols,
 };
 
 #[derive(Clone, Copy)]
@@ -7692,6 +7693,194 @@ impl GenericRigidSymbols for DenseGenericRule {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CheckedPlanCall {
+    Dual,
+    N,
+    SqrtDim,
+    InvSqrtDim,
+    FrobeniusSchur,
+    F,
+    R,
+}
+
+impl CheckedPlanCall {
+    const COUNT: usize = 7;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MalformedCheckedSymbol {
+    F,
+    R,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CheckedPlanSpyError(CheckedPlanCall);
+
+impl std::fmt::Display for CheckedPlanSpyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "injected {:?} failure", self.0)
+    }
+}
+
+impl std::error::Error for CheckedPlanSpyError {}
+
+struct CheckedPlanSpy<'a, R> {
+    rule: &'a R,
+    fusion_style: Option<FusionStyleKind>,
+    braiding_style: Option<BraidingStyleKind>,
+    fail: Option<(CheckedPlanCall, usize)>,
+    malformed: Option<MalformedCheckedSymbol>,
+    calls: std::cell::Cell<[usize; CheckedPlanCall::COUNT]>,
+}
+
+impl<'a, R> CheckedPlanSpy<'a, R> {
+    fn new(rule: &'a R) -> Self {
+        Self {
+            rule,
+            fusion_style: None,
+            braiding_style: None,
+            fail: None,
+            malformed: None,
+            calls: std::cell::Cell::new([0; CheckedPlanCall::COUNT]),
+        }
+    }
+
+    fn trip(&self, call: CheckedPlanCall) -> Result<(), CheckedPlanSpyError> {
+        let mut calls = self.calls.get();
+        calls[call.index()] += 1;
+        self.calls.set(calls);
+        if self.fail == Some((call, calls[call.index()])) {
+            Err(CheckedPlanSpyError(call))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn call_count(&self, call: CheckedPlanCall) -> usize {
+        self.calls.get()[call.index()]
+    }
+}
+
+impl<R: FusionRule> CheckedGenericFusion for CheckedPlanSpy<'_, R> {
+    type Error = CheckedPlanSpyError;
+
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.fusion_style
+            .unwrap_or_else(|| self.rule.fusion_style())
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.braiding_style
+            .unwrap_or_else(|| self.rule.braiding_style())
+    }
+
+    fn vacuum(&self) -> SectorId {
+        self.rule.vacuum()
+    }
+
+    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+        self.trip(CheckedPlanCall::Dual)?;
+        Ok(self.rule.dual(sector))
+    }
+
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        Ok(self.rule.fusion_channels(left, right))
+    }
+
+    fn try_fusion_channels_in_table(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        Ok(self.rule.fusion_channels_in_table(left, right))
+    }
+
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, Self::Error> {
+        self.trip(CheckedPlanCall::N)?;
+        Ok(self.rule.nsymbol(left, right, coupled))
+    }
+}
+
+impl<R> CheckedGenericRigidSymbols for CheckedPlanSpy<'_, R>
+where
+    R: GenericRigidSymbols,
+    R::Scalar: tenet_core::GenericBraidScalar + Send + Sync,
+{
+    type Scalar = R::Scalar;
+
+    fn try_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        self.trip(CheckedPlanCall::SqrtDim)?;
+        Ok(self.rule.sqrt_dim_scalar(sector))
+    }
+
+    fn try_inv_sqrt_dim_scalar(&mut self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        self.trip(CheckedPlanCall::InvSqrtDim)?;
+        Ok(self.rule.inv_sqrt_dim_scalar(sector))
+    }
+
+    fn try_frobenius_schur_phase_scalar(
+        &mut self,
+        sector: SectorId,
+    ) -> Result<Self::Scalar, Self::Error> {
+        self.trip(CheckedPlanCall::FrobeniusSchur)?;
+        Ok(self.rule.frobenius_schur_phase_scalar(sector))
+    }
+
+    fn try_f_symbol_generic(
+        &mut self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> Result<GenericFArray<Self::Scalar>, Self::Error> {
+        self.trip(CheckedPlanCall::F)?;
+        let symbol = self.rule.f_symbol_generic(a, b, c, d, e, f);
+        if self.malformed == Some(MalformedCheckedSymbol::F) {
+            Ok(GenericFArray::new(
+                symbol.data().to_vec(),
+                (1, 1, symbol.data().len(), 1),
+            ))
+        } else {
+            Ok(symbol)
+        }
+    }
+
+    fn try_r_symbol_generic(
+        &mut self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+    ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> {
+        self.trip(CheckedPlanCall::R)?;
+        let symbol = self.rule.r_symbol_generic(a, b, c);
+        if self.malformed == Some(MalformedCheckedSymbol::R) {
+            Ok(GenericRMatrix::new(
+                symbol.data().to_vec(),
+                1,
+                symbol.data().len(),
+            ))
+        } else {
+            Ok(symbol)
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct AnyonicGenericRule;
 
@@ -7798,6 +7987,29 @@ fn dense_generic_source_pairs(rule: &DenseGenericRule) -> [FusionTreePairKey; 2]
             .unwrap(),
         )
     })
+}
+
+fn dense_generic_dual_source_pair(rule: &DenseGenericRule) -> FusionTreePairKey {
+    FusionTreePairKey::pair(
+        FusionTreeKey::try_new_for_rule(
+            rule,
+            [SectorId::new(1), SectorId::new(1)],
+            SectorId::new(1),
+            [false, true],
+            [],
+            [MultiplicityIndex::ONE],
+        )
+        .unwrap(),
+        FusionTreeKey::try_new_for_rule(
+            rule,
+            [SectorId::new(1)],
+            SectorId::new(1),
+            [false],
+            [],
+            [],
+        )
+        .unwrap(),
+    )
 }
 
 // The generic plan compile reproduces the core `generic_permute_tree_pair`
@@ -7999,6 +8211,265 @@ fn generic_dense_block_plan_matches_per_source_oracle_matrix() {
         spec.recoupling_coefficients_dst_src(),
         expected_coefficients.as_slice()
     );
+}
+
+fn su3_rank3_outer_multiplicity_pairs(rule: &tenet_core::Su3FusionRule) -> Vec<FusionTreePairKey> {
+    let eight = rule.sector_of(1, 1).unwrap();
+    let vacuum = SectorId::new(0);
+    [1, 2]
+        .map(|multiplicity| {
+            FusionTreePairKey::pair(
+                FusionTreeKey::try_new_for_rule(
+                    rule,
+                    [eight, eight, eight],
+                    vacuum,
+                    [false, false, false],
+                    [eight],
+                    [
+                        MultiplicityIndex::new(multiplicity).unwrap(),
+                        MultiplicityIndex::ONE,
+                    ],
+                )
+                .unwrap(),
+                FusionTreeKey::try_new_for_rule(rule, [], vacuum, [], [], []).unwrap(),
+            )
+        })
+        .to_vec()
+}
+
+#[test]
+fn checked_generic_rank3_plan_matches_legacy_rows_coefficients_and_order() {
+    use tenet_core::{InfallibleGeneric, Su3FusionRule};
+
+    let rule = Su3FusionRule::new();
+    let pairs = su3_rank3_outer_multiplicity_pairs(&rule);
+    let structure = packed_fixture_structure(
+        3,
+        pairs
+            .iter()
+            .cloned()
+            .map(BlockKey::from)
+            .map(|key| (key, vec![1usize; 3])),
+    )
+    .unwrap();
+    for operation in [
+        // The adjacent 8×8 exchange is R-only.
+        TreeTransformOperation::permute([1, 0, 2], []),
+        // Moving the right 8 past the middle 8 exercises the inner F-R-F path.
+        TreeTransformOperation::braid([0, 2, 1], [], [0, 1, 2], []),
+    ] {
+        let legacy =
+            build_generic_tree_pair_transform_group_plan(&rule, operation.clone(), &structure)
+                .unwrap();
+        let mut checked_rule = InfallibleGeneric::new(&rule);
+        let checked = build_checked_generic_tree_pair_transform_group_plan(
+            &mut checked_rule,
+            operation,
+            &structure,
+        )
+        .unwrap();
+        assert_eq!(checked.specs().len(), legacy.specs().len());
+        for (checked, legacy) in checked.specs().iter().zip(legacy.specs()) {
+            assert_eq!(checked.src_keys(), legacy.src_keys());
+            assert_eq!(checked.dst_keys(), legacy.dst_keys());
+            assert_eq!(
+                checked.recoupling_coefficients_dst_src(),
+                legacy.recoupling_coefficients_dst_src()
+            );
+        }
+    }
+}
+
+#[test]
+fn checked_generic_plan_preserves_provider_sources_and_rejects_bad_f_r_shapes() {
+    use tenet_core::Su3FusionRule;
+
+    let rule = Su3FusionRule::new();
+    let pairs = su3_rank3_outer_multiplicity_pairs(&rule);
+    let structure = packed_fixture_structure(
+        3,
+        pairs
+            .into_iter()
+            .map(BlockKey::from)
+            .map(|key| (key, vec![1usize; 3])),
+    )
+    .unwrap();
+    let r_only = TreeTransformOperation::permute([1, 0, 2], []);
+    let inner_f_r = TreeTransformOperation::braid([0, 2, 1], [], [0, 1, 2], []);
+    let store = RuntimeTreeTransformStore::<f64>::default();
+    let pristine = store.info();
+
+    for (operation, call) in [
+        (r_only.clone(), CheckedPlanCall::R),
+        (inner_f_r.clone(), CheckedPlanCall::F),
+    ] {
+        let mut provider = CheckedPlanSpy::new(&rule);
+        // Fail after the first lookup has succeeded: compilation must still
+        // return no partially assembled plan.
+        provider.fail = Some((call, 2));
+        let error = build_checked_generic_tree_pair_transform_group_plan(
+            &mut provider,
+            operation,
+            &structure,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CheckedGenericPlanError::Provider(CheckedPlanSpyError(found)) if found == call
+        ));
+        assert_eq!(
+            std::error::Error::source(&error)
+                .and_then(|source| source.downcast_ref::<CheckedPlanSpyError>()),
+            Some(&CheckedPlanSpyError(call))
+        );
+        // Checked planning is a standalone compile step: a failed provider
+        // query cannot publish a partial Runtime cache entry or statistic.
+        assert_eq!(store.info(), pristine);
+    }
+
+    for (operation, malformed, symbol) in [
+        (r_only, MalformedCheckedSymbol::R, "R"),
+        (inner_f_r, MalformedCheckedSymbol::F, "F"),
+    ] {
+        let mut provider = CheckedPlanSpy::new(&rule);
+        provider.malformed = Some(malformed);
+        let error = build_checked_generic_tree_pair_transform_group_plan(
+            &mut provider,
+            operation,
+            &structure,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CheckedGenericPlanError::SymbolShape {
+                symbol: found,
+                ..
+            } if found == symbol
+        ));
+        assert_eq!(store.info(), pristine);
+    }
+}
+
+#[test]
+fn checked_generic_plan_rejects_style_before_structure_or_symbol_queries() {
+    use tenet_core::Su3FusionRule;
+
+    let rule = Su3FusionRule::new();
+    let pairs = su3_rank3_outer_multiplicity_pairs(&rule);
+    let structure = packed_fixture_structure(
+        3,
+        pairs
+            .into_iter()
+            .map(BlockKey::from)
+            .map(|key| (key, vec![1usize; 3])),
+    )
+    .unwrap();
+    let operation = TreeTransformOperation::permute([1, 0, 2], []);
+
+    let mut wrong_fusion_style = CheckedPlanSpy::new(&rule);
+    wrong_fusion_style.fusion_style = Some(FusionStyleKind::Simple);
+    wrong_fusion_style.braiding_style = Some(BraidingStyleKind::NoBraiding);
+    let error = build_checked_generic_tree_pair_transform_group_plan(
+        &mut wrong_fusion_style,
+        operation.clone(),
+        &structure,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        CheckedGenericPlanError::Operation(OperationError::UnsupportedFusionStyle {
+            style: FusionStyleKind::Simple,
+            ..
+        })
+    ));
+    assert_eq!(wrong_fusion_style.calls.get(), [0; CheckedPlanCall::COUNT]);
+
+    // "Planar" providers have `NoBraiding`: a permutation is rejected before
+    // either structural N/dual access or any F/R/rigidity lookup.
+    let mut planar = CheckedPlanSpy::new(&rule);
+    planar.braiding_style = Some(BraidingStyleKind::NoBraiding);
+    let error =
+        build_checked_generic_tree_pair_transform_group_plan(&mut planar, operation, &structure)
+            .unwrap_err();
+    assert!(matches!(
+        error,
+        CheckedGenericPlanError::Operation(OperationError::UnsupportedBraidingStyle {
+            style: BraidingStyleKind::NoBraiding,
+            ..
+        })
+    ));
+    assert_eq!(planar.calls.get(), [0; CheckedPlanCall::COUNT]);
+
+    let mut second_tree_fails_structure = CheckedPlanSpy::new(&rule);
+    // Each rank-3 tree has two vertices. Failure 3 is therefore the first N
+    // query of the second source tree in the all-source structural preflight.
+    second_tree_fails_structure.fail = Some((CheckedPlanCall::N, 3));
+    let error = build_checked_generic_tree_pair_transform_group_plan(
+        &mut second_tree_fails_structure,
+        TreeTransformOperation::permute([1, 0, 2], []),
+        &structure,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        CheckedGenericPlanError::Provider(CheckedPlanSpyError(CheckedPlanCall::N))
+    ));
+    for call in [
+        CheckedPlanCall::SqrtDim,
+        CheckedPlanCall::InvSqrtDim,
+        CheckedPlanCall::FrobeniusSchur,
+        CheckedPlanCall::F,
+        CheckedPlanCall::R,
+    ] {
+        assert_eq!(second_tree_fails_structure.call_count(call), 0);
+    }
+}
+
+#[test]
+fn checked_generic_plan_repartition_queries_checked_rigid_primitives() {
+    let rule = DenseGenericRule;
+    let pair = dense_generic_dual_source_pair(&rule);
+    let structure = packed_fixture_structure(3, [(BlockKey::from(pair), vec![1usize; 3])]).unwrap();
+    let operation = TreeTransformOperation::permute([1, 0], [2]);
+    for call in [
+        CheckedPlanCall::Dual,
+        CheckedPlanCall::N,
+        CheckedPlanCall::SqrtDim,
+        CheckedPlanCall::InvSqrtDim,
+        CheckedPlanCall::FrobeniusSchur,
+        // On this repartition, the F lookup derives the B move; B is not a
+        // separate provider method.
+        CheckedPlanCall::F,
+        CheckedPlanCall::R,
+    ] {
+        let mut provider = CheckedPlanSpy::new(&rule);
+        provider.fail = Some((call, 1));
+        let error = build_checked_generic_tree_pair_transform_group_plan(
+            &mut provider,
+            operation.clone(),
+            &structure,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CheckedGenericPlanError::Provider(CheckedPlanSpyError(found)) if found == call
+        ));
+    }
+
+    let mut provider = CheckedPlanSpy::new(&rule);
+    build_checked_generic_tree_pair_transform_group_plan(&mut provider, operation, &structure)
+        .unwrap();
+    for call in [
+        CheckedPlanCall::Dual,
+        CheckedPlanCall::N,
+        CheckedPlanCall::SqrtDim,
+        CheckedPlanCall::InvSqrtDim,
+        CheckedPlanCall::FrobeniusSchur,
+        CheckedPlanCall::F,
+        CheckedPlanCall::R,
+    ] {
+        assert!(provider.call_count(call) > 0, "{call:?} was not live");
+    }
 }
 
 #[test]

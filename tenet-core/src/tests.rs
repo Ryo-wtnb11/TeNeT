@@ -13729,6 +13729,64 @@ mod tests {
         }
     }
 
+    impl CheckedGenericFusion for UnitaryToyOmRule {
+        type Error = std::convert::Infallible;
+        fn fusion_style(&self) -> FusionStyleKind { FusionStyleKind::Generic }
+        fn braiding_style(&self) -> BraidingStyleKind { BraidingStyleKind::Bosonic }
+        fn vacuum(&self) -> SectorId { FusionRule::vacuum(self) }
+        fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> { Ok(sector) }
+        fn try_fusion_channels(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.fusion_channels(a,b)) }
+        fn try_fusion_channels_in_table(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.fusion_channels_in_table(a,b)) }
+        fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> { Ok(self.nsymbol(a,b,c)) }
+    }
+
+    impl CheckedGenericRigidSymbols for UnitaryToyOmRule {
+        type Scalar = f64;
+        fn try_sqrt_dim_scalar(&mut self, _: SectorId) -> Result<f64, Self::Error> { Ok(1.0) }
+        fn try_inv_sqrt_dim_scalar(&mut self, _: SectorId) -> Result<f64, Self::Error> { Ok(1.0) }
+        fn try_frobenius_schur_phase_scalar(&mut self, _: SectorId) -> Result<f64, Self::Error> { Ok(1.0) }
+        fn try_f_symbol_generic(&mut self, a: SectorId,b: SectorId,c: SectorId,d: SectorId,e: SectorId,f: SectorId) -> Result<GenericFArray<f64>, Self::Error> { Ok(self.f_symbol_generic(a,b,c,d,e,f)) }
+        fn try_r_symbol_generic(&mut self, a: SectorId,b: SectorId,c: SectorId) -> Result<GenericRMatrix<f64>, Self::Error> { Ok(self.r_symbol_generic(a,b,c)) }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ArtinSpyError { F, R }
+    impl std::fmt::Display for ArtinSpyError { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{self:?}") } }
+    impl std::error::Error for ArtinSpyError {}
+
+    struct ArtinSpy {
+        inner: UnitaryToyOmRule,
+        f_calls: std::cell::Cell<usize>,
+        r_calls: std::cell::Cell<usize>,
+        rigid_calls: std::cell::Cell<usize>,
+        fail_f: Option<usize>,
+        fail_r: Option<usize>,
+        bad_f: bool,
+        bad_r: bool,
+    }
+    impl ArtinSpy {
+        fn new() -> Self { Self { inner: UnitaryToyOmRule, f_calls: std::cell::Cell::new(0), r_calls: std::cell::Cell::new(0), rigid_calls: std::cell::Cell::new(0), fail_f: None, fail_r: None, bad_f: false, bad_r: false } }
+        fn trip(counter: &std::cell::Cell<usize>, fail: Option<usize>, error: ArtinSpyError) -> Result<(), ArtinSpyError> { let n = counter.get()+1; counter.set(n); if fail == Some(n) { Err(error) } else { Ok(()) } }
+    }
+    impl CheckedGenericFusion for ArtinSpy {
+        type Error = ArtinSpyError;
+        fn fusion_style(&self) -> FusionStyleKind { FusionRule::fusion_style(&self.inner) }
+        fn braiding_style(&self) -> BraidingStyleKind { FusionRule::braiding_style(&self.inner) }
+        fn vacuum(&self) -> SectorId { FusionRule::vacuum(&self.inner) }
+        fn try_dual(&self, s: SectorId) -> Result<SectorId, Self::Error> { Ok(s) }
+        fn try_fusion_channels(&self,a:SectorId,b:SectorId)->Result<SectorVec,Self::Error>{Ok(self.inner.fusion_channels(a,b))}
+        fn try_fusion_channels_in_table(&self,a:SectorId,b:SectorId)->Result<SectorVec,Self::Error>{Ok(self.inner.fusion_channels_in_table(a,b))}
+        fn try_nsymbol(&self,a:SectorId,b:SectorId,c:SectorId)->Result<usize,Self::Error>{Ok(self.inner.nsymbol(a,b,c))}
+    }
+    impl CheckedGenericRigidSymbols for ArtinSpy {
+        type Scalar=f64;
+        fn try_sqrt_dim_scalar(&mut self,_:SectorId)->Result<f64,Self::Error>{self.rigid_calls.set(self.rigid_calls.get()+1);Ok(1.0)}
+        fn try_inv_sqrt_dim_scalar(&mut self,_:SectorId)->Result<f64,Self::Error>{self.rigid_calls.set(self.rigid_calls.get()+1);Ok(1.0)}
+        fn try_frobenius_schur_phase_scalar(&mut self,_:SectorId)->Result<f64,Self::Error>{self.rigid_calls.set(self.rigid_calls.get()+1);Ok(1.0)}
+        fn try_f_symbol_generic(&mut self,a:SectorId,b:SectorId,c:SectorId,d:SectorId,e:SectorId,f:SectorId)->Result<GenericFArray<f64>,Self::Error>{Self::trip(&self.f_calls,self.fail_f,ArtinSpyError::F)?; let x=self.inner.f_symbol_generic(a,b,c,d,e,f); if self.bad_f { Ok(GenericFArray::new(x.data().to_vec(), (1,1,x.data().len(),1))) } else { Ok(x) }}
+        fn try_r_symbol_generic(&mut self,a:SectorId,b:SectorId,c:SectorId)->Result<GenericRMatrix<f64>,Self::Error>{Self::trip(&self.r_calls,self.fail_r,ArtinSpyError::R)?; let x=self.inner.r_symbol_generic(a,b,c); if self.bad_r { Ok(GenericRMatrix::new(x.data().to_vec(), 1,x.data().len())) } else { Ok(x) }}
+    }
+
     // Rank-2 tree [a, a] -> c with a single OM vertex label `vertex`.
     fn unitary_rank2_tree(vertex: usize) -> FusionTreeKey {
         let a = SectorId::new(UnitaryToyOmRule::A);
@@ -13748,6 +13806,39 @@ mod tests {
             [c],
             [MultiplicityIndex::new(vertex1).expect("test multiplicity label is one-based"), MultiplicityIndex::ONE],
         )
+    }
+
+    #[test]
+    fn checked_generic_artin_matches_legacy_outer_and_inner_rows() {
+        let mut rule = UnitaryToyOmRule;
+        for (tree, index) in [(unitary_rank2_tree(1), 0), (unitary_rank3_tree(1), 1)] {
+            let legacy = generic_artin_braid_at_with_inverse(&rule, &tree, index, false).unwrap();
+            let checked = generic_artin_braid_at_with_inverse_checked(&mut rule, &tree, index, false).unwrap();
+            assert_eq!(checked, legacy);
+        }
+    }
+
+    #[test]
+    fn checked_generic_artin_calls_only_required_symbols_and_preserves_failures() {
+        let mut outer = ArtinSpy::new();
+        generic_artin_braid_at_with_inverse_checked(&mut outer, &unitary_rank2_tree(1), 0, false).unwrap();
+        assert_eq!((outer.f_calls.get(), outer.r_calls.get()), (0, 1));
+        assert_eq!(outer.rigid_calls.get(), 0);
+        let mut inner = ArtinSpy::new();
+        generic_artin_braid_at_with_inverse_checked(&mut inner, &unitary_rank3_tree(1), 1, false).unwrap();
+        assert!(inner.f_calls.get() > 0 && inner.r_calls.get() > 0);
+        let mut fail_r = ArtinSpy { fail_r: Some(1), ..ArtinSpy::new() };
+        assert!(matches!(generic_artin_braid_at_with_inverse_checked(&mut fail_r, &unitary_rank2_tree(1), 0, false), Err(CheckedGenericSymbolError::Provider(ArtinSpyError::R))));
+        let mut fail_f = ArtinSpy { fail_f: Some(1), ..ArtinSpy::new() };
+        assert!(matches!(generic_artin_braid_at_with_inverse_checked(&mut fail_f, &unitary_rank3_tree(1), 1, false), Err(CheckedGenericSymbolError::Provider(ArtinSpyError::F))));
+    }
+
+    #[test]
+    fn checked_generic_artin_rejects_categorical_symbol_shapes_before_indexing() {
+        let mut bad_r = ArtinSpy { bad_r: true, ..ArtinSpy::new() };
+        assert!(matches!(generic_artin_braid_at_with_inverse_checked(&mut bad_r, &unitary_rank2_tree(1), 0, false), Err(CheckedGenericSymbolError::Shape { symbol: "R", .. })));
+        let mut bad_f = ArtinSpy { bad_f: true, ..ArtinSpy::new() };
+        assert!(matches!(generic_artin_braid_at_with_inverse_checked(&mut bad_f, &unitary_rank3_tree(1), 1, false), Err(CheckedGenericSymbolError::Shape { symbol: "F", .. })));
     }
 
     // Braid at `index` (inv=false) then braid every output at `index`
@@ -14521,6 +14612,309 @@ mod tests {
         }
     }
 
+    impl CheckedGenericFusion for A4BendRule {
+        type Error = std::convert::Infallible;
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionRule::fusion_style(self)
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            FusionRule::braiding_style(self)
+        }
+
+        fn vacuum(&self) -> SectorId {
+            FusionRule::vacuum(self)
+        }
+
+        fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+            Ok(FusionRule::dual(self, sector))
+        }
+
+        fn try_fusion_channels(
+            &self,
+            left: SectorId,
+            right: SectorId,
+        ) -> Result<SectorVec, Self::Error> {
+            Ok(FusionRule::fusion_channels(self, left, right))
+        }
+
+        fn try_fusion_channels_in_table(
+            &self,
+            left: SectorId,
+            right: SectorId,
+        ) -> Result<SectorVec, Self::Error> {
+            Ok(FusionRule::fusion_channels_in_table(self, left, right))
+        }
+
+        fn try_nsymbol(
+            &self,
+            left: SectorId,
+            right: SectorId,
+            coupled: SectorId,
+        ) -> Result<usize, Self::Error> {
+            Ok(FusionRule::nsymbol(self, left, right, coupled))
+        }
+    }
+
+    impl CheckedGenericRigidSymbols for A4BendRule {
+        type Scalar = f64;
+
+        fn try_sqrt_dim_scalar(
+            &mut self,
+            sector: SectorId,
+        ) -> Result<Self::Scalar, Self::Error> {
+            Ok(GenericRigidSymbols::sqrt_dim_scalar(self, sector))
+        }
+
+        fn try_inv_sqrt_dim_scalar(
+            &mut self,
+            sector: SectorId,
+        ) -> Result<Self::Scalar, Self::Error> {
+            Ok(GenericRigidSymbols::inv_sqrt_dim_scalar(self, sector))
+        }
+
+        fn try_frobenius_schur_phase_scalar(
+            &mut self,
+            sector: SectorId,
+        ) -> Result<Self::Scalar, Self::Error> {
+            Ok(GenericRigidSymbols::frobenius_schur_phase_scalar(
+                self, sector,
+            ))
+        }
+
+        fn try_f_symbol_generic(
+            &mut self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> Result<GenericFArray<Self::Scalar>, Self::Error> {
+            Ok(GenericFusionSymbols::f_symbol_generic(
+                self, a, b, c, d, e, f,
+            ))
+        }
+
+        fn try_r_symbol_generic(
+            &mut self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+        ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> {
+            Ok(GenericFusionSymbols::r_symbol_generic(self, a, b, c))
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum RigidSpyError {
+        Dual,
+        N,
+        F,
+        Sqrt,
+        InvSqrt,
+        Fs,
+    }
+
+    impl std::fmt::Display for RigidSpyError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "{self:?}")
+        }
+    }
+
+    impl std::error::Error for RigidSpyError {}
+
+    struct CheckedA4Spy {
+        dual_calls: std::cell::Cell<usize>,
+        n_calls: std::cell::Cell<usize>,
+        f_calls: std::cell::Cell<usize>,
+        sqrt_calls: std::cell::Cell<usize>,
+        inv_sqrt_calls: std::cell::Cell<usize>,
+        fs_calls: std::cell::Cell<usize>,
+        fail_dual: Option<usize>,
+        fail_n: Option<usize>,
+        fail_f: Option<usize>,
+        fail_sqrt: Option<usize>,
+        fail_inv_sqrt: Option<usize>,
+        fail_fs: Option<usize>,
+        bad_b_f: bool,
+        bad_a_f: bool,
+        non_diagonal_b: bool,
+    }
+
+    impl CheckedA4Spy {
+        fn new() -> Self {
+            Self {
+                dual_calls: std::cell::Cell::new(0),
+                n_calls: std::cell::Cell::new(0),
+                f_calls: std::cell::Cell::new(0),
+                sqrt_calls: std::cell::Cell::new(0),
+                inv_sqrt_calls: std::cell::Cell::new(0),
+                fs_calls: std::cell::Cell::new(0),
+                fail_dual: None,
+                fail_n: None,
+                fail_f: None,
+                fail_sqrt: None,
+                fail_inv_sqrt: None,
+                fail_fs: None,
+                bad_b_f: false,
+                bad_a_f: false,
+                non_diagonal_b: false,
+            }
+        }
+
+        fn trip(
+            counter: &std::cell::Cell<usize>,
+            fail: Option<usize>,
+            error: RigidSpyError,
+        ) -> Result<(), RigidSpyError> {
+            let call = counter.get() + 1;
+            counter.set(call);
+            if fail == Some(call) {
+                Err(error)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl CheckedGenericFusion for CheckedA4Spy {
+        type Error = RigidSpyError;
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            FusionRule::vacuum(&A4BendRule)
+        }
+
+        fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+            Self::trip(&self.dual_calls, self.fail_dual, RigidSpyError::Dual)?;
+            Ok(FusionRule::dual(&A4BendRule, sector))
+        }
+
+        fn try_fusion_channels(
+            &self,
+            left: SectorId,
+            right: SectorId,
+        ) -> Result<SectorVec, Self::Error> {
+            Ok(FusionRule::fusion_channels(&A4BendRule, left, right))
+        }
+
+        fn try_fusion_channels_in_table(
+            &self,
+            left: SectorId,
+            right: SectorId,
+        ) -> Result<SectorVec, Self::Error> {
+            self.try_fusion_channels(left, right)
+        }
+
+        fn try_nsymbol(
+            &self,
+            left: SectorId,
+            right: SectorId,
+            coupled: SectorId,
+        ) -> Result<usize, Self::Error> {
+            Self::trip(&self.n_calls, self.fail_n, RigidSpyError::N)?;
+            Ok(FusionRule::nsymbol(
+                &A4BendRule,
+                left,
+                right,
+                coupled,
+            ))
+        }
+    }
+
+    impl CheckedGenericRigidSymbols for CheckedA4Spy {
+        type Scalar = f64;
+
+        fn try_sqrt_dim_scalar(
+            &mut self,
+            sector: SectorId,
+        ) -> Result<Self::Scalar, Self::Error> {
+            Self::trip(&self.sqrt_calls, self.fail_sqrt, RigidSpyError::Sqrt)?;
+            Ok(GenericRigidSymbols::sqrt_dim_scalar(&A4BendRule, sector))
+        }
+
+        fn try_inv_sqrt_dim_scalar(
+            &mut self,
+            sector: SectorId,
+        ) -> Result<Self::Scalar, Self::Error> {
+            Self::trip(
+                &self.inv_sqrt_calls,
+                self.fail_inv_sqrt,
+                RigidSpyError::InvSqrt,
+            )?;
+            Ok(GenericRigidSymbols::inv_sqrt_dim_scalar(
+                &A4BendRule,
+                sector,
+            ))
+        }
+
+        fn try_frobenius_schur_phase_scalar(
+            &mut self,
+            sector: SectorId,
+        ) -> Result<Self::Scalar, Self::Error> {
+            Self::trip(&self.fs_calls, self.fail_fs, RigidSpyError::Fs)?;
+            Ok(GenericRigidSymbols::frobenius_schur_phase_scalar(
+                &A4BendRule,
+                sector,
+            ))
+        }
+
+        fn try_f_symbol_generic(
+            &mut self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> Result<GenericFArray<Self::Scalar>, Self::Error> {
+            Self::trip(&self.f_calls, self.fail_f, RigidSpyError::F)?;
+            let symbol =
+                GenericFusionSymbols::f_symbol_generic(&A4BendRule, a, b, c, d, e, f);
+            if self.non_diagonal_b
+                && (a.id(), b.id(), c.id(), d.id(), e.id(), f.id()) == (3, 3, 3, 3, 3, 0)
+            {
+                Ok(GenericFArray::new(
+                    vec![0.3, 0.7, 0.9, 0.1],
+                    (2, 2, 1, 1),
+                ))
+            } else if self.bad_b_f
+                && (a.id(), b.id(), c.id(), d.id(), e.id(), f.id()) == (3, 3, 3, 3, 3, 0)
+            {
+                Ok(GenericFArray::new(symbol.data().to_vec(), (1, 4, 1, 1)))
+            } else if self.bad_a_f
+                && (a.id(), b.id(), c.id(), d.id(), e.id(), f.id()) == (3, 3, 3, 3, 0, 3)
+            {
+                Ok(GenericFArray::new(symbol.data().to_vec(), (1, 1, 1, 4)))
+            } else {
+                Ok(symbol)
+            }
+        }
+
+        fn try_r_symbol_generic(
+            &mut self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+        ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> {
+            Ok(GenericFusionSymbols::r_symbol_generic(
+                &A4BendRule,
+                a,
+                b,
+                c,
+            ))
+        }
+    }
+
     #[derive(Clone, Copy, Debug)]
     struct MisreportedSimpleA4Rule;
 
@@ -14534,11 +14928,11 @@ mod tests {
         }
 
         fn braiding_style(&self) -> BraidingStyleKind {
-            A4BendRule.braiding_style()
+            FusionRule::braiding_style(&A4BendRule)
         }
 
         fn vacuum(&self) -> SectorId {
-            A4BendRule.vacuum()
+            FusionRule::vacuum(&A4BendRule)
         }
 
         fn dual(&self, sector: SectorId) -> SectorId {
@@ -14616,6 +15010,165 @@ mod tests {
         );
         let dom = FusionTreeKey::new([t], t, [false], [], []);
         FusionTreePairKey::pair(cod, dom)
+    }
+
+    fn a4_dual_pair_rank2(mu: usize) -> FusionTreePairKey {
+        let t = a4_three();
+        let cod = FusionTreeKey::new(
+            [t, t],
+            t,
+            [false, true],
+            [],
+            [MultiplicityIndex::new(mu)
+                .expect("test multiplicity label is one-based")],
+        );
+        let dom = FusionTreeKey::new([t], t, [false], [], []);
+        FusionTreePairKey::pair(cod, dom)
+    }
+
+    fn assert_rigid_provider_error(
+        error: CheckedGenericSymbolError<RigidSpyError>,
+        expected: RigidSpyError,
+    ) {
+        assert!(std::error::Error::source(&error).is_some());
+        assert!(matches!(
+            error,
+            CheckedGenericSymbolError::Provider(actual) if actual == expected
+        ));
+    }
+
+    #[test]
+    fn checked_generic_bend_and_repartition_match_legacy_rows_and_order() {
+        let pair = a4_dual_pair_rank2(2);
+        let legacy_bend = generic_bendright_tree_pair(&A4BendRule, &pair).unwrap();
+        let mut checked = A4BendRule;
+        let checked_bend =
+            generic_bendright_tree_pair_checked(&mut checked, &pair).unwrap();
+        assert_eq!(checked_bend, legacy_bend);
+
+        let legacy_repartition =
+            generic_repartition_tree_pair(&A4BendRule, &pair, 0).unwrap();
+        let mut checked = A4BendRule;
+        let checked_repartition =
+            generic_repartition_tree_pair_checked(&mut checked, &pair, 0).unwrap();
+        assert_eq!(checked_repartition, legacy_repartition);
+
+        let mut checked = A4BendRule;
+        assert_eq!(
+            generic_bendleft_tree_pair_checked(&mut checked, &legacy_bend[0].0).unwrap(),
+            generic_bendleft_tree_pair(&A4BendRule, &legacy_bend[0].0).unwrap()
+        );
+    }
+
+    #[test]
+    fn checked_generic_bend_queries_only_the_rigid_data_it_uses() {
+        let pair = a4_dual_pair_rank2(1);
+        let mut rule = CheckedA4Spy::new();
+        generic_bendright_tree_pair_checked(&mut rule, &pair).unwrap();
+        assert_eq!(rule.dual_calls.get(), 3);
+        assert_eq!(rule.n_calls.get(), 7);
+        assert_eq!(rule.f_calls.get(), 1);
+        assert_eq!(rule.sqrt_calls.get(), 3);
+        assert_eq!(rule.inv_sqrt_calls.get(), 2);
+        assert_eq!(rule.fs_calls.get(), 1);
+    }
+
+    #[test]
+    fn checked_generic_bend_stores_the_b_column_as_the_output_vertex() {
+        let mut rule = CheckedA4Spy {
+            non_diagonal_b: true,
+            ..CheckedA4Spy::new()
+        };
+        let out =
+            generic_bendright_tree_pair_checked(&mut rule, &a4_pair_rank2(1)).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out.iter()
+                .map(|(key, _)| key.domain_tree().vertices()[0].get())
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn checked_generic_bend_preserves_each_provider_failure_source() {
+        let pair = a4_dual_pair_rank2(1);
+
+        let mut rule = CheckedA4Spy {
+            fail_n: Some(2),
+            ..CheckedA4Spy::new()
+        };
+        assert_rigid_provider_error(
+            generic_bendright_tree_pair_checked(&mut rule, &pair).unwrap_err(),
+            RigidSpyError::N,
+        );
+
+        let mut rule = CheckedA4Spy {
+            fail_dual: Some(2),
+            ..CheckedA4Spy::new()
+        };
+        assert_rigid_provider_error(
+            generic_bendright_tree_pair_checked(&mut rule, &pair).unwrap_err(),
+            RigidSpyError::Dual,
+        );
+
+        let mut rule = CheckedA4Spy {
+            fail_sqrt: Some(1),
+            ..CheckedA4Spy::new()
+        };
+        assert_rigid_provider_error(
+            generic_bendright_tree_pair_checked(&mut rule, &pair).unwrap_err(),
+            RigidSpyError::Sqrt,
+        );
+
+        let mut rule = CheckedA4Spy {
+            fail_inv_sqrt: Some(1),
+            ..CheckedA4Spy::new()
+        };
+        assert_rigid_provider_error(
+            generic_bendright_tree_pair_checked(&mut rule, &pair).unwrap_err(),
+            RigidSpyError::InvSqrt,
+        );
+
+        let mut rule = CheckedA4Spy {
+            fail_fs: Some(1),
+            ..CheckedA4Spy::new()
+        };
+        assert_rigid_provider_error(
+            generic_bendright_tree_pair_checked(&mut rule, &pair).unwrap_err(),
+            RigidSpyError::Fs,
+        );
+
+        let mut rule = CheckedA4Spy {
+            fail_f: Some(1),
+            ..CheckedA4Spy::new()
+        };
+        assert_rigid_provider_error(
+            generic_bendright_tree_pair_checked(&mut rule, &pair).unwrap_err(),
+            RigidSpyError::F,
+        );
+    }
+
+    #[test]
+    fn checked_generic_b_and_a_reject_malformed_categorical_f_shapes() {
+        let mut bad_b = CheckedA4Spy {
+            bad_b_f: true,
+            ..CheckedA4Spy::new()
+        };
+        assert!(matches!(
+            generic_bendright_tree_pair_checked(&mut bad_b, &a4_pair_rank2(1)),
+            Err(CheckedGenericSymbolError::Shape { symbol: "F", .. })
+        ));
+
+        let mut bad_a = CheckedA4Spy {
+            bad_a_f: true,
+            ..CheckedA4Spy::new()
+        };
+        let t = a4_three();
+        assert!(matches!(
+            GenericRigidAccess::try_a_symbol_generic(&mut bad_a, t, t, t),
+            Err(CheckedGenericSymbolError::Shape { symbol: "F", .. })
+        ));
     }
 
     #[test]
