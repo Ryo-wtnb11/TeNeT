@@ -515,6 +515,8 @@ impl<Scalar> GenericRMatrix<Scalar> {
 pub trait CheckedGenericFusion {
     type Error: std::error::Error + Send + Sync + 'static;
 
+    /// Stable semantic provider identity; the contract is the same as
+    /// [`FusionRule::rule_identity`].
     fn rule_identity(&self) -> RuleIdentity;
     fn fusion_style(&self) -> FusionStyleKind;
     fn braiding_style(&self) -> BraidingStyleKind;

@@ -7731,6 +7731,7 @@ impl std::error::Error for CheckedPlanSpyError {}
 
 struct CheckedPlanSpy<'a, R> {
     rule: &'a R,
+    identity: Option<tenet_core::RuleIdentity>,
     fusion_style: Option<FusionStyleKind>,
     braiding_style: Option<BraidingStyleKind>,
     fail: Option<(CheckedPlanCall, usize)>,
@@ -7742,6 +7743,7 @@ impl<'a, R> CheckedPlanSpy<'a, R> {
     fn new(rule: &'a R) -> Self {
         Self {
             rule,
+            identity: None,
             fusion_style: None,
             braiding_style: None,
             fail: None,
@@ -7770,7 +7772,9 @@ impl<R: FusionRule> CheckedGenericFusion for CheckedPlanSpy<'_, R> {
     type Error = CheckedPlanSpyError;
 
     fn rule_identity(&self) -> tenet_core::RuleIdentity {
-        self.rule.rule_identity()
+        self.identity
+            .clone()
+            .unwrap_or_else(|| self.rule.rule_identity())
     }
 
     fn fusion_style(&self) -> FusionStyleKind {
@@ -8301,17 +8305,21 @@ fn checked_generic_rank3_plan_matches_legacy_rows_coefficients_and_order() {
 fn checked_generic_owned_transform_matches_legacy_for_r_and_inner_f_r() {
     use tenet_core::{InfallibleGeneric, Su3FusionRule};
 
+    const TENSORKIT_ORACLE: &str = include_str!("fixtures/issue645_tensorkit_su3_owned_oracle.txt");
     let rule = Su3FusionRule::new();
     let src_space = su3_rank3_dynamic_space(&rule);
     let src_data = (0..src_space.required_len().unwrap())
-        .map(|index| index as f64 - 7.5)
+        .map(|index| index as f64)
         .collect::<Vec<_>>();
     let source_before = src_space.clone();
     let data_before = src_data.clone();
 
-    for operation in [
-        TreeTransformOperation::permute([1, 0], [2]),
-        TreeTransformOperation::braid([0, 2], [1], [0, 1], [2]),
+    for (operation, oracle_name) in [
+        (TreeTransformOperation::permute([1, 0], [2]), "r_only.flat="),
+        (
+            TreeTransformOperation::braid([0, 2], [1], [0, 1], [2]),
+            "inner_f_r.flat=",
+        ),
     ] {
         let mut checked = InfallibleGeneric::new(&rule);
         let (actual_space, actual_data) = crate::tree_transform_dyn_owned_checked_generic(
@@ -8319,7 +8327,7 @@ fn checked_generic_owned_transform_matches_legacy_for_r_and_inner_f_r() {
             operation.clone(),
             &src_space,
             &src_data,
-            1.25,
+            1.0,
         )
         .unwrap();
 
@@ -8333,16 +8341,32 @@ fn checked_generic_owned_transform_matches_legacy_for_r_and_inner_f_r() {
                 src_space.structure(),
                 &mut expected_data,
                 &src_data,
-                1.25,
+                1.0,
                 0.0,
             )
             .unwrap();
 
         assert_eq!(actual_space, expected_space);
         assert_eq!(actual_data, expected_data);
+        let oracle = TENSORKIT_ORACLE
+            .lines()
+            .find_map(|line| line.strip_prefix(oracle_name))
+            .unwrap()
+            .split(',')
+            .map(|value| value.parse::<f64>().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(actual_data.len(), oracle.len());
+        for (index, (actual, expected)) in actual_data.iter().zip(&oracle).enumerate() {
+            assert!(
+                (actual - expected).abs() <= 1e-12,
+                "{oracle_name}[{index}]: {actual} != TensorKit {expected}"
+            );
+        }
         assert_eq!(src_space, source_before);
         assert_eq!(src_data, data_before);
     }
+    assert!(TENSORKIT_ORACLE.contains("TensorKit_version=0.16.2"));
+    assert!(TENSORKIT_ORACLE.contains("SUNRepresentations_version=0.4.0"));
 }
 
 #[test]
@@ -8362,6 +8386,58 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
     let data_before = src_data.clone();
     let operation = TreeTransformOperation::braid([0, 2], [1], [0, 1], [2]);
     let store = RuntimeTreeTransformStore::<f64>::default();
+
+    for identity in [
+        None,
+        Some(tenet_core::RuleIdentity::of_type::<DenseGenericRule>()),
+    ] {
+        let is_unbound = identity.is_none();
+        let test_space = if is_unbound {
+            let unbound = FusionTensorMapSpace::new_unbound(
+                TensorMapSpace::<2, 1>::from_dims([2, 3], [5]).unwrap(),
+                src_space.homspace().clone(),
+                src_space.structure().as_ref().clone(),
+            )
+            .unwrap();
+            crate::contract::DynamicFusionMapSpace::from_typed(&unbound)
+        } else {
+            src_space.clone()
+        };
+        let layout_before = fusion_tree_layout_cache_info();
+        let complete_before = complete_hom_space_structure_cache_info();
+        let interner_before = block_structure_intern_cache_info();
+        let runtime_before = store.info();
+        let mut provider = CheckedPlanSpy::new(&rule);
+        provider.identity = identity;
+        provider.fail = Some((CheckedPlanCall::N, 1));
+
+        let error = crate::tree_transform_dyn_owned_checked_generic(
+            &mut provider,
+            operation.clone(),
+            &test_space,
+            &src_data,
+            1.0,
+        )
+        .unwrap_err();
+        if is_unbound {
+            assert!(matches!(
+                error,
+                CheckedGenericPlanError::Core(CoreError::MalformedFusionTree { .. })
+            ));
+        } else {
+            assert!(matches!(
+                error,
+                CheckedGenericPlanError::Core(CoreError::FusionRuleMismatch { .. })
+            ));
+        }
+        assert_eq!(provider.calls.get(), [0; CheckedPlanCall::COUNT]);
+        assert_eq!(fusion_tree_layout_cache_info(), layout_before);
+        assert_eq!(complete_hom_space_structure_cache_info(), complete_before);
+        assert_eq!(block_structure_intern_cache_info(), interner_before);
+        assert_eq!(store.info(), runtime_before);
+        assert_eq!(src_space, source_before);
+        assert_eq!(src_data, data_before);
+    }
 
     for failure in [
         Err((CheckedPlanCall::Dual, 1)),

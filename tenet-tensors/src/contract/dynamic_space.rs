@@ -2205,11 +2205,10 @@ impl DynamicFusionMapSpace {
         Self::from_final_homspace_generic(rule, homspace)
     }
 
-    pub(crate) fn prepare_transformed_generic_checked<R>(
+    pub(crate) fn validate_transformed_generic_checked_identity<R>(
         &self,
         rule: &R,
-        operation: &TreeTransformOperation,
-    ) -> Result<PreparedCheckedGenericDynamicSpace, CheckedGenericStructureError<R::Error>>
+    ) -> Result<RuleIdentity, CheckedGenericStructureError<R::Error>>
     where
         R: CheckedGenericFusion,
     {
@@ -2226,6 +2225,18 @@ impl DynamicFusionMapSpace {
         if expected != actual {
             return Err(CoreError::FusionRuleMismatch { expected, actual }.into());
         }
+        Ok(actual)
+    }
+
+    pub(crate) fn prepare_transformed_generic_checked<R>(
+        &self,
+        rule: &R,
+        operation: &TreeTransformOperation,
+        identity: RuleIdentity,
+    ) -> Result<PreparedCheckedGenericDynamicSpace, CheckedGenericStructureError<R::Error>>
+    where
+        R: CheckedGenericFusion,
+    {
         let (codomain_axes, domain_axes) = tree_transform_operation_axes(operation);
         let homspace =
             self.homspace()
@@ -2237,7 +2248,7 @@ impl DynamicFusionMapSpace {
             nin: domain_axes.len(),
             homspace,
             structure,
-            identity: actual,
+            identity,
         })
     }
 

@@ -55,8 +55,9 @@ where
         }
         .into());
     }
+    let identity = src_space.validate_transformed_generic_checked_identity(provider)?;
     validate_checked_generic_tree_pair_plan_preflight(provider, &operation, src_space.structure())?;
-    let prepared = src_space.prepare_transformed_generic_checked(provider, &operation)?;
+    let prepared = src_space.prepare_transformed_generic_checked(provider, &operation, identity)?;
     let plan = build_checked_generic_tree_pair_transform_group_plan(
         provider,
         operation,
