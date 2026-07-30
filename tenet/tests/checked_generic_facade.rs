@@ -476,6 +476,51 @@ fn checked_only_multiplicity_two_transforms_keep_the_source_authority() {
 }
 
 #[test]
+fn checked_only_identity_transforms_make_no_provider_queries() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 1.0
+        })
+        .unwrap();
+
+    for counter in [
+        &provider.identity_queries,
+        &provider.style_queries,
+        &provider.algebra_queries,
+        &provider.coefficient_queries,
+        &provider.f_queries,
+        &provider.r_queries,
+        &provider.postcommit_queries,
+    ] {
+        counter.store(0, Ordering::Relaxed);
+    }
+
+    for output in [
+        source.permute(&[0, 1], &[2]).unwrap(),
+        source.braid(&[0, 1], &[2], &[2, 1, 0]).unwrap(),
+        source.transpose_axes(&[0, 1], &[2]).unwrap(),
+        source.repartition(2).unwrap(),
+    ] {
+        assert!(std::ptr::eq(output.provider(), provider.as_ref()));
+        assert_eq!(output.data().as_ptr(), source.data().as_ptr());
+    }
+    for counter in [
+        &provider.identity_queries,
+        &provider.style_queries,
+        &provider.algebra_queries,
+        &provider.coefficient_queries,
+        &provider.f_queries,
+        &provider.r_queries,
+        &provider.postcommit_queries,
+    ] {
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[test]
 fn checked_only_otimes_preserves_typed_late_f_failures() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));

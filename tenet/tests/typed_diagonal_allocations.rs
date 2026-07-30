@@ -486,23 +486,24 @@ fn the_rank_one_swap_keeps_its_source_and_its_result_compact() {
 }
 
 #[test]
-fn the_geometries_outside_the_proved_swap_keep_the_dense_route() {
-    // What: the compact arm is deliberately narrow. `repartition(1)` is the
-    // identity partition of a bond space and `braid` is an explicit braid;
-    // neither is the proved swap, so both must still go through the dense tree
-    // transform. Recorded as a probe rather than a comment because the whole
-    // `contract` value-oracle sweep in `typed_facade.rs` uses `repartition(1)`
-    // as its *dense twin* — widening the arm to cover it would silently turn
-    // that oracle into a comparison of the fast path against itself.
+fn exact_identity_keeps_compact_storage_and_a_real_braid_keeps_the_dense_route() {
+    // What (#689 PR A): exact identities return the source body without
+    // allocating or materializing its compact spectrum. A real braid remains
+    // the negative control and still takes the dense transform route.
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let d = spectrum(0x5eed_0042);
 
-    let repartitioned = d.repartition(1).unwrap();
     assert_eq!(
-        measured_bytes(|| repartitioned.data().len()),
+        warmed_bytes(|| d.repartition(1).unwrap()),
         0,
-        "repartition(1) returned compact storage instead of the dense route"
+        "identity repartition allocated"
     );
+    let repartitioned = d.repartition(1).unwrap();
+    assert!(
+        measured_bytes(|| repartitioned.data().len()) >= dense_payload_bytes(),
+        "identity repartition materialized compact storage"
+    );
+
     let braided = d.braid(&[1], &[0], &[0, 1]).unwrap();
     assert_eq!(
         measured_bytes(|| braided.data().len()),
