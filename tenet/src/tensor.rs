@@ -8791,7 +8791,29 @@ impl Tensor {
     /// side of the seam.
     pub fn svd_trunc(&self, truncation: &Truncation) -> Result<SvdTrunc, Error> {
         if self.is_adjoint_view() {
-            return self.materialized_tensor()?.svd_trunc(truncation);
+            #[cfg(feature = "cuda")]
+            if matches!(self.stored_data(), Data::CudaF64(_)) {
+                return Err(device_unsupported("materializing an adjoint device tensor"));
+            }
+            let parent = self.parent_tensor_for_lowering();
+            if matches!(
+                parent.ordinary_body().space.as_ref(),
+                UserBoundSpace::Su3(_)
+            ) {
+                return self.materialized_tensor()?.svd_trunc(truncation);
+            }
+            let complex = parent.dtype() == Dtype::C64;
+            let mut dense = parent.rt.lease_dense();
+            return with_data!(parent, data, {
+                with_bound_multiplicity_free!(parent.ordinary_body().space, bound, {
+                    let output = tenet_matrixalgebra::svd_trunc_adjoint_factors_dyn(
+                        dense.dense(),
+                        &BoundDynamicTensorRef::try_new(&bound, data)?,
+                        truncation,
+                    )?;
+                    parent.from_svd_trunc_factors(output, complex)
+                })
+            });
         }
         #[cfg(feature = "cuda")]
         if let Data::CudaF64(storage) = self.stored_data() {
@@ -12147,6 +12169,17 @@ mod adjoint_parent_view_tests {
         }
     }
 
+    fn assert_spectra_close(actual: &[SectorSpectrum], expected: &[SectorSpectrum]) {
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert_eq!(actual.sector, expected.sector);
+            assert_eq!(actual.values.len(), expected.values.len());
+            for (&actual, &expected) in actual.values.iter().zip(&expected.values) {
+                assert!((actual - expected).abs() < 1e-11);
+            }
+        }
+    }
+
     fn assert_lazy_compact_svd_matches_eager(
         runtime: &Runtime,
         left: &Space,
@@ -12171,6 +12204,28 @@ mod adjoint_parent_view_tests {
                 .unwrap(),
             &eager,
         );
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+    }
+
+    fn assert_lazy_truncated_svd_matches_eager(
+        runtime: &Runtime,
+        left: &Space,
+        right: &Space,
+        dtype: Dtype,
+        seed: u64,
+    ) {
+        let parent = Tensor::rand_with_seed(runtime, dtype, [left], [right], seed).unwrap();
+        let lazy = parent.adjoint().unwrap();
+        let eager = parent.adjoint().unwrap().materialized_tensor().unwrap();
+        let actual = lazy.svd_trunc(&Truncation::rank(4)).unwrap();
+        let expected = eager.svd_trunc(&Truncation::rank(4)).unwrap();
+
+        assert_close(&actual.u, &expected.u);
+        assert_close(&actual.s, &expected.s);
+        assert_close(&actual.vh, &expected.vh);
+        assert_spectra_close(&actual.singular_values, &expected.singular_values);
+        assert!((actual.error - expected.error).abs() < 1e-12);
         assert_eq!(lazy.adjoint_body_builds(), 0);
         assert!(!lazy.has_cached_materialization());
     }
@@ -12668,6 +12723,160 @@ mod adjoint_parent_view_tests {
             assert_eq!(lazy.adjoint_body_builds(), 0);
             assert!(!lazy.has_cached_materialization());
         }
+    }
+
+    #[test]
+    fn truncated_svd_reads_multiplicity_free_parent_without_materialization() {
+        // What: truncation keeps the compact-SVD gauge, policy, and error while
+        // avoiding an owned adjoint input for every multiplicity-free rule.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let fixtures = [
+            (
+                Space::u1([(-1, 1), (0, 3), (1, 2)]),
+                Space::u1([(-1, 2), (0, 1), (1, 3)]),
+            ),
+            (
+                Space::su2([(0, 1), (1, 3), (2, 2)]).unwrap(),
+                Space::su2([(0, 2), (1, 1), (2, 3)]).unwrap(),
+            ),
+            (
+                Space::product([((-1, 0), 1), ((0, 1), 3), ((1, 0), 2)]).unwrap(),
+                Space::product([((-1, 0), 2), ((0, 1), 1), ((1, 0), 3)]).unwrap(),
+            ),
+        ];
+
+        for (fixture, (left, right)) in fixtures.into_iter().enumerate() {
+            for (dtype, lane) in [(Dtype::F64, 0), (Dtype::C64, 1)] {
+                assert_lazy_truncated_svd_matches_eager(
+                    &runtime,
+                    &left,
+                    &right,
+                    dtype,
+                    603_600 + 2 * fixture as u64 + lane,
+                );
+            }
+        }
+
+        let space = Space::u1([(-1, 2), (0, 3), (1, 1)]);
+        let parent =
+            Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space], 603_699).unwrap();
+        let lazy = parent.adjoint().unwrap();
+        let expected = parent
+            .adjoint()
+            .unwrap()
+            .materialized_tensor()
+            .unwrap()
+            .svd_trunc(&Truncation::rank(4))
+            .unwrap();
+        std::thread::scope(|scope| {
+            let calls: Vec<_> = (0..4)
+                .map(|_| {
+                    let lazy = lazy.clone();
+                    scope.spawn(move || lazy.svd_trunc(&Truncation::rank(4)).unwrap())
+                })
+                .collect();
+            for call in calls {
+                let actual = call.join().unwrap();
+                assert_close(&actual.u, &expected.u);
+                assert_close(&actual.s, &expected.s);
+                assert_close(&actual.vh, &expected.vh);
+                assert_spectra_close(&actual.singular_values, &expected.singular_values);
+                assert!((actual.error - expected.error).abs() < 1e-12);
+            }
+        });
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+    }
+
+    #[test]
+    fn truncated_svd_split_degenerate_cluster_uses_semantic_oracle() {
+        // What: raw singular vectors are not compared when rank truncation
+        // splits an exactly degenerate cluster; the retained subspace is
+        // checked by isometry and its approximation error.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let space = Space::u1([(0, 4)]);
+        let parent = Tensor::from_block_fn(&runtime, [&space], [&space], |_, indices| {
+            if indices[0] == indices[1] {
+                Complex64::new([5.0, 2.0, 2.0, 0.5][indices[0]], 0.0)
+            } else {
+                Complex64::new(0.0, 0.0)
+            }
+        })
+        .unwrap();
+        let lazy = parent.adjoint().unwrap();
+        let output = lazy.svd_trunc(&Truncation::rank(2)).unwrap();
+        let approximation = output
+            .u
+            .compose(&output.s)
+            .unwrap()
+            .compose(&output.vh)
+            .unwrap();
+
+        assert_eq!(output.singular_values.len(), 1);
+        assert_eq!(output.singular_values[0].values, vec![5.0, 2.0]);
+        assert!(output.u.is_isometric(1e-12).unwrap());
+        assert!(output.vh.adjoint().unwrap().is_isometric(1e-12).unwrap());
+        assert!(
+            (parent
+                .add(&approximation, 1.0, -1.0)
+                .unwrap()
+                .norm()
+                .unwrap()
+                - output.error)
+                .abs()
+                < 1e-12
+        );
+        assert!((output.error - (2.0_f64.powi(2) + 0.5_f64.powi(2)).sqrt()).abs() < 1e-12);
+
+        // The retained sigma=2 directions may rotate within span{e1,e2}, but
+        // they must not leak into the complete sigma=5 or sigma=0.5 clusters.
+        let u = output.u.try_data_c64().unwrap();
+        let vh = output.vh.try_data_c64().unwrap();
+        for value in [u[4], u[7], vh[1], vh[7]] {
+            assert!(value.norm() < 1e-12);
+        }
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+    }
+
+    #[test]
+    fn truncated_svd_keeps_generic_adjoint_fallback() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let left = Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap();
+        let right = Space::su3([((1, 0), 1), ((0, 1), 2)]).unwrap();
+        let parent =
+            Tensor::rand_with_seed(&runtime, Dtype::C64, [&left], [&right], 603_700).unwrap();
+        let lazy = parent.adjoint().unwrap();
+        let eager = parent.adjoint().unwrap().materialized_tensor().unwrap();
+        let actual = lazy.svd_trunc(&Truncation::rank(4)).unwrap();
+        let expected = eager.svd_trunc(&Truncation::rank(4)).unwrap();
+
+        assert_close(&actual.u, &expected.u);
+        assert_close(&actual.s, &expected.s);
+        assert_close(&actual.vh, &expected.vh);
+        assert_spectra_close(&actual.singular_values, &expected.singular_values);
+        assert!((actual.error - expected.error).abs() < 1e-12);
+        assert_eq!(lazy.adjoint_body_builds(), 1);
+        assert!(lazy.has_cached_materialization());
+    }
+
+    #[test]
+    fn truncated_svd_rejects_foreign_truncspace_without_materialization() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let space = Space::u1([(-1, 2), (0, 3), (1, 1)]);
+        let foreign = Space::su2([(0, 2), (1, 1)]).unwrap();
+        let parent =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 603_701).unwrap();
+        let before = parent.data().to_vec();
+        let lazy = parent.adjoint().unwrap();
+
+        assert!(matches!(
+            lazy.svd_trunc(&Truncation::space(foreign.truncspace())),
+            Err(Error::Operation(_))
+        ));
+        assert_eq!(parent.data(), before);
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
     }
 
     fn assert_adjoint_compact_lq_matches_eager_oracle(
@@ -13971,6 +14180,17 @@ mod bound_provider_tests {
                 .ordinary_body()
                 .space
                 .provider_matches_context_allocation(&provider));
+        }
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+
+        for rank in [1, 0] {
+            let output = lazy.svd_trunc(&Truncation::rank(rank)).unwrap();
+            for factor in [&output.u, &output.s, &output.vh] {
+                assert!(factor
+                    .ordinary_body()
+                    .space
+                    .provider_matches_context_allocation(&provider));
+            }
         }
         assert_eq!(lazy.adjoint_body_builds(), 0);
     }

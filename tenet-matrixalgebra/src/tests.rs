@@ -44,6 +44,12 @@ struct FailSecondSolve {
 }
 
 #[derive(Default)]
+struct FailSecondSvd {
+    inner: tenet_dense::DefaultDenseExecutor,
+    calls: usize,
+}
+
+#[derive(Default)]
 struct FailAfterObservingSvdInput {
     observed: Vec<Vec<f64>>,
 }
@@ -358,6 +364,48 @@ impl DenseExecutor for FailAfterObservingSvdInput {
             op: "svd_into",
             message: "injected failure".to_string(),
         })
+    }
+
+    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises SVD")
+    }
+
+    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("test only exercises SVD")
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        panic!("test only exercises SVD")
+    }
+}
+
+impl DenseExecutor for FailSecondSvd {
+    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("compact SVD must use the destination API")
+    }
+
+    fn svd_into(
+        &mut self,
+        input: DenseRead<'_>,
+        u: DenseWrite<'_>,
+        s: DenseWrite<'_>,
+        vt: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        self.calls += 1;
+        if self.calls == 2 {
+            return Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "svd_into",
+                message: "injected second-sector failure".to_string(),
+            });
+        }
+        self.inner.svd_into(input, u, s, vt)
     }
 
     fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
@@ -1846,6 +1894,22 @@ fn compact_svd_adjoint_error_preserves_borrowed_input_and_publishes_no_factors()
     assert!(matches!(result, Err(OperationError::Dense(_))));
     assert_eq!(tensor.data(), before);
     assert!(!adjoint_dense.observed.is_empty());
+}
+
+#[test]
+fn truncated_svd_adjoint_error_preserves_borrowed_input_and_publishes_no_factors() {
+    let rule = Z2FusionRule;
+    let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let before = tensor.data().to_vec();
+    let bound = bound_tensor(Arc::new(rule), &tensor);
+    let mut dense = FailSecondSvd::default();
+
+    let result =
+        svd_trunc_adjoint_factors_dyn(&mut dense, &bound.as_ref().dynamic(), &Truncation::rank(1));
+
+    assert!(matches!(result, Err(OperationError::Dense(_))));
+    assert_eq!(tensor.data(), before);
+    assert_eq!(dense.calls, 2);
 }
 
 #[test]

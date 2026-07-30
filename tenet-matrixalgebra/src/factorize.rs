@@ -1474,6 +1474,29 @@ where
     ))
 }
 
+/// Truncated SVD factors for the logical adjoint without constructing its input.
+#[doc(hidden)]
+pub fn svd_trunc_adjoint_factors_dyn<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    truncation: &Truncation,
+) -> Result<SvdTruncFactorsDyn<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let (u, vh, spectrum) =
+        svd_compact_factors_dyn_with_direction(dense, input, None, CompactSvdGauge::AdjointLeft)?;
+    let (u, vh, spectrum, error) = truncate_svd_factors_only_dyn(u, vh, spectrum, truncation)?;
+    Ok((
+        adjoint_bound_factor(&vh)?,
+        adjoint_bound_factor(&u)?,
+        spectrum,
+        error,
+    ))
+}
+
 #[derive(Clone, Copy)]
 enum PolarDirection {
     Left,
