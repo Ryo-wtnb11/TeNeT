@@ -1559,33 +1559,37 @@ fn eigh_vals_rejects_a_later_nonhermitian_sector_before_any_dense_call() {
 }
 
 #[test]
-fn eigh_uses_a_relative_frobenius_tolerance_for_every_factor_dtype() {
-    // What: EIGH applies the working dtype's dimensionless eps^(3/4) threshold.
-    let within_f32 = one_sector_matrix(vec![1.0_f32, 1.0e-7, 0.0, 2.0]);
-    let outside_f32 = one_sector_matrix(vec![1.0_f32, 1.0e-3, 0.0, 2.0]);
+fn eigh_uses_64_epsilon_relative_tolerance_for_every_factor_dtype() {
+    // What: normalized residuals below 64 eps pass and those above it fail for every dtype.
+    let within_f32_delta = 62.0 * f32::EPSILON * 10.0_f32.sqrt();
+    let outside_f32_delta = 66.0 * f32::EPSILON * 10.0_f32.sqrt();
+    let within_f64_delta = 62.0 * f64::EPSILON * 10.0_f64.sqrt();
+    let outside_f64_delta = 66.0 * f64::EPSILON * 10.0_f64.sqrt();
+    let within_f32 = one_sector_matrix(vec![1.0_f32, within_f32_delta, 0.0, 2.0]);
+    let outside_f32 = one_sector_matrix(vec![1.0_f32, outside_f32_delta, 0.0, 2.0]);
     let within_c32 = one_sector_matrix(vec![
         Complex32::new(1.0, 0.0),
-        Complex32::new(1.0e-7, 0.0),
+        Complex32::new(within_f32_delta, 0.0),
         Complex32::new(0.0, 0.0),
         Complex32::new(2.0, 0.0),
     ]);
     let outside_c32 = one_sector_matrix(vec![
         Complex32::new(1.0, 0.0),
-        Complex32::new(1.0e-3, 0.0),
+        Complex32::new(outside_f32_delta, 0.0),
         Complex32::new(0.0, 0.0),
         Complex32::new(2.0, 0.0),
     ]);
-    let within_f64 = one_sector_matrix(vec![1.0_f64, 1.0e-13, 0.0, 2.0]);
-    let outside_f64 = one_sector_matrix(vec![1.0_f64, 1.0e-8, 0.0, 2.0]);
+    let within_f64 = one_sector_matrix(vec![1.0_f64, within_f64_delta, 0.0, 2.0]);
+    let outside_f64 = one_sector_matrix(vec![1.0_f64, outside_f64_delta, 0.0, 2.0]);
     let within_c64 = one_sector_matrix(vec![
         Complex64::new(1.0, 0.0),
-        Complex64::new(1.0e-13, 0.0),
+        Complex64::new(within_f64_delta, 0.0),
         Complex64::new(0.0, 0.0),
         Complex64::new(2.0, 0.0),
     ]);
     let outside_c64 = one_sector_matrix(vec![
         Complex64::new(1.0, 0.0),
-        Complex64::new(1.0e-8, 0.0),
+        Complex64::new(outside_f64_delta, 0.0),
         Complex64::new(0.0, 0.0),
         Complex64::new(2.0, 0.0),
     ]);
@@ -1603,10 +1607,35 @@ fn eigh_uses_a_relative_frobenius_tolerance_for_every_factor_dtype() {
 #[test]
 fn eigh_hermitian_preflight_is_invariant_under_finite_rescaling() {
     // What: multiplying a block cannot change a fixed relative perturbation's classification.
-    let rtol = f64::EPSILON.powf(0.75);
     for scale in [1.0e-200, 1.0, 1.0e200] {
-        let accepted = one_sector_matrix(vec![scale, rtol * scale, 0.0, 2.0 * scale]);
-        let rejected = one_sector_matrix(vec![scale, 10.0 * rtol * scale, 0.0, 2.0 * scale]);
+        let accepted = one_sector_matrix(vec![
+            scale,
+            62.0 * f64::EPSILON * 10.0_f64.sqrt() * scale,
+            0.0,
+            2.0 * scale,
+        ]);
+        let rejected = one_sector_matrix(vec![
+            scale,
+            66.0 * f64::EPSILON * 10.0_f64.sqrt() * scale,
+            0.0,
+            2.0 * scale,
+        ]);
+        assert_eigh_preflight(&accepted, true);
+        assert_eigh_preflight(&rejected, false);
+    }
+    for scale in [1.0e-30_f32, 1.0, 1.0e30] {
+        let accepted = one_sector_matrix(vec![
+            scale,
+            62.0 * f32::EPSILON * 10.0_f32.sqrt() * scale,
+            0.0,
+            2.0 * scale,
+        ]);
+        let rejected = one_sector_matrix(vec![
+            scale,
+            66.0 * f32::EPSILON * 10.0_f32.sqrt() * scale,
+            0.0,
+            2.0 * scale,
+        ]);
         assert_eigh_preflight(&accepted, true);
         assert_eigh_preflight(&rejected, false);
     }
@@ -1658,7 +1687,7 @@ fn eigh_rejects_a_large_nonhermitian_input() {
 #[test]
 fn eigh_relative_hermitian_preflight_is_block_size_independent() {
     // What: repeating the same relative diagonal defect cannot change acceptance with block size.
-    let rtol = f64::EPSILON.powf(0.75);
+    let rtol = 64.0 * f64::EPSILON;
     for n in [2, 64] {
         for (delta, accepted) in [(rtol / 2.0, true), (2.0 * rtol, false)] {
             let mut data = vec![Complex64::new(0.0, 0.0); n * n];
@@ -1674,7 +1703,7 @@ fn eigh_relative_hermitian_preflight_is_block_size_independent() {
 fn eigh_relative_hermitian_preflight_counts_cross_block_pairs_twice() {
     // What: a defect spanning the 32x32 traversal boundary contributes both conjugate positions.
     const N: usize = 33;
-    let rtol = f64::EPSILON.powf(0.75);
+    let rtol = 64.0 * f64::EPSILON;
     for (factor, accepted) in [(1.3, true), (1.6, false)] {
         let mut data = vec![0.0; N * N];
         for diagonal in 0..N {

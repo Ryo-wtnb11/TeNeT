@@ -81,7 +81,7 @@ impl HermitianReal for f32 {
     }
 
     fn relative_tolerance() -> Self {
-        Self::EPSILON.powf(0.75)
+        64.0 * Self::EPSILON
     }
 }
 
@@ -91,7 +91,7 @@ impl HermitianReal for f64 {
     }
 
     fn relative_tolerance() -> Self {
-        Self::EPSILON.powf(0.75)
+        64.0 * Self::EPSILON
     }
 }
 
@@ -2701,10 +2701,9 @@ impl<R, D> EighTruncDyn<R, D> {
 /// Full Hermitian eigendecomposition through the device boundary.
 ///
 /// Before any dense call, every coupled-sector block `A` must satisfy
-/// `||(A - A†)/2||_F <= eps(real(D))^(3/4) * ||A||_F`, where `real(D)` is
-/// the real component type of `D`. This dimensionless relative tolerance is a
-/// fixed practical heuristic, not a uniquely derived backward-error bound, and
-/// is not user-configurable in this API.
+/// `||(A - A†)/2||_F <= 64 * eps(real(D)) * ||A||_F`, where `real(D)` is
+/// the real component type of `D`. This fixed machine-precision multiple is
+/// not currently user-configurable in this API.
 pub fn eigh_full<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
@@ -5197,7 +5196,7 @@ fn hermitian_residual_norm<D: FactorScalar, R: HermitianReal>(
     Some(residual)
 }
 
-/// Tests `||(A - A†)/2||_F <= eps(R)^(3/4) * ||A||_F`.
+/// Tests `||(A - A†)/2||_F <= 64 * eps(R) * ||A||_F`.
 ///
 /// The scaled sums keep that relative decision stable when either norm would
 /// overflow or underflow if formed directly.

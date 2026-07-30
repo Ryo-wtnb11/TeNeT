@@ -26,10 +26,10 @@ use crate::factorize::{
 /// algorithm behind the `LinearAlgebra.exp!` TensorKit calls.
 ///
 /// The route is selected by the same fixed criterion used by EIGH:
-/// `||(A - A†)/2||_F <= eps(real(D))^(3/4) * ||A||_F` in every
+/// `||(A - A†)/2||_F <= 64 * eps(real(D)) * ||A||_F` in every
 /// coupled-sector block, where `real(D)` is the real component type of `D`.
-/// This practical heuristic is not user-configurable; changing it can change
-/// whether [`exp`] uses the spectral or Padé algorithm.
+/// This machine-precision multiple is not currently user-configurable;
+/// changing it can change whether [`exp`] uses the spectral or Padé algorithm.
 pub fn exp<E, RuleKey, BT, BC, R, D, const N: usize>(
     dense: &mut E,
     context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
