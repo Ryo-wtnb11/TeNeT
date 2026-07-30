@@ -10,7 +10,7 @@ use tenet_core::{
 };
 use tenet_matrixalgebra::{
     eigh_full_dyn, qr_compact_dyn, sector_matricization_diagnostic, svd_compact_dyn,
-    BoundDynamicTensorRef,
+    validate_hermitian_regions, BoundDynamicTensorRef,
 };
 use tenet_tensors::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
 
@@ -47,21 +47,43 @@ fn main() {
     let svd_iters = env_usize("ISSUE19_SVD_ITERS", 5);
     let qr_iters = env_usize("ISSUE19_QR_ITERS", svd_iters);
     let eigh_iters = env_usize("ISSUE19_EIGH_ITERS", svd_iters);
-    let rule = SU2FusionRule;
-    let tensor = synthetic_su2_tensor();
-    let dyn_space =
-        DynamicFusionMapSpace::from_typed(tensor.fusion_space().expect("fusion tensor"));
-    let bound_space =
-        BoundDynamicFusionMapSpace::bind_multiplicity_free(dyn_space.clone(), Arc::new(rule))
-            .unwrap();
-    let input = BoundDynamicTensorRef::try_new(&bound_space, tensor.data()).unwrap();
+    let rule = Arc::new(SU2FusionRule);
+    let general = synthetic_su2_tensor();
+    let general_space = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        DynamicFusionMapSpace::from_typed(general.fusion_space().expect("fusion tensor")),
+        Arc::clone(&rule),
+    )
+    .unwrap();
+    let general_input = BoundDynamicTensorRef::try_new(&general_space, general.data()).unwrap();
 
-    let mut summaries = sector_matricization_diagnostic(&input).unwrap();
+    let hermitian = synthetic_hermitian_su2_tensor();
+    let hermitian_space = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        DynamicFusionMapSpace::from_typed(hermitian.fusion_space().expect("fusion tensor")),
+        rule,
+    )
+    .unwrap();
+    let hermitian_input =
+        BoundDynamicTensorRef::try_new(&hermitian_space, hermitian.data()).unwrap();
+    let regions = hermitian_space
+        .space()
+        .structure()
+        .coupled_sector_regions(hermitian_space.space().nout())
+        .unwrap()
+        .expect("synthetic Hermitian layout must expose coupled-sector regions");
+    validate_hermitian_regions(hermitian_input.data(), &regions)
+        .expect("synthetic factorization input must be Hermitian");
+
+    let mut summaries = sector_matricization_diagnostic(&general_input).unwrap();
     summaries.sort_by_key(|summary| summary.sector.id());
     println!(
-        "synthetic_su2 storage_len={} block_count={}",
-        tensor.data().len(),
-        tensor.structure().block_count()
+        "general_su2 storage_len={} block_count={}",
+        general.data().len(),
+        general.structure().block_count()
+    );
+    println!(
+        "hermitian_su2 storage_len={} block_count={}",
+        hermitian.data().len(),
+        hermitian.structure().block_count()
     );
     for summary in &summaries {
         println!(
@@ -74,11 +96,11 @@ fn main() {
     }
 
     for _ in 0..10 {
-        black_box(sector_matricization_diagnostic(&input).unwrap());
+        black_box(sector_matricization_diagnostic(&general_input).unwrap());
     }
     let start = Instant::now();
     for _ in 0..mat_iters {
-        black_box(sector_matricization_diagnostic(&input).unwrap());
+        black_box(sector_matricization_diagnostic(&general_input).unwrap());
     }
     let elapsed = start.elapsed();
     println!(
@@ -89,55 +111,55 @@ fn main() {
     );
 
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
-    black_box(svd_compact_dyn(&mut dense, &input).unwrap());
+    black_box(svd_compact_dyn(&mut dense, &general_input).unwrap());
     ALLOCATIONS.store(0, Ordering::Relaxed);
     let start = Instant::now();
     for _ in 0..svd_iters {
-        black_box(svd_compact_dyn(&mut dense, &input).unwrap());
+        black_box(svd_compact_dyn(&mut dense, &general_input).unwrap());
     }
     let elapsed = start.elapsed();
-    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
+    let allocation_calls = ALLOCATIONS.load(Ordering::Relaxed);
     println!(
-        "svd_compact_dyn iters={} total_ms={:.3} avg_us={:.3} allocations={} allocs_per_iter={:.2}",
+        "svd_compact_dyn fixture=general iters={} total_ms={:.3} avg_us={:.3} allocation_calls={} allocation_calls_per_iter={:.2}",
         svd_iters,
         elapsed.as_secs_f64() * 1.0e3,
         elapsed.as_secs_f64() * 1.0e6 / svd_iters as f64,
-        allocations,
-        allocations as f64 / svd_iters as f64
+        allocation_calls,
+        allocation_calls as f64 / svd_iters as f64
     );
 
-    black_box(qr_compact_dyn(&mut dense, &input).unwrap());
+    black_box(qr_compact_dyn(&mut dense, &general_input).unwrap());
     ALLOCATIONS.store(0, Ordering::Relaxed);
     let start = Instant::now();
     for _ in 0..qr_iters {
-        black_box(qr_compact_dyn(&mut dense, &input).unwrap());
+        black_box(qr_compact_dyn(&mut dense, &general_input).unwrap());
     }
     let elapsed = start.elapsed();
-    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
+    let allocation_calls = ALLOCATIONS.load(Ordering::Relaxed);
     println!(
-        "qr_compact_dyn iters={} total_ms={:.3} avg_us={:.3} allocations={} allocs_per_iter={:.2}",
+        "qr_compact_dyn fixture=general iters={} total_ms={:.3} avg_us={:.3} allocation_calls={} allocation_calls_per_iter={:.2}",
         qr_iters,
         elapsed.as_secs_f64() * 1.0e3,
         elapsed.as_secs_f64() * 1.0e6 / qr_iters as f64,
-        allocations,
-        allocations as f64 / qr_iters as f64
+        allocation_calls,
+        allocation_calls as f64 / qr_iters as f64
     );
 
-    black_box(eigh_full_dyn(&mut dense, &input).unwrap());
+    black_box(eigh_full_dyn(&mut dense, &hermitian_input).unwrap());
     ALLOCATIONS.store(0, Ordering::Relaxed);
     let start = Instant::now();
     for _ in 0..eigh_iters {
-        black_box(eigh_full_dyn(&mut dense, &input).unwrap());
+        black_box(eigh_full_dyn(&mut dense, &hermitian_input).unwrap());
     }
     let elapsed = start.elapsed();
-    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
+    let allocation_calls = ALLOCATIONS.load(Ordering::Relaxed);
     println!(
-        "eigh_full_dyn iters={} total_ms={:.3} avg_us={:.3} allocations={} allocs_per_iter={:.2}",
+        "eigh_full_dyn fixture=hermitian iters={} total_ms={:.3} avg_us={:.3} allocation_calls={} allocation_calls_per_iter={:.2}",
         eigh_iters,
         elapsed.as_secs_f64() * 1.0e3,
         elapsed.as_secs_f64() * 1.0e6 / eigh_iters as f64,
-        allocations,
-        allocations as f64 / eigh_iters as f64
+        allocation_calls,
+        allocation_calls as f64 / eigh_iters as f64
     );
 }
 
@@ -148,7 +170,7 @@ fn env_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-fn synthetic_su2_tensor() -> TensorMap<f64, 2, 2> {
+fn synthetic_su2_space() -> FusionTensorMapSpace<2, 2> {
     let sectors = [(0usize, 2usize), (1usize, 2usize), (2usize, 3usize)];
     let leg = || {
         SectorLeg::new(
@@ -189,13 +211,17 @@ fn synthetic_su2_tensor() -> TensorMap<f64, 2, 2> {
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+    FusionTensorMapSpace::from_degeneracy_shapes_coupled(
         TensorMapSpace::<2, 2>::from_dims([leg_dim, leg_dim], [leg_dim, leg_dim]).unwrap(),
         homspace,
         &SU2FusionRule,
         shapes,
     )
-    .unwrap();
+    .unwrap()
+}
+
+fn synthetic_su2_tensor() -> TensorMap<f64, 2, 2> {
+    let space = synthetic_su2_space();
     let len = space.required_len().unwrap();
     TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(
         (0..len)
@@ -204,4 +230,29 @@ fn synthetic_su2_tensor() -> TensorMap<f64, 2, 2> {
         space,
     )
     .unwrap()
+}
+
+fn synthetic_hermitian_su2_tensor() -> TensorMap<f64, 2, 2> {
+    let space = synthetic_su2_space();
+    let len = space.required_len().unwrap();
+    let regions = space
+        .subblock_structure()
+        .coupled_sector_regions(2)
+        .unwrap()
+        .expect("synthetic Hermitian layout must expose coupled-sector regions");
+    let mut data = vec![0.0; len];
+    for region in regions.iter() {
+        assert_eq!(region.rows(), region.cols());
+        let start = region.range().start;
+        let n = region.rows();
+        for col in 0..n {
+            for row in 0..n {
+                let low = row.min(col);
+                let high = row.max(col);
+                data[start + row + n * col] =
+                    ((region.coupled().id() + 3 * low + 5 * high) % 19) as f64 * 0.5 - 4.0;
+            }
+        }
+    }
+    TensorMap::<f64, 2, 2>::from_vec_with_fusion_space(data, space).unwrap()
 }
