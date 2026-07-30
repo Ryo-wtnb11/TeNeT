@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::Arc;
 
@@ -1584,8 +1584,18 @@ where
             kept: matrix.rows.min(matrix.cols),
         })
         .collect::<Vec<_>>();
-    let (u_space, vt_space) =
-        build_left_right_bound_spaces(input.space(), space.homspace(), &ranks)?;
+    let u_space = build_bound_factor_space(
+        input.space(),
+        space.homspace(),
+        ranks.iter().map(|rank| (rank.sector, rank.kept)),
+        FactorSide::Left,
+    )?;
+    let vt_space = build_bound_factor_space(
+        input.space(),
+        space.homspace(),
+        ranks.iter().map(|rank| (rank.sector, rank.kept)),
+        FactorSide::Right,
+    )?;
     let u_len = u_space
         .space()
         .required_len()
@@ -1941,7 +1951,18 @@ where
             kept: region.rows().min(region.cols()),
         })
         .collect::<Vec<_>>();
-    let (u_space, vh_space) = build_left_right_bound_spaces(input, space.homspace(), &ranks)?;
+    let u_space = build_bound_factor_space(
+        input,
+        space.homspace(),
+        ranks.iter().map(|rank| (rank.sector, rank.kept)),
+        FactorSide::Left,
+    )?;
+    let vh_space = build_bound_factor_space(
+        input,
+        space.homspace(),
+        ranks.iter().map(|rank| (rank.sector, rank.kept)),
+        FactorSide::Right,
+    )?;
     let left_regions = checked_sector_regions(u_space.space().structure(), u_space.space().nout())?
         .ok_or(OperationError::UnsupportedTensorContractScope {
             message: "compact left factor is not a coupled-sector matrix layout",
@@ -2484,43 +2505,42 @@ struct SectorRank {
     kept: usize,
 }
 
-fn build_left_right_bound_spaces<R>(
-    authority: &BoundDynamicFusionMapSpace<R>,
-    homspace: &FusionTreeHomSpace,
-    ranks: &[SectorRank],
-) -> Result<(BoundDynamicFusionMapSpace<R>, BoundDynamicFusionMapSpace<R>), OperationError>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-{
-    let new_leg = SectorLeg::new(ranks.iter().map(|rank| (rank.sector, rank.kept)), false);
-
-    let left_hom = FusionTreeHomSpace::new(
-        homspace.codomain().clone(),
-        FusionProductSpace::new([new_leg.clone()]),
-    );
-    let left = authority.derive_from_final_homspace(left_hom)?;
-
-    let right_hom = FusionTreeHomSpace::new(
-        FusionProductSpace::new([new_leg]),
-        homspace.domain().clone(),
-    );
-    let right = authority.derive_from_final_homspace(right_hom)?;
-    Ok((left, right))
+#[cfg(test)]
+thread_local! {
+    static FACTOR_BUFFER_BUILD_COUNTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
 }
 
-fn build_left_bound_space<R>(
+#[cfg(test)]
+pub(crate) fn reset_factor_buffer_build_counts_for_test() {
+    FACTOR_BUFFER_BUILD_COUNTS.set((0, 0));
+}
+
+#[cfg(test)]
+pub(crate) fn factor_buffer_build_counts_for_test() -> (usize, usize) {
+    FACTOR_BUFFER_BUILD_COUNTS.get()
+}
+
+#[derive(Clone, Copy)]
+enum FactorSide {
+    Left,
+    Right,
+}
+
+fn build_bound_factor_space<R>(
     authority: &BoundDynamicFusionMapSpace<R>,
     homspace: &FusionTreeHomSpace,
-    ranks: &[SectorRank],
+    dimensions: impl IntoIterator<Item = (SectorId, usize)>,
+    side: FactorSide,
 ) -> Result<BoundDynamicFusionMapSpace<R>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
-    let new_leg = SectorLeg::new(ranks.iter().map(|rank| (rank.sector, rank.kept)), false);
-    let hom = FusionTreeHomSpace::new(
-        homspace.codomain().clone(),
-        FusionProductSpace::new([new_leg]),
-    );
+    let new_leg = SectorLeg::new(dimensions, false);
+    let bond = FusionProductSpace::new([new_leg]);
+    let hom = match side {
+        FactorSide::Left => FusionTreeHomSpace::new(homspace.codomain().clone(), bond),
+        FactorSide::Right => FusionTreeHomSpace::new(bond, homspace.domain().clone()),
+    };
     authority.derive_from_final_homspace(hom)
 }
 
@@ -2536,64 +2556,27 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let ranks = pairs
+    let dimensions = pairs
         .iter()
-        .map(|pair| SectorRank {
-            sector: pair.sector,
-            kept: pair.kept,
-        })
-        .collect::<Vec<_>>();
-    let (left_space, right_space) = build_left_right_bound_spaces(authority, homspace, &ranks)?;
-    let matrix_by_sector = matricization_map(matricizations);
-    let pair_by_sector: HashMap<SectorId, &FactorPair<D>> =
-        pairs.iter().map(|pair| (pair.sector, pair)).collect();
-    let mut left_data = vec![D::zero(); left_space.space().required_len()?];
-    for index in 0..left_space.space().structure().block_count() {
-        let block = left_space.space().structure().block(index)?;
-        let BlockKey::FusionTree(key) = block.key() else {
-            continue;
-        };
-        let sector = coupled_of(key.codomain_tree());
-        let matrix = matricization_of(&matrix_by_sector, sector)?;
-        let pair = pair_by_sector[&sector];
-        let (row_offset, _) = row_placement(matrix, key.codomain_tree())?;
-        scatter_matrix_block(
-            &mut left_data,
-            block.shape(),
-            block.strides(),
-            block.offset(),
-            block.shape().len() - 1,
-            &pair.left,
-            pair.left_rows,
-            row_offset,
-        );
-    }
-    let mut right_data = vec![D::zero(); right_space.space().required_len()?];
-    for index in 0..right_space.space().structure().block_count() {
-        let block = right_space.space().structure().block(index)?;
-        let BlockKey::FusionTree(key) = block.key() else {
-            continue;
-        };
-        let sector = coupled_of(key.domain_tree());
-        let matrix = matricization_of(&matrix_by_sector, sector)?;
-        let pair = pair_by_sector[&sector];
-        let (col_offset, _) = col_placement(matrix, key.domain_tree())?;
-        scatter_matrix_block(
-            &mut right_data,
-            block.shape(),
-            block.strides(),
-            block.offset(),
-            0,
-            &pair.right,
-            pair.right_leading,
-            col_offset,
-        );
-    }
-    let left_nout = left_space.space().nout();
-    let right_nin = right_space.space().nin();
+        .map(|pair| (pair.sector, pair.kept))
+        .collect::<BTreeMap<_, _>>();
     Ok((
-        BoundDynFactor::from_bound(left_space, left_data, left_nout, 1)?,
-        BoundDynFactor::from_bound(right_space, right_data, 1, right_nin)?,
+        build_bound_factor(
+            authority,
+            homspace,
+            matricizations,
+            pairs,
+            &dimensions,
+            FactorSide::Left,
+        )?,
+        build_bound_factor(
+            authority,
+            homspace,
+            matricizations,
+            pairs,
+            &dimensions,
+            FactorSide::Right,
+        )?,
     ))
 }
 
@@ -2607,23 +2590,133 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    let ranks = pairs
+    let dimensions = pairs
         .iter()
-        .map(|pair| SectorRank {
-            sector: pair.sector,
-            kept: pair.kept,
-        })
-        .collect::<Vec<_>>();
-    let space = build_left_bound_space(authority, homspace, &ranks)?;
+        .map(|pair| (pair.sector, pair.kept))
+        .collect::<BTreeMap<_, _>>();
+    build_bound_factor(
+        authority,
+        homspace,
+        matricizations,
+        pairs,
+        &dimensions,
+        FactorSide::Left,
+    )
+}
+
+fn build_bound_factor<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    homspace: &FusionTreeHomSpace,
+    matricizations: &[SectorMatricization<D>],
+    pairs: &[FactorPair<D>],
+    dimensions: &BTreeMap<SectorId, usize>,
+    side: FactorSide,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let space = build_bound_factor_space(
+        authority,
+        homspace,
+        dimensions
+            .iter()
+            .map(|(&sector, &dimension)| (sector, dimension)),
+        side,
+    )?;
     let mut data = vec![D::zero(); space.space().required_len()?];
-    let pair_by_sector: HashMap<SectorId, &FactorPair<D>> =
-        pairs.iter().map(|pair| (pair.sector, pair)).collect();
-    for matrix in matricizations {
-        let pair = pair_by_sector[&matrix.sector];
-        scatter_left_sector_blocks(space.space(), &mut data, matrix, &pair.left, pair.left_rows)?;
+    #[cfg(test)]
+    FACTOR_BUFFER_BUILD_COUNTS.set({
+        let (left, right) = FACTOR_BUFFER_BUILD_COUNTS.get();
+        match side {
+            FactorSide::Left => (left + 1, right),
+            FactorSide::Right => (left, right + 1),
+        }
+    });
+    let mut routes = matricizations
+        .iter()
+        .map(|matrix| (matrix.sector, (matrix, None)))
+        .collect::<HashMap<_, _>>();
+    for pair in pairs {
+        let route =
+            routes
+                .get_mut(&pair.sector)
+                .ok_or(OperationError::UnsupportedTensorContractScope {
+                    message: "factor sector absent from the source tensor",
+                })?;
+        route.1 = Some(pair);
     }
-    let nout = space.space().nout();
-    BoundDynFactor::from_bound(space, data, nout, 1)
+    let mut missing_offsets = HashMap::<SectorId, usize>::new();
+    for index in 0..space.space().structure().block_count() {
+        let block = space.space().structure().block(index)?;
+        let BlockKey::FusionTree(key) = block.key() else {
+            continue;
+        };
+        let (sector, matrix_axis) = match side {
+            FactorSide::Left => (coupled_of(key.codomain_tree()), block.shape().len() - 1),
+            FactorSide::Right => (coupled_of(key.domain_tree()), 0),
+        };
+        if let Some(&(matrix, Some(pair))) = routes.get(&sector) {
+            let side_offset = match side {
+                FactorSide::Left => row_placement(matrix, key.codomain_tree())?.0,
+                FactorSide::Right => col_placement(matrix, key.domain_tree())?.0,
+            };
+            let (factor, factor_rows) = match side {
+                FactorSide::Left => (pair.left.as_slice(), pair.left_rows),
+                FactorSide::Right => (pair.right.as_slice(), pair.right_leading),
+            };
+            scatter_matrix_block(
+                &mut data,
+                block.shape(),
+                block.strides(),
+                block.offset(),
+                matrix_axis,
+                factor,
+                factor_rows,
+                side_offset,
+            );
+            continue;
+        }
+        if routes.contains_key(&sector) {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "factor rank absent for a populated source sector",
+            });
+        }
+        let dimension = dimensions[&sector];
+        let side_offset = missing_offsets.entry(sector).or_default();
+        let extent = block
+            .shape()
+            .iter()
+            .enumerate()
+            .filter(|&(axis, _)| axis != matrix_axis)
+            .try_fold(1usize, |acc, (_, &value)| acc.checked_mul(value))
+            .ok_or(OperationError::ElementCountOverflow)?;
+        let side_end = side_offset
+            .checked_add(extent)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        if side_end > dimension {
+            return Err(OperationError::ElementCountMismatch {
+                expected: dimension,
+                actual: side_end,
+            });
+        }
+        scatter_identity_matrix_block(
+            &mut data,
+            block.shape(),
+            block.strides(),
+            block.offset(),
+            matrix_axis,
+            dimension,
+            *side_offset,
+            extent,
+        )?;
+        *side_offset = side_end;
+    }
+    let (nout, nin) = match side {
+        FactorSide::Left => (space.space().nout(), 1),
+        FactorSide::Right => (1, space.space().nin()),
+    };
+    BoundDynFactor::from_bound(space, data, nout, nin)
 }
 
 fn scatter_left_sector_blocks<D>(
@@ -2832,7 +2925,12 @@ where
             kept: matrix.rows,
         })
         .collect::<Vec<_>>();
-    let v_space = build_left_bound_space(input.space(), space.homspace(), &ranks)?;
+    let v_space = build_bound_factor_space(
+        input.space(),
+        space.homspace(),
+        ranks.iter().map(|rank| (rank.sector, rank.kept)),
+        FactorSide::Left,
+    )?;
     let v_len = v_space
         .space()
         .required_len()
@@ -3179,10 +3277,17 @@ where
 {
     let space = input.space().space();
     let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
+    let row_dimensions = space
+        .homspace()
+        .codomain()
+        .coupled_sector_block_dimensions(input.space().provider())?;
+    let col_dimensions = space
+        .homspace()
+        .domain()
+        .coupled_sector_block_dimensions(input.space().provider())?;
 
     let mut pairs = Vec::with_capacity(matricizations.len());
     let mut singular_values = Vec::with_capacity(matricizations.len());
-    let mut col_dims: Vec<(SectorId, usize)> = Vec::new();
     let max_rows = matricizations
         .iter()
         .map(|matrix| matrix.rows)
@@ -3270,7 +3375,6 @@ where
             sector: matrix.sector,
             values: s_values.clone(),
         });
-        col_dims.push((matrix.sector, matrix.cols));
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: matrix.rows,
@@ -3281,56 +3385,30 @@ where
         });
     }
 
-    let cols_by_sector: HashMap<SectorId, usize> = col_dims.into_iter().collect();
-    let cols_of = |sector: SectorId| {
-        cols_by_sector
-            .get(&sector)
-            .copied()
-            .expect("column dimension recorded per sector")
-    };
     // The left/right bond legs differ in the full SVD (rows vs columns), so
     // build the two factors with separate bond dimensions.
-    let (u_factor, _) = build_left_right_bound_pair(
+    let u_factor = build_bound_factor(
         input.space(),
         space.homspace(),
         &matricizations,
-        &pairs
-            .iter()
-            .map(|pair| FactorPair {
-                sector: pair.sector,
-                kept: pair.left_rows,
-                left: pair.left.clone(),
-                left_rows: pair.left_rows,
-                // Discarded placeholder sized kept x cols for the scatter.
-                right: vec![D::zero(); pair.left_rows * cols_of(pair.sector)],
-                right_leading: pair.left_rows,
-            })
-            .collect::<Vec<_>>(),
+        &pairs,
+        &row_dimensions,
+        FactorSide::Left,
     )?;
-    let (_, vh_factor) = build_left_right_bound_pair(
+    let vh_factor = build_bound_factor(
         input.space(),
         space.homspace(),
         &matricizations,
-        &pairs
-            .iter()
-            .map(|pair| FactorPair {
-                sector: pair.sector,
-                kept: cols_of(pair.sector),
-                // Discarded placeholder sized rows x kept for the scatter.
-                left: vec![D::zero(); pair.left_rows * cols_of(pair.sector)],
-                left_rows: pair.left_rows,
-                right: pair.right.clone(),
-                right_leading: cols_of(pair.sector),
-            })
-            .collect::<Vec<_>>(),
+        &pairs,
+        &col_dimensions,
+        FactorSide::Right,
     )?;
-    let rows_by_sector: HashMap<SectorId, usize> = pairs
-        .iter()
-        .map(|pair| (pair.sector, pair.left_rows))
-        .collect();
-    let rows_of = |sector: SectorId| rows_by_sector.get(&sector).copied().unwrap_or(0);
-    let s_factor =
-        rectangular_diagonal_bond_tensor(input.space(), &singular_values, &rows_of, &cols_of)?;
+    let s_factor = rectangular_diagonal_bond_tensor(
+        input.space(),
+        &singular_values,
+        &row_dimensions,
+        &col_dimensions,
+    )?;
     Ok(SvdFullDyn {
         u: u_factor,
         s: s_factor,
@@ -3388,23 +3466,23 @@ where
 fn rectangular_diagonal_bond_tensor<R, D>(
     authority: &BoundDynamicFusionMapSpace<R>,
     spectra: &[SectorSpectrum],
-    rows_of: &dyn Fn(SectorId) -> usize,
-    cols_of: &dyn Fn(SectorId) -> usize,
+    row_dimensions: &BTreeMap<SectorId, usize>,
+    col_dimensions: &BTreeMap<SectorId, usize>,
 ) -> Result<BoundDynFactor<R, D>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
     let row_leg = SectorLeg::new(
-        spectra
+        row_dimensions
             .iter()
-            .map(|entry| (entry.sector, rows_of(entry.sector))),
+            .map(|(&sector, &dimension)| (sector, dimension)),
         false,
     );
     let col_leg = SectorLeg::new(
-        spectra
+        col_dimensions
             .iter()
-            .map(|entry| (entry.sector, cols_of(entry.sector))),
+            .map(|(&sector, &dimension)| (sector, dimension)),
         false,
     );
     let homspace = FusionTreeHomSpace::new(
@@ -3726,7 +3804,28 @@ where
             right_leading: rows,
         });
     }
-    build_left_right_bound_pair(input.space(), space.homspace(), &matrices, &pairs)
+    let dimensions = space
+        .homspace()
+        .codomain()
+        .coupled_sector_block_dimensions(input.space().provider())?;
+    Ok((
+        build_bound_factor(
+            input.space(),
+            space.homspace(),
+            &matrices,
+            &pairs,
+            &dimensions,
+            FactorSide::Left,
+        )?,
+        build_bound_factor(
+            input.space(),
+            space.homspace(),
+            &matrices,
+            &pairs,
+            &dimensions,
+            FactorSide::Right,
+        )?,
+    ))
 }
 
 /// Full LQ `t = L * Q` (MatrixAlgebraKit `lq_full`): per sector `L` is the
@@ -3796,7 +3895,28 @@ where
             right_leading: cols,
         });
     }
-    build_left_right_bound_pair(input.space(), space.homspace(), &matrices, &pairs)
+    let dimensions = space
+        .homspace()
+        .domain()
+        .coupled_sector_block_dimensions(input.space().provider())?;
+    Ok((
+        build_bound_factor(
+            input.space(),
+            space.homspace(),
+            &matrices,
+            &pairs,
+            &dimensions,
+            FactorSide::Left,
+        )?,
+        build_bound_factor(
+            input.space(),
+            space.homspace(),
+            &matrices,
+            &pairs,
+            &dimensions,
+            FactorSide::Right,
+        )?,
+    ))
 }
 
 /// Full general eigendecomposition `t = V * D * V^-1` (MatrixAlgebraKit
@@ -5135,6 +5255,42 @@ fn scatter_matrix_block<D: Copy>(
         }
         advance_outer_index(&mut index, shape);
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scatter_identity_matrix_block<D: FactorScalar>(
+    data: &mut [D],
+    shape: &[usize],
+    strides: &[usize],
+    offset: usize,
+    matrix_axis: usize,
+    matrix_dimension: usize,
+    side_offset: usize,
+    side_extent: usize,
+) -> Result<(), OperationError> {
+    if shape.get(matrix_axis).copied() != Some(matrix_dimension) {
+        return Err(OperationError::ElementCountMismatch {
+            expected: matrix_dimension,
+            actual: shape.get(matrix_axis).copied().unwrap_or(0),
+        });
+    }
+    for local_side in 0..side_extent {
+        let matrix_index = side_offset
+            .checked_add(local_side)
+            .ok_or(OperationError::ElementCountOverflow)?;
+        let mut destination = offset + matrix_index * strides[matrix_axis];
+        let mut remaining = local_side;
+        for axis in 0..shape.len() {
+            if axis == matrix_axis {
+                continue;
+            }
+            let coordinate = remaining % shape[axis];
+            remaining /= shape[axis];
+            destination += coordinate * strides[axis];
+        }
+        data[destination] = D::one();
+    }
+    Ok(())
 }
 
 fn coupled_of(tree: &FusionTreeKey) -> SectorId {

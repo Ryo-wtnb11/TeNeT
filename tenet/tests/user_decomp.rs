@@ -28,6 +28,55 @@ fn relative_distance(lhs: &Tensor, rhs: &Tensor) -> f64 {
     diff.norm().unwrap() / (1.0 + rhs.norm().unwrap())
 }
 
+fn assert_full_factorization_contracts(
+    rt: &Runtime,
+    dtype: Dtype,
+    codomain: &[&Space],
+    domain: &[&Space],
+    seed: u64,
+) {
+    let tensor = Tensor::rand_with_seed(
+        rt,
+        dtype,
+        codomain.iter().copied(),
+        domain.iter().copied(),
+        seed,
+    )
+    .unwrap();
+    let codomain_identity = Tensor::id(rt, dtype, codomain.iter().copied()).unwrap();
+    let domain_identity = Tensor::id(rt, dtype, domain.iter().copied()).unwrap();
+
+    let (u, s, vh) = tensor.svd_full().unwrap();
+    assert!(relative_distance(&u.compose(&s).unwrap().compose(&vh).unwrap(), &tensor) < 1e-10);
+    assert!(
+        relative_distance(
+            &u.compose(&u.adjoint().unwrap()).unwrap(),
+            &codomain_identity
+        ) < 1e-10
+    );
+    assert!(
+        relative_distance(
+            &vh.adjoint().unwrap().compose(&vh).unwrap(),
+            &domain_identity
+        ) < 1e-10
+    );
+
+    let (q, r) = tensor.qr_full().unwrap();
+    assert!(relative_distance(&q.compose(&r).unwrap(), &tensor) < 1e-10);
+    assert!(
+        relative_distance(
+            &q.compose(&q.adjoint().unwrap()).unwrap(),
+            &codomain_identity
+        ) < 1e-10
+    );
+
+    let (l, q) = tensor.lq_full().unwrap();
+    assert!(relative_distance(&l.compose(&q).unwrap(), &tensor) < 1e-10);
+    assert!(
+        relative_distance(&q.adjoint().unwrap().compose(&q).unwrap(), &domain_identity) < 1e-10
+    );
+}
+
 fn assert_isomorphic_inverse(rt: &Runtime, dtype: Dtype, leg: Space) {
     let fused = leg.fuse(&leg).unwrap();
     let map = Tensor::isomorphism(rt, dtype, [&fused], [&leg, &leg]).unwrap();
@@ -447,6 +496,49 @@ fn qr_and_lq_factorizations() {
         let (lf, qf) = t.lq_full().unwrap();
         assert!(relative_distance(&lf.compose(&qf).unwrap(), &t) < 1e-10);
     }
+}
+
+#[test]
+fn full_factorizations_complete_unmatched_u1_sectors() {
+    let rt = Runtime::builder().build().unwrap();
+
+    let codomain = Space::u1([(0, 2), (1, 1)]);
+    let domain = Space::u1([(0, 1)]);
+    assert_full_factorization_contracts(&rt, Dtype::F64, &[&codomain], &[&domain], 108);
+
+    let codomain = Space::u1([(0, 1)]);
+    let domain = Space::u1([(0, 2), (1, 1)]);
+    assert_full_factorization_contracts(&rt, Dtype::F64, &[&codomain], &[&domain], 109);
+}
+
+#[test]
+fn full_factorizations_complete_multitree_su2_complex_sectors() {
+    let rt = Runtime::builder().build().unwrap();
+    let half = Space::su2([(1, 1)]).unwrap();
+    let three_halves = Space::su2([(3, 1)]).unwrap();
+
+    assert_full_factorization_contracts(
+        &rt,
+        Dtype::C64,
+        &[&half, &half, &half],
+        &[&three_halves],
+        110,
+    );
+    assert_full_factorization_contracts(
+        &rt,
+        Dtype::C64,
+        &[&three_halves],
+        &[&half, &half, &half],
+        111,
+    );
+}
+
+#[test]
+fn full_factorizations_handle_disjoint_u1_support() {
+    let rt = Runtime::builder().build().unwrap();
+    let codomain = Space::u1([(1, 2)]);
+    let domain = Space::u1([(0, 3)]);
+    assert_full_factorization_contracts(&rt, Dtype::C64, &[&codomain], &[&domain], 112);
 }
 
 #[test]
