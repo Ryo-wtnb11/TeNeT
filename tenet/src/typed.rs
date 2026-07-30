@@ -2238,10 +2238,12 @@ where
     ///
     /// # Compact storage
     ///
-    /// A factor in compact diagonal storage ([`Self::svd_compact`]'s `s`,
-    /// [`Self::eigh_full`]'s `d`) is **materialized** here, and so by
-    /// [`Self::braid`], [`Self::transpose`], [`Self::transpose_axes`] and
-    /// [`Self::repartition`] as well: the result is a dense `Σ_c k_c²` buffer.
+    /// A non-identity transform of a factor in compact diagonal storage
+    /// ([`Self::svd_compact`]'s `s`, [`Self::eigh_full`]'s `d`) is
+    /// **materialized** here, and so by [`Self::braid`], [`Self::transpose`],
+    /// [`Self::transpose_axes`] and [`Self::repartition`] as well: the result
+    /// is a dense `Σ_c k_c²` buffer. An exact identity returns the source body
+    /// unchanged and preserves compact storage.
     /// TensorKit draws the line in the same place — its `DiagonalTensorMap`
     /// implements only the two permutations that leave a diagonal diagonal —
     /// and the general case genuinely is not diagonal, so this is a missing
@@ -2291,11 +2293,9 @@ where
         codomain_axes: &[usize],
         domain_axes: &[usize],
     ) -> Result<Self, TypedFacadeError<R>> {
-        // Why no identity shortcut (the erased facade shares storage when the
-        // axes do not move): the result would be byte-identical either way, so
-        // the shortcut is a pure cost question, and adding one without a gate
-        // that measures it is speculative. The same reasoning covers every
-        // other operation routed through `tree_transform` below.
+        if self.axes_are_identity(codomain_axes, domain_axes) {
+            return Ok(self.clone());
+        }
         <R::Mode as TypedTensorTransformDispatch<R, D>>::tree_transform(
             self,
             TreeTransformOperation::permute(
@@ -2347,6 +2347,9 @@ where
             ))
             .into());
         }
+        if self.axes_are_identity(codomain_axes, domain_axes) {
+            return Ok(self.clone());
+        }
         let nout = self.codomain_rank();
         <R::Mode as TypedTensorTransformDispatch<R, D>>::tree_transform(
             self,
@@ -2375,6 +2378,9 @@ where
     /// validation this facade passes through. Checked Generic failures use
     /// [`GenericTensorError::Plan`].
     pub fn repartition(&self, num_codomain: usize) -> Result<Self, TypedFacadeError<R>> {
+        if num_codomain == self.codomain_rank() {
+            return Ok(self.clone());
+        }
         self.planar(PlanarRequestKind::Repartition { num_codomain })
     }
 
@@ -2397,6 +2403,9 @@ where
     /// the expert layer. The generated axis order is planar by construction, so
     /// a failure here means the provider could not carry the bend.
     pub fn transpose(&self) -> Result<Self, TypedFacadeError<R>> {
+        if self.rank() == 0 {
+            return Ok(self.clone());
+        }
         self.planar(PlanarRequestKind::FullTranspose)
     }
 
@@ -2425,10 +2434,22 @@ where
         codomain_axes: &[usize],
         domain_axes: &[usize],
     ) -> Result<Self, TypedFacadeError<R>> {
+        if self.axes_are_identity(codomain_axes, domain_axes) {
+            return Ok(self.clone());
+        }
         self.planar(PlanarRequestKind::Explicit {
             codomain_axes,
             domain_axes,
         })
+    }
+
+    /// Exact current split and axis order, checked without constructing a
+    /// transform operation (whose inline axis storage can spill at high rank).
+    #[inline]
+    fn axes_are_identity(&self, codomain_axes: &[usize], domain_axes: &[usize]) -> bool {
+        let codomain_rank = self.codomain_rank();
+        codomain_axes.iter().copied().eq(0..codomain_rank)
+            && domain_axes.iter().copied().eq(codomain_rank..self.rank())
     }
 
     /// Shared body of the three planar operations: derive the planar axis
@@ -5698,7 +5719,7 @@ fn map_spectrum_dtype<A: Copy, B>(
 #[cfg(test)]
 mod representation_gates {
     use super::*;
-    use tenet_core::{Z2FusionRule, Z2Irrep};
+    use tenet_core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep};
 
     fn fixture() -> TensorMap<Z2FusionRule, f64> {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -5807,6 +5828,154 @@ mod representation_gates {
         assert!(Arc::ptr_eq(&fermionic.body, &untouched.body));
         let touched = fermionic.twist(&[1]).unwrap();
         assert!(!Arc::ptr_eq(&fermionic.body, &touched.body));
+    }
+
+    fn transform_seam_calls<T>(operation: impl FnOnce() -> T) -> usize {
+        crate::tensor_core::TREE_TRANSFORM_SEAM_CALLS.with(|observation| observation.set(Some(0)));
+        let _output = operation();
+        crate::tensor_core::TREE_TRANSFORM_SEAM_CALLS
+            .with(|observation| observation.replace(None))
+            .unwrap()
+    }
+
+    #[test]
+    fn exact_identity_transforms_share_unique_and_simple_bodies() {
+        // What (#689 PR A): exact identity permute/braid/transpose/repartition
+        // never reach the transform seam and return the same body allocation.
+        // Body identity also pins zero payload copies more directly than an
+        // allocator byte count can.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+
+        let u1_provider = Arc::new(U1FusionRule);
+        let u1_leg = GradedSpace::try_new(
+            Arc::clone(&u1_provider),
+            [
+                (U1Irrep::new(-1), 1),
+                (U1Irrep::new(0), 2),
+                (U1Irrep::new(1), 1),
+            ],
+            false,
+        )
+        .unwrap();
+        let u1_f64: TensorMap<U1FusionRule, f64> =
+            TensorMap::from_block_fn(&runtime, [&u1_leg, &u1_leg], [&u1_leg], |_, indices| {
+                indices.iter().sum::<usize>() as f64 + 1.0
+            })
+            .unwrap();
+        let u1_c64 = u1_f64.to_c64();
+
+        let su2_provider = Arc::new(SU2FusionRule);
+        let su2_leg = GradedSpace::try_new(
+            Arc::clone(&su2_provider),
+            [
+                (SU2Irrep::from_twice_spin(0), 2),
+                (SU2Irrep::from_twice_spin(1), 1),
+            ],
+            false,
+        )
+        .unwrap();
+        let su2_f64: TensorMap<SU2FusionRule, f64> =
+            TensorMap::from_block_fn(&runtime, [&su2_leg, &su2_leg], [&su2_leg], |_, indices| {
+                indices.iter().sum::<usize>() as f64 + 1.0
+            })
+            .unwrap();
+        let su2_c64 = su2_f64.to_c64();
+
+        macro_rules! assert_identity_ops {
+            ($tensor:expr) => {{
+                let tensor = $tensor;
+                let calls = transform_seam_calls(|| {
+                    for output in [
+                        tensor.permute(&[0, 1], &[2]).unwrap(),
+                        tensor.braid(&[0, 1], &[2], &[5, 3, 1]).unwrap(),
+                        tensor.transpose_axes(&[0, 1], &[2]).unwrap(),
+                        tensor.repartition(2).unwrap(),
+                    ] {
+                        assert!(Arc::ptr_eq(&tensor.body, &output.body));
+                        assert!(Arc::ptr_eq(&tensor.body.data, &output.body.data));
+                        assert_eq!(tensor.data().as_ptr(), output.data().as_ptr());
+                    }
+                });
+                assert_eq!(calls, 0);
+            }};
+        }
+
+        assert_identity_ops!(&u1_f64);
+        assert_identity_ops!(&u1_c64);
+        assert_identity_ops!(&su2_f64);
+        assert_identity_ops!(&su2_c64);
+
+        // Validation still precedes the braid shortcut.
+        let calls = transform_seam_calls(|| {
+            assert!(u1_f64.braid(&[0, 1], &[2], &[0, 0]).is_err());
+        });
+        assert_eq!(calls, 0);
+        assert!(u1_f64.permute(&[0, 1], &[2, 3]).is_err());
+        assert!(u1_f64.transpose_axes(&[0, 1], &[2, 3]).is_err());
+        assert!(u1_f64.repartition(4).is_err());
+
+        // Negative control: the counter observes a real transform.
+        let calls = transform_seam_calls(|| {
+            let moved = u1_f64.permute(&[1, 0], &[2]).unwrap();
+            assert!(!Arc::ptr_eq(&u1_f64.body, &moved.body));
+        });
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn high_rank_identity_has_no_inline_capacity_boundary() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new(provider, [(U1Irrep::new(0), 1)], false).unwrap();
+        let tensor: TensorMap<U1FusionRule, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg; 10], [&leg; 9], |_, _| 1.0).unwrap();
+        let codomain_axes: Vec<_> = (0..10).collect();
+        let domain_axes: Vec<_> = (10..19).collect();
+        let levels = vec![0; 19];
+
+        let calls = transform_seam_calls(|| {
+            for output in [
+                tensor.permute(&codomain_axes, &domain_axes).unwrap(),
+                tensor.braid(&codomain_axes, &domain_axes, &levels).unwrap(),
+                tensor.transpose_axes(&codomain_axes, &domain_axes).unwrap(),
+            ] {
+                assert!(Arc::ptr_eq(&tensor.body, &output.body));
+            }
+        });
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn compact_identity_transforms_do_not_materialize() {
+        let factor = fixture().svd_compact().unwrap().1;
+        assert!(matches!(&*factor.body.data, TypedData::Diagonal(_)));
+        assert!(factor.body.dense_cache.get().is_none());
+
+        let calls = transform_seam_calls(|| {
+            for output in [
+                factor.permute(&[0], &[1]).unwrap(),
+                factor.braid(&[0], &[1], &[2, 1]).unwrap(),
+                factor.transpose_axes(&[0], &[1]).unwrap(),
+                factor.repartition(1).unwrap(),
+            ] {
+                assert!(Arc::ptr_eq(&factor.body, &output.body));
+                assert!(matches!(&*output.body.data, TypedData::Diagonal(_)));
+                assert!(output.body.dense_cache.get().is_none());
+            }
+        });
+        assert_eq!(calls, 0);
+        assert!(factor.body.dense_cache.get().is_none());
+    }
+
+    #[test]
+    fn scalar_transpose_shares_the_body() {
+        let scalar = fixture().trace_pairs(&[(0, 1)]).unwrap();
+        assert_eq!(scalar.rank(), 0);
+        let calls = transform_seam_calls(|| {
+            let transposed = scalar.transpose().unwrap();
+            assert!(Arc::ptr_eq(&scalar.body, &transposed.body));
+        });
+        assert_eq!(calls, 0);
     }
 
     #[test]
