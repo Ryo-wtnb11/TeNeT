@@ -4868,6 +4868,72 @@ fn svd_full_gives_square_unitaries_and_reconstructs() {
 }
 
 #[test]
+fn full_factorizations_preserve_compact_bytes_on_matching_square_support() {
+    let rule = U1FusionRule;
+    let neutral = U1Irrep::new(0).sector_id();
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(neutral, 2)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(neutral, 2)], false)]),
+    );
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
+        homspace,
+        &rule,
+        [vec![2, 2]],
+    )
+    .unwrap();
+    let tensor = TensorMap::from_vec_with_fusion_space(vec![-1.0, 3.0, 2.0, 4.0], space).unwrap();
+    let input = bound_tensor(Arc::new(rule), &tensor);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let compact = svd_compact(&mut dense, &input.as_ref()).unwrap();
+    crate::factorize::reset_factor_buffer_build_counts_for_test();
+    let full = svd_full(&mut dense, &input.as_ref()).unwrap();
+    assert_eq!(
+        crate::factorize::factor_buffer_build_counts_for_test(),
+        (1, 1),
+        "full SVD must build exactly its returned U and Vh buffers"
+    );
+    assert_eq!(full.u.data(), compact.u.data());
+    assert_eq!(full.s.data(), compact.s.data());
+    assert_eq!(full.vh.data(), compact.vh.data());
+
+    let (q_compact, r_compact) = qr_compact(&mut dense, &input.as_ref()).unwrap();
+    let (q_full, r_full) = qr_full(&mut dense, &input.as_ref()).unwrap();
+    assert_eq!(q_full.data(), q_compact.data());
+    assert_eq!(r_full.data(), r_compact.data());
+
+    let (l_compact, q_compact) = lq_compact(&mut dense, &input.as_ref()).unwrap();
+    let (l_full, q_full) = lq_full(&mut dense, &input.as_ref()).unwrap();
+    assert_eq!(l_full.data(), l_compact.data());
+    assert_eq!(q_full.data(), q_compact.data());
+}
+
+#[test]
+fn full_factorizations_skip_dense_backend_for_disjoint_support() {
+    let rule = U1FusionRule;
+    let positive = U1Irrep::new(1).sector_id();
+    let neutral = U1Irrep::new(0).sector_id();
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(positive, 2)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(neutral, 3)], false)]),
+    );
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims([2], [3]).unwrap(),
+        homspace,
+        &rule,
+        Vec::<Vec<usize>>::new(),
+    )
+    .unwrap();
+    let tensor = TensorMap::from_vec_with_fusion_space(Vec::<f64>::new(), space).unwrap();
+    let input = bound_tensor(Arc::new(rule), &tensor);
+
+    svd_full(&mut RejectExecutorCalls, &input.as_ref()).unwrap();
+    qr_full(&mut RejectExecutorCalls, &input.as_ref()).unwrap();
+    lq_full(&mut RejectExecutorCalls, &input.as_ref()).unwrap();
+}
+
+#[test]
 fn svd_trunc_c64_reconstruction_distance_matches_error() {
     use num_complex::Complex64;
     let rule = Z2FusionRule;
