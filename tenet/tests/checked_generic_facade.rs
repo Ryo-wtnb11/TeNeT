@@ -9,11 +9,13 @@ use tenet::core::{
     SectorId, SectorVec, Su3FusionRule, TypedSectorAdmission,
 };
 use tenet::prelude::{Complex64, Runtime};
-use tenet::typed::{GenericTensorError, GradedSpace, TensorMap};
+use tenet::typed::{CheckedGenericTensorProductError, GenericTensorError, GradedSpace, TensorMap};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 enum Label {
     Vacuum,
+    One,
+    Two,
     X,
     Invalid,
 }
@@ -40,6 +42,18 @@ struct CheckedOnlyToy {
     fail_decode: AtomicBool,
     algebra_queries: AtomicUsize,
     coefficient_queries: AtomicUsize,
+    f_queries: AtomicUsize,
+    r_queries: AtomicUsize,
+    malformed_f: AtomicBool,
+    invalid_style: AtomicBool,
+    use_product_probe: bool,
+    fail_f_on_query: AtomicUsize,
+    identity_queries: AtomicUsize,
+    style_queries: AtomicUsize,
+    commit_identity_seen: AtomicBool,
+    committed: AtomicBool,
+    commit_count: AtomicUsize,
+    postcommit_queries: AtomicUsize,
 }
 
 impl CheckedOnlyToy {
@@ -51,11 +65,65 @@ impl CheckedOnlyToy {
             fail_decode: AtomicBool::new(false),
             algebra_queries: AtomicUsize::new(0),
             coefficient_queries: AtomicUsize::new(0),
+            f_queries: AtomicUsize::new(0),
+            r_queries: AtomicUsize::new(0),
+            malformed_f: AtomicBool::new(false),
+            invalid_style: AtomicBool::new(false),
+            use_product_probe: false,
+            fail_f_on_query: AtomicUsize::new(0),
+            identity_queries: AtomicUsize::new(0),
+            style_queries: AtomicUsize::new(0),
+            commit_identity_seen: AtomicBool::new(false),
+            committed: AtomicBool::new(false),
+            commit_count: AtomicUsize::new(0),
+            postcommit_queries: AtomicUsize::new(0),
+        }
+    }
+
+    fn new_product_probe(identity_tag: u8) -> Self {
+        Self {
+            use_product_probe: true,
+            ..Self::new(identity_tag)
         }
     }
 
     fn x(&self) -> SectorId {
-        self.rule.sector_of(1, 1).unwrap()
+        if self.use_product_probe {
+            SectorId::new(3)
+        } else {
+            self.rule.sector_of(1, 1).unwrap()
+        }
+    }
+
+    fn probe_fusion_channels(left: SectorId, right: SectorId) -> SectorVec {
+        let ids: &[usize] = match (left.id(), right.id()) {
+            (0, x) | (x, 0) => return [SectorId::new(x)].into_iter().collect(),
+            (3, 3) | (3, 1) | (1, 3) => &[3],
+            (1, 1) => &[1],
+            _ => &[],
+        };
+        ids.iter().copied().map(SectorId::new).collect()
+    }
+
+    fn probe_nsymbol(left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        if (left.id(), right.id(), coupled.id()) == (3, 3, 3) {
+            2
+        } else {
+            usize::from(Self::probe_fusion_channels(left, right).contains(&coupled))
+        }
+    }
+
+    fn reset_commit_spy(&self) {
+        self.commit_identity_seen.store(false, Ordering::Relaxed);
+        self.committed.store(false, Ordering::Relaxed);
+        self.commit_count.store(0, Ordering::Relaxed);
+        self.postcommit_queries.store(0, Ordering::Relaxed);
+    }
+
+    fn record_query(&self) {
+        if self.committed.load(Ordering::Relaxed) {
+            self.postcommit_queries.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -63,24 +131,56 @@ impl CheckedGenericFusion for CheckedOnlyToy {
     type Error = ToyError;
 
     fn rule_identity(&self) -> RuleIdentity {
-        RuleIdentity::from_canonical_bytes::<Self>(0x677, Arc::<[u8]>::from([self.identity_tag]))
+        self.identity_queries.fetch_add(1, Ordering::Relaxed);
+        if self.committed.load(Ordering::Relaxed) {
+            self.postcommit_queries.fetch_add(1, Ordering::Relaxed);
+        } else if self.f_queries.load(Ordering::Relaxed) > 0 {
+            self.commit_identity_seen.store(true, Ordering::Relaxed);
+        }
+        RuleIdentity::from_canonical_bytes::<Self>(
+            0x677,
+            Arc::<[u8]>::from([self.identity_tag, u8::from(self.use_product_probe)]),
+        )
     }
 
     fn fusion_style(&self) -> FusionStyleKind {
-        self.rule.fusion_style()
+        self.style_queries.fetch_add(1, Ordering::Relaxed);
+        if self.commit_identity_seen.load(Ordering::Relaxed)
+            && !self.committed.swap(true, Ordering::Relaxed)
+        {
+            self.commit_count.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.record_query();
+        }
+        if self.invalid_style.load(Ordering::Relaxed) {
+            FusionStyleKind::Unique
+        } else {
+            self.rule.fusion_style()
+        }
     }
 
     fn braiding_style(&self) -> BraidingStyleKind {
+        self.record_query();
         self.rule.braiding_style()
     }
 
     fn vacuum(&self) -> SectorId {
-        self.rule.vacuum()
+        self.record_query();
+        if self.use_product_probe {
+            SectorId::new(0)
+        } else {
+            self.rule.vacuum()
+        }
     }
 
     fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+        self.record_query();
         self.algebra_queries.fetch_add(1, Ordering::Relaxed);
-        Ok(self.rule.dual(sector))
+        Ok(if self.use_product_probe {
+            sector
+        } else {
+            self.rule.dual(sector)
+        })
     }
 
     fn try_fusion_channels(
@@ -88,11 +188,16 @@ impl CheckedGenericFusion for CheckedOnlyToy {
         left: SectorId,
         right: SectorId,
     ) -> Result<SectorVec, Self::Error> {
+        self.record_query();
         self.algebra_queries.fetch_add(1, Ordering::Relaxed);
         if self.fail_algebra.load(Ordering::Relaxed) {
             return Err(ToyError::Algebra);
         }
-        Ok(self.rule.fusion_channels(left, right))
+        Ok(if self.use_product_probe {
+            Self::probe_fusion_channels(left, right)
+        } else {
+            self.rule.fusion_channels(left, right)
+        })
     }
 
     fn try_fusion_channels_in_table(
@@ -100,8 +205,13 @@ impl CheckedGenericFusion for CheckedOnlyToy {
         left: SectorId,
         right: SectorId,
     ) -> Result<SectorVec, Self::Error> {
+        self.record_query();
         self.algebra_queries.fetch_add(1, Ordering::Relaxed);
-        Ok(self.rule.fusion_channels_in_table(left, right))
+        Ok(if self.use_product_probe {
+            Self::probe_fusion_channels(left, right)
+        } else {
+            self.rule.fusion_channels_in_table(left, right)
+        })
     }
 
     fn try_nsymbol(
@@ -110,8 +220,13 @@ impl CheckedGenericFusion for CheckedOnlyToy {
         right: SectorId,
         coupled: SectorId,
     ) -> Result<usize, Self::Error> {
+        self.record_query();
         self.algebra_queries.fetch_add(1, Ordering::Relaxed);
-        Ok(self.rule.nsymbol(left, right, coupled))
+        Ok(if self.use_product_probe {
+            Self::probe_nsymbol(left, right, coupled)
+        } else {
+            self.rule.nsymbol(left, right, coupled)
+        })
     }
 }
 
@@ -119,18 +234,37 @@ impl CheckedGenericRigidSymbols for CheckedOnlyToy {
     type Scalar = f64;
 
     fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
+        self.record_query();
         self.coefficient_queries.fetch_add(1, Ordering::Relaxed);
-        Ok(self.rule.sqrt_dim_scalar(sector))
+        Ok(if self.use_product_probe && sector.id() == 3 {
+            3.0_f64.sqrt()
+        } else if self.use_product_probe {
+            1.0
+        } else {
+            self.rule.sqrt_dim_scalar(sector)
+        })
     }
 
     fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
+        self.record_query();
         self.coefficient_queries.fetch_add(1, Ordering::Relaxed);
-        Ok(self.rule.inv_sqrt_dim_scalar(sector))
+        Ok(if self.use_product_probe && sector.id() == 3 {
+            1.0 / 3.0_f64.sqrt()
+        } else if self.use_product_probe {
+            1.0
+        } else {
+            self.rule.inv_sqrt_dim_scalar(sector)
+        })
     }
 
     fn try_frobenius_schur_phase_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
+        self.record_query();
         self.coefficient_queries.fetch_add(1, Ordering::Relaxed);
-        Ok(self.rule.frobenius_schur_phase_scalar(sector))
+        Ok(if self.use_product_probe {
+            1.0
+        } else {
+            self.rule.frobenius_schur_phase_scalar(sector)
+        })
     }
 
     fn try_f_symbol_generic(
@@ -142,11 +276,44 @@ impl CheckedGenericRigidSymbols for CheckedOnlyToy {
         e: SectorId,
         f: SectorId,
     ) -> Result<GenericFArray<f64>, Self::Error> {
+        self.record_query();
         self.coefficient_queries.fetch_add(1, Ordering::Relaxed);
-        if self.fail_algebra.load(Ordering::Relaxed) {
+        let query = self.f_queries.fetch_add(1, Ordering::Relaxed) + 1;
+        if self.fail_algebra.load(Ordering::Relaxed)
+            || self.fail_f_on_query.load(Ordering::Relaxed) == query
+        {
             return Err(ToyError::Algebra);
         }
-        Ok(self.rule.f_symbol_generic(a, b, c, d, e, f))
+        let symbol = if self.use_product_probe {
+            let shape = (
+                Self::probe_nsymbol(a, b, e),
+                Self::probe_nsymbol(e, c, d),
+                Self::probe_nsymbol(b, c, f),
+                Self::probe_nsymbol(a, f, d),
+            );
+            let len = shape.0 * shape.1 * shape.2 * shape.3;
+            let data = (0..len)
+                .map(|index| {
+                    let magnitude = (index + 1) as f64;
+                    if index % 2 == 0 {
+                        magnitude
+                    } else {
+                        -magnitude
+                    }
+                })
+                .collect();
+            GenericFArray::new(data, shape)
+        } else {
+            self.rule.f_symbol_generic(a, b, c, d, e, f)
+        };
+        if self.malformed_f.load(Ordering::Relaxed) {
+            Ok(GenericFArray::new(
+                symbol.data().to_vec(),
+                (1, 1, symbol.data().len(), 1),
+            ))
+        } else {
+            Ok(symbol)
+        }
     }
 
     fn try_r_symbol_generic(
@@ -155,11 +322,24 @@ impl CheckedGenericRigidSymbols for CheckedOnlyToy {
         b: SectorId,
         c: SectorId,
     ) -> Result<GenericRMatrix<f64>, Self::Error> {
+        self.record_query();
         self.coefficient_queries.fetch_add(1, Ordering::Relaxed);
+        self.r_queries.fetch_add(1, Ordering::Relaxed);
         if self.fail_algebra.load(Ordering::Relaxed) {
             return Err(ToyError::Algebra);
         }
-        Ok(self.rule.r_symbol_generic(a, b, c))
+        Ok(if self.use_product_probe {
+            let rows = Self::probe_nsymbol(a, b, c);
+            GenericRMatrix::new(
+                (0..rows * rows)
+                    .map(|index| f64::from(index / rows == index % rows))
+                    .collect(),
+                rows,
+                rows,
+            )
+        } else {
+            self.rule.r_symbol_generic(a, b, c)
+        })
     }
 }
 
@@ -173,19 +353,27 @@ impl TypedSectorAdmission for CheckedOnlyToy {
     }
 
     fn try_encode_label(&self, sector: &Self::Sector) -> Result<SectorId, Self::Error> {
+        self.record_query();
         match sector {
-            Label::Vacuum => Ok(self.rule.vacuum()),
+            Label::Vacuum => Ok(self.vacuum()),
+            Label::One if self.use_product_probe => Ok(SectorId::new(1)),
+            Label::Two if self.use_product_probe => Ok(SectorId::new(2)),
             Label::X => Ok(self.x()),
-            Label::Invalid => Err(ToyError::InvalidSector),
+            Label::One | Label::Two | Label::Invalid => Err(ToyError::InvalidSector),
         }
     }
 
     fn try_decode_label(&self, sector: SectorId) -> Result<Self::Sector, Self::Error> {
+        self.record_query();
         if self.fail_decode.load(Ordering::Relaxed) {
             return Err(ToyError::Decode);
         }
-        if sector == self.rule.vacuum() {
+        if sector == self.vacuum() {
             Ok(Label::Vacuum)
+        } else if self.use_product_probe && sector == SectorId::new(1) {
+            Ok(Label::One)
+        } else if self.use_product_probe && sector == SectorId::new(2) {
+            Ok(Label::Two)
         } else if sector == self.x() {
             Ok(Label::X)
         } else {
@@ -288,6 +476,254 @@ fn checked_only_multiplicity_two_transforms_keep_the_source_authority() {
 }
 
 #[test]
+fn checked_only_otimes_preserves_typed_late_f_failures() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, _| {
+            trees.codomain_vertices()[0].get() as f64
+                - 2.0 * trees.domain_vertices()[0].get() as f64
+        })
+        .unwrap();
+
+    provider.f_queries.store(0, Ordering::Relaxed);
+    source.otimes(&source).unwrap();
+    let final_f_query = provider.f_queries.load(Ordering::Relaxed);
+    assert!(final_f_query > 1);
+    provider.f_queries.store(0, Ordering::Relaxed);
+    provider.reset_commit_spy();
+    provider
+        .fail_f_on_query
+        .store(final_f_query, Ordering::Relaxed);
+    let error = source.otimes(&source).unwrap_err();
+    assert!(matches!(
+        error,
+        GenericTensorError::TensorProduct(CheckedGenericTensorProductError::Provider(
+            ToyError::Algebra
+        ))
+    ));
+    assert_eq!(provider.f_queries.load(Ordering::Relaxed), final_f_query);
+    assert_eq!(provider.commit_count.load(Ordering::Relaxed), 0);
+    provider.fail_f_on_query.store(0, Ordering::Relaxed);
+
+    provider.f_queries.store(0, Ordering::Relaxed);
+    provider.reset_commit_spy();
+    provider.malformed_f.store(true, Ordering::Relaxed);
+    let error = source.otimes(&source).unwrap_err();
+    assert!(matches!(
+        error,
+        GenericTensorError::TensorProduct(CheckedGenericTensorProductError::SymbolShape {
+            symbol: "F",
+            ..
+        })
+    ));
+    assert_eq!(provider.commit_count.load(Ordering::Relaxed), 0);
+    assert_eq!(provider.r_queries.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn checked_only_otimes_rejects_runtime_identity_and_style_before_algebra() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let first = Arc::new(CheckedOnlyToy::new(0));
+    let mismatched = Arc::new(CheckedOnlyToy::new(1));
+    let first_leg = GradedSpace::try_new(Arc::clone(&first), [(Label::X, 1)], false).unwrap();
+    let mismatched_leg =
+        GradedSpace::try_new(Arc::clone(&mismatched), [(Label::X, 1)], false).unwrap();
+    let lhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&first_leg, &first_leg], [&first_leg], |_, _| 1.0)
+            .unwrap();
+    let wrong_runtime: TensorMap<_, f64> = TensorMap::from_block_fn(
+        &other_runtime,
+        [&first_leg, &first_leg],
+        [&first_leg],
+        |_, _| 1.0,
+    )
+    .unwrap();
+    let wrong_identity: TensorMap<_, f64> = TensorMap::from_block_fn(
+        &runtime,
+        [&mismatched_leg, &mismatched_leg],
+        [&mismatched_leg],
+        |_, _| 1.0,
+    )
+    .unwrap();
+    first.algebra_queries.store(0, Ordering::Relaxed);
+    first.coefficient_queries.store(0, Ordering::Relaxed);
+    mismatched.algebra_queries.store(0, Ordering::Relaxed);
+    mismatched.coefficient_queries.store(0, Ordering::Relaxed);
+
+    assert!(matches!(
+        lhs.otimes(&wrong_runtime),
+        Err(GenericTensorError::Facade(_))
+    ));
+    assert!(matches!(
+        lhs.otimes(&wrong_identity),
+        Err(GenericTensorError::TensorProduct(
+            CheckedGenericTensorProductError::Core(_)
+        ))
+    ));
+    first.invalid_style.store(true, Ordering::Relaxed);
+    assert!(matches!(
+        lhs.otimes(&lhs),
+        Err(GenericTensorError::TensorProduct(
+            CheckedGenericTensorProductError::Core(_)
+        ))
+    ));
+    assert_eq!(first.algebra_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(first.coefficient_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(mismatched.algebra_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(mismatched.coefficient_queries.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn checked_only_otimes_matches_fixed_heterogeneous_nonunit_oracle() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let first = Arc::new(CheckedOnlyToy::new_product_probe(9));
+    let second = Arc::new(CheckedOnlyToy::new_product_probe(9));
+    let x2 = GradedSpace::try_new(Arc::clone(&first), [(Label::X, 2)], false).unwrap();
+    let x1 = GradedSpace::try_new(Arc::clone(&first), [(Label::X, 1)], false).unwrap();
+    let y3 = GradedSpace::try_new(Arc::clone(&second), [(Label::One, 3)], false).unwrap();
+    let y1 = GradedSpace::try_new(Arc::clone(&second), [(Label::One, 1)], false).unwrap();
+    let rhs_x1 = GradedSpace::try_new(Arc::clone(&second), [(Label::X, 1)], false).unwrap();
+    let lhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&x2, &x1], [&x1, &x1], |trees, index| {
+            100.0 * trees.codomain_vertices()[0].get() as f64
+                + 10.0 * trees.domain_vertices()[0].get() as f64
+                + index[0] as f64
+                + 1.0
+        })
+        .unwrap();
+    let rhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&y3, &rhs_x1], [&y1, &rhs_x1], |_, index| {
+            index[0] as f64 + 1.0
+        })
+        .unwrap();
+    for provider in [&first, &second] {
+        provider.identity_queries.store(0, Ordering::Relaxed);
+        provider.style_queries.store(0, Ordering::Relaxed);
+        provider.algebra_queries.store(0, Ordering::Relaxed);
+        provider.coefficient_queries.store(0, Ordering::Relaxed);
+        provider.r_queries.store(0, Ordering::Relaxed);
+        provider.f_queries.store(0, Ordering::Relaxed);
+        provider.reset_commit_spy();
+    }
+    let output = lhs.otimes(&rhs).unwrap();
+    assert!(std::ptr::eq(output.provider(), first.as_ref()));
+    assert_eq!(first.identity_queries.load(Ordering::Relaxed), 3);
+    assert_eq!(second.identity_queries.load(Ordering::Relaxed), 1);
+    assert_eq!(first.commit_count.load(Ordering::Relaxed), 1);
+    assert_eq!(second.commit_count.load(Ordering::Relaxed), 0);
+    assert_eq!(first.postcommit_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(second.postcommit_queries.load(Ordering::Relaxed), 0);
+    assert!(first.algebra_queries.load(Ordering::Relaxed) > 0);
+    assert!(first.f_queries.load(Ordering::Relaxed) > 0);
+    assert_eq!(first.r_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(second.algebra_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(second.coefficient_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(second.f_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(second.r_queries.load(Ordering::Relaxed), 0);
+
+    const EXPECTED_KEYS: [([usize; 3], [usize; 3]); 16] = [
+        ([1, 1, 1], [1, 1, 1]),
+        ([2, 1, 1], [1, 1, 1]),
+        ([1, 1, 2], [1, 1, 1]),
+        ([2, 1, 2], [1, 1, 1]),
+        ([1, 1, 1], [2, 1, 1]),
+        ([2, 1, 1], [2, 1, 1]),
+        ([1, 1, 2], [2, 1, 1]),
+        ([2, 1, 2], [2, 1, 1]),
+        ([1, 1, 1], [1, 1, 2]),
+        ([2, 1, 1], [1, 1, 2]),
+        ([1, 1, 2], [1, 1, 2]),
+        ([2, 1, 2], [1, 1, 2]),
+        ([1, 1, 1], [2, 1, 2]),
+        ([2, 1, 1], [2, 1, 2]),
+        ([1, 1, 2], [2, 1, 2]),
+        ([2, 1, 2], [2, 1, 2]),
+    ];
+    let keys = (0..output.block_count())
+        .map(|index| {
+            let trees = output.block_fusion_trees(index).unwrap();
+            assert_eq!(
+                trees.codomain_uncoupled(),
+                &[Label::X, Label::X, Label::One, Label::X]
+            );
+            assert_eq!(
+                trees.domain_uncoupled(),
+                &[Label::X, Label::X, Label::One, Label::X]
+            );
+            assert_eq!(
+                output.block(index).unwrap().shape(),
+                &[2, 1, 3, 1, 1, 1, 1, 1]
+            );
+            (
+                trees
+                    .codomain_vertices()
+                    .iter()
+                    .map(|vertex| vertex.get())
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap(),
+                trees
+                    .domain_vertices()
+                    .iter()
+                    .map(|vertex| vertex.get())
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(keys, EXPECTED_KEYS);
+
+    const EXPECTED_DATA: [f64; 96] = [
+        555.0, 560.0, 1110.0, 1120.0, 1665.0, 1680.0, 1055.0, 1060.0, 2110.0, 2120.0, 3165.0,
+        3180.0, 1221.0, 1232.0, 2442.0, 2464.0, 3663.0, 3696.0, 2321.0, 2332.0, 4642.0, 4664.0,
+        6963.0, 6996.0, 605.0, 610.0, 1210.0, 1220.0, 1815.0, 1830.0, 1105.0, 1110.0, 2210.0,
+        2220.0, 3315.0, 3330.0, 1331.0, 1342.0, 2662.0, 2684.0, 3993.0, 4026.0, 2431.0, 2442.0,
+        4862.0, 4884.0, 7293.0, 7326.0, 1221.0, 1232.0, 2442.0, 2464.0, 3663.0, 3696.0, 2321.0,
+        2332.0, 4642.0, 4664.0, 6963.0, 6996.0, 2775.0, 2800.0, 5550.0, 5600.0, 8325.0, 8400.0,
+        5275.0, 5300.0, 10550.0, 10600.0, 15825.0, 15900.0, 1331.0, 1342.0, 2662.0, 2684.0, 3993.0,
+        4026.0, 2431.0, 2442.0, 4862.0, 4884.0, 7293.0, 7326.0, 3025.0, 3050.0, 6050.0, 6100.0,
+        9075.0, 9150.0, 5525.0, 5550.0, 11050.0, 11100.0, 16575.0, 16650.0,
+    ];
+    assert_eq!(output.data(), EXPECTED_DATA);
+
+    // The first stored value has two nonzero root-multiplicity paths:
+    // μ=1 contributes 111*1 and μ=2 contributes 111*4. The fixed result
+    // therefore kills overwrite-instead-of-accumulate mutations.
+    let colliding_path_coefficients = [1.0, 4.0];
+    assert_eq!(colliding_path_coefficients.len(), 2);
+    assert_eq!(
+        111.0 * colliding_path_coefficients.iter().sum::<f64>(),
+        EXPECTED_DATA[0]
+    );
+
+    let complex_lhs: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&x2, &x1], [&x1, &x1], |trees, index| {
+            Complex64::new(1.0, 1.0)
+                * (100.0 * trees.codomain_vertices()[0].get() as f64
+                    + 10.0 * trees.domain_vertices()[0].get() as f64
+                    + index[0] as f64
+                    + 1.0)
+        })
+        .unwrap();
+    let complex_rhs: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&y3, &rhs_x1], [&y1, &rhs_x1], |_, index| {
+            Complex64::new(2.0, -3.0) * (index[0] as f64 + 1.0)
+        })
+        .unwrap();
+    first.f_queries.store(0, Ordering::Relaxed);
+    first.reset_commit_spy();
+    let complex = complex_lhs.otimes(&complex_rhs).unwrap();
+    assert!(std::ptr::eq(complex.provider(), first.as_ref()));
+    for (actual, expected) in complex.data().iter().zip(EXPECTED_DATA) {
+        assert!((*actual - Complex64::new(5.0, -1.0) * expected).norm() <= 1e-12);
+    }
+}
+
+#[test]
 fn checked_errors_stay_typed_and_callback_waits_for_all_decodes() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
@@ -379,6 +815,82 @@ fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() 
             assert_eq!(tensor.block(index).unwrap().shape(), &[1, 1, 1]);
         }
         assert_eq!(tensor.data(), &[1.0, 2.0]);
+
+        let product = tensor.otimes(&tensor).unwrap();
+        assert!(std::ptr::eq(product.provider(), provider.as_ref()));
+        let (expected_len, expected_sum, expected_weighted, expected_prefix): (
+            usize,
+            f64,
+            f64,
+            &[f64],
+        ) = match n {
+            3 => (
+                145,
+                9.468_841_418_575_323,
+                39.231_504_693_264_13,
+                &[
+                    0.0,
+                    1.0,
+                    2.0,
+                    2.0,
+                    4.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.353_553_390_593_273_6,
+                    0.707_106_781_186_547_2,
+                    0.0,
+                    0.857_142_857_142_857,
+                ],
+            ),
+            4 => (
+                245,
+                8.608_165_620_335_726,
+                -1.317_392_645_553_582,
+                &[
+                    0.0,
+                    0.0,
+                    1.0,
+                    2.0,
+                    2.0,
+                    4.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.338_873_675_850_995_87,
+                    0.677_747_351_701_991_7,
+                ],
+            ),
+            _ => unreachable!(),
+        };
+        assert_eq!(product.data().len(), expected_len);
+        let sum = product.data().iter().sum::<f64>();
+        let weighted = product
+            .data()
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (index + 1) as f64 * value)
+            .sum::<f64>();
+        assert!((sum - expected_sum).abs() <= 1e-10);
+        assert!((weighted - expected_weighted).abs() <= 1e-9);
+        for (&actual, &expected) in product.data().iter().zip(expected_prefix) {
+            assert!((actual - expected).abs() <= 1e-10);
+        }
+        let mut adjoint_root_vertices = Vec::new();
+        for index in 0..product.block_count() {
+            let trees = product.block_fusion_trees(index).unwrap();
+            if trees.coupled() == &adjoint
+                && product.data()[product.block(index).unwrap().offset()].abs() > 1e-10
+            {
+                assert_eq!(trees.codomain_uncoupled(), vec![adjoint.clone(); 4]);
+                assert_eq!(trees.domain_uncoupled(), vec![adjoint.clone(); 2]);
+                adjoint_root_vertices.push(trees.domain_vertices().last().unwrap().get());
+            }
+        }
+        adjoint_root_vertices.sort_unstable();
+        adjoint_root_vertices.dedup();
+        assert_eq!(adjoint_root_vertices, [1, 2]);
 
         let snapshot = |tensor: &TensorMap<SUNFusionRule, f64>| {
             (0..tensor.block_count())

@@ -243,9 +243,11 @@ use crate::tensor::{
     weighted_inner, weighted_trace, with_planar_axes, CatOperandLayout, CatSide, Fill,
     PlanarRequestKind, TensorScalar,
 };
+pub use crate::tensor_core::CheckedGenericTensorProductError;
 use crate::tensor_core::{
     pow_by_squaring, tensorcompose_owned_multiplicity_free, tensorcontract_owned_multiplicity_free,
-    tensorproduct_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
+    tensorproduct_owned_checked_generic, tensorproduct_owned_multiplicity_free,
+    tree_transform_owned_multiplicity_free,
 };
 
 /// Facade error for checked Generic providers.
@@ -258,6 +260,8 @@ pub enum GenericTensorError<E> {
     Structure(CheckedGenericStructureError<E>),
     /// Checked Generic operation-plan construction or replay failed.
     Plan(CheckedGenericPlanError<E>),
+    /// Checked Generic tensor-product preparation or execution failed.
+    TensorProduct(CheckedGenericTensorProductError<E>),
 }
 
 impl<E: core::fmt::Display> core::fmt::Display for GenericTensorError<E> {
@@ -266,6 +270,7 @@ impl<E: core::fmt::Display> core::fmt::Display for GenericTensorError<E> {
             Self::Facade(error) => error.fmt(formatter),
             Self::Structure(error) => error.fmt(formatter),
             Self::Plan(error) => error.fmt(formatter),
+            Self::TensorProduct(error) => error.fmt(formatter),
         }
     }
 }
@@ -276,6 +281,7 @@ impl<E: std::error::Error + 'static> std::error::Error for GenericTensorError<E>
             Self::Facade(error) => Some(error),
             Self::Structure(error) => Some(error),
             Self::Plan(error) => Some(error),
+            Self::TensorProduct(error) => Some(error),
         }
     }
 }
@@ -295,6 +301,12 @@ impl<E> From<CheckedGenericStructureError<E>> for GenericTensorError<E> {
 impl<E> From<CheckedGenericPlanError<E>> for GenericTensorError<E> {
     fn from(error: CheckedGenericPlanError<E>) -> Self {
         Self::Plan(error)
+    }
+}
+
+impl<E> From<CheckedGenericTensorProductError<E>> for GenericTensorError<E> {
+    fn from(error: CheckedGenericTensorProductError<E>) -> Self {
+        Self::TensorProduct(error)
     }
 }
 
@@ -352,6 +364,20 @@ where
     fn tree_transform(
         tensor: &TensorMap<R, D>,
         operation: TreeTransformOperation,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
+}
+
+/// Tensor-product execution selected by a provider-owned mode.
+#[doc(hidden)]
+pub trait TypedTensorProductDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    /// Executes the F-only product while preserving the left provider.
+    fn tensor_product(
+        lhs: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
     ) -> Result<TensorMap<R, D>, Self::FacadeError>;
 }
 
@@ -459,6 +485,55 @@ where
         )?;
         Ok(TensorMap {
             runtime: tensor.runtime.clone(),
+            body: Arc::new(TypedTensorBody::dense(space, data)),
+        })
+    }
+}
+
+impl<R, D> TypedTensorProductDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + CanonicalUnitFusionRule,
+    D: TensorScalar,
+{
+    fn tensor_product(
+        lhs: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        let (space, data) = tensorproduct_owned_multiplicity_free(
+            BoundDynamicTensorRef::try_new(&lhs.body.space, lhs.dense_data())?,
+            BoundDynamicTensorRef::try_new(&rhs.body.space, rhs.dense_data())?,
+        )?;
+        Ok(TensorMap {
+            runtime: lhs.runtime.clone(),
+            body: Arc::new(TypedTensorBody::dense(space, data)),
+        })
+    }
+}
+
+impl<R, D> TypedTensorProductDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericRigidSymbols<Scalar = f64>,
+    D: TensorScalar,
+{
+    fn tensor_product(
+        lhs: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        let (space, data) = tensorproduct_owned_checked_generic(
+            &lhs.body.space,
+            lhs.dense_data(),
+            &rhs.body.space,
+            rhs.dense_data(),
+        )?;
+        Ok(TensorMap {
+            runtime: lhs.runtime.clone(),
             body: Arc::new(TypedTensorBody::dense(space, data)),
         })
     }
@@ -2386,6 +2461,36 @@ where
 
 impl<R, D> TensorMap<R, D>
 where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorProductDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// Tensor product in one category, ordered as
+    /// `codomain(self), codomain(other); domain(self), domain(other)`.
+    ///
+    /// The two codomain trees and the two domain trees are merged
+    /// independently with F moves. No legs cross and no R symbol is needed,
+    /// including for a `NoBraiding` provider.
+    ///
+    /// Equal provider identities are sufficient; the two tensors may own
+    /// different `Arc` allocations. The output always retains `self`'s exact
+    /// provider allocation.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::RuntimeMismatch`] is reported before provider work. Checked
+    /// Generic providers preserve algebra and malformed-F failures in
+    /// [`GenericTensorError::TensorProduct`].
+    pub fn otimes(&self, other: &Self) -> Result<Self, TypedFacadeError<R>> {
+        if !self.runtime.same_runtime(&other.runtime) {
+            return Err(Error::RuntimeMismatch.into());
+        }
+        <R::Mode as TypedTensorProductDispatch<R, D>>::tensor_product(self, other)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: TensorScalar,
 {
@@ -2607,29 +2712,6 @@ where
         output_axes: &[usize],
     ) -> Result<Self, Error> {
         self.contract(other, lhs_axes, rhs_axes, output_axes)
-    }
-
-    /// Tensor product in one category, ordered as
-    /// `codomain(self), codomain(other); domain(self), domain(other)`.
-    ///
-    /// The two codomain trees and the two domain trees are merged
-    /// independently with F moves. No legs cross and no R symbol is needed,
-    /// including for a `NoBraiding` provider.
-    pub fn otimes(&self, other: &Self) -> Result<Self, Error>
-    where
-        R: CanonicalUnitFusionRule,
-    {
-        if !self.runtime.same_runtime(&other.runtime) {
-            return Err(Error::RuntimeMismatch);
-        }
-        let (space, data) = tensorproduct_owned_multiplicity_free(
-            BoundDynamicTensorRef::try_new(&self.body.space, self.dense_data())?,
-            BoundDynamicTensorRef::try_new(&other.body.space, other.dense_data())?,
-        )?;
-        Ok(Self {
-            runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody::dense(space, data)),
-        })
     }
 
     /// TensorKit `deligneproduct`: embeds `self` as `(a, 𝟙)` and `other` as
