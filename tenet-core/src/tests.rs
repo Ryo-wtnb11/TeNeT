@@ -15915,6 +15915,62 @@ mod tests {
         }
     }
 
+    struct LegacyA4FPolicyProbe {
+        n_calls: std::cell::Cell<usize>,
+        f_calls: std::cell::Cell<usize>,
+    }
+
+    impl FusionRule for LegacyA4FPolicyProbe {
+        fn rule_identity(&self) -> RuleIdentity {
+            FusionRule::rule_identity(&A4FoldRule)
+        }
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionRule::fusion_style(&A4FoldRule)
+        }
+        fn braiding_style(&self) -> BraidingStyleKind {
+            FusionRule::braiding_style(&A4FoldRule)
+        }
+        fn vacuum(&self) -> SectorId {
+            FusionRule::vacuum(&A4FoldRule)
+        }
+        fn dual(&self, sector: SectorId) -> SectorId {
+            FusionRule::dual(&A4FoldRule, sector)
+        }
+        fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+            FusionRule::fusion_channels(&A4FoldRule, left, right)
+        }
+        fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+            self.n_calls.set(self.n_calls.get() + 1);
+            FusionRule::nsymbol(&A4FoldRule, left, right, coupled)
+        }
+    }
+
+    impl GenericFusionSymbols for LegacyA4FPolicyProbe {
+        type Scalar = f64;
+
+        fn f_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+            d: SectorId,
+            e: SectorId,
+            f: SectorId,
+        ) -> GenericFArray<Self::Scalar> {
+            self.f_calls.set(self.f_calls.get() + 1);
+            GenericFusionSymbols::f_symbol_generic(&A4FoldRule, a, b, c, d, e, f)
+        }
+
+        fn r_symbol_generic(
+            &self,
+            a: SectorId,
+            b: SectorId,
+            c: SectorId,
+        ) -> GenericRMatrix<Self::Scalar> {
+            GenericFusionSymbols::r_symbol_generic(&A4FoldRule, a, b, c)
+        }
+    }
+
     fn a4f_rank3(inner: usize, v1: usize, v2: usize) -> FusionTreeKey {
         let t = SectorId::new(3);
         FusionTreeKey::new(
@@ -16002,6 +16058,30 @@ mod tests {
                 assert_vec(&got, &want, &format!("in({inner},{v1},{v2}) out(c={coupled},v={vtx})"));
             }
         }
+    }
+
+    #[test]
+    fn legacy_generic_associator_keeps_raw_f_shape_policy() {
+        let long = a4f_rank3(3, 2, 1);
+        let tail = generic_multi_fmove_tree(&A4FoldRule, &long)
+            .unwrap()
+            .into_iter()
+            .find(|(tree, _)| tree.coupled().id() == 3 && tree.vertices()[0].get() == 1)
+            .unwrap()
+            .0;
+        let probe = LegacyA4FPolicyProbe {
+            n_calls: std::cell::Cell::new(0),
+            f_calls: std::cell::Cell::new(0),
+        };
+        generic_multi_associator_result(&InfallibleGenericFR(&probe), &long, &tail)
+            .unwrap()
+            .unwrap();
+        assert_eq!(probe.f_calls.get(), 1);
+        assert_eq!(
+            probe.n_calls.get(),
+            1,
+            "legacy access must not add four F-shape Nsymbol queries"
+        );
     }
 
     // Build the full foldright coefficient map keyed by output tree pair. The
@@ -16938,6 +17018,87 @@ mod tests {
             }
         }
         assert_identity_term_map(&totals, &pair, "A4 transpose round-trip");
+    }
+
+    #[test]
+    fn checked_generic_cyclic_transpose_matches_legacy_rows() {
+        let rule = A4FoldRule;
+        let t = SectorId::new(3);
+        let checked = InfallibleGeneric::new(&rule);
+        for (pair, codomain, domain, label) in [
+            (
+                FusionTreePairKey::pair(
+                    a4f_rank3(3, 2, 1),
+                    FusionTreeKey::new([t], t, [false], [], []),
+                ),
+                vec![1, 2, 3],
+                vec![0],
+                "clockwise",
+            ),
+            (
+                FusionTreePairKey::pair(
+                    a4f_rank3(3, 1, 2),
+                    FusionTreeKey::new([t], t, [false], [], []),
+                ),
+                vec![3, 0, 1],
+                vec![2],
+                "anticlockwise",
+            ),
+            (
+                FusionTreePairKey::pair(
+                    FusionTreeKey::new(
+                        [t, t, t],
+                        t,
+                        [true, false, true],
+                        [t],
+                        [
+                            MultiplicityIndex::new(2).unwrap(),
+                            MultiplicityIndex::ONE,
+                        ],
+                    ),
+                    FusionTreeKey::new([t], t, [true], [], []),
+                ),
+                vec![2, 3, 0],
+                vec![1],
+                "multi-step dual flags",
+            ),
+        ] {
+            let legacy = map_terms(
+                generic_transpose_tree_pair(&rule, &pair, &codomain, &domain).unwrap(),
+            );
+            let actual = map_terms(
+                generic_transpose_tree_pair_checked(&checked, &pair, &codomain, &domain).unwrap(),
+            );
+            assert_term_maps_eq(&actual, &legacy, label);
+        }
+    }
+
+    #[test]
+    fn checked_generic_cyclic_transpose_preserves_provider_and_shape_errors() {
+        let pair = a4_pair_rank2(1);
+        let provider_error = CheckedA4Spy {
+            fail_f: Some(1),
+            ..CheckedA4Spy::new()
+        };
+        assert_rigid_provider_error(
+            generic_transpose_tree_pair_checked(
+                &provider_error,
+                &pair,
+                &[1, 2],
+                &[0],
+            )
+            .unwrap_err(),
+            RigidSpyError::F,
+        );
+
+        let malformed = CheckedA4Spy {
+            bad_a_f: true,
+            ..CheckedA4Spy::new()
+        };
+        assert!(matches!(
+            generic_transpose_tree_pair_checked(&malformed, &pair, &[1, 2], &[0]),
+            Err(CheckedGenericSymbolError::Shape { symbol: "F", .. })
+        ));
     }
 
     // Gate B2c-2: braid with the IDENTITY permutation is the identity map on an

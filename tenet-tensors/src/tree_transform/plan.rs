@@ -7,8 +7,8 @@ use num_traits::Zero;
 use tenet_core::{
     generic_braid_tree_pair_block_ordered, generic_braid_tree_pair_checked,
     generic_permute_tree_pair_block_ordered, generic_permute_tree_pair_checked,
-    generic_repartition_tree_pair_checked, generic_transpose_tree_pair_block_ordered,
-    linearize_tree_pair_permutation, multiplicity_free_braid_tree_pair_block_ordered_indexed,
+    generic_transpose_tree_pair_block_ordered, generic_transpose_tree_pair_checked,
+    multiplicity_free_braid_tree_pair_block_ordered_indexed,
     multiplicity_free_transpose_tree_pair_block_ordered_indexed,
     validate_generic_fusion_tree_pair_checked, BlockKey, BlockKeyKind, BlockStructure,
     CheckedGenericFusion, CheckedGenericRigidSymbols, CheckedGenericStructureError,
@@ -299,38 +299,6 @@ where
     }
     validate_tree_transform_rank_syntax(operation, src_structure.rank())?;
     validate_fusion_tree_key_namespace(src_structure)?;
-    if matches!(operation.kind(), TreeTransformOperationKind::Transpose) {
-        if src_structure.block_count() == 0 {
-            return Err(CheckedGenericPlanError::Operation(
-                OperationError::UnsupportedTreeTransformScope {
-                    operation: Box::new(operation.clone()),
-                    message: "checked Generic transpose cannot prove planar repartition from an empty structure",
-                },
-            ));
-        }
-        for index in 0..src_structure.block_count() {
-            let block = src_structure.block(index)?;
-            let BlockKey::FusionTree(key) = block.key() else {
-                unreachable!("tree-key namespace was validated")
-            };
-            let source_nout = key.codomain_tree().uncoupled().len();
-            let source_nin = key.domain_tree().uncoupled().len();
-            let linearized = linearize_tree_pair_permutation(
-                operation.codomain_permutation(),
-                operation.domain_permutation(),
-                source_nout,
-                source_nin,
-            )?;
-            if linearized.iter().copied().ne(0..src_structure.rank()) {
-                return Err(CheckedGenericPlanError::Operation(
-                    OperationError::UnsupportedTreeTransformScope {
-                        operation: Box::new(operation.clone()),
-                        message: "checked Generic transpose supports planar repartition without cyclic rotation",
-                    },
-                ));
-            }
-        }
-    }
     validate_tree_transform_operation_syntax(operation, src_structure)?;
     for index in 0..src_structure.block_count() {
         let block = src_structure.block(index)?;
@@ -1864,13 +1832,11 @@ where
     }
 }
 
-/// Compile a checked Generic permute, braid, or planar repartition plan.
+/// Compile a checked Generic permute, braid, or planar transpose plan.
 ///
 /// The complete source structure is admitted before the first rigidity or F/R
 /// lookup. A failure returns no plan, and this standalone entry does not access
-/// the Runtime transform store. A transpose is accepted only when its
-/// linearized permutation is identity; cyclic transpose needs separate
-/// checked fold/cycle lowering.
+/// the Runtime transform store.
 pub fn build_checked_generic_tree_pair_transform_group_plan<P>(
     provider: &P,
     operation: TreeTransformOperation,
@@ -1901,10 +1867,11 @@ where
                     operation.codomain_levels(),
                     operation.domain_levels(),
                 ),
-                TreeTransformOperationKind::Transpose => generic_repartition_tree_pair_checked(
+                TreeTransformOperationKind::Transpose => generic_transpose_tree_pair_checked(
                     provider,
                     source,
-                    operation.codomain_permutation().len(),
+                    operation.codomain_permutation(),
+                    operation.domain_permutation(),
                 ),
             }
             .map_err(map_checked_generic_symbol_error)?;
