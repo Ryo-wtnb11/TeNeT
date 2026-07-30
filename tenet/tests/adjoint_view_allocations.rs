@@ -10,6 +10,8 @@ thread_local! {
     static ENABLED: Cell<bool> = const { Cell::new(false) };
     static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
     static BYTES: Cell<u64> = const { Cell::new(0) };
+    static LIVE_BYTES: Cell<i64> = const { Cell::new(0) };
+    static PEAK_BYTES: Cell<u64> = const { Cell::new(0) };
 }
 
 unsafe impl GlobalAlloc for CountingAllocator {
@@ -18,11 +20,17 @@ unsafe impl GlobalAlloc for CountingAllocator {
         if !pointer.is_null() && ENABLED.get() {
             ALLOCATIONS.set(ALLOCATIONS.get() + 1);
             BYTES.set(BYTES.get() + layout.size() as u64);
+            let live = LIVE_BYTES.get() + layout.size() as i64;
+            LIVE_BYTES.set(live);
+            PEAK_BYTES.set(PEAK_BYTES.get().max(live.max(0) as u64));
         }
         pointer
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        if ENABLED.get() {
+            LIVE_BYTES.set(LIVE_BYTES.get() - layout.size() as i64);
+        }
         unsafe { System.dealloc(pointer, layout) };
     }
 
@@ -31,6 +39,9 @@ unsafe impl GlobalAlloc for CountingAllocator {
         if !pointer.is_null() && ENABLED.get() {
             ALLOCATIONS.set(ALLOCATIONS.get() + 1);
             BYTES.set(BYTES.get() + new_size as u64);
+            let live = LIVE_BYTES.get() - layout.size() as i64 + new_size as i64;
+            LIVE_BYTES.set(live);
+            PEAK_BYTES.set(PEAK_BYTES.get().max(live.max(0) as u64));
         }
         pointer
     }
@@ -40,12 +51,19 @@ unsafe impl GlobalAlloc for CountingAllocator {
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 fn measure(f: impl FnOnce()) -> (u64, u64) {
+    let (allocations, bytes, _) = measure_peak(f);
+    (allocations, bytes)
+}
+
+fn measure_peak(f: impl FnOnce()) -> (u64, u64, u64) {
     ALLOCATIONS.set(0);
     BYTES.set(0);
+    LIVE_BYTES.set(0);
+    PEAK_BYTES.set(0);
     ENABLED.set(true);
     f();
     ENABLED.set(false);
-    (ALLOCATIONS.get(), BYTES.get())
+    (ALLOCATIONS.get(), BYTES.get(), PEAK_BYTES.get())
 }
 
 fn tensor(
@@ -93,6 +111,51 @@ fn adjoint_involution_does_not_allocate() {
     });
 
     assert_eq!(cost, (0, 0));
+}
+
+#[test]
+fn compact_svd_keeps_total_and_peak_below_materialized_baseline() {
+    // What: factoring through the parent saves the prohibited owned-adjoint
+    // payload even while parent and final factors overlap.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = Space::u1([(0, 32)]);
+    let parent = Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space], 603_674).unwrap();
+    black_box(parent.svd_compact().unwrap());
+
+    let input_bytes = std::mem::size_of_val(parent.try_data_c64().unwrap()) as u64;
+    let optimized = parent.adjoint().unwrap();
+    let baseline = parent.adjoint().unwrap();
+    let optimized_cost = measure_peak(|| {
+        black_box(optimized.svd_compact().unwrap());
+    });
+    let baseline_cost = measure_peak(|| {
+        black_box(baseline.try_data_c64().unwrap());
+        black_box(baseline.svd_compact().unwrap());
+    });
+    eprintln!("input={input_bytes} optimized={optimized_cost:?} materialized={baseline_cost:?}");
+
+    assert!(
+        optimized_cost.1 < baseline_cost.1,
+        "total bytes: optimized={optimized_cost:?}, baseline={baseline_cost:?}"
+    );
+    assert!(
+        optimized_cost.2 < baseline_cost.2,
+        "peak bytes: optimized={optimized_cost:?}, baseline={baseline_cost:?}"
+    );
+    assert!(
+        measure(|| {
+            black_box(optimized.try_data_c64().unwrap());
+        })
+        .1 >= input_bytes,
+        "optimized compact SVD materialized its lazy input"
+    );
+    assert_eq!(
+        measure(|| {
+            black_box(baseline.try_data_c64().unwrap());
+        }),
+        (0, 0),
+        "baseline materialization was not retained"
+    );
 }
 
 #[test]

@@ -1834,6 +1834,21 @@ fn eigh_error_preserves_borrowed_input_and_publishes_no_output() {
 }
 
 #[test]
+fn compact_svd_adjoint_error_preserves_borrowed_input_and_publishes_no_factors() {
+    // What: an SVD backend failure leaves the parent storage unchanged and
+    // returns no partially constructed adjoint factors.
+    let rule = Z2FusionRule;
+    let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let before = tensor.data().to_vec();
+    let bound = bound_tensor(Arc::new(rule), &tensor);
+    let mut adjoint_dense = FailAfterObservingSvdInput::default();
+    let result = svd_compact_adjoint_factors_dyn(&mut adjoint_dense, &bound.as_ref().dynamic());
+    assert!(matches!(result, Err(OperationError::Dense(_))));
+    assert_eq!(tensor.data(), before);
+    assert!(!adjoint_dense.observed.is_empty());
+}
+
+#[test]
 fn eigh_stably_orders_equal_magnitudes_and_reorders_vectors_in_place() {
     // What: equal magnitudes retain backend order while larger-magnitude columns move together.
     let tensor =
@@ -2230,8 +2245,9 @@ fn assert_rectangular_direct_svd(rows: usize, cols: usize) {
     let rule = Z2FusionRule;
     let tensor = rectangular_svd_tensor(rows, cols);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let bound = bound_tensor(Arc::new(rule), &tensor);
     crate::factorize::reset_compact_svd_copy_probe();
-    let svd = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
+    let svd = svd_compact(&mut dense, &bound.as_ref()).unwrap();
     assert_factor_layout_matches_legacy_shapes(svd.u.space());
     assert_factor_layout_matches_legacy_shapes(svd.s.space());
     assert_factor_layout_matches_legacy_shapes(svd.vh.space());
@@ -2264,6 +2280,26 @@ fn assert_rectangular_direct_svd(rows: usize, cols: usize) {
                 })
                 .sum::<f64>();
             assert!((reconstructed - tensor.data()[row + rows * col]).abs() < 1e-10);
+        }
+    }
+
+    let adjoint = svd_compact_adjoint_factors_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
+    let adjoint_singular = adjoint
+        .2
+        .first()
+        .map(|entry| entry.values.as_slice())
+        .unwrap_or_default();
+    assert_eq!(adjoint_singular.len(), rank);
+    for col in 0..rows {
+        for row in 0..cols {
+            let reconstructed = (0..rank)
+                .map(|bond| {
+                    adjoint.0.data()[row + cols * bond]
+                        * adjoint_singular[bond]
+                        * adjoint.1.data()[bond + rank * col]
+                })
+                .sum::<f64>();
+            assert!((reconstructed - tensor.data()[col + rows * row]).abs() < 1e-10);
         }
     }
 }
@@ -2401,6 +2437,48 @@ fn compact_svd_direct_and_fallback_apply_the_same_gauge() {
         assert!((left - right).abs() < 1e-12);
     }
     assert_eq!(direct.singular_values, fallback.singular_values());
+
+    let adjoint_fallback = svd_compact_adjoint_factors_dyn(&mut dense, &fallback_input).unwrap();
+    let expected = svd_compact_factors_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
+    for (actual, expected) in adjoint_fallback.0.data().iter().zip(expected.0.data()) {
+        assert!((actual - expected).abs() < 1e-12);
+    }
+    for (actual, expected) in adjoint_fallback.1.data().iter().zip(expected.1.data()) {
+        assert!((actual - expected).abs() < 1e-12);
+    }
+    for (actual, expected) in adjoint_fallback.2.iter().zip(&expected.2) {
+        assert_eq!(actual.sector, expected.sector);
+        for (actual, expected) in actual.values.iter().zip(&expected.values) {
+            assert!((actual - expected).abs() < 1e-12);
+        }
+    }
+}
+
+#[test]
+fn compact_svd_adjoint_accepts_padded_parent_layout() {
+    // What: the optimized adjoint path uses the existing packed fallback for
+    // custom offsets instead of materializing a canonical adjoint input.
+    let rule = Z2FusionRule;
+    let parent = padded_copy(&rule, &rectangular_svd_tensor(5, 3));
+    let bound = bound_tensor(Arc::new(rule), &parent);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let actual = svd_compact_adjoint_factors_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
+    let singular = &actual.2[0].values;
+    let source = parent.structure().block(0).unwrap();
+    for col in 0..5 {
+        for row in 0..3 {
+            let reconstructed = (0..3)
+                .map(|bond| {
+                    actual.0.data()[row + 3 * bond]
+                        * singular[bond]
+                        * actual.1.data()[bond + 3 * col]
+                })
+                .sum::<f64>();
+            let expected = parent.data()
+                [source.offset() + col * source.strides()[0] + row * source.strides()[1]];
+            assert!((reconstructed - expected).abs() < 1e-10);
+        }
+    }
 }
 
 #[test]
@@ -7204,6 +7282,56 @@ fn svd_compact_gauge_matches_matrixalgebrakit_phase_rule() {
     crate::factorize::svd_compact_gauge(&mut u, 3, 3, &mut vh, 2, 3, 2);
     for &(row, col) in &[(0, 0), (1, 1)] {
         let pivot = u[row + 3 * col];
+        assert!(pivot.im.abs() < 1e-14, "pivot {pivot} not real");
+        assert!(pivot.re >= 0.0, "pivot {pivot} negative");
+    }
+    let after = product(&u, &vh);
+    for (lhs, rhs) in after.iter().zip(&before) {
+        assert!(
+            (lhs - rhs).norm() < 1e-13,
+            "product changed: {lhs} vs {rhs}"
+        );
+    }
+}
+
+#[test]
+fn svd_compact_adjoint_gauge_fixes_final_left_factor() {
+    use num_complex::Complex64;
+    let c = Complex64::new;
+    let mut u = vec![
+        c(3.0, 4.0),
+        c(1.0, -1.0),
+        c(-2.0, 0.5),
+        c(0.25, -0.5),
+        c(-4.0, 0.0),
+        c(1.0, 2.0),
+    ];
+    let mut vh = vec![
+        c(0.5, -1.0),
+        c(-0.25, 0.75),
+        c(1.0, 0.0),
+        c(0.0, -2.0),
+        c(-0.5, 1.0),
+        c(0.75, -0.5),
+    ];
+    let sigma = [2.0, 0.75];
+    let product = |u: &[Complex64], vh: &[Complex64]| -> Vec<Complex64> {
+        let mut out = vec![c(0.0, 0.0); 9];
+        for col in 0..3 {
+            for row in 0..3 {
+                for k in 0..2 {
+                    out[row + 3 * col] += u[row + 3 * k] * sigma[k] * vh[k + 2 * col];
+                }
+            }
+        }
+        out
+    };
+    let before = product(&u, &vh);
+    crate::factorize::svd_compact_adjoint_gauge(&mut u, 3, 3, &mut vh, 2, 3, 2);
+
+    // These rows become the columns of final U = V after adjointing Vh.
+    for &(row, col) in &[(0, 0), (1, 1)] {
+        let pivot = vh[row + 2 * col];
         assert!(pivot.im.abs() < 1e-14, "pivot {pivot} not real");
         assert!(pivot.re >= 0.0, "pivot {pivot} negative");
     }

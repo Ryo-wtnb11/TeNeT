@@ -8680,7 +8680,25 @@ impl Tensor {
     /// per coupled sector the bond is `min(rows, cols)`.
     pub fn svd_compact(&self) -> Result<(Self, Self, Self), Error> {
         if self.is_adjoint_view() {
-            return self.materialized_tensor()?.svd_compact();
+            #[cfg(feature = "cuda")]
+            if matches!(self.stored_data(), Data::CudaF64(_)) {
+                return Err(device_unsupported("materializing an adjoint device tensor"));
+            }
+            if self.rule_kind() == RuleKind::Su3 {
+                return self.materialized_tensor()?.svd_compact();
+            }
+            let parent = self.parent_tensor_for_lowering();
+            let complex = parent.dtype() == Dtype::C64;
+            let mut dense = parent.rt.lease_dense();
+            return with_data!(&parent, data, {
+                with_bound_multiplicity_free!(parent.ordinary_body().space, bound, {
+                    let factors = tenet_matrixalgebra::svd_compact_adjoint_factors_dyn(
+                        dense.dense(),
+                        &BoundDynamicTensorRef::try_new(bound, data)?,
+                    )?;
+                    parent.from_bound_factors(factors, complex)
+                })
+            });
         }
         #[cfg(feature = "cuda")]
         if let Data::CudaF64(storage) = self.stored_data() {
@@ -12129,6 +12147,34 @@ mod adjoint_parent_view_tests {
         }
     }
 
+    fn assert_lazy_compact_svd_matches_eager(
+        runtime: &Runtime,
+        left: &Space,
+        right: &Space,
+        dtype: Dtype,
+        seed: u64,
+    ) {
+        let parent = Tensor::rand_with_seed(runtime, dtype, [left], [right], seed).unwrap();
+        let lazy = parent.adjoint().unwrap();
+        let eager = parent.adjoint().unwrap().materialized_tensor().unwrap();
+        let (actual_u, actual_s, actual_vh) = lazy.svd_compact().unwrap();
+        let (expected_u, expected_s, expected_vh) = eager.svd_compact().unwrap();
+
+        assert_close(&actual_u, &expected_u);
+        assert_close(&actual_s, &expected_s);
+        assert_close(&actual_vh, &expected_vh);
+        assert_close(
+            &actual_u
+                .compose(&actual_s)
+                .unwrap()
+                .compose(&actual_vh)
+                .unwrap(),
+            &eager,
+        );
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+    }
+
     fn assert_metadata_and_materialization(space: Space, seed: u64) {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let source =
@@ -12532,6 +12578,96 @@ mod adjoint_parent_view_tests {
         let trace = endomorphism.tr().unwrap().to_c64();
         let adjoint_trace = endomorphism.adjoint().unwrap().tr().unwrap().to_c64();
         assert!((adjoint_trace - trace.conj()).norm() < 1e-12);
+    }
+
+    #[test]
+    fn compact_svd_reads_multiplicity_free_parent_without_materialization() {
+        // What: asymmetric real/complex U(1), SU(2), and product factors match
+        // the owned-adjoint gauge oracle while the lazy input cache stays empty.
+        let runtime = Runtime::builder().dense_threads(4).build().unwrap();
+        let fixtures = [
+            (
+                Space::u1([(-1, 1), (0, 3), (1, 2)]),
+                Space::u1([(-1, 2), (0, 1), (1, 3)]),
+            ),
+            (
+                Space::su2([(0, 1), (1, 3), (2, 2)]).unwrap(),
+                Space::su2([(0, 2), (1, 1), (2, 3)]).unwrap(),
+            ),
+            (
+                Space::product([((-1, 0), 1), ((0, 1), 3), ((1, 0), 2)]).unwrap(),
+                Space::product([((-1, 0), 2), ((0, 1), 1), ((1, 0), 3)]).unwrap(),
+            ),
+        ];
+
+        for (fixture, (left, right)) in fixtures.into_iter().enumerate() {
+            for (dtype, lane) in [(Dtype::F64, 0), (Dtype::C64, 1)] {
+                assert_lazy_compact_svd_matches_eager(
+                    &runtime,
+                    &left,
+                    &right,
+                    dtype,
+                    603_300 + 2 * fixture as u64 + lane,
+                );
+            }
+        }
+
+        let space = Space::u1([(-1, 2), (0, 3), (1, 1)]);
+        let parent =
+            Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space], 603_400).unwrap();
+        let lazy = parent.adjoint().unwrap();
+        let eager = parent.adjoint().unwrap().materialized_tensor().unwrap();
+        std::thread::scope(|scope| {
+            let calls: Vec<_> = (0..4)
+                .map(|_| scope.spawn(|| lazy.svd_compact().unwrap()))
+                .collect();
+            for call in calls {
+                let (u, s, vh) = call.join().unwrap();
+                assert_close(&u.compose(&s).unwrap().compose(&vh).unwrap(), &eager);
+            }
+        });
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+    }
+
+    #[test]
+    fn compact_svd_keeps_generic_adjoint_fallback() {
+        // What: this leaf does not silently extend factor remapping to
+        // outer-multiplicity metadata.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let left = Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap();
+        let right = Space::su3([((1, 0), 1), ((0, 1), 2)]).unwrap();
+        let parent =
+            Tensor::rand_with_seed(&runtime, Dtype::C64, [&left], [&right], 603_500).unwrap();
+        let lazy = parent.adjoint().unwrap();
+        let eager = parent.adjoint().unwrap().materialized_tensor().unwrap();
+        let (actual_u, actual_s, actual_vh) = lazy.svd_compact().unwrap();
+        let (expected_u, expected_s, expected_vh) = eager.svd_compact().unwrap();
+
+        assert_close(&actual_u, &expected_u);
+        assert_close(&actual_s, &expected_s);
+        assert_close(&actual_vh, &expected_vh);
+        assert_eq!(lazy.adjoint_body_builds(), 1);
+        assert!(lazy.has_cached_materialization());
+    }
+
+    #[test]
+    fn compact_svd_whole_degenerate_cluster_uses_semantic_oracle() {
+        // What: a fully retained repeated-singular-value cluster is checked by
+        // reconstruction and isometry rather than an arbitrary raw basis.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let space = Space::u1([(-1, 2), (0, 3), (1, 2)]);
+        for dtype in [Dtype::F64, Dtype::C64] {
+            let parent = Tensor::id(&runtime, dtype, [&space]).unwrap();
+            let lazy = parent.adjoint().unwrap();
+            let (u, s, vh) = lazy.svd_compact().unwrap();
+
+            assert_close(&u.compose(&s).unwrap().compose(&vh).unwrap(), &parent);
+            assert!(u.is_isometric(1e-12).unwrap());
+            assert!(vh.adjoint().unwrap().is_isometric(1e-12).unwrap());
+            assert_eq!(lazy.adjoint_body_builds(), 0);
+            assert!(!lazy.has_cached_materialization());
+        }
     }
 
     fn assert_adjoint_compact_lq_matches_eager_oracle(
@@ -13827,6 +13963,16 @@ mod bound_provider_tests {
                 .space
                 .provider_matches_context_allocation(&provider));
         }
+
+        let lazy = tensor.adjoint().unwrap();
+        let (u, s, vh) = lazy.svd_compact().unwrap();
+        for factor in [&u, &s, &vh] {
+            assert!(factor
+                .ordinary_body()
+                .space
+                .provider_matches_context_allocation(&provider));
+        }
+        assert_eq!(lazy.adjoint_body_builds(), 0);
     }
 
     #[test]
