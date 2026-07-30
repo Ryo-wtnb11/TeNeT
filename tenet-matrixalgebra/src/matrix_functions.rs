@@ -24,6 +24,12 @@ use crate::factorize::{
 /// `exp(t) = V exp(D) V^H`; everything else takes blockwise scaling-and-squaring
 /// Padé [13/13] (Higham 2005) around LAPACK `gebal('B')` balancing, the
 /// algorithm behind the `LinearAlgebra.exp!` TensorKit calls.
+///
+/// The route is selected by the same fixed criterion used by EIGH:
+/// `||(A - A†)/2||_F <= 64 * eps(real(D)) * ||A||_F` in every
+/// coupled-sector block, where `real(D)` is the real component type of `D`.
+/// This machine-precision multiple is not currently user-configurable;
+/// changing it can change whether [`exp`] uses the spectral or Padé algorithm.
 pub fn exp<E, RuleKey, BT, BC, R, D, const N: usize>(
     dense: &mut E,
     context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
