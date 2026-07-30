@@ -1732,8 +1732,10 @@ fn prepared_tensorcontract_fusion_matches_facade_and_rejects_foreign_tensors() {
             tensor: "prepared contraction"
         }
     ));
+    assert_eq!(foreign_dst.data(), &[0.0, 0.0]);
 
     let foreign_lhs = test_host_read_fusion_tensor_map(vec![2.0_f64, 3.0], fusion_space());
+    let dst_before_error = dst_prepared.data().to_vec();
     let err = context
         .execute_prepared_tensorcontract_fusion(
             &prepared,
@@ -1751,8 +1753,10 @@ fn prepared_tensorcontract_fusion_matches_facade_and_rejects_foreign_tensors() {
             tensor: "prepared contraction"
         }
     ));
+    assert_eq!(dst_prepared.data(), dst_before_error);
 
     let foreign_rhs = test_host_read_fusion_tensor_map(vec![5.0_f64, 7.0], fusion_space());
+    let dst_before_error = dst_prepared.data().to_vec();
     let err = context
         .execute_prepared_tensorcontract_fusion(
             &prepared,
@@ -1770,6 +1774,7 @@ fn prepared_tensorcontract_fusion_matches_facade_and_rejects_foreign_tensors() {
             tensor: "prepared contraction"
         }
     ));
+    assert_eq!(dst_prepared.data(), dst_before_error);
 }
 
 #[test]

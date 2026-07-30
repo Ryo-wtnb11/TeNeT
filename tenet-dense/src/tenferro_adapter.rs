@@ -850,10 +850,14 @@ fn tenferro_view_mut(output: DenseWrite<'_>) -> Result<TensorViewMut<'_>, DenseE
 fn typed_tenferro_view<'a, T: 'static>(
     view: DenseView<'a, T>,
 ) -> Result<TypedTensorView<'a, T>, DenseError> {
-    let strides = strides_to_isize(view.strides())?;
     let offset = isize::try_from(view.offset()).map_err(|_| DenseError::OffsetOverflow {
         value: view.offset(),
     })?;
+    if view.shape().len() == 1 && view.strides() == [1] {
+        return TypedTensorView::from_slice([view.shape()[0]], [1_isize], offset, view.data())
+            .map_err(|err| tenferro_error("TypedTensorView::from_slice", err));
+    }
+    let strides = strides_to_isize(view.strides())?;
     TypedTensorView::from_slice(view.shape(), strides, offset, view.data())
         .map_err(|err| tenferro_error("TypedTensorView::from_slice", err))
 }
@@ -867,9 +871,13 @@ fn typed_tenferro_view_mut<'a, T: 'static>(
         strides,
         offset,
     } = view;
-    let strides = strides_to_isize(strides)?;
     let offset =
         isize::try_from(offset).map_err(|_| DenseError::OffsetOverflow { value: offset })?;
+    if shape.len() == 1 && strides == [1] {
+        return TypedTensorViewMut::from_slice([shape[0]], [1_isize], offset, data)
+            .map_err(|err| tenferro_error("TypedTensorViewMut::from_slice", err));
+    }
+    let strides = strides_to_isize(strides)?;
     TypedTensorViewMut::from_slice(shape, strides, offset, data)
         .map_err(|err| tenferro_error("TypedTensorViewMut::from_slice", err))
 }
