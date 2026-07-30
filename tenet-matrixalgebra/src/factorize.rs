@@ -72,7 +72,7 @@ pub trait FactorScalar: DenseRecouplingScalar {
 
 trait HermitianReal: Float {
     fn from_f64(value: f64) -> Self;
-    fn tolerance(max_abs: Self) -> Self;
+    fn relative_tolerance() -> Self;
 }
 
 impl HermitianReal for f32 {
@@ -80,15 +80,8 @@ impl HermitianReal for f32 {
         value as Self
     }
 
-    fn tolerance(max_abs: Self) -> Self {
-        let spacing = if max_abs == 0.0 {
-            Self::from_bits(1)
-        } else if max_abs == Self::MAX {
-            max_abs - Self::from_bits(max_abs.to_bits() - 1)
-        } else {
-            Self::from_bits(max_abs.to_bits() + 1) - max_abs
-        };
-        f64::from(spacing).powf(0.75) as Self
+    fn relative_tolerance() -> Self {
+        Self::EPSILON.powf(0.75)
     }
 }
 
@@ -97,15 +90,8 @@ impl HermitianReal for f64 {
         value
     }
 
-    fn tolerance(max_abs: Self) -> Self {
-        let spacing = if max_abs == 0.0 {
-            Self::from_bits(1)
-        } else if max_abs == Self::MAX {
-            max_abs - Self::from_bits(max_abs.to_bits() - 1)
-        } else {
-            Self::from_bits(max_abs.to_bits() + 1) - max_abs
-        };
-        spacing.powf(0.75)
+    fn relative_tolerance() -> Self {
+        Self::EPSILON.powf(0.75)
     }
 }
 
@@ -2713,6 +2699,12 @@ impl<R, D> EighTruncDyn<R, D> {
 }
 
 /// Full Hermitian eigendecomposition through the device boundary.
+///
+/// Before any dense call, every coupled-sector block `A` must satisfy
+/// `||(A - A†)/2||_F <= eps(real(D))^(3/4) * ||A||_F`, where `real(D)` is
+/// the real component type of `D`. This dimensionless relative tolerance is a
+/// fixed practical heuristic, not a uniquely derived backward-error bound, and
+/// is not user-configurable in this API.
 pub fn eigh_full<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
@@ -2734,7 +2726,8 @@ where
     })
 }
 
-/// Dynamic-rank [`eigh_full`]: the shared core of the Hermitian entries.
+/// Dynamic-rank [`eigh_full`]: the shared core, with the same fixed
+/// relative-Frobenius Hermiticity criterion.
 pub fn eigh_full_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
@@ -4001,6 +3994,9 @@ where
 
 /// All Hermitian eigenvalues per coupled sector, descending by magnitude
 /// (MatrixAlgebraKit `eigh_vals`).
+///
+/// Uses the same fixed relative-Frobenius Hermiticity criterion as
+/// [`eigh_full`]; this API does not expose `atol` or `rtol`.
 pub fn eigh_vals<E, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     input: &BoundTensorMapRef<'_, R, D, NOUT, NIN>,
@@ -5104,80 +5100,109 @@ fn validate_dense_shape(actual: &[usize], expected: &[usize]) -> Result<(), Oper
     Ok(())
 }
 
-fn hermitian_projection<D: FactorScalar, R: HermitianReal>(
+fn scaled_antihermitian_difference<D: FactorScalar, R: HermitianReal>(
     data: &[D],
     n: usize,
     row: usize,
     col: usize,
+    scale: R,
 ) -> (R, R) {
     let upper = data[row + n * col].widen_complex();
     let lower = data[col + n * row].widen_complex();
-    let residual_re = (R::from_f64(upper.re) - R::from_f64(lower.re)) / (R::one() + R::one());
-    let residual_im = (R::from_f64(upper.im) + R::from_f64(lower.im)) / (R::one() + R::one());
+    let residual_re = R::from_f64(upper.re) / scale - R::from_f64(lower.re) / scale;
+    let residual_im = R::from_f64(upper.im) / scale + R::from_f64(lower.im) / scale;
     (residual_re, residual_im)
 }
 
-fn hermitian_projection_norm_squared<D: FactorScalar, R: HermitianReal>(
-    data: &[D],
-    n: usize,
-    row: usize,
-    col: usize,
-) -> R {
-    let (residual_re, residual_im) = hermitian_projection::<D, R>(data, n, row, col);
-    residual_re * residual_re + residual_im * residual_im
+#[derive(Clone, Copy)]
+struct ScaledFrobenius<R> {
+    scale: R,
+    sum_squares: R,
 }
 
-fn hermitian_residual_within<R, F>(n: usize, limit: R, mut term: F) -> bool
-where
-    R: HermitianReal,
-    F: FnMut(usize, usize) -> Option<R>,
-{
+impl<R: HermitianReal> ScaledFrobenius<R> {
+    fn zero() -> Self {
+        Self {
+            scale: R::zero(),
+            sum_squares: R::one(),
+        }
+    }
+
+    fn add(&mut self, magnitude: R) -> bool {
+        if !magnitude.is_finite() {
+            return false;
+        }
+        if magnitude == R::zero() {
+            return true;
+        }
+        if self.scale < magnitude {
+            let ratio = self.scale / magnitude;
+            self.sum_squares = R::one() + self.sum_squares * ratio * ratio;
+            self.scale = magnitude;
+        } else {
+            let ratio = magnitude / self.scale;
+            self.sum_squares = self.sum_squares + ratio * ratio;
+        }
+        true
+    }
+
+    fn add_complex(&mut self, re: R, im: R) -> bool {
+        self.add(re.abs()) && self.add(im.abs())
+    }
+
+    fn scaled_norm(self, scale: R) -> R {
+        if self.scale == R::zero() {
+            R::zero()
+        } else {
+            (self.scale / scale) * self.sum_squares.sqrt()
+        }
+    }
+}
+
+fn hermitian_residual_norm<D: FactorScalar, R: HermitianReal>(
+    data: &[D],
+    n: usize,
+    input_scale: R,
+) -> Option<ScaledFrobenius<R>> {
     const BLOCK_SIZE: usize = 32;
-    let mut residual_squared = R::zero();
+    let mut residual = ScaledFrobenius::zero();
     for block_col in (0..n).step_by(BLOCK_SIZE) {
         let block_width = BLOCK_SIZE.min(n - block_col);
         for local_col in 0..block_width {
             let col = block_col + local_col;
             for local_row in 0..=local_col {
                 let row = block_col + local_row;
-                let multiplicity = if row == col {
-                    R::one()
-                } else {
-                    R::one() + R::one()
-                };
-                let Some(term) = term(row, col) else {
-                    return false;
-                };
-                residual_squared = residual_squared + term * multiplicity;
+                let (re, im) =
+                    scaled_antihermitian_difference::<D, R>(data, n, row, col, input_scale);
+                if !residual.add_complex(re, im) || (row != col && !residual.add_complex(re, im)) {
+                    return None;
+                }
             }
-        }
-        if !residual_squared.is_finite() || residual_squared > limit {
-            return false;
         }
 
         for block_row in (0..block_col).step_by(BLOCK_SIZE) {
-            let mut block_squared = R::zero();
             for local_col in 0..block_width {
                 let col = block_col + local_col;
                 for local_row in 0..BLOCK_SIZE {
                     let row = block_row + local_row;
-                    let Some(term) = term(row, col) else {
-                        return false;
-                    };
-                    block_squared = block_squared + term;
+                    let (re, im) =
+                        scaled_antihermitian_difference::<D, R>(data, n, row, col, input_scale);
+                    if !residual.add_complex(re, im) || !residual.add_complex(re, im) {
+                        return None;
+                    }
                 }
-            }
-            residual_squared = residual_squared + (R::one() + R::one()) * block_squared;
-            if !residual_squared.is_finite() || residual_squared > limit {
-                return false;
             }
         }
     }
-    true
+    Some(residual)
 }
 
-fn matrixalgebrakit_hermitian<D: FactorScalar, R: HermitianReal>(data: &[D], n: usize) -> bool {
-    let mut max_abs = R::zero();
+/// Tests `||(A - A†)/2||_F <= eps(R)^(3/4) * ||A||_F`.
+///
+/// The scaled sums keep that relative decision stable when either norm would
+/// overflow or underflow if formed directly.
+fn normwise_hermitian<D: FactorScalar, R: HermitianReal>(data: &[D], n: usize) -> bool {
+    let mut input = ScaledFrobenius::zero();
     for &value in data {
         let value = value.widen_complex();
         let re = R::from_f64(value.re);
@@ -5185,36 +5210,19 @@ fn matrixalgebrakit_hermitian<D: FactorScalar, R: HermitianReal>(data: &[D], n: 
         if !re.is_finite() || !im.is_finite() {
             return false;
         }
-        let magnitude = re.hypot(im);
-        if !magnitude.is_finite() {
+        if !input.add_complex(re, im) {
             return false;
         }
-        max_abs = max_abs.max(magnitude);
     }
 
-    let tolerance = R::tolerance(max_abs);
-    if !tolerance.is_finite() {
+    if input.scale == R::zero() {
+        return true;
+    }
+    let Some(residual) = hermitian_residual_norm::<D, R>(data, n, input.scale) else {
         return false;
-    }
-    let limit = tolerance * tolerance;
-    if limit.is_finite() && limit != R::zero() {
-        return hermitian_residual_within(n, limit, |row, col| {
-            Some(hermitian_projection_norm_squared::<D, R>(data, n, row, col))
-        });
-    }
-
-    hermitian_residual_within(n, R::one(), |row, col| {
-        let (residual_re, residual_im) = hermitian_projection::<D, R>(data, n, row, col);
-        let magnitude = residual_re.hypot(residual_im);
-        if !magnitude.is_finite() || magnitude > tolerance {
-            return None;
-        }
-        if tolerance == R::zero() {
-            return (magnitude == R::zero()).then_some(R::zero());
-        }
-        let ratio = magnitude / tolerance;
-        Some(ratio * ratio)
-    })
+    };
+    residual.scaled_norm(R::one())
+        <= (R::one() + R::one()) * R::relative_tolerance() * input.sum_squares.sqrt()
 }
 
 fn validate_hermitian_matrix_shape<D>(
@@ -5239,16 +5247,16 @@ fn validate_hermitian_matrix_shape<D>(
     Ok(())
 }
 
-/// MatrixAlgebraKit's hermiticity predicate at the working precision of `D`.
+/// Scale-invariant normwise hermiticity predicate at the working precision of `D`.
 ///
 /// Extracted from [`validate_hermitian_matrix_contents`] so the `exp` dispatch
 /// (issue #577) can ask the question without provoking — and then having to
 /// interpret — an EIGH failure. Same data, same tolerance, no second policy.
 fn hermitian_matrix_contents<D: FactorScalar>(data: &[D], n: usize) -> bool {
     if D::epsilon() == f32::EPSILON as f64 {
-        matrixalgebrakit_hermitian::<D, f32>(data, n)
+        normwise_hermitian::<D, f32>(data, n)
     } else if D::epsilon() == f64::EPSILON {
-        matrixalgebrakit_hermitian::<D, f64>(data, n)
+        normwise_hermitian::<D, f64>(data, n)
     } else {
         false
     }
@@ -5313,12 +5321,12 @@ pub fn validate_hermitian_regions<D: FactorScalar>(
 /// Hermitian input, and everything else goes to blockwise Padé. Inferring it
 /// from a failed EIGH would conflate hermiticity with a backend failure, so
 /// this asks directly, over the same direct-region / packed matricization
-/// split and the same MatrixAlgebraKit tolerance [`eigh_full_dyn`] uses.
+/// split and the same relative Frobenius tolerance [`eigh_full_dyn`] uses.
 ///
 /// A non-endomorphism, a malformed layout or a non-square block is still an
 /// error — only non-hermiticity is `Ok(false)`. Nonfinite entries make
-/// MatrixAlgebraKit's predicate `false`, so they arrive at the Padé route,
-/// which rejects them in its own words.
+/// the predicate `false`, so they arrive at the Padé route, which rejects them
+/// in its own words.
 ///
 /// Cost is `O(Σ_c n_c²)`, one pass over the blocks, against the `O(Σ_c n_c³)`
 /// factorization that follows.
