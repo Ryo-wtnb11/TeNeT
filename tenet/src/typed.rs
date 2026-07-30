@@ -187,9 +187,9 @@
 //!   facade, and composition is what this facade would spell it as. Adding
 //!   them later is not a breaking change.
 //! - `conj` stays design-gated on its open correctness question for
-//!   non-self-dual sectors. [`TensorMap::adjoint`] is now in, eagerly: see its
-//!   own documentation for why that is TensorKit's `adjoint!` rather than a
-//!   divergence from the erased facade's lazy view.
+//!   non-self-dual sectors. [`TensorMap::adjoint`] is the TensorKit-style lazy
+//!   parent view for dense storage; compact diagonal storage keeps its direct
+//!   `O(Σ_c k_c)` conjugation path.
 //!
 //! Adding any of them ahead of its review would bypass the gate that exists to
 //! keep this surface deliberate.
@@ -199,7 +199,7 @@
 //! typed error and publishes no layout, cache, or admission state.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tenet_core::{
     validate_unit_layout_correspondence_checked, BlockKey, BlockRef, CanonicalUnitFusionRule,
@@ -477,15 +477,16 @@ where
         tensor: &TensorMap<R, D>,
         operation: TreeTransformOperation,
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        let body = tensor.materialized_body();
         let (space, data) = tree_transform_dyn_owned_checked_generic(
             operation,
-            &tensor.body.space,
-            tensor.dense_data(),
+            &body.space,
+            body.materialized_dense_data(),
             D::from_real(1.0),
         )?;
         Ok(TensorMap {
             runtime: tensor.runtime.clone(),
-            body: Arc::new(TypedTensorBody::dense(space, data)),
+            repr: owned_repr(TypedTensorBody::dense(space, data)),
         })
     }
 }
@@ -503,13 +504,15 @@ where
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        let lhs_body = lhs.materialized_body();
+        let rhs_body = rhs.materialized_body();
         let (space, data) = tensorproduct_owned_multiplicity_free(
-            BoundDynamicTensorRef::try_new(&lhs.body.space, lhs.dense_data())?,
-            BoundDynamicTensorRef::try_new(&rhs.body.space, rhs.dense_data())?,
+            BoundDynamicTensorRef::try_new(&lhs_body.space, lhs_body.materialized_dense_data())?,
+            BoundDynamicTensorRef::try_new(&rhs_body.space, rhs_body.materialized_dense_data())?,
         )?;
         Ok(TensorMap {
             runtime: lhs.runtime.clone(),
-            body: Arc::new(TypedTensorBody::dense(space, data)),
+            repr: owned_repr(TypedTensorBody::dense(space, data)),
         })
     }
 }
@@ -526,15 +529,17 @@ where
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        let lhs_body = lhs.materialized_body();
+        let rhs_body = rhs.materialized_body();
         let (space, data) = tensorproduct_owned_checked_generic(
-            &lhs.body.space,
-            lhs.dense_data(),
-            &rhs.body.space,
-            rhs.dense_data(),
+            &lhs_body.space,
+            lhs_body.materialized_dense_data(),
+            &rhs_body.space,
+            rhs_body.materialized_dense_data(),
         )?;
         Ok(TensorMap {
             runtime: lhs.runtime.clone(),
-            body: Arc::new(TypedTensorBody::dense(space, data)),
+            repr: owned_repr(TypedTensorBody::dense(space, data)),
         })
     }
 }
@@ -1040,7 +1045,7 @@ where
     D: TensorScalar,
 {
     fn commit(self) -> Result<TensorMap<P, D>, Error> {
-        let data = self.source.dense_data();
+        let data = self.source.materialized_body().materialized_dense_data();
         let blocks = self.blocks;
         let source = self.source;
         let codomain = self.codomain;
@@ -1286,7 +1291,7 @@ where
         .collect();
     Ok(TensorMap {
         runtime: runtime.clone(),
-        body: Arc::new(TypedTensorBody::diagonal(space, data)),
+        repr: owned_repr(TypedTensorBody::diagonal(space, data)),
     })
 }
 
@@ -1299,7 +1304,7 @@ where
     let (space, data) = factor.into_parts();
     TensorMap {
         runtime: runtime.clone(),
-        body: Arc::new(TypedTensorBody::dense(space, data)),
+        repr: owned_repr(TypedTensorBody::dense(space, data)),
     }
 }
 
@@ -1532,6 +1537,23 @@ impl<R, D> TypedTensorBody<R, D> {
     }
 }
 
+struct TypedAdjointView<R, D> {
+    parent: Arc<TypedTensorBody<R, D>>,
+    logical_space: BoundDynamicFusionMapSpace<R>,
+    materialized: OnceLock<Arc<TypedTensorBody<R, D>>>,
+    #[cfg(test)]
+    materialized_body_builds: std::sync::atomic::AtomicUsize,
+}
+
+enum TypedTensorRepr<R, D> {
+    Owned(Arc<TypedTensorBody<R, D>>),
+    Adjoint(Arc<TypedAdjointView<R, D>>),
+}
+
+fn owned_repr<R, D>(body: TypedTensorBody<R, D>) -> TypedTensorRepr<R, D> {
+    TypedTensorRepr::Owned(Arc::new(body))
+}
+
 /// A block-sparse symmetric tensor map that keeps its provider type.
 ///
 /// `D` is the payload dtype ([`f64`] or [`num_complex::Complex64`]) and is
@@ -1542,7 +1564,7 @@ impl<R, D> TypedTensorBody<R, D> {
 /// reference-counted.
 pub struct TensorMap<R, D> {
     runtime: Runtime,
-    body: Arc<TypedTensorBody<R, D>>,
+    repr: TypedTensorRepr<R, D>,
 }
 
 // Why hand-written: the derives would demand `R: Clone` and `D: Clone`, and
@@ -1551,13 +1573,17 @@ impl<R, D> Clone for TensorMap<R, D> {
     fn clone(&self) -> Self {
         Self {
             runtime: self.runtime.clone(),
-            body: Arc::clone(&self.body),
+            repr: match &self.repr {
+                TypedTensorRepr::Owned(body) => TypedTensorRepr::Owned(Arc::clone(body)),
+                TypedTensorRepr::Adjoint(view) => TypedTensorRepr::Adjoint(Arc::clone(view)),
+            },
         }
     }
 }
 
 impl<R, D> core::fmt::Debug for TensorMap<R, D> {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let stored = &self.storage_body().data;
         formatter
             .debug_struct("TensorMap")
             // Storage-shaped, deliberately: a compact spectrum payload reports
@@ -1565,7 +1591,7 @@ impl<R, D> core::fmt::Debug for TensorMap<R, D> {
             // `{:?}` would make a diagnostic the most expensive call on the type.
             .field(
                 "elements",
-                &match &*self.body.data {
+                &match stored.as_ref() {
                     TypedData::Dense(data) => data.len(),
                     TypedData::Diagonal(spectrum) => {
                         spectrum.iter().map(|entry| entry.values.len()).sum()
@@ -1577,22 +1603,43 @@ impl<R, D> core::fmt::Debug for TensorMap<R, D> {
 }
 
 impl<R, D> TensorMap<R, D> {
+    fn storage_body(&self) -> &Arc<TypedTensorBody<R, D>> {
+        match &self.repr {
+            TypedTensorRepr::Owned(body) => body,
+            TypedTensorRepr::Adjoint(view) => &view.parent,
+        }
+    }
+
+    fn logical_space(&self) -> &BoundDynamicFusionMapSpace<R> {
+        match &self.repr {
+            TypedTensorRepr::Owned(body) => &body.space,
+            TypedTensorRepr::Adjoint(view) => &view.logical_space,
+        }
+    }
+
+    fn owned_body(&self) -> Option<&Arc<TypedTensorBody<R, D>>> {
+        match &self.repr {
+            TypedTensorRepr::Owned(body) => Some(body),
+            TypedTensorRepr::Adjoint(_) => None,
+        }
+    }
+
     /// The provider allocation that owns this tensor's categorical layout.
     #[inline]
     pub fn provider(&self) -> &R {
-        self.body.space.provider()
+        self.logical_space().provider()
     }
 
     /// Number of codomain legs.
     #[inline]
     pub fn codomain_rank(&self) -> usize {
-        self.body.space.space().homspace().codomain().len()
+        self.logical_space().space().homspace().codomain().len()
     }
 
     /// Number of domain legs.
     #[inline]
     pub fn domain_rank(&self) -> usize {
-        self.body.space.space().homspace().domain().len()
+        self.logical_space().space().homspace().domain().len()
     }
 
     /// Total number of legs.
@@ -1619,10 +1666,11 @@ impl<R, D> TensorMap<R, D> {
         self.rank()
     }
 
-    /// Engine-level layout view of one stored block.
+    /// One block in the tensor's logical coupled layout.
+    ///
+    /// Metadata only: reading an adjoint block does not materialize its data.
     pub fn block(&self, index: usize) -> Result<BlockRef<'_>, Error> {
-        self.body
-            .space
+        self.logical_space()
             .space()
             .structure()
             .block(index)
@@ -1638,7 +1686,7 @@ impl<R, D> TensorMap<R, D> {
     /// Number of stored fusion-tree blocks.
     #[inline]
     pub fn block_count(&self) -> usize {
-        self.body.space.space().structure().block_count()
+        self.logical_space().space().structure().block_count()
     }
 }
 
@@ -1646,21 +1694,45 @@ impl<R, D> TensorMap<R, D>
 where
     D: TensorScalar,
 {
-    /// Whole dense payload in storage order.
+    /// Whole dense payload in the tensor's logical coupled-layout order.
+    ///
+    /// A lazy adjoint is materialized here at most once across all clones.
     #[inline]
     pub fn data(&self) -> &[D] {
-        self.dense_data()
+        self.materialized_body().materialized_dense_data()
     }
 
-    fn dense_data(&self) -> &[D] {
-        match &*self.body.data {
+    fn materialized_body(&self) -> &Arc<TypedTensorBody<R, D>> {
+        let TypedTensorRepr::Adjoint(view) = &self.repr else {
+            return self.owned_body().expect("owned representation");
+        };
+        view.materialized.get_or_init(|| {
+            let parent = &view.parent;
+            let data = tenet_tensors::materialize_adjoint_data_dyn(
+                parent.space.space(),
+                view.logical_space.space(),
+                parent.materialized_dense_data(),
+            )
+            .expect("a pre-admitted typed adjoint must materialize");
+            #[cfg(test)]
+            view.materialized_body_builds
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Arc::new(TypedTensorBody::dense(view.logical_space.clone(), data))
+        })
+    }
+}
+
+impl<R, D> TypedTensorBody<R, D>
+where
+    D: TensorScalar,
+{
+    fn materialized_dense_data(&self) -> &[D] {
+        match &*self.data {
             TypedData::Dense(data) => data,
-            TypedData::Diagonal(spectrum) => self.body.dense_cache.get_or_init(|| {
-                tenet_matrixalgebra::diagonal_bond_data(
-                    self.body.space.space(),
-                    spectrum,
-                    &|value| value,
-                )
+            TypedData::Diagonal(spectrum) => self.dense_cache.get_or_init(|| {
+                tenet_matrixalgebra::diagonal_bond_data(self.space.space(), spectrum, &|value| {
+                    value
+                })
                 .expect("diagonal fill is total on the stored bond space")
             }),
         }
@@ -1713,7 +1785,7 @@ where
         let space = Self::build_space(Arc::clone(bond.provider_arc()), &[bond], &[bond])?;
         Ok(Self {
             runtime: runtime.clone(),
-            body: Arc::new(TypedTensorBody::diagonal(space, spectrum)),
+            repr: owned_repr(TypedTensorBody::diagonal(space, spectrum)),
         })
     }
 
@@ -1729,7 +1801,10 @@ where
                     .iter()
                     .map(|entry| {
                         Ok(SectorSpectrum {
-                            sector: self.body.space.provider().decode_sector(entry.sector)?,
+                            sector: self
+                                .logical_space()
+                                .provider()
+                                .decode_sector(entry.sector)?,
                             values: entry.values.clone(),
                         })
                     })
@@ -1755,11 +1830,11 @@ where
         if self.rank() != 2 || self.numout() != 1 || self.numin() != 1 {
             return Ok(false);
         }
-        let data = self.dense_data();
+        let data = self.materialized_body().materialized_dense_data();
         let mut norm = 0.0_f64;
         let mut offdiag = 0.0_f64;
-        for index in 0..self.body.space.space().structure().block_count() {
-            let block = self.body.space.space().structure().block(index)?;
+        for index in 0..self.logical_space().space().structure().block_count() {
+            let block = self.logical_space().space().structure().block(index)?;
             for row in 0..block.shape()[0] {
                 for col in 0..block.shape()[1] {
                     let value = data
@@ -1834,7 +1909,7 @@ where
             .map_err(TypedFacadeError::<R>::from)?;
         Ok(Self {
             runtime: runtime.clone(),
-            body: Arc::new(TypedTensorBody::dense(space, data)),
+            repr: owned_repr(TypedTensorBody::dense(space, data)),
         })
     }
 
@@ -1992,14 +2067,13 @@ where
         index: usize,
     ) -> Result<BlockFusionTrees<R::Sector>, TypedFacadeError<R>> {
         let block = self
-            .body
-            .space
+            .logical_space()
             .space()
             .structure()
             .block(index)
             .map_err(Error::from)
             .map_err(TypedFacadeError::<R>::from)?;
-        decode_block_fusion_trees(self.body.space.provider(), block.key())
+        decode_block_fusion_trees(self.logical_space().provider(), block.key())
     }
 }
 
@@ -2198,7 +2272,10 @@ where
         // The zero fill is written into, not replaced: `build` has just
         // allocated the payload and nothing else holds the body yet, so the
         // diagonal goes in place rather than into a second buffer.
-        let body = Arc::get_mut(&mut tensor.body).expect("a freshly built body has no other owner");
+        let TypedTensorRepr::Owned(body) = &mut tensor.repr else {
+            unreachable!("a freshly built tensor is owned")
+        };
+        let body = Arc::get_mut(body).expect("a freshly built body has no other owner");
         // Same coupled-sector region walk and same diagonal addressing as the
         // erased `Tensor::structural`, on the shared helper: the two build the
         // same tensor, and a second copy of the offset arithmetic would be free
@@ -2533,10 +2610,12 @@ where
                 self.rank() - self.codomain_rank(),
                 &operation,
             ) {
-                let destination = self.body.space.transformed_multiplicity_free(&operation)?;
+                let destination = self
+                    .logical_space()
+                    .transformed_multiplicity_free(&operation)?;
                 let transformed = crate::tensor_core::transform_rank_one_diagonal_spectrum(
-                    self.body.space.provider(),
-                    self.body.space.space(),
+                    self.logical_space().provider(),
+                    self.logical_space().space(),
                     destination.space(),
                     &operation,
                     spectrum,
@@ -2547,14 +2626,15 @@ where
         // Leasing rather than locking, matching the erased path: independent
         // operations on one runtime must not serialize behind each other.
         let mut lease = self.runtime.lease_context()?;
+        let body = self.materialized_body();
         let (space, data) = tree_transform_owned_multiplicity_free(
             lease.context().multiplicity_free_lane::<D>(),
-            BoundDynamicTensorRef::try_new(&self.body.space, self.dense_data())?,
+            BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())?,
             operation,
         )?;
         Ok(Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody::dense(space, data)),
+            repr: owned_repr(TypedTensorBody::dense(space, data)),
         })
     }
 
@@ -2677,10 +2757,12 @@ where
             return Ok(compact);
         }
         let mut lease = self.runtime.lease_context()?;
+        let lhs_body = self.materialized_body();
+        let rhs_body = other.materialized_body();
         let (space, data) = tensorcontract_owned_multiplicity_free(
             lease.context().multiplicity_free_lane::<D>(),
-            BoundDynamicTensorRef::try_new(&self.body.space, self.dense_data())?,
-            BoundDynamicTensorRef::try_new(&other.body.space, other.dense_data())?,
+            BoundDynamicTensorRef::try_new(&lhs_body.space, lhs_body.materialized_dense_data())?,
+            BoundDynamicTensorRef::try_new(&rhs_body.space, rhs_body.materialized_dense_data())?,
             lhs_axes,
             rhs_axes,
             // Why `OutputAxisOrder` stays out of the signature: it is an
@@ -2690,7 +2772,7 @@ where
         )?;
         Ok(Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody::dense(space, data)),
+            repr: owned_repr(TypedTensorBody::dense(space, data)),
         })
     }
 
@@ -2769,8 +2851,9 @@ where
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }
-        if product.left_rule().rule_identity() != self.body.space.provider().rule_identity()
-            || product.right_rule().rule_identity() != other.body.space.provider().rule_identity()
+        if product.left_rule().rule_identity() != self.logical_space().provider().rule_identity()
+            || product.right_rule().rule_identity()
+                != other.logical_space().provider().rule_identity()
         {
             return Err(Error::RuleMismatch);
         }
@@ -2862,16 +2945,18 @@ where
         let lhs_axes: Vec<usize> = (self.codomain_rank()..self.rank()).collect();
         let rhs_axes: Vec<usize> = (0..other.codomain_rank()).collect();
         let mut lease = self.runtime.lease_context()?;
+        let lhs_body = self.materialized_body();
+        let rhs_body = other.materialized_body();
         let (space, data) = tensorcompose_owned_multiplicity_free(
             lease.context().multiplicity_free_lane::<D>(),
-            BoundDynamicTensorRef::try_new(&self.body.space, self.dense_data())?,
-            BoundDynamicTensorRef::try_new(&other.body.space, other.dense_data())?,
+            BoundDynamicTensorRef::try_new(&lhs_body.space, lhs_body.materialized_dense_data())?,
+            BoundDynamicTensorRef::try_new(&rhs_body.space, rhs_body.materialized_dense_data())?,
             &lhs_axes,
             &rhs_axes,
         )?;
         Ok(Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody::dense(space, data)),
+            repr: owned_repr(TypedTensorBody::dense(space, data)),
         })
     }
 
@@ -2925,7 +3010,7 @@ where
         if !self.same_rule(other) {
             return Ok(None);
         }
-        let (left, right) = (self.body.space.space(), other.body.space.space());
+        let (left, right) = (self.logical_space().space(), other.logical_space().space());
         match (self.spectrum(), other.spectrum()) {
             (Some(lhs), Some(rhs)) => {
                 // Both clauses are unreachable today and stay for the reason
@@ -3040,12 +3125,11 @@ where
         }
         // Why the provider rather than a stored flag: `braiding_style` is the
         // rule's own answer, and `R` is concrete here.
-        let fermionic =
-            self.body.space.provider().braiding_style() == tenet_core::BraidingStyleKind::Fermionic;
+        let fermionic = self.logical_space().provider().braiding_style()
+            == tenet_core::BraidingStyleKind::Fermionic;
         if fermionic
             && other
-                .body
-                .space
+                .logical_space()
                 .space()
                 .homspace()
                 .external_axis_is_dual(rhs_axis)
@@ -3053,7 +3137,7 @@ where
         {
             return Ok(None);
         }
-        let (left, right) = (self.body.space.space(), other.body.space.space());
+        let (left, right) = (self.logical_space().space(), other.logical_space().space());
         let (left_home, right_home) = (left.homspace(), right.homspace());
         match (self.spectrum(), other.spectrum()) {
             // `D · D`: the same product as `D * D`, which already knows how to
@@ -3139,9 +3223,9 @@ where
         axis: Option<usize>,
         spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
     ) -> Result<Self, Error> {
-        let mut data = self.dense_data().to_vec();
+        let mut data = self.materialized_body().materialized_dense_data().to_vec();
         tenet_matrixalgebra::scale_axis_by_spectrum_mapped(
-            self.body.space.space(),
+            self.logical_space().space(),
             &mut data,
             axis,
             spectrum,
@@ -3175,7 +3259,7 @@ where
         spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<V>>,
         to_scalar: impl Fn(V) -> D,
     ) -> Result<Self, Error> {
-        diagonal_factor_on(&self.runtime, &self.body.space, spectrum, to_scalar)
+        diagonal_factor_on(&self.runtime, self.logical_space(), spectrum, to_scalar)
     }
 
     /// Decodes a seam spectrum into provider labels and sorts it by label.
@@ -3187,7 +3271,7 @@ where
         &self,
         raw: Vec<tenet_matrixalgebra::SectorSpectrum<V>>,
     ) -> Result<Vec<SectorSpectrum<R::Sector, V>>, Error> {
-        let provider = self.body.space.provider();
+        let provider = self.logical_space().provider();
         let mut decoded: Vec<SectorSpectrum<R::Sector, V>> = raw
             .into_iter()
             .map(|entry| {
@@ -3205,7 +3289,9 @@ where
 
     /// Borrowed seam view of this tensor map.
     fn bound_ref(&self) -> Result<BoundDynamicTensorRef<'_, R, D>, Error> {
-        BoundDynamicTensorRef::try_new(&self.body.space, self.dense_data()).map_err(Error::from)
+        let body = self.materialized_body();
+        BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+            .map_err(Error::from)
     }
 
     /// TensorKit 0.17 / MatrixAlgebraKit `svd_compact`: `t = u * s * vh` with
@@ -3522,9 +3608,8 @@ where
     /// own space `codomain <- domain`, `p` on `domain <- domain`. TensorKit
     /// also exposes algorithm kinds for the polars; neither tenet facade does —
     /// a deliberate narrowing, in parity with the erased
-    /// [`crate::prelude::Tensor::left_polar`]. The erased facade materializes
-    /// an adjoint view before decomposing; this facade has no adjoint views, so
-    /// there is no counterpart to that step here.
+    /// [`crate::prelude::Tensor::left_polar`]. A lazy typed adjoint is
+    /// materialized once at the explicit decomposition boundary.
     ///
     /// # Errors
     ///
@@ -3703,7 +3788,7 @@ where
         Ok((
             diagonal_factor_on(
                 &self.runtime,
-                &self.body.space,
+                self.logical_space(),
                 eigenvalues,
                 <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
             )?,
@@ -3729,7 +3814,7 @@ where
         Ok(EigTrunc {
             d: diagonal_factor_on(
                 &self.runtime,
-                &self.body.space,
+                self.logical_space(),
                 eigenvalues.clone(),
                 <<D as FactorScalar>::Eig as FactorScalar>::from_complex64,
             )?,
@@ -3850,10 +3935,11 @@ where
         }
         let mut dense = self.runtime.lease_dense();
         let mut lease = self.runtime.lease_context()?;
+        let body = self.materialized_body();
         let out = tenet_matrixalgebra::exp_dyn(
             dense.dense(),
             lease.context().multiplicity_free_lane::<D>(),
-            &BoundDynamicTensorRef::try_new(&self.body.space, self.dense_data())?,
+            &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())?,
         )?;
         Ok(self.wrap_bound_factor(out))
     }
@@ -3984,10 +4070,11 @@ where
         }
         let mut dense = self.runtime.lease_dense();
         let mut lease = self.runtime.lease_context()?;
+        let body = self.materialized_body();
         let out = tenet_matrixalgebra::pinv_dyn(
             dense.dense(),
             lease.context().multiplicity_free_lane::<D>(),
-            &BoundDynamicTensorRef::try_new(&self.body.space, self.dense_data())?,
+            &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())?,
             rcond,
         )?;
         Ok(self.wrap_bound_factor(out))
@@ -4041,7 +4128,7 @@ where
         // Same guard as the erased facade's, and the same one
         // [`is_diagonal_bond_space`] applies to compact *destinations*: here it
         // is asked of the receiver, which is what makes it reachable.
-        if !is_diagonal_bond_space(self.body.space.space()) {
+        if !is_diagonal_bond_space(self.logical_space().space()) {
             return Err(Error::InvalidArgument(
                 "sqrt requires a diagonal bond tensor `[v] <- [v]` (equal single \
                  codomain and domain legs), like the `s` factor of svd_trunc"
@@ -4055,10 +4142,10 @@ where
         // but only by convention — the buffer is free to hold anything, so the
         // off-diagonal entries are checked rather than assumed. Skipping the
         // check would silently drop them.
-        let data = self.dense_data();
+        let data = self.materialized_body().materialized_dense_data();
         let zero = num_complex::Complex64::new(0.0, 0.0);
         let mut out = vec![D::from_real(0.0); data.len()];
-        let structure = self.body.space.space().structure();
+        let structure = self.logical_space().space().structure();
         for index in 0..structure.block_count() {
             let block = structure.block(index)?;
             let (shape, strides, offset) = (block.shape(), block.strides(), block.offset());
@@ -4089,7 +4176,7 @@ where
     fn with_data(&self, data: Vec<D>) -> Self {
         Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody::dense(self.body.space.clone(), data)),
+            repr: owned_repr(TypedTensorBody::dense(self.logical_space().clone(), data)),
         }
     }
 
@@ -4100,7 +4187,10 @@ where
     fn with_spectrum(&self, spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<D>>) -> Self {
         Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody::diagonal(self.body.space.clone(), spectrum)),
+            repr: owned_repr(TypedTensorBody::diagonal(
+                self.logical_space().clone(),
+                spectrum,
+            )),
         }
     }
 
@@ -4116,13 +4206,14 @@ where
     ) -> Self {
         Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody::diagonal(space, spectrum)),
+            repr: owned_repr(TypedTensorBody::diagonal(space, spectrum)),
         }
     }
 
     /// The compact payload, when this tensor has one.
     fn spectrum(&self) -> Option<&[tenet_matrixalgebra::SectorSpectrum<D>]> {
-        match &*self.body.data {
+        let body = self.owned_body()?;
+        match body.data.as_ref() {
             TypedData::Diagonal(spectrum) => Some(spectrum),
             TypedData::Dense(_) => None,
         }
@@ -4132,7 +4223,8 @@ where
     /// below skip the expert layer, which is where a mismatch would otherwise
     /// be caught, so they have to ask themselves.
     fn same_rule(&self, other: &Self) -> bool {
-        self.body.space.provider().rule_identity() == other.body.space.provider().rule_identity()
+        self.logical_space().provider().rule_identity()
+            == other.logical_space().provider().rule_identity()
     }
 
     /// The dimension-weighted inner product of two compact spectra,
@@ -4219,7 +4311,7 @@ where
         // makes the zipped element-wise combination below meaningful. Message
         // verbatim from the erased `check_same_space`: one mistake reported two
         // ways across the two facades is a support burden with no upside.
-        if self.body.space.space() != other.body.space.space() {
+        if self.logical_space().space() != other.logical_space().space() {
             return Err(Error::InvalidArgument(
                 "tensors live on different spaces or block layouts".to_string(),
             ));
@@ -4256,8 +4348,8 @@ where
             // diagonal. Materializing first would allocate a second.
             (Some(diagonal), None) => {
                 return Ok(self.with_data(scatter_spectrum(
-                    self.body.space.space(),
-                    other.dense_data(),
+                    self.logical_space().space(),
+                    other.materialized_body().materialized_dense_data(),
                     beta,
                     diagonal,
                     alpha,
@@ -4265,8 +4357,8 @@ where
             }
             (None, Some(diagonal)) => {
                 return Ok(self.with_data(scatter_spectrum(
-                    self.body.space.space(),
-                    self.dense_data(),
+                    self.logical_space().space(),
+                    self.materialized_body().materialized_dense_data(),
                     alpha,
                     diagonal,
                     beta,
@@ -4275,9 +4367,10 @@ where
             (None, None) => {}
         }
         Ok(self.with_data(
-            self.dense_data()
+            self.materialized_body()
+                .materialized_dense_data()
                 .iter()
-                .zip(other.dense_data())
+                .zip(other.materialized_body().materialized_dense_data())
                 .map(|(&x, &y)| x * alpha + y * beta)
                 .collect(),
         ))
@@ -4307,7 +4400,8 @@ where
             );
         }
         self.with_data(
-            self.dense_data()
+            self.materialized_body()
+                .materialized_dense_data()
                 .iter()
                 .map(|&value| value * factor)
                 .collect(),
@@ -4386,11 +4480,11 @@ where
         // homspace selection must fail before any destination layout is
         // derived, so a rejected trace publishes no state.
         let homspace = tenet_tensors::tensortrace_fusion_dyn_selected_homspace_checked(
-            &self.body.space,
+            self.logical_space(),
             axes,
             destination_codomain_rank,
         )?;
-        let space = self.body.space.derive_from_final_homspace(homspace)?;
+        let space = self.logical_space().derive_from_final_homspace(homspace)?;
         // Compact arm (#604): the full trace of a rank-(1,1) spectrum factor
         // over its only pair is a reduction of the stored spectrum, so there
         // is nothing to materialize — the typed twin of the erased #585 arm in
@@ -4407,18 +4501,18 @@ where
         // destination tree whose recoupling is not a per-sector scaling.
         // Today the geometric conditions are implied by the Group 4 contract
         // (`TypedData::Diagonal` lives on bond spaces only), so they are
-        // defensive parity with the erased guard, not a reachable branch. No
-        // adjoint-view exclusion, unlike erased: this facade's `adjoint` is
-        // eager and keeps compact storage compact, so there is no lazy view to
-        // exclude. The coefficient is not derivable here — it is pinned
+        // defensive parity with the erased guard, not a reachable branch. A
+        // lazy dense adjoint has no compact spectrum and therefore takes the
+        // explicit materialized fallback; a compact adjoint remains an owned
+        // compact tensor. The coefficient is not derivable here — it is pinned
         // against the erased arm and the engine route by the oracle sweeps in
         // `tests/typed_facade.rs` (`compact_full_trace_*`) and, on the erased
         // side, `tensor/compact_diagonal_tests.rs`.
         if let Some(spectrum) = self.spectrum() {
             if rank == 2 && self.codomain_rank() == 1 && pairs.len() == 1 {
                 let traced_leg_is_dual: bool =
-                    self.body.space.space().homspace().codomain().legs()[0].is_dual();
-                let provider: &R = self.body.space.provider();
+                    self.logical_space().space().homspace().codomain().legs()[0].is_dual();
+                let provider: &R = self.logical_space().provider();
                 // Accumulated in `Complex64` and narrowed once through the
                 // #568 `UserScalar` surface, mirroring both the compact `tr`
                 // above and the erased arm's `ordinary_trace_with` — same
@@ -4450,20 +4544,20 @@ where
                 let value: D = D::from_complex64(total);
                 return Ok(Self {
                     runtime: self.runtime.clone(),
-                    body: Arc::new(TypedTensorBody::dense(space, vec![value])),
+                    repr: owned_repr(TypedTensorBody::dense(space, vec![value])),
                 });
             }
         }
         let data = tenet_tensors::tensortrace_fusion_dyn_owned_checked(
             &space,
-            &self.body.space,
-            self.dense_data(),
+            self.logical_space(),
+            self.materialized_body().materialized_dense_data(),
             axes,
             D::from_real(1.0),
         )?;
         Ok(Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody::dense(space, data)),
+            repr: owned_repr(TypedTensorBody::dense(space, data)),
         })
     }
 
@@ -4471,11 +4565,11 @@ where
     /// conjugate-transposes every block. Real payloads are transposed only;
     /// c64 entries are conjugated as well.
     ///
-    /// Eager, into a fresh destination — TensorKit's own `adjoint!`, so this is a TK-sanctioned form rather than a
-    /// divergence. The erased [`crate::prelude::Tensor::adjoint`] is instead
-    /// the analogue of TensorKit's lazy `AdjointTensorMap` view: same result,
-    /// different point at which the work is paid. Only the eager seam is
-    /// reachable from this facade.
+    /// Dense storage is a lazy parent-backed view, matching TensorKit's
+    /// `AdjointTensorMap`: metadata swaps immediately, while raw data and
+    /// owned-only consumers share one deferred materialization across clones.
+    /// Compact diagonal storage keeps its established `O(Σ_c k_c)` owned
+    /// conjugation path and never enters the general lazy cell.
     ///
     /// # Errors
     ///
@@ -4503,11 +4597,29 @@ where
                     .collect(),
             ));
         }
-        let (space, data) = tenet_tensors::adjoint_bound_dyn(&self.body.space, self.dense_data())
-            .map_err(Error::from)?;
-        Ok(Self {
-            runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody::dense(space, data)),
+        Ok(match &self.repr {
+            TypedTensorRepr::Owned(parent) => {
+                let logical_space =
+                    tenet_tensors::adjoint_bound_space_dyn(&parent.space).map_err(Error::from)?;
+                debug_assert!(Arc::ptr_eq(
+                    parent.space.provider_arc(),
+                    logical_space.provider_arc()
+                ));
+                Self {
+                    runtime: self.runtime.clone(),
+                    repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView {
+                        parent: Arc::clone(parent),
+                        logical_space,
+                        materialized: OnceLock::new(),
+                        #[cfg(test)]
+                        materialized_body_builds: std::sync::atomic::AtomicUsize::new(0),
+                    })),
+                }
+            }
+            TypedTensorRepr::Adjoint(view) => Self {
+                runtime: self.runtime.clone(),
+                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+            },
         })
     }
 
@@ -4527,7 +4639,7 @@ where
         // a second copy would be free to drift from the sibling this is
         // byte-compared against.
         if let Some(spectrum) = self.spectrum() {
-            let provider = self.body.space.provider();
+            let provider = self.logical_space().provider();
             return Ok(Self::compact_inner(spectrum, spectrum, provider)?.re.sqrt());
         }
         Ok(self.weighted_self_inner()?.re.sqrt())
@@ -4557,7 +4669,8 @@ where
                 .fold(0.0, f64::max));
         }
         Ok(self
-            .dense_data()
+            .materialized_body()
+            .materialized_dense_data()
             .iter()
             .map(|&value| value.widen_complex().norm())
             .fold(0.0, f64::max))
@@ -4602,7 +4715,7 @@ where
         if p.is_infinite() {
             return self.norm_inf();
         }
-        let provider = self.body.space.provider();
+        let provider = self.logical_space().provider();
         if let Some(spectrum) = self.spectrum() {
             let total: f64 = spectrum
                 .iter()
@@ -4618,9 +4731,9 @@ where
             return Ok(total.powf(p.recip()));
         }
         coupled_region_pow_sum(
-            self.body.space.space().structure(),
-            self.body.space.space().nout(),
-            self.dense_data(),
+            self.logical_space().space().structure(),
+            self.logical_space().space().nout(),
+            self.materialized_body().materialized_dense_data(),
             p,
             |coupled| provider.dim_scalar(coupled),
         )
@@ -4645,11 +4758,11 @@ where
     /// body of [`Self::norm`].
     fn weighted_self_inner(&self) -> Result<num_complex::Complex64, Error> {
         weighted_inner(
-            self.body.space.provider(),
-            self.body.space.space().structure(),
-            self.body.space.space().nout(),
-            self.dense_data(),
-            self.dense_data(),
+            self.logical_space().provider(),
+            self.logical_space().space().structure(),
+            self.logical_space().space().nout(),
+            self.materialized_body().materialized_dense_data(),
+            self.materialized_body().materialized_dense_data(),
         )
     }
 
@@ -4670,7 +4783,7 @@ where
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }
-        if self.body.space.space() != other.body.space.space() {
+        if self.logical_space().space() != other.logical_space().space() {
             return Err(Error::InvalidArgument(
                 "tensors live on different spaces or block layouts".to_string(),
             ));
@@ -4680,18 +4793,18 @@ where
         // positions anyway, so it goes through the shared materialization
         // cache like every other dense consumer.
         if let (Some(lhs), Some(rhs)) = (self.spectrum(), other.spectrum()) {
-            let provider = self.body.space.provider();
+            let provider = self.logical_space().provider();
             return Ok(D::from_complex64(Self::compact_inner(lhs, rhs, provider)?));
         }
         // `D::from_complex64` is `.re` for the real scalar and the identity for
         // the complex one, so this is bit-identical to the erased facade's
         // `Scalar::F64(v.re)` / `Scalar::C64(v)` dispatch, without the enum.
         Ok(D::from_complex64(weighted_inner(
-            self.body.space.provider(),
-            self.body.space.space().structure(),
-            self.body.space.space().nout(),
-            self.dense_data(),
-            other.dense_data(),
+            self.logical_space().provider(),
+            self.logical_space().space().structure(),
+            self.logical_space().space().nout(),
+            self.materialized_body().materialized_dense_data(),
+            other.materialized_body().materialized_dense_data(),
         )?))
     }
 
@@ -4722,7 +4835,7 @@ where
     /// the erased facade's own message, and [`Error::Core`] when the block
     /// structure cannot be walked.
     pub fn tr(&self) -> Result<D, Error> {
-        let hom = self.body.space.space().homspace();
+        let hom = self.logical_space().space().homspace();
         // Mirrors the erased pre-check verbatim, message included: the weighted
         // trace below indexes codomain axis `i` together with domain axis
         // `nout + i` and would be meaningless without it.
@@ -4734,7 +4847,7 @@ where
         if let Some(spectrum) = self.spectrum() {
             // `Σ_c dim(c) * Σ_i d_i`: TensorKit's positive trace on a
             // `DiagonalTensorMap`, read straight off the stored values.
-            let provider = self.body.space.provider();
+            let provider = self.logical_space().provider();
             let mut total = num_complex::Complex64::new(0.0, 0.0);
             for entry in spectrum {
                 let mut partial = D::from_real(0.0);
@@ -4746,10 +4859,10 @@ where
             return Ok(D::from_complex64(total));
         }
         Ok(D::from_complex64(weighted_trace(
-            self.body.space.provider(),
-            self.body.space.space().structure(),
-            self.body.space.space().nout(),
-            self.dense_data(),
+            self.logical_space().provider(),
+            self.logical_space().space().structure(),
+            self.logical_space().space().nout(),
+            self.materialized_body().materialized_dense_data(),
         )?))
     }
 
@@ -4830,7 +4943,7 @@ where
         // eigenvalues, so there is nothing to factorize and nothing to
         // materialize (#585). The gate and the threshold above are already
         // compact — `is_hermitian` and `norm` both read the spectrum — so this
-        // is the last step that reached `dense_data()`.
+        // is the last step that reached `materialized_dense_data()`.
         if let Some(spectrum) = self.spectrum() {
             return Ok(crate::tensor_core::compact_is_posdef(spectrum, threshold));
         }
@@ -4867,7 +4980,7 @@ where
     /// precondition every member of the family above tests against, and the
     /// same comparison [`Self::tr`] makes.
     fn is_endomorphism(&self) -> bool {
-        let hom = self.body.space.space().homspace();
+        let hom = self.logical_space().space().homspace();
         hom.codomain().legs() == hom.domain().legs()
     }
 
@@ -4877,14 +4990,14 @@ where
     /// sector table (the provider travels by `Arc` bump). Hold the result
     /// rather than re-calling in a loop.
     pub fn codomain(&self) -> Vec<GradedSpace<R>> {
-        self.legs(self.body.space.space().homspace().codomain())
+        self.legs(self.logical_space().space().homspace().codomain())
     }
 
     /// The domain legs, in axis order.
     ///
     /// Allocates per call, exactly as [`Self::codomain`].
     pub fn domain(&self) -> Vec<GradedSpace<R>> {
-        self.legs(self.body.space.space().homspace().domain())
+        self.legs(self.logical_space().space().homspace().domain())
     }
 
     /// The codomain legs, in axis order (TensorKit `codomain(t)`).
@@ -4929,8 +5042,8 @@ where
     /// None today; the `Result` keeps the erased signature's shape so the two
     /// facades stay drop-in for each other.
     pub fn leg_dims(&self) -> Result<Vec<usize>, Error> {
-        let hom = self.body.space.space().homspace();
-        let provider = self.body.space.provider();
+        let hom = self.logical_space().space().homspace();
+        let provider = self.logical_space().provider();
         Ok(hom
             .codomain()
             .legs()
@@ -4948,7 +5061,7 @@ where
     /// [`Error::InvalidArgument`] when `axis >= rank()`, with the erased
     /// facade's own message.
     pub fn leg_dim(&self, axis: usize) -> Result<usize, Error> {
-        let hom = self.body.space.space().homspace();
+        let hom = self.logical_space().space().homspace();
         let nout = hom.codomain().len();
         let leg = if axis < nout {
             &hom.codomain().legs()[axis]
@@ -4960,7 +5073,7 @@ where
                 self.rank()
             )));
         };
-        Ok(Self::weighted_leg_dim(self.body.space.provider(), leg))
+        Ok(Self::weighted_leg_dim(self.logical_space().provider(), leg))
     }
 
     /// The erased facade's per-leg reduction, verbatim: quantum dimensions are
@@ -4999,7 +5112,8 @@ where
         // A rank-0 payload holds at most one element; summing matches the
         // erased facade and gives the empty payload its zero for free.
         Ok(self
-            .dense_data()
+            .materialized_body()
+            .materialized_dense_data()
             .iter()
             .fold(D::from_real(0.0), |acc, &value| acc + value))
     }
@@ -5019,11 +5133,9 @@ where
     /// Narrowings against the erased sibling, all statically enforced rather
     /// than semantic differences: both operands share one `D`, so the erased
     /// mixed-dtype widening arm (`execute_c64`) is unrepresentable — widen
-    /// with [`Self::to_c64`] first; there are no device placements to check;
-    /// and the erased lazy-adjoint fast path has no counterpart because the
-    /// typed [`Self::adjoint`] is eager. A compact diagonal operand is
-    /// materialized dense first (once, into the body cache), as the erased
-    /// route does through its coupled-data materialization.
+    /// with [`Self::to_c64`] first; there are no device placements to check.
+    /// A lazy adjoint or compact diagonal operand is materialized dense once
+    /// at this owned-only concatenation boundary.
     ///
     /// # Complexity
     ///
@@ -5066,15 +5178,16 @@ where
         // devices here). Same rationale as `authority()`: separately
         // allocated providers of one rule interoperate; different identities
         // are rejected before any layout work.
-        if self.body.space.provider().rule_identity() != other.body.space.provider().rule_identity()
+        if self.logical_space().provider().rule_identity()
+            != other.logical_space().provider().rule_identity()
         {
             return Err(Error::RuleMismatch);
         }
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }
-        let lhs = self.body.space.space().homspace();
-        let rhs = other.body.space.space().homspace();
+        let lhs = self.logical_space().space().homspace();
+        let rhs = other.logical_space().space().homspace();
         let (axis, homspace) = cat_homspace(
             lhs.codomain(),
             lhs.domain(),
@@ -5085,20 +5198,20 @@ where
         // The same derivation route the erased `from_homspace` takes
         // (`build_bound_space_like` is `derive_from_final_homspace` on the
         // authority space); no new space-construction logic.
-        let space = self.body.space.derive_from_final_homspace(homspace)?;
+        let space = self.logical_space().derive_from_final_homspace(homspace)?;
         let plan = compile_cat_plan(
             space.space().structure(),
             space.space().nout(),
             [
                 CatOperandLayout::owned(
-                    self.body.space.space().structure(),
-                    self.body.space.space().nout(),
-                    self.body.space.space().nin(),
+                    self.logical_space().space().structure(),
+                    self.logical_space().space().nout(),
+                    self.logical_space().space().nin(),
                 )?,
                 CatOperandLayout::owned(
-                    other.body.space.space().structure(),
-                    other.body.space.space().nout(),
-                    other.body.space.space().nin(),
+                    other.logical_space().space().structure(),
+                    other.logical_space().space().nout(),
+                    other.logical_space().space().nin(),
                 )?,
             ],
             axis,
@@ -5109,10 +5222,13 @@ where
         .ok_or_else(|| {
             internal_layout_error("owned concatenation unexpectedly declined its layout")
         })?;
-        let data = plan.execute(self.dense_data(), other.dense_data())?;
+        let data = plan.execute(
+            self.materialized_body().materialized_dense_data(),
+            other.materialized_body().materialized_dense_data(),
+        )?;
         Ok(Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody::dense(space, data)),
+            repr: owned_repr(TypedTensorBody::dense(space, data)),
         })
     }
 
@@ -5146,8 +5262,8 @@ where
     /// The messages name `TensorMap::absorb` where the erased ones name
     /// `Tensor::absorb` — same shape, honest receiver.
     pub fn absorb(&self, source: &Self) -> Result<Self, Error> {
-        let destination_space = self.body.space.space();
-        let source_space = source.body.space.space();
+        let destination_space = self.logical_space().space();
+        let source_space = source.logical_space().space();
         if destination_space.nout() != source_space.nout()
             || destination_space.nin() != source_space.nin()
         {
@@ -5159,8 +5275,8 @@ where
                 source_space.nin()
             )));
         }
-        if self.body.space.provider().rule_identity()
-            != source.body.space.provider().rule_identity()
+        if self.logical_space().provider().rule_identity()
+            != source.logical_space().provider().rule_identity()
         {
             return Err(Error::RuleMismatch);
         }
@@ -5189,8 +5305,8 @@ where
                 ));
             }
         }
-        let destination_data = self.dense_data();
-        let source_data = source.dense_data();
+        let destination_data = self.materialized_body().materialized_dense_data();
+        let source_data = source.materialized_body().materialized_dense_data();
         // The erased `validate_absorb_layout` internal guard, minus its
         // dtype/device arms (unrepresentable here): the dense payloads must
         // cover their structures before any block walk trusts the offsets.
@@ -5211,7 +5327,7 @@ where
         )?;
         Ok(Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody::dense(self.body.space.clone(), output)),
+            repr: owned_repr(TypedTensorBody::dense(self.logical_space().clone(), output)),
         })
     }
 
@@ -5235,10 +5351,10 @@ where
     /// Otherwise: one scaled copy of the dense payload, O(len), through the
     /// same per-block walk as the erased facade (`scale_blocks_impl`).
     ///
-    /// No adjoint arm (this facade's `adjoint` is eager, so there is no lazy
-    /// view to materialize first) and no device arm (the payload is a host
-    /// `Vec<D>` by construction) — deliberate narrowings, not semantic
-    /// differences. The erased route's SU(3) rejection is dead here: the
+    /// A lazy dense adjoint is materialized once before this owned-only
+    /// per-block path; compact adjoints remain compact and use the spectrum
+    /// arm above. There is no device arm (the payload is a host `Vec<D>` by
+    /// construction). The erased route's SU(3) rejection is dead here: the
     /// multiplicity-free admission bound keeps a `Generic` provider out at
     /// construction.
     ///
@@ -5258,18 +5374,18 @@ where
         if legs.is_empty() {
             return Ok(self.clone());
         }
-        let provider = self.body.space.provider();
+        let provider = self.logical_space().provider();
         // NoBraiding preflight (PR #620 review): before the compact arm and
         // before any θ evaluation — see `reject_unbraided_nonunit_legs`.
         reject_unbraided_nonunit_legs(
             provider,
-            self.body.space.space().homspace(),
+            self.logical_space().space().homspace(),
             legs,
             "twist",
             true,
         )?;
         let nout = self.codomain_rank();
-        if let TypedData::Diagonal(spectrum) = &*self.body.data {
+        if let Some(spectrum) = self.spectrum() {
             // Compact arm, mirroring the erased `scaled_by_sector` route: a
             // bond space's two legs both carry the block's coupled sector, so
             // the per-block factor collapses to θ(sector)^|legs|. The space
@@ -5293,20 +5409,24 @@ where
                     }
                 })
                 .collect();
-            return Ok(self.with_spectrum_on(self.body.space.clone(), scaled));
+            return Ok(self.with_spectrum_on(self.logical_space().clone(), scaled));
         }
-        if twist_is_identity_over_blocks(provider, self.body.space.space().structure(), nout, legs)?
-        {
+        if twist_is_identity_over_blocks(
+            provider,
+            self.logical_space().space().structure(),
+            nout,
+            legs,
+        )? {
             return Ok(self.clone());
         }
-        let mut data = self.dense_data().to_vec();
-        scale_blocks_impl(self.body.space.space(), &mut data, &|key| match key {
+        let mut data = self.materialized_body().materialized_dense_data().to_vec();
+        scale_blocks_impl(self.logical_space().space(), &mut data, &|key| match key {
             BlockKey::FusionTree(key) => twist_block_factor(provider, key, nout, legs),
             _ => 1.0,
         })?;
         Ok(Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody::dense(self.body.space.clone(), data)),
+            repr: owned_repr(TypedTensorBody::dense(self.logical_space().clone(), data)),
         })
     }
 
@@ -5330,8 +5450,9 @@ where
     /// One scaled copy of the dense payload into a fresh body, O(len); a
     /// compact spectrum factor materializes first (the flipped space is no
     /// longer a bond space, so the result cannot stay compact). The same
-    /// facade narrowings as [`Self::twist`] apply: no adjoint arm, no device
-    /// arm, SU(3) dead at the admission bound.
+    /// facade narrowings as [`Self::twist`] apply: a lazy dense adjoint
+    /// materializes once at this owned-only boundary, there is no device arm,
+    /// and SU(3) is dead at the admission bound.
     ///
     /// # Errors
     ///
@@ -5349,28 +5470,28 @@ where
         if legs.is_empty() {
             return Ok(self.clone());
         }
-        let hom = self.body.space.space().homspace();
+        let hom = self.logical_space().space().homspace();
         // NoBraiding preflight (PR #620 review): flip's coefficients are
         // built from the same θ/χ — see `reject_unbraided_nonunit_legs`.
-        reject_unbraided_nonunit_legs(self.body.space.provider(), hom, legs, "flip", false)?;
+        reject_unbraided_nonunit_legs(self.logical_space().provider(), hom, legs, "flip", false)?;
         let nout = hom.codomain().len();
         // Sequential semantics for repeated legs, from the helper shared
         // with the erased facade (#580 PR 5).
         let (new_hom, occurrences) = flip_toggled_homspace(hom, legs);
-        let space = self.body.space.derive_from_final_homspace(new_hom)?;
+        let space = self.logical_space().derive_from_final_homspace(new_hom)?;
         check_flip_layout_identity(
-            self.body.space.space().structure(),
+            self.logical_space().space().structure(),
             space.space().structure(),
         )?;
-        let provider = self.body.space.provider();
-        let mut data = self.dense_data().to_vec();
+        let provider = self.logical_space().provider();
+        let mut data = self.materialized_body().materialized_dense_data().to_vec();
         scale_blocks_impl(space.space(), &mut data, &|key| match key {
             BlockKey::FusionTree(key) => flip_block_factor(provider, key, nout, &occurrences),
             _ => 1.0,
         })?;
         Ok(Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody::dense(space, data)),
+            repr: owned_repr(TypedTensorBody::dense(space, data)),
         })
     }
 
@@ -5442,8 +5563,8 @@ where
                 self.rank()
             )));
         }
-        let provider = self.body.space.provider();
-        let source_hom = self.body.space.space().homspace();
+        let provider = self.logical_space().provider();
+        let source_hom = self.logical_space().space().homspace();
         let homspace = match insertion {
             UnitLegInsertion::Left { position, dual } => {
                 source_hom.insert_left_unit(provider, position, dual)?
@@ -5452,10 +5573,10 @@ where
                 source_hom.insert_right_unit(provider, position, dual)?
             }
         };
-        let destination = self.body.space.derive_from_final_homspace(homspace)?;
+        let destination = self.logical_space().derive_from_final_homspace(homspace)?;
         validate_unit_layout_correspondence_checked(
             provider,
-            (source_hom, self.body.space.space().structure()),
+            (source_hom, self.logical_space().space().structure()),
             (
                 destination.space().homspace(),
                 destination.space().structure(),
@@ -5466,7 +5587,7 @@ where
         let data = self.shareable_dense_payload();
         Ok(Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody::with_shared_payload(destination, data)),
+            repr: owned_repr(TypedTensorBody::with_shared_payload(destination, data)),
         })
     }
 
@@ -5494,8 +5615,8 @@ where
                 self.rank()
             )));
         }
-        let provider = self.body.space.provider();
-        let source_hom = self.body.space.space().homspace();
+        let provider = self.logical_space().provider();
+        let source_hom = self.logical_space().space().homspace();
         let nout = source_hom.codomain().len();
         let leg = if axis < nout {
             &source_hom.codomain().legs()[axis]
@@ -5522,21 +5643,21 @@ where
             }
         };
         let homspace = source_hom.remove_unit(provider, axis)?;
-        let destination = self.body.space.derive_from_final_homspace(homspace)?;
+        let destination = self.logical_space().derive_from_final_homspace(homspace)?;
         validate_unit_layout_correspondence_checked(
             provider,
             (
                 destination.space().homspace(),
                 destination.space().structure(),
             ),
-            (source_hom, self.body.space.space().structure()),
+            (source_hom, self.logical_space().space().structure()),
             insertion,
         )
         .map_err(map_checked_unit_layout_error)?;
         let data = self.shareable_dense_payload();
         Ok(Self {
             runtime: self.runtime.clone(),
-            body: Arc::new(TypedTensorBody::with_shared_payload(destination, data)),
+            repr: owned_repr(TypedTensorBody::with_shared_payload(destination, data)),
         })
     }
 
@@ -5548,17 +5669,17 @@ where
     /// pairing and only lends a borrowed slice (see the
     /// [`TypedTensorBody::data`] rationale).
     ///
-    /// Infallible for the reason [`Self::dense_data`] is: the diagonal fill
+    /// Infallible for the reason [`TypedTensorBody::materialized_dense_data`]
+    /// is: the diagonal fill
     /// is total on a bond space this module built from that same spectrum.
     fn shareable_dense_payload(&self) -> Arc<TypedData<D>> {
-        match &*self.body.data {
-            TypedData::Dense(_) => Arc::clone(&self.body.data),
+        let body = self.materialized_body();
+        match body.data.as_ref() {
+            TypedData::Dense(_) => Arc::clone(&body.data),
             TypedData::Diagonal(spectrum) => Arc::new(TypedData::Dense(
-                tenet_matrixalgebra::diagonal_bond_data(
-                    self.body.space.space(),
-                    spectrum,
-                    &|value| value,
-                )
+                tenet_matrixalgebra::diagonal_bond_data(body.space.space(), spectrum, &|value| {
+                    value
+                })
                 .expect("diagonal fill is total on the stored bond space"),
             )),
         }
@@ -5581,25 +5702,26 @@ where
             .legs()
             .iter()
             .map(|leg| GradedSpace {
-                provider: Arc::clone(self.body.space.provider_arc()),
+                provider: Arc::clone(self.logical_space().provider_arc()),
                 leg: leg.clone(),
             })
             .collect()
     }
 }
 
-// Bound-free, like the accessor impl on `GradedSpace<R>`: an element-wise
-// dtype conversion touches the stored payload only — no provider algebra, no
-// layout derivation — so demanding the construction bounds here would be
-// certification without a certificate to check.
+// Bound-free, like the accessor impl on `GradedSpace<R>`: dtype conversion
+// needs no provider algebra or new layout admission. It is nevertheless an
+// owned-only boundary: a cold lazy adjoint first publishes its one shared
+// logical materialization.
 impl<R> TensorMap<R, f64> {
     /// Widens to a c64 tensor map, imaginary parts zero (TensorKit
     /// `Base.complex`).
     ///
-    /// Element-wise on the stored payload: a dense payload is widened in
-    /// place-order, a compact spectrum factor maps spectrum-to-spectrum and
-    /// **stays compact** (same as the erased `to_c64_storage` route). One
-    /// `O(stored_len)` output allocation; the space is shared, not re-derived.
+    /// Element-wise on an owned payload: a dense payload is widened in
+    /// place-order, while a compact spectrum maps spectrum-to-spectrum and
+    /// **stays compact**. A cold lazy adjoint is materialized once before the
+    /// output allocation; an already-owned input needs only its
+    /// `O(stored_len)` output. The logical space is shared, not re-derived.
     ///
     /// Infallible, unlike the erased pair [`crate::prelude::Tensor::to_c64`] /
     /// `try_to_c64`: that split exists only for device residency, which the
@@ -5629,18 +5751,19 @@ impl<R> TensorMap<R, f64> {
     /// ```
     pub fn to_c64(&self) -> TensorMap<R, num_complex::Complex64> {
         let widen = |&value: &f64| num_complex::Complex64::new(value, 0.0);
-        let body = match &*self.body.data {
+        let source = self.materialized_body();
+        let body = match source.data.as_ref() {
             TypedData::Dense(data) => {
-                TypedTensorBody::dense(self.body.space.clone(), data.iter().map(widen).collect())
+                TypedTensorBody::dense(source.space.clone(), data.iter().map(widen).collect())
             }
             TypedData::Diagonal(spectrum) => TypedTensorBody::diagonal(
-                self.body.space.clone(),
+                source.space.clone(),
                 map_spectrum_dtype(spectrum, |value| num_complex::Complex64::new(value, 0.0)),
             ),
         };
         TensorMap {
             runtime: self.runtime.clone(),
-            body: Arc::new(body),
+            repr: owned_repr(body),
         }
     }
 }
@@ -5656,8 +5779,9 @@ impl<R> TensorMap<R, num_complex::Complex64> {
     /// (TensorKit `Base.real`: blockwise element-wise, result scalartype
     /// real).
     ///
-    /// A compact spectrum factor maps spectrum-to-spectrum and stays compact.
-    /// One `O(stored_len)` output allocation; the space is shared.
+    /// A compact spectrum maps spectrum-to-spectrum and stays compact. A cold
+    /// lazy adjoint is materialized once before the `O(stored_len)` output;
+    /// the logical space is shared.
     pub fn re(&self) -> TensorMap<R, f64> {
         self.map_parts(|value| value.re)
     }
@@ -5665,28 +5789,28 @@ impl<R> TensorMap<R, num_complex::Complex64> {
     /// The element-wise imaginary part, as an f64 tensor map on the same
     /// spaces (TensorKit `Base.imag`).
     ///
-    /// A compact spectrum factor maps spectrum-to-spectrum and stays compact.
-    /// One `O(stored_len)` output allocation; the space is shared.
+    /// A compact spectrum maps spectrum-to-spectrum and stays compact. A cold
+    /// lazy adjoint is materialized once before the `O(stored_len)` output;
+    /// the logical space is shared.
     pub fn im(&self) -> TensorMap<R, f64> {
         self.map_parts(|value| value.im)
     }
 
-    /// The shared body of [`Self::re`] / [`Self::im`]: one element-wise
-    /// component map over whichever payload representation is stored.
+    /// The shared owned-only body of [`Self::re`] / [`Self::im`].
     fn map_parts(&self, part: impl Fn(num_complex::Complex64) -> f64) -> TensorMap<R, f64> {
-        let body = match &*self.body.data {
+        let source = self.materialized_body();
+        let body = match source.data.as_ref() {
             TypedData::Dense(data) => TypedTensorBody::dense(
-                self.body.space.clone(),
+                source.space.clone(),
                 data.iter().map(|&value| part(value)).collect(),
             ),
-            TypedData::Diagonal(spectrum) => TypedTensorBody::diagonal(
-                self.body.space.clone(),
-                map_spectrum_dtype(spectrum, part),
-            ),
+            TypedData::Diagonal(spectrum) => {
+                TypedTensorBody::diagonal(source.space.clone(), map_spectrum_dtype(spectrum, part))
+            }
         };
         TensorMap {
             runtime: self.runtime.clone(),
-            body: Arc::new(body),
+            repr: owned_repr(body),
         }
     }
 }
@@ -5721,6 +5845,299 @@ mod representation_gates {
     use super::*;
     use tenet_core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep};
 
+    fn owned<R, D>(tensor: &TensorMap<R, D>) -> &Arc<TypedTensorBody<R, D>> {
+        tensor.owned_body().expect("test fixture must be owned")
+    }
+
+    fn materialized_adjoint_builds<R, D>(tensor: &TensorMap<R, D>) -> usize {
+        let TypedTensorRepr::Adjoint(view) = &tensor.repr else {
+            return 0;
+        };
+        view.materialized_body_builds
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn u1_lazy_fixture() -> TensorMap<U1FusionRule, f64> {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let left = GradedSpace::try_new(
+            Arc::clone(&provider),
+            [(U1Irrep::new(-1), 1), (U1Irrep::new(0), 2)],
+            false,
+        )
+        .unwrap();
+        let right = GradedSpace::try_new(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), 3), (U1Irrep::new(1), 1)],
+            true,
+        )
+        .unwrap();
+        let domain = GradedSpace::try_new(
+            provider,
+            [
+                (U1Irrep::new(-1), 2),
+                (U1Irrep::new(0), 1),
+                (U1Irrep::new(1), 2),
+            ],
+            false,
+        )
+        .unwrap();
+        TensorMap::from_block_fn(&runtime, [&left, &right], [&domain], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 1.0
+        })
+        .unwrap()
+    }
+
+    fn su2_lazy_fixture() -> TensorMap<SU2FusionRule, f64> {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(SU2FusionRule);
+        let leg = GradedSpace::try_new(
+            provider,
+            [
+                (SU2Irrep::from_twice_spin(0), 2),
+                (SU2Irrep::from_twice_spin(1), 1),
+            ],
+            false,
+        )
+        .unwrap();
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 1.0
+        })
+        .unwrap()
+    }
+
+    fn assert_lazy_involution<R, D>(source: &TensorMap<R, D>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: TensorScalar,
+    {
+        let adjoint = source.adjoint().unwrap();
+        let TypedTensorRepr::Adjoint(view) = &adjoint.repr else {
+            panic!("dense adjoint must be lazy");
+        };
+        assert!(Arc::ptr_eq(&view.parent, owned(source)));
+        assert!(Arc::ptr_eq(
+            view.parent.space.provider_arc(),
+            view.logical_space.provider_arc()
+        ));
+        assert!(std::ptr::eq(adjoint.provider(), source.provider()));
+        assert_eq!(materialized_adjoint_builds(&adjoint), 0);
+        assert!(view.materialized.get().is_none());
+
+        let clone = adjoint.clone();
+        let TypedTensorRepr::Adjoint(clone_view) = &clone.repr else {
+            unreachable!()
+        };
+        assert!(Arc::ptr_eq(view, clone_view));
+
+        let restored = adjoint.adjoint().unwrap();
+        assert!(Arc::ptr_eq(owned(source), owned(&restored)));
+        assert_eq!(source.data().as_ptr(), restored.data().as_ptr());
+        assert_eq!(materialized_adjoint_builds(&adjoint), 0);
+    }
+
+    #[test]
+    fn lazy_adjoint_representation_and_involution_cover_unique_simple_and_both_dtypes() {
+        let u1_f64 = u1_lazy_fixture();
+        let u1_c64 = u1_f64.to_c64();
+        let su2_f64 = su2_lazy_fixture();
+        let su2_c64 = su2_f64.to_c64();
+
+        assert_lazy_involution(&u1_f64);
+        assert_lazy_involution(&u1_c64);
+        assert_lazy_involution(&su2_f64);
+        assert_lazy_involution(&su2_c64);
+    }
+
+    #[test]
+    fn lazy_adjoint_metadata_is_logical_and_cold() {
+        let source = u1_lazy_fixture();
+        let adjoint = source.adjoint().unwrap();
+        assert_eq!((source.codomain_rank(), source.domain_rank()), (2, 1));
+        assert_eq!((adjoint.codomain_rank(), adjoint.domain_rank()), (1, 2));
+        assert_eq!(adjoint.rank(), 3);
+        let signature = |space: &GradedSpace<U1FusionRule>| {
+            (
+                space.sectors().unwrap(),
+                space.degeneracies().to_vec(),
+                space.is_dual(),
+            )
+        };
+        let source_codomain = source.codomain_spaces();
+        let source_domain = source.domain_spaces();
+        let adjoint_codomain = adjoint.codomain_spaces();
+        let adjoint_domain = adjoint.domain_spaces();
+        assert_eq!(
+            signature(&adjoint_codomain[0]),
+            signature(&source_domain[0])
+        );
+        assert_eq!(
+            signature(&adjoint_domain[0]),
+            signature(&source_codomain[0])
+        );
+        assert_eq!(
+            signature(&adjoint_domain[1]),
+            signature(&source_codomain[1])
+        );
+        let source_dims = source.leg_dims().unwrap();
+        assert_eq!(
+            adjoint.leg_dims().unwrap(),
+            [source_dims[2], source_dims[0], source_dims[1]]
+        );
+        assert_eq!(adjoint.block_count(), source.block_count());
+        let expected = tenet_tensors::adjoint_bound_space_dyn(source.logical_space()).unwrap();
+        for index in 0..adjoint.block_count() {
+            let actual = adjoint.block(index).unwrap();
+            let expected_block = expected.space().structure().block(index).unwrap();
+            assert_eq!(actual.key(), expected_block.key());
+            assert_eq!(actual.shape(), expected_block.shape());
+            assert_eq!(actual.strides(), expected_block.strides());
+            assert_eq!(actual.offset(), expected_block.offset());
+            assert_eq!(
+                adjoint.block_fusion_trees(index).unwrap(),
+                decode_block_fusion_trees(adjoint.provider(), expected_block.key()).unwrap()
+            );
+        }
+        assert_eq!(adjoint.logical_space().space(), expected.space());
+        assert!(!format!("{adjoint:?}").is_empty());
+        assert_eq!(materialized_adjoint_builds(&adjoint), 0);
+        let TypedTensorRepr::Adjoint(view) = &adjoint.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+    }
+
+    #[test]
+    fn cloned_adjoint_materializes_once_across_threads() {
+        let source = u1_lazy_fixture().to_c64();
+        let (_, expected) =
+            tenet_tensors::adjoint_bound_dyn(source.logical_space(), source.data()).unwrap();
+        let adjoint = source.adjoint().unwrap();
+        let expected_len = adjoint.logical_space().space().required_len().unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let adjoint = adjoint.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let data = adjoint.data();
+                    (data.as_ptr() as usize, data.to_vec())
+                })
+            })
+            .collect();
+        let outputs: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        assert!(outputs
+            .iter()
+            .all(|(pointer, data)| *pointer == outputs[0].0 && data.len() == expected_len));
+        assert_eq!(outputs[0].1, expected);
+        assert_eq!(materialized_adjoint_builds(&adjoint), 1);
+    }
+
+    #[test]
+    fn identity_transforms_preserve_the_cold_lazy_view() {
+        let adjoint = u1_lazy_fixture().adjoint().unwrap();
+        let TypedTensorRepr::Adjoint(view) = &adjoint.repr else {
+            unreachable!()
+        };
+
+        let outputs = [
+            adjoint.permute(&[0], &[1, 2]).unwrap(),
+            adjoint.braid(&[0], &[1, 2], &[0, 1, 2]).unwrap(),
+            adjoint.transpose_axes(&[0], &[1, 2]).unwrap(),
+            adjoint.repartition(1).unwrap(),
+        ];
+        for output in &outputs {
+            let TypedTensorRepr::Adjoint(output_view) = &output.repr else {
+                panic!("identity transform must preserve the lazy representation");
+            };
+            assert!(Arc::ptr_eq(view, output_view));
+        }
+        assert!(adjoint.braid(&[0], &[1, 2], &[]).is_err());
+        // Nonidentity malformed axes still enter PR B's explicit
+        // materialization fallback; PR C moves their validation ahead of it.
+        assert_eq!(materialized_adjoint_builds(&adjoint), 0);
+        assert!(view.materialized.get().is_none());
+
+        let scalar = fixture().trace_pairs(&[(0, 1)]).unwrap();
+        let scalar_adjoint = scalar.adjoint().unwrap();
+        let TypedTensorRepr::Adjoint(scalar_view) = &scalar_adjoint.repr else {
+            unreachable!()
+        };
+        let scalar_transpose = scalar_adjoint.transpose().unwrap();
+        let TypedTensorRepr::Adjoint(transpose_view) = &scalar_transpose.repr else {
+            panic!("rank-zero transpose must preserve the lazy representation");
+        };
+        assert!(Arc::ptr_eq(scalar_view, transpose_view));
+        assert!(scalar_view.materialized.get().is_none());
+    }
+
+    #[test]
+    fn compact_adjoint_never_enters_the_lazy_representation() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let bond = GradedSpace::try_new(provider, [(U1Irrep::new(0), 2)], false).unwrap();
+        let real = TensorMap::diagonal(
+            &runtime,
+            &bond,
+            [SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![1.0, 2.0],
+            }],
+        )
+        .unwrap();
+        let complex = TensorMap::diagonal(
+            &runtime,
+            &bond,
+            [SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![
+                    num_complex::Complex64::new(1.0, 2.0),
+                    num_complex::Complex64::new(3.0, -4.0),
+                ],
+            }],
+        )
+        .unwrap();
+
+        let real_adjoint = real.adjoint().unwrap();
+        let complex_adjoint = complex.adjoint().unwrap();
+        assert!(matches!(&real_adjoint.repr, TypedTensorRepr::Owned(_)));
+        assert!(matches!(&complex_adjoint.repr, TypedTensorRepr::Owned(_)));
+        assert!(matches!(
+            owned(&real_adjoint).data.as_ref(),
+            TypedData::Diagonal(_)
+        ));
+        assert_eq!(real_adjoint.spectrum().unwrap()[0].values, [1.0, 2.0]);
+        assert!(owned(&real_adjoint).dense_cache.get().is_none());
+        let spectrum = complex_adjoint.spectrum().unwrap();
+        assert_eq!(
+            spectrum[0].values,
+            [
+                num_complex::Complex64::new(1.0, -2.0),
+                num_complex::Complex64::new(3.0, 4.0)
+            ]
+        );
+        assert!(owned(&complex_adjoint).dense_cache.get().is_none());
+
+        let complex_restored = complex_adjoint.adjoint().unwrap();
+        assert!(matches!(&complex_restored.repr, TypedTensorRepr::Owned(_)));
+        assert!(matches!(
+            owned(&complex_restored).data.as_ref(),
+            TypedData::Diagonal(_)
+        ));
+        assert_eq!(
+            complex_restored.spectrum().unwrap()[0].values,
+            [
+                num_complex::Complex64::new(1.0, 2.0),
+                num_complex::Complex64::new(3.0, -4.0)
+            ]
+        );
+        assert!(owned(&complex_restored).dense_cache.get().is_none());
+    }
+
     fn fixture() -> TensorMap<Z2FusionRule, f64> {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let leg =
@@ -5740,12 +6157,12 @@ mod representation_gates {
         // copy the size of a warm cache line".
         let tensor = fixture();
         let twin = tensor.clone();
-        assert!(Arc::ptr_eq(&tensor.body, &twin.body));
-        assert!(Arc::ptr_eq(&tensor.body.data, &twin.body.data));
+        assert!(Arc::ptr_eq(owned(&tensor), owned(&twin)));
+        assert!(Arc::ptr_eq(&owned(&tensor).data, &owned(&twin).data));
         assert_eq!(tensor.data().as_ptr(), twin.data().as_ptr());
         // One payload, however many handles reach it.
-        assert_eq!(Arc::strong_count(&tensor.body.data), 1);
-        assert_eq!(Arc::strong_count(&tensor.body), 2);
+        assert_eq!(Arc::strong_count(&owned(&tensor).data), 1);
+        assert_eq!(Arc::strong_count(owned(&tensor)), 2);
     }
 
     /// A small fermionic fixture whose codomain leg 0 carries only the even
@@ -5784,13 +6201,13 @@ mod representation_gates {
         // operations now compile against anyway.
         let tensor = fixture();
         let inserted = tensor.insert_left_unit(1, false).unwrap();
-        assert!(!Arc::ptr_eq(&tensor.body, &inserted.body));
-        assert!(Arc::ptr_eq(&tensor.body.data, &inserted.body.data));
-        assert!(inserted.body.dense_cache.get().is_none());
+        assert!(!Arc::ptr_eq(owned(&tensor), owned(&inserted)));
+        assert!(Arc::ptr_eq(&owned(&tensor).data, &owned(&inserted).data));
+        assert!(owned(&inserted).dense_cache.get().is_none());
         let removed = inserted.remove_unit(1).unwrap();
-        assert!(Arc::ptr_eq(&tensor.body.data, &removed.body.data));
+        assert!(Arc::ptr_eq(&owned(&tensor).data, &owned(&removed).data));
         // One payload allocation, three bodies holding it.
-        assert_eq!(Arc::strong_count(&tensor.body.data), 3);
+        assert_eq!(Arc::strong_count(&owned(&tensor).data), 3);
         assert_eq!(tensor.data().as_ptr(), removed.data().as_ptr());
     }
 
@@ -5804,12 +6221,12 @@ mod representation_gates {
         let s = fixture().svd_compact().unwrap().1;
         let warmed = s.data().as_ptr(); // warm the body-local cache first
         let inserted = s.insert_left_unit(0, false).unwrap();
-        assert!(!Arc::ptr_eq(&s.body.data, &inserted.body.data));
-        assert!(matches!(&*inserted.body.data, TypedData::Dense(_)));
+        assert!(!Arc::ptr_eq(&owned(&s).data, &owned(&inserted).data));
+        assert!(matches!(&*owned(&inserted).data, TypedData::Dense(_)));
         // Fresh buffer, not the cache the warm-up populated.
         assert_ne!(inserted.data().as_ptr(), warmed);
         let removed = inserted.remove_unit(0).unwrap();
-        assert!(Arc::ptr_eq(&inserted.body.data, &removed.body.data));
+        assert!(Arc::ptr_eq(&owned(&inserted).data, &owned(&removed).data));
     }
 
     #[test]
@@ -5821,13 +6238,13 @@ mod representation_gates {
         // publishes a new body.
         let tensor = fixture();
         let twisted = tensor.twist(&[0, 1]).unwrap();
-        assert!(Arc::ptr_eq(&tensor.body, &twisted.body));
+        assert!(Arc::ptr_eq(owned(&tensor), owned(&twisted)));
 
         let fermionic = fz2_fixture();
         let untouched = fermionic.twist(&[0]).unwrap();
-        assert!(Arc::ptr_eq(&fermionic.body, &untouched.body));
+        assert!(Arc::ptr_eq(owned(&fermionic), owned(&untouched)));
         let touched = fermionic.twist(&[1]).unwrap();
-        assert!(!Arc::ptr_eq(&fermionic.body, &touched.body));
+        assert!(!Arc::ptr_eq(owned(&fermionic), owned(&touched)));
     }
 
     fn transform_seam_calls<T>(operation: impl FnOnce() -> T) -> usize {
@@ -5891,8 +6308,8 @@ mod representation_gates {
                         tensor.transpose_axes(&[0, 1], &[2]).unwrap(),
                         tensor.repartition(2).unwrap(),
                     ] {
-                        assert!(Arc::ptr_eq(&tensor.body, &output.body));
-                        assert!(Arc::ptr_eq(&tensor.body.data, &output.body.data));
+                        assert!(Arc::ptr_eq(owned(tensor), owned(&output)));
+                        assert!(Arc::ptr_eq(&owned(tensor).data, &owned(&output).data));
                         assert_eq!(tensor.data().as_ptr(), output.data().as_ptr());
                     }
                 });
@@ -5917,7 +6334,7 @@ mod representation_gates {
         // Negative control: the counter observes a real transform.
         let calls = transform_seam_calls(|| {
             let moved = u1_f64.permute(&[1, 0], &[2]).unwrap();
-            assert!(!Arc::ptr_eq(&u1_f64.body, &moved.body));
+            assert!(!Arc::ptr_eq(owned(&u1_f64), owned(&moved)));
         });
         assert_eq!(calls, 1);
     }
@@ -5939,7 +6356,7 @@ mod representation_gates {
                 tensor.braid(&codomain_axes, &domain_axes, &levels).unwrap(),
                 tensor.transpose_axes(&codomain_axes, &domain_axes).unwrap(),
             ] {
-                assert!(Arc::ptr_eq(&tensor.body, &output.body));
+                assert!(Arc::ptr_eq(owned(&tensor), owned(&output)));
             }
         });
         assert_eq!(calls, 0);
@@ -5948,8 +6365,8 @@ mod representation_gates {
     #[test]
     fn compact_identity_transforms_do_not_materialize() {
         let factor = fixture().svd_compact().unwrap().1;
-        assert!(matches!(&*factor.body.data, TypedData::Diagonal(_)));
-        assert!(factor.body.dense_cache.get().is_none());
+        assert!(matches!(&*owned(&factor).data, TypedData::Diagonal(_)));
+        assert!(owned(&factor).dense_cache.get().is_none());
 
         let calls = transform_seam_calls(|| {
             for output in [
@@ -5958,13 +6375,13 @@ mod representation_gates {
                 factor.transpose_axes(&[0], &[1]).unwrap(),
                 factor.repartition(1).unwrap(),
             ] {
-                assert!(Arc::ptr_eq(&factor.body, &output.body));
-                assert!(matches!(&*output.body.data, TypedData::Diagonal(_)));
-                assert!(output.body.dense_cache.get().is_none());
+                assert!(Arc::ptr_eq(owned(&factor), owned(&output)));
+                assert!(matches!(&*owned(&output).data, TypedData::Diagonal(_)));
+                assert!(owned(&output).dense_cache.get().is_none());
             }
         });
         assert_eq!(calls, 0);
-        assert!(factor.body.dense_cache.get().is_none());
+        assert!(owned(&factor).dense_cache.get().is_none());
     }
 
     #[test]
@@ -5973,7 +6390,7 @@ mod representation_gates {
         assert_eq!(scalar.rank(), 0);
         let calls = transform_seam_calls(|| {
             let transposed = scalar.transpose().unwrap();
-            assert!(Arc::ptr_eq(&scalar.body, &transposed.body));
+            assert!(Arc::ptr_eq(owned(&scalar), owned(&transposed)));
         });
         assert_eq!(calls, 0);
     }
@@ -5987,12 +6404,12 @@ mod representation_gates {
         // clone.
         let s = fz2_fixture().svd_compact().unwrap().1;
         let twisted = s.twist(&[0]).unwrap();
-        assert!(matches!(&*twisted.body.data, TypedData::Diagonal(_)));
-        assert!(!Arc::ptr_eq(&s.body.data, &twisted.body.data));
+        assert!(matches!(&*owned(&twisted).data, TypedData::Diagonal(_)));
+        assert!(!Arc::ptr_eq(&owned(&s).data, &owned(&twisted).data));
 
         let bosonic_s = fixture().svd_compact().unwrap().1;
         let untouched = bosonic_s.twist(&[0]).unwrap();
-        assert!(Arc::ptr_eq(&bosonic_s.body, &untouched.body));
+        assert!(Arc::ptr_eq(owned(&bosonic_s), owned(&untouched)));
     }
 
     #[test]
@@ -6009,7 +6426,7 @@ mod representation_gates {
         assert_eq!(tensor.data(), before.as_slice());
         assert_eq!(twin.data(), before.as_slice());
         assert_ne!(scaled.data().as_ptr(), tensor.data().as_ptr());
-        assert!(!Arc::ptr_eq(&scaled.body.data, &tensor.body.data));
+        assert!(!Arc::ptr_eq(&owned(&scaled).data, &owned(&tensor).data));
     }
 
     #[test]
@@ -6023,21 +6440,21 @@ mod representation_gates {
         // does *not* gate the struct shape — the fresh `OnceLock` below is
         // hand-supplied, so any layout keeping the field compiles and passes.
         let s = fixture().svd_compact().unwrap().1;
-        assert!(s.body.dense_cache.get().is_none(), "cache warm at birth");
+        assert!(owned(&s).dense_cache.get().is_none(), "cache warm at birth");
         let materialized = s.data().as_ptr();
-        assert!(s.body.dense_cache.get().is_some());
+        assert!(owned(&s).dense_cache.get().is_some());
 
         // Hand-constructed body, same caveat as the gate above: shape changes
         // become compile errors.
         let reused = TensorMap {
             runtime: s.runtime.clone(),
-            body: Arc::new(TypedTensorBody {
-                space: s.body.space.clone(),
-                data: Arc::clone(&s.body.data),
+            repr: owned_repr(TypedTensorBody {
+                space: owned(&s).space.clone(),
+                data: Arc::clone(&owned(&s).data),
                 dense_cache: std::sync::OnceLock::new(),
             }),
         };
-        assert!(reused.body.dense_cache.get().is_none());
+        assert!(owned(&reused).dense_cache.get().is_none());
         assert_ne!(reused.data().as_ptr(), materialized);
     }
 }

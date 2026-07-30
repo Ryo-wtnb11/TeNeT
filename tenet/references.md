@@ -54,7 +54,7 @@ single defensible upstream location (the note says why).
 | `Scalar` | TensorKit | 0.17.0 | `tensors/linalg.jl:319-327` | erased return-scalar enum: TK `tr` (319-327) and `dot` (255) return the block scalartype — real tensors give real scalars |
 | `SvdTrunc` | MatrixAlgebraKit | 0.6.9 | `interface/svd.jl:44-93` | `svd_trunc` docstring: returns `(U, S, Vᴴ, ϵ)`; both facades (identical claim on the erased and typed item) |
 | `Tensor::add` | TensorKit | 0.17.0 | `tensors/vectorinterface.jl:67-99` | divergence: TK computes `β*ty + α*tx` (first coefficient on the *second* argument); tenet's `alpha` belongs to `self`; both facades (identical claim on the erased and typed item) |
-| `Tensor::adjoint` | TensorKit | 0.17.0 | `tensors/adjoint.jl:19` | `Base.adjoint` returns the lazy `AdjointTensorMap` wrapper (struct at 9-12); the typed eager form is rowed at `typed::TensorMap::adjoint` |
+| `Tensor::adjoint` | TensorKit | 0.17.0 | `tensors/adjoint.jl:19` | `Base.adjoint` returns the lazy `AdjointTensorMap` wrapper (struct at 9-12) |
 | `Tensor::braid` | TensorKit | 0.17.0 | `tensors/indexmanipulations.jl:331-342` | both facades (identical claim on the erased and typed item) |
 | `Tensor::compose` | TensorKit | 0.17.0 | `tensors/tensoroperations.jl:388-420` | fermionic supertrace twist applied only in `blas_contract!`, never in `mul!` |
 | `Tensor::compose` | TensorKit | 0.17.0 | `tensors/linalg.jl:38-42` | categorical composition `compose` behind `A * B`; both facades (identical claim on the erased and typed item) |
@@ -132,7 +132,7 @@ single defensible upstream location (the note says why).
 | `typed::GradedSpace::try_new` | TensorKit | 0.17.0 | `spaces/gradedspace.jl:70-85` | `GradedSpace` / `Vect[I]` constructor family |
 | `typed::TensorMap` | TensorKit | 0.17.0 | `tensors/tensor.jl:10-35` | convention: payload scalar `T` independent of the sector type, as TK's `TensorMap{T, S, ...}` parameters separate them |
 | `typed::TensorMap::absorb` | TensorKit | 0.17.0 | `tensors/linalg.jl:531-545` | `absorb` (531), `absorb!` (532-545); rank-check `DimensionError` at 533-534; shared-block `min` region copy at 538-543; both facades (identical claim on the erased and typed item) |
-| `typed::TensorMap::adjoint` | TensorKit | 0.17.0 | `tensors/linalg.jl:218` | eager `adjoint!` into a fresh destination |
+| `typed::TensorMap::adjoint` | TensorKit | 0.17.0 | `tensors/adjoint.jl:9-19` | dense storage returns a lazy parent-backed view; compact diagonal storage keeps its direct owned conjugation path |
 | `typed::TensorMap::block_count` | TensorKit | 0.17.0 | `tensors/abstracttensor.jl:331-335` | `length(blocksectors(t))` counts coupled sectors |
 | `typed::TensorMap::catcodomain` | TensorKit | 0.17.0 | `tensors/linalg.jl:498-514` | domain match 499-500; codomain duality 503-504; direct sum `V = V1 ⊕ V2` 506; per-sector row slabs, `t1` first, 509-512; both facades (identical claim on the erased and typed item) |
 | `typed::TensorMap::catdomain` | TensorKit | 0.17.0 | `tensors/linalg.jl:479-497` | codomain match 480-483; domain duality 486-487; direct sum `V = V1 ⊕ V2` 489; per-sector column slabs, `t1` first, 492-495; both facades (identical claim on the erased and typed item) |

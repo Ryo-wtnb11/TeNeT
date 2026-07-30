@@ -260,13 +260,32 @@ where
     space.validate_rule(rule)?;
     validate_adjoint_data_extent(space.required_len(), data.len())?;
     validate_adjoint_source_structure(rule, space.homspace(), space.structure())?;
-    let nout = space.nout();
-    let nin = space.nin();
-    let structure = Arc::clone(space.structure());
     // Uncached build: the eager adjoint (SVD/eigh consumers) is a separate,
     // out-of-scope path from the cached lazy `adjoint_space_dyn` (#118 PR-1),
     // and routing it here keeps the replay-cache-key bound off matrix algebra.
     let adjoint_space = build_adjoint_target_space_with_primer(rule, space.homspace(), primer)?;
+    let result = materialize_adjoint_data_dyn(space, &adjoint_space, data)?;
+    Ok((adjoint_space, result))
+}
+
+/// Materialize adjoint payload bytes between an already-admitted source and
+/// destination layout.
+///
+/// This contains no provider work: callers must derive and admit
+/// `adjoint_space` transactionally before publishing a lazy view.
+#[doc(hidden)]
+pub fn materialize_adjoint_data_dyn<D>(
+    space: &DynamicFusionMapSpace,
+    adjoint_space: &DynamicFusionMapSpace,
+    data: &[D],
+) -> Result<Vec<D>, OperationError>
+where
+    D: Copy + num_traits::Zero + Clone + ConjugateValue,
+{
+    validate_adjoint_data_extent(space.required_len(), data.len())?;
+    let nout = space.nout();
+    let nin = space.nin();
+    let structure = Arc::clone(space.structure());
     let len = adjoint_space
         .required_len()
         .map_err(OperationError::from_core_preserving_context)?;
@@ -330,7 +349,7 @@ where
             }
         }
     }
-    Ok((adjoint_space, result))
+    Ok(result)
 }
 
 /// Dynamic-rank adjoint that retains the exact provider allocation of its
