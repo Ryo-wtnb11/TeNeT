@@ -576,6 +576,61 @@ pub trait CheckedGenericFusion {
     ) -> Result<usize, Self::Error>;
 }
 
+/// Provider-side labels and checked duality used by ordinary typed tensors.
+///
+/// The provider owns this capability; tensor crates only select layout
+/// admission from [`Self::Mode`].
+pub trait TypedSectorAdmission: 'static {
+    /// Public semantic sector label.
+    type Sector: Clone + Eq + Ord + core::hash::Hash + core::fmt::Debug;
+    /// Provider error preserved by the typed facade.
+    type Error: std::error::Error + Send + Sync + 'static;
+    /// Layout-admission mode.
+    type Mode;
+
+    /// Stable categorical authority identity.
+    fn typed_rule_identity(&self) -> RuleIdentity;
+    /// Encodes a public label as an engine sector.
+    fn try_encode_label(&self, sector: &Self::Sector) -> Result<SectorId, Self::Error>;
+    /// Decodes an engine sector as a public label.
+    fn try_decode_label(&self, sector: SectorId) -> Result<Self::Sector, Self::Error>;
+    /// Returns the exact dual engine sector.
+    fn try_dual_id(&self, sector: SectorId) -> Result<SectorId, Self::Error>;
+}
+
+/// Layout mode for existing multiplicity-free providers.
+#[doc(hidden)]
+pub struct MultiplicityFreeAdmissionMode;
+
+/// Layout mode for checked Generic providers.
+#[doc(hidden)]
+pub struct CheckedGenericAdmissionMode;
+
+impl<R> TypedSectorAdmission for R
+where
+    R: CheckedFusionAlgebra + SectorCodec,
+{
+    type Sector = R::Sector;
+    type Error = FusionAlgebraError;
+    type Mode = MultiplicityFreeAdmissionMode;
+
+    fn typed_rule_identity(&self) -> RuleIdentity {
+        FusionRule::rule_identity(self)
+    }
+
+    fn try_encode_label(&self, sector: &Self::Sector) -> Result<SectorId, Self::Error> {
+        SectorCodec::encode_sector(self, sector)
+    }
+
+    fn try_decode_label(&self, sector: SectorId) -> Result<Self::Sector, Self::Error> {
+        SectorCodec::decode_sector(self, sector)
+    }
+
+    fn try_dual_id(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+        CheckedFusionAlgebra::try_dual_sector(self, sector)
+    }
+}
+
 /// Fallible categorical symbol access for Generic-fusion plan lowering.
 ///
 /// This extends [`CheckedGenericFusion`] with only the data needed to compile

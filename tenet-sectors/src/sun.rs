@@ -4,8 +4,9 @@ use std::sync::Arc;
 use num_traits::ToPrimitive;
 
 use crate::{
-    BraidingStyleKind, CheckedGenericFusion, CheckedGenericRigidSymbols, FusionStyleKind,
-    GenericFArray, GenericRMatrix, RuleIdentity, SectorId, SectorVec, SymbolShapeError,
+    BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericFusion,
+    CheckedGenericRigidSymbols, FusionStyleKind, GenericFArray, GenericRMatrix, RuleIdentity,
+    SectorId, SectorVec, SymbolShapeError, TypedSectorAdmission,
 };
 
 const CODEC_VERSION: &[u8] = b"tenet:sun:dynkin:graded-total-then-lex:v1";
@@ -328,6 +329,28 @@ impl CheckedGenericFusion for SUNFusionRule {
         let product = racah::sun::directproduct(&self.irrep(left)?, &self.irrep(right)?)
             .map_err(SUNFusionRuleError::Racah)?;
         Ok(product.get(&self.irrep(coupled)?).copied().unwrap_or(0) as usize)
+    }
+}
+
+impl TypedSectorAdmission for SUNFusionRule {
+    type Sector = Vec<i64>;
+    type Error = SUNFusionRuleError;
+    type Mode = CheckedGenericAdmissionMode;
+
+    fn typed_rule_identity(&self) -> RuleIdentity {
+        CheckedGenericFusion::rule_identity(self)
+    }
+
+    fn try_encode_label(&self, sector: &Self::Sector) -> Result<SectorId, Self::Error> {
+        self.encode_dynkin(sector)
+    }
+
+    fn try_decode_label(&self, sector: SectorId) -> Result<Self::Sector, Self::Error> {
+        self.decode_dynkin(sector)
+    }
+
+    fn try_dual_id(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+        CheckedGenericFusion::try_dual(self, sector)
     }
 }
 

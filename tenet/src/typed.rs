@@ -5,7 +5,7 @@
 //! of built-ins. This module is its typed sibling: `R` stays concrete through
 //! monomorphized construction, so any provider — including one defined
 //! downstream — can drive it, and the categorical identity of a tensor comes
-//! back as [`SectorCodec::Sector`] labels instead of opaque
+//! back as [`TypedSectorAdmission::Sector`] labels instead of opaque
 //! [`tenet_core::SectorId`] keys. The engine itself never sees a label; the
 //! codec is the single boundary where one enters or leaves.
 //!
@@ -66,11 +66,10 @@
 //! TeNeT keeps the nesting in the Rust type — see
 //! [`tenet_core::ProductFusionRule`] for the full statement.
 //!
-//! The scope of that claim is this facade's current admission:
+//! The scope of that product-provider claim is:
 //! `MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra +
-//! SectorCodec`. Complex categorical scalars and anyonic admission are issue
-//! #539; multiplicity-bearing providers (SU(3) and any other `Generic` rule)
-//! need their own admission path, as noted below.
+//! SectorCodec`. Complex categorical scalars and anyonic product operations
+//! are issue #539.
 //!
 //! **`ProductSector` is not `ProductSpace`.** [`tenet_core::ProductSector`] is
 //! a *sector label*: one irrep of a Deligne product category, TensorKit's
@@ -170,10 +169,11 @@
 //!   [`crate::prelude::Tensor::exp`] carried a complexity-parity gap against
 //!   this one — it densified a diagonal payload where this facade has an
 //!   O(rank) arm — until issue #578 gave it the same arm.
-//! - **Outer multiplicity** (SU(3) and any other `Generic` provider) is out at
-//!   the admission boundary, not at this layer: every constructor here consumes
-//!   the multiplicity-free checked root. A `Generic` provider needs its own
-//!   admission path before any of this surface can accept one.
+//! - **Outer multiplicity operations** remain outside this leaf. Checked
+//!   `Generic` providers can use the ordinary `GradedSpace` and `TensorMap`
+//!   constructors and read back complete vertex-labelled blocks, but transforms,
+//!   contractions, and factorizations still retain their multiplicity-free
+//!   bounds.
 //! - **Device placement** is absent for the same structural reason: the payload
 //!   is a `Vec<D>` host buffer by construction, and there is no dtype or
 //!   placement token to reconcile because `D` is a type parameter. Adding a
@@ -201,10 +201,13 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use tenet_core::CheckedGenericFusion;
 use tenet_core::{
     validate_unit_layout_correspondence_checked, BlockKey, BlockRef, CanonicalUnitFusionRule,
-    CheckedFusionAlgebra, FusionProductSpace, FusionTreeHomSpace, MultiplicityFreeRigidSymbols,
-    ProductFusionRule, ProductSector, ProductSectorCodec, SectorLeg, UnitLegInsertion,
+    CheckedFusionAlgebra, CheckedGenericAdmissionMode, CheckedGenericStructureError,
+    FusionAlgebraError, FusionProductSpace, FusionTreeHomSpace, MultiplicityFreeAdmissionMode,
+    MultiplicityFreeRigidSymbols, MultiplicityIndex, ProductFusionRule, ProductSector,
+    ProductSectorCodec, SectorLeg, TypedSectorAdmission, UnitLegInsertion,
 };
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace, OutputAxisOrder,
@@ -212,6 +215,8 @@ use tenet_tensors::{
 };
 
 pub use tenet_core::SectorCodec;
+#[cfg(feature = "racah-generated")]
+pub use tenet_core::{SUNFusionRule, SUNFusionRuleError};
 
 /// Re-exported so `use tenet::typed::*` is self-sufficient apart from the
 /// provider: every fallible method here returns this error.
@@ -241,6 +246,143 @@ use crate::tensor_core::{
     pow_by_squaring, tensorcompose_owned_multiplicity_free, tensorcontract_owned_multiplicity_free,
     tensorproduct_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
 };
+
+/// Facade error for checked Generic providers.
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum GenericTensorError<E> {
+    /// Ordinary facade validation or payload construction failed.
+    Facade(Error),
+    /// Checked Generic provider or structural admission failed.
+    Structure(CheckedGenericStructureError<E>),
+}
+
+impl<E: core::fmt::Display> core::fmt::Display for GenericTensorError<E> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Facade(error) => error.fmt(formatter),
+            Self::Structure(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for GenericTensorError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Facade(error) => Some(error),
+            Self::Structure(error) => Some(error),
+        }
+    }
+}
+
+impl<E> From<Error> for GenericTensorError<E> {
+    fn from(error: Error) -> Self {
+        Self::Facade(error)
+    }
+}
+
+impl<E> From<CheckedGenericStructureError<E>> for GenericTensorError<E> {
+    fn from(error: CheckedGenericStructureError<E>) -> Self {
+        Self::Structure(error)
+    }
+}
+
+/// Tensor-side layout admission selected by a provider-owned mode.
+#[doc(hidden)]
+pub trait TypedTensorModeDispatch<R>: typed_admission_private::Sealed
+where
+    R: TypedSectorAdmission,
+{
+    /// Error returned by the ordinary typed facade.
+    type FacadeError: std::error::Error + From<Error>;
+
+    /// Preserves a provider-side admission error.
+    fn map_provider_error(error: R::Error) -> Self::FacadeError;
+}
+
+/// Tensor-side root construction selected by a provider-owned mode.
+#[doc(hidden)]
+pub trait TypedTensorRootDispatch<R>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+{
+    /// Builds one fully admitted root while retaining `provider`.
+    fn build_root(
+        provider: Arc<R>,
+        homspace: FusionTreeHomSpace,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::FacadeError>;
+}
+
+mod typed_admission_private {
+    use super::{CheckedGenericAdmissionMode, MultiplicityFreeAdmissionMode};
+
+    pub trait Sealed {}
+
+    impl Sealed for MultiplicityFreeAdmissionMode {}
+    impl Sealed for CheckedGenericAdmissionMode {}
+}
+
+impl<R> TypedTensorModeDispatch<R> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>,
+{
+    type FacadeError = Error;
+
+    fn map_provider_error(error: <R as TypedSectorAdmission>::Error) -> Self::FacadeError {
+        error.into()
+    }
+}
+
+impl<R> TypedTensorRootDispatch<R> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+{
+    fn build_root(
+        provider: Arc<R>,
+        homspace: FusionTreeHomSpace,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::FacadeError> {
+        BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_checked(
+            provider, homspace,
+        )
+        .map_err(Into::into)
+    }
+}
+
+impl<R> TypedTensorModeDispatch<R> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+{
+    type FacadeError = GenericTensorError<<R as CheckedGenericFusion>::Error>;
+
+    fn map_provider_error(error: <R as TypedSectorAdmission>::Error) -> Self::FacadeError {
+        GenericTensorError::Structure(CheckedGenericStructureError::Provider(error))
+    }
+}
+
+impl<R> TypedTensorRootDispatch<R> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+{
+    fn build_root(
+        provider: Arc<R>,
+        homspace: FusionTreeHomSpace,
+    ) -> Result<BoundDynamicFusionMapSpace<R>, Self::FacadeError> {
+        BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(provider, homspace)
+            .map_err(Into::into)
+    }
+}
+
+type TypedFacadeError<R> =
+    <<R as TypedSectorAdmission>::Mode as TypedTensorModeDispatch<R>>::FacadeError;
 
 /// One tensor leg: a provider plus the sector-to-degeneracy map of that axis
 /// (TensorKit's `GradedSpace`).
@@ -277,7 +419,8 @@ impl<R> core::fmt::Debug for GradedSpace<R> {
 
 impl<R> GradedSpace<R>
 where
-    R: SectorCodec + CheckedFusionAlgebra,
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorModeDispatch<R>,
 {
     /// Builds a leg from `(label, degeneracy)` pairs — TensorKit's
     /// `GradedSpace` / `Vect[I](c => d, ...; dual)` constructor family.
@@ -302,15 +445,15 @@ where
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidArgument`] when a label is declared more than once,
-    ///   naming the offending label.
-    /// - [`Error::InvalidArgument`] when two distinct labels encode to one
-    ///   sector id. That is the provider breaking [`SectorCodec`]'s
-    ///   injectivity law, and it is reported as such rather than as a caller
-    ///   duplicate.
-    /// - [`Error::FusionAlgebra`] when the provider cannot represent a label,
-    ///   preserving the provider's own encode error.
-    pub fn try_new<Pairs>(provider: Arc<R>, pairs: Pairs, is_dual: bool) -> Result<Self, Error>
+    /// Facade validation rejects duplicate labels and non-injective encodings;
+    /// provider encode failures remain in the mode's facade error. Legacy
+    /// multiplicity-free providers use [`Error`], while checked Generic
+    /// providers retain their typed structure/provider error.
+    pub fn try_new<Pairs>(
+        provider: Arc<R>,
+        pairs: Pairs,
+        is_dual: bool,
+    ) -> Result<Self, TypedFacadeError<R>>
     where
         Pairs: IntoIterator<Item = (R::Sector, usize)>,
     {
@@ -326,12 +469,18 @@ where
             return Err(Error::InvalidArgument(format!(
                 "sector label {:?} is declared more than once",
                 window[0]
-            )));
+            ))
+            .into());
         }
 
         let mut encoded = Vec::with_capacity(pairs.len());
         for (label, degeneracy) in &pairs {
-            encoded.push((provider.encode_sector(label)?, label, *degeneracy));
+            encoded.push((
+                TypedSectorAdmission::try_encode_label(provider.as_ref(), label)
+                    .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?,
+                label,
+                *degeneracy,
+            ));
         }
         let mut by_id: Vec<_> = encoded.iter().collect();
         by_id.sort_unstable_by_key(|(id, _, _)| *id);
@@ -339,14 +488,15 @@ where
             return Err(Error::InvalidArgument(format!(
                 "SectorCodec law violation: labels {:?} and {:?} both encode to {:?}",
                 window[0].1, window[1].1, window[0].0
-            )));
+            ))
+            .into());
         }
 
         let leg = SectorLeg::try_new(
             encoded.iter().map(|(id, _, degeneracy)| (*id, *degeneracy)),
             is_dual,
         )
-        .map_err(|error| Error::InvalidArgument(error.to_string()))?;
+        .map_err(|error| TypedFacadeError::<R>::from(Error::InvalidArgument(error.to_string())))?;
         Ok(Self { provider, leg })
     }
 
@@ -367,35 +517,17 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::FusionAlgebra`] when the provider cannot decode an id
-    /// it previously produced, which is a violation of [`SectorCodec`]'s
-    /// decode-totality law.
-    pub fn sectors(&self) -> Result<Vec<R::Sector>, Error> {
+    /// Provider decode failures remain in the mode's facade error; decoding an id
+    /// previously produced by the same provider is required to be total.
+    pub fn sectors(&self) -> Result<Vec<R::Sector>, TypedFacadeError<R>> {
         self.leg
             .sectors()
             .iter()
-            .map(|&id| self.provider.decode_sector(id).map_err(Error::from))
+            .map(|&id| {
+                TypedSectorAdmission::try_decode_label(self.provider.as_ref(), id)
+                    .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)
+            })
             .collect()
-    }
-
-    /// Per-sector degeneracies, parallel to [`Self::sectors`] — TensorKit's
-    /// `dim(V, c)` read for every carried sector at once. A borrowed slice: `O(1)`, no decode,
-    /// no allocation.
-    #[inline]
-    pub fn degeneracies(&self) -> &[usize] {
-        self.leg.degeneracies()
-    }
-
-    /// Whether this is the conjugate space (TensorKit's `V'`).
-    #[inline]
-    pub fn is_dual(&self) -> bool {
-        self.leg.is_dual()
-    }
-
-    /// The provider this leg is bound to.
-    #[inline]
-    pub fn provider(&self) -> &R {
-        &self.provider
     }
 
     /// The conjugate leg: every sector replaced by its dual (degeneracies
@@ -411,14 +543,37 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::FusionAlgebra`] when the provider cannot represent the
-    /// dual of some sector, or when its dual collapses two of this leg's
-    /// sectors onto one and so is not the involution rigidity requires. No
+    /// Provider dual failures remain in the mode's facade error. A dual that
+    /// collapses two sectors is reported as facade validation failure. No
     /// partially dualized leg is produced in either case.
-    pub fn try_dual(&self) -> Result<Self, Error> {
+    pub fn try_dual(&self) -> Result<Self, TypedFacadeError<R>> {
+        let sectors = self
+            .leg
+            .sectors()
+            .iter()
+            .copied()
+            .zip(self.leg.degeneracies().iter().copied())
+            .map(|(sector, degeneracy)| {
+                TypedSectorAdmission::try_dual_id(self.provider.as_ref(), sector)
+                    .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)
+                    .map(|dual| (dual, degeneracy))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut duals: Vec<_> = sectors.iter().map(|(sector, _)| *sector).collect();
+        duals.sort_unstable();
+        if let Some(duplicate) = duals.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(Error::InvalidArgument(format!(
+                "dual map is not injective: sector {:?} appears multiple times",
+                duplicate[0]
+            ))
+            .into());
+        }
+        let leg = SectorLeg::try_new(sectors, !self.leg.is_dual()).map_err(|error| {
+            TypedFacadeError::<R>::from(Error::InvalidArgument(error.to_string()))
+        })?;
         Ok(Self {
             provider: Arc::clone(&self.provider),
-            leg: self.leg.try_dual(self.provider.as_ref())?,
+            leg,
         })
     }
 
@@ -441,7 +596,7 @@ where
     /// spectrum or payload is touched.
     pub fn truncspace(&self) -> TruncationSpace {
         TruncationSpace::new(
-            self.provider.rule_identity(),
+            TypedSectorAdmission::typed_rule_identity(self.provider.as_ref()),
             self.leg
                 .sectors()
                 .iter()
@@ -452,6 +607,24 @@ where
 }
 
 impl<R> GradedSpace<R> {
+    /// Per-sector degeneracies, parallel to semantic sector readback.
+    #[inline]
+    pub fn degeneracies(&self) -> &[usize] {
+        self.leg.degeneracies()
+    }
+
+    /// Whether this is the conjugate space (TensorKit's `V'`).
+    #[inline]
+    pub fn is_dual(&self) -> bool {
+        self.leg.is_dual()
+    }
+
+    /// The provider bound to this leg.
+    #[inline]
+    pub fn provider(&self) -> &R {
+        self.provider.as_ref()
+    }
+
     // Bound-free so the crate-internal accessors stay usable wherever the leg
     // travels, independently of what the caller has to certify.
     pub(crate) fn leg(&self) -> &SectorLeg {
@@ -478,15 +651,17 @@ impl<R> GradedSpace<R> {
 /// differ only in how the intermediate fusions ran, so a key without them
 /// would not name a block.
 ///
-/// Vertex labels are absent because this facade admits multiplicity-free
-/// providers only, where every fusion vertex is the unique one.
+/// Vertex labels are part of the identity for Generic providers: two trees
+/// can have identical sector labels and differ only by outer multiplicity.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct BlockFusionTrees<S> {
     coupled: S,
     codomain_uncoupled: Vec<S>,
     codomain_innerlines: Vec<S>,
+    codomain_vertices: Vec<MultiplicityIndex>,
     domain_uncoupled: Vec<S>,
     domain_innerlines: Vec<S>,
+    domain_vertices: Vec<MultiplicityIndex>,
 }
 
 impl<S> BlockFusionTrees<S> {
@@ -508,6 +683,12 @@ impl<S> BlockFusionTrees<S> {
         &self.codomain_innerlines
     }
 
+    /// Codomain outer-multiplicity labels, in fusion-vertex order.
+    #[inline]
+    pub fn codomain_vertices(&self) -> &[MultiplicityIndex] {
+        &self.codomain_vertices
+    }
+
     /// Domain leg sectors, in domain axis order.
     ///
     /// These are the domain spaces' own sectors (TensorKit's `f2.uncoupled`),
@@ -523,14 +704,27 @@ impl<S> BlockFusionTrees<S> {
     pub fn domain_innerlines(&self) -> &[S] {
         &self.domain_innerlines
     }
+
+    /// Domain outer-multiplicity labels, in fusion-vertex order.
+    #[inline]
+    pub fn domain_vertices(&self) -> &[MultiplicityIndex] {
+        &self.domain_vertices
+    }
 }
 
-fn decode_sectors<R>(provider: &R, ids: &[tenet_core::SectorId]) -> Result<Vec<R::Sector>, Error>
+fn decode_sectors<R>(
+    provider: &R,
+    ids: &[tenet_core::SectorId],
+) -> Result<Vec<R::Sector>, TypedFacadeError<R>>
 where
-    R: SectorCodec,
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorModeDispatch<R>,
 {
     ids.iter()
-        .map(|&id| provider.decode_sector(id).map_err(Error::from))
+        .map(|&id| {
+            TypedSectorAdmission::try_decode_label(provider, id)
+                .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)
+        })
         .collect()
 }
 
@@ -542,24 +736,28 @@ where
 fn decode_block_fusion_trees<R>(
     provider: &R,
     key: &BlockKey,
-) -> Result<BlockFusionTrees<R::Sector>, Error>
+) -> Result<BlockFusionTrees<R::Sector>, TypedFacadeError<R>>
 where
-    R: SectorCodec,
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorModeDispatch<R>,
 {
     let pair = key.as_fusion_tree_pair().ok_or_else(|| {
-        Error::InvalidArgument(format!(
+        TypedFacadeError::<R>::from(Error::InvalidArgument(format!(
             "block key is {}, not a fusion-tree pair",
             key.kind()
-        ))
+        )))
     })?;
     let codomain = pair.codomain_tree();
     let domain = pair.domain_tree();
     Ok(BlockFusionTrees {
-        coupled: provider.decode_sector(codomain.coupled())?,
+        coupled: TypedSectorAdmission::try_decode_label(provider, codomain.coupled())
+            .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?,
         codomain_uncoupled: decode_sectors(provider, codomain.uncoupled())?,
         codomain_innerlines: decode_sectors(provider, codomain.innerlines())?,
+        codomain_vertices: codomain.vertices().to_vec(),
         domain_uncoupled: decode_sectors(provider, domain.uncoupled())?,
         domain_innerlines: decode_sectors(provider, domain.innerlines())?,
+        domain_vertices: domain.vertices().to_vec(),
     })
 }
 
@@ -571,8 +769,10 @@ fn map_block_fusion_trees<A, B>(
         coupled: map(&source.coupled),
         codomain_uncoupled: source.codomain_uncoupled.iter().map(&map).collect(),
         codomain_innerlines: source.codomain_innerlines.iter().map(&map).collect(),
+        codomain_vertices: source.codomain_vertices.clone(),
         domain_uncoupled: source.domain_uncoupled.iter().map(&map).collect(),
         domain_innerlines: source.domain_innerlines.iter().map(map).collect(),
+        domain_vertices: source.domain_vertices.clone(),
     }
 }
 
@@ -1218,6 +1418,97 @@ impl<R, D> core::fmt::Debug for TensorMap<R, D> {
     }
 }
 
+impl<R, D> TensorMap<R, D> {
+    /// The provider allocation that owns this tensor's categorical layout.
+    #[inline]
+    pub fn provider(&self) -> &R {
+        self.body.space.provider()
+    }
+
+    /// Number of codomain legs.
+    #[inline]
+    pub fn codomain_rank(&self) -> usize {
+        self.body.space.space().homspace().codomain().len()
+    }
+
+    /// Number of domain legs.
+    #[inline]
+    pub fn domain_rank(&self) -> usize {
+        self.body.space.space().homspace().domain().len()
+    }
+
+    /// Total number of legs.
+    #[inline]
+    pub fn rank(&self) -> usize {
+        self.codomain_rank() + self.domain_rank()
+    }
+
+    /// TensorKit-compatible alias for [`Self::codomain_rank`].
+    #[inline]
+    pub fn numout(&self) -> usize {
+        self.codomain_rank()
+    }
+
+    /// TensorKit-compatible alias for [`Self::domain_rank`].
+    #[inline]
+    pub fn numin(&self) -> usize {
+        self.domain_rank()
+    }
+
+    /// TensorKit-compatible alias for [`Self::rank`].
+    #[inline]
+    pub fn numind(&self) -> usize {
+        self.rank()
+    }
+
+    /// Engine-level layout view of one stored block.
+    pub fn block(&self, index: usize) -> Result<BlockRef<'_>, Error> {
+        self.body
+            .space
+            .space()
+            .structure()
+            .block(index)
+            .map_err(Error::from)
+    }
+
+    /// Runtime bound to this tensor map.
+    #[inline]
+    pub fn runtime(&self) -> &Runtime {
+        &self.runtime
+    }
+
+    /// Number of stored fusion-tree blocks.
+    #[inline]
+    pub fn block_count(&self) -> usize {
+        self.body.space.space().structure().block_count()
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    D: TensorScalar,
+{
+    /// Whole dense payload in storage order.
+    #[inline]
+    pub fn data(&self) -> &[D] {
+        self.dense_data()
+    }
+
+    fn dense_data(&self) -> &[D] {
+        match &*self.body.data {
+            TypedData::Dense(data) => data,
+            TypedData::Diagonal(spectrum) => self.body.dense_cache.get_or_init(|| {
+                tenet_matrixalgebra::diagonal_bond_data(
+                    self.body.space.space(),
+                    spectrum,
+                    &|value| value,
+                )
+                .expect("diagonal fill is total on the stored bond space")
+            }),
+        }
+    }
+}
+
 impl<R, D> TensorMap<R, D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -1329,56 +1620,60 @@ where
         }
         Ok(offdiag <= tol * norm.max(1.0))
     }
+}
 
-    /// The provider that owns the layout, after proving every leg agrees on
-    /// the rule identity.
-    fn authority<'a>(legs: &[&'a GradedSpace<R>]) -> Result<&'a Arc<R>, Error> {
-        let (authority, rest) = legs.split_first().ok_or_else(|| {
-            Error::InvalidArgument(
-                "at least one leg is required to infer the fusion provider".to_string(),
-            )
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorRootDispatch<R>,
+    D: TensorScalar,
+{
+    /// Returns the first leg's provider allocation after proving that every
+    /// leg has the same categorical identity.
+    fn authority<'a>(legs: &[&'a GradedSpace<R>]) -> Result<&'a Arc<R>, TypedFacadeError<R>> {
+        let (first, rest) = legs.split_first().ok_or_else(|| {
+            TypedFacadeError::<R>::from(Error::InvalidArgument(
+                "at least one leg is required to infer the fusion provider".into(),
+            ))
         })?;
-        // Why compare `RuleIdentity` rather than `Arc::ptr_eq`: separately
-        // allocated providers of one rule must interoperate, exactly as they do
-        // for the erased facade. Checking here also means a mismatch is
-        // reported before any provider algebra or layout staging runs.
-        let identity = authority.provider().rule_identity();
-        if rest
-            .iter()
-            .any(|leg| leg.provider().rule_identity() != identity)
-        {
-            return Err(Error::RuleMismatch);
+        // Equal identities, rather than pointer equality, let separately
+        // allocated providers interoperate. This guard precedes every provider
+        // query and layout-admission stage.
+        let expected_identity = TypedSectorAdmission::typed_rule_identity(first.provider());
+        for leg in rest {
+            let actual_identity = TypedSectorAdmission::typed_rule_identity(leg.provider());
+            if actual_identity != expected_identity {
+                return Err(TypedFacadeError::<R>::from(Error::RuleMismatch));
+            }
         }
-        Ok(authority.provider_arc())
+        Ok(first.provider_arc())
     }
 
-    /// Validation half of [`Self::build`]: admits the bound layout without
-    /// touching any payload. Split out so [`Self::rand`] can draw its stream
-    /// position strictly *after* every fallible stage has passed.
+    /// Validation half of [`Self::build`]: admits the complete bound layout
+    /// without touching payload or runtime RNG state.
     fn build_space(
         provider: Arc<R>,
         codomain: &[&GradedSpace<R>],
         domain: &[&GradedSpace<R>],
-    ) -> Result<BoundDynamicFusionMapSpace<R>, Error> {
-        let hom = FusionTreeHomSpace::new(
+    ) -> Result<BoundDynamicFusionMapSpace<R>, TypedFacadeError<R>> {
+        let homspace = FusionTreeHomSpace::new(
             FusionProductSpace::new(codomain.iter().map(|leg| leg.leg().clone())),
             FusionProductSpace::new(domain.iter().map(|leg| leg.leg().clone())),
         );
-        // Why only the checked root: the infallible enumeration reaches legacy
-        // encoded paths that may panic on an external provider's unrepresentable
-        // value. The checked root publishes no layout, cache, or admission state
-        // until every fallible stage has passed.
-        BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_checked(provider, hom)
-            .map_err(Into::into)
+        <R::Mode as TypedTensorRootDispatch<R>>::build_root(provider, homspace)
     }
 
-    /// Payload half of [`Self::build`]: fills a freshly admitted layout.
+    /// Payload half of [`Self::build`]: fills only a fully admitted layout and
+    /// validates its final data length before publication.
     fn fill_space(
         runtime: &Runtime,
         space: BoundDynamicFusionMapSpace<R>,
         fill: Fill<'_, D>,
-    ) -> Result<Self, Error> {
-        let data = apply_fill(space.space(), fill)?;
+    ) -> Result<Self, TypedFacadeError<R>> {
+        let data = apply_fill(space.space(), fill).map_err(TypedFacadeError::<R>::from)?;
+        BoundDynamicTensorRef::try_new(&space, &data)
+            .map_err(Error::from)
+            .map_err(TypedFacadeError::<R>::from)?;
         Ok(Self {
             runtime: runtime.clone(),
             body: Arc::new(TypedTensorBody::dense(space, data)),
@@ -1391,44 +1686,35 @@ where
         codomain: &[&GradedSpace<R>],
         domain: &[&GradedSpace<R>],
         fill: Fill<'_, D>,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, TypedFacadeError<R>> {
         let space = Self::build_space(provider, codomain, domain)?;
         Self::fill_space(runtime, space, fill)
     }
 
     /// Zero tensor map on `codomain <- domain` (TensorKit `zeros(T, W <- V)`).
     ///
-    /// The payload dtype comes from `D`, so no dtype token is needed. Every
-    /// leg must carry a provider with the same
-    /// [`tenet_core::FusionRule::rule_identity`]; the first leg's provider allocation
-    /// becomes the tensor's authority.
-    ///
-    /// # Errors
-    ///
-    /// - [`Error::InvalidArgument`] when no leg is given, since the provider is
-    ///   inferred from the legs.
-    /// - [`Error::RuleMismatch`] when the legs disagree on the rule identity.
-    ///   This is reported before any provider algebra runs.
-    /// - [`Error::FusionAlgebra`] / [`Error::Operation`] when the provider
-    ///   cannot certify the layout. Nothing is published in that case.
+    /// Every leg must have the same rule identity; the first leg's exact
+    /// provider allocation becomes the tensor's authority. Identity mismatch
+    /// is reported before provider algebra is queried. Layout admission and
+    /// payload validation are transactional: failure publishes no tensor.
     ///
     /// # Complexity
     ///
-    /// One layout admission (the fusion-tree enumeration for the requested
-    /// legs) plus one `O(stored_len)` zeroed payload allocation.
+    /// One fusion-tree layout admission plus one `O(stored_len)` zeroed
+    /// payload allocation.
     pub fn zeros<'a, Codomain, Domain>(
         runtime: &Runtime,
         codomain: Codomain,
         domain: Domain,
-    ) -> Result<Self, Error>
+    ) -> Result<Self, TypedFacadeError<R>>
     where
         Codomain: IntoIterator<Item = &'a GradedSpace<R>>,
         Domain: IntoIterator<Item = &'a GradedSpace<R>>,
         R: 'a,
     {
-        let codomain: Vec<&GradedSpace<R>> = codomain.into_iter().collect();
-        let domain: Vec<&GradedSpace<R>> = domain.into_iter().collect();
-        let legs: Vec<&GradedSpace<R>> = codomain.iter().chain(&domain).copied().collect();
+        let codomain: Vec<_> = codomain.into_iter().collect();
+        let domain: Vec<_> = domain.into_iter().collect();
+        let legs: Vec<_> = codomain.iter().chain(&domain).copied().collect();
         let provider = Arc::clone(Self::authority(&legs)?);
         Self::build(runtime, provider, &codomain, &domain, Fill::Zeros)
     }
@@ -1436,162 +1722,134 @@ where
     /// Tensor map whose every symmetry-allowed element is produced by
     /// `fill(sectors, indices)`.
     ///
-    /// `sectors` names the block through the provider's own labels; `indices`
-    /// are the degeneracy coordinates local to that block, codomain axes
-    /// first, first axis fastest. The payload dtype follows `D`.
+    /// All block keys are decoded exactly once before the first callback.
+    /// Therefore a late decode failure invokes `fill` zero times and publishes
+    /// neither a partial payload nor a tensor.
     ///
-    /// The block labels are decoded once per block, not once per element: the
-    /// erased odometer underneath reports the same key for every element of a
-    /// block, and the decode is memoized against it.
+    /// **No TensorKit counterpart.** TensorKit builds an uninitialized,
+    /// zeroed, or random tensor and then mutates its blocks; this labelled
+    /// callback is TeNeT's semantic-fixture constructor.
     ///
-    /// **No TensorKit counterpart.** TensorKit 0.17 has no callback
-    /// constructor: it builds `undef`/`zeros`/`rand`-style
-    /// (`tensors/tensor.jl`) and fills by mutating `block(t, c)` directly.
-    /// The label-driven callback is a tenet addition, so cross-version
-    /// fixtures can be written against semantic sectors instead of storage
-    /// order.
+    /// # Complexity
     ///
-    /// # Errors
-    ///
-    /// Everything [`Self::zeros`] reports, plus [`Error::FusionAlgebra`] when
-    /// the provider cannot decode a sector its own algebra produced.
+    /// One layout admission, one decode per stored block, and one callback per
+    /// stored element.
     pub fn from_block_fn<'a, Codomain, Domain, F>(
         runtime: &Runtime,
         codomain: Codomain,
         domain: Domain,
         mut fill: F,
-    ) -> Result<Self, Error>
+    ) -> Result<Self, TypedFacadeError<R>>
     where
         Codomain: IntoIterator<Item = &'a GradedSpace<R>>,
         Domain: IntoIterator<Item = &'a GradedSpace<R>>,
         F: FnMut(&BlockFusionTrees<R::Sector>, &[usize]) -> D,
         R: 'a,
     {
-        let codomain: Vec<&GradedSpace<R>> = codomain.into_iter().collect();
-        let domain: Vec<&GradedSpace<R>> = domain.into_iter().collect();
-        let legs: Vec<&GradedSpace<R>> = codomain.iter().chain(&domain).copied().collect();
+        let codomain: Vec<_> = codomain.into_iter().collect();
+        let domain: Vec<_> = domain.into_iter().collect();
+        let legs: Vec<_> = codomain.iter().chain(&domain).copied().collect();
         let provider = Arc::clone(Self::authority(&legs)?);
-
-        // Why reuse the erased `Fill::BlockFn` odometer instead of walking the
-        // blocks here: the traversal order and the strided element addressing
-        // are exactly the erased facade's, and duplicating them would be a
-        // second place for the two to drift apart. The adapter below only adds
-        // the label decode — memoized on the block key, so the cost stays one
-        // decode per block plus one key comparison per element, which the
-        // odometer already pays per element anyway.
-        let mut decode_failure: Option<Error> = None;
-        let mut memo: Option<(BlockKey, BlockFusionTrees<R::Sector>)> = None;
-        let mut labelled = |key: &BlockKey, indices: &[usize]| -> D {
-            if decode_failure.is_some() {
-                return D::from_real(0.0);
-            }
-            if memo.as_ref().is_none_or(|(cached, _)| cached != key) {
-                match decode_block_fusion_trees(provider.as_ref(), key) {
-                    Ok(sectors) => memo = Some((key.clone(), sectors)),
-                    Err(error) => {
-                        decode_failure = Some(error);
-                        return D::from_real(0.0);
-                    }
-                }
-            }
-            let (_, sectors) = memo.as_ref().expect("memo was just populated");
-            fill(sectors, indices)
-        };
-
-        let built = Self::build(
-            runtime,
-            Arc::clone(&provider),
-            &codomain,
-            &domain,
-            Fill::BlockFn(&mut labelled),
-        );
-        // A decode failure inside the infallible odometer callback is reported
-        // here; the partially written buffer never leaves this function.
-        if let Some(error) = decode_failure {
-            return Err(error);
+        let space = Self::build_space(Arc::clone(&provider), &codomain, &domain)?;
+        let structure = space.space().structure();
+        let mut labelled = HashMap::with_capacity(structure.block_count());
+        for index in 0..structure.block_count() {
+            let key = structure
+                .block(index)
+                .map_err(Error::from)
+                .map_err(TypedFacadeError::<R>::from)?
+                .key()
+                .clone();
+            let decoded = decode_block_fusion_trees(provider.as_ref(), &key)?;
+            labelled.insert(key, decoded);
         }
-        built
+        let mut callback = |key: &BlockKey, indices: &[usize]| {
+            fill(
+                labelled
+                    .get(key)
+                    .expect("all admitted block keys were decoded before payload fill"),
+                indices,
+            )
+        };
+        Self::fill_space(runtime, space, Fill::BlockFn(&mut callback))
     }
 
-    /// Random tensor map on `codomain <- domain` (TensorKit
-    /// `rand(T, W ← V)`): entries (real and imaginary parts for
-    /// a `Complex64` payload) uniform in `[-1, 1)`, drawn from the runtime's
-    /// deterministic splitmix64 stream. The payload dtype comes from `D`, so
-    /// no dtype token is needed.
+    /// Random tensor map using the runtime's deterministic splitmix64 stream.
     ///
-    /// Deterministic per runtime: the n-th `rand`-family call on a given
-    /// runtime always produces the same tensor. Unlike the erased
-    /// [`crate::prelude::Tensor::rand`], which draws its stream position
-    /// before validating the spaces, this constructor draws only *after* the
-    /// layout is admitted — a failing call does not advance the runtime's
-    /// random stream, so error handling cannot silently shift every later
-    /// seedless `rand`. Use [`Self::rand_with_seed`] for an explicit stream.
-    ///
-    /// # Errors
-    ///
-    /// Everything [`Self::zeros`] reports; nothing (including the stream
-    /// position) is published in that case.
+    /// The stream position is drawn only after every fallible identity,
+    /// provider, shape, and layout-admission stage succeeds. A failed call
+    /// therefore does not advance the runtime RNG or shift later seedless
+    /// results.
     ///
     /// # Complexity
     ///
-    /// One `O(stored_len)` payload allocation and fill.
-    pub fn rand<'a, C, M>(runtime: &Runtime, codomain: C, domain: M) -> Result<Self, Error>
+    /// One layout admission and one `O(stored_len)` payload allocation/fill.
+    pub fn rand<'a, Codomain, Domain>(
+        runtime: &Runtime,
+        codomain: Codomain,
+        domain: Domain,
+    ) -> Result<Self, TypedFacadeError<R>>
     where
-        C: IntoIterator<Item = &'a GradedSpace<R>>,
-        M: IntoIterator<Item = &'a GradedSpace<R>>,
+        Codomain: IntoIterator<Item = &'a GradedSpace<R>>,
+        Domain: IntoIterator<Item = &'a GradedSpace<R>>,
         R: 'a,
     {
-        let codomain: Vec<&GradedSpace<R>> = codomain.into_iter().collect();
-        let domain: Vec<&GradedSpace<R>> = domain.into_iter().collect();
-        let legs: Vec<&GradedSpace<R>> = codomain.iter().chain(&domain).copied().collect();
+        let codomain: Vec<_> = codomain.into_iter().collect();
+        let domain: Vec<_> = domain.into_iter().collect();
+        let legs: Vec<_> = codomain.iter().chain(&domain).copied().collect();
         let provider = Arc::clone(Self::authority(&legs)?);
         let space = Self::build_space(provider, &codomain, &domain)?;
-        // The stream position is drawn here, strictly after every fallible
-        // validation stage: see the rustdoc contract above.
         Self::fill_space(runtime, space, Fill::Rand(runtime.next_rand_seed()))
     }
 
-    /// Random tensor map with an explicit seed (splitmix64 stream, entries
-    /// uniform in `[-1, 1)`) — the typed twin of the erased
-    /// [`crate::prelude::Tensor::rand_with_seed`], byte-identical to it for
-    /// the same layout and seed since both run the one shared fill.
+    /// Random tensor map using an explicit deterministic splitmix64 seed.
     ///
-    /// **No TensorKit counterpart.** TensorKit's `rand` family threads a
-    /// caller-supplied Julia `rng` and has no
-    /// integer-seed entry point of its own; the explicit u64 splitmix64
-    /// stream is a tenet extension for reproducible fixtures.
-    ///
-    /// Reproducibility is defined for the same TeNeT version and tensor
-    /// layout. The stream fills internal storage order, so a sector codec or
-    /// block-layout migration can produce a different semantic tensor from
-    /// the same seed. Cross-version fixtures should use
-    /// [`Self::from_block_fn`] with semantic labels.
-    ///
-    /// # Errors
-    ///
-    /// Everything [`Self::zeros`] reports.
+    /// Reproducibility is defined for the same TeNeT version and layout;
+    /// semantic cross-version fixtures should use [`Self::from_block_fn`].
     ///
     /// # Complexity
     ///
-    /// One `O(stored_len)` payload allocation and fill.
-    pub fn rand_with_seed<'a, C, M>(
+    /// One layout admission and one `O(stored_len)` payload allocation/fill.
+    pub fn rand_with_seed<'a, Codomain, Domain>(
         runtime: &Runtime,
-        codomain: C,
-        domain: M,
+        codomain: Codomain,
+        domain: Domain,
         seed: u64,
-    ) -> Result<Self, Error>
+    ) -> Result<Self, TypedFacadeError<R>>
     where
-        C: IntoIterator<Item = &'a GradedSpace<R>>,
-        M: IntoIterator<Item = &'a GradedSpace<R>>,
+        Codomain: IntoIterator<Item = &'a GradedSpace<R>>,
+        Domain: IntoIterator<Item = &'a GradedSpace<R>>,
         R: 'a,
     {
-        let codomain: Vec<&GradedSpace<R>> = codomain.into_iter().collect();
-        let domain: Vec<&GradedSpace<R>> = domain.into_iter().collect();
-        let legs: Vec<&GradedSpace<R>> = codomain.iter().chain(&domain).copied().collect();
+        let codomain: Vec<_> = codomain.into_iter().collect();
+        let domain: Vec<_> = domain.into_iter().collect();
+        let legs: Vec<_> = codomain.iter().chain(&domain).copied().collect();
         let provider = Arc::clone(Self::authority(&legs)?);
         Self::build(runtime, provider, &codomain, &domain, Fill::Rand(seed))
     }
 
+    /// Provider-labelled fusion trees for one stored block.
+    pub fn block_fusion_trees(
+        &self,
+        index: usize,
+    ) -> Result<BlockFusionTrees<R::Sector>, TypedFacadeError<R>> {
+        let block = self
+            .body
+            .space
+            .space()
+            .structure()
+            .block(index)
+            .map_err(Error::from)
+            .map_err(TypedFacadeError::<R>::from)?;
+        decode_block_fusion_trees(self.body.space.provider(), block.key())
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+{
     /// The fused external sector content of one side of a structural
     /// constructor — the typed counterpart of the erased `Space::fuse_all`
     /// (TensorKit `fuse`, `spaces/gradedspace.jl:150-158`), on the one shared
@@ -2056,54 +2314,6 @@ where
             runtime: self.runtime.clone(),
             body: Arc::new(TypedTensorBody::dense(space, data)),
         })
-    }
-
-    /// Number of codomain legs.
-    ///
-    /// Reads the space structure only — no payload is touched and nothing is
-    /// allocated. The TensorKit name is [`Self::numout`].
-    #[inline]
-    pub fn codomain_rank(&self) -> usize {
-        self.body.space.space().homspace().codomain().len()
-    }
-
-    /// Number of domain legs.
-    ///
-    /// Reads the space structure only — no payload is touched and nothing is
-    /// allocated. The TensorKit name is [`Self::numin`].
-    #[inline]
-    pub fn domain_rank(&self) -> usize {
-        self.body.space.space().homspace().domain().len()
-    }
-
-    /// Total number of legs, `codomain_rank() + domain_rank()`.
-    ///
-    /// Reads the space structure only — no payload is touched and nothing is
-    /// allocated. The TensorKit name is [`Self::numind`].
-    #[inline]
-    pub fn rank(&self) -> usize {
-        self.codomain_rank() + self.domain_rank()
-    }
-
-    /// Number of codomain (output) legs. TensorKit `numout`; alias of
-    /// [`Self::codomain_rank`], exactly as on the erased facade.
-    #[inline]
-    pub fn numout(&self) -> usize {
-        self.codomain_rank()
-    }
-
-    /// Number of domain (input) legs. TensorKit `numin`; alias of
-    /// [`Self::domain_rank`], exactly as on the erased facade.
-    #[inline]
-    pub fn numin(&self) -> usize {
-        self.domain_rank()
-    }
-
-    /// Total number of legs. TensorKit `numind`; alias of [`Self::rank`], exactly as
-    /// on the erased facade.
-    #[inline]
-    pub fn numind(&self) -> usize {
-        self.rank()
     }
 
     /// Contracts `lhs_axes` of `self` with `rhs_axes` of `other` (pairwise, in
@@ -5156,90 +5366,6 @@ where
                 leg: leg.clone(),
             })
             .collect()
-    }
-
-    /// The provider-labelled fusion trees of the block at `index`.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Core`] when `index` is out of range, [`Error::FusionAlgebra`]
-    /// when the provider cannot decode one of its own sectors.
-    pub fn block_fusion_trees(&self, index: usize) -> Result<BlockFusionTrees<R::Sector>, Error> {
-        let block = self.body.space.space().structure().block(index)?;
-        decode_block_fusion_trees(self.body.space.provider(), block.key())
-    }
-
-    /// Engine-level layout view of the block at `index`: its shape, strides
-    /// and offset addressing into [`Self::data`].
-    ///
-    /// This is the one accessor here that speaks the engine's vocabulary
-    /// rather than the provider's — the returned [`BlockRef`] exposes the raw
-    /// [`tenet_core::BlockKey`], whose sectors are [`tenet_core::SectorId`]s.
-    /// It is not wrapped because a layout view has no use for labels; for the
-    /// block's categorical identity use [`Self::block_fusion_trees`], which
-    /// reports the same block through the codec.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Core`] when `index` is out of range.
-    pub fn block(&self, index: usize) -> Result<BlockRef<'_>, Error> {
-        self.body
-            .space
-            .space()
-            .structure()
-            .block(index)
-            .map_err(Error::from)
-    }
-
-    /// The runtime this tensor map is bound to.
-    #[inline]
-    pub fn runtime(&self) -> &Runtime {
-        &self.runtime
-    }
-
-    /// Number of stored symmetry-allowed blocks — one per fusion-tree pair of
-    /// the coupled layout (the namespace [`Self::block_fusion_trees`]
-    /// indexes). Finer than TensorKit `length(blocksectors(t))`, which counts coupled sectors: a
-    /// coupled sector with several tree pairs contributes one TK block but
-    /// several here.
-    #[inline]
-    pub fn block_count(&self) -> usize {
-        self.body.space.space().structure().block_count()
-    }
-
-    /// The whole block payload in storage order.
-    ///
-    /// Individual blocks address this buffer through their own offset and
-    /// strides.
-    ///
-    /// On a compact spectrum factor (the module doc's compact-storage
-    /// contract) the first call pays the materialization: the `Σ_c k_c` stored
-    /// values are expanded into the `Σ_c k_c²` dense block-diagonal buffer,
-    /// cached once per body and shared by every clone.
-    #[inline]
-    pub fn data(&self) -> &[D] {
-        self.dense_data()
-    }
-
-    /// The dense coupled-sector payload, materializing a compact spectrum on
-    /// first demand into the body's shared cache.
-    ///
-    /// Why infallible: the fill is total on a bond space this module built
-    /// itself from that same spectrum, so a failure would be an engine
-    /// invariant break rather than a caller mistake — the same judgement, and
-    /// the same `expect`, as the erased `Tensor::materialize_diagonal`.
-    fn dense_data(&self) -> &[D] {
-        match &*self.body.data {
-            TypedData::Dense(data) => data,
-            TypedData::Diagonal(spectrum) => self.body.dense_cache.get_or_init(|| {
-                tenet_matrixalgebra::diagonal_bond_data(
-                    self.body.space.space(),
-                    spectrum,
-                    &|value| value,
-                )
-                .expect("diagonal fill is total on the stored bond space")
-            }),
-        }
     }
 }
 

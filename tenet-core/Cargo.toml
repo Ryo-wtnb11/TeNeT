@@ -9,6 +9,10 @@ repository.workspace = true
 name = "tenet_core"
 path = "src/lib.rs"
 
+[features]
+default = []
+racah-generated = ["tenet-sectors/racah-generated"]
+
 [dependencies]
 tenet-sectors = { path = "../tenet-sectors" }
 smallvec = { version = "1", features = ["const_generics", "union"] }
