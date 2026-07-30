@@ -1449,13 +1449,41 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
-    svd_compact_factors_dyn_with_direction(dense, input, None)
+    svd_compact_factors_dyn_with_direction(dense, input, None, CompactSvdGauge::Left)
+}
+
+/// Compact SVD factors for the logical adjoint without constructing its input:
+/// if `A = U S Vh`, returns `(V, Uh, spectrum)` with the phase gauge applied
+/// to the final left factor `V`.
+#[doc(hidden)]
+pub fn svd_compact_adjoint_factors_dyn<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<SvdFactorsDyn<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let (u, vh, spectrum) =
+        svd_compact_factors_dyn_with_direction(dense, input, None, CompactSvdGauge::AdjointLeft)?;
+    Ok((
+        adjoint_bound_factor(&vh)?,
+        adjoint_bound_factor(&u)?,
+        spectrum,
+    ))
 }
 
 #[derive(Clone, Copy)]
 enum PolarDirection {
     Left,
     Right,
+}
+
+#[derive(Clone, Copy)]
+enum CompactSvdGauge {
+    Left,
+    AdjointLeft,
 }
 
 impl PolarDirection {
@@ -1494,6 +1522,7 @@ fn svd_compact_factors_dyn_with_direction<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
     polar_direction: Option<PolarDirection>,
+    gauge: CompactSvdGauge,
 ) -> Result<SvdFactorsDyn<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
@@ -1511,7 +1540,7 @@ where
                 }),
             )?;
         }
-        return svd_compact_direct_regions(dense, input, &plan);
+        return svd_compact_direct_regions(dense, input, &plan, gauge);
     }
     let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
     if let Some(direction) = polar_direction {
@@ -1587,15 +1616,26 @@ where
                 D::dense_write(vt_view),
             )
             .map_err(OperationError::Dense)?;
-        svd_compact_gauge(
-            &mut u_workspace,
-            matrix.rows,
-            max_rows,
-            &mut vt_workspace,
-            rank,
-            matrix.cols,
-            max_rank,
-        );
+        match gauge {
+            CompactSvdGauge::Left => svd_compact_gauge(
+                &mut u_workspace,
+                matrix.rows,
+                max_rows,
+                &mut vt_workspace,
+                rank,
+                matrix.cols,
+                max_rank,
+            ),
+            CompactSvdGauge::AdjointLeft => svd_compact_adjoint_gauge(
+                &mut u_workspace,
+                matrix.rows,
+                max_rows,
+                &mut vt_workspace,
+                rank,
+                matrix.cols,
+                max_rank,
+            ),
+        }
 
         singular_values.push(SectorSpectrum {
             sector: matrix.sector,
@@ -1975,6 +2015,7 @@ fn svd_compact_direct_regions<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
     plan: &CompactFactorPlan,
+    gauge: CompactSvdGauge,
 ) -> Result<SvdFactorsDyn<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
@@ -2037,15 +2078,26 @@ where
                 )
                 .map_err(OperationError::Dense)
         })?;
-        svd_compact_gauge(
-            &mut u_data[u_region.range()],
-            region.rows(),
-            region.rows(),
-            &mut vh_data[vh_region.range()],
-            rank,
-            region.cols(),
-            rank,
-        );
+        match gauge {
+            CompactSvdGauge::Left => svd_compact_gauge(
+                &mut u_data[u_region.range()],
+                region.rows(),
+                region.rows(),
+                &mut vh_data[vh_region.range()],
+                rank,
+                region.cols(),
+                rank,
+            ),
+            CompactSvdGauge::AdjointLeft => svd_compact_adjoint_gauge(
+                &mut u_data[u_region.range()],
+                region.rows(),
+                region.rows(),
+                &mut vh_data[vh_region.range()],
+                rank,
+                region.cols(),
+                rank,
+            ),
+        }
         singular_values.push(SectorSpectrum {
             sector: route.sector,
             values: spectrum,
@@ -3434,6 +3486,24 @@ pub(crate) fn svd_compact_gauge<D: FactorScalar>(
     }
 }
 
+pub(crate) fn svd_compact_adjoint_gauge<D: FactorScalar>(
+    u: &mut [D],
+    u_rows: usize,
+    u_leading: usize,
+    vh: &mut [D],
+    vh_rows: usize,
+    vh_cols: usize,
+    vh_leading: usize,
+) {
+    for j in 0..vh_rows {
+        let (phase, needs_scaling) = phase_of_largest_abs_row(vh, vh_cols, vh_leading, j);
+        if needs_scaling {
+            scale_col(u, u_rows, u_leading, j, phase);
+            scale_row(vh, vh_cols, vh_leading, j, FactorScalar::adjoint(phase));
+        }
+    }
+}
+
 pub(crate) fn svd_full_gauge<D: FactorScalar>(
     u: &mut [D],
     u_rows: usize,
@@ -4335,8 +4405,12 @@ where
 {
     // Polar needs only U, Vh and the spectrum — not the dense diagonal S — so
     // use the S-free factors core.
-    let (u, vh, singular_values) =
-        svd_compact_factors_dyn_with_direction(dense, input, Some(PolarDirection::Left))?;
+    let (u, vh, singular_values) = svd_compact_factors_dyn_with_direction(
+        dense,
+        input,
+        Some(PolarDirection::Left),
+        CompactSvdGauge::Left,
+    )?;
     let isometry = crate::compose::compose_bound_dyn(context, &u, &vh)?;
     // P = V·S·Vh. Fold S into V as a block-local scaling of V's bond (trailing)
     // axis — TensorKit's `DiagonalTensorMap` `rmul!` — instead of a full block
@@ -4395,8 +4469,12 @@ where
 {
     // Polar needs only U, Vh and the spectrum — not the dense diagonal S — so
     // use the S-free factors core.
-    let (u, vh, singular_values) =
-        svd_compact_factors_dyn_with_direction(dense, input, Some(PolarDirection::Right))?;
+    let (u, vh, singular_values) = svd_compact_factors_dyn_with_direction(
+        dense,
+        input,
+        Some(PolarDirection::Right),
+        CompactSvdGauge::Left,
+    )?;
     let uh = adjoint_bound_factor(&u)?;
     let isometry = crate::compose::compose_bound_dyn(context, &u, &vh)?;
     // P = U·S·Uh. Fold S into U's bond (trailing) axis by block-local scaling —
@@ -6382,7 +6460,7 @@ where
 {
     let space = input.space().space();
     if let Some(plan) = compact_factor_plan_generic(input.space())? {
-        return svd_compact_direct_regions(dense, input, &plan);
+        return svd_compact_direct_regions(dense, input, &plan, CompactSvdGauge::Left);
     }
     let matricizations =
         sector_matricizations_generic(space.structure(), input.data(), space.nout())?;

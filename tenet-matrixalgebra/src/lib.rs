@@ -46,6 +46,9 @@ pub use truncation::{
 #[doc(hidden)]
 pub use factorize::validate_hermitian_regions;
 
+#[doc(hidden)]
+pub use factorize::svd_compact_adjoint_factors_dyn;
+
 #[cfg(feature = "diagnostics")]
 #[doc(hidden)]
 pub use factorize::{sector_matricization_diagnostic, SectorMatricizationDiagnostic};
