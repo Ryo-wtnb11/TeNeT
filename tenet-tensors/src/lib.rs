@@ -27,7 +27,7 @@ pub use tenet_core::RuleIdentity;
 
 pub use adjoint::{
     adjoint, adjoint_bound_dyn, adjoint_bound_dyn_generic, adjoint_bound_space_dyn,
-    adjoint_bound_space_dyn_generic,
+    adjoint_bound_space_dyn_generic, materialize_adjoint_data_dyn,
 };
 pub use backend_trace::TensorTraceOperationsBackend;
 pub use bound_tensor::BoundDynamicTensorRef;

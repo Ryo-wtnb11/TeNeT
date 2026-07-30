@@ -3449,9 +3449,9 @@ fn tr_requires_an_endomorphism() {
 
 #[test]
 fn typed_and_erased_adjoint_agree_byte_for_byte() {
-    // What: the eager typed adjoint is the erased lazy view's materialized
-    // buffer, byte for byte — the divergence is in when the work happens, not
-    // in what comes out. The spaces swap sides, which the shape assertions pin.
+    // What: both lazy views materialize the same buffer byte for byte. The
+    // spaces swap sides before data is requested, which the shape assertions
+    // pin.
     let _guard = cache_lock();
     let runtime = runtime();
     let (erased, typed) = z2_oracle_pair(&runtime);
