@@ -8814,7 +8814,11 @@ impl Tensor {
     /// `svd_vals`). Real for both dtypes.
     pub fn svd_vals(&self) -> Result<Vec<SectorSpectrum>, Error> {
         if self.is_adjoint_view() {
-            return self.materialized_tensor()?.svd_vals();
+            #[cfg(feature = "cuda")]
+            if matches!(self.stored_data(), Data::CudaF64(_)) {
+                return Err(device_unsupported("materializing an adjoint device tensor"));
+            }
+            return self.parent_tensor_for_lowering().svd_vals();
         }
         // Lease a dense executor for this op instead of the coarse runtime lock,
         // so concurrent factorizations on a shared runtime run in parallel
@@ -12441,6 +12445,65 @@ mod adjoint_parent_view_tests {
             assert_eq!(lazy.norm_inf().unwrap(), source.norm_inf().unwrap());
             assert_eq!(lazy.adjoint_body_builds(), 0);
         }
+    }
+
+    #[test]
+    fn svd_vals_reads_parent_without_adjoint_materialization() {
+        // What: values-only SVD preserves every host rule's sector spectrum
+        // across cold, repeated, cloned, and concurrent lazy-adjoint reads.
+        let runtime = Runtime::builder().dense_threads(4).build().unwrap();
+        let fixtures = [
+            (Space::u1([(-1, 1), (0, 3)]), Space::u1([(-1, 2), (0, 1)])),
+            (
+                Space::su2([(0, 2), (1, 1)]).unwrap(),
+                Space::su2([(0, 1), (1, 3)]).unwrap(),
+            ),
+            (
+                Space::product([((-1, 0), 1), ((0, 1), 3)]).unwrap(),
+                Space::product([((-1, 0), 2), ((0, 1), 1)]).unwrap(),
+            ),
+            (
+                Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap(),
+                Space::su3([((1, 0), 1), ((0, 1), 2)]).unwrap(),
+            ),
+        ];
+
+        for (fixture, (left, right)) in fixtures.into_iter().enumerate() {
+            for (dtype, lane) in [(Dtype::F64, 0), (Dtype::C64, 1)] {
+                let parent = Tensor::rand_with_seed(
+                    &runtime,
+                    dtype,
+                    [&left],
+                    [&right],
+                    603_100 + 2 * fixture as u64 + lane,
+                )
+                .unwrap();
+                let expected = parent.svd_vals().unwrap();
+                let lazy = parent.adjoint().unwrap();
+
+                assert_eq!(lazy.svd_vals().unwrap(), expected);
+                assert_eq!(lazy.svd_vals().unwrap(), expected);
+                assert_eq!(lazy.clone().svd_vals().unwrap(), expected);
+                assert_eq!(lazy.adjoint_body_builds(), 0);
+                assert!(!lazy.has_cached_materialization());
+            }
+        }
+
+        let space = Space::u1([(-1, 2), (0, 3), (1, 1)]);
+        let parent =
+            Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space], 603_200).unwrap();
+        let expected = parent.svd_vals().unwrap();
+        let lazy = parent.adjoint().unwrap();
+        std::thread::scope(|scope| {
+            let calls: Vec<_> = (0..4)
+                .map(|_| scope.spawn(|| lazy.svd_vals().unwrap()))
+                .collect();
+            for call in calls {
+                assert_eq!(call.join().unwrap(), expected);
+            }
+        });
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
     }
 
     #[test]
