@@ -282,14 +282,15 @@ where
             let tree = &profile.tree_replay;
             println!(
                 "  tree_replay: total={total:.1} single={single:.1}({sb}) \
-                 pack={pack:.1}({pc}) recoupling={rec:.1} matmul={mm:.1} \
+                 pack={pack:.1}({pc}) dense_gemm={gemm:.1} scalar={scalar:.1} matmul={mm:.1} \
                  scatter={scatter:.1}({sc}) prepare={prep:.1} multi_blocks={mb}",
                 total = us(tree.total),
                 single = us(tree.single_total),
                 sb = tree.single_blocks / profile_iters as usize,
                 pack = us(tree.multi_pack),
                 pc = tree.packed_columns / profile_iters as usize,
-                rec = us(tree.multi_scalar_recoupling),
+                gemm = us(tree.multi_dense_matmul_call),
+                scalar = us(tree.multi_scalar_recoupling),
                 mm = us(tree.multi_matmul_total),
                 scatter = us(tree.multi_scatter),
                 sc = tree.scattered_columns / profile_iters as usize,

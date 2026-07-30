@@ -4801,7 +4801,9 @@ fn tensorcontract_fusion_non_core_form_su2_absorbs_explicit_transform_sequence()
     assert_eq!(profile.tree_replay.multi_dense_matmul_call.as_nanos(), 0);
     assert_eq!(
         profile.tree_replay.multi_matmul_total,
-        profile.tree_replay.multi_scalar_recoupling
+        profile.tree_replay.multi_dense_view_setup
+            + profile.tree_replay.multi_dense_matmul_call
+            + profile.tree_replay.multi_scalar_recoupling
     );
     assert_eq!(profile.tree_replay.multi_blocks, 0);
     assert_eq!(profile.tree_replay.packed_columns, 0);
