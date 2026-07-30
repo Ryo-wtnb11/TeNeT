@@ -269,6 +269,14 @@ fn checked_only_multiplicity_two_transforms_keep_the_source_authority() {
         assert!((actual - expected).abs() <= 1e-12);
     }
 
+    let transposed = source.transpose().unwrap();
+    assert!(std::ptr::eq(transposed.provider(), provider.as_ref()));
+    let restored = transposed.transpose().unwrap();
+    assert_eq!(snapshot(&restored), source_snapshot);
+    for (actual, expected) in restored.data().iter().zip(source.data()) {
+        assert!((actual - expected).abs() <= 1e-12);
+    }
+
     provider.fail_algebra.store(true, Ordering::Relaxed);
     let error = source.permute(&[1, 0], &[2]).unwrap_err();
     assert!(matches!(
@@ -390,6 +398,7 @@ fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() 
                 .braid(&[0, 2], &[1], &[0, 1, 2])
                 .unwrap(),
             tensor.repartition(1).unwrap().repartition(2).unwrap(),
+            tensor.transpose().unwrap().transpose().unwrap(),
         ] {
             assert!(std::ptr::eq(restored.provider(), provider.as_ref()));
             assert_eq!(snapshot(&restored), source_snapshot);

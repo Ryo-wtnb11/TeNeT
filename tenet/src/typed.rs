@@ -326,9 +326,7 @@ where
 
 /// Tensor-side tree-transform execution selected by a provider-owned mode.
 ///
-/// Checked cyclic transpose deliberately remains outside this capability:
-///
-/// ```compile_fail
+/// ```
 /// use tenet::core::{
 ///     CheckedGenericAdmissionMode, CheckedGenericRigidSymbols, TypedSectorAdmission,
 /// };
@@ -336,8 +334,10 @@ where
 ///
 /// fn checked_transpose<R>(tensor: &TensorMap<R, f64>)
 /// where
-///     R: TypedSectorAdmission<Mode = CheckedGenericAdmissionMode>
-///         + CheckedGenericRigidSymbols<Scalar = f64>,
+///     R: TypedSectorAdmission<
+///             Error = <R as tenet::core::CheckedGenericFusion>::Error,
+///             Mode = CheckedGenericAdmissionMode,
+///         > + CheckedGenericRigidSymbols<Scalar = f64>,
 /// {
 ///     let _ = tensor.transpose();
 /// }
@@ -348,7 +348,7 @@ where
     R: TypedSectorAdmission,
     D: TensorScalar,
 {
-    /// Executes one admitted permutation, braid, or planar repartition.
+    /// Executes one admitted permutation, braid, or planar transpose.
     fn tree_transform(
         tensor: &TensorMap<R, D>,
         operation: TreeTransformOperation,
@@ -2298,30 +2298,11 @@ where
     /// otherwise [`Error::Operation`] / [`Error::Core`] /
     /// [`Error::FusionAlgebra`] from the expert layer, which owns the
     /// validation this facade passes through. Checked Generic failures use
-    /// [`GenericTensorError::Plan`]; planar [`Self::transpose`] remains
-    /// multiplicity-free-only.
+    /// [`GenericTensorError::Plan`].
     pub fn repartition(&self, num_codomain: usize) -> Result<Self, TypedFacadeError<R>> {
-        let operation = with_planar_axes(
-            self.codomain_rank(),
-            self.rank(),
-            PlanarRequestKind::Repartition { num_codomain },
-            |codomain_axes, domain_axes| {
-                Ok(TreeTransformOperation::transpose(
-                    codomain_axes.iter().copied(),
-                    domain_axes.iter().copied(),
-                ))
-            },
-        )
-        .map_err(TypedFacadeError::<R>::from)?;
-        <R::Mode as TypedTensorTransformDispatch<R, D>>::tree_transform(self, operation)
+        self.planar(PlanarRequestKind::Repartition { num_codomain })
     }
-}
 
-impl<R, D> TensorMap<R, D>
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    D: TensorScalar,
-{
     /// TensorKit `transpose`: the planar transpose of `codomain <- domain` to
     /// `domain' <- codomain'`, i.e. a cyclic rotation of the legs round the
     /// planar boundary by the codomain rank, which is what carries every
@@ -2340,7 +2321,7 @@ where
     /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] from
     /// the expert layer. The generated axis order is planar by construction, so
     /// a failure here means the provider could not carry the bend.
-    pub fn transpose(&self) -> Result<Self, Error> {
+    pub fn transpose(&self) -> Result<Self, TypedFacadeError<R>> {
         self.planar(PlanarRequestKind::FullTranspose)
     }
 
@@ -2368,7 +2349,7 @@ where
         &self,
         codomain_axes: &[usize],
         domain_axes: &[usize],
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, TypedFacadeError<R>> {
         self.planar(PlanarRequestKind::Explicit {
             codomain_axes,
             domain_axes,
@@ -2382,8 +2363,8 @@ where
     /// rewritten here: it *is* the definition of what "planar" means for each
     /// request kind, and a second copy would be free to drift from the erased
     /// sibling these operations are byte-compared against.
-    fn planar(&self, kind: PlanarRequestKind<'_>) -> Result<Self, Error> {
-        with_planar_axes(
+    fn planar(&self, kind: PlanarRequestKind<'_>) -> Result<Self, TypedFacadeError<R>> {
+        let operation = with_planar_axes(
             self.codomain_rank(),
             self.rank(),
             kind,
@@ -2392,14 +2373,22 @@ where
                 // to be a plain permutation: domain trees run opposite to the
                 // planar boundary, so flattening them into a permute would
                 // braid a different leg across it.
-                self.tree_transform_multiplicity_free(TreeTransformOperation::transpose(
+                Ok(TreeTransformOperation::transpose(
                     codomain_axes.iter().copied(),
                     domain_axes.iter().copied(),
                 ))
             },
         )
+        .map_err(TypedFacadeError::<R>::from)?;
+        <R::Mode as TypedTensorTransformDispatch<R, D>>::tree_transform(self, operation)
     }
+}
 
+impl<R, D> TensorMap<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+{
     /// Runs one prepared tree transform on this tensor's own runtime.
     fn tree_transform_multiplicity_free(
         &self,

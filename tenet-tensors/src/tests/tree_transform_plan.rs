@@ -8383,6 +8383,8 @@ fn checked_generic_rank3_plan_matches_legacy_rows_coefficients_and_order() {
         TreeTransformOperation::permute([1, 0, 2], []),
         // Moving the right 8 past the middle 8 exercises the inner F-R-F path.
         TreeTransformOperation::braid([0, 2, 1], [], [0, 1, 2], []),
+        // A planar rotation exercises repartition plus fold/bend lowering.
+        TreeTransformOperation::transpose([1, 2, 0], []),
     ] {
         let legacy =
             build_generic_tree_pair_transform_group_plan(&rule, operation.clone(), &structure)
@@ -8427,11 +8429,15 @@ fn checked_generic_owned_transform_matches_legacy_for_r_and_inner_f_r() {
     let data_before = src_data.clone();
 
     for (operation, oracle_name) in [
-        (TreeTransformOperation::permute([1, 0], [2]), "r_only.flat="),
+        (
+            TreeTransformOperation::permute([1, 0], [2]),
+            Some("r_only.flat="),
+        ),
         (
             TreeTransformOperation::braid([0, 2], [1], [0, 1], [2]),
-            "inner_f_r.flat=",
+            Some("inner_f_r.flat="),
         ),
+        (TreeTransformOperation::transpose([1, 2], [0]), None),
     ] {
         let (actual_space, actual_data) = crate::tree_transform_dyn_owned_checked_generic(
             operation.clone(),
@@ -8459,19 +8465,21 @@ fn checked_generic_owned_transform_matches_legacy_for_r_and_inner_f_r() {
         assert_eq!(actual_space.space(), &expected_space);
         assert!(Arc::ptr_eq(actual_space.provider_arc(), &provider));
         assert_eq!(actual_data, expected_data);
-        let oracle = TENSORKIT_ORACLE
-            .lines()
-            .find_map(|line| line.strip_prefix(oracle_name))
-            .unwrap()
-            .split(',')
-            .map(|value| value.parse::<f64>().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(actual_data.len(), oracle.len());
-        for (index, (actual, expected)) in actual_data.iter().zip(&oracle).enumerate() {
-            assert!(
-                (actual - expected).abs() <= 1e-12,
-                "{oracle_name}[{index}]: {actual} != TensorKit {expected}"
-            );
+        if let Some(oracle_name) = oracle_name {
+            let oracle = TENSORKIT_ORACLE
+                .lines()
+                .find_map(|line| line.strip_prefix(oracle_name))
+                .unwrap()
+                .split(',')
+                .map(|value| value.parse::<f64>().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(actual_data.len(), oracle.len());
+            for (index, (actual, expected)) in actual_data.iter().zip(&oracle).enumerate() {
+                assert!(
+                    (actual - expected).abs() <= 1e-12,
+                    "{oracle_name}[{index}]: {actual} != TensorKit {expected}"
+                );
+            }
         }
         assert_eq!(src_space, source_before);
         assert_eq!(src_data, data_before);
@@ -8915,30 +8923,41 @@ fn checked_generic_plan_rejects_style_before_structure_or_symbol_queries() {
     ));
     assert_eq!(planar.calls.get(), [0; CheckedPlanCall::COUNT]);
 
-    let cyclic = CheckedPlanSpy::new(&rule);
+    let noncyclic = CheckedPlanSpy::new(&rule);
     let error = build_checked_generic_tree_pair_transform_group_plan(
-        &cyclic,
-        TreeTransformOperation::transpose([2], [1, 0]),
+        &noncyclic,
+        TreeTransformOperation::transpose([1, 0], [2]),
         &structure,
     )
     .unwrap_err();
     assert!(matches!(
         error,
-        CheckedGenericPlanError::Operation(OperationError::UnsupportedTreeTransformScope { .. })
+        CheckedGenericPlanError::Operation(OperationError::Core(
+            CoreError::InvalidPermutation { .. }
+        ))
     ));
-    assert_eq!(cyclic.calls.get(), [0; CheckedPlanCall::COUNT]);
+    // Syntax rejection precedes structural (Dual/N), rigidity, and F/R
+    // provider queries.
+    assert_eq!(noncyclic.calls.get(), [0; CheckedPlanCall::COUNT]);
+
+    let cyclic = CheckedPlanSpy::new(&rule);
+    let cyclic_plan = build_checked_generic_tree_pair_transform_group_plan(
+        &cyclic,
+        TreeTransformOperation::transpose([2], [1, 0]),
+        &structure,
+    )
+    .unwrap();
+    assert!(!cyclic_plan.specs().is_empty());
+    assert!(cyclic.call_count(CheckedPlanCall::F) > 0);
 
     let empty_cyclic = CheckedPlanSpy::new(&rule);
-    let error = build_checked_generic_tree_pair_transform_group_plan(
+    let empty_plan = build_checked_generic_tree_pair_transform_group_plan(
         &empty_cyclic,
         TreeTransformOperation::transpose([2], [1, 0]),
         &BlockStructure::empty(3),
     )
-    .unwrap_err();
-    assert!(matches!(
-        error,
-        CheckedGenericPlanError::Operation(OperationError::UnsupportedTreeTransformScope { .. })
-    ));
+    .unwrap();
+    assert!(empty_plan.specs().is_empty());
     assert_eq!(empty_cyclic.calls.get(), [0; CheckedPlanCall::COUNT]);
 
     let second_tree_fails_structure = CheckedPlanSpy::new(&rule);

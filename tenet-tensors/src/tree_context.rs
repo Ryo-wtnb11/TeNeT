@@ -27,7 +27,7 @@ use tenet_operations::OperationError;
 use tenet_operations::TreeTransformScalar;
 use tenet_operations::{DenseTreeTransformOperations, TreeTransformBackend};
 
-/// Applies one checked Generic permute or braid and returns its owned output.
+/// Applies one checked Generic permute, braid, or transpose and returns its owned output.
 ///
 /// Provider queries and replay compilation finish against an uninterned
 /// destination preview. The destination structure becomes visible only after
