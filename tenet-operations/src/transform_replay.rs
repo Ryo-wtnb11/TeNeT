@@ -1030,6 +1030,69 @@ mod inactive_destination_tests {
     }
 
     #[test]
+    fn profiled_multi_attributes_recoupling_to_dense_gemm() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            let (dst_structure, src_structure, structure) = identity_multi_fixture();
+            for threads in [1, 2] {
+                let mut dst = vec![f64::NAN; 3];
+                let mut profile = TreeTransformReplayProfile::default();
+                tree_transform_structure_overwrite_with_structural_recoupling_raw_profiled(
+                    &mut StridedHostKernelAdapter::default(),
+                    &mut DefaultDenseExecutor::new(),
+                    &mut TreeTransformWorkspace::default(),
+                    &structure,
+                    &dst_structure,
+                    &src_structure,
+                    &mut dst,
+                    &[3.0, 4.0],
+                    2.0,
+                    threads,
+                    &mut profile,
+                )
+                .unwrap();
+
+                assert_eq!(dst, [6.0, 8.0, 0.0]);
+                assert_eq!(profile.multi_blocks, 1);
+                assert!(profile.multi_dense_matmul_call > Duration::ZERO);
+                assert_eq!(profile.multi_scalar_recoupling, Duration::ZERO);
+                assert_eq!(
+                    profile.multi_matmul_total,
+                    profile.multi_dense_view_setup
+                        + profile.multi_dense_matmul_call
+                        + profile.multi_scalar_recoupling
+                );
+            }
+
+            let (mut dst, src, structure) = fixture();
+            let mut profile = TreeTransformReplayProfile::default();
+            tree_transform_structure_with_structural_recoupling_raw_profiled(
+                &mut StridedHostKernelAdapter::default(),
+                &mut DefaultDenseExecutor::new(),
+                &mut TreeTransformWorkspace::default(),
+                &structure,
+                &Arc::clone(dst.structure()),
+                &Arc::clone(src.structure()),
+                dst.data_mut(),
+                src.data(),
+                1.0,
+                0.0,
+                2,
+                &mut profile,
+            )
+            .unwrap();
+            assert_eq!(profile.multi_blocks, 0);
+            assert_eq!(profile.multi_matmul_total, Duration::ZERO);
+            assert_eq!(profile.multi_dense_view_setup, Duration::ZERO);
+            assert_eq!(profile.multi_dense_matmul_call, Duration::ZERO);
+            assert_eq!(profile.multi_scalar_recoupling, Duration::ZERO);
+        });
+    }
+
+    #[test]
     fn overwrite_threaded_single_multi_and_storage_multi_ignore_destination_bits() {
         let src_structure = Arc::new(
             BlockStructure::packed_column_major(1, [vec![1], vec![1], vec![1], vec![1]]).unwrap(),
@@ -3247,7 +3310,7 @@ where
         }
         if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
             let elapsed = start.elapsed();
-            profile.multi_scalar_recoupling += elapsed;
+            profile.multi_dense_matmul_call += elapsed;
             profile.multi_matmul_total += elapsed;
         }
 
@@ -3873,7 +3936,7 @@ where
         )?;
         if let (Some(profile), Some(start)) = (profile.as_deref_mut(), start) {
             let elapsed = start.elapsed();
-            profile.multi_scalar_recoupling += elapsed;
+            profile.multi_dense_matmul_call += elapsed;
             profile.multi_matmul_total += elapsed;
         }
 
