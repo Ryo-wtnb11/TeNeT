@@ -120,7 +120,8 @@
 //! [`TensorMap::is_unitary`], [`TensorMap::is_posdef`],
 //! [`TensorMap::project_hermitian`], [`TensorMap::project_antihermitian`]) and
 //! — with issue #576 — the **matrix functions** ([`TensorMap::exp`],
-//! [`TensorMap::inv`], [`TensorMap::pinv`], [`TensorMap::sqrt`]) and — with
+//! [`TensorMap::inv`], [`TensorMap::pinv`], [`TensorMap::sqrt`],
+//! [`TensorMap::solve`]) and — with
 //! issue #580 — the **typed inspection, scalar and conversion group**
 //! ([`TensorMap::rank`], [`TensorMap::codomain_rank`],
 //! [`TensorMap::domain_rank`] and their TensorKit aliases `numout` / `numin` /
@@ -157,10 +158,10 @@
 //! with a decision behind them rather than a queue position:
 //!
 //! - The **rest of the matrix-function family** — the trigonometric and
-//!   hyperbolic members, `log`, `sylvester`, the `\` and `/` solves and integer
+//!   hyperbolic members, `log`, `sylvester`, the `/` solve and integer
 //!   `^` — is out by decision, not by queue position (issue #576). Every one of
 //!   them is a spectral function or a solve over the same seams, so adding them
-//!   is mechanical; what is missing is a reason to. The four that landed are
+//!   is mechanical; what is missing is a reason to. The five that landed are
 //!   the ones the tensor-network algorithms in this repository actually call.
 //!   One capability gap still stands behind that line: general endomorphism
 //!   **`sqrt`** needs a Schur seam ([`TensorMap::sqrt`] is the diagonal-bond
@@ -3484,6 +3485,56 @@ where
         Ok(self.wrap_bound_factor(out))
     }
 
+    /// Left solve `self \ rhs`, for `self : V <- W` and `rhs : V <- U`.
+    ///
+    /// Returns `X : W <- U` satisfying `self * X = rhs`. Dense storage calls
+    /// the backend solve once per nonempty coupled sector; a compact diagonal
+    /// divisor stays on the existing elementwise-reciprocal and bond-scaling
+    /// paths and is never materialized.
+    ///
+    /// The initial dense scope requires square nonsingular coupled-sector
+    /// blocks. Runtime, rule and codomain mismatches are rejected before
+    /// execution; singularity is a dense numerical-failure error.
+    pub fn solve(&self, rhs: &Self) -> Result<Self, Error> {
+        if !self.runtime.same_runtime(&rhs.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        if !self.same_rule(rhs) {
+            return Err(Error::RuleMismatch);
+        }
+        if self.body.space.space().homspace().codomain()
+            != rhs.body.space.space().homspace().codomain()
+        {
+            return Err(Error::InvalidArgument(
+                "solve requires equal divisor and right-hand-side codomains".to_string(),
+            ));
+        }
+        if self.spectrum().is_some() {
+            let inverse = self
+                .inv()
+                .map_err(|_| crate::error::singular_solve_error())?;
+            let output = inverse.compose(rhs)?;
+            let space = self
+                .body
+                .space
+                .derive_from_final_homspace(output.body.space.space().homspace().clone())?;
+            return Ok(Self {
+                runtime: self.runtime.clone(),
+                body: Arc::new(TypedTensorBody::with_shared_payload(
+                    space,
+                    Arc::clone(&output.body.data),
+                )),
+            });
+        }
+        let mut dense = self.runtime.lease_dense();
+        let out = tenet_matrixalgebra::solve_left_direct_dyn(
+            dense.dense(),
+            &self.bound_ref()?,
+            &rhs.bound_ref()?,
+        )?;
+        Ok(self.wrap_bound_factor(out))
+    }
+
     /// TensorKit 0.17 / MatrixAlgebraKit `pinv`: the Moore-Penrose
     /// pseudo-inverse `t⁺ = V S⁺ Uᴴ`, where `t = U S Vᴴ` is the compact SVD and
     /// `S⁺` inverts every singular value above the cutoff and sends the rest to
@@ -5401,6 +5452,55 @@ mod representation_gates {
         // One payload, however many handles reach it.
         assert_eq!(Arc::strong_count(&tensor.body.data), 1);
         assert_eq!(Arc::strong_count(&tensor.body), 2);
+    }
+
+    #[test]
+    fn compact_solve_keeps_the_divisor_provider_and_cold_dense_cache() {
+        // What: both compact routes inherit A's exact authority and never
+        // materialize A's diagonal payload.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let divisor_provider = Arc::new(Z2FusionRule);
+        let rhs_provider = Arc::new(Z2FusionRule);
+        let divisor_leg =
+            GradedSpace::try_new(Arc::clone(&divisor_provider), [(Z2Irrep::EVEN, 2)], false)
+                .unwrap();
+        let rhs_leg =
+            GradedSpace::try_new(Arc::clone(&rhs_provider), [(Z2Irrep::EVEN, 2)], false).unwrap();
+        let divisor = TensorMap::diagonal(
+            &runtime,
+            &divisor_leg,
+            [SectorSpectrum {
+                sector: Z2Irrep::EVEN,
+                values: vec![2.0, 4.0],
+            }],
+        )
+        .unwrap();
+        let compact_rhs = TensorMap::diagonal(
+            &runtime,
+            &rhs_leg,
+            [SectorSpectrum {
+                sector: Z2Irrep::EVEN,
+                values: vec![6.0, 20.0],
+            }],
+        )
+        .unwrap();
+        let dense_rhs =
+            TensorMap::from_block_fn(&runtime, [&rhs_leg], [&rhs_leg], |_, _| 1.0).unwrap();
+
+        let compact = divisor.solve(&compact_rhs).unwrap();
+        let dense = divisor.solve(&dense_rhs).unwrap();
+
+        assert!(Arc::ptr_eq(
+            compact.body.space.provider_arc(),
+            &divisor_provider
+        ));
+        assert!(Arc::ptr_eq(
+            dense.body.space.provider_arc(),
+            &divisor_provider
+        ));
+        assert!(compact.spectrum().is_some());
+        assert!(dense.spectrum().is_none());
+        assert!(divisor.body.dense_cache.get().is_none());
     }
 
     /// A small fermionic fixture whose codomain leg 0 carries only the even

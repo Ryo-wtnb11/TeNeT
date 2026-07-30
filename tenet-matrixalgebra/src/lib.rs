@@ -37,7 +37,9 @@ pub use factorize::{
     SpectrumMagnitude, SvdCompact, SvdCompactDyn, SvdFactorsDyn, SvdFull, SvdFullDyn, SvdTrunc,
     SvdTruncDyn, SvdTruncFactorsDyn,
 };
-pub use matrix_functions::{exp, exp_dyn, inv, inv_direct_dyn, inv_dyn, pinv, pinv_dyn};
+pub use matrix_functions::{
+    exp, exp_dyn, inv, inv_direct_dyn, inv_dyn, pinv, pinv_dyn, solve_left_direct_dyn,
+};
 pub use truncation::{
     select_truncation, Truncation, TruncationDecision, TruncationError, TruncationSpace,
     WeightedSpectrum,

@@ -6056,6 +6056,208 @@ fn inv_composes_to_the_identity() {
     assert_identity_matrices(&dense_sector_matrices(2, &identity));
 }
 
+#[test]
+fn solve_left_uses_one_direct_solve_per_sector_for_rectangular_rhs() {
+    // What: A \\ B accepts multiple RHS columns and never forms an inverse.
+    let divisor = u1_block_endomorphism(&[(0, 2, vec![2.0_f64, 0.0, 1.0, 3.0]), (1, 1, vec![4.0])]);
+    let rhs = u1_block_map(&[
+        (0, 2, 3, vec![4.0_f64, 6.0, 10.0, 12.0, 16.0, 18.0]),
+        (1, 1, 2, vec![28.0, 32.0]),
+    ]);
+    let divisor = bound_tensor(Arc::new(U1FusionRule), &divisor);
+    let rhs = bound_tensor(Arc::new(U1FusionRule), &rhs);
+    let mut dense = SolveCallSpy::default();
+
+    let solved = solve_left_direct_dyn(
+        &mut dense,
+        &divisor.as_ref().dynamic(),
+        &rhs.as_ref().dynamic(),
+    )
+    .unwrap();
+
+    let solved: BoundTensorMap<_, _, 1, 1> = typed_from_bound_factor(solved).unwrap();
+    let sectors = dense_sector_matrices(1, solved.tensor());
+    let even = sectors
+        .iter()
+        .find(|(sector, _, _, _)| *sector == U1Irrep::new(0).sector_id())
+        .unwrap();
+    let odd = sectors
+        .iter()
+        .find(|(sector, _, _, _)| *sector == U1Irrep::new(1).sector_id())
+        .unwrap();
+    assert_eq!((even.1, even.2), (2, 3));
+    assert_eq!(even.3, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    assert_eq!((odd.1, odd.2), (1, 2));
+    assert_eq!(odd.3, vec![7.0, 8.0]);
+    assert_eq!(dense.solve_calls, 2);
+}
+
+#[test]
+fn solve_left_preserves_complex_values_without_adjointing() {
+    // What: A \\ B is the ordinary complex linear solve, not a Hermitian route.
+    let a = [
+        Complex64::new(2.0, 1.0),
+        Complex64::new(0.0, 0.5),
+        Complex64::new(1.0, -1.0),
+        Complex64::new(3.0, 0.0),
+    ];
+    let expected = [
+        Complex64::new(1.0, 2.0),
+        Complex64::new(-1.0, 0.5),
+        Complex64::new(0.25, -0.75),
+        Complex64::new(2.0, 1.0),
+    ];
+    let mut b = vec![Complex64::zero(); 4];
+    for col in 0..2 {
+        for row in 0..2 {
+            b[row + 2 * col] = a[row] * expected[2 * col] + a[row + 2] * expected[1 + 2 * col];
+        }
+    }
+    let divisor = u1_block_endomorphism(&[(0, 2, a.to_vec())]);
+    let rhs = u1_block_map(&[(0, 2, 2, b)]);
+    let divisor = bound_tensor(Arc::new(U1FusionRule), &divisor);
+    let rhs = bound_tensor(Arc::new(U1FusionRule), &rhs);
+    let mut dense = SolveCallSpy::default();
+
+    let solved = solve_left_direct_dyn(
+        &mut dense,
+        &divisor.as_ref().dynamic(),
+        &rhs.as_ref().dynamic(),
+    )
+    .unwrap();
+
+    for (&actual, expected) in solved.data().iter().zip(expected) {
+        assert!((actual - expected).norm() < 1.0e-12);
+    }
+    assert_eq!(dense.solve_calls, 1);
+}
+
+#[test]
+fn solve_left_discards_an_output_when_a_later_sector_fails() {
+    // What: an earlier successful sector cannot publish a partial solution.
+    let divisor = u1_block_endomorphism(&[(0, 1, vec![2.0_f64]), (1, 1, vec![3.0])]);
+    let rhs = u1_block_map(&[(0, 1, 1, vec![4.0_f64]), (1, 1, 1, vec![9.0_f64])]);
+    let divisor = bound_tensor(Arc::new(U1FusionRule), &divisor);
+    let rhs = bound_tensor(Arc::new(U1FusionRule), &rhs);
+    let mut dense = FailSecondSolve::default();
+
+    let error = solve_left_direct_dyn(
+        &mut dense,
+        &divisor.as_ref().dynamic(),
+        &rhs.as_ref().dynamic(),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        OperationError::Dense(DenseError::Backend {
+            op: "solve_into",
+            ..
+        })
+    ));
+    assert_eq!(dense.solve_calls, 2);
+}
+
+#[test]
+fn solve_left_validates_spaces_before_backend_execution() {
+    // What: codomain mismatch and a rectangular divisor are structural
+    // failures, not backend calls.
+    let divisor = u1_block_endomorphism(&[(0, 2, vec![1.0_f64, 0.0, 0.0, 1.0])]);
+    let wrong_codomain = u1_cross_space_map(&[(0, 3)], &[(0, 1)]);
+    let divisor = bound_tensor(Arc::new(U1FusionRule), &divisor);
+    let wrong_codomain = bound_tensor(Arc::new(U1FusionRule), &wrong_codomain);
+    let mut dense = RejectExecutorCalls;
+    let error = solve_left_direct_dyn(
+        &mut dense,
+        &divisor.as_ref().dynamic(),
+        &wrong_codomain.as_ref().dynamic(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        OperationError::UnsupportedTensorContractScope {
+            message: "solve requires equal divisor and right-hand-side codomains"
+        }
+    ));
+
+    let rectangular = u1_cross_space_map(&[(0, 2)], &[(0, 3)]);
+    let rhs = u1_cross_space_map(&[(0, 2)], &[(0, 1)]);
+    let rectangular = bound_tensor(Arc::new(U1FusionRule), &rectangular);
+    let rhs = bound_tensor(Arc::new(U1FusionRule), &rhs);
+    let error = solve_left_direct_dyn(
+        &mut dense,
+        &rectangular.as_ref().dynamic(),
+        &rhs.as_ref().dynamic(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        OperationError::UnsupportedTensorContractScope {
+            message: "solve requires an isomorphic divisor codomain and domain"
+        }
+    ));
+
+    let sector_missing_from_domain = u1_cross_space_map(&[(0, 1), (1, 1)], &[(0, 1)]);
+    let rhs = u1_cross_space_map(&[(0, 1), (1, 1)], &[(0, 1)]);
+    let sector_missing_from_domain =
+        bound_tensor(Arc::new(U1FusionRule), &sector_missing_from_domain);
+    let rhs = bound_tensor(Arc::new(U1FusionRule), &rhs);
+    let error = solve_left_direct_dyn(
+        &mut dense,
+        &sector_missing_from_domain.as_ref().dynamic(),
+        &rhs.as_ref().dynamic(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        OperationError::UnsupportedTensorContractScope {
+            message: "solve requires an isomorphic divisor codomain and domain"
+        }
+    ));
+}
+
+#[test]
+fn solve_left_propagates_singular_and_unsupported_backend_errors() {
+    // What: exact singularity and missing solve capability retain their stable
+    // dense error classes; neither falls back to SVD or pinv.
+    let divisor = u1_block_endomorphism(&[(0, 2, vec![1.0_f64, 0.0, 0.0, 0.0])]);
+    let rhs = u1_block_map(&[(0, 2, 1, vec![1.0_f64, 1.0])]);
+    let divisor = bound_tensor(Arc::new(U1FusionRule), &divisor);
+    let rhs = bound_tensor(Arc::new(U1FusionRule), &rhs);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let error = solve_left_direct_dyn(
+        &mut dense,
+        &divisor.as_ref().dynamic(),
+        &rhs.as_ref().dynamic(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        OperationError::Dense(DenseError::NumericalFailure {
+            op: "solve_into",
+            ..
+        })
+    ));
+
+    let divisor = u1_block_endomorphism(&[(0, 1, vec![2.0_f64])]);
+    let rhs = u1_block_map(&[(0, 1, 1, vec![1.0_f64])]);
+    let divisor = bound_tensor(Arc::new(U1FusionRule), &divisor);
+    let rhs = bound_tensor(Arc::new(U1FusionRule), &rhs);
+    let error = solve_left_direct_dyn(
+        &mut RejectExecutorCalls,
+        &divisor.as_ref().dynamic(),
+        &rhs.as_ref().dynamic(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        OperationError::Dense(DenseError::Unsupported {
+            op: "solve_into",
+            ..
+        })
+    ));
+}
+
 fn u1_cross_space_map(codomain: &[(i32, usize)], domain: &[(i32, usize)]) -> TensorMap<f64, 1, 1> {
     let codomain_leg = SectorLeg::new(
         codomain
@@ -6143,6 +6345,62 @@ where
         })
         .collect::<Vec<_>>();
     block_endomorphism(&U1FusionRule, &blocks)
+}
+
+fn u1_block_map<D>(blocks: &[(i32, usize, usize, Vec<D>)]) -> TensorMap<D, 1, 1>
+where
+    D: Copy + Zero,
+{
+    let codomain = SectorLeg::new(
+        blocks
+            .iter()
+            .map(|(charge, rows, _, _)| (U1Irrep::new(*charge).sector_id(), *rows)),
+        false,
+    );
+    let domain = SectorLeg::new(
+        blocks
+            .iter()
+            .map(|(charge, _, cols, _)| (U1Irrep::new(*charge).sector_id(), *cols)),
+        false,
+    );
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([codomain]),
+        FusionProductSpace::new([domain]),
+    );
+    let rows = blocks.iter().map(|(_, rows, _, _)| rows).sum();
+    let cols = blocks.iter().map(|(_, _, cols, _)| cols).sum();
+    let shapes = homspace
+        .fusion_tree_keys(&U1FusionRule)
+        .iter()
+        .map(|key| {
+            let coupled = key.codomain_tree().coupled();
+            let (_, rows, cols, data) = blocks
+                .iter()
+                .find(|(charge, _, _, _)| U1Irrep::new(*charge).sector_id() == coupled)
+                .unwrap();
+            assert_eq!(data.len(), rows * cols);
+            vec![*rows, *cols]
+        })
+        .collect::<Vec<_>>();
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<1, 1>::from_dims([rows], [cols]).unwrap(),
+        homspace,
+        &U1FusionRule,
+        shapes,
+    )
+    .unwrap();
+    TensorMap::from_block_fn_with_fusion_space(space, D::zero(), |key, indices| {
+        let BlockKey::FusionTree(tree) = key else {
+            return D::zero();
+        };
+        let coupled = tree.codomain_tree().coupled();
+        let (_, rows, _, data) = blocks
+            .iter()
+            .find(|(charge, _, _, _)| U1Irrep::new(*charge).sector_id() == coupled)
+            .unwrap();
+        data[indices[0] + rows * indices[1]]
+    })
+    .unwrap()
 }
 
 /// `1 <- 1` endomorphism with one fusion tree per coupled sector, on any rule.

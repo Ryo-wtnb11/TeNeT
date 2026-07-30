@@ -4811,6 +4811,29 @@ fn z2_invertible_pair(
     )
 }
 
+fn z2_complex_invertible_pair(
+    runtime: &Runtime,
+) -> (
+    tenet::prelude::Tensor,
+    TensorMap<tenet::core::Z2FusionRule, Complex64>,
+) {
+    let (erased, typed) = z2_complex_endo_oracle_pair(runtime);
+    let erased_id =
+        tenet::prelude::Tensor::id(runtime, tenet::prelude::Dtype::C64, &erased.domain_spaces())
+            .unwrap();
+    let typed_id = TensorMap::<_, Complex64>::id(runtime, &typed.domain()).unwrap();
+    (
+        erased.add(&erased_id, 1.0, 100.0).unwrap(),
+        typed
+            .add(
+                &typed_id,
+                Complex64::new(1.0, 0.0),
+                Complex64::new(100.0, 0.0),
+            )
+            .unwrap(),
+    )
+}
+
 #[test]
 fn typed_and_erased_inv_agree_byte_for_byte() {
     // What: the typed `inv` is the erased one — the same per-sector dense solve
@@ -4834,6 +4857,202 @@ fn typed_and_erased_inv_agree_byte_for_byte() {
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f64, f64::max);
     assert!(error < 1e-9, "t * inv(t) is not the identity: {error}");
+}
+
+#[test]
+fn typed_and_erased_left_solve_agree_and_recover_the_rhs_map() {
+    // What: both public facades expose TensorKit's A \\ B space semantics and
+    // route f64 through the same direct sector solve.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased_a, typed_a) = z2_invertible_pair(&runtime);
+    let (erased_x, typed_x) = z2_endo_oracle_pair(&runtime);
+    let erased_b = erased_a.compose(&erased_x).unwrap();
+    let typed_b = typed_a.compose(&typed_x).unwrap();
+
+    let erased_solved = erased_a.solve(&erased_b).unwrap();
+    let typed_solved = typed_a.solve(&typed_b).unwrap();
+
+    assert_eq!(typed_solved.data(), erased_solved.data());
+    let residual = typed_a
+        .compose(&typed_solved)
+        .unwrap()
+        .add(&typed_b, 1.0, -1.0)
+        .unwrap()
+        .norm()
+        .unwrap()
+        / typed_b.norm().unwrap().max(1.0);
+    assert!(residual < 1.0e-12, "relative solve residual: {residual}");
+    assert_same_legs(&typed_solved.codomain(), &typed_a.domain());
+    assert_same_legs(&typed_solved.domain(), &typed_b.domain());
+}
+
+#[test]
+fn typed_and_erased_complex_left_solve_preserve_phase() {
+    // What: c64 uses the same non-Hermitian direct solve on both facades.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased_a, typed_a) = z2_complex_invertible_pair(&runtime);
+    let (erased_x, typed_x) = z2_complex_endo_oracle_pair(&runtime);
+    let erased_b = erased_a.compose(&erased_x).unwrap();
+    let typed_b = typed_a.compose(&typed_x).unwrap();
+
+    let erased_solved = erased_a.solve(&erased_b).unwrap();
+    let typed_solved = typed_a.solve(&typed_b).unwrap();
+
+    for (&typed, &erased) in typed_solved.data().iter().zip(erased_solved.data_c64()) {
+        assert!((typed - erased).norm() < 1.0e-12);
+    }
+    let residual = typed_a
+        .compose(&typed_solved)
+        .unwrap()
+        .add(
+            &typed_b,
+            Complex64::new(1.0, 0.0),
+            Complex64::new(-1.0, 0.0),
+        )
+        .unwrap()
+        .norm()
+        .unwrap()
+        / typed_b.norm().unwrap().max(1.0);
+    assert!(residual < 1.0e-12, "relative solve residual: {residual}");
+}
+
+#[test]
+fn compact_left_solve_stays_elementwise_and_reports_singular_like_dense() {
+    // What: compact/compact uses reciprocal-plus-product without a dense
+    // divisor, and exact zero uses the dense solve's numerical-failure class.
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+    let erased_s = erased
+        .svd_trunc(&tenet::prelude::Truncation::Rank(2))
+        .unwrap()
+        .s;
+    let typed_s = typed.svd_trunc(&Truncation::Rank(2)).unwrap().s;
+
+    let erased_solved = erased_s.solve(&erased_s.scale(2.0).unwrap()).unwrap();
+    let typed_solved = typed_s.solve(&typed_s.scale(2.0)).unwrap();
+    assert_eq!(typed_solved.data(), erased_solved.data());
+
+    let erased_codomain = erased_s.codomain_spaces();
+    let erased_domain = erased_s.domain_spaces();
+    let erased_dense = tenet::prelude::Tensor::from_block_fn(
+        &runtime,
+        erased_codomain.iter(),
+        erased_domain.iter(),
+        |_, _| 1.0,
+    )
+    .unwrap();
+    let typed_codomain = typed_s.codomain();
+    let typed_domain = typed_s.domain();
+    let typed_dense = TensorMap::from_block_fn(
+        &runtime,
+        typed_codomain.iter(),
+        typed_domain.iter(),
+        |_, _| 1.0,
+    )
+    .unwrap();
+    assert_eq!(
+        typed_s.solve(&typed_dense).unwrap().data(),
+        erased_s.solve(&erased_dense).unwrap().data()
+    );
+
+    let erased_zero = erased_s.scale(0.0).unwrap();
+    let typed_zero = typed_s.scale(0.0);
+    assert!(matches!(
+        erased_zero.solve(&erased_zero),
+        Err(tenet::prelude::Error::Operation(error))
+            if matches!(
+                error.as_ref(),
+                tenet::operations::OperationError::Dense(
+                    tenet::dense::DenseError::NumericalFailure {
+                        op: "solve_into",
+                        ..
+                    }
+                )
+            )
+    ));
+    assert!(matches!(
+        typed_zero.solve(&typed_zero),
+        Err(tenet::typed::Error::Operation(error))
+            if matches!(
+                error.as_ref(),
+                tenet::operations::OperationError::Dense(
+                    tenet::dense::DenseError::NumericalFailure {
+                        op: "solve_into",
+                        ..
+                    }
+                )
+            )
+    ));
+}
+
+#[test]
+fn left_solve_rejects_world_space_shape_and_singularity_as_typed_errors() {
+    // What: public validation keeps caller mistakes separate from numerical
+    // failure, and never publishes a partial tensor.
+    let _guard = cache_lock();
+    let rt = runtime();
+    let other_runtime = runtime();
+    let (erased_a, typed_a) = z2_invertible_pair(&rt);
+    let (erased_elsewhere, typed_elsewhere) = z2_endo_oracle_pair(&other_runtime);
+    assert!(matches!(
+        erased_a.solve(&erased_elsewhere),
+        Err(tenet::prelude::Error::RuntimeMismatch)
+    ));
+    assert!(matches!(
+        typed_a.solve(&typed_elsewhere),
+        Err(tenet::typed::Error::RuntimeMismatch)
+    ));
+
+    let (erased_wrong_codomain, typed_wrong_codomain) = z2_oracle_pair_split(&rt, 2);
+    assert!(matches!(
+        erased_a.solve(&erased_wrong_codomain),
+        Err(tenet::prelude::Error::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        typed_a.solve(&typed_wrong_codomain),
+        Err(tenet::typed::Error::InvalidArgument(_))
+    ));
+
+    assert!(matches!(
+        erased_wrong_codomain.solve(&erased_wrong_codomain),
+        Err(tenet::prelude::Error::Operation(_))
+    ));
+    assert!(matches!(
+        typed_wrong_codomain.solve(&typed_wrong_codomain),
+        Err(tenet::typed::Error::Operation(_))
+    ));
+
+    let erased_singular = erased_a.scale(0.0).unwrap();
+    let typed_singular = typed_a.scale(0.0);
+    assert!(matches!(
+        erased_singular.solve(&erased_a),
+        Err(tenet::prelude::Error::Operation(error))
+            if matches!(
+                error.as_ref(),
+                tenet::operations::OperationError::Dense(
+                    tenet::dense::DenseError::NumericalFailure {
+                        op: "solve_into",
+                        ..
+                    }
+                )
+            )
+    ));
+    assert!(matches!(
+        typed_singular.solve(&typed_a),
+        Err(tenet::typed::Error::Operation(error))
+            if matches!(
+                error.as_ref(),
+                tenet::operations::OperationError::Dense(
+                    tenet::dense::DenseError::NumericalFailure {
+                        op: "solve_into",
+                        ..
+                    }
+                )
+            )
+    ));
 }
 
 #[test]

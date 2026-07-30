@@ -3458,6 +3458,22 @@ macro_rules! with_bound_multiplicity_free {
             }
         }
     };
+    ($left:expr, $right:expr, $lhs:ident, $rhs:ident, $body:expr) => {
+        match ($left.as_ref(), $right.as_ref()) {
+            (UserBoundSpace::U1($lhs), UserBoundSpace::U1($rhs)) => $body,
+            (UserBoundSpace::CU1($lhs), UserBoundSpace::CU1($rhs)) => $body,
+            (UserBoundSpace::Z2($lhs), UserBoundSpace::Z2($rhs)) => $body,
+            (UserBoundSpace::ZN($lhs), UserBoundSpace::ZN($rhs)) => $body,
+            (UserBoundSpace::FZ2($lhs), UserBoundSpace::FZ2($rhs)) => $body,
+            (UserBoundSpace::SU2($lhs), UserBoundSpace::SU2($rhs)) => $body,
+            (UserBoundSpace::U1FZ2($lhs), UserBoundSpace::U1FZ2($rhs)) => $body,
+            (UserBoundSpace::FZ2U1SU2($lhs), UserBoundSpace::FZ2U1SU2($rhs)) => $body,
+            (UserBoundSpace::Su3(_), UserBoundSpace::Su3(_)) => {
+                unreachable!("generic provider uses the dedicated solve path")
+            }
+            _ => unreachable!("same rule identity implies the same built-in provider variant"),
+        }
+    };
 }
 
 /// Static dispatch from the tensor's sole bound authority. Why not rebuild a
@@ -9390,6 +9406,94 @@ impl Tensor {
         })
     }
 
+    /// Left solve `self \ rhs`, for `self : V <- W` and `rhs : V <- U`.
+    ///
+    /// Returns `X : W <- U` satisfying `self * X = rhs`. Dense storage calls
+    /// the backend solve once per nonempty coupled sector; a compact diagonal
+    /// divisor stays on the existing elementwise-reciprocal and bond-scaling
+    /// paths and is never materialized.
+    ///
+    /// The initial dense scope requires square nonsingular coupled-sector
+    /// blocks. World and codomain mismatches are rejected before execution;
+    /// singularity is a dense numerical-failure error. Dense SU(3) and device
+    /// payloads retain their explicit unsupported boundaries.
+    pub fn solve(&self, rhs: &Self) -> Result<Self, Error> {
+        self.check_same_world(rhs)?;
+        if self.metadata().codomain() != rhs.metadata().codomain() {
+            return Err(Error::InvalidArgument(
+                "solve requires equal divisor and right-hand-side codomains".to_string(),
+            ));
+        }
+        if self.is_adjoint_view() || rhs.is_adjoint_view() {
+            let divisor = if self.is_adjoint_view() {
+                self.materialized_tensor()?
+            } else {
+                self.clone()
+            };
+            let rhs = if rhs.is_adjoint_view() {
+                rhs.materialized_tensor()?
+            } else {
+                rhs.clone()
+            };
+            return divisor.solve(&rhs);
+        }
+        if matches!(self.stored_data(), Data::Diagonal(_)) {
+            let inverse = self
+                .inv()
+                .map_err(|_| crate::error::singular_solve_error())?;
+            return self.rebind_compact_solve_output(inverse.compose(rhs)?);
+        }
+        self.reject_unwired_su3("Tensor::solve")?;
+        match (self.coupled_data()?, rhs.coupled_data()?) {
+            (Data::F64(divisor), Data::F64(rhs_data)) => self.solve_impl(rhs, divisor, rhs_data),
+            (Data::C64(divisor), Data::C64(rhs_data)) => self.solve_impl(rhs, divisor, rhs_data),
+            (Data::Diagonal(_), _) | (_, Data::Diagonal(_)) => {
+                unreachable!("coupled_data materializes compact diagonal storage")
+            }
+            #[cfg(feature = "cuda")]
+            (Data::CudaF64(_), _) | (_, Data::CudaF64(_)) => {
+                Err(device_unsupported("Tensor::solve"))
+            }
+            _ => Err(Error::DtypeMismatch),
+        }
+    }
+
+    fn solve_impl<D: UserScalar>(
+        &self,
+        rhs: &Self,
+        divisor_data: &[D],
+        rhs_data: &[D],
+    ) -> Result<Self, Error> {
+        let mut dense = self.rt.lease_dense();
+        with_bound_multiplicity_free!(
+            self.ordinary_body().space,
+            rhs.ordinary_body().space,
+            divisor_bound,
+            rhs_bound,
+            {
+                let out = tenet_matrixalgebra::solve_left_direct_dyn(
+                    dense.dense(),
+                    &BoundDynamicTensorRef::try_new(divisor_bound, divisor_data)?,
+                    &BoundDynamicTensorRef::try_new(rhs_bound, rhs_data)?,
+                )?;
+                self.from_bound_factor(out)
+            }
+        )
+    }
+
+    fn rebind_compact_solve_output(&self, output: Self) -> Result<Self, Error> {
+        let homspace = output.ordinary_body().space.homspace().clone();
+        with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
+            let space = bound.derive_from_final_homspace(homspace)?;
+            let space = UserBoundSpace::from_bound(self.ordinary_body().space.as_ref(), space)?;
+            Ok(Self::owned(
+                self.rt.clone(),
+                Arc::new(space),
+                Arc::clone(&output.ordinary_body().data),
+            ))
+        })
+    }
+
     /// Moore-Penrose pseudo-inverse `t^+ = v s^+ u^H` (MatrixAlgebraKit
     /// `pinv`) with an `rcond * sigma_max` cutoff on the singular values.
     ///
@@ -12251,6 +12355,23 @@ mod adjoint_parent_view_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn solve_rejects_a_lazy_codomain_mismatch_before_materialization() {
+        // What: TensorKit checks the logical spaces before block execution;
+        // a doomed solve must not publish an adjoint body cache.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let left = Space::u1([(0, 2)]);
+        let right = Space::u1([(0, 3)]);
+        let parent =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&left], [&right], 666_050).unwrap();
+        let lazy = parent.adjoint().unwrap();
+        let rhs = Tensor::rand_with_seed(&runtime, Dtype::F64, [&left], [&left], 666_051).unwrap();
+
+        assert!(matches!(lazy.solve(&rhs), Err(Error::InvalidArgument(_))));
+        assert!(!lazy.has_cached_materialization());
+        assert_eq!(lazy.adjoint_body_builds(), 0);
     }
 
     #[test]

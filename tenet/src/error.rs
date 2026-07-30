@@ -3,6 +3,7 @@
 use std::fmt;
 
 use tenet_core::{CoreError, FusionAlgebraError};
+use tenet_dense::{DenseBackend, DenseError};
 use tenet_matrixalgebra::TruncationError;
 use tenet_tensors::OperationError;
 
@@ -130,4 +131,13 @@ impl From<FusionAlgebraError> for Error {
     fn from(err: FusionAlgebraError) -> Self {
         Self::FusionAlgebra(Box::new(err))
     }
+}
+
+pub(crate) fn singular_solve_error() -> Error {
+    OperationError::Dense(DenseError::NumericalFailure {
+        backend: DenseBackend::Tenferro,
+        op: "solve_into",
+        message: "singular compact diagonal divisor".to_string(),
+    })
+    .into()
 }

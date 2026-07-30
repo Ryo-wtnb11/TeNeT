@@ -5553,6 +5553,13 @@ struct InverseMatrixRoute {
 }
 
 #[derive(Clone, Copy)]
+struct SolveLeftSectorRoute {
+    divisor: usize,
+    rhs: usize,
+    output: usize,
+}
+
+#[derive(Clone, Copy)]
 struct InverseBasisExtent {
     source_offset: usize,
     output_offset: usize,
@@ -5670,6 +5677,188 @@ where
         source_space.nin(),
         source_space.nout(),
     )
+}
+
+pub(crate) fn solve_left_by_sector_dyn<E, R, D>(
+    dense: &mut E,
+    divisor: &BoundDynamicTensorRef<'_, R, D>,
+    rhs: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let divisor_space = divisor.space().space();
+    let rhs_space = rhs.space().space();
+    let expected = divisor.space().provider().rule_identity();
+    let actual = rhs.space().provider().rule_identity();
+    if expected != actual {
+        return Err(OperationError::from_core_preserving_context(
+            CoreError::FusionRuleMismatch { expected, actual },
+        ));
+    }
+    if divisor_space.homspace().codomain() != rhs_space.homspace().codomain() {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "solve requires equal divisor and right-hand-side codomains",
+        });
+    }
+    if !divisor.space().codomain_isomorphic_to_domain()? {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "solve requires an isomorphic divisor codomain and domain",
+        });
+    }
+
+    let output_homspace = FusionTreeHomSpace::new(
+        divisor_space.homspace().domain().clone(),
+        rhs_space.homspace().domain().clone(),
+    );
+    let output_space = divisor
+        .space()
+        .derive_from_final_homspace(output_homspace)?;
+    let mut output_data = vec![D::zero(); output_space.space().required_len()?];
+
+    let divisor_regions = checked_sector_regions(divisor_space.structure(), divisor_space.nout())?
+        .ok_or(OperationError::UnsupportedTensorContractScope {
+            message: "solve requires canonical coupled-sector divisor storage",
+        })?;
+    for region in divisor_regions.iter() {
+        validate_region_range(region, divisor.data().len())?;
+        if region.rows() != region.cols() {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "solve coupled-sector divisor matrices must be square",
+            });
+        }
+    }
+    let rhs_regions = checked_sector_regions(rhs_space.structure(), rhs_space.nout())?.ok_or(
+        OperationError::UnsupportedTensorContractScope {
+            message: "solve requires canonical coupled-sector right-hand-side storage",
+        },
+    )?;
+    let output_regions = checked_sector_regions(
+        output_space.space().structure(),
+        output_space.space().nout(),
+    )?
+    .expect("a freshly derived solve layout is canonical");
+    let routes = compile_solve_left_region_routes(
+        &divisor_regions,
+        &rhs_regions,
+        &output_regions,
+        divisor.data().len(),
+        rhs.data().len(),
+        output_data.len(),
+    )?;
+
+    for route in routes {
+        let divisor_region = &divisor_regions[route.divisor];
+        if divisor_region.rows() == 0 || output_regions[route.output].cols() == 0 {
+            continue;
+        }
+        solve_left_sector(
+            dense,
+            &divisor.data()[divisor_region.range()],
+            &rhs.data()[rhs_regions[route.rhs].range()],
+            &mut output_data[output_regions[route.output].range()],
+            divisor_region.rows(),
+            rhs_regions[route.rhs].cols(),
+        )?;
+    }
+
+    BoundDynFactor::from_bound(
+        output_space,
+        output_data,
+        divisor_space.nin(),
+        rhs_space.nin(),
+    )
+}
+
+fn compile_solve_left_region_routes(
+    divisor: &[CoupledSectorRegion],
+    rhs: &[CoupledSectorRegion],
+    output: &[CoupledSectorRegion],
+    divisor_len: usize,
+    rhs_len: usize,
+    output_len: usize,
+) -> Result<Vec<SolveLeftSectorRoute>, OperationError> {
+    let divisor_by_sector = sector_region_index_map(divisor)?;
+    let rhs_by_sector = sector_region_index_map(rhs)?;
+    let mut routes = Vec::with_capacity(output.len());
+    for (output_index, output_region) in output.iter().enumerate() {
+        let sector = output_region.coupled();
+        let divisor_index = divisor_by_sector.get(&sector).copied().ok_or(
+            OperationError::UnsupportedTensorContractScope {
+                message: "solve divisor is missing an output coupled sector",
+            },
+        )?;
+        let rhs_index = rhs_by_sector.get(&sector).copied().ok_or(
+            OperationError::UnsupportedTensorContractScope {
+                message: "solve right-hand side is missing an output coupled sector",
+            },
+        )?;
+        let divisor_region = &divisor[divisor_index];
+        let rhs_region = &rhs[rhs_index];
+        if divisor_region.rows() != divisor_region.cols()
+            || rhs_region.rows() != divisor_region.rows()
+            || output_region.rows() != divisor_region.cols()
+            || output_region.cols() != rhs_region.cols()
+        {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "solve coupled-sector matrix dimensions are incompatible",
+            });
+        }
+        if divisor_region.row_trees() != rhs_region.row_trees()
+            || divisor_region.col_trees() != output_region.row_trees()
+            || rhs_region.col_trees() != output_region.col_trees()
+        {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "solve coupled-sector tree bases are incompatible",
+            });
+        }
+        validate_region_range(divisor_region, divisor_len)?;
+        validate_region_range(rhs_region, rhs_len)?;
+        validate_region_range(output_region, output_len)?;
+        routes.push(SolveLeftSectorRoute {
+            divisor: divisor_index,
+            rhs: rhs_index,
+            output: output_index,
+        });
+    }
+    if rhs_by_sector.len() != routes.len() {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "solve right-hand side contains a sector absent from the output",
+        });
+    }
+    Ok(routes)
+}
+
+fn solve_left_sector<E, D>(
+    dense: &mut E,
+    divisor: &[D],
+    rhs: &[D],
+    output: &mut [D],
+    order: usize,
+    columns: usize,
+) -> Result<(), OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let divisor_shape = [order, order];
+    let rhs_shape = [order, columns];
+    let divisor_strides = [1, order];
+    let rhs_strides = [1, order];
+    let divisor = DenseView::new(divisor, &divisor_shape, &divisor_strides, 0)
+        .map_err(OperationError::Dense)?;
+    let rhs = DenseView::new(rhs, &rhs_shape, &rhs_strides, 0).map_err(OperationError::Dense)?;
+    let output =
+        DenseViewMut::new(output, &rhs_shape, &rhs_strides, 0).map_err(OperationError::Dense)?;
+    dense
+        .solve_into(
+            D::dense_read(divisor),
+            D::dense_read(rhs),
+            D::dense_write(output),
+        )
+        .map_err(OperationError::Dense)
 }
 
 /// Walks the coupled-sector matricization of an endomorphism and replaces each
