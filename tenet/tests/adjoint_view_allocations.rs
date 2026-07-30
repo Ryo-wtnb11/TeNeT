@@ -159,6 +159,42 @@ fn compact_svd_keeps_total_and_peak_below_materialized_baseline() {
 }
 
 #[test]
+fn truncated_svd_keeps_total_and_peak_below_materialized_baseline() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = Space::u1([(0, 64)]);
+    let parent = Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space], 603_675).unwrap();
+    let truncation = Truncation::rank(16);
+    black_box(parent.svd_trunc(&truncation).unwrap());
+
+    let input_bytes = std::mem::size_of_val(parent.try_data_c64().unwrap()) as u64;
+    let optimized = parent.adjoint().unwrap();
+    let baseline = parent.adjoint().unwrap();
+    let optimized_cost = measure_peak(|| {
+        black_box(optimized.svd_trunc(&truncation).unwrap());
+    });
+    let baseline_cost = measure_peak(|| {
+        black_box(baseline.try_data_c64().unwrap());
+        black_box(baseline.svd_trunc(&truncation).unwrap());
+    });
+    eprintln!("input={input_bytes} optimized={optimized_cost:?} materialized={baseline_cost:?}");
+
+    assert!(
+        optimized_cost.1 < baseline_cost.1,
+        "total bytes: optimized={optimized_cost:?}, baseline={baseline_cost:?}"
+    );
+    assert!(
+        optimized_cost.2 < baseline_cost.2,
+        "peak bytes: optimized={optimized_cost:?}, baseline={baseline_cost:?}"
+    );
+    assert!(
+        measure(|| {
+            black_box(optimized.try_data_c64().unwrap());
+        })
+        .1 >= input_bytes
+    );
+}
+
+#[test]
 fn lazy_scale_and_add_allocate_only_one_input_sized_payload() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let space = Space::u1((-4..=4).map(|charge| (charge, 8)));
