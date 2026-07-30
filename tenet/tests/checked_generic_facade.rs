@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use tenet::core::{
     BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericFusion,
-    CheckedGenericStructureError, FusionStyleKind, RuleIdentity, SectorId, SectorVec,
-    TypedSectorAdmission,
+    CheckedGenericRigidSymbols, CheckedGenericStructureError, FusionRule, FusionStyleKind,
+    GenericFArray, GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols, RuleIdentity,
+    SectorId, SectorVec, Su3FusionRule, TypedSectorAdmission,
 };
 use tenet::prelude::{Complex64, Runtime};
 use tenet::typed::{GenericTensorError, GradedSpace, TensorMap};
@@ -33,20 +34,28 @@ impl fmt::Display for ToyError {
 impl std::error::Error for ToyError {}
 
 struct CheckedOnlyToy {
+    rule: Su3FusionRule,
     identity_tag: u8,
     fail_algebra: AtomicBool,
     fail_decode: AtomicBool,
     algebra_queries: AtomicUsize,
+    coefficient_queries: AtomicUsize,
 }
 
 impl CheckedOnlyToy {
     fn new(identity_tag: u8) -> Self {
         Self {
+            rule: Su3FusionRule::new(),
             identity_tag,
             fail_algebra: AtomicBool::new(false),
             fail_decode: AtomicBool::new(false),
             algebra_queries: AtomicUsize::new(0),
+            coefficient_queries: AtomicUsize::new(0),
         }
+    }
+
+    fn x(&self) -> SectorId {
+        self.rule.sector_of(1, 1).unwrap()
     }
 }
 
@@ -58,22 +67,20 @@ impl CheckedGenericFusion for CheckedOnlyToy {
     }
 
     fn fusion_style(&self) -> FusionStyleKind {
-        FusionStyleKind::Generic
+        self.rule.fusion_style()
     }
 
     fn braiding_style(&self) -> BraidingStyleKind {
-        BraidingStyleKind::Bosonic
+        self.rule.braiding_style()
     }
 
     fn vacuum(&self) -> SectorId {
-        SectorId::new(0)
+        self.rule.vacuum()
     }
 
     fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
         self.algebra_queries.fetch_add(1, Ordering::Relaxed);
-        (sector.id() <= 1)
-            .then_some(sector)
-            .ok_or(ToyError::Algebra)
+        Ok(self.rule.dual(sector))
     }
 
     fn try_fusion_channels(
@@ -85,12 +92,7 @@ impl CheckedGenericFusion for CheckedOnlyToy {
         if self.fail_algebra.load(Ordering::Relaxed) {
             return Err(ToyError::Algebra);
         }
-        let coupled = match (left.id(), right.id()) {
-            (0, value) | (value, 0) if value <= 1 => value,
-            (1, 1) => 1,
-            _ => return Err(ToyError::Algebra),
-        };
-        Ok(core::iter::once(SectorId::new(coupled)).collect())
+        Ok(self.rule.fusion_channels(left, right))
     }
 
     fn try_fusion_channels_in_table(
@@ -98,7 +100,8 @@ impl CheckedGenericFusion for CheckedOnlyToy {
         left: SectorId,
         right: SectorId,
     ) -> Result<SectorVec, Self::Error> {
-        self.try_fusion_channels(left, right)
+        self.algebra_queries.fetch_add(1, Ordering::Relaxed);
+        Ok(self.rule.fusion_channels_in_table(left, right))
     }
 
     fn try_nsymbol(
@@ -108,12 +111,55 @@ impl CheckedGenericFusion for CheckedOnlyToy {
         coupled: SectorId,
     ) -> Result<usize, Self::Error> {
         self.algebra_queries.fetch_add(1, Ordering::Relaxed);
-        Ok(match (left.id(), right.id(), coupled.id()) {
-            (0, value, result) | (value, 0, result) if value <= 1 && result == value => 1,
-            (1, 1, 1) => 2,
-            (left, right, result) if left <= 1 && right <= 1 && result <= 1 => 0,
-            _ => return Err(ToyError::Algebra),
-        })
+        Ok(self.rule.nsymbol(left, right, coupled))
+    }
+}
+
+impl CheckedGenericRigidSymbols for CheckedOnlyToy {
+    type Scalar = f64;
+
+    fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
+        self.coefficient_queries.fetch_add(1, Ordering::Relaxed);
+        Ok(self.rule.sqrt_dim_scalar(sector))
+    }
+
+    fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
+        self.coefficient_queries.fetch_add(1, Ordering::Relaxed);
+        Ok(self.rule.inv_sqrt_dim_scalar(sector))
+    }
+
+    fn try_frobenius_schur_phase_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
+        self.coefficient_queries.fetch_add(1, Ordering::Relaxed);
+        Ok(self.rule.frobenius_schur_phase_scalar(sector))
+    }
+
+    fn try_f_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> Result<GenericFArray<f64>, Self::Error> {
+        self.coefficient_queries.fetch_add(1, Ordering::Relaxed);
+        if self.fail_algebra.load(Ordering::Relaxed) {
+            return Err(ToyError::Algebra);
+        }
+        Ok(self.rule.f_symbol_generic(a, b, c, d, e, f))
+    }
+
+    fn try_r_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+    ) -> Result<GenericRMatrix<f64>, Self::Error> {
+        self.coefficient_queries.fetch_add(1, Ordering::Relaxed);
+        if self.fail_algebra.load(Ordering::Relaxed) {
+            return Err(ToyError::Algebra);
+        }
+        Ok(self.rule.r_symbol_generic(a, b, c))
     }
 }
 
@@ -128,8 +174,8 @@ impl TypedSectorAdmission for CheckedOnlyToy {
 
     fn try_encode_label(&self, sector: &Self::Sector) -> Result<SectorId, Self::Error> {
         match sector {
-            Label::Vacuum => Ok(SectorId::new(0)),
-            Label::X => Ok(SectorId::new(1)),
+            Label::Vacuum => Ok(self.rule.vacuum()),
+            Label::X => Ok(self.x()),
             Label::Invalid => Err(ToyError::InvalidSector),
         }
     }
@@ -138,10 +184,12 @@ impl TypedSectorAdmission for CheckedOnlyToy {
         if self.fail_decode.load(Ordering::Relaxed) {
             return Err(ToyError::Decode);
         }
-        match sector.id() {
-            0 => Ok(Label::Vacuum),
-            1 => Ok(Label::X),
-            _ => Err(ToyError::InvalidSector),
+        if sector == self.rule.vacuum() {
+            Ok(Label::Vacuum)
+        } else if sector == self.x() {
+            Ok(Label::X)
+        } else {
+            Err(ToyError::InvalidSector)
         }
     }
 
@@ -179,6 +227,56 @@ fn checked_only_provider_uses_ordinary_typed_ownership_and_vertices() {
     let clone = tensor.clone();
     assert!(std::ptr::eq(clone.provider(), first.as_ref()));
     assert_eq!(clone.data().as_ptr(), tensor.data().as_ptr());
+}
+
+#[test]
+fn checked_only_multiplicity_two_transforms_keep_the_source_authority() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |trees, _| {
+            trees.codomain_vertices()[0].get() as f64
+        })
+        .unwrap();
+    let snapshot = |tensor: &TensorMap<CheckedOnlyToy, f64>| {
+        (0..tensor.block_count())
+            .map(|index| tensor.block_fusion_trees(index).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let source_snapshot = snapshot(&source);
+    provider.coefficient_queries.store(0, Ordering::Relaxed);
+    let error = source.braid(&[1, 0], &[2], &[0, 1]).unwrap_err();
+    assert!(matches!(error, GenericTensorError::Facade(_)));
+    assert_eq!(provider.coefficient_queries.load(Ordering::Relaxed), 0);
+
+    let permuted = source.permute(&[1, 0], &[2]).unwrap();
+    assert!(std::ptr::eq(permuted.provider(), provider.as_ref()));
+    let restored = permuted.permute(&[1, 0], &[2]).unwrap();
+    assert_eq!(snapshot(&restored), source_snapshot);
+    for (actual, expected) in restored.data().iter().zip(source.data()) {
+        assert!((actual - expected).abs() <= 1e-12);
+    }
+
+    let braided = source.braid(&[1, 0], &[2], &[0, 1, 2]).unwrap();
+    assert!(std::ptr::eq(braided.provider(), provider.as_ref()));
+
+    let repartitioned = source.repartition(1).unwrap();
+    assert!(std::ptr::eq(repartitioned.provider(), provider.as_ref()));
+    let restored = repartitioned.repartition(2).unwrap();
+    assert_eq!(snapshot(&restored), source_snapshot);
+    for (actual, expected) in restored.data().iter().zip(source.data()) {
+        assert!((actual - expected).abs() <= 1e-12);
+    }
+
+    provider.fail_algebra.store(true, Ordering::Relaxed);
+    let error = source.permute(&[1, 0], &[2]).unwrap_err();
+    assert!(matches!(
+        error,
+        GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Provider(
+            ToyError::Algebra
+        ))
+    ));
 }
 
 #[test]
@@ -247,7 +345,7 @@ fn failed_checked_admission_does_not_advance_the_runtime_stream() {
 
 #[cfg(feature = "racah-generated")]
 #[test]
-fn sun_adjoint_multiplicity_round_trips_semantic_labels_and_vertices() {
+fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() {
     use tenet::typed::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -273,5 +371,31 @@ fn sun_adjoint_multiplicity_round_trips_semantic_labels_and_vertices() {
             assert_eq!(tensor.block(index).unwrap().shape(), &[1, 1, 1]);
         }
         assert_eq!(tensor.data(), &[1.0, 2.0]);
+
+        let snapshot = |tensor: &TensorMap<SUNFusionRule, f64>| {
+            (0..tensor.block_count())
+                .map(|index| tensor.block_fusion_trees(index).unwrap())
+                .collect::<Vec<_>>()
+        };
+        let source_snapshot = snapshot(&tensor);
+        for restored in [
+            tensor
+                .permute(&[1, 0], &[2])
+                .unwrap()
+                .permute(&[1, 0], &[2])
+                .unwrap(),
+            tensor
+                .braid(&[0, 2], &[1], &[0, 1, 2])
+                .unwrap()
+                .braid(&[0, 2], &[1], &[0, 1, 2])
+                .unwrap(),
+            tensor.repartition(1).unwrap().repartition(2).unwrap(),
+        ] {
+            assert!(std::ptr::eq(restored.provider(), provider.as_ref()));
+            assert_eq!(snapshot(&restored), source_snapshot);
+            for (actual, expected) in restored.data().iter().zip(tensor.data()) {
+                assert!((actual - expected).abs() <= 1e-10);
+            }
+        }
     }
 }

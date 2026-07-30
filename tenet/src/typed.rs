@@ -169,11 +169,11 @@
 //!   [`crate::prelude::Tensor::exp`] carried a complexity-parity gap against
 //!   this one — it densified a diagonal payload where this facade has an
 //!   O(rank) arm — until issue #578 gave it the same arm.
-//! - **Outer multiplicity operations** remain outside this leaf. Checked
-//!   `Generic` providers can use the ordinary `GradedSpace` and `TensorMap`
-//!   constructors and read back complete vertex-labelled blocks, but transforms,
-//!   contractions, and factorizations still retain their multiplicity-free
-//!   bounds.
+//! - **Outer multiplicity contractions and factorizations** remain outside this
+//!   leaf. Checked `Generic` providers use the ordinary `permute`, `braid`, and
+//!   `repartition` methods through their retained provider authority, but
+//!   planar `transpose`, contractions, and factorizations still retain their
+//!   multiplicity-free bounds.
 //! - **Device placement** is absent for the same structural reason: the payload
 //!   is a `Vec<D>` host buffer by construction, and there is no dtype or
 //!   placement token to reconcile because `D` is a type parameter. Adding a
@@ -201,7 +201,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use tenet_core::CheckedGenericFusion;
 use tenet_core::{
     validate_unit_layout_correspondence_checked, BlockKey, BlockRef, CanonicalUnitFusionRule,
     CheckedFusionAlgebra, CheckedGenericAdmissionMode, CheckedGenericStructureError,
@@ -209,14 +208,16 @@ use tenet_core::{
     MultiplicityFreeRigidSymbols, MultiplicityIndex, ProductFusionRule, ProductSector,
     ProductSectorCodec, SectorLeg, TypedSectorAdmission, UnitLegInsertion,
 };
+use tenet_core::{CheckedGenericFusion, CheckedGenericRigidSymbols};
 use tenet_tensors::{
-    BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace, OutputAxisOrder,
-    TreeTransformOperation,
+    tree_transform_dyn_owned_checked_generic, BoundDynamicFusionMapSpace, BoundDynamicTensorRef,
+    DynamicFusionMapSpace, OutputAxisOrder, TreeTransformOperation,
 };
 
 pub use tenet_core::SectorCodec;
 #[cfg(feature = "racah-generated")]
 pub use tenet_core::{SUNFusionRule, SUNFusionRuleError};
+pub use tenet_tensors::CheckedGenericPlanError;
 
 /// Re-exported so `use tenet::typed::*` is self-sufficient apart from the
 /// provider: every fallible method here returns this error.
@@ -255,6 +256,8 @@ pub enum GenericTensorError<E> {
     Facade(Error),
     /// Checked Generic provider or structural admission failed.
     Structure(CheckedGenericStructureError<E>),
+    /// Checked Generic operation-plan construction or replay failed.
+    Plan(CheckedGenericPlanError<E>),
 }
 
 impl<E: core::fmt::Display> core::fmt::Display for GenericTensorError<E> {
@@ -262,6 +265,7 @@ impl<E: core::fmt::Display> core::fmt::Display for GenericTensorError<E> {
         match self {
             Self::Facade(error) => error.fmt(formatter),
             Self::Structure(error) => error.fmt(formatter),
+            Self::Plan(error) => error.fmt(formatter),
         }
     }
 }
@@ -271,6 +275,7 @@ impl<E: std::error::Error + 'static> std::error::Error for GenericTensorError<E>
         match self {
             Self::Facade(error) => Some(error),
             Self::Structure(error) => Some(error),
+            Self::Plan(error) => Some(error),
         }
     }
 }
@@ -284,6 +289,12 @@ impl<E> From<Error> for GenericTensorError<E> {
 impl<E> From<CheckedGenericStructureError<E>> for GenericTensorError<E> {
     fn from(error: CheckedGenericStructureError<E>) -> Self {
         Self::Structure(error)
+    }
+}
+
+impl<E> From<CheckedGenericPlanError<E>> for GenericTensorError<E> {
+    fn from(error: CheckedGenericPlanError<E>) -> Self {
+        Self::Plan(error)
     }
 }
 
@@ -311,6 +322,37 @@ where
         provider: Arc<R>,
         homspace: FusionTreeHomSpace,
     ) -> Result<BoundDynamicFusionMapSpace<R>, Self::FacadeError>;
+}
+
+/// Tensor-side tree-transform execution selected by a provider-owned mode.
+///
+/// Checked cyclic transpose deliberately remains outside this capability:
+///
+/// ```compile_fail
+/// use tenet::core::{
+///     CheckedGenericAdmissionMode, CheckedGenericRigidSymbols, TypedSectorAdmission,
+/// };
+/// use tenet::typed::TensorMap;
+///
+/// fn checked_transpose<R>(tensor: &TensorMap<R, f64>)
+/// where
+///     R: TypedSectorAdmission<Mode = CheckedGenericAdmissionMode>
+///         + CheckedGenericRigidSymbols<Scalar = f64>,
+/// {
+///     let _ = tensor.transpose();
+/// }
+/// ```
+#[doc(hidden)]
+pub trait TypedTensorTransformDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    /// Executes one admitted permutation, braid, or planar repartition.
+    fn tree_transform(
+        tensor: &TensorMap<R, D>,
+        operation: TreeTransformOperation,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
 }
 
 mod typed_admission_private {
@@ -378,6 +420,47 @@ where
     ) -> Result<BoundDynamicFusionMapSpace<R>, Self::FacadeError> {
         BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(provider, homspace)
             .map_err(Into::into)
+    }
+}
+
+impl<R, D> TypedTensorTransformDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn tree_transform(
+        tensor: &TensorMap<R, D>,
+        operation: TreeTransformOperation,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        tensor.tree_transform_multiplicity_free(operation)
+    }
+}
+
+impl<R, D> TypedTensorTransformDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericRigidSymbols<Scalar = f64>,
+    D: TensorScalar,
+{
+    fn tree_transform(
+        tensor: &TensorMap<R, D>,
+        operation: TreeTransformOperation,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        let (space, data) = tree_transform_dyn_owned_checked_generic(
+            operation,
+            &tensor.body.space,
+            tensor.dense_data(),
+            D::from_real(1.0),
+        )?;
+        Ok(TensorMap {
+            runtime: tensor.runtime.clone(),
+            body: Arc::new(TypedTensorBody::dense(space, data)),
+        })
     }
 }
 
@@ -2063,7 +2146,14 @@ where
         }
         Ok(())
     }
+}
 
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorTransformDispatch<R, D>,
+    D: TensorScalar,
+{
     /// TensorKit `permute`: re-arranges legs with symmetric braiding.
     ///
     /// `codomain_axes` and `domain_axes` list source axis numbers (`0..rank`,
@@ -2090,6 +2180,8 @@ where
     /// requested motion needs. The expert layer's own typed errors are the
     /// contract here: re-validating the axes at this layer would be a second
     /// copy of a rule that already exists one call down, free to drift.
+    /// Checked Generic providers return [`GenericTensorError::Plan`] with the
+    /// concrete provider error preserved as its source.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -2119,16 +2211,23 @@ where
     /// assert_eq!(swapped.permute(&[1], &[0])?.data(), t.data());
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn permute(&self, codomain_axes: &[usize], domain_axes: &[usize]) -> Result<Self, Error> {
+    pub fn permute(
+        &self,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+    ) -> Result<Self, TypedFacadeError<R>> {
         // Why no identity shortcut (the erased facade shares storage when the
         // axes do not move): the result would be byte-identical either way, so
         // the shortcut is a pure cost question, and adding one without a gate
         // that measures it is speculative. The same reasoning covers every
         // other operation routed through `tree_transform` below.
-        self.tree_transform(TreeTransformOperation::permute(
-            codomain_axes.iter().copied(),
-            domain_axes.iter().copied(),
-        ))
+        <R::Mode as TypedTensorTransformDispatch<R, D>>::tree_transform(
+            self,
+            TreeTransformOperation::permute(
+                codomain_axes.iter().copied(),
+                domain_axes.iter().copied(),
+            ),
+        )
     }
 
     /// TensorKit `braid`: re-arranges legs with an explicit braid, one level
@@ -2154,12 +2253,13 @@ where
     /// axis lists or a provider that cannot support the requested braiding.
     /// As for [`Self::permute`], those errors are the contract; this layer does
     /// not re-validate axes.
+    /// Checked Generic failures use [`GenericTensorError::Plan`].
     pub fn braid(
         &self,
         codomain_axes: &[usize],
         domain_axes: &[usize],
         levels: &[usize],
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, TypedFacadeError<R>> {
         // Mirrors the erased pre-check verbatim (`Tensor::transformed`), same
         // message: two facades reporting one mistake two ways is a support
         // burden with no upside.
@@ -2169,17 +2269,59 @@ where
                 "braid levels must list one level per source axis \
                  (expected {rank}, got {})",
                 levels.len()
-            )));
+            ))
+            .into());
         }
         let nout = self.codomain_rank();
-        self.tree_transform(TreeTransformOperation::braid(
-            codomain_axes.iter().copied(),
-            domain_axes.iter().copied(),
-            levels[..nout].iter().copied(),
-            levels[nout..].iter().copied(),
-        ))
+        <R::Mode as TypedTensorTransformDispatch<R, D>>::tree_transform(
+            self,
+            TreeTransformOperation::braid(
+                codomain_axes.iter().copied(),
+                domain_axes.iter().copied(),
+                levels[..nout].iter().copied(),
+                levels[nout..].iter().copied(),
+            ),
+        )
     }
 
+    /// TensorKit `repartition(t, N₁, N₂)`: moves the planar boundary so the
+    /// codomain holds `num_codomain` legs and the domain holds the rest.
+    ///
+    /// The planar order — codomain followed by reversed domain — is preserved;
+    /// legs that cross the boundary are bent, and so arrive with their dual
+    /// flag flipped and their sectors dualized, without any braid being
+    /// introduced.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when `num_codomain` exceeds the rank, and
+    /// otherwise [`Error::Operation`] / [`Error::Core`] /
+    /// [`Error::FusionAlgebra`] from the expert layer, which owns the
+    /// validation this facade passes through. Checked Generic failures use
+    /// [`GenericTensorError::Plan`]; planar [`Self::transpose`] remains
+    /// multiplicity-free-only.
+    pub fn repartition(&self, num_codomain: usize) -> Result<Self, TypedFacadeError<R>> {
+        let operation = with_planar_axes(
+            self.codomain_rank(),
+            self.rank(),
+            PlanarRequestKind::Repartition { num_codomain },
+            |codomain_axes, domain_axes| {
+                Ok(TreeTransformOperation::transpose(
+                    codomain_axes.iter().copied(),
+                    domain_axes.iter().copied(),
+                ))
+            },
+        )
+        .map_err(TypedFacadeError::<R>::from)?;
+        <R::Mode as TypedTensorTransformDispatch<R, D>>::tree_transform(self, operation)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+{
     /// TensorKit `transpose`: the planar transpose of `codomain <- domain` to
     /// `domain' <- codomain'`, i.e. a cyclic rotation of the legs round the
     /// planar boundary by the codomain rank, which is what carries every
@@ -2233,24 +2375,6 @@ where
         })
     }
 
-    /// TensorKit `repartition(t, N₁, N₂)`: moves the planar boundary so the
-    /// codomain holds `num_codomain` legs and the domain holds the rest.
-    ///
-    /// The planar order — codomain followed by reversed domain — is preserved;
-    /// legs that cross the boundary are bent, and so arrive with their dual
-    /// flag flipped and their sectors dualized, without any braid being
-    /// introduced.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::InvalidArgument`] when `num_codomain` exceeds the rank, and
-    /// otherwise [`Error::Operation`] / [`Error::Core`] /
-    /// [`Error::FusionAlgebra`] from the expert layer, which owns the
-    /// validation this facade passes through.
-    pub fn repartition(&self, num_codomain: usize) -> Result<Self, Error> {
-        self.planar(PlanarRequestKind::Repartition { num_codomain })
-    }
-
     /// Shared body of the three planar operations: derive the planar axis
     /// order, let the expert layer check it, and run it as a transpose.
     ///
@@ -2268,7 +2392,7 @@ where
                 // to be a plain permutation: domain trees run opposite to the
                 // planar boundary, so flattening them into a permute would
                 // braid a different leg across it.
-                self.tree_transform(TreeTransformOperation::transpose(
+                self.tree_transform_multiplicity_free(TreeTransformOperation::transpose(
                     codomain_axes.iter().copied(),
                     domain_axes.iter().copied(),
                 ))
@@ -2277,7 +2401,10 @@ where
     }
 
     /// Runs one prepared tree transform on this tensor's own runtime.
-    fn tree_transform(&self, operation: TreeTransformOperation) -> Result<Self, Error> {
+    fn tree_transform_multiplicity_free(
+        &self,
+        operation: TreeTransformOperation,
+    ) -> Result<Self, Error> {
         // Compact arm: a rank-(1,1) leg swap of a spectrum factor is a
         // per-sector rescaling of the stored diagonal, so it never touches the
         // `Σ_c k_c²` materialization. Every other geometry — an explicit braid,
