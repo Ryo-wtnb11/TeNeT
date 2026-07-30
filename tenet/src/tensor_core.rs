@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 
 use tenet_core::{
-    merge_fusion_trees_generic, merge_fusion_trees_multiplicity_free, BlockKey,
-    CanonicalUnitFusionRule, CheckedFusionAlgebra, CheckedFusionSpaceError, CoreError,
-    FusionProductSpace, FusionTreeHomSpace, FusionTreePairKey, GenericBraidScalar,
-    GenericRigidSymbols, MultiplicityFreeRigidSymbols, PreparedTreePairOperation, RuleIdentity,
+    merge_fusion_trees_generic, merge_fusion_trees_generic_checked,
+    merge_fusion_trees_multiplicity_free, BlockKey, CanonicalUnitFusionRule, CheckedFusionAlgebra,
+    CheckedFusionSpaceError, CheckedGenericFusion, CheckedGenericRigidSymbols,
+    CheckedGenericStructureError, CheckedGenericSymbolError, CoreError, FusionProductSpace,
+    FusionStyleKind, FusionTreeHomSpace, FusionTreePairKey, GenericBraidScalar,
+    GenericRigidSymbols, MultiplicityFreeRigidSymbols, MultiplicityIndex,
+    PreparedTreePairOperation, RuleIdentity,
 };
 use tenet_matrixalgebra::SectorSpectrum;
 use tenet_tensors::{
@@ -15,6 +18,100 @@ use tenet_tensors::{
 
 use crate::runtime::Ctx;
 use crate::tensor::{internal_layout_error, UserScalar};
+
+/// Error from fallible checked-Generic tensor-product execution.
+///
+/// Provider failures and malformed F arrays remain distinct from local tensor
+/// layout failures. Tensor product is not a tree-transform plan, so this type
+/// deliberately does not reuse `CheckedGenericPlanError`.
+#[derive(Debug)]
+pub enum CheckedGenericTensorProductError<E> {
+    /// The checked provider rejected an algebra or coefficient query.
+    Provider(E),
+    /// A returned F array did not have the shape fixed by its sectors.
+    SymbolShape {
+        /// The malformed categorical symbol.
+        symbol: &'static str,
+        /// Shape required by the fusion multiplicities.
+        expected: Vec<usize>,
+        /// Shape returned by the provider.
+        actual: Vec<usize>,
+    },
+    /// A provider-independent categorical invariant failed.
+    Core(CoreError),
+    /// A local tensor layout or payload invariant failed.
+    Operation(tenet_tensors::OperationError),
+}
+
+impl<E> From<CoreError> for CheckedGenericTensorProductError<E> {
+    fn from(error: CoreError) -> Self {
+        Self::Core(error)
+    }
+}
+
+impl<E> From<tenet_tensors::OperationError> for CheckedGenericTensorProductError<E> {
+    fn from(error: tenet_tensors::OperationError) -> Self {
+        Self::Operation(error)
+    }
+}
+
+impl<E> From<CheckedGenericStructureError<E>> for CheckedGenericTensorProductError<E> {
+    fn from(error: CheckedGenericStructureError<E>) -> Self {
+        match error {
+            CheckedGenericStructureError::Provider(error) => Self::Provider(error),
+            CheckedGenericStructureError::Core(error) => Self::Core(error),
+        }
+    }
+}
+
+impl<E: core::fmt::Display> core::fmt::Display for CheckedGenericTensorProductError<E> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Provider(error) => error.fmt(formatter),
+            Self::SymbolShape {
+                symbol,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "{symbol} shape mismatch: expected {expected:?}, got {actual:?}"
+            ),
+            Self::Core(error) => error.fmt(formatter),
+            Self::Operation(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for CheckedGenericTensorProductError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Provider(error) => Some(error),
+            Self::Core(error) => Some(error),
+            Self::Operation(error) => Some(error),
+            Self::SymbolShape { .. } => None,
+        }
+    }
+}
+
+fn map_checked_tensor_product_symbol_error<E>(
+    error: CheckedGenericSymbolError<E>,
+) -> CheckedGenericTensorProductError<E> {
+    match error {
+        CheckedGenericSymbolError::Provider(error) => {
+            CheckedGenericTensorProductError::Provider(error)
+        }
+        CheckedGenericSymbolError::Shape {
+            symbol,
+            expected,
+            actual,
+        } => CheckedGenericTensorProductError::SymbolShape {
+            symbol,
+            expected,
+            actual,
+        },
+        CheckedGenericSymbolError::Core(error) => CheckedGenericTensorProductError::Core(error),
+    }
+}
 
 /// Positive integer power with no identity seed.
 pub(crate) fn pow_by_squaring<T: Clone, E>(
@@ -656,6 +753,277 @@ where
     Ok((destination, data))
 }
 
+type CheckedGenericTensorProductResult<R, D> = Result<
+    (BoundDynamicFusionMapSpace<R>, Vec<D>),
+    CheckedGenericTensorProductError<<R as CheckedGenericFusion>::Error>,
+>;
+
+#[cfg(test)]
+static FAIL_CHECKED_TENSOR_PRODUCT_BEFORE_SCATTER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+static CHECKED_TENSOR_PRODUCT_COMMIT_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+std::thread_local! {
+    static CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE:
+        std::cell::RefCell<Option<tenet_core::BlockStructure>> = const {
+            std::cell::RefCell::new(None)
+        };
+}
+
+fn validate_tensor_product_source_structure<E>(
+    tensor: &'static str,
+    structure: &tenet_core::BlockStructure,
+) -> Result<(), CheckedGenericTensorProductError<E>> {
+    for index in 0..structure.block_count() {
+        let block = structure.block(index)?;
+        let BlockKey::FusionTree(key) = block.key() else {
+            return Err(
+                tenet_tensors::OperationError::ExpectedFusionTreeBlock { tensor, index }.into(),
+            );
+        };
+        if block.shape().len() != structure.rank() || block.strides().len() != structure.rank() {
+            return Err(CoreError::StructureRankMismatch {
+                expected: structure.rank(),
+                actual: block.shape().len(),
+            }
+            .into());
+        }
+        let key_rank = key.codomain_tree().uncoupled().len() + key.domain_tree().uncoupled().len();
+        if key_rank != structure.rank() {
+            return Err(CoreError::StructureRankMismatch {
+                expected: structure.rank(),
+                actual: key_rank,
+            }
+            .into());
+        }
+        for tree in [key.codomain_tree(), key.domain_tree()] {
+            let rank = tree.uncoupled().len();
+            if tree.is_dual().len() != rank
+                || tree.innerlines().len() != rank.saturating_sub(2)
+                || tree.vertices().len() != rank.saturating_sub(1)
+            {
+                return Err(CoreError::MalformedFusionTree {
+                    message: "tensor-product source fusion-tree arrays have inconsistent lengths",
+                }
+                .into());
+            }
+        }
+        if key.codomain_tree().coupled() != key.domain_tree().coupled() {
+            return Err(CoreError::MalformedFusionTree {
+                message: "tensor-product source tree pair has mismatched coupled sectors",
+            }
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_tensor_product_source_structures<E>(
+    lhs: &tenet_core::BlockStructure,
+    rhs: &tenet_core::BlockStructure,
+) -> Result<(), CheckedGenericTensorProductError<E>> {
+    validate_tensor_product_source_structure("lhs", lhs)?;
+    #[cfg(test)]
+    {
+        return CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE.with(|override_structure| {
+            let override_structure = override_structure.borrow();
+            validate_tensor_product_source_structure(
+                "rhs",
+                override_structure.as_ref().unwrap_or(rhs),
+            )
+        });
+    }
+    #[cfg(not(test))]
+    validate_tensor_product_source_structure("rhs", rhs)
+}
+
+pub(crate) fn tensorproduct_owned_checked_generic<R, D>(
+    lhs_space: &BoundDynamicFusionMapSpace<R>,
+    lhs_data: &[D],
+    rhs_space: &BoundDynamicFusionMapSpace<R>,
+    rhs_data: &[D],
+) -> CheckedGenericTensorProductResult<R, D>
+where
+    R: CheckedGenericRigidSymbols<Scalar = f64>,
+    D: UserScalar,
+{
+    let rule = lhs_space.provider();
+    let lhs_identity = rule.rule_identity();
+    let rhs_identity = rhs_space.provider().rule_identity();
+    if lhs_identity != rhs_identity {
+        return Err(CoreError::FusionRuleMismatch {
+            expected: lhs_identity,
+            actual: rhs_identity,
+        }
+        .into());
+    }
+    for actual in [rule.fusion_style(), rhs_space.provider().fusion_style()] {
+        if actual != FusionStyleKind::Generic {
+            return Err(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Generic,
+                actual,
+            }
+            .into());
+        }
+    }
+
+    // Local storage validation is deliberately after identity/style rejection
+    // and before any provider enumeration or symbol query.
+    let lhs = BoundDynamicTensorRef::try_new(lhs_space, lhs_data)?;
+    let rhs = BoundDynamicTensorRef::try_new(rhs_space, rhs_data)?;
+    let lhs_structure = lhs.space().space().structure();
+    let rhs_structure = rhs.space().space().structure();
+    validate_tensor_product_source_structures::<R::Error>(lhs_structure, rhs_structure)?;
+    let lhs_hom = lhs.space().space().homspace();
+    let rhs_hom = rhs.space().space().homspace();
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new(
+            lhs_hom
+                .codomain()
+                .legs()
+                .iter()
+                .chain(rhs_hom.codomain().legs())
+                .cloned(),
+        ),
+        FusionProductSpace::new(
+            lhs_hom
+                .domain()
+                .legs()
+                .iter()
+                .chain(rhs_hom.domain().legs())
+                .cloned(),
+        ),
+    );
+    let prepared = lhs
+        .space()
+        .prepare_final_homspace_generic_with_checked(rule, homspace)?;
+    let destination_indices = (0..prepared.structure().block_count())
+        .map(|index| {
+            let block = prepared.structure().block(index)?;
+            let BlockKey::FusionTree(key) = block.key() else {
+                return Err(tenet_tensors::OperationError::ExpectedFusionTreeBlock {
+                    tensor: "tensor-product destination",
+                    index,
+                });
+            };
+            Ok((key.clone(), index))
+        })
+        .collect::<Result<HashMap<_, _>, tenet_tensors::OperationError>>()?;
+
+    struct Contribution {
+        lhs: usize,
+        rhs: usize,
+        destination: usize,
+        coefficient: f64,
+    }
+    let mut contributions = Vec::new();
+    for lhs_index in 0..lhs_structure.block_count() {
+        let BlockKey::FusionTree(lhs_key) = lhs_structure.block(lhs_index)?.key() else {
+            return Err(tenet_tensors::OperationError::ExpectedFusionTreeBlock {
+                tensor: "lhs",
+                index: lhs_index,
+            }
+            .into());
+        };
+        for rhs_index in 0..rhs_structure.block_count() {
+            let BlockKey::FusionTree(rhs_key) = rhs_structure.block(rhs_index)?.key() else {
+                return Err(tenet_tensors::OperationError::ExpectedFusionTreeBlock {
+                    tensor: "rhs",
+                    index: rhs_index,
+                }
+                .into());
+            };
+            let left_root = lhs_key.codomain_tree().coupled();
+            let right_root = rhs_key.codomain_tree().coupled();
+            let channels = rule
+                .try_fusion_channels(left_root, right_root)
+                .map_err(CheckedGenericTensorProductError::Provider)?;
+            for coupled in channels {
+                let multiplicity = rule
+                    .try_nsymbol(left_root, right_root, coupled)
+                    .map_err(CheckedGenericTensorProductError::Provider)?;
+                for mu in 1..=multiplicity {
+                    let mu = MultiplicityIndex::new(mu).ok_or(
+                        tenet_tensors::OperationError::InvalidArgument {
+                            message: "invalid Generic root multiplicity",
+                        },
+                    )?;
+                    let codomain = merge_fusion_trees_generic_checked(
+                        rule,
+                        lhs_key.codomain_tree(),
+                        rhs_key.codomain_tree(),
+                        coupled,
+                        mu,
+                    )
+                    .map_err(map_checked_tensor_product_symbol_error)?;
+                    let domain = merge_fusion_trees_generic_checked(
+                        rule,
+                        lhs_key.domain_tree(),
+                        rhs_key.domain_tree(),
+                        coupled,
+                        mu,
+                    )
+                    .map_err(map_checked_tensor_product_symbol_error)?;
+                    for (codomain, codomain_coefficient) in &codomain {
+                        for (domain, domain_coefficient) in &domain {
+                            let key = FusionTreePairKey::pair(codomain.clone(), domain.clone());
+                            let destination =
+                                destination_indices.get(&key).copied().ok_or_else(|| {
+                                    tenet_tensors::OperationError::MissingBlockKey {
+                                        key: Box::new(BlockKey::FusionTree(key)),
+                                    }
+                                })?;
+                            contributions.push(Contribution {
+                                lhs: lhs_index,
+                                rhs: rhs_index,
+                                destination,
+                                coefficient: *codomain_coefficient
+                                    * domain_coefficient.braid_conj(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // All provider and F-array work is complete before payload allocation.
+    // Scatter targets the staged structure; publishing the bound destination
+    // is the final operation below.
+    let mut data = vec![D::from_real(0.0); prepared.required_len()];
+    #[cfg(test)]
+    if FAIL_CHECKED_TENSOR_PRODUCT_BEFORE_SCATTER.swap(false, std::sync::atomic::Ordering::Relaxed)
+    {
+        return Err(tenet_tensors::OperationError::StructureMismatch {
+            tensor: "forced late tensor-product scatter failure",
+        }
+        .into());
+    }
+    let lhs_nout = lhs.space().space().nout();
+    let rhs_nout = rhs.space().space().nout();
+    for contribution in contributions {
+        scatter_tensor_product_block(
+            lhs.data(),
+            lhs_structure.block(contribution.lhs)?,
+            lhs_nout,
+            rhs.data(),
+            rhs_structure.block(contribution.rhs)?,
+            rhs_nout,
+            &mut data,
+            prepared.structure().block(contribution.destination)?,
+            contribution.coefficient,
+        )?;
+    }
+    let destination = lhs
+        .space()
+        .commit_final_homspace_generic_bound_checked(prepared)?;
+    #[cfg(test)]
+    CHECKED_TENSOR_PRODUCT_COMMIT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Ok((destination, data))
+}
+
 fn tensor_product_checked_error(error: CheckedFusionSpaceError) -> tenet_tensors::OperationError {
     match error {
         CheckedFusionSpaceError::Core(error) => tenet_tensors::OperationError::Core(*error),
@@ -808,12 +1176,16 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use tenet_core::{
-        BlockKey, BlockSpec, BlockStructure, BraidingStyleKind, FusionProductSpace, FusionRule,
-        FusionStyleKind, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
-        MultiplicityFreeRigidSymbols, RuleIdentity, SectorId, SectorLeg, SectorVec, Z2FusionRule,
+        BlockKey, BlockSpec, BlockStructure, BraidingStyleKind, CheckedGenericFusion,
+        CheckedGenericRigidSymbols, CoreError, FusionProductSpace, FusionRule, FusionStyleKind,
+        FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey, GenericFArray, GenericRMatrix,
+        MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols,
+        RuleIdentity, SectorId, SectorLeg, SectorVec, Z2FusionRule,
     };
     use tenet_tensors::{
         BoundDynamicFusionMapSpace, BoundDynamicTensorRef, OutputAxisOrder, TreeTransformOperation,
@@ -821,7 +1193,9 @@ mod tests {
 
     use super::{
         pow_by_squaring, scatter_tensor_product_block, tensorcontract_owned_multiplicity_free,
-        tree_transform_owned_multiplicity_free,
+        tensorproduct_owned_checked_generic, tree_transform_owned_multiplicity_free,
+        CHECKED_TENSOR_PRODUCT_COMMIT_COUNT, CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE,
+        FAIL_CHECKED_TENSOR_PRODUCT_BEFORE_SCATTER,
     };
     use crate::runtime::Ctx;
 
@@ -851,6 +1225,200 @@ mod tests {
             1
         );
         assert_eq!(compositions, 31);
+    }
+
+    struct CheckedTensorProductSpy {
+        algebra_queries: AtomicUsize,
+        f_queries: AtomicUsize,
+    }
+
+    impl CheckedTensorProductSpy {
+        fn reset(&self) {
+            self.algebra_queries.store(0, Ordering::Relaxed);
+            self.f_queries.store(0, Ordering::Relaxed);
+        }
+    }
+
+    impl CheckedGenericFusion for CheckedTensorProductSpy {
+        type Error = Infallible;
+
+        fn rule_identity(&self) -> RuleIdentity {
+            RuleIdentity::of_type::<Self>()
+        }
+
+        fn fusion_style(&self) -> FusionStyleKind {
+            FusionStyleKind::Generic
+        }
+
+        fn braiding_style(&self) -> BraidingStyleKind {
+            BraidingStyleKind::Bosonic
+        }
+
+        fn vacuum(&self) -> SectorId {
+            SectorId::new(0)
+        }
+
+        fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+            self.algebra_queries.fetch_add(1, Ordering::Relaxed);
+            Ok(sector)
+        }
+
+        fn try_fusion_channels(
+            &self,
+            _left: SectorId,
+            _right: SectorId,
+        ) -> Result<SectorVec, Self::Error> {
+            self.algebra_queries.fetch_add(1, Ordering::Relaxed);
+            Ok([SectorId::new(0)].into_iter().collect())
+        }
+
+        fn try_fusion_channels_in_table(
+            &self,
+            left: SectorId,
+            right: SectorId,
+        ) -> Result<SectorVec, Self::Error> {
+            self.try_fusion_channels(left, right)
+        }
+
+        fn try_nsymbol(
+            &self,
+            _left: SectorId,
+            _right: SectorId,
+            _coupled: SectorId,
+        ) -> Result<usize, Self::Error> {
+            self.algebra_queries.fetch_add(1, Ordering::Relaxed);
+            Ok(1)
+        }
+    }
+
+    impl CheckedGenericRigidSymbols for CheckedTensorProductSpy {
+        type Scalar = f64;
+
+        fn try_sqrt_dim_scalar(&self, _sector: SectorId) -> Result<f64, Self::Error> {
+            Ok(1.0)
+        }
+
+        fn try_inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Result<f64, Self::Error> {
+            Ok(1.0)
+        }
+
+        fn try_frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Result<f64, Self::Error> {
+            Ok(1.0)
+        }
+
+        fn try_f_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+            _d: SectorId,
+            _e: SectorId,
+            _f: SectorId,
+        ) -> Result<GenericFArray<f64>, Self::Error> {
+            self.f_queries.fetch_add(1, Ordering::Relaxed);
+            Ok(GenericFArray::new(vec![1.0], (1, 1, 1, 1)))
+        }
+
+        fn try_r_symbol_generic(
+            &self,
+            _a: SectorId,
+            _b: SectorId,
+            _c: SectorId,
+        ) -> Result<GenericRMatrix<f64>, Self::Error> {
+            Ok(GenericRMatrix::new(vec![1.0], 1, 1))
+        }
+    }
+
+    fn checked_tensor_product_source(
+        provider: Arc<CheckedTensorProductSpy>,
+    ) -> (
+        BoundDynamicFusionMapSpace<CheckedTensorProductSpy>,
+        Vec<f64>,
+    ) {
+        let leg = || SectorLeg::new([(SectorId::new(0), 1)], false);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([leg(), leg()]),
+            FusionProductSpace::new([leg(), leg()]),
+        );
+        let space =
+            BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(provider, homspace)
+                .unwrap();
+        let data = vec![1.0; space.space().required_len().unwrap()];
+        (space, data)
+    }
+
+    #[test]
+    fn checked_tensor_product_rejects_a_later_malformed_key_before_provider_queries() {
+        let provider = Arc::new(CheckedTensorProductSpy {
+            algebra_queries: AtomicUsize::new(0),
+            f_queries: AtomicUsize::new(0),
+        });
+        let (source, data) = checked_tensor_product_source(Arc::clone(&provider));
+        let sector = SectorId::new(0);
+        let tree =
+            FusionTreeKey::try_new_for_rule(&Z2FusionRule, [sector], sector, [false], [], [])
+                .unwrap();
+        let valid = BlockSpec::column_major_with_key(
+            BlockKey::FusionTree(FusionTreePairKey::pair(tree.clone(), tree)),
+            vec![1, 1],
+            0,
+        )
+        .unwrap();
+        let rank_zero =
+            FusionTreeKey::try_new_for_rule(&Z2FusionRule, [], sector, [], [], []).unwrap();
+        let malformed = BlockSpec::column_major_with_key(
+            BlockKey::FusionTree(FusionTreePairKey::pair(rank_zero.clone(), rank_zero)),
+            vec![1, 1],
+            1,
+        )
+        .unwrap();
+        CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE.with(|override_structure| {
+            *override_structure.borrow_mut() =
+                Some(BlockStructure::from_blocks(vec![valid, malformed]).unwrap());
+        });
+        provider.reset();
+
+        let error =
+            tensorproduct_owned_checked_generic(&source, &data, &source, &data).unwrap_err();
+        CHECKED_TENSOR_PRODUCT_RHS_STRUCTURE_OVERRIDE.with(|override_structure| {
+            override_structure.borrow_mut().take();
+        });
+
+        assert!(matches!(
+            error,
+            super::CheckedGenericTensorProductError::Core(CoreError::StructureRankMismatch {
+                expected: 2,
+                actual: 0
+            })
+        ));
+        assert_eq!(provider.algebra_queries.load(Ordering::Relaxed), 0);
+        assert_eq!(provider.f_queries.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn checked_tensor_product_late_scatter_failure_precedes_publication() {
+        let provider = Arc::new(CheckedTensorProductSpy {
+            algebra_queries: AtomicUsize::new(0),
+            f_queries: AtomicUsize::new(0),
+        });
+        let (source, data) = checked_tensor_product_source(Arc::clone(&provider));
+        provider.reset();
+        CHECKED_TENSOR_PRODUCT_COMMIT_COUNT.store(0, Ordering::Relaxed);
+        FAIL_CHECKED_TENSOR_PRODUCT_BEFORE_SCATTER.store(true, Ordering::Relaxed);
+
+        let error =
+            tensorproduct_owned_checked_generic(&source, &data, &source, &data).unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::CheckedGenericTensorProductError::Operation(_)
+        ));
+        assert!(provider.algebra_queries.load(Ordering::Relaxed) > 0);
+        assert!(provider.f_queries.load(Ordering::Relaxed) > 0);
+        assert_eq!(
+            CHECKED_TENSOR_PRODUCT_COMMIT_COUNT.load(Ordering::Relaxed),
+            0
+        );
     }
 
     #[test]
