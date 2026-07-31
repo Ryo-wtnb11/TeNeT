@@ -4018,6 +4018,9 @@ where
     where
         <D as FactorScalar>::Eig: TensorScalar,
     {
+        if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
+            return self.materialized_tensor_uncached()?.eig_full();
+        }
         let mut dense = self.runtime.lease_dense();
         let out = tenet_matrixalgebra::eig_full_dyn(dense.dense(), &self.bound_ref()?)?;
         let (v, eigenvalues) = out.into_parts();
@@ -4043,6 +4046,9 @@ where
         // See [`Self::eig_full`] for why this bound is per-method.
         <D as FactorScalar>::Eig: TensorScalar,
     {
+        if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
+            return self.materialized_tensor_uncached()?.eig_trunc(truncation);
+        }
         let mut dense = self.runtime.lease_dense();
         let out =
             tenet_matrixalgebra::eig_trunc_dyn(dense.dense(), &self.bound_ref()?, truncation)?;
@@ -4074,6 +4080,9 @@ where
         // of them but not the third would be reading an accident.
         <D as FactorScalar>::Eig: TensorScalar,
     {
+        if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
+            return self.materialized_tensor_uncached()?.eig_vals();
+        }
         let mut dense = self.runtime.lease_dense();
         let raw = tenet_matrixalgebra::eig_vals_dyn(dense.dense(), &self.bound_ref()?)?;
         self.decode_spectrum(raw)
@@ -7154,6 +7163,183 @@ mod representation_gates {
             assert_eq!(lazy.eigh_full().unwrap_err().to_string(), expected[1]);
             assert_eq!(
                 lazy.eigh_trunc(&Truncation::rank(1))
+                    .unwrap_err()
+                    .to_string(),
+                expected[2]
+            );
+        }
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+    }
+
+    fn assert_eig_uses_a_cold_logical_copy(source: &TensorMap<U1FusionRule, f64>) {
+        let eager = eager_adjoint_oracle(source);
+        let expected_vals = eager.eig_vals().unwrap();
+        let expected_full = eager.eig_full().unwrap();
+        let expected_trunc = eager.eig_trunc(&Truncation::rank(1)).unwrap();
+        let parent_body = Arc::clone(owned(source));
+        let parent_data = Arc::clone(&parent_body.data);
+        let lazy = source.adjoint().unwrap();
+
+        for _ in 0..2 {
+            assert_eq!(lazy.clone().eig_vals().unwrap(), expected_vals);
+            let full = lazy.clone().eig_full().unwrap();
+            assert_eq!(full.0.data(), expected_full.0.data());
+            assert_eq!(full.1.data(), expected_full.1.data());
+            let trunc = lazy.clone().eig_trunc(&Truncation::rank(1)).unwrap();
+            assert_eq!(trunc.eigenvalues, expected_trunc.eigenvalues);
+            assert_eq!(trunc.error, expected_trunc.error);
+            assert_eq!(trunc.d.data(), expected_trunc.d.data());
+            assert_eq!(trunc.v.data(), expected_trunc.v.data());
+            for output in [&full.0, &full.1, &trunc.d, &trunc.v] {
+                assert!(output.owned_body().is_some());
+                assert!(Arc::ptr_eq(
+                    output.logical_space().provider_arc(),
+                    source.logical_space().provider_arc()
+                ));
+            }
+        }
+
+        let calls = (0..4)
+            .map(|_| {
+                let clone = lazy.clone();
+                std::thread::spawn(move || {
+                    let vals = clone.eig_vals().unwrap();
+                    let full = clone.eig_full().unwrap();
+                    let trunc = clone.eig_trunc(&Truncation::rank(1)).unwrap();
+                    (vals, full.0.data().to_vec(), trunc.error)
+                })
+            })
+            .collect::<Vec<_>>();
+        for call in calls {
+            let (vals, diagonal, error) = call.join().unwrap();
+            assert_eq!(vals, expected_vals);
+            assert_eq!(diagonal, expected_full.0.data());
+            assert_eq!(error, expected_trunc.error);
+        }
+        assert!(Arc::ptr_eq(owned(source), &parent_body));
+        assert!(Arc::ptr_eq(&owned(source).data, &parent_data));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+
+        let _ = lazy.data();
+        assert_eq!(materialized_adjoint_builds(&lazy), 1);
+        assert!(view.materialized.get().is_some());
+    }
+
+    #[test]
+    fn eig_dense_lazy_nonnormal_is_logical_owned_repeatable_and_cold() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new(provider, [(U1Irrep::new(0), 2)], false).unwrap();
+        let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            match (indices[0], indices[1]) {
+                (0, 0) => 1.0,
+                (1, 1) => 2.0,
+                (0, 1) => 1.0,
+                _ => 0.0,
+            }
+        })
+        .unwrap();
+        let logical = eager_adjoint_oracle(&source);
+        let (d, v) = source.adjoint().unwrap().eig_full().unwrap();
+        let lhs = logical.to_c64().compose(&v).unwrap();
+        let rhs = v.compose(&d).unwrap();
+        assert_typed_map_close(&lhs, &rhs, 1.0e-12);
+
+        assert_eig_uses_a_cold_logical_copy(&source);
+    }
+
+    #[test]
+    fn eig_dense_lazy_real_order_signed_zero_and_defective_cases_match_logical_oracles() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let scalar_leg =
+            GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 1)], false).unwrap();
+        let negative =
+            TensorMap::from_block_fn(&runtime, [&scalar_leg], [&scalar_leg], |_, _| -2.0).unwrap();
+        let lazy = negative.adjoint().unwrap();
+        let value = lazy.eig_vals().unwrap()[0].values[0];
+        assert_eq!(value, num_complex::Complex64::new(-2.0, 0.0));
+        assert_eq!(value.im.to_bits(), 0.0f64.to_bits());
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+
+        let leg = GradedSpace::try_new(provider, [(U1Irrep::new(0), 2)], false).unwrap();
+        let rotation = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            match (indices[0], indices[1]) {
+                (0, 1) => -1.0,
+                (1, 0) => 1.0,
+                _ => 0.0,
+            }
+        })
+        .unwrap();
+        let eager = eager_adjoint_oracle(&rotation);
+        let expected = eager.eig_vals().unwrap();
+        let lazy = rotation.adjoint().unwrap();
+        assert_eq!(lazy.eig_vals().unwrap(), expected);
+        assert_eq!(expected[0].values[0].im, 1.0);
+        assert_eq!(expected[0].values[1].im, -1.0);
+        let trunc = lazy.eig_trunc(&Truncation::rank(1)).unwrap();
+        let expected_trunc = eager.eig_trunc(&Truncation::rank(1)).unwrap();
+        assert_eq!(trunc.eigenvalues, expected_trunc.eigenvalues);
+        assert_eq!(trunc.d.data(), expected_trunc.d.data());
+        assert_eq!(trunc.v.data(), expected_trunc.v.data());
+        assert_eq!(trunc.error, expected_trunc.error);
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+
+        for epsilon in [0.0, 1.0e-12] {
+            let jordan = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+                match (indices[0], indices[1]) {
+                    (0, 0) | (1, 1) => 1.0,
+                    (0, 1) => 1.0,
+                    (1, 0) => epsilon,
+                    _ => unreachable!(),
+                }
+            })
+            .unwrap();
+            let eager = eager_adjoint_oracle(&jordan);
+            let lazy = jordan.adjoint().unwrap();
+            assert_eq!(lazy.eig_vals().unwrap(), eager.eig_vals().unwrap());
+            let actual = lazy.eig_full().unwrap();
+            let expected = eager.eig_full().unwrap();
+            assert_eq!(actual.0.data(), expected.0.data());
+            assert_eq!(actual.1.data(), expected.1.data());
+            assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        }
+    }
+
+    #[test]
+    fn eig_dense_lazy_failures_match_logical_oracle_and_stay_cold() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let left =
+            GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 2)], false).unwrap();
+        let right = GradedSpace::try_new(provider, [(U1Irrep::new(0), 3)], false).unwrap();
+        let source = TensorMap::from_block_fn(&runtime, [&left], [&right], |_, indices| {
+            (indices[0] + indices[1]) as f64
+        })
+        .unwrap();
+        let eager = eager_adjoint_oracle(&source);
+        let expected = [
+            eager.eig_vals().unwrap_err().to_string(),
+            eager.eig_full().unwrap_err().to_string(),
+            eager
+                .eig_trunc(&Truncation::rank(1))
+                .unwrap_err()
+                .to_string(),
+        ];
+        let lazy = source.adjoint().unwrap();
+        for _ in 0..2 {
+            assert_eq!(lazy.eig_vals().unwrap_err().to_string(), expected[0]);
+            assert_eq!(lazy.eig_full().unwrap_err().to_string(), expected[1]);
+            assert_eq!(
+                lazy.eig_trunc(&Truncation::rank(1))
                     .unwrap_err()
                     .to_string(),
                 expected[2]
