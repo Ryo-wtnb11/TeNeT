@@ -4870,6 +4870,20 @@ impl Tensor {
         ))
     }
 
+    /// Builds an operation-local logical tensor without publishing the lazy
+    /// view's reusable materialization.
+    fn materialized_tensor_uncached(&self) -> Result<Self, Error> {
+        let TensorRepr::Adjoint(view) = &self.repr else {
+            return Ok(self.clone());
+        };
+        let body = Self::build_adjoint_body(&view.parent)?;
+        Ok(Self::owned(
+            self.rt.clone(),
+            Arc::clone(&body.space),
+            Arc::clone(&body.data),
+        ))
+    }
+
     fn materialized_dense_data_arc(&self, body: &TensorBody) -> Result<Arc<Data>, Error> {
         match body.data.as_ref() {
             Data::F64(_) | Data::C64(_) => Ok(Arc::clone(&body.data)),
@@ -8899,7 +8913,14 @@ impl Tensor {
     /// the rules.
     pub fn qr_compact(&self) -> Result<(Self, Self), Error> {
         if self.is_adjoint_view() {
-            return self.materialized_tensor()?.qr_compact();
+            if self.rule_kind() == RuleKind::Su3 {
+                return self.materialized_tensor()?.qr_compact();
+            }
+            #[cfg(feature = "cuda")]
+            if matches!(self.stored_data(), Data::CudaF64(_)) {
+                return self.materialized_tensor()?.qr_compact();
+            }
+            return self.materialized_tensor_uncached()?.qr_compact();
         }
         #[cfg(feature = "cuda")]
         if let Data::CudaF64(storage) = self.stored_data() {
@@ -8931,9 +8952,6 @@ impl Tensor {
     /// Full QR `t = q * r` (MatrixAlgebraKit `qr_full`): square `q` per
     /// sector.
     pub fn qr_full(&self) -> Result<(Self, Self), Error> {
-        if self.is_adjoint_view() {
-            return self.materialized_tensor()?.qr_full();
-        }
         // ponytail: see svd_full — the square-Q completion has no generic
         // sibling yet (B3c-3); qr_compact covers left_orth and the workflows.
         if self.rule_kind() == RuleKind::Su3 {
@@ -8941,6 +8959,13 @@ impl Tensor {
                 operation: "Tensor::qr_full",
                 rule: "SU(3)",
             });
+        }
+        if self.is_adjoint_view() {
+            #[cfg(feature = "cuda")]
+            if matches!(self.stored_data(), Data::CudaF64(_)) {
+                return self.materialized_tensor()?.qr_full();
+            }
+            return self.materialized_tensor_uncached()?.qr_full();
         }
         // Lease a dense executor for this op instead of the coarse runtime lock,
         // so concurrent factorizations on a shared runtime run in parallel
@@ -8965,10 +8990,11 @@ impl Tensor {
             if matches!(self.stored_data(), Data::CudaF64(_)) {
                 return self.materialized_tensor()?.lq_compact();
             }
-            // Why not mirror this in QR: LQ is already QR-through-adjoint and
-            // would add an adjoint scratch plus output copies before returning.
             let (q, r) = self.adjoint()?.qr_compact()?;
-            return Ok((r.adjoint()?, q.adjoint()?));
+            return Ok((
+                r.adjoint()?.materialized_tensor_uncached()?,
+                q.adjoint()?.materialized_tensor_uncached()?,
+            ));
         }
         // Lease a dense executor for this op instead of the coarse runtime lock,
         // so concurrent factorizations on a shared runtime run in parallel
@@ -8996,15 +9022,23 @@ impl Tensor {
     /// Full LQ `t = l * q` (MatrixAlgebraKit `lq_full`): square `q` per
     /// sector.
     pub fn lq_full(&self) -> Result<(Self, Self), Error> {
-        if self.is_adjoint_view() {
-            return self.materialized_tensor()?.lq_full();
-        }
         // ponytail: see svd_full/qr_full (B3c-3); lq_compact covers right_orth.
         if self.rule_kind() == RuleKind::Su3 {
             return Err(Error::UnsupportedForRule {
                 operation: "Tensor::lq_full",
                 rule: "SU(3)",
             });
+        }
+        if self.is_adjoint_view() {
+            #[cfg(feature = "cuda")]
+            if matches!(self.stored_data(), Data::CudaF64(_)) {
+                return self.materialized_tensor()?.lq_full();
+            }
+            let (q, r) = self.adjoint()?.qr_full()?;
+            return Ok((
+                r.adjoint()?.materialized_tensor_uncached()?,
+                q.adjoint()?.materialized_tensor_uncached()?,
+            ));
         }
         // Lease a dense executor for this op instead of the coarse runtime lock,
         // so concurrent factorizations on a shared runtime run in parallel
@@ -12940,7 +12974,7 @@ mod adjoint_parent_view_tests {
         assert!(!lazy.has_cached_materialization());
     }
 
-    fn assert_adjoint_compact_lq_matches_eager_oracle(
+    fn assert_adjoint_qr_lq_matches_eager_oracle(
         left: Space,
         right: Space,
         dtype: Dtype,
@@ -12948,44 +12982,108 @@ mod adjoint_parent_view_tests {
     ) {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let source = Tensor::rand_with_seed(&runtime, dtype, [&left], [&right], seed).unwrap();
+        assert_adjoint_qr_lq_tensor(&source);
+    }
+
+    fn assert_adjoint_qr_lq_tensor(source: &Tensor) {
         let lazy = source.adjoint().unwrap();
         let eager = source.adjoint().unwrap().materialized_tensor().unwrap();
 
+        let (lazy_q, lazy_r) = lazy.qr_compact().unwrap();
+        assert!(!lazy_q.is_adjoint_view() && !lazy_r.is_adjoint_view());
+        let (eager_q, eager_r) = eager.qr_compact().unwrap();
+        assert_close(&lazy_q, &eager_q);
+        assert_close(&lazy_r, &eager_r);
+        assert_close(&lazy_q.compose(&lazy_r).unwrap(), &eager);
+        assert!(lazy_q.is_isometric(1e-12).unwrap());
+
         let (lazy_l, lazy_q) = lazy.lq_compact().unwrap();
-        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy_l.is_adjoint_view() && !lazy_q.is_adjoint_view());
         let (eager_l, eager_q) = eager.lq_compact().unwrap();
         assert_close(&lazy_l, &eager_l);
         assert_close(&lazy_q, &eager_q);
+        assert_close(&lazy_l.compose(&lazy_q).unwrap(), &eager);
+        assert!(lazy_q.adjoint().unwrap().is_isometric(1e-12).unwrap());
+
+        let (lazy_q, lazy_r) = lazy.qr_full().unwrap();
+        assert!(!lazy_q.is_adjoint_view() && !lazy_r.is_adjoint_view());
+        assert_close(&lazy_q.compose(&lazy_r).unwrap(), &eager);
+        assert!(lazy_q.is_isometric(1e-12).unwrap());
+
+        let (lazy_l, lazy_q) = lazy.lq_full().unwrap();
+        assert!(!lazy_l.is_adjoint_view() && !lazy_q.is_adjoint_view());
+        assert_close(&lazy_l.compose(&lazy_q).unwrap(), &eager);
+        assert!(lazy_q.adjoint().unwrap().is_isometric(1e-12).unwrap());
+
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
     }
 
     #[test]
-    fn compact_lq_adjoint_dispatch_preserves_canonical_factors() {
-        // What: rectangular adjoint LQ reuses the parent QR decomposition while
-        // preserving direct-route factor spaces, gauge, dtype, and lazy input storage.
-        assert_adjoint_compact_lq_matches_eager_oracle(
-            Space::u1([(-1, 2), (0, 3), (1, 2)]),
-            Space::u1([(-1, 1), (0, 2), (1, 1)]),
+    fn qr_lq_adjoint_dispatch_preserves_semantics_without_publishing_input_materialization() {
+        // What: rectangular adjoint QR uses an operation-local logical copy
+        // while LQ uses the parent QR, preserving compact gauge, full semantics,
+        // and cold lazy-input storage.
+        assert_adjoint_qr_lq_matches_eager_oracle(
+            Space::u1([(-2, 2), (0, 3), (1, 2)]),
+            Space::u1([(-2, 1), (0, 2)]),
             Dtype::F64,
             261_201,
         );
-        assert_adjoint_compact_lq_matches_eager_oracle(
-            Space::u1([(-1, 1), (0, 2), (1, 1)]),
-            Space::u1([(-1, 2), (0, 3), (1, 2)]),
+        assert_adjoint_qr_lq_matches_eager_oracle(
+            Space::u1([(-2, 1), (0, 2)]),
+            Space::u1([(-2, 2), (0, 3), (1, 2)]),
             Dtype::C64,
             261_202,
         );
-        assert_adjoint_compact_lq_matches_eager_oracle(
-            Space::su2([(0, 2), (1, 3), (2, 2)]).unwrap(),
-            Space::su2([(0, 1), (1, 2), (2, 1)]).unwrap(),
-            Dtype::C64,
-            261_203,
-        );
-        assert_adjoint_compact_lq_matches_eager_oracle(
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let su2 = Space::su2([(0, 2), (1, 2)]).unwrap();
+        let source =
+            Tensor::rand_with_seed(&runtime, Dtype::C64, [&su2, &su2], [&su2], 261_203).unwrap();
+        assert!(source.ordinary_body().space.structure().block_count() > 1);
+        assert_adjoint_qr_lq_tensor(&source);
+        assert_adjoint_qr_lq_matches_eager_oracle(
             Space::product([((-1, 0), 1), ((0, 1), 2), ((1, 0), 1)]).unwrap(),
             Space::product([((-1, 0), 2), ((0, 1), 3), ((1, 0), 2)]).unwrap(),
             Dtype::C64,
             261_204,
         );
+    }
+
+    #[test]
+    fn qr_adjoint_dispatch_does_not_expand_su3_and_full_errors_keep_requested_names() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let left = Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap();
+        let right = Space::su3([((1, 0), 1), ((0, 1), 2)]).unwrap();
+        let source =
+            Tensor::rand_with_seed(&runtime, Dtype::C64, [&left], [&right], 261_205).unwrap();
+        let eager = source.adjoint().unwrap().materialized_tensor().unwrap();
+        let lazy = source.adjoint().unwrap();
+
+        let actual = lazy.qr_compact().unwrap();
+        let expected = eager.qr_compact().unwrap();
+        assert_close(&actual.0, &expected.0);
+        assert_close(&actual.1, &expected.1);
+        assert_eq!(lazy.adjoint_body_builds(), 1);
+        assert!(lazy.has_cached_materialization());
+
+        let cold = source.adjoint().unwrap();
+        assert_eq!(
+            cold.qr_full().unwrap_err(),
+            Error::UnsupportedForRule {
+                operation: "Tensor::qr_full",
+                rule: "SU(3)",
+            }
+        );
+        assert_eq!(
+            cold.lq_full().unwrap_err(),
+            Error::UnsupportedForRule {
+                operation: "Tensor::lq_full",
+                rule: "SU(3)",
+            }
+        );
+        assert_eq!(cold.adjoint_body_builds(), 0);
+        assert!(!cold.has_cached_materialization());
     }
 
     fn assert_adjoint_trace_matches_eager_oracle(
