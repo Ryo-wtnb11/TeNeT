@@ -1531,10 +1531,26 @@ impl PolarDirection {
 
 fn validate_polar_direction(
     direction: PolarDirection,
-    sectors: impl IntoIterator<Item = (SectorId, usize, usize)>,
+    space: &BoundDynamicFusionMapSpace<impl FusionRule>,
 ) -> Result<(), OperationError> {
-    for (_, rows, cols) in sectors {
+    let row_dimensions = space
+        .space()
+        .homspace()
+        .codomain()
+        .coupled_sector_block_dimensions(space.provider())?;
+    let col_dimensions = space
+        .space()
+        .homspace()
+        .domain()
+        .coupled_sector_block_dimensions(space.provider())?;
+    for (&sector, &rows) in &row_dimensions {
+        let cols = col_dimensions.get(&sector).copied().unwrap_or(0);
         if !direction.accepts(rows, cols) {
+            return Err(direction.error());
+        }
+    }
+    for (&sector, &cols) in &col_dimensions {
+        if !row_dimensions.contains_key(&sector) && !direction.accepts(0, cols) {
             return Err(direction.error());
         }
     }
@@ -1553,27 +1569,15 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
+    if let Some(direction) = polar_direction {
+        // Stored routes omit side-only sectors, whose logical matrices are
+        // rows x 0 or 0 x columns and still constrain the isometry direction.
+        validate_polar_direction(direction, input.space())?;
+    }
     if let Some(plan) = compact_factor_plan(input.space())? {
-        if let Some(direction) = polar_direction {
-            validate_polar_direction(
-                direction,
-                plan.routes.iter().map(|route| {
-                    let region = &plan.source.regions[route.source_region];
-                    (route.sector, region.rows(), region.cols())
-                }),
-            )?;
-        }
         return svd_compact_direct_regions(dense, input, &plan, gauge);
     }
     let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
-    if let Some(direction) = polar_direction {
-        validate_polar_direction(
-            direction,
-            matricizations
-                .iter()
-                .map(|matrix| (matrix.sector, matrix.rows, matrix.cols)),
-        )?;
-    }
     #[cfg(test)]
     record_compact_svd_input_pack(&matricizations);
 

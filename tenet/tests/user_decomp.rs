@@ -634,6 +634,27 @@ fn polar_rectangular_direction_contracts_hold_for_f64_and_c64() {
 }
 
 #[test]
+fn polar_rejects_disjoint_su2_multitree_complex_support_without_mutation() {
+    // What: complete coupled-sector dimensions, not the empty stored block
+    // intersection, reject both requested polar directions.
+    let rt = Runtime::builder().build().unwrap();
+    let half = Space::su2([(1, 1)]).unwrap();
+    let five_halves = Space::su2([(5, 1)]).unwrap();
+    let fused_codomain = Space::fuse_all(&[&half, &half, &half]).unwrap();
+    assert_eq!(
+        fused_codomain.degeneracy(SectorLabel::SU2 { twice_spin: 1 }),
+        Some(2)
+    );
+    let tensor =
+        Tensor::rand_with_seed(&rt, Dtype::C64, [&half, &half, &half], [&five_halves], 705)
+            .unwrap();
+    assert!(tensor.data_c64().is_empty());
+
+    assert_polar_direction_error_without_mutation(&tensor, "left_polar");
+    assert_polar_direction_error_without_mutation(&tensor, "right_polar");
+}
+
+#[test]
 fn eigh_reconstructs_a_hermitized_tensor() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {
