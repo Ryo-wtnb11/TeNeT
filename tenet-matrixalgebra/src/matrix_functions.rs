@@ -805,8 +805,12 @@ where
     compose_bound_dyn(context, &vd, &vh)
 }
 
-/// Moore-Penrose pseudo-inverse via the compact SVD with an
+/// Thresholded pseudo-inverse via the compact SVD with an
 /// `rcond * sigma_max` cutoff: `t^+ = V S^+ U^H`.
+///
+/// This is the exact Moore-Penrose inverse of the hard-thresholded
+/// effective-rank tensor. It is the Moore-Penrose inverse of the original
+/// tensor only when the cutoff discards no genuinely nonzero singular value.
 pub fn pinv<E, RuleKey, BT, BC, R, D, const NOUT: usize, const NIN: usize>(
     dense: &mut E,
     context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
@@ -840,15 +844,39 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
     D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
+    validate_pinv_rcond(rcond)?;
+    // Only the factors and the spectrum are needed — S^+ is folded into a
+    // scaling below — so skip materializing the dense diagonal S.
+    let factors = svd_compact_factors_dyn(dense, input)?;
+    pinv_from_factors(context, factors, rcond)
+}
+
+fn validate_pinv_rcond(rcond: f64) -> Result<(), OperationError> {
     if !rcond.is_finite() || rcond < 0.0 {
         return Err(OperationError::InvalidArgument {
             message: "pinv rcond must be finite and non-negative",
         });
     }
-    // Only the factors and the spectrum are needed — S^+ is folded into a
-    // scaling below — so skip materializing the dense diagonal S.
-    let factors = svd_compact_factors_dyn(dense, input)?;
-    pinv_from_factors(context, factors, rcond)
+    Ok(())
+}
+
+fn inverted_pinv_spectrum(singular_values: &[SectorSpectrum], rcond: f64) -> Vec<SectorSpectrum> {
+    let sigma_max = singular_values
+        .iter()
+        .flat_map(|entry| entry.values.iter().copied())
+        .fold(0.0_f64, f64::max);
+    let cutoff = rcond * sigma_max;
+    singular_values
+        .iter()
+        .map(|entry| SectorSpectrum {
+            sector: entry.sector,
+            values: entry
+                .values
+                .iter()
+                .map(|&sigma| if sigma > cutoff { 1.0 / sigma } else { 0.0 })
+                .collect(),
+        })
+        .collect()
 }
 
 /// Applies the public `pinv` cutoff to compact SVD factors before the
@@ -866,23 +894,36 @@ where
     D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
     let (u, vh, singular_values) = factors;
-    let sigma_max = singular_values
-        .iter()
-        .flat_map(|entry| entry.values.iter().copied())
-        .fold(0.0_f64, f64::max);
-    let cutoff = rcond * sigma_max;
-    let inverted: Vec<SectorSpectrum> = singular_values
-        .iter()
-        .map(|entry| SectorSpectrum {
-            sector: entry.sector,
-            values: entry
-                .values
-                .iter()
-                .map(|&sigma| if sigma > cutoff { 1.0 / sigma } else { 0.0 })
-                .collect(),
-        })
-        .collect();
+    let inverted = inverted_pinv_spectrum(&singular_values, rcond);
     inverse_from_factors(context, u, vh, &inverted)
+}
+
+/// Parent-native pseudo-inverse of a logical adjoint.
+///
+/// Computes the parent's compact SVD once and forms
+/// `(A^H)^+ = U S^+ V^H` directly, without a logical-adjoint input, a complete
+/// parent pseudo-inverse, or adjointed factor copies.
+#[doc(hidden)]
+pub fn pinv_adjoint_parent_dyn<E, RuleKey, BT, BC, R, D>(
+    dense: &mut E,
+    context: &mut TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
+    parent: &BoundDynamicTensorRef<'_, R, D>,
+    rcond: f64,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    RuleKey: Clone + Eq + Hash + Send + Sync + 'static,
+    BT: TreeTransformBackend<D, f64>,
+    BC: TensorContractBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+{
+    validate_pinv_rcond(rcond)?;
+    let (mut u, vh, singular_values) = svd_compact_factors_dyn(dense, parent)?;
+    let inverted = inverted_pinv_spectrum(&singular_values, rcond);
+    let (space, data) = u.raw_space_and_data_mut();
+    scale_axis_by_spectrum(space, data, None, &inverted)?;
+    compose_bound_dyn(context, &u, &vh)
 }
 
 fn inverse_from_factors<RuleKey, BT, BC, R, D>(

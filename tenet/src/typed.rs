@@ -4239,10 +4239,13 @@ where
     }
 
     /// TensorKit 0.17 / MatrixAlgebraKit `pinv`: the Moore-Penrose
-    /// pseudo-inverse `t⁺ = V S⁺ Uᴴ`, where `t = U S Vᴴ` is the compact SVD and
+    /// thresholded pseudo-inverse `t⁺ = V S⁺ Uᴴ`, where `t = U S Vᴴ` is the compact SVD and
     /// `S⁺` inverts every singular value above the cutoff and sends the rest to
-    /// zero. `t⁺` satisfies `t t⁺ t = t` and reduces to [`Self::inv`] when `t`
-    /// is nonsingular and `rcond` is small enough to keep every singular value.
+    /// zero. This is the exact Moore-Penrose inverse of the hard-thresholded
+    /// effective-rank tensor `t_r`. It is the Moore-Penrose inverse of `t`
+    /// itself only when no genuinely nonzero singular value is discarded, and
+    /// then satisfies `t t⁺ t = t`. It reduces to [`Self::inv`] when `t` is
+    /// nonsingular and `rcond` keeps every singular value.
     ///
     /// # Tolerance, and the divergence from TensorKit
     ///
@@ -4309,13 +4312,23 @@ where
         }
         let mut dense = self.runtime.lease_dense();
         let mut lease = self.runtime.lease_context()?;
-        let body = self.materialized_body();
-        let out = tenet_matrixalgebra::pinv_dyn(
-            dense.dense(),
-            lease.context().multiplicity_free_lane::<D>(),
-            &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())?,
-            rcond,
-        )?;
+        let out = match &self.repr {
+            TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::pinv_adjoint_parent_dyn(
+                dense.dense(),
+                lease.context().multiplicity_free_lane::<D>(),
+                &BoundDynamicTensorRef::try_new(
+                    &view.parent.space,
+                    view.parent.materialized_dense_data(),
+                )?,
+                rcond,
+            )?,
+            TypedTensorRepr::Owned(_) => tenet_matrixalgebra::pinv_dyn(
+                dense.dense(),
+                lease.context().multiplicity_free_lane::<D>(),
+                &self.bound_ref()?,
+                rcond,
+            )?,
+        };
         Ok(self.wrap_bound_factor(out))
     }
 
@@ -7266,6 +7279,127 @@ mod representation_gates {
         assert!(Arc::ptr_eq(&owned(&late).data, &data));
         assert_eq!(materialized_adjoint_builds(&cold), 0);
         let TypedTensorRepr::Adjoint(view) = &cold.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+    }
+
+    fn assert_pinv_redirect<R, D>(source: &TensorMap<R, D>, rcond: f64, exact_original: bool)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec
+            + Send
+            + Sync
+            + 'static,
+        D: TensorScalar + core::fmt::Debug + Send + Sync + 'static,
+    {
+        let eager = eager_adjoint_oracle(source);
+        let expected = eager.pinv(rcond).unwrap();
+        let parent_body = Arc::clone(owned(source));
+        let parent_data = Arc::clone(&parent_body.data);
+        let lazy = source.adjoint().unwrap();
+
+        for _ in 0..2 {
+            let actual = lazy.clone().pinv(rcond).unwrap();
+            assert_typed_map_close(&actual, &expected, 1e-9);
+            let pap = actual.compose(&eager).unwrap().compose(&actual).unwrap();
+            assert_typed_map_close(&pap, &actual, 1e-8);
+            assert!(eager.compose(&actual).unwrap().is_hermitian(1e-9).unwrap());
+            assert!(actual.compose(&eager).unwrap().is_hermitian(1e-9).unwrap());
+            if exact_original {
+                let apa = eager.compose(&actual).unwrap().compose(&eager).unwrap();
+                assert_typed_map_close(&apa, &eager, 1e-8);
+            }
+            assert!(actual.owned_body().is_some());
+            assert!(Arc::ptr_eq(
+                actual.logical_space().provider_arc(),
+                source.logical_space().provider_arc()
+            ));
+            assert!(!Arc::ptr_eq(&owned(&actual).data, &parent_data));
+            let _ = actual.data();
+        }
+
+        let calls = (0..4)
+            .map(|_| {
+                let clone = lazy.clone();
+                std::thread::spawn(move || clone.pinv(rcond).unwrap())
+            })
+            .collect::<Vec<_>>();
+        for call in calls {
+            assert_typed_map_close(&call.join().unwrap(), &expected, 1e-9);
+        }
+        assert!(Arc::ptr_eq(owned(source), &parent_body));
+        assert!(Arc::ptr_eq(&owned(source).data, &parent_data));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+    }
+
+    #[test]
+    fn pinv_redirect_preserves_semantics_ownership_and_cold_concurrency() {
+        // What: full-rank, rectangular/rank-deficient, non-self-dual U(1),
+        // complex data, empty support, and a genuine SU(2) multitree all use
+        // the parent-factor seam and return detached provider-native outputs.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new(
+            provider,
+            [(U1Irrep::new(-1), 2), (U1Irrep::new(0), 3)],
+            false,
+        )
+        .unwrap();
+        let full = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            let re = if indices[0] == indices[1] {
+                30.0 + indices[0] as f64
+            } else {
+                (indices[0] + indices[1] + 1) as f64 / 100.0
+            };
+            num_complex::Complex64::new(re, (indices[0] + 2 * indices[1] + 1) as f64 / 200.0)
+        })
+        .unwrap();
+        assert_pinv_redirect(&full, 1e-12, true);
+
+        assert_pinv_redirect(
+            &genuinely_complex(&u1_matrix_fixture([(0, 3), (1, 2)], [(0, 2)])),
+            1e-10,
+            false,
+        );
+        assert_pinv_redirect(&u1_matrix_fixture([(1, 2)], [(0, 3)]), 1e-10, false);
+        let su2 = genuinely_complex(&su2_lazy_fixture());
+        assert!(su2.logical_space().space().structure().block_count() > 1);
+        assert_pinv_redirect(&su2, 1e-10, false);
+    }
+
+    #[test]
+    fn pinv_redirect_late_svd_failure_keeps_parent_and_receiver_cold() {
+        // What: a successful first-sector SVD cannot publish factors, mutate
+        // parent bytes, or initialize the lazy receiver when sector two fails.
+        let runtime = Runtime::builder()
+            .with_dense_executor(Box::new(FailSecondSvd::default()))
+            .build()
+            .unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new(
+            provider,
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)],
+            false,
+        )
+        .unwrap();
+        let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            (indices.iter().sum::<usize>() + 1) as f64
+        })
+        .unwrap();
+        let before = source.data().to_vec();
+        let data = Arc::clone(&owned(&source).data);
+        let lazy = source.adjoint().unwrap();
+        assert!(matches!(lazy.pinv(0.0), Err(Error::Operation(_))));
+        assert_eq!(source.data(), before);
+        assert!(Arc::ptr_eq(&owned(&source).data, &data));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
             unreachable!()
         };
         assert!(view.materialized.get().is_none());

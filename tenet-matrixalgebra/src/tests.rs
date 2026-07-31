@@ -7,8 +7,9 @@ use tenet_core::{
     SectorVec, Su3FusionRule, TensorMap, TensorMapSpace, U1FusionRule, U1Irrep, Z2FusionRule,
 };
 use tenet_tensors::{
-    BoundDynamicFusionMapSpace, DynamicFusionMapSpace, OperationError, OutputAxisOrder,
-    TensorContractFusionExecutionContext, TensorContractSpec, TreeTransformRuleCacheKey,
+    BoundDynamicFusionMapSpace, DenseTreeTransformOperations, DynamicFusionMapSpace,
+    OperationError, OutputAxisOrder, TensorContractFusionExecutionContext, TensorContractSpec,
+    TreeTransformRuleCacheKey,
 };
 
 use crate::factorize::{
@@ -24,6 +25,8 @@ use tenet_dense::{
 };
 
 struct RejectExecutorCalls;
+
+struct FailComposition;
 
 #[derive(Default)]
 struct SvdCallSpy {
@@ -228,6 +231,34 @@ impl DenseExecutor for RejectExecutorCalls {
         _: &DenseDotConfig,
     ) -> Result<(), DenseError> {
         panic!("validation must reject the input before dense execution")
+    }
+}
+
+impl DenseExecutor for FailComposition {
+    fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("composition backend must not run SVD")
+    }
+
+    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("composition backend must not run QR")
+    }
+
+    fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        panic!("composition backend must not run EIGH")
+    }
+
+    fn dot_general_into(
+        &mut self,
+        _: DenseWrite<'_>,
+        _: DenseRead<'_>,
+        _: DenseRead<'_>,
+        _: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        Err(DenseError::Backend {
+            backend: DenseBackend::Tenferro,
+            op: "dot_general_into",
+            message: "injected recomposition failure".to_string(),
+        })
     }
 }
 
@@ -7110,6 +7141,88 @@ fn pinv_keeps_its_global_rcond_cutoff() {
 
     assert!((scalar_u1_block(inverse.tensor(), 0) - 1.0).abs() < 1e-12);
     assert_eq!(scalar_u1_block(inverse.tensor(), 1), 0.0);
+}
+
+#[test]
+fn pinv_adjoint_parent_uses_one_parent_svd_and_the_shared_global_cutoff() {
+    // What: the largest singular value is in the later sector, and the first
+    // sector sits exactly on the strict global cutoff. The parent-native seam
+    // runs one SVD per stored sector, preserves provider identity, and emits
+    // the final logical-adjoint orientation directly.
+    let tensor = u1_block_endomorphism(&[(0, 1, vec![0.5_f64]), (1, 1, vec![1.0])]);
+    let provider = Arc::new(U1FusionRule);
+    let bound = bound_tensor(Arc::clone(&provider), &tensor);
+    let mut dense = SvdCallSpy::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+
+    let output =
+        pinv_adjoint_parent_dyn(&mut dense, &mut context, &bound.as_ref().dynamic(), 0.5).unwrap();
+    assert_eq!(dense.svd_calls, 2);
+    assert!(Arc::ptr_eq(output.space().provider_arc(), &provider));
+    let output: BoundTensorMap<_, _, 1, 1> = typed_from_bound_factor(output).unwrap();
+    assert_eq!(scalar_u1_block(output.tensor(), 0), 0.0);
+    assert!((scalar_u1_block(output.tensor(), 1) - 1.0).abs() < 1e-12);
+}
+
+#[test]
+fn pinv_adjoint_parent_rejects_invalid_rcond_before_svd() {
+    // What: the hidden seam owns the same validation precedence as ordinary
+    // pinv, independently of either facade.
+    let tensor = u1_block_endomorphism(&[(0, 1, vec![1.0_f64])]);
+    let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
+    for rcond in [-1.0, f64::NAN, f64::INFINITY] {
+        let mut dense = RejectExecutorCalls;
+        let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+        assert!(matches!(
+            pinv_adjoint_parent_dyn(&mut dense, &mut context, &bound.as_ref().dynamic(), rcond,),
+            Err(OperationError::InvalidArgument { .. })
+        ));
+    }
+}
+
+#[test]
+fn pinv_adjoint_parent_discards_unpublished_factors_on_late_svd_failure() {
+    // What: a successful first sector cannot publish factors or an output when
+    // the second sector's SVD fails.
+    let tensor = u1_block_endomorphism(&[(0, 1, vec![2.0_f64]), (1, 1, vec![3.0])]);
+    let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
+    let mut dense = FailSecondSvd::default();
+    let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+
+    assert!(matches!(
+        pinv_adjoint_parent_dyn(&mut dense, &mut context, &bound.as_ref().dynamic(), 0.0,),
+        Err(OperationError::Dense(DenseError::Backend {
+            op: "svd_into",
+            ..
+        }))
+    ));
+    assert_eq!(dense.calls, 2);
+}
+
+#[test]
+fn pinv_adjoint_parent_discards_unpublished_output_on_recomposition_failure() {
+    // What: after a successful parent SVD and scaling, a failed final compose
+    // returns no partial output.
+    let tensor = u1_block_endomorphism(&[(0, 2, vec![2.0, 0.0, 0.0, 3.0])]);
+    let bound = bound_tensor(Arc::new(U1FusionRule), &tensor);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let mut context: TensorContractFusionExecutionContext<
+        f64,
+        RuleIdentity,
+        DenseTreeTransformOperations,
+        DenseTreeTransformOperations<FailComposition>,
+    > = TensorContractFusionExecutionContext::new(
+        DenseTreeTransformOperations::default(),
+        DenseTreeTransformOperations::new(FailComposition),
+    );
+
+    assert!(matches!(
+        pinv_adjoint_parent_dyn(&mut dense, &mut context, &bound.as_ref().dynamic(), 0.0,),
+        Err(OperationError::Dense(DenseError::Backend {
+            op: "dot_general_into",
+            ..
+        }))
+    ));
 }
 
 #[test]
