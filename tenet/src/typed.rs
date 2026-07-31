@@ -3526,7 +3526,20 @@ where
     /// sector its own algebra produced.
     pub fn svd_vals(&self) -> Result<Vec<SectorSpectrum<R::Sector>>, Error> {
         let mut dense = self.runtime.lease_dense();
-        let raw = tenet_matrixalgebra::svd_vals_dyn(dense.dense(), &self.bound_ref()?)?;
+        // Singular values and coupled-sector ids are invariant under adjoint,
+        // so an oriented input or logical-payload copy cannot change this output.
+        let raw = match &self.repr {
+            TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::svd_vals_dyn(
+                dense.dense(),
+                &BoundDynamicTensorRef::try_new(
+                    &view.parent.space,
+                    view.parent.materialized_dense_data(),
+                )?,
+            )?,
+            TypedTensorRepr::Owned(_) => {
+                tenet_matrixalgebra::svd_vals_dyn(dense.dense(), &self.bound_ref()?)?
+            }
+        };
         self.decode_spectrum(raw)
     }
 
@@ -6283,6 +6296,53 @@ mod representation_gates {
             .all(|(pointer, data)| *pointer == outputs[0].0 && data.len() == expected_len));
         assert_eq!(outputs[0].1, expected);
         assert_eq!(materialized_adjoint_builds(&adjoint), 1);
+    }
+
+    #[test]
+    fn svd_vals_reads_the_parent_without_materializing_the_adjoint() {
+        // What: values-only SVD preserves typed sector spectra across cold,
+        // repeated, cloned, and concurrent lazy-adjoint reads.
+        macro_rules! assert_fixture {
+            ($source:expr) => {{
+                let source = $source;
+                let expected = source.svd_vals().unwrap();
+                let lazy = source.adjoint().unwrap();
+                assert_eq!(lazy.svd_vals().unwrap(), expected);
+                assert_eq!(lazy.svd_vals().unwrap(), expected);
+                assert_eq!(lazy.clone().svd_vals().unwrap(), expected);
+                assert_eq!(materialized_adjoint_builds(&lazy), 0);
+                let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+                    unreachable!()
+                };
+                assert!(view.materialized.get().is_none());
+                assert!(Arc::ptr_eq(
+                    view.logical_space.provider_arc(),
+                    source.logical_space().provider_arc()
+                ));
+            }};
+        }
+        assert_fixture!(u1_lazy_fixture());
+        assert_fixture!(u1_lazy_fixture().to_c64());
+        assert_fixture!(su2_lazy_fixture());
+        assert_fixture!(su2_lazy_fixture().to_c64());
+
+        let source = u1_lazy_fixture().to_c64();
+        let expected = source.svd_vals().unwrap();
+        let lazy = source.adjoint().unwrap();
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let lazy = lazy.clone();
+                std::thread::spawn(move || lazy.svd_vals().unwrap())
+            })
+            .collect();
+        for thread in threads {
+            assert_eq!(thread.join().unwrap(), expected);
+        }
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
     }
 
     fn eager_adjoint_oracle<R, D>(source: &TensorMap<R, D>) -> TensorMap<R, D>
