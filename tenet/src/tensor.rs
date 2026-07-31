@@ -9641,6 +9641,8 @@ impl Tensor {
     /// be `>= 0` (Julia's real `sqrt` throws a `DomainError` there too;
     /// convert with [`Self::to_c64`] first for the complex branch); c64
     /// tensors take the principal complex square root.
+    /// A dense lazy adjoint builds one operation-local logical payload without
+    /// publishing its reusable receiver cache.
     ///
     /// ```
     /// use tenet::prelude::*;
@@ -9663,7 +9665,7 @@ impl Tensor {
     /// ```
     pub fn sqrt(&self) -> Result<Self, Error> {
         if self.is_adjoint_view() {
-            return self.materialized_tensor()?.sqrt();
+            return self.materialized_tensor_uncached()?.sqrt();
         }
         let hom = self.ordinary_body().space.homspace();
         if hom.codomain().len() != 1
@@ -12470,6 +12472,171 @@ mod adjoint_parent_view_tests {
                 rule: "SU(3)",
             }
         );
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+    }
+
+    fn assert_erased_sqrt_uses_a_cold_logical_copy(parent: &Tensor) {
+        let expected = parent
+            .adjoint()
+            .unwrap()
+            .materialized_tensor_uncached()
+            .unwrap()
+            .sqrt()
+            .unwrap();
+        let parent_space = Arc::clone(&parent.ordinary_body().space);
+        let parent_data = Arc::clone(&parent.ordinary_body().data);
+        let lazy = parent.adjoint().unwrap();
+
+        for _ in 0..2 {
+            let actual = lazy.clone().sqrt().unwrap();
+            assert_close(&actual, &expected);
+            assert!(!actual.is_adjoint_view());
+            assert!(actual
+                .rule_authority_space()
+                .provider_matches_context_allocation(&parent.rule_authority_space().context()));
+            assert!(!Arc::ptr_eq(&actual.ordinary_body().data, &parent_data));
+        }
+        let calls = (0..4)
+            .map(|_| {
+                let clone = lazy.clone();
+                std::thread::spawn(move || clone.sqrt().unwrap())
+            })
+            .collect::<Vec<_>>();
+        for call in calls {
+            assert_close(&call.join().unwrap(), &expected);
+        }
+        assert!(Arc::ptr_eq(&parent.ordinary_body().space, &parent_space));
+        assert!(Arc::ptr_eq(&parent.ordinary_body().data, &parent_data));
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+
+        let _ = lazy.coupled_data().unwrap();
+        assert_eq!(lazy.adjoint_body_builds(), 1);
+        assert!(lazy.has_cached_materialization());
+    }
+
+    #[test]
+    fn erased_sqrt_dense_lazy_success_is_owned_provider_native_repeatable_and_cold() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let u1 = Space::u1([(-1, 2), (2, 4)]);
+        let f64_parent = Tensor::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+            if indices[0] == indices[1] {
+                (indices[0] + 1) as f64
+            } else {
+                0.0
+            }
+        })
+        .unwrap();
+        assert_erased_sqrt_uses_a_cold_logical_copy(&f64_parent);
+
+        let c64_parent = Tensor::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+            if indices[0] == indices[1] {
+                match indices[0] % 4 {
+                    0 => Complex64::new(-4.0, 0.0),
+                    1 => Complex64::new(-4.0, -0.0),
+                    2 => Complex64::new(-4.0, 1.0e-300),
+                    _ => Complex64::new(-4.0, -1.0e-300),
+                }
+            } else {
+                Complex64::new(0.0, -0.0)
+            }
+        })
+        .unwrap();
+        let expected = c64_parent
+            .adjoint()
+            .unwrap()
+            .materialized_tensor_uncached()
+            .unwrap()
+            .sqrt()
+            .unwrap();
+        let lazy = c64_parent.adjoint().unwrap();
+        let actual = lazy.sqrt().unwrap();
+        assert!(actual
+            .data_c64()
+            .iter()
+            .zip(expected.data_c64())
+            .all(|(actual, expected)| {
+                actual.re.to_bits() == expected.re.to_bits()
+                    && actual.im.to_bits() == expected.im.to_bits()
+            }));
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+        assert_erased_sqrt_uses_a_cold_logical_copy(&c64_parent);
+
+        let su2 = Space::su2([(0, 2), (1, 4)]).unwrap();
+        let su2_parent = Tensor::from_block_fn(&runtime, [&su2], [&su2], |_, indices| {
+            if indices[0] == indices[1] {
+                Complex64::new(-4.0, (indices[0] as f64 - 1.0) / 10.0)
+            } else {
+                Complex64::new(0.0, 0.0)
+            }
+        })
+        .unwrap();
+        assert_erased_sqrt_uses_a_cold_logical_copy(&su2_parent);
+    }
+
+    #[test]
+    fn erased_sqrt_dense_lazy_failures_preserve_logical_order_and_stay_cold() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let leg = Space::u1([(0, 3)]);
+
+        let offdiag = Tensor::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            if indices == [0, 1] {
+                1.0
+            } else {
+                0.0
+            }
+        })
+        .unwrap();
+        let lazy = offdiag.adjoint().unwrap();
+        let error = lazy.sqrt().unwrap_err().to_string();
+        assert!(error.contains("(1, 0)"), "{error}");
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+
+        let mixed = Tensor::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            match (indices[0], indices[1]) {
+                (1, 1) => -1.0,
+                (0, 2) => 1.0,
+                _ => 0.0,
+            }
+        })
+        .unwrap();
+        let eager_error = mixed
+            .adjoint()
+            .unwrap()
+            .materialized_tensor_uncached()
+            .unwrap()
+            .sqrt()
+            .unwrap_err()
+            .to_string();
+        let lazy = mixed.adjoint().unwrap();
+        assert_eq!(lazy.sqrt().unwrap_err().to_string(), eager_error);
+        assert!(eager_error.contains("negative"), "{eager_error}");
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+
+        let negative = Tensor::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            if indices[0] == indices[1] {
+                -1.0
+            } else {
+                0.0
+            }
+        })
+        .unwrap();
+        let eager_error = negative
+            .adjoint()
+            .unwrap()
+            .materialized_tensor_uncached()
+            .unwrap()
+            .sqrt()
+            .unwrap_err()
+            .to_string();
+        let lazy = negative.adjoint().unwrap();
+        for _ in 0..2 {
+            assert_eq!(lazy.clone().sqrt().unwrap_err().to_string(), eager_error);
+        }
         assert_eq!(lazy.adjoint_body_builds(), 0);
         assert!(!lazy.has_cached_materialization());
     }
