@@ -332,33 +332,47 @@ fn c64_qr_null_polar_inverse_and_pseudoinverse_are_end_to_end() {
 /// `eig_full` of a REAL tensor returns c64 factors with
 /// `V * diag(lambda) * V^-1 ~ t` (this is why the dtype-erased storage
 /// exists: the output dtype differs from the input's).
-#[test]
-fn eig_full_of_real_tensor_is_c64_and_recomposes() {
+fn assert_real_eig_full_recomposes(v: Space, rule: &str) {
     let rt = Runtime::builder().build().unwrap();
-    for v in [u1_space(), su2_space()] {
-        let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 51).unwrap();
-        assert_eq!(t.dtype(), Dtype::F64);
+    let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 51).unwrap();
+    assert_eq!(t.dtype(), Dtype::F64);
 
-        let (d, w) = t.eig_full().unwrap();
-        assert_eq!(d.dtype(), Dtype::C64);
-        assert_eq!(w.dtype(), Dtype::C64);
+    let (d, w) = t.eig_full().unwrap();
+    assert_eq!(d.dtype(), Dtype::C64);
+    assert_eq!(w.dtype(), Dtype::C64);
 
-        // Eigen equation `t * V = V * D` (V maps the bond into the original
-        // codomain, so it is not an endomorphism; no inverse needed).
-        let lhs = t.to_c64().compose(&w).unwrap();
-        let rhs = w.compose(&d).unwrap();
-        let diff = lhs.add(&rhs, 1.0, -1.0).unwrap().norm().unwrap();
-        assert!(diff <= 1e-8 * (1.0 + t.norm().unwrap()), "diff = {diff}");
+    // Eigen equation `t * V = V * D` (V maps the bond into the original
+    // codomain, so it is not an endomorphism; no inverse needed).
+    let lhs = t.to_c64().compose(&w).unwrap();
+    let rhs = w.compose(&d).unwrap();
+    let diff = lhs.add(&rhs, 1.0, -1.0).unwrap().norm().unwrap();
+    let equation_scale = lhs.norm().unwrap() + rhs.norm().unwrap();
+    let relative_residual = diff / equation_scale.max(f64::MIN_POSITIVE);
 
-        // Complex eigenvalues of a real matrix come in conjugate pairs, so
-        // eig_vals of real input sums to a real number (the trace).
-        let spectra = t.eig_vals().unwrap();
-        let sum: Complex64 = spectra
-            .iter()
-            .flat_map(|spectrum| spectrum.values.iter())
-            .sum();
-        assert!(sum.im.abs() <= 1e-8 * (1.0 + sum.norm()));
-    }
+    // Complex eigenvalues of a real matrix come in conjugate pairs, so
+    // eig_vals of real input sums to a real number (the trace).
+    let spectra = t.eig_vals().unwrap();
+    let sectors: Vec<_> = spectra.iter().map(|spectrum| spectrum.sector).collect();
+    assert!(
+        diff <= 1e-8 * (1.0 + t.norm().unwrap()),
+        "rule={rule}, coupled_sectors={sectors:?}, \
+         relative AV-VD residual={relative_residual:e}, absolute diff={diff:e}"
+    );
+    let sum: Complex64 = spectra
+        .iter()
+        .flat_map(|spectrum| spectrum.values.iter())
+        .sum();
+    assert!(sum.im.abs() <= 1e-8 * (1.0 + sum.norm()));
+}
+
+#[test]
+fn u1_eig_full_of_real_tensor_is_c64_and_recomposes() {
+    assert_real_eig_full_recomposes(u1_space(), "U1");
+}
+
+#[test]
+fn su2_eig_full_of_real_tensor_is_c64_and_recomposes() {
+    assert_real_eig_full_recomposes(su2_space(), "SU2");
 }
 
 #[test]
