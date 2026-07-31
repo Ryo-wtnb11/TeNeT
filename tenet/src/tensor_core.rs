@@ -5,9 +5,9 @@ use tenet_core::{
     merge_fusion_trees_multiplicity_free, BlockKey, CanonicalUnitFusionRule, CheckedFusionAlgebra,
     CheckedFusionSpaceError, CheckedGenericFusion, CheckedGenericRigidSymbols,
     CheckedGenericStructureError, CheckedGenericSymbolError, CoreError, FusionProductSpace,
-    FusionStyleKind, FusionTreeHomSpace, FusionTreePairKey, GenericBraidScalar,
-    GenericRigidSymbols, MultiplicityFreeRigidSymbols, MultiplicityIndex,
-    PreparedTreePairOperation, RuleIdentity,
+    FusionStyleKind, FusionTreeHomSpace, FusionTreePairKey, FusionTreePairOrientation,
+    GenericBraidScalar, GenericRigidSymbols, MultiplicityFreeRigidSymbols, MultiplicityIndex,
+    OrientedFusionTreeHomSpace, PreparedTreePairOperation, RuleIdentity,
 };
 use tenet_matrixalgebra::SectorSpectrum;
 use tenet_tensors::{
@@ -435,6 +435,160 @@ where
         D::from_real(1.0),
         D::from_real(0.0),
     )?;
+    Ok((destination, data))
+}
+
+pub(crate) enum OrientedContractionKind {
+    Contract,
+    Compose,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tensorcontract_oriented_multiplicity_free<R, D>(
+    context: &mut Ctx<D, RuleIdentity>,
+    lhs_authority: &BoundDynamicFusionMapSpace<R>,
+    lhs: FusionOperand<'_>,
+    lhs_data: &[D],
+    rhs_authority: &BoundDynamicFusionMapSpace<R>,
+    rhs: FusionOperand<'_>,
+    rhs_data: &[D],
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+    output_order: OutputAxisOrder<'_>,
+    kind: OrientedContractionKind,
+) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), tenet_tensors::OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + TreeTransformRuleCacheKey<Key = RuleIdentity>,
+    D: UserScalar,
+{
+    if lhs_authority.provider().rule_identity() != rhs_authority.provider().rule_identity() {
+        return Err(tenet_tensors::OperationError::from_core_preserving_context(
+            CoreError::FusionRuleMismatch {
+                expected: lhs_authority.provider().rule_identity(),
+                actual: rhs_authority.provider().rule_identity(),
+            },
+        ));
+    }
+    if lhs_axes.len() != rhs_axes.len() {
+        return Err(tenet_tensors::OperationError::ContractAxisCountMismatch {
+            lhs: lhs_axes.len(),
+            rhs: rhs_axes.len(),
+        });
+    }
+    let lhs_rank = lhs.storage_space().rank();
+    let rhs_rank = rhs.storage_space().rank();
+    // Keep `TensorContractAxisPlan::compile`'s public error order before any
+    // oriented homspace/provider work. That plan is private to tenet-tensors;
+    // re-exporting it just to share these three syntax checks would widen the
+    // expert API.
+    for (tensor, axes, rank) in [("lhs", lhs_axes, lhs_rank), ("rhs", rhs_axes, rhs_rank)] {
+        let mut seen = vec![false; rank];
+        if axes.iter().any(|&axis| {
+            if axis >= rank || seen[axis] {
+                true
+            } else {
+                seen[axis] = true;
+                false
+            }
+        }) {
+            return Err(tenet_tensors::OperationError::InvalidAxisSet {
+                tensor,
+                axes: axes.to_vec(),
+                rank,
+            });
+        }
+    }
+    let lhs_open_rank = lhs_rank - lhs_axes.len();
+    let rhs_open_rank = rhs_rank - rhs_axes.len();
+    let identity_axes;
+    let output_axes = match output_order {
+        OutputAxisOrder::Identity => {
+            identity_axes = (0..lhs_open_rank + rhs_open_rank).collect::<Vec<_>>();
+            identity_axes.as_slice()
+        }
+        OutputAxisOrder::Axes(axes) => axes,
+    };
+    if output_axes.len() != lhs_open_rank + rhs_open_rank || {
+        let mut seen = vec![false; output_axes.len()];
+        output_axes.iter().any(|&axis| {
+            if axis >= seen.len() || seen[axis] {
+                true
+            } else {
+                seen[axis] = true;
+                false
+            }
+        })
+    } {
+        return Err(tenet_tensors::OperationError::InvalidPermutation {
+            axes: output_axes.to_vec(),
+            rank: lhs_open_rank + rhs_open_rank,
+        });
+    }
+    let lhs_orientation = if lhs.storage_conjugate() {
+        FusionTreePairOrientation::Adjoint
+    } else {
+        FusionTreePairOrientation::Direct
+    };
+    let rhs_orientation = if rhs.storage_conjugate() {
+        FusionTreePairOrientation::Adjoint
+    } else {
+        FusionTreePairOrientation::Direct
+    };
+    let homspace = OrientedFusionTreeHomSpace::try_tensorcontract_homspace_checked(
+        lhs_authority.provider(),
+        OrientedFusionTreeHomSpace::new(lhs.storage_space().homspace(), lhs_orientation),
+        OrientedFusionTreeHomSpace::new(rhs.storage_space().homspace(), rhs_orientation),
+        lhs_axes,
+        rhs_axes,
+        output_axes,
+        lhs_open_rank,
+    )
+    .map_err(|error| match error {
+        tenet_core::CheckedFusionSpaceError::Core(error) => {
+            tenet_tensors::OperationError::from_core_preserving_context(*error)
+        }
+        tenet_core::CheckedFusionSpaceError::FusionAlgebra(error) => {
+            tenet_tensors::OperationError::FusionAlgebra(error)
+        }
+        _ => tenet_tensors::OperationError::InvalidArgument {
+            message: "unknown checked fusion metadata error",
+        },
+    })?;
+    let destination = lhs_authority.derive_from_final_homspace(homspace)?;
+    let mut data = vec![D::from_real(0.0); destination.space().required_len()?];
+    match kind {
+        OrientedContractionKind::Compose => context.tensorcompose_fusion_dyn_into(
+            &destination,
+            &mut data,
+            lhs,
+            lhs_data,
+            rhs,
+            rhs_data,
+            lhs_axes,
+            rhs_axes,
+            D::from_real(1.0),
+            D::from_real(0.0),
+        )?,
+        OrientedContractionKind::Contract => context.tensorcontract_fusion_dyn_prelowered_into(
+            &destination,
+            &mut data,
+            lhs,
+            lhs_data,
+            rhs,
+            rhs_data,
+            TensorContractSpec::new_with_conjugation(
+                lhs_axes,
+                rhs_axes,
+                output_order,
+                lhs.storage_conjugate(),
+                rhs.storage_conjugate(),
+            ),
+            D::from_real(1.0),
+            D::from_real(0.0),
+        )?,
+    }
     Ok((destination, data))
 }
 

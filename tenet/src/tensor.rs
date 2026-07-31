@@ -53,7 +53,8 @@ use tenet_tensors::cuda::{CudaStorage, CudaStorageGemm};
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, OperationError, OutputAxisOrder,
     OwnedCatC64Source as CatC64Source, OwnedCatCopy, OwnedCatSide, RecouplingCoefficientAction,
-    TensorContractSpec, TreeTransformOperation, TreeTransformRuleCacheKey,
+    TensorContractSpec, TreeTransformOperation, TreeTransformOperationKind,
+    TreeTransformRuleCacheKey,
 };
 
 use crate::error::Error;
@@ -2904,12 +2905,6 @@ pub(crate) fn with_planar_axes<T>(
     }
 }
 
-struct LoweredAdjointTransformRequest {
-    codomain_axes: Vec<usize>,
-    domain_axes: Vec<usize>,
-    levels: Vec<usize>,
-}
-
 fn logical_adjoint_axis_to_parent(
     parent_codomain_rank: usize,
     parent_domain_rank: usize,
@@ -2923,7 +2918,7 @@ fn logical_adjoint_axis_to_parent(
     }
 }
 
-fn logical_adjoint_axes_to_parent(
+pub(crate) fn logical_adjoint_axes_to_parent(
     parent_codomain_rank: usize,
     parent_domain_rank: usize,
     axes: &[usize],
@@ -2933,50 +2928,62 @@ fn logical_adjoint_axes_to_parent(
         .collect()
 }
 
-fn lower_adjoint_transform_request(
+pub(crate) fn lower_adjoint_tree_transform_operation(
     parent_codomain_rank: usize,
     parent_domain_rank: usize,
-    logical_codomain_axes: &[usize],
-    logical_domain_axes: &[usize],
-    kind: &TransformKind<'_>,
-) -> Result<LoweredAdjointTransformRequest, Error> {
+    operation: &TreeTransformOperation,
+) -> Result<TreeTransformOperation, Error> {
     let rank = parent_codomain_rank
         .checked_add(parent_domain_rank)
         .ok_or_else(|| Error::InvalidArgument("tensor rank overflow".to_string()))?;
-    let logical_axes = logical_codomain_axes
+    let logical_axes = operation
+        .codomain_permutation()
         .iter()
-        .chain(logical_domain_axes)
+        .chain(operation.domain_permutation())
         .copied()
         .collect::<Vec<_>>();
     validate_axis_permutation(&logical_axes, rank)?;
 
-    let codomain_axes = logical_domain_axes
+    let codomain_axes = operation
+        .domain_permutation()
         .iter()
         .copied()
         .map(|axis| logical_adjoint_axis_to_parent(parent_codomain_rank, parent_domain_rank, axis))
-        .collect();
-    let domain_axes = logical_codomain_axes
+        .collect::<Vec<_>>();
+    let domain_axes = operation
+        .codomain_permutation()
         .iter()
         .copied()
         .map(|axis| logical_adjoint_axis_to_parent(parent_codomain_rank, parent_domain_rank, axis))
-        .collect();
-    let levels = match kind {
-        TransformKind::Braid { levels } => {
+        .collect::<Vec<_>>();
+    Ok(match operation.kind() {
+        TreeTransformOperationKind::Permute => {
+            TreeTransformOperation::permute(codomain_axes, domain_axes)
+        }
+        TreeTransformOperationKind::Transpose => {
+            TreeTransformOperation::transpose(codomain_axes, domain_axes)
+        }
+        TreeTransformOperationKind::Braid => {
+            let level_count = operation
+                .codomain_levels()
+                .len()
+                .checked_add(operation.domain_levels().len())
+                .ok_or_else(|| Error::InvalidArgument("braid level count overflow".to_string()))?;
+            if level_count != rank {
+                return Err(Error::InvalidArgument(format!(
+                    "braid levels must list one level per source axis \
+                     (expected {rank}, got {level_count})",
+                )));
+            }
             // Why not reflect the level values: the outer adjoint conjugates
             // coefficients; TensorKit only reindexes levels into parent order.
-            levels[parent_domain_rank..]
-                .iter()
-                .chain(&levels[..parent_domain_rank])
-                .copied()
-                .collect()
+            TreeTransformOperation::braid(
+                codomain_axes,
+                domain_axes,
+                operation.domain_levels().iter().copied(),
+                operation.codomain_levels().iter().copied(),
+            )
         }
-        TransformKind::Permute | TransformKind::Transpose => Vec::new(),
-    };
-
-    Ok(LoweredAdjointTransformRequest {
-        codomain_axes,
-        domain_axes,
-        levels,
     })
 }
 
@@ -6717,43 +6724,7 @@ impl Tensor {
         if shares_identity_storage {
             return Ok(self.clone());
         }
-        if let TensorRepr::Adjoint(view) = &self.repr {
-            let parent_nout = view.parent.space.homspace().codomain().len();
-            let parent_nin = view.parent.space.homspace().domain().len();
-            let lowered = lower_adjoint_transform_request(
-                parent_nout,
-                parent_nin,
-                codomain_axes,
-                domain_axes,
-                &kind,
-            )?;
-            let parent = Self::owned(
-                self.rt.clone(),
-                Arc::clone(&view.parent.space),
-                Arc::clone(&view.parent.data),
-            );
-            let transformed = match kind {
-                TransformKind::Permute => parent.transformed(
-                    &lowered.codomain_axes,
-                    &lowered.domain_axes,
-                    TransformKind::Permute,
-                ),
-                TransformKind::Braid { .. } => parent.transformed(
-                    &lowered.codomain_axes,
-                    &lowered.domain_axes,
-                    TransformKind::Braid {
-                        levels: &lowered.levels,
-                    },
-                ),
-                TransformKind::Transpose => parent.transformed(
-                    &lowered.codomain_axes,
-                    &lowered.domain_axes,
-                    TransformKind::Transpose,
-                ),
-            }?;
-            return transformed.adjoint();
-        }
-        let operation = match kind {
+        let operation = match &kind {
             TransformKind::Permute => TreeTransformOperation::permute(
                 codomain_axes.iter().copied(),
                 domain_axes.iter().copied(),
@@ -6769,6 +6740,19 @@ impl Tensor {
                 domain_axes.iter().copied(),
             ),
         };
+        if let TensorRepr::Adjoint(view) = &self.repr {
+            let parent_nout = view.parent.space.homspace().codomain().len();
+            let parent_nin = view.parent.space.homspace().domain().len();
+            let lowered =
+                lower_adjoint_tree_transform_operation(parent_nout, parent_nin, &operation)?;
+            let parent = Self::owned(
+                self.rt.clone(),
+                Arc::clone(&view.parent.space),
+                Arc::clone(&view.parent.data),
+            );
+            let transformed = with_data!(parent, data, parent.transformed_impl(data, lowered))?;
+            return transformed.adjoint();
+        }
 
         if let Data::Diagonal(diagonal) = self.stored_data() {
             // Why not include explicit braid or Generic fusion: their compact
@@ -13525,13 +13509,13 @@ mod adjoint_parent_view_tests {
     fn adjoint_braid_levels_follow_tensorkit_parent_axis_order() {
         // What: a 3|1 parent's logical levels map to [3, 11, 5, 17], with
         // unchanged values, while the output tuples swap around the adjoint.
-        let levels = [17, 3, 11, 5];
-        let kind = TransformKind::Braid { levels: &levels };
-        let lowered = lower_adjoint_transform_request(3, 1, &[3, 0, 2], &[1], &kind).unwrap();
+        let operation = TreeTransformOperation::braid([3, 0, 2], [1], [17], [3, 11, 5]);
+        let lowered = lower_adjoint_tree_transform_operation(3, 1, &operation).unwrap();
 
-        assert_eq!(lowered.codomain_axes, [0]);
-        assert_eq!(lowered.domain_axes, [2, 3, 1]);
-        assert_eq!(lowered.levels, [3, 11, 5, 17]);
+        assert_eq!(lowered.codomain_permutation(), [0]);
+        assert_eq!(lowered.domain_permutation(), [2, 3, 1]);
+        assert_eq!(lowered.codomain_levels(), [3, 11, 5]);
+        assert_eq!(lowered.domain_levels(), [17]);
     }
 
     #[test]

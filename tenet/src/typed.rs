@@ -238,6 +238,7 @@ use tenet_matrixalgebra::{BoundDynFactor, FactorScalar};
 use crate::tensor::{
     absorb_mapped, apply_fill, cat_homspace, check_flip_layout_identity, compile_cat_plan,
     coupled_region_pow_sum, flip_block_factor, flip_toggled_homspace, internal_layout_error,
+    logical_adjoint_axes_to_parent, lower_adjoint_tree_transform_operation,
     map_checked_unit_layout_error, reject_unbraided_nonunit_legs, scale_blocks_impl,
     sector_regions, twist_block_factor, twist_is_identity_over_blocks, validate_norm_p,
     weighted_inner, weighted_trace, with_planar_axes, CatOperandLayout, CatSide, Fill,
@@ -245,9 +246,10 @@ use crate::tensor::{
 };
 pub use crate::tensor_core::CheckedGenericTensorProductError;
 use crate::tensor_core::{
-    pow_by_squaring, tensorcompose_owned_multiplicity_free, tensorcontract_owned_multiplicity_free,
+    pow_by_squaring, tensorcompose_owned_multiplicity_free,
+    tensorcontract_oriented_multiplicity_free, tensorcontract_owned_multiplicity_free,
     tensorproduct_owned_checked_generic, tensorproduct_owned_multiplicity_free,
-    tree_transform_owned_multiplicity_free,
+    tree_transform_owned_multiplicity_free, OrientedContractionKind,
 };
 
 /// Facade error for checked Generic providers.
@@ -1326,6 +1328,19 @@ where
     D: TensorScalar,
 {
     let mut data: Vec<D> = dense.iter().map(|&value| value * dense_factor).collect();
+    add_spectrum_into(space, &mut data, spectrum, diagonal_factor)?;
+    Ok(data)
+}
+
+fn add_spectrum_into<D>(
+    space: &DynamicFusionMapSpace,
+    data: &mut [D],
+    spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
+    diagonal_factor: D,
+) -> Result<(), Error>
+where
+    D: TensorScalar,
+{
     let structure = space.structure();
     for index in 0..structure.block_count() {
         let block = structure.block(index)?;
@@ -1361,7 +1376,7 @@ where
             data[position] = data[position] + value * diagonal_factor;
         }
     }
-    Ok(data)
+    Ok(())
 }
 
 /// Whether `space` is a bond space: rank one on each side, with the same leg on
@@ -1694,6 +1709,19 @@ impl<R, D> TensorMap<R, D>
 where
     D: TensorScalar,
 {
+    fn fusion_operand_and_data(&self) -> (tenet_tensors::FusionOperand<'_>, &[D]) {
+        match &self.repr {
+            TypedTensorRepr::Owned(body) => (
+                tenet_tensors::FusionOperand::direct(body.space.space()),
+                body.materialized_dense_data(),
+            ),
+            TypedTensorRepr::Adjoint(view) => (
+                tenet_tensors::FusionOperand::adjoint(view.parent.space.space()),
+                view.parent.materialized_dense_data(),
+            ),
+        }
+    }
+
     /// Whole dense payload in the tensor's logical coupled-layout order.
     ///
     /// A lazy adjoint is materialized here at most once across all clones.
@@ -2623,6 +2651,19 @@ where
                 return Ok(self.with_spectrum_on(destination, transformed));
             }
         }
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            let parent_space = view.parent.space.space();
+            let lowered = lower_adjoint_tree_transform_operation(
+                parent_space.nout(),
+                parent_space.nin(),
+                &operation,
+            )?;
+            let parent = Self {
+                runtime: self.runtime.clone(),
+                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+            };
+            return parent.tree_transform_multiplicity_free(lowered)?.adjoint();
+        }
         // Leasing rather than locking, matching the erased path: independent
         // operations on one runtime must not serialize behind each other.
         let mut lease = self.runtime.lease_context()?;
@@ -2757,19 +2798,38 @@ where
             return Ok(compact);
         }
         let mut lease = self.runtime.lease_context()?;
-        let lhs_body = self.materialized_body();
-        let rhs_body = other.materialized_body();
-        let (space, data) = tensorcontract_owned_multiplicity_free(
-            lease.context().multiplicity_free_lane::<D>(),
-            BoundDynamicTensorRef::try_new(&lhs_body.space, lhs_body.materialized_dense_data())?,
-            BoundDynamicTensorRef::try_new(&rhs_body.space, rhs_body.materialized_dense_data())?,
-            lhs_axes,
-            rhs_axes,
-            // Why `OutputAxisOrder` stays out of the signature: it is an
-            // expert-layer borrow type, and a `&[usize]` says the same thing
-            // at the facade without a second public vocabulary.
-            OutputAxisOrder::from_axes(output_axes),
-        )?;
+        let output_order = OutputAxisOrder::from_axes(output_axes);
+        let (space, data) = if let (TypedTensorRepr::Owned(lhs), TypedTensorRepr::Owned(rhs)) =
+            (&self.repr, &other.repr)
+        {
+            tensorcontract_owned_multiplicity_free(
+                lease.context().multiplicity_free_lane::<D>(),
+                BoundDynamicTensorRef::try_new(&lhs.space, lhs.materialized_dense_data())?,
+                BoundDynamicTensorRef::try_new(&rhs.space, rhs.materialized_dense_data())?,
+                lhs_axes,
+                rhs_axes,
+                output_order,
+            )?
+        } else {
+            let (lhs, lhs_data) = self.fusion_operand_and_data();
+            let (rhs, rhs_data) = other.fusion_operand_and_data();
+            tensorcontract_oriented_multiplicity_free(
+                lease.context().multiplicity_free_lane::<D>(),
+                self.logical_space(),
+                lhs,
+                lhs_data,
+                other.logical_space(),
+                rhs,
+                rhs_data,
+                lhs_axes,
+                rhs_axes,
+                // Why `OutputAxisOrder` stays out of the signature: it is
+                // an expert-layer borrow type, and `&[usize]` says the same
+                // thing at the facade without a second public vocabulary.
+                output_order,
+                OrientedContractionKind::Contract,
+            )?
+        };
         Ok(Self {
             runtime: self.runtime.clone(),
             repr: owned_repr(TypedTensorBody::dense(space, data)),
@@ -2945,15 +3005,33 @@ where
         let lhs_axes: Vec<usize> = (self.codomain_rank()..self.rank()).collect();
         let rhs_axes: Vec<usize> = (0..other.codomain_rank()).collect();
         let mut lease = self.runtime.lease_context()?;
-        let lhs_body = self.materialized_body();
-        let rhs_body = other.materialized_body();
-        let (space, data) = tensorcompose_owned_multiplicity_free(
-            lease.context().multiplicity_free_lane::<D>(),
-            BoundDynamicTensorRef::try_new(&lhs_body.space, lhs_body.materialized_dense_data())?,
-            BoundDynamicTensorRef::try_new(&rhs_body.space, rhs_body.materialized_dense_data())?,
-            &lhs_axes,
-            &rhs_axes,
-        )?;
+        let (space, data) = if let (TypedTensorRepr::Owned(lhs), TypedTensorRepr::Owned(rhs)) =
+            (&self.repr, &other.repr)
+        {
+            tensorcompose_owned_multiplicity_free(
+                lease.context().multiplicity_free_lane::<D>(),
+                BoundDynamicTensorRef::try_new(&lhs.space, lhs.materialized_dense_data())?,
+                BoundDynamicTensorRef::try_new(&rhs.space, rhs.materialized_dense_data())?,
+                &lhs_axes,
+                &rhs_axes,
+            )?
+        } else {
+            let (lhs, lhs_data) = self.fusion_operand_and_data();
+            let (rhs, rhs_data) = other.fusion_operand_and_data();
+            tensorcontract_oriented_multiplicity_free(
+                lease.context().multiplicity_free_lane::<D>(),
+                self.logical_space(),
+                lhs,
+                lhs_data,
+                other.logical_space(),
+                rhs,
+                rhs_data,
+                &lhs_axes,
+                &rhs_axes,
+                OutputAxisOrder::identity(),
+                OrientedContractionKind::Compose,
+            )?
+        };
         Ok(Self {
             runtime: self.runtime.clone(),
             repr: owned_repr(TypedTensorBody::dense(space, data)),
@@ -3223,7 +3301,23 @@ where
         axis: Option<usize>,
         spectrum: &[tenet_matrixalgebra::SectorSpectrum<D>],
     ) -> Result<Self, Error> {
-        let mut data = self.materialized_body().materialized_dense_data().to_vec();
+        let mut data = if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
+            let (operand, source) = self.fusion_operand_and_data();
+            let mut data = vec![D::from_real(0.0); self.logical_space().space().required_len()?];
+            tenet_tensors::oriented_fusion_add_into(
+                self.logical_space().space().structure(),
+                &mut data,
+                operand,
+                source,
+                operand,
+                source,
+                D::from_real(1.0),
+                D::from_real(0.0),
+            )?;
+            data
+        } else {
+            self.materialized_body().materialized_dense_data().to_vec()
+        };
         tenet_matrixalgebra::scale_axis_by_spectrum_mapped(
             self.logical_space().space(),
             &mut data,
@@ -4316,6 +4410,58 @@ where
                 "tensors live on different spaces or block layouts".to_string(),
             ));
         }
+        if matches!(&self.repr, TypedTensorRepr::Adjoint(_))
+            || matches!(&other.repr, TypedTensorRepr::Adjoint(_))
+        {
+            if let (Some(spectrum), TypedTensorRepr::Adjoint(_)) = (self.spectrum(), &other.repr) {
+                let (operand, dense) = other.fusion_operand_and_data();
+                let mut data =
+                    vec![D::from_real(0.0); self.logical_space().space().required_len()?];
+                tenet_tensors::oriented_fusion_add_into(
+                    self.logical_space().space().structure(),
+                    &mut data,
+                    operand,
+                    dense,
+                    operand,
+                    dense,
+                    beta,
+                    D::from_real(0.0),
+                )?;
+                add_spectrum_into(self.logical_space().space(), &mut data, spectrum, alpha)?;
+                return Ok(self.with_data(data));
+            }
+            if let (TypedTensorRepr::Adjoint(_), Some(spectrum)) = (&self.repr, other.spectrum()) {
+                let (operand, dense) = self.fusion_operand_and_data();
+                let mut data =
+                    vec![D::from_real(0.0); self.logical_space().space().required_len()?];
+                tenet_tensors::oriented_fusion_add_into(
+                    self.logical_space().space().structure(),
+                    &mut data,
+                    operand,
+                    dense,
+                    operand,
+                    dense,
+                    alpha,
+                    D::from_real(0.0),
+                )?;
+                add_spectrum_into(self.logical_space().space(), &mut data, spectrum, beta)?;
+                return Ok(self.with_data(data));
+            }
+            let (lhs, lhs_data) = self.fusion_operand_and_data();
+            let (rhs, rhs_data) = other.fusion_operand_and_data();
+            let mut data = vec![D::from_real(0.0); self.logical_space().space().required_len()?];
+            tenet_tensors::oriented_fusion_add_into(
+                self.logical_space().space().structure(),
+                &mut data,
+                lhs,
+                lhs_data,
+                rhs,
+                rhs_data,
+                alpha,
+                beta,
+            )?;
+            return Ok(self.with_data(data));
+        }
         match (self.spectrum(), other.spectrum()) {
             // Two spectra on one bond space: the sum is diagonal too.
             (Some(lhs), Some(rhs)) => {
@@ -4399,6 +4545,16 @@ where
                     .collect(),
             );
         }
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            let parent = Self {
+                runtime: self.runtime.clone(),
+                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+            };
+            return parent
+                .scale(FactorScalar::adjoint(factor))
+                .adjoint()
+                .expect("scaling a pre-admitted adjoint must preserve its layout");
+        }
         self.with_data(
             self.materialized_body()
                 .materialized_dense_data()
@@ -4475,16 +4631,47 @@ where
             .count();
         let trace_lhs: Vec<usize> = pairs.iter().map(|&(lhs, _)| lhs).collect();
         let trace_rhs: Vec<usize> = pairs.iter().map(|&(_, rhs)| rhs).collect();
-        let axes = tenet_tensors::TensorTraceAxisSpec::new(&output_axes, &trace_lhs, &trace_rhs);
+        let mapped_output_axes;
+        let mapped_trace_lhs;
+        let mapped_trace_rhs;
+        let (source_space, source_data, axes) = match &self.repr {
+            TypedTensorRepr::Owned(body) => (
+                &body.space,
+                match &*body.data {
+                    TypedData::Dense(data) => Some(data.as_slice()),
+                    TypedData::Diagonal(_) => None,
+                },
+                tenet_tensors::TensorTraceAxisSpec::new(&output_axes, &trace_lhs, &trace_rhs),
+            ),
+            TypedTensorRepr::Adjoint(view) => {
+                let parent = view.parent.space.space();
+                mapped_output_axes =
+                    logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &output_axes);
+                mapped_trace_lhs =
+                    logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &trace_lhs);
+                mapped_trace_rhs =
+                    logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &trace_rhs);
+                (
+                    &view.parent.space,
+                    Some(view.parent.materialized_dense_data()),
+                    tenet_tensors::TensorTraceAxisSpec::new_with_conjugation(
+                        &mapped_output_axes,
+                        &mapped_trace_lhs,
+                        &mapped_trace_rhs,
+                        true,
+                    ),
+                )
+            }
+        };
         // Preflight first, exactly as the erased facade does: the checked
         // homspace selection must fail before any destination layout is
         // derived, so a rejected trace publishes no state.
         let homspace = tenet_tensors::tensortrace_fusion_dyn_selected_homspace_checked(
-            self.logical_space(),
+            source_space,
             axes,
             destination_codomain_rank,
         )?;
-        let space = self.logical_space().derive_from_final_homspace(homspace)?;
+        let space = source_space.derive_from_final_homspace(homspace)?;
         // Compact arm (#604): the full trace of a rank-(1,1) spectrum factor
         // over its only pair is a reduction of the stored spectrum, so there
         // is nothing to materialize — the typed twin of the erased #585 arm in
@@ -4502,8 +4689,8 @@ where
         // Today the geometric conditions are implied by the Group 4 contract
         // (`TypedData::Diagonal` lives on bond spaces only), so they are
         // defensive parity with the erased guard, not a reachable branch. A
-        // lazy dense adjoint has no compact spectrum and therefore takes the
-        // explicit materialized fallback; a compact adjoint remains an owned
+        // lazy dense adjoint has no compact spectrum and therefore goes through
+        // the parent-oriented trace seam; a compact adjoint remains an owned
         // compact tensor. The coefficient is not derivable here — it is pinned
         // against the erased arm and the engine route by the oracle sweeps in
         // `tests/typed_facade.rs` (`compact_full_trace_*`) and, on the erased
@@ -4548,10 +4735,12 @@ where
                 });
             }
         }
+        let source_data =
+            source_data.unwrap_or_else(|| self.materialized_body().materialized_dense_data());
         let data = tenet_tensors::tensortrace_fusion_dyn_owned_checked(
             &space,
-            self.logical_space(),
-            self.materialized_body().materialized_dense_data(),
+            source_space,
+            source_data,
             axes,
             D::from_real(1.0),
         )?;
@@ -4642,6 +4831,13 @@ where
             let provider = self.logical_space().provider();
             return Ok(Self::compact_inner(spectrum, spectrum, provider)?.re.sqrt());
         }
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            let parent = Self {
+                runtime: self.runtime.clone(),
+                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+            };
+            return parent.norm();
+        }
         Ok(self.weighted_self_inner()?.re.sqrt())
     }
 
@@ -4665,6 +4861,14 @@ where
             return Ok(spectrum
                 .iter()
                 .flat_map(|entry| entry.values.iter())
+                .map(|&value| value.widen_complex().norm())
+                .fold(0.0, f64::max));
+        }
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            return Ok(view
+                .parent
+                .materialized_dense_data()
+                .iter()
                 .map(|&value| value.widen_complex().norm())
                 .fold(0.0, f64::max));
         }
@@ -4714,6 +4918,13 @@ where
         }
         if p.is_infinite() {
             return self.norm_inf();
+        }
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            let parent = Self {
+                runtime: self.runtime.clone(),
+                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+            };
+            return parent.norm_p(p);
         }
         let provider = self.logical_space().provider();
         if let Some(spectrum) = self.spectrum() {
@@ -4788,13 +4999,40 @@ where
                 "tensors live on different spaces or block layouts".to_string(),
             ));
         }
-        // Two compact spectra reduce without either being materialized. A mixed
-        // pair does not: the dense operand has to be read at its diagonal
-        // positions anyway, so it goes through the shared materialization
-        // cache like every other dense consumer.
+        // Two compact spectra reduce without either being materialized. A
+        // compact/dense pair needs the compact factor's dense cache, while a
+        // lazy dense operand remains parent-oriented.
         if let (Some(lhs), Some(rhs)) = (self.spectrum(), other.spectrum()) {
             let provider = self.logical_space().provider();
             return Ok(D::from_complex64(Self::compact_inner(lhs, rhs, provider)?));
+        }
+        if matches!(&self.repr, TypedTensorRepr::Adjoint(_))
+            || matches!(&other.repr, TypedTensorRepr::Adjoint(_))
+        {
+            let provider = self.logical_space().provider();
+            let (lhs_operand, lhs_data) = self.fusion_operand_and_data();
+            let (rhs_operand, rhs_data) = other.fusion_operand_and_data();
+            let value = match (&self.repr, &other.repr) {
+                (TypedTensorRepr::Adjoint(lhs), TypedTensorRepr::Adjoint(rhs)) => {
+                    tenet_tensors::oriented_fusion_inner(
+                        lhs.parent.space.space().structure(),
+                        tenet_tensors::FusionOperand::direct(rhs.parent.space.space()),
+                        rhs.parent.materialized_dense_data(),
+                        tenet_tensors::FusionOperand::direct(lhs.parent.space.space()),
+                        lhs.parent.materialized_dense_data(),
+                        |sector| D::from_real(provider.dim_scalar(sector)),
+                    )?
+                }
+                _ => tenet_tensors::oriented_fusion_inner(
+                    self.logical_space().space().structure(),
+                    lhs_operand,
+                    lhs_data,
+                    rhs_operand,
+                    rhs_data,
+                    |sector| D::from_real(provider.dim_scalar(sector)),
+                )?,
+            };
+            return Ok(value);
         }
         // `D::from_complex64` is `.re` for the real scalar and the identity for
         // the complex one, so this is bit-identical to the erased facade's
@@ -4857,6 +5095,13 @@ where
                 total += partial.widen_complex() * provider.dim_scalar(entry.sector);
             }
             return Ok(D::from_complex64(total));
+        }
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            let parent = Self {
+                runtime: self.runtime.clone(),
+                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+            };
+            return Ok(FactorScalar::adjoint(parent.tr()?));
         }
         Ok(D::from_complex64(weighted_trace(
             self.logical_space().provider(),
@@ -5843,7 +6088,10 @@ fn map_spectrum_dtype<A: Copy, B>(
 #[cfg(test)]
 mod representation_gates {
     use super::*;
-    use tenet_core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep};
+    use tenet_core::{
+        FermionParityFusionRule, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2FusionRule,
+        Z2Irrep, ZNFusionRule,
+    };
 
     fn owned<R, D>(tensor: &TensorMap<R, D>) -> &Arc<TypedTensorBody<R, D>> {
         tensor.owned_body().expect("test fixture must be owned")
@@ -6037,6 +6285,679 @@ mod representation_gates {
         assert_eq!(materialized_adjoint_builds(&adjoint), 1);
     }
 
+    fn eager_adjoint_oracle<R, D>(source: &TensorMap<R, D>) -> TensorMap<R, D>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: TensorScalar,
+    {
+        let (space, data) =
+            tenet_tensors::adjoint_bound_dyn(source.logical_space(), source.data()).unwrap();
+        TensorMap {
+            runtime: source.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(space, data)),
+        }
+    }
+
+    fn assert_parent_native_transform<R, D>(
+        source: &TensorMap<R, D>,
+        operation: impl Fn(&TensorMap<R, D>) -> Result<TensorMap<R, D>, Error>,
+    ) where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: TensorScalar + core::fmt::Debug,
+    {
+        let lazy = source.adjoint().unwrap();
+        let eager = eager_adjoint_oracle(source);
+        let actual = operation(&lazy).unwrap();
+        let expected = operation(&eager).unwrap();
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &actual.repr else {
+            panic!("a transformed lazy adjoint must remain parent-backed");
+        };
+        assert!(view.materialized.get().is_none());
+        assert_eq!(
+            actual.logical_space().space(),
+            expected.logical_space().space()
+        );
+        assert!(Arc::ptr_eq(
+            actual.logical_space().provider_arc(),
+            source.logical_space().provider_arc()
+        ));
+        assert_eq!(actual.data().len(), expected.data().len());
+        assert!(actual
+            .data()
+            .iter()
+            .zip(expected.data())
+            .all(|(&actual, &expected)| {
+                (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
+            }));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+    }
+
+    fn assert_parent_native_transform_suite<R, D>(source: &TensorMap<R, D>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: TensorScalar + core::fmt::Debug,
+    {
+        assert_parent_native_transform(source, |tensor| tensor.permute(&[2, 0], &[1]));
+        assert_parent_native_transform(source, |tensor| tensor.braid(&[2, 0], &[1], &[17, 3, 11]));
+        assert_parent_native_transform(source, TensorMap::transpose);
+        assert_parent_native_transform(source, |tensor| tensor.transpose_axes(&[2, 1], &[0]));
+        assert_parent_native_transform(source, |tensor| tensor.repartition(2));
+    }
+
+    #[test]
+    fn nonidentity_adjoint_transforms_stay_parent_native_for_unique_simple_and_both_dtypes() {
+        let u1 = u1_lazy_fixture();
+        let su2 = su2_lazy_fixture();
+        let u1_c64 = u1.to_c64().scale(num_complex::Complex64::new(1.0, 2.0));
+        let su2_c64 = su2.to_c64().scale(num_complex::Complex64::new(1.0, 2.0));
+        assert_parent_native_transform_suite(&u1);
+        assert_parent_native_transform_suite(&u1_c64);
+        assert_parent_native_transform_suite(&su2);
+        assert_parent_native_transform_suite(&su2_c64);
+    }
+
+    fn assert_close<D: TensorScalar>(actual: D, expected: D) {
+        assert!((actual.widen_complex() - expected.widen_complex()).norm() < 1e-12);
+    }
+
+    fn assert_parent_native_elementwise<R, D>(source: &TensorMap<R, D>, alpha: D, beta: D)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: TensorScalar + core::fmt::Debug,
+    {
+        let lazy = source.adjoint().unwrap();
+        let eager = eager_adjoint_oracle(source);
+
+        let add = lazy.add(&eager, alpha, beta).unwrap();
+        let expected_add = eager.add(&eager, alpha, beta).unwrap();
+        assert!(add
+            .data()
+            .iter()
+            .zip(expected_add.data())
+            .all(|(&actual, &expected)| {
+                (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
+            }));
+        let add_both = lazy.add(&lazy, alpha, beta).unwrap();
+        assert!(add_both
+            .data()
+            .iter()
+            .zip(expected_add.data())
+            .all(|(&actual, &expected)| {
+                (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
+            }));
+        let add_rhs = eager.add(&lazy, alpha, beta).unwrap();
+        assert!(add_rhs
+            .data()
+            .iter()
+            .zip(expected_add.data())
+            .all(|(&actual, &expected)| {
+                (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
+            }));
+
+        let scaled = lazy.scale(alpha);
+        let expected_scaled = eager.scale(alpha);
+        let TypedTensorRepr::Adjoint(scaled_view) = &scaled.repr else {
+            panic!("scaling a lazy adjoint must remain parent-backed");
+        };
+        assert!(scaled_view.materialized.get().is_none());
+        assert!(scaled
+            .data()
+            .iter()
+            .zip(expected_scaled.data())
+            .all(|(&actual, &expected)| {
+                (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
+            }));
+
+        assert_close(lazy.inner(&eager).unwrap(), eager.inner(&eager).unwrap());
+        assert_close(eager.inner(&lazy).unwrap(), eager.inner(&eager).unwrap());
+        assert_close(lazy.inner(&lazy).unwrap(), eager.inner(&eager).unwrap());
+        assert!((lazy.norm().unwrap() - eager.norm().unwrap()).abs() < 1e-12);
+        assert!((lazy.norm_inf().unwrap() - eager.norm_inf().unwrap()).abs() < 1e-12);
+        assert!((lazy.norm_p(1.5).unwrap() - eager.norm_p(1.5).unwrap()).abs() < 1e-12);
+
+        let normalized = lazy.normalize().unwrap();
+        let TypedTensorRepr::Adjoint(normalized_view) = &normalized.repr else {
+            panic!("normalizing a lazy adjoint must remain parent-backed");
+        };
+        assert!(normalized_view.materialized.get().is_none());
+        assert!((normalized.norm().unwrap() - 1.0).abs() < 1e-12);
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+    }
+
+    #[test]
+    fn adjoint_elementwise_and_reductions_stay_parent_native() {
+        let u1 = u1_lazy_fixture();
+        let su2 = su2_lazy_fixture();
+        let u1_c64 = u1.to_c64().scale(num_complex::Complex64::new(1.0, 2.0));
+        let su2_c64 = su2.to_c64().scale(num_complex::Complex64::new(1.0, 2.0));
+        assert_parent_native_elementwise(&u1, 2.0, -0.5);
+        assert_parent_native_elementwise(&su2, 2.0, -0.5);
+        assert_parent_native_elementwise(
+            &u1_c64,
+            num_complex::Complex64::new(0.5, 1.0),
+            num_complex::Complex64::new(-0.25, 0.75),
+        );
+        assert_parent_native_elementwise(
+            &su2_c64,
+            num_complex::Complex64::new(0.5, 1.0),
+            num_complex::Complex64::new(-0.25, 0.75),
+        );
+    }
+
+    fn assert_parent_native_trace_pairs<R, D>(source: &TensorMap<R, D>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: TensorScalar + core::fmt::Debug,
+    {
+        let lazy = source.adjoint().unwrap();
+        let eager = eager_adjoint_oracle(source);
+        let expected = eager.trace_pairs(&[(0, 1)]).unwrap();
+        let actual = lazy.trace_pairs(&[(0, 1)]).unwrap();
+        assert_eq!(
+            actual.logical_space().space(),
+            expected.logical_space().space()
+        );
+        assert!(Arc::ptr_eq(
+            actual.logical_space().provider_arc(),
+            source.logical_space().provider_arc()
+        ));
+        assert!(actual
+            .data()
+            .iter()
+            .zip(expected.data())
+            .all(|(&actual, &expected)| {
+                (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
+            }));
+        assert!(lazy.trace_pairs(&[(0, 3)]).is_err());
+        assert!(lazy.trace_pairs(&[(0, 0)]).is_err());
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+    }
+
+    #[test]
+    fn adjoint_trace_pairs_stays_parent_native() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let u1_provider = Arc::new(U1FusionRule);
+        let u1_traced = GradedSpace::try_new(
+            Arc::clone(&u1_provider),
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+            false,
+        )
+        .unwrap();
+        let u1_open = GradedSpace::try_new(
+            u1_provider,
+            [(U1Irrep::new(-1), 1), (U1Irrep::new(0), 1)],
+            true,
+        )
+        .unwrap();
+        let u1 = TensorMap::from_block_fn(
+            &runtime,
+            [&u1_traced, &u1_open],
+            [&u1_traced],
+            |_, indices| indices.iter().sum::<usize>() as f64 + 1.0,
+        )
+        .unwrap();
+        let su2_provider = Arc::new(SU2FusionRule);
+        let su2_traced = GradedSpace::try_new(
+            Arc::clone(&su2_provider),
+            [
+                (SU2Irrep::from_twice_spin(0), 2),
+                (SU2Irrep::from_twice_spin(1), 1),
+            ],
+            false,
+        )
+        .unwrap();
+        let su2_open = GradedSpace::try_new(
+            su2_provider,
+            [
+                (SU2Irrep::from_twice_spin(0), 1),
+                (SU2Irrep::from_twice_spin(1), 1),
+            ],
+            true,
+        )
+        .unwrap();
+        let su2 = TensorMap::from_block_fn(
+            &runtime,
+            [&su2_traced, &su2_open, &su2_open],
+            [&su2_traced],
+            |_, indices| indices.iter().sum::<usize>() as f64 + 1.0,
+        )
+        .unwrap();
+        assert!(su2.block_count() > 1);
+        assert!(
+            eager_adjoint_oracle(&su2)
+                .trace_pairs(&[(0, 1)])
+                .unwrap()
+                .block_count()
+                > 1
+        );
+        let u1_c64 = u1.to_c64().scale(num_complex::Complex64::new(1.0, 2.0));
+        let su2_c64 = su2.to_c64().scale(num_complex::Complex64::new(1.0, 2.0));
+        assert_parent_native_trace_pairs(&u1);
+        assert_parent_native_trace_pairs(&u1_c64);
+        assert_parent_native_trace_pairs(&su2);
+        assert_parent_native_trace_pairs(&su2_c64);
+    }
+
+    fn assert_parent_native_tr<R, D>(source: &TensorMap<R, D>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: TensorScalar + core::fmt::Debug,
+    {
+        let lazy = source.adjoint().unwrap();
+        let eager = eager_adjoint_oracle(source);
+        assert_close(lazy.tr().unwrap(), eager.tr().unwrap());
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+    }
+
+    #[test]
+    fn adjoint_positive_trace_conjugates_the_parent_without_materializing() {
+        let u1_source = u1_lazy_fixture();
+        let u1_leg = u1_source.codomain_spaces().remove(0);
+        let u1 =
+            TensorMap::from_block_fn(u1_source.runtime(), [&u1_leg], [&u1_leg], |_, indices| {
+                (indices[0] + 2 * indices[1]) as f64 + 1.0
+            })
+            .unwrap();
+        let su2_source = su2_lazy_fixture();
+        let su2_leg = su2_source.codomain_spaces().remove(0);
+        let su2 = TensorMap::from_block_fn(
+            su2_source.runtime(),
+            [&su2_leg],
+            [&su2_leg],
+            |_, indices| (indices[0] + 2 * indices[1]) as f64 + 1.0,
+        )
+        .unwrap();
+        let u1_c64 = u1.to_c64().scale(num_complex::Complex64::new(1.0, 2.0));
+        let su2_c64 = su2.to_c64().scale(num_complex::Complex64::new(1.0, 2.0));
+        assert_parent_native_tr(&u1);
+        assert_parent_native_tr(&u1_c64);
+        assert_parent_native_tr(&su2);
+        assert_parent_native_tr(&su2_c64);
+    }
+
+    fn assert_parent_native_contract_and_compose<R, D>(source: &TensorMap<R, D>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: TensorScalar + core::fmt::Debug,
+    {
+        let lazy = source.adjoint().unwrap();
+        let eager = eager_adjoint_oracle(source);
+        for (lhs, rhs, expected_lhs, expected_rhs) in [
+            (&lazy, &eager, &eager, &eager),
+            (&eager, &lazy, &eager, &eager),
+            (&lazy, &lazy, &eager, &eager),
+        ] {
+            let actual = lhs.contract(rhs, &[1], &[0], &[1, 0]).unwrap();
+            let expected = expected_lhs
+                .contract(expected_rhs, &[1], &[0], &[1, 0])
+                .unwrap();
+            assert_eq!(
+                actual.logical_space().space(),
+                expected.logical_space().space()
+            );
+            assert!(Arc::ptr_eq(
+                actual.logical_space().provider_arc(),
+                lhs.logical_space().provider_arc()
+            ));
+            assert!(actual
+                .data()
+                .iter()
+                .zip(expected.data())
+                .all(|(&actual, &expected)| {
+                    (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
+                }));
+
+            let actual = lhs.compose(rhs).unwrap();
+            let expected = expected_lhs.compose(expected_rhs).unwrap();
+            assert_eq!(
+                actual.logical_space().space(),
+                expected.logical_space().space()
+            );
+            assert!(Arc::ptr_eq(
+                actual.logical_space().provider_arc(),
+                lhs.logical_space().provider_arc()
+            ));
+            assert!(actual
+                .data()
+                .iter()
+                .zip(expected.data())
+                .all(|(&actual, &expected)| {
+                    (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
+                }));
+        }
+        assert!(lazy.contract(&eager, &[2], &[0], &[0, 1]).is_err());
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+    }
+
+    #[test]
+    fn adjoint_contract_and_compose_stay_parent_native() {
+        let u1_source = u1_lazy_fixture();
+        let u1_leg = u1_source.codomain_spaces().remove(0);
+        let u1 =
+            TensorMap::from_block_fn(u1_source.runtime(), [&u1_leg], [&u1_leg], |_, indices| {
+                (indices[0] + 2 * indices[1]) as f64 + 1.0
+            })
+            .unwrap();
+        let su2_source = su2_lazy_fixture();
+        let su2_leg = su2_source.codomain_spaces().remove(0);
+        let su2 = TensorMap::from_block_fn(
+            su2_source.runtime(),
+            [&su2_leg],
+            [&su2_leg],
+            |_, indices| (indices[0] + 2 * indices[1]) as f64 + 1.0,
+        )
+        .unwrap();
+        let u1_c64 = u1.to_c64().scale(num_complex::Complex64::new(1.0, 2.0));
+        let su2_c64 = su2.to_c64().scale(num_complex::Complex64::new(1.0, 2.0));
+        assert_parent_native_contract_and_compose(&u1);
+        assert_parent_native_contract_and_compose(&u1_c64);
+        assert_parent_native_contract_and_compose(&su2);
+        assert_parent_native_contract_and_compose(&su2_c64);
+    }
+
+    fn assert_rank_three_su2_contract_and_compose<D>(source: &TensorMap<SU2FusionRule, D>)
+    where
+        D: TensorScalar + core::fmt::Debug,
+    {
+        assert!(source.block_count() > 1);
+        let lazy = source.adjoint().unwrap();
+        let eager = eager_adjoint_oracle(source);
+
+        let actual = lazy.contract(source, &[2, 1], &[1, 0], &[1, 0]).unwrap();
+        let expected = eager.contract(source, &[2, 1], &[1, 0], &[1, 0]).unwrap();
+        assert!(actual.block_count() > 1);
+        assert_eq!(
+            actual.logical_space().space(),
+            expected.logical_space().space()
+        );
+        assert!(Arc::ptr_eq(
+            actual.logical_space().provider_arc(),
+            source.logical_space().provider_arc()
+        ));
+        assert!(actual
+            .data()
+            .iter()
+            .zip(expected.data())
+            .all(|(&actual, &expected)| {
+                (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
+            }));
+
+        let actual = lazy.compose(source).unwrap();
+        let expected = eager.compose(source).unwrap();
+        assert!(actual.block_count() > 1);
+        assert_eq!(
+            actual.logical_space().space(),
+            expected.logical_space().space()
+        );
+        assert!(Arc::ptr_eq(
+            actual.logical_space().provider_arc(),
+            source.logical_space().provider_arc()
+        ));
+        assert!(actual
+            .data()
+            .iter()
+            .zip(expected.data())
+            .all(|(&actual, &expected)| {
+                (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
+            }));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+    }
+
+    #[test]
+    fn rank_three_su2_adjoint_contract_and_compose_use_oriented_recoupling() {
+        let source = su2_lazy_fixture();
+        let complex = source.to_c64().scale(num_complex::Complex64::new(1.0, 2.0));
+        assert_rank_three_su2_contract_and_compose(&source);
+        assert_rank_three_su2_contract_and_compose(&complex);
+    }
+
+    fn assert_fermionic_contract_and_compose_semantics<D>(
+        source: &TensorMap<FermionParityFusionRule, D>,
+    ) where
+        D: TensorScalar + core::fmt::Debug,
+    {
+        let lazy = source.adjoint().unwrap();
+        let eager = eager_adjoint_oracle(source);
+        let contract = lazy.contract(source, &[1], &[0], &[0, 1]).unwrap();
+        let expected_contract = eager.contract(source, &[1], &[0], &[0, 1]).unwrap();
+        let compose = lazy.compose(source).unwrap();
+        let expected_compose = eager.compose(source).unwrap();
+        assert!(contract.data().iter().zip(expected_contract.data()).all(
+            |(&actual, &expected)| {
+                (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
+            }
+        ));
+        assert!(compose
+            .data()
+            .iter()
+            .zip(expected_compose.data())
+            .all(|(&actual, &expected)| {
+                (actual.widen_complex() - expected.widen_complex()).norm() < 1e-12
+            }));
+        assert!(contract
+            .data()
+            .iter()
+            .zip(compose.data())
+            .any(|(&contract, &compose)| {
+                (contract.widen_complex() - compose.widen_complex()).norm() > 1e-12
+            }));
+        assert!(Arc::ptr_eq(
+            contract.logical_space().provider_arc(),
+            source.logical_space().provider_arc()
+        ));
+        assert!(Arc::ptr_eq(
+            compose.logical_space().provider_arc(),
+            source.logical_space().provider_arc()
+        ));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+    }
+
+    #[test]
+    fn fermionic_lazy_contract_keeps_the_supertrace_distinct_from_compose() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(FermionParityFusionRule);
+        let leg =
+            GradedSpace::try_new(provider, [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 2)], true).unwrap();
+        let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, indices| {
+            let sector = trees.codomain_uncoupled[0];
+            let parity_weight = if sector == Z2Irrep::ODD { 3.0 } else { 1.0 };
+            parity_weight * (indices[0] + 2 * indices[1] + 1) as f64
+        })
+        .unwrap();
+        let complex = source.to_c64().scale(num_complex::Complex64::new(1.0, 2.0));
+        assert_fermionic_contract_and_compose_semantics(&source);
+        assert_fermionic_contract_and_compose_semantics(&complex);
+    }
+
+    fn assert_same_error(actual: Error, expected: Error) {
+        assert_eq!(
+            core::mem::discriminant(&actual),
+            core::mem::discriminant(&expected)
+        );
+        assert_eq!(actual.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn lazy_contract_preserves_validation_precedence_without_materializing() {
+        let source = {
+            let fixture = u1_lazy_fixture();
+            let leg = fixture.codomain_spaces().remove(0);
+            TensorMap::from_block_fn(fixture.runtime(), [&leg], [&leg], |_, indices| {
+                (indices[0] + 2 * indices[1] + 1) as f64
+            })
+            .unwrap()
+        };
+        let eager = eager_adjoint_oracle(&source);
+        for (lhs_axes, rhs_axes, output_axes) in [
+            (&[2][..], &[0][..], &[0, 1][..]),
+            (&[1, 1][..], &[0, 0][..], &[][..]),
+        ] {
+            let lazy = source.adjoint().unwrap();
+            assert_same_error(
+                lazy.contract(&eager, lhs_axes, rhs_axes, output_axes)
+                    .unwrap_err(),
+                eager
+                    .contract(&eager, lhs_axes, rhs_axes, output_axes)
+                    .unwrap_err(),
+            );
+            assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        }
+
+        let bad_leg = GradedSpace::try_new(
+            Arc::clone(source.logical_space().provider_arc()),
+            [(U1Irrep::new(7), 1)],
+            false,
+        )
+        .unwrap();
+        let bad =
+            TensorMap::from_block_fn(source.runtime(), [&bad_leg], [&bad_leg], |_, _| 1.0).unwrap();
+        let lazy = source.adjoint().unwrap();
+        assert_same_error(
+            lazy.contract(&bad, &[1], &[0], &[0, 0]).unwrap_err(),
+            eager.contract(&bad, &[1], &[0], &[0, 0]).unwrap_err(),
+        );
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+
+        let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let source_leg = source.codomain_spaces().remove(0);
+        let other =
+            TensorMap::from_block_fn(&other_runtime, [&source_leg], [&source_leg], |_, _| 1.0)
+                .unwrap();
+        let lazy = source.adjoint().unwrap();
+        assert_same_error(
+            lazy.contract(&other, &[1], &[0], &[0, 1]).unwrap_err(),
+            eager.contract(&other, &[1], &[0], &[0, 1]).unwrap_err(),
+        );
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let z2 = Arc::new(ZNFusionRule::new(2).unwrap());
+        let z3 = Arc::new(ZNFusionRule::new(3).unwrap());
+        let z2_leg = GradedSpace::try_new(Arc::clone(&z2), [(z2.irrep(0), 2)], false).unwrap();
+        let z3_leg = GradedSpace::try_new(Arc::clone(&z3), [(z3.irrep(0), 2)], false).unwrap();
+        let z2_tensor =
+            TensorMap::from_block_fn(&runtime, [&z2_leg], [&z2_leg], |_, _| 1.0).unwrap();
+        let z3_tensor =
+            TensorMap::from_block_fn(&runtime, [&z3_leg], [&z3_leg], |_, _| 1.0).unwrap();
+        let eager = eager_adjoint_oracle(&z2_tensor);
+        let lazy = z2_tensor.adjoint().unwrap();
+        assert_same_error(
+            lazy.contract(&z3_tensor, &[1], &[0], &[0, 1]).unwrap_err(),
+            eager.contract(&z3_tensor, &[1], &[0], &[0, 1]).unwrap_err(),
+        );
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+    }
+
+    #[test]
+    fn lazy_binary_outputs_keep_the_lhs_provider_allocation() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let lhs_provider = Arc::new(U1FusionRule);
+        let rhs_provider = Arc::new(U1FusionRule);
+        assert!(!Arc::ptr_eq(&lhs_provider, &rhs_provider));
+        let lhs_leg = GradedSpace::try_new(
+            Arc::clone(&lhs_provider),
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+            false,
+        )
+        .unwrap();
+        let rhs_leg = GradedSpace::try_new(
+            Arc::clone(&rhs_provider),
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+            false,
+        )
+        .unwrap();
+        let lhs = TensorMap::from_block_fn(&runtime, [&lhs_leg], [&lhs_leg], |_, indices| {
+            (indices[0] + 2 * indices[1] + 1) as f64
+        })
+        .unwrap();
+        let rhs = TensorMap::from_block_fn(&runtime, [&rhs_leg], [&rhs_leg], |_, indices| {
+            (2 * indices[0] + indices[1] + 1) as f64
+        })
+        .unwrap();
+        let lazy = lhs.adjoint().unwrap();
+        let eager = eager_adjoint_oracle(&lhs);
+        let rhs_lazy = rhs.adjoint().unwrap();
+        let rhs_eager = eager_adjoint_oracle(&rhs);
+        for (actual, expected) in [
+            (
+                lazy.contract(&rhs_lazy, &[1], &[0], &[0, 1]).unwrap(),
+                eager.contract(&rhs_eager, &[1], &[0], &[0, 1]).unwrap(),
+            ),
+            (
+                lazy.compose(&rhs_lazy).unwrap(),
+                eager.compose(&rhs_eager).unwrap(),
+            ),
+        ] {
+            assert_eq!(actual.data(), expected.data());
+            assert!(Arc::ptr_eq(
+                actual.logical_space().provider_arc(),
+                &lhs_provider
+            ));
+            assert!(!Arc::ptr_eq(
+                actual.logical_space().provider_arc(),
+                &rhs_provider
+            ));
+        }
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        assert_eq!(materialized_adjoint_builds(&rhs_lazy), 0);
+    }
+
+    #[test]
+    fn mixed_compact_add_does_not_materialize_the_lazy_operand() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let bond = GradedSpace::try_new(provider, [(U1Irrep::new(0), 2)], false).unwrap();
+        let dense = TensorMap::from_block_fn(&runtime, [&bond], [&bond], |_, indices| {
+            (indices[0] + 2 * indices[1]) as f64
+        })
+        .unwrap();
+        let lazy = dense.adjoint().unwrap();
+        let eager = eager_adjoint_oracle(&dense);
+        let diagonal = TensorMap::diagonal(
+            &runtime,
+            &bond,
+            [SectorSpectrum {
+                sector: U1Irrep::new(0),
+                values: vec![2.0, 3.0],
+            }],
+        )
+        .unwrap();
+        let actual = diagonal.add(&lazy, 0.5, -2.0).unwrap();
+        let expected = diagonal.add(&eager, 0.5, -2.0).unwrap();
+        assert_eq!(actual.data(), expected.data());
+        let reverse = lazy.add(&diagonal, -2.0, 0.5).unwrap();
+        let expected_reverse = eager.add(&diagonal, -2.0, 0.5).unwrap();
+        assert_eq!(reverse.data(), expected_reverse.data());
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        assert!(owned(&diagonal).dense_cache.get().is_none());
+
+        for (lhs, rhs, eager_lhs, eager_rhs) in [
+            (&diagonal, &lazy, &diagonal, &eager),
+            (&lazy, &diagonal, &eager, &diagonal),
+        ] {
+            let actual = lhs.compose(rhs).unwrap();
+            let expected = eager_lhs.compose(eager_rhs).unwrap();
+            assert_eq!(actual.data(), expected.data());
+            let actual = lhs.contract(rhs, &[1], &[0], &[0, 1]).unwrap();
+            let expected = eager_lhs.contract(eager_rhs, &[1], &[0], &[0, 1]).unwrap();
+            assert_eq!(actual.data(), expected.data());
+        }
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        assert!(owned(&diagonal).dense_cache.get().is_none());
+
+        assert_close(
+            diagonal.inner(&lazy).unwrap(),
+            diagonal.inner(&eager).unwrap(),
+        );
+        assert_close(
+            lazy.inner(&diagonal).unwrap(),
+            eager.inner(&diagonal).unwrap(),
+        );
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        assert!(owned(&diagonal).dense_cache.get().is_some());
+    }
+
     #[test]
     fn identity_transforms_preserve_the_cold_lazy_view() {
         let adjoint = u1_lazy_fixture().adjoint().unwrap();
@@ -6057,8 +6978,10 @@ mod representation_gates {
             assert!(Arc::ptr_eq(view, output_view));
         }
         assert!(adjoint.braid(&[0], &[1, 2], &[]).is_err());
-        // Nonidentity malformed axes still enter PR B's explicit
-        // materialization fallback; PR C moves their validation ahead of it.
+        assert!(adjoint.permute(&[0, 0], &[1]).is_err());
+        assert!(adjoint.braid(&[0, 0], &[1], &[0, 1, 2]).is_err());
+        assert!(adjoint.transpose_axes(&[0, 0], &[1]).is_err());
+        assert!(adjoint.repartition(4).is_err());
         assert_eq!(materialized_adjoint_builds(&adjoint), 0);
         assert!(view.materialized.get().is_none());
 
