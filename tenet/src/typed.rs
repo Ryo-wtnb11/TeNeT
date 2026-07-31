@@ -4383,7 +4383,9 @@ where
     /// values, staying compact — so `s.sqrt()` and the two `compose`s around it
     /// are all bond scalings. Dense input: `O(Σ_c n_c²)`, one walk over the
     /// block-diagonal buffer, which is what the off-diagonal check costs; the
-    /// root itself is still only `Σ_c n_c` square roots.
+    /// root itself is still only `Σ_c n_c` square roots. A dense lazy adjoint
+    /// builds one operation-local logical payload without publishing its
+    /// reusable receiver cache.
     pub fn sqrt(&self) -> Result<Self, Error> {
         // Same guard as the erased facade's, and the same one
         // [`is_diagonal_bond_space`] applies to compact *destinations*: here it
@@ -4397,6 +4399,9 @@ where
         }
         if let Some(spectrum) = self.spectrum() {
             return Ok(self.with_spectrum(map_spectrum(spectrum, D::sqrt_value)?));
+        }
+        if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
+            return self.materialized_tensor_uncached()?.sqrt();
         }
         // Dense payload on a bond space: block-diagonal by the space's shape,
         // but only by convention — the buffer is free to hold anything, so the
@@ -7154,6 +7159,177 @@ mod representation_gates {
         }));
         assert!(Arc::ptr_eq(owned(&source), &parent));
         assert!(Arc::ptr_eq(&owned(&source).data, &data));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+    }
+
+    fn assert_sqrt_uses_a_cold_logical_copy<R, D>(source: &TensorMap<R, D>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec
+            + Send
+            + Sync
+            + 'static,
+        D: TensorScalar + core::fmt::Debug + Send + Sync + 'static,
+    {
+        let expected = eager_adjoint_oracle(source).sqrt().unwrap();
+        let parent = Arc::clone(owned(source));
+        let parent_data = Arc::clone(&parent.data);
+        let lazy = source.adjoint().unwrap();
+
+        for _ in 0..2 {
+            let actual = lazy.clone().sqrt().unwrap();
+            assert_typed_map_close(&actual, &expected, f64::EPSILON);
+            assert!(actual.owned_body().is_some());
+            assert!(Arc::ptr_eq(
+                actual.logical_space().provider_arc(),
+                source.logical_space().provider_arc()
+            ));
+            assert!(!Arc::ptr_eq(&owned(&actual).data, &parent_data));
+        }
+        let calls = (0..4)
+            .map(|_| {
+                let clone = lazy.clone();
+                std::thread::spawn(move || clone.sqrt().unwrap())
+            })
+            .collect::<Vec<_>>();
+        for call in calls {
+            assert_typed_map_close(&call.join().unwrap(), &expected, f64::EPSILON);
+        }
+        assert!(Arc::ptr_eq(owned(source), &parent));
+        assert!(Arc::ptr_eq(&owned(source).data, &parent_data));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+
+        let _ = lazy.data();
+        assert_eq!(materialized_adjoint_builds(&lazy), 1);
+        assert!(view.materialized.get().is_some());
+    }
+
+    #[test]
+    fn sqrt_dense_lazy_success_is_owned_provider_native_repeatable_and_cold() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new(
+            provider,
+            [(U1Irrep::new(-1), 2), (U1Irrep::new(2), 4)],
+            false,
+        )
+        .unwrap();
+        let f64_source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            if indices[0] == indices[1] {
+                (indices[0] + 1) as f64
+            } else {
+                0.0
+            }
+        })
+        .unwrap();
+        assert_sqrt_uses_a_cold_logical_copy(&f64_source);
+
+        let c64_source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            if indices[0] == indices[1] {
+                match indices[0] % 4 {
+                    0 => num_complex::Complex64::new(-4.0, 0.0),
+                    1 => num_complex::Complex64::new(-4.0, -0.0),
+                    2 => num_complex::Complex64::new(-4.0, 1.0e-300),
+                    _ => num_complex::Complex64::new(-4.0, -1.0e-300),
+                }
+            } else {
+                num_complex::Complex64::new(0.0, -0.0)
+            }
+        })
+        .unwrap();
+        let expected = eager_adjoint_oracle(&c64_source).sqrt().unwrap();
+        let lazy = c64_source.adjoint().unwrap();
+        let actual = lazy.sqrt().unwrap();
+        assert!(actual
+            .data()
+            .iter()
+            .zip(expected.data())
+            .all(|(actual, expected)| {
+                actual.re.to_bits() == expected.re.to_bits()
+                    && actual.im.to_bits() == expected.im.to_bits()
+            }));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        assert_sqrt_uses_a_cold_logical_copy(&c64_source);
+
+        let provider = Arc::new(SU2FusionRule);
+        let leg = GradedSpace::try_new(
+            provider,
+            [
+                (SU2Irrep::from_twice_spin(0), 2),
+                (SU2Irrep::from_twice_spin(1), 4),
+            ],
+            false,
+        )
+        .unwrap();
+        let su2 = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            if indices[0] == indices[1] {
+                num_complex::Complex64::new(-4.0, (indices[0] as f64 - 1.0) / 10.0)
+            } else {
+                num_complex::Complex64::new(0.0, 0.0)
+            }
+        })
+        .unwrap();
+        assert_sqrt_uses_a_cold_logical_copy(&su2);
+    }
+
+    #[test]
+    fn sqrt_dense_lazy_failures_preserve_logical_order_and_stay_cold() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new(provider, [(U1Irrep::new(0), 3)], false).unwrap();
+
+        let offdiag = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            if indices == [0, 1] {
+                1.0
+            } else {
+                0.0
+            }
+        })
+        .unwrap();
+        let lazy = offdiag.adjoint().unwrap();
+        let error = lazy.sqrt().unwrap_err().to_string();
+        assert!(error.contains("(1, 0)"), "{error}");
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+
+        let mixed = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            match (indices[0], indices[1]) {
+                (1, 1) => -1.0,
+                (0, 2) => 1.0,
+                _ => 0.0,
+            }
+        })
+        .unwrap();
+        let eager_error = eager_adjoint_oracle(&mixed).sqrt().unwrap_err().to_string();
+        let lazy = mixed.adjoint().unwrap();
+        assert_eq!(lazy.sqrt().unwrap_err().to_string(), eager_error);
+        assert!(eager_error.contains("negative"), "{eager_error}");
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+
+        let negative = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            if indices[0] == indices[1] {
+                -1.0
+            } else {
+                0.0
+            }
+        })
+        .unwrap();
+        let eager_error = eager_adjoint_oracle(&negative)
+            .sqrt()
+            .unwrap_err()
+            .to_string();
+        let lazy = negative.adjoint().unwrap();
+        for _ in 0..2 {
+            assert_eq!(lazy.clone().sqrt().unwrap_err().to_string(), eager_error);
+        }
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
         let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
             unreachable!()
