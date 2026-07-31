@@ -133,30 +133,45 @@ where
             isize::try_from(rhs_block.strides()[rhs.storage_axis(axis)?])
                 .map_err(|_| OperationError::ElementCountOverflow)
         };
-        tensoradd_raw_strided_kernel_mapped(
-            destination_data,
-            lhs_data,
-            destination_block.shape(),
-            destination_stride,
-            lhs_stride,
-            checked_offset(destination_block.offset())?,
-            checked_offset(lhs_block.offset())?,
-            lhs.storage_conjugate(),
-            alpha,
-            D::zero(),
-        )?;
-        tensoradd_raw_strided_kernel_mapped(
-            destination_data,
-            rhs_data,
-            destination_block.shape(),
-            destination_stride,
-            rhs_stride,
-            checked_offset(destination_block.offset())?,
-            checked_offset(rhs_block.offset())?,
-            rhs.storage_conjugate(),
-            beta,
-            D::one(),
-        )?;
+        let destination_offset = checked_offset(destination_block.offset())?;
+        let lhs_offset = checked_offset(lhs_block.offset())?;
+        let rhs_offset = checked_offset(rhs_block.offset())?;
+        for axis in 0..destination_block.shape().len() {
+            destination_stride(axis)?;
+            lhs_stride(axis)?;
+            rhs_stride(axis)?;
+        }
+        if !alpha.is_zero() {
+            tensoradd_raw_strided_kernel_mapped(
+                destination_data,
+                lhs_data,
+                destination_block.shape(),
+                destination_stride,
+                lhs_stride,
+                destination_offset,
+                lhs_offset,
+                lhs.storage_conjugate(),
+                alpha,
+                D::zero(),
+            )?;
+        }
+        if !beta.is_zero() {
+            tensoradd_raw_strided_kernel_mapped(
+                destination_data,
+                rhs_data,
+                destination_block.shape(),
+                destination_stride,
+                rhs_stride,
+                destination_offset,
+                rhs_offset,
+                rhs.storage_conjugate(),
+                beta,
+                if alpha.is_zero() { D::zero() } else { D::one() },
+            )?;
+        }
+    }
+    if alpha.is_zero() && beta.is_zero() {
+        destination_data.fill(D::zero());
     }
     Ok(())
 }
@@ -362,5 +377,55 @@ mod tests {
             .unwrap(),
             expected_inner.conj()
         );
+
+        let mut output = vec![Complex64::zero(); direct.len()];
+        let inactive = vec![Complex64::new(f64::NAN, f64::NAN); parent.len()];
+        oriented_fusion_add_into(
+            logical.structure(),
+            &mut output,
+            direct_operand,
+            &direct,
+            adjoint_operand,
+            &inactive,
+            Complex64::one(),
+            Complex64::zero(),
+        )
+        .unwrap();
+        assert_eq!(output, direct);
+
+        let mut output = vec![Complex64::zero(); direct.len()];
+        oriented_fusion_add_into(
+            logical.structure(),
+            &mut output,
+            direct_operand,
+            &vec![Complex64::new(f64::NAN, f64::NAN); direct.len()],
+            adjoint_operand,
+            &parent,
+            Complex64::zero(),
+            Complex64::one(),
+        )
+        .unwrap();
+        let expected = (0..6)
+            .map(|logical_index| {
+                let row = logical_index % 3;
+                let column = logical_index / 3;
+                parent[1 + 2 * column + 5 * row].conj()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(output, expected);
+
+        let mut output = vec![Complex64::new(f64::NAN, f64::NAN); direct.len()];
+        oriented_fusion_add_into(
+            logical.structure(),
+            &mut output,
+            direct_operand,
+            &vec![Complex64::new(f64::NAN, f64::NAN); direct.len()],
+            adjoint_operand,
+            &inactive,
+            Complex64::zero(),
+            Complex64::zero(),
+        )
+        .unwrap();
+        assert_eq!(output, vec![Complex64::zero(); direct.len()]);
     }
 }
