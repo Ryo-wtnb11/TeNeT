@@ -7178,6 +7178,157 @@ fn polar_rejects_wrong_rectangular_direction_before_dense_execution() {
     }
 }
 
+fn assert_polar_direction_error_before_dense(tensor: &TensorMap<f64, 1, 1>, left: bool) {
+    let before = tensor.data().to_vec();
+    let mut dense = RejectExecutorCalls;
+    let mut context = default_context();
+    let input = bound_tensor(Arc::new(U1FusionRule), tensor);
+    let error = if left {
+        left_polar(&mut dense, &mut context, &input.as_ref()).unwrap_err()
+    } else {
+        right_polar(&mut dense, &mut context, &input.as_ref()).unwrap_err()
+    };
+    let operation = if left { "left_polar" } else { "right_polar" };
+    assert!(matches!(
+        error,
+        OperationError::InvalidArgument { message }
+            if message.contains(operation) && message.contains("coupled-sector")
+    ));
+    assert_eq!(tensor.data(), before);
+}
+
+fn assert_valid_unmatched_left_polar(tensor: &TensorMap<f64, 1, 1>) {
+    let provider = Arc::new(U1FusionRule);
+    let input = bound_tensor(Arc::clone(&provider), tensor);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let mut context = default_context();
+    let (isometry, positive) = left_polar(&mut dense, &mut context, &input.as_ref()).unwrap();
+
+    assert!(Arc::ptr_eq(isometry.space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(positive.space().provider_arc(), &provider));
+    let reconstructed =
+        crate::compose::compose(&mut context, provider.as_ref(), &isometry, &positive).unwrap();
+    assert_svd_blocks_match(tensor, &reconstructed);
+    let adjoint = tenet_tensors::adjoint(provider.as_ref(), &isometry).unwrap();
+    let gram =
+        crate::compose::compose(&mut context, provider.as_ref(), &adjoint, &isometry).unwrap();
+    assert_identity_matrices(&dense_sector_matrices(1, &gram));
+    assert_identity_matrices(&dense_sector_matrices(1, &positive));
+}
+
+fn assert_valid_unmatched_right_polar(tensor: &TensorMap<f64, 1, 1>) {
+    let provider = Arc::new(U1FusionRule);
+    let input = bound_tensor(Arc::clone(&provider), tensor);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let mut context = default_context();
+    let (positive, isometry) = right_polar(&mut dense, &mut context, &input.as_ref()).unwrap();
+
+    assert!(Arc::ptr_eq(positive.space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(isometry.space().provider_arc(), &provider));
+    let reconstructed =
+        crate::compose::compose(&mut context, provider.as_ref(), &positive, &isometry).unwrap();
+    assert_svd_blocks_match(tensor, &reconstructed);
+    let adjoint = tenet_tensors::adjoint(provider.as_ref(), &isometry).unwrap();
+    let gram =
+        crate::compose::compose(&mut context, provider.as_ref(), &isometry, &adjoint).unwrap();
+    assert_identity_matrices(&dense_sector_matrices(1, &gram));
+    assert_identity_matrices(&dense_sector_matrices(1, &positive));
+}
+
+#[test]
+fn polar_complete_dimension_preflight_handles_unmatched_and_disjoint_support() {
+    // What: side-only sectors participate as rows x 0 or 0 x columns, so only
+    // the direction whose isometry law is structurally possible is accepted.
+    let codomain_only = u1_cross_space_map::<f64>(&[(0, 2), (1, 3)], &[(0, 2)]);
+    assert_valid_unmatched_left_polar(&codomain_only);
+    assert_polar_direction_error_before_dense(&codomain_only, false);
+
+    let domain_only = u1_cross_space_map::<f64>(&[(0, 2)], &[(0, 2), (1, 3)]);
+    assert_valid_unmatched_right_polar(&domain_only);
+    assert_polar_direction_error_before_dense(&domain_only, true);
+
+    let disjoint = u1_cross_space_map::<f64>(&[(1, 2)], &[(0, 3)]);
+    assert_polar_direction_error_before_dense(&disjoint, true);
+    assert_polar_direction_error_before_dense(&disjoint, false);
+}
+
+#[test]
+fn polar_complete_dimension_preflight_handles_empty_sides_and_empty_products() {
+    // What: an empty smaller side remains a valid vacuous isometry, while an
+    // empty larger side is rejected; rank-zero products still carry vacuum.
+    let empty_codomain = u1_cross_space_map::<f64>(&[], &[(0, 2)]);
+    assert_polar_direction_error_before_dense(&empty_codomain, true);
+    let mut dense = RejectExecutorCalls;
+    let mut context = default_context();
+    right_polar(
+        &mut dense,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &empty_codomain),
+    )
+    .unwrap();
+
+    let empty_domain = u1_cross_space_map::<f64>(&[(0, 2)], &[]);
+    assert_polar_direction_error_before_dense(&empty_domain, false);
+    let mut dense = RejectExecutorCalls;
+    let mut context = default_context();
+    left_polar(
+        &mut dense,
+        &mut context,
+        &bound_tensor_ref!(Arc::new(U1FusionRule), &empty_domain),
+    )
+    .unwrap();
+
+    let empty = u1_cross_space_map::<f64>(&[], &[]);
+    let mut dense = RejectExecutorCalls;
+    let mut context = default_context();
+    let input = bound_tensor(Arc::new(U1FusionRule), &empty);
+    left_polar(&mut dense, &mut context, &input.as_ref()).unwrap();
+    right_polar(&mut dense, &mut context, &input.as_ref()).unwrap();
+
+    let rule = U1FusionRule;
+    let homspace =
+        FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
+    let shapes = vec![Vec::new(); homspace.fusion_tree_keys(&rule).len()];
+    let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+        TensorMapSpace::<0, 0>::from_dims([], []).unwrap(),
+        homspace,
+        &rule,
+        shapes,
+    )
+    .unwrap();
+    let scalar = TensorMap::<f64, 0, 0>::from_vec_with_fusion_space(vec![2.0], space).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let mut context = default_context();
+    let input = bound_tensor(Arc::new(rule), &scalar);
+    let (w, p) = left_polar(&mut dense, &mut context, &input.as_ref()).unwrap();
+    assert_eq!(w.data(), &[1.0]);
+    assert_eq!(p.data(), &[2.0]);
+    let (p, w) = right_polar(&mut dense, &mut context, &input.as_ref()).unwrap();
+    assert_eq!(p.data(), &[2.0]);
+    assert_eq!(w.data(), &[1.0]);
+}
+
+#[test]
+fn polar_second_sector_failure_leaves_the_source_unchanged() {
+    // What: a later dense failure publishes no factors and cannot mutate the
+    // borrowed source, in either direction.
+    let tensor = u1_cross_space_map::<f64>(&[(0, 2), (1, 2)], &[(0, 2), (1, 2)]);
+    let before = tensor.data().to_vec();
+    let input = bound_tensor(Arc::new(U1FusionRule), &tensor);
+    for left in [true, false] {
+        let mut dense = FailSecondSvd::default();
+        let mut context = default_context();
+        let result = if left {
+            left_polar(&mut dense, &mut context, &input.as_ref())
+        } else {
+            right_polar(&mut dense, &mut context, &input.as_ref())
+        };
+        assert!(matches!(result, Err(OperationError::Dense(_))));
+        assert_eq!(dense.calls, 2);
+        assert_eq!(tensor.data(), before);
+    }
+}
+
 #[test]
 fn polar_validates_every_sector_before_direct_or_fallback_svd_execution() {
     // What: a later invalid sector prevents SVD of an earlier valid sector on both layouts.
