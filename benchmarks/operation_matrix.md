@@ -1,23 +1,29 @@
 # Operation matrix
 
-`operation_matrix.sh` is a read-only smoke benchmark for the public user API.
-It fixes Rayon to one worker and reports a fresh-process (cold) sample followed
-by repeated-process (warm) samples. It intentionally measures the existing
-owned-returning API; no allocator or cache toggles are enabled.
+`operation_matrix.sh` launches one dependency-free Rust executable. Each row
+uses a fresh `Runtime` and constructs its fixture before timing. Owned rows run
+one cold call followed by warm-up and repeated calls in that same process.
+Here `cold` means that the fresh `Runtime` tree-transform store is empty;
+process-global interned structure may already exist.
+Destination rows require an exact output from the owned operation; they report
+`first_after_setup` and `warm_after_setup`, never a false cold sample.
+Validation assertions run after the timer.
 
-The destination rows are not silently substituted with owned calls. TensorKit
-benchmarks `permute!` and `svd_compact!` into caller-owned storage. TeNeT's
-typed destination primitive is `tenet_tensors::permute_into` (and
-`transpose_into`); constructing a destination requires the corresponding
-`FusionTensorMapSpace`, so those rows remain an explicit follow-up rather than
-an incomparable number.
-
-Run with:
+The initial executable covers U1 and SU2 controls for owned and actual
+caller-owned-destination forms of `permute` and arbitrary-axis `contract`.
+Runtime tree-transform counters are reported as cold and warm deltas. The
+destination rows call the stable public `permute_overwrite_into` and
+`contract_overwrite_into` APIs; their internal preparation/comparison counters
+are not public and are therefore `NA`. Unsupported instrumentation is also
+printed as `NA`; the harness does not infer allocations, scratch, provider
+queries, dense kernel calls, or transfers from elapsed time.
 
 ```sh
-REPS=5 RAYON_NUM_THREADS=1 benchmarks/operation_matrix.sh
+OP_MATRIX_MIN_MS=20 benchmarks/operation_matrix.sh
 ```
 
-This harness is intentionally outside CI: it is diagnostic evidence, not a
-correctness gate. Semantic coverage remains in `tenet/tests/user_api.rs` and
-`tenet/tests/user_decomp.rs`.
+The remaining #724 rows (transpose/repartition, compose, ordered contract,
+trace, add/inner/norm, compact SVD/QR, compact diagonal, and lazy adjoint) are
+not substituted with other operations. Add each only with its real public form
+and available counters. This diagnostic harness remains outside required CI;
+semantic coverage belongs in the existing user API tests.
