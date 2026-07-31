@@ -3750,8 +3750,17 @@ where
     /// Sectorwise cubic — one compact SVD per coupled sector plus an
     /// orthonormal completion of the sectors that keep null directions; a
     /// compact-diagonal payload is materialized dense first, as for
-    /// [`Self::qr_compact`].
+    /// [`Self::qr_compact`]. A lazy adjoint runs the owned parent's
+    /// [`Self::right_null`] and returns its detached adjoint, without
+    /// materializing the receiver.
     pub fn left_null(&self) -> Result<Self, Error> {
+        if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
+            return self
+                .adjoint()?
+                .right_null()?
+                .adjoint()?
+                .materialized_tensor_uncached();
+        }
         let mut dense = self.runtime.lease_dense();
         let out = tenet_matrixalgebra::left_null_dyn(dense.dense(), &self.bound_ref()?)?;
         Ok(self.wrap_bound_factor(out))
@@ -3775,8 +3784,16 @@ where
     /// # Complexity
     ///
     /// As [`Self::left_null`]: sectorwise cubic, compact-diagonal payload
-    /// materialized dense first.
+    /// materialized dense first. A lazy adjoint mirrors the parent redirect
+    /// described there.
     pub fn right_null(&self) -> Result<Self, Error> {
+        if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
+            return self
+                .adjoint()?
+                .left_null()?
+                .adjoint()?
+                .materialized_tensor_uncached();
+        }
         let mut dense = self.runtime.lease_dense();
         let out = tenet_matrixalgebra::right_null_dyn(dense.dense(), &self.bound_ref()?)?;
         Ok(self.wrap_bound_factor(out))
@@ -6754,6 +6771,124 @@ mod representation_gates {
             unreachable!()
         };
         assert!(view.materialized.get().is_none());
+    }
+
+    fn assert_null_redirect<R, D>(source: &TensorMap<R, D>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: TensorScalar + core::fmt::Debug,
+    {
+        let target = eager_adjoint_oracle(source);
+        let lazy = source.adjoint().unwrap();
+        for (actual, expected, left) in [
+            (lazy.left_null().unwrap(), target.left_null().unwrap(), true),
+            (
+                lazy.right_null().unwrap(),
+                target.right_null().unwrap(),
+                false,
+            ),
+        ] {
+            assert!(actual.owned_body().is_some());
+            assert_eq!(
+                actual.logical_space().space(),
+                expected.logical_space().space()
+            );
+            assert!(Arc::ptr_eq(
+                actual.logical_space().provider_arc(),
+                source.logical_space().provider_arc()
+            ));
+            let actual_projector = if left {
+                actual.compose(&actual.adjoint().unwrap()).unwrap()
+            } else {
+                actual.adjoint().unwrap().compose(&actual).unwrap()
+            };
+            let expected_projector = if left {
+                expected.compose(&expected.adjoint().unwrap()).unwrap()
+            } else {
+                expected.adjoint().unwrap().compose(&expected).unwrap()
+            };
+            assert!(actual_projector
+                .data()
+                .iter()
+                .zip(expected_projector.data())
+                .all(|(&actual, &expected)| {
+                    (actual.widen_complex() - expected.widen_complex()).norm() < 1e-11
+                }));
+            let residual = if left {
+                actual.adjoint().unwrap().compose(&target).unwrap()
+            } else {
+                target.compose(&actual.adjoint().unwrap()).unwrap()
+            };
+            assert!(residual.norm().unwrap() < 1e-10 * (1.0 + target.norm().unwrap()));
+            assert!(if left {
+                actual.is_isometric(1e-11).unwrap()
+            } else {
+                actual.adjoint().unwrap().is_isometric(1e-11).unwrap()
+            });
+            let _ = actual.data();
+        }
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+    }
+
+    #[test]
+    fn null_spaces_redirect_through_the_parent_without_materializing_the_adjoint() {
+        let fixtures = [
+            u1_matrix_fixture([(0, 3)], [(0, 2)]),
+            u1_matrix_fixture([(0, 3), (1, 2)], [(0, 2)]),
+            u1_matrix_fixture([(0, 3)], [(0, 2), (1, 2)]),
+            u1_matrix_fixture([(1, 2)], [(0, 3)]),
+            u1_matrix_fixture([(0, 3)], [(0, 3)]),
+        ];
+        for source in &fixtures {
+            assert_null_redirect(source);
+            assert_null_redirect(&genuinely_complex(source));
+        }
+        let multitree = su2_lazy_fixture();
+        assert_null_redirect(&multitree);
+        assert_null_redirect(&genuinely_complex(&multitree));
+    }
+
+    fn assert_null_late_failure(left: bool) {
+        let runtime = Runtime::builder()
+            .with_dense_executor(Box::new(FailSecondSvd::default()))
+            .build()
+            .unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new(
+            provider,
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)],
+            false,
+        )
+        .unwrap();
+        let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            (indices.iter().sum::<usize>() + 1) as f64
+        })
+        .unwrap();
+        let before = source.data().to_vec();
+        let lazy = source.adjoint().unwrap();
+
+        let result = if left {
+            lazy.left_null()
+        } else {
+            lazy.right_null()
+        };
+        assert!(matches!(result, Err(Error::Operation(_))));
+        assert_eq!(source.data(), before);
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+    }
+
+    #[test]
+    fn null_space_late_failure_leaves_parent_and_adjoint_cache_unchanged() {
+        assert_null_late_failure(true);
+        assert_null_late_failure(false);
     }
 
     fn assert_qr_lq_factors<R, D>(

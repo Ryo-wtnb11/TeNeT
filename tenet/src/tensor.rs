@@ -9070,12 +9070,21 @@ impl Tensor {
     }
 
     /// Left null space `n : codomain <- W` with `n^H * t = 0` (MatrixAlgebraKit
-    /// `left_null`).
+    /// `left_null`). A host lazy adjoint redirects through the owned parent's
+    /// right null space and returns a detached owned factor.
     pub fn left_null(&self) -> Result<Self, Error> {
-        if self.is_adjoint_view() {
-            return self.materialized_tensor()?.left_null();
-        }
         self.reject_unwired_su3("Tensor::left_null")?;
+        if self.is_adjoint_view() {
+            #[cfg(feature = "cuda")]
+            if matches!(self.stored_data(), Data::CudaF64(_)) {
+                return self.materialized_tensor()?.left_null();
+            }
+            return self
+                .adjoint()?
+                .right_null()?
+                .adjoint()?
+                .materialized_tensor_uncached();
+        }
         // Lease a dense executor for this op instead of the coarse runtime lock,
         // so concurrent factorizations on a shared runtime run in parallel
         // (#155); byte-identical single-threaded.
@@ -9092,12 +9101,21 @@ impl Tensor {
     }
 
     /// Right null space `n : W <- domain` with `t * n^H = 0` (MatrixAlgebraKit
-    /// `right_null`).
+    /// `right_null`). A host lazy adjoint redirects through the owned parent's
+    /// left null space and returns a detached owned factor.
     pub fn right_null(&self) -> Result<Self, Error> {
-        if self.is_adjoint_view() {
-            return self.materialized_tensor()?.right_null();
-        }
         self.reject_unwired_su3("Tensor::right_null")?;
+        if self.is_adjoint_view() {
+            #[cfg(feature = "cuda")]
+            if matches!(self.stored_data(), Data::CudaF64(_)) {
+                return self.materialized_tensor()?.right_null();
+            }
+            return self
+                .adjoint()?
+                .left_null()?
+                .adjoint()?
+                .materialized_tensor_uncached();
+        }
         // Lease a dense executor for this op instead of the coarse runtime lock,
         // so concurrent factorizations on a shared runtime run in parallel
         // (#155); byte-identical single-threaded.
@@ -13086,6 +13104,129 @@ mod adjoint_parent_view_tests {
         );
         assert_eq!(cold.adjoint_body_builds(), 0);
         assert!(!cold.has_cached_materialization());
+    }
+
+    fn assert_adjoint_null_spaces(source: &Tensor) {
+        let lazy = source.adjoint().unwrap();
+        let eager = source.adjoint().unwrap().materialized_tensor().unwrap();
+        let source_context = source.rule_authority_space().context();
+        for (actual, expected, left) in [
+            (lazy.left_null().unwrap(), eager.left_null().unwrap(), true),
+            (
+                lazy.right_null().unwrap(),
+                eager.right_null().unwrap(),
+                false,
+            ),
+        ] {
+            assert!(!actual.is_adjoint_view());
+            assert!(actual
+                .rule_authority_space()
+                .provider_matches_context_allocation(&source_context));
+            assert_eq!(actual.codomain_spaces(), expected.codomain_spaces());
+            assert_eq!(actual.domain_spaces(), expected.domain_spaces());
+            let actual_projector = if left {
+                actual.compose(&actual.adjoint().unwrap()).unwrap()
+            } else {
+                actual.adjoint().unwrap().compose(&actual).unwrap()
+            };
+            let expected_projector = if left {
+                expected.compose(&expected.adjoint().unwrap()).unwrap()
+            } else {
+                expected.adjoint().unwrap().compose(&expected).unwrap()
+            };
+            assert_close(&actual_projector, &expected_projector);
+            let residual = if left {
+                actual.adjoint().unwrap().compose(&eager).unwrap()
+            } else {
+                eager.compose(&actual.adjoint().unwrap()).unwrap()
+            };
+            assert!(residual.norm().unwrap() < 1e-10 * (1.0 + eager.norm().unwrap()));
+            assert!(if left {
+                actual.is_isometric(1e-11).unwrap()
+            } else {
+                actual.adjoint().unwrap().is_isometric(1e-11).unwrap()
+            });
+            let _ = actual.coupled_data().unwrap();
+        }
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+    }
+
+    #[test]
+    fn erased_null_spaces_redirect_through_the_parent_without_materializing_the_adjoint() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let matched_left = Space::u1([(0, 3)]);
+        let matched_right = Space::u1([(0, 2)]);
+        let unmatched_left = Space::u1([(0, 3), (1, 2)]);
+        let unmatched_right = Space::u1([(0, 2), (1, 2)]);
+        let disjoint_left = Space::u1([(1, 2)]);
+        let disjoint_right = Space::u1([(0, 3)]);
+        for (fixture, (left, right)) in [
+            (&matched_left, &matched_right),
+            (&unmatched_left, &matched_right),
+            (&matched_left, &unmatched_right),
+            (&disjoint_left, &disjoint_right),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for (dtype, lane) in [(Dtype::F64, 0), (Dtype::C64, 1)] {
+                let source = Tensor::rand_with_seed(
+                    &runtime,
+                    dtype,
+                    [left],
+                    [right],
+                    703_000 + 2 * fixture as u64 + lane,
+                )
+                .unwrap();
+                assert_adjoint_null_spaces(&source);
+            }
+        }
+
+        let rank_deficient =
+            Tensor::from_block_fn(&runtime, [&matched_left], [&matched_left], |_, indices| {
+                Complex64::new(
+                    (indices[0] + indices[1] + 1) as f64,
+                    (indices[0] + indices[1] + 1) as f64 / 7.0,
+                )
+            })
+            .unwrap();
+        assert_adjoint_null_spaces(&rank_deficient);
+
+        let su2 = Space::su2([(0, 2), (1, 1)]).unwrap();
+        for (dtype, seed) in [(Dtype::F64, 703_010), (Dtype::C64, 703_011)] {
+            let source =
+                Tensor::rand_with_seed(&runtime, dtype, [&su2, &su2], [&su2], seed).unwrap();
+            assert!(source.ordinary_body().space.structure().block_count() > 1);
+            assert_adjoint_null_spaces(&source);
+        }
+    }
+
+    #[test]
+    fn erased_null_redirect_preserves_the_su3_boundary() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let space = Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap();
+        let lazy = Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space], 703_012)
+            .unwrap()
+            .adjoint()
+            .unwrap();
+
+        assert_eq!(
+            lazy.left_null().unwrap_err(),
+            Error::UnsupportedForRule {
+                operation: "Tensor::left_null",
+                rule: "SU(3)",
+            }
+        );
+        assert_eq!(
+            lazy.right_null().unwrap_err(),
+            Error::UnsupportedForRule {
+                operation: "Tensor::right_null",
+                rule: "SU(3)",
+            }
+        );
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
     }
 
     fn assert_adjoint_trace_matches_eager_oracle(
