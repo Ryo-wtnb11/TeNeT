@@ -4204,7 +4204,9 @@ where
     /// **O(rank) elementwise-reciprocal arm**, `1/s_i` over the `Σ_c k_c`
     /// stored values, and the result stays compact — matching TensorKit's
     /// `inv(::DiagonalTensorMap)`, which is `inv.(d.data)`. Nothing dense is
-    /// built on either side of that arm.
+    /// built on either side of that arm. A host lazy adjoint solves its owned
+    /// parent and returns a detached owned adjoint of that inverse; it does not
+    /// allocate or publish a separate receiver-materialization payload.
     pub fn inv(&self) -> Result<Self, Error> {
         if let Some(spectrum) = self.spectrum() {
             // Why `== 0` and not a tolerance: the dense arm has none either
@@ -4220,6 +4222,16 @@ where
                     Ok(value.recip_value())
                 }
             })?));
+        }
+        if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
+            // (A†)^-1 = (A^-1)†. Keep the receiver's lazy cache cold by
+            // solving the owned parent, then detach the final adjoint so the
+            // result retains neither the parent inverse nor its payload.
+            return self
+                .adjoint()?
+                .inv()?
+                .adjoint()?
+                .materialized_tensor_uncached();
         }
         let mut dense = self.runtime.lease_dense();
         let out = tenet_matrixalgebra::inv_direct_dyn(dense.dense(), &self.bound_ref()?)?;
@@ -7055,6 +7067,205 @@ mod representation_gates {
         }
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
         let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+    }
+
+    fn assert_inverse_redirect<R, D>(source: &TensorMap<R, D>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec
+            + Send
+            + Sync
+            + 'static,
+        D: TensorScalar + core::fmt::Debug + Send + Sync + 'static,
+    {
+        let eager = eager_adjoint_oracle(source);
+        let expected = eager.inv().unwrap();
+        let parent_body = Arc::clone(owned(source));
+        let parent_data = Arc::clone(&parent_body.data);
+        let lazy = source.adjoint().unwrap();
+
+        for _ in 0..2 {
+            let actual = lazy.clone().inv().unwrap();
+            assert_typed_map_close(&actual, &expected, 1e-10);
+            let codomain = eager.codomain();
+            let domain = eager.domain();
+            assert_typed_map_close(
+                &eager.compose(&actual).unwrap(),
+                &TensorMap::id(source.runtime(), codomain.iter()).unwrap(),
+                1e-9,
+            );
+            assert_typed_map_close(
+                &actual.compose(&eager).unwrap(),
+                &TensorMap::id(source.runtime(), domain.iter()).unwrap(),
+                1e-9,
+            );
+            assert!(actual.owned_body().is_some());
+            assert!(Arc::ptr_eq(
+                actual.logical_space().provider_arc(),
+                source.logical_space().provider_arc()
+            ));
+            assert!(!Arc::ptr_eq(&owned(&actual).data, &parent_data));
+            let _ = actual.data();
+        }
+
+        let calls = (0..4)
+            .map(|_| {
+                let clone = lazy.clone();
+                std::thread::spawn(move || clone.inv().unwrap())
+            })
+            .collect::<Vec<_>>();
+        for call in calls {
+            assert_typed_map_close(&call.join().unwrap(), &expected, 1e-10);
+        }
+
+        assert!(Arc::ptr_eq(owned(source), &parent_body));
+        assert!(Arc::ptr_eq(&owned(source).data, &parent_data));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+    }
+
+    #[test]
+    fn inverse_redirect_is_owned_provider_native_repeatable_and_cold() {
+        // What: U(1) complex blocks and a genuine SU(2) multitree use the
+        // inverse identity without warming the lazy receiver, including
+        // cloned and concurrent calls, and return detached provider-native data.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new(
+            provider,
+            [
+                (U1Irrep::new(-1), 2),
+                (U1Irrep::new(0), 3),
+                (U1Irrep::new(2), 1),
+            ],
+            false,
+        )
+        .unwrap();
+        let u1 = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            let re = if indices[0] == indices[1] {
+                20.0 + indices[0] as f64
+            } else {
+                (indices[0] + 2 * indices[1] + 1) as f64 / 100.0
+            };
+            num_complex::Complex64::new(re, (indices[0] + indices[1] + 1) as f64 / 200.0)
+        })
+        .unwrap();
+        let identity = TensorMap::<_, num_complex::Complex64>::id(&runtime, [&leg]).unwrap();
+        let u1 = u1
+            .add(
+                &identity,
+                num_complex::Complex64::new(1.0, 0.0),
+                num_complex::Complex64::new(100.0, 0.0),
+            )
+            .unwrap();
+        assert_inverse_redirect(&u1);
+
+        let provider = Arc::new(U1FusionRule);
+        let wide =
+            GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 4)], false).unwrap();
+        let narrow = GradedSpace::try_new(provider, [(U1Irrep::new(0), 2)], false).unwrap();
+        let unequal =
+            TensorMap::from_block_fn(&runtime, [&wide], [&narrow, &narrow], |_, indices| {
+                let column = 2 * indices[1] + indices[2];
+                if indices[0] == column {
+                    10.0 + indices[0] as f64
+                } else {
+                    (indices[0] + column + 1) as f64 / 100.0
+                }
+            })
+            .unwrap();
+        assert_ne!(unequal.codomain_rank(), unequal.domain_rank());
+        assert_inverse_redirect(&unequal);
+
+        let provider = Arc::new(SU2FusionRule);
+        let half =
+            GradedSpace::try_new(provider, [(SU2Irrep::from_twice_spin(1), 1)], false).unwrap();
+        let su2 = TensorMap::from_block_fn(
+            &runtime,
+            [&half, &half, &half],
+            [&half, &half, &half],
+            |_, indices| {
+                if indices[..3] == indices[3..] {
+                    20.0 + indices.iter().sum::<usize>() as f64
+                } else {
+                    (indices.iter().sum::<usize>() + 1) as f64 / 100.0
+                }
+            },
+        )
+        .unwrap();
+        let identity = TensorMap::<_, f64>::id(&runtime, [&half, &half, &half]).unwrap();
+        let su2 = su2.add(&identity, 1.0, 100.0).unwrap();
+        assert!(su2.logical_space().space().structure().block_count() > 1);
+        assert_inverse_redirect(&su2);
+    }
+
+    #[test]
+    fn inverse_redirect_failure_and_negative_powi_leave_the_receiver_cold() {
+        // What: negative powers inherit the inverse redirect, while a singular
+        // solve changes neither parent Arc/bytes nor the lazy receiver cache.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new(provider, [(U1Irrep::new(0), 3)], false).unwrap();
+        let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            if indices[0] == indices[1] {
+                4.0 + indices[0] as f64
+            } else {
+                (indices[0] + indices[1] + 1) as f64 / 20.0
+            }
+        })
+        .unwrap();
+        let lazy = source.adjoint().unwrap();
+        let eager = eager_adjoint_oracle(&source);
+        assert_typed_map_close(&lazy.powi(-3).unwrap(), &eager.powi(-3).unwrap(), 1e-10);
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+
+        let singular = source.scale(0.0);
+        let before = singular.data().to_vec();
+        let body = Arc::clone(owned(&singular));
+        let data = Arc::clone(&body.data);
+        let cold = singular.adjoint().unwrap();
+        assert!(matches!(cold.inv(), Err(Error::Operation(_))));
+        assert_eq!(singular.data(), before);
+        assert!(Arc::ptr_eq(owned(&singular), &body));
+        assert!(Arc::ptr_eq(&owned(&singular).data, &data));
+        assert_eq!(materialized_adjoint_builds(&cold), 0);
+        let TypedTensorRepr::Adjoint(view) = &cold.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+
+        // The first U(1) sector solves before the second singular sector
+        // fails, pinning atomicity after partial backend progress.
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new(
+            provider,
+            [(U1Irrep::new(0), 1), (U1Irrep::new(1), 2)],
+            false,
+        )
+        .unwrap();
+        let late = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, indices| {
+            if trees.codomain_uncoupled[0] == U1Irrep::new(0) && indices[0] == indices[1] {
+                2.0
+            } else {
+                0.0
+            }
+        })
+        .unwrap();
+        let before = late.data().to_vec();
+        let data = Arc::clone(&owned(&late).data);
+        let cold = late.adjoint().unwrap();
+        assert!(matches!(cold.inv(), Err(Error::Operation(_))));
+        assert_eq!(late.data(), before);
+        assert!(Arc::ptr_eq(&owned(&late).data, &data));
+        assert_eq!(materialized_adjoint_builds(&cold), 0);
+        let TypedTensorRepr::Adjoint(view) = &cold.repr else {
             unreachable!()
         };
         assert!(view.materialized.get().is_none());
