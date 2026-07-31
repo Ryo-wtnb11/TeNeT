@@ -108,6 +108,10 @@ fn lazy_adjoint_metadata_and_involution_stay_on_cuda() {
         adjoint.pinv(0.0).unwrap_err(),
         Error::UnsupportedOnDevice(_)
     ));
+    assert!(matches!(
+        adjoint.exp().unwrap_err(),
+        Error::UnsupportedOnDevice(_)
+    ));
     assert_eq!(adjoint.placement(), Placement::Cuda(0));
     assert!(matches!(
         adjoint.try_data().unwrap_err(),

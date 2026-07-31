@@ -9456,6 +9456,8 @@ impl Tensor {
     /// adding `O(Σ_c n_c²)`. Sectors are never coupled. Compact input: `O(Σ_c k_c)` time and storage over the stored
     /// spectra, with no dense buffer, no EIGH and no GEMM — the result stays
     /// compact, so a following `compose` is still a bond scaling (issue #578).
+    /// A dense lazy adjoint builds one operation-local logical payload per call
+    /// without publishing its reusable receiver cache.
     ///
     /// # Errors
     ///
@@ -9475,7 +9477,7 @@ impl Tensor {
     ///   matrix-function seam is not wired.
     pub fn exp(&self) -> Result<Self, Error> {
         if self.is_adjoint_view() {
-            return self.materialized_tensor()?.exp();
+            return self.materialized_tensor_uncached()?.exp();
         }
         // Compact diagonal: `exp` is elementwise on the spectrum (O(Σ_c k_c))
         // and stays diagonal, so it must not reach the dense lease below —
@@ -12316,6 +12318,160 @@ mod adjoint_parent_view_tests {
                 assert!((actual - expected).abs() < 1e-11);
             }
         }
+    }
+
+    #[test]
+    fn erased_exp_of_a_near_hermitian_adjoint_uses_the_logical_orientation_and_stays_cold() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let leg = Space::u1([(0, 2)]);
+        let delta = 4.0e-15;
+        let parent = Tensor::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            match (indices[0], indices[1]) {
+                (0, 0) => Complex64::new(0.25, 0.0),
+                (1, 1) => Complex64::new(-0.5, 0.0),
+                (0, 1) => Complex64::new(delta, 0.0),
+                _ => Complex64::new(0.0, 0.0),
+            }
+        })
+        .unwrap();
+        let expected = parent
+            .adjoint()
+            .unwrap()
+            .materialized_tensor_uncached()
+            .unwrap()
+            .exp()
+            .unwrap();
+        let parent_redirect = parent
+            .exp()
+            .unwrap()
+            .adjoint()
+            .unwrap()
+            .materialized_tensor_uncached()
+            .unwrap();
+        let lazy = parent.adjoint().unwrap();
+        let actual = lazy.exp().unwrap();
+
+        assert_close(&actual, &expected);
+        assert!(actual
+            .data_c64()
+            .iter()
+            .zip(expected.data_c64())
+            .all(|(&actual, &expected)| (actual - expected).norm() < 1.0e-20));
+        assert!(actual
+            .data_c64()
+            .iter()
+            .zip(parent_redirect.data_c64())
+            .any(|(&actual, &redirect)| (actual - redirect).norm() > 1.0e-16));
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+    }
+
+    fn assert_erased_exp_uses_a_cold_logical_copy(parent: &Tensor) {
+        let expected = parent
+            .adjoint()
+            .unwrap()
+            .materialized_tensor_uncached()
+            .unwrap()
+            .exp()
+            .unwrap();
+        let parent_space = Arc::clone(&parent.ordinary_body().space);
+        let parent_data = Arc::clone(&parent.ordinary_body().data);
+        let lazy = parent.adjoint().unwrap();
+
+        for _ in 0..2 {
+            let actual = lazy.clone().exp().unwrap();
+            assert_close(&actual, &expected);
+            assert!(!actual.is_adjoint_view());
+            assert!(actual
+                .rule_authority_space()
+                .provider_matches_context_allocation(&parent.rule_authority_space().context()));
+            assert!(!Arc::ptr_eq(&actual.ordinary_body().data, &parent_data));
+            let _ = actual.coupled_data().unwrap();
+        }
+        let calls = (0..4)
+            .map(|_| {
+                let clone = lazy.clone();
+                std::thread::spawn(move || clone.exp().unwrap())
+            })
+            .collect::<Vec<_>>();
+        for call in calls {
+            assert_close(&call.join().unwrap(), &expected);
+        }
+        assert!(Arc::ptr_eq(&parent.ordinary_body().space, &parent_space));
+        assert!(Arc::ptr_eq(&parent.ordinary_body().data, &parent_data));
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+    }
+
+    #[test]
+    fn erased_exp_returns_owned_provider_native_outputs_and_keeps_receivers_cold() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let u1 = Space::u1([(-1, 2), (0, 3), (2, 1)]);
+        let parent = Tensor::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+            let re = if indices[0] == indices[1] {
+                0.25 + indices[0] as f64 / 10.0
+            } else {
+                (indices[0] + 2 * indices[1] + 1) as f64 / 100.0
+            };
+            Complex64::new(re, (indices[0] + indices[1] + 1) as f64 / 200.0)
+        })
+        .unwrap();
+        assert_erased_exp_uses_a_cold_logical_copy(&parent);
+
+        let half = Space::su2([(1, 1)]).unwrap();
+        let parent = Tensor::from_block_fn(
+            &runtime,
+            [&half, &half, &half],
+            [&half, &half, &half],
+            |_, indices| (indices.iter().sum::<usize>() + 1) as f64 / 20.0,
+        )
+        .unwrap();
+        assert!(parent.ordinary_body().space.structure().block_count() > 1);
+        assert_erased_exp_uses_a_cold_logical_copy(&parent);
+    }
+
+    #[test]
+    fn erased_exp_failures_and_su3_rejection_keep_the_receiver_cold() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let leg = Space::u1([(0, 2)]);
+        let parent = Tensor::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            if indices == [0, 1] {
+                Complex64::new(f64::NAN, 0.0)
+            } else {
+                Complex64::new((indices[0] + indices[1] + 1) as f64, 0.0)
+            }
+        })
+        .unwrap();
+        let before = parent.data_c64().to_vec();
+        let data = Arc::clone(&parent.ordinary_body().data);
+        let lazy = parent.adjoint().unwrap();
+        assert!(matches!(lazy.exp(), Err(Error::Operation(_))));
+        assert!(parent
+            .data_c64()
+            .iter()
+            .zip(&before)
+            .all(|(actual, expected)| {
+                actual.re.to_bits() == expected.re.to_bits()
+                    && actual.im.to_bits() == expected.im.to_bits()
+            }));
+        assert!(Arc::ptr_eq(&parent.ordinary_body().data, &data));
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+
+        let su3 = Space::su3([((1, 0), 1)]).unwrap();
+        let lazy = Tensor::rand_with_seed(&runtime, Dtype::C64, [&su3], [&su3], 713_001)
+            .unwrap()
+            .adjoint()
+            .unwrap();
+        assert_eq!(
+            lazy.exp().unwrap_err(),
+            Error::UnsupportedForRule {
+                operation: "Tensor::exp",
+                rule: "SU(3)",
+            }
+        );
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
     }
 
     fn assert_lazy_compact_svd_matches_eager(

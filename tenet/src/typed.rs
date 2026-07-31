@@ -4116,7 +4116,9 @@ where
     /// the whole of the scratch on the canonical layout; a payload whose
     /// coupled sectors are not laid out in contiguous regions takes a fallback
     /// that matricizes them all first, adding `O(Σ_c n_c²)`. Neither route
-    /// couples sectors. Compact input (TensorKit's
+    /// couples sectors. A dense lazy adjoint builds one operation-local logical
+    /// payload per call without publishing its reusable receiver cache. Compact
+    /// input (TensorKit's
     /// `DiagonalTensorMap`): the **O(rank) elementwise arm**, `exp(s_i)` over
     /// the `Σ_c k_c` stored values, staying compact. The erased
     /// [`crate::prelude::Tensor::exp`] has the same arm since issue #578 — it
@@ -4162,7 +4164,13 @@ where
         }
         let mut dense = self.runtime.lease_dense();
         let mut lease = self.runtime.lease_context()?;
-        let body = self.materialized_body();
+        let local = matches!(&self.repr, TypedTensorRepr::Adjoint(_))
+            .then(|| self.materialized_tensor_uncached())
+            .transpose()?;
+        let body = local
+            .as_ref()
+            .and_then(Self::owned_body)
+            .unwrap_or_else(|| self.owned_body().expect("owned representation"));
         let out = tenet_matrixalgebra::exp_dyn(
             dense.dense(),
             lease.context().multiplicity_free_lane::<D>(),
@@ -6988,6 +6996,169 @@ mod representation_gates {
             .all(|(&actual, &expected)| {
                 (actual.widen_complex() - expected.widen_complex()).norm() < tolerance
             }));
+    }
+
+    #[test]
+    fn exp_of_a_near_hermitian_adjoint_uses_the_logical_orientation_and_stays_cold() {
+        // What: the fixed approximate-Hermitian dispatch must see logical A^H,
+        // whose lower triangle is the conjugated parent upper triangle. A
+        // parent-exp redirect feeds EIGH the other triangle and changes values.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new(provider, [(U1Irrep::new(0), 2)], false).unwrap();
+        let delta = 4.0e-15;
+        let parent = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            match (indices[0], indices[1]) {
+                (0, 0) => num_complex::Complex64::new(0.25, 0.0),
+                (1, 1) => num_complex::Complex64::new(-0.5, 0.0),
+                (0, 1) => num_complex::Complex64::new(delta, 0.0),
+                _ => num_complex::Complex64::new(0.0, 0.0),
+            }
+        })
+        .unwrap();
+        let eager = eager_adjoint_oracle(&parent);
+        let expected = eager.exp().unwrap();
+        let parent_redirect = parent
+            .exp()
+            .unwrap()
+            .adjoint()
+            .unwrap()
+            .materialized_tensor_uncached()
+            .unwrap();
+        let lazy = parent.adjoint().unwrap();
+        let actual = lazy.exp().unwrap();
+
+        assert_typed_map_close(&actual, &expected, 1.0e-20);
+        assert!(parent_redirect
+            .data()
+            .iter()
+            .zip(expected.data())
+            .any(|(&actual, &expected)| {
+                (actual.widen_complex() - expected.widen_complex()).norm() > 1.0e-16
+            }));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+    }
+
+    fn assert_exp_uses_a_cold_logical_copy<R, D>(source: &TensorMap<R, D>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec
+            + Send
+            + Sync
+            + 'static,
+        D: TensorScalar + core::fmt::Debug + Send + Sync + 'static,
+    {
+        let eager = eager_adjoint_oracle(source);
+        let expected = eager.exp().unwrap();
+        let parent_body = Arc::clone(owned(source));
+        let parent_data = Arc::clone(&parent_body.data);
+        let lazy = source.adjoint().unwrap();
+
+        for _ in 0..2 {
+            let actual = lazy.clone().exp().unwrap();
+            assert_typed_map_close(&actual, &expected, 1.0e-9);
+            assert!(actual.owned_body().is_some());
+            assert!(Arc::ptr_eq(
+                actual.logical_space().provider_arc(),
+                source.logical_space().provider_arc()
+            ));
+            assert!(!Arc::ptr_eq(&owned(&actual).data, &parent_data));
+            let _ = actual.data();
+        }
+        let calls = (0..4)
+            .map(|_| {
+                let clone = lazy.clone();
+                std::thread::spawn(move || clone.exp().unwrap())
+            })
+            .collect::<Vec<_>>();
+        for call in calls {
+            assert_typed_map_close(&call.join().unwrap(), &expected, 1.0e-9);
+        }
+        assert!(Arc::ptr_eq(owned(source), &parent_body));
+        assert!(Arc::ptr_eq(&owned(source).data, &parent_data));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+    }
+
+    #[test]
+    fn exp_uses_owned_provider_native_outputs_without_warming_lazy_receivers() {
+        // What: real/complex non-self-dual U(1) and a genuine SU(2) multitree
+        // remain deterministic across repeats, clones, and concurrent calls.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new(
+            provider,
+            [
+                (U1Irrep::new(-1), 2),
+                (U1Irrep::new(0), 3),
+                (U1Irrep::new(2), 1),
+            ],
+            false,
+        )
+        .unwrap();
+        let u1 = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            if indices[0] == indices[1] {
+                0.25 + indices[0] as f64 / 10.0
+            } else {
+                (indices[0] + 2 * indices[1] + 1) as f64 / 100.0
+            }
+        })
+        .unwrap();
+        assert_exp_uses_a_cold_logical_copy(&u1);
+        assert_exp_uses_a_cold_logical_copy(&genuinely_complex(&u1));
+
+        let provider = Arc::new(SU2FusionRule);
+        let half =
+            GradedSpace::try_new(provider, [(SU2Irrep::from_twice_spin(1), 1)], false).unwrap();
+        let su2 = TensorMap::from_block_fn(
+            &runtime,
+            [&half, &half, &half],
+            [&half, &half, &half],
+            |_, indices| (indices.iter().sum::<usize>() + 1) as f64 / 20.0,
+        )
+        .unwrap();
+        assert!(su2.logical_space().space().structure().block_count() > 1);
+        assert_exp_uses_a_cold_logical_copy(&genuinely_complex(&su2));
+    }
+
+    #[test]
+    fn exp_failure_leaves_the_lazy_receiver_and_parent_untouched() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new(provider, [(U1Irrep::new(0), 2)], false).unwrap();
+        let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            if indices == [0, 1] {
+                num_complex::Complex64::new(f64::NAN, 0.0)
+            } else {
+                num_complex::Complex64::new((indices[0] + indices[1] + 1) as f64, 0.0)
+            }
+        })
+        .unwrap();
+        let before = source.data().to_vec();
+        let parent = Arc::clone(owned(&source));
+        let data = Arc::clone(&parent.data);
+        let lazy = source.adjoint().unwrap();
+
+        assert!(matches!(lazy.exp(), Err(Error::Operation(_))));
+        assert!(source.data().iter().zip(&before).all(|(actual, expected)| {
+            actual.re.to_bits() == expected.re.to_bits()
+                && actual.im.to_bits() == expected.im.to_bits()
+        }));
+        assert!(Arc::ptr_eq(owned(&source), &parent));
+        assert!(Arc::ptr_eq(&owned(&source).data, &data));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
     }
 
     fn assert_polar_factors<R, D>(

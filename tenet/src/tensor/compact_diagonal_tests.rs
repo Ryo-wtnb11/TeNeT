@@ -1457,6 +1457,8 @@ fn exp_of_an_adjoint_conjugates_the_spectrum_and_never_reaches_an_adjoint_view()
     assert!(view.is_adjoint_view());
     assert_tensor_close(
         &view.exp().unwrap(),
-        &view.materialized_tensor().unwrap().exp().unwrap(),
+        &view.materialized_tensor_uncached().unwrap().exp().unwrap(),
     );
+    assert_eq!(view.adjoint_body_builds(), 0);
+    assert!(!view.has_cached_materialization());
 }
