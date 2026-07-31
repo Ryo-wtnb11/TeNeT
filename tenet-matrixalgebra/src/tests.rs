@@ -6357,6 +6357,15 @@ fn u1_cross_space_map<D: FactorScalar>(
 }
 
 fn assert_disjoint_null_spaces_keep_structural_directions<D: FactorScalar>() {
+    let assert_identity = |data: &[D], order: usize| {
+        for col in 0..order {
+            for row in 0..order {
+                let expected = if row == col { 1.0 } else { 0.0 };
+                assert!((data[row + order * col].widen_complex().re - expected).abs() < 1e-12);
+                assert!(data[row + order * col].widen_complex().im.abs() < 1e-12);
+            }
+        }
+    };
     let provider = Arc::new(U1FusionRule);
     let tensor = u1_cross_space_map::<D>(&[(1, 2)], &[(0, 3)]);
     let input = bound_tensor(Arc::clone(&provider), &tensor);
@@ -6370,6 +6379,7 @@ fn assert_disjoint_null_spaces_keep_structural_directions<D: FactorScalar>() {
     assert_eq!(left.structure().block_count(), 1);
     assert_eq!(left.structure().block(0).unwrap().shape(), &[2, 2]);
     assert_eq!(left.data().len(), 4);
+    assert_identity(left.data(), 2);
     assert!(Arc::ptr_eq(left.space().provider_arc(), &provider));
 
     crate::factorize::reset_factor_buffer_build_counts_for_test();
@@ -6381,6 +6391,7 @@ fn assert_disjoint_null_spaces_keep_structural_directions<D: FactorScalar>() {
     assert_eq!(right.structure().block_count(), 1);
     assert_eq!(right.structure().block(0).unwrap().shape(), &[3, 3]);
     assert_eq!(right.data().len(), 9);
+    assert_identity(right.data(), 3);
     assert!(Arc::ptr_eq(right.space().provider_arc(), &provider));
 }
 
