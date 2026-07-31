@@ -9346,7 +9346,7 @@ impl Tensor {
     /// `eigen`, whose `D` and `V` are `ComplexF64` for real input.
     pub fn eig_full(&self) -> Result<(Self, Self), Error> {
         if self.is_adjoint_view() {
-            return self.materialized_tensor()?.eig_full();
+            return self.materialized_tensor_uncached()?.eig_full();
         }
         self.reject_unwired_su3("Tensor::eig_full")?;
         // Lease a dense executor for this op instead of the coarse runtime lock,
@@ -9373,7 +9373,7 @@ impl Tensor {
     /// are always c64.
     pub fn eig_trunc(&self, truncation: &Truncation) -> Result<EigTrunc, Error> {
         if self.is_adjoint_view() {
-            return self.materialized_tensor()?.eig_trunc(truncation);
+            return self.materialized_tensor_uncached()?.eig_trunc(truncation);
         }
         self.reject_unwired_su3("Tensor::eig_trunc")?;
         // Lease a dense executor for this op instead of the coarse runtime lock,
@@ -9402,7 +9402,7 @@ impl Tensor {
     /// (MatrixAlgebraKit `eig_vals`). Complex for both dtypes.
     pub fn eig_vals(&self) -> Result<Vec<SectorSpectrum<Complex64>>, Error> {
         if self.is_adjoint_view() {
-            return self.materialized_tensor()?.eig_vals();
+            return self.materialized_tensor_uncached()?.eig_vals();
         }
         self.reject_unwired_su3("Tensor::eig_vals")?;
         // Lease a dense executor for this op instead of the coarse runtime lock,
@@ -12498,6 +12498,239 @@ mod adjoint_parent_view_tests {
         assert_eq!(lazy.eigh_full().unwrap_err(), expected[1]);
         assert_eq!(
             lazy.eigh_trunc(&Truncation::rank(1)).unwrap_err(),
+            expected[2]
+        );
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+    }
+
+    fn assert_erased_eig_uses_a_cold_logical_copy(parent: &Tensor) {
+        let eager = parent
+            .adjoint()
+            .unwrap()
+            .materialized_tensor_uncached()
+            .unwrap();
+        let expected_vals = eager.eig_vals().unwrap();
+        let expected_full = eager.eig_full().unwrap();
+        let expected_trunc = eager.eig_trunc(&Truncation::rank(1)).unwrap();
+        let parent_space = Arc::clone(&parent.ordinary_body().space);
+        let parent_data = Arc::clone(&parent.ordinary_body().data);
+        let lazy = parent.adjoint().unwrap();
+
+        for _ in 0..2 {
+            assert_eq!(lazy.clone().eig_vals().unwrap(), expected_vals);
+            let full = lazy.clone().eig_full().unwrap();
+            assert_eq!(full.0.try_data_c64().unwrap(), expected_full.0.data_c64());
+            assert_eq!(full.1.try_data_c64().unwrap(), expected_full.1.data_c64());
+            let trunc = lazy.clone().eig_trunc(&Truncation::rank(1)).unwrap();
+            assert_eq!(trunc.eigenvalues, expected_trunc.eigenvalues);
+            assert_eq!(trunc.error, expected_trunc.error);
+            assert_eq!(trunc.d.try_data_c64().unwrap(), expected_trunc.d.data_c64());
+            assert_eq!(trunc.v.try_data_c64().unwrap(), expected_trunc.v.data_c64());
+            for output in [&full.0, &full.1, &trunc.d, &trunc.v] {
+                assert!(!output.is_adjoint_view());
+                assert!(output
+                    .rule_authority_space()
+                    .provider_matches_context_allocation(&parent.rule_authority_space().context()));
+            }
+        }
+
+        let calls = (0..4)
+            .map(|_| {
+                let clone = lazy.clone();
+                std::thread::spawn(move || {
+                    let vals = clone.eig_vals().unwrap();
+                    let full = clone.eig_full().unwrap();
+                    let trunc = clone.eig_trunc(&Truncation::rank(1)).unwrap();
+                    (vals, full.0.data_c64().to_vec(), trunc.error)
+                })
+            })
+            .collect::<Vec<_>>();
+        for call in calls {
+            let (vals, diagonal, error) = call.join().unwrap();
+            assert_eq!(vals, expected_vals);
+            assert_eq!(diagonal, expected_full.0.data_c64());
+            assert_eq!(error, expected_trunc.error);
+        }
+        assert!(Arc::ptr_eq(&parent.ordinary_body().space, &parent_space));
+        assert!(Arc::ptr_eq(&parent.ordinary_body().data, &parent_data));
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+
+        let _ = lazy.data();
+        assert_eq!(lazy.adjoint_body_builds(), 1);
+        assert!(lazy.has_cached_materialization());
+    }
+
+    #[test]
+    fn erased_eig_dense_lazy_nonnormal_is_logical_owned_repeatable_and_cold() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let leg = Space::u1([(0, 2)]);
+        let parent = Tensor::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            match (indices[0], indices[1]) {
+                (0, 0) => 1.0,
+                (1, 1) => 2.0,
+                (0, 1) => 1.0,
+                _ => 0.0,
+            }
+        })
+        .unwrap();
+        let logical = parent
+            .adjoint()
+            .unwrap()
+            .materialized_tensor_uncached()
+            .unwrap();
+        let (d, v) = parent.adjoint().unwrap().eig_full().unwrap();
+        let lhs = logical.to_c64().compose(&v).unwrap();
+        let rhs = v.compose(&d).unwrap();
+        let residual = lhs.add(&rhs, 1.0, -1.0).unwrap().norm().unwrap();
+        assert!(residual < 1.0e-12, "A^H V - V D residual={residual:e}");
+
+        assert_erased_eig_uses_a_cold_logical_copy(&parent);
+    }
+
+    #[test]
+    fn erased_eig_dense_lazy_signed_zero_order_complex_tie_and_jordan_match_oracles() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let scalar_leg = Space::u1([(0, 1)]);
+        let negative =
+            Tensor::from_block_fn(&runtime, [&scalar_leg], [&scalar_leg], |_, _| -2.0).unwrap();
+        let lazy = negative.adjoint().unwrap();
+        let value = lazy.eig_vals().unwrap()[0].values[0];
+        assert_eq!(value, Complex64::new(-2.0, 0.0));
+        assert_eq!(value.im.to_bits(), 0.0f64.to_bits());
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+
+        let leg = Space::u1([(0, 2)]);
+        let rotation = Tensor::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            match (indices[0], indices[1]) {
+                (0, 1) => -1.0,
+                (1, 0) => 1.0,
+                _ => 0.0,
+            }
+        })
+        .unwrap();
+        let eager = rotation
+            .adjoint()
+            .unwrap()
+            .materialized_tensor_uncached()
+            .unwrap();
+        let expected = eager.eig_vals().unwrap();
+        let lazy = rotation.adjoint().unwrap();
+        assert_eq!(lazy.eig_vals().unwrap(), expected);
+        assert_eq!(expected[0].values[0].im, 1.0);
+        assert_eq!(expected[0].values[1].im, -1.0);
+        let actual = lazy.eig_trunc(&Truncation::rank(1)).unwrap();
+        let expected_trunc = eager.eig_trunc(&Truncation::rank(1)).unwrap();
+        assert_eq!(actual.eigenvalues, expected_trunc.eigenvalues);
+        assert_eq!(actual.d.data_c64(), expected_trunc.d.data_c64());
+        assert_eq!(actual.v.data_c64(), expected_trunc.v.data_c64());
+        assert_eq!(actual.error, expected_trunc.error);
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+
+        let complex = Tensor::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            if indices[0] == indices[1] {
+                if indices[0] == 0 {
+                    Complex64::new(1.0, 1.0)
+                } else {
+                    Complex64::new(-1.0, 1.0)
+                }
+            } else {
+                Complex64::new(0.0, 0.0)
+            }
+        })
+        .unwrap();
+        let eager = complex
+            .adjoint()
+            .unwrap()
+            .materialized_tensor_uncached()
+            .unwrap();
+        let lazy = complex.adjoint().unwrap();
+        assert_eq!(lazy.eig_vals().unwrap(), eager.eig_vals().unwrap());
+        let actual = lazy.eig_full().unwrap();
+        let expected = eager.eig_full().unwrap();
+        assert_eq!(actual.0.data_c64(), expected.0.data_c64());
+        assert_eq!(actual.1.data_c64(), expected.1.data_c64());
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+
+        for epsilon in [0.0, 1.0e-12] {
+            let jordan = Tensor::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+                match (indices[0], indices[1]) {
+                    (0, 0) | (1, 1) => 1.0,
+                    (0, 1) => 1.0,
+                    (1, 0) => epsilon,
+                    _ => unreachable!(),
+                }
+            })
+            .unwrap();
+            let eager = jordan
+                .adjoint()
+                .unwrap()
+                .materialized_tensor_uncached()
+                .unwrap();
+            let lazy = jordan.adjoint().unwrap();
+            assert_eq!(lazy.eig_vals().unwrap(), eager.eig_vals().unwrap());
+            let actual = lazy.eig_full().unwrap();
+            let expected = eager.eig_full().unwrap();
+            assert_eq!(actual.0.data_c64(), expected.0.data_c64());
+            assert_eq!(actual.1.data_c64(), expected.1.data_c64());
+            assert_eq!(lazy.adjoint_body_builds(), 0);
+        }
+    }
+
+    #[test]
+    fn erased_eig_dense_lazy_failures_and_su3_match_exact_logical_errors() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let left = Space::u1([(0, 2)]);
+        let right = Space::u1([(0, 3)]);
+        let parent = Tensor::from_block_fn(&runtime, [&left], [&right], |_, indices| {
+            (indices[0] + indices[1]) as f64
+        })
+        .unwrap();
+        let eager = parent
+            .adjoint()
+            .unwrap()
+            .materialized_tensor_uncached()
+            .unwrap();
+        let expected = [
+            eager.eig_vals().unwrap_err().to_string(),
+            eager.eig_full().unwrap_err().to_string(),
+            eager
+                .eig_trunc(&Truncation::rank(1))
+                .unwrap_err()
+                .to_string(),
+        ];
+        let lazy = parent.adjoint().unwrap();
+        for _ in 0..2 {
+            assert_eq!(lazy.eig_vals().unwrap_err().to_string(), expected[0]);
+            assert_eq!(lazy.eig_full().unwrap_err().to_string(), expected[1]);
+            assert_eq!(
+                lazy.eig_trunc(&Truncation::rank(1))
+                    .unwrap_err()
+                    .to_string(),
+                expected[2]
+            );
+        }
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+
+        let su3 = Space::su3([((1, 0), 1)]).unwrap();
+        let parent = Tensor::rand_with_seed(&runtime, Dtype::C64, [&su3], [&su3], 719_001).unwrap();
+        let eager = parent
+            .adjoint()
+            .unwrap()
+            .materialized_tensor_uncached()
+            .unwrap();
+        let expected = [
+            eager.eig_vals().unwrap_err(),
+            eager.eig_full().unwrap_err(),
+            eager.eig_trunc(&Truncation::rank(1)).unwrap_err(),
+        ];
+        let lazy = parent.adjoint().unwrap();
+        assert_eq!(lazy.eig_vals().unwrap_err(), expected[0]);
+        assert_eq!(lazy.eig_full().unwrap_err(), expected[1]);
+        assert_eq!(
+            lazy.eig_trunc(&Truncation::rank(1)).unwrap_err(),
             expected[2]
         );
         assert_eq!(lazy.adjoint_body_builds(), 0);
