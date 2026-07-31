@@ -208,6 +208,53 @@ fn typed_compact_svd_keeps_total_and_peak_below_materialized_baseline() {
 }
 
 #[test]
+fn typed_truncated_svd_keeps_total_and_peak_below_materialized_baseline() {
+    // What: typed truncation reuses the parent-factor seam without retaining
+    // a receiver-sized logical-adjoint input.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let space = GradedSpace::try_new(provider, [(U1Irrep::new(0), 64)], false).unwrap();
+    let parent: TypedTensorMap<_, num_complex::Complex64> =
+        TypedTensorMap::rand_with_seed(&runtime, [&space], [&space], 693_696).unwrap();
+    let truncation = Truncation::rank(16);
+    black_box(parent.svd_trunc(&truncation).unwrap());
+
+    let input_bytes = (parent.data().len() * std::mem::size_of::<num_complex::Complex64>()) as u64;
+    let optimized = parent.adjoint().unwrap();
+    let baseline = parent.adjoint().unwrap();
+    let optimized_cost = measure_peak(|| {
+        black_box(optimized.svd_trunc(&truncation).unwrap());
+    });
+    let baseline_cost = measure_peak(|| {
+        black_box(baseline.data());
+        black_box(baseline.svd_trunc(&truncation).unwrap());
+    });
+
+    assert!(
+        optimized_cost.1 < baseline_cost.1,
+        "total bytes: optimized={optimized_cost:?}, baseline={baseline_cost:?}"
+    );
+    assert!(
+        optimized_cost.2 < baseline_cost.2,
+        "peak bytes: optimized={optimized_cost:?}, baseline={baseline_cost:?}"
+    );
+    assert!(
+        measure(|| {
+            black_box(optimized.data());
+        })
+        .1 >= input_bytes,
+        "optimized truncated SVD materialized its lazy input"
+    );
+    assert_eq!(
+        measure(|| {
+            black_box(baseline.data());
+        }),
+        (0, 0),
+        "baseline materialization was not retained"
+    );
+}
+
+#[test]
 fn truncated_svd_keeps_total_and_peak_below_materialized_baseline() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let space = Space::u1([(0, 64)]);
