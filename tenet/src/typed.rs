@@ -3807,8 +3807,10 @@ where
     /// own space `codomain <- domain`, `p` on `domain <- domain`. TensorKit
     /// also exposes algorithm kinds for the polars; neither tenet facade does —
     /// a deliberate narrowing, in parity with the erased
-    /// [`crate::prelude::Tensor::left_polar`]. A lazy typed adjoint is
-    /// materialized once at the explicit decomposition boundary.
+    /// [`crate::prelude::Tensor::left_polar`]. A lazy typed adjoint executes
+    /// the opposite polar on its exact owned parent, keeps the already-owned
+    /// positive factor, and returns an owned adjoint of the isometry without
+    /// publishing the receiver's materialization cache.
     ///
     /// # Errors
     ///
@@ -3829,6 +3831,19 @@ where
     /// issue #613 Group 4 contract requires any compact fast path to be
     /// individually re-proven — out of scope here.
     pub fn left_polar(&self) -> Result<(Self, Self), Error> {
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            let mut dense = self.runtime.lease_dense();
+            let mut lease = self.runtime.lease_context()?;
+            let (w, p) = tenet_matrixalgebra::left_polar_adjoint_parent_dyn(
+                dense.dense(),
+                lease.context().multiplicity_free_lane::<D>(),
+                &BoundDynamicTensorRef::try_new(
+                    &view.parent.space,
+                    view.parent.materialized_dense_data(),
+                )?,
+            )?;
+            return Ok((self.wrap_bound_factor(w), self.wrap_bound_factor(p)));
+        }
         // Dense lease before the context lease — the polar seam recouples
         // internally, so unlike QR/LQ/null it takes the context lane; the
         // lease order matches every existing site on both facades.
@@ -3863,6 +3878,19 @@ where
     /// As [`Self::left_polar`]: `O(Σ_c n_c³)`, sectorwise, with a
     /// compact-diagonal payload materialized first.
     pub fn right_polar(&self) -> Result<(Self, Self), Error> {
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            let mut dense = self.runtime.lease_dense();
+            let mut lease = self.runtime.lease_context()?;
+            let (p, w) = tenet_matrixalgebra::right_polar_adjoint_parent_dyn(
+                dense.dense(),
+                lease.context().multiplicity_free_lane::<D>(),
+                &BoundDynamicTensorRef::try_new(
+                    &view.parent.space,
+                    view.parent.materialized_dense_data(),
+                )?,
+            )?;
+            return Ok((self.wrap_bound_factor(p), self.wrap_bound_factor(w)));
+        }
         // See `left_polar` for the lease order rationale.
         let mut dense = self.runtime.lease_dense();
         let mut lease = self.runtime.lease_context()?;
@@ -6889,6 +6917,301 @@ mod representation_gates {
     fn null_space_late_failure_leaves_parent_and_adjoint_cache_unchanged() {
         assert_null_late_failure(true);
         assert_null_late_failure(false);
+    }
+
+    fn assert_polar_redirect<R, D>(source: &TensorMap<R, D>, left: bool)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: TensorScalar + core::fmt::Debug,
+    {
+        let target = eager_adjoint_oracle(source);
+        let lazy = source.adjoint().unwrap();
+        let actual = if left {
+            lazy.left_polar().unwrap()
+        } else {
+            lazy.right_polar().unwrap()
+        };
+        let expected = if left {
+            target.left_polar().unwrap()
+        } else {
+            target.right_polar().unwrap()
+        };
+        assert_polar_factors(source, &target, &actual, &expected, left);
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+    }
+
+    fn assert_typed_map_close<R, D>(
+        actual: &TensorMap<R, D>,
+        expected: &TensorMap<R, D>,
+        tolerance: f64,
+    ) where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: TensorScalar,
+    {
+        assert_eq!(
+            actual.logical_space().space(),
+            expected.logical_space().space()
+        );
+        assert!(actual
+            .data()
+            .iter()
+            .zip(expected.data())
+            .all(|(&actual, &expected)| {
+                (actual.widen_complex() - expected.widen_complex()).norm() < tolerance
+            }));
+    }
+
+    fn assert_polar_factors<R, D>(
+        source: &TensorMap<R, D>,
+        target: &TensorMap<R, D>,
+        actual: &(TensorMap<R, D>, TensorMap<R, D>),
+        expected: &(TensorMap<R, D>, TensorMap<R, D>),
+        left: bool,
+    ) where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: TensorScalar + core::fmt::Debug,
+    {
+        let reconstructed = actual.0.compose(&actual.1).unwrap();
+        assert_typed_map_close(&reconstructed, target, 1e-10);
+        let (positive, isometry) = if left {
+            (&actual.1, &actual.0)
+        } else {
+            (&actual.0, &actual.1)
+        };
+        assert!(if left {
+            isometry.is_isometric(1e-11).unwrap()
+        } else {
+            isometry.adjoint().unwrap().is_isometric(1e-11).unwrap()
+        });
+        assert!(positive.is_hermitian(1e-11).unwrap());
+        assert!(positive
+            .eigh_vals()
+            .unwrap()
+            .iter()
+            .all(|entry| entry.values.iter().all(|&value| value >= -1e-11)));
+        for factor in [&actual.0, &actual.1] {
+            assert!(factor.owned_body().is_some());
+            assert!(Arc::ptr_eq(
+                factor.logical_space().provider_arc(),
+                source.logical_space().provider_arc()
+            ));
+            let _ = factor.data();
+        }
+        assert_eq!(
+            actual.0.logical_space().space(),
+            expected.0.logical_space().space()
+        );
+        assert_eq!(
+            actual.1.logical_space().space(),
+            expected.1.logical_space().space()
+        );
+    }
+
+    fn assert_rank_deficient_polar_support<R, D>(source: &TensorMap<R, D>, left: bool)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: TensorScalar + core::fmt::Debug,
+    {
+        let target = eager_adjoint_oracle(source);
+        let target_pinv = target.pinv(1e-10).unwrap();
+        let target_codomain = target.compose(&target_pinv).unwrap();
+        let target_domain = target_pinv.compose(&target).unwrap();
+        let lazy = source.adjoint().unwrap();
+        let factors = if left {
+            lazy.left_polar().unwrap()
+        } else {
+            lazy.right_polar().unwrap()
+        };
+        let (positive, isometry) = if left {
+            (&factors.1, &factors.0)
+        } else {
+            (&factors.0, &factors.1)
+        };
+        let positive_pinv = positive.pinv(1e-10).unwrap();
+        if left {
+            let support = positive_pinv.compose(positive).unwrap();
+            assert_typed_map_close(&support, &target_domain, 1e-9);
+            let image = isometry
+                .compose(&support)
+                .unwrap()
+                .compose(&isometry.adjoint().unwrap())
+                .unwrap();
+            assert_typed_map_close(&image, &target_codomain, 1e-9);
+        } else {
+            let support = positive.compose(&positive_pinv).unwrap();
+            assert_typed_map_close(&support, &target_codomain, 1e-9);
+            let image = isometry
+                .adjoint()
+                .unwrap()
+                .compose(&support)
+                .unwrap()
+                .compose(isometry)
+                .unwrap();
+            assert_typed_map_close(&image, &target_domain, 1e-9);
+        }
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+    }
+
+    #[test]
+    fn polar_redirects_through_parent_with_owned_psd_factors_and_a_cold_receiver() {
+        let tall = u1_matrix_fixture([(0, 3)], [(0, 2)]);
+        assert_polar_redirect(&tall, false);
+        assert_polar_redirect(&genuinely_complex(&tall), false);
+
+        let wide = u1_matrix_fixture([(0, 2)], [(0, 3)]);
+        assert_polar_redirect(&wide, true);
+
+        let codomain_only = u1_matrix_fixture([(0, 2), (1, 2)], [(0, 2)]);
+        assert_polar_redirect(&codomain_only, false);
+        let domain_only = u1_matrix_fixture([(0, 2)], [(0, 2), (1, 2)]);
+        assert_polar_redirect(&domain_only, true);
+
+        let provider = Arc::new(SU2FusionRule);
+        let half =
+            GradedSpace::try_new(provider, [(SU2Irrep::from_twice_spin(1), 1)], false).unwrap();
+        let multitree = TensorMap::from_block_fn(
+            &Runtime::builder().dense_threads(1).build().unwrap(),
+            [&half, &half, &half],
+            [&half],
+            |_, indices| (indices.iter().sum::<usize>() + 1) as f64,
+        )
+        .unwrap();
+        assert_eq!(
+            multitree.logical_space().space().structure().block_count(),
+            2
+        );
+        let multitree = genuinely_complex(&multitree);
+        assert_polar_redirect(&multitree, false);
+
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new(provider, [(U1Irrep::new(0), 3)], false).unwrap();
+        let rank_deficient = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            let value = ((indices[0] + 1) * (indices[1] + 1)) as f64;
+            num_complex::Complex64::new(value, value / 3.0)
+        })
+        .unwrap();
+        assert_polar_redirect(&rank_deficient, true);
+        assert_polar_redirect(&rank_deficient, false);
+        assert_rank_deficient_polar_support(&rank_deficient, true);
+        assert_rank_deficient_polar_support(&rank_deficient, false);
+    }
+
+    #[test]
+    fn polar_redirect_repeats_clones_and_runs_concurrently_without_warming_receiver() {
+        let source = genuinely_complex(&u1_matrix_fixture([(0, 3)], [(0, 3)]));
+        let target = eager_adjoint_oracle(&source);
+        let lazy = source.adjoint().unwrap();
+        for left in [true, false] {
+            let expected = if left {
+                target.left_polar().unwrap()
+            } else {
+                target.right_polar().unwrap()
+            };
+            for _ in 0..2 {
+                let actual = if left {
+                    lazy.clone().left_polar().unwrap()
+                } else {
+                    lazy.clone().right_polar().unwrap()
+                };
+                assert_polar_factors(&source, &target, &actual, &expected, left);
+            }
+            let calls = (0..4)
+                .map(|_| {
+                    let clone = lazy.clone();
+                    std::thread::spawn(move || {
+                        if left {
+                            clone.left_polar().unwrap()
+                        } else {
+                            clone.right_polar().unwrap()
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            for call in calls {
+                let actual = call.join().unwrap();
+                assert_polar_factors(&source, &target, &actual, &expected, left);
+            }
+        }
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+    }
+
+    #[test]
+    fn polar_redirect_wrong_direction_keeps_requested_name_and_receiver_cold() {
+        let source = u1_matrix_fixture([(0, 3)], [(0, 2)]);
+        let lazy = source.adjoint().unwrap();
+        let error = lazy.left_polar().unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Operation(error)
+                if matches!(
+                    error.as_ref(),
+                    tenet_tensors::OperationError::InvalidArgument { message }
+                        if *message == "left_polar requires rows >= columns in every coupled-sector matrix"
+                )
+        ));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+
+        let source = u1_matrix_fixture([(0, 2)], [(0, 3)]);
+        let lazy = source.adjoint().unwrap();
+        let error = lazy.right_polar().unwrap_err();
+        assert!(matches!(
+            error,
+            Error::Operation(error)
+                if matches!(
+                    error.as_ref(),
+                    tenet_tensors::OperationError::InvalidArgument { message }
+                        if *message == "right_polar requires columns >= rows in every coupled-sector matrix"
+                )
+        ));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+    }
+
+    #[test]
+    fn polar_redirect_late_failure_leaves_parent_and_receiver_unchanged() {
+        for left in [true, false] {
+            let runtime = Runtime::builder()
+                .with_dense_executor(Box::new(FailSecondSvd::default()))
+                .build()
+                .unwrap();
+            let provider = Arc::new(U1FusionRule);
+            let leg = GradedSpace::try_new(
+                provider,
+                [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)],
+                false,
+            )
+            .unwrap();
+            let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+                (indices.iter().sum::<usize>() + 1) as f64
+            })
+            .unwrap();
+            let before = source.data().to_vec();
+            let lazy = source.adjoint().unwrap();
+            let result = if left {
+                lazy.left_polar()
+            } else {
+                lazy.right_polar()
+            };
+            assert!(matches!(result, Err(Error::Operation(_))));
+            assert_eq!(source.data(), before);
+            assert_eq!(materialized_adjoint_builds(&lazy), 0);
+            let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+                unreachable!()
+            };
+            assert!(view.materialized.get().is_none());
+        }
     }
 
     fn assert_qr_lq_factors<R, D>(

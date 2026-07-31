@@ -9135,10 +9135,15 @@ impl Tensor {
     /// `w` isometric, `p` positive on the domain. Every coupled-sector matrix
     /// must have at least as many rows as columns.
     pub fn left_polar(&self) -> Result<(Self, Self), Error> {
-        if self.is_adjoint_view() {
-            return self.materialized_tensor()?.left_polar();
-        }
         self.reject_unwired_su3("Tensor::left_polar")?;
+        if self.is_adjoint_view() {
+            #[cfg(feature = "cuda")]
+            if matches!(self.stored_data(), Data::CudaF64(_)) {
+                return self.materialized_tensor()?.left_polar();
+            }
+            let parent = self.adjoint()?;
+            return with_data!(&parent, data, parent.left_polar_adjoint_impl(data));
+        }
         with_data!(self, data, self.left_polar_impl(data))
     }
 
@@ -9156,14 +9161,33 @@ impl Tensor {
         })
     }
 
+    fn left_polar_adjoint_impl<D: UserScalar>(&self, data: &[D]) -> Result<(Self, Self), Error> {
+        let mut dense = self.rt.lease_dense();
+        let mut lease = self.rt.lease_context()?;
+        let context = lease.context();
+        with_bound_ctx!(self.ordinary_body().space, context, bound, ctxs, {
+            let (w, p) = tenet_matrixalgebra::left_polar_adjoint_parent_dyn(
+                dense.dense(),
+                D::ctx_of(ctxs),
+                &BoundDynamicTensorRef::try_new(bound, data)?,
+            )?;
+            Ok::<_, Error>((self.from_bound_factor(w)?, self.from_bound_factor(p)?))
+        })
+    }
+
     /// Right polar decomposition `t = p * w` (MatrixAlgebraKit
     /// `right_polar`): `p` positive on the codomain, `w` isometric. Every
     /// coupled-sector matrix must have at least as many columns as rows.
     pub fn right_polar(&self) -> Result<(Self, Self), Error> {
-        if self.is_adjoint_view() {
-            return self.materialized_tensor()?.right_polar();
-        }
         self.reject_unwired_su3("Tensor::right_polar")?;
+        if self.is_adjoint_view() {
+            #[cfg(feature = "cuda")]
+            if matches!(self.stored_data(), Data::CudaF64(_)) {
+                return self.materialized_tensor()?.right_polar();
+            }
+            let parent = self.adjoint()?;
+            return with_data!(&parent, data, parent.right_polar_adjoint_impl(data));
+        }
         with_data!(self, data, self.right_polar_impl(data))
     }
 
@@ -9173,6 +9197,20 @@ impl Tensor {
         let context = lease.context();
         with_bound_ctx!(self.ordinary_body().space, context, bound, ctxs, {
             let (p, w) = tenet_matrixalgebra::right_polar_dyn(
+                dense.dense(),
+                D::ctx_of(ctxs),
+                &BoundDynamicTensorRef::try_new(bound, data)?,
+            )?;
+            Ok::<_, Error>((self.from_bound_factor(p)?, self.from_bound_factor(w)?))
+        })
+    }
+
+    fn right_polar_adjoint_impl<D: UserScalar>(&self, data: &[D]) -> Result<(Self, Self), Error> {
+        let mut dense = self.rt.lease_dense();
+        let mut lease = self.rt.lease_context()?;
+        let context = lease.context();
+        with_bound_ctx!(self.ordinary_body().space, context, bound, ctxs, {
+            let (p, w) = tenet_matrixalgebra::right_polar_adjoint_parent_dyn(
                 dense.dense(),
                 D::ctx_of(ctxs),
                 &BoundDynamicTensorRef::try_new(bound, data)?,
@@ -12199,6 +12237,7 @@ mod runtime_detached_tests {
 #[cfg(test)]
 mod adjoint_parent_view_tests {
     use super::*;
+    use crate::space::SectorLabel;
     use tenet_core::FusionAlgebraError;
 
     fn assert_scalar_close(actual: Scalar, expected: Scalar) {
@@ -13222,6 +13261,185 @@ mod adjoint_parent_view_tests {
             lazy.right_null().unwrap_err(),
             Error::UnsupportedForRule {
                 operation: "Tensor::right_null",
+                rule: "SU(3)",
+            }
+        );
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+    }
+
+    fn assert_erased_polar_factors(
+        parent: &Tensor,
+        target: &Tensor,
+        factors: &(Tensor, Tensor),
+        left: bool,
+    ) {
+        let reconstructed = factors.0.compose(&factors.1).unwrap();
+        assert_close(&reconstructed, target);
+        let (positive, isometry) = if left {
+            (&factors.1, &factors.0)
+        } else {
+            (&factors.0, &factors.1)
+        };
+        assert!(if left {
+            isometry.is_isometric(1e-11).unwrap()
+        } else {
+            isometry.adjoint().unwrap().is_isometric(1e-11).unwrap()
+        });
+        assert!(positive.is_hermitian(1e-11).unwrap());
+        assert!(positive
+            .eigh_vals()
+            .unwrap()
+            .iter()
+            .all(|entry| entry.values.iter().all(|&value| value >= -1e-11)));
+        for factor in [&factors.0, &factors.1] {
+            assert!(!factor.is_adjoint_view());
+            assert!(factor
+                .rule_authority_space()
+                .provider_matches_context_allocation(&parent.rule_authority_space().context()));
+            let _ = factor.coupled_data().unwrap();
+        }
+    }
+
+    #[test]
+    fn erased_c64_multitree_polar_redirect_returns_owned_psd_factors_cold() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let half = Space::su2([(1, 1)]).unwrap();
+        assert_eq!(
+            Space::fuse_all(&[&half, &half, &half])
+                .unwrap()
+                .degeneracy(SectorLabel::SU2 { twice_spin: 1 }),
+            Some(2)
+        );
+        let parent = Tensor::rand_with_seed(
+            &runtime,
+            Dtype::C64,
+            [&half, &half, &half],
+            [&half, &half, &half],
+            706,
+        )
+        .unwrap();
+        assert!(parent
+            .data_c64()
+            .iter()
+            .any(|value| value.im.abs() > f64::EPSILON));
+        assert!(parent.ordinary_body().space.structure().block_count() > 1);
+        let lazy = parent.adjoint().unwrap();
+        let eager = lazy.materialized_tensor_uncached().unwrap();
+
+        for left in [true, false] {
+            let factors = if left {
+                lazy.left_polar().unwrap()
+            } else {
+                lazy.right_polar().unwrap()
+            };
+            assert_erased_polar_factors(&parent, &eager, &factors, left);
+        }
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+    }
+
+    #[test]
+    fn erased_polar_redirect_repeats_clones_and_runs_concurrently_cold() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let leg = Space::u1([(-1, 1), (0, 2), (2, 1)]);
+        let parent = Tensor::rand_with_seed(&runtime, Dtype::C64, [&leg], [&leg], 706_010).unwrap();
+        let lazy = parent.adjoint().unwrap();
+        let target = lazy.materialized_tensor_uncached().unwrap();
+        for left in [true, false] {
+            for _ in 0..2 {
+                let factors = if left {
+                    lazy.clone().left_polar().unwrap()
+                } else {
+                    lazy.clone().right_polar().unwrap()
+                };
+                assert_erased_polar_factors(&parent, &target, &factors, left);
+            }
+            let calls = (0..4)
+                .map(|_| {
+                    let clone = lazy.clone();
+                    std::thread::spawn(move || {
+                        if left {
+                            clone.left_polar().unwrap()
+                        } else {
+                            clone.right_polar().unwrap()
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            for call in calls {
+                let factors = call.join().unwrap();
+                assert_erased_polar_factors(&parent, &target, &factors, left);
+            }
+        }
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+    }
+
+    #[test]
+    fn erased_polar_redirect_errors_keep_requested_names_and_su3_stays_cold() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        for (source, left, message) in [
+            (
+                Tensor::rand_with_seed(
+                    &runtime,
+                    Dtype::F64,
+                    [&Space::u1([(0, 3)])],
+                    [&Space::u1([(0, 2)])],
+                    706_001,
+                )
+                .unwrap(),
+                true,
+                "left_polar requires rows >= columns in every coupled-sector matrix",
+            ),
+            (
+                Tensor::rand_with_seed(
+                    &runtime,
+                    Dtype::F64,
+                    [&Space::u1([(0, 2)])],
+                    [&Space::u1([(0, 3)])],
+                    706_002,
+                )
+                .unwrap(),
+                false,
+                "right_polar requires columns >= rows in every coupled-sector matrix",
+            ),
+        ] {
+            let lazy = source.adjoint().unwrap();
+            let error = if left {
+                lazy.left_polar().unwrap_err()
+            } else {
+                lazy.right_polar().unwrap_err()
+            };
+            assert!(matches!(
+                error,
+                Error::Operation(error)
+                    if matches!(
+                        error.as_ref(),
+                        tenet_tensors::OperationError::InvalidArgument { message: actual }
+                            if *actual == message
+                    )
+            ));
+            assert_eq!(lazy.adjoint_body_builds(), 0);
+            assert!(!lazy.has_cached_materialization());
+        }
+
+        let su3 = Space::su3([((1, 0), 1)]).unwrap();
+        let lazy = Tensor::rand_with_seed(&runtime, Dtype::C64, [&su3], [&su3], 706_003)
+            .unwrap()
+            .adjoint()
+            .unwrap();
+        assert_eq!(
+            lazy.left_polar().unwrap_err(),
+            Error::UnsupportedForRule {
+                operation: "Tensor::left_polar",
+                rule: "SU(3)",
+            }
+        );
+        assert_eq!(
+            lazy.right_polar().unwrap_err(),
+            Error::UnsupportedForRule {
+                operation: "Tensor::right_polar",
                 rule: "SU(3)",
             }
         );

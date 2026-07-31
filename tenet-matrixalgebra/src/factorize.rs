@@ -1530,7 +1530,8 @@ impl PolarDirection {
 }
 
 fn validate_polar_direction(
-    direction: PolarDirection,
+    acceptance_direction: PolarDirection,
+    error_direction: PolarDirection,
     space: &BoundDynamicFusionMapSpace<impl FusionRule>,
 ) -> Result<(), OperationError> {
     let row_dimensions = space
@@ -1545,13 +1546,13 @@ fn validate_polar_direction(
         .coupled_sector_block_dimensions(space.provider())?;
     for (&sector, &rows) in &row_dimensions {
         let cols = col_dimensions.get(&sector).copied().unwrap_or(0);
-        if !direction.accepts(rows, cols) {
-            return Err(direction.error());
+        if !acceptance_direction.accepts(rows, cols) {
+            return Err(error_direction.error());
         }
     }
     for (&sector, &cols) in &col_dimensions {
-        if !row_dimensions.contains_key(&sector) && !direction.accepts(0, cols) {
-            return Err(direction.error());
+        if !row_dimensions.contains_key(&sector) && !acceptance_direction.accepts(0, cols) {
+            return Err(error_direction.error());
         }
     }
     Ok(())
@@ -1560,7 +1561,7 @@ fn validate_polar_direction(
 fn svd_compact_factors_dyn_with_direction<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
-    polar_direction: Option<PolarDirection>,
+    polar_direction: Option<(PolarDirection, PolarDirection)>,
     gauge: CompactSvdGauge,
 ) -> Result<SvdFactorsDyn<R, D>, OperationError>
 where
@@ -1569,10 +1570,10 @@ where
     D: FactorScalar,
 {
     let space = input.space().space();
-    if let Some(direction) = polar_direction {
+    if let Some((acceptance_direction, error_direction)) = polar_direction {
         // Stored routes omit side-only sectors, whose logical matrices are
         // rows x 0 or 0 x columns and still constrain the isometry direction.
-        validate_polar_direction(direction, input.space())?;
+        validate_polar_direction(acceptance_direction, error_direction, input.space())?;
     }
     if let Some(plan) = compact_factor_plan(input.space())? {
         return svd_compact_direct_regions(dense, input, &plan, gauge);
@@ -4668,12 +4669,30 @@ where
         + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleKey>,
     D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
+    left_polar_dyn_reported(dense, context, input, PolarDirection::Left)
+}
+
+fn left_polar_dyn_reported<E, RuleKey, BT, BC, R, D>(
+    dense: &mut E,
+    context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    error_direction: PolarDirection,
+) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
+    BT: tenet_tensors::TreeTransformBackend<D, f64>,
+    BC: tenet_tensors::TensorContractBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+{
     // Polar needs only U, Vh and the spectrum — not the dense diagonal S — so
     // use the S-free factors core.
     let (u, vh, singular_values) = svd_compact_factors_dyn_with_direction(
         dense,
         input,
-        Some(PolarDirection::Left),
+        Some((PolarDirection::Left, error_direction)),
         CompactSvdGauge::Left,
     )?;
     let isometry = crate::compose::compose_bound_dyn(context, &u, &vh)?;
@@ -4732,12 +4751,30 @@ where
         + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleKey>,
     D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
+    right_polar_dyn_reported(dense, context, input, PolarDirection::Right)
+}
+
+fn right_polar_dyn_reported<E, RuleKey, BT, BC, R, D>(
+    dense: &mut E,
+    context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    error_direction: PolarDirection,
+) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
+    BT: tenet_tensors::TreeTransformBackend<D, f64>,
+    BC: tenet_tensors::TensorContractBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+{
     // Polar needs only U, Vh and the spectrum — not the dense diagonal S — so
     // use the S-free factors core.
     let (u, vh, singular_values) = svd_compact_factors_dyn_with_direction(
         dense,
         input,
-        Some(PolarDirection::Right),
+        Some((PolarDirection::Right, error_direction)),
         CompactSvdGauge::Left,
     )?;
     let uh = adjoint_bound_factor(&u)?;
@@ -4751,6 +4788,48 @@ where
     scale_axis_by_spectrum(&us_space, us.data_mut(), None, &singular_values)?;
     let positive = crate::compose::compose_bound_dyn(context, &us, &uh)?;
     Ok((positive, isometry))
+}
+
+/// Left polar factors of an adjoint view, executed on its owned parent.
+#[doc(hidden)]
+pub fn left_polar_adjoint_parent_dyn<E, RuleKey, BT, BC, R, D>(
+    dense: &mut E,
+    context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
+    parent: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
+    BT: tenet_tensors::TreeTransformBackend<D, f64>,
+    BC: tenet_tensors::TensorContractBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+{
+    let (positive, isometry) =
+        right_polar_dyn_reported(dense, context, parent, PolarDirection::Left)?;
+    Ok((adjoint_bound_factor(&isometry)?, positive))
+}
+
+/// Right polar factors of an adjoint view, executed on its owned parent.
+#[doc(hidden)]
+pub fn right_polar_adjoint_parent_dyn<E, RuleKey, BT, BC, R, D>(
+    dense: &mut E,
+    context: &mut tenet_tensors::TensorContractFusionExecutionContext<D, RuleKey, BT, BC>,
+    parent: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    RuleKey: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
+    BT: tenet_tensors::TreeTransformBackend<D, f64>,
+    BC: tenet_tensors::TensorContractBackend<D, f64>,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>
+        + tenet_tensors::TreeTransformRuleCacheKey<Key = RuleKey>,
+    D: FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+{
+    let (isometry, positive) =
+        left_polar_dyn_reported(dense, context, parent, PolarDirection::Right)?;
+    Ok((positive, adjoint_bound_factor(&isometry)?))
 }
 
 /// Compact QR `t = Q * R` (MatrixAlgebraKit `qr_compact`):
