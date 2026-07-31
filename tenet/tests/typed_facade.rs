@@ -5058,6 +5058,24 @@ fn pinv_cuts_a_singular_value_sitting_exactly_on_the_cutoff() {
     kept.sort_by(f64::total_cmp);
     assert_eq!(kept, vec![0.25], "the boundary singular value survived");
 
+    // A discarded nonzero mode makes this the exact Moore-Penrose inverse of
+    // the hard-thresholded effective-rank tensor, not of the original tensor.
+    let thresholded = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices: &[usize]| {
+        if indices[0] == 0 && indices[1] == 0 {
+            4.0
+        } else {
+            0.0
+        }
+    })
+    .unwrap();
+    let triple = tensor
+        .compose(&dense_pinv)
+        .unwrap()
+        .compose(&tensor)
+        .unwrap();
+    assert_eq!(triple.data(), thresholded.data());
+    assert_ne!(triple.data(), tensor.data());
+
     // And on the compact arm, whose comparison is the erased facade's own.
     let spectrum = tensor.svd_trunc(&Truncation::Full).unwrap().s;
     let compact_pinv = spectrum.pinv(0.25).unwrap();

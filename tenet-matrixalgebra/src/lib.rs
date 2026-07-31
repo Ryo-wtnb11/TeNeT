@@ -38,7 +38,9 @@ pub use factorize::{
     SvdCompact, SvdCompactDyn, SvdFactorsDyn, SvdFull, SvdFullDyn, SvdTrunc, SvdTruncDyn,
     SvdTruncFactorsDyn,
 };
-pub use matrix_functions::{exp, exp_dyn, inv, inv_direct_dyn, inv_dyn, pinv, pinv_dyn};
+pub use matrix_functions::{
+    exp, exp_dyn, inv, inv_direct_dyn, inv_dyn, pinv, pinv_adjoint_parent_dyn, pinv_dyn,
+};
 pub use truncation::{
     select_truncation, Truncation, TruncationDecision, TruncationError, TruncationSpace,
     WeightedSpectrum,

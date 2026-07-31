@@ -9541,8 +9541,10 @@ impl Tensor {
         })
     }
 
-    /// Moore-Penrose pseudo-inverse `t^+ = v s^+ u^H` (MatrixAlgebraKit
-    /// `pinv`) with an `rcond * sigma_max` cutoff on the singular values.
+    /// Thresholded pseudo-inverse `t^+ = v s^+ u^H` (MatrixAlgebraKit `pinv`)
+    /// with an `rcond * sigma_max` cutoff on the singular values. It is the
+    /// exact Moore-Penrose inverse of the hard-thresholded effective-rank
+    /// tensor, and of the original tensor only when no nonzero mode is cut.
     ///
     /// # Complexity
     ///
@@ -9565,9 +9567,6 @@ impl Tensor {
     /// There is no singular-input failure: sending the offending directions
     /// to zero is what a pseudo-inverse is for.
     pub fn pinv(&self, rcond: f64) -> Result<Self, Error> {
-        if self.is_adjoint_view() {
-            return self.materialized_tensor()?.pinv(rcond);
-        }
         if !rcond.is_finite() || rcond < 0.0 {
             return Err(Error::InvalidArgument(
                 "pinv rcond must be finite and non-negative".to_string(),
@@ -9580,7 +9579,34 @@ impl Tensor {
             return Ok(self.with_diagonal(diagonal.pinv(rcond)));
         }
         self.reject_unwired_su3("Tensor::pinv")?;
+        if self.is_adjoint_view() {
+            #[cfg(feature = "cuda")]
+            if matches!(self.stored_data(), Data::CudaF64(_)) {
+                return self.materialized_tensor()?.pinv(rcond);
+            }
+            let parent = self.adjoint()?;
+            return with_data!(&parent, data, parent.pinv_adjoint_parent_impl(data, rcond));
+        }
         with_data!(self, data, self.pinv_impl(data, rcond))
+    }
+
+    fn pinv_adjoint_parent_impl<D: UserScalar>(
+        &self,
+        data: &[D],
+        rcond: f64,
+    ) -> Result<Self, Error> {
+        let mut dense = self.rt.lease_dense();
+        let mut lease = self.rt.lease_context()?;
+        let context = lease.context();
+        with_bound_ctx!(self.ordinary_body().space, context, bound, ctxs, {
+            let out = tenet_matrixalgebra::pinv_adjoint_parent_dyn(
+                dense.dense(),
+                D::ctx_of(ctxs),
+                &BoundDynamicTensorRef::try_new(bound, data)?,
+                rcond,
+            )?;
+            self.from_bound_factor(out)
+        })
     }
 
     fn pinv_impl<D: UserScalar>(&self, data: &[D], rcond: f64) -> Result<Self, Error> {
@@ -13485,6 +13511,131 @@ mod adjoint_parent_view_tests {
         );
         assert_eq!(cold.adjoint_body_builds(), 0);
         assert!(!cold.has_cached_materialization());
+    }
+
+    #[test]
+    fn erased_pinv_rejects_invalid_rcond_before_materializing_a_lazy_receiver() {
+        // What: argument validation precedes storage, rule, device, provider,
+        // and lazy dispatch. None of the invalid values may publish the view.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let leg = Space::u1([(-1, 1), (0, 2), (2, 1)]);
+        let parent = Tensor::rand_with_seed(&runtime, Dtype::C64, [&leg], [&leg], 711_001).unwrap();
+        let lazy = parent.adjoint().unwrap();
+
+        for rcond in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(lazy.pinv(rcond), Err(Error::InvalidArgument(_))));
+            assert_eq!(lazy.adjoint_body_builds(), 0);
+            assert!(!lazy.has_cached_materialization());
+        }
+
+        let su3 = Space::su3([((1, 0), 1)]).unwrap();
+        let lazy = Tensor::rand_with_seed(&runtime, Dtype::C64, [&su3], [&su3], 711_002)
+            .unwrap()
+            .adjoint()
+            .unwrap();
+        assert_eq!(
+            lazy.pinv(0.0).unwrap_err(),
+            Error::UnsupportedForRule {
+                operation: "Tensor::pinv",
+                rule: "SU(3)",
+            }
+        );
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+    }
+
+    fn assert_erased_pinv_redirect(parent: &Tensor, rcond: f64, exact_original: bool) {
+        let eager = parent
+            .adjoint()
+            .unwrap()
+            .materialized_tensor_uncached()
+            .unwrap();
+        let expected = eager.pinv(rcond).unwrap();
+        let parent_space = Arc::clone(&parent.ordinary_body().space);
+        let parent_data = Arc::clone(&parent.ordinary_body().data);
+        let lazy = parent.adjoint().unwrap();
+
+        for _ in 0..2 {
+            let actual = lazy.clone().pinv(rcond).unwrap();
+            assert_close(&actual, &expected);
+            assert_close(
+                &actual.compose(&eager).unwrap().compose(&actual).unwrap(),
+                &actual,
+            );
+            assert!(eager.compose(&actual).unwrap().is_hermitian(1e-9).unwrap());
+            assert!(actual.compose(&eager).unwrap().is_hermitian(1e-9).unwrap());
+            if exact_original {
+                assert_close(
+                    &eager.compose(&actual).unwrap().compose(&eager).unwrap(),
+                    &eager,
+                );
+            }
+            assert!(!actual.is_adjoint_view());
+            assert!(actual
+                .rule_authority_space()
+                .provider_matches_context_allocation(&parent.rule_authority_space().context()));
+            assert!(!Arc::ptr_eq(&actual.ordinary_body().data, &parent_data));
+            let _ = actual.coupled_data().unwrap();
+        }
+        let calls = (0..4)
+            .map(|_| {
+                let clone = lazy.clone();
+                std::thread::spawn(move || clone.pinv(rcond).unwrap())
+            })
+            .collect::<Vec<_>>();
+        for call in calls {
+            assert_close(&call.join().unwrap(), &expected);
+        }
+        assert!(Arc::ptr_eq(&parent.ordinary_body().space, &parent_space));
+        assert!(Arc::ptr_eq(&parent.ordinary_body().data, &parent_data));
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+    }
+
+    #[test]
+    fn erased_pinv_redirect_preserves_semantics_ownership_and_cold_concurrency() {
+        // What: real/complex U(1), rectangular and empty support, plus a
+        // genuine SU(2) multitree match a materialized oracle and projector
+        // laws without publishing the lazy receiver.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let leg = Space::u1([(-1, 2), (0, 3)]);
+        let full = Tensor::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            let re = if indices[0] == indices[1] {
+                30.0 + indices[0] as f64
+            } else {
+                (indices[0] + indices[1] + 1) as f64 / 100.0
+            };
+            Complex64::new(re, (indices[0] + 2 * indices[1] + 1) as f64 / 200.0)
+        })
+        .unwrap();
+        assert_erased_pinv_redirect(&full, 1e-12, true);
+
+        let left = Space::u1([(0, 3), (1, 2)]);
+        let right = Space::u1([(0, 2)]);
+        let rectangular =
+            Tensor::rand_with_seed(&runtime, Dtype::F64, [&left], [&right], 711_010).unwrap();
+        assert_erased_pinv_redirect(&rectangular, 1e-10, false);
+        let disjoint = Tensor::rand_with_seed(
+            &runtime,
+            Dtype::C64,
+            [&Space::u1([(1, 2)])],
+            [&right],
+            711_011,
+        )
+        .unwrap();
+        assert_erased_pinv_redirect(&disjoint, 1e-10, false);
+
+        let half = Space::su2([(1, 1)]).unwrap();
+        let su2 = Tensor::rand_with_seed(
+            &runtime,
+            Dtype::C64,
+            [&half, &half, &half],
+            [&half],
+            711_012,
+        )
+        .unwrap();
+        assert!(su2.ordinary_body().space.structure().block_count() > 1);
+        assert_erased_pinv_redirect(&su2, 1e-10, false);
     }
 
     #[test]
