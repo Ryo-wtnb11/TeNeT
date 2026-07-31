@@ -4870,8 +4870,10 @@ impl Tensor {
         ))
     }
 
-    /// Builds an operation-local logical tensor without publishing the lazy
-    /// view's reusable materialization.
+    /// Builds an operation-local logical tensor without publishing the
+    /// receiver's reusable materialization cache, but still constructs a full
+    /// receiver-sized logical payload. Prefer an oriented kernel or algebraic
+    /// redirect when one implements the same semantics.
     fn materialized_tensor_uncached(&self) -> Result<Self, Error> {
         let TensorRepr::Adjoint(view) = &self.repr else {
             return Ok(self.clone());
