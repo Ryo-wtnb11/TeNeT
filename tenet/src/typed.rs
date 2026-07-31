@@ -3509,11 +3509,21 @@ where
     pub fn svd_trunc(&self, truncation: &Truncation) -> Result<SvdTrunc<R, D>, Error> {
         let mut dense = self.runtime.lease_dense();
         // The `_factors_` seam, for the reason `svd_compact` gives.
-        let (u, vh, singular_values, error) = tenet_matrixalgebra::svd_trunc_factors_dyn(
-            dense.dense(),
-            &self.bound_ref()?,
-            truncation,
-        )?;
+        let (u, vh, singular_values, error) = match &self.repr {
+            TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::svd_trunc_adjoint_factors_dyn(
+                dense.dense(),
+                &BoundDynamicTensorRef::try_new(
+                    &view.parent.space,
+                    view.parent.materialized_dense_data(),
+                )?,
+                truncation,
+            )?,
+            TypedTensorRepr::Owned(_) => tenet_matrixalgebra::svd_trunc_factors_dyn(
+                dense.dense(),
+                &self.bound_ref()?,
+                truncation,
+            )?,
+        };
         Ok(SvdTrunc {
             u: self.wrap_bound_factor(u),
             s: self.diagonal_factor(singular_values.clone(), D::from_real)?,
@@ -6436,6 +6446,85 @@ mod representation_gates {
         assert_compact_svd_reads_parent(&genuinely_complex(&u1));
         assert_compact_svd_reads_parent(&su2);
         assert_compact_svd_reads_parent(&genuinely_complex(&su2));
+    }
+
+    fn assert_truncated_svd_reads_parent<R, D>(source: &TensorMap<R, D>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: TensorScalar + core::fmt::Debug,
+    {
+        let eager = eager_adjoint_oracle(source);
+        let lazy = source.adjoint().unwrap();
+        let truncation = Truncation::rank(1);
+        let actual = lazy.svd_trunc(&truncation).unwrap();
+        let expected = eager.svd_trunc(&truncation).unwrap();
+
+        assert_eq!(actual.singular_values, expected.singular_values);
+        assert_eq!(actual.error, expected.error);
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+        for (actual, expected) in [
+            (&actual.u, &expected.u),
+            (&actual.s, &expected.s),
+            (&actual.vh, &expected.vh),
+        ] {
+            assert_eq!(
+                actual.logical_space().space(),
+                expected.logical_space().space()
+            );
+            assert!(Arc::ptr_eq(
+                actual.logical_space().provider_arc(),
+                source.logical_space().provider_arc()
+            ));
+            assert!(actual
+                .data()
+                .iter()
+                .zip(expected.data())
+                .all(|(&left, &right)| {
+                    (left.widen_complex() - right.widen_complex()).norm() < 1e-12
+                }));
+        }
+        assert!(actual.u.is_isometric(1e-12).unwrap());
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        assert!(view.materialized.get().is_none());
+    }
+
+    #[test]
+    fn truncated_svd_reads_the_parent_without_materializing_the_adjoint() {
+        // What: truncation selection, error, factor gauge, and typed provider
+        // authority match an eager logical-adjoint oracle without an input copy.
+        let u1 = u1_lazy_fixture();
+        let su2 = su2_lazy_fixture();
+        assert_truncated_svd_reads_parent(&u1);
+        assert_truncated_svd_reads_parent(&genuinely_complex(&u1));
+        assert_truncated_svd_reads_parent(&su2);
+        assert_truncated_svd_reads_parent(&genuinely_complex(&su2));
+    }
+
+    #[test]
+    fn rejected_truncation_does_not_materialize_the_adjoint() {
+        // What: the parent-native path preserves typed truncation errors
+        // without publishing the logical-adjoint payload first.
+        let source = u1_lazy_fixture();
+        let foreign = GradedSpace::try_new(
+            Arc::new(SU2FusionRule),
+            [(SU2Irrep::from_twice_spin(0), 1)],
+            false,
+        )
+        .unwrap();
+        let lazy = source.adjoint().unwrap();
+        assert!(matches!(
+            lazy.svd_trunc(&Truncation::space(foreign.truncspace())),
+            Err(Error::Operation(_))
+        ));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
     }
 
     fn eager_adjoint_oracle<R, D>(source: &TensorMap<R, D>) -> TensorMap<R, D>
