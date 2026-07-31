@@ -1748,6 +1748,25 @@ where
             Arc::new(TypedTensorBody::dense(view.logical_space.clone(), data))
         })
     }
+
+    /// Builds an operation-local logical tensor without publishing the
+    /// receiver's reusable materialization cache, but still constructs a full
+    /// receiver-sized logical payload. Prefer an oriented kernel or algebraic
+    /// redirect when one implements the same semantics.
+    fn materialized_tensor_uncached(&self) -> Result<Self, Error> {
+        let TypedTensorRepr::Adjoint(view) = &self.repr else {
+            return Ok(self.clone());
+        };
+        let data = tenet_tensors::materialize_adjoint_data_dyn(
+            view.parent.space.space(),
+            view.logical_space.space(),
+            view.parent.materialized_dense_data(),
+        )?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(view.logical_space.clone(), data)),
+        })
+    }
 }
 
 impl<R, D> TypedTensorBody<R, D>
@@ -3583,16 +3602,21 @@ where
     ///
     /// # Complexity
     ///
-    /// `O(Σ_c n_c³)` — sectorwise cubic, no global materialization; the seam
-    /// runs one dense QR per coupled-sector matrix. A compact-diagonal
-    /// payload (TensorKit's `DiagonalTensorMap`) is materialized into the
-    /// dense coupled buffer first, through the same [`Self::data`] route as
+    /// `O(Σ_c n_c³)` — sectorwise cubic; the seam runs one dense QR per
+    /// coupled-sector matrix. A lazy adjoint first allocates its whole logical
+    /// dense payload as an operation-local owned tensor. That allocation is
+    /// not published in the receiver's reusable materialization cache, and
+    /// the returned factors are owned. A compact-diagonal payload
+    /// (TensorKit's `DiagonalTensorMap`) is materialized into the dense coupled
+    /// buffer first, through the same [`Self::data`] route as
     /// [`Self::left_polar`]. TensorKit 0.17 *does* keep a diagonal QR compact
-    /// (MatrixAlgebraKit's `DiagonalAlgorithm`); that fast path is not
-    /// adopted here — the issue #613 Group 4 contract requires every compact
-    /// fast path to be re-proven individually, the same deferral the polars
-    /// record.
+    /// (MatrixAlgebraKit's `DiagonalAlgorithm`); that fast path is not adopted
+    /// here — the issue #613 Group 4 contract requires every compact fast path
+    /// to be re-proven individually, the same deferral the polars record.
     pub fn qr_compact(&self) -> Result<(Self, Self), Error> {
+        if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
+            return self.materialized_tensor_uncached()?.qr_compact();
+        }
         let mut dense = self.runtime.lease_dense();
         let (q, r) = tenet_matrixalgebra::qr_compact_dyn(dense.dense(), &self.bound_ref()?)?;
         Ok((self.wrap_bound_factor(q), self.wrap_bound_factor(r)))
@@ -3607,11 +3631,14 @@ where
     ///
     /// # Complexity
     ///
-    /// As [`Self::qr_compact`]: sectorwise cubic, with a compact-diagonal
-    /// payload materialized dense first (TensorKit's `DiagonalAlgorithm`
-    /// covers `qr_full!` too — same non-adoption, same #613 Group 4
-    /// deferral).
+    /// As [`Self::qr_compact`]: sectorwise cubic. This includes the uncached
+    /// whole-logical-payload allocation for a lazy adjoint. A compact-diagonal
+    /// payload is materialized dense first (TensorKit's `DiagonalAlgorithm`
+    /// covers `qr_full!` too — same non-adoption, same #613 Group 4 deferral).
     pub fn qr_full(&self) -> Result<(Self, Self), Error> {
+        if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
+            return self.materialized_tensor_uncached()?.qr_full();
+        }
         let mut dense = self.runtime.lease_dense();
         let (q, r) = tenet_matrixalgebra::qr_full_dyn(dense.dense(), &self.bound_ref()?)?;
         Ok((self.wrap_bound_factor(q), self.wrap_bound_factor(r)))
@@ -3626,11 +3653,20 @@ where
     ///
     /// # Complexity
     ///
-    /// As [`Self::qr_compact`]: sectorwise cubic, with a compact-diagonal
-    /// payload materialized dense first (TensorKit's `DiagonalAlgorithm`
-    /// covers the LQ pair as well — same non-adoption, same #613 Group 4
-    /// deferral).
+    /// Sectorwise cubic. A lazy adjoint runs compact QR on its owned parent,
+    /// reverses and adjoints the factors, then materializes both outputs into
+    /// detached owned tensors. This publishes no receiver cache and retains
+    /// neither parent factor buffer. A compact-diagonal payload is materialized
+    /// dense first (TensorKit's `DiagonalAlgorithm` covers the LQ pair as well
+    /// — same non-adoption, same #613 Group 4 deferral).
     pub fn lq_compact(&self) -> Result<(Self, Self), Error> {
+        if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
+            let (q, r) = self.adjoint()?.qr_compact()?;
+            return Ok((
+                r.adjoint()?.materialized_tensor_uncached()?,
+                q.adjoint()?.materialized_tensor_uncached()?,
+            ));
+        }
         let mut dense = self.runtime.lease_dense();
         let (l, q) = tenet_matrixalgebra::lq_compact_dyn(dense.dense(), &self.bound_ref()?)?;
         Ok((self.wrap_bound_factor(l), self.wrap_bound_factor(q)))
@@ -3645,9 +3681,17 @@ where
     ///
     /// # Complexity
     ///
-    /// As [`Self::lq_compact`]: sectorwise cubic, compact-diagonal payload
-    /// materialized dense first.
+    /// As [`Self::lq_compact`]: sectorwise cubic, including the lazy-adjoint
+    /// parent-QR route and two detached owned output payloads. A compact-diagonal
+    /// payload is materialized dense first.
     pub fn lq_full(&self) -> Result<(Self, Self), Error> {
+        if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
+            let (q, r) = self.adjoint()?.qr_full()?;
+            return Ok((
+                r.adjoint()?.materialized_tensor_uncached()?,
+                q.adjoint()?.materialized_tensor_uncached()?,
+            ));
+        }
         let mut dense = self.runtime.lease_dense();
         let (l, q) = tenet_matrixalgebra::lq_full_dyn(dense.dense(), &self.bound_ref()?)?;
         Ok((self.wrap_bound_factor(l), self.wrap_bound_factor(q)))
@@ -6147,6 +6191,12 @@ mod representation_gates {
         calls: usize,
     }
 
+    #[derive(Default)]
+    struct FailSecondQr {
+        inner: DefaultDenseExecutor,
+        calls: usize,
+    }
+
     impl DenseExecutor for FailSecondSvd {
         fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
             panic!("full SVD must use the destination API")
@@ -6186,6 +6236,47 @@ mod representation_gates {
             _: &DenseDotConfig,
         ) -> Result<(), DenseError> {
             panic!("test only exercises SVD")
+        }
+    }
+
+    impl DenseExecutor for FailSecondQr {
+        fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            panic!("test only exercises QR")
+        }
+
+        fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            panic!("QR must use the destination API")
+        }
+
+        fn qr_into(
+            &mut self,
+            input: DenseRead<'_>,
+            q: DenseWrite<'_>,
+            r: DenseWrite<'_>,
+        ) -> Result<(), DenseError> {
+            self.calls += 1;
+            if self.calls == 2 {
+                return Err(DenseError::Backend {
+                    backend: DenseBackend::Tenferro,
+                    op: "qr_into",
+                    message: "injected second-sector failure".to_string(),
+                });
+            }
+            self.inner.qr_into(input, q, r)
+        }
+
+        fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            panic!("test only exercises QR")
+        }
+
+        fn dot_general_into(
+            &mut self,
+            _: DenseWrite<'_>,
+            _: DenseRead<'_>,
+            _: DenseRead<'_>,
+            _: &DenseDotConfig,
+        ) -> Result<(), DenseError> {
+            panic!("test only exercises QR")
         }
     }
 
@@ -6663,6 +6754,234 @@ mod representation_gates {
             unreachable!()
         };
         assert!(view.materialized.get().is_none());
+    }
+
+    fn assert_qr_lq_factors<R, D>(
+        source: &TensorMap<R, D>,
+        target: &TensorMap<R, D>,
+        actual: &(TensorMap<R, D>, TensorMap<R, D>),
+        expected: &(TensorMap<R, D>, TensorMap<R, D>),
+        qr: bool,
+        compare_gauge: bool,
+    ) where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: TensorScalar + core::fmt::Debug,
+    {
+        for (actual, expected) in [(&actual.0, &expected.0), (&actual.1, &expected.1)] {
+            assert!(actual.owned_body().is_some());
+            assert_eq!(
+                actual.logical_space().space(),
+                expected.logical_space().space()
+            );
+            assert!(Arc::ptr_eq(
+                actual.logical_space().provider_arc(),
+                source.logical_space().provider_arc()
+            ));
+            if compare_gauge {
+                assert!(actual
+                    .data()
+                    .iter()
+                    .zip(expected.data())
+                    .all(|(&left, &right)| {
+                        (left.widen_complex() - right.widen_complex()).norm() < 1e-12
+                    }));
+            }
+        }
+        let isometry = if qr {
+            actual.0.is_isometric(1e-12).unwrap()
+        } else {
+            actual.1.adjoint().unwrap().is_isometric(1e-12).unwrap()
+        };
+        assert!(isometry);
+        let rebuilt = actual.0.compose(&actual.1).unwrap();
+        assert!(rebuilt
+            .data()
+            .iter()
+            .zip(target.data())
+            .all(|(&left, &right)| {
+                (left.widen_complex() - right.widen_complex()).norm() < 1e-12
+            }));
+    }
+
+    fn assert_qr_lq_keeps_input_cache_cold<R, D>(source: &TensorMap<R, D>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: TensorScalar + core::fmt::Debug,
+    {
+        let target = eager_adjoint_oracle(source);
+        let lazy = source.adjoint().unwrap();
+
+        let actual = lazy.qr_compact().unwrap();
+        assert_qr_lq_factors(
+            source,
+            &target,
+            &actual,
+            &target.qr_compact().unwrap(),
+            true,
+            true,
+        );
+        let actual = lazy.lq_compact().unwrap();
+        assert_qr_lq_factors(
+            source,
+            &target,
+            &actual,
+            &target.lq_compact().unwrap(),
+            false,
+            true,
+        );
+        let actual = lazy.qr_full().unwrap();
+        assert_qr_lq_factors(
+            source,
+            &target,
+            &actual,
+            &target.qr_full().unwrap(),
+            true,
+            false,
+        );
+        let actual = lazy.lq_full().unwrap();
+        assert_qr_lq_factors(
+            source,
+            &target,
+            &actual,
+            &target.lq_full().unwrap(),
+            false,
+            false,
+        );
+
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+    }
+
+    #[test]
+    fn qr_lq_adjoint_dispatch_covers_unique_simple_dtypes_and_rectangles() {
+        // What: adjoint QR uses an operation-local logical copy while LQ uses
+        // the parent QR, preserving compact gauge, full semantics, and provider authority.
+        let tall = u1_matrix_fixture([(-2, 1), (0, 3)], [(-2, 1), (0, 1)]);
+        let wide = u1_matrix_fixture([(-2, 1), (0, 1)], [(-2, 1), (0, 3)]);
+        assert_qr_lq_keeps_input_cache_cold(&tall);
+        assert_qr_lq_keeps_input_cache_cold(&genuinely_complex(&tall));
+        assert_qr_lq_keeps_input_cache_cold(&wide);
+        assert_qr_lq_keeps_input_cache_cold(&genuinely_complex(&wide));
+
+        let multitree = su2_lazy_fixture();
+        assert_qr_lq_keeps_input_cache_cold(&multitree);
+        assert_qr_lq_keeps_input_cache_cold(&genuinely_complex(&multitree));
+    }
+
+    #[test]
+    fn full_qr_lq_adjoint_dispatch_handles_unmatched_and_disjoint_sectors() {
+        for source in [
+            u1_matrix_fixture([(0, 2), (1, 1)], [(0, 3)]),
+            u1_matrix_fixture([(0, 2)], [(0, 3), (1, 1)]),
+        ] {
+            let target = eager_adjoint_oracle(&source);
+            let lazy = source.adjoint().unwrap();
+            let qr = lazy.qr_full().unwrap();
+            assert_qr_lq_factors(
+                &source,
+                &target,
+                &qr,
+                &target.qr_full().unwrap(),
+                true,
+                false,
+            );
+            let lq = lazy.lq_full().unwrap();
+            assert_qr_lq_factors(
+                &source,
+                &target,
+                &lq,
+                &target.lq_full().unwrap(),
+                false,
+                false,
+            );
+            assert_eq!(materialized_adjoint_builds(&lazy), 0);
+            let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+                unreachable!()
+            };
+            assert!(view.materialized.get().is_none());
+        }
+    }
+
+    #[test]
+    fn qr_lq_adjoint_dispatch_handles_an_empty_homspace() {
+        let source = u1_matrix_fixture([(1, 2)], [(0, 3)]);
+        assert!(source.data().is_empty());
+        assert_qr_lq_keeps_input_cache_cold(&source);
+    }
+
+    #[test]
+    fn qr_lq_uncached_owned_outputs_repeat_clone_and_run_concurrently() {
+        let source = genuinely_complex(&su2_lazy_fixture());
+        let target = eager_adjoint_oracle(&source);
+        let lazy = source.adjoint().unwrap();
+        let expected_qr = lazy.qr_compact().unwrap();
+        let expected_lq = lazy.lq_full().unwrap();
+        for _ in 0..2 {
+            let qr = lazy.clone().qr_compact().unwrap();
+            let lq = lazy.clone().lq_full().unwrap();
+            assert_qr_lq_factors(&source, &target, &qr, &expected_qr, true, true);
+            assert_qr_lq_factors(&source, &target, &lq, &expected_lq, false, false);
+        }
+        std::thread::scope(|scope| {
+            let calls: Vec<_> = (0..4)
+                .map(|_| {
+                    let lazy = lazy.clone();
+                    scope.spawn(move || {
+                        let qr = lazy.qr_compact().unwrap();
+                        let lq = lazy.lq_full().unwrap();
+                        (qr, lq)
+                    })
+                })
+                .collect();
+            for call in calls {
+                let (qr, lq) = call.join().unwrap();
+                assert_qr_lq_factors(&source, &target, &qr, &expected_qr, true, true);
+                assert_qr_lq_factors(&source, &target, &lq, &expected_lq, false, false);
+            }
+        });
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+    }
+
+    fn assert_full_qr_lq_late_failure(qr: bool) {
+        let runtime = Runtime::builder()
+            .with_dense_executor(Box::new(FailSecondQr::default()))
+            .build()
+            .unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new(
+            provider,
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)],
+            false,
+        )
+        .unwrap();
+        let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            (indices.iter().sum::<usize>() + 1) as f64
+        })
+        .unwrap();
+        let before = source.data().to_vec();
+        let lazy = source.adjoint().unwrap();
+
+        let result = if qr { lazy.qr_full() } else { lazy.lq_full() };
+        assert!(matches!(result, Err(Error::Operation(_))));
+        assert_eq!(source.data(), before);
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+    }
+
+    #[test]
+    fn full_qr_lq_late_failure_leaves_parent_and_adjoint_cache_unchanged() {
+        assert_full_qr_lq_late_failure(true);
+        assert_full_qr_lq_late_failure(false);
     }
 
     fn assert_truncated_svd_reads_parent<R, D>(source: &TensorMap<R, D>)
