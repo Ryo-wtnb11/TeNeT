@@ -9503,10 +9503,23 @@ impl Tensor {
     }
 
     /// True inverse of a nonsingular map between isomorphic spaces
-    /// (MatrixAlgebraKit-style `inv`).
+    /// (MatrixAlgebraKit-style `inv`). A host lazy adjoint solves its owned
+    /// parent and returns a detached owned adjoint of that inverse, without
+    /// allocating or publishing a separate receiver-materialization payload.
     pub fn inv(&self) -> Result<Self, Error> {
         if self.is_adjoint_view() {
-            return self.materialized_tensor()?.inv();
+            self.reject_unwired_su3("Tensor::inv")?;
+            #[cfg(feature = "cuda")]
+            if matches!(self.stored_data(), Data::CudaF64(_)) {
+                return self.materialized_tensor()?.inv();
+            }
+            // (A†)^-1 = (A^-1)†. Solve the owned parent without publishing
+            // the receiver's lazy materialization, then detach the result.
+            return self
+                .adjoint()?
+                .inv()?
+                .adjoint()?
+                .materialized_tensor_uncached();
         }
         // A diagonal inverse is elementwise (O(rank)), not a block inversion;
         // keep it diagonal so the next contract still scales the bond.
@@ -13299,6 +13312,179 @@ mod adjoint_parent_view_tests {
                 .provider_matches_context_allocation(&parent.rule_authority_space().context()));
             let _ = factor.coupled_data().unwrap();
         }
+    }
+
+    fn assert_erased_inverse_redirect(parent: &Tensor) {
+        let eager = parent
+            .adjoint()
+            .unwrap()
+            .materialized_tensor_uncached()
+            .unwrap();
+        let expected = eager.inv().unwrap();
+        let parent_space = Arc::clone(&parent.ordinary_body().space);
+        let parent_data = Arc::clone(&parent.ordinary_body().data);
+        let lazy = parent.adjoint().unwrap();
+
+        for _ in 0..2 {
+            let actual = lazy.clone().inv().unwrap();
+            assert_close(&actual, &expected);
+            assert_close(
+                &eager.compose(&actual).unwrap(),
+                &Tensor::id(&parent.rt, parent.dtype(), eager.codomain_spaces().iter()).unwrap(),
+            );
+            assert_close(
+                &actual.compose(&eager).unwrap(),
+                &Tensor::id(&parent.rt, parent.dtype(), eager.domain_spaces().iter()).unwrap(),
+            );
+            assert!(!actual.is_adjoint_view());
+            assert!(actual
+                .rule_authority_space()
+                .provider_matches_context_allocation(&parent.rule_authority_space().context()));
+            assert!(!Arc::ptr_eq(&actual.ordinary_body().data, &parent_data));
+            let _ = actual.coupled_data().unwrap();
+        }
+
+        let calls = (0..4)
+            .map(|_| {
+                let clone = lazy.clone();
+                std::thread::spawn(move || clone.inv().unwrap())
+            })
+            .collect::<Vec<_>>();
+        for call in calls {
+            assert_close(&call.join().unwrap(), &expected);
+        }
+
+        assert!(Arc::ptr_eq(&parent.ordinary_body().space, &parent_space));
+        assert!(Arc::ptr_eq(&parent.ordinary_body().data, &parent_data));
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+    }
+
+    #[test]
+    fn erased_inverse_redirect_is_owned_provider_native_repeatable_and_cold() {
+        // What: U(1) complex blocks and a genuine SU(2) multitree redirect
+        // through the parent across repeated, cloned, and concurrent calls,
+        // preserving provider authority and cold lazy storage.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let u1 = Space::u1([(-1, 2), (0, 3), (2, 1)]);
+        let parent = Tensor::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+            let re = if indices[0] == indices[1] {
+                20.0 + indices[0] as f64
+            } else {
+                (indices[0] + 2 * indices[1] + 1) as f64 / 100.0
+            };
+            Complex64::new(re, (indices[0] + indices[1] + 1) as f64 / 200.0)
+        })
+        .unwrap();
+        let identity = Tensor::id(&runtime, Dtype::C64, [&u1]).unwrap();
+        let parent = parent.add(&identity, 1.0, 100.0).unwrap();
+        assert_erased_inverse_redirect(&parent);
+
+        let wide = Space::u1([(0, 4)]);
+        let narrow = Space::u1([(0, 2)]);
+        let parent = Tensor::from_block_fn(&runtime, [&wide], [&narrow, &narrow], |_, indices| {
+            let column = 2 * indices[1] + indices[2];
+            if indices[0] == column {
+                10.0 + indices[0] as f64
+            } else {
+                (indices[0] + column + 1) as f64 / 100.0
+            }
+        })
+        .unwrap();
+        assert_ne!(parent.codomain_rank(), parent.domain_rank());
+        assert_erased_inverse_redirect(&parent);
+
+        let half = Space::su2([(1, 1)]).unwrap();
+        let parent = Tensor::from_block_fn(
+            &runtime,
+            [&half, &half, &half],
+            [&half, &half, &half],
+            |_, indices| {
+                if indices[..3] == indices[3..] {
+                    20.0 + indices.iter().sum::<usize>() as f64
+                } else {
+                    (indices.iter().sum::<usize>() + 1) as f64 / 100.0
+                }
+            },
+        )
+        .unwrap();
+        let identity = Tensor::id(&runtime, Dtype::F64, [&half, &half, &half]).unwrap();
+        let parent = parent.add(&identity, 1.0, 100.0).unwrap();
+        assert!(parent.ordinary_body().space.structure().block_count() > 1);
+        assert_erased_inverse_redirect(&parent);
+    }
+
+    #[test]
+    fn erased_inverse_redirect_failure_powi_and_su3_rejection_stay_cold() {
+        // What: negative powers inherit the redirect; singular and unsupported
+        // inputs preserve parent Arc/bytes and reject with a cold receiver.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let u1 = Space::u1([(0, 3)]);
+        let parent = Tensor::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+            if indices[0] == indices[1] {
+                4.0 + indices[0] as f64
+            } else {
+                (indices[0] + indices[1] + 1) as f64 / 20.0
+            }
+        })
+        .unwrap();
+        let lazy = parent.adjoint().unwrap();
+        let eager = parent
+            .adjoint()
+            .unwrap()
+            .materialized_tensor_uncached()
+            .unwrap();
+        assert_close(&lazy.powi(-3).unwrap(), &eager.powi(-3).unwrap());
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+
+        let singular = parent.scale(0.0).unwrap();
+        let space = Arc::clone(&singular.ordinary_body().space);
+        let data = Arc::clone(&singular.ordinary_body().data);
+        let before = singular.data().to_vec();
+        let cold = singular.adjoint().unwrap();
+        assert!(matches!(cold.inv(), Err(Error::Operation(_))));
+        assert_eq!(singular.data(), before);
+        assert!(Arc::ptr_eq(&singular.ordinary_body().space, &space));
+        assert!(Arc::ptr_eq(&singular.ordinary_body().data, &data));
+        assert_eq!(cold.adjoint_body_builds(), 0);
+        assert!(!cold.has_cached_materialization());
+
+        // The charge-zero block solves before the later singular block fails:
+        // no partially produced inverse or receiver materialization may leak.
+        let leg = Space::u1([(0, 1), (1, 2)]);
+        let late = Tensor::from_block_fn(&runtime, [&leg], [&leg], |key, indices| match key {
+            BlockKey::FusionTree(key)
+                if key.codomain_uncoupled()[0].id() == 0 && indices[0] == indices[1] =>
+            {
+                2.0
+            }
+            _ => 0.0,
+        })
+        .unwrap();
+        let before = late.data().to_vec();
+        let data = Arc::clone(&late.ordinary_body().data);
+        let cold = late.adjoint().unwrap();
+        assert!(matches!(cold.inv(), Err(Error::Operation(_))));
+        assert_eq!(late.data(), before);
+        assert!(Arc::ptr_eq(&late.ordinary_body().data, &data));
+        assert_eq!(cold.adjoint_body_builds(), 0);
+        assert!(!cold.has_cached_materialization());
+
+        let su3 = Space::su3([((1, 0), 1)]).unwrap();
+        let cold = Tensor::rand_with_seed(&runtime, Dtype::C64, [&su3], [&su3], 708_003)
+            .unwrap()
+            .adjoint()
+            .unwrap();
+        assert_eq!(
+            cold.inv().unwrap_err(),
+            Error::UnsupportedForRule {
+                operation: "Tensor::inv",
+                rule: "SU(3)",
+            }
+        );
+        assert_eq!(cold.adjoint_body_builds(), 0);
+        assert!(!cold.has_cached_materialization());
     }
 
     #[test]
