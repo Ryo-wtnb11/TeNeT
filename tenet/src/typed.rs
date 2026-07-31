@@ -3446,8 +3446,18 @@ where
         // Why the `_factors_` seam rather than `svd_compact_dyn`: the latter
         // builds the dense block-diagonal `s` itself, so taking it and throwing
         // it away would pay the very `Σ_c k_c²` allocation this storage avoids.
-        let (u, vh, spectrum) =
-            tenet_matrixalgebra::svd_compact_factors_dyn(dense.dense(), &self.bound_ref()?)?;
+        let (u, vh, spectrum) = match &self.repr {
+            TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::svd_compact_adjoint_factors_dyn(
+                dense.dense(),
+                &BoundDynamicTensorRef::try_new(
+                    &view.parent.space,
+                    view.parent.materialized_dense_data(),
+                )?,
+            )?,
+            TypedTensorRepr::Owned(_) => {
+                tenet_matrixalgebra::svd_compact_factors_dyn(dense.dense(), &self.bound_ref()?)?
+            }
+        };
         Ok((
             self.wrap_bound_factor(u),
             self.diagonal_factor(spectrum, D::from_real)?,
@@ -6167,6 +6177,23 @@ mod representation_gates {
         .unwrap()
     }
 
+    fn genuinely_complex<R>(source: &TensorMap<R, f64>) -> TensorMap<R, num_complex::Complex64> {
+        TensorMap {
+            runtime: source.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(
+                source.logical_space().clone(),
+                source
+                    .data()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, &value)| {
+                        num_complex::Complex64::new(value, (index + 1) as f64 / 7.0)
+                    })
+                    .collect(),
+            )),
+        }
+    }
+
     fn assert_lazy_involution<R, D>(source: &TensorMap<R, D>)
     where
         R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -6343,6 +6370,72 @@ mod representation_gates {
             unreachable!()
         };
         assert!(view.materialized.get().is_none());
+    }
+
+    fn assert_compact_svd_reads_parent<R, D>(source: &TensorMap<R, D>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: TensorScalar + core::fmt::Debug,
+    {
+        let eager = eager_adjoint_oracle(source);
+        let lazy = source.adjoint().unwrap();
+        let actual = lazy.svd_compact().unwrap();
+        let expected = eager.svd_compact().unwrap();
+
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+        for (actual, expected) in [
+            (&actual.0, &expected.0),
+            (&actual.1, &expected.1),
+            (&actual.2, &expected.2),
+        ] {
+            assert_eq!(
+                actual.logical_space().space(),
+                expected.logical_space().space()
+            );
+            assert!(Arc::ptr_eq(
+                actual.logical_space().provider_arc(),
+                source.logical_space().provider_arc()
+            ));
+            assert!(actual
+                .data()
+                .iter()
+                .zip(expected.data())
+                .all(|(&left, &right)| {
+                    (left.widen_complex() - right.widen_complex()).norm() < 1e-12
+                }));
+        }
+        assert!(actual.0.is_isometric(1e-12).unwrap());
+        let rebuilt = actual
+            .0
+            .compose(&actual.1)
+            .unwrap()
+            .compose(&actual.2)
+            .unwrap();
+        assert!(rebuilt
+            .data()
+            .iter()
+            .zip(eager.data())
+            .all(|(&left, &right)| {
+                (left.widen_complex() - right.widen_complex()).norm() < 1e-12
+            }));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        assert!(view.materialized.get().is_none());
+    }
+
+    #[test]
+    fn compact_svd_reads_the_parent_without_materializing_the_adjoint() {
+        // What: typed compact factors keep the eager logical-adjoint semantics,
+        // provider authority, final gauge, and reconstruction without an input copy.
+        let u1 = u1_lazy_fixture();
+        let su2 = su2_lazy_fixture();
+        assert_compact_svd_reads_parent(&u1);
+        assert_compact_svd_reads_parent(&genuinely_complex(&u1));
+        assert_compact_svd_reads_parent(&su2);
+        assert_compact_svd_reads_parent(&genuinely_complex(&su2));
     }
 
     fn eager_adjoint_oracle<R, D>(source: &TensorMap<R, D>) -> TensorMap<R, D>
