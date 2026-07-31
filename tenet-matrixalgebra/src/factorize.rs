@@ -4455,30 +4455,42 @@ where
 {
     let space = input.space().space();
     let matrices = sector_matricizations(space.structure(), input.data(), space.nout())?;
+    // A codomain-only sector has no tensor block but is entirely left-null.
+    let mut null_dimensions = space
+        .homspace()
+        .codomain()
+        .coupled_sector_block_dimensions(input.space().provider())?;
     let mut pairs = Vec::new();
     for matrix in &matrices {
         let (rows, cols) = (matrix.rows, matrix.cols);
         let (rank, u_compact, _) =
             numerical_rank_and_compact_bases(dense, &matrix.data, rows, cols)?;
         if rank == rows {
+            null_dimensions.remove(&matrix.sector);
             continue;
         }
         // Only the left basis is completed: completing V would run an unused
         // QR for this operation.
         let u = orthonormal_completion(dense, &u_compact, rows, rows.min(cols))?;
         let null_dim = rows - rank;
+        null_dimensions.insert(matrix.sector, null_dim);
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: null_dim,
             left: u[rows * rank..].to_vec(),
             left_rows: rows,
-            right: vec![D::zero(); null_dim * cols],
+            right: Vec::new(),
             right_leading: null_dim,
         });
     }
-    let (null, _) =
-        build_left_right_bound_pair(input.space(), space.homspace(), &matrices, &pairs)?;
-    Ok(null)
+    build_bound_factor(
+        input.space(),
+        space.homspace(),
+        &matrices,
+        &pairs,
+        &null_dimensions,
+        FactorSide::Left,
+    )
 }
 
 /// Right null space `N : W <- domain` (MatrixAlgebraKit `right_null`).
@@ -4512,30 +4524,42 @@ where
 {
     let space = input.space().space();
     let matrices = sector_matricizations(space.structure(), input.data(), space.nout())?;
+    // A domain-only sector has no tensor block but is entirely right-null.
+    let mut null_dimensions = space
+        .homspace()
+        .domain()
+        .coupled_sector_block_dimensions(input.space().provider())?;
     let mut pairs = Vec::new();
     for matrix in &matrices {
         let (rows, cols) = (matrix.rows, matrix.cols);
         let (rank, _, v_compact) =
             numerical_rank_and_compact_bases(dense, &matrix.data, rows, cols)?;
         if rank == cols {
+            null_dimensions.remove(&matrix.sector);
             continue;
         }
         // Only the right basis is completed: completing U would run an unused
         // QR for this operation.
         let v = orthonormal_completion(dense, &v_compact, cols, rows.min(cols))?;
         let null_dim = cols - rank;
+        null_dimensions.insert(matrix.sector, null_dim);
         pairs.push(FactorPair {
             sector: matrix.sector,
             kept: null_dim,
-            left: vec![D::zero(); rows * null_dim],
+            left: Vec::new(),
             left_rows: rows,
             right: adjoint_col_major(&v[cols * rank..], cols, null_dim),
             right_leading: null_dim,
         });
     }
-    let (_, null) =
-        build_left_right_bound_pair(input.space(), space.homspace(), &matrices, &pairs)?;
-    Ok(null)
+    build_bound_factor(
+        input.space(),
+        space.homspace(),
+        &matrices,
+        &pairs,
+        &null_dimensions,
+        FactorSide::Right,
+    )
 }
 
 /// Computes compact singular-vector bases and the documented numerical rank.
