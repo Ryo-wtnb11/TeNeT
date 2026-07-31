@@ -565,6 +565,41 @@ fn null_spaces_annihilate_the_tensor() {
 }
 
 #[test]
+fn null_spaces_complete_unmatched_multitree_su2_complex_sectors() {
+    let rt = Runtime::builder().build().unwrap();
+    let half = Space::su2([(1, 1)]).unwrap();
+    let three_halves = Space::su2([(3, 1)]).unwrap();
+
+    let tall = Tensor::rand_with_seed(&rt, Dtype::C64, [&half, &half, &half], [&three_halves], 113)
+        .unwrap();
+    let left = tall.left_null().unwrap();
+    assert!(!left.data_c64().is_empty());
+    assert!(left.is_isometric(1e-12).unwrap());
+    assert!(
+        left.adjoint()
+            .unwrap()
+            .compose(&tall)
+            .unwrap()
+            .norm()
+            .unwrap()
+            < 1e-10 * (1.0 + tall.norm().unwrap())
+    );
+
+    let wide = Tensor::rand_with_seed(&rt, Dtype::C64, [&three_halves], [&half, &half, &half], 114)
+        .unwrap();
+    let right = wide.right_null().unwrap();
+    assert!(!right.data_c64().is_empty());
+    assert!(right.adjoint().unwrap().is_isometric(1e-12).unwrap());
+    assert!(
+        wide.compose(&right.adjoint().unwrap())
+            .unwrap()
+            .norm()
+            .unwrap()
+            < 1e-10 * (1.0 + wide.norm().unwrap())
+    );
+}
+
+#[test]
 fn polar_decompositions_reconstruct() {
     let rt = Runtime::builder().build().unwrap();
     for v in [u1_space(), su2_space()] {

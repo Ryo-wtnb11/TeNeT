@@ -6304,7 +6304,10 @@ fn inv_composes_to_the_identity() {
     assert_identity_matrices(&dense_sector_matrices(2, &identity));
 }
 
-fn u1_cross_space_map(codomain: &[(i32, usize)], domain: &[(i32, usize)]) -> TensorMap<f64, 1, 1> {
+fn u1_cross_space_map<D: FactorScalar>(
+    codomain: &[(i32, usize)],
+    domain: &[(i32, usize)],
+) -> TensorMap<D, 1, 1> {
     let codomain_leg = SectorLeg::new(
         codomain
             .iter()
@@ -6343,14 +6346,101 @@ fn u1_cross_space_map(codomain: &[(i32, usize)], domain: &[(i32, usize)]) -> Ten
         shapes,
     )
     .unwrap();
-    TensorMap::from_block_fn_with_fusion_space(space, 0.0, |_, indices| {
+    TensorMap::from_block_fn_with_fusion_space(space, D::zero(), |_, indices| {
         if indices[0] == indices[1] {
-            1.0
+            D::one()
         } else {
-            0.0
+            D::zero()
         }
     })
     .unwrap()
+}
+
+fn assert_disjoint_null_spaces_keep_structural_directions<D: FactorScalar>() {
+    let provider = Arc::new(U1FusionRule);
+    let tensor = u1_cross_space_map::<D>(&[(1, 2)], &[(0, 3)]);
+    let input = bound_tensor(Arc::clone(&provider), &tensor);
+
+    crate::factorize::reset_factor_buffer_build_counts_for_test();
+    let left = left_null(&mut RejectExecutorCalls, &input.as_ref()).unwrap();
+    assert_eq!(
+        crate::factorize::factor_buffer_build_counts_for_test(),
+        (1, 0)
+    );
+    assert_eq!(left.structure().block_count(), 1);
+    assert_eq!(left.structure().block(0).unwrap().shape(), &[2, 2]);
+    assert_eq!(left.data().len(), 4);
+    assert!(Arc::ptr_eq(left.space().provider_arc(), &provider));
+
+    crate::factorize::reset_factor_buffer_build_counts_for_test();
+    let right = right_null(&mut RejectExecutorCalls, &input.as_ref()).unwrap();
+    assert_eq!(
+        crate::factorize::factor_buffer_build_counts_for_test(),
+        (0, 1)
+    );
+    assert_eq!(right.structure().block_count(), 1);
+    assert_eq!(right.structure().block(0).unwrap().shape(), &[3, 3]);
+    assert_eq!(right.data().len(), 9);
+    assert!(Arc::ptr_eq(right.space().provider_arc(), &provider));
+}
+
+#[test]
+fn disjoint_null_spaces_keep_all_structural_directions_without_dense_work() {
+    // What: a zero map between disjoint supports has the whole codomain/domain
+    // as its left/right null space and builds only the requested factor.
+    assert_disjoint_null_spaces_keep_structural_directions::<f64>();
+    assert_disjoint_null_spaces_keep_structural_directions::<Complex64>();
+}
+
+#[test]
+fn unmatched_null_sectors_coexist_with_a_full_rank_matched_sector() {
+    // What: matched full-rank directions disappear while side-only sectors
+    // survive as identity bases.
+    let provider = Arc::new(U1FusionRule);
+    let tensor = u1_cross_space_map::<f64>(&[(0, 1), (1, 2)], &[(0, 1), (2, 3)]);
+    let input = bound_tensor(Arc::clone(&provider), &tensor);
+
+    let mut dense = SvdCallSpy::default();
+    let left = left_null(&mut dense, &input.as_ref()).unwrap();
+    assert_eq!(dense.svd_calls, 1);
+    assert_eq!(left.structure().block_count(), 1);
+    assert_eq!(left.structure().block(0).unwrap().shape(), &[2, 2]);
+
+    let mut dense = SvdCallSpy::default();
+    let right = right_null(&mut dense, &input.as_ref()).unwrap();
+    assert_eq!(dense.svd_calls, 1);
+    assert_eq!(right.structure().block_count(), 1);
+    assert_eq!(right.structure().block(0).unwrap().shape(), &[3, 3]);
+}
+
+#[test]
+fn null_space_second_sector_failure_builds_no_factor() {
+    // What: all dense work finishes before the one requested factor is built.
+    let provider = Arc::new(U1FusionRule);
+    let tensor = u1_cross_space_map::<f64>(&[(0, 2), (1, 2)], &[(0, 2), (1, 2)]);
+    let before = tensor.data().to_vec();
+    let input = bound_tensor(provider, &tensor);
+
+    crate::factorize::reset_factor_buffer_build_counts_for_test();
+    assert!(matches!(
+        left_null(&mut FailSecondSvd::default(), &input.as_ref()),
+        Err(OperationError::Dense(_))
+    ));
+    assert_eq!(
+        crate::factorize::factor_buffer_build_counts_for_test(),
+        (0, 0)
+    );
+
+    crate::factorize::reset_factor_buffer_build_counts_for_test();
+    assert!(matches!(
+        right_null(&mut FailSecondSvd::default(), &input.as_ref()),
+        Err(OperationError::Dense(_))
+    ));
+    assert_eq!(
+        crate::factorize::factor_buffer_build_counts_for_test(),
+        (0, 0)
+    );
+    assert_eq!(tensor.data(), before);
 }
 
 #[test]
@@ -6362,7 +6452,7 @@ fn inv_rejects_nonisomorphic_spaces_before_dense_execution() {
         (&[(0, 1), (1, 1)], &[(0, 1), (2, 1)]),
     ];
     for &(codomain, domain) in cases {
-        let tensor = u1_cross_space_map(codomain, domain);
+        let tensor = u1_cross_space_map::<f64>(codomain, domain);
         let mut dense = RejectExecutorCalls;
         let mut context = TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
         let error = inv(
