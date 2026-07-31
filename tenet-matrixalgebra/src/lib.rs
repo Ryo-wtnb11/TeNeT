@@ -49,6 +49,8 @@ pub use factorize::validate_hermitian_regions;
 #[doc(hidden)]
 pub use factorize::svd_compact_adjoint_factors_dyn;
 #[doc(hidden)]
+pub use factorize::svd_full_adjoint_dyn;
+#[doc(hidden)]
 pub use factorize::svd_trunc_adjoint_factors_dyn;
 
 #[cfg(feature = "diagnostics")]

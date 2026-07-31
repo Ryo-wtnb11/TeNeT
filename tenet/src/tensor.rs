@@ -8719,7 +8719,29 @@ impl Tensor {
     /// unitaries per sector, rectangular diagonal `s`.
     pub fn svd_full(&self) -> Result<(Self, Self, Self), Error> {
         if self.is_adjoint_view() {
-            return self.materialized_tensor()?.svd_full();
+            #[cfg(feature = "cuda")]
+            if matches!(self.stored_data(), Data::CudaF64(_)) {
+                return Err(device_unsupported("materializing an adjoint device tensor"));
+            }
+            if self.rule_kind() == RuleKind::Su3 {
+                return self.materialized_tensor()?.svd_full();
+            }
+            let parent = self.parent_tensor_for_lowering();
+            let mut dense = parent.rt.lease_dense();
+            return with_data!(&parent, data, {
+                with_bound_multiplicity_free!(parent.ordinary_body().space, bound, {
+                    let out = tenet_matrixalgebra::svd_full_adjoint_dyn(
+                        dense.dense(),
+                        &BoundDynamicTensorRef::try_new(bound, data)?,
+                    )?;
+                    let (u, s, vh, _) = out.into_parts();
+                    Ok::<_, Error>((
+                        parent.from_bound_factor(u)?,
+                        parent.from_bound_factor(s)?,
+                        parent.from_bound_factor(vh)?,
+                    ))
+                })
+            });
         }
         // Why not dispatch SU(3): the square-unitary completion path has no
         // generic sibling yet. Compact and truncated SVD are supported, but
@@ -12192,6 +12214,34 @@ mod adjoint_parent_view_tests {
         assert!(!lazy.has_cached_materialization());
     }
 
+    fn assert_lazy_full_svd_matches_eager(
+        runtime: &Runtime,
+        left: &Space,
+        right: &Space,
+        dtype: Dtype,
+        seed: u64,
+    ) {
+        let parent = Tensor::rand_with_seed(runtime, dtype, [left], [right], seed).unwrap();
+        let lazy = parent.adjoint().unwrap();
+        let eager = parent.adjoint().unwrap().materialized_tensor().unwrap();
+        let (actual_u, actual_s, actual_vh) = lazy.svd_full().unwrap();
+        let (expected_u, expected_s, expected_vh) = eager.svd_full().unwrap();
+
+        assert_close(&actual_u, &expected_u);
+        assert_close(&actual_s, &expected_s);
+        assert_close(&actual_vh, &expected_vh);
+        assert_close(
+            &actual_u
+                .compose(&actual_s)
+                .unwrap()
+                .compose(&actual_vh)
+                .unwrap(),
+            &eager,
+        );
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert!(!lazy.has_cached_materialization());
+    }
+
     fn assert_lazy_truncated_svd_matches_eager(
         runtime: &Runtime,
         left: &Space,
@@ -12667,6 +12717,33 @@ mod adjoint_parent_view_tests {
         });
         assert_eq!(lazy.adjoint_body_builds(), 0);
         assert!(!lazy.has_cached_materialization());
+    }
+
+    #[test]
+    fn full_svd_reads_multiplicity_free_parent_without_materialization() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let fixtures = [
+            (
+                Space::u1([(-1, 1), (0, 3), (1, 2)]),
+                Space::u1([(-1, 2), (0, 1), (1, 3)]),
+            ),
+            (
+                Space::su2([(0, 1), (1, 3), (2, 2)]).unwrap(),
+                Space::su2([(0, 2), (1, 1), (2, 3)]).unwrap(),
+            ),
+        ];
+
+        for (fixture, (left, right)) in fixtures.into_iter().enumerate() {
+            for (dtype, lane) in [(Dtype::F64, 0), (Dtype::C64, 1)] {
+                assert_lazy_full_svd_matches_eager(
+                    &runtime,
+                    &left,
+                    &right,
+                    dtype,
+                    603_800 + 2 * fixture as u64 + lane,
+                );
+            }
+        }
     }
 
     #[test]

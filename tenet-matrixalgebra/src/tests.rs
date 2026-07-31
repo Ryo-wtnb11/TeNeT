@@ -1913,6 +1913,46 @@ fn truncated_svd_adjoint_error_preserves_borrowed_input_and_publishes_no_factors
 }
 
 #[test]
+fn full_svd_late_error_preserves_input_and_publishes_no_factors() {
+    // What: the adjoint-oriented full-SVD engine finishes every sector before
+    // allocating any returned factor.
+    let rule = Z2FusionRule;
+    let tensor = hermitian_test_tensor(&rule, &[SectorId::new(0), SectorId::new(1)]);
+    let before = tensor.data().to_vec();
+    let bound = bound_tensor(Arc::new(rule), &tensor);
+    let mut dense = FailSecondSvd::default();
+
+    crate::factorize::reset_factor_buffer_build_counts_for_test();
+    let result = svd_full_adjoint_dyn(&mut dense, &bound.as_ref().dynamic());
+
+    assert!(matches!(result, Err(OperationError::Dense(_))));
+    assert_eq!(tensor.data(), before);
+    assert_eq!(dense.calls, 2);
+    assert_eq!(
+        crate::factorize::factor_buffer_build_counts_for_test(),
+        (0, 0)
+    );
+}
+
+#[test]
+fn full_svd_adjoint_builds_only_the_final_factor_buffers() {
+    let tensor = one_sector_rectangular_matrix(vec![1.0, 2.0, 3.0, 4.0, 5.0, 7.0], 2, 3);
+    let bound = bound_tensor(Arc::new(Z2FusionRule), &tensor);
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    crate::factorize::reset_factor_buffer_build_counts_for_test();
+    let output = svd_full_adjoint_dyn(&mut dense, &bound.as_ref().dynamic()).unwrap();
+
+    assert_eq!(
+        crate::factorize::factor_buffer_build_counts_for_test(),
+        (1, 1)
+    );
+    assert_eq!(output.u().space().space().required_len().unwrap(), 9);
+    assert_eq!(output.s().space().space().required_len().unwrap(), 6);
+    assert_eq!(output.vh().space().space().required_len().unwrap(), 4);
+}
+
+#[test]
 fn eigh_stably_orders_equal_magnitudes_and_reorders_vectors_in_place() {
     // What: equal magnitudes retain backend order while larger-magnitude columns move together.
     let tensor =

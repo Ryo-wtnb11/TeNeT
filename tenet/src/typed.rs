@@ -3483,7 +3483,18 @@ where
     /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
     pub fn svd_full(&self) -> Result<(Self, Self, Self), Error> {
         let mut dense = self.runtime.lease_dense();
-        let out = tenet_matrixalgebra::svd_full_dyn(dense.dense(), &self.bound_ref()?)?;
+        let out = match &self.repr {
+            TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::svd_full_adjoint_dyn(
+                dense.dense(),
+                &BoundDynamicTensorRef::try_new(
+                    &view.parent.space,
+                    view.parent.materialized_dense_data(),
+                )?,
+            )?,
+            TypedTensorRepr::Owned(_) => {
+                tenet_matrixalgebra::svd_full_dyn(dense.dense(), &self.bound_ref()?)?
+            }
+        };
         let (u, s, vh, _) = out.into_parts();
         Ok((
             self.wrap_bound_factor(u),
@@ -6125,6 +6136,58 @@ mod representation_gates {
         FermionParityFusionRule, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2FusionRule,
         Z2Irrep, ZNFusionRule,
     };
+    use tenet_dense::{
+        DefaultDenseExecutor, DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseRead,
+        DenseTensor, DenseWrite,
+    };
+
+    #[derive(Default)]
+    struct FailSecondSvd {
+        inner: DefaultDenseExecutor,
+        calls: usize,
+    }
+
+    impl DenseExecutor for FailSecondSvd {
+        fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            panic!("full SVD must use the destination API")
+        }
+
+        fn svd_into(
+            &mut self,
+            input: DenseRead<'_>,
+            u: DenseWrite<'_>,
+            s: DenseWrite<'_>,
+            vt: DenseWrite<'_>,
+        ) -> Result<(), DenseError> {
+            self.calls += 1;
+            if self.calls == 2 {
+                return Err(DenseError::Backend {
+                    backend: DenseBackend::Tenferro,
+                    op: "svd_into",
+                    message: "injected second-sector failure".to_string(),
+                });
+            }
+            self.inner.svd_into(input, u, s, vt)
+        }
+
+        fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            panic!("test only exercises SVD")
+        }
+
+        fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            panic!("test only exercises SVD")
+        }
+
+        fn dot_general_into(
+            &mut self,
+            _: DenseWrite<'_>,
+            _: DenseRead<'_>,
+            _: DenseRead<'_>,
+            _: &DenseDotConfig,
+        ) -> Result<(), DenseError> {
+            panic!("test only exercises SVD")
+        }
+    }
 
     fn owned<R, D>(tensor: &TensorMap<R, D>) -> &Arc<TypedTensorBody<R, D>> {
         tensor.owned_body().expect("test fixture must be owned")
@@ -6183,6 +6246,34 @@ mod representation_gates {
         .unwrap();
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, indices| {
             indices.iter().sum::<usize>() as f64 + 1.0
+        })
+        .unwrap()
+    }
+
+    fn u1_matrix_fixture(
+        codomain: impl IntoIterator<Item = (i32, usize)>,
+        domain: impl IntoIterator<Item = (i32, usize)>,
+    ) -> TensorMap<U1FusionRule, f64> {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let codomain = GradedSpace::try_new(
+            Arc::clone(&provider),
+            codomain
+                .into_iter()
+                .map(|(charge, degeneracy)| (U1Irrep::new(charge), degeneracy)),
+            false,
+        )
+        .unwrap();
+        let domain = GradedSpace::try_new(
+            provider,
+            domain
+                .into_iter()
+                .map(|(charge, degeneracy)| (U1Irrep::new(charge), degeneracy)),
+            false,
+        )
+        .unwrap();
+        TensorMap::from_block_fn(&runtime, [&codomain], [&domain], |_, indices| {
+            (indices.iter().sum::<usize>() + 1) as f64
         })
         .unwrap()
     }
@@ -6446,6 +6537,132 @@ mod representation_gates {
         assert_compact_svd_reads_parent(&genuinely_complex(&u1));
         assert_compact_svd_reads_parent(&su2);
         assert_compact_svd_reads_parent(&genuinely_complex(&su2));
+    }
+
+    fn assert_full_svd_reads_parent<R, D>(source: &TensorMap<R, D>, compare_factor_bytes: bool)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: TensorScalar + core::fmt::Debug,
+    {
+        let eager = eager_adjoint_oracle(source);
+        let lazy = source.adjoint().unwrap();
+        let actual = lazy.svd_full().unwrap();
+        let expected = eager.svd_full().unwrap();
+
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        for (actual, expected) in [
+            (&actual.0, &expected.0),
+            (&actual.1, &expected.1),
+            (&actual.2, &expected.2),
+        ] {
+            assert_eq!(
+                actual.logical_space().space(),
+                expected.logical_space().space()
+            );
+            assert!(Arc::ptr_eq(
+                actual.logical_space().provider_arc(),
+                source.logical_space().provider_arc()
+            ));
+        }
+        assert!(actual
+            .1
+            .data()
+            .iter()
+            .zip(expected.1.data())
+            .all(|(&left, &right)| {
+                (left.widen_complex() - right.widen_complex()).norm() < 1e-12
+            }));
+        if compare_factor_bytes {
+            for (actual, expected) in [(&actual.0, &expected.0), (&actual.2, &expected.2)] {
+                assert!(actual
+                    .data()
+                    .iter()
+                    .zip(expected.data())
+                    .all(|(&left, &right)| {
+                        (left.widen_complex() - right.widen_complex()).norm() < 1e-12
+                    }));
+            }
+        }
+        assert!(actual.0.is_isometric(1e-12).unwrap());
+        assert!(actual.2.is_isometric(1e-12).unwrap());
+        let rebuilt = actual
+            .0
+            .compose(&actual.1)
+            .unwrap()
+            .compose(&actual.2)
+            .unwrap();
+        assert!(rebuilt
+            .data()
+            .iter()
+            .zip(eager.data())
+            .all(|(&left, &right)| {
+                (left.widen_complex() - right.widen_complex()).norm() < 1e-12
+            }));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        assert!(view.materialized.get().is_none());
+    }
+
+    #[test]
+    fn full_svd_adjoint_rectangular_matched_matches_materialized_oracle() {
+        let matched = u1_matrix_fixture([(0, 2)], [(0, 3)]);
+        assert_full_svd_reads_parent(&matched, true);
+        assert_full_svd_reads_parent(&genuinely_complex(&matched), true);
+    }
+
+    #[test]
+    fn full_svd_adjoint_unmatched_row_only_matches_materialized_oracle() {
+        let source = u1_matrix_fixture([(0, 2), (1, 1)], [(0, 3)]);
+        assert_full_svd_reads_parent(&source, false);
+    }
+
+    #[test]
+    fn full_svd_adjoint_unmatched_column_only_matches_materialized_oracle() {
+        let source = u1_matrix_fixture([(0, 2)], [(0, 3), (1, 1)]);
+        assert_full_svd_reads_parent(&source, false);
+    }
+
+    #[test]
+    fn full_svd_adjoint_disjoint_matches_materialized_oracle() {
+        let source = u1_matrix_fixture([(1, 2)], [(0, 3)]);
+        assert_full_svd_reads_parent(&source, false);
+    }
+
+    #[test]
+    fn full_svd_adjoint_multitree_matches_materialized_oracle() {
+        let multitree = su2_lazy_fixture();
+        assert_full_svd_reads_parent(&multitree, false);
+        assert_full_svd_reads_parent(&genuinely_complex(&multitree), false);
+    }
+
+    #[test]
+    fn full_svd_late_failure_does_not_publish_the_adjoint_cache() {
+        let runtime = Runtime::builder()
+            .with_dense_executor(Box::new(FailSecondSvd::default()))
+            .build()
+            .unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new(
+            provider,
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)],
+            false,
+        )
+        .unwrap();
+        let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            (indices.iter().sum::<usize>() + 1) as f64
+        })
+        .unwrap();
+        let before = source.data().to_vec();
+        let lazy = source.adjoint().unwrap();
+
+        assert!(matches!(lazy.svd_full(), Err(Error::Operation(_))));
+        assert_eq!(source.data(), before);
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
     }
 
     fn assert_truncated_svd_reads_parent<R, D>(source: &TensorMap<R, D>)

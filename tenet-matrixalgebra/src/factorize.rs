@@ -2526,6 +2526,12 @@ enum FactorSide {
     Right,
 }
 
+#[derive(Clone, Copy)]
+enum FactorPlacement {
+    Direct,
+    Adjoint,
+}
+
 fn build_bound_factor_space<R>(
     authority: &BoundDynamicFusionMapSpace<R>,
     homspace: &FusionTreeHomSpace,
@@ -2616,6 +2622,31 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
+    build_bound_factor_with_placement(
+        authority,
+        homspace,
+        matricizations,
+        pairs,
+        dimensions,
+        side,
+        FactorPlacement::Direct,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_bound_factor_with_placement<R, D>(
+    authority: &BoundDynamicFusionMapSpace<R>,
+    homspace: &FusionTreeHomSpace,
+    matricizations: &[SectorMatricization<D>],
+    pairs: &[FactorPair<D>],
+    dimensions: &BTreeMap<SectorId, usize>,
+    side: FactorSide,
+    placement: FactorPlacement,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
     let space = build_bound_factor_space(
         authority,
         homspace,
@@ -2657,9 +2688,19 @@ where
             FactorSide::Right => (coupled_of(key.domain_tree()), 0),
         };
         if let Some(&(matrix, Some(pair))) = routes.get(&sector) {
-            let side_offset = match side {
-                FactorSide::Left => row_placement(matrix, key.codomain_tree())?.0,
-                FactorSide::Right => col_placement(matrix, key.domain_tree())?.0,
+            let side_offset = match (side, placement) {
+                (FactorSide::Left, FactorPlacement::Direct) => {
+                    row_placement(matrix, key.codomain_tree())?.0
+                }
+                (FactorSide::Right, FactorPlacement::Direct) => {
+                    col_placement(matrix, key.domain_tree())?.0
+                }
+                (FactorSide::Left, FactorPlacement::Adjoint) => {
+                    col_placement(matrix, key.codomain_tree())?.0
+                }
+                (FactorSide::Right, FactorPlacement::Adjoint) => {
+                    row_placement(matrix, key.domain_tree())?.0
+                }
             };
             let (factor, factor_rows) = match side {
                 FactorSide::Left => (pair.left.as_slice(), pair.left_rows),
@@ -3275,6 +3316,33 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
     D: FactorScalar,
 {
+    svd_full_oriented_dyn(dense, input, FactorPlacement::Direct)
+}
+
+/// Full SVD factors for the logical adjoint without constructing its input.
+#[doc(hidden)]
+pub fn svd_full_adjoint_dyn<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<SvdFullDyn<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    svd_full_oriented_dyn(dense, input, FactorPlacement::Adjoint)
+}
+
+fn svd_full_oriented_dyn<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    placement: FactorPlacement,
+) -> Result<SvdFullDyn<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
     let space = input.space().space();
     let matricizations = sector_matricizations(space.structure(), input.data(), space.nout())?;
     let row_dimensions = space
@@ -3356,19 +3424,32 @@ where
             rank,
         );
 
-        let mut u_full = orthonormal_completion(dense, &u_thin, matrix.rows, rank)?;
+        let u_full = orthonormal_completion(dense, &u_thin, matrix.rows, rank)?;
         // V columns are the adjoint rows of Vh; complete V (n x rank) to
         // n x n, then store Vh = V^H.
         let v_thin = adjoint_col_major(&vt_thin, rank, matrix.cols);
         let v_full = orthonormal_completion(dense, &v_thin, matrix.cols, rank)?;
-        let mut vh_full = adjoint_col_major(&v_full, matrix.cols, matrix.cols);
+        let (mut left, left_rows, mut right, right_leading) = match placement {
+            FactorPlacement::Direct => (
+                u_full,
+                matrix.rows,
+                adjoint_col_major(&v_full, matrix.cols, matrix.cols),
+                matrix.cols,
+            ),
+            FactorPlacement::Adjoint => (
+                v_full,
+                matrix.cols,
+                adjoint_col_major(&u_full, matrix.rows, matrix.rows),
+                matrix.rows,
+            ),
+        };
         svd_full_gauge(
-            &mut u_full,
-            matrix.rows,
-            matrix.rows,
-            &mut vh_full,
-            matrix.cols,
-            matrix.cols,
+            &mut left,
+            left_rows,
+            left_rows,
+            &mut right,
+            right_leading,
+            right_leading,
         );
 
         singular_values.push(SectorSpectrum {
@@ -3377,37 +3458,50 @@ where
         });
         pairs.push(FactorPair {
             sector: matrix.sector,
-            kept: matrix.rows,
-            left: u_full,
-            left_rows: matrix.rows,
-            right: vh_full,
-            right_leading: matrix.cols,
+            kept: left_rows,
+            left,
+            left_rows,
+            right,
+            right_leading,
         });
     }
 
+    let adjoint_space = match placement {
+        FactorPlacement::Direct => None,
+        FactorPlacement::Adjoint => Some(tenet_tensors::adjoint_bound_space_dyn(input.space())?),
+    };
+    let authority = adjoint_space.as_ref().unwrap_or(input.space());
+    let homspace = authority.space().homspace();
+    let (output_row_dimensions, output_col_dimensions) = match placement {
+        FactorPlacement::Direct => (&row_dimensions, &col_dimensions),
+        FactorPlacement::Adjoint => (&col_dimensions, &row_dimensions),
+    };
+
     // The left/right bond legs differ in the full SVD (rows vs columns), so
     // build the two factors with separate bond dimensions.
-    let u_factor = build_bound_factor(
-        input.space(),
-        space.homspace(),
+    let u_factor = build_bound_factor_with_placement(
+        authority,
+        homspace,
         &matricizations,
         &pairs,
-        &row_dimensions,
+        output_row_dimensions,
         FactorSide::Left,
+        placement,
     )?;
-    let vh_factor = build_bound_factor(
-        input.space(),
-        space.homspace(),
+    let vh_factor = build_bound_factor_with_placement(
+        authority,
+        homspace,
         &matricizations,
         &pairs,
-        &col_dimensions,
+        output_col_dimensions,
         FactorSide::Right,
+        placement,
     )?;
     let s_factor = rectangular_diagonal_bond_tensor(
-        input.space(),
+        authority,
         &singular_values,
-        &row_dimensions,
-        &col_dimensions,
+        output_row_dimensions,
+        output_col_dimensions,
     )?;
     Ok(SvdFullDyn {
         u: u_factor,
