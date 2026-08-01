@@ -1,6 +1,6 @@
 //! `tensor!` — @tensor-style index-notation contraction for TeNeT.
 //!
-//! Expression form (returns `Result<Tensor, Error>`):
+//! Expression form (returns `Result<TensorMap<R, D, S>, Error>`):
 //!
 //! ```text
 //! let c = tensor!([a, b; g, h] = x[a, b; i, j] * y[i, j; g, h])?;
@@ -12,13 +12,17 @@
 //! - RHS terms are `expr[labels]` products; `expr` is an identifier, a
 //!   field-access chain (`svd.u`, `pair.0`), a parenthesized expression, or
 //!   `conj(expr)` marking an adjoint operand. Each `expr` must evaluate to
-//!   a `Tensor` or `&Tensor`.
+//!   a homogeneous provider-typed `TensorMap<R, D, S>` or a borrow of one.
 //! - A label appearing on two operands is contracted; a label appearing
 //!   twice on ONE operand is a partial trace of that operand (TensorKit
 //!   `@tensor a[i, i; j]`); a label appearing once must be listed in the
 //!   output. Violations are compile errors.
-//! - Lowers to `tenet_network::contract_network` (planner IR directly; no
-//!   einsum strings).
+//! - Lowers directly to the typed static topology/cache entrypoint (no einsum
+//!   strings and no rule-erased tensor conversion).
+//!
+//! Every operand must be a homogeneous provider-typed `TensorMap<R, D>` (or
+//! a borrow of one). Host execution reuses a typed per-plan workspace; CUDA
+//! execution is returning-only and rejects intra-operand traces.
 //!
 //! **Fermionic semantics**: `tensor!` follows TensorKit `@tensor` /
 //! `tensorcontract!` — dual contracted legs are twisted with the fermionic
@@ -28,7 +32,7 @@
 //! `Tensor::compose`.
 
 use proc_macro::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::{parenthesized, Expr, Ident, Token};
@@ -197,8 +201,9 @@ fn check_labels(inputs: &[Vec<String>], output: &[String]) -> Result<(), String>
     Ok(())
 }
 
-/// @tensor-style contraction over TeNeT user-layer tensors; see the crate
-/// docs for the syntax. Evaluates to `Result<Tensor, tenet::prelude::Error>`.
+/// @tensor-style contraction over homogeneous provider-typed TeNeT tensors;
+/// see the crate docs for the syntax. Evaluates to
+/// `Result<TensorMap<R, D, S>, tenet::prelude::Error>`.
 #[proc_macro]
 pub fn tensor(input: TokenStream) -> TokenStream {
     let parsed = syn::parse_macro_input!(input as TensorExpr);
@@ -214,10 +219,20 @@ pub fn tensor(input: TokenStream) -> TokenStream {
             .into();
     }
 
-    let tensors = parsed.operands.iter().map(|op| {
-        let tensor = &op.tensor;
-        quote! { &#tensor }
-    });
+    let tensors = parsed
+        .operands
+        .iter()
+        .map(|op| {
+            let tensor = &op.tensor;
+            quote! { &#tensor }
+        })
+        .collect::<Vec<_>>();
+    let raw_bindings = (0..parsed.operands.len())
+        .map(|index| format_ident!("__tenet_raw_operand_{index}"))
+        .collect::<Vec<_>>();
+    let normalized_bindings = (0..parsed.operands.len())
+        .map(|index| format_ident!("__tenet_operand_{index}"))
+        .collect::<Vec<_>>();
     let labels = parsed.operands.iter().map(|op| &op.group.labels);
     let conj = parsed.operands.iter().map(|op| op.conj);
     let splits = parsed
@@ -237,8 +252,13 @@ pub fn tensor(input: TokenStream) -> TokenStream {
                     output: &[#(#output),*],
                     output_codomain_rank: #out_split,
                 };
+            #(let #raw_bindings = #tensors;)*
+            #(
+                let #normalized_bindings =
+                    ::tenet_network::normalize_tensor_operand(#raw_bindings);
+            )*
             ::tenet_network::contract_static_network(
-                &[#(#tensors),*],
+                &[#(#normalized_bindings),*],
                 &__TENET_TOPOLOGY,
             )
         }

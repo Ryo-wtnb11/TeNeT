@@ -80,9 +80,11 @@ factorizations and matrix functions, and compact-diagonal paths. Construction
 uses transactional checked admission, so an invalid or unrepresentable algebra
 publishes no layout, cache, or admission state.
 
-The rule-erased `Runtime` / `Space` / `Tensor` / `tensor!` facade is its peer
-for built-in providers. It owns runtime dtype and placement dispatch,
-lazy-adjoint state, `tensor!`, CUDA paths, and built-in Generic/SU(3) support.
+The rule-erased `Runtime` / `Space` / `Tensor` facade is its peer for built-in
+providers. It owns runtime dtype and placement dispatch and its own
+lazy-adjoint state. `tensor!` belongs to the provider-typed facade: it executes
+typed Host tensors through a per-plan workspace and canonical CUDA tensors
+through the returning-only device path.
 Neither facade replaces or wraps the other.
 
 SU(2) representation algebra itself is not reimplemented here: `tenet-sectors`
@@ -102,7 +104,6 @@ The erased user layer — the shortest path to a working contraction:
 
 ```rust
 use tenet::prelude::*;
-use tenet_network::tensor;
 
 fn main() -> Result<(), Error> {
     let rt = Runtime::builder().build()?;
@@ -112,8 +113,7 @@ fn main() -> Result<(), Error> {
     let a = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v, &v])?;
     let b = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v, &v])?;
 
-    // @tensor-style notation: [codomain; domain].
-    let c = tensor!([i, j; g, h] = a[i, j; k, l] * b[k, l; g, h])?;
+    let c = a.compose(&b)?;
     assert_eq!((c.codomain_rank(), c.domain_rank()), (2, 2));
 
     Ok(())
@@ -134,6 +134,7 @@ use std::sync::Arc;
 use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::prelude::{Error, Runtime};
 use tenet::typed::{GradedSpace, TensorMap};
+use tenet_network::tensor;
 
 fn main() -> Result<(), Error> {
     let rt = Runtime::builder().build()?;
@@ -146,11 +147,16 @@ fn main() -> Result<(), Error> {
     )?;
 
     let t: TensorMap<U1FusionRule, f64> = TensorMap::zeros(&rt, [&v], [&v])?;
+    let u: TensorMap<U1FusionRule, f64> = TensorMap::zeros(&rt, [&v], [&v])?;
     assert_eq!(t.block_count(), 3);
 
     // Blocks report the provider's own labels, not SectorIds.
     let trees = t.block_fusion_trees(0)?;
     assert_eq!(trees.coupled(), &U1Irrep::new(0));
+
+    // @tensor-style notation: [codomain; domain].
+    let c = tensor!([i; k] = t[i; j] * u[j; k])?;
+    assert_eq!((c.codomain_rank(), c.domain_rank()), (1, 1));
 
     Ok(())
 }
@@ -297,9 +303,10 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
 
 ## Current Limitations
 
-- The typed facade is host-only and admits checked multiplicity-free providers.
-  It has no conversion to or from the erased `Tensor`; Generic/SU(3), device
-  placement, and `tensor!` remain erased-facade gaps.
+- The typed facade admits checked multiplicity-free providers. It has no
+  conversion to or from the erased `Tensor`. `tensor!` supports Host tensors
+  and canonical returning CUDA schedules; intra-operand trace lowering remains
+  Host-only and returns `UnsupportedOnDevice` on CUDA.
 - Execution crates reject a no-default-features build because their convenience
   APIs require a concrete executor. Use `tenet-sectors` / `tenet-core` for
   backend-free types, or enable a CPU feature or `provider-inject` for the full

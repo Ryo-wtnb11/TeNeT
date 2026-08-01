@@ -10,9 +10,9 @@
 //!       serialize. This is the suspected FLAT arm.
 //!   (b) `perthread` — each thread builds its own `Runtime`. No shared lock;
 //!       the expected ~linear arm, the throughput ceiling to compare against.
-//!   (c) `network` — shared `Runtime`, but the `tensor!` cached-plan path,
-//!       which clones a per-call workspace and holds the lock only briefly.
-//!       The claimed already-parallel path.
+//!   (c) `network` — shared `Runtime`, but typed `TensorMap` operands through
+//!       the `tensor!` cached-plan path, which clones a per-call workspace and
+//!       holds the lock only briefly. The claimed already-parallel path.
 //!
 //! **Why a fixed CPU budget.** Scaling numbers only mean something if the
 //! outer threads are the ONLY source of parallelism — otherwise inner BLAS /
@@ -35,7 +35,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use tenet::core::{SU2FusionRule, SU2Irrep};
 use tenet::prelude::{Dtype, Runtime, Space, Tensor};
+use tenet::typed::{GradedSpace, TensorMap};
 use tenet_network::tensor;
 
 fn env_usizes(key: &str, default: &[usize]) -> Vec<usize> {
@@ -68,6 +70,26 @@ fn make_pair(rt: &Runtime, d: usize, seed: u64) -> (Tensor, Tensor) {
     (a, b)
 }
 
+fn make_typed_pair(
+    rt: &Runtime,
+    d: usize,
+    seed: u64,
+) -> (TensorMap<SU2FusionRule, f64>, TensorMap<SU2FusionRule, f64>) {
+    let v = GradedSpace::try_new(
+        Arc::new(SU2FusionRule),
+        [
+            (SU2Irrep::from_twice_spin(0), d),
+            (SU2Irrep::from_twice_spin(1), d),
+            (SU2Irrep::from_twice_spin(2), d),
+        ],
+        false,
+    )
+    .expect("SU(2) space");
+    let a = TensorMap::rand_with_seed(rt, [&v, &v], [&v, &v], seed).expect("typed lhs");
+    let b = TensorMap::rand_with_seed(rt, [&v, &v], [&v, &v], seed + 1).expect("typed rhs");
+    (a, b)
+}
+
 /// Compose-form contract: `a[i,j;k,l] * b[k,l;m,n]` -> rank-4. lhs domain
 /// axes (2,3) with rhs codomain axes (0,1).
 fn contract_once(a: &Tensor, b: &Tensor) -> Tensor {
@@ -87,9 +109,12 @@ fn build_runtime() -> Runtime {
 /// given runtime, single-threaded, before any timed region.
 fn warm(rt: &Runtime, d: usize) {
     let (a, b) = make_pair(rt, d, 1);
+    let (typed_a, typed_b) = make_typed_pair(rt, d, 1);
     for _ in 0..8 {
         black_box(contract_once(&a, &b));
-        black_box(tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).expect("warm net"));
+        black_box(
+            tensor!([i, j; m, n] = typed_a[i, j; k, l] * typed_b[k, l; m, n]).expect("warm net"),
+        );
     }
 }
 
@@ -162,22 +187,27 @@ fn main() {
                                 build_runtime()
                             };
                             let seed = 1000 + (t as u64) * 2;
-                            let (a, b) = make_pair(&rt, d, seed);
                             if !uses_shared {
                                 warm(&rt, d);
                             }
-                            let start = Instant::now();
-                            for _ in 0..m {
-                                if arm == "network" {
+                            if arm == "network" {
+                                let (a, b) = make_typed_pair(&rt, d, seed);
+                                let start = Instant::now();
+                                for _ in 0..m {
                                     black_box(
                                         tensor!([i, j; p, q] = a[i, j; k, l] * b[k, l; p, q])
                                             .expect("net"),
                                     );
-                                } else {
+                                }
+                                start.elapsed()
+                            } else {
+                                let (a, b) = make_pair(&rt, d, seed);
+                                let start = Instant::now();
+                                for _ in 0..m {
                                     black_box(contract_once(&a, &b));
                                 }
+                                start.elapsed()
                             }
-                            start.elapsed()
                         })
                     })
                     .collect();

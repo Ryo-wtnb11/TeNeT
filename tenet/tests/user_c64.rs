@@ -4,7 +4,15 @@
 //! `tensor!` macro over conjugated complex operands, and mixed-dtype
 //! rejection.
 
+use std::sync::Arc;
+
+use tenet::core::{
+    CheckedFusionAlgebra, FusionAlgebraError, MultiplicityFreeAdmissionMode,
+    MultiplicityFreeRigidSymbols, SU2FusionRule, SU2Irrep, SectorCodec, TypedSectorAdmission,
+    U1FusionRule, U1Irrep,
+};
 use tenet::prelude::*;
+use tenet::typed::{GradedSpace, TensorMap};
 use tenet_network::tensor;
 
 fn u1_space() -> Space {
@@ -415,40 +423,73 @@ fn c64_eig_and_eigh_trunc_on_hermitized_tensor() {
     }
 }
 
-/// `tensor!` with `conj()` on c64 operands: `<psi|H|psi>` is real for
+fn assert_typed_macro_conj<R>(rt: &Runtime, p: &GradedSpace<R>)
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec
+        + Send,
+{
+    let l = p.clone();
+    let r = p.try_dual().unwrap();
+    let psi = TensorMap::<R, Complex64>::rand_with_seed(rt, [p], [&l, &r], 71).unwrap();
+    let h0 = TensorMap::<R, Complex64>::rand_with_seed(rt, [p], [p], 72).unwrap();
+    let h = h0
+        .add(
+            &h0.adjoint().unwrap(),
+            Complex64::new(0.5, 0.0),
+            Complex64::new(0.5, 0.0),
+        )
+        .unwrap();
+
+    let e = tensor!([] = conj(psi)[p; l, r] * h[p; q] * psi[q; l, r])
+        .unwrap()
+        .scalar()
+        .unwrap();
+    let n = tensor!([] = conj(psi)[p; l, r] * psi[p; l, r])
+        .unwrap()
+        .scalar()
+        .unwrap();
+    assert!(n.re > 0.0);
+    assert!(n.im.abs() <= 1e-12 * (1.0 + n.re), "norm not real: {n}");
+    assert!(
+        e.im.abs() <= 1e-10 * (1.0 + e.norm()),
+        "<psi|H|psi> not real for Hermitian H: {e}"
+    );
+    let hpsi = h.compose(&psi).unwrap();
+    let via_inner = psi.inner(&hpsi).unwrap();
+    assert!((via_inner - e).norm() <= 1e-10 * (1.0 + e.norm()));
+}
+
+/// Typed `tensor!` with `conj()` on c64 operands: `<psi|H|psi>` is real for
 /// Hermitian `H` (the network layer lowers `conj` to `adjoint`, which must
 /// conjugate complex data).
 #[test]
 fn tensor_macro_conj_expectation_value_is_real() {
     let rt = Runtime::builder().build().unwrap();
-    for p in [u1_space(), su2_space()] {
-        let l = p.clone();
-        let r = p.dual();
-        let psi = Tensor::rand_with_seed(&rt, Dtype::C64, [&p], [&l, &r], 71).unwrap();
-        let h0 = Tensor::rand_with_seed(&rt, Dtype::C64, [&p], [&p], 72).unwrap();
-        let h = h0.add(&h0.adjoint().unwrap(), 0.5, 0.5).unwrap();
+    let u1 = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [
+            (U1Irrep::new(-1), 1),
+            (U1Irrep::new(0), 2),
+            (U1Irrep::new(1), 1),
+        ],
+        false,
+    )
+    .unwrap();
+    assert_typed_macro_conj(&rt, &u1);
 
-        let e = tensor!([] = conj(psi)[p; l, r] * h[p; q] * psi[q; l, r])
-            .unwrap()
-            .scalar()
-            .unwrap()
-            .to_c64();
-        let n = tensor!([] = conj(psi)[p; l, r] * psi[p; l, r])
-            .unwrap()
-            .scalar()
-            .unwrap()
-            .to_c64();
-        assert!(n.re > 0.0);
-        assert!(n.im.abs() <= 1e-12 * (1.0 + n.re), "norm not real: {n}");
-        assert!(
-            e.im.abs() <= 1e-10 * (1.0 + e.norm()),
-            "<psi|H|psi> not real for Hermitian H: {e}"
-        );
-        // Cross-check against the method-level inner: <psi, H psi>.
-        let hpsi = h.compose(&psi).unwrap();
-        let via_inner = psi.inner(&hpsi).unwrap().to_c64();
-        assert!((via_inner - e).norm() <= 1e-10 * (1.0 + e.norm()));
-    }
+    let su2 = GradedSpace::try_new(
+        Arc::new(SU2FusionRule),
+        [
+            (SU2Irrep::from_twice_spin(0), 1),
+            (SU2Irrep::from_twice_spin(1), 2),
+        ],
+        false,
+    )
+    .unwrap();
+    assert_typed_macro_conj(&rt, &su2);
 }
 
 #[test]

@@ -1,28 +1,29 @@
 use std::hint::black_box;
+use std::sync::Arc;
 use std::time::Instant;
 
-use tenet::prelude::{Dtype, Runtime, Space, Tensor};
+use tenet::core::{U1FusionRule, U1Irrep};
+use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use tenet_network::{plan_cache_stats, tensor};
 
 fn main() {
     let runtime = Runtime::builder().build().expect("runtime");
-    let space = Space::u1([(-1, 8), (0, 16), (1, 8)]);
-    let a = Tensor::rand_with_seed(
-        &runtime,
-        Dtype::F64,
-        [&space, &space],
-        [&space, &space],
-        12401,
+    let space = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [
+            (U1Irrep::new(-1), 8),
+            (U1Irrep::new(0), 16),
+            (U1Irrep::new(1), 8),
+        ],
+        false,
     )
-    .expect("lhs");
-    let b = Tensor::rand_with_seed(
-        &runtime,
-        Dtype::F64,
-        [&space, &space],
-        [&space, &space],
-        12402,
-    )
-    .expect("rhs");
+    .expect("space");
+    let a =
+        TensorMap::<_, f64>::rand_with_seed(&runtime, [&space, &space], [&space, &space], 12401)
+            .expect("lhs");
+    let b =
+        TensorMap::<_, f64>::rand_with_seed(&runtime, [&space, &space], [&space, &space], 12402)
+            .expect("rhs");
 
     let cold_start = Instant::now();
     black_box(tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).expect("cold"));

@@ -59,7 +59,7 @@ TensorKit 並みの使い勝手。最重要軸 = Rust 準拠の保守性・拡�
       (sector, deg, dual) とオペランド番号・ラベルを表示
 - [x] tensor! のプラン再利用(topology key + drift-factor replanning。
       truncation sweep では同じ topology を再利用、必要時のみ再計画)
-- [ ] tensor! で field access オペランド(svd.u[..])がパース不可(要括弧)
+- [x] tensor! の field access オペランド(svd.u[..])と一時値/borrow を typed 経路で一度だけ評価
 - [ ] 参考: λ⁻¹ は pinv で clean に書けた、exp() は rank-4 endomorphism に
       直接効いた(追加実装不要だった良い所見)
 

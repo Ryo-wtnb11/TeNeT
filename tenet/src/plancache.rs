@@ -320,6 +320,8 @@ pub struct PlanCacheStats {
     pub topology_materializations: u64,
     /// Idle execution workspaces retained by current cached plans.
     pub idle_workspaces: usize,
-    /// Process-local aliases retained for reusable `Network` instances.
+    /// Compatibility field for the removed process-local `Network` alias path.
+    #[doc(hidden)]
+    #[deprecated(note = "dynamic Network aliases were removed; this field is always zero")]
     pub dynamic_aliases: usize,
 }

@@ -9,7 +9,6 @@
 //! suite when those land.
 
 use tenet::prelude::*;
-use tenet_network::tensor;
 
 fn assert_close(lhs: &[f64], rhs: &[f64], tol: f64) {
     assert_eq!(lhs.len(), rhs.len(), "data lengths differ");
@@ -317,10 +316,9 @@ fn isometry_and_unitary_are_isometric() {
 // Contraction order independence
 // ---------------------------------------------------------------------------
 
-/// The same network contracted through different routes must agree:
-/// `tensor!` (greedy pairwise) vs manual pairwise contraction in two
-/// different association orders, for both a closed ring (scalar) and an
-/// open two-tensor network that forces axis permutations.
+/// The same network contracted through different explicit pairwise routes
+/// must agree, for both a closed ring (scalar) and an open two-tensor network
+/// that forces axis permutations.
 #[test]
 fn contraction_order_independence() {
     let rt = Runtime::builder().build().unwrap();
@@ -330,12 +328,6 @@ fn contraction_order_independence() {
         let x2 = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 82).unwrap();
         let x3 = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 83).unwrap();
         let x4 = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 84).unwrap();
-        let ring = tensor!([] = x1[a; b] * x2[b; c] * x3[c; d] * x4[d; a])
-            .unwrap()
-            .scalar()
-            .unwrap()
-            .try_f64()
-            .unwrap();
         let left = x1
             .compose(&x2)
             .unwrap()
@@ -361,21 +353,17 @@ fn contraction_order_independence() {
             .unwrap()
             .try_f64()
             .unwrap();
-        assert_scalar_close(ring, left, 1e-12);
-        assert_scalar_close(ring, middle, 1e-12);
+        assert_scalar_close(left, middle, 1e-12);
 
-        // Open chain: three association orders elementwise.
-        let chain = tensor!([i; m] = x1[i; j] * x2[j; k] * x3[k; m]).unwrap();
+        // Open chain: both association orders agree elementwise.
         let assoc_l = x1.compose(&x2).unwrap().compose(&x3).unwrap();
         let assoc_r = x1.compose(&x2.compose(&x3).unwrap()).unwrap();
-        assert_close(chain.data(), assoc_l.data(), 1e-12);
-        assert_close(chain.data(), assoc_r.data(), 1e-12);
+        assert_close(assoc_l.data(), assoc_r.data(), 1e-12);
 
         // Rank-4 pair with crossed contracted legs: forces tree transforms
-        // and output permutes on every route (incl. the dynamic engine).
+        // and output permutes on both routes.
         let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 85).unwrap();
         let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 86).unwrap();
-        let via_macro = tensor!([p, q; r, s] = a[p, x; y, s] * b[q, y; x, r]).unwrap();
         let ab = a
             .contract(&b, &[1, 2], &[2, 1])
             .unwrap()
@@ -388,8 +376,7 @@ fn contraction_order_independence() {
             // default open order [q, r, p, s]
             .permute(&[2, 0], &[1, 3])
             .unwrap();
-        assert_close(via_macro.data(), ab.data(), 1e-12);
-        assert_close(via_macro.data(), ba.data(), 1e-12);
+        assert_close(ab.data(), ba.data(), 1e-12);
         let _ = name;
     }
 }
@@ -402,15 +389,14 @@ fn contraction_order_independence() {
 /// `(lhs codomain tree, rhs domain tree)`, which is only the destination key
 /// when the contracted axes are exactly lhs-domain x rhs-codomain (compose);
 /// for crossed axes the open-axis shapes of unrelated sector combinations
-/// collided under one key. Asserts contraction-order independence: crossed
-/// contract == `tensor!` reference elementwise.
+/// collided under one key. Asserts contraction-order independence between
+/// the two explicit crossed-contract routes.
 #[test]
 fn su2_nonuniform_degeneracy_crossed_contract() {
     let rt = Runtime::builder().build().unwrap();
     let v = Space::su2([(0, 2), (1, 2), (2, 1)]).unwrap();
     let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 85).unwrap();
     let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 86).unwrap();
-    let via_macro = tensor!([p, q; r, s] = a[p, x; y, s] * b[q, y; x, r]).unwrap();
     let ab = a
         .contract(&b, &[1, 2], &[2, 1])
         .unwrap()
@@ -421,8 +407,7 @@ fn su2_nonuniform_degeneracy_crossed_contract() {
         .unwrap()
         .permute(&[2, 0], &[1, 3])
         .unwrap();
-    assert_close(via_macro.data(), ab.data(), 1e-12);
-    assert_close(via_macro.data(), ba.data(), 1e-12);
+    assert_close(ab.data(), ba.data(), 1e-12);
 }
 
 /// Regression test for issue #12, fZ2 shape: decreasing degeneracies
@@ -456,7 +441,6 @@ fn triple_product_nonuniform_degeneracy_crossed_contract() {
     let v = Space::fz2_u1_su2([((0, 0, 0), 2), ((1, 1, 1), 2), ((0, 2, 0), 1)]).unwrap();
     let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 87).unwrap();
     let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 88).unwrap();
-    let via_macro = tensor!([p, q; r, s] = a[p, x; y, s] * b[q, y; x, r]).unwrap();
     let ab = a
         .contract(&b, &[1, 2], &[2, 1])
         .unwrap()
@@ -467,8 +451,7 @@ fn triple_product_nonuniform_degeneracy_crossed_contract() {
         .unwrap()
         .permute(&[2, 0], &[1, 3])
         .unwrap();
-    assert_close(via_macro.data(), ab.data(), 1e-12);
-    assert_close(via_macro.data(), ba.data(), 1e-12);
+    assert_close(ab.data(), ba.data(), 1e-12);
 }
 
 // ---------------------------------------------------------------------------

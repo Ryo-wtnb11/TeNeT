@@ -47,9 +47,6 @@ pub mod typed;
 #[doc(hidden)]
 pub use runtime::RuntimeIdentity;
 pub use runtime::{clear_default_runtime, default_runtime, set_default_runtime};
-#[doc(hidden)]
-pub use tensor::RuntimeDetachedTensor;
-
 /// User-layer API: [`prelude::Runtime`], [`prelude::Space`], and
 /// [`prelude::Tensor`], plus the handful of expert-layer types their
 /// signatures mention. `use tenet::prelude::*;` is the intended import for

@@ -56,6 +56,10 @@ impl ContractionStep {
 struct ActiveTensor {
     id: TensorId,
     labels: Vec<TemporaryLabel>,
+    /// Earliest written operand represented by this subtree. Pair selection
+    /// uses active-list positions, but contraction orientation must preserve
+    /// the expression's left-to-right factor order after results are appended.
+    first_input: usize,
 }
 
 pub fn greedy_order(ir: &NetworkIR, cost_model: &DenseCostModel) -> Result<Vec<ContractionStep>> {
@@ -66,9 +70,11 @@ pub fn greedy_order(ir: &NetworkIR, cost_model: &DenseCostModel) -> Result<Vec<C
     let mut active = ir
         .tensors()
         .iter()
-        .map(|tensor| ActiveTensor {
+        .enumerate()
+        .map(|(first_input, tensor)| ActiveTensor {
             id: tensor.id(),
             labels: tensor.labels().to_vec(),
+            first_input,
         })
         .collect::<Vec<_>>();
     let mut steps = Vec::new();
@@ -87,8 +93,11 @@ pub fn greedy_order(ir: &NetworkIR, cost_model: &DenseCostModel) -> Result<Vec<C
         }
 
         let (lhs_index, rhs_index, cost) = best.ok_or(ContractError::NotEnoughTensors)?;
-        let rhs = active.remove(rhs_index);
-        let lhs = active.remove(lhs_index);
+        let mut rhs = active.remove(rhs_index);
+        let mut lhs = active.remove(lhs_index);
+        if rhs.first_input < lhs.first_input {
+            std::mem::swap(&mut lhs, &mut rhs);
+        }
         let remaining_labels = active
             .iter()
             .map(|tensor| tensor.labels.clone())
@@ -110,6 +119,7 @@ pub fn greedy_order(ir: &NetworkIR, cost_model: &DenseCostModel) -> Result<Vec<C
         active.push(ActiveTensor {
             id: result_id,
             labels: result_labels,
+            first_input: lhs.first_input.min(rhs.first_input),
         });
     }
 
@@ -304,9 +314,11 @@ pub fn dense_order_from_labels(
     let mut active = ir
         .tensors()
         .iter()
-        .map(|tensor| ActiveTensor {
+        .enumerate()
+        .map(|(first_input, tensor)| ActiveTensor {
             id: tensor.id(),
             labels: tensor.labels().to_vec(),
+            first_input,
         })
         .collect::<Vec<_>>();
     let mut steps = Vec::new();
@@ -568,6 +580,7 @@ fn push_dense_active_contraction_step(
     active.push(ActiveTensor {
         id: result_id,
         labels: result_labels,
+        first_input: lhs.first_input.min(rhs.first_input),
     });
     Ok(())
 }

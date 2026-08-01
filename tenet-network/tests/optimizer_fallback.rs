@@ -3,8 +3,11 @@
 //! falling back down the legacy auto-hq -> auto -> dp -> greedy chain.
 #![cfg(feature = "opt-path")]
 
-use tenet::prelude::*;
-use tenet_network::tensor;
+use std::sync::Arc;
+
+use tenet::core::{SU2FusionRule, SU2Irrep};
+use tenet::typed::{GradedSpace, Runtime, TensorMap};
+use tenet_network::{tensor, Optimizer, PlanCacheConfig};
 
 #[test]
 fn autohq_falls_back_on_all_dim1_gram_topology() {
@@ -36,10 +39,15 @@ fn autohq_falls_back_on_all_dim1_gram_topology() {
         })
         .build()
         .unwrap();
-    let v = Space::su2([(0, 1)]).unwrap();
-    let cne = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 1).unwrap();
-    let sne = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 2).unwrap();
-    let ev = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 3).unwrap();
+    let v = GradedSpace::try_new(
+        Arc::new(SU2FusionRule),
+        [(SU2Irrep::from_twice_spin(0), 1)],
+        false,
+    )
+    .unwrap();
+    let cne = TensorMap::<_, f64>::rand_with_seed(&rt, [&v, &v], [&v], 1).unwrap();
+    let sne = TensorMap::<_, f64>::rand_with_seed(&rt, [&v, &v], [&v], 2).unwrap();
+    let ev = TensorMap::<_, f64>::rand_with_seed(&rt, [&v, &v], [&v, &v], 3).unwrap();
     let out = tensor!(
         [o1, o2; o3, o4] = cne[n3, n4; o3]
             * conj(cne)[n3, n5; o1]

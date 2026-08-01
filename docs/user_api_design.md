@@ -52,7 +52,6 @@ let z = Tensor::rand(&rt, Dtype::C64, [&v, &v], [&v, &v])?; // c64 は dtype tok
 let c = a.compose(&b)?;                          // 圏論的合成 (A * B)
 let d = a.contract(&b, &[2, 3], &[1, 0])?;       // 任意軸(pAB は既定順)
 let e = a.contract_ordered(&b, &[2, 3], &[1, 0], &[1, 0, 2, 3])?; // pAB 指定
-let f = tensor!([i, j; g, h] = a[i, j; k, l] * b[k, l; g, h])?;
 
 // インデックス操作(TensorKit permute/braid/transpose)
 let p = c.permute(&[0, 2], &[1, 3])?;
@@ -132,8 +131,8 @@ let c_c64 = c.to_c64();                          // c64 には明示 widening
 ## 層の関係
 
 ```text
-ユーザー層   erased: Tensor / Space / Runtime / tensor!
-             typed: TensorMap<R, D> / GradedSpace<R> (peer)
+ユーザー層   erased: Tensor / Space / Runtime
+             typed: TensorMap<R, D> / GradedSpace<R> / tensor! (peer)
 expert 層    tensorcontract_into / permute_into / svd_compact ...(既存)
 内部実行層   private admitted layout / operation / backend
 ```
