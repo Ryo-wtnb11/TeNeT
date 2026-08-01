@@ -3460,7 +3460,8 @@ fn oriented_storage_contract_and_compose_use_parent_rectangular_views() {
                 &[],
             )
             .unwrap();
-            let mut rejected = vec![0.0; outer_dst.space().required_len().unwrap()];
+            let sentinel = vec![42.0; outer_dst.space().required_len().unwrap()];
+            let mut rejected = sentinel.clone();
             let mut rejected_gemm = CpuOrientedGemm::default();
             assert!(matches!(
                 context.tensorcompose_fusion_dyn_prelowered_direct_on_storage(
@@ -3477,6 +3478,8 @@ fn oriented_storage_contract_and_compose_use_parent_rectangular_views() {
                 Err(OperationError::UnsupportedTensorContractScope { .. })
             ));
             assert!(rejected_gemm.calls.is_empty());
+            assert_eq!(rejected, sentinel);
+            assert_eq!(crate::contract::fusion_operand_projection_prepares(), 0);
         }
     }
 }
