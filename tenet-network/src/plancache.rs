@@ -422,6 +422,17 @@ fn cache_mut(slot: &mut Option<Box<dyn Any + Send>>) -> &mut PlanCache {
         .expect("runtime plan-cache slot claimed by another type")
 }
 
+/// Read/write access that preserves an unclaimed runtime extension slot.
+/// Rejected device plans must not make an otherwise-cold runtime own an empty
+/// cache merely by probing it.
+fn existing_cache_mut(slot: &mut Option<Box<dyn Any + Send>>) -> Option<&mut PlanCache> {
+    slot.as_deref_mut().map(|cache| {
+        cache
+            .downcast_mut::<PlanCache>()
+            .expect("runtime plan-cache slot claimed by another type")
+    })
+}
+
 /// Replaces the runtime's plan-cache configuration (the builder-time
 /// equivalent is `Runtime::builder().plan_cache(config)`).
 pub fn configure_plan_cache(runtime: &Runtime, config: PlanCacheConfig) {
@@ -883,7 +894,9 @@ where
         if !config.enabled {
             return Ok(Lookup::Disabled);
         }
-        let cache = cache_mut(slot);
+        let Some(cache) = existing_cache_mut(slot) else {
+            return Ok(Lookup::Miss);
+        };
         let Some(aliases) = cache.static_aliases.peek(&key) else {
             return Ok(Lookup::Miss);
         };
@@ -934,7 +947,9 @@ where
         Miss,
     }
     let outcome = runtime.with_plan_cache(|config, slot| -> Result<Outcome, Error> {
-        let cache = cache_mut(slot);
+        let Some(cache) = existing_cache_mut(slot) else {
+            return Ok(Outcome::Miss);
+        };
         // `peek` inspects without touching LRU order, so a stale entry that will
         // be replanned does not count as a use; a genuine hit is promoted to
         // most-recently-used with an O(1) `promote`.
@@ -977,11 +992,12 @@ where
     // replan numerics byte-identical.
     let topo_key = topology_text(&topology);
     let disk_plan = runtime.with_extension_slot(|slot| {
-        let cache = cache_mut(slot);
-        cache
-            .persist
-            .then(|| cache.disk.get(&topo_key).cloned())
-            .flatten()
+        existing_cache_mut(slot).and_then(|cache| {
+            cache
+                .persist
+                .then(|| cache.disk.get(&topo_key).cloned())
+                .flatten()
+        })
     });
     let (planned, fresh_plan_copy) = match disk_plan {
         Some(plan) => (Arc::new(network.plan_with(tensors, plan)?), None),

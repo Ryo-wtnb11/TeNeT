@@ -98,14 +98,14 @@ fn noncanonical_cuda_macro_never_publishes_or_touches_cache_state() {
     let b_cuda = b.to_cuda().unwrap();
     let c_cuda = c.to_cuda().unwrap();
 
-    let empty = plan_cache_stats(&runtime);
+    assert!(runtime.with_extension_slot(|slot| slot.is_none()));
     for _ in 0..2 {
         let error = tensor!([c; d] = a_cuda[a; b] * b_cuda[b; c] * c_cuda[a; d]).unwrap_err();
         assert!(matches!(
             error,
             tenet::prelude::Error::UnsupportedOnDevice(_)
         ));
-        assert_eq!(plan_cache_stats(&runtime), empty);
+        assert!(runtime.with_extension_slot(|slot| slot.is_none()));
     }
 
     // Publish the same structural plan from Host. CUDA must validate the
