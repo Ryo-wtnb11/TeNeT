@@ -283,6 +283,66 @@ where
     assert!((self_inner - norm.powi(2)).abs() <= 1e-12 * (1.0 + self_inner.abs()));
 }
 
+fn assert_close(actual: &[f64], expected: &[f64], tolerance: f64) {
+    assert_eq!(actual.len(), expected.len());
+    for (&actual, &expected) in actual.iter().zip(expected) {
+        assert!(
+            (actual - expected).abs() <= tolerance * (1.0 + expected.abs()),
+            "actual {actual:?}, expected {expected:?}"
+        );
+    }
+}
+
+fn assert_typed_cuda_qr_matches_host<R>(source: &TensorMap<R, f64>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    let provider = source.provider() as *const R;
+    let runtime = source.runtime().identity();
+    let source_data = source.data().to_vec();
+    let (expected_left, expected_right) = source.qr_compact().unwrap();
+    let source_device = source.to_cuda().unwrap();
+    let (left_device, right_device) = source_device.qr_compact().unwrap();
+
+    for factor in [&left_device, &right_device] {
+        assert!(std::ptr::eq(factor.provider(), provider));
+        assert!(runtime.matches(factor.runtime()));
+        assert_eq!(factor.placement(), tenet::core::Placement::Cuda(0));
+    }
+    let left = left_device.to_host().unwrap();
+    let right = right_device.to_host().unwrap();
+    assert_close(left.data(), expected_left.data(), 1e-10);
+    assert_close(right.data(), expected_right.data(), 1e-10);
+    assert_eq!(
+        structural_snapshot(&left),
+        structural_snapshot(&expected_left)
+    );
+    assert_eq!(
+        structural_snapshot(&right),
+        structural_snapshot(&expected_right)
+    );
+    let rebuilt = left.compose(&right).unwrap();
+    assert_close(rebuilt.data(), source.data(), 1e-10);
+    assert_eq!(source_device.to_host().unwrap().data(), source_data);
+}
+
+fn assert_finite_r_diagonal_nonnegative<R>(right: &TensorMap<R, f64>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    for block_index in 0..right.block_count() {
+        let block = right.block(block_index).unwrap();
+        let diagonal_len = block.shape()[0].min(block.shape()[1]);
+        for index in 0..diagonal_len {
+            let value = right.data()
+                [block.offset() + index * block.strides()[0] + index * block.strides()[1]];
+            if value.is_finite() {
+                assert!(value >= 0.0, "negative finite R diagonal {value:?}");
+            }
+        }
+    }
+}
+
 #[test]
 #[ignore]
 fn builtin_and_simple_product_providers_share_one_transfer_path() {
@@ -642,6 +702,221 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
     assert_eq!(empty_device.norm().unwrap(), 0.0);
     assert_eq!(empty_device.inner(&empty_device).unwrap(), 0.0);
     assert_eq!(empty_device.dot(&empty_device).unwrap(), 0.0);
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn typed_cuda_qr_compact_streams_multiplicity_free_f64_factors() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+
+    let u1 = Arc::new(U1FusionRule);
+    let tall = GradedSpace::try_new(
+        Arc::clone(&u1),
+        [(U1Irrep::new(0), 3), (U1Irrep::new(1), 1)],
+        false,
+    )
+    .unwrap();
+    let wide = GradedSpace::try_new(
+        Arc::clone(&u1),
+        [(U1Irrep::new(0), 2), (U1Irrep::new(1), 3)],
+        false,
+    )
+    .unwrap();
+    let mixed = TensorMap::from_block_fn(&runtime, [&tall], [&wide], |_, indices| {
+        if indices[0] == indices[1] {
+            6.0 + indices[0] as f64
+        } else {
+            (1 + indices[0] + 2 * indices[1]) as f64
+        }
+    })
+    .unwrap();
+    assert_typed_cuda_qr_matches_host(&mixed);
+
+    let charge_zero_only =
+        GradedSpace::try_new(Arc::clone(&u1), [(U1Irrep::new(0), 2)], false).unwrap();
+    let unmatched =
+        TensorMap::from_block_fn(&runtime, [&tall], [&charge_zero_only], |_, indices| {
+            if indices[0] == indices[1] {
+                4.0 + indices[0] as f64
+            } else {
+                1.0
+            }
+        })
+        .unwrap();
+    assert_typed_cuda_qr_matches_host(&unmatched);
+
+    let square = TensorMap::from_block_fn(&runtime, [&wide], [&wide], |_, indices| {
+        if indices[0] == indices[1] {
+            8.0 + indices[0] as f64
+        } else {
+            (1 + indices[0] + indices[1]) as f64
+        }
+    })
+    .unwrap();
+    assert_typed_cuda_qr_matches_host(&square);
+
+    let su2 = Arc::new(SU2FusionRule);
+    let su2_leg = GradedSpace::try_new(
+        Arc::clone(&su2),
+        [
+            (SU2Irrep::from_twice_spin(0), 2),
+            (SU2Irrep::from_twice_spin(1), 2),
+        ],
+        false,
+    )
+    .unwrap();
+    let su2_tensor = TensorMap::from_block_fn(&runtime, [&su2_leg], [&su2_leg], |_, indices| {
+        if indices[0] == indices[1] {
+            7.0 + indices[0] as f64
+        } else {
+            1.0
+        }
+    })
+    .unwrap();
+    assert_typed_cuda_qr_matches_host(&su2_tensor);
+
+    let product = Arc::new(U1FusionRule.product(FermionParityFusionRule));
+    let product_leg = GradedSpace::try_new(
+        Arc::clone(&product),
+        [
+            (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
+            (product_sector(U1Irrep::new(1), Z2Irrep::ODD), 1),
+        ],
+        false,
+    )
+    .unwrap();
+    let product_tensor =
+        TensorMap::from_block_fn(&runtime, [&product_leg], [&product_leg], |_, indices| {
+            if indices[0] == indices[1] {
+                5.0 + indices[0] as f64
+            } else {
+                1.0
+            }
+        })
+        .unwrap();
+    assert_typed_cuda_qr_matches_host(&product_tensor);
+
+    let multi_tree =
+        TensorMap::from_block_fn(&runtime, [&su2_leg, &su2_leg], [&su2_leg], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 1.0
+        })
+        .unwrap();
+    let (expected_multi_left, expected_multi_right) = multi_tree.qr_compact().unwrap();
+    let multi_tree_device = multi_tree.to_cuda().unwrap();
+    let (left, right) = multi_tree_device.qr_compact().unwrap();
+    let left = left.to_host().unwrap();
+    let right = right.to_host().unwrap();
+    assert_eq!(
+        structural_snapshot(&left),
+        structural_snapshot(&expected_multi_left)
+    );
+    assert_eq!(
+        structural_snapshot(&right),
+        structural_snapshot(&expected_multi_right)
+    );
+    let rebuilt = left.compose(&right).unwrap();
+    assert_close(rebuilt.data(), multi_tree.data(), 1e-10);
+
+    let zero = TensorMap::from_block_fn(&runtime, [&wide], [&wide], |_, _| 0.0).unwrap();
+    let zero_device = zero.to_cuda().unwrap();
+    let (zero_left, zero_right) = zero_device.qr_compact().unwrap();
+    let zero_left = zero_left.to_host().unwrap();
+    let zero_right = zero_right.to_host().unwrap();
+    let zero_rebuilt = zero_left.compose(&zero_right).unwrap();
+    assert_close(zero_rebuilt.data(), zero.data(), 1e-10);
+    assert_finite_r_diagonal_nonnegative(&zero_right);
+
+    let rank_deficient_leg =
+        GradedSpace::try_new(Arc::clone(&u1), [(U1Irrep::new(0), 3)], false).unwrap();
+    let rank_deficient = TensorMap::from_block_fn(
+        &runtime,
+        [&rank_deficient_leg],
+        [&rank_deficient_leg],
+        |_, indices| (indices[0] + 1) as f64 * (indices[1] + 1) as f64,
+    )
+    .unwrap();
+    let (rank_left, rank_right) = rank_deficient.to_cuda().unwrap().qr_compact().unwrap();
+    let rank_left = rank_left.to_host().unwrap();
+    let rank_right = rank_right.to_host().unwrap();
+    assert!(rank_left.is_isometric(1e-10).unwrap());
+    assert_close(
+        rank_left.compose(&rank_right).unwrap().data(),
+        rank_deficient.data(),
+        1e-10,
+    );
+    assert_finite_r_diagonal_nonnegative(&rank_right);
+
+    let tiny_negative = TensorMap::from_block_fn(
+        &runtime,
+        [&charge_zero_only],
+        [&charge_zero_only],
+        |_, indices| {
+            if indices[0] == indices[1] {
+                -1.0e-300 * (indices[0] + 1) as f64
+            } else {
+                0.0
+            }
+        },
+    )
+    .unwrap();
+    let (tiny_left, tiny_right) = tiny_negative.to_cuda().unwrap().qr_compact().unwrap();
+    let tiny_left = tiny_left.to_host().unwrap();
+    let tiny_right = tiny_right.to_host().unwrap();
+    assert_close(
+        tiny_left.compose(&tiny_right).unwrap().data(),
+        tiny_negative.data(),
+        1e-10,
+    );
+    assert_finite_r_diagonal_nonnegative(&tiny_right);
+
+    let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
+    let charge0 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(0), 2)], false).unwrap();
+    let charge1 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(1), 3)], false).unwrap();
+    let empty: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&charge0], [&charge1], |_, _| 1.0).unwrap();
+    assert!(empty.data().is_empty());
+    assert_typed_cuda_qr_matches_host(&empty);
+
+    let device = mixed.to_cuda().unwrap();
+    let lazy = device.adjoint().unwrap();
+    assert!(matches!(
+        lazy.qr_compact(),
+        Err(tenet::typed::Error::UnsupportedOnDevice(_))
+    ));
+    let expected = device.qr_compact().unwrap();
+    let expected_left = expected.0.to_host().unwrap();
+    let expected_right = expected.1.to_host().unwrap();
+    for _ in 0..3 {
+        let actual = device.qr_compact().unwrap();
+        assert_close(
+            actual.0.to_host().unwrap().data(),
+            expected_left.data(),
+            1e-10,
+        );
+        assert_close(
+            actual.1.to_host().unwrap().data(),
+            expected_right.data(),
+            1e-10,
+        );
+    }
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..4)
+            .map(|_| scope.spawn(|| device.qr_compact().unwrap()))
+            .collect();
+        for worker in workers {
+            let actual = worker.join().unwrap();
+            assert_close(
+                actual.0.to_host().unwrap().data(),
+                expected_left.data(),
+                1e-10,
+            );
+            assert_close(
+                actual.1.to_host().unwrap().data(),
+                expected_right.data(),
+                1e-10,
+            );
+        }
+    });
 }
 
 #[test]

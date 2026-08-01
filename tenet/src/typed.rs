@@ -223,7 +223,9 @@ use tenet_core::{
     CheckedGenericFusion, CheckedGenericRigidSymbols, HostReadableStorage, Placement, TensorStorage,
 };
 #[cfg(feature = "cuda")]
-use tenet_dense::{cuda_gemm_region_into, CudaDenseContext};
+use tenet_core::{CoupledSectorRegion, CoupledTreeExtent};
+#[cfg(feature = "cuda")]
+use tenet_dense::{cuda_gemm_region_into, CudaDenseContext, CudaDenseStorage};
 #[cfg(feature = "cuda")]
 use tenet_operations::StorageGemm;
 use tenet_tensors::{
@@ -267,6 +269,8 @@ use crate::tensor::{
     validate_norm_p, weighted_inner, weighted_trace, with_planar_axes, CatOperandLayout, CatSide,
     Fill, PlanarRequestKind, TensorScalar,
 };
+#[cfg(feature = "cuda")]
+use crate::tensor::{assemble_left_factor, assemble_right_factor, cuda_qr_region, upload_selector};
 pub use crate::tensor_core::CheckedGenericTensorProductError;
 use crate::tensor_core::{
     pow_by_squaring, tensorcompose_owned_multiplicity_free,
@@ -288,7 +292,15 @@ thread_local! {
         std::cell::Cell<Option<(usize, usize, usize)>> = const {
             std::cell::Cell::new(None)
         };
+    /// `(qr_calls, diagonal_values, selector_uploads, output_uploads,
+    /// assembly_gemms, live_route_scratch, peak_route_scratch)`.
+    static CUDA_QR_OBSERVATION: std::cell::Cell<Option<CudaQrObservation>> = const {
+            std::cell::Cell::new(None)
+        };
 }
+
+#[cfg(all(test, feature = "cuda"))]
+type CudaQrObservation = (usize, usize, usize, usize, usize, usize, usize);
 
 #[cfg(all(test, feature = "cuda"))]
 fn observe_cuda_arithmetic(zero_uploads: usize, coefficient_uploads: usize, kernels: usize) {
@@ -301,6 +313,148 @@ fn observe_cuda_arithmetic(zero_uploads: usize, coefficient_uploads: usize, kern
             )));
         }
     });
+}
+
+#[cfg(all(test, feature = "cuda"))]
+fn update_cuda_qr_observation(update: impl FnOnce(CudaQrObservation) -> CudaQrObservation) {
+    CUDA_QR_OBSERVATION.with(|observation| {
+        if let Some(current) = observation.get() {
+            observation.set(Some(update(current)));
+        }
+    });
+}
+
+#[cfg(all(test, feature = "cuda"))]
+pub(crate) fn observe_cuda_qr_decomposition(diagonal_values: usize) {
+    update_cuda_qr_observation(|(qr, diagonal, selectors, outputs, gemms, live, peak)| {
+        (
+            qr + 1,
+            diagonal + diagonal_values,
+            selectors,
+            outputs,
+            gemms,
+            live,
+            peak,
+        )
+    });
+}
+
+#[cfg(all(test, feature = "cuda"))]
+pub(crate) fn observe_cuda_qr_selector_upload() {
+    update_cuda_qr_observation(|(qr, diagonal, selectors, outputs, gemms, live, peak)| {
+        (qr, diagonal, selectors + 1, outputs, gemms, live, peak)
+    });
+}
+
+#[cfg(all(test, feature = "cuda"))]
+pub(crate) fn observe_cuda_qr_assembly_gemm() {
+    update_cuda_qr_observation(|(qr, diagonal, selectors, outputs, gemms, live, peak)| {
+        (qr, diagonal, selectors, outputs, gemms + 1, live, peak)
+    });
+}
+
+#[cfg(all(test, feature = "cuda"))]
+fn observe_cuda_qr_output_upload() {
+    update_cuda_qr_observation(|(qr, diagonal, selectors, outputs, gemms, live, peak)| {
+        (qr, diagonal, selectors, outputs + 1, gemms, live, peak)
+    });
+}
+
+#[cfg(feature = "cuda")]
+struct TypedCudaQrScratch {
+    left: CudaDenseStorage,
+    right: CudaDenseStorage,
+    selector: CudaStorage,
+}
+
+#[cfg(feature = "cuda")]
+impl TypedCudaQrScratch {
+    fn new(left: CudaDenseStorage, right: CudaDenseStorage, selector: CudaStorage) -> Self {
+        #[cfg(test)]
+        update_cuda_qr_observation(|(qr, diagonal, selectors, outputs, gemms, live, peak)| {
+            let live = live + 1;
+            (
+                qr,
+                diagonal,
+                selectors,
+                outputs,
+                gemms,
+                live,
+                peak.max(live),
+            )
+        });
+        Self {
+            left,
+            right,
+            selector,
+        }
+    }
+}
+
+#[cfg(all(test, feature = "cuda"))]
+impl Drop for TypedCudaQrScratch {
+    fn drop(&mut self) {
+        update_cuda_qr_observation(|(qr, diagonal, selectors, outputs, gemms, live, peak)| {
+            (qr, diagonal, selectors, outputs, gemms, live - 1, peak)
+        });
+    }
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Clone, Copy)]
+struct TypedCudaQrRoute {
+    source: usize,
+    left: usize,
+    right: usize,
+    rank: usize,
+}
+
+#[cfg(feature = "cuda")]
+struct TypedCudaQrPlan<R> {
+    left_space: BoundDynamicFusionMapSpace<R>,
+    right_space: BoundDynamicFusionMapSpace<R>,
+    source_regions: Arc<[CoupledSectorRegion]>,
+    left_regions: Arc<[CoupledSectorRegion]>,
+    right_regions: Arc<[CoupledSectorRegion]>,
+    routes: Vec<TypedCudaQrRoute>,
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_qr_tree_extents_match(
+    source: &[CoupledTreeExtent],
+    factor: &[CoupledTreeExtent],
+) -> Result<bool, Error> {
+    if source.len() != factor.len() {
+        return Ok(false);
+    }
+    let mut matched = vec![false; factor.len()];
+    for source_tree in source {
+        let source_extent = source_tree.extent()?;
+        let mut match_index = None;
+        for (index, factor_tree) in factor.iter().enumerate() {
+            if !matched[index]
+                && source_tree.tree() == factor_tree.tree()
+                && source_extent == factor_tree.extent()?
+            {
+                match_index = Some(index);
+                break;
+            }
+        }
+        let Some(index) = match_index else {
+            return Ok(false);
+        };
+        matched[index] = true;
+    }
+    Ok(matched.into_iter().all(|is_matched| is_matched))
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_qr_diagonal_sign(value: f64) -> f64 {
+    if value < 0.0 {
+        -1.0
+    } else {
+        1.0
+    }
 }
 
 #[cfg(feature = "cuda")]
@@ -2570,6 +2724,7 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 ///     let _ = lhs.add(rhs, 2.0, -3.0);
 ///     let _ = lhs.zeros_like();
 ///     let _ = lhs.normalize();
+///     let _ = lhs.qr_compact();
 /// }
 /// ```
 ///
@@ -2596,6 +2751,29 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 ///     );
 ///     let _ = lhs.zeros_like();
 ///     let _ = lhs.normalize();
+///     let _ = lhs.qr_compact();
+/// }
+/// ```
+///
+/// Compact QR remains unavailable for checked-Generic and complex CUDA
+/// tensors independently of the reduction/arithmetic surface above:
+///
+/// ```compile_fail
+/// use tenet::core::Su3FusionRule;
+/// use tenet::typed::{CudaStorage, TensorMap};
+///
+/// fn no_checked_generic_cuda_qr(tensor: &TensorMap<Su3FusionRule, f64, CudaStorage>) {
+///     let _ = tensor.qr_compact();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use num_complex::Complex64;
+/// use tenet::core::U1FusionRule;
+/// use tenet::typed::{CudaStorage, TensorMap};
+///
+/// fn no_complex_cuda_qr(tensor: &TensorMap<U1FusionRule, Complex64, CudaStorage>) {
+///     let _ = tensor.qr_compact();
 /// }
 /// ```
 impl<R> TensorMap<R, f64, CudaStorage>
@@ -2621,7 +2799,7 @@ where
         }
     }
 
-    fn validate_cuda_arithmetic_metadata(
+    fn validate_cuda_owned_metadata(
         expected: Placement,
         actual: Placement,
         required_len: usize,
@@ -2636,6 +2814,195 @@ where
             ));
         }
         Ok(())
+    }
+
+    fn compile_cuda_qr_plan(
+        &self,
+        source_regions: Arc<[CoupledSectorRegion]>,
+    ) -> Result<TypedCudaQrPlan<R>, Error> {
+        let source_space = self.logical_space().space();
+        let hom = source_space.homspace();
+        let bond = SectorLeg::new(
+            source_regions.iter().filter_map(|region| {
+                let rank = region.rows().min(region.cols());
+                (rank != 0).then_some((region.coupled(), rank))
+            }),
+            false,
+        );
+        let left_space =
+            self.logical_space()
+                .derive_from_final_homspace(FusionTreeHomSpace::new(
+                    FusionProductSpace::new(hom.codomain().legs().iter().cloned()),
+                    FusionProductSpace::new([bond.clone()]),
+                ))?;
+        let right_space =
+            self.logical_space()
+                .derive_from_final_homspace(FusionTreeHomSpace::new(
+                    FusionProductSpace::new([bond]),
+                    FusionProductSpace::new(hom.domain().legs().iter().cloned()),
+                ))?;
+        let left_regions =
+            sector_regions(left_space.space().structure(), left_space.space().nout())?;
+        let right_regions =
+            sector_regions(right_space.space().structure(), right_space.space().nout())?;
+        let index_by_sector = |regions: &[CoupledSectorRegion]| {
+            let mut indices = HashMap::with_capacity(regions.len());
+            for (index, region) in regions.iter().enumerate() {
+                if indices.insert(region.coupled(), index).is_some() {
+                    return Err(internal_layout_error(
+                        "compact QR factor contains a duplicate coupled sector",
+                    ));
+                }
+            }
+            Ok(indices)
+        };
+        let left_by_sector = index_by_sector(&left_regions)?;
+        let right_by_sector = index_by_sector(&right_regions)?;
+        let mut routes = Vec::with_capacity(source_regions.len());
+        for (source, region) in source_regions.iter().enumerate() {
+            let rank = region.rows().min(region.cols());
+            if rank == 0 {
+                continue;
+            }
+            let left = *left_by_sector.get(&region.coupled()).ok_or_else(|| {
+                internal_layout_error("compact QR left factor is missing a source sector")
+            })?;
+            let right = *right_by_sector.get(&region.coupled()).ok_or_else(|| {
+                internal_layout_error("compact QR right factor is missing a source sector")
+            })?;
+            let left_region = &left_regions[left];
+            let right_region = &right_regions[right];
+            if (left_region.rows(), left_region.cols()) != (region.rows(), rank)
+                || (right_region.rows(), right_region.cols()) != (rank, region.cols())
+                || !cuda_qr_tree_extents_match(region.row_trees(), left_region.row_trees())?
+                || !cuda_qr_tree_extents_match(region.col_trees(), right_region.col_trees())?
+            {
+                return Err(internal_layout_error(
+                    "compact QR factor region does not match its source route",
+                ));
+            }
+            routes.push(TypedCudaQrRoute {
+                source,
+                left,
+                right,
+                rank,
+            });
+        }
+        if routes.len() != left_regions.len() || routes.len() != right_regions.len() {
+            return Err(internal_layout_error(
+                "compact QR factor contains an unrouted coupled sector",
+            ));
+        }
+        Ok(TypedCudaQrPlan {
+            left_space,
+            right_space,
+            source_regions,
+            left_regions,
+            right_regions,
+            routes,
+        })
+    }
+
+    /// Streamed compact QR of owned dense CUDA storage. Each nonempty coupled
+    /// sector is gauge-fixed on device; only its compact R diagonal is read
+    /// back for the exact sign decision.
+    pub fn qr_compact(&self) -> Result<(Self, Self), Error> {
+        let source = self.direct_cuda_storage("qr_compact")?;
+        let source_space = self.logical_space().space();
+        let required_len = source_space.required_len()?;
+        let source_regions = sector_regions(source_space.structure(), source_space.nout())?;
+
+        {
+            let mut state = self.runtime.lock();
+            let cuda = state.cuda.as_mut().ok_or_else(|| {
+                Error::InvalidArgument(
+                    "this runtime was built without a CUDA device; use \
+                     Runtime::builder().cuda(device)"
+                        .to_string(),
+                )
+            })?;
+            Self::validate_cuda_owned_metadata(
+                Placement::Cuda(cuda.device()),
+                source.placement(),
+                required_len,
+                source.len(),
+            )?;
+        }
+
+        // Provider queries and final HomSpace admission belong outside the
+        // execution lock; the plan owns every source-to-factor route.
+        let plan = self.compile_cuda_qr_plan(source_regions)?;
+        let left_len = plan.left_space.space().required_len()?;
+        let right_len = plan.right_space.space().required_len()?;
+
+        let (left_data, right_data) = {
+            let mut state = self.runtime.lock();
+            let cuda = state.cuda.as_mut().ok_or_else(|| {
+                Error::InvalidArgument(
+                    "this runtime was built without a CUDA device; use \
+                     Runtime::builder().cuda(device)"
+                        .to_string(),
+                )
+            })?;
+            let mut left_data = CudaStorage::upload(cuda, &vec![0.0; left_len])?;
+            #[cfg(test)]
+            observe_cuda_qr_output_upload();
+            let mut right_data = CudaStorage::upload(cuda, &vec![0.0; right_len])?;
+            #[cfg(test)]
+            observe_cuda_qr_output_upload();
+            for route in &plan.routes {
+                let source_region = &plan.source_regions[route.source];
+                let left_region = &plan.left_regions[route.left];
+                let right_region = &plan.right_regions[route.right];
+                let (raw_left, raw_right, diagonal) = cuda_qr_region(
+                    cuda,
+                    &source.0,
+                    source_region.range().start,
+                    source_region.rows(),
+                    source_region.cols(),
+                )?;
+                let signs = diagonal.iter().copied().map(cuda_qr_diagonal_sign);
+                let selector = upload_selector(
+                    cuda,
+                    route.rank,
+                    route.rank,
+                    signs.enumerate().map(|(index, sign)| (index, index, sign)),
+                )?;
+                let scratch = TypedCudaQrScratch::new(raw_left, raw_right, selector);
+                assemble_left_factor(
+                    cuda,
+                    &mut left_data,
+                    left_region,
+                    source_region,
+                    &scratch.left,
+                    route.rank,
+                    &scratch.selector,
+                    route.rank,
+                )?;
+                assemble_right_factor(
+                    cuda,
+                    &mut right_data,
+                    right_region,
+                    source_region,
+                    &scratch.selector,
+                    route.rank,
+                    route.rank,
+                    &scratch.right,
+                )?;
+            }
+            (left_data, right_data)
+        };
+
+        Ok((
+            Self {
+                runtime: self.runtime.clone(),
+                repr: owned_repr(TypedTensorBody::dense(plan.left_space, left_data)),
+            },
+            Self {
+                runtime: self.runtime.clone(),
+                repr: owned_repr(TypedTensorBody::dense(plan.right_space, right_data)),
+            },
+        ))
     }
 
     fn cuda_axpby_owned(
@@ -2654,19 +3021,9 @@ where
             )
         })?;
         let expected = Placement::Cuda(cuda.device());
-        Self::validate_cuda_arithmetic_metadata(
-            expected,
-            lhs.placement(),
-            required_len,
-            lhs.len(),
-        )?;
+        Self::validate_cuda_owned_metadata(expected, lhs.placement(), required_len, lhs.len())?;
         if let Some((rhs, _)) = rhs {
-            Self::validate_cuda_arithmetic_metadata(
-                expected,
-                rhs.placement(),
-                required_len,
-                rhs.len(),
-            )?;
+            Self::validate_cuda_owned_metadata(expected, rhs.placement(), required_len, rhs.len())?;
         }
 
         // ponytail: #740 keeps these proven Host uploads until native device
@@ -2744,7 +3101,7 @@ where
                     .to_string(),
             )
         })?;
-        Self::validate_cuda_arithmetic_metadata(
+        Self::validate_cuda_owned_metadata(
             Placement::Cuda(cuda.device()),
             source.placement(),
             required_len,
@@ -2769,7 +3126,7 @@ where
                     .to_string(),
             )
         })?;
-        Self::validate_cuda_arithmetic_metadata(
+        Self::validate_cuda_owned_metadata(
             Placement::Cuda(cuda.device()),
             storage.placement(),
             required_len,
@@ -8384,9 +8741,9 @@ mod representation_gates {
 
     #[cfg(feature = "cuda")]
     #[test]
-    fn typed_cuda_arithmetic_metadata_validation_orders_ordinal_before_length() {
+    fn typed_cuda_owned_metadata_validation_orders_ordinal_before_length() {
         type DeviceTensor = TensorMap<U1FusionRule, f64, CudaStorage>;
-        assert!(DeviceTensor::validate_cuda_arithmetic_metadata(
+        assert!(DeviceTensor::validate_cuda_owned_metadata(
             Placement::Cuda(0),
             Placement::Cuda(0),
             7,
@@ -8394,7 +8751,7 @@ mod representation_gates {
         )
         .is_ok());
         assert_eq!(
-            DeviceTensor::validate_cuda_arithmetic_metadata(
+            DeviceTensor::validate_cuda_owned_metadata(
                 Placement::Cuda(1),
                 Placement::Cuda(0),
                 7,
@@ -8404,7 +8761,7 @@ mod representation_gates {
             Error::PlacementMismatch
         );
         assert!(matches!(
-            DeviceTensor::validate_cuda_arithmetic_metadata(
+            DeviceTensor::validate_cuda_owned_metadata(
                 Placement::Cuda(0),
                 Placement::Cuda(0),
                 7,
@@ -8412,6 +8769,183 @@ mod representation_gates {
             ),
             Err(Error::InvalidArgument(message)) if message.contains("payload length")
         ));
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn typed_cuda_qr_tree_route_validation_is_order_independent_and_bijective() {
+        let source = u1_lazy_fixture();
+        let regions = sector_regions(
+            source.logical_space().space().structure(),
+            source.logical_space().space().nout(),
+        )
+        .unwrap();
+        let trees = regions
+            .iter()
+            .flat_map(|region| [region.row_trees(), region.col_trees()])
+            .find(|trees| trees.len() > 1)
+            .expect("fixture must contain a multi-tree coupled sector");
+        let mut reordered = trees.to_vec();
+        reordered.reverse();
+        assert!(cuda_qr_tree_extents_match(trees, &reordered).unwrap());
+        reordered.pop();
+        assert!(!cuda_qr_tree_extents_match(trees, &reordered).unwrap());
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn typed_cuda_qr_sign_keeps_exact_zero_and_flips_tiny_negative_pivots() {
+        assert_eq!(cuda_qr_diagonal_sign(0.0), 1.0);
+        assert_eq!(cuda_qr_diagonal_sign(-0.0), 1.0);
+        assert_eq!(cuda_qr_diagonal_sign(-1.0e-300), -1.0);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn typed_cuda_qr_rejects_compact_and_lazy_representations_before_runtime_work() {
+        let diagonal = u1_lazy_fixture().svd_compact().unwrap().1;
+        let TypedData::Diagonal(spectrum) = owned(&diagonal).data.as_ref() else {
+            unreachable!("SVD factor is compact")
+        };
+        let device_diagonal: TensorMap<_, f64, CudaStorage> = TensorMap {
+            runtime: diagonal.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::new(
+                diagonal.logical_space().clone(),
+                TypedData::<f64, CudaStorage>::Diagonal(spectrum.clone()),
+            )),
+        };
+        assert!(matches!(
+            device_diagonal.qr_compact(),
+            Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
+        ));
+        let lazy = device_diagonal.adjoint().unwrap();
+        assert!(matches!(
+            lazy.qr_compact(),
+            Err(Error::UnsupportedOnDevice(message)) if message.contains("lazy adjoint")
+        ));
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn typed_cuda_qr_work_and_preflight_are_streamed_and_transactional() {
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+        let provider = Arc::new(SU2FusionRule);
+        let leg = GradedSpace::try_new(
+            Arc::clone(&provider),
+            [
+                (SU2Irrep::from_twice_spin(0), 2),
+                (SU2Irrep::from_twice_spin(1), 2),
+            ],
+            false,
+        )
+        .unwrap();
+        let source = TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 1.0
+        })
+        .unwrap();
+        let regions = sector_regions(
+            source.logical_space().space().structure(),
+            source.logical_space().space().nout(),
+        )
+        .unwrap();
+        let nonempty = regions
+            .iter()
+            .filter(|region| region.rows() != 0 && region.cols() != 0)
+            .count();
+        let diagonal_values = regions
+            .iter()
+            .map(|region| region.rows().min(region.cols()))
+            .sum();
+        let assembly_gemms = regions
+            .iter()
+            .map(|region| {
+                region
+                    .row_trees()
+                    .iter()
+                    .filter(|tree| tree.extent().is_ok_and(|extent| extent != 0))
+                    .count()
+                    + region
+                        .col_trees()
+                        .iter()
+                        .filter(|tree| tree.extent().is_ok_and(|extent| extent != 0))
+                        .count()
+            })
+            .sum();
+        let source_device = source.to_cuda().unwrap();
+
+        CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
+        source_device.qr_compact().unwrap();
+        CUDA_QR_OBSERVATION.with(|observation| {
+            assert_eq!(
+                observation.get(),
+                Some((
+                    nonempty,
+                    diagonal_values,
+                    nonempty,
+                    2,
+                    assembly_gemms,
+                    0,
+                    usize::from(nonempty != 0),
+                ))
+            );
+            observation.set(None);
+        });
+
+        let malformed_storage = {
+            let state = runtime.lock();
+            CudaStorage::upload(state.cuda.as_ref().unwrap(), &[]).unwrap()
+        };
+        let malformed = TensorMap {
+            runtime: runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(
+                source.logical_space().clone(),
+                malformed_storage,
+            )),
+        };
+        let sentinel = (usize::MAX, 0, 0, 0, 0, 0, 0);
+        CUDA_QR_OBSERVATION.with(|observation| observation.set(Some(sentinel)));
+        assert!(matches!(
+            malformed.qr_compact(),
+            Err(Error::InvalidArgument(message)) if message.contains("payload length")
+        ));
+        CUDA_QR_OBSERVATION.with(|observation| {
+            assert_eq!(observation.get(), Some(sentinel));
+            observation.set(None);
+        });
+
+        let stranded_storage = {
+            let state = runtime.lock();
+            CudaStorage::upload(state.cuda.as_ref().unwrap(), source.data()).unwrap()
+        };
+        let stranded = TensorMap {
+            runtime: Runtime::builder().build().unwrap(),
+            repr: owned_repr(TypedTensorBody::dense(
+                source.logical_space().clone(),
+                stranded_storage,
+            )),
+        };
+        CUDA_QR_OBSERVATION.with(|observation| observation.set(Some(sentinel)));
+        assert!(matches!(
+            stranded.qr_compact(),
+            Err(Error::InvalidArgument(message)) if message.contains("without a CUDA device")
+        ));
+        CUDA_QR_OBSERVATION.with(|observation| {
+            assert_eq!(observation.get(), Some(sentinel));
+            observation.set(None);
+        });
+
+        let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
+        let charge0 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(0), 1)], false).unwrap();
+        let charge1 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(1), 1)], false).unwrap();
+        let empty: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&charge0], [&charge1], |_, _| 1.0).unwrap();
+        CUDA_QR_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
+        empty.to_cuda().unwrap().qr_compact().unwrap();
+        CUDA_QR_OBSERVATION.with(|observation| {
+            assert_eq!(observation.get(), Some((0, 0, 0, 2, 0, 0, 0)));
+            observation.set(None);
+        });
     }
 
     #[cfg(feature = "cuda")]
