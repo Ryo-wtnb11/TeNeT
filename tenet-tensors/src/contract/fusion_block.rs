@@ -2007,6 +2007,10 @@ where
     DLhs: HostReadableStorage<D>,
     DRhs: HostReadableStorage<D>,
 {
+    fn supports_matmul_with_ops_scaled(&self, lhs_op: MatrixOp, rhs_op: MatrixOp) -> bool {
+        lhs_op == MatrixOp::Identity && rhs_op == MatrixOp::Identity
+    }
+
     fn matmul_range_into(
         &mut self,
         dst: &mut DDst,
@@ -2033,7 +2037,7 @@ where
         )
     }
 
-    fn matmul_range_scaled_into(
+    fn matmul_range_with_ops_scaled_into(
         &mut self,
         dst: &mut DDst,
         dst_offset: usize,
@@ -2044,8 +2048,15 @@ where
         rows: usize,
         contracted: usize,
         cols: usize,
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
         alpha: D,
     ) -> Result<(), OperationError> {
+        if lhs_op != MatrixOp::Identity || rhs_op != MatrixOp::Identity {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "host storage GEMM does not implement transformed operands",
+            });
+        }
         let dst_len = rows * cols;
         let lhs_len = rows * contracted;
         let rhs_len = contracted * cols;

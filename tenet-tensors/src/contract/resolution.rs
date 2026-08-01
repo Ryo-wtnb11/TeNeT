@@ -231,28 +231,54 @@ where
     Ok(plan.map(|plan| Resolution::Core(Arc::new(plan))))
 }
 
-/// Compiles only the canonical storage route whose fermionic coefficient is
-/// uniform within every RHS coupled-sector matrix.
-pub(crate) fn try_compile_scaled_storage_contract_plan<R>(
+/// Compiles the storage-only route with one categorical preflight. Ordinary
+/// host resolution keeps its existing profiled path.
+pub(crate) fn compile_storage_resolution<R>(
     rule: &R,
     dst: &DynamicFusionMapSpace,
     lhs: &DynamicFusionMapSpace,
     rhs: &DynamicFusionMapSpace,
     axes: TensorContractSpec<'_>,
-) -> Result<Option<Arc<FusionBlockContractPlan>>, OperationError>
+    compile_structure: impl FnOnce()
+        -> Result<Option<Arc<TensorContractStructure<f64>>>, OperationError>,
+    compile_dynamic: impl FnOnce() -> Result<Arc<FusionContractPlan>, OperationError>,
+) -> Result<Resolution, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     let preflight = CoreContractPreflight::compile(rule, dst, lhs, rhs, axes)?;
-    if preflight.has_conjugation() {
-        return Ok(None);
+    if !preflight.has_conjugation() {
+        if let Some(validated) = preflight.validate_core_geometry()? {
+            if validated_rhs_contract_requires_twist(&validated)? {
+                if let Some(plan) =
+                    try_compile_scaled_storage_contract_plan(rule, &validated, dst, lhs, rhs)?
+                {
+                    return Ok(Resolution::Core(Arc::new(plan)));
+                }
+            } else {
+                return compile_fusion_block_contract_plan_validated(validated, dst, lhs, rhs)
+                    .map(Arc::new)
+                    .map(Resolution::Core);
+            }
+        }
+        return Ok(Resolution::DynamicTree(compile_dynamic()?));
     }
-    let Some(validated) = preflight.validate_core_geometry()? else {
-        return Ok(None);
-    };
-    if !validated_rhs_contract_requires_twist(&validated)? {
-        return Ok(None);
+    if let Some(structure) = compile_structure()? {
+        return Ok(Resolution::Structure(structure));
     }
+    Ok(Resolution::DynamicTree(compile_dynamic()?))
+}
+
+fn try_compile_scaled_storage_contract_plan<R>(
+    rule: &R,
+    validated: &ValidatedCoreContract<'_, R>,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+) -> Result<Option<FusionBlockContractPlan>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
     let Some(regions) = rhs
         .structure()
         .coupled_sector_regions(rhs.nout())
@@ -289,8 +315,7 @@ where
         }
         alpha_by_coupled.push((region.coupled(), alpha));
     }
-    try_compile_scaled_canonical_core_plan(&validated, dst, lhs, rhs, &alpha_by_coupled)
-        .map(|plan| plan.map(Arc::new))
+    try_compile_scaled_canonical_core_plan(validated, dst, lhs, rhs, &alpha_by_coupled)
 }
 
 /// Compiles the coupled block plan for already-materialized core operands.
@@ -484,6 +509,33 @@ mod tests {
         .unwrap();
 
         // What: one core compiler invocation derives each geometry authority once.
+        assert!(matches!(resolution, Resolution::Core(_)));
+        assert_eq!(
+            super::super::fusion_block::core_contract_derivations(),
+            (1, 1)
+        );
+    }
+
+    #[test]
+    fn storage_core_resolution_derives_geometry_once() {
+        let rule = U1FusionRule;
+        let zero = U1Irrep::new(0).sector_id();
+        let lhs = single_sector_matrix_space(&rule, zero, false, false);
+        let rhs = single_sector_matrix_space(&rule, zero, false, false);
+        let dst = single_sector_matrix_space(&rule, zero, false, false);
+        super::super::fusion_block::reset_core_contract_derivations();
+
+        let resolution = compile_storage_resolution(
+            &rule,
+            &dst,
+            &lhs,
+            &rhs,
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
+            || panic!("core storage contraction must not compile a dense structure"),
+            || panic!("core storage contraction must not compile tree transforms"),
+        )
+        .unwrap();
+
         assert!(matches!(resolution, Resolution::Core(_)));
         assert_eq!(
             super::super::fusion_block::core_contract_derivations(),

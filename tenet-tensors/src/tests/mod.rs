@@ -38,7 +38,7 @@ use tenet_core::{
     SimilarStorage, TensorMap, TensorMapSpace, TensorStorage, Trivial, U1FusionRule, U1Irrep,
     Z2FusionRule,
 };
-use tenet_dense::{DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseWrite};
+use tenet_dense::{DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseWrite, MatrixOp};
 
 #[derive(Clone, Debug, PartialEq)]
 struct TestHostStorage<T>(Vec<T>);

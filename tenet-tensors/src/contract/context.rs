@@ -40,8 +40,7 @@ use super::fusion::{
 use super::fusion_block::{validate_fusion_contract_rule, FusionBlockContractWorkspace};
 use super::resolution::{
     compile_composition_plan, compile_core_plan, compile_prelowered_resolution, compile_resolution,
-    try_compile_oriented_canonical_core_resolution, try_compile_scaled_storage_contract_plan,
-    Resolution,
+    compile_storage_resolution, try_compile_oriented_canonical_core_resolution, Resolution,
 };
 use super::scratch::DynamicFusionScratchWorkspace;
 use super::structure::{TensorContractAxisPlan, TensorContractStructure};
@@ -1359,40 +1358,34 @@ where
         DLhs: TensorStorage<D>,
         DRhs: TensorStorage<D>,
     {
-        let resolution = if let Some(plan) =
-            try_compile_scaled_storage_contract_plan(rule, dst_space, lhs_space, rhs_space, axes)?
-        {
-            Resolution::Core(plan)
-        } else {
-            compile_resolution(
+        let resolution = compile_storage_resolution(
+            rule,
+            dst_space,
+            lhs_space,
+            rhs_space,
+            axes,
+            || match super::fusion::tensorcontract_fusion_structure_dyn_raw(
                 rule,
                 dst_space,
                 lhs_space,
                 rhs_space,
+                Arc::clone(lhs_space.structure()),
+                Arc::clone(rhs_space.structure()),
                 axes,
-                || match super::fusion::tensorcontract_fusion_structure_dyn_raw(
-                    rule,
-                    dst_space,
-                    lhs_space,
-                    rhs_space,
-                    Arc::clone(lhs_space.structure()),
-                    Arc::clone(rhs_space.structure()),
-                    axes,
-                ) {
-                    Ok(structure) => Ok(Some(Arc::new(structure))),
-                    Err(OperationError::UnsupportedTensorContractScope {
-                        message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
-                    }) => Ok(None),
-                    Err(err) => Err(err),
-                },
-                || {
-                    prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
-                        rule, dst_space, lhs_space, rhs_space, axes,
-                    )
-                    .map(Arc::new)
-                },
-            )?
-        };
+            ) {
+                Ok(structure) => Ok(Some(Arc::new(structure))),
+                Err(OperationError::UnsupportedTensorContractScope {
+                    message: SOURCE_TRANSFORM_REQUIRES_EXPLICIT,
+                }) => Ok(None),
+                Err(err) => Err(err),
+            },
+            || {
+                prepare_tensorcontract_fusion_plan_dyn_raw_canonical(
+                    rule, dst_space, lhs_space, rhs_space, axes,
+                )
+                .map(Arc::new)
+            },
+        )?;
         #[cfg(test)]
         self.record_top_level_resolution(&resolution);
         match resolution {
