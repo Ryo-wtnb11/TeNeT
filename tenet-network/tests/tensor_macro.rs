@@ -2,10 +2,7 @@
 //! executor over the user-layer `Tensor`.
 
 use tenet::prelude::*;
-use tenet_network::{
-    tensor, GreedyDenseOptimizer, LabelOrderDenseOptimizer, Network, NetworkExecutionWorkspace,
-    TemporaryLabel, TensorId,
-};
+use tenet_network::tensor;
 
 fn assert_close(lhs: &[f64], rhs: &[f64], tol: f64) {
     assert_eq!(lhs.len(), rhs.len(), "data lengths differ");
@@ -65,58 +62,6 @@ fn permuted_output_labels_match_contract_ordered() {
             .contract_ordered(&b, &[2, 3], &[0, 1], &[1, 0, 2, 3])
             .unwrap();
         assert_close(c.data(), expected.data(), 1e-12);
-    }
-}
-
-#[test]
-fn planned_crossed_output_preserves_heterogeneous_leg_spaces() {
-    let rt = Runtime::builder().build().unwrap();
-    let a = Space::u1([(-2, 1), (0, 2)]);
-    let b = Space::u1([(-1, 2), (1, 1)]);
-    let bond = Space::u1([(-1, 1), (0, 3), (2, 1)]);
-    let c = Space::u1([(0, 1), (2, 2)]);
-    let d = Space::u1([(-3, 1), (1, 2)]);
-    let lhs = Tensor::rand_with_seed(&rt, Dtype::F64, [&a, &b], [&bond], 224_601).unwrap();
-    let rhs = Tensor::rand_with_seed(&rt, Dtype::F64, [&bond], [&c, &d], 224_602).unwrap();
-    let network = Network::new(
-        vec![
-            vec!["a", "b", "k"]
-                .into_iter()
-                .map(TemporaryLabel::from)
-                .collect(),
-            vec!["k", "c", "d"]
-                .into_iter()
-                .map(TemporaryLabel::from)
-                .collect(),
-        ],
-        vec![false, false],
-        vec![Some(2), Some(1)],
-        ["d", "a", "b", "c"]
-            .into_iter()
-            .map(TemporaryLabel::from)
-            .collect(),
-        Some(2),
-    )
-    .unwrap();
-    let tensors = [&lhs, &rhs];
-    let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
-    let default = lhs.contract(&rhs, &[2], &[0]).unwrap();
-    let expected = default.permute(&[3, 0], &[1, 2]).unwrap();
-    let mut workspace = NetworkExecutionWorkspace::default();
-
-    let cold = planned
-        .execute_with_workspace(&tensors, &mut workspace)
-        .unwrap();
-    let warm = planned
-        .execute_with_workspace(&tensors, &mut workspace)
-        .unwrap();
-    // What: pAB maps every heterogeneous open leg to the requested output
-    // position; equality of flat data alone cannot detect a swapped Space.
-    for actual in [&cold, &warm] {
-        assert_close(actual.data(), expected.data(), 1e-12);
-        for axis in 0..actual.rank() {
-            assert_eq!(actual.space(axis), expected.space(axis));
-        }
     }
 }
 
@@ -186,340 +131,31 @@ fn three_tensor_chain_with_conj_matches_manual_contraction() {
     }
 }
 
-/// 4-tensor chain where greedy planning differs from naive left-to-right:
-/// results identical, greedy's estimated cost strictly lower, and the first
-/// greedy step is the cheap tail pair rather than the head pair.
+/// SU(3) remains on the private erased macro executor until macro cutover;
+/// keep its multi-step crossed-output orientation pinned meanwhile.
 #[test]
-fn greedy_order_beats_naive_left_to_right_on_a_chain() {
-    let rt = Runtime::builder().build().unwrap();
-    let dim = |d: usize| Space::u1([(0, d)]);
-    let (va, vb, vc, vd, ve) = (dim(4), dim(8), dim(4), dim(2), dim(2));
-    let t1 = Tensor::rand_with_seed(&rt, Dtype::F64, [&va], [&vb], 151).unwrap();
-    let t2 = Tensor::rand_with_seed(&rt, Dtype::F64, [&vb], [&vc], 152).unwrap();
-    let t3 = Tensor::rand_with_seed(&rt, Dtype::F64, [&vc], [&vd], 153).unwrap();
-    let t4 = Tensor::rand_with_seed(&rt, Dtype::F64, [&vd], [&ve], 154).unwrap();
-    let tensors = [&t1, &t2, &t3, &t4];
+fn su3_multistep_orientation_matches_manual_contraction() {
+    let runtime = Runtime::builder().build().unwrap();
+    let space = Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap();
+    let a = Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space], 224_811).unwrap();
+    let b = Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space], 224_812).unwrap();
+    let c = Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space], 224_813).unwrap();
 
-    let label = |s: &str| TemporaryLabel::from(s);
-    let network = Network::new(
-        vec![
-            vec![label("a"), label("b")],
-            vec![label("b"), label("c")],
-            vec![label("c"), label("d")],
-            vec![label("d"), label("e")],
-        ],
-        vec![false; 4],
-        vec![None; 4],
-        vec![label("a"), label("e")],
-        None,
-    )
-    .unwrap();
-
-    let greedy = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
-    // Naive left-to-right = contract labels in written order b, c, d.
-    let naive = network
-        .plan(
-            &tensors,
-            &LabelOrderDenseOptimizer::new(vec![label("b"), label("c"), label("d")]),
-        )
+    let actual = tensor!([l; i] = a[i; j] * b[j; k] * c[k; l]).unwrap();
+    let expected = a
+        .contract(&b, &[1], &[0])
+        .unwrap()
+        .contract(&c, &[1], &[0])
+        .unwrap()
+        .permute(&[1], &[0])
         .unwrap();
-
-    // Greedy starts with the cheap tail pair (t3, t4), not (t1, t2).
-    let first = &greedy.plan().steps()[0];
-    assert_eq!(
-        (first.lhs(), first.rhs()),
-        (TensorId::new(2), TensorId::new(3)),
-        "greedy should contract the cheap (c,d)x(d,e) pair first"
-    );
-    let naive_first = &naive.plan().steps()[0];
-    assert_eq!(
-        (naive_first.lhs(), naive_first.rhs()),
-        (TensorId::new(0), TensorId::new(1))
-    );
-
-    assert!(
-        greedy.plan().total_cost() < naive.plan().total_cost(),
-        "greedy cost {} should beat naive cost {}",
-        greedy.plan().total_cost(),
-        naive.plan().total_cost()
-    );
-
-    let from_greedy = greedy.execute(&tensors).unwrap();
-    let from_naive = naive.execute(&tensors).unwrap();
-    assert_close(from_greedy.data(), from_naive.data(), 1e-12);
-
-    // The macro (greedy default) agrees too.
-    let from_macro = tensor!([a; e] = t1[a; b] * t2[b; c] * t3[c; d] * t4[d; e]).unwrap();
-    assert_close(from_macro.data(), from_greedy.data(), 1e-12);
+    assert!(actual
+        .data_c64()
+        .iter()
+        .zip(expected.data_c64())
+        .all(|(lhs, rhs)| (*lhs - *rhs).norm() < 1e-12));
 }
 
-/// Reusing one workspace across warm executions preserves the compiled
-/// schedule's numerical result, including intermediate orientation.
-#[test]
-fn planned_network_reuses_execution_workspace() {
-    let rt = Runtime::builder().build().unwrap();
-    let v = u1_space();
-    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 157).unwrap();
-    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 158).unwrap();
-    let c = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 159).unwrap();
-    let labels = |names: &[&str]| {
-        names
-            .iter()
-            .map(|name| TemporaryLabel::from(*name))
-            .collect()
-    };
-    let network = Network::new(
-        vec![
-            labels(&["i", "j"]),
-            labels(&["j", "k"]),
-            labels(&["k", "l"]),
-        ],
-        vec![false; 3],
-        vec![None; 3],
-        labels(&["l", "i"]),
-        Some(1),
-    )
-    .unwrap();
-    let tensors = [&a, &b, &c];
-    let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
-    let expected = planned.execute(&tensors).unwrap();
-    let mut workspace = NetworkExecutionWorkspace::default();
-
-    let first = planned
-        .execute_with_workspace(&tensors, &mut workspace)
-        .unwrap();
-    let after_first = workspace.stats();
-    let second = planned
-        .execute_with_workspace(&tensors, &mut workspace)
-        .unwrap();
-    let after_second = workspace.stats();
-    let third = planned
-        .execute_with_workspace(&tensors, &mut workspace)
-        .unwrap();
-    let after_third = workspace.stats();
-    assert_close(first.data(), expected.data(), 1e-12);
-    assert_close(second.data(), expected.data(), 1e-12);
-    assert_close(third.data(), expected.data(), 1e-12);
-    assert_eq!(
-        after_second.contract_layout_preparations - after_first.contract_layout_preparations,
-        1
-    );
-    assert_eq!(
-        after_second.orientation_layout_preparations - after_first.orientation_layout_preparations,
-        0,
-        "crossed pAB must be compiled into the contraction destination"
-    );
-    assert_eq!(
-        after_third.contract_layout_preparations - after_second.contract_layout_preparations,
-        0
-    );
-    assert_eq!(
-        after_third.orientation_layout_preparations - after_second.orientation_layout_preparations,
-        0
-    );
-    assert_eq!(
-        after_third.contract_structural_comparisons - after_second.contract_structural_comparisons,
-        0
-    );
-    assert_eq!(
-        after_third.orientation_structural_comparisons
-            - after_second.orientation_structural_comparisons,
-        0
-    );
-    assert_eq!(
-        after_third.owned_orientations - after_first.owned_orientations,
-        0
-    );
-    assert_eq!(
-        after_third.reused_orientations - after_first.reused_orientations,
-        0
-    );
-    assert_eq!(workspace.retained_intermediate_buffer_count(), 1);
-
-    let z = Space::z2([(0, 2), (1, 2)]);
-    let wrong_a = Tensor::rand_with_seed(&rt, Dtype::F64, [&z], [&z], 160).unwrap();
-    assert!(planned
-        .execute_with_workspace(&[&wrong_a, &b, &c], &mut workspace)
-        .is_err());
-
-    let before_recovery = workspace.stats();
-    let recovered = planned
-        .execute_with_workspace(&tensors, &mut workspace)
-        .unwrap();
-    assert_close(recovered.data(), expected.data(), 1e-12);
-    assert_eq!(
-        workspace.stats().reused_intermediates - before_recovery.reused_intermediates,
-        1
-    );
-}
-
-#[test]
-fn split_changing_intermediate_keeps_sequential_orientation_replay() {
-    let rt = Runtime::builder().build().unwrap();
-    let v = u1_space();
-    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 224_801).unwrap();
-    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v, &v], 224_802).unwrap();
-    let c = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 224_803).unwrap();
-    let label = |name: &str| TemporaryLabel::from(name);
-    let network = Network::new(
-        vec![
-            vec![label("a"), label("c")],
-            vec![label("c"), label("b"), label("d")],
-            vec![label("b"), label("d"), label("e")],
-        ],
-        vec![false; 3],
-        vec![Some(1), Some(1), Some(2)],
-        vec![label("e"), label("a")],
-        Some(1),
-    )
-    .unwrap();
-    let tensors = [&a, &b, &c];
-    let planned = network
-        .plan(
-            &tensors,
-            &LabelOrderDenseOptimizer::new(vec![label("c"), label("b"), label("d")]),
-        )
-        .unwrap();
-    let expected = planned.execute(&tensors).unwrap();
-    let mut workspace = NetworkExecutionWorkspace::default();
-    planned
-        .execute_with_workspace(&tensors, &mut workspace)
-        .unwrap();
-    let after_cold = workspace.stats();
-    let warm = planned
-        .execute_with_workspace(&tensors, &mut workspace)
-        .unwrap();
-    let after_warm = workspace.stats();
-    planned
-        .execute_with_workspace(&tensors, &mut workspace)
-        .unwrap();
-    let after_second_warm = workspace.stats();
-
-    // What: moving the planar boundary is not pAB-only. Warm replay retains
-    // the proven contract destination followed by one orientation replay.
-    assert_close(warm.data(), expected.data(), 1e-12);
-    assert_eq!(
-        after_warm.reused_orientations - after_cold.reused_orientations,
-        1
-    );
-    assert_eq!(
-        after_warm.orientation_layout_preparations - after_cold.orientation_layout_preparations,
-        1
-    );
-    assert_eq!(
-        after_second_warm.contract_layout_preparations - after_warm.contract_layout_preparations,
-        0
-    );
-    assert_eq!(
-        after_second_warm.orientation_layout_preparations
-            - after_warm.orientation_layout_preparations,
-        0
-    );
-}
-
-#[test]
-fn su3_crossed_intermediate_keeps_sequential_orientation_replay() {
-    let rt = Runtime::builder().build().unwrap();
-    let v = Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap();
-    let a = Tensor::rand_with_seed(&rt, Dtype::C64, [&v], [&v], 224_811).unwrap();
-    let b = Tensor::rand_with_seed(&rt, Dtype::C64, [&v], [&v], 224_812).unwrap();
-    let c = Tensor::rand_with_seed(&rt, Dtype::C64, [&v], [&v], 224_813).unwrap();
-    let labels = |names: &[&str]| names.iter().copied().map(TemporaryLabel::from).collect();
-    let network = Network::new(
-        vec![
-            labels(&["i", "j"]),
-            labels(&["j", "k"]),
-            labels(&["k", "l"]),
-        ],
-        vec![false; 3],
-        vec![Some(1); 3],
-        labels(&["l", "i"]),
-        Some(1),
-    )
-    .unwrap();
-    let tensors = [&a, &b, &c];
-    let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
-    let expected = planned.execute(&tensors).unwrap();
-    let mut workspace = NetworkExecutionWorkspace::default();
-    planned
-        .execute_with_workspace(&tensors, &mut workspace)
-        .unwrap();
-    let after_cold = workspace.stats();
-    let warm = planned
-        .execute_with_workspace(&tensors, &mut workspace)
-        .unwrap();
-    let after_warm = workspace.stats();
-    planned
-        .execute_with_workspace(&tensors, &mut workspace)
-        .unwrap();
-    let after_second_warm = workspace.stats();
-
-    // What: generic fusion does not enter the multiplicity-free ordered seam.
-    assert_eq!(warm.data_c64(), expected.data_c64());
-    assert_eq!(
-        after_warm.reused_orientations - after_cold.reused_orientations,
-        1
-    );
-    assert_eq!(
-        after_warm.orientation_layout_preparations - after_cold.orientation_layout_preparations,
-        1
-    );
-    assert_eq!(
-        after_second_warm.contract_layout_preparations - after_warm.contract_layout_preparations,
-        0
-    );
-    assert_eq!(
-        after_second_warm.orientation_layout_preparations
-            - after_warm.orientation_layout_preparations,
-        0
-    );
-}
-
-/// One immutable plan supports concurrent replay when each worker owns its
-/// execution workspace.
-#[test]
-fn planned_network_replays_concurrently_with_distinct_workspaces() {
-    let rt = Runtime::builder().build().unwrap();
-    let v = u1_space();
-    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 167).unwrap();
-    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 168).unwrap();
-    let network = Network::new(
-        vec![
-            vec![TemporaryLabel::from("i"), TemporaryLabel::from("j")],
-            vec![TemporaryLabel::from("j"), TemporaryLabel::from("k")],
-        ],
-        vec![false; 2],
-        vec![None; 2],
-        vec![TemporaryLabel::from("i"), TemporaryLabel::from("k")],
-        Some(1),
-    )
-    .unwrap();
-    let tensors = [&a, &b];
-    let planned = network.plan(&tensors, &GreedyDenseOptimizer).unwrap();
-    let expected = planned.execute(&tensors).unwrap();
-    let barrier = std::sync::Barrier::new(4);
-
-    std::thread::scope(|scope| {
-        let workers: Vec<_> = (0..4)
-            .map(|_| {
-                scope.spawn(|| {
-                    let mut workspace = NetworkExecutionWorkspace::default();
-                    barrier.wait();
-                    planned
-                        .execute_with_workspace(&tensors, &mut workspace)
-                        .unwrap()
-                })
-            })
-            .collect();
-        for worker in workers {
-            let result = worker.join().unwrap();
-            assert_close(result.data(), expected.data(), 1e-12);
-        }
-    });
-}
-
-/// A written `;` split that contradicts the tensor's codomain rank is a
-/// runtime error (labels are checked at compile time, spaces at run time).
 #[test]
 fn wrong_input_codomain_split_is_rejected() {
     let rt = Runtime::builder().build().unwrap();
@@ -531,36 +167,6 @@ fn wrong_input_codomain_split_is_rejected() {
     assert!(matches!(result, Err(Error::InvalidArgument(_))));
 }
 
-/// A compiled schedule rejects a tensor whose rank still matches but whose
-/// codomain/domain orientation no longer matches the topology it lowered.
-#[test]
-fn planned_network_rejects_codomain_orientation_drift() {
-    let rt = Runtime::builder().build().unwrap();
-    let v = u1_space();
-    let planned_input = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 165).unwrap();
-    let network = Network::new(
-        vec![vec![TemporaryLabel::from("i"), TemporaryLabel::from("j")]],
-        vec![false],
-        vec![None],
-        vec![TemporaryLabel::from("i"), TemporaryLabel::from("j")],
-        Some(1),
-    )
-    .unwrap();
-    let planned = network
-        .plan(&[&planned_input], &GreedyDenseOptimizer)
-        .unwrap();
-
-    let drifted = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [], 166).unwrap();
-    let error = planned.execute(&[&drifted]).unwrap_err();
-    assert!(
-        matches!(&error, Error::InvalidArgument(message) if message.contains("topology drifted")),
-        "unexpected error: {error}"
-    );
-}
-
-/// Contracted legs are validated structurally at plan time: same sectors AND
-/// same per-sector degeneracies (mutually dual spaces). A degeneracy mismatch
-/// is rejected with a message naming the label and both legs' content.
 #[test]
 fn contracted_leg_degeneracy_mismatch_is_rejected_with_both_legs_spelled_out() {
     let rt = Runtime::builder().build().unwrap();

@@ -1,19 +1,23 @@
-//! Contraction of a labeled tensor network over the user-layer
-//! [`tenet::prelude::Tensor`].
+//! Typed Host contraction of a labeled tensor network.
 //!
 //! This is the execution half rewritten for the current user layer: the
 //! planner ([`NetworkIR`], [`DenseCostModel`], [`ContractionPlan`]) is pure
 //! structure, and each planned pairwise step lowers to
-//! [`Tensor::contract`] plus orientation/final [`Tensor::permute`] calls,
-//! mirroring the legacy `tenet-contract` executor over the old core.
+//! typed contraction plus orientation/final permutation calls. The erased
+//! executor remains private solely for the `tensor!` compatibility path.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use tenet::core::{
+    CheckedFusionAlgebra, FusionAlgebraError, MultiplicityFreeAdmissionMode,
+    MultiplicityFreeRigidSymbols, RuleIdentity, SectorCodec, SectorLeg, TypedSectorAdmission,
+};
 use tenet::prelude::{
     ContractOverwriteCache, Dtype, Error, OverwriteOutcome, PermuteOverwriteCache, Runtime, Scalar,
-    Tensor, TensorExecutionContext,
+    Tensor, TensorExecutionContext, TensorScalar,
 };
+use tenet::typed::{GradedSpace, NetworkReuseClass, TensorMap};
 use tenet::{RuntimeDetachedTensor, RuntimeIdentity};
 
 use crate::cost::{DenseCostModel, DenseTensorInfo};
@@ -28,7 +32,7 @@ use crate::plancache::Optimizer;
 /// then domain legs of the *original* tensor), and an optional stated
 /// codomain rank (the position of `;` in the written label list, checked
 /// against the tensor at plan time).
-pub struct NetOperand<'a> {
+pub(crate) struct NetOperand<'a> {
     pub tensor: &'a Tensor,
     pub conj: bool,
     pub labels: &'a [&'a str],
@@ -75,7 +79,7 @@ impl StaticTopologySpec {
 /// Labels are expression-local identifiers supplied by the [`tensor!`]
 /// macro (or directly by a caller); there is no public einsum-string
 /// parser. Build with [`Network::new`], then [`Network::plan`] +
-/// [`PlannedNetwork::execute`], or one-shot [`Network::contract`].
+/// [`PlannedNetwork::execute`].
 ///
 /// [`tensor!`]: https://docs.rs/tenet-macros
 pub struct Network {
@@ -90,6 +94,7 @@ pub struct Network {
 }
 
 static NEXT_NETWORK_CACHE_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_PLAN_OWNER_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 fn invalid(message: impl std::fmt::Display) -> Error {
     Error::InvalidArgument(message.to_string())
@@ -140,35 +145,175 @@ impl Network {
         self.cache_id
     }
 
-    /// Convenience constructor from `&str` labels (what the `tensor!`
-    /// macro emits).
-    pub fn from_names(
-        operands: &[NetOperand<'_>],
-        output: &[&str],
-        output_codomain_rank: Option<usize>,
-    ) -> Result<Self, Error> {
-        Self::new(
-            operands
-                .iter()
-                .map(|op| op.labels.iter().map(|&l| TemporaryLabel::from(l)).collect())
-                .collect(),
-            operands.iter().map(|op| op.conj).collect(),
-            operands.iter().map(|op| op.codomain_split).collect(),
-            output.iter().map(|&l| TemporaryLabel::from(l)).collect(),
-            output_codomain_rank,
-        )
+    /// Plans this topology for homogeneous typed Host multiplicity-free tensors.
+    pub fn plan<R, D>(
+        &self,
+        tensors: &[&TensorMap<R, D>],
+        optimizer: &(impl DenseContractionOptimizer + ?Sized),
+    ) -> Result<PlannedNetwork, Error>
+    where
+        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+            + MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec,
+        D: TensorScalar,
+    {
+        let (ir, infos) = self.lower_typed(tensors)?;
+        let plan = if ir.tensors().len() == 1 {
+            ContractionPlan::new(1, self.output.clone(), Vec::new()).map_err(invalid)?
+        } else {
+            let cost = DenseCostModel::from_network(&ir, &infos).map_err(invalid)?;
+            ContractionPlan::from_dense_optimizer(&ir, optimizer, &cost).map_err(invalid)?
+        };
+        self.finish_typed_plan(tensors, ir, plan)
+    }
+
+    /// Wraps an already searched structural order for typed execution.
+    pub fn plan_with<R, D>(
+        &self,
+        tensors: &[&TensorMap<R, D>],
+        plan: ContractionPlan,
+    ) -> Result<PlannedNetwork, Error>
+    where
+        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+            + MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec,
+        D: TensorScalar,
+    {
+        let (ir, _) = self.lower_typed(tensors)?;
+        self.finish_typed_plan(tensors, ir, plan)
+    }
+
+    fn finish_typed_plan<R, D>(
+        &self,
+        tensors: &[&TensorMap<R, D>],
+        ir: NetworkIR,
+        plan: ContractionPlan,
+    ) -> Result<PlannedNetwork, Error>
+    where
+        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+            + MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec,
+        D: TensorScalar,
+    {
+        let input_codomain_ranks = tensors
+            .iter()
+            .map(|tensor| tensor.codomain_rank())
+            .collect();
+        let lowered_codomain_ranks = tensors
+            .iter()
+            .enumerate()
+            .map(|(i, tensor)| {
+                if self.conj[i] {
+                    tensor.domain_rank()
+                } else {
+                    tensor.codomain_rank()
+                }
+            })
+            .collect::<Vec<_>>();
+        self.finish_plan(input_codomain_ranks, lowered_codomain_ranks, ir, plan)
+    }
+
+    fn finish_plan(
+        &self,
+        input_codomain_ranks: Vec<usize>,
+        lowered_codomain_ranks: Vec<usize>,
+        ir: NetworkIR,
+        plan: ContractionPlan,
+    ) -> Result<PlannedNetwork, Error> {
+        let schedule = compile_schedule(
+            &ir,
+            &plan,
+            self.output_codomain_rank,
+            &lowered_codomain_ranks,
+        )?;
+        Ok(PlannedNetwork {
+            owner_token: NEXT_PLAN_OWNER_TOKEN.fetch_add(1, Ordering::Relaxed),
+            plan,
+            conj: self.conj.clone(),
+            input_codomain_ranks,
+            schedule,
+        })
+    }
+
+    fn lower_typed<R, D>(
+        &self,
+        tensors: &[&TensorMap<R, D>],
+    ) -> Result<(NetworkIR, Vec<DenseTensorInfo>), Error>
+    where
+        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+            + MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec,
+        D: TensorScalar,
+    {
+        if tensors.len() != self.inputs.len() {
+            return Err(invalid(format!(
+                "network has {} operands but {} tensors were given",
+                self.inputs.len(),
+                tensors.len()
+            )));
+        }
+        if let Some(first) = tensors.first() {
+            let runtime = first.runtime().identity();
+            let identity = TypedSectorAdmission::typed_rule_identity(first.provider());
+            for (index, tensor) in tensors.iter().enumerate().skip(1) {
+                if !runtime.matches(tensor.runtime()) {
+                    return Err(invalid(format!("operand {index} uses a different Runtime")));
+                }
+                if identity != TypedSectorAdmission::typed_rule_identity(tensor.provider()) {
+                    return Err(Error::RuleMismatch);
+                }
+            }
+        }
+
+        let mut lowered_labels = Vec::with_capacity(tensors.len());
+        let mut infos = Vec::with_capacity(tensors.len());
+        let mut lowered_spaces = Vec::with_capacity(tensors.len());
+        for (i, (&tensor, labels)) in tensors.iter().zip(&self.inputs).enumerate() {
+            if labels.len() != tensor.rank() {
+                return Err(invalid(format!(
+                    "operand {i} has {} labels but tensor rank {}",
+                    labels.len(),
+                    tensor.rank()
+                )));
+            }
+            if let Some(split) = self.codomain_splits[i] {
+                if split != tensor.codomain_rank() {
+                    return Err(invalid(format!(
+                        "operand {i} puts {split} label(s) before `;` but the tensor's codomain rank is {}",
+                        tensor.codomain_rank()
+                    )));
+                }
+            }
+            let lowered = if self.conj[i] {
+                let split = tensor.codomain_rank();
+                lowered_labels.push(rotate(labels, split));
+                tensor.adjoint()?
+            } else {
+                lowered_labels.push(labels.clone());
+                (*tensor).clone()
+            };
+            infos.push(DenseTensorInfo::new(lowered.leg_dims()?));
+            lowered_spaces.push(typed_flat_spaces(&lowered)?);
+        }
+        validate_typed_contracted_leg_spaces(&lowered_labels, &lowered_spaces)?;
+        let ir = NetworkIR::from_labels(lowered_labels, self.output.clone()).map_err(invalid)?;
+        Ok((ir, infos))
     }
 
     /// Plan the contraction order for concrete operand tensors using the
     /// given optimizer. The plan is data-independent (labels + leg
     /// dimensions only) and can be executed repeatedly over same-shaped
     /// operands.
-    pub fn plan(
+    pub(crate) fn plan_erased(
         &self,
         tensors: &[&Tensor],
         optimizer: &(impl DenseContractionOptimizer + ?Sized),
     ) -> Result<PlannedNetwork, Error> {
-        let (ir, infos) = self.lower(tensors)?;
+        let (ir, infos) = self.lower_erased(tensors)?;
         let plan = if ir.tensors().len() == 1 {
             // Single operand: nothing to order; the executor just permutes.
             ContractionPlan::new(1, self.output.clone(), Vec::new()).map_err(invalid)?
@@ -191,18 +336,7 @@ impl Network {
                 }
             })
             .collect();
-        let schedule = compile_schedule(
-            &ir,
-            &plan,
-            self.output_codomain_rank,
-            &lowered_codomain_ranks,
-        )?;
-        Ok(PlannedNetwork {
-            plan,
-            conj: self.conj.clone(),
-            input_codomain_ranks,
-            schedule,
-        })
+        self.finish_plan(input_codomain_ranks, lowered_codomain_ranks, ir, plan)
     }
 
     /// Wrap an already-searched [`ContractionPlan`] (same topology) into a
@@ -210,12 +344,12 @@ impl Network {
     /// pure pairwise order over operand ids and labels, valid for any leg
     /// dimensions of this topology, so a persisted plan (see the plan cache's
     /// disk save/restore) skips the cold optimal-order search on reuse.
-    pub fn plan_with(
+    pub(crate) fn plan_with_erased(
         &self,
         tensors: &[&Tensor],
         plan: ContractionPlan,
     ) -> Result<PlannedNetwork, Error> {
-        let (ir, _infos) = self.lower(tensors)?;
+        let (ir, _infos) = self.lower_erased(tensors)?;
         let input_codomain_ranks: Vec<usize> = tensors
             .iter()
             .map(|tensor| tensor.codomain_rank())
@@ -231,24 +365,16 @@ impl Network {
                 }
             })
             .collect();
-        let schedule = compile_schedule(
-            &ir,
-            &plan,
-            self.output_codomain_rank,
-            &lowered_codomain_ranks,
-        )?;
-        Ok(PlannedNetwork {
-            plan,
-            conj: self.conj.clone(),
-            input_codomain_ranks,
-            schedule,
-        })
+        self.finish_plan(input_codomain_ranks, lowered_codomain_ranks, ir, plan)
     }
 
     /// Validate operand ranks and `;` splits and lower conj markers into the
     /// [`NetworkIR`] and per-operand cost infos shared by [`plan`](Self::plan)
     /// and [`plan_with`](Self::plan_with).
-    fn lower(&self, tensors: &[&Tensor]) -> Result<(NetworkIR, Vec<DenseTensorInfo>), Error> {
+    fn lower_erased(
+        &self,
+        tensors: &[&Tensor],
+    ) -> Result<(NetworkIR, Vec<DenseTensorInfo>), Error> {
         if tensors.len() != self.inputs.len() {
             return Err(invalid(format!(
                 "network has {} operands but {} tensors were given",
@@ -308,19 +434,19 @@ impl Network {
     /// [`crate::configure_plan_cache`]), going through that runtime's
     /// topology-keyed plan cache. This is what the `tensor!` macro path
     /// runs.
-    pub fn contract(&self, tensors: &[&Tensor]) -> Result<Tensor, Error> {
+    pub(crate) fn contract_erased(&self, tensors: &[&Tensor]) -> Result<Tensor, Error> {
         let optimizer = tensors
             .first()
             .map(|tensor| tensor.runtime().plan_cache_config().optimizer)
             .unwrap_or_default();
-        self.contract_with(tensors, &optimizer)
+        self.contract_with_erased(tensors, &optimizer)
     }
 
-    /// [`Self::contract`] with an explicit per-call [`Optimizer`] choice
+    /// Private erased one-shot execution with an explicit [`Optimizer`] choice
     /// (still cached; the optimizer is part of the cache key). For a raw
     /// [`DenseContractionOptimizer`] implementation, use [`Self::plan`],
     /// which always plans fresh.
-    pub fn contract_with(
+    pub(crate) fn contract_with_erased(
         &self,
         tensors: &[&Tensor],
         optimizer: &Optimizer,
@@ -361,6 +487,79 @@ fn validate_contracted_leg_spaces(
     Ok(())
 }
 
+fn validate_typed_contracted_leg_spaces<R>(
+    labels: &[Vec<TemporaryLabel>],
+    spaces: &[Vec<GradedSpace<R>>],
+) -> Result<(), Error>
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+{
+    let mut seen: HashMap<&TemporaryLabel, (usize, usize)> = HashMap::new();
+    for (operand, operand_labels) in labels.iter().enumerate() {
+        for (axis, label) in operand_labels.iter().enumerate() {
+            let Some(&(previous_operand, previous_axis)) = seen.get(label) else {
+                seen.insert(label, (operand, axis));
+                continue;
+            };
+            let lhs = &spaces[previous_operand][previous_axis];
+            let rhs = &spaces[operand][axis];
+            if rhs != &lhs.try_dual()? {
+                return Err(invalid(format!(
+                    "space mismatch for contracted label `{label}` between operand {previous_operand} leg {previous_axis} and operand {operand} leg {axis}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_typed_contracted_pairs<R, D>(
+    tensors: &[TensorMap<R, D>],
+    pairs: &[InputLegPair],
+) -> Result<(), Error>
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    let spaces = tensors
+        .iter()
+        .map(typed_flat_spaces)
+        .collect::<Result<Vec<_>, Error>>()?;
+    for &((lhs_slot, lhs_axis), (rhs_slot, rhs_axis)) in pairs {
+        if spaces[rhs_slot][rhs_axis] != spaces[lhs_slot][lhs_axis].try_dual()? {
+            return Err(invalid(format!(
+                "contracted input spaces mismatch between operand {lhs_slot} leg {lhs_axis} and operand {rhs_slot} leg {rhs_axis}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn typed_flat_spaces<R, D>(tensor: &TensorMap<R, D>) -> Result<Vec<GradedSpace<R>>, Error>
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    let mut spaces = tensor.codomain();
+    spaces.extend(
+        tensor
+            .domain()
+            .iter()
+            .map(GradedSpace::try_dual)
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    Ok(spaces)
+}
+
 fn rotate<T: Clone>(items: &[T], split: usize) -> Vec<T> {
     items[split..]
         .iter()
@@ -373,6 +572,7 @@ fn rotate<T: Clone>(items: &[T], split: usize) -> Vec<T> {
 /// shapes. Inspect the order via [`Self::plan`], run it via
 /// [`Self::execute`].
 pub struct PlannedNetwork {
+    owner_token: u64,
     plan: ContractionPlan,
     conj: Vec<bool>,
     input_codomain_ranks: Vec<usize>,
@@ -382,10 +582,13 @@ pub struct PlannedNetwork {
 struct CompiledSchedule {
     slot_count: usize,
     input_ranks: Vec<usize>,
+    contracted_input_pairs: Vec<InputLegPair>,
     steps: Vec<CompiledStep>,
     final_slot: usize,
     final_permutation: Option<(Vec<usize>, Vec<usize>)>,
 }
+
+type InputLegPair = ((usize, usize), (usize, usize));
 
 struct CompiledStep {
     lhs_slot: usize,
@@ -395,11 +598,100 @@ struct CompiledStep {
     rhs_contract_axes: Vec<usize>,
     result_permutation: Option<(Vec<usize>, Vec<usize>)>,
     result_output_axes: Option<Vec<usize>>,
+    contract_output_axes: Vec<usize>,
+    authority_input_slot: usize,
+}
+
+/// Caller-owned typed Host replay storage for one planned network at a time.
+pub struct NetworkExecutionWorkspace<R, D> {
+    slots: Vec<Option<TensorMap<R, D>>>,
+    producers: Vec<Option<(usize, bool)>>,
+    intermediates: Vec<TypedIntermediateBuffers<R, D>>,
+    owner_token: Option<u64>,
+    runtime: Option<RuntimeIdentity>,
+    rule_identity: Option<RuleIdentity>,
+    input_snapshot: Vec<TypedInputSnapshot>,
+}
+
+struct TypedInputSnapshot {
+    spaces: Vec<SectorLeg>,
+    reuse_class: NetworkReuseClass,
+}
+
+struct TypedIntermediateBuffers<R, D> {
+    contracted: Option<TensorMap<R, D>>,
+    oriented: Option<TensorMap<R, D>>,
+}
+
+enum StepOutput<T> {
+    Returned(T),
+    Overwritten,
+}
+
+impl<T> StepOutput<T> {
+    fn get<'a>(&'a self, destination: &'a Option<T>) -> &'a T {
+        match self {
+            Self::Returned(value) => value,
+            Self::Overwritten => destination
+                .as_ref()
+                .expect("successful overwrite retains its destination"),
+        }
+    }
+
+    fn take(self, destination: &mut Option<T>) -> T {
+        match self {
+            Self::Returned(value) => value,
+            Self::Overwritten => destination
+                .take()
+                .expect("successful overwrite retains its destination"),
+        }
+    }
+
+    fn retain(self, destination: &mut Option<T>) {
+        if let Self::Returned(value) = self {
+            *destination = Some(value);
+        }
+    }
+}
+
+impl<R, D> Default for TypedIntermediateBuffers<R, D> {
+    fn default() -> Self {
+        Self {
+            contracted: None,
+            oriented: None,
+        }
+    }
+}
+
+impl<R, D> Default for NetworkExecutionWorkspace<R, D> {
+    fn default() -> Self {
+        Self {
+            slots: Vec::new(),
+            producers: Vec::new(),
+            intermediates: Vec::new(),
+            owner_token: None,
+            runtime: None,
+            rule_identity: None,
+            input_snapshot: Vec::new(),
+        }
+    }
+}
+
+impl<R, D> NetworkExecutionWorkspace<R, D> {
+    fn clear_replay_state(&mut self) {
+        self.slots.clear();
+        self.producers.clear();
+        self.intermediates.clear();
+        self.owner_token = None;
+        self.runtime = None;
+        self.rule_identity = None;
+        self.input_snapshot.clear();
+    }
 }
 
 /// Caller-owned tensor slots for repeated execution of a [`PlannedNetwork`].
 #[derive(Default)]
-pub struct NetworkExecutionWorkspace {
+pub(crate) struct ErasedNetworkExecutionWorkspace {
     slots: Vec<Option<Tensor>>,
     slot_producers: Vec<Option<(usize, bool)>>,
     intermediates: Vec<IntermediateBuffers>,
@@ -409,7 +701,7 @@ pub struct NetworkExecutionWorkspace {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct NetworkExecutionStats {
+pub(crate) struct NetworkExecutionStats {
     pub owned_intermediates: u64,
     pub reused_intermediates: u64,
     pub owned_contractions: u64,
@@ -433,7 +725,7 @@ struct IntermediateBuffers {
     orientation_cache: PermuteOverwriteCache,
 }
 
-impl NetworkExecutionWorkspace {
+impl ErasedNetworkExecutionWorkspace {
     pub(crate) fn slot_capacity(&self) -> usize {
         self.slots.capacity()
     }
@@ -486,24 +778,9 @@ impl NetworkExecutionWorkspace {
         Ok(())
     }
 
-    #[doc(hidden)]
-    pub fn clear_intermediate_buffers(&mut self) {
-        self.intermediates.clear();
-    }
-
-    #[doc(hidden)]
-    pub fn stats(&self) -> NetworkExecutionStats {
+    #[cfg(test)]
+    pub(crate) fn stats(&self) -> NetworkExecutionStats {
         self.stats
-    }
-
-    #[doc(hidden)]
-    pub fn retained_intermediate_buffer_count(&self) -> usize {
-        self.intermediates
-            .iter()
-            .map(|buffers| {
-                usize::from(buffers.contracted.is_some()) + usize::from(buffers.oriented.is_some())
-            })
-            .sum()
     }
 
     #[cfg(test)]
@@ -528,13 +805,9 @@ impl PlannedNetwork {
         &self.plan
     }
 
-    /// Run the plan over `tensors` (same operand order and shapes as
-    /// given to [`Network::plan`]). Conj-marked operands are adjointed
-    /// here; each pairwise step is one [`Tensor::contract`], intermediates
-    /// are oriented for their next use, and the final tensor is permuted
-    /// to the requested output label order and codomain/domain split.
-    pub fn execute(&self, tensors: &[&Tensor]) -> Result<Tensor, Error> {
-        self.execute_with_workspace(tensors, &mut NetworkExecutionWorkspace::default())
+    #[cfg(test)]
+    pub(crate) fn execute_erased(&self, tensors: &[&Tensor]) -> Result<Tensor, Error> {
+        self.execute_erased_with_workspace(tensors, &mut ErasedNetworkExecutionWorkspace::default())
     }
 
     /// Run the compiled schedule while reusing its tensor-slot table and
@@ -542,10 +815,10 @@ impl PlannedNetwork {
     /// checked-out reusable buffers. Backend panics are treated as fatal and
     /// may discard workspace contents; the runtime already applies the same
     /// policy by poisoning its execution-state mutex after an unwind.
-    pub fn execute_with_workspace(
+    pub(crate) fn execute_erased_with_workspace(
         &self,
         tensors: &[&Tensor],
-        workspace: &mut NetworkExecutionWorkspace,
+        workspace: &mut ErasedNetworkExecutionWorkspace,
     ) -> Result<Tensor, Error> {
         if tensors.len() != self.conj.len() {
             return Err(invalid(format!(
@@ -840,6 +1113,291 @@ impl PlannedNetwork {
     }
 }
 
+impl PlannedNetwork {
+    /// Executes this plan with a fresh typed workspace.
+    pub fn execute<R, D>(&self, tensors: &[&TensorMap<R, D>]) -> Result<TensorMap<R, D>, Error>
+    where
+        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+            + MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec,
+        D: TensorScalar,
+    {
+        self.execute_with_workspace(tensors, &mut NetworkExecutionWorkspace::default())
+    }
+
+    /// Executes this plan while reusing exact-compatible typed Host destinations.
+    pub fn execute_with_workspace<R, D>(
+        &self,
+        tensors: &[&TensorMap<R, D>],
+        workspace: &mut NetworkExecutionWorkspace<R, D>,
+    ) -> Result<TensorMap<R, D>, Error>
+    where
+        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+            + MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec,
+        D: TensorScalar,
+    {
+        let prepared = (|| {
+            if tensors.len() != self.schedule.input_ranks.len() {
+                return Err(invalid(format!(
+                    "plan has {} operands but {} tensors were given",
+                    self.schedule.input_ranks.len(),
+                    tensors.len()
+                )));
+            }
+            let runtime = tensors
+                .first()
+                .ok_or_else(|| invalid("network execution requires at least one operand"))?
+                .runtime();
+            let runtime_identity = runtime.identity();
+            let rule_identity = TypedSectorAdmission::typed_rule_identity(tensors[0].provider());
+            for (index, &tensor) in tensors.iter().enumerate() {
+                if !runtime_identity.matches(tensor.runtime()) {
+                    return Err(invalid(format!("operand {index} uses a different Runtime")));
+                }
+                if rule_identity != TypedSectorAdmission::typed_rule_identity(tensor.provider()) {
+                    return Err(Error::RuleMismatch);
+                }
+                if tensor.rank() != self.schedule.input_ranks[index]
+                    || tensor.codomain_rank() != self.input_codomain_ranks[index]
+                {
+                    return Err(invalid(format!(
+                        "operand {index} topology drifted: planned rank/split {}/{}, got {}/{}",
+                        self.schedule.input_ranks[index],
+                        self.input_codomain_ranks[index],
+                        tensor.rank(),
+                        tensor.codomain_rank()
+                    )));
+                }
+            }
+            let snapshot_matches = workspace.owner_token == Some(self.owner_token)
+                && workspace
+                    .runtime
+                    .as_ref()
+                    .is_some_and(|cached| cached.matches(runtime))
+                && workspace.rule_identity == Some(rule_identity.clone())
+                && workspace.input_snapshot.len() == tensors.len()
+                && tensors.iter().enumerate().all(|(index, tensor)| {
+                    tensor.network_input_metadata_matches(
+                        self.conj[index],
+                        &workspace.input_snapshot[index].spaces,
+                        workspace.input_snapshot[index].reuse_class,
+                    )
+                });
+            let lowered = tensors
+                .iter()
+                .enumerate()
+                .map(|(index, tensor)| {
+                    if self.conj[index] {
+                        tensor.adjoint()
+                    } else {
+                        Ok((*tensor).clone())
+                    }
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            let new_snapshot = if snapshot_matches {
+                None
+            } else {
+                validate_typed_contracted_pairs(&lowered, &self.schedule.contracted_input_pairs)?;
+                Some(
+                    lowered
+                        .iter()
+                        .map(|tensor| {
+                            let spaces = tensor
+                                .codomain()
+                                .into_iter()
+                                .chain(tensor.domain())
+                                .map(|space| space.network_sector_leg().clone())
+                                .collect();
+                            TypedInputSnapshot {
+                                spaces,
+                                reuse_class: tensor.network_reuse_class(false),
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            };
+            let reuse_enabled = new_snapshot
+                .as_ref()
+                .unwrap_or(&workspace.input_snapshot)
+                .iter()
+                .all(|snapshot| snapshot.reuse_class != NetworkReuseClass::Compact);
+            Ok((
+                runtime_identity,
+                rule_identity,
+                lowered,
+                new_snapshot,
+                reuse_enabled,
+            ))
+        })();
+        let (runtime_identity, rule_identity, lowered, new_snapshot, reuse_enabled) = match prepared
+        {
+            Ok(prepared) => prepared,
+            Err(error) => return Err(error),
+        };
+        if let Some(snapshot) = new_snapshot {
+            workspace.clear_replay_state();
+            workspace.owner_token = Some(self.owner_token);
+            workspace.runtime = Some(runtime_identity);
+            workspace.rule_identity = Some(rule_identity);
+            workspace.input_snapshot = snapshot;
+        } else if !reuse_enabled {
+            workspace.slots.clear();
+            workspace.producers.clear();
+            workspace.intermediates.clear();
+        }
+        workspace
+            .slots
+            .resize_with(self.schedule.slot_count, || None);
+        workspace.producers.resize(self.schedule.slot_count, None);
+        workspace
+            .intermediates
+            .resize_with(self.schedule.steps.len(), TypedIntermediateBuffers::default);
+        if reuse_enabled {
+            for index in 0..workspace.slots.len() {
+                if let Some(tensor) = workspace.slots[index].take() {
+                    let producer = workspace.producers[index].take();
+                    return_typed_intermediate(&mut workspace.intermediates, tensor, producer, true);
+                }
+            }
+        }
+        for (step, buffers) in self.schedule.steps.iter().zip(&mut workspace.intermediates) {
+            let provider = tensors[step.authority_input_slot].provider();
+            if buffers
+                .contracted
+                .as_ref()
+                .is_some_and(|tensor| !std::ptr::eq(tensor.provider(), provider))
+            {
+                buffers.contracted = None;
+            }
+            if buffers
+                .oriented
+                .as_ref()
+                .is_some_and(|tensor| !std::ptr::eq(tensor.provider(), provider))
+            {
+                buffers.oriented = None;
+            }
+        }
+        workspace.slots.fill(None);
+        workspace.producers.fill(None);
+        for (index, lowered) in lowered.into_iter().enumerate() {
+            workspace.slots[index] = Some(lowered);
+        }
+        let slots = &mut workspace.slots;
+        let producers = &mut workspace.producers;
+        let intermediates = &mut workspace.intermediates;
+        for (step_index, step) in self.schedule.steps.iter().enumerate() {
+            let lhs = slots[step.lhs_slot]
+                .as_ref()
+                .ok_or_else(|| invalid("lhs operand already consumed"))?;
+            let rhs = slots[step.rhs_slot]
+                .as_ref()
+                .ok_or_else(|| invalid("rhs operand already consumed"))?;
+            let fused = step.result_output_axes.is_some();
+            let TypedIntermediateBuffers {
+                contracted: contracted_buffer,
+                oriented: oriented_buffer,
+            } = &mut intermediates[step_index];
+            let contract_buffer = if fused {
+                &mut *oriented_buffer
+            } else {
+                &mut *contracted_buffer
+            };
+            let contracted = if reuse_enabled && contract_buffer.is_some() {
+                lhs.contract_overwrite_into(
+                    rhs,
+                    contract_buffer.as_mut().expect("destination checked"),
+                    &step.lhs_contract_axes,
+                    &step.rhs_contract_axes,
+                    &step.contract_output_axes,
+                    D::from_real(1.0),
+                )?;
+                StepOutput::Overwritten
+            } else {
+                StepOutput::Returned(lhs.contract(
+                    rhs,
+                    &step.lhs_contract_axes,
+                    &step.rhs_contract_axes,
+                    &step.contract_output_axes,
+                )?)
+            };
+            let result = if fused {
+                contracted.take(oriented_buffer)
+            } else if let Some((codomain, domain)) = &step.result_permutation {
+                let oriented = if reuse_enabled && oriented_buffer.is_some() {
+                    contracted.get(contracted_buffer).permute_overwrite_into(
+                        oriented_buffer.as_mut().expect("destination checked"),
+                        codomain,
+                        domain,
+                        D::from_real(1.0),
+                    )?;
+                    StepOutput::Overwritten
+                } else {
+                    StepOutput::Returned(
+                        contracted
+                            .get(contracted_buffer)
+                            .permute(codomain, domain)?,
+                    )
+                };
+                contracted.retain(contracted_buffer);
+                oriented.take(oriented_buffer)
+            } else {
+                contracted.take(contracted_buffer)
+            };
+            let lhs = slots[step.lhs_slot]
+                .take()
+                .expect("validated lhs remains until step success");
+            let lhs_producer = producers[step.lhs_slot].take();
+            let rhs = slots[step.rhs_slot]
+                .take()
+                .expect("validated rhs remains until step success");
+            let rhs_producer = producers[step.rhs_slot].take();
+            return_typed_intermediate(intermediates, lhs, lhs_producer, reuse_enabled);
+            return_typed_intermediate(intermediates, rhs, rhs_producer, reuse_enabled);
+            slots[step.result_slot] = Some(result);
+            producers[step.result_slot] =
+                Some((step_index, fused || step.result_permutation.is_some()));
+        }
+        let result = slots[self.schedule.final_slot]
+            .as_ref()
+            .ok_or_else(|| invalid("no final tensor produced"))?;
+        if let Some((codomain, domain)) = &self.schedule.final_permutation {
+            let output = result.permute(codomain, domain)?;
+            let input = slots[self.schedule.final_slot]
+                .take()
+                .expect("validated final tensor remains until permutation success");
+            let producer = producers[self.schedule.final_slot].take();
+            return_typed_intermediate(intermediates, input, producer, reuse_enabled);
+            Ok(output)
+        } else {
+            Ok(slots[self.schedule.final_slot]
+                .take()
+                .expect("validated final tensor remains until return"))
+        }
+    }
+}
+
+fn return_typed_intermediate<R, D>(
+    intermediates: &mut [TypedIntermediateBuffers<R, D>],
+    tensor: TensorMap<R, D>,
+    producer: Option<(usize, bool)>,
+    reuse_enabled: bool,
+) {
+    if !reuse_enabled {
+        return;
+    }
+    if let Some((step, oriented)) = producer {
+        let destination = if oriented {
+            &mut intermediates[step].oriented
+        } else {
+            &mut intermediates[step].contracted
+        };
+        *destination = Some(tensor);
+    }
+}
+
 fn identity_scalar(dtype: Dtype) -> Scalar {
     match dtype {
         Dtype::F64 => Scalar::F64(1.0),
@@ -848,7 +1406,7 @@ fn identity_scalar(dtype: Dtype) -> Scalar {
 }
 
 fn return_intermediate(
-    workspace: &mut NetworkExecutionWorkspace,
+    workspace: &mut ErasedNetworkExecutionWorkspace,
     tensor: Tensor,
     producer: Option<(usize, bool)>,
 ) {
@@ -862,22 +1420,40 @@ fn return_intermediate(
     }
 }
 
+fn contracted_input_pairs(ir: &NetworkIR) -> Vec<InputLegPair> {
+    let mut first = HashMap::new();
+    let mut pairs = Vec::new();
+    for (slot, node) in ir.tensors().iter().enumerate() {
+        for (axis, label) in node.labels().iter().enumerate() {
+            if let Some(previous) = first.remove(label) {
+                pairs.push((previous, (slot, axis)));
+            } else {
+                first.insert(label.clone(), (slot, axis));
+            }
+        }
+    }
+    pairs
+}
+
 fn compile_schedule(
     ir: &NetworkIR,
     plan: &ContractionPlan,
     output_codomain_rank: Option<usize>,
     input_codomain_ranks: &[usize],
 ) -> Result<CompiledSchedule, Error> {
+    let contracted_input_pairs = contracted_input_pairs(ir);
     let labels_by_id = planned_label_orders(ir, plan)?;
     let consumers = build_consumers(plan.steps());
     let slot_count = ir.tensors().len() + plan.steps().len();
     let mut current_labels: Vec<Option<Vec<TemporaryLabel>>> = vec![None; slot_count];
     let mut current_codomain_ranks: Vec<Option<usize>> = vec![None; slot_count];
+    let mut authority_input_slots: Vec<Option<usize>> = vec![None; slot_count];
     let mut slots_by_id = HashMap::with_capacity(slot_count);
     for (slot, node) in ir.tensors().iter().enumerate() {
         slots_by_id.insert(node.id(), slot);
         current_labels[slot] = Some(node.labels().to_vec());
         current_codomain_ranks[slot] = Some(input_codomain_ranks[slot]);
+        authority_input_slots[slot] = Some(slot);
     }
 
     let mut compiled_steps = Vec::with_capacity(plan.steps().len());
@@ -901,6 +1477,12 @@ fn compile_schedule(
         current_codomain_ranks[rhs_slot]
             .take()
             .ok_or_else(|| invalid("rhs orientation already consumed while compiling schedule"))?;
+        let authority_input_slot = authority_input_slots[lhs_slot]
+            .take()
+            .ok_or_else(|| invalid("lhs authority already consumed while compiling schedule"))?;
+        authority_input_slots[rhs_slot]
+            .take()
+            .ok_or_else(|| invalid("rhs authority already consumed while compiling schedule"))?;
 
         let mut lhs_contract_axes = Vec::new();
         let mut rhs_contract_axes = Vec::new();
@@ -944,9 +1526,18 @@ fn compile_schedule(
             lhs_labels.len() - lhs_contract_axes.len(),
             |(codomain, _)| codomain.len(),
         );
+        let result_rank = result_labels.len();
         current_labels[result_slot] = Some(result_labels);
         current_codomain_ranks[result_slot] = Some(result_codomain_rank);
+        authority_input_slots[result_slot] = Some(authority_input_slot);
         slots_by_id.insert(step.result(), result_slot);
+        let result_output_axes = result_permutation
+            .as_ref()
+            .filter(|(codomain, _)| codomain.len() == lhs_open_count)
+            .map(|(codomain, domain)| codomain.iter().chain(domain).copied().collect::<Vec<_>>());
+        let contract_output_axes = result_output_axes
+            .clone()
+            .unwrap_or_else(|| (0..result_rank).collect());
         compiled_steps.push(CompiledStep {
             lhs_slot,
             rhs_slot,
@@ -955,11 +1546,10 @@ fn compile_schedule(
             rhs_contract_axes,
             // pAB reorders axes inside the existing split. Moving the split is
             // a repartition and remains an explicit orientation operation.
-            result_output_axes: result_permutation
-                .as_ref()
-                .filter(|(codomain, _)| codomain.len() == lhs_open_count)
-                .map(|(codomain, domain)| codomain.iter().chain(domain).copied().collect()),
+            result_output_axes,
+            contract_output_axes,
             result_permutation,
+            authority_input_slot,
         });
     }
 
@@ -995,6 +1585,7 @@ fn compile_schedule(
             .iter()
             .map(|node| node.labels().len())
             .collect(),
+        contracted_input_pairs,
         steps: compiled_steps,
         final_slot,
         final_permutation,
@@ -1112,7 +1703,7 @@ fn build_consumers(steps: &[ContractionStep]) -> HashMap<TensorId, (usize, bool)
 /// intra-operand trace pairs, build a [`Network`] from the (reduced)
 /// written labels, plan with the configured optimizer (through the plan
 /// cache), and execute over the given operands.
-pub fn contract_network(
+fn contract_network(
     operands: &[NetOperand<'_>],
     output: &[&str],
     output_codomain_rank: Option<usize>,
@@ -1183,7 +1774,7 @@ pub fn contract_network(
         .zip(&lowered)
         .map(|(op, traced)| traced.as_ref().unwrap_or(op.tensor))
         .collect();
-    network.contract(&tensors)
+    network.contract_erased(&tensors)
 }
 
 /// Borrowed topology lookup used by [`tensor!`] for networks without
@@ -1282,4 +1873,378 @@ fn split_trace_pairs(
         .map(|(_, l)| l.clone())
         .collect();
     Ok((pairs, reduced))
+}
+
+#[cfg(test)]
+mod typed_replay_tests {
+    use std::sync::Arc;
+
+    use tenet::core::{U1FusionRule, U1Irrep};
+    use tenet::typed::{GradedSpace, TensorMap};
+
+    use super::*;
+
+    fn label(name: &str) -> TemporaryLabel {
+        TemporaryLabel::from(name)
+    }
+
+    fn crossed_plan() -> PlannedNetwork {
+        let inputs = vec![
+            vec![label("a"), label("b")],
+            vec![label("b"), label("c")],
+            vec![label("a"), label("d")],
+        ];
+        let output = vec![label("c"), label("d")];
+        let ir = NetworkIR::from_labels(inputs.clone(), output.clone()).unwrap();
+        let plan = ContractionPlan::new(
+            3,
+            output,
+            vec![
+                ContractionStep::new(
+                    TensorId::new(0),
+                    TensorId::new(1),
+                    TensorId::new(3),
+                    0,
+                    vec![label("a"), label("c")],
+                ),
+                ContractionStep::new(
+                    TensorId::new(3),
+                    TensorId::new(2),
+                    TensorId::new(4),
+                    0,
+                    vec![label("c"), label("d")],
+                ),
+            ],
+        )
+        .unwrap();
+        let schedule = compile_schedule(&ir, &plan, Some(1), &[1, 1, 1]).unwrap();
+        assert_eq!(
+            schedule.steps[0].result_output_axes.as_deref(),
+            Some(&[1, 0][..])
+        );
+        PlannedNetwork {
+            owner_token: NEXT_PLAN_OWNER_TOKEN.fetch_add(1, Ordering::Relaxed),
+            plan,
+            conj: vec![false; 3],
+            input_codomain_ranks: vec![1; 3],
+            schedule,
+        }
+    }
+
+    #[test]
+    fn typed_crossed_schedule_reuses_the_actual_first_step_destination() {
+        let runtime = Runtime::builder().build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let other_provider = Arc::new(U1FusionRule);
+        let space = |provider: &Arc<U1FusionRule>, degeneracy| {
+            GradedSpace::try_new(Arc::clone(provider), [(U1Irrep::new(0), degeneracy)], false)
+                .unwrap()
+        };
+        let left = space(&provider, 9);
+        let bond = space(&provider, 8);
+        let right = space(&provider, 10);
+        let tail = space(&provider, 11);
+        let left_dual = left.try_dual().unwrap();
+        let a =
+            TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&left], [&bond], 1).unwrap();
+        let b = TensorMap::rand_with_seed(&runtime, [&bond], [&right], 2).unwrap();
+        let c = TensorMap::rand_with_seed(&runtime, [&left_dual], [&tail], 3).unwrap();
+        let planned = crossed_plan();
+        let mut workspace = NetworkExecutionWorkspace::default();
+        let refs = [&a, &b, &c];
+        let oracle = a
+            .contract(&b, &[1], &[0], &[1, 0])
+            .unwrap()
+            .contract(&c, &[1], &[0], &[0, 1])
+            .unwrap();
+        drop(
+            planned
+                .execute_with_workspace(&refs, &mut workspace)
+                .unwrap(),
+        );
+        let before = workspace.intermediates[0]
+            .oriented
+            .as_ref()
+            .map(|tensor| (tensor.data().as_ptr(), tensor.data().len()))
+            .unwrap();
+        let output = planned
+            .execute_with_workspace(&refs, &mut workspace)
+            .unwrap();
+        let after = workspace.intermediates[0]
+            .oriented
+            .as_ref()
+            .map(|tensor| (tensor.data().as_ptr(), tensor.data().len()))
+            .unwrap();
+        assert_eq!(before, after);
+        assert_ne!(after.0, output.data().as_ptr());
+        assert_eq!(output.data(), oracle.data());
+
+        let other_bond = space(&other_provider, 8);
+        let other_right = space(&other_provider, 10);
+        let rhs_drift =
+            TensorMap::rand_with_seed(&runtime, [&other_bond], [&other_right], 4).unwrap();
+        drop(
+            planned
+                .execute_with_workspace(&[&a, &rhs_drift, &c], &mut workspace)
+                .unwrap(),
+        );
+        let rhs_only = workspace.intermediates[0].oriented.as_ref().unwrap();
+        assert_eq!((rhs_only.data().as_ptr(), rhs_only.data().len()), before);
+        assert!(std::ptr::eq(rhs_only.provider(), provider.as_ref()));
+
+        let retained = rhs_only.clone();
+        assert!(planned
+            .execute_with_workspace(&refs[..2], &mut workspace)
+            .is_err());
+        assert_eq!(
+            workspace.intermediates[0]
+                .oriented
+                .as_ref()
+                .unwrap()
+                .data()
+                .as_ptr(),
+            retained.data().as_ptr()
+        );
+        let bad_bond = space(&provider, 7);
+        let bad_rhs = TensorMap::rand_with_seed(&runtime, [&bad_bond], [&right], 5).unwrap();
+        assert!(planned
+            .execute_with_workspace(&[&a, &bad_rhs, &c], &mut workspace)
+            .is_err());
+        assert_eq!(
+            workspace.intermediates[0]
+                .oriented
+                .as_ref()
+                .unwrap()
+                .data()
+                .as_ptr(),
+            retained.data().as_ptr()
+        );
+
+        let other_left = space(&other_provider, 9);
+        let lhs_drift =
+            TensorMap::rand_with_seed(&runtime, [&other_left], [&other_bond], 6).unwrap();
+        drop(
+            planned
+                .execute_with_workspace(&[&lhs_drift, &b, &c], &mut workspace)
+                .unwrap(),
+        );
+        let replaced = workspace.intermediates[0].oriented.as_ref().unwrap();
+        assert_ne!(replaced.data().as_ptr(), retained.data().as_ptr());
+        assert!(std::ptr::eq(replaced.provider(), other_provider.as_ref()));
+
+        let replaced = replaced.clone();
+        let wide_left = space(&other_provider, 12);
+        let other_tail = space(&other_provider, 11);
+        let wide_c =
+            TensorMap::rand_with_seed(&runtime, [&wide_left.try_dual().unwrap()], [&other_tail], 7)
+                .unwrap();
+        let wide_a = TensorMap::rand_with_seed(&runtime, [&wide_left], [&other_bond], 8).unwrap();
+        drop(
+            planned
+                .execute_with_workspace(&[&wide_a, &rhs_drift, &wide_c], &mut workspace)
+                .unwrap(),
+        );
+        let widened = workspace.intermediates[0].oriented.as_ref().unwrap();
+        assert_ne!(widened.data().len(), replaced.data().len());
+
+        let widened = widened.clone();
+        let other_runtime = Runtime::builder().build().unwrap();
+        let foreign_a =
+            TensorMap::rand_with_seed(&other_runtime, [&other_left], [&other_bond], 9).unwrap();
+        let foreign_b =
+            TensorMap::rand_with_seed(&other_runtime, [&other_bond], [&other_right], 10).unwrap();
+        let foreign_c = TensorMap::rand_with_seed(
+            &other_runtime,
+            [&other_left.try_dual().unwrap()],
+            [&other_tail],
+            11,
+        )
+        .unwrap();
+        drop(
+            planned
+                .execute_with_workspace(&[&foreign_a, &foreign_b, &foreign_c], &mut workspace)
+                .unwrap(),
+        );
+        assert_ne!(
+            workspace.intermediates[0]
+                .oriented
+                .as_ref()
+                .unwrap()
+                .data()
+                .as_ptr(),
+            widened.data().as_ptr()
+        );
+
+        let previous = workspace.intermediates[0]
+            .oriented
+            .as_ref()
+            .unwrap()
+            .clone();
+        let other_plan = crossed_plan();
+        drop(
+            other_plan
+                .execute_with_workspace(&[&foreign_a, &foreign_b, &foreign_c], &mut workspace)
+                .unwrap(),
+        );
+        assert_eq!(workspace.owner_token, Some(other_plan.owner_token));
+        assert_ne!(
+            workspace.intermediates[0]
+                .oriented
+                .as_ref()
+                .unwrap()
+                .data()
+                .as_ptr(),
+            previous.data().as_ptr()
+        );
+    }
+
+    #[test]
+    fn typed_replay_restores_buffers_after_injected_failures() {
+        let runtime = Runtime::builder().build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let space = |degeneracy| {
+            GradedSpace::try_new(
+                Arc::clone(&provider),
+                [(U1Irrep::new(0), degeneracy)],
+                false,
+            )
+            .unwrap()
+        };
+        let left = space(5);
+        let bond = space(4);
+        let right = space(6);
+        let tail = space(7);
+        let a =
+            TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&left], [&bond], 11).unwrap();
+        let b = TensorMap::rand_with_seed(&runtime, [&bond], [&right], 12).unwrap();
+        let c =
+            TensorMap::rand_with_seed(&runtime, [&left.try_dual().unwrap()], [&tail], 13).unwrap();
+        let refs = [&a, &b, &c];
+        let mut planned = crossed_plan();
+        let mut workspace = NetworkExecutionWorkspace::default();
+        drop(
+            planned
+                .execute_with_workspace(&refs, &mut workspace)
+                .unwrap(),
+        );
+
+        let rhs_axes = std::mem::replace(
+            &mut planned.schedule.steps[1].rhs_contract_axes,
+            vec![usize::MAX],
+        );
+        assert!(planned
+            .execute_with_workspace(&refs, &mut workspace)
+            .is_err());
+        assert!(workspace.slots[planned.schedule.steps[0].result_slot].is_some());
+        planned.schedule.steps[1].rhs_contract_axes = rhs_axes;
+        drop(
+            planned
+                .execute_with_workspace(&refs, &mut workspace)
+                .unwrap(),
+        );
+
+        planned.schedule.final_permutation = Some((vec![usize::MAX], vec![0]));
+        assert!(planned
+            .execute_with_workspace(&refs, &mut workspace)
+            .is_err());
+        assert!(workspace.slots[planned.schedule.final_slot].is_some());
+        planned.schedule.final_permutation = None;
+        drop(
+            planned
+                .execute_with_workspace(&refs, &mut workspace)
+                .unwrap(),
+        );
+    }
+
+    #[test]
+    fn typed_natural_split_change_replays_contract_then_permute() {
+        let runtime = Runtime::builder().build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let space = GradedSpace::try_new(provider, [(U1Irrep::new(0), 3)], false).unwrap();
+        let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space], [&space], 31)
+            .unwrap();
+        let b = TensorMap::rand_with_seed(&runtime, [&space], [&space, &space], 32).unwrap();
+        let c = TensorMap::rand_with_seed(&runtime, [&space, &space], [&space], 33).unwrap();
+        let network = Network::new(
+            vec![
+                vec![label("a"), label("c")],
+                vec![label("c"), label("b"), label("d")],
+                vec![label("b"), label("d"), label("e")],
+            ],
+            vec![false; 3],
+            vec![Some(1), Some(1), Some(2)],
+            vec![label("e"), label("a")],
+            Some(1),
+        )
+        .unwrap();
+        let refs = [&a, &b, &c];
+        let planned = network
+            .plan(
+                &refs,
+                &crate::LabelOrderDenseOptimizer::new(vec![label("c"), label("b"), label("d")]),
+            )
+            .unwrap();
+        assert!(planned.schedule.steps[0].result_output_axes.is_none());
+        assert!(planned.schedule.steps[0].result_permutation.is_some());
+        let expected = planned.execute(&refs).unwrap();
+        let mut workspace = NetworkExecutionWorkspace::default();
+        for _ in 0..2 {
+            assert_eq!(
+                planned
+                    .execute_with_workspace(&refs, &mut workspace)
+                    .unwrap()
+                    .data(),
+                expected.data()
+            );
+        }
+        assert!(workspace.intermediates[0].contracted.is_some());
+        assert!(workspace.intermediates[0].oriented.is_some());
+    }
+
+    #[test]
+    fn typed_replay_restores_both_orientation_buffers_after_failure() {
+        let runtime = Runtime::builder().build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let space = |degeneracy| {
+            GradedSpace::try_new(
+                Arc::clone(&provider),
+                [(U1Irrep::new(0), degeneracy)],
+                false,
+            )
+            .unwrap()
+        };
+        let left = space(5);
+        let bond = space(4);
+        let right = space(6);
+        let tail = space(7);
+        let a =
+            TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&left], [&bond], 21).unwrap();
+        let b = TensorMap::rand_with_seed(&runtime, [&bond], [&right], 22).unwrap();
+        let c =
+            TensorMap::rand_with_seed(&runtime, [&left.try_dual().unwrap()], [&tail], 23).unwrap();
+        let refs = [&a, &b, &c];
+        let mut planned = crossed_plan();
+        planned.schedule.steps[0].result_output_axes = None;
+        planned.schedule.steps[0].contract_output_axes = vec![0, 1];
+        planned.schedule.steps[0].result_permutation = Some((vec![1], vec![0]));
+        let mut workspace = NetworkExecutionWorkspace::default();
+        drop(
+            planned
+                .execute_with_workspace(&refs, &mut workspace)
+                .unwrap(),
+        );
+
+        planned.schedule.steps[0].result_permutation = Some((vec![usize::MAX], vec![0]));
+        assert!(planned
+            .execute_with_workspace(&refs, &mut workspace)
+            .is_err());
+        assert!(workspace.intermediates[0].contracted.is_some());
+        assert!(workspace.intermediates[0].oriented.is_some());
+        planned.schedule.steps[0].result_permutation = Some((vec![1], vec![0]));
+        drop(
+            planned
+                .execute_with_workspace(&refs, &mut workspace)
+                .unwrap(),
+        );
+    }
 }

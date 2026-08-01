@@ -5,10 +5,10 @@
 //! The planner half (labels, [`NetworkIR`], cost models, optimizer trait,
 //! [`ContractionPlan`], slicing) is ported nearly verbatim from the legacy
 //! `tenet-contract` crate: it is **pure structure** over labels and leg
-//! dimensions and never touches tensor data. The execution half is a thin
-//! new loop over the user-layer [`tenet::prelude::Tensor`]
-//! (`contract` + `permute` per planned pairwise step); the legacy old-core
-//! executor was not ported.
+//! dimensions and never touches tensor data. Explicit execution uses homogeneous
+//! typed Host [`tenet::typed::TensorMap`] operands and a caller-owned typed
+//! workspace. The erased loop remains private for the `tensor!` compatibility
+//! path until its separate cutover.
 //!
 //! ## Pipeline
 //!
@@ -17,7 +17,7 @@
 //!   -> NetworkIR + DenseCostModel        (per-label dimension map)
 //!   -> DenseContractionOptimizer         (greedy by default)
 //!   -> ContractionPlan                   (reusable, serializable)
-//!   -> PlannedNetwork::execute(&[&Tensor]) -> Tensor
+//!   -> PlannedNetwork::execute(&[&TensorMap<R, D>]) -> TensorMap<R, D>
 //! ```
 //!
 //! There is **no public einsum-string parser** (decision 4 in
@@ -61,8 +61,7 @@ pub use error::{ContractError, Result};
 pub use ir::{HyperEdge, NetworkIR, TensorNode};
 pub use labels::{LabelOccurrence, TemporaryLabel, TensorAxis, TensorId};
 pub use network::{
-    contract_network, contract_static_network, NetOperand, Network, NetworkExecutionWorkspace,
-    PlannedNetwork, StaticTopologySpec,
+    contract_static_network, Network, NetworkExecutionWorkspace, PlannedNetwork, StaticTopologySpec,
 };
 pub use optimizer::{
     block_sparse_order_from_labels, greedy_order, greedy_order_block_sparse,

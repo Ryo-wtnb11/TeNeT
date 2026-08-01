@@ -1,5 +1,5 @@
-//! Topology-keyed contraction-plan cache for the `tensor!` /
-//! [`Network::contract`] path.
+//! Topology-keyed contraction-plan cache for the private erased compatibility
+//! path behind [`tenet_macros::tensor`].
 //!
 //! The cache key is the network *topology*: per-operand label lists, conj
 //! flags, codomain ranks and written `;` splits, plus the output labels and
@@ -38,7 +38,9 @@ pub use tenet::plancache::{
 };
 
 use crate::labels::TemporaryLabel;
-use crate::network::{Network, NetworkExecutionWorkspace, PlannedNetwork, StaticTopologySpec};
+use crate::network::{
+    ErasedNetworkExecutionWorkspace, Network, PlannedNetwork, StaticTopologySpec,
+};
 use crate::optimizer::GreedyDenseOptimizer;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -68,7 +70,7 @@ struct CacheEntry {
 
 #[derive(Default)]
 struct WorkspacePool {
-    available: Mutex<Vec<NetworkExecutionWorkspace>>,
+    available: Mutex<Vec<ErasedNetworkExecutionWorkspace>>,
     created: AtomicU64,
     reused: AtomicU64,
     slot_grows: AtomicU64,
@@ -78,7 +80,7 @@ const MAX_IDLE_WORKSPACES_PER_PLAN: usize = 2;
 
 struct WorkspaceLease {
     pool: Arc<WorkspacePool>,
-    workspace: Option<NetworkExecutionWorkspace>,
+    workspace: Option<ErasedNetworkExecutionWorkspace>,
 }
 
 impl WorkspacePool {
@@ -95,7 +97,7 @@ impl WorkspacePool {
             }
             None => {
                 self.created.fetch_add(1, Ordering::Relaxed);
-                NetworkExecutionWorkspace::default()
+                ErasedNetworkExecutionWorkspace::default()
             }
         };
         WorkspaceLease {
@@ -106,7 +108,7 @@ impl WorkspacePool {
 }
 
 impl WorkspaceLease {
-    fn workspace(&mut self) -> &mut NetworkExecutionWorkspace {
+    fn workspace(&mut self) -> &mut ErasedNetworkExecutionWorkspace {
         self.workspace
             .as_mut()
             .expect("workspace lease always owns a workspace")
@@ -146,7 +148,7 @@ impl CachedPlan {
         let previous_capacity = lease.workspace().slot_capacity();
         let result = self
             .planned
-            .execute_with_workspace(tensors, lease.workspace());
+            .execute_erased_with_workspace(tensors, lease.workspace());
         if lease.workspace().slot_capacity() > previous_capacity {
             self.workspaces.slot_grows.fetch_add(1, Ordering::Relaxed);
         }
@@ -604,7 +606,7 @@ pub(crate) fn execute_static(
     optimizer: &Optimizer,
 ) -> Result<Tensor, Error> {
     let Some(runtime) = tensors.first().map(|tensor| tensor.runtime()) else {
-        return spec.network()?.contract_with(tensors, optimizer);
+        return spec.network()?.contract_with_erased(tensors, optimizer);
     };
     let key = StaticTopologyKey {
         spec,
@@ -644,7 +646,7 @@ pub(crate) fn execute_static(
         })
     })?;
     match lookup {
-        Lookup::Disabled => return spec.network()?.contract_with(tensors, optimizer),
+        Lookup::Disabled => return spec.network()?.contract_with_erased(tensors, optimizer),
         Lookup::Hit(cached) => return cached.execute(tensors),
         Lookup::Miss => {}
     }
@@ -709,9 +711,9 @@ fn plan_fresh(
     optimizer: &Optimizer,
 ) -> Result<PlannedNetwork, Error> {
     match optimizer {
-        Optimizer::Greedy => network.plan(tensors, &GreedyDenseOptimizer),
+        Optimizer::Greedy => network.plan_erased(tensors, &GreedyDenseOptimizer),
         #[cfg(feature = "opt-path")]
-        Optimizer::Optimal => network.plan(
+        Optimizer::Optimal => network.plan_erased(
             tensors,
             &crate::pathopt::OptEinsumPathOptimizer::new(crate::pathopt::PathStrategy::Optimal),
         ),
@@ -723,12 +725,12 @@ fn plan_fresh(
         #[cfg(feature = "opt-path")]
         Optimizer::DynamicProgramming => {
             use crate::pathopt::{OptEinsumPathOptimizer, PathStrategy};
-            match network.plan(
+            match network.plan_erased(
                 tensors,
                 &OptEinsumPathOptimizer::new(PathStrategy::DynamicProgramming),
             ) {
                 Ok(plan) => Ok(plan),
-                Err(_) => network.plan(tensors, &GreedyDenseOptimizer),
+                Err(_) => network.plan_erased(tensors, &GreedyDenseOptimizer),
             }
         }
         // Legacy `default_dense_plan` fallback chain: auto-hq -> auto -> dp
@@ -743,16 +745,16 @@ fn plan_fresh(
                 PathStrategy::Auto,
                 PathStrategy::DynamicProgramming,
             ] {
-                match network.plan(tensors, &OptEinsumPathOptimizer::new(strategy)) {
+                match network.plan_erased(tensors, &OptEinsumPathOptimizer::new(strategy)) {
                     Ok(plan) => return Ok(plan),
                     Err(err) => last_error = Some(err),
                 }
             }
             let _ = last_error;
-            network.plan(tensors, &GreedyDenseOptimizer)
+            network.plan_erased(tensors, &GreedyDenseOptimizer)
         }
         #[cfg(feature = "cotengra-python")]
-        Optimizer::CotengraPython(config) => network.plan(
+        Optimizer::CotengraPython(config) => network.plan_erased(
             tensors,
             &crate::cotengra_python::CotengraPythonOptimizer::new(config.clone()),
         ),
@@ -807,9 +809,9 @@ fn topology_for(
     })
 }
 
-/// Cache-aware planning for [`Network::contract`]: reuse a topology-matched
-/// plan from the operands' runtime (subject to the drift policy), otherwise
-/// plan fresh and cache.
+/// Cache-aware erased compatibility planning: reuse a topology-matched plan
+/// from the operands' runtime (subject to the drift policy), otherwise plan
+/// fresh and cache.
 pub(crate) fn get_or_plan(
     network: &Network,
     tensors: &[&Tensor],
@@ -951,7 +953,7 @@ fn get_or_plan_internal(
             .flatten()
     });
     let planned = match disk_plan {
-        Some(plan) => Arc::new(network.plan_with(tensors, plan)?),
+        Some(plan) => Arc::new(network.plan_with_erased(tensors, plan)?),
         None => {
             let fresh = Arc::new(plan_fresh(network, tensors, optimizer)?);
             // Record the freshly searched order so a later process reusing
@@ -1138,6 +1140,48 @@ mod tests {
         assert_eq!(cached.workspaces.reused.load(Ordering::Relaxed), 1);
     }
 
+    /// The erased macro cache still distinguishes explicit optimizer keys even
+    /// though direct erased `Network` execution is no longer public.
+    #[cfg(feature = "opt-path")]
+    #[test]
+    fn optimizer_override_keys_separately() {
+        let runtime = Runtime::builder().build().unwrap();
+        let space = Space::u1([(0, 2)]);
+        let a = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 361).unwrap();
+        let b = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 362).unwrap();
+        let labels = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| TemporaryLabel::from(*name))
+                .collect::<Vec<_>>()
+        };
+        let network = Network::new(
+            vec![labels(&["i", "k"]), labels(&["k", "m"])],
+            vec![false; 2],
+            vec![Some(1); 2],
+            labels(&["i", "m"]),
+            Some(1),
+        )
+        .unwrap();
+        let tensors = [&a, &b];
+
+        let greedy = get_or_plan(&network, &tensors, &Optimizer::Greedy).unwrap();
+        let optimal = get_or_plan(&network, &tensors, &Optimizer::Optimal).unwrap();
+        assert_eq!(
+            (
+                plan_cache_stats(&runtime).misses,
+                plan_cache_stats(&runtime).entries
+            ),
+            (2, 2)
+        );
+        let _ = get_or_plan(&network, &tensors, &Optimizer::Optimal).unwrap();
+        assert_eq!(plan_cache_stats(&runtime).hits, 1);
+        assert_eq!(
+            greedy.execute(&tensors).unwrap().data(),
+            optimal.execute(&tensors).unwrap().data()
+        );
+    }
+
     /// Clearing cache ownership cannot invalidate a lease that was already
     /// checked out for execution.
     #[test]
@@ -1163,12 +1207,12 @@ mod tests {
         let tensors = [&a, &b];
         let cached = get_or_plan(&network, &tensors, &Optimizer::Greedy).unwrap();
         let mut lease = cached.workspaces.lease();
-        let expected = cached.planned.execute(&tensors).unwrap();
+        let expected = cached.planned.execute_erased(&tensors).unwrap();
 
         super::clear_plan_cache(&runtime);
         let actual = cached
             .planned
-            .execute_with_workspace(&tensors, lease.workspace())
+            .execute_erased_with_workspace(&tensors, lease.workspace())
             .unwrap();
 
         assert_eq!(actual.data(), expected.data());
