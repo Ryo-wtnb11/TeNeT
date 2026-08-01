@@ -5,12 +5,15 @@
 
 #![cfg(feature = "cuda")]
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use tenet::core::{
-    product_sector, CheckedFusionAlgebra, FermionParityFusionRule, MultiplicityFreeRigidSymbols,
-    ProductFusionRuleExt, SU2FusionRule, SU2Irrep, SectorCodec, U1FusionRule, U1Irrep, Z2Irrep,
-    ZNFusionRule,
+    product_sector, BraidingStyleKind, CheckedFusionAlgebra, FermionParityFusionRule,
+    FusionAlgebraError, FusionRule, FusionStyleKind, MultiplicityFreeFusionRule,
+    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, ProductFusionRuleExt,
+    RuleIdentity, SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorVec, U1FusionRule, U1Irrep,
+    Z2Irrep, ZNFusionRule,
 };
 use tenet::typed::{BlockFusionTrees, GradedSpace, Runtime, TensorMap};
 
@@ -35,6 +38,135 @@ struct StructuralSnapshot<S> {
     codomain: Vec<LegSnapshot<S>>,
     domain: Vec<LegSnapshot<S>>,
     blocks: Vec<BlockSnapshot<S>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct ProbeSector;
+
+/// One-sector provider whose dimension callback re-enters the public Runtime
+/// lock. A reduction deadlocks here if it calls provider code under that lock.
+struct ReentrantDimensionRule {
+    runtime: Runtime,
+    calls: Arc<AtomicUsize>,
+}
+
+impl FusionRule for ReentrantDimensionRule {
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::from_canonical_bytes::<Self>(0x7520_0000_0000_0001, Arc::<[u8]>::from([]))
+    }
+
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Unique
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Bosonic
+    }
+
+    fn vacuum(&self) -> SectorId {
+        SectorId::new(0)
+    }
+
+    fn fusion_channels(&self, _: SectorId, _: SectorId) -> SectorVec {
+        core::iter::once(SectorId::new(0)).collect()
+    }
+}
+
+impl MultiplicityFreeFusionRule for ReentrantDimensionRule {}
+
+impl MultiplicityFreeFusionSymbols for ReentrantDimensionRule {
+    type Scalar = f64;
+
+    fn scalar_one(&self) -> f64 {
+        1.0
+    }
+
+    fn scalar_conj(&self, value: f64) -> f64 {
+        value
+    }
+
+    fn f_symbol_scalar(
+        &self,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+        _: SectorId,
+    ) -> f64 {
+        1.0
+    }
+
+    fn r_symbol_scalar(&self, _: SectorId, _: SectorId, _: SectorId) -> f64 {
+        1.0
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for ReentrantDimensionRule {
+    fn dim_scalar(&self, _: SectorId) -> f64 {
+        assert_eq!(self.runtime.cuda_device_ordinal(), Some(0));
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        1.0
+    }
+
+    fn inv_dim_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+
+    fn sqrt_dim_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+
+    fn inv_sqrt_dim_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+
+    fn twist_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+
+    fn frobenius_schur_phase_scalar(&self, _: SectorId) -> f64 {
+        1.0
+    }
+}
+
+impl CheckedFusionAlgebra for ReentrantDimensionRule {
+    fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
+        Ok(sector)
+    }
+
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, FusionAlgebraError> {
+        Ok(self.fusion_channels(left, right))
+    }
+
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, FusionAlgebraError> {
+        Ok(self.nsymbol(left, right, coupled))
+    }
+}
+
+impl SectorCodec for ReentrantDimensionRule {
+    type Sector = ProbeSector;
+
+    fn encode_sector(&self, _: &ProbeSector) -> Result<SectorId, FusionAlgebraError> {
+        Ok(SectorId::new(0))
+    }
+
+    fn decode_sector(&self, sector: SectorId) -> Result<ProbeSector, FusionAlgebraError> {
+        if sector == SectorId::new(0) {
+            Ok(ProbeSector)
+        } else {
+            Err(FusionAlgebraError::InvalidSector { sector })
+        }
+    }
 }
 
 fn structural_snapshot<R>(tensor: &TensorMap<R, f64>) -> StructuralSnapshot<R::Sector>
@@ -130,6 +262,25 @@ where
         assert_eq!(actual.data(), expected.data());
         assert_eq!(structural_snapshot(actual), structural_snapshot(expected));
     }
+}
+
+fn assert_reduction_parity<R>(lhs: &TensorMap<R, f64>, rhs: &TensorMap<R, f64>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    let expected_inner = lhs.inner(rhs).unwrap();
+    let expected_norm = lhs.norm().unwrap();
+    let lhs_device = lhs.to_cuda().unwrap();
+    let rhs_device = rhs.to_cuda().unwrap();
+    let inner = lhs_device.inner(&rhs_device).unwrap();
+    let norm = lhs_device.norm().unwrap();
+    let tolerance = 1e-12 * (1.0 + expected_inner.abs().max(expected_norm));
+
+    assert!((inner - expected_inner).abs() <= tolerance);
+    assert_eq!(lhs_device.dot(&rhs_device).unwrap(), inner);
+    assert!((norm - expected_norm).abs() <= tolerance);
+    let self_inner = lhs_device.inner(&lhs_device).unwrap();
+    assert!((self_inner - norm.powi(2)).abs() <= 1e-12 * (1.0 + self_inner.abs()));
 }
 
 #[test]
@@ -286,6 +437,211 @@ fn typed_cuda_direct_execution_matches_host_providers_and_structure() {
     )
     .unwrap();
     assert_direct_contract_and_compose(&product_multileg_lhs, &product_multileg_rhs);
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+
+    let u1_provider = Arc::new(U1FusionRule);
+    let u1_leg = GradedSpace::try_new(
+        Arc::clone(&u1_provider),
+        [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
+        false,
+    )
+    .unwrap();
+    let u1_lhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&u1_leg], [&u1_leg], |trees, _| {
+            if trees.coupled() == &U1Irrep::new(0) {
+                1.0
+            } else {
+                2.0
+            }
+        })
+        .unwrap();
+    let u1_rhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&u1_leg], [&u1_leg], |trees, _| {
+            if trees.coupled() == &U1Irrep::new(0) {
+                3.0
+            } else {
+                4.0
+            }
+        })
+        .unwrap();
+    assert_eq!(u1_lhs.inner(&u1_rhs).unwrap(), 11.0);
+    assert_reduction_parity(&u1_lhs, &u1_rhs);
+
+    let u1_device = u1_lhs.to_cuda().unwrap();
+    let u1_norm = u1_device.norm().unwrap();
+    let lazy = u1_device.adjoint().unwrap();
+    assert!((lazy.norm().unwrap() - u1_norm).abs() < 1e-12);
+    assert!(matches!(
+        lazy.inner(&lazy),
+        Err(tenet::typed::Error::UnsupportedOnDevice(_))
+    ));
+    assert!(matches!(
+        lazy.dot(&lazy),
+        Err(tenet::typed::Error::UnsupportedOnDevice(_))
+    ));
+    let u1_rhs_device = u1_rhs.to_cuda().unwrap();
+    let repeated = u1_device.inner(&u1_rhs_device).unwrap();
+    for _ in 0..3 {
+        assert_eq!(u1_device.inner(&u1_rhs_device).unwrap(), repeated);
+    }
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..4)
+            .map(|_| scope.spawn(|| u1_device.inner(&u1_rhs_device).unwrap()))
+            .collect();
+        for worker in workers {
+            assert_eq!(worker.join().unwrap(), repeated);
+        }
+    });
+
+    let su2_provider = Arc::new(SU2FusionRule);
+    let spin0 = SU2Irrep::from_twice_spin(0);
+    let spin_half = SU2Irrep::from_twice_spin(1);
+    let su2_leg = GradedSpace::try_new(
+        Arc::clone(&su2_provider),
+        [(spin0, 1), (spin_half, 1)],
+        false,
+    )
+    .unwrap();
+    let su2_lhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&su2_leg], [&su2_leg], |trees, _| {
+            if trees.coupled() == &spin0 {
+                1.0
+            } else {
+                2.0
+            }
+        })
+        .unwrap();
+    let su2_rhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&su2_leg], [&su2_leg], |trees, _| {
+            if trees.coupled() == &spin0 {
+                3.0
+            } else {
+                4.0
+            }
+        })
+        .unwrap();
+    // dim(j=0) * 1 * 3 + dim(j=1/2) * 2 * 4 = 1 * 3 + 2 * 8.
+    assert_eq!(su2_lhs.inner(&su2_rhs).unwrap(), 19.0);
+    assert_reduction_parity(&su2_lhs, &su2_rhs);
+
+    let su2_rank5_lhs = TensorMap::from_block_fn(
+        &runtime,
+        [&su2_leg, &su2_leg, &su2_leg],
+        [&su2_leg, &su2_leg],
+        |_, indices| indices.iter().sum::<usize>() as f64 + 1.0,
+    )
+    .unwrap();
+    let su2_rank5_rhs = TensorMap::from_block_fn(
+        &runtime,
+        [&su2_leg, &su2_leg, &su2_leg],
+        [&su2_leg, &su2_leg],
+        |_, indices| indices.iter().sum::<usize>() as f64 + 3.0,
+    )
+    .unwrap();
+    assert_reduction_parity(&su2_rank5_lhs, &su2_rank5_rhs);
+
+    let fz2_provider = Arc::new(FermionParityFusionRule);
+    let fz2_leg = GradedSpace::try_new(
+        Arc::clone(&fz2_provider),
+        [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)],
+        false,
+    )
+    .unwrap();
+    let fz2_lhs = TensorMap::from_block_fn(&runtime, [&fz2_leg], [&fz2_leg], |_, indices| {
+        indices.iter().sum::<usize>() as f64 + 1.0
+    })
+    .unwrap();
+    let fz2_rhs = TensorMap::from_block_fn(&runtime, [&fz2_leg], [&fz2_leg], |_, indices| {
+        indices.iter().sum::<usize>() as f64 + 3.0
+    })
+    .unwrap();
+    assert_reduction_parity(&fz2_lhs, &fz2_rhs);
+
+    let product_provider = Arc::new(U1FusionRule.product(FermionParityFusionRule));
+    let product_leg = GradedSpace::try_new(
+        Arc::clone(&product_provider),
+        [
+            (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
+            (product_sector(U1Irrep::new(1), Z2Irrep::ODD), 1),
+        ],
+        false,
+    )
+    .unwrap();
+    let product_lhs =
+        TensorMap::from_block_fn(&runtime, [&product_leg], [&product_leg], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 2.0
+        })
+        .unwrap();
+    let product_rhs =
+        TensorMap::from_block_fn(&runtime, [&product_leg], [&product_leg], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 5.0
+        })
+        .unwrap();
+    assert_reduction_parity(&product_lhs, &product_rhs);
+
+    let callback_count = Arc::new(AtomicUsize::new(0));
+    let probe_provider = Arc::new(ReentrantDimensionRule {
+        runtime: runtime.clone(),
+        calls: Arc::clone(&callback_count),
+    });
+    let probe_leg =
+        GradedSpace::try_new(Arc::clone(&probe_provider), [(ProbeSector, 1)], false).unwrap();
+    let probe_lhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&probe_leg], [&probe_leg], |_, _| 2.0).unwrap();
+    let probe_rhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&probe_leg], [&probe_leg], |_, _| 3.0).unwrap();
+    let calls_before_reduction = callback_count.load(Ordering::SeqCst);
+    assert_eq!(
+        probe_lhs
+            .to_cuda()
+            .unwrap()
+            .inner(&probe_rhs.to_cuda().unwrap())
+            .unwrap(),
+        6.0
+    );
+    assert!(callback_count.load(Ordering::SeqCst) > calls_before_reduction);
+
+    let other_runtime = Runtime::builder().cuda(0).build().unwrap();
+    let foreign = TensorMap::from_block_fn(&other_runtime, [&u1_leg], [&u1_leg], |_, _| 1.0)
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    assert_eq!(
+        u1_device.inner(&foreign).unwrap_err(),
+        tenet::typed::Error::RuntimeMismatch
+    );
+
+    let wider = GradedSpace::try_new(
+        Arc::clone(&u1_provider),
+        [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+        false,
+    )
+    .unwrap();
+    let mismatched = TensorMap::from_block_fn(&runtime, [&wider], [&wider], |_, _| 1.0)
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    assert!(matches!(
+        u1_device.inner(&mismatched),
+        Err(tenet::typed::Error::InvalidArgument(_))
+    ));
+    assert_eq!(u1_device.to_host().unwrap().data(), u1_lhs.data());
+
+    let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
+    let charge0 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(0), 1)], false).unwrap();
+    let charge1 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(1), 1)], false).unwrap();
+    let empty: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&charge0], [&charge1], |_, _| 1.0).unwrap();
+    assert!(empty.data().is_empty());
+    let empty_device = empty.to_cuda().unwrap();
+    assert_eq!(empty_device.norm().unwrap(), 0.0);
+    assert_eq!(empty_device.inner(&empty_device).unwrap(), 0.0);
+    assert_eq!(empty_device.dot(&empty_device).unwrap(), 0.0);
 }
 
 #[test]

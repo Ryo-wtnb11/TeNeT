@@ -222,6 +222,10 @@ use tenet_core::{
 use tenet_core::{
     CheckedGenericFusion, CheckedGenericRigidSymbols, HostReadableStorage, Placement, TensorStorage,
 };
+#[cfg(feature = "cuda")]
+use tenet_dense::CudaDenseContext;
+#[cfg(feature = "cuda")]
+use tenet_operations::StorageGemm;
 use tenet_tensors::{
     tree_transform_dyn_owned_checked_generic, BoundDynamicFusionMapSpace, BoundDynamicTensorRef,
     DynamicFusionMapSpace, OutputAxisOrder, TensorContractSpec, TreeTransformOperation,
@@ -271,6 +275,52 @@ use crate::tensor_core::{
     tree_transform_owned_multiplicity_free, OrientedContractionKind,
 };
 use crate::RuntimeIdentity;
+
+#[cfg(all(test, feature = "cuda"))]
+thread_local! {
+    /// `(download_calls, device_partials_len, host_partials_len)`.
+    static CUDA_REDUCTION_BUFFER_OBSERVATION:
+        std::cell::Cell<Option<(usize, usize, usize)>> = const {
+            std::cell::Cell::new(None)
+        };
+}
+
+#[cfg(feature = "cuda")]
+fn validate_cuda_reduction_placement(
+    expected: Placement,
+    lhs: Placement,
+    rhs: Placement,
+) -> Result<(), Error> {
+    if lhs != expected || rhs != expected {
+        return Err(Error::PlacementMismatch);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+fn download_cuda_reduction_partials(
+    partials: &CudaStorage,
+    cuda: &CudaDenseContext,
+) -> Result<Vec<f64>, Error> {
+    #[cfg(test)]
+    let device_len = partials.len();
+    #[cfg(test)]
+    let observed_call = CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| {
+        observation.get().map(|(calls, _, _)| {
+            let calls = calls + 1;
+            observation.set(Some((calls, device_len, 0)));
+            calls
+        })
+    });
+    let values = partials.download(cuda)?;
+    #[cfg(test)]
+    if let Some(calls) = observed_call {
+        CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| {
+            observation.set(Some((calls, device_len, values.len())));
+        });
+    }
+    Ok(values)
+}
 
 /// Facade error for checked Generic providers.
 #[non_exhaustive]
@@ -2491,11 +2541,31 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 /// use tenet::core::Su3FusionRule;
 /// use tenet::typed::{CudaStorage, TensorMap};
 ///
-/// fn no_checked_generic_cuda_compose(
+/// fn no_checked_generic_cuda_reductions(
 ///     lhs: &TensorMap<Su3FusionRule, f64, CudaStorage>,
 ///     rhs: &TensorMap<Su3FusionRule, f64, CudaStorage>,
 /// ) {
-///     let _ = lhs.compose(rhs);
+///     let _ = lhs.norm();
+///     let _ = lhs.inner(rhs);
+///     let _ = lhs.dot(rhs);
+/// }
+/// ```
+///
+/// Complex CUDA reductions are likewise absent: CUDA storage currently owns
+/// f64 payloads only.
+///
+/// ```compile_fail
+/// use num_complex::Complex64;
+/// use tenet::core::U1FusionRule;
+/// use tenet::typed::{CudaStorage, TensorMap};
+///
+/// fn no_c64_cuda_reductions(
+///     lhs: &TensorMap<U1FusionRule, Complex64, CudaStorage>,
+///     rhs: &TensorMap<U1FusionRule, Complex64, CudaStorage>,
+/// ) {
+///     let _ = lhs.norm();
+///     let _ = lhs.inner(rhs);
+///     let _ = lhs.dot(rhs);
 /// }
 /// ```
 impl<R> TensorMap<R, f64, CudaStorage>
@@ -2505,6 +2575,113 @@ where
     /// Lazy categorical adjoint over the same parent device allocation.
     pub fn adjoint(&self) -> Result<Self, Error> {
         self.dense_adjoint_view()
+    }
+
+    fn direct_cuda_storage(&self, operation: &'static str) -> Result<&CudaStorage, Error> {
+        match &self.repr {
+            TypedTensorRepr::Owned(body) => match body.data.as_ref() {
+                TypedData::Dense(storage) => Ok(storage),
+                TypedData::Diagonal(_) => Err(Error::UnsupportedOnDevice(format!(
+                    "{operation} requires dense CUDA storage"
+                ))),
+            },
+            TypedTensorRepr::Adjoint(_) => Err(Error::UnsupportedOnDevice(format!(
+                "{operation} does not support lazy adjoint CUDA operands"
+            ))),
+        }
+    }
+
+    /// Quantum-dimension-weighted Frobenius reduction over owned CUDA storage.
+    ///
+    /// The device returns one scalar per coupled sector. Category weights stay
+    /// with the tensor and are applied only after releasing the Runtime lock.
+    fn weighted_inner_cuda(&self, lhs: &CudaStorage, rhs: &CudaStorage) -> Result<f64, Error> {
+        let space = self.logical_space().space();
+        let regions = sector_regions(space.structure(), space.nout())?;
+        let mut state = self.runtime.lock();
+        let cuda = state.cuda.as_mut().ok_or_else(|| {
+            Error::InvalidArgument(
+                "this runtime was built without a CUDA device; use \
+                 Runtime::builder().cuda(device)"
+                    .to_string(),
+            )
+        })?;
+        validate_cuda_reduction_placement(
+            Placement::Cuda(cuda.device()),
+            lhs.placement(),
+            rhs.placement(),
+        )?;
+        // ponytail: #740 keeps the proven host-zero upload until a native
+        // allocation has correct cross-stream publication and measured value.
+        let mut partials = CudaStorage::upload(cuda, &vec![0.0; regions.len().max(1)])?;
+        {
+            let mut gemm = CudaStorageGemm::new(cuda);
+            for (index, region) in regions.iter().enumerate() {
+                let len = region.rows() * region.cols();
+                if len == 0 {
+                    continue;
+                }
+                gemm.matmul_range_into(
+                    &mut partials,
+                    index,
+                    lhs,
+                    region.range().start,
+                    rhs,
+                    region.range().start,
+                    1,
+                    len,
+                    1,
+                )?;
+            }
+        }
+        let values = download_cuda_reduction_partials(&partials, cuda)?;
+        drop(state);
+
+        Ok(regions
+            .iter()
+            .zip(values)
+            .map(|(region, value)| {
+                value * self.logical_space().provider().dim_scalar(region.coupled())
+            })
+            .sum())
+    }
+
+    /// Quantum-dimension-weighted Frobenius norm of a device tensor.
+    ///
+    /// A lazy adjoint delegates to its canonical parent because this norm is
+    /// adjoint invariant; no logical-adjoint payload is materialized.
+    pub fn norm(&self) -> Result<f64, Error> {
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            return Self {
+                runtime: self.runtime.clone(),
+                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+            }
+            .norm();
+        }
+        let storage = self.direct_cuda_storage("norm")?;
+        Ok(self.weighted_inner_cuda(storage, storage)?.sqrt())
+    }
+
+    /// Quantum-dimension-weighted Frobenius inner product of owned f64 device
+    /// tensors. Lazy adjoints remain an explicit unsupported device scope.
+    pub fn inner(&self, other: &Self) -> Result<f64, Error> {
+        if !self.runtime.same_runtime(&other.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        if self.logical_space().space() != other.logical_space().space() {
+            return Err(Error::InvalidArgument(
+                "tensors live on different spaces or block layouts".to_string(),
+            ));
+        }
+        let lhs = self.direct_cuda_storage("inner")?;
+        let rhs = other.direct_cuda_storage("inner")?;
+        self.weighted_inner_cuda(lhs, rhs)
+    }
+
+    /// Total alias of [`Self::inner`].
+    #[inline]
+    pub fn dot(&self, other: &Self) -> Result<f64, Error> {
+        self.inner(other)
     }
 
     fn cuda_fusion_operand(
@@ -7900,6 +8077,49 @@ mod representation_gates {
             unreachable!("transfer preserves the lazy view")
         };
         assert!(device_view.materialized.get().is_none());
+        let expected_norm = source.norm().unwrap();
+        CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0))));
+        assert!(
+            (lazy_device.norm().unwrap() - expected_norm).abs() <= 1e-12 * (1.0 + expected_norm)
+        );
+        let observed = CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| {
+            let observed = observation.get().unwrap();
+            observation.set(None);
+            observed
+        });
+        let sector_count = sector_regions(
+            source.logical_space().space().structure(),
+            source.logical_space().space().nout(),
+        )
+        .unwrap()
+        .len();
+        assert_eq!(observed, (1, sector_count.max(1), sector_count.max(1)));
+        assert!(source.data().len() > sector_count.max(1));
+        assert!(matches!(
+            lazy_device.inner(&lazy_device),
+            Err(Error::UnsupportedOnDevice(_))
+        ));
+        assert!(matches!(
+            lazy_device.dot(&lazy_device),
+            Err(Error::UnsupportedOnDevice(_))
+        ));
+        assert_eq!(materialized_adjoint_builds(&lazy_device), 0);
+        assert!(device_view.materialized.get().is_none());
+
+        let mut missing_context = lazy_device.clone();
+        missing_context.runtime = Runtime::builder().build().unwrap();
+        let preflight_sentinel = (usize::MAX, usize::MAX, usize::MAX);
+        CUDA_REDUCTION_BUFFER_OBSERVATION
+            .with(|observation| observation.set(Some(preflight_sentinel)));
+        assert!(matches!(
+            missing_context.norm(),
+            Err(Error::InvalidArgument(message)) if message.contains("without a CUDA device")
+        ));
+        CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| {
+            assert_eq!(observation.get(), Some(preflight_sentinel));
+            observation.set(None);
+        });
+        assert_eq!(materialized_adjoint_builds(&missing_context), 0);
         let device_clone = lazy_device.clone();
         let TypedTensorRepr::Adjoint(clone_view) = &device_clone.repr else {
             unreachable!("clone preserves the lazy view")
@@ -7913,6 +8133,26 @@ mod representation_gates {
         assert!(host_view.materialized.get().is_none());
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
         assert_eq!(lazy_host.data(), expected_lazy);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn typed_cuda_reduction_placement_validation_is_exact() {
+        assert!(validate_cuda_reduction_placement(
+            Placement::Cuda(0),
+            Placement::Cuda(0),
+            Placement::Cuda(0)
+        )
+        .is_ok());
+        assert_eq!(
+            validate_cuda_reduction_placement(
+                Placement::Cuda(1),
+                Placement::Cuda(0),
+                Placement::Cuda(0)
+            )
+            .unwrap_err(),
+            Error::PlacementMismatch
+        );
     }
 
     #[cfg(feature = "cuda")]
