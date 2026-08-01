@@ -335,7 +335,7 @@ fn typed_cuda_fermionic_contract_is_minus_six_and_compose_stays_plus_six() {
 
 #[test]
 #[ignore]
-fn typed_cuda_direct_rejects_scope_lazy_and_runtime_before_mutating_inputs() {
+fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mutation() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let other_runtime = Runtime::builder().cuda(0).build().unwrap();
     let provider = Arc::new(U1FusionRule);
@@ -363,10 +363,21 @@ fn typed_cuda_direct_rejects_scope_lazy_and_runtime_before_mutating_inputs() {
         Err(tenet::typed::Error::Operation(error))
             if matches!(*error, tenet::operations::OperationError::UnsupportedTensorContractScope { .. })
     ));
-    let lazy = host.adjoint().unwrap().to_cuda().unwrap();
+    let lazy_host = host.adjoint().unwrap();
+    let expected_lazy_compose = lazy_host.compose(&host).unwrap();
+    let lazy = lazy_host.to_cuda().unwrap();
+    let lazy_compose = lazy.compose(&device).unwrap().to_host().unwrap();
+    assert!(std::ptr::eq(lazy_compose.provider(), host.provider()));
+    assert!(runtime.identity().matches(lazy_compose.runtime()));
+    assert_eq!(lazy_compose.data(), expected_lazy_compose.data());
+    assert_eq!(
+        structural_snapshot(&lazy_compose),
+        structural_snapshot(&expected_lazy_compose)
+    );
     assert!(matches!(
-        lazy.compose(&device),
-        Err(tenet::typed::Error::UnsupportedOnDevice(_))
+        lazy.contract(&device, &[1], &[0], &[1, 0]),
+        Err(tenet::typed::Error::Operation(error))
+            if matches!(*error, tenet::operations::OperationError::UnsupportedTensorContractScope { .. })
     ));
     assert_eq!(device.to_host().unwrap().data(), expected);
 

@@ -1107,15 +1107,15 @@ impl FusionBlockContractPlan {
         DRhs: TensorStorage<D>,
     {
         self.require_fully_direct_storage()?;
-        self.require_identity_storage_ops()?;
         if self.direct_batch.len() != self.direct_batch_alpha.len() {
             return Err(OperationError::UnsupportedTensorContractScope {
                 message: "storage-direct plan has misaligned GEMM coefficients",
             });
         }
-        if self.direct_batch_alpha.iter().any(|&alpha| alpha != 1.0)
-            && !gemm.supports_matmul_with_ops_scaled(self.lhs_op, self.rhs_op)
-        {
+        let needs_general_gemm = self.lhs_op != MatrixOp::Identity
+            || self.rhs_op != MatrixOp::Identity
+            || self.direct_batch_alpha.iter().any(|&alpha| alpha != 1.0);
+        if needs_general_gemm && !gemm.supports_matmul_with_ops_scaled(self.lhs_op, self.rhs_op) {
             return Err(OperationError::UnsupportedTensorContractScope {
                 message: "storage GEMM backend does not implement scaled replay",
             });
@@ -1126,7 +1126,10 @@ impl FusionBlockContractPlan {
             validate_storage_range(dst.len(), job.dst_offset, job.rows, job.cols)?;
         }
         for (job, &alpha) in self.direct_batch.iter().zip(&self.direct_batch_alpha) {
-            if alpha == 1.0 {
+            if alpha == 1.0
+                && self.lhs_op == MatrixOp::Identity
+                && self.rhs_op == MatrixOp::Identity
+            {
                 gemm.matmul_range_into(
                     dst,
                     job.dst_offset,
@@ -3068,7 +3071,7 @@ mod tests {
     }
 
     #[test]
-    fn op_bearing_plan_rejects_prezeroed_storage_replay() {
+    fn op_bearing_plan_rejects_unsupported_storage_gemm_before_mutation() {
         let structure = Arc::new(BlockStructure::trivial(&[2, 2]).unwrap());
         let plan = FusionBlockContractPlan::from_parts_with_ops(
             Arc::clone(&structure),
@@ -3095,10 +3098,10 @@ mod tests {
         assert!(matches!(
             error,
             OperationError::UnsupportedTensorContractScope {
-                message:
-                    "storage-handle core replay does not expose transpose/adjoint matrix views"
+                message: "storage GEMM backend does not implement scaled replay"
             }
         ));
+        assert_eq!(dst, [0.0; 4]);
     }
 
     #[derive(Default)]

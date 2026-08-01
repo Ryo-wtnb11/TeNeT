@@ -97,6 +97,117 @@ impl MultiplicityFreeRigidSymbols for AdversarialNonuniformTwistRule {
     }
 }
 
+#[derive(Default)]
+struct CpuOrientedGemm {
+    calls: Vec<(usize, usize, MatrixOp, MatrixOp, f64)>,
+}
+
+impl CpuOrientedGemm {
+    #[allow(clippy::too_many_arguments)]
+    fn run(
+        &mut self,
+        dst: &mut [f64],
+        dst_offset: usize,
+        lhs: &[f64],
+        lhs_offset: usize,
+        rhs: &[f64],
+        rhs_offset: usize,
+        rows: usize,
+        contracted: usize,
+        cols: usize,
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+        alpha: f64,
+    ) {
+        self.calls
+            .push((lhs_offset, rhs_offset, lhs_op, rhs_op, alpha));
+        for col in 0..cols {
+            for row in 0..rows {
+                dst[dst_offset + row + rows * col] = alpha
+                    * (0..contracted)
+                        .map(|inner| {
+                            let lhs_index = match lhs_op {
+                                MatrixOp::Identity => row + rows * inner,
+                                MatrixOp::Adjoint => inner + contracted * row,
+                                MatrixOp::Transpose => {
+                                    unreachable!("test does not admit transpose")
+                                }
+                            };
+                            let rhs_index = match rhs_op {
+                                MatrixOp::Identity => inner + contracted * col,
+                                MatrixOp::Adjoint => col + cols * inner,
+                                MatrixOp::Transpose => {
+                                    unreachable!("test does not admit transpose")
+                                }
+                            };
+                            lhs[lhs_offset + lhs_index] * rhs[rhs_offset + rhs_index]
+                        })
+                        .sum::<f64>();
+            }
+        }
+    }
+}
+
+impl tenet_operations::fusion_replay::StorageGemm<f64, Vec<f64>, Vec<f64>, Vec<f64>>
+    for CpuOrientedGemm
+{
+    fn supports_matmul_with_ops_scaled(&self, lhs_op: MatrixOp, rhs_op: MatrixOp) -> bool {
+        let supported = |op| matches!(op, MatrixOp::Identity | MatrixOp::Adjoint);
+        supported(lhs_op) && supported(rhs_op)
+    }
+
+    fn matmul_range_into(
+        &mut self,
+        dst: &mut Vec<f64>,
+        dst_offset: usize,
+        lhs: &Vec<f64>,
+        lhs_offset: usize,
+        rhs: &Vec<f64>,
+        rhs_offset: usize,
+        rows: usize,
+        contracted: usize,
+        cols: usize,
+    ) -> Result<(), OperationError> {
+        self.run(
+            dst,
+            dst_offset,
+            lhs,
+            lhs_offset,
+            rhs,
+            rhs_offset,
+            rows,
+            contracted,
+            cols,
+            MatrixOp::Identity,
+            MatrixOp::Identity,
+            1.0,
+        );
+        Ok(())
+    }
+
+    fn matmul_range_with_ops_scaled_into(
+        &mut self,
+        dst: &mut Vec<f64>,
+        dst_offset: usize,
+        lhs: &Vec<f64>,
+        lhs_offset: usize,
+        rhs: &Vec<f64>,
+        rhs_offset: usize,
+        rows: usize,
+        contracted: usize,
+        cols: usize,
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+        alpha: f64,
+    ) -> Result<(), OperationError> {
+        self.run(
+            dst, dst_offset, lhs, lhs_offset, rhs, rhs_offset, rows, contracted, cols, lhs_op,
+            rhs_op, alpha,
+        );
+        Ok(())
+    }
+}
+
 fn assert_f64_bits_eq(label: &str, actual: &[f64], expected: &[f64]) {
     assert_eq!(actual.len(), expected.len(), "{label} length");
     for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
@@ -3154,6 +3265,331 @@ fn fermionic_storage_contract_rejects_nonuniform_twist_before_gemm() {
     ));
     assert_eq!(gemm.calls, 0);
     assert_eq!(output, before);
+}
+
+#[test]
+fn oriented_storage_contract_and_compose_use_parent_rectangular_views() {
+    let rule = Z2FusionRule;
+    let provider = Arc::new(rule);
+    let (m, k, n) = (2, 3, 4);
+    let lhs_blocks = [
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+    ];
+    let rhs_blocks = [
+        vec![1.0, 0.0, 2.0, 0.0, 1.0, 3.0, 4.0, 1.0, 0.0, 2.0, 5.0, 1.0],
+        vec![2.0, 1.0, 0.0, 1.0, 3.0, 2.0, 0.0, 4.0, 1.0, 3.0, 0.0, 2.0],
+    ];
+    let transpose = |matrix: &[f64], rows: usize, cols: usize| {
+        (0..rows)
+            .flat_map(|row| (0..cols).map(move |col| matrix[row + rows * col]))
+            .collect::<Vec<_>>()
+    };
+    let product = |lhs: &[f64], rhs: &[f64]| {
+        (0..n)
+            .flat_map(|col| {
+                (0..m).map(move |row| {
+                    (0..k)
+                        .map(|inner| lhs[row + m * inner] * rhs[inner + k * col])
+                        .sum::<f64>()
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected = lhs_blocks
+        .iter()
+        .zip(&rhs_blocks)
+        .flat_map(|(lhs, rhs)| product(lhs, rhs))
+        .collect::<Vec<_>>();
+    let matrix_space = |rows, cols| {
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<1, 1>::from_dims([2 * rows], [2 * cols]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([SectorLeg::new(
+                    [(SectorId::new(0), rows), (SectorId::new(1), rows)],
+                    false,
+                )]),
+                FusionProductSpace::new([SectorLeg::new(
+                    [(SectorId::new(0), cols), (SectorId::new(1), cols)],
+                    false,
+                )]),
+            ),
+            &rule,
+            [vec![rows, cols], vec![rows, cols]],
+        )
+        .unwrap()
+    };
+
+    for (lhs_adjoint, rhs_adjoint) in [(false, false), (true, false), (false, true), (true, true)] {
+        let lhs_parent_typed = if lhs_adjoint {
+            matrix_space(k, m)
+        } else {
+            matrix_space(m, k)
+        };
+        let lhs_logical_typed = if lhs_adjoint {
+            crate::lowering::adjoint_fusion_space_view(&rule, &lhs_parent_typed).unwrap()
+        } else {
+            lhs_parent_typed.clone()
+        };
+        let rhs_parent_typed = if rhs_adjoint {
+            matrix_space(n, k)
+        } else {
+            matrix_space(k, n)
+        };
+        let rhs_logical_typed = if rhs_adjoint {
+            crate::lowering::adjoint_fusion_space_view(&rule, &rhs_parent_typed).unwrap()
+        } else {
+            rhs_parent_typed.clone()
+        };
+        let lhs_parent = crate::DynamicFusionMapSpace::from_typed(&lhs_parent_typed);
+        let rhs_parent = crate::DynamicFusionMapSpace::from_typed(&rhs_parent_typed);
+        let lhs_logical = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            crate::DynamicFusionMapSpace::from_typed(&lhs_logical_typed),
+            Arc::clone(&provider),
+        )
+        .unwrap();
+        let rhs_logical = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            crate::DynamicFusionMapSpace::from_typed(&rhs_logical_typed),
+            Arc::clone(&provider),
+        )
+        .unwrap();
+        let dst = crate::BoundDynamicFusionMapSpace::contracted_multiplicity_free(
+            &lhs_logical,
+            &rhs_logical,
+            &[1],
+            &[0],
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(dst.provider_arc(), &provider));
+        let lhs_operand = if lhs_adjoint {
+            crate::FusionOperand::adjoint(&lhs_parent)
+        } else {
+            crate::FusionOperand::direct(&lhs_parent)
+        };
+        let rhs_operand = if rhs_adjoint {
+            crate::FusionOperand::adjoint(&rhs_parent)
+        } else {
+            crate::FusionOperand::direct(&rhs_parent)
+        };
+        let lhs_values = lhs_blocks
+            .iter()
+            .flat_map(|block| {
+                if lhs_adjoint {
+                    transpose(block, m, k)
+                } else {
+                    block.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let rhs_values = rhs_blocks
+            .iter()
+            .flat_map(|block| {
+                if rhs_adjoint {
+                    transpose(block, k, n)
+                } else {
+                    block.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut context =
+            crate::TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+        crate::contract::reset_fusion_operand_projection_prepares();
+
+        let mut contracted = vec![0.0; dst.space().required_len().unwrap()];
+        let mut contract_gemm = CpuOrientedGemm::default();
+        context
+            .tensorcontract_fusion_dyn_prelowered_direct_on_storage(
+                &mut contract_gemm,
+                &dst,
+                &mut contracted,
+                lhs_operand,
+                &lhs_values,
+                rhs_operand,
+                &rhs_values,
+                TensorContractSpec::new_with_conjugation(
+                    &[1],
+                    &[0],
+                    crate::OutputAxisOrder::identity(),
+                    lhs_adjoint,
+                    rhs_adjoint,
+                ),
+            )
+            .unwrap();
+        assert_eq!(contracted, expected);
+        assert_eq!(contract_gemm.calls.len(), 2);
+        assert!(contract_gemm.calls[1].0 > 0 && contract_gemm.calls[1].1 > 0);
+        assert_eq!(
+            contract_gemm.calls[0].2,
+            if lhs_adjoint {
+                MatrixOp::Adjoint
+            } else {
+                MatrixOp::Identity
+            }
+        );
+        assert_eq!(
+            contract_gemm.calls[0].3,
+            if rhs_adjoint {
+                MatrixOp::Adjoint
+            } else {
+                MatrixOp::Identity
+            }
+        );
+
+        let mut composed = vec![0.0; dst.space().required_len().unwrap()];
+        context
+            .tensorcompose_fusion_dyn_prelowered_direct_on_storage(
+                &mut CpuOrientedGemm::default(),
+                &dst,
+                &mut composed,
+                lhs_operand,
+                &lhs_values,
+                rhs_operand,
+                &rhs_values,
+                &[1],
+                &[0],
+            )
+            .unwrap();
+        assert_eq!(composed, expected);
+        assert_eq!(crate::contract::fusion_operand_projection_prepares(), 0);
+
+        if lhs_adjoint && !rhs_adjoint {
+            let outer_dst = crate::BoundDynamicFusionMapSpace::contracted_multiplicity_free(
+                &lhs_logical,
+                &rhs_logical,
+                &[],
+                &[],
+            )
+            .unwrap();
+            let sentinel = vec![42.0; outer_dst.space().required_len().unwrap()];
+            let mut rejected = sentinel.clone();
+            let mut rejected_gemm = CpuOrientedGemm::default();
+            assert!(matches!(
+                context.tensorcompose_fusion_dyn_prelowered_direct_on_storage(
+                    &mut rejected_gemm,
+                    &outer_dst,
+                    &mut rejected,
+                    lhs_operand,
+                    &lhs_values,
+                    rhs_operand,
+                    &rhs_values,
+                    &[],
+                    &[],
+                ),
+                Err(OperationError::UnsupportedTensorContractScope { .. })
+            ));
+            assert!(rejected_gemm.calls.is_empty());
+            assert_eq!(rejected, sentinel);
+            assert_eq!(crate::contract::fusion_operand_projection_prepares(), 0);
+        }
+    }
+}
+
+#[test]
+fn oriented_fermionic_storage_keeps_contract_and_compose_signs_distinct() {
+    let rule = FermionParityFusionRule;
+    let provider = Arc::new(rule);
+    let odd = SectorId::new(1);
+    let space = |codomain_dual, domain_dual| {
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<1, 1>::from_dims([1], [1]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([SectorLeg::new([(odd, 1)], codomain_dual)]),
+                FusionProductSpace::new([SectorLeg::new([(odd, 1)], domain_dual)]),
+            ),
+            &rule,
+            [vec![1, 1]],
+        )
+        .unwrap()
+    };
+    let lhs_logical_typed = space(false, true);
+    let rhs_logical_typed = space(true, false);
+    let lhs_values = vec![2.0];
+    let rhs_values = vec![3.0];
+
+    for (lhs_adjoint, rhs_adjoint) in [(false, false), (true, false), (false, true), (true, true)] {
+        let lhs_parent_typed = if lhs_adjoint {
+            lhs_logical_typed.adjoint_view().unwrap()
+        } else {
+            lhs_logical_typed.clone()
+        };
+        let rhs_parent_typed = if rhs_adjoint {
+            rhs_logical_typed.adjoint_view().unwrap()
+        } else {
+            rhs_logical_typed.clone()
+        };
+        let lhs_parent = crate::DynamicFusionMapSpace::from_typed(&lhs_parent_typed);
+        let rhs_parent = crate::DynamicFusionMapSpace::from_typed(&rhs_parent_typed);
+        let lhs_logical = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            crate::DynamicFusionMapSpace::from_typed(&lhs_logical_typed),
+            Arc::clone(&provider),
+        )
+        .unwrap();
+        let rhs_logical = crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(
+            crate::DynamicFusionMapSpace::from_typed(&rhs_logical_typed),
+            Arc::clone(&provider),
+        )
+        .unwrap();
+        let dst = crate::BoundDynamicFusionMapSpace::contracted_multiplicity_free(
+            &lhs_logical,
+            &rhs_logical,
+            &[1],
+            &[0],
+        )
+        .unwrap();
+        let lhs = if lhs_adjoint {
+            crate::FusionOperand::adjoint(&lhs_parent)
+        } else {
+            crate::FusionOperand::direct(&lhs_parent)
+        };
+        let rhs = if rhs_adjoint {
+            crate::FusionOperand::adjoint(&rhs_parent)
+        } else {
+            crate::FusionOperand::direct(&rhs_parent)
+        };
+        let mut context =
+            crate::TensorContractFusionExecutionContext::<f64, RuleIdentity>::default();
+        crate::contract::reset_fusion_operand_projection_prepares();
+
+        let mut contracted = vec![0.0];
+        let mut contract_gemm = CpuOrientedGemm::default();
+        context
+            .tensorcontract_fusion_dyn_prelowered_direct_on_storage(
+                &mut contract_gemm,
+                &dst,
+                &mut contracted,
+                lhs,
+                &lhs_values,
+                rhs,
+                &rhs_values,
+                TensorContractSpec::new_with_conjugation(
+                    &[1],
+                    &[0],
+                    crate::OutputAxisOrder::identity(),
+                    lhs_adjoint,
+                    rhs_adjoint,
+                ),
+            )
+            .unwrap();
+        assert_eq!(contracted, [-6.0]);
+        assert_eq!(contract_gemm.calls[0].4, -1.0);
+
+        let mut composed = vec![0.0];
+        context
+            .tensorcompose_fusion_dyn_prelowered_direct_on_storage(
+                &mut CpuOrientedGemm::default(),
+                &dst,
+                &mut composed,
+                lhs,
+                &lhs_values,
+                rhs,
+                &rhs_values,
+                &[1],
+                &[0],
+            )
+            .unwrap();
+        assert_eq!(composed, [6.0]);
+        assert_eq!(crate::contract::fusion_operand_projection_prepares(), 0);
+    }
 }
 
 #[test]

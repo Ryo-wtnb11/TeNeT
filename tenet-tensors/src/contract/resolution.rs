@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use tenet_core::{FusionTreeHomSpace, MultiplicityFreeRigidSymbols};
+use tenet_core::{FusionTreeHomSpace, FusionTreePairOrientation, MultiplicityFreeRigidSymbols};
 
 use super::structure::TensorContractStructure;
 use crate::OperationError;
@@ -15,7 +15,9 @@ use tenet_operations::fusion_replay::FusionBlockContractPlan;
 use tenet_operations::TensorContractFusionProfile;
 
 use super::dynamic_space::{DynamicFusionMapSpace, FusionOperand, FusionOperandLayout};
-use super::fusion::{external_axis_is_dual, rhs_contract_twist_factor, FusionContractPlan};
+use super::fusion::{
+    external_axis_is_dual, rhs_contract_twist_factor_oriented, FusionContractPlan,
+};
 use super::fusion_block::{
     compile_fusion_block_contract_plan_prelowered_validated,
     compile_fusion_block_contract_plan_validated, try_compile_oriented_canonical_core_plan,
@@ -250,9 +252,14 @@ where
     if !preflight.has_conjugation() {
         if let Some(validated) = preflight.validate_core_geometry()? {
             if validated_rhs_contract_requires_twist(&validated)? {
-                if let Some(plan) =
-                    try_compile_scaled_storage_contract_plan(rule, &validated, dst, lhs, rhs)?
-                {
+                if let Some(plan) = try_compile_scaled_storage_contract_plan(
+                    rule,
+                    &validated,
+                    dst,
+                    lhs,
+                    rhs,
+                    FusionTreePairOrientation::Direct,
+                )? {
                     return Ok(Resolution::Core(Arc::new(plan)));
                 }
             } else {
@@ -275,6 +282,7 @@ fn try_compile_scaled_storage_contract_plan<R>(
     dst: &DynamicFusionMapSpace,
     lhs: &DynamicFusionMapSpace,
     rhs: &DynamicFusionMapSpace,
+    rhs_orientation: FusionTreePairOrientation,
 ) -> Result<Option<FusionBlockContractPlan>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -288,22 +296,26 @@ where
     };
     let mut alpha_by_coupled = Vec::with_capacity(regions.len());
     for region in regions.iter() {
-        let mut row_trees = region.row_trees().iter();
+        let mut row_trees = match rhs_orientation {
+            FusionTreePairOrientation::Direct => region.row_trees(),
+            FusionTreePairOrientation::Adjoint => region.col_trees(),
+        }
+        .iter();
         let Some(first) = row_trees.next() else {
             return Err(OperationError::UnsupportedTensorContractScope {
                 message: "canonical RHS coupled region has no row fusion tree",
             });
         };
-        let alpha = rhs_contract_twist_factor(
+        let alpha = rhs_contract_twist_factor_oriented(
             rule,
-            rhs.homspace(),
+            validated.rhs_homspace(),
             validated.rhs_contracting_axes(),
             first.tree(),
         )?;
         for extent in row_trees {
-            if rhs_contract_twist_factor(
+            if rhs_contract_twist_factor_oriented(
                 rule,
-                rhs.homspace(),
+                validated.rhs_homspace(),
                 validated.rhs_contracting_axes(),
                 extent.tree(),
             )? != alpha
@@ -316,6 +328,78 @@ where
         alpha_by_coupled.push((region.coupled(), alpha));
     }
     try_compile_scaled_canonical_core_plan(validated, dst, lhs, rhs, &alpha_by_coupled)
+}
+
+/// Compiles the canonical storage contraction directly from parent spaces and
+/// lazy operand orientation, before any logical-key projection is prepared.
+pub(crate) fn try_compile_oriented_storage_contract_plan<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: FusionOperand<'_>,
+    rhs: FusionOperand<'_>,
+    axes: TensorContractSpec<'_>,
+) -> Result<Option<Arc<FusionBlockContractPlan>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let preflight = CoreContractPreflight::compile_oriented(
+        rule,
+        dst.homspace(),
+        lhs.oriented_homspace(),
+        rhs.oriented_homspace(),
+        axes,
+    )?;
+    let Some(validated) = preflight.validate_core_geometry()? else {
+        return Ok(None);
+    };
+    let plan = if validated_rhs_contract_requires_twist(&validated)? {
+        try_compile_scaled_storage_contract_plan(
+            rule,
+            &validated,
+            dst,
+            lhs.storage_space(),
+            rhs.storage_space(),
+            rhs.orientation(),
+        )?
+    } else {
+        try_compile_oriented_canonical_core_plan(
+            &validated,
+            dst,
+            lhs.storage_space(),
+            rhs.storage_space(),
+        )?
+    };
+    Ok(plan.map(Arc::new))
+}
+
+/// Twist-free counterpart used only by tensor-map composition.
+pub(crate) fn try_compile_oriented_storage_composition_plan<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: FusionOperand<'_>,
+    rhs: FusionOperand<'_>,
+    axes: TensorContractSpec<'_>,
+) -> Result<Option<Arc<FusionBlockContractPlan>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let preflight = CoreContractPreflight::compile_oriented(
+        rule,
+        dst.homspace(),
+        lhs.oriented_homspace(),
+        rhs.oriented_homspace(),
+        axes,
+    )?;
+    let Some(validated) = preflight.validate_core_geometry()? else {
+        return Ok(None);
+    };
+    try_compile_oriented_canonical_core_plan(
+        &validated,
+        dst,
+        lhs.storage_space(),
+        rhs.storage_space(),
+    )
+    .map(|plan| plan.map(Arc::new))
 }
 
 /// Compiles the coupled block plan for already-materialized core operands.
