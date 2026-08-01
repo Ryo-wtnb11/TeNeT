@@ -497,6 +497,111 @@ fn checked_only_provider_uses_ordinary_typed_ownership_and_vertices() {
     assert_eq!(clone.data().as_ptr(), tensor.data().as_ptr());
 }
 
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore]
+fn checked_only_provider_roundtrips_through_typed_cuda_without_algebra_dispatch() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let codomain = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(Label::Vacuum, 1), (Label::X, 2)],
+        false,
+    )
+    .unwrap();
+    let domain = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(Label::Vacuum, 1), (Label::X, 3)],
+        true,
+    )
+    .unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&codomain], [&domain], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 1.0
+        })
+        .unwrap();
+    let vertex_leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let vertex_source: TensorMap<_, f64> = TensorMap::from_block_fn(
+        &runtime,
+        [&vertex_leg, &vertex_leg],
+        [&vertex_leg],
+        |trees, indices| {
+            trees.codomain_vertices()[0].get() as f64 + indices.iter().sum::<usize>() as f64
+        },
+    )
+    .unwrap();
+    let block_structure = |tensor: &TensorMap<CheckedOnlyToy, f64>| {
+        (0..tensor.block_count())
+            .map(|index| {
+                let block = tensor.block(index).unwrap();
+                (
+                    block.key().clone(),
+                    tensor.block_fusion_trees(index).unwrap(),
+                    block.offset(),
+                    block.shape().to_vec(),
+                    block.strides().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let structure = |tensor: &TensorMap<CheckedOnlyToy, f64>| {
+        let mut codomain_legs = Vec::new();
+        let mut domain_legs = Vec::new();
+        for index in 0..tensor.block_count() {
+            let block = tensor.block(index).unwrap();
+            let trees = tensor.block_fusion_trees(index).unwrap();
+            let tenet::core::BlockKey::FusionTree(raw_trees) = block.key() else {
+                panic!("checked Generic tensors use fusion-tree block keys")
+            };
+            assert_eq!(trees.codomain_uncoupled().len(), 1);
+            assert_eq!(trees.domain_uncoupled().len(), 1);
+            assert_eq!(block.shape().len(), 2);
+            codomain_legs.push((
+                trees.codomain_uncoupled()[0],
+                block.shape()[0],
+                raw_trees.codomain_tree().is_dual()[0],
+            ));
+            domain_legs.push((
+                trees.domain_uncoupled()[0],
+                block.shape()[1],
+                raw_trees.domain_tree().is_dual()[0],
+            ));
+        }
+        codomain_legs.sort_unstable();
+        codomain_legs.dedup();
+        domain_legs.sort_unstable();
+        domain_legs.dedup();
+        (codomain_legs, domain_legs, block_structure(tensor))
+    };
+    let expected_structure = structure(&source);
+    let expected_vertex_structure = block_structure(&vertex_source);
+    assert_eq!(
+        expected_structure.0,
+        [(Label::Vacuum, 1, false), (Label::X, 2, false)]
+    );
+    assert_eq!(
+        expected_structure.1,
+        [(Label::Vacuum, 1, true), (Label::X, 3, true)]
+    );
+    let expected = source.data().to_vec();
+    let expected_vertex_data = vertex_source.data().to_vec();
+    provider.algebra_queries.store(0, Ordering::Relaxed);
+    provider.coefficient_queries.store(0, Ordering::Relaxed);
+
+    let device = source.to_cuda().unwrap();
+    let restored = device.to_host().unwrap();
+    let vertex_device = vertex_source.to_cuda().unwrap();
+    let vertex_restored = vertex_device.to_host().unwrap();
+
+    assert!(std::ptr::eq(restored.provider(), provider.as_ref()));
+    assert_eq!(restored.data(), expected);
+    assert_eq!(structure(&restored), expected_structure);
+    assert_eq!(vertex_restored.data(), expected_vertex_data);
+    assert_eq!(block_structure(&vertex_restored), expected_vertex_structure);
+    assert_eq!(provider.algebra_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(provider.coefficient_queries.load(Ordering::Relaxed), 0);
+}
+
 #[test]
 fn checked_only_multiplicity_two_transforms_keep_the_source_authority() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();

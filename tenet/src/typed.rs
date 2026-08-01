@@ -200,6 +200,15 @@
 //! provider that reports an invalid or unrepresentable algebra fails with a
 //! typed error and publishes no layout, cache, or admission state.
 
+#![cfg_attr(
+    not(feature = "cuda"),
+    doc = "```compile_fail\nuse tenet::typed::CudaStorage;\n```"
+)]
+#![cfg_attr(
+    not(feature = "cuda"),
+    doc = "```compile_fail\nuse tenet::typed::TensorMap;\nfn no_cuda<R>(tensor: &TensorMap<R, f64>) { let _ = tensor.to_cuda(); }\n```"
+)]
+
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
@@ -211,7 +220,7 @@ use tenet_core::{
     ProductSectorCodec, SectorId, SectorLeg, TypedSectorAdmission, UnitLegInsertion,
 };
 use tenet_core::{
-    CheckedGenericFusion, CheckedGenericRigidSymbols, HostReadableStorage, TensorStorage,
+    CheckedGenericFusion, CheckedGenericRigidSymbols, HostReadableStorage, Placement, TensorStorage,
 };
 use tenet_tensors::{
     tree_transform_dyn_owned_checked_generic, BoundDynamicFusionMapSpace, BoundDynamicTensorRef,
@@ -221,6 +230,9 @@ use tenet_tensors::{
 pub use tenet_core::SectorCodec;
 #[cfg(feature = "racah-generated")]
 pub use tenet_core::{SUNFusionRule, SUNFusionRuleError};
+/// Flat f64 CUDA storage used by explicit typed ownership transfer.
+#[cfg(feature = "cuda")]
+pub use tenet_tensors::cuda::CudaStorage;
 pub use tenet_tensors::CheckedGenericPlanError;
 
 /// Re-exported so `use tenet::typed::*` is self-sufficient apart from the
@@ -2018,6 +2030,136 @@ impl<R, D, S> TensorMap<R, D, S> {
     #[inline]
     pub fn block_count(&self) -> usize {
         self.logical_space().space().structure().block_count()
+    }
+}
+
+impl<R, D, S> TensorMap<R, D, S>
+where
+    S: TensorStorage<D>,
+{
+    /// Reports where the canonical payload lives.
+    ///
+    /// This is diagnostic metadata only. Arithmetic never dispatches on
+    /// placement, and transfers are always explicit and type-changing.
+    pub fn placement(&self) -> Placement {
+        match self.storage_body().data.as_ref() {
+            TypedData::Dense(storage) => storage.placement(),
+            TypedData::Diagonal(_) => Placement::Host,
+        }
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl<R> TensorMap<R, f64> {
+    /// Uploads host f64 ownership to this tensor's Runtime CUDA context.
+    ///
+    /// Dense storage uploads directly. Compact diagonal storage is expanded
+    /// operation-locally and becomes dense on device; the source's reusable
+    /// dense cache stays cold, and a roundtrip remains dense rather than
+    /// recovering compactness. A lazy adjoint transfers only its canonical
+    /// parent and rebuilds a cold lazy view over the device parent.
+    ///
+    /// CUDA transfer is deliberately unavailable for c64 payloads:
+    ///
+    /// ```compile_fail
+    /// use tenet::core::U1FusionRule;
+    /// use tenet::typed::TensorMap;
+    ///
+    /// fn no_c64_upload(tensor: &TensorMap<U1FusionRule, num_complex::Complex64>) {
+    ///     let _ = tensor.to_cuda();
+    /// }
+    /// ```
+    pub fn to_cuda(&self) -> Result<TensorMap<R, f64, CudaStorage>, Error> {
+        let state = self.runtime.lock();
+        let cuda = state.cuda.as_ref().ok_or_else(|| {
+            Error::InvalidArgument(
+                "this runtime was built without a CUDA device; use \
+                 Runtime::builder().cuda(device)"
+                    .to_string(),
+            )
+        })?;
+        let upload = |body: &Arc<TypedTensorBody<R, f64>>| {
+            let storage = match body.data.as_ref() {
+                TypedData::Dense(data) => CudaStorage::upload(cuda, data)?,
+                TypedData::Diagonal(spectrum) => {
+                    let dense = tenet_matrixalgebra::diagonal_bond_data(
+                        body.space.space(),
+                        spectrum,
+                        &|value| value,
+                    )?;
+                    CudaStorage::upload(cuda, &dense)?
+                }
+            };
+            Ok::<_, Error>(Arc::new(TypedTensorBody::dense(
+                body.space.clone(),
+                storage,
+            )))
+        };
+
+        let repr = match &self.repr {
+            TypedTensorRepr::Owned(body) => TypedTensorRepr::Owned(upload(body)?),
+            TypedTensorRepr::Adjoint(view) => {
+                TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView {
+                    parent: upload(&view.parent)?,
+                    logical_space: view.logical_space.clone(),
+                    materialized: OnceLock::new(),
+                    #[cfg(test)]
+                    materialized_body_builds: std::sync::atomic::AtomicUsize::new(0),
+                }))
+            }
+        };
+        Ok(TensorMap {
+            runtime: self.runtime.clone(),
+            repr,
+        })
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl<R> TensorMap<R, f64, CudaStorage> {
+    /// Downloads device f64 ownership into one final dense host buffer.
+    ///
+    /// A lazy adjoint downloads only its canonical parent and rebuilds a cold
+    /// host lazy view. No receiver-sized logical adjoint is materialized.
+    /// Device storage is never implicitly host-readable:
+    ///
+    /// ```compile_fail
+    /// use tenet::core::U1FusionRule;
+    /// use tenet::typed::{CudaStorage, TensorMap};
+    ///
+    /// fn no_device_slice(tensor: &TensorMap<U1FusionRule, f64, CudaStorage>) {
+    ///     let _ = tensor.data();
+    /// }
+    /// ```
+    pub fn to_host(&self) -> Result<TensorMap<R, f64>, Error> {
+        let state = self.runtime.lock();
+        let cuda = state.cuda.as_ref().ok_or_else(|| {
+            Error::InvalidArgument("this runtime was built without a CUDA device".to_string())
+        })?;
+        let download = |body: &Arc<TypedTensorBody<R, f64, CudaStorage>>| {
+            let TypedData::Dense(storage) = body.data.as_ref() else {
+                unreachable!("typed CUDA transfer never produces compact storage")
+            };
+            let data = storage.download(cuda)?;
+            Ok::<_, Error>(Arc::new(TypedTensorBody::dense(body.space.clone(), data)))
+        };
+
+        let repr = match &self.repr {
+            TypedTensorRepr::Owned(body) => TypedTensorRepr::Owned(download(body)?),
+            TypedTensorRepr::Adjoint(view) => {
+                TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView {
+                    parent: download(&view.parent)?,
+                    logical_space: view.logical_space.clone(),
+                    materialized: OnceLock::new(),
+                    #[cfg(test)]
+                    materialized_body_builds: std::sync::atomic::AtomicUsize::new(0),
+                }))
+            }
+        };
+        Ok(TensorMap {
+            runtime: self.runtime.clone(),
+            repr,
+        })
     }
 }
 
@@ -6820,6 +6962,129 @@ mod representation_gates {
         assert!(Arc::ptr_eq(owned(&tensor), owned(&twin)));
         assert!(std::ptr::eq(tensor.provider(), twin.provider()));
         assert_eq!(tensor.data(), twin.data());
+    }
+
+    #[test]
+    fn typed_placement_is_diagnostic_for_dense_compact_and_lazy_host_storage() {
+        let source = u1_lazy_fixture();
+        let diagonal = source.svd_compact().unwrap().1;
+        let lazy = source.adjoint().unwrap();
+
+        assert_eq!(source.placement(), Placement::Host);
+        assert_eq!(diagonal.placement(), Placement::Host);
+        assert_eq!(lazy.placement(), Placement::Host);
+        assert!(owned(&diagonal).dense_cache.get().is_none());
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn missing_cuda_context_precedes_compact_expansion_and_lazy_materialization() {
+        let source = u1_lazy_fixture();
+        let diagonal = source.svd_compact().unwrap().1;
+        let lazy = source.adjoint().unwrap();
+        let TypedData::Diagonal(spectrum) = owned(&diagonal).data.as_ref() else {
+            unreachable!("SVD factor is compact")
+        };
+        let mut malformed_spectrum = spectrum.clone();
+        for entry in &mut malformed_spectrum {
+            entry.values.clear();
+        }
+        let malformed_expansion = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tenet_matrixalgebra::diagonal_bond_data(
+                diagonal.logical_space().space(),
+                &malformed_spectrum,
+                &|value| value,
+            )
+        }));
+        assert!(
+            malformed_expansion.is_err() || matches!(malformed_expansion, Ok(Err(_))),
+            "the fixture must fail if compact expansion runs"
+        );
+        let malformed = TensorMap {
+            runtime: diagonal.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::diagonal(
+                diagonal.logical_space().clone(),
+                malformed_spectrum,
+            )),
+        };
+        let missing_context = Error::InvalidArgument(
+            "this runtime was built without a CUDA device; use Runtime::builder().cuda(device)"
+                .to_string(),
+        );
+
+        assert_eq!(malformed.to_cuda().unwrap_err(), missing_context);
+        assert!(matches!(lazy.to_cuda(), Err(error) if error == missing_context));
+        assert!(owned(&malformed).dense_cache.get().is_none());
+        assert!(owned(&diagonal).dense_cache.get().is_none());
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore]
+    fn typed_cuda_compact_and_lazy_roundtrips_keep_source_caches_cold() {
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+            false,
+        )
+        .unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+                indices.iter().sum::<usize>() as f64 + 1.0
+            })
+            .unwrap();
+
+        let diagonal = source.svd_compact().unwrap().1;
+        let TypedData::Diagonal(spectrum) = owned(&diagonal).data.as_ref() else {
+            unreachable!("SVD factor is compact")
+        };
+        let expected_diagonal = tenet_matrixalgebra::diagonal_bond_data(
+            diagonal.logical_space().space(),
+            spectrum,
+            &|value| value,
+        )
+        .unwrap();
+        let diagonal_device = diagonal.to_cuda().unwrap();
+        assert_eq!(diagonal_device.placement(), Placement::Cuda(0));
+        assert!(owned(&diagonal).dense_cache.get().is_none());
+        let diagonal_host = diagonal_device.to_host().unwrap();
+        assert!(matches!(
+            owned(&diagonal_host).data.as_ref(),
+            TypedData::Dense(_)
+        ));
+        assert_eq!(diagonal_host.data(), expected_diagonal);
+        assert!(owned(&diagonal).dense_cache.get().is_none());
+
+        let lazy = source.adjoint().unwrap();
+        let expected_lazy = tenet_tensors::materialize_adjoint_data_dyn(
+            source.logical_space().space(),
+            lazy.logical_space().space(),
+            source.data(),
+        )
+        .unwrap();
+        let lazy_device = lazy.to_cuda().unwrap();
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(device_view) = &lazy_device.repr else {
+            unreachable!("transfer preserves the lazy view")
+        };
+        assert!(device_view.materialized.get().is_none());
+        let device_clone = lazy_device.clone();
+        let TypedTensorRepr::Adjoint(clone_view) = &device_clone.repr else {
+            unreachable!("clone preserves the lazy view")
+        };
+        assert!(Arc::ptr_eq(device_view, clone_view));
+
+        let lazy_host = device_clone.to_host().unwrap();
+        let TypedTensorRepr::Adjoint(host_view) = &lazy_host.repr else {
+            unreachable!("roundtrip preserves the lazy view")
+        };
+        assert!(host_view.materialized.get().is_none());
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        assert_eq!(lazy_host.data(), expected_lazy);
     }
 
     #[test]
