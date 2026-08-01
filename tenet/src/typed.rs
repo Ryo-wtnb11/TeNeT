@@ -206,7 +206,7 @@ use tenet_core::{
     CheckedFusionAlgebra, CheckedGenericAdmissionMode, CheckedGenericStructureError,
     FusionAlgebraError, FusionProductSpace, FusionTreeHomSpace, MultiplicityFreeAdmissionMode,
     MultiplicityFreeRigidSymbols, MultiplicityIndex, ProductFusionRule, ProductSector,
-    ProductSectorCodec, SectorLeg, TypedSectorAdmission, UnitLegInsertion,
+    ProductSectorCodec, SectorId, SectorLeg, TypedSectorAdmission, UnitLegInsertion,
 };
 use tenet_core::{CheckedGenericFusion, CheckedGenericRigidSymbols};
 use tenet_tensors::{
@@ -390,6 +390,108 @@ mod typed_admission_private {
 
     impl Sealed for MultiplicityFreeAdmissionMode {}
     impl Sealed for CheckedGenericAdmissionMode {}
+}
+
+#[doc(hidden)]
+pub trait TypedSpaceModeDispatch<R>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+{
+    fn vacuum(provider: &R) -> SectorId;
+    fn fusion_channels(
+        provider: &R,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<Vec<SectorId>, <Self as TypedTensorModeDispatch<R>>::FacadeError>;
+    fn nsymbol(
+        provider: &R,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, <Self as TypedTensorModeDispatch<R>>::FacadeError>;
+    fn dim(
+        provider: &R,
+        sector: SectorId,
+    ) -> Result<f64, <Self as TypedTensorModeDispatch<R>>::FacadeError>;
+}
+
+impl<R> TypedSpaceModeDispatch<R> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+{
+    fn vacuum(provider: &R) -> SectorId {
+        provider.vacuum()
+    }
+
+    fn fusion_channels(
+        provider: &R,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<Vec<SectorId>, TypedFacadeError<R>> {
+        provider
+            .try_fusion_channels(left, right)
+            .map(|channels| channels.into_iter().collect())
+            .map_err(Into::into)
+    }
+
+    fn nsymbol(
+        provider: &R,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, TypedFacadeError<R>> {
+        provider
+            .try_nsymbol(left, right, coupled)
+            .map_err(Into::into)
+    }
+
+    fn dim(provider: &R, sector: SectorId) -> Result<f64, TypedFacadeError<R>> {
+        Ok(provider.dim_scalar(sector))
+    }
+}
+
+impl<R> TypedSpaceModeDispatch<R> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericRigidSymbols<Scalar = f64>,
+{
+    fn vacuum(provider: &R) -> SectorId {
+        CheckedGenericFusion::vacuum(provider)
+    }
+
+    fn fusion_channels(
+        provider: &R,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<Vec<SectorId>, TypedFacadeError<R>> {
+        provider
+            .try_fusion_channels(left, right)
+            .map(|channels| channels.into_iter().collect())
+            .map_err(<Self as TypedTensorModeDispatch<R>>::map_provider_error)
+    }
+
+    fn nsymbol(
+        provider: &R,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, TypedFacadeError<R>> {
+        provider
+            .try_nsymbol(left, right, coupled)
+            .map_err(<Self as TypedTensorModeDispatch<R>>::map_provider_error)
+    }
+
+    fn dim(provider: &R, sector: SectorId) -> Result<f64, TypedFacadeError<R>> {
+        provider
+            .try_sqrt_dim_scalar(sector)
+            .map(|sqrt_dim| sqrt_dim * sqrt_dim)
+            .map_err(<Self as TypedTensorModeDispatch<R>>::map_provider_error)
+    }
 }
 
 impl<R> TypedTensorModeDispatch<R> for MultiplicityFreeAdmissionMode
@@ -590,14 +692,11 @@ where
     /// Builds a leg from `(label, degeneracy)` pairs — TensorKit's
     /// `GradedSpace` / `Vect[I](c => d, ...; dual)` constructor family.
     ///
-    /// **Dual-leg convention.** Labels are stored exactly as given —
-    /// `is_dual` only marks the orientation, it never dualizes them. On a
-    /// dual leg that is *not* what TensorKit's constructor-plus-read
-    /// composition reports: `sectors(Vect[U1](1 => 1; dual = true))` is `-1`
-    /// (TK dualizes stored keys on read), while
-    /// `try_new(.., [(1, 1)], true)?.sectors()?` is `1`. A dual leg meant to
-    /// agree with TensorKit must be built from pre-dualized labels, or via
-    /// [`Self::try_dual`], which dualizes at construction.
+    /// **Dual-leg convention.** TensorKit interprets constructor labels
+    /// through the orientation: `sectors(Vect[U1](1 => 1; dual = true))` is
+    /// `-1`. TeNeT stores external sector content in [`SectorLeg`], so a dual
+    /// constructor eagerly stores each label's provider dual. Readback and
+    /// every tensor layout therefore see the same external labels.
     ///
     /// Order is irrelevant: the leg stores its sectors in the provider's
     /// [`tenet_core::SectorId`] order. A zero-degeneracy sector is absent from
@@ -615,6 +714,31 @@ where
     /// multiplicity-free providers use [`Error`], while checked Generic
     /// providers retain their typed structure/provider error.
     pub fn try_new<Pairs>(
+        provider: Arc<R>,
+        pairs: Pairs,
+        is_dual: bool,
+    ) -> Result<Self, TypedFacadeError<R>>
+    where
+        Pairs: IntoIterator<Item = (R::Sector, usize)>,
+    {
+        Self::try_new_shared(provider, pairs, is_dual)
+    }
+
+    /// Owned-provider sibling of [`Self::try_new`]. The provider is placed in
+    /// one [`Arc`] at entry, then follows the identical transactional
+    /// validation and normalization path.
+    pub fn try_new_owned<Pairs>(
+        provider: R,
+        pairs: Pairs,
+        is_dual: bool,
+    ) -> Result<Self, TypedFacadeError<R>>
+    where
+        Pairs: IntoIterator<Item = (R::Sector, usize)>,
+    {
+        Self::try_new_shared(Arc::new(provider), pairs, is_dual)
+    }
+
+    fn try_new_shared<Pairs>(
         provider: Arc<R>,
         pairs: Pairs,
         is_dual: bool,
@@ -657,6 +781,22 @@ where
             .into());
         }
 
+        if is_dual {
+            for (id, _, _) in &mut encoded {
+                *id = TypedSectorAdmission::try_dual_id(provider.as_ref(), *id)
+                    .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
+            }
+            let mut duals: Vec<_> = encoded.iter().map(|(id, _, _)| *id).collect();
+            duals.sort_unstable();
+            if let Some(duplicate) = duals.windows(2).find(|pair| pair[0] == pair[1]) {
+                return Err(Error::InvalidArgument(format!(
+                    "dual map is not injective: sector {:?} appears multiple times",
+                    duplicate[0]
+                ))
+                .into());
+            }
+        }
+
         let leg = SectorLeg::try_new(
             encoded.iter().map(|(id, _, degeneracy)| (*id, *degeneracy)),
             is_dual,
@@ -666,14 +806,10 @@ where
     }
 
     /// The sector labels carried by this leg, in the provider's
-    /// [`tenet_core::SectorId`] order — TensorKit `sectors(V)`, with one convention difference:
-    /// the stored labels are returned as-is, never dualized on read, while
-    /// TensorKit dualizes stored keys when `isdual(V)`. A leg from
-    /// [`Self::try_dual`] already stores dual labels, so there the two
-    /// surfaces agree; a leg built by [`Self::try_new`] with `is_dual =
-    /// true` from non-pre-dualized labels does not (see the dual-leg
-    /// convention there). One decode per sector, one `Vec` allocation per
-    /// call.
+    /// [`tenet_core::SectorId`] order — TensorKit `sectors(V)`. Constructor
+    /// normalization and [`Self::try_dual`] both keep the stored ids equal to
+    /// the leg's external sector content. One decode per sector, one `Vec`
+    /// allocation per call.
     ///
     /// The order is the engine's, deliberately: it is the order of
     /// [`Self::degeneracies`] and of every block layout derived from the leg,
@@ -695,6 +831,19 @@ where
             .collect()
     }
 
+    /// Degeneracy of one external sector label — TensorKit `dim(V, c)`.
+    /// A representable label absent from the space has degeneracy zero.
+    pub fn degeneracy(&self, sector: &R::Sector) -> Result<usize, TypedFacadeError<R>> {
+        let id = TypedSectorAdmission::try_encode_label(self.provider.as_ref(), sector)
+            .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
+        Ok(self.leg.degeneracy(id).unwrap_or(0))
+    }
+
+    /// Whether this space carries `sector` with nonzero degeneracy.
+    pub fn has_sector(&self, sector: &R::Sector) -> Result<bool, TypedFacadeError<R>> {
+        self.degeneracy(sector).map(|degeneracy| degeneracy != 0)
+    }
+
     /// The conjugate leg: every sector replaced by its dual (degeneracies
     /// carried along) and the dual flag flipped — TensorKit `dual(V)` / `V'`,
     /// which must satisfy the `dual(dual(V)) == V` contract of TensorKit's
@@ -702,9 +851,7 @@ where
     /// dualizes labels lazily on read; this leg rewrites its stored sector
     /// table eagerly — `O(k log k)`, one provider dual per sector plus the
     /// leg constructor's re-sort — and [`Self::sectors`] then reports the
-    /// dual labels just as TK's `sectors(V')` does, provided the source
-    /// leg's stored labels were its external content (see
-    /// [`Self::try_new`]'s dual-leg convention).
+    /// dual labels just as TK's `sectors(V')` does.
     ///
     /// # Errors
     ///
@@ -768,6 +915,110 @@ where
                 .copied()
                 .zip(self.leg.degeneracies().iter().copied()),
         )
+    }
+}
+
+impl<R> GradedSpace<R>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedSpaceModeDispatch<R>,
+{
+    /// Exact quantum-dimension-weighted total dimension,
+    /// `sum_c degeneracy(c) * dim(c)`, without integer rounding.
+    pub fn dim(&self) -> Result<f64, TypedFacadeError<R>> {
+        let mut total = 0.0;
+        for (&sector, &degeneracy) in self.leg.sectors().iter().zip(self.leg.degeneracies()) {
+            total += degeneracy as f64
+                * <R::Mode as TypedSpaceModeDispatch<R>>::dim(self.provider(), sector)?;
+        }
+        Ok(total)
+    }
+
+    /// Unit space for this provider: one nondual vacuum sector of degeneracy
+    /// one, retaining this space's exact provider allocation.
+    pub fn unitspace(&self) -> Result<Self, TypedFacadeError<R>> {
+        let vacuum = <R::Mode as TypedSpaceModeDispatch<R>>::vacuum(self.provider());
+        TypedSectorAdmission::try_decode_label(self.provider(), vacuum)
+            .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
+        let leg = SectorLeg::try_new([(vacuum, 1)], false).map_err(|error| {
+            TypedFacadeError::<R>::from(Error::InvalidArgument(error.to_string()))
+        })?;
+        Ok(Self {
+            provider: Arc::clone(self.provider_arc()),
+            leg,
+        })
+    }
+
+    /// TensorKit `fuse(self, other)`: fuse external sector content and return
+    /// a nondual space. Provider identity is checked before algebra queries.
+    pub fn fuse(&self, other: &Self) -> Result<Self, TypedFacadeError<R>> {
+        self.require_same_identity(other)?;
+        let mut fused = std::collections::BTreeMap::<SectorId, usize>::new();
+        for (left, left_deg) in self.leg.iter() {
+            for (right, right_deg) in other.leg.iter() {
+                let pair_deg = left_deg.checked_mul(right_deg).ok_or_else(|| {
+                    TypedFacadeError::<R>::from(Error::InvalidArgument(
+                        "fuse: degeneracy multiplication overflow".into(),
+                    ))
+                })?;
+                for coupled in <R::Mode as TypedSpaceModeDispatch<R>>::fusion_channels(
+                    self.provider(),
+                    left,
+                    right,
+                )? {
+                    let multiplicity = <R::Mode as TypedSpaceModeDispatch<R>>::nsymbol(
+                        self.provider(),
+                        left,
+                        right,
+                        coupled,
+                    )?;
+                    let contribution = pair_deg.checked_mul(multiplicity).ok_or_else(|| {
+                        TypedFacadeError::<R>::from(Error::InvalidArgument(
+                            "fuse: degeneracy multiplication overflow".into(),
+                        ))
+                    })?;
+                    let entry = fused.entry(coupled).or_insert(0);
+                    *entry = entry.checked_add(contribution).ok_or_else(|| {
+                        TypedFacadeError::<R>::from(Error::InvalidArgument(format!(
+                            "fuse: degeneracy overflow for sector {coupled:?}"
+                        )))
+                    })?;
+                }
+            }
+        }
+        fused.retain(|_, degeneracy| *degeneracy != 0);
+        for &sector in fused.keys() {
+            TypedSectorAdmission::try_decode_label(self.provider(), sector)
+                .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?;
+        }
+        let leg = SectorLeg::try_new(fused, false).map_err(|error| {
+            TypedFacadeError::<R>::from(Error::InvalidArgument(error.to_string()))
+        })?;
+        Ok(Self {
+            provider: Arc::clone(self.provider_arc()),
+            leg,
+        })
+    }
+
+    /// TensorKit direct sum. Equal provider identity and orientation are
+    /// required; degeneracy addition is checked.
+    pub fn oplus(&self, other: &Self) -> Result<Self, TypedFacadeError<R>> {
+        self.require_same_identity(other)?;
+        let leg = crate::space::oplus_sector_legs(&self.leg, &other.leg)
+            .map_err(TypedFacadeError::<R>::from)?;
+        Ok(Self {
+            provider: Arc::clone(self.provider_arc()),
+            leg,
+        })
+    }
+
+    fn require_same_identity(&self, other: &Self) -> Result<(), TypedFacadeError<R>> {
+        if TypedSectorAdmission::typed_rule_identity(self.provider())
+            != TypedSectorAdmission::typed_rule_identity(other.provider())
+        {
+            return Err(TypedFacadeError::<R>::from(Error::RuleMismatch));
+        }
+        Ok(())
     }
 }
 
