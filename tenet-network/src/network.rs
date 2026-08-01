@@ -1997,6 +1997,44 @@ mod typed_replay_tests {
 
     #[cfg(feature = "cuda")]
     #[test]
+    fn greedy_three_tensor_chain_has_a_direct_cuda_schedule() {
+        let runtime = Runtime::builder().build().unwrap();
+        let space =
+            GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)], false).unwrap();
+        let tensors = (0..3)
+            .map(|seed| {
+                TensorMap::<U1FusionRule, f64>::rand_with_seed(
+                    &runtime,
+                    [&space],
+                    [&space],
+                    750_300 + seed,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let network = Network::new(
+            vec![
+                vec![label("a"), label("b")],
+                vec![label("b"), label("c")],
+                vec![label("c"), label("d")],
+            ],
+            vec![false; 3],
+            vec![Some(1); 3],
+            vec![label("a"), label("d")],
+            Some(1),
+        )
+        .unwrap();
+        let refs = [&tensors[0], &tensors[1], &tensors[2]];
+        let planned = network.plan(&refs, &GreedyDenseOptimizer).unwrap();
+        assert!(
+            planned.validate_cuda_plan_structure().is_ok(),
+            "greedy steps: {:?}",
+            planned.plan().steps()
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
     #[ignore = "requires a real CUDA device"]
     fn cuda_rejections_happen_before_the_first_network_contract() {
         let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();

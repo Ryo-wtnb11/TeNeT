@@ -368,7 +368,7 @@ impl Default for PlanCache {
 /// optimizer's order search changes so that a stale on-disk file (which would
 /// otherwise replay a now-suboptimal order and silently drift truncation) is
 /// rejected on load rather than trusted.
-const PLAN_CACHE_FILE_VERSION: &str = "TENET_PLANCACHE 1";
+const PLAN_CACHE_FILE_VERSION: &str = "TENET_PLANCACHE 2";
 
 /// Stable one-line text key for a network topology: optimizer, output split
 /// and labels, then each operand's conj / codomain rank / written split /

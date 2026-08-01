@@ -28,6 +28,16 @@ fn pair_network() -> Network {
     .unwrap()
 }
 
+fn assert_unsupported_cuda_network(error: tenet::prelude::Error) {
+    match error {
+        tenet::prelude::Error::Operation(error) => assert!(matches!(
+            error.as_ref(),
+            tenet::operations::OperationError::UnsupportedTensorContractScope { .. }
+        )),
+        other => panic!("expected unsupported tensor-contract scope, got {other:?}"),
+    }
+}
+
 fn cuda_pair<R>(runtime: &Runtime, space: &GradedSpace<R>, seed: u64)
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
@@ -101,10 +111,7 @@ fn noncanonical_cuda_macro_never_publishes_or_touches_cache_state() {
     assert!(runtime.with_extension_slot(|slot| slot.is_none()));
     for _ in 0..2 {
         let error = tensor!([c; d] = a_cuda[a; b] * b_cuda[b; c] * c_cuda[a; d]).unwrap_err();
-        assert!(matches!(
-            error,
-            tenet::prelude::Error::UnsupportedOnDevice(_)
-        ));
+        assert_unsupported_cuda_network(error);
         assert!(runtime.with_extension_slot(|slot| slot.is_none()));
     }
 
@@ -114,10 +121,7 @@ fn noncanonical_cuda_macro_never_publishes_or_touches_cache_state() {
     let preseeded = plan_cache_stats(&runtime);
     for _ in 0..2 {
         let error = tensor!([c; d] = a_cuda[a; b] * b_cuda[b; c] * c_cuda[a; d]).unwrap_err();
-        assert!(matches!(
-            error,
-            tenet::prelude::Error::UnsupportedOnDevice(_)
-        ));
+        assert_unsupported_cuda_network(error);
         assert_eq!(plan_cache_stats(&runtime), preseeded);
     }
 }
