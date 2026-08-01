@@ -40,7 +40,9 @@ use super::fusion::{
 use super::fusion_block::{validate_fusion_contract_rule, FusionBlockContractWorkspace};
 use super::resolution::{
     compile_composition_plan, compile_core_plan, compile_prelowered_resolution, compile_resolution,
-    compile_storage_resolution, try_compile_oriented_canonical_core_resolution, Resolution,
+    compile_storage_resolution, try_compile_oriented_canonical_core_resolution,
+    try_compile_oriented_storage_composition_plan, try_compile_oriented_storage_contract_plan,
+    Resolution,
 };
 use super::scratch::DynamicFusionScratchWorkspace;
 use super::structure::{TensorContractAxisPlan, TensorContractStructure};
@@ -1336,6 +1338,113 @@ where
             self.last_top_level_resolution_orientation = None;
         }
         plan.execute_direct_on_storage_prezeroed(gemm, dst, lhs, rhs)
+    }
+
+    /// Canonical storage contraction over parent buffers with lazy operand
+    /// orientation. A miss is unsupported; this device leaf never prepares
+    /// logical-key projections or source transforms.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn tensorcontract_fusion_dyn_prelowered_direct_on_storage<R, G, DDst, DLhs, DRhs>(
+        &mut self,
+        gemm: &mut G,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        dst: &mut DDst,
+        lhs: FusionOperand<'_>,
+        lhs_storage: &DLhs,
+        rhs: FusionOperand<'_>,
+        rhs_storage: &DRhs,
+        axes: TensorContractSpec<'_>,
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        G: tenet_operations::fusion_replay::StorageGemm<D, DDst, DLhs, DRhs>,
+        DDst: TensorStorage<D>,
+        DLhs: TensorStorage<D>,
+        DRhs: TensorStorage<D>,
+    {
+        let rule = dst_space.provider();
+        validate_fusion_contract_rule(
+            rule,
+            dst_space.space(),
+            lhs.storage_space(),
+            rhs.storage_space(),
+        )?;
+        if axes.lhs_conjugate() != lhs.storage_conjugate()
+            || axes.rhs_conjugate() != rhs.storage_conjugate()
+        {
+            return Err(OperationError::InvalidArgument {
+                message: "prelowered operand flags must match the contraction request",
+            });
+        }
+        let plan = try_compile_oriented_storage_contract_plan(
+            rule,
+            dst_space.space(),
+            lhs,
+            rhs,
+            axes,
+        )?
+        .filter(|plan| plan.is_fully_direct())
+        .ok_or(OperationError::UnsupportedTensorContractScope {
+            message:
+                "storage-direct contraction supports only canonical fully-direct oriented operands",
+        })?;
+        #[cfg(test)]
+        self.record_top_level_resolution(&Resolution::Core(Arc::clone(&plan)));
+        plan.execute_direct_on_storage_prezeroed(gemm, dst, lhs_storage, rhs_storage)
+    }
+
+    /// Twist-free storage composition over the same parent/orientation seam.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn tensorcompose_fusion_dyn_prelowered_direct_on_storage<R, G, DDst, DLhs, DRhs>(
+        &mut self,
+        gemm: &mut G,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        dst: &mut DDst,
+        lhs: FusionOperand<'_>,
+        lhs_storage: &DLhs,
+        rhs: FusionOperand<'_>,
+        rhs_storage: &DRhs,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        G: tenet_operations::fusion_replay::StorageGemm<D, DDst, DLhs, DRhs>,
+        DDst: TensorStorage<D>,
+        DLhs: TensorStorage<D>,
+        DRhs: TensorStorage<D>,
+    {
+        let rule = dst_space.provider();
+        validate_fusion_contract_rule(
+            rule,
+            dst_space.space(),
+            lhs.storage_space(),
+            rhs.storage_space(),
+        )?;
+        let axes = TensorContractSpec::new_with_conjugation(
+            lhs_axes,
+            rhs_axes,
+            tenet_operations::OutputAxisOrder::identity(),
+            lhs.storage_conjugate(),
+            rhs.storage_conjugate(),
+        );
+        let plan = try_compile_oriented_storage_composition_plan(
+            rule,
+            dst_space.space(),
+            lhs,
+            rhs,
+            axes,
+        )?
+        .filter(|plan| plan.is_fully_direct())
+        .ok_or(OperationError::UnsupportedTensorContractScope {
+            message:
+                "storage-direct composition supports only canonical fully-direct oriented operands",
+        })?;
+        #[cfg(test)]
+        self.record_top_level_resolution(&Resolution::Core(Arc::clone(&plan)));
+        plan.execute_direct_on_storage_prezeroed(gemm, dst, lhs_storage, rhs_storage)
     }
 
     #[allow(clippy::too_many_arguments)]

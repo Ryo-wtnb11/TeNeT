@@ -1969,6 +1969,35 @@ impl<R, D, S> TensorMap<R, D, S> {
         }
     }
 
+    fn dense_adjoint_view(&self) -> Result<Self, Error>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    {
+        Ok(match &self.repr {
+            TypedTensorRepr::Owned(parent) => {
+                let logical_space = tenet_tensors::adjoint_bound_space_dyn(&parent.space)?;
+                debug_assert!(Arc::ptr_eq(
+                    parent.space.provider_arc(),
+                    logical_space.provider_arc()
+                ));
+                Self {
+                    runtime: self.runtime.clone(),
+                    repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView {
+                        parent: Arc::clone(parent),
+                        logical_space,
+                        materialized: OnceLock::new(),
+                        #[cfg(test)]
+                        materialized_body_builds: std::sync::atomic::AtomicUsize::new(0),
+                    })),
+                }
+            }
+            TypedTensorRepr::Adjoint(view) => Self {
+                runtime: self.runtime.clone(),
+                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+            },
+        })
+    }
+
     /// The provider allocation that owns this tensor's categorical layout.
     #[inline]
     pub fn provider(&self) -> &R {
@@ -2184,20 +2213,43 @@ impl<R> TensorMap<R, f64, CudaStorage>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
-    fn direct_cuda_owned_dense(
+    /// Lazy categorical adjoint over the same parent device allocation.
+    pub fn adjoint(&self) -> Result<Self, Error> {
+        self.dense_adjoint_view()
+    }
+
+    fn cuda_fusion_operand(
         &self,
         operation: &'static str,
-    ) -> Result<(&Arc<TypedTensorBody<R, f64, CudaStorage>>, &CudaStorage), Error> {
+    ) -> Result<
+        (
+            &BoundDynamicFusionMapSpace<R>,
+            tenet_tensors::FusionOperand<'_>,
+            &CudaStorage,
+        ),
+        Error,
+    > {
         match &self.repr {
             TypedTensorRepr::Owned(body) => match body.data.as_ref() {
-                TypedData::Dense(storage) => Ok((body, storage)),
+                TypedData::Dense(storage) => Ok((
+                    &body.space,
+                    tenet_tensors::FusionOperand::direct(body.space.space()),
+                    storage,
+                )),
                 TypedData::Diagonal(_) => Err(Error::UnsupportedOnDevice(format!(
                     "{operation} requires dense CUDA storage"
                 ))),
             },
-            TypedTensorRepr::Adjoint(_) => Err(Error::UnsupportedOnDevice(format!(
-                "{operation} does not yet support lazy CUDA operands"
-            ))),
+            TypedTensorRepr::Adjoint(view) => match view.parent.data.as_ref() {
+                TypedData::Dense(storage) => Ok((
+                    &view.logical_space,
+                    tenet_tensors::FusionOperand::adjoint(view.parent.space.space()),
+                    storage,
+                )),
+                TypedData::Diagonal(_) => Err(Error::UnsupportedOnDevice(format!(
+                    "{operation} requires dense CUDA storage"
+                ))),
+            },
         }
     }
 
@@ -2209,7 +2261,7 @@ where
         .into()
     }
 
-    /// Contracts two owned device tensors through the canonical fully-direct
+    /// Contracts owned or lazy-adjoint device tensors through the canonical fully-direct
     /// coupled-block route. Other layouts are explicit unsupported errors;
     /// device data is never downloaded or materialized on host.
     pub fn contract(
@@ -2222,8 +2274,8 @@ where
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }
-        let (lhs, lhs_storage) = self.direct_cuda_owned_dense("contract")?;
-        let (rhs, rhs_storage) = other.direct_cuda_owned_dense("contract")?;
+        let (lhs_space, lhs_operand, lhs_storage) = self.cuda_fusion_operand("contract")?;
+        let (rhs_space, rhs_operand, rhs_storage) = other.cuda_fusion_operand("contract")?;
         if !lhs_axes
             .iter()
             .copied()
@@ -2237,8 +2289,8 @@ where
             return Err(Self::unsupported_direct_contract());
         }
         let dst_space = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
-            &lhs.space,
-            &rhs.space,
+            lhs_space,
+            rhs_space,
             lhs_axes,
             rhs_axes,
             OutputAxisOrder::identity(),
@@ -2261,16 +2313,23 @@ where
         // ponytail: the existing device seam initializes by uploading zeros;
         // replace this only with a measured native allocation/memset leaf.
         let mut dst = CudaStorage::upload(cuda, &vec![0.0; dst_space.space().required_len()?])?;
-        mf.f64.tensorcontract_fusion_dyn_direct_on_storage(
-            &mut CudaStorageGemm::new(cuda),
-            &dst_space,
-            &mut dst,
-            &lhs.space,
-            lhs_storage,
-            &rhs.space,
-            rhs_storage,
-            tenet_tensors::TensorContractSpec::new(lhs_axes, rhs_axes, OutputAxisOrder::identity()),
-        )?;
+        mf.f64
+            .tensorcontract_fusion_dyn_prelowered_direct_on_storage(
+                &mut CudaStorageGemm::new(cuda),
+                &dst_space,
+                &mut dst,
+                lhs_operand,
+                lhs_storage,
+                rhs_operand,
+                rhs_storage,
+                tenet_tensors::TensorContractSpec::new_with_conjugation(
+                    lhs_axes,
+                    rhs_axes,
+                    OutputAxisOrder::identity(),
+                    lhs_operand.storage_conjugate(),
+                    rhs_operand.storage_conjugate(),
+                ),
+            )?;
         drop(state);
         Ok(Self {
             runtime: self.runtime.clone(),
@@ -2291,7 +2350,7 @@ where
         self.contract(other, lhs_axes, rhs_axes, output_axes)
     }
 
-    /// Tensor-map composition on owned device tensors. This uses the
+    /// Tensor-map composition on owned or lazy-adjoint device tensors. This uses the
     /// twist-free composition compiler and therefore remains distinct from
     /// [`Self::contract`] for fermionic providers.
     #[doc(alias = "mul")]
@@ -2299,12 +2358,12 @@ where
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }
-        let (lhs, lhs_storage) = self.direct_cuda_owned_dense("compose")?;
-        let (rhs, rhs_storage) = other.direct_cuda_owned_dense("compose")?;
+        let (lhs_space, lhs_operand, lhs_storage) = self.cuda_fusion_operand("compose")?;
+        let (rhs_space, rhs_operand, rhs_storage) = other.cuda_fusion_operand("compose")?;
         let lhs_axes: Vec<_> = (self.codomain_rank()..self.rank()).collect();
         let rhs_axes: Vec<_> = (0..other.codomain_rank()).collect();
         let dst_space = BoundDynamicFusionMapSpace::contracted_multiplicity_free(
-            &lhs.space, &rhs.space, &lhs_axes, &rhs_axes,
+            lhs_space, rhs_space, &lhs_axes, &rhs_axes,
         )?;
         let mut state = self.runtime.lock();
         let crate::runtime::RuntimeState { mf, cuda, .. } = &mut *state;
@@ -2322,17 +2381,18 @@ where
             return Err(Error::PlacementMismatch);
         }
         let mut dst = CudaStorage::upload(cuda, &vec![0.0; dst_space.space().required_len()?])?;
-        mf.f64.tensorcompose_fusion_dyn_direct_on_storage(
-            &mut CudaStorageGemm::new(cuda),
-            &dst_space,
-            &mut dst,
-            &lhs.space,
-            lhs_storage,
-            &rhs.space,
-            rhs_storage,
-            &lhs_axes,
-            &rhs_axes,
-        )?;
+        mf.f64
+            .tensorcompose_fusion_dyn_prelowered_direct_on_storage(
+                &mut CudaStorageGemm::new(cuda),
+                &dst_space,
+                &mut dst,
+                lhs_operand,
+                lhs_storage,
+                rhs_operand,
+                rhs_storage,
+                &lhs_axes,
+                &rhs_axes,
+            )?;
         drop(state);
         Ok(Self {
             runtime: self.runtime.clone(),
@@ -5634,30 +5694,7 @@ where
                     .collect(),
             ));
         }
-        Ok(match &self.repr {
-            TypedTensorRepr::Owned(parent) => {
-                let logical_space =
-                    tenet_tensors::adjoint_bound_space_dyn(&parent.space).map_err(Error::from)?;
-                debug_assert!(Arc::ptr_eq(
-                    parent.space.provider_arc(),
-                    logical_space.provider_arc()
-                ));
-                Self {
-                    runtime: self.runtime.clone(),
-                    repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView {
-                        parent: Arc::clone(parent),
-                        logical_space,
-                        materialized: OnceLock::new(),
-                        #[cfg(test)]
-                        materialized_body_builds: std::sync::atomic::AtomicUsize::new(0),
-                    })),
-                }
-            }
-            TypedTensorRepr::Adjoint(view) => Self {
-                runtime: self.runtime.clone(),
-                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
-            },
-        })
+        self.dense_adjoint_view()
     }
 
     /// TensorKit `norm`: the Frobenius norm weighted by the coupled sectors'
@@ -6959,6 +6996,8 @@ fn map_spectrum_dtype<A: Copy, B>(
 #[cfg(test)]
 mod representation_gates {
     use super::*;
+    #[cfg(feature = "cuda")]
+    use tenet_core::{product_sector, ProductFusionRuleExt};
     use tenet_core::{
         FermionParityFusionRule, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2FusionRule,
         Z2Irrep, ZNFusionRule,
@@ -7085,12 +7124,88 @@ mod representation_gates {
         tensor.owned_body().expect("test fixture must be owned")
     }
 
-    fn materialized_adjoint_builds<R, D>(tensor: &TensorMap<R, D>) -> usize {
+    fn materialized_adjoint_builds<R, D, S>(tensor: &TensorMap<R, D, S>) -> usize {
         let TypedTensorRepr::Adjoint(view) = &tensor.repr else {
             return 0;
         };
         view.materialized_body_builds
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn assert_cuda_tensor_matches_host<R>(
+        actual: &TensorMap<R, f64>,
+        expected: &TensorMap<R, f64>,
+        provider: *const R,
+        runtime: &crate::runtime::RuntimeIdentity,
+    ) where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    {
+        assert!(std::ptr::eq(actual.provider(), provider));
+        assert!(runtime.matches(actual.runtime()));
+        assert_eq!(
+            actual.logical_space().space(),
+            expected.logical_space().space()
+        );
+        assert_eq!(actual.data(), expected.data());
+        assert_eq!(actual.block_count(), expected.block_count());
+        for index in 0..actual.block_count() {
+            let actual_block = actual.block(index).unwrap();
+            let expected_block = expected.block(index).unwrap();
+            assert_eq!(actual_block.key(), expected_block.key());
+            assert_eq!(actual_block.offset(), expected_block.offset());
+            assert_eq!(actual_block.shape(), expected_block.shape());
+            assert_eq!(actual_block.strides(), expected_block.strides());
+            assert_eq!(
+                actual.block_fusion_trees(index).unwrap(),
+                expected.block_fusion_trees(index).unwrap()
+            );
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn assert_cuda_lazy_contract_orientations<R>(lhs: &TensorMap<R, f64>, rhs: &TensorMap<R, f64>)
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    {
+        let lhs_axes: Vec<_> = (lhs.codomain_rank()..lhs.rank()).collect();
+        let rhs_axes: Vec<_> = (0..rhs.codomain_rank()).collect();
+        let output_axes: Vec<_> = (0..lhs.codomain_rank() + rhs.domain_rank()).collect();
+        let expected_contract = lhs
+            .contract(rhs, &lhs_axes, &rhs_axes, &output_axes)
+            .unwrap();
+        let expected_compose = lhs.compose(rhs).unwrap();
+        let provider = lhs.provider() as *const R;
+        let runtime = lhs.runtime().identity();
+
+        for (lhs_adjoint, rhs_adjoint) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let device_operand = |logical: &TensorMap<R, f64>, adjoint: bool| {
+                if adjoint {
+                    eager_adjoint_oracle(logical)
+                        .to_cuda()
+                        .unwrap()
+                        .adjoint()
+                        .unwrap()
+                } else {
+                    logical.to_cuda().unwrap()
+                }
+            };
+            let lhs_device = device_operand(lhs, lhs_adjoint);
+            let rhs_device = device_operand(rhs, rhs_adjoint);
+            let contract = lhs_device
+                .contract(&rhs_device, &lhs_axes, &rhs_axes, &output_axes)
+                .unwrap()
+                .to_host()
+                .unwrap();
+            let compose = lhs_device.compose(&rhs_device).unwrap().to_host().unwrap();
+
+            assert_cuda_tensor_matches_host(&contract, &expected_contract, provider, &runtime);
+            assert_cuda_tensor_matches_host(&compose, &expected_compose, provider, &runtime);
+            assert_eq!(materialized_adjoint_builds(&lhs_device), 0);
+            assert_eq!(materialized_adjoint_builds(&rhs_device), 0);
+        }
     }
 
     fn u1_lazy_fixture() -> TensorMap<U1FusionRule, f64> {
@@ -7263,6 +7378,183 @@ mod representation_gates {
         assert!(host_view.materialized.get().is_none());
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
         assert_eq!(lazy_host.data(), expected_lazy);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn typed_cuda_lazy_adjoint_contract_and_compose_match_rectangular_host_oracles() {
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = |degeneracy| {
+            GradedSpace::try_new(
+                Arc::clone(&provider),
+                [(U1Irrep::new(0), degeneracy)],
+                false,
+            )
+            .unwrap()
+        };
+        let (m, k, n) = (2, 3, 4);
+        let lhs = TensorMap::from_block_fn(&runtime, [&leg(m)], [&leg(k)], |_, indices| {
+            (indices[0] + m * indices[1]) as f64 + 1.0
+        })
+        .unwrap();
+        let rhs = TensorMap::from_block_fn(&runtime, [&leg(k)], [&leg(n)], |_, indices| {
+            (2 * indices[0] + indices[1]) as f64 + 1.0
+        })
+        .unwrap();
+        let expected_contract = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
+        let expected_compose = lhs.compose(&rhs).unwrap();
+
+        for upload_parent_first in [false, true] {
+            for (lhs_adjoint, rhs_adjoint) in
+                [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let device_operand = |logical: &TensorMap<U1FusionRule, f64>, adjoint: bool| {
+                    if !adjoint {
+                        return logical.to_cuda().unwrap();
+                    }
+                    let parent = eager_adjoint_oracle(logical);
+                    if upload_parent_first {
+                        let device = parent.to_cuda().unwrap().adjoint().unwrap();
+                        assert_eq!(materialized_adjoint_builds(&device), 0);
+                        device
+                    } else {
+                        let lazy = parent.adjoint().unwrap();
+                        let device = lazy.to_cuda().unwrap();
+                        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+                        device
+                    }
+                };
+                let lhs_device = device_operand(&lhs, lhs_adjoint);
+                let rhs_device = device_operand(&rhs, rhs_adjoint);
+                let contracted = if upload_parent_first {
+                    lhs_device
+                        .contract_ordered(&rhs_device, &[1], &[0], &[0, 1])
+                        .unwrap()
+                } else {
+                    lhs_device
+                        .contract(&rhs_device, &[1], &[0], &[0, 1])
+                        .unwrap()
+                };
+                let composed = lhs_device.compose(&rhs_device).unwrap();
+                let contracted = contracted.to_host().unwrap();
+                let composed = composed.to_host().unwrap();
+
+                assert_eq!(
+                    contracted.logical_space().space(),
+                    expected_contract.logical_space().space()
+                );
+                assert_eq!(
+                    composed.logical_space().space(),
+                    expected_compose.logical_space().space()
+                );
+                assert_eq!(contracted.data(), expected_contract.data());
+                assert_eq!(composed.data(), expected_compose.data());
+                assert!(Arc::ptr_eq(
+                    contracted.logical_space().provider_arc(),
+                    lhs.logical_space().provider_arc()
+                ));
+                assert_eq!(materialized_adjoint_builds(&lhs_device), 0);
+                assert_eq!(materialized_adjoint_builds(&rhs_device), 0);
+            }
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn typed_cuda_lazy_adjoint_preserves_fermionic_contract_sign() {
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+        let provider = Arc::new(FermionParityFusionRule);
+        let odd = |is_dual| {
+            GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::ODD, 1)], is_dual).unwrap()
+        };
+        let lhs =
+            TensorMap::from_block_fn(&runtime, [&odd(false)], [&odd(true)], |_, _| 2.0).unwrap();
+        let rhs =
+            TensorMap::from_block_fn(&runtime, [&odd(true)], [&odd(false)], |_, _| 3.0).unwrap();
+
+        for (lhs_adjoint, rhs_adjoint) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let device_operand = |logical: &TensorMap<FermionParityFusionRule, f64>,
+                                  adjoint: bool| {
+                if adjoint {
+                    eager_adjoint_oracle(logical)
+                        .to_cuda()
+                        .unwrap()
+                        .adjoint()
+                        .unwrap()
+                } else {
+                    logical.to_cuda().unwrap()
+                }
+            };
+            let lhs_device = device_operand(&lhs, lhs_adjoint);
+            let rhs_device = device_operand(&rhs, rhs_adjoint);
+            let contract = lhs_device
+                .contract(&rhs_device, &[1], &[0], &[0, 1])
+                .unwrap()
+                .to_host()
+                .unwrap();
+            let compose = lhs_device.compose(&rhs_device).unwrap().to_host().unwrap();
+
+            assert_eq!(contract.data(), &[-6.0]);
+            assert_eq!(compose.data(), &[6.0]);
+            assert_eq!(materialized_adjoint_builds(&lhs_device), 0);
+            assert_eq!(materialized_adjoint_builds(&rhs_device), 0);
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn typed_cuda_lazy_adjoint_covers_su2_rank_five_and_simple_product() {
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+
+        let su2_provider = Arc::new(SU2FusionRule);
+        let su2 = GradedSpace::try_new(
+            Arc::clone(&su2_provider),
+            [
+                (SU2Irrep::from_twice_spin(0), 1),
+                (SU2Irrep::from_twice_spin(1), 2),
+            ],
+            false,
+        )
+        .unwrap();
+        let su2_lhs =
+            TensorMap::from_block_fn(&runtime, [&su2, &su2, &su2], [&su2, &su2], |_, indices| {
+                indices.iter().sum::<usize>() as f64 + 1.0
+            })
+            .unwrap();
+        let su2_rhs =
+            TensorMap::from_block_fn(&runtime, [&su2, &su2], [&su2, &su2, &su2], |_, indices| {
+                indices.iter().sum::<usize>() as f64 + 3.0
+            })
+            .unwrap();
+        assert_cuda_lazy_contract_orientations(&su2_lhs, &su2_rhs);
+
+        let product_provider = Arc::new(U1FusionRule.product(FermionParityFusionRule));
+        let product = GradedSpace::try_new(
+            Arc::clone(&product_provider),
+            [
+                (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
+                (product_sector(U1Irrep::new(1), Z2Irrep::ODD), 1),
+            ],
+            false,
+        )
+        .unwrap();
+        let product_lhs =
+            TensorMap::from_block_fn(&runtime, [&product], [&product], |_, indices| {
+                indices.iter().sum::<usize>() as f64 + 1.0
+            })
+            .unwrap();
+        let product_rhs =
+            TensorMap::from_block_fn(&runtime, [&product], [&product], |_, indices| {
+                indices.iter().sum::<usize>() as f64 + 4.0
+            })
+            .unwrap();
+        assert_cuda_lazy_contract_orientations(&product_lhs, &product_rhs);
     }
 
     #[test]

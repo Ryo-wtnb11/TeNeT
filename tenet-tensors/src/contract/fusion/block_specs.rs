@@ -3,7 +3,8 @@ use std::sync::Arc;
 use tenet_core::{
     multiplicity_free_permute_tree_pair, BlockKey, BraidingStyleKind, CoreError, FusionRule,
     FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
-    MultiplicityFreeRigidSymbols, SectorId, TensorMap, TensorStorage,
+    FusionTreePairOrientation, MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace, SectorId,
+    TensorMap, TensorStorage,
 };
 
 use crate::lowering::lower_tensorcontract_adjoint_axes;
@@ -659,6 +660,23 @@ pub(crate) fn rhs_contract_twist_factor<R>(
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
+    rhs_contract_twist_factor_oriented(
+        rule,
+        OrientedFusionTreeHomSpace::new(rhs, FusionTreePairOrientation::Direct),
+        rhs_contracting_axes,
+        rhs_core_codomain,
+    )
+}
+
+pub(crate) fn rhs_contract_twist_factor_oriented<R>(
+    rule: &R,
+    rhs: OrientedFusionTreeHomSpace<'_>,
+    rhs_contracting_axes: &[usize],
+    rhs_core_codomain: &FusionTreeKey,
+) -> Result<f64, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
     if rule.braiding_style() != BraidingStyleKind::Fermionic {
         return Ok(rule.scalar_one());
     }
@@ -670,7 +688,14 @@ where
     }
     let mut factor = rule.scalar_one();
     for (position, &axis) in rhs_contracting_axes.iter().enumerate() {
-        if external_axis_is_dual(rhs, axis)? {
+        if rhs
+            .external_axis_is_dual(axis)
+            .ok_or_else(|| OperationError::InvalidAxisSet {
+                tensor: "rhs",
+                axes: vec![axis],
+                rank: rhs.rank(),
+            })?
+        {
             factor *= rule.twist_scalar(rhs_core_codomain.uncoupled()[position]);
         }
     }

@@ -10,13 +10,21 @@ use tenferro_tensor::{
     TensorView, TensorViewCanonicalization, TensorViewMut, TensorWrite,
 };
 
-use super::{DenseBackend, DenseError};
+use super::{DenseBackend, DenseError, MatrixOp};
 
 fn cuda_error(op: &'static str, err: impl std::fmt::Display) -> DenseError {
     DenseError::Backend {
         backend: DenseBackend::Cuda,
         op,
         message: err.to_string(),
+    }
+}
+
+fn cuda_operand_view(op: MatrixOp, rows: usize, cols: usize) -> ([usize; 2], bool) {
+    match op {
+        MatrixOp::Identity => ([1, rows], false),
+        MatrixOp::Transpose => ([cols, 1], false),
+        MatrixOp::Adjoint => ([cols, 1], true),
     }
 }
 
@@ -130,15 +138,27 @@ impl CudaDenseStorage {
         ld: usize,
         offset: usize,
     ) -> Result<TensorView<'_>, DenseError> {
+        self.region_view_strided([rows, cols], [1, ld], offset)
+    }
+
+    fn region_view_strided(
+        &self,
+        shape: [usize; 2],
+        strides: [usize; 2],
+        offset: usize,
+    ) -> Result<TensorView<'_>, DenseError> {
         let Tensor::F64(tensor) = &self.tensor else {
             return Err(cuda_error("cuda_region", "device buffer is not f64"));
         };
         let offset = isize::try_from(offset)
             .map_err(|_| cuda_error("cuda_region", "offset does not fit in isize"))?;
-        let ld_isize = isize::try_from(ld)
-            .map_err(|_| cuda_error("cuda_region", "leading dimension does not fit in isize"))?;
+        let strides = strides
+            .map(isize::try_from)
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| cuda_error("cuda_region", "stride does not fit in isize"))?;
         tensor
-            .backend_region_view(vec![rows, cols], vec![1, ld_isize], offset)
+            .backend_region_view(shape.to_vec(), strides, offset)
             .map(TensorView::F64)
             .map_err(|err| cuda_error("cuda_region", err))
     }
@@ -212,6 +232,91 @@ pub fn cuda_gemm_region_into(
     alpha: f64,
     beta: f64,
 ) -> Result<(), DenseError> {
+    cuda_gemm_region_strided_into(
+        ctx,
+        dst,
+        dst_offset,
+        dst_ld,
+        lhs,
+        lhs_offset,
+        [1, lhs_ld],
+        false,
+        rhs,
+        rhs_offset,
+        [1, rhs_ld],
+        false,
+        m,
+        k,
+        n,
+        alpha,
+        beta,
+    )
+}
+
+/// GEMM over logical matrix views of packed parent regions. For f64,
+/// `Adjoint` changes the two strides and carries conjugation metadata without
+/// creating a transposed payload.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn cuda_gemm_region_with_ops_into(
+    ctx: &mut CudaDenseContext,
+    dst: &mut CudaDenseStorage,
+    dst_offset: usize,
+    lhs: &CudaDenseStorage,
+    lhs_offset: usize,
+    rhs: &CudaDenseStorage,
+    rhs_offset: usize,
+    m: usize,
+    k: usize,
+    n: usize,
+    lhs_op: MatrixOp,
+    rhs_op: MatrixOp,
+    alpha: f64,
+    beta: f64,
+) -> Result<(), DenseError> {
+    let (lhs_strides, lhs_conj) = cuda_operand_view(lhs_op, m, k);
+    let (rhs_strides, rhs_conj) = cuda_operand_view(rhs_op, k, n);
+    cuda_gemm_region_strided_into(
+        ctx,
+        dst,
+        dst_offset,
+        m,
+        lhs,
+        lhs_offset,
+        lhs_strides,
+        lhs_conj,
+        rhs,
+        rhs_offset,
+        rhs_strides,
+        rhs_conj,
+        m,
+        k,
+        n,
+        alpha,
+        beta,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cuda_gemm_region_strided_into(
+    ctx: &mut CudaDenseContext,
+    dst: &mut CudaDenseStorage,
+    dst_offset: usize,
+    dst_ld: usize,
+    lhs: &CudaDenseStorage,
+    lhs_offset: usize,
+    lhs_strides: [usize; 2],
+    lhs_conj: bool,
+    rhs: &CudaDenseStorage,
+    rhs_offset: usize,
+    rhs_strides: [usize; 2],
+    rhs_conj: bool,
+    m: usize,
+    k: usize,
+    n: usize,
+    alpha: f64,
+    beta: f64,
+) -> Result<(), DenseError> {
     ensure_cuda_device(
         ctx.device,
         "cuda_matmul",
@@ -221,8 +326,8 @@ pub fn cuda_gemm_region_into(
             ("rhs", rhs.device),
         ],
     )?;
-    let lhs_view = lhs.region_view(m, k, lhs_ld, lhs_offset)?;
-    let rhs_view = rhs.region_view(k, n, rhs_ld, rhs_offset)?;
+    let lhs_view = lhs.region_view_strided([m, k], lhs_strides, lhs_offset)?;
+    let rhs_view = rhs.region_view_strided([k, n], rhs_strides, rhs_offset)?;
     let dst_view = dst.region_view_mut(m, n, dst_ld, dst_offset)?;
     let config = DotGeneralConfig {
         lhs_contracting_dims: vec![1],
@@ -231,8 +336,8 @@ pub fn cuda_gemm_region_into(
         rhs_batch_dims: Vec::new(),
     };
     let accumulation = DotGeneralAccumulation {
-        lhs_conj: false,
-        rhs_conj: false,
+        lhs_conj,
+        rhs_conj,
         alpha: ContractionScalar::F64(alpha),
         beta: ContractionScalar::F64(beta),
     };
@@ -378,6 +483,14 @@ pub fn cuda_eigh_region(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rectangular_operand_views_use_parent_native_strides() {
+        assert_eq!(cuda_operand_view(MatrixOp::Identity, 2, 3), ([1, 2], false));
+        assert_eq!(cuda_operand_view(MatrixOp::Adjoint, 2, 3), ([3, 1], true));
+        assert_eq!(cuda_operand_view(MatrixOp::Identity, 3, 4), ([1, 3], false));
+        assert_eq!(cuda_operand_view(MatrixOp::Adjoint, 3, 4), ([4, 1], true));
+    }
 
     #[test]
     fn ensure_cuda_device_accepts_matching_operands() {

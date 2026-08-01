@@ -7,7 +7,8 @@
 
 use tenet_core::{Placement, TensorStorage};
 use tenet_dense::{
-    cuda_gemm_region_into, cuda_matmul_region_into, CudaDenseContext, CudaDenseStorage, MatrixOp,
+    cuda_gemm_region_with_ops_into, cuda_matmul_region_into, CudaDenseContext, CudaDenseStorage,
+    MatrixOp,
 };
 
 use crate::fusion_replay::StorageGemm;
@@ -61,7 +62,8 @@ impl<'a> CudaStorageGemm<'a> {
 
 impl StorageGemm<f64, CudaStorage, CudaStorage, CudaStorage> for CudaStorageGemm<'_> {
     fn supports_matmul_with_ops_scaled(&self, lhs_op: MatrixOp, rhs_op: MatrixOp) -> bool {
-        lhs_op == MatrixOp::Identity && rhs_op == MatrixOp::Identity
+        let supported = |op| matches!(op, MatrixOp::Identity | MatrixOp::Adjoint);
+        supported(lhs_op) && supported(rhs_op)
     }
 
     fn matmul_range_into(
@@ -98,14 +100,14 @@ impl StorageGemm<f64, CudaStorage, CudaStorage, CudaStorage> for CudaStorageGemm
         rhs_op: MatrixOp,
         alpha: f64,
     ) -> Result<(), OperationError> {
-        if lhs_op != MatrixOp::Identity || rhs_op != MatrixOp::Identity {
+        if !self.supports_matmul_with_ops_scaled(lhs_op, rhs_op) {
             return Err(OperationError::UnsupportedTensorContractScope {
-                message: "CUDA storage GEMM does not implement transformed operands",
+                message: "CUDA storage GEMM supports only identity and f64 adjoint operands",
             });
         }
-        cuda_gemm_region_into(
-            self.ctx, &mut dst.0, dst_offset, rows, &lhs.0, lhs_offset, rows, &rhs.0, rhs_offset,
-            contracted, rows, contracted, cols, alpha, 0.0,
+        cuda_gemm_region_with_ops_into(
+            self.ctx, &mut dst.0, dst_offset, &lhs.0, lhs_offset, &rhs.0, rhs_offset, rows,
+            contracted, cols, lhs_op, rhs_op, alpha, 0.0,
         )
         .map_err(OperationError::Dense)
     }
