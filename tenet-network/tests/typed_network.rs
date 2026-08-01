@@ -490,6 +490,99 @@ fn one_plan_replays_concurrently_with_distinct_workspaces() {
 }
 
 #[test]
+fn fermionic_greedy_chain_keeps_intermediate_on_the_expression_left() {
+    let runtime = Runtime::builder().build().unwrap();
+    let space = GradedSpace::try_new(
+        Arc::new(FermionParityFusionRule),
+        [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 2)],
+        false,
+    )
+    .unwrap();
+    let tensors = (0..3)
+        .map(|offset| {
+            TensorMap::<_, f64>::rand_with_seed(&runtime, [&space], [&space], 750_350 + offset)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let refs = [&tensors[0], &tensors[1], &tensors[2]];
+    let network = Network::new(
+        vec![
+            labels(&["a", "b"]),
+            labels(&["b", "c"]),
+            labels(&["c", "d"]),
+        ],
+        vec![false; 3],
+        vec![Some(1); 3],
+        labels(&["a", "d"]),
+        Some(1),
+    )
+    .unwrap();
+    let planned = network.plan(&refs, &GreedyDenseOptimizer).unwrap();
+    let steps = planned.plan().steps();
+    assert_eq!(
+        (steps[0].lhs(), steps[0].rhs()),
+        (TensorId::new(0), TensorId::new(1))
+    );
+    assert_eq!(
+        (steps[1].lhs(), steps[1].rhs()),
+        (TensorId::new(3), TensorId::new(2))
+    );
+
+    let manual = tensors[0]
+        .contract(&tensors[1], &[1], &[0], &[0, 1])
+        .unwrap()
+        .contract(&tensors[2], &[1], &[0], &[0, 1])
+        .unwrap();
+    assert_same(&planned.execute(&refs).unwrap(), &manual);
+}
+
+#[test]
+fn fermionic_interleaved_subtrees_keep_expression_order_and_signs() {
+    let runtime = Runtime::builder().build().unwrap();
+    let provider = Arc::new(FermionParityFusionRule);
+    let large = GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::ODD, 3)], false).unwrap();
+    let small = GradedSpace::try_new(provider, [(Z2Irrep::ODD, 2)], false).unwrap();
+    let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&large], [&large], 750_400).unwrap();
+    let b = TensorMap::<_, f64>::rand_with_seed(&runtime, [&small], [&small], 750_401).unwrap();
+    let c = TensorMap::<_, f64>::rand_with_seed(&runtime, [&large], [&large], 750_402).unwrap();
+    let d = TensorMap::<_, f64>::rand_with_seed(&runtime, [&small], [&small], 750_403).unwrap();
+    let refs = [&a, &b, &c, &d];
+    let network = Network::new(
+        vec![
+            labels(&["a", "x"]),
+            labels(&["b", "y"]),
+            labels(&["x", "c"]),
+            labels(&["y", "d"]),
+        ],
+        vec![false; 4],
+        vec![Some(1); 4],
+        labels(&["a", "b", "c", "d"]),
+        Some(2),
+    )
+    .unwrap();
+    let planned = network.plan(&refs, &GreedyDenseOptimizer).unwrap();
+    let steps = planned.plan().steps();
+    assert_eq!(
+        (steps[0].lhs(), steps[0].rhs()),
+        (TensorId::new(1), TensorId::new(3))
+    );
+    assert_eq!(
+        (steps[1].lhs(), steps[1].rhs()),
+        (TensorId::new(0), TensorId::new(2))
+    );
+    assert_eq!(
+        (steps[2].lhs(), steps[2].rhs()),
+        (TensorId::new(5), TensorId::new(4))
+    );
+    assert_eq!(steps[2].result_labels(), labels(&["a", "b", "c", "d"]));
+
+    let ac = a.contract(&c, &[1], &[0], &[0, 1]).unwrap();
+    let bd = b.contract(&d, &[1], &[0], &[0, 1]).unwrap();
+    let manual = ac.contract(&bd, &[], &[], &[0, 2, 1, 3]).unwrap();
+    assert_same(&planned.execute(&refs).unwrap(), &manual);
+}
+
+#[test]
 fn greedy_order_and_four_site_ring_match_manual_typed_oracles() {
     let runtime = Runtime::builder().build().unwrap();
     let provider = Arc::new(U1FusionRule);
