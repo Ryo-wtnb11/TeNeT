@@ -420,13 +420,10 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
 fn typed_cuda_mixed_active_and_inactive_destination_blocks_stay_ordered() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let open = GradedSpace::try_new(
-        Arc::clone(&provider),
-        [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
-        false,
-    )
-    .unwrap();
-    let seam = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 1)], false).unwrap();
+    let q0 = U1Irrep::new(0);
+    let q1 = U1Irrep::new(1);
+    let open = GradedSpace::try_new(Arc::clone(&provider), [(q0, 1), (q1, 1)], false).unwrap();
+    let seam = GradedSpace::try_new(Arc::clone(&provider), [(q0, 1)], false).unwrap();
     let lhs = TensorMap::from_block_fn(&runtime, [&open], [&seam], |_, _| 2.0).unwrap();
     let rhs = TensorMap::from_block_fn(&runtime, [&seam], [&open], |_, _| 3.0).unwrap();
     assert_eq!(lhs.block_count(), 1);
@@ -464,7 +461,19 @@ fn typed_cuda_mixed_active_and_inactive_destination_blocks_stay_ordered() {
         assert_eq!(structural_snapshot(actual), structural_snapshot(expected));
         assert_eq!(actual.data(), expected.data());
         assert_eq!(actual.block_count(), 2);
-        assert_eq!(actual.data(), [6.0, 0.0]);
-        assert_eq!(actual.data()[1].to_bits(), 0);
+        for (sector, expected_value) in [(q0, 6.0), (q1, 0.0)] {
+            let index = (0..actual.block_count())
+                .find(|&index| actual.block_fusion_trees(index).unwrap().coupled() == &sector)
+                .unwrap();
+            let block = actual.block(index).unwrap();
+            let len = block.shape().iter().product::<usize>();
+            let values = &actual.data()[block.offset()..block.offset() + len];
+            assert!(!values.is_empty());
+            if sector == q1 {
+                assert!(values.iter().all(|value| value.to_bits() == 0));
+            } else {
+                assert!(values.iter().all(|&value| value == expected_value));
+            }
+        }
     }
 }
