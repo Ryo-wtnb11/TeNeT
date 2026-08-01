@@ -18,7 +18,9 @@ use crate::cost::DenseCostModel;
 use crate::error::{ContractError, Result};
 use crate::ir::NetworkIR;
 use crate::optimizer::{ContractionStep, DenseContractionOptimizer};
-use crate::plan::{dense_steps_from_active_pair_path, ActivePair, ContractionPlan};
+use crate::plan::{
+    dense_steps_from_active_pair_path, orient_unordered_active_pairs, ActivePair, ContractionPlan,
+};
 use crate::slice::{slice_plan_for_ordered, SliceKind, SlicedPlan};
 use crate::TemporaryLabel;
 
@@ -168,7 +170,7 @@ impl CotengraPythonOptimizer {
         }
         let spec = cotengra_spec(ir, cost_model, &self.config);
         let result = run_cotengra_python(&self.config, &spec)?;
-        let pairs = path_to_active_pairs(&result.path)?;
+        let pairs = path_to_active_pairs(&result.path, ir.tensors().len())?;
         let plan = ContractionPlan::from_dense_active_pair_path(ir, &pairs, cost_model)?;
         let sliced = parse_sliced_labels(ir, cost_model, &result.sliced)?;
         let slice = slice_plan_for_ordered(ir, &plan, cost_model, &sliced);
@@ -196,7 +198,7 @@ impl DenseContractionOptimizer for CotengraPythonOptimizer {
         config.slicing = CotengraSlicingConfig::None;
         let spec = cotengra_spec(ir, cost_model, &config);
         let result = run_cotengra_python(&config, &spec)?;
-        let pairs = path_to_active_pairs(&result.path)?;
+        let pairs = path_to_active_pairs(&result.path, ir.tensors().len())?;
         dense_steps_from_active_pair_path(ir, &pairs, cost_model)
     }
 }
@@ -511,8 +513,9 @@ fn parse_sliced_labels(
     Ok(labels)
 }
 
-fn path_to_active_pairs(path: &[Vec<usize>]) -> Result<Vec<ActivePair>> {
-    path.iter()
+fn path_to_active_pairs(path: &[Vec<usize>], tensor_count: usize) -> Result<Vec<ActivePair>> {
+    let pairs = path
+        .iter()
         .map(|step| match step.as_slice() {
             [lhs, rhs] => Ok(ActivePair::new(*lhs, *rhs)),
             other => Err(ContractError::InvalidContractionPlan(format!(
@@ -520,7 +523,8 @@ fn path_to_active_pairs(path: &[Vec<usize>]) -> Result<Vec<ActivePair>> {
                 other.len()
             ))),
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    orient_unordered_active_pairs(&pairs, tensor_count)
 }
 
 fn method_name(method: &CotengraPythonMethod) -> &'static str {
@@ -671,8 +675,16 @@ mod tests {
 
     #[test]
     fn rejects_non_pairwise_path_steps() {
-        let err = path_to_active_pairs(&[vec![0], vec![0, 1, 2]]).unwrap_err();
+        let err = path_to_active_pairs(&[vec![0], vec![0, 1, 2]], 3).unwrap_err();
         assert!(err.to_string().contains("non-pairwise"));
+    }
+
+    #[test]
+    fn unordered_path_pairs_are_oriented_by_written_subtree() {
+        assert_eq!(
+            path_to_active_pairs(&[vec![0, 1], vec![0, 1]], 3).unwrap(),
+            vec![ActivePair::new(0, 1), ActivePair::new(1, 0)]
+        );
     }
 
     #[test]

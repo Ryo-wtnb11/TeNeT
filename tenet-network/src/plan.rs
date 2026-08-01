@@ -45,6 +45,32 @@ pub struct ActivePair {
     rhs_position: usize,
 }
 
+/// Orient an external planner's unordered active pairs by written expression
+/// order while preserving its contraction tree. External einsum planners use
+/// pair positions only to select a tree edge; TeNeT additionally assigns
+/// fermionic and orientation semantics to lhs/rhs. The public explicit path
+/// constructor intentionally does not call this helper.
+#[cfg(any(feature = "opt-path", feature = "cotengra-python"))]
+pub(crate) fn orient_unordered_active_pairs(
+    path: &[ActivePair],
+    tensor_count: usize,
+) -> Result<Vec<ActivePair>> {
+    let mut active = (0..tensor_count).collect::<Vec<_>>();
+    let mut oriented = Vec::with_capacity(path.len());
+    for pair in path {
+        let (mut lhs, mut rhs) = (pair.lhs_position(), pair.rhs_position());
+        validate_active_pair(lhs, rhs, active.len())?;
+        if active[rhs] < active[lhs] {
+            std::mem::swap(&mut lhs, &mut rhs);
+        }
+        let first_input = active[lhs].min(active[rhs]);
+        remove_pair(&mut active, lhs, rhs);
+        active.push(first_input);
+        oriented.push(ActivePair::new(lhs, rhs));
+    }
+    Ok(oriented)
+}
+
 impl ActivePair {
     /// Construct a pair of active tensor positions.
     pub const fn new(lhs_position: usize, rhs_position: usize) -> Self {

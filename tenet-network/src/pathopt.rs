@@ -25,7 +25,7 @@ use crate::error::{ContractError, Result};
 use crate::ir::NetworkIR;
 use crate::labels::TemporaryLabel;
 use crate::optimizer::{ContractionStep, DenseContractionOptimizer};
-use crate::plan::{dense_steps_from_active_pair_path, ActivePair};
+use crate::plan::{dense_steps_from_active_pair_path, orient_unordered_active_pairs, ActivePair};
 
 /// einsum equation + per-tensor shapes in `opt_einsum_path` form, plus the
 /// label→symbol map used to build them (kept for debugging/round-tripping).
@@ -335,16 +335,22 @@ impl DenseContractionOptimizer for OptEinsumPathOptimizer {
             ))
         })?;
 
-        let pairs = path_to_active_pairs(&path)?;
+        let pairs = path_to_active_pairs(&path, ir.tensors().len())?;
         dense_steps_from_active_pair_path(ir, &pairs, cost_model)
     }
 }
 
 /// Convert an opt_einsum linear path (positions into the shrinking active list,
 /// result appended at the end — the same convention as [`ActivePair`]) into
-/// TeNeT active pairs. Errors on any non-pairwise step (no silent reduction).
-fn path_to_active_pairs(path: &[Vec<usize>]) -> Result<Vec<ActivePair>> {
-    path.iter()
+/// TeNeT active pairs. opt_einsum treats each pair as unordered; TeNeT does
+/// not, because lhs/rhs orientation controls fermionic order and orientation
+/// costs. Preserve the upstream contraction tree while orienting each pair by
+/// the earliest written operand in its subtree. The public explicit
+/// [`ContractionPlan::from_dense_active_pair_path`](crate::ContractionPlan::from_dense_active_pair_path)
+/// remains untouched and preserves caller-supplied lhs/rhs exactly.
+fn path_to_active_pairs(path: &[Vec<usize>], tensor_count: usize) -> Result<Vec<ActivePair>> {
+    let pairs = path
+        .iter()
         .map(|step| match step.as_slice() {
             [lhs, rhs] => Ok(ActivePair::new(*lhs, *rhs)),
             other => Err(ContractError::InvalidContractionPlan(format!(
@@ -353,7 +359,8 @@ fn path_to_active_pairs(path: &[Vec<usize>]) -> Result<Vec<ActivePair>> {
                 other.len()
             ))),
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    orient_unordered_active_pairs(&pairs, tensor_count)
 }
 
 #[cfg(test)]
@@ -414,8 +421,16 @@ mod tests {
             ContractionPlan::from_dense_optimizer(&ir, &OptEinsumPathOptimizer::default(), &cost)
                 .unwrap();
 
-        assert_eq!(plan.active_pair_path().unwrap().len(), 2);
+        assert_eq!(
+            plan.active_pair_path().unwrap(),
+            vec![ActivePair::new(0, 1), ActivePair::new(1, 0)]
+        );
         assert_eq!(plan.output_labels(), ir.output_labels());
+
+        let explicit_path = vec![ActivePair::new(0, 1), ActivePair::new(0, 1)];
+        let explicit =
+            ContractionPlan::from_dense_active_pair_path(&ir, &explicit_path, &cost).unwrap();
+        assert_eq!(explicit.active_pair_path().unwrap(), explicit_path);
 
         let report = plan.dense_cost_report(&ir, &cost).unwrap();
         assert!(
@@ -481,7 +496,7 @@ mod tests {
 
     #[test]
     fn non_pairwise_step_is_rejected() {
-        let err = path_to_active_pairs(&[vec![0, 1, 2]]).unwrap_err();
+        let err = path_to_active_pairs(&[vec![0, 1, 2]], 3).unwrap_err();
         assert!(matches!(err, ContractError::InvalidContractionPlan(_)));
     }
 }
