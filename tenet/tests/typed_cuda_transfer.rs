@@ -645,6 +645,294 @@ fn typed_cuda_reductions_cover_weights_providers_lazy_and_preflight() {
 }
 
 #[test]
+#[ignore = "requires a real CUDA device"]
+fn typed_cuda_arithmetic_matches_host_lazy_ownership_and_concurrency() {
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let leg = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+        false,
+    )
+    .unwrap();
+    let lhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 1.0
+        })
+        .unwrap();
+    let rhs_provider = Arc::new(U1FusionRule);
+    let rhs_leg = GradedSpace::try_new(
+        Arc::clone(&rhs_provider),
+        [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+        false,
+    )
+    .unwrap();
+    let rhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&rhs_leg], [&rhs_leg], |_, indices| {
+            2.0 * indices.iter().sum::<usize>() as f64 - 1.0
+        })
+        .unwrap();
+    let lhs_data = lhs.data().to_vec();
+    let rhs_data = rhs.data().to_vec();
+    let lhs_provider = lhs.provider() as *const U1FusionRule;
+    let rhs_provider = rhs.provider() as *const U1FusionRule;
+    let runtime_id = runtime.identity();
+    let lhs_device = lhs.to_cuda().unwrap();
+    let rhs_device = rhs.to_cuda().unwrap();
+
+    for factor in [2.5, -1.75] {
+        let expected = lhs.scale(factor);
+        let actual = lhs_device.scale(factor).unwrap().to_host().unwrap();
+        assert_eq!(actual.data(), expected.data());
+        assert!(std::ptr::eq(actual.provider(), lhs_provider));
+        assert!(runtime_id.matches(actual.runtime()));
+        assert_eq!(structural_snapshot(&actual), structural_snapshot(&lhs));
+    }
+
+    let (alpha, beta) = (2.25, -3.5);
+    let expected_add = lhs.add(&rhs, alpha, beta).unwrap();
+    let actual_add = lhs_device
+        .add(&rhs_device, alpha, beta)
+        .unwrap()
+        .to_host()
+        .unwrap();
+    assert_eq!(actual_add.data(), expected_add.data());
+    assert!(std::ptr::eq(actual_add.provider(), lhs_provider));
+    assert!(!std::ptr::eq(actual_add.provider(), rhs_provider));
+    assert!(runtime_id.matches(actual_add.runtime()));
+    assert_eq!(structural_snapshot(&actual_add), structural_snapshot(&lhs));
+    assert_eq!(lhs_device.to_host().unwrap().data(), lhs_data);
+    assert_eq!(rhs_device.to_host().unwrap().data(), rhs_data);
+    for _ in 0..3 {
+        assert_eq!(
+            lhs_device
+                .add(&rhs_device, alpha, beta)
+                .unwrap()
+                .to_host()
+                .unwrap()
+                .data(),
+            expected_add.data()
+        );
+    }
+
+    let nonfinite_values = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -0.0];
+    let nonfinite_index = std::cell::Cell::new(0usize);
+    let nonfinite = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| {
+        let index = nonfinite_index.get();
+        nonfinite_index.set(index + 1);
+        nonfinite_values[index % nonfinite_values.len()]
+    })
+    .unwrap();
+    let nonfinite_bits: Vec<_> = nonfinite
+        .data()
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
+    let nonfinite_device = nonfinite.to_cuda().unwrap();
+    let exact_zero = nonfinite_device.zeros_like().unwrap().to_host().unwrap();
+    assert!(exact_zero.data().iter().all(|value| value.to_bits() == 0));
+
+    let finite_values = [0.0, -0.0, 2.0, -3.0, 1.0];
+    let finite_index = std::cell::Cell::new(0usize);
+    let finite = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| {
+        let index = finite_index.get();
+        finite_index.set(index + 1);
+        finite_values[index % finite_values.len()]
+    })
+    .unwrap();
+    let finite_device = finite.to_cuda().unwrap();
+    let assert_nonfinite_numeric_parity = |actual: &[f64], expected: &[f64]| {
+        assert_eq!(actual.len(), expected.len());
+        for (&actual, &expected) in actual.iter().zip(expected) {
+            if expected.is_nan() {
+                assert!(actual.is_nan(), "expected NaN, got {actual:?}");
+            } else {
+                assert_eq!(actual, expected);
+            }
+        }
+    };
+
+    for zero_factor in [0.0, -0.0] {
+        let expected_scale_zero = nonfinite.scale(zero_factor);
+        let actual_scale_zero = nonfinite_device
+            .scale(zero_factor)
+            .unwrap()
+            .to_host()
+            .unwrap();
+        assert_nonfinite_numeric_parity(actual_scale_zero.data(), expected_scale_zero.data());
+
+        let expected_zero_alpha = nonfinite.add(&finite, zero_factor, 1.0).unwrap();
+        let actual_zero_alpha = nonfinite_device
+            .add(&finite_device, zero_factor, 1.0)
+            .unwrap()
+            .to_host()
+            .unwrap();
+        assert_nonfinite_numeric_parity(actual_zero_alpha.data(), expected_zero_alpha.data());
+
+        let expected_zero_beta = finite.add(&nonfinite, 1.0, zero_factor).unwrap();
+        let actual_zero_beta = finite_device
+            .add(&nonfinite_device, 1.0, zero_factor)
+            .unwrap()
+            .to_host()
+            .unwrap();
+        assert_nonfinite_numeric_parity(actual_zero_beta.data(), expected_zero_beta.data());
+    }
+    assert_eq!(
+        nonfinite_device
+            .to_host()
+            .unwrap()
+            .data()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        nonfinite_bits
+    );
+
+    let lhs_lazy = lhs_device.adjoint().unwrap();
+    let rhs_lazy = rhs_device.adjoint().unwrap();
+    let lazy_scale = lhs_lazy.scale(alpha).unwrap().to_host().unwrap();
+    let lazy_add = lhs_lazy
+        .add(&rhs_lazy, alpha, beta)
+        .unwrap()
+        .to_host()
+        .unwrap();
+    let lazy_zero = lhs_lazy.zeros_like().unwrap().to_host().unwrap();
+    assert_eq!(
+        lazy_scale.data(),
+        lhs.adjoint().unwrap().scale(alpha).data()
+    );
+    assert_eq!(
+        lazy_add.data(),
+        lhs.adjoint()
+            .unwrap()
+            .add(&rhs.adjoint().unwrap(), alpha, beta)
+            .unwrap()
+            .data()
+    );
+    assert!(std::ptr::eq(lazy_add.provider(), lhs_provider));
+    assert!(!std::ptr::eq(lazy_add.provider(), rhs_provider));
+    assert!(lazy_zero.data().iter().all(|value| value.to_bits() == 0));
+    assert!(matches!(
+        lhs_lazy.add(&rhs_device, alpha, beta),
+        Err(tenet::typed::Error::UnsupportedOnDevice(_))
+    ));
+
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                scope.spawn(|| {
+                    lhs_device
+                        .add(&rhs_device, alpha, beta)
+                        .unwrap()
+                        .to_host()
+                        .unwrap()
+                        .data()
+                        .to_vec()
+                })
+            })
+            .collect();
+        for worker in workers {
+            assert_eq!(worker.join().unwrap(), expected_add.data());
+        }
+    });
+
+    let su2_provider = Arc::new(SU2FusionRule);
+    let su2_leg = GradedSpace::try_new(
+        Arc::clone(&su2_provider),
+        [
+            (SU2Irrep::from_twice_spin(0), 1),
+            (SU2Irrep::from_twice_spin(1), 1),
+        ],
+        false,
+    )
+    .unwrap();
+    let su2: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&su2_leg], [&su2_leg], |trees, _| {
+            if trees.coupled() == &SU2Irrep::from_twice_spin(0) {
+                1.0
+            } else {
+                2.0
+            }
+        })
+        .unwrap();
+    let normalized = su2.to_cuda().unwrap().normalize().unwrap();
+    assert!((normalized.norm().unwrap() - 1.0).abs() < 1e-12);
+    let expected_normalized = su2.normalize().unwrap();
+    let normalized_host = normalized.to_host().unwrap();
+    for (&actual, &expected) in normalized_host
+        .data()
+        .iter()
+        .zip(expected_normalized.data())
+    {
+        assert!((actual - expected).abs() < 1e-12);
+    }
+
+    let zero = lhs.zeros_like().to_cuda().unwrap().normalize().unwrap();
+    assert!(zero
+        .to_host()
+        .unwrap()
+        .data()
+        .iter()
+        .all(|value| !value.is_finite()));
+
+    let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
+    let charge0 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(0), 1)], false).unwrap();
+    let charge1 = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(1), 1)], false).unwrap();
+    let empty: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&charge0], [&charge1], |_, _| f64::NAN).unwrap();
+    let empty_device = empty.to_cuda().unwrap();
+    assert!(empty_device
+        .scale(2.0)
+        .unwrap()
+        .to_host()
+        .unwrap()
+        .data()
+        .is_empty());
+    assert!(empty_device
+        .add(&empty_device, alpha, beta)
+        .unwrap()
+        .to_host()
+        .unwrap()
+        .data()
+        .is_empty());
+    assert!(empty_device
+        .zeros_like()
+        .unwrap()
+        .to_host()
+        .unwrap()
+        .data()
+        .is_empty());
+    assert!(empty_device
+        .normalize()
+        .unwrap()
+        .to_host()
+        .unwrap()
+        .data()
+        .is_empty());
+
+    let other_runtime = Runtime::builder().cuda(0).build().unwrap();
+    let other_leg =
+        GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 1)], false).unwrap();
+    let foreign = TensorMap::from_block_fn(&other_runtime, [&other_leg], [&other_leg], |_, _| 1.0)
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    assert_eq!(
+        lhs_device.add(&foreign, alpha, beta).unwrap_err(),
+        tenet::typed::Error::RuntimeMismatch
+    );
+    let mismatched = TensorMap::from_block_fn(&runtime, [&other_leg], [&other_leg], |_, _| 1.0)
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    assert!(matches!(
+        lhs_device.add(&mismatched, alpha, beta),
+        Err(tenet::typed::Error::InvalidArgument(_))
+    ));
+    assert_eq!(lhs_device.to_host().unwrap().data(), lhs_data);
+}
+
+#[test]
 #[ignore]
 fn typed_cuda_fermionic_contract_is_minus_six_and_compose_stays_plus_six() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
