@@ -6,7 +6,9 @@
 //! coupled-sector matrix GEMM to the tenet-dense CUDA boundary.
 
 use tenet_core::{Placement, TensorStorage};
-use tenet_dense::{cuda_matmul_region_into, CudaDenseContext, CudaDenseStorage};
+use tenet_dense::{
+    cuda_gemm_region_into, cuda_matmul_region_into, CudaDenseContext, CudaDenseStorage,
+};
 
 use crate::fusion_replay::StorageGemm;
 use crate::OperationError;
@@ -73,6 +75,26 @@ impl StorageGemm<f64, CudaStorage, CudaStorage, CudaStorage> for CudaStorageGemm
         cuda_matmul_region_into(
             self.ctx, &mut dst.0, dst_offset, &lhs.0, lhs_offset, &rhs.0, rhs_offset, rows,
             contracted, cols,
+        )
+        .map_err(OperationError::Dense)
+    }
+
+    fn matmul_range_scaled_into(
+        &mut self,
+        dst: &mut CudaStorage,
+        dst_offset: usize,
+        lhs: &CudaStorage,
+        lhs_offset: usize,
+        rhs: &CudaStorage,
+        rhs_offset: usize,
+        rows: usize,
+        contracted: usize,
+        cols: usize,
+        alpha: f64,
+    ) -> Result<(), OperationError> {
+        cuda_gemm_region_into(
+            self.ctx, &mut dst.0, dst_offset, rows, &lhs.0, lhs_offset, rows, &rhs.0, rhs_offset,
+            contracted, rows, contracted, cols, alpha, 0.0,
         )
         .map_err(OperationError::Dense)
     }

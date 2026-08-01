@@ -1673,6 +1673,35 @@ fn compile_direct_coupled_region_plan(
     )
 }
 
+fn compile_scaled_direct_coupled_region_plan(
+    dst_space: &DynamicFusionMapSpace,
+    lhs_storage: &DynamicFusionMapSpace,
+    rhs_storage: &DynamicFusionMapSpace,
+    lhs_op: MatrixOp,
+    rhs_op: MatrixOp,
+    alpha_by_coupled: &[(SectorId, f64)],
+) -> Result<Option<FusionBlockContractPlan>, OperationError> {
+    FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops_and_alpha(
+        dst_space.structure(),
+        dst_space.nout(),
+        lhs_storage.structure(),
+        lhs_storage.nout(),
+        rhs_storage.structure(),
+        rhs_storage.nout(),
+        lhs_op,
+        rhs_op,
+        |coupled| {
+            alpha_by_coupled
+                .binary_search_by_key(&coupled, |&(sector, _)| sector)
+                .map(|index| alpha_by_coupled[index].1)
+                .map_err(|_| OperationError::UnsupportedTensorContractScope {
+                    message:
+                        "canonical storage plan is missing a verified coupled-sector coefficient",
+                })
+        },
+    )
+}
+
 pub(crate) fn try_compile_oriented_canonical_core_plan<R>(
     validated: &ValidatedCoreContract<'_, R>,
     dst_space: &DynamicFusionMapSpace,
@@ -1689,6 +1718,27 @@ pub(crate) fn try_compile_oriented_canonical_core_plan<R>(
         rhs_storage,
         matrix_op(validated.preflight.lhs_homspace.orientation()),
         matrix_op(validated.preflight.rhs_homspace.orientation()),
+    )
+}
+
+pub(crate) fn try_compile_scaled_canonical_core_plan<R>(
+    validated: &ValidatedCoreContract<'_, R>,
+    dst_space: &DynamicFusionMapSpace,
+    lhs_storage: &DynamicFusionMapSpace,
+    rhs_storage: &DynamicFusionMapSpace,
+    alpha_by_coupled: &[(SectorId, f64)],
+) -> Result<Option<FusionBlockContractPlan>, OperationError> {
+    let matrix_op = |orientation| match orientation {
+        FusionTreePairOrientation::Direct => MatrixOp::Identity,
+        FusionTreePairOrientation::Adjoint => MatrixOp::Adjoint,
+    };
+    compile_scaled_direct_coupled_region_plan(
+        dst_space,
+        lhs_storage,
+        rhs_storage,
+        matrix_op(validated.preflight.lhs_homspace.orientation()),
+        matrix_op(validated.preflight.rhs_homspace.orientation()),
+        alpha_by_coupled,
     )
 }
 
@@ -1980,6 +2030,35 @@ where
             rows,
             contracted,
             cols,
+        )
+    }
+
+    fn matmul_range_scaled_into(
+        &mut self,
+        dst: &mut DDst,
+        dst_offset: usize,
+        lhs: &DLhs,
+        lhs_offset: usize,
+        rhs: &DRhs,
+        rhs_offset: usize,
+        rows: usize,
+        contracted: usize,
+        cols: usize,
+        alpha: D,
+    ) -> Result<(), OperationError> {
+        let dst_len = rows * cols;
+        let lhs_len = rows * contracted;
+        let rhs_len = contracted * cols;
+        self.backend.matmul_rank2_axpby_into_raw(
+            self.workspace,
+            &mut dst.as_mut_slice()[dst_offset..dst_offset + dst_len],
+            &lhs.as_slice()[lhs_offset..lhs_offset + lhs_len],
+            &rhs.as_slice()[rhs_offset..rhs_offset + rhs_len],
+            rows,
+            contracted,
+            cols,
+            alpha,
+            D::zero(),
         )
     }
 }

@@ -2709,7 +2709,10 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
     assert!(context.last_resolution_is_core());
     assert_eq!(compose(&mut context), [6.0]);
 
-    struct VecGemm;
+    #[derive(Default)]
+    struct VecGemm {
+        scaled_alphas: Vec<f64>,
+    }
 
     impl tenet_operations::fusion_replay::StorageGemm<f64, Vec<f64>, Vec<f64>, Vec<f64>> for VecGemm {
         fn matmul_range_into(
@@ -2736,6 +2739,29 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
             }
             Ok(())
         }
+
+        fn matmul_range_scaled_into(
+            &mut self,
+            dst: &mut Vec<f64>,
+            dst_offset: usize,
+            lhs: &Vec<f64>,
+            lhs_offset: usize,
+            rhs: &Vec<f64>,
+            rhs_offset: usize,
+            rows: usize,
+            contracted: usize,
+            cols: usize,
+            alpha: f64,
+        ) -> Result<(), OperationError> {
+            self.scaled_alphas.push(alpha);
+            self.matmul_range_into(
+                dst, dst_offset, lhs, lhs_offset, rhs, rhs_offset, rows, contracted, cols,
+            )?;
+            for value in &mut dst[dst_offset..dst_offset + rows * cols] {
+                *value *= alpha;
+            }
+            Ok(())
+        }
     }
 
     let lhs_values = vec![2.0];
@@ -2743,7 +2769,7 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
     let mut direct_composed = vec![0.0; dst.required_len().unwrap()];
     context
         .tensorcompose_fusion_dyn_direct_on_storage(
-            &mut VecGemm,
+            &mut VecGemm::default(),
             &dst_bound,
             &mut direct_composed,
             &lhs_bound,
@@ -2757,9 +2783,10 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
     assert_eq!(direct_composed, [6.0]);
 
     let mut direct_contracted = vec![0.0; dst.required_len().unwrap()];
-    assert!(matches!(
-        context.tensorcontract_fusion_dyn_direct_on_storage(
-            &mut VecGemm,
+    let mut contract_gemm = VecGemm::default();
+    context
+        .tensorcontract_fusion_dyn_direct_on_storage(
+            &mut contract_gemm,
             &dst_bound,
             &mut direct_contracted,
             &lhs_bound,
@@ -2767,10 +2794,10 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
             &rhs_bound,
             &rhs_values,
             TensorContractSpec::new(&[1], &[0], crate::OutputAxisOrder::identity()),
-        ),
-        Err(OperationError::UnsupportedTensorContractScope { .. })
-    ));
-    assert_eq!(direct_contracted, [0.0]);
+        )
+        .unwrap();
+    assert_eq!(direct_contracted, [-6.0]);
+    assert_eq!(contract_gemm.scaled_alphas, [-1.0]);
 
     struct FailingGemm;
 
@@ -2793,11 +2820,29 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
                 message: "injected storage GEMM failure",
             })
         }
+
+        fn matmul_range_scaled_into(
+            &mut self,
+            _dst: &mut Vec<f64>,
+            _dst_offset: usize,
+            _lhs: &Vec<f64>,
+            _lhs_offset: usize,
+            _rhs: &Vec<f64>,
+            _rhs_offset: usize,
+            _rows: usize,
+            _contracted: usize,
+            _cols: usize,
+            _alpha: f64,
+        ) -> Result<(), OperationError> {
+            Err(OperationError::UnsupportedTensorContractScope {
+                message: "injected scaled storage GEMM failure",
+            })
+        }
     }
 
     let mut failed = vec![0.0; dst.required_len().unwrap()];
     assert!(context
-        .tensorcompose_fusion_dyn_direct_on_storage(
+        .tensorcontract_fusion_dyn_direct_on_storage(
             &mut FailingGemm,
             &dst_bound,
             &mut failed,
@@ -2805,8 +2850,7 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
             &lhs_values,
             &rhs_bound,
             &rhs_values,
-            &[1],
-            &[0],
+            TensorContractSpec::new(&[1], &[0], crate::OutputAxisOrder::identity()),
         )
         .is_err());
     assert_eq!(failed, [0.0]);

@@ -15,11 +15,11 @@ use tenet_operations::fusion_replay::FusionBlockContractPlan;
 use tenet_operations::TensorContractFusionProfile;
 
 use super::dynamic_space::{DynamicFusionMapSpace, FusionOperand, FusionOperandLayout};
-use super::fusion::{external_axis_is_dual, FusionContractPlan};
+use super::fusion::{external_axis_is_dual, rhs_contract_twist_factor, FusionContractPlan};
 use super::fusion_block::{
     compile_fusion_block_contract_plan_prelowered_validated,
     compile_fusion_block_contract_plan_validated, try_compile_oriented_canonical_core_plan,
-    CoreContractPreflight, ValidatedCoreContract,
+    try_compile_scaled_canonical_core_plan, CoreContractPreflight, ValidatedCoreContract,
 };
 
 /// Resolved execution artifact for one contraction key: the route decision
@@ -229,6 +229,68 @@ where
         rhs.storage_space(),
     )?;
     Ok(plan.map(|plan| Resolution::Core(Arc::new(plan))))
+}
+
+/// Compiles only the canonical storage route whose fermionic coefficient is
+/// uniform within every RHS coupled-sector matrix.
+pub(crate) fn try_compile_scaled_storage_contract_plan<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+) -> Result<Option<Arc<FusionBlockContractPlan>>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let preflight = CoreContractPreflight::compile(rule, dst, lhs, rhs, axes)?;
+    if preflight.has_conjugation() {
+        return Ok(None);
+    }
+    let Some(validated) = preflight.validate_core_geometry()? else {
+        return Ok(None);
+    };
+    if !validated_rhs_contract_requires_twist(&validated)? {
+        return Ok(None);
+    }
+    let Some(regions) = rhs
+        .structure()
+        .coupled_sector_regions(rhs.nout())
+        .map_err(OperationError::from_core_preserving_context)?
+    else {
+        return Ok(None);
+    };
+    let mut alpha_by_coupled = Vec::with_capacity(regions.len());
+    for region in regions.iter() {
+        let mut row_trees = region.row_trees().iter();
+        let Some(first) = row_trees.next() else {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "canonical RHS coupled region has no row fusion tree",
+            });
+        };
+        let alpha = rhs_contract_twist_factor(
+            rule,
+            rhs.homspace(),
+            validated.rhs_contracting_axes(),
+            first.tree(),
+        )?;
+        for extent in row_trees {
+            if rhs_contract_twist_factor(
+                rule,
+                rhs.homspace(),
+                validated.rhs_contracting_axes(),
+                extent.tree(),
+            )? != alpha
+            {
+                return Err(OperationError::UnsupportedTensorContractScope {
+                    message: "fermionic twist is nonuniform within one RHS coupled-sector matrix",
+                });
+            }
+        }
+        alpha_by_coupled.push((region.coupled(), alpha));
+    }
+    try_compile_scaled_canonical_core_plan(&validated, dst, lhs, rhs, &alpha_by_coupled)
+        .map(|plan| plan.map(Arc::new))
 }
 
 /// Compiles the coupled block plan for already-materialized core operands.
