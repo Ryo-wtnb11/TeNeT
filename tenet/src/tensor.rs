@@ -2505,6 +2505,7 @@ where
 /// codomain first) of the ribbon-twist eigenvalue θ of that leg's uncoupled
 /// sector — TensorKit `twist!` (`tensors/indexmanipulations.jl:62-78`,
 /// `θ = prod(i -> i <= N₁ ? twist(f₁.uncoupled[i]) : twist(f₂.uncoupled[i - N₁]), inds)`).
+/// The inverse direction conjugates that complete product.
 ///
 /// One home for the formula, generic over the rigid-symbols trait, so the
 /// erased and typed facades cannot drift apart (#580 PR 5).
@@ -2513,13 +2514,27 @@ pub(crate) fn twist_block_factor<R>(
     key: &FusionTreePairKey,
     nout: usize,
     legs: &[usize],
+    inverse: bool,
 ) -> f64
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + ?Sized,
 {
-    legs.iter()
+    let factor = legs
+        .iter()
         .map(|&leg| rule.twist_scalar(uncoupled_sector_of_leg(key, nout, leg)))
-        .product()
+        .product();
+    twist_factor_with_inverse(rule, factor, inverse)
+}
+
+pub(crate) fn twist_factor_with_inverse<R>(rule: &R, factor: f64, inverse: bool) -> f64
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + ?Sized,
+{
+    if inverse {
+        rule.scalar_conj(factor)
+    } else {
+        factor
+    }
 }
 
 /// Whether the twist over `legs` is the identity on every stored block —
@@ -2556,8 +2571,7 @@ where
 /// Per-block flip coefficient: the product over `occurrences` — each a
 /// `(leg, pre-flip duality)` pair in call order — of the Z-isomorphism phase
 /// of TensorKit `flip((f₁, f₂), i)` (`fusiontrees/braiding_manipulations.jl:384-414`,
-/// forward `inv = false` arm, χ and θ real for every rule in scope):
-/// codomain leg → `d ? χ·θ : 1`; domain leg → `d ? χ : θ`.
+/// with the exact forward or inverse arm selected for that pre-flip state.
 ///
 /// One home for the formula, generic over the rigid-symbols trait, shared by
 /// the erased and typed facades (#580 PR 5).
@@ -2566,6 +2580,7 @@ pub(crate) fn flip_block_factor<R>(
     key: &FusionTreePairKey,
     nout: usize,
     occurrences: &[(usize, bool)],
+    inverse: bool,
 ) -> f64
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + ?Sized,
@@ -2576,15 +2591,25 @@ where
             let sector = uncoupled_sector_of_leg(key, nout, leg);
             let chi = rule.frobenius_schur_phase_scalar(sector);
             let theta = rule.twist_scalar(sector);
-            // TensorKit 0.17 flip coefficients (forward, real χ/θ): TK's
-            // domain dual arm is conj(χ), which is χ for the real χ in scope.
             if leg < nout {
                 if dual {
-                    chi * theta
+                    if inverse {
+                        1.0
+                    } else {
+                        chi * theta
+                    }
+                } else if inverse {
+                    rule.scalar_conj(chi * theta)
                 } else {
                     1.0
                 }
             } else if dual {
+                if inverse {
+                    rule.scalar_conj(theta)
+                } else {
+                    rule.scalar_conj(chi)
+                }
+            } else if inverse {
                 chi
             } else {
                 theta
@@ -4690,7 +4715,7 @@ impl Tensor {
         }
         self.scaled_blocks(&self.ordinary_body().space, &|key| match key {
             BlockKey::FusionTree(key) => with_user_rule!(self.ordinary_body().space, rule, {
-                twist_block_factor(rule, key, nout, legs)
+                twist_block_factor(rule, key, nout, legs, false)
             }),
             _ => 1.0,
         })
@@ -4771,7 +4796,7 @@ impl Tensor {
 
         let flipped = self.scaled_blocks(new_space.raw(), &|key| match key {
             BlockKey::FusionTree(key) => with_user_rule!(self.ordinary_body().space, rule, {
-                flip_block_factor(rule, key, nout, &occurrences)
+                flip_block_factor(rule, key, nout, &occurrences, false)
             }),
             _ => 1.0,
         })?;

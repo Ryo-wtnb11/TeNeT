@@ -240,9 +240,9 @@ use crate::tensor::{
     coupled_region_pow_sum, flip_block_factor, flip_toggled_homspace, internal_layout_error,
     logical_adjoint_axes_to_parent, lower_adjoint_tree_transform_operation,
     map_checked_unit_layout_error, reject_unbraided_nonunit_legs, scale_blocks_impl,
-    sector_regions, twist_block_factor, twist_is_identity_over_blocks, validate_norm_p,
-    weighted_inner, weighted_trace, with_planar_axes, CatOperandLayout, CatSide, Fill,
-    PlanarRequestKind, TensorScalar,
+    sector_regions, twist_block_factor, twist_factor_with_inverse, twist_is_identity_over_blocks,
+    validate_norm_p, weighted_inner, weighted_trace, with_planar_axes, CatOperandLayout, CatSide,
+    Fill, PlanarRequestKind, TensorScalar,
 };
 pub use crate::tensor_core::CheckedGenericTensorProductError;
 use crate::tensor_core::{
@@ -5799,10 +5799,20 @@ where
     /// short-circuit, matching the erased validation order. An empty `legs`
     /// returns an identical clone.
     pub fn twist(&self, legs: &[usize]) -> Result<Self, Error> {
+        self.twist_with_inverse(legs, false)
+    }
+
+    /// Applies the inverse TensorKit ribbon twist on the selected legs.
+    pub fn twist_inverse(&self, legs: &[usize]) -> Result<Self, Error> {
+        self.twist_with_inverse(legs, true)
+    }
+
+    fn twist_with_inverse(&self, legs: &[usize], inverse: bool) -> Result<Self, Error> {
         let rank = self.rank();
+        let name = if inverse { "twist_inverse" } else { "twist" };
         if let Some(&leg) = legs.iter().find(|&&leg| leg >= rank) {
             return Err(Error::InvalidArgument(format!(
-                "twist leg {leg} out of range for rank {rank}"
+                "{name} leg {leg} out of range for rank {rank}"
             )));
         }
         if legs.is_empty() {
@@ -5815,7 +5825,7 @@ where
             provider,
             self.logical_space().space().homspace(),
             legs,
-            "twist",
+            name,
             true,
         )?;
         let nout = self.codomain_rank();
@@ -5825,7 +5835,8 @@ where
             // the per-block factor collapses to θ(sector)^|legs|. The space
             // is unchanged, so the payload may stay compact.
             let sector_factor = |sector: tenet_core::SectorId| -> f64 {
-                legs.iter().map(|_| provider.twist_scalar(sector)).product()
+                let factor = legs.iter().map(|_| provider.twist_scalar(sector)).product();
+                twist_factor_with_inverse(provider, factor, inverse)
             };
             if spectrum
                 .iter()
@@ -5855,7 +5866,7 @@ where
         }
         let mut data = self.materialized_body().materialized_dense_data().to_vec();
         scale_blocks_impl(self.logical_space().space(), &mut data, &|key| match key {
-            BlockKey::FusionTree(key) => twist_block_factor(provider, key, nout, legs),
+            BlockKey::FusionTree(key) => twist_block_factor(provider, key, nout, legs, inverse),
             _ => 1.0,
         })?;
         Ok(Self {
@@ -5895,10 +5906,20 @@ where
     /// `legs` returns an identical clone). Otherwise [`Error::Operation`] /
     /// [`Error::Core`] from the layout derivation of the toggled hom space.
     pub fn flip(&self, legs: &[usize]) -> Result<Self, Error> {
+        self.flip_with_inverse(legs, false)
+    }
+
+    /// Applies the inverse TensorKit Z-isomorphism on the selected legs.
+    pub fn flip_inverse(&self, legs: &[usize]) -> Result<Self, Error> {
+        self.flip_with_inverse(legs, true)
+    }
+
+    fn flip_with_inverse(&self, legs: &[usize], inverse: bool) -> Result<Self, Error> {
         let rank = self.rank();
+        let name = if inverse { "flip_inverse" } else { "flip" };
         if let Some(&leg) = legs.iter().find(|&&leg| leg >= rank) {
             return Err(Error::InvalidArgument(format!(
-                "flip leg {leg} out of range for rank {rank}"
+                "{name} leg {leg} out of range for rank {rank}"
             )));
         }
         if legs.is_empty() {
@@ -5907,7 +5928,7 @@ where
         let hom = self.logical_space().space().homspace();
         // NoBraiding preflight (PR #620 review): flip's coefficients are
         // built from the same θ/χ — see `reject_unbraided_nonunit_legs`.
-        reject_unbraided_nonunit_legs(self.logical_space().provider(), hom, legs, "flip", false)?;
+        reject_unbraided_nonunit_legs(self.logical_space().provider(), hom, legs, name, false)?;
         let nout = hom.codomain().len();
         // Sequential semantics for repeated legs, from the helper shared
         // with the erased facade (#580 PR 5).
@@ -5920,7 +5941,9 @@ where
         let provider = self.logical_space().provider();
         let mut data = self.materialized_body().materialized_dense_data().to_vec();
         scale_blocks_impl(space.space(), &mut data, &|key| match key {
-            BlockKey::FusionTree(key) => flip_block_factor(provider, key, nout, &occurrences),
+            BlockKey::FusionTree(key) => {
+                flip_block_factor(provider, key, nout, &occurrences, inverse)
+            }
             _ => 1.0,
         })?;
         Ok(Self {
@@ -8575,6 +8598,29 @@ mod representation_gates {
         }
     }
 
+    #[test]
+    fn inverse_twist_and_flip_keep_the_lazy_adjoint_materialization_boundary() {
+        let source = fz2_fixture();
+        let eager = eager_adjoint_oracle(&source);
+
+        let lazy_twist = source.adjoint().unwrap();
+        assert_eq!(
+            lazy_twist.twist_inverse(&[0]).unwrap().data(),
+            eager.twist_inverse(&[0]).unwrap().data()
+        );
+        assert_eq!(materialized_adjoint_builds(&lazy_twist), 1);
+
+        let lazy_flip = source.adjoint().unwrap();
+        let actual = lazy_flip.flip_inverse(&[1]).unwrap();
+        let expected = eager.flip_inverse(&[1]).unwrap();
+        assert_eq!(actual.data(), expected.data());
+        assert_eq!(
+            actual.logical_space().space(),
+            expected.logical_space().space()
+        );
+        assert_eq!(materialized_adjoint_builds(&lazy_flip), 1);
+    }
+
     fn assert_parent_native_transform<R, D>(
         source: &TensorMap<R, D>,
         operation: impl Fn(&TensorMap<R, D>) -> Result<TensorMap<R, D>, Error>,
@@ -9606,10 +9652,15 @@ mod representation_gates {
         let twisted = s.twist(&[0]).unwrap();
         assert!(matches!(&*owned(&twisted).data, TypedData::Diagonal(_)));
         assert!(!Arc::ptr_eq(&owned(&s).data, &owned(&twisted).data));
+        let inverse = s.twist_inverse(&[0]).unwrap();
+        assert!(matches!(&*owned(&inverse).data, TypedData::Diagonal(_)));
+        assert!(!Arc::ptr_eq(&owned(&s).data, &owned(&inverse).data));
 
         let bosonic_s = fixture().svd_compact().unwrap().1;
         let untouched = bosonic_s.twist(&[0]).unwrap();
         assert!(Arc::ptr_eq(owned(&bosonic_s), owned(&untouched)));
+        let untouched_inverse = bosonic_s.twist_inverse(&[0]).unwrap();
+        assert!(Arc::ptr_eq(owned(&bosonic_s), owned(&untouched_inverse)));
     }
 
     #[test]

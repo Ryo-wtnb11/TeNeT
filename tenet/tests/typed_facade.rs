@@ -9744,6 +9744,57 @@ fn fz2_doctest_pair(
     (erased, typed)
 }
 
+fn typed_fz2_two_block(
+    runtime: &Runtime,
+    dual: bool,
+) -> TensorMap<tenet::core::FermionParityFusionRule, f64> {
+    let provider = Arc::new(tenet::core::FermionParityFusionRule);
+    let leg = GradedSpace::try_new(
+        provider,
+        [
+            (tenet::core::Z2Irrep::EVEN, 1),
+            (tenet::core::Z2Irrep::ODD, 1),
+        ],
+        false,
+    )
+    .unwrap();
+    let leg = if dual { leg.try_dual().unwrap() } else { leg };
+    TensorMap::from_block_fn(runtime, [&leg], [&leg], |sectors, _| {
+        if sectors.coupled() == &tenet::core::Z2Irrep::EVEN {
+            2.0
+        } else {
+            3.0
+        }
+    })
+    .unwrap()
+}
+
+macro_rules! assert_same_typed_block_structure {
+    ($got:expr, $source:expr) => {{
+        let (got, source) = ($got, $source);
+        assert!(std::ptr::eq(got.provider(), source.provider()));
+        assert_eq!(got.block_count(), source.block_count());
+        for index in 0..source.block_count() {
+            let (after, before) = (got.block(index).unwrap(), source.block(index).unwrap());
+            assert_eq!(
+                (after.offset(), after.shape(), after.strides()),
+                (before.offset(), before.shape(), before.strides())
+            );
+            let (after, before) = (
+                got.block_fusion_trees(index).unwrap(),
+                source.block_fusion_trees(index).unwrap(),
+            );
+            assert_eq!(after.coupled(), before.coupled());
+            assert_eq!(after.codomain_uncoupled(), before.codomain_uncoupled());
+            assert_eq!(after.codomain_innerlines(), before.codomain_innerlines());
+            assert_eq!(after.codomain_vertices(), before.codomain_vertices());
+            assert_eq!(after.domain_uncoupled(), before.domain_uncoupled());
+            assert_eq!(after.domain_innerlines(), before.domain_innerlines());
+            assert_eq!(after.domain_vertices(), before.domain_vertices());
+        }
+    }};
+}
+
 #[test]
 fn typed_and_erased_twist_agree_byte_for_byte_on_fz2() {
     // What (gate 1): the typed fermionic twist is the erased one, bytes and
@@ -9840,6 +9891,126 @@ fn typed_and_erased_flip_agree_on_c64() {
             typed_flipped.data(),
             erased_flipped.data_c64(),
             "legs {legs:?}"
+        );
+    }
+}
+
+#[test]
+fn typed_inverse_index_ops_pin_values_and_preserve_structure() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let simple = typed_fz2_two_block(&runtime, false);
+    let dual = typed_fz2_two_block(&runtime, true);
+    assert_eq!(simple.flip_inverse(&[0]).unwrap().data(), &[2.0, -3.0]);
+    assert_eq!(dual.flip_inverse(&[0]).unwrap().data(), &[2.0, 3.0]);
+    assert_eq!(simple.flip_inverse(&[1]).unwrap().data(), &[2.0, 3.0]);
+    assert_eq!(dual.flip_inverse(&[1]).unwrap().data(), &[2.0, -3.0]);
+    assert_eq!(simple.twist_inverse(&[0]).unwrap().data(), &[2.0, -3.0]);
+    assert_ne!(
+        simple.flip(&[1]).unwrap().flip(&[1]).unwrap().data(),
+        simple.data()
+    );
+    for restored in [
+        simple.flip(&[1]).unwrap().flip_inverse(&[1]).unwrap(),
+        simple.flip_inverse(&[1]).unwrap().flip(&[1]).unwrap(),
+    ] {
+        assert_eq!(restored.data(), simple.data());
+        assert_same_legs(&restored.codomain(), &simple.codomain());
+        assert_same_legs(&restored.domain(), &simple.domain());
+    }
+    assert_eq!(
+        simple.flip_inverse(&[1, 1]).unwrap().data(),
+        simple
+            .flip_inverse(&[1])
+            .unwrap()
+            .flip_inverse(&[1])
+            .unwrap()
+            .data()
+    );
+
+    let complex = simple.to_c64();
+    assert_eq!(
+        complex.flip_inverse(&[0]).unwrap().data(),
+        &[2.0.into(), (-3.0).into()]
+    );
+    assert_eq!(
+        complex.twist_inverse(&[0]).unwrap().data(),
+        &[2.0.into(), (-3.0).into()]
+    );
+
+    let su2_provider = Arc::new(SU2FusionRule);
+    let spin_half =
+        GradedSpace::try_new(su2_provider, [(SU2Irrep::from_twice_spin(1), 1)], false).unwrap();
+    let spin_half_dual = spin_half.try_dual().unwrap();
+    let su2: TensorMap<SU2FusionRule, f64> =
+        TensorMap::from_block_fn(&runtime, [&spin_half_dual], [&spin_half], |_, _| 5.0).unwrap();
+    assert_eq!(su2.flip_inverse(&[0]).unwrap().data(), &[5.0]);
+    assert_eq!(su2.flip_inverse(&[1]).unwrap().data(), &[-5.0]);
+
+    let (_, structured) = fz2_index_pair(&runtime);
+    let twisted = structured.twist_inverse(&[0, 1, 2]).unwrap();
+    assert!(std::ptr::eq(twisted.provider(), structured.provider()));
+    assert_same_legs(&twisted.codomain(), &structured.codomain());
+    assert_same_legs(&twisted.domain(), &structured.domain());
+    let codomain_flip = structured.flip_inverse(&[0]).unwrap();
+    assert_same_typed_block_structure!(&codomain_flip, &structured);
+    assert_eq!(
+        codomain_flip.codomain()[0].is_dual(),
+        !structured.codomain()[0].is_dual()
+    );
+    assert_eq!(
+        codomain_flip.codomain()[1].is_dual(),
+        structured.codomain()[1].is_dual()
+    );
+    assert_same_legs(&codomain_flip.domain(), &structured.domain());
+    let domain_flip = structured.flip_inverse(&[2]).unwrap();
+    assert_same_typed_block_structure!(&domain_flip, &structured);
+    assert_same_legs(&domain_flip.codomain(), &structured.codomain());
+    assert_eq!(
+        domain_flip.domain()[0].is_dual(),
+        !structured.domain()[0].is_dual()
+    );
+
+    let u1_provider = Arc::new(tenet::core::U1FusionRule);
+    let u1_leg = GradedSpace::try_new(
+        u1_provider,
+        [
+            (tenet::core::U1Irrep::new(-1), 1),
+            (tenet::core::U1Irrep::new(0), 1),
+            (tenet::core::U1Irrep::new(1), 1),
+        ],
+        false,
+    )
+    .unwrap();
+    let u1: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::from_block_fn(&runtime, [&u1_leg], [&u1_leg], |_, _| 7.0).unwrap();
+    let u1_twist = u1.twist_inverse(&[0, 1]).unwrap();
+    assert_eq!(u1_twist.data().as_ptr(), u1.data().as_ptr());
+    let u1_flip = u1.flip_inverse(&[0]).unwrap();
+    assert_eq!(u1_flip.data(), u1.data());
+    assert_same_typed_block_structure!(&u1_flip, &u1);
+    assert_eq!(u1_flip.codomain()[0].is_dual(), !u1.codomain()[0].is_dual());
+    assert_same_legs(&u1_flip.domain(), &u1.domain());
+}
+
+#[test]
+fn inverse_index_ops_cover_the_fermionic_simple_product() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let (_, typed) = fz2_u1_su2_oracle_pair(&runtime, 1.0);
+    for legs in [&[0usize][..], &[1][..], &[0, 1][..]] {
+        assert_eq!(
+            typed
+                .twist(legs)
+                .unwrap()
+                .twist_inverse(legs)
+                .unwrap()
+                .data(),
+            typed.data()
+        );
+        assert_eq!(
+            typed.flip(legs).unwrap().flip_inverse(legs).unwrap().data(),
+            typed.data()
         );
     }
 }
@@ -10067,6 +10238,19 @@ fn typed_index_op_error_classes_match_the_erased_facade() {
         );
         assert_eq!(typed_message, erased_message);
     }
+    for (error, message) in [
+        (
+            typed.twist_inverse(&[5]).unwrap_err(),
+            "invalid argument: twist_inverse leg 5 out of range for rank 3",
+        ),
+        (
+            typed.flip_inverse(&[5]).unwrap_err(),
+            "invalid argument: flip_inverse leg 5 out of range for rank 3",
+        ),
+    ] {
+        assert!(matches!(error, tenet::typed::Error::InvalidArgument(_)));
+        assert_eq!(error.to_string(), message);
+    }
 
     // Empty leg list: identical clone, shared buffer typed-side.
     let typed_untwisted: TensorMap<tenet::core::FermionParityFusionRule, f64> =
@@ -10075,6 +10259,18 @@ fn typed_index_op_error_classes_match_the_erased_facade() {
     let typed_unflipped: TensorMap<tenet::core::FermionParityFusionRule, f64> =
         typed.flip(&[]).unwrap();
     assert_eq!(typed_unflipped.data().as_ptr(), typed.data().as_ptr());
+    let typed_untwisted_inverse: TensorMap<tenet::core::FermionParityFusionRule, f64> =
+        typed.twist_inverse(&[]).unwrap();
+    assert_eq!(
+        typed_untwisted_inverse.data().as_ptr(),
+        typed.data().as_ptr()
+    );
+    let typed_unflipped_inverse: TensorMap<tenet::core::FermionParityFusionRule, f64> =
+        typed.flip_inverse(&[]).unwrap();
+    assert_eq!(
+        typed_unflipped_inverse.data().as_ptr(),
+        typed.data().as_ptr()
+    );
 
     // Insert: position past the rank.
     let typed_insert = typed.insert_left_unit(4, false).unwrap_err().to_string();
@@ -10128,6 +10324,9 @@ fn typed_twist_on_a_compact_spectrum_matches_the_erased_diagonal_route() {
     let typed_both: TensorMap<tenet::core::FermionParityFusionRule, f64> =
         typed_s.twist(&[0, 1]).unwrap();
     assert_eq!(typed_both.data(), typed_s.data());
+    let typed_inverse: TensorMap<tenet::core::FermionParityFusionRule, f64> =
+        typed_s.twist_inverse(&[0]).unwrap();
+    assert_eq!(typed_inverse.data(), typed_twisted.data());
 }
 
 #[test]
@@ -10321,7 +10520,12 @@ fn external_nobraiding_twist_and_flip_reject_nontrivial_sectors() {
         })
         .unwrap();
 
-    for error in [t.twist(&[0]).unwrap_err(), t.flip(&[1]).unwrap_err()] {
+    for error in [
+        t.twist(&[0]).unwrap_err(),
+        t.flip(&[1]).unwrap_err(),
+        t.twist_inverse(&[0]).unwrap_err(),
+        t.flip_inverse(&[1]).unwrap_err(),
+    ] {
         assert!(
             matches!(error, tenet::typed::Error::InvalidArgument(_)),
             "{error:?}"
@@ -10337,6 +10541,10 @@ fn external_nobraiding_twist_and_flip_reject_nontrivial_sectors() {
         matches!(compact_error, tenet::typed::Error::InvalidArgument(_)),
         "{compact_error:?}"
     );
+    assert!(matches!(
+        s.twist_inverse(&[0]),
+        Err(tenet::typed::Error::InvalidArgument(_))
+    ));
 }
 
 #[test]
@@ -10364,6 +10572,8 @@ fn external_nobraiding_vacuum_only_legs_twist_passes_flip_rejects() {
 
     let twisted: TensorMap<PlanarZ2, f64> = t.twist(&[0, 1]).unwrap();
     assert_eq!(twisted.data().as_ptr(), t.data().as_ptr());
+    let twisted_inverse: TensorMap<PlanarZ2, f64> = t.twist_inverse(&[0, 1]).unwrap();
+    assert_eq!(twisted_inverse.data().as_ptr(), t.data().as_ptr());
 
     let flip_error = t.flip(&[0]).unwrap_err();
     assert!(
@@ -10374,9 +10584,15 @@ fn external_nobraiding_vacuum_only_legs_twist_passes_flip_rejects() {
         flip_error.to_string().contains("no braiding"),
         "{flip_error}"
     );
+    assert!(matches!(
+        t.flip_inverse(&[0]),
+        Err(tenet::typed::Error::InvalidArgument(_))
+    ));
 
     let unflipped: TensorMap<PlanarZ2, f64> = t.flip(&[]).unwrap();
     assert_eq!(unflipped.data().as_ptr(), t.data().as_ptr());
+    let unflipped_inverse: TensorMap<PlanarZ2, f64> = t.flip_inverse(&[]).unwrap();
+    assert_eq!(unflipped_inverse.data().as_ptr(), t.data().as_ptr());
 }
 
 #[test]
