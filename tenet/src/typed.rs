@@ -7563,15 +7563,35 @@ where
     }
 
     /// A zero tensor on the same spaces and dtype as `self` (TensorKit
-    /// `zerovector`). Cheapest same-shape
-    /// constructor: scales the storage by zero rather than re-deriving the
-    /// block structure — exactly the erased
-    /// [`crate::prelude::Tensor::zeros_like`], but infallible because the
-    /// typed [`Self::scale`] is.
-    ///
-    /// Compact diagonal storage is preserved, as it is for every scaling.
+    /// `zerovector`). Dense and compact payloads are freshly initialized to
+    /// exact positive zero, independently of non-finite source values. A lazy
+    /// adjoint zeros its canonical parent and stays a cold lazy adjoint.
     pub fn zeros_like(&self) -> Self {
-        self.scale(D::from_real(0.0))
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            let parent = Self {
+                runtime: self.runtime.clone(),
+                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+            };
+            return parent
+                .zeros_like()
+                .adjoint()
+                .expect("zeroing a pre-admitted adjoint must preserve its layout");
+        }
+        if let Some(spectrum) = self.spectrum() {
+            return self.with_spectrum(
+                spectrum
+                    .iter()
+                    .map(|entry| tenet_matrixalgebra::SectorSpectrum {
+                        sector: entry.sector,
+                        values: vec![D::from_real(0.0); entry.values.len()],
+                    })
+                    .collect(),
+            );
+        }
+        self.with_data(vec![
+            D::from_real(0.0);
+            self.materialized_body().materialized_dense_data().len()
+        ])
     }
 }
 
@@ -7980,6 +8000,104 @@ mod representation_gates {
         assert_eq!(lazy.placement(), Placement::Host);
         assert!(owned(&diagonal).dense_cache.get().is_none());
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
+    }
+
+    #[test]
+    fn typed_zeros_like_is_exact_and_representation_preserving() {
+        let source = u1_lazy_fixture();
+        let values = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -0.0];
+        let index = std::cell::Cell::new(0usize);
+        let dense = TensorMap::from_block_fn(
+            source.runtime(),
+            &source.codomain(),
+            &source.domain(),
+            |_, _| {
+                let i = index.get();
+                index.set(i + 1);
+                values[i % values.len()]
+            },
+        )
+        .unwrap();
+        let source_bits: Vec<_> = dense.data().iter().map(|value| value.to_bits()).collect();
+        let provider = dense.provider() as *const _;
+        let zero = dense.zeros_like();
+        assert!(zero.data().iter().all(|value| value.to_bits() == 0));
+        assert_eq!(
+            dense
+                .data()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            source_bits
+        );
+        assert!(std::ptr::eq(zero.provider(), provider));
+        assert!(zero.runtime().same_runtime(dense.runtime()));
+        assert_eq!(zero.logical_space().space(), dense.logical_space().space());
+
+        let complex = dense.to_c64();
+        let complex = complex.with_data(
+            complex
+                .data()
+                .iter()
+                .enumerate()
+                .map(|(i, _)| {
+                    num_complex::Complex64::new(
+                        values[i % values.len()],
+                        values[(i + 1) % values.len()],
+                    )
+                })
+                .collect(),
+        );
+        let complex_zero = complex.zeros_like();
+        assert!(complex_zero
+            .data()
+            .iter()
+            .all(|value| value.re.to_bits() == 0 && value.im.to_bits() == 0));
+
+        let compact = source.svd_compact().unwrap().1;
+        let compact = compact.with_spectrum(
+            compact
+                .spectrum()
+                .unwrap()
+                .iter()
+                .map(|entry| tenet_matrixalgebra::SectorSpectrum {
+                    sector: entry.sector,
+                    values: (0..entry.values.len())
+                        .map(|i| values[i % values.len()])
+                        .collect(),
+                })
+                .collect(),
+        );
+        let compact_zero = compact.zeros_like();
+        assert!(matches!(
+            owned(&compact_zero).data.as_ref(),
+            TypedData::Diagonal(_)
+        ));
+        assert!(compact_zero
+            .spectrum()
+            .unwrap()
+            .iter()
+            .flat_map(|entry| &entry.values)
+            .all(|value| value.to_bits() == 0));
+        assert!(owned(&compact).dense_cache.get().is_none());
+        assert!(owned(&compact_zero).dense_cache.get().is_none());
+
+        let lazy = dense.adjoint().unwrap();
+        let lazy_zero = lazy.zeros_like();
+        assert!(matches!(lazy_zero.repr, TypedTensorRepr::Adjoint(_)));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        assert_eq!(materialized_adjoint_builds(&lazy_zero), 0);
+        assert!(std::ptr::eq(lazy_zero.provider(), provider));
+
+        let empty_leg =
+            GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 0)], false).unwrap();
+        let empty =
+            TensorMap::from_block_fn(source.runtime(), [&empty_leg], [&empty_leg], |_, _| {
+                f64::NAN
+            })
+            .unwrap();
+        assert!(empty.data().is_empty());
+        assert!(empty.zeros_like().data().is_empty());
     }
 
     #[cfg(feature = "cuda")]
