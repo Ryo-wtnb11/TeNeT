@@ -40,7 +40,7 @@ use tenet_core::{SectorLeg, TensorStorage};
 #[cfg(feature = "cuda")]
 use tenet_dense::{
     cuda_eigh_region, cuda_gemm_region_into, cuda_qr_region as dense_cuda_qr_region,
-    cuda_svd_region, CudaDenseContext, CudaDenseStorage,
+    cuda_svd_region as dense_cuda_svd_region, CudaDenseContext, CudaDenseStorage,
 };
 #[cfg(feature = "cuda")]
 use tenet_matrixalgebra::{select_truncation, validate_hermitian_regions, WeightedSpectrum};
@@ -11392,6 +11392,21 @@ pub(crate) fn cuda_qr_region(
     Ok(factors)
 }
 
+#[cfg(feature = "cuda")]
+#[inline]
+pub(crate) fn cuda_svd_region(
+    cuda: &mut CudaDenseContext,
+    source: &CudaDenseStorage,
+    offset: usize,
+    rows: usize,
+    cols: usize,
+) -> Result<(CudaDenseStorage, Vec<f64>, CudaDenseStorage), Error> {
+    let factors = dense_cuda_svd_region(cuda, source, offset, rows, cols).map_err(dense_err)?;
+    #[cfg(test)]
+    crate::typed::observe_cuda_svd_decomposition(factors.1.len());
+    Ok(factors)
+}
+
 /// Writes `factor_rows x kept` slices of `factor * selector` into the target
 /// sector region of a left factor (`codomain <- bond`), one GEMM per
 /// codomain tree so correctness never relies on tree enumeration order
@@ -11496,7 +11511,7 @@ pub(crate) fn assemble_right_factor(
 /// Fills the diagonal of a coupled-layout `W <- W` buffer from per-sector
 /// spectra, mirroring the host `diagonal_bond_tensor_dyn`.
 #[cfg(feature = "cuda")]
-fn fill_diagonal_values(
+pub(crate) fn fill_diagonal_values(
     structure: &BlockStructure,
     data: &mut [f64],
     spectra: &[SectorSpectrum],
@@ -11642,8 +11657,7 @@ impl Tensor {
                     region.range().start,
                     region.rows(),
                     region.cols(),
-                )
-                .map_err(dense_err)?;
+                )?;
                 spectra.push(SectorSpectrum { sector, values: s });
                 factors.push(Some((u, vt)));
             }

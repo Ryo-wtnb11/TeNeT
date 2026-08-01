@@ -408,7 +408,27 @@ pub fn cuda_svd_region(
     let vt = expect_f64("cuda_svd", outputs.pop().expect("len checked"), ctx.device)?;
     let s = download_values(ctx, &outputs.pop().expect("len checked"))?;
     let u = expect_f64("cuda_svd", outputs.pop().expect("len checked"), ctx.device)?;
+    validate_svd_factor_shapes(u.tensor.shape(), s.len(), vt.tensor.shape(), rows, cols)?;
     Ok((u, s, vt))
+}
+
+fn validate_svd_factor_shapes(
+    u_shape: &[usize],
+    s_len: usize,
+    vt_shape: &[usize],
+    rows: usize,
+    cols: usize,
+) -> Result<(), DenseError> {
+    let k = rows.min(cols);
+    if u_shape != [rows, k] || s_len != k || vt_shape != [k, cols] {
+        return Err(cuda_error(
+            "cuda_svd",
+            format!(
+                "device SVD returned U={u_shape:?}, len(S)={s_len}, Vt={vt_shape:?}; expected U=[{rows}, {k}], len(S)={k}, Vt=[{k}, {cols}]"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// cuSOLVER QR of one packed column-major `rows x cols` region:
@@ -551,6 +571,15 @@ mod tests {
             }
             other => panic!("expected a CUDA backend error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn svd_factor_shape_contract_covers_rectangular_and_bad_backend_results() {
+        assert!(validate_svd_factor_shapes(&[4, 3], 3, &[3, 3], 4, 3).is_ok());
+        assert!(validate_svd_factor_shapes(&[3, 3], 3, &[3, 4], 3, 4).is_ok());
+        assert!(validate_svd_factor_shapes(&[4, 4], 3, &[3, 3], 4, 3).is_err());
+        assert!(validate_svd_factor_shapes(&[4, 3], 2, &[3, 3], 4, 3).is_err());
+        assert!(validate_svd_factor_shapes(&[4, 3], 3, &[4, 3], 4, 3).is_err());
     }
 
     #[test]
