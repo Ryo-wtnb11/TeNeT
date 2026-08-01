@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tenet::core::{
     product_sector, CheckedFusionAlgebra, FermionParityFusionRule, MultiplicityFreeRigidSymbols,
     ProductFusionRuleExt, SU2FusionRule, SU2Irrep, SectorCodec, U1FusionRule, U1Irrep, Z2Irrep,
+    ZNFusionRule,
 };
 use tenet::typed::{BlockFusionTrees, GradedSpace, Runtime, TensorMap};
 
@@ -91,6 +92,46 @@ where
     assert_eq!(structural_snapshot(&restored), structure);
 }
 
+fn assert_direct_contract_and_compose<R>(lhs: &TensorMap<R, f64>, rhs: &TensorMap<R, f64>)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    let lhs_axes: Vec<_> = (lhs.codomain_rank()..lhs.rank()).collect();
+    let rhs_axes: Vec<_> = (0..rhs.codomain_rank()).collect();
+    let output_axes: Vec<_> = (0..lhs.codomain_rank() + rhs.domain_rank()).collect();
+    let expected_contract = lhs
+        .contract(rhs, &lhs_axes, &rhs_axes, &output_axes)
+        .unwrap();
+    let expected_compose = lhs.compose(rhs).unwrap();
+    let provider = lhs.provider() as *const R;
+    let runtime = lhs.runtime().identity();
+    let lhs_device = lhs.to_cuda().unwrap();
+    let rhs_device = rhs.to_cuda().unwrap();
+
+    let contract = lhs_device
+        .contract(&rhs_device, &lhs_axes, &rhs_axes, &output_axes)
+        .unwrap()
+        .to_host()
+        .unwrap();
+    let ordered = lhs_device
+        .contract_ordered(&rhs_device, &lhs_axes, &rhs_axes, &output_axes)
+        .unwrap()
+        .to_host()
+        .unwrap();
+    let compose = lhs_device.compose(&rhs_device).unwrap().to_host().unwrap();
+
+    for (actual, expected) in [
+        (&contract, &expected_contract),
+        (&ordered, &expected_contract),
+        (&compose, &expected_compose),
+    ] {
+        assert!(std::ptr::eq(actual.provider(), provider));
+        assert!(runtime.matches(actual.runtime()));
+        assert_eq!(actual.data(), expected.data());
+        assert_eq!(structural_snapshot(actual), structural_snapshot(expected));
+    }
+}
+
 #[test]
 #[ignore]
 fn builtin_and_simple_product_providers_share_one_transfer_path() {
@@ -155,4 +196,181 @@ fn builtin_and_simple_product_providers_share_one_transfer_path() {
         })
         .unwrap(),
     );
+}
+
+#[test]
+#[ignore]
+fn typed_cuda_direct_execution_matches_host_providers_and_structure() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+
+    let u1_rule = Arc::new(U1FusionRule);
+    let u1 = GradedSpace::try_new(
+        Arc::clone(&u1_rule),
+        [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+        false,
+    )
+    .unwrap();
+    let u1_lhs = TensorMap::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+        indices.iter().sum::<usize>() as f64 + 1.0
+    })
+    .unwrap();
+    let u1_rhs = TensorMap::from_block_fn(&runtime, [&u1], [&u1], |_, indices| {
+        indices.iter().sum::<usize>() as f64 + 2.0
+    })
+    .unwrap();
+    assert_direct_contract_and_compose(&u1_lhs, &u1_rhs);
+
+    let su2_rule = Arc::new(SU2FusionRule);
+    let su2 = GradedSpace::try_new(
+        Arc::clone(&su2_rule),
+        [
+            (SU2Irrep::from_twice_spin(0), 1),
+            (SU2Irrep::from_twice_spin(1), 2),
+        ],
+        false,
+    )
+    .unwrap();
+    let su2_lhs =
+        TensorMap::from_block_fn(&runtime, [&su2, &su2, &su2], [&su2, &su2], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 1.0
+        })
+        .unwrap();
+    let su2_rhs =
+        TensorMap::from_block_fn(&runtime, [&su2, &su2], [&su2, &su2, &su2], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 3.0
+        })
+        .unwrap();
+    assert_direct_contract_and_compose(&su2_lhs, &su2_rhs);
+
+    let product_rule = Arc::new(U1FusionRule.product(FermionParityFusionRule));
+    let product = GradedSpace::try_new(
+        Arc::clone(&product_rule),
+        [
+            (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
+            (product_sector(U1Irrep::new(1), Z2Irrep::ODD), 1),
+        ],
+        false,
+    )
+    .unwrap();
+    let product_lhs = TensorMap::from_block_fn(&runtime, [&product], [&product], |_, indices| {
+        indices.iter().sum::<usize>() as f64 + 1.0
+    })
+    .unwrap();
+    let product_rhs = TensorMap::from_block_fn(&runtime, [&product], [&product], |_, indices| {
+        indices.iter().sum::<usize>() as f64 + 4.0
+    })
+    .unwrap();
+    assert_direct_contract_and_compose(&product_lhs, &product_rhs);
+}
+
+#[test]
+#[ignore]
+fn typed_cuda_fermionic_compose_is_plus_six_and_contract_twist_is_explicit() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let provider = Arc::new(FermionParityFusionRule);
+    let lhs_codomain =
+        GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::ODD, 1)], false).unwrap();
+    let lhs_domain =
+        GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::ODD, 1)], true).unwrap();
+    let rhs_codomain =
+        GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::ODD, 1)], true).unwrap();
+    let rhs_domain =
+        GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::ODD, 1)], false).unwrap();
+    let lhs =
+        TensorMap::from_block_fn(&runtime, [&lhs_codomain], [&lhs_domain], |_, _| 2.0).unwrap();
+    let rhs =
+        TensorMap::from_block_fn(&runtime, [&rhs_codomain], [&rhs_domain], |_, _| 3.0).unwrap();
+    assert_eq!(
+        lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap().data(),
+        [-6.0]
+    );
+    assert_eq!(lhs.compose(&rhs).unwrap().data(), [6.0]);
+
+    let lhs_device = lhs.to_cuda().unwrap();
+    let rhs_device = rhs.to_cuda().unwrap();
+    assert_eq!(
+        lhs_device
+            .compose(&rhs_device)
+            .unwrap()
+            .to_host()
+            .unwrap()
+            .data(),
+        [6.0]
+    );
+    assert!(matches!(
+        lhs_device.contract(&rhs_device, &[1], &[0], &[0, 1]),
+        Err(tenet::typed::Error::Operation(error))
+            if matches!(*error, tenet::operations::OperationError::UnsupportedTensorContractScope { .. })
+    ));
+}
+
+#[test]
+#[ignore]
+fn typed_cuda_direct_rejects_scope_lazy_and_runtime_before_mutating_inputs() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let other_runtime = Runtime::builder().cuda(0).build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 2)], false).unwrap();
+    let host = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+        indices.iter().sum::<usize>() as f64 + 1.0
+    })
+    .unwrap();
+    let other_host = TensorMap::from_block_fn(&other_runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
+    let expected = host.data().to_vec();
+    let device = host.to_cuda().unwrap();
+    let other_device = other_host.to_cuda().unwrap();
+
+    assert_eq!(
+        device.compose(&other_device).unwrap_err(),
+        tenet::typed::Error::RuntimeMismatch
+    );
+    assert!(matches!(
+        device.contract(&device, &[0], &[0], &[0, 1]),
+        Err(tenet::typed::Error::Operation(error))
+            if matches!(*error, tenet::operations::OperationError::UnsupportedTensorContractScope { .. })
+    ));
+    assert!(matches!(
+        device.contract(&device, &[1], &[0], &[1, 0]),
+        Err(tenet::typed::Error::Operation(error))
+            if matches!(*error, tenet::operations::OperationError::UnsupportedTensorContractScope { .. })
+    ));
+    let lazy = host.adjoint().unwrap().to_cuda().unwrap();
+    assert!(matches!(
+        lazy.compose(&device),
+        Err(tenet::typed::Error::UnsupportedOnDevice(_))
+    ));
+    assert_eq!(device.to_host().unwrap().data(), expected);
+
+    let zn3 = Arc::new(ZNFusionRule::new(3).unwrap());
+    let zn4 = Arc::new(ZNFusionRule::new(4).unwrap());
+    let zn3_leg = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(0), 1)], false).unwrap();
+    let zn4_leg = GradedSpace::try_new(Arc::clone(&zn4), [(zn4.irrep(0), 1)], false).unwrap();
+    let zn3_tensor: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&zn3_leg], [&zn3_leg], |_, _| 1.0).unwrap();
+    let zn4_tensor: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&zn4_leg], [&zn4_leg], |_, _| 1.0).unwrap();
+    let zn3_device = zn3_tensor.to_cuda().unwrap();
+    let zn4_device = zn4_tensor.to_cuda().unwrap();
+    assert!(zn3_device.compose(&zn4_device).is_err());
+    assert_eq!(zn3_device.to_host().unwrap().data(), [1.0]);
+    assert_eq!(zn4_device.to_host().unwrap().data(), [1.0]);
+
+    let left_open = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(0), 1)], false).unwrap();
+    let seam = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(1), 1)], false).unwrap();
+    let right_open = GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(2), 1)], false).unwrap();
+    let zero_lhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&left_open], [&seam], |_, _| 1.0).unwrap();
+    let zero_rhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&seam], [&right_open], |_, _| 1.0).unwrap();
+    assert_eq!(zero_lhs.block_count(), 0);
+    assert_eq!(zero_rhs.block_count(), 0);
+    let zero_output = zero_lhs
+        .to_cuda()
+        .unwrap()
+        .compose(&zero_rhs.to_cuda().unwrap())
+        .unwrap()
+        .to_host()
+        .unwrap();
+    assert_eq!(zero_output.block_count(), 0);
+    assert!(zero_output.data().is_empty());
 }

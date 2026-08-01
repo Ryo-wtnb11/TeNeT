@@ -2708,6 +2708,110 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
     assert_eq!(compose(&mut context), [6.0]);
     assert!(context.last_resolution_is_core());
     assert_eq!(compose(&mut context), [6.0]);
+
+    struct VecGemm;
+
+    impl tenet_operations::fusion_replay::StorageGemm<f64, Vec<f64>, Vec<f64>, Vec<f64>> for VecGemm {
+        fn matmul_range_into(
+            &mut self,
+            dst: &mut Vec<f64>,
+            dst_offset: usize,
+            lhs: &Vec<f64>,
+            lhs_offset: usize,
+            rhs: &Vec<f64>,
+            rhs_offset: usize,
+            rows: usize,
+            contracted: usize,
+            cols: usize,
+        ) -> Result<(), OperationError> {
+            for col in 0..cols {
+                for row in 0..rows {
+                    dst[dst_offset + row + rows * col] = (0..contracted)
+                        .map(|inner| {
+                            lhs[lhs_offset + row + rows * inner]
+                                * rhs[rhs_offset + inner + contracted * col]
+                        })
+                        .sum();
+                }
+            }
+            Ok(())
+        }
+    }
+
+    let lhs_values = vec![2.0];
+    let rhs_values = vec![3.0];
+    let mut direct_composed = vec![0.0; dst.required_len().unwrap()];
+    context
+        .tensorcompose_fusion_dyn_direct_on_storage(
+            &mut VecGemm,
+            &dst_bound,
+            &mut direct_composed,
+            &lhs_bound,
+            &lhs_values,
+            &rhs_bound,
+            &rhs_values,
+            &[1],
+            &[0],
+        )
+        .unwrap();
+    assert_eq!(direct_composed, [6.0]);
+
+    let mut direct_contracted = vec![0.0; dst.required_len().unwrap()];
+    assert!(matches!(
+        context.tensorcontract_fusion_dyn_direct_on_storage(
+            &mut VecGemm,
+            &dst_bound,
+            &mut direct_contracted,
+            &lhs_bound,
+            &lhs_values,
+            &rhs_bound,
+            &rhs_values,
+            TensorContractSpec::new(&[1], &[0], crate::OutputAxisOrder::identity()),
+        ),
+        Err(OperationError::UnsupportedTensorContractScope { .. })
+    ));
+    assert_eq!(direct_contracted, [0.0]);
+
+    struct FailingGemm;
+
+    impl tenet_operations::fusion_replay::StorageGemm<f64, Vec<f64>, Vec<f64>, Vec<f64>>
+        for FailingGemm
+    {
+        fn matmul_range_into(
+            &mut self,
+            _dst: &mut Vec<f64>,
+            _dst_offset: usize,
+            _lhs: &Vec<f64>,
+            _lhs_offset: usize,
+            _rhs: &Vec<f64>,
+            _rhs_offset: usize,
+            _rows: usize,
+            _contracted: usize,
+            _cols: usize,
+        ) -> Result<(), OperationError> {
+            Err(OperationError::UnsupportedTensorContractScope {
+                message: "injected storage GEMM failure",
+            })
+        }
+    }
+
+    let mut failed = vec![0.0; dst.required_len().unwrap()];
+    assert!(context
+        .tensorcompose_fusion_dyn_direct_on_storage(
+            &mut FailingGemm,
+            &dst_bound,
+            &mut failed,
+            &lhs_bound,
+            &lhs_values,
+            &rhs_bound,
+            &rhs_values,
+            &[1],
+            &[0],
+        )
+        .is_err());
+    assert_eq!(failed, [0.0]);
+    assert_eq!(lhs_values, [2.0]);
+    assert_eq!(rhs_values, [3.0]);
 }
 
 #[test]

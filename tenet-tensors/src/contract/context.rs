@@ -1291,6 +1291,53 @@ where
         )
     }
 
+    /// Tensor-map composition replayed directly on opaque storages.
+    ///
+    /// This is deliberately separate from
+    /// [`Self::tensorcontract_fusion_dyn_direct_on_storage`]: composition is
+    /// twist-free even for fermionic rules. Only an owned, canonical,
+    /// fully-direct composition plan with identity storage operations can
+    /// execute here; every transform-bearing route remains unsupported.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tensorcompose_fusion_dyn_direct_on_storage<R, G, DDst, DLhs, DRhs>(
+        &mut self,
+        gemm: &mut G,
+        dst_space: &BoundDynamicFusionMapSpace<R>,
+        dst: &mut DDst,
+        lhs_space: &BoundDynamicFusionMapSpace<R>,
+        lhs: &DLhs,
+        rhs_space: &BoundDynamicFusionMapSpace<R>,
+        rhs: &DRhs,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+    ) -> Result<(), OperationError>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleKey>,
+        G: tenet_operations::fusion_replay::StorageGemm<D, DDst, DLhs, DRhs>,
+        DDst: TensorStorage<D>,
+        DLhs: TensorStorage<D>,
+        DRhs: TensorStorage<D>,
+    {
+        let rule = dst_space.provider();
+        let axes = TensorContractSpec::new(
+            lhs_axes,
+            rhs_axes,
+            tenet_operations::OutputAxisOrder::identity(),
+        );
+        let lhs_layout =
+            FusionOperand::direct(lhs_space.space()).prepare(rule, dst_space.layout_primer())?;
+        let rhs_layout =
+            FusionOperand::direct(rhs_space.space()).prepare(rule, dst_space.layout_primer())?;
+        let plan =
+            compile_composition_plan(rule, dst_space.space(), &lhs_layout, &rhs_layout, axes)?;
+        #[cfg(test)]
+        {
+            self.last_top_level_resolution_was_core = true;
+            self.last_top_level_resolution_orientation = None;
+        }
+        plan.execute_direct_on_storage_prezeroed(gemm, dst, lhs, rhs)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn tensorcontract_fusion_dyn_direct_on_storage_raw<R, G, DDst, DLhs, DRhs>(
         &mut self,
