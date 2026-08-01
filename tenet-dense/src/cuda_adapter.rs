@@ -76,6 +76,20 @@ pub struct CudaDenseStorage {
 }
 
 impl CudaDenseStorage {
+    /// Allocates a flat device buffer initialized to positive zero.
+    pub fn zeros_f64(ctx: &CudaDenseContext, len: usize) -> Result<Self, DenseError> {
+        let tensor = ctx
+            .backend
+            .zeros::<f64>(len)
+            .map(Tensor::F64)
+            .map_err(|err| cuda_error("cuda_zeros_f64", err))?;
+        Ok(Self {
+            tensor,
+            len,
+            device: ctx.device,
+        })
+    }
+
     /// Uploads host data as a flat device buffer.
     pub fn upload_f64(ctx: &CudaDenseContext, data: &[f64]) -> Result<Self, DenseError> {
         let host = Tensor::from_vec_col_major(vec![data.len()], data.to_vec())

@@ -14,6 +14,40 @@ use tenet::core::{
 };
 use tenet::typed::{BlockFusionTrees, GradedSpace, Runtime, TensorMap};
 
+#[test]
+fn returning_typed_cuda_destinations_use_native_zero_without_host_transfer() {
+    let dense = include_str!("../../tenet-dense/src/cuda_adapter.rs");
+    let operations = include_str!("../../tenet-operations/src/cuda.rs");
+    let typed = include_str!("../src/typed.rs");
+
+    let dense_zeros = dense
+        .split_once("pub fn zeros_f64")
+        .unwrap()
+        .1
+        .split_once("pub fn upload_f64")
+        .unwrap()
+        .0;
+    assert!(dense_zeros.contains(".zeros::<f64>(len)"));
+    assert!(dense_zeros.contains(".map(Tensor::F64)"));
+    assert!(dense_zeros.contains("cuda_zeros_f64"));
+    assert!(!dense_zeros.contains("upload_tensor"));
+    assert!(!dense_zeros.contains("vec!["));
+
+    let storage_zeros = operations
+        .split_once("pub fn zeros")
+        .unwrap()
+        .1
+        .split_once("pub fn upload")
+        .unwrap()
+        .0;
+    assert!(storage_zeros.contains("CudaDenseStorage::zeros_f64(ctx, len)"));
+    assert!(!storage_zeros.contains("upload"));
+
+    assert_eq!(typed.matches("CudaStorage::zeros(cuda,").count(), 2);
+    assert!(!typed.contains("vec![0.0; dst_space.space().required_len()?]"));
+    assert!(typed.contains("TypedData::Dense(data) => CudaStorage::upload(cuda, data)?"));
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct LegSnapshot<S> {
     sectors: Vec<S>,
@@ -413,4 +447,26 @@ fn typed_cuda_direct_supports_canonical_lazy_and_rejects_other_scopes_before_mut
         .unwrap();
     assert_eq!(zero_output.block_count(), 0);
     assert!(zero_output.data().is_empty());
+
+    // The inputs have no admissible blocks, but the q=0 -> q=0 destination
+    // does. No GEMM writes that stored block, so native initialization is the
+    // only source of its values.
+    let inactive_right_open =
+        GradedSpace::try_new(Arc::clone(&zn3), [(zn3.irrep(0), 1)], false).unwrap();
+    let inactive_rhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&seam], [&inactive_right_open], |_, _| 1.0).unwrap();
+    assert_eq!(inactive_rhs.block_count(), 0);
+    let inactive_output = zero_lhs
+        .to_cuda()
+        .unwrap()
+        .compose(&inactive_rhs.to_cuda().unwrap())
+        .unwrap()
+        .to_host()
+        .unwrap();
+    assert_eq!(inactive_output.block_count(), 1);
+    assert!(!inactive_output.data().is_empty());
+    assert!(inactive_output
+        .data()
+        .iter()
+        .all(|value| value.to_bits() == 0));
 }

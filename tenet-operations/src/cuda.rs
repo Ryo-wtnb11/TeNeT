@@ -27,6 +27,13 @@ impl std::fmt::Debug for CudaStorage {
 }
 
 impl CudaStorage {
+    #[doc(hidden)]
+    pub fn zeros(ctx: &CudaDenseContext, len: usize) -> Result<Self, OperationError> {
+        CudaDenseStorage::zeros_f64(ctx, len)
+            .map(Self)
+            .map_err(OperationError::Dense)
+    }
+
     pub fn upload(ctx: &CudaDenseContext, data: &[f64]) -> Result<Self, OperationError> {
         CudaDenseStorage::upload_f64(ctx, data)
             .map(Self)

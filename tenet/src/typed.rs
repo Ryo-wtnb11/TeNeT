@@ -2310,9 +2310,7 @@ where
         {
             return Err(Error::PlacementMismatch);
         }
-        // ponytail: the existing device seam initializes by uploading zeros;
-        // replace this only with a measured native allocation/memset leaf.
-        let mut dst = CudaStorage::upload(cuda, &vec![0.0; dst_space.space().required_len()?])?;
+        let mut dst = CudaStorage::zeros(cuda, dst_space.space().required_len()?)?;
         mf.f64
             .tensorcontract_fusion_dyn_prelowered_direct_on_storage(
                 &mut CudaStorageGemm::new(cuda),
@@ -2380,7 +2378,7 @@ where
         {
             return Err(Error::PlacementMismatch);
         }
-        let mut dst = CudaStorage::upload(cuda, &vec![0.0; dst_space.space().required_len()?])?;
+        let mut dst = CudaStorage::zeros(cuda, dst_space.space().required_len()?)?;
         mf.f64
             .tensorcompose_fusion_dyn_prelowered_direct_on_storage(
                 &mut CudaStorageGemm::new(cuda),
