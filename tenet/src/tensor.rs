@@ -453,6 +453,33 @@ impl DiagonalData {
         }
     }
 
+    /// Compact exact zero: keep sector keys, dtype, and degeneracies without
+    /// reading the stored values (in particular NaN and infinities).
+    fn zeros_like(&self) -> DiagonalData {
+        fn real(spectra: &[SectorSpectrum<f64>]) -> Vec<SectorSpectrum<f64>> {
+            spectra
+                .iter()
+                .map(|entry| SectorSpectrum {
+                    sector: entry.sector,
+                    values: vec![0.0; entry.values.len()],
+                })
+                .collect()
+        }
+        match self {
+            Self::RealF64(spectra) => Self::RealF64(real(spectra)),
+            Self::RealC64(spectra) => Self::RealC64(real(spectra)),
+            Self::C64(spectra) => Self::C64(
+                spectra
+                    .iter()
+                    .map(|entry| SectorSpectrum {
+                        sector: entry.sector,
+                        values: vec![Complex64::new(0.0, 0.0); entry.values.len()],
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
     /// Elementwise reciprocal — the diagonal `inv` (TensorKit `inv.(d.data)`).
     /// Errors on a zero entry, like the dense `inv` on a rank-deficient block.
     fn try_recip(&self) -> Result<DiagonalData, Error> {
@@ -5415,10 +5442,35 @@ impl Tensor {
     }
 
     /// A zero tensor on the same spaces and dtype as `self` (TensorKit
-    /// `zerovector` / `zero`). Cheapest same-shape constructor: scales the
-    /// storage by zero rather than re-deriving the block structure.
+    /// `zerovector` / `zero`). Every stored scalar is freshly initialized to
+    /// exact positive zero, independently of non-finite source values.
     pub fn zeros_like(&self) -> Result<Self, Error> {
-        self.scale(0.0)
+        if self.is_adjoint_view() {
+            return self.parent_tensor_for_lowering().zeros_like()?.adjoint();
+        }
+        let data = match self.stored_data() {
+            Data::F64(data) => Data::F64(vec![0.0; data.len()]),
+            Data::C64(data) => Data::C64(vec![Complex64::new(0.0, 0.0); data.len()]),
+            Data::Diagonal(diagonal) => Data::Diagonal(diagonal.zeros_like()),
+            #[cfg(feature = "cuda")]
+            Data::CudaF64(storage) => {
+                let len = self.ordinary_body().space.raw().required_len()?;
+                if TensorStorage::<f64>::len(storage.as_ref()) != len {
+                    return Err(internal_layout_error(
+                        "CUDA payload length does not match its admitted tensor space",
+                    ));
+                }
+                let mut state = self.rt.lock();
+                let cuda = require_cuda(state.cuda.as_mut())?;
+                validate_cuda_zero_placement(cuda.device(), storage.placement())?;
+                Data::CudaF64(Arc::new(CudaStorage::upload(cuda, &vec![0.0; len])?))
+            }
+        };
+        Ok(Self::owned(
+            self.rt.clone(),
+            Arc::clone(&self.ordinary_body().space),
+            Arc::new(data),
+        ))
     }
 
     /// Quantum-dimension-weighted total dimension of every leg, in flat
@@ -11239,6 +11291,14 @@ fn require_cuda(cuda: Option<&mut CudaDenseContext>) -> Result<&mut CudaDenseCon
 }
 
 #[cfg(feature = "cuda")]
+fn validate_cuda_zero_placement(device: usize, actual: Placement) -> Result<(), Error> {
+    if actual != Placement::Cuda(device) {
+        return Err(Error::PlacementMismatch);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
 fn coupled_sector_of(region: &SectorRegion) -> SectorId {
     region.coupled()
 }
@@ -17021,15 +17081,191 @@ mod tk_user_api_tests {
     }
 
     #[test]
-    fn zeros_like_is_a_same_shape_zero() {
-        // What: zeros_like keeps spaces/dtype and zeroes every entry.
+    fn zeros_like_is_exact_for_dense_compact_lazy_and_empty_host_storage() {
         let rt = Runtime::builder().build().unwrap();
         let v = Space::u1([(0, 2), (1, 1)]);
-        let t = Tensor::rand(&rt, Dtype::C64, [&v], [&v]).unwrap();
-        let z = t.zeros_like().unwrap();
-        assert_eq!(z.dtype(), Dtype::C64);
-        assert_eq!(z.codomain_spaces(), t.codomain_spaces());
-        assert_eq!(z.norm().unwrap(), 0.0);
+        let values = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -0.0];
+        let index = std::cell::Cell::new(0usize);
+        let dense = Tensor::from_block_fn(&rt, [&v], [&v], |_, _| {
+            let i = index.get();
+            index.set(i + 1);
+            values[i % values.len()]
+        })
+        .unwrap();
+        let source_bits: Vec<_> = dense.data().iter().map(|value| value.to_bits()).collect();
+        let source_space = Arc::clone(dense.rule_authority_space());
+        let zero = dense.zeros_like().unwrap();
+        assert!(zero.data().iter().all(|value| value.to_bits() == 0));
+        assert_eq!(
+            dense
+                .data()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            source_bits
+        );
+        assert!(Arc::ptr_eq(zero.rule_authority_space(), &source_space));
+        assert!(zero.runtime().same_runtime(dense.runtime()));
+        assert_eq!(zero.codomain_spaces(), dense.codomain_spaces());
+        assert_eq!(zero.domain_spaces(), dense.domain_spaces());
+
+        let complex = Tensor::from_block_fn(&rt, [&v], [&v], |_, indices| {
+            Complex64::new(
+                values[indices.iter().sum::<usize>() % values.len()],
+                values[(indices.iter().sum::<usize>() + 1) % values.len()],
+            )
+        })
+        .unwrap();
+        let complex_zero = complex.zeros_like().unwrap();
+        assert!(complex_zero
+            .data_c64()
+            .iter()
+            .all(|value| value.re.to_bits() == 0 && value.im.to_bits() == 0));
+
+        let diagonal = Tensor::diagonal(
+            &rt,
+            Dtype::F64,
+            &v,
+            [
+                vec![Scalar::F64(f64::NAN), Scalar::F64(f64::INFINITY)],
+                vec![Scalar::F64(f64::NEG_INFINITY)],
+            ],
+        )
+        .unwrap();
+        let diagonal_zero = diagonal.zeros_like().unwrap();
+        let Data::Diagonal(DiagonalData::RealF64(spectrum)) = diagonal_zero.stored_data() else {
+            panic!("f64 compact zero must remain compact")
+        };
+        assert!(spectrum
+            .iter()
+            .flat_map(|entry| &entry.values)
+            .all(|value| value.to_bits() == 0));
+        assert!(!diagonal.has_cached_materialization());
+        assert!(!diagonal_zero.has_cached_materialization());
+
+        let complex_diagonal = Tensor::diagonal(
+            &rt,
+            Dtype::C64,
+            &v,
+            [
+                vec![
+                    Scalar::C64(Complex64::new(f64::NAN, f64::INFINITY)),
+                    Scalar::C64(Complex64::new(f64::NEG_INFINITY, -0.0)),
+                ],
+                vec![Scalar::C64(Complex64::new(-0.0, f64::NAN))],
+            ],
+        )
+        .unwrap();
+        let complex_diagonal_zero = complex_diagonal.zeros_like().unwrap();
+        let Data::Diagonal(DiagonalData::C64(spectrum)) = complex_diagonal_zero.stored_data()
+        else {
+            panic!("c64 compact zero must remain compact")
+        };
+        assert!(spectrum
+            .iter()
+            .flat_map(|entry| &entry.values)
+            .all(|value| value.re.to_bits() == 0 && value.im.to_bits() == 0));
+
+        let lazy = complex.adjoint().unwrap();
+        let lazy_zero = lazy.zeros_like().unwrap();
+        assert!(lazy_zero.is_adjoint_view());
+        assert!(!lazy.has_cached_materialization());
+        assert!(!lazy_zero.has_cached_materialization());
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert_eq!(lazy_zero.adjoint_body_builds(), 0);
+        let Data::C64(parent_zero) = lazy_zero.stored_data() else {
+            panic!("lazy c64 zero must keep its dense canonical parent")
+        };
+        assert!(parent_zero
+            .iter()
+            .all(|value| value.re.to_bits() == 0 && value.im.to_bits() == 0));
+
+        let empty = Space::u1([(0, 0)]);
+        let empty = Tensor::from_block_fn(&rt, [&empty], [&empty], |_, _| f64::NAN).unwrap();
+        assert!(empty.data().is_empty());
+        assert!(empty.zeros_like().unwrap().data().is_empty());
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_zero_placement_validation_is_exact() {
+        assert!(validate_cuda_zero_placement(0, Placement::Cuda(0)).is_ok());
+        assert_eq!(
+            validate_cuda_zero_placement(1, Placement::Cuda(0)).unwrap_err(),
+            Error::PlacementMismatch
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore]
+    fn cuda_zeros_like_uses_exact_host_zero_upload_and_keeps_lazy_cold() {
+        let rt = Runtime::builder().cuda(0).build().unwrap();
+        let v = Space::u1([(0, 2), (1, 1)]);
+        let values = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -0.0];
+        let index = std::cell::Cell::new(0usize);
+        let host = Tensor::from_block_fn(&rt, [&v], [&v], |_, _| {
+            let i = index.get();
+            index.set(i + 1);
+            values[i % values.len()]
+        })
+        .unwrap();
+        let source_bits: Vec<_> = host.data().iter().map(|value| value.to_bits()).collect();
+        let device = host.to_cuda().unwrap();
+        let authority = Arc::clone(device.rule_authority_space());
+        for _ in 0..3 {
+            let zero = device.zeros_like().unwrap();
+            assert_eq!(zero.placement(), Placement::Cuda(0));
+            assert!(Arc::ptr_eq(zero.rule_authority_space(), &authority));
+            assert!(zero.runtime().same_runtime(device.runtime()));
+            assert!(zero
+                .to_host()
+                .unwrap()
+                .data()
+                .iter()
+                .all(|value| value.to_bits() == 0));
+        }
+
+        let empty_space = Space::u1([(0, 0)]);
+        let empty_host =
+            Tensor::from_block_fn(&rt, [&empty_space], [&empty_space], |_, _| f64::NAN).unwrap();
+        let empty_device = empty_host.to_cuda().unwrap();
+        let empty_authority = Arc::clone(empty_device.rule_authority_space());
+        let empty_zero = empty_device.zeros_like().unwrap();
+        assert_eq!(empty_zero.placement(), Placement::Cuda(0));
+        assert!(Arc::ptr_eq(
+            empty_zero.rule_authority_space(),
+            &empty_authority
+        ));
+        assert!(empty_zero.runtime().same_runtime(empty_device.runtime()));
+        assert!(empty_zero.to_host().unwrap().data().is_empty());
+
+        assert_eq!(
+            device
+                .to_host()
+                .unwrap()
+                .data()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            source_bits
+        );
+
+        let lazy = device.adjoint().unwrap();
+        let lazy_zero = lazy.zeros_like().unwrap();
+        assert!(lazy_zero.is_adjoint_view());
+        assert!(!lazy.has_cached_materialization());
+        assert!(!lazy_zero.has_cached_materialization());
+        assert_eq!(lazy.adjoint_body_builds(), 0);
+        assert_eq!(lazy_zero.adjoint_body_builds(), 0);
+
+        let mut missing_context = device.clone();
+        missing_context.rt = Runtime::builder().build().unwrap();
+        assert!(matches!(
+            missing_context.zeros_like(),
+            Err(Error::InvalidArgument(message)) if message.contains("without a CUDA device")
+        ));
+        assert_eq!(device.placement(), Placement::Cuda(0));
     }
 
     #[test]
