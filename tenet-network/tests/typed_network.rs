@@ -4,7 +4,8 @@ use std::sync::Arc;
 use tenet::core::{
     product_sector, CheckedFusionAlgebra, FermionParityFusionRule, FusionAlgebraError,
     MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, ProductFusionRuleExt,
-    SU2FusionRule, SU2Irrep, SectorCodec, TypedSectorAdmission, U1FusionRule, U1Irrep, Z2Irrep,
+    SU2FusionRule, SU2Irrep, SectorCodec, TensorStorage, TypedSectorAdmission, U1FusionRule,
+    U1Irrep, Z2Irrep,
 };
 use tenet::prelude::{Complex64, TensorScalar};
 use tenet::typed::{GradedSpace, Runtime, TensorMap};
@@ -26,6 +27,18 @@ fn pair_network() -> Network {
         Some(1),
     )
     .unwrap()
+}
+
+fn plan_accepts_storage<R, D, S>(network: &Network, tensors: &[&TensorMap<R, D, S>])
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+    S: TensorStorage<D>,
+{
+    network.plan(tensors, &GreedyDenseOptimizer).unwrap();
 }
 
 fn pair_case<R, D>(space: &GradedSpace<R>)
@@ -112,6 +125,102 @@ fn provider_and_dtype_matrix_matches_direct_contract() {
     .unwrap();
     pair_case::<_, f64>(&product);
     pair_case::<_, Complex64>(&product);
+}
+
+#[test]
+fn planning_conjugation_uses_checked_effective_duals_without_reading_storage() {
+    fn run<R>(
+        runtime: &Runtime,
+        x0: &GradedSpace<R>,
+        x1: &GradedSpace<R>,
+        y: &GradedSpace<R>,
+        z0: &GradedSpace<R>,
+        z1: &GradedSpace<R>,
+        seed: u64,
+    ) where
+        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+            + MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec,
+    {
+        let a = TensorMap::<R, f64>::rand_with_seed(runtime, [x0, x1], [y], seed).unwrap();
+        let b = TensorMap::rand_with_seed(runtime, [x1], [z0, z1], seed + 1).unwrap();
+        let adjoint = a.adjoint().unwrap();
+        assert_eq!(adjoint.codomain(), vec![y.clone()]);
+        assert_eq!(adjoint.domain(), vec![x0.clone(), x1.clone()]);
+        let network = Network::new(
+            vec![labels(&["i0", "i1", "j"]), labels(&["i1", "k0", "k1"])],
+            vec![true, false],
+            vec![Some(2), Some(1)],
+            labels(&["j", "i0", "k0", "k1"]),
+            Some(2),
+        )
+        .unwrap();
+        let refs = [&a, &b];
+        plan_accepts_storage(&network, &refs);
+        let actual = network
+            .plan(&refs, &GreedyDenseOptimizer)
+            .unwrap()
+            .execute(&refs)
+            .unwrap();
+        let expected = adjoint.contract(&b, &[2], &[0], &[0, 1, 2, 3]).unwrap();
+        assert_eq!(actual.codomain(), vec![y.clone(), x0.try_dual().unwrap()]);
+        assert_eq!(actual.domain(), vec![z0.clone(), z1.clone()]);
+        assert_same(&actual, &expected);
+    }
+
+    let runtime = Runtime::builder().build().unwrap();
+    let rule = Arc::new(U1FusionRule);
+    let x0 = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(2), 2)], false).unwrap();
+    let x1_base = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(-1), 1)], false).unwrap();
+    let x1 = x1_base.try_dual().unwrap();
+    let y = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(1), 3)], false).unwrap();
+    let z0 = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(-2), 2)], false).unwrap();
+    let z1 = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 1)], false).unwrap();
+    run(&runtime, &x0, &x1, &y, &z0, &z1, 748_001);
+
+    let product_rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
+    let product_x0 = GradedSpace::try_new(
+        Arc::clone(&product_rule),
+        [(product_sector(Z2Irrep::EVEN, U1Irrep::new(2)), 1)],
+        false,
+    )
+    .unwrap();
+    let product_x1 = GradedSpace::try_new(
+        Arc::clone(&product_rule),
+        [(product_sector(Z2Irrep::ODD, U1Irrep::new(-1)), 2)],
+        false,
+    )
+    .unwrap()
+    .try_dual()
+    .unwrap();
+    let product_y = GradedSpace::try_new(
+        Arc::clone(&product_rule),
+        [(product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2)],
+        false,
+    )
+    .unwrap();
+    let product_z0 = GradedSpace::try_new(
+        Arc::clone(&product_rule),
+        [(product_sector(Z2Irrep::EVEN, U1Irrep::new(-2)), 1)],
+        false,
+    )
+    .unwrap();
+    let product_z1 = GradedSpace::try_new(
+        product_rule,
+        [(product_sector(Z2Irrep::ODD, U1Irrep::new(0)), 1)],
+        false,
+    )
+    .unwrap();
+    run(
+        &runtime,
+        &product_x0,
+        &product_x1,
+        &product_y,
+        &product_z0,
+        &product_z1,
+        748_003,
+    );
 }
 
 #[test]
