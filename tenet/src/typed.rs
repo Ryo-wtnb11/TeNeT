@@ -233,6 +233,8 @@ pub use tenet_core::{SUNFusionRule, SUNFusionRuleError};
 /// Flat f64 CUDA storage used by explicit typed ownership transfer.
 #[cfg(feature = "cuda")]
 pub use tenet_tensors::cuda::CudaStorage;
+#[cfg(feature = "cuda")]
+use tenet_tensors::cuda::CudaStorageGemm;
 pub use tenet_tensors::CheckedGenericPlanError;
 
 /// Re-exported so `use tenet::typed::*` is self-sufficient apart from the
@@ -2159,6 +2161,182 @@ impl<R> TensorMap<R, f64, CudaStorage> {
         Ok(TensorMap {
             runtime: self.runtime.clone(),
             repr,
+        })
+    }
+}
+
+#[cfg(feature = "cuda")]
+/// Checked Generic providers deliberately have no device execution methods in
+/// this leaf:
+///
+/// ```compile_fail
+/// use tenet::core::Su3FusionRule;
+/// use tenet::typed::{CudaStorage, TensorMap};
+///
+/// fn no_checked_generic_cuda_compose(
+///     lhs: &TensorMap<Su3FusionRule, f64, CudaStorage>,
+///     rhs: &TensorMap<Su3FusionRule, f64, CudaStorage>,
+/// ) {
+///     let _ = lhs.compose(rhs);
+/// }
+/// ```
+impl<R> TensorMap<R, f64, CudaStorage>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    fn direct_cuda_owned_dense(
+        &self,
+        operation: &'static str,
+    ) -> Result<(&Arc<TypedTensorBody<R, f64, CudaStorage>>, &CudaStorage), Error> {
+        match &self.repr {
+            TypedTensorRepr::Owned(body) => match body.data.as_ref() {
+                TypedData::Dense(storage) => Ok((body, storage)),
+                TypedData::Diagonal(_) => Err(Error::UnsupportedOnDevice(format!(
+                    "{operation} requires dense CUDA storage"
+                ))),
+            },
+            TypedTensorRepr::Adjoint(_) => Err(Error::UnsupportedOnDevice(format!(
+                "{operation} does not yet support lazy CUDA operands"
+            ))),
+        }
+    }
+
+    fn unsupported_direct_contract() -> Error {
+        tenet_tensors::OperationError::UnsupportedTensorContractScope {
+            message: "typed CUDA contraction supports only whole-domain/whole-codomain axes in \
+                      canonical order with identity output order",
+        }
+        .into()
+    }
+
+    /// Contracts two owned device tensors through the canonical fully-direct
+    /// coupled-block route. Other layouts are explicit unsupported errors;
+    /// device data is never downloaded or materialized on host.
+    pub fn contract(
+        &self,
+        other: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+    ) -> Result<Self, Error> {
+        if !self.runtime.same_runtime(&other.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        let (lhs, lhs_storage) = self.direct_cuda_owned_dense("contract")?;
+        let (rhs, rhs_storage) = other.direct_cuda_owned_dense("contract")?;
+        if !lhs_axes
+            .iter()
+            .copied()
+            .eq(self.codomain_rank()..self.rank())
+            || !rhs_axes.iter().copied().eq(0..other.codomain_rank())
+        {
+            return Err(Self::unsupported_direct_contract());
+        }
+        let output_rank = self.codomain_rank() + other.domain_rank();
+        if !output_axes.iter().copied().eq(0..output_rank) {
+            return Err(Self::unsupported_direct_contract());
+        }
+        let dst_space = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+            &lhs.space,
+            &rhs.space,
+            lhs_axes,
+            rhs_axes,
+            OutputAxisOrder::identity(),
+        )?;
+        let mut state = self.runtime.lock();
+        let crate::runtime::RuntimeState { mf, cuda, .. } = &mut *state;
+        let cuda = cuda.as_mut().ok_or_else(|| {
+            Error::InvalidArgument(
+                "this runtime was built without a CUDA device; use \
+                 Runtime::builder().cuda(device)"
+                    .to_string(),
+            )
+        })?;
+        let expected_placement = Placement::Cuda(cuda.device());
+        if lhs_storage.placement() != expected_placement
+            || rhs_storage.placement() != expected_placement
+        {
+            return Err(Error::PlacementMismatch);
+        }
+        // ponytail: the existing device seam initializes by uploading zeros;
+        // replace this only with a measured native allocation/memset leaf.
+        let mut dst = CudaStorage::upload(cuda, &vec![0.0; dst_space.space().required_len()?])?;
+        mf.f64.tensorcontract_fusion_dyn_direct_on_storage(
+            &mut CudaStorageGemm::new(cuda),
+            &dst_space,
+            &mut dst,
+            &lhs.space,
+            lhs_storage,
+            &rhs.space,
+            rhs_storage,
+            tenet_tensors::TensorContractSpec::new(lhs_axes, rhs_axes, OutputAxisOrder::identity()),
+        )?;
+        drop(state);
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(dst_space, dst)),
+        })
+    }
+
+    /// Total alias of [`Self::contract`] with the same device capability and
+    /// error behavior.
+    #[inline]
+    pub fn contract_ordered(
+        &self,
+        other: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+    ) -> Result<Self, Error> {
+        self.contract(other, lhs_axes, rhs_axes, output_axes)
+    }
+
+    /// Tensor-map composition on owned device tensors. This uses the
+    /// twist-free composition compiler and therefore remains distinct from
+    /// [`Self::contract`] for fermionic providers.
+    #[doc(alias = "mul")]
+    pub fn compose(&self, other: &Self) -> Result<Self, Error> {
+        if !self.runtime.same_runtime(&other.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        let (lhs, lhs_storage) = self.direct_cuda_owned_dense("compose")?;
+        let (rhs, rhs_storage) = other.direct_cuda_owned_dense("compose")?;
+        let lhs_axes: Vec<_> = (self.codomain_rank()..self.rank()).collect();
+        let rhs_axes: Vec<_> = (0..other.codomain_rank()).collect();
+        let dst_space = BoundDynamicFusionMapSpace::contracted_multiplicity_free(
+            &lhs.space, &rhs.space, &lhs_axes, &rhs_axes,
+        )?;
+        let mut state = self.runtime.lock();
+        let crate::runtime::RuntimeState { mf, cuda, .. } = &mut *state;
+        let cuda = cuda.as_mut().ok_or_else(|| {
+            Error::InvalidArgument(
+                "this runtime was built without a CUDA device; use \
+                 Runtime::builder().cuda(device)"
+                    .to_string(),
+            )
+        })?;
+        let expected_placement = Placement::Cuda(cuda.device());
+        if lhs_storage.placement() != expected_placement
+            || rhs_storage.placement() != expected_placement
+        {
+            return Err(Error::PlacementMismatch);
+        }
+        let mut dst = CudaStorage::upload(cuda, &vec![0.0; dst_space.space().required_len()?])?;
+        mf.f64.tensorcompose_fusion_dyn_direct_on_storage(
+            &mut CudaStorageGemm::new(cuda),
+            &dst_space,
+            &mut dst,
+            &lhs.space,
+            lhs_storage,
+            &rhs.space,
+            rhs_storage,
+            &lhs_axes,
+            &rhs_axes,
+        )?;
+        drop(state);
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(dst_space, dst)),
         })
     }
 }
