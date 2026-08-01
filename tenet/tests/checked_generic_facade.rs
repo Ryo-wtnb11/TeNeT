@@ -47,6 +47,7 @@ struct CheckedOnlyToy {
     malformed_f: AtomicBool,
     invalid_style: AtomicBool,
     use_product_probe: bool,
+    fractional_dim: bool,
     fail_f_on_query: AtomicUsize,
     identity_queries: AtomicUsize,
     style_queries: AtomicUsize,
@@ -70,6 +71,7 @@ impl CheckedOnlyToy {
             malformed_f: AtomicBool::new(false),
             invalid_style: AtomicBool::new(false),
             use_product_probe: false,
+            fractional_dim: false,
             fail_f_on_query: AtomicUsize::new(0),
             identity_queries: AtomicUsize::new(0),
             style_queries: AtomicUsize::new(0),
@@ -83,6 +85,14 @@ impl CheckedOnlyToy {
     fn new_product_probe(identity_tag: u8) -> Self {
         Self {
             use_product_probe: true,
+            ..Self::new(identity_tag)
+        }
+    }
+
+    fn new_space_probe(identity_tag: u8) -> Self {
+        Self {
+            use_product_probe: true,
+            fractional_dim: true,
             ..Self::new(identity_tag)
         }
     }
@@ -139,7 +149,11 @@ impl CheckedGenericFusion for CheckedOnlyToy {
         }
         RuleIdentity::from_canonical_bytes::<Self>(
             0x677,
-            Arc::<[u8]>::from([self.identity_tag, u8::from(self.use_product_probe)]),
+            Arc::<[u8]>::from([
+                self.identity_tag,
+                u8::from(self.use_product_probe),
+                u8::from(self.fractional_dim),
+            ]),
         )
     }
 
@@ -237,7 +251,12 @@ impl CheckedGenericRigidSymbols for CheckedOnlyToy {
         self.record_query();
         self.coefficient_queries.fetch_add(1, Ordering::Relaxed);
         Ok(if self.use_product_probe && sector.id() == 3 {
-            3.0_f64.sqrt()
+            if self.fractional_dim {
+                2.5_f64
+            } else {
+                3.0_f64
+            }
+            .sqrt()
         } else if self.use_product_probe {
             1.0
         } else {
@@ -249,7 +268,12 @@ impl CheckedGenericRigidSymbols for CheckedOnlyToy {
         self.record_query();
         self.coefficient_queries.fetch_add(1, Ordering::Relaxed);
         Ok(if self.use_product_probe && sector.id() == 3 {
-            1.0 / 3.0_f64.sqrt()
+            1.0 / if self.fractional_dim {
+                2.5_f64
+            } else {
+                3.0_f64
+            }
+            .sqrt()
         } else if self.use_product_probe {
             1.0
         } else {
@@ -384,6 +408,62 @@ impl TypedSectorAdmission for CheckedOnlyToy {
     fn try_dual_id(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
         CheckedGenericFusion::try_dual(self, sector)
     }
+}
+
+#[test]
+fn checked_generic_space_algebra_keeps_multiplicity_dimensions_and_failures_typed() {
+    let provider = Arc::new(CheckedOnlyToy::new_space_probe(7));
+    let rhs_provider = Arc::new(CheckedOnlyToy::new_space_probe(7));
+    let left = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let right = GradedSpace::try_new(Arc::clone(&rhs_provider), [(Label::X, 3)], false).unwrap();
+
+    let dim = left.dim().unwrap();
+    assert!((dim - 5.0).abs() < 1.0e-12);
+    assert_ne!(dim, 6.0);
+    let fused = left.fuse(&right).unwrap();
+    assert_eq!(fused.degeneracy(&Label::X).unwrap(), 12);
+    assert!(std::ptr::eq(fused.provider(), provider.as_ref()));
+    assert!(!std::ptr::eq(fused.provider(), rhs_provider.as_ref()));
+    let summed = left.oplus(&right).unwrap();
+    assert_eq!(summed.degeneracy(&Label::X).unwrap(), 5);
+    assert!(std::ptr::eq(summed.provider(), provider.as_ref()));
+    assert!(!std::ptr::eq(summed.provider(), rhs_provider.as_ref()));
+    let unit = left.unitspace().unwrap();
+    assert!(std::ptr::eq(unit.provider(), provider.as_ref()));
+    assert_eq!(unit.degeneracy(&Label::Vacuum).unwrap(), 1);
+
+    let foreign_provider = Arc::new(CheckedOnlyToy::new_space_probe(8));
+    let foreign =
+        GradedSpace::try_new(Arc::clone(&foreign_provider), [(Label::X, 1)], false).unwrap();
+    let before = provider.algebra_queries.load(Ordering::Relaxed)
+        + foreign_provider.algebra_queries.load(Ordering::Relaxed);
+    assert!(matches!(
+        left.oplus(&foreign),
+        Err(GenericTensorError::Facade(
+            tenet::prelude::Error::RuleMismatch
+        ))
+    ));
+    assert!(matches!(
+        left.fuse(&foreign),
+        Err(GenericTensorError::Facade(
+            tenet::prelude::Error::RuleMismatch
+        ))
+    ));
+    assert_eq!(
+        provider.algebra_queries.load(Ordering::Relaxed)
+            + foreign_provider.algebra_queries.load(Ordering::Relaxed),
+        before
+    );
+
+    provider.fail_algebra.store(true, Ordering::Relaxed);
+    assert!(matches!(
+        left.fuse(&right),
+        Err(GenericTensorError::Structure(
+            CheckedGenericStructureError::Provider(ToyError::Algebra)
+        ))
+    ));
+    assert_eq!(left.degeneracy(&Label::X).unwrap(), 2);
+    assert_eq!(right.degeneracy(&Label::X).unwrap(), 3);
 }
 
 #[test]

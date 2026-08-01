@@ -415,6 +415,153 @@ fn graded_space_drops_zero_degeneracy_sectors() {
 }
 
 #[test]
+fn graded_space_constructor_queries_and_algebra_match_tensorkit() {
+    fn generic_dim<R>(space: &GradedSpace<R>) -> f64
+    where
+        R: tenet::core::TypedSectorAdmission,
+        R::Mode: tenet::typed::TypedSpaceModeDispatch<R>,
+    {
+        space.dim().ok().unwrap()
+    }
+
+    let owned = GradedSpace::<tenet::core::U1FusionRule>::try_new_owned(
+        tenet::core::U1FusionRule,
+        [(tenet::core::U1Irrep::new(0), 1)],
+        false,
+    )
+    .unwrap();
+    assert_eq!(owned.sectors().unwrap(), [tenet::core::U1Irrep::new(0)]);
+
+    let provider = Arc::new(tenet::core::U1FusionRule);
+    let shared = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(tenet::core::U1Irrep::new(0), 1)],
+        false,
+    )
+    .unwrap();
+    assert_eq!(shared.sectors().unwrap(), owned.sectors().unwrap());
+    assert_eq!(shared.degeneracies(), owned.degeneracies());
+    assert_eq!(shared.is_dual(), owned.is_dual());
+    let dual = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(tenet::core::U1Irrep::new(1), 2)],
+        true,
+    )
+    .unwrap();
+    assert!(std::ptr::eq(dual.provider(), provider.as_ref()));
+    assert_eq!(dual.sectors().unwrap(), [tenet::core::U1Irrep::new(-1)]);
+    assert_eq!(dual.degeneracy(&tenet::core::U1Irrep::new(-1)).unwrap(), 2);
+    assert_eq!(dual.degeneracy(&tenet::core::U1Irrep::new(1)).unwrap(), 0);
+    assert!(dual.has_sector(&tenet::core::U1Irrep::new(-1)).unwrap());
+    assert!(!dual.has_sector(&tenet::core::U1Irrep::new(1)).unwrap());
+    let back = dual.try_dual().unwrap();
+    assert!(!back.is_dual());
+    assert_eq!(back.sectors().unwrap(), [tenet::core::U1Irrep::new(1)]);
+    assert_eq!(
+        back.try_dual().unwrap().sectors().unwrap(),
+        dual.sectors().unwrap()
+    );
+
+    let unit = dual.unitspace().unwrap();
+    assert!(std::ptr::eq(unit.provider(), provider.as_ref()));
+    assert!(!unit.is_dual());
+    assert_eq!(unit.sectors().unwrap(), [tenet::core::U1Irrep::new(0)]);
+    assert_eq!(unit.degeneracies(), [1]);
+
+    let left = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [
+            (tenet::core::U1Irrep::new(0), 1),
+            (tenet::core::U1Irrep::new(1), 2),
+        ],
+        false,
+    )
+    .unwrap();
+    let right = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(tenet::core::U1Irrep::new(-1), 3)],
+        false,
+    )
+    .unwrap();
+    let fused = left.fuse(&right).unwrap();
+    assert_eq!(fused.degeneracy(&tenet::core::U1Irrep::new(-1)).unwrap(), 3);
+    assert_eq!(fused.degeneracy(&tenet::core::U1Irrep::new(0)).unwrap(), 6);
+    assert!(!fused.is_dual());
+    assert_eq!(generic_dim(&left), 3.0);
+
+    let summed = left.oplus(&right).unwrap();
+    assert_eq!(
+        summed.degeneracy(&tenet::core::U1Irrep::new(-1)).unwrap(),
+        3
+    );
+    assert_eq!(summed.degeneracy(&tenet::core::U1Irrep::new(0)).unwrap(), 1);
+    assert_eq!(summed.degeneracy(&tenet::core::U1Irrep::new(1)).unwrap(), 2);
+    assert!(left.oplus(&right.try_dual().unwrap()).is_err());
+    let huge = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(tenet::core::U1Irrep::new(0), usize::MAX)],
+        false,
+    )
+    .unwrap();
+    assert!(huge.oplus(&owned).is_err());
+    assert!(huge.fuse(&left).is_err());
+
+    let su2_provider = Arc::new(SU2FusionRule);
+    let half = SU2Irrep::from_twice_spin(1);
+    let su2_left = GradedSpace::try_new(Arc::clone(&su2_provider), [(half, 2)], true).unwrap();
+    let su2_right = GradedSpace::try_new(Arc::clone(&su2_provider), [(half, 3)], false).unwrap();
+    assert_eq!(su2_left.sectors().unwrap(), [half]);
+    assert!(su2_left.is_dual());
+    assert_eq!(su2_left.dim().unwrap(), 4.0);
+    let su2_fused = su2_left.fuse(&su2_right).unwrap();
+    assert_eq!(
+        su2_fused.degeneracy(&SU2Irrep::from_twice_spin(0)).unwrap(),
+        6
+    );
+    assert_eq!(
+        su2_fused.degeneracy(&SU2Irrep::from_twice_spin(2)).unwrap(),
+        6
+    );
+
+    let z2_provider = Arc::new(tenet::core::Z2FusionRule);
+    let z2_dual =
+        GradedSpace::try_new(z2_provider, [(tenet::core::Z2Irrep::ODD, 1)], true).unwrap();
+    assert_eq!(z2_dual.sectors().unwrap(), [tenet::core::Z2Irrep::ODD]);
+    assert!(z2_dual.is_dual());
+
+    let product_provider =
+        Arc::new(tenet::core::U1FusionRule.product(tenet::core::FermionParityFusionRule));
+    let product_left = GradedSpace::try_new(
+        Arc::clone(&product_provider),
+        [(
+            tenet::core::product_sector(tenet::core::U1Irrep::new(1), tenet::core::Z2Irrep::ODD),
+            2,
+        )],
+        false,
+    )
+    .unwrap();
+    let product_right = GradedSpace::try_new(
+        product_provider,
+        [(
+            tenet::core::product_sector(tenet::core::U1Irrep::new(-1), tenet::core::Z2Irrep::ODD),
+            3,
+        )],
+        false,
+    )
+    .unwrap();
+    let product_fused = product_left.fuse(&product_right).unwrap();
+    assert_eq!(
+        product_fused
+            .degeneracy(&tenet::core::product_sector(
+                tenet::core::U1Irrep::new(0),
+                tenet::core::Z2Irrep::EVEN,
+            ))
+            .unwrap(),
+        6
+    );
+}
+
+#[test]
 fn graded_space_rejects_a_duplicate_label_by_name() {
     // What: the duplicate is reported as the caller's own label, which needs
     // the check to run before the label is encoded away into a `SectorId`.
@@ -449,6 +596,10 @@ fn graded_space_reports_an_unrepresentable_label() {
     let error = GradedSpace::try_new(provider, [(Z3Charge(7), 2)], false).unwrap_err();
 
     assert!(error.to_string().contains("Z3 charge 7"), "{error}");
+    let provider = Arc::new(ExternalZ3::new());
+    let space = z3_leg(&provider, false);
+    assert!(space.degeneracy(&Z3Charge(7)).is_err());
+    assert!(space.has_sector(&Z3Charge(7)).is_err());
 }
 
 #[test]
@@ -494,6 +645,7 @@ fn graded_space_dual_reports_a_non_injective_dual_instead_of_panicking() {
     let error = space.try_dual().unwrap_err();
 
     assert!(error.to_string().contains("not injective"), "{error}");
+    assert!(GradedSpace::try_new(provider, [(Z3Charge(0), 1), (Z3Charge(1), 1)], true,).is_err());
 }
 
 #[test]
@@ -616,8 +768,9 @@ fn checked_construction_failure_publishes_no_cache_state() {
     // provider), otherwise the staging never calls its failing primitive.
     let broken = Arc::new(ExternalZ3::with(Quirk::FailDual));
     let codomain = z3_leg(&broken, false);
+    let healthy = Arc::new(ExternalZ3::new());
     let domain = GradedSpace::try_new(
-        Arc::clone(&broken),
+        healthy,
         [(Z3Charge(0), 2), (Z3Charge(2), 3), (Z3Charge(1), 1)],
         true,
     )
@@ -755,7 +908,9 @@ fn block_fusion_trees_reports_a_non_self_dual_domain_label() {
     let _guard = cache_lock();
     let provider = Arc::new(ExternalZ3::new());
     let codomain = GradedSpace::try_new(Arc::clone(&provider), [(Z3Charge(1), 1)], false).unwrap();
-    let domain = GradedSpace::try_new(Arc::clone(&provider), [(Z3Charge(2), 1)], true).unwrap();
+    // A dual constructor interprets its key through the orientation, so key
+    // charge 1 is stored and reported as the external charge 2.
+    let domain = GradedSpace::try_new(Arc::clone(&provider), [(Z3Charge(1), 1)], true).unwrap();
     assert_eq!(
         domain.try_dual().unwrap().sectors().unwrap(),
         vec![Z3Charge(1)]
