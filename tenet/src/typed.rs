@@ -270,7 +270,10 @@ use crate::tensor::{
     Fill, PlanarRequestKind, TensorScalar,
 };
 #[cfg(feature = "cuda")]
-use crate::tensor::{assemble_left_factor, assemble_right_factor, cuda_qr_region, upload_selector};
+use crate::tensor::{
+    assemble_left_factor, assemble_right_factor, cuda_qr_region, cuda_svd_region,
+    fill_diagonal_values, upload_selector,
+};
 pub use crate::tensor_core::CheckedGenericTensorProductError;
 use crate::tensor_core::{
     pow_by_squaring, tensorcompose_owned_multiplicity_free,
@@ -297,10 +300,40 @@ thread_local! {
     static CUDA_QR_OBSERVATION: std::cell::Cell<Option<CudaQrObservation>> = const {
             std::cell::Cell::new(None)
         };
+    /// `(successful_results, spectrum_scalars, final_storage_creations,
+    /// live_route_scratch, peak_route_scratch)`.
+    static CUDA_SVD_OBSERVATION: std::cell::Cell<Option<CudaSvdObservation>> = const {
+            std::cell::Cell::new(None)
+        };
 }
 
 #[cfg(all(test, feature = "cuda"))]
 type CudaQrObservation = (usize, usize, usize, usize, usize, usize, usize);
+#[cfg(all(test, feature = "cuda"))]
+type CudaSvdObservation = (usize, usize, usize, usize, usize);
+
+#[cfg(all(test, feature = "cuda"))]
+fn update_cuda_svd_observation(update: impl FnOnce(CudaSvdObservation) -> CudaSvdObservation) {
+    CUDA_SVD_OBSERVATION.with(|observation| {
+        if let Some(current) = observation.get() {
+            observation.set(Some(update(current)));
+        }
+    });
+}
+
+#[cfg(all(test, feature = "cuda"))]
+pub(crate) fn observe_cuda_svd_decomposition(values: usize) {
+    update_cuda_svd_observation(|(results, total, creations, live, peak)| {
+        (results + 1, total + values, creations, live, peak)
+    });
+}
+
+#[cfg(all(test, feature = "cuda"))]
+fn observe_cuda_svd_final_storage_creation() {
+    update_cuda_svd_observation(|(results, total, creations, live, peak)| {
+        (results, total, creations + 1, live, peak)
+    });
+}
 
 #[cfg(all(test, feature = "cuda"))]
 fn observe_cuda_arithmetic(zero_uploads: usize, coefficient_uploads: usize, kernels: usize) {
@@ -401,6 +434,38 @@ impl Drop for TypedCudaQrScratch {
 }
 
 #[cfg(feature = "cuda")]
+struct TypedCudaSvdScratch {
+    left: CudaDenseStorage,
+    right: CudaDenseStorage,
+    selector: CudaStorage,
+}
+
+#[cfg(feature = "cuda")]
+impl TypedCudaSvdScratch {
+    fn new(left: CudaDenseStorage, right: CudaDenseStorage, selector: CudaStorage) -> Self {
+        #[cfg(test)]
+        update_cuda_svd_observation(|(results, total, creations, live, peak)| {
+            let live = live + 1;
+            (results, total, creations, live, peak.max(live))
+        });
+        Self {
+            left,
+            right,
+            selector,
+        }
+    }
+}
+
+#[cfg(all(test, feature = "cuda"))]
+impl Drop for TypedCudaSvdScratch {
+    fn drop(&mut self) {
+        update_cuda_svd_observation(|(results, total, creations, live, peak)| {
+            (results, total, creations, live - 1, peak)
+        });
+    }
+}
+
+#[cfg(feature = "cuda")]
 #[derive(Clone, Copy)]
 struct TypedCudaQrRoute {
     source: usize,
@@ -446,6 +511,51 @@ fn cuda_qr_tree_extents_match(
         matched[index] = true;
     }
     Ok(matched.into_iter().all(|is_matched| is_matched))
+}
+
+#[cfg(feature = "cuda")]
+fn validate_cuda_svd_middle_regions<R>(
+    plan: &TypedCudaQrPlan<R>,
+    middle_regions: &[CoupledSectorRegion],
+) -> Result<(), Error> {
+    if middle_regions.len() != plan.routes.len() {
+        return Err(internal_layout_error(
+            "compact SVD diagonal factor does not have exactly one region per route",
+        ));
+    }
+    let mut by_sector = HashMap::with_capacity(middle_regions.len());
+    for region in middle_regions {
+        if by_sector.insert(region.coupled(), region).is_some() {
+            return Err(internal_layout_error(
+                "compact SVD diagonal factor contains a duplicate coupled sector",
+            ));
+        }
+    }
+    for route in &plan.routes {
+        let source = &plan.source_regions[route.source];
+        let middle = by_sector.get(&source.coupled()).ok_or_else(|| {
+            internal_layout_error("compact SVD diagonal factor is missing a source sector")
+        })?;
+        let range_len = middle
+            .range()
+            .end
+            .checked_sub(middle.range().start)
+            .ok_or_else(|| {
+                internal_layout_error("compact SVD diagonal factor has an invalid region range")
+            })?;
+        let expected_len = route.rank.checked_mul(route.rank).ok_or_else(|| {
+            internal_layout_error("compact SVD diagonal factor region length overflows")
+        })?;
+        if (middle.rows(), middle.cols()) != (route.rank, route.rank)
+            || range_len != expected_len
+            || !cuda_qr_tree_extents_match(middle.row_trees(), middle.col_trees())?
+        {
+            return Err(internal_layout_error(
+                "compact SVD diagonal factor region does not match its source route",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "cuda")]
@@ -2725,6 +2835,7 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 ///     let _ = lhs.zeros_like();
 ///     let _ = lhs.normalize();
 ///     let _ = lhs.qr_compact();
+///     let _ = lhs.svd_compact();
 /// }
 /// ```
 ///
@@ -2752,6 +2863,7 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 ///     let _ = lhs.zeros_like();
 ///     let _ = lhs.normalize();
 ///     let _ = lhs.qr_compact();
+///     let _ = lhs.svd_compact();
 /// }
 /// ```
 ///
@@ -2774,6 +2886,27 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 ///
 /// fn no_complex_cuda_qr(tensor: &TensorMap<U1FusionRule, Complex64, CudaStorage>) {
 ///     let _ = tensor.qr_compact();
+/// }
+/// ```
+///
+/// Compact SVD has the same deliberately narrow typed CUDA surface:
+///
+/// ```compile_fail
+/// use tenet::core::Su3FusionRule;
+/// use tenet::typed::{CudaStorage, TensorMap};
+///
+/// fn no_checked_generic_cuda_svd(tensor: &TensorMap<Su3FusionRule, f64, CudaStorage>) {
+///     let _ = tensor.svd_compact();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use num_complex::Complex64;
+/// use tenet::core::U1FusionRule;
+/// use tenet::typed::{CudaStorage, TensorMap};
+///
+/// fn no_complex_cuda_svd(tensor: &TensorMap<U1FusionRule, Complex64, CudaStorage>) {
+///     let _ = tensor.svd_compact();
 /// }
 /// ```
 impl<R> TensorMap<R, f64, CudaStorage>
@@ -2997,6 +3130,149 @@ where
             Self {
                 runtime: self.runtime.clone(),
                 repr: owned_repr(TypedTensorBody::dense(plan.left_space, left_data)),
+            },
+            Self {
+                runtime: self.runtime.clone(),
+                repr: owned_repr(TypedTensorBody::dense(plan.right_space, right_data)),
+            },
+        ))
+    }
+
+    /// Streamed compact SVD of owned dense CUDA storage.
+    ///
+    /// Each nonempty coupled-sector route is decomposed and assembled before
+    /// its raw device factors are dropped. Singular values are the only
+    /// numerical tensor payload downloaded; the backend additionally reads
+    /// O(1) solver-status metadata per route. The returned `s` is deliberately
+    /// a dense CUDA tensor because
+    /// CUDA diagonal storage is not part of the typed storage contract.
+    /// `u` and `vh` retain the raw CUDA backend gauge; unlike the Host method,
+    /// this method does not impose TensorKit's largest-pivot sign gauge.
+    pub fn svd_compact(&self) -> Result<(Self, Self, Self), Error> {
+        let source = self.direct_cuda_storage("svd_compact")?;
+        let source_space = self.logical_space().space();
+        let required_len = source_space.required_len()?;
+        let source_regions = sector_regions(source_space.structure(), source_space.nout())?;
+
+        {
+            let mut state = self.runtime.lock();
+            let cuda = state.cuda.as_mut().ok_or_else(|| {
+                Error::InvalidArgument(
+                    "this runtime was built without a CUDA device; use \
+                     Runtime::builder().cuda(device)"
+                        .to_string(),
+                )
+            })?;
+            Self::validate_cuda_owned_metadata(
+                Placement::Cuda(cuda.device()),
+                source.placement(),
+                required_len,
+                source.len(),
+            )?;
+        }
+        // As for typed CUDA QR, all provider work and final-space admission
+        // complete before the execution lock and before any output exists.
+        let plan = self.compile_cuda_qr_plan(source_regions)?;
+        let bond = plan.left_space.space().homspace().domain().legs()[0].clone();
+        let middle_space =
+            self.logical_space()
+                .derive_from_final_homspace(FusionTreeHomSpace::new(
+                    FusionProductSpace::new([bond.clone()]),
+                    FusionProductSpace::new([bond]),
+                ))?;
+        let middle_regions = sector_regions(
+            middle_space.space().structure(),
+            middle_space.space().nout(),
+        )?;
+        validate_cuda_svd_middle_regions(&plan, &middle_regions)?;
+        let left_len = plan.left_space.space().required_len()?;
+        let middle_len = middle_space.space().required_len()?;
+        let right_len = plan.right_space.space().required_len()?;
+        let (left_data, middle_data, right_data) = {
+            let mut state = self.runtime.lock();
+            let cuda = state.cuda.as_mut().ok_or_else(|| {
+                Error::InvalidArgument(
+                    "this runtime was built without a CUDA device; use \
+                     Runtime::builder().cuda(device)"
+                        .to_string(),
+                )
+            })?;
+            let mut left_data = CudaStorage::upload(cuda, &vec![0.0; left_len])?;
+            #[cfg(test)]
+            observe_cuda_svd_final_storage_creation();
+            let mut right_data = CudaStorage::upload(cuda, &vec![0.0; right_len])?;
+            #[cfg(test)]
+            observe_cuda_svd_final_storage_creation();
+            let mut spectra = Vec::with_capacity(plan.routes.len());
+
+            for route in &plan.routes {
+                let source_region = &plan.source_regions[route.source];
+                let left_region = &plan.left_regions[route.left];
+                let right_region = &plan.right_regions[route.right];
+                let (raw_left, values, raw_right) = cuda_svd_region(
+                    cuda,
+                    &source.0,
+                    source_region.range().start,
+                    source_region.rows(),
+                    source_region.cols(),
+                )?;
+                if values.len() != route.rank {
+                    return Err(internal_layout_error(
+                        "compact SVD spectrum length does not match its source route",
+                    ));
+                }
+                let selector = upload_selector(
+                    cuda,
+                    route.rank,
+                    route.rank,
+                    (0..route.rank).map(|index| (index, index, 1.0)),
+                )?;
+                // The scratch owns all route-local allocations. It is dropped
+                // at the end of this iteration, bounding peak raw-factor
+                // storage independently of the number of sectors.
+                let scratch = TypedCudaSvdScratch::new(raw_left, raw_right, selector);
+                assemble_left_factor(
+                    cuda,
+                    &mut left_data,
+                    left_region,
+                    source_region,
+                    &scratch.left,
+                    route.rank,
+                    &scratch.selector,
+                    route.rank,
+                )?;
+                assemble_right_factor(
+                    cuda,
+                    &mut right_data,
+                    right_region,
+                    source_region,
+                    &scratch.selector,
+                    route.rank,
+                    route.rank,
+                    &scratch.right,
+                )?;
+                spectra.push(tenet_matrixalgebra::SectorSpectrum {
+                    sector: source_region.coupled(),
+                    values,
+                });
+            }
+
+            let mut middle_host = vec![0.0; middle_len];
+            fill_diagonal_values(middle_space.space().structure(), &mut middle_host, &spectra)?;
+            let middle_data = CudaStorage::upload(cuda, &middle_host)?;
+            #[cfg(test)]
+            observe_cuda_svd_final_storage_creation();
+            (left_data, middle_data, right_data)
+        };
+
+        Ok((
+            Self {
+                runtime: self.runtime.clone(),
+                repr: owned_repr(TypedTensorBody::dense(plan.left_space, left_data)),
+            },
+            Self {
+                runtime: self.runtime.clone(),
+                repr: owned_repr(TypedTensorBody::dense(middle_space, middle_data)),
             },
             Self {
                 runtime: self.runtime.clone(),
@@ -8802,7 +9078,7 @@ mod representation_gates {
 
     #[cfg(feature = "cuda")]
     #[test]
-    fn typed_cuda_qr_rejects_compact_and_lazy_representations_before_runtime_work() {
+    fn typed_cuda_factorizations_reject_compact_and_lazy_before_runtime_work() {
         let diagonal = u1_lazy_fixture().svd_compact().unwrap().1;
         let TypedData::Diagonal(spectrum) = owned(&diagonal).data.as_ref() else {
             unreachable!("SVD factor is compact")
@@ -8818,9 +9094,17 @@ mod representation_gates {
             device_diagonal.qr_compact(),
             Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
         ));
+        assert!(matches!(
+            device_diagonal.svd_compact(),
+            Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
+        ));
         let lazy = device_diagonal.adjoint().unwrap();
         assert!(matches!(
             lazy.qr_compact(),
+            Err(Error::UnsupportedOnDevice(message)) if message.contains("lazy adjoint")
+        ));
+        assert!(matches!(
+            lazy.svd_compact(),
             Err(Error::UnsupportedOnDevice(message)) if message.contains("lazy adjoint")
         ));
     }
@@ -8944,6 +9228,93 @@ mod representation_gates {
         empty.to_cuda().unwrap().qr_compact().unwrap();
         CUDA_QR_OBSERVATION.with(|observation| {
             assert_eq!(observation.get(), Some((0, 0, 0, 2, 0, 0, 0)));
+            observation.set(None);
+        });
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn typed_cuda_svd_work_is_streamed_and_preflight_is_transactional() {
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+        let provider = Arc::new(SU2FusionRule);
+        let leg = GradedSpace::try_new(
+            Arc::clone(&provider),
+            [
+                (SU2Irrep::from_twice_spin(0), 2),
+                (SU2Irrep::from_twice_spin(1), 2),
+            ],
+            false,
+        )
+        .unwrap();
+        let source = TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 1.0
+        })
+        .unwrap();
+        let regions = sector_regions(
+            source.logical_space().space().structure(),
+            source.logical_space().space().nout(),
+        )
+        .unwrap();
+        let nonempty = regions
+            .iter()
+            .filter(|region| region.rows() != 0 && region.cols() != 0)
+            .count();
+        let singular_values = regions
+            .iter()
+            .map(|region| region.rows().min(region.cols()))
+            .sum();
+        let source_device = source.to_cuda().unwrap();
+        CUDA_SVD_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0))));
+        source_device.svd_compact().unwrap();
+        CUDA_SVD_OBSERVATION.with(|observation| {
+            assert_eq!(
+                observation.get(),
+                Some((nonempty, singular_values, 3, 0, usize::from(nonempty != 0),))
+            );
+            observation.set(None);
+        });
+
+        let malformed_storage = {
+            let state = runtime.lock();
+            CudaStorage::upload(state.cuda.as_ref().unwrap(), &[]).unwrap()
+        };
+        let malformed = TensorMap {
+            runtime: runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(
+                source.logical_space().clone(),
+                malformed_storage,
+            )),
+        };
+        for lazy in [false, true] {
+            CUDA_SVD_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0))));
+            let rejected = if lazy {
+                source_device.adjoint().unwrap().svd_compact()
+            } else {
+                malformed.svd_compact()
+            };
+            assert!(rejected.is_err());
+            CUDA_SVD_OBSERVATION.with(|observation| {
+                assert_eq!(observation.get(), Some((0, 0, 0, 0, 0)));
+                observation.set(None);
+            });
+        }
+
+        let stranded_storage = {
+            let state = runtime.lock();
+            CudaStorage::upload(state.cuda.as_ref().unwrap(), source.data()).unwrap()
+        };
+        let stranded = TensorMap {
+            runtime: Runtime::builder().build().unwrap(),
+            repr: owned_repr(TypedTensorBody::dense(
+                source.logical_space().clone(),
+                stranded_storage,
+            )),
+        };
+        CUDA_SVD_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0))));
+        assert!(stranded.svd_compact().is_err());
+        CUDA_SVD_OBSERVATION.with(|observation| {
+            assert_eq!(observation.get(), Some((0, 0, 0, 0, 0)));
             observation.set(None);
         });
     }
