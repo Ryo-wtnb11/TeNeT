@@ -39,8 +39,8 @@ use tenet_core::{
 use tenet_core::{SectorLeg, TensorStorage};
 #[cfg(feature = "cuda")]
 use tenet_dense::{
-    cuda_eigh_region, cuda_gemm_region_into, cuda_qr_region, cuda_svd_region, CudaDenseContext,
-    CudaDenseStorage,
+    cuda_eigh_region, cuda_gemm_region_into, cuda_qr_region as dense_cuda_qr_region,
+    cuda_svd_region, CudaDenseContext, CudaDenseStorage,
 };
 #[cfg(feature = "cuda")]
 use tenet_matrixalgebra::{select_truncation, validate_hermitian_regions, WeightedSpectrum};
@@ -11361,7 +11361,7 @@ fn decide_kept<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
 /// Uploads a small host-built selector matrix (`rows x cols`, column-major,
 /// zero except `entries`) used by the assembly GEMMs.
 #[cfg(feature = "cuda")]
-fn upload_selector(
+pub(crate) fn upload_selector(
     cuda: &mut CudaDenseContext,
     rows: usize,
     cols: usize,
@@ -11371,7 +11371,25 @@ fn upload_selector(
     for (row, col, value) in entries {
         data[row + rows * col] = value;
     }
-    CudaStorage::upload(cuda, &data).map_err(Error::from)
+    let selector = CudaStorage::upload(cuda, &data).map_err(Error::from)?;
+    #[cfg(test)]
+    crate::typed::observe_cuda_qr_selector_upload();
+    Ok(selector)
+}
+
+#[cfg(feature = "cuda")]
+#[inline]
+pub(crate) fn cuda_qr_region(
+    cuda: &mut CudaDenseContext,
+    source: &CudaDenseStorage,
+    offset: usize,
+    rows: usize,
+    cols: usize,
+) -> Result<(CudaDenseStorage, CudaDenseStorage, Vec<f64>), Error> {
+    let factors = dense_cuda_qr_region(cuda, source, offset, rows, cols).map_err(dense_err)?;
+    #[cfg(test)]
+    crate::typed::observe_cuda_qr_decomposition(factors.2.len());
+    Ok(factors)
 }
 
 /// Writes `factor_rows x kept` slices of `factor * selector` into the target
@@ -11380,7 +11398,7 @@ fn upload_selector(
 /// matching between the source and factor spaces.
 #[cfg(feature = "cuda")]
 #[allow(clippy::too_many_arguments)]
-fn assemble_left_factor(
+pub(crate) fn assemble_left_factor(
     cuda: &mut CudaDenseContext,
     dst: &mut CudaStorage,
     target: &SectorRegion,
@@ -11419,6 +11437,8 @@ fn assemble_left_factor(
             0.0,
         )
         .map_err(dense_err)?;
+        #[cfg(test)]
+        crate::typed::observe_cuda_qr_assembly_gemm();
     }
     Ok(())
 }
@@ -11428,7 +11448,7 @@ fn assemble_left_factor(
 /// tree.
 #[cfg(feature = "cuda")]
 #[allow(clippy::too_many_arguments)]
-fn assemble_right_factor(
+pub(crate) fn assemble_right_factor(
     cuda: &mut CudaDenseContext,
     dst: &mut CudaStorage,
     target: &SectorRegion,
@@ -11467,6 +11487,8 @@ fn assemble_right_factor(
             0.0,
         )
         .map_err(dense_err)?;
+        #[cfg(test)]
+        crate::typed::observe_cuda_qr_assembly_gemm();
     }
     Ok(())
 }
@@ -11743,8 +11765,7 @@ impl Tensor {
                     region.range().start,
                     region.rows(),
                     region.cols(),
-                )
-                .map_err(dense_err)?;
+                )?;
                 // Positive-diagonal gauge (host `positive_diagonal_gauge`,
                 // real scalars): flip where R's diagonal is negative, leave
                 // exact zeros untouched.

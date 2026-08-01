@@ -435,6 +435,7 @@ pub fn cuda_qr_region(
     let r = expect_f64("cuda_qr", outputs.pop().expect("len checked"), ctx.device)?;
     let q = expect_f64("cuda_qr", outputs.pop().expect("len checked"), ctx.device)?;
     let k = rows.min(cols);
+    validate_qr_factor_shapes(q.tensor.shape(), r.tensor.shape(), rows, cols)?;
     // R's diagonal as a strided [k] view (stride k + 1), compacted on
     // device, then downloaded: k scalars, not the factor.
     let diag = {
@@ -450,7 +451,34 @@ pub fn cuda_qr_region(
             .map_err(|err| cuda_error("cuda_qr", err))?;
         download_values(ctx, &Tensor::F64(compact))?
     };
+    if diag.len() != k {
+        return Err(cuda_error(
+            "cuda_qr",
+            format!(
+                "device QR returned diagonal length {}; expected {k}",
+                diag.len()
+            ),
+        ));
+    }
     Ok((q, r, diag))
+}
+
+fn validate_qr_factor_shapes(
+    q_shape: &[usize],
+    r_shape: &[usize],
+    rows: usize,
+    cols: usize,
+) -> Result<(), DenseError> {
+    let k = rows.min(cols);
+    if q_shape != [rows, k] || r_shape != [k, cols] {
+        return Err(cuda_error(
+            "cuda_qr",
+            format!(
+                "device QR returned shapes Q={q_shape:?}, R={r_shape:?}; expected Q=[{rows}, {k}], R=[{k}, {cols}]"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// cuSOLVER Hermitian eigendecomposition of one packed column-major
@@ -523,6 +551,13 @@ mod tests {
             }
             other => panic!("expected a CUDA backend error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn qr_factor_shapes_must_match_the_requested_compact_problem() {
+        assert!(validate_qr_factor_shapes(&[4, 3], &[3, 3], 4, 3).is_ok());
+        assert!(validate_qr_factor_shapes(&[4, 4], &[3, 3], 4, 3).is_err());
+        assert!(validate_qr_factor_shapes(&[4, 3], &[4, 3], 4, 3).is_err());
     }
 
     #[test]
