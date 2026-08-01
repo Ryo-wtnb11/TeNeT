@@ -3451,6 +3451,33 @@ fn oriented_storage_contract_and_compose_use_parent_rectangular_views() {
             .unwrap();
         assert_eq!(composed, expected);
         assert_eq!(crate::contract::fusion_operand_projection_prepares(), 0);
+
+        if lhs_adjoint && !rhs_adjoint {
+            let outer_dst = crate::BoundDynamicFusionMapSpace::contracted_multiplicity_free(
+                &lhs_logical,
+                &rhs_logical,
+                &[],
+                &[],
+            )
+            .unwrap();
+            let mut rejected = vec![0.0; outer_dst.space().required_len().unwrap()];
+            let mut rejected_gemm = CpuOrientedGemm::default();
+            assert!(matches!(
+                context.tensorcompose_fusion_dyn_prelowered_direct_on_storage(
+                    &mut rejected_gemm,
+                    &outer_dst,
+                    &mut rejected,
+                    lhs_operand,
+                    &lhs_values,
+                    rhs_operand,
+                    &rhs_values,
+                    &[],
+                    &[],
+                ),
+                Err(OperationError::UnsupportedTensorContractScope { .. })
+            ));
+            assert!(rejected_gemm.calls.is_empty());
+        }
     }
 }
 
