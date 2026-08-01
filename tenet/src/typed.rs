@@ -2136,10 +2136,131 @@ impl<R, D, S> TensorMap<R, D, S> {
         &self.runtime
     }
 
+    /// The codomain legs, in axis order.
+    ///
+    /// Allocates: each call builds a fresh `Vec` and clones every leg's
+    /// sector table (the provider travels by `Arc` bump). Hold the result
+    /// rather than re-calling in a loop.
+    pub fn codomain(&self) -> Vec<GradedSpace<R>> {
+        self.legs(self.logical_space().space().homspace().codomain())
+    }
+
+    /// The domain legs, in axis order.
+    ///
+    /// Allocates per call, exactly as [`Self::codomain`].
+    pub fn domain(&self) -> Vec<GradedSpace<R>> {
+        self.legs(self.logical_space().space().homspace().domain())
+    }
+
+    /// The codomain legs, in axis order (TensorKit `codomain(t)`).
+    /// Documented alias of
+    /// [`Self::codomain`], carried for cross-facade name parity with the
+    /// erased [`crate::prelude::Tensor::codomain_spaces`].
+    #[inline]
+    pub fn codomain_spaces(&self) -> Vec<GradedSpace<R>> {
+        self.codomain()
+    }
+
+    /// The domain legs, in axis order (TensorKit `domain(t)`) — the
+    /// spaces as written, i.e.
+    /// *not* dualized. Documented alias of [`Self::domain`], carried for
+    /// cross-facade name parity with the erased
+    /// [`crate::prelude::Tensor::domain_spaces`].
+    #[inline]
+    pub fn domain_spaces(&self) -> Vec<GradedSpace<R>> {
+        self.domain()
+    }
+
+    fn legs(&self, product: &FusionProductSpace) -> Vec<GradedSpace<R>> {
+        product
+            .legs()
+            .iter()
+            .map(|leg| GradedSpace {
+                provider: Arc::clone(self.logical_space().provider_arc()),
+                leg: leg.clone(),
+            })
+            .collect()
+    }
+
     /// Number of stored fusion-tree blocks.
     #[inline]
     pub fn block_count(&self) -> usize {
         self.logical_space().space().structure().block_count()
+    }
+}
+
+impl<R, D, S> TensorMap<R, D, S>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    /// Quantum-dimension-weighted total dimension of every leg, in flat order
+    /// (codomain legs first, then domain legs) — TensorKit's `dim(space(t,
+    /// i))` per leg.
+    /// Contraction planners use it as a size/FLOP proxy, exactly as they use
+    /// the erased [`crate::prelude::Tensor::leg_dims`].
+    ///
+    /// Same rounding formula as the erased facade:
+    /// `Σ_sector round(degeneracy * dim(sector))` per leg. The erased sibling
+    /// needs a dedicated SU(3) branch because its rule set is a closed enum
+    /// whose SU(3) arm speaks a different symbol trait; here the provider
+    /// abstraction carries `dim_scalar` uniformly, so there is deliberately
+    /// **no special case** — fewer branches, identical semantics.
+    ///
+    /// # Complexity
+    ///
+    /// `O(Σ_leg sectors)`; allocates the returned `Vec<usize>` only, never a
+    /// payload.
+    ///
+    /// # Errors
+    ///
+    /// None today; the `Result` keeps the erased signature's shape so the two
+    /// facades stay drop-in for each other.
+    pub fn leg_dims(&self) -> Result<Vec<usize>, Error> {
+        let hom = self.logical_space().space().homspace();
+        let provider = self.logical_space().provider();
+        Ok(hom
+            .codomain()
+            .legs()
+            .iter()
+            .chain(hom.domain().legs())
+            .map(|leg| Self::weighted_leg_dim(provider, leg))
+            .collect())
+    }
+
+    /// Quantum-dimension-weighted size of one flat leg — one entry of
+    /// [`Self::leg_dims`] without building the whole vector.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when `axis >= rank()`, with the erased
+    /// facade's own message.
+    pub fn leg_dim(&self, axis: usize) -> Result<usize, Error> {
+        let hom = self.logical_space().space().homspace();
+        let nout = hom.codomain().len();
+        let leg = if axis < nout {
+            &hom.codomain().legs()[axis]
+        } else if axis < self.rank() {
+            &hom.domain().legs()[axis - nout]
+        } else {
+            return Err(Error::InvalidArgument(format!(
+                "axis {axis} out of range for rank {}",
+                self.rank()
+            )));
+        };
+        Ok(Self::weighted_leg_dim(self.logical_space().provider(), leg))
+    }
+
+    /// The erased facade's per-leg reduction, verbatim: quantum dimensions are
+    /// generally irrational (SU(2) `sqrt` products, anyonic golden ratios), so
+    /// the per-sector weight is computed in `f64` and rounded once.
+    fn weighted_leg_dim(provider: &R, leg: &SectorLeg) -> usize {
+        leg.sectors()
+            .iter()
+            .zip(leg.degeneracies())
+            .map(|(&sector, &degeneracy)| {
+                (degeneracy as f64 * provider.dim_scalar(sector)).round() as usize
+            })
+            .sum()
     }
 }
 
@@ -6556,111 +6677,6 @@ where
         hom.codomain().legs() == hom.domain().legs()
     }
 
-    /// The codomain legs, in axis order.
-    ///
-    /// Allocates: each call builds a fresh `Vec` and clones every leg's
-    /// sector table (the provider travels by `Arc` bump). Hold the result
-    /// rather than re-calling in a loop.
-    pub fn codomain(&self) -> Vec<GradedSpace<R>> {
-        self.legs(self.logical_space().space().homspace().codomain())
-    }
-
-    /// The domain legs, in axis order.
-    ///
-    /// Allocates per call, exactly as [`Self::codomain`].
-    pub fn domain(&self) -> Vec<GradedSpace<R>> {
-        self.legs(self.logical_space().space().homspace().domain())
-    }
-
-    /// The codomain legs, in axis order (TensorKit `codomain(t)`).
-    /// Documented alias of
-    /// [`Self::codomain`], carried for cross-facade name parity with the
-    /// erased [`crate::prelude::Tensor::codomain_spaces`].
-    #[inline]
-    pub fn codomain_spaces(&self) -> Vec<GradedSpace<R>> {
-        self.codomain()
-    }
-
-    /// The domain legs, in axis order (TensorKit `domain(t)`) — the
-    /// spaces as written, i.e.
-    /// *not* dualized. Documented alias of [`Self::domain`], carried for
-    /// cross-facade name parity with the erased
-    /// [`crate::prelude::Tensor::domain_spaces`].
-    #[inline]
-    pub fn domain_spaces(&self) -> Vec<GradedSpace<R>> {
-        self.domain()
-    }
-
-    /// Quantum-dimension-weighted total dimension of every leg, in flat order
-    /// (codomain legs first, then domain legs) — TensorKit's `dim(space(t,
-    /// i))` per leg.
-    /// Contraction planners use it as a size/FLOP proxy, exactly as they use
-    /// the erased [`crate::prelude::Tensor::leg_dims`].
-    ///
-    /// Same rounding formula as the erased facade:
-    /// `Σ_sector round(degeneracy * dim(sector))` per leg. The erased sibling
-    /// needs a dedicated SU(3) branch because its rule set is a closed enum
-    /// whose SU(3) arm speaks a different symbol trait; here the provider
-    /// abstraction carries `dim_scalar` uniformly, so there is deliberately
-    /// **no special case** — fewer branches, identical semantics.
-    ///
-    /// # Complexity
-    ///
-    /// `O(Σ_leg sectors)`; allocates the returned `Vec<usize>` only, never a
-    /// payload.
-    ///
-    /// # Errors
-    ///
-    /// None today; the `Result` keeps the erased signature's shape so the two
-    /// facades stay drop-in for each other.
-    pub fn leg_dims(&self) -> Result<Vec<usize>, Error> {
-        let hom = self.logical_space().space().homspace();
-        let provider = self.logical_space().provider();
-        Ok(hom
-            .codomain()
-            .legs()
-            .iter()
-            .chain(hom.domain().legs())
-            .map(|leg| Self::weighted_leg_dim(provider, leg))
-            .collect())
-    }
-
-    /// Quantum-dimension-weighted size of one flat leg — one entry of
-    /// [`Self::leg_dims`] without building the whole vector.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::InvalidArgument`] when `axis >= rank()`, with the erased
-    /// facade's own message.
-    pub fn leg_dim(&self, axis: usize) -> Result<usize, Error> {
-        let hom = self.logical_space().space().homspace();
-        let nout = hom.codomain().len();
-        let leg = if axis < nout {
-            &hom.codomain().legs()[axis]
-        } else if axis < self.rank() {
-            &hom.domain().legs()[axis - nout]
-        } else {
-            return Err(Error::InvalidArgument(format!(
-                "axis {axis} out of range for rank {}",
-                self.rank()
-            )));
-        };
-        Ok(Self::weighted_leg_dim(self.logical_space().provider(), leg))
-    }
-
-    /// The erased facade's per-leg reduction, verbatim: quantum dimensions are
-    /// generally irrational (SU(2) `sqrt` products, anyonic golden ratios), so
-    /// the per-sector weight is computed in `f64` and rounded once.
-    fn weighted_leg_dim(provider: &R, leg: &SectorLeg) -> usize {
-        leg.sectors()
-            .iter()
-            .zip(leg.degeneracies())
-            .map(|(&sector, &degeneracy)| {
-                (degeneracy as f64 * provider.dim_scalar(sector)).round() as usize
-            })
-            .sum()
-    }
-
     /// The single element of a rank-0 (scalar) tensor, e.g. the result of
     /// contracting every leg — TensorKit `scalar` (an empty payload reads
     /// as zero there too).
@@ -7290,17 +7306,6 @@ where
     /// Compact diagonal storage is preserved, as it is for every scaling.
     pub fn zeros_like(&self) -> Self {
         self.scale(D::from_real(0.0))
-    }
-
-    fn legs(&self, product: &FusionProductSpace) -> Vec<GradedSpace<R>> {
-        product
-            .legs()
-            .iter()
-            .map(|leg| GradedSpace {
-                provider: Arc::clone(self.logical_space().provider_arc()),
-                leg: leg.clone(),
-            })
-            .collect()
     }
 }
 

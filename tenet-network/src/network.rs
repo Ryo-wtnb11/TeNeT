@@ -7,17 +7,24 @@
 //! executor remains private solely for the `tensor!` compatibility path.
 
 use std::collections::HashMap;
+#[cfg(all(test, feature = "cuda"))]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tenet::core::{
     CheckedFusionAlgebra, FusionAlgebraError, MultiplicityFreeAdmissionMode,
-    MultiplicityFreeRigidSymbols, RuleIdentity, SectorCodec, SectorLeg, TypedSectorAdmission,
+    MultiplicityFreeRigidSymbols, RuleIdentity, SectorCodec, SectorLeg, TensorStorage,
+    TypedSectorAdmission,
 };
 use tenet::prelude::{
     ContractOverwriteCache, Dtype, Error, OverwriteOutcome, PermuteOverwriteCache, Runtime, Scalar,
     Tensor, TensorExecutionContext, TensorScalar,
 };
+#[cfg(feature = "cuda")]
+use tenet::typed::CudaStorage;
 use tenet::typed::{GradedSpace, NetworkReuseClass, TensorMap};
+#[cfg(feature = "cuda")]
+use tenet::{core::Placement, operations::OperationError};
 use tenet::{RuntimeDetachedTensor, RuntimeIdentity};
 
 use crate::cost::{DenseCostModel, DenseTensorInfo};
@@ -95,9 +102,19 @@ pub struct Network {
 
 static NEXT_NETWORK_CACHE_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_PLAN_OWNER_TOKEN: AtomicU64 = AtomicU64::new(1);
+#[cfg(all(test, feature = "cuda"))]
+static CUDA_NETWORK_CONTRACT_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 fn invalid(message: impl std::fmt::Display) -> Error {
     Error::InvalidArgument(message.to_string())
+}
+
+#[cfg(feature = "cuda")]
+fn unsupported_cuda_network() -> Error {
+    OperationError::UnsupportedTensorContractScope {
+        message: "typed CUDA network execution supports only canonical whole-domain/whole-codomain contractions with identity intermediate and final output order",
+    }
+    .into()
 }
 
 impl Network {
@@ -145,10 +162,11 @@ impl Network {
         self.cache_id
     }
 
-    /// Plans this topology for homogeneous typed Host multiplicity-free tensors.
-    pub fn plan<R, D>(
+    /// Plans from storage-independent metadata of homogeneous typed
+    /// multiplicity-free tensors; payload storage is never read or transferred.
+    pub fn plan<R, D, S>(
         &self,
-        tensors: &[&TensorMap<R, D>],
+        tensors: &[&TensorMap<R, D, S>],
         optimizer: &(impl DenseContractionOptimizer + ?Sized),
     ) -> Result<PlannedNetwork, Error>
     where
@@ -157,6 +175,7 @@ impl Network {
             + CheckedFusionAlgebra
             + SectorCodec,
         D: TensorScalar,
+        S: TensorStorage<D>,
     {
         let (ir, infos) = self.lower_typed(tensors)?;
         let plan = if ir.tensors().len() == 1 {
@@ -169,9 +188,9 @@ impl Network {
     }
 
     /// Wraps an already searched structural order for typed execution.
-    pub fn plan_with<R, D>(
+    pub fn plan_with<R, D, S>(
         &self,
-        tensors: &[&TensorMap<R, D>],
+        tensors: &[&TensorMap<R, D, S>],
         plan: ContractionPlan,
     ) -> Result<PlannedNetwork, Error>
     where
@@ -180,14 +199,15 @@ impl Network {
             + CheckedFusionAlgebra
             + SectorCodec,
         D: TensorScalar,
+        S: TensorStorage<D>,
     {
         let (ir, _) = self.lower_typed(tensors)?;
         self.finish_typed_plan(tensors, ir, plan)
     }
 
-    fn finish_typed_plan<R, D>(
+    fn finish_typed_plan<R, D, S>(
         &self,
-        tensors: &[&TensorMap<R, D>],
+        tensors: &[&TensorMap<R, D, S>],
         ir: NetworkIR,
         plan: ContractionPlan,
     ) -> Result<PlannedNetwork, Error>
@@ -197,6 +217,7 @@ impl Network {
             + CheckedFusionAlgebra
             + SectorCodec,
         D: TensorScalar,
+        S: TensorStorage<D>,
     {
         let input_codomain_ranks = tensors
             .iter()
@@ -238,9 +259,9 @@ impl Network {
         })
     }
 
-    fn lower_typed<R, D>(
+    fn lower_typed<R, D, S>(
         &self,
-        tensors: &[&TensorMap<R, D>],
+        tensors: &[&TensorMap<R, D, S>],
     ) -> Result<(NetworkIR, Vec<DenseTensorInfo>), Error>
     where
         R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
@@ -248,6 +269,7 @@ impl Network {
             + CheckedFusionAlgebra
             + SectorCodec,
         D: TensorScalar,
+        S: TensorStorage<D>,
     {
         if tensors.len() != self.inputs.len() {
             return Err(invalid(format!(
@@ -288,16 +310,16 @@ impl Network {
                     )));
                 }
             }
-            let lowered = if self.conj[i] {
+            let dims = if self.conj[i] {
                 let split = tensor.codomain_rank();
                 lowered_labels.push(rotate(labels, split));
-                tensor.adjoint()?
+                rotate(&tensor.leg_dims()?, split)
             } else {
                 lowered_labels.push(labels.clone());
-                (*tensor).clone()
+                tensor.leg_dims()?
             };
-            infos.push(DenseTensorInfo::new(lowered.leg_dims()?));
-            lowered_spaces.push(typed_flat_spaces(&lowered)?);
+            infos.push(DenseTensorInfo::new(dims));
+            lowered_spaces.push(typed_effective_spaces(tensor, self.conj[i])?);
         }
         validate_typed_contracted_leg_spaces(&lowered_labels, &lowered_spaces)?;
         let ir = NetworkIR::from_labels(lowered_labels, self.output.clone()).map_err(invalid)?;
@@ -541,13 +563,14 @@ where
     Ok(())
 }
 
-fn typed_flat_spaces<R, D>(tensor: &TensorMap<R, D>) -> Result<Vec<GradedSpace<R>>, Error>
+fn typed_flat_spaces<R, D, S>(tensor: &TensorMap<R, D, S>) -> Result<Vec<GradedSpace<R>>, Error>
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
         + MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + SectorCodec,
     D: TensorScalar,
+    S: TensorStorage<D>,
 {
     let mut spaces = tensor.codomain();
     spaces.extend(
@@ -558,6 +581,61 @@ where
             .collect::<Result<Vec<_>, _>>()?,
     );
     Ok(spaces)
+}
+
+fn typed_effective_spaces<R, D, S>(
+    tensor: &TensorMap<R, D, S>,
+    adjoint: bool,
+) -> Result<Vec<GradedSpace<R>>, Error>
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+    S: TensorStorage<D>,
+{
+    if !adjoint {
+        return typed_flat_spaces(tensor);
+    }
+    let mut spaces = tensor.domain();
+    spaces.extend(
+        tensor
+            .codomain()
+            .iter()
+            .map(GradedSpace::try_dual)
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    Ok(spaces)
+}
+
+#[cfg(feature = "cuda")]
+fn validate_typed_input_pairs<R, D, S>(
+    tensors: &[&TensorMap<R, D, S>],
+    adjoints: &[bool],
+    pairs: &[InputLegPair],
+) -> Result<(), Error>
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+    S: TensorStorage<D>,
+{
+    let spaces = tensors
+        .iter()
+        .zip(adjoints)
+        .map(|(&tensor, &adjoint)| typed_effective_spaces(tensor, adjoint))
+        .collect::<Result<Vec<_>, Error>>()?;
+    for &((lhs_slot, lhs_axis), (rhs_slot, rhs_axis)) in pairs {
+        if spaces[rhs_slot][rhs_axis] != spaces[lhs_slot][lhs_axis].try_dual()? {
+            return Err(invalid(format!(
+                "contracted input spaces mismatch between operand {lhs_slot} leg {lhs_axis} and operand {rhs_slot} leg {rhs_axis}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn rotate<T: Clone>(items: &[T], split: usize) -> Vec<T> {
@@ -803,6 +881,143 @@ impl PlannedNetwork {
     /// The resolved pairwise contraction order with its cost estimates.
     pub fn plan(&self) -> &ContractionPlan {
         &self.plan
+    }
+
+    /// Executes a schedule expressible entirely by the canonical returning CUDA kernel.
+    /// The complete schedule is preflighted before any output allocation or kernel;
+    /// unsupported layouts fail without a Host fallback or transfer.
+    #[cfg(feature = "cuda")]
+    pub fn execute_cuda<R>(
+        &self,
+        tensors: &[&TensorMap<R, f64, CudaStorage>],
+    ) -> Result<TensorMap<R, f64, CudaStorage>, Error>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    {
+        if tensors.len() != self.schedule.input_ranks.len() {
+            return Err(invalid(format!(
+                "plan has {} operands but {} tensors were given",
+                self.schedule.input_ranks.len(),
+                tensors.len()
+            )));
+        }
+        let runtime = tensors
+            .first()
+            .ok_or_else(|| invalid("network execution requires at least one operand"))?
+            .runtime();
+        let runtime_identity = runtime.identity();
+        let rule_identity = TypedSectorAdmission::typed_rule_identity(tensors[0].provider());
+        let device = runtime.cuda_device_ordinal().ok_or_else(|| {
+            invalid(
+                "this runtime was built without a CUDA device; use Runtime::builder().cuda(device)",
+            )
+        })?;
+        for (index, &tensor) in tensors.iter().enumerate() {
+            if !runtime_identity.matches(tensor.runtime()) {
+                return Err(invalid(format!("operand {index} uses a different Runtime")));
+            }
+            if rule_identity != TypedSectorAdmission::typed_rule_identity(tensor.provider()) {
+                return Err(Error::RuleMismatch);
+            }
+            if tensor.rank() != self.schedule.input_ranks[index]
+                || tensor.codomain_rank() != self.input_codomain_ranks[index]
+            {
+                return Err(invalid(format!(
+                    "operand {index} topology drifted: planned rank/split {}/{}, got {}/{}",
+                    self.schedule.input_ranks[index],
+                    self.input_codomain_ranks[index],
+                    tensor.rank(),
+                    tensor.codomain_rank()
+                )));
+            }
+            if tensor.placement() != Placement::Cuda(device) {
+                return Err(Error::PlacementMismatch);
+            }
+        }
+        validate_typed_input_pairs(tensors, &self.conj, &self.schedule.contracted_input_pairs)?;
+
+        let input_shapes = tensors
+            .iter()
+            .enumerate()
+            .map(|(index, tensor)| {
+                (
+                    tensor.rank(),
+                    if self.conj[index] {
+                        tensor.domain_rank()
+                    } else {
+                        tensor.codomain_rank()
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        self.preflight_cuda_schedule(&input_shapes)?;
+
+        let mut slots: Vec<Option<TensorMap<R, f64, CudaStorage>>> =
+            (0..self.schedule.slot_count).map(|_| None).collect();
+        for (index, &tensor) in tensors.iter().enumerate() {
+            slots[index] = Some(if self.conj[index] {
+                tensor.adjoint()?
+            } else {
+                tensor.clone()
+            });
+        }
+        for step in &self.schedule.steps {
+            let lhs = slots[step.lhs_slot]
+                .take()
+                .ok_or_else(|| invalid("lhs operand already consumed"))?;
+            let rhs = slots[step.rhs_slot]
+                .take()
+                .ok_or_else(|| invalid("rhs operand already consumed"))?;
+            #[cfg(all(test, feature = "cuda"))]
+            CUDA_NETWORK_CONTRACT_CALLS.fetch_add(1, Ordering::Relaxed);
+            let result = lhs.contract(
+                &rhs,
+                &step.lhs_contract_axes,
+                &step.rhs_contract_axes,
+                &step.contract_output_axes,
+            )?;
+            slots[step.result_slot] = Some(result);
+        }
+        slots[self.schedule.final_slot]
+            .take()
+            .ok_or_else(|| invalid("network execution produced no final tensor"))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn preflight_cuda_schedule(&self, input_shapes: &[(usize, usize)]) -> Result<(), Error> {
+        let mut shapes = vec![None; self.schedule.slot_count];
+        for (index, &shape) in input_shapes.iter().enumerate() {
+            shapes[index] = Some(shape);
+        }
+        for step in &self.schedule.steps {
+            let (lhs_rank, lhs_codomain_rank) = shapes[step.lhs_slot]
+                .take()
+                .ok_or_else(|| invalid("lhs shape already consumed"))?;
+            let (rhs_rank, rhs_codomain_rank) = shapes[step.rhs_slot]
+                .take()
+                .ok_or_else(|| invalid("rhs shape already consumed"))?;
+            let result_rank = lhs_codomain_rank + rhs_rank - rhs_codomain_rank;
+            if !step
+                .lhs_contract_axes
+                .iter()
+                .copied()
+                .eq(lhs_codomain_rank..lhs_rank)
+                || !step
+                    .rhs_contract_axes
+                    .iter()
+                    .copied()
+                    .eq(0..rhs_codomain_rank)
+                || !step.contract_output_axes.iter().copied().eq(0..result_rank)
+                || step.result_permutation.is_some()
+            {
+                return Err(unsupported_cuda_network());
+            }
+            shapes[step.result_slot] = Some((result_rank, lhs_codomain_rank));
+        }
+        if self.schedule.final_permutation.is_some() {
+            return Err(unsupported_cuda_network());
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -1879,10 +2094,14 @@ fn split_trace_pairs(
 mod typed_replay_tests {
     use std::sync::Arc;
 
+    #[cfg(feature = "cuda")]
+    use tenet::core::{product_sector, FermionParityFusionRule, ProductFusionRuleExt, Z2Irrep};
     use tenet::core::{U1FusionRule, U1Irrep};
     use tenet::typed::{GradedSpace, TensorMap};
 
     use super::*;
+    #[cfg(feature = "cuda")]
+    use crate::GreedyDenseOptimizer;
 
     fn label(name: &str) -> TemporaryLabel {
         TemporaryLabel::from(name)
@@ -1929,6 +2148,432 @@ mod typed_replay_tests {
             input_codomain_ranks: vec![1; 3],
             schedule,
         }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_schedule_preflight_accepts_only_the_complete_direct_subset() {
+        let runtime = Runtime::builder().build().unwrap();
+        let space =
+            GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)], false).unwrap();
+        let tensors = (0..3)
+            .map(|seed| {
+                TensorMap::<U1FusionRule, f64>::rand_with_seed(
+                    &runtime,
+                    [&space],
+                    [&space],
+                    748_200 + seed,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let labels = |names: &[&str]| names.iter().copied().map(label).collect::<Vec<_>>();
+        let pair = Network::new(
+            vec![labels(&["a", "b"]), labels(&["b", "c"])],
+            vec![false; 2],
+            vec![Some(1); 2],
+            labels(&["a", "c"]),
+            Some(1),
+        )
+        .unwrap()
+        .plan(&[&tensors[0], &tensors[1]], &GreedyDenseOptimizer)
+        .unwrap();
+        assert!(pair.preflight_cuda_schedule(&[(2, 1), (2, 1)]).is_ok());
+
+        let chain_network = Network::new(
+            vec![
+                labels(&["a", "b"]),
+                labels(&["b", "c"]),
+                labels(&["c", "d"]),
+            ],
+            vec![false; 3],
+            vec![Some(1); 3],
+            labels(&["a", "d"]),
+            Some(1),
+        )
+        .unwrap();
+        let chain_order = ContractionPlan::new(
+            3,
+            labels(&["a", "d"]),
+            vec![
+                ContractionStep::new(
+                    TensorId::new(0),
+                    TensorId::new(1),
+                    TensorId::new(3),
+                    0,
+                    labels(&["a", "c"]),
+                ),
+                ContractionStep::new(
+                    TensorId::new(3),
+                    TensorId::new(2),
+                    TensorId::new(4),
+                    0,
+                    labels(&["a", "d"]),
+                ),
+            ],
+        )
+        .unwrap();
+        let chain = chain_network
+            .plan_with(&[&tensors[0], &tensors[1], &tensors[2]], chain_order)
+            .unwrap();
+        assert!(
+            chain
+                .preflight_cuda_schedule(&[(2, 1), (2, 1), (2, 1)])
+                .is_ok(),
+            "steps={:?}",
+            chain
+                .schedule
+                .steps
+                .iter()
+                .map(|step| (
+                    &step.lhs_contract_axes,
+                    &step.rhs_contract_axes,
+                    &step.contract_output_axes,
+                    &step.result_permutation
+                ))
+                .collect::<Vec<_>>()
+        );
+
+        let mut late_invalid = chain;
+        late_invalid.schedule.steps[1].result_permutation = Some((vec![1], vec![0]));
+        assert!(late_invalid
+            .preflight_cuda_schedule(&[(2, 1), (2, 1), (2, 1)])
+            .is_err());
+        assert!(crossed_plan()
+            .preflight_cuda_schedule(&[(2, 1), (2, 1), (2, 1)])
+            .is_err());
+
+        let final_permutation = Network::new(
+            vec![labels(&["a", "b"]), labels(&["b", "c"])],
+            vec![false; 2],
+            vec![Some(1); 2],
+            labels(&["c", "a"]),
+            Some(1),
+        )
+        .unwrap()
+        .plan(&[&tensors[0], &tensors[1]], &GreedyDenseOptimizer)
+        .unwrap();
+        assert!(final_permutation
+            .preflight_cuda_schedule(&[(2, 1), (2, 1)])
+            .is_err());
+
+        let single = Network::new(
+            vec![labels(&["a", "b"])],
+            vec![false],
+            vec![Some(1)],
+            labels(&["a", "b"]),
+            Some(1),
+        )
+        .unwrap()
+        .plan(&[&tensors[0]], &GreedyDenseOptimizer)
+        .unwrap();
+        assert!(single.preflight_cuda_schedule(&[(2, 1)]).is_ok());
+
+        let ket = TensorMap::<U1FusionRule, f64>::rand_with_seed(
+            &runtime,
+            std::iter::empty::<&GradedSpace<U1FusionRule>>(),
+            [&space],
+            748_210,
+        )
+        .unwrap();
+        let bra = TensorMap::rand_with_seed(
+            &runtime,
+            [&space],
+            std::iter::empty::<&GradedSpace<U1FusionRule>>(),
+            748_211,
+        )
+        .unwrap();
+        let scalar = Network::new(
+            vec![labels(&["k"]), labels(&["k"])],
+            vec![false; 2],
+            vec![Some(0), Some(1)],
+            vec![],
+            Some(0),
+        )
+        .unwrap()
+        .plan(&[&ket, &bra], &GreedyDenseOptimizer)
+        .unwrap();
+        assert!(scalar.preflight_cuda_schedule(&[(1, 0), (1, 1)]).is_ok());
+    }
+
+    #[cfg(feature = "cuda")]
+    fn assert_asymmetric_cuda_plan_parity<R>(
+        runtime: &Runtime,
+        x0: &GradedSpace<R>,
+        x1: &GradedSpace<R>,
+        y: &GradedSpace<R>,
+        z0: &GradedSpace<R>,
+        z1: &GradedSpace<R>,
+        seed: u64,
+    ) where
+        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+            + MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec,
+    {
+        let a = TensorMap::<R, f64>::rand_with_seed(runtime, [x0, x1], [y], seed).unwrap();
+        let b = TensorMap::rand_with_seed(runtime, [x1], [z0, z1], seed + 1).unwrap();
+        let a_cuda = a.to_cuda().unwrap();
+        let b_cuda = b.to_cuda().unwrap();
+        let network = Network::new(
+            vec![
+                vec![label("i0"), label("i1"), label("j")],
+                vec![label("i1"), label("k0"), label("k1")],
+            ],
+            vec![true, false],
+            vec![Some(2), Some(1)],
+            vec![label("j"), label("i0"), label("k0"), label("k1")],
+            Some(2),
+        )
+        .unwrap();
+        let host_refs = [&a, &b];
+        let cuda_refs = [&a_cuda, &b_cuda];
+        let host = network.plan(&host_refs, &GreedyDenseOptimizer).unwrap();
+        let cuda = network.plan(&cuda_refs, &GreedyDenseOptimizer).unwrap();
+
+        assert_eq!(host.plan.steps(), cuda.plan.steps());
+        assert_eq!(host.schedule.input_ranks, cuda.schedule.input_ranks);
+        assert_eq!(
+            host.schedule.contracted_input_pairs,
+            cuda.schedule.contracted_input_pairs
+        );
+        for (host_step, cuda_step) in host.schedule.steps.iter().zip(&cuda.schedule.steps) {
+            assert_eq!(host_step.lhs_contract_axes, cuda_step.lhs_contract_axes);
+            assert_eq!(host_step.rhs_contract_axes, cuda_step.rhs_contract_axes);
+            assert_eq!(
+                host_step.contract_output_axes,
+                cuda_step.contract_output_axes
+            );
+            assert_eq!(host_step.result_permutation, cuda_step.result_permutation);
+        }
+        assert_eq!(
+            host.schedule.final_permutation,
+            cuda.schedule.final_permutation
+        );
+        for ((host_tensor, cuda_tensor), conj) in [(&a, &a_cuda), (&b, &b_cuda)]
+            .into_iter()
+            .zip([true, false])
+        {
+            assert_eq!(
+                typed_effective_spaces(host_tensor, conj).unwrap(),
+                typed_effective_spaces(cuda_tensor, conj).unwrap()
+            );
+            assert_eq!(
+                host_tensor.leg_dims().unwrap(),
+                cuda_tensor.leg_dims().unwrap()
+            );
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn cuda_rejections_happen_before_the_first_network_contract() {
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+        let u1_rule = Arc::new(U1FusionRule);
+        let u1_x0 =
+            GradedSpace::try_new(Arc::clone(&u1_rule), [(U1Irrep::new(2), 2)], false).unwrap();
+        let u1_x1 = GradedSpace::try_new(Arc::clone(&u1_rule), [(U1Irrep::new(-1), 1)], false)
+            .unwrap()
+            .try_dual()
+            .unwrap();
+        let u1_y =
+            GradedSpace::try_new(Arc::clone(&u1_rule), [(U1Irrep::new(1), 3)], false).unwrap();
+        let u1_z0 =
+            GradedSpace::try_new(Arc::clone(&u1_rule), [(U1Irrep::new(-2), 2)], false).unwrap();
+        let u1_z1 = GradedSpace::try_new(u1_rule, [(U1Irrep::new(0), 1)], false).unwrap();
+        assert_asymmetric_cuda_plan_parity(
+            &runtime, &u1_x0, &u1_x1, &u1_y, &u1_z0, &u1_z1, 748_210,
+        );
+
+        let product_rule = Arc::new(FermionParityFusionRule.product(U1FusionRule));
+        let product_x0 = GradedSpace::try_new(
+            Arc::clone(&product_rule),
+            [(product_sector(Z2Irrep::EVEN, U1Irrep::new(2)), 1)],
+            false,
+        )
+        .unwrap();
+        let product_x1 = GradedSpace::try_new(
+            Arc::clone(&product_rule),
+            [(product_sector(Z2Irrep::ODD, U1Irrep::new(-1)), 2)],
+            false,
+        )
+        .unwrap()
+        .try_dual()
+        .unwrap();
+        let product_y = GradedSpace::try_new(
+            Arc::clone(&product_rule),
+            [(product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2)],
+            false,
+        )
+        .unwrap();
+        let product_z0 = GradedSpace::try_new(
+            Arc::clone(&product_rule),
+            [(product_sector(Z2Irrep::EVEN, U1Irrep::new(-2)), 1)],
+            false,
+        )
+        .unwrap();
+        let product_z1 = GradedSpace::try_new(
+            product_rule,
+            [(product_sector(Z2Irrep::ODD, U1Irrep::new(0)), 1)],
+            false,
+        )
+        .unwrap();
+        assert_asymmetric_cuda_plan_parity(
+            &runtime,
+            &product_x0,
+            &product_x1,
+            &product_y,
+            &product_z0,
+            &product_z1,
+            748_212,
+        );
+
+        let provider = Arc::new(U1FusionRule);
+        let good =
+            GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 2)], false).unwrap();
+        let bad =
+            GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(1), 2)], false).unwrap();
+        let host_tensors = (0..3)
+            .map(|seed| {
+                TensorMap::<U1FusionRule, f64>::rand_with_seed(
+                    &runtime,
+                    [&good],
+                    [&good],
+                    748_220 + seed,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let tensors = host_tensors
+            .iter()
+            .map(|tensor| tensor.to_cuda().unwrap())
+            .collect::<Vec<_>>();
+        let labels = |names: &[&str]| names.iter().copied().map(label).collect::<Vec<_>>();
+        let network = Network::new(
+            vec![
+                labels(&["a", "b"]),
+                labels(&["b", "c"]),
+                labels(&["c", "d"]),
+            ],
+            vec![false; 3],
+            vec![Some(1); 3],
+            labels(&["a", "d"]),
+            Some(1),
+        )
+        .unwrap();
+        let refs = [&tensors[0], &tensors[1], &tensors[2]];
+        let canonical_order = || {
+            ContractionPlan::new(
+                3,
+                labels(&["a", "d"]),
+                vec![
+                    ContractionStep::new(
+                        TensorId::new(0),
+                        TensorId::new(1),
+                        TensorId::new(3),
+                        0,
+                        labels(&["a", "c"]),
+                    ),
+                    ContractionStep::new(
+                        TensorId::new(3),
+                        TensorId::new(2),
+                        TensorId::new(4),
+                        0,
+                        labels(&["a", "d"]),
+                    ),
+                ],
+            )
+            .unwrap()
+        };
+        let host_refs = [&host_tensors[0], &host_tensors[1], &host_tensors[2]];
+        let host_plan = network.plan_with(&host_refs, canonical_order()).unwrap();
+        let cuda_plan = network.plan_with(&refs, canonical_order()).unwrap();
+        assert_eq!(host_plan.plan.steps(), cuda_plan.plan.steps());
+        assert_eq!(
+            host_plan.schedule.input_ranks,
+            cuda_plan.schedule.input_ranks
+        );
+        assert_eq!(
+            host_plan.schedule.contracted_input_pairs,
+            cuda_plan.schedule.contracted_input_pairs
+        );
+        for (host, cuda) in host_plan
+            .schedule
+            .steps
+            .iter()
+            .zip(&cuda_plan.schedule.steps)
+        {
+            assert_eq!(host.lhs_contract_axes, cuda.lhs_contract_axes);
+            assert_eq!(host.rhs_contract_axes, cuda.rhs_contract_axes);
+            assert_eq!(host.contract_output_axes, cuda.contract_output_axes);
+            assert_eq!(host.result_permutation, cuda.result_permutation);
+        }
+        assert_eq!(
+            host_plan.schedule.final_permutation,
+            cuda_plan.schedule.final_permutation
+        );
+        assert_eq!(
+            typed_effective_spaces(&host_tensors[0], true).unwrap(),
+            typed_effective_spaces(&tensors[0], true).unwrap()
+        );
+        assert_eq!(
+            host_tensors[0].leg_dims().unwrap(),
+            tensors[0].leg_dims().unwrap()
+        );
+        let mut split_changing = network.plan_with(&refs, canonical_order()).unwrap();
+        split_changing.schedule.steps[1].result_permutation = Some((vec![0, 1], vec![]));
+        CUDA_NETWORK_CONTRACT_CALLS.store(0, Ordering::Relaxed);
+        assert!(split_changing.execute_cuda(&refs).is_err());
+        assert_eq!(CUDA_NETWORK_CONTRACT_CALLS.load(Ordering::Relaxed), 0);
+
+        let mut nonidentity_pab = network.plan_with(&refs, canonical_order()).unwrap();
+        nonidentity_pab.schedule.steps[1].contract_output_axes = vec![1, 0];
+        CUDA_NETWORK_CONTRACT_CALLS.store(0, Ordering::Relaxed);
+        assert!(nonidentity_pab.execute_cuda(&refs).is_err());
+        assert_eq!(CUDA_NETWORK_CONTRACT_CALLS.load(Ordering::Relaxed), 0);
+
+        let mut final_permutation = network.plan_with(&refs, canonical_order()).unwrap();
+        final_permutation.schedule.final_permutation = Some((vec![1], vec![0]));
+        CUDA_NETWORK_CONTRACT_CALLS.store(0, Ordering::Relaxed);
+        assert!(final_permutation.execute_cuda(&refs).is_err());
+        assert_eq!(CUDA_NETWORK_CONTRACT_CALLS.load(Ordering::Relaxed), 0);
+
+        let bad_rhs =
+            TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&bad], [&good], 748_230)
+                .unwrap()
+                .to_cuda()
+                .unwrap();
+        let pair = Network::new(
+            vec![labels(&["a", "b"]), labels(&["b", "c"])],
+            vec![false; 2],
+            vec![Some(1); 2],
+            labels(&["a", "c"]),
+            Some(1),
+        )
+        .unwrap();
+        let planned = pair
+            .plan(&[&tensors[0], &tensors[1]], &GreedyDenseOptimizer)
+            .unwrap();
+        CUDA_NETWORK_CONTRACT_CALLS.store(0, Ordering::Relaxed);
+        assert!(planned.execute_cuda(&[&tensors[0], &bad_rhs]).is_err());
+        assert_eq!(CUDA_NETWORK_CONTRACT_CALLS.load(Ordering::Relaxed), 0);
+
+        let other_runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+        let other_space =
+            GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)], false).unwrap();
+        let foreign = TensorMap::<U1FusionRule, f64>::rand_with_seed(
+            &other_runtime,
+            [&other_space],
+            [&other_space],
+            748_231,
+        )
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+        CUDA_NETWORK_CONTRACT_CALLS.store(0, Ordering::Relaxed);
+        assert!(planned.execute_cuda(&[&tensors[0], &foreign]).is_err());
+        assert_eq!(CUDA_NETWORK_CONTRACT_CALLS.load(Ordering::Relaxed), 0);
     }
 
     #[test]

@@ -585,6 +585,13 @@ impl Runtime {
         f(&home.config, &mut home.slot)
     }
 
+    /// CUDA device ordinal fixed when this runtime was built.
+    #[cfg(feature = "cuda")]
+    #[doc(hidden)]
+    pub fn cuda_device_ordinal(&self) -> Option<usize> {
+        self.lock().cuda.as_ref().map(|cuda| cuda.device())
+    }
+
     /// Deterministic per-runtime stream position for [`crate::prelude::Tensor::rand`].
     pub(crate) fn next_rand_seed(&self) -> u64 {
         // Fixed base seed: runs are reproducible, consecutive `rand` calls
