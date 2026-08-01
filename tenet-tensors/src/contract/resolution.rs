@@ -15,11 +15,11 @@ use tenet_operations::fusion_replay::FusionBlockContractPlan;
 use tenet_operations::TensorContractFusionProfile;
 
 use super::dynamic_space::{DynamicFusionMapSpace, FusionOperand, FusionOperandLayout};
-use super::fusion::{external_axis_is_dual, FusionContractPlan};
+use super::fusion::{external_axis_is_dual, rhs_contract_twist_factor, FusionContractPlan};
 use super::fusion_block::{
     compile_fusion_block_contract_plan_prelowered_validated,
     compile_fusion_block_contract_plan_validated, try_compile_oriented_canonical_core_plan,
-    CoreContractPreflight, ValidatedCoreContract,
+    try_compile_scaled_canonical_core_plan, CoreContractPreflight, ValidatedCoreContract,
 };
 
 /// Resolved execution artifact for one contraction key: the route decision
@@ -231,6 +231,93 @@ where
     Ok(plan.map(|plan| Resolution::Core(Arc::new(plan))))
 }
 
+/// Compiles the storage-only route with one categorical preflight. Ordinary
+/// host resolution keeps its existing profiled path.
+pub(crate) fn compile_storage_resolution<R>(
+    rule: &R,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+    axes: TensorContractSpec<'_>,
+    compile_structure: impl FnOnce()
+        -> Result<Option<Arc<TensorContractStructure<f64>>>, OperationError>,
+    compile_dynamic: impl FnOnce() -> Result<Arc<FusionContractPlan>, OperationError>,
+) -> Result<Resolution, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let preflight = CoreContractPreflight::compile(rule, dst, lhs, rhs, axes)?;
+    if !preflight.has_conjugation() {
+        if let Some(validated) = preflight.validate_core_geometry()? {
+            if validated_rhs_contract_requires_twist(&validated)? {
+                if let Some(plan) =
+                    try_compile_scaled_storage_contract_plan(rule, &validated, dst, lhs, rhs)?
+                {
+                    return Ok(Resolution::Core(Arc::new(plan)));
+                }
+            } else {
+                return compile_fusion_block_contract_plan_validated(validated, dst, lhs, rhs)
+                    .map(Arc::new)
+                    .map(Resolution::Core);
+            }
+        }
+        return Ok(Resolution::DynamicTree(compile_dynamic()?));
+    }
+    if let Some(structure) = compile_structure()? {
+        return Ok(Resolution::Structure(structure));
+    }
+    Ok(Resolution::DynamicTree(compile_dynamic()?))
+}
+
+fn try_compile_scaled_storage_contract_plan<R>(
+    rule: &R,
+    validated: &ValidatedCoreContract<'_, R>,
+    dst: &DynamicFusionMapSpace,
+    lhs: &DynamicFusionMapSpace,
+    rhs: &DynamicFusionMapSpace,
+) -> Result<Option<FusionBlockContractPlan>, OperationError>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+{
+    let Some(regions) = rhs
+        .structure()
+        .coupled_sector_regions(rhs.nout())
+        .map_err(OperationError::from_core_preserving_context)?
+    else {
+        return Ok(None);
+    };
+    let mut alpha_by_coupled = Vec::with_capacity(regions.len());
+    for region in regions.iter() {
+        let mut row_trees = region.row_trees().iter();
+        let Some(first) = row_trees.next() else {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "canonical RHS coupled region has no row fusion tree",
+            });
+        };
+        let alpha = rhs_contract_twist_factor(
+            rule,
+            rhs.homspace(),
+            validated.rhs_contracting_axes(),
+            first.tree(),
+        )?;
+        for extent in row_trees {
+            if rhs_contract_twist_factor(
+                rule,
+                rhs.homspace(),
+                validated.rhs_contracting_axes(),
+                extent.tree(),
+            )? != alpha
+            {
+                return Err(OperationError::UnsupportedTensorContractScope {
+                    message: "fermionic twist is nonuniform within one RHS coupled-sector matrix",
+                });
+            }
+        }
+        alpha_by_coupled.push((region.coupled(), alpha));
+    }
+    try_compile_scaled_canonical_core_plan(validated, dst, lhs, rhs, &alpha_by_coupled)
+}
+
 /// Compiles the coupled block plan for already-materialized core operands.
 pub(crate) fn compile_core_plan<R>(
     rule: &R,
@@ -422,6 +509,33 @@ mod tests {
         .unwrap();
 
         // What: one core compiler invocation derives each geometry authority once.
+        assert!(matches!(resolution, Resolution::Core(_)));
+        assert_eq!(
+            super::super::fusion_block::core_contract_derivations(),
+            (1, 1)
+        );
+    }
+
+    #[test]
+    fn storage_core_resolution_derives_geometry_once() {
+        let rule = U1FusionRule;
+        let zero = U1Irrep::new(0).sector_id();
+        let lhs = single_sector_matrix_space(&rule, zero, false, false);
+        let rhs = single_sector_matrix_space(&rule, zero, false, false);
+        let dst = single_sector_matrix_space(&rule, zero, false, false);
+        super::super::fusion_block::reset_core_contract_derivations();
+
+        let resolution = compile_storage_resolution(
+            &rule,
+            &dst,
+            &lhs,
+            &rhs,
+            TensorContractSpec::with_default_output_order(&[1], &[0]),
+            || panic!("core storage contraction must not compile a dense structure"),
+            || panic!("core storage contraction must not compile tree transforms"),
+        )
+        .unwrap();
+
         assert!(matches!(resolution, Resolution::Core(_)));
         assert_eq!(
             super::super::fusion_block::core_contract_derivations(),

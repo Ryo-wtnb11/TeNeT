@@ -261,11 +261,36 @@ fn typed_cuda_direct_execution_matches_host_providers_and_structure() {
     })
     .unwrap();
     assert_direct_contract_and_compose(&product_lhs, &product_rhs);
+
+    let product_dual = GradedSpace::try_new(
+        Arc::clone(&product_rule),
+        [
+            (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
+            (product_sector(U1Irrep::new(1), Z2Irrep::ODD), 1),
+        ],
+        true,
+    )
+    .unwrap();
+    let product_multileg_lhs = TensorMap::from_block_fn(
+        &runtime,
+        [&product],
+        [&product_dual, &product_dual],
+        |_, indices| indices.iter().sum::<usize>() as f64 + 1.0,
+    )
+    .unwrap();
+    let product_multileg_rhs = TensorMap::from_block_fn(
+        &runtime,
+        [&product_dual, &product_dual],
+        [&product],
+        |_, indices| indices.iter().sum::<usize>() as f64 + 2.0,
+    )
+    .unwrap();
+    assert_direct_contract_and_compose(&product_multileg_lhs, &product_multileg_rhs);
 }
 
 #[test]
 #[ignore]
-fn typed_cuda_fermionic_compose_is_plus_six_and_contract_twist_is_explicit() {
+fn typed_cuda_fermionic_contract_is_minus_six_and_compose_stays_plus_six() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let provider = Arc::new(FermionParityFusionRule);
     let lhs_codomain =
@@ -297,11 +322,15 @@ fn typed_cuda_fermionic_compose_is_plus_six_and_contract_twist_is_explicit() {
             .data(),
         [6.0]
     );
-    assert!(matches!(
-        lhs_device.contract(&rhs_device, &[1], &[0], &[0, 1]),
-        Err(tenet::typed::Error::Operation(error))
-            if matches!(*error, tenet::operations::OperationError::UnsupportedTensorContractScope { .. })
-    ));
+    assert_eq!(
+        lhs_device
+            .contract(&rhs_device, &[1], &[0], &[0, 1])
+            .unwrap()
+            .to_host()
+            .unwrap()
+            .data(),
+        [-6.0]
+    );
 }
 
 #[test]

@@ -216,6 +216,7 @@ pub struct FusionBlockContractPlan {
     inactive_dst_scale_blocks: Vec<FusionScaleBlockLayout>,
     groups: Vec<FusionBlockContractGroupPlan>,
     direct_batch: Vec<Rank2GemmBatchJob>,
+    direct_batch_alpha: Vec<f64>,
     // Plan-time run partition of `direct_batch` (see issue #103): the backend
     // reads it to route each run without recomputing the partition per replay.
     // A backend-agnostic shape fact, so it lives in this operations-layer plan
@@ -279,6 +280,7 @@ impl FusionBlockContractPlan {
         )?;
         let (direct_batch, irregular, max_irregular_scratch_len) =
             compile_group_execution(&groups)?;
+        let direct_batch_alpha = vec![1.0; direct_batch.len()];
         let direct_batch_runs = strided_batch_runs(&direct_batch);
         Ok(Self {
             dst_structure,
@@ -287,6 +289,7 @@ impl FusionBlockContractPlan {
             inactive_dst_scale_blocks,
             groups,
             direct_batch,
+            direct_batch_alpha,
             direct_batch_runs,
             irregular,
             max_irregular_scratch_len,
@@ -312,6 +315,59 @@ impl FusionBlockContractPlan {
         rhs_storage_nout: usize,
         lhs_op: MatrixOp,
         rhs_op: MatrixOp,
+    ) -> Result<Option<Self>, OperationError> {
+        Self::try_from_canonical_coupled_regions_impl(
+            dst_structure,
+            dst_nout,
+            lhs_storage_structure,
+            lhs_storage_nout,
+            rhs_storage_structure,
+            rhs_storage_nout,
+            lhs_op,
+            rhs_op,
+            |_| Ok(1.0),
+        )
+    }
+
+    /// Canonical storage plan with one already-verified coefficient per
+    /// coupled-sector GEMM job.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_from_canonical_coupled_regions_with_ops_and_alpha(
+        dst_structure: &Arc<BlockStructure>,
+        dst_nout: usize,
+        lhs_storage_structure: &Arc<BlockStructure>,
+        lhs_storage_nout: usize,
+        rhs_storage_structure: &Arc<BlockStructure>,
+        rhs_storage_nout: usize,
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+        alpha_for_coupled: impl FnMut(SectorId) -> Result<f64, OperationError>,
+    ) -> Result<Option<Self>, OperationError> {
+        Self::try_from_canonical_coupled_regions_impl(
+            dst_structure,
+            dst_nout,
+            lhs_storage_structure,
+            lhs_storage_nout,
+            rhs_storage_structure,
+            rhs_storage_nout,
+            lhs_op,
+            rhs_op,
+            alpha_for_coupled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_from_canonical_coupled_regions_impl(
+        dst_structure: &Arc<BlockStructure>,
+        dst_nout: usize,
+        lhs_storage_structure: &Arc<BlockStructure>,
+        lhs_storage_nout: usize,
+        rhs_storage_structure: &Arc<BlockStructure>,
+        rhs_storage_nout: usize,
+        lhs_op: MatrixOp,
+        rhs_op: MatrixOp,
+        mut alpha_for_coupled: impl FnMut(SectorId) -> Result<f64, OperationError>,
     ) -> Result<Option<Self>, OperationError> {
         let Some(dst_regions) = sorted_coupled_regions(dst_structure, dst_nout)? else {
             return Ok(None);
@@ -363,14 +419,17 @@ impl FusionBlockContractPlan {
             {
                 return Ok(None);
             }
-            direct_batch.push(Rank2GemmBatchJob {
-                dst_offset: dst.range().start,
-                lhs_offset: lhs.storage_range().start,
-                rhs_offset: rhs.storage_range().start,
-                rows: lhs.rows(),
-                contracted: lhs.cols(),
-                cols: rhs.cols(),
-            });
+            direct_batch.push((
+                Rank2GemmBatchJob {
+                    dst_offset: dst.range().start,
+                    lhs_offset: lhs.storage_range().start,
+                    rhs_offset: rhs.storage_range().start,
+                    rows: lhs.rows(),
+                    contracted: lhs.cols(),
+                    cols: rhs.cols(),
+                },
+                alpha_for_coupled(rhs.coupled())?,
+            ));
         }
         validate_direct_plan_layouts(
             dst_structure,
@@ -379,6 +438,7 @@ impl FusionBlockContractPlan {
             &inactive_dst_scale_blocks,
             &direct_batch,
         )?;
+        let (direct_batch, direct_batch_alpha): (Vec<_>, Vec<_>) = direct_batch.into_iter().unzip();
         let direct_batch_runs = strided_batch_runs(&direct_batch);
         Ok(Some(Self {
             dst_structure: Arc::clone(dst_structure),
@@ -387,6 +447,7 @@ impl FusionBlockContractPlan {
             inactive_dst_scale_blocks,
             groups: Vec::new(),
             direct_batch,
+            direct_batch_alpha,
             direct_batch_runs,
             irregular: Vec::new(),
             max_irregular_scratch_len: 0,
@@ -489,6 +550,7 @@ impl FusionBlockContractPlan {
         G: Rank2Gemm<D>,
         D: DenseBlockScalar + RecouplingCoefficientAction<f64>,
     {
+        self.require_unit_direct_batch_alpha()?;
         let total_start = PROFILED.then(std::time::Instant::now);
         let start = PROFILED.then(std::time::Instant::now);
         self.validate_replay_inputs(
@@ -785,6 +847,7 @@ impl FusionBlockContractPlan {
         )?;
         self.require_fully_direct_storage()?;
         self.require_identity_storage_ops()?;
+        self.require_unit_direct_batch_alpha()?;
         scale_all_blocks(
             kernels,
             &self.inactive_dst_scale_blocks,
@@ -828,6 +891,15 @@ impl FusionBlockContractPlan {
         }
         Err(OperationError::UnsupportedTensorContractScope {
             message: "storage-handle core replay does not expose transpose/adjoint matrix views",
+        })
+    }
+
+    fn require_unit_direct_batch_alpha(&self) -> Result<(), OperationError> {
+        if self.direct_batch_alpha.iter().all(|&alpha| alpha == 1.0) {
+            return Ok(());
+        }
+        Err(OperationError::UnsupportedTensorContractScope {
+            message: "scaled storage plan cannot execute through unscaled host replay",
         })
     }
 
@@ -887,6 +959,7 @@ impl FusionBlockContractPlan {
         )?;
         self.require_fully_direct_storage()?;
         self.require_identity_storage_ops()?;
+        self.require_unit_direct_batch_alpha()?;
         scale_all_blocks(kernels, &self.inactive_dst_scale_blocks, dst_data, beta)?;
 
         let _ = fusion_workspace;
@@ -962,6 +1035,7 @@ impl FusionBlockContractPlan {
         )?;
         self.require_fully_direct_storage()?;
         self.require_identity_storage_ops()?;
+        self.require_unit_direct_batch_alpha()?;
         scale_all_blocks(
             kernels,
             &self.inactive_dst_scale_blocks,
@@ -986,8 +1060,8 @@ impl FusionBlockContractPlan {
     ///
     /// This is the device-side replay seam: the bounds require only
     /// [`TensorStorage`], so no host-slice contract leaks into the path. It
-    /// supports exactly the fully-direct coupled-layout case with `alpha = 1`,
-    /// `beta = 0` and no inactive destination blocks; every other case must
+    /// supports exactly the fully-direct coupled-layout case with one scalar
+    /// per GEMM job, `beta = 0` and no inactive destination blocks; every other case must
     /// use the host replay paths until the corresponding device kernels
     /// (pack/scatter, scale, tree transforms) exist behind their own seams.
     #[allow(dead_code)]
@@ -1000,6 +1074,7 @@ impl FusionBlockContractPlan {
     ) -> Result<(), OperationError>
     where
         G: StorageGemm<D, DDst, DLhs, DRhs>,
+        D: RecouplingCoefficientAction<f64>,
         DDst: TensorStorage<D>,
         DLhs: TensorStorage<D>,
         DRhs: TensorStorage<D>,
@@ -1026,29 +1101,59 @@ impl FusionBlockContractPlan {
     ) -> Result<(), OperationError>
     where
         G: StorageGemm<D, DDst, DLhs, DRhs>,
+        D: RecouplingCoefficientAction<f64>,
         DDst: TensorStorage<D>,
         DLhs: TensorStorage<D>,
         DRhs: TensorStorage<D>,
     {
         self.require_fully_direct_storage()?;
         self.require_identity_storage_ops()?;
+        if self.direct_batch.len() != self.direct_batch_alpha.len() {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "storage-direct plan has misaligned GEMM coefficients",
+            });
+        }
+        if self.direct_batch_alpha.iter().any(|&alpha| alpha != 1.0)
+            && !gemm.supports_matmul_with_ops_scaled(self.lhs_op, self.rhs_op)
+        {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "storage GEMM backend does not implement scaled replay",
+            });
+        }
         for job in &self.direct_batch {
             validate_storage_range(lhs.len(), job.lhs_offset, job.rows, job.contracted)?;
             validate_storage_range(rhs.len(), job.rhs_offset, job.contracted, job.cols)?;
             validate_storage_range(dst.len(), job.dst_offset, job.rows, job.cols)?;
         }
-        for job in &self.direct_batch {
-            gemm.matmul_range_into(
-                dst,
-                job.dst_offset,
-                lhs,
-                job.lhs_offset,
-                rhs,
-                job.rhs_offset,
-                job.rows,
-                job.contracted,
-                job.cols,
-            )?;
+        for (job, &alpha) in self.direct_batch.iter().zip(&self.direct_batch_alpha) {
+            if alpha == 1.0 {
+                gemm.matmul_range_into(
+                    dst,
+                    job.dst_offset,
+                    lhs,
+                    job.lhs_offset,
+                    rhs,
+                    job.rhs_offset,
+                    job.rows,
+                    job.contracted,
+                    job.cols,
+                )?;
+            } else {
+                gemm.matmul_range_with_ops_scaled_into(
+                    dst,
+                    job.dst_offset,
+                    lhs,
+                    job.lhs_offset,
+                    rhs,
+                    job.rhs_offset,
+                    job.rows,
+                    job.contracted,
+                    job.cols,
+                    self.lhs_op,
+                    self.rhs_op,
+                    D::coefficient_as_data(alpha),
+                )?;
+            }
         }
         Ok(())
     }
@@ -1089,6 +1194,12 @@ impl FusionBlockContractPlan {
 /// a rank-2 GEMM backend; device implementations submit kernels against
 /// device storage handles.
 pub trait StorageGemm<D, DDst, DLhs, DRhs> {
+    /// Reports whether the generalized entry point accepts these operand views.
+    /// Replay checks this once before any unit-coefficient job can mutate `dst`.
+    fn supports_matmul_with_ops_scaled(&self, _lhs_op: MatrixOp, _rhs_op: MatrixOp) -> bool {
+        false
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn matmul_range_into(
         &mut self,
@@ -1102,6 +1213,29 @@ pub trait StorageGemm<D, DDst, DLhs, DRhs> {
         contracted: usize,
         cols: usize,
     ) -> Result<(), OperationError>;
+
+    /// Executes one GEMM with explicit operand views and output coefficient.
+    /// The default preserves source compatibility while rejecting the extension.
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_range_with_ops_scaled_into(
+        &mut self,
+        _dst: &mut DDst,
+        _dst_offset: usize,
+        _lhs: &DLhs,
+        _lhs_offset: usize,
+        _rhs: &DRhs,
+        _rhs_offset: usize,
+        _rows: usize,
+        _contracted: usize,
+        _cols: usize,
+        _lhs_op: MatrixOp,
+        _rhs_op: MatrixOp,
+        _alpha: D,
+    ) -> Result<(), OperationError> {
+        Err(OperationError::UnsupportedTensorContractScope {
+            message: "storage GEMM backend does not implement scaled replay",
+        })
+    }
 }
 
 fn validate_storage_range(
@@ -1418,7 +1552,7 @@ fn validate_direct_plan_layouts(
     lhs_structure: &BlockStructure,
     rhs_structure: &BlockStructure,
     inactive_dst_scale_blocks: &[FusionScaleBlockLayout],
-    jobs: &[Rank2GemmBatchJob],
+    jobs: &[(Rank2GemmBatchJob, f64)],
 ) -> Result<(), OperationError> {
     let dst_len = dst_structure
         .required_len()
@@ -1431,7 +1565,7 @@ fn validate_direct_plan_layouts(
         .map_err(OperationError::from_core_preserving_context)?;
 
     let mut previous_job_offset = None;
-    for job in jobs {
+    for (job, _) in jobs {
         validate_storage_range(lhs_len, job.lhs_offset, job.rows, job.contracted)?;
         validate_storage_range(rhs_len, job.rhs_offset, job.contracted, job.cols)?;
         validate_storage_range(dst_len, job.dst_offset, job.rows, job.cols)?;
@@ -1457,7 +1591,10 @@ fn validate_direct_plan_layouts(
     let mut inactive_index = 0usize;
     let mut covered = 0usize;
     while job_index < jobs.len() || inactive_index < inactive_dst_scale_blocks.len() {
-        let job_range = jobs.get(job_index).map(canonical_job_range).transpose()?;
+        let job_range = jobs
+            .get(job_index)
+            .map(|(job, _)| canonical_job_range(job))
+            .transpose()?;
         let inactive_range = inactive_dst_scale_blocks
             .get(inactive_index)
             .map(|layout| canonical_inactive_range(layout, dst_len))
@@ -3061,5 +3198,216 @@ mod tests {
         assert_eq!(profile.core_direct_gemm_groups, 2);
         assert_eq!(profile.core_workspace_prepare, std::time::Duration::ZERO);
         assert_eq!(workspace.scratch.len(), 0);
+    }
+
+    #[derive(Default)]
+    struct RecordingComplexStorageGemm {
+        calls: Vec<(usize, Complex64)>,
+    }
+
+    impl StorageGemm<Complex64, Vec<Complex64>, Vec<Complex64>, Vec<Complex64>>
+        for RecordingComplexStorageGemm
+    {
+        fn supports_matmul_with_ops_scaled(&self, lhs_op: MatrixOp, rhs_op: MatrixOp) -> bool {
+            lhs_op == MatrixOp::Identity && rhs_op == MatrixOp::Identity
+        }
+
+        fn matmul_range_into(
+            &mut self,
+            dst: &mut Vec<Complex64>,
+            dst_offset: usize,
+            lhs: &Vec<Complex64>,
+            lhs_offset: usize,
+            rhs: &Vec<Complex64>,
+            rhs_offset: usize,
+            rows: usize,
+            contracted: usize,
+            cols: usize,
+        ) -> Result<(), OperationError> {
+            self.matmul_range_with_ops_scaled_into(
+                dst,
+                dst_offset,
+                lhs,
+                lhs_offset,
+                rhs,
+                rhs_offset,
+                rows,
+                contracted,
+                cols,
+                MatrixOp::Identity,
+                MatrixOp::Identity,
+                Complex64::new(1.0, 0.0),
+            )
+        }
+
+        fn matmul_range_with_ops_scaled_into(
+            &mut self,
+            dst: &mut Vec<Complex64>,
+            dst_offset: usize,
+            lhs: &Vec<Complex64>,
+            lhs_offset: usize,
+            rhs: &Vec<Complex64>,
+            rhs_offset: usize,
+            rows: usize,
+            contracted: usize,
+            cols: usize,
+            lhs_op: MatrixOp,
+            rhs_op: MatrixOp,
+            alpha: Complex64,
+        ) -> Result<(), OperationError> {
+            assert_eq!(lhs_op, MatrixOp::Identity);
+            assert_eq!(rhs_op, MatrixOp::Identity);
+            self.calls.push((dst_offset, alpha));
+            for col in 0..cols {
+                for row in 0..rows {
+                    dst[dst_offset + row + rows * col] = alpha
+                        * (0..contracted)
+                            .map(|inner| {
+                                lhs[lhs_offset + row + rows * inner]
+                                    * rhs[rhs_offset + inner + contracted * col]
+                            })
+                            .sum::<Complex64>();
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct UnitOnlyComplexStorageGemm {
+        unit_calls: usize,
+    }
+
+    impl StorageGemm<Complex64, Vec<Complex64>, Vec<Complex64>, Vec<Complex64>>
+        for UnitOnlyComplexStorageGemm
+    {
+        fn matmul_range_into(
+            &mut self,
+            _dst: &mut Vec<Complex64>,
+            _dst_offset: usize,
+            _lhs: &Vec<Complex64>,
+            _lhs_offset: usize,
+            _rhs: &Vec<Complex64>,
+            _rhs_offset: usize,
+            _rows: usize,
+            _contracted: usize,
+            _cols: usize,
+        ) -> Result<(), OperationError> {
+            self.unit_calls += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn scaled_storage_jobs_keep_canonical_coefficients_aligned_and_convert_payload() {
+        let leg = || SectorLeg::new([(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)], false);
+        let space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<1, 1>::from_dims([3], [3]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([leg()]),
+                FusionProductSpace::new([leg()]),
+            ),
+            &Z2FusionRule,
+            [vec![2, 2], vec![1, 1]],
+        )
+        .unwrap();
+        let structure = Arc::clone(space.subblock_structure());
+        let plan = FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops_and_alpha(
+            &structure,
+            1,
+            &structure,
+            1,
+            &structure,
+            1,
+            MatrixOp::Identity,
+            MatrixOp::Identity,
+            |coupled| {
+                Ok(if coupled == SectorId::new(0) {
+                    1.0
+                } else {
+                    -1.0
+                })
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(plan.direct_batch_alpha, [1.0, -1.0]);
+
+        let lhs = vec![1.0, 2.0, 3.0, 4.0, 5.0]
+            .into_iter()
+            .map(|value| Complex64::new(value, 0.0))
+            .collect();
+        let rhs = vec![1.0, 0.0, 0.0, 1.0, 2.0]
+            .into_iter()
+            .map(|value| Complex64::new(value, 0.0))
+            .collect();
+        let mut dst = vec![Complex64::ZERO; 5];
+        let mut gemm = RecordingComplexStorageGemm::default();
+        plan.execute_direct_on_storage_prezeroed(&mut gemm, &mut dst, &lhs, &rhs)
+            .unwrap();
+
+        assert_eq!(
+            gemm.calls,
+            [
+                (0, Complex64::new(1.0, 0.0)),
+                (4, Complex64::new(-1.0, 0.0))
+            ]
+        );
+        assert_eq!(
+            dst,
+            [1.0, 2.0, 3.0, 4.0, -10.0].map(|value| Complex64::new(value, 0.0))
+        );
+
+        let unit_first_space = FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([SectorLeg::new(
+                    [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
+                    false,
+                )]),
+                FusionProductSpace::new([SectorLeg::new(
+                    [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
+                    false,
+                )]),
+            ),
+            &Z2FusionRule,
+            [vec![1, 1], vec![1, 1]],
+        )
+        .unwrap();
+        let unit_first_structure = Arc::clone(unit_first_space.subblock_structure());
+        let unit_first_plan =
+            FusionBlockContractPlan::try_from_canonical_coupled_regions_with_ops_and_alpha(
+                &unit_first_structure,
+                1,
+                &unit_first_structure,
+                1,
+                &unit_first_structure,
+                1,
+                MatrixOp::Identity,
+                MatrixOp::Identity,
+                |coupled| {
+                    Ok(if coupled == SectorId::new(0) {
+                        1.0
+                    } else {
+                        -1.0
+                    })
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let mut rejected = vec![Complex64::ZERO; 2];
+        let source = vec![Complex64::new(1.0, 0.0); 2];
+        let mut unit_only = UnitOnlyComplexStorageGemm::default();
+        let error = unit_first_plan
+            .execute_direct_on_storage_prezeroed(&mut unit_only, &mut rejected, &source, &source)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::UnsupportedTensorContractScope {
+                message: "storage GEMM backend does not implement scaled replay"
+            }
+        ));
+        assert_eq!(unit_only.unit_calls, 0);
+        assert_eq!(rejected, vec![Complex64::ZERO; 2]);
     }
 }

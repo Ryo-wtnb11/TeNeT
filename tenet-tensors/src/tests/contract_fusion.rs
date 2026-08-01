@@ -1,6 +1,102 @@
 use super::*;
 use std::sync::Arc;
 
+// Mutation oracle for unchecked internal rigid-symbol providers, not a
+// physically coherent ribbon category.
+#[derive(Clone, Copy, Debug)]
+struct AdversarialNonuniformTwistRule;
+
+impl FusionRule for AdversarialNonuniformTwistRule {
+    fn rule_identity(&self) -> RuleIdentity {
+        RuleIdentity::of_type::<Self>()
+    }
+
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Unique
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        BraidingStyleKind::Fermionic
+    }
+
+    fn vacuum(&self) -> SectorId {
+        SectorId::new(0)
+    }
+
+    fn dual(&self, sector: SectorId) -> SectorId {
+        SectorId::new((3 - sector.id()) % 3)
+    }
+
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        vec![SectorId::new((left.id() + right.id()) % 3)].into()
+    }
+}
+
+impl MultiplicityFreeFusionRule for AdversarialNonuniformTwistRule {}
+
+impl MultiplicityFreeFusionSymbols for AdversarialNonuniformTwistRule {
+    type Scalar = f64;
+
+    fn scalar_one(&self) -> Self::Scalar {
+        1.0
+    }
+
+    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
+        value
+    }
+
+    fn f_symbol_scalar(
+        &self,
+        _left: SectorId,
+        _middle: SectorId,
+        _right: SectorId,
+        _coupled: SectorId,
+        _left_coupled: SectorId,
+        _right_coupled: SectorId,
+    ) -> Self::Scalar {
+        1.0
+    }
+
+    fn r_symbol_scalar(
+        &self,
+        _left: SectorId,
+        _right: SectorId,
+        _coupled: SectorId,
+    ) -> Self::Scalar {
+        1.0
+    }
+}
+
+impl MultiplicityFreeRigidSymbols for AdversarialNonuniformTwistRule {
+    fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn inv_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+
+    fn twist_scalar(&self, sector: SectorId) -> Self::Scalar {
+        if sector == SectorId::new(1) {
+            -1.0
+        } else {
+            1.0
+        }
+    }
+
+    fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
+    }
+}
+
 fn assert_f64_bits_eq(label: &str, actual: &[f64], expected: &[f64]) {
     assert_eq!(actual.len(), expected.len(), "{label} length");
     for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
@@ -2709,9 +2805,17 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
     assert!(context.last_resolution_is_core());
     assert_eq!(compose(&mut context), [6.0]);
 
-    struct VecGemm;
+    #[derive(Default)]
+    struct VecGemm {
+        unit_calls: usize,
+        scaled_alphas: Vec<f64>,
+    }
 
     impl tenet_operations::fusion_replay::StorageGemm<f64, Vec<f64>, Vec<f64>, Vec<f64>> for VecGemm {
+        fn supports_matmul_with_ops_scaled(&self, lhs_op: MatrixOp, rhs_op: MatrixOp) -> bool {
+            lhs_op == MatrixOp::Identity && rhs_op == MatrixOp::Identity
+        }
+
         fn matmul_range_into(
             &mut self,
             dst: &mut Vec<f64>,
@@ -2724,6 +2828,7 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
             contracted: usize,
             cols: usize,
         ) -> Result<(), OperationError> {
+            self.unit_calls += 1;
             for col in 0..cols {
                 for row in 0..rows {
                     dst[dst_offset + row + rows * col] = (0..contracted)
@@ -2736,6 +2841,38 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
             }
             Ok(())
         }
+
+        fn matmul_range_with_ops_scaled_into(
+            &mut self,
+            dst: &mut Vec<f64>,
+            dst_offset: usize,
+            lhs: &Vec<f64>,
+            lhs_offset: usize,
+            rhs: &Vec<f64>,
+            rhs_offset: usize,
+            rows: usize,
+            contracted: usize,
+            cols: usize,
+            lhs_op: MatrixOp,
+            rhs_op: MatrixOp,
+            alpha: f64,
+        ) -> Result<(), OperationError> {
+            assert_eq!(lhs_op, MatrixOp::Identity);
+            assert_eq!(rhs_op, MatrixOp::Identity);
+            self.scaled_alphas.push(alpha);
+            for col in 0..cols {
+                for row in 0..rows {
+                    dst[dst_offset + row + rows * col] = alpha
+                        * (0..contracted)
+                            .map(|inner| {
+                                lhs[lhs_offset + row + rows * inner]
+                                    * rhs[rhs_offset + inner + contracted * col]
+                            })
+                            .sum::<f64>();
+                }
+            }
+            Ok(())
+        }
     }
 
     let lhs_values = vec![2.0];
@@ -2743,7 +2880,7 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
     let mut direct_composed = vec![0.0; dst.required_len().unwrap()];
     context
         .tensorcompose_fusion_dyn_direct_on_storage(
-            &mut VecGemm,
+            &mut VecGemm::default(),
             &dst_bound,
             &mut direct_composed,
             &lhs_bound,
@@ -2757,9 +2894,10 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
     assert_eq!(direct_composed, [6.0]);
 
     let mut direct_contracted = vec![0.0; dst.required_len().unwrap()];
-    assert!(matches!(
-        context.tensorcontract_fusion_dyn_direct_on_storage(
-            &mut VecGemm,
+    let mut contract_gemm = VecGemm::default();
+    context
+        .tensorcontract_fusion_dyn_direct_on_storage(
+            &mut contract_gemm,
             &dst_bound,
             &mut direct_contracted,
             &lhs_bound,
@@ -2767,16 +2905,72 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
             &rhs_bound,
             &rhs_values,
             TensorContractSpec::new(&[1], &[0], crate::OutputAxisOrder::identity()),
-        ),
-        Err(OperationError::UnsupportedTensorContractScope { .. })
-    ));
-    assert_eq!(direct_contracted, [0.0]);
+        )
+        .unwrap();
+    assert_eq!(direct_contracted, [-6.0]);
+    assert_eq!(contract_gemm.scaled_alphas, [-1.0]);
+
+    let mixed_space = |codomain_dual: bool, domain_dual: bool| {
+        FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<1, 1>::from_dims([2], [2]).unwrap(),
+            FusionTreeHomSpace::new(
+                FusionProductSpace::new([SectorLeg::new(
+                    [(SectorId::new(0), 1), (odd, 1)],
+                    codomain_dual,
+                )]),
+                FusionProductSpace::new([SectorLeg::new(
+                    [(SectorId::new(0), 1), (odd, 1)],
+                    domain_dual,
+                )]),
+            ),
+            &rule,
+            [vec![1, 1], vec![1, 1]],
+        )
+        .unwrap()
+    };
+    let mixed_lhs = crate::DynamicFusionMapSpace::from_typed(&mixed_space(false, true));
+    let mixed_rhs = crate::DynamicFusionMapSpace::from_typed(&mixed_space(true, false));
+    let mixed_dst =
+        crate::DynamicFusionMapSpace::contracted(&rule, &mixed_lhs, &mixed_rhs, &[1], &[0])
+            .unwrap();
+    let mixed_lhs_bound =
+        crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(mixed_lhs, Arc::clone(&provider))
+            .unwrap();
+    let mixed_rhs_bound =
+        crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(mixed_rhs, Arc::clone(&provider))
+            .unwrap();
+    let mixed_dst_bound =
+        crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(mixed_dst, Arc::clone(&provider))
+            .unwrap();
+    let mut mixed_output = vec![0.0; mixed_dst_bound.space().required_len().unwrap()];
+    let mixed_lhs_values = vec![2.0, 5.0];
+    let mixed_rhs_values = vec![3.0, 7.0];
+    let mut mixed_gemm = VecGemm::default();
+    context
+        .tensorcontract_fusion_dyn_direct_on_storage(
+            &mut mixed_gemm,
+            &mixed_dst_bound,
+            &mut mixed_output,
+            &mixed_lhs_bound,
+            &mixed_lhs_values,
+            &mixed_rhs_bound,
+            &mixed_rhs_values,
+            TensorContractSpec::new(&[1], &[0], crate::OutputAxisOrder::identity()),
+        )
+        .unwrap();
+    assert_eq!(mixed_output, [6.0, -35.0]);
+    assert_eq!(mixed_gemm.unit_calls, 1);
+    assert_eq!(mixed_gemm.scaled_alphas, [-1.0]);
 
     struct FailingGemm;
 
     impl tenet_operations::fusion_replay::StorageGemm<f64, Vec<f64>, Vec<f64>, Vec<f64>>
         for FailingGemm
     {
+        fn supports_matmul_with_ops_scaled(&self, lhs_op: MatrixOp, rhs_op: MatrixOp) -> bool {
+            lhs_op == MatrixOp::Identity && rhs_op == MatrixOp::Identity
+        }
+
         fn matmul_range_into(
             &mut self,
             _dst: &mut Vec<f64>,
@@ -2793,11 +2987,31 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
                 message: "injected storage GEMM failure",
             })
         }
+
+        fn matmul_range_with_ops_scaled_into(
+            &mut self,
+            _dst: &mut Vec<f64>,
+            _dst_offset: usize,
+            _lhs: &Vec<f64>,
+            _lhs_offset: usize,
+            _rhs: &Vec<f64>,
+            _rhs_offset: usize,
+            _rows: usize,
+            _contracted: usize,
+            _cols: usize,
+            _lhs_op: MatrixOp,
+            _rhs_op: MatrixOp,
+            _alpha: f64,
+        ) -> Result<(), OperationError> {
+            Err(OperationError::UnsupportedTensorContractScope {
+                message: "injected scaled storage GEMM failure",
+            })
+        }
     }
 
     let mut failed = vec![0.0; dst.required_len().unwrap()];
     assert!(context
-        .tensorcompose_fusion_dyn_direct_on_storage(
+        .tensorcontract_fusion_dyn_direct_on_storage(
             &mut FailingGemm,
             &dst_bound,
             &mut failed,
@@ -2805,13 +3019,141 @@ fn fermionic_tensorcompose_keeps_coefficient_free_semantics() {
             &lhs_values,
             &rhs_bound,
             &rhs_values,
-            &[1],
-            &[0],
+            TensorContractSpec::new(&[1], &[0], crate::OutputAxisOrder::identity()),
         )
         .is_err());
     assert_eq!(failed, [0.0]);
     assert_eq!(lhs_values, [2.0]);
     assert_eq!(rhs_values, [3.0]);
+}
+
+#[test]
+fn fermionic_storage_contract_rejects_nonuniform_twist_before_gemm() {
+    let rule = AdversarialNonuniformTwistRule;
+    let leg = |is_dual| {
+        SectorLeg::new(
+            [
+                (SectorId::new(0), 1),
+                (SectorId::new(1), 1),
+                (SectorId::new(2), 1),
+            ],
+            is_dual,
+        )
+    };
+    let lhs_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(false)]),
+        FusionProductSpace::new([leg(true), leg(true)]),
+    );
+    let lhs_shapes = vec![vec![1; 3]; lhs_hom.fusion_tree_keys(&rule).len()];
+    let lhs = crate::DynamicFusionMapSpace::from_typed(
+        &FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<1, 2>::from_dims([3], [3, 3]).unwrap(),
+            lhs_hom,
+            &rule,
+            lhs_shapes,
+        )
+        .unwrap(),
+    );
+    let rhs_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg(true), leg(true)]),
+        FusionProductSpace::new([leg(false)]),
+    );
+    let rhs_shapes = vec![vec![1; 3]; rhs_hom.fusion_tree_keys(&rule).len()];
+    let rhs = crate::DynamicFusionMapSpace::from_typed(
+        &FusionTensorMapSpace::from_degeneracy_shapes_coupled(
+            TensorMapSpace::<2, 1>::from_dims([3, 3], [3]).unwrap(),
+            rhs_hom,
+            &rule,
+            rhs_shapes,
+        )
+        .unwrap(),
+    );
+    let dst =
+        crate::DynamicFusionMapSpace::contracted(&rule, &lhs, &rhs, &[1, 2], &[0, 1]).unwrap();
+    let provider = Arc::new(rule);
+    let lhs_bound =
+        crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(lhs, Arc::clone(&provider))
+            .unwrap();
+    let rhs_bound =
+        crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(rhs, Arc::clone(&provider))
+            .unwrap();
+    let dst_bound =
+        crate::BoundDynamicFusionMapSpace::bind_multiplicity_free(dst, Arc::clone(&provider))
+            .unwrap();
+
+    #[derive(Default)]
+    struct NoCallGemm {
+        calls: usize,
+    }
+
+    impl tenet_operations::fusion_replay::StorageGemm<f64, Vec<f64>, Vec<f64>, Vec<f64>>
+        for NoCallGemm
+    {
+        fn supports_matmul_with_ops_scaled(&self, lhs_op: MatrixOp, rhs_op: MatrixOp) -> bool {
+            lhs_op == MatrixOp::Identity && rhs_op == MatrixOp::Identity
+        }
+
+        fn matmul_range_into(
+            &mut self,
+            _dst: &mut Vec<f64>,
+            _dst_offset: usize,
+            _lhs: &Vec<f64>,
+            _lhs_offset: usize,
+            _rhs: &Vec<f64>,
+            _rhs_offset: usize,
+            _rows: usize,
+            _contracted: usize,
+            _cols: usize,
+        ) -> Result<(), OperationError> {
+            self.calls += 1;
+            Ok(())
+        }
+
+        fn matmul_range_with_ops_scaled_into(
+            &mut self,
+            _dst: &mut Vec<f64>,
+            _dst_offset: usize,
+            _lhs: &Vec<f64>,
+            _lhs_offset: usize,
+            _rhs: &Vec<f64>,
+            _rhs_offset: usize,
+            _rows: usize,
+            _contracted: usize,
+            _cols: usize,
+            _lhs_op: MatrixOp,
+            _rhs_op: MatrixOp,
+            _alpha: f64,
+        ) -> Result<(), OperationError> {
+            self.calls += 1;
+            Ok(())
+        }
+    }
+
+    let lhs_values = vec![1.0; lhs_bound.space().required_len().unwrap()];
+    let rhs_values = vec![1.0; rhs_bound.space().required_len().unwrap()];
+    let mut output = vec![9.0; dst_bound.space().required_len().unwrap()];
+    let before = output.clone();
+    let mut gemm = NoCallGemm::default();
+    let error = crate::TensorContractFusionExecutionContext::<f64, RuleIdentity>::default()
+        .tensorcontract_fusion_dyn_direct_on_storage(
+            &mut gemm,
+            &dst_bound,
+            &mut output,
+            &lhs_bound,
+            &lhs_values,
+            &rhs_bound,
+            &rhs_values,
+            TensorContractSpec::new(&[1, 2], &[0, 1], crate::OutputAxisOrder::identity()),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        OperationError::UnsupportedTensorContractScope {
+            message: "fermionic twist is nonuniform within one RHS coupled-sector matrix"
+        }
+    ));
+    assert_eq!(gemm.calls, 0);
+    assert_eq!(output, before);
 }
 
 #[test]
