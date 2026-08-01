@@ -3068,6 +3068,225 @@ where
 
 impl<R, D> TensorMap<R, D>
 where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    /// Overwrites `destination` with `alpha * self.permute(...)` without
+    /// replacing its provider, space, body, or dense host allocation.
+    ///
+    /// # Errors
+    ///
+    /// Validation and plan-construction failures leave `destination`
+    /// unchanged. A backend error after replay begins may leave it partially
+    /// overwritten.
+    pub fn permute_overwrite_into(
+        &self,
+        destination: &mut Self,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+        alpha: D,
+    ) -> Result<(), Error> {
+        self.overwrite_tree_transform(destination, alpha, |_, _| {
+            Ok(TreeTransformOperation::permute(
+                codomain_axes.iter().copied(),
+                domain_axes.iter().copied(),
+            ))
+        })
+    }
+
+    /// Overwrites `destination` with `alpha * self.transpose()` while
+    /// preserving the destination's identities and allocation.
+    /// Validation and failure behavior matches
+    /// [`Self::permute_overwrite_into`].
+    pub fn transpose_overwrite_into(&self, destination: &mut Self, alpha: D) -> Result<(), Error> {
+        self.overwrite_tree_transform(destination, alpha, |source, _| {
+            with_planar_axes(
+                source.codomain_rank(),
+                source.rank(),
+                PlanarRequestKind::FullTranspose,
+                |codomain_axes, domain_axes| {
+                    Ok(TreeTransformOperation::transpose(
+                        codomain_axes.iter().copied(),
+                        domain_axes.iter().copied(),
+                    ))
+                },
+            )
+        })
+    }
+
+    /// Overwrites `destination` with
+    /// `alpha * self.transpose_axes(codomain_axes, domain_axes)`.
+    /// Validation and failure behavior matches
+    /// [`Self::permute_overwrite_into`].
+    pub fn transpose_axes_overwrite_into(
+        &self,
+        destination: &mut Self,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+        alpha: D,
+    ) -> Result<(), Error> {
+        self.overwrite_tree_transform(destination, alpha, |source, _| {
+            with_planar_axes(
+                source.codomain_rank(),
+                source.rank(),
+                PlanarRequestKind::Explicit {
+                    codomain_axes,
+                    domain_axes,
+                },
+                |codomain_axes, domain_axes| {
+                    Ok(TreeTransformOperation::transpose(
+                        codomain_axes.iter().copied(),
+                        domain_axes.iter().copied(),
+                    ))
+                },
+            )
+        })
+    }
+
+    /// Overwrites `destination` with
+    /// `alpha * self.repartition(destination.codomain_rank())`.
+    /// Validation and failure behavior matches
+    /// [`Self::permute_overwrite_into`].
+    pub fn repartition_overwrite_into(
+        &self,
+        destination: &mut Self,
+        alpha: D,
+    ) -> Result<(), Error> {
+        self.overwrite_tree_transform(destination, alpha, |source, destination| {
+            if destination.rank() != source.rank() {
+                return Err(Error::InvalidArgument(format!(
+                    "repartition destination rank {} does not match source rank {}",
+                    destination.rank(),
+                    source.rank()
+                )));
+            }
+            with_planar_axes(
+                source.codomain_rank(),
+                source.rank(),
+                PlanarRequestKind::Repartition {
+                    num_codomain: destination.codomain_rank(),
+                },
+                |codomain_axes, domain_axes| {
+                    Ok(TreeTransformOperation::transpose(
+                        codomain_axes.iter().copied(),
+                        domain_axes.iter().copied(),
+                    ))
+                },
+            )
+        })
+    }
+
+    /// One admission and replay boundary for every typed Host overwrite.
+    fn overwrite_tree_transform(
+        &self,
+        destination: &mut Self,
+        alpha: D,
+        operation: impl FnOnce(&Self, &Self) -> Result<TreeTransformOperation, Error>,
+    ) -> Result<(), Error> {
+        if !self.runtime.same_runtime(&destination.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        if TypedSectorAdmission::typed_rule_identity(self.provider())
+            != TypedSectorAdmission::typed_rule_identity(destination.provider())
+        {
+            return Err(Error::RuleMismatch);
+        }
+
+        let source_body = match &self.repr {
+            TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Dense(_)) => {
+                body
+            }
+            _ => {
+                return Err(Error::InvalidArgument(
+                    "typed destination tree transform requires an ordinary dense host source"
+                        .to_string(),
+                ))
+            }
+        };
+        let destination_body = match &destination.repr {
+            TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Dense(_)) => {
+                body
+            }
+            _ => {
+                return Err(Error::InvalidArgument(
+                    "destination must use ordinary dense host storage".to_string(),
+                ))
+            }
+        };
+        if Arc::ptr_eq(&source_body.data, &destination_body.data) {
+            return Err(Error::InvalidArgument(
+                "destination storage must not alias an input".to_string(),
+            ));
+        }
+
+        let operation = operation(self, destination)?;
+        let expected = source_body
+            .space
+            .transformed_multiplicity_free(&operation)?;
+        if destination_body.space.space() != expected.space() {
+            return Err(Error::InvalidArgument(
+                "destination fusion space or block layout does not match the operation result"
+                    .to_string(),
+            ));
+        }
+        let required = expected.space().required_len()?;
+        let actual = match destination_body.data.as_ref() {
+            TypedData::Dense(data) => data.len(),
+            TypedData::Diagonal(_) => unreachable!("dense destination checked above"),
+        };
+        if actual != required {
+            return Err(Error::InvalidArgument(format!(
+                "destination storage length {actual} does not match required length {required}"
+            )));
+        }
+        if Arc::strong_count(destination_body) != 1
+            || Arc::strong_count(&destination_body.data) != 1
+        {
+            return Err(Error::InvalidArgument(
+                "destination storage must be uniquely owned".to_string(),
+            ));
+        }
+
+        let source_structure = source_body.space.space().structure();
+        let source_data = match source_body.data.as_ref() {
+            TypedData::Dense(data) => data.as_slice(),
+            TypedData::Diagonal(_) => unreachable!("dense source checked above"),
+        };
+        let mut lease = self.runtime.lease_context()?;
+        let context = lease
+            .context()
+            .multiplicity_free_lane::<D>()
+            .tree_context_mut();
+        let TypedTensorRepr::Owned(destination_body) = &mut destination.repr else {
+            unreachable!("ordinary destination checked above")
+        };
+        let destination_body =
+            Arc::get_mut(destination_body).expect("unique destination body checked above");
+        let destination_provider = destination_body.space.provider();
+        let destination_structure = destination_body.space.space().structure();
+        let destination_data = Arc::get_mut(&mut destination_body.data)
+            .expect("unique destination payload checked above");
+        let TypedData::Dense(destination_data) = destination_data else {
+            unreachable!("dense destination checked above")
+        };
+        context.tree_transform_dyn_overwrite_into_ref(
+            destination_provider,
+            &operation,
+            destination_structure,
+            source_structure,
+            destination_data.as_mut_slice(),
+            source_data,
+            alpha,
+        )?;
+        Ok(())
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorTransformDispatch<R, D>,
     D: TensorScalar,
@@ -6996,7 +7215,6 @@ fn map_spectrum_dtype<A: Copy, B>(
 #[cfg(test)]
 mod representation_gates {
     use super::*;
-    #[cfg(feature = "cuda")]
     use tenet_core::{product_sector, ProductFusionRuleExt};
     use tenet_core::{
         FermionParityFusionRule, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2FusionRule,
@@ -10637,6 +10855,418 @@ mod representation_gates {
         crate::tensor_core::TREE_TRANSFORM_SEAM_CALLS
             .with(|observation| observation.replace(None))
             .unwrap()
+    }
+
+    fn poison_destination<R, D>(destination: &mut TensorMap<R, D>)
+    where
+        D: TensorScalar,
+    {
+        let TypedTensorRepr::Owned(body) = &mut destination.repr else {
+            panic!("overwrite destination fixture must be owned")
+        };
+        let body = Arc::get_mut(body).expect("overwrite destination body must be unique");
+        let data = Arc::get_mut(&mut body.data).expect("overwrite payload must be unique");
+        let TypedData::Dense(data) = data else {
+            panic!("overwrite destination fixture must be dense")
+        };
+        data.fill(D::from_real(f64::NAN));
+    }
+
+    fn assert_overwrite_matches<R, D>(
+        source: &TensorMap<R, D>,
+        expected: TensorMap<R, D>,
+        alpha: D,
+        overwrite: impl FnOnce(&mut TensorMap<R, D>) -> Result<(), Error>,
+    ) where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+        D: TensorScalar + core::fmt::Debug,
+    {
+        let source_before = source.data().to_vec();
+        let mut destination = expected.zeros_like();
+        poison_destination(&mut destination);
+        let provider = Arc::as_ptr(destination.logical_space().provider_arc());
+        let body = Arc::as_ptr(owned(&destination));
+        let space = destination.logical_space().space() as *const DynamicFusionMapSpace;
+        let storage = destination.data().as_ptr();
+
+        overwrite(&mut destination).unwrap();
+
+        let scaled = expected.scale(alpha);
+        assert_eq!(destination.data(), scaled.data());
+        assert_eq!(source.data(), source_before);
+        assert_eq!(
+            Arc::as_ptr(destination.logical_space().provider_arc()),
+            provider
+        );
+        assert_eq!(Arc::as_ptr(owned(&destination)), body);
+        assert_eq!(
+            destination.logical_space().space() as *const DynamicFusionMapSpace,
+            space
+        );
+        assert_eq!(destination.data().as_ptr(), storage);
+    }
+
+    #[test]
+    fn typed_tree_overwrite_matches_owned_provider_and_scalar_matrix() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+
+        let u1_provider = Arc::new(U1FusionRule);
+        let u1_leg = GradedSpace::try_new(
+            Arc::clone(&u1_provider),
+            [
+                (U1Irrep::new(-1), 1),
+                (U1Irrep::new(0), 2),
+                (U1Irrep::new(1), 1),
+            ],
+            false,
+        )
+        .unwrap();
+        let u1 = TensorMap::from_block_fn(&runtime, [&u1_leg, &u1_leg], [&u1_leg], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 1.0
+        })
+        .unwrap();
+        let u1_permuted = u1.permute(&[1], &[2, 0]).unwrap();
+        assert_overwrite_matches(&u1, u1_permuted, -1.5, |destination| {
+            u1.permute_overwrite_into(destination, &[1], &[2, 0], -1.5)
+        });
+        let u1_identity = u1.zeros_like();
+        assert_overwrite_matches(&u1, u1_identity, 0.0, |destination| {
+            u1.permute_overwrite_into(destination, &[0, 1], &[2], 0.0)
+        });
+
+        let independent_leg = GradedSpace::try_new(
+            Arc::new(U1FusionRule),
+            [
+                (U1Irrep::new(-1), 1),
+                (U1Irrep::new(0), 2),
+                (U1Irrep::new(1), 1),
+            ],
+            false,
+        )
+        .unwrap();
+        let mut independent_destination = TensorMap::from_block_fn(
+            &runtime,
+            [&independent_leg, &independent_leg],
+            [&independent_leg],
+            |_, _| f64::NAN,
+        )
+        .unwrap();
+        assert!(!Arc::ptr_eq(
+            u1.logical_space().provider_arc(),
+            independent_destination.logical_space().provider_arc()
+        ));
+        let destination_provider =
+            Arc::as_ptr(independent_destination.logical_space().provider_arc());
+        u1.permute_overwrite_into(&mut independent_destination, &[0, 1], &[2], 2.0)
+            .unwrap();
+        assert_eq!(independent_destination.data(), u1.scale(2.0).data());
+        assert_eq!(
+            Arc::as_ptr(independent_destination.logical_space().provider_arc()),
+            destination_provider
+        );
+
+        let su2_provider = Arc::new(SU2FusionRule);
+        let su2_leg = GradedSpace::try_new(
+            su2_provider,
+            [
+                (SU2Irrep::from_twice_spin(0), 2),
+                (SU2Irrep::from_twice_spin(1), 1),
+            ],
+            false,
+        )
+        .unwrap();
+        let su2 =
+            TensorMap::from_block_fn(&runtime, [&su2_leg, &su2_leg], [&su2_leg], |_, indices| {
+                indices.iter().sum::<usize>() as f64 + 1.0
+            })
+            .unwrap()
+            .to_c64();
+        let alpha = num_complex::Complex64::new(0.75, -0.25);
+        let su2_permuted = su2.permute(&[1], &[2, 0]).unwrap();
+        assert_overwrite_matches(&su2, su2_permuted, alpha, |destination| {
+            su2.permute_overwrite_into(destination, &[1], &[2, 0], alpha)
+        });
+
+        let product_provider = Arc::new(U1FusionRule.product(FermionParityFusionRule));
+        let product_leg = GradedSpace::try_new(
+            product_provider,
+            [
+                (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
+                (product_sector(U1Irrep::new(1), Z2Irrep::ODD), 1),
+            ],
+            false,
+        )
+        .unwrap();
+        let product = TensorMap::from_block_fn(
+            &runtime,
+            [&product_leg, &product_leg],
+            [&product_leg],
+            |_, indices| indices.iter().sum::<usize>() as f64 + 1.0,
+        )
+        .unwrap();
+        let product_permuted = product.permute(&[1], &[2, 0]).unwrap();
+        assert_overwrite_matches(&product, product_permuted, 2.0, |destination| {
+            product.permute_overwrite_into(destination, &[1], &[2, 0], 2.0)
+        });
+    }
+
+    #[test]
+    fn typed_planar_overwrite_matches_fermionic_owned_routes() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(FermionParityFusionRule);
+        let odd = GradedSpace::try_new(provider, [(Z2Irrep::ODD, 2)], false).unwrap();
+        let source =
+            TensorMap::from_block_fn(&runtime, [&odd, &odd], [&odd, &odd], |_, indices| {
+                indices.iter().sum::<usize>() as f64 + 1.0
+            })
+            .unwrap();
+        let alpha = -1.25;
+
+        assert_overwrite_matches(&source, source.transpose().unwrap(), alpha, |destination| {
+            source.transpose_overwrite_into(destination, alpha)
+        });
+        assert_overwrite_matches(
+            &source,
+            source.transpose_axes(&[1, 3], &[0, 2]).unwrap(),
+            alpha,
+            |destination| {
+                source.transpose_axes_overwrite_into(destination, &[1, 3], &[0, 2], alpha)
+            },
+        );
+        let right = source.repartition(3).unwrap();
+        assert_overwrite_matches(&source, right, alpha, |destination| {
+            source.repartition_overwrite_into(destination, alpha)
+        });
+        let left = source.repartition(1).unwrap();
+        assert_overwrite_matches(&source, left, alpha, |destination| {
+            source.repartition_overwrite_into(destination, alpha)
+        });
+    }
+
+    fn f64_bits<R>(tensor: &TensorMap<R, f64>) -> Vec<u64> {
+        tensor.data().iter().map(|value| value.to_bits()).collect()
+    }
+
+    #[test]
+    fn typed_tree_overwrite_rejections_leave_destination_unchanged() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new(
+            provider,
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+            false,
+        )
+        .unwrap();
+        let source = TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 1.0
+        })
+        .unwrap();
+        let expected = source.permute(&[1], &[2, 0]).unwrap();
+
+        let assert_unchanged = |destination: &TensorMap<U1FusionRule, f64>, before: &[u64]| {
+            assert_eq!(f64_bits(destination), before);
+        };
+
+        let mut wrong_layout = source.zeros_like();
+        poison_destination(&mut wrong_layout);
+        let before = f64_bits(&wrong_layout);
+        assert!(source
+            .permute_overwrite_into(&mut wrong_layout, &[1], &[2, 0], 1.0)
+            .is_err());
+        assert_unchanged(&wrong_layout, &before);
+
+        for (codomain_axes, domain_axes) in [(&[1, 1][..], &[2][..]), (&[1][..], &[2, 3][..])] {
+            let mut destination = expected.zeros_like();
+            poison_destination(&mut destination);
+            let before = f64_bits(&destination);
+            assert!(source
+                .permute_overwrite_into(&mut destination, codomain_axes, domain_axes, 1.0,)
+                .is_err());
+            assert_unchanged(&destination, &before);
+        }
+
+        let mut nonplanar = source.transpose().unwrap().zeros_like();
+        poison_destination(&mut nonplanar);
+        let before = f64_bits(&nonplanar);
+        assert!(source
+            .transpose_axes_overwrite_into(&mut nonplanar, &[0, 2], &[1], 1.0)
+            .is_err());
+        assert_unchanged(&nonplanar, &before);
+
+        let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let mut foreign = expected.zeros_like();
+        foreign.runtime = other_runtime;
+        poison_destination(&mut foreign);
+        let before = f64_bits(&foreign);
+        assert_eq!(
+            source
+                .permute_overwrite_into(&mut foreign, &[1], &[2, 0], 1.0)
+                .unwrap_err(),
+            Error::RuntimeMismatch
+        );
+        assert_unchanged(&foreign, &before);
+
+        let mut shared_body = expected.zeros_like();
+        poison_destination(&mut shared_body);
+        let before = f64_bits(&shared_body);
+        let shared_body_handle = shared_body.clone();
+        assert!(source
+            .permute_overwrite_into(&mut shared_body, &[1], &[2, 0], 1.0)
+            .is_err());
+        assert_unchanged(&shared_body, &before);
+        drop(shared_body_handle);
+
+        let mut shared_payload = expected.zeros_like();
+        poison_destination(&mut shared_payload);
+        let before = f64_bits(&shared_payload);
+        let payload_handle = shared_payload.insert_left_unit(0, false).unwrap();
+        assert!(source
+            .permute_overwrite_into(&mut shared_payload, &[1], &[2, 0], 1.0)
+            .is_err());
+        assert_unchanged(&shared_payload, &before);
+        drop(payload_handle);
+
+        let mut alias = source
+            .insert_left_unit(0, false)
+            .unwrap()
+            .remove_unit(0)
+            .unwrap();
+        let before = f64_bits(&alias);
+        assert!(source
+            .permute_overwrite_into(&mut alias, &[0, 1], &[2], 1.0)
+            .is_err());
+        assert_unchanged(&alias, &before);
+
+        let mut bad_len = expected.zeros_like();
+        poison_destination(&mut bad_len);
+        let before = {
+            let TypedTensorRepr::Owned(body) = &mut bad_len.repr else {
+                unreachable!()
+            };
+            let body = Arc::get_mut(body).unwrap();
+            let data = Arc::get_mut(&mut body.data).unwrap();
+            let TypedData::Dense(data) = data else {
+                unreachable!()
+            };
+            data.pop();
+            f64_bits(&bad_len)
+        };
+        assert!(source
+            .permute_overwrite_into(&mut bad_len, &[1], &[2, 0], 1.0)
+            .is_err());
+        assert_unchanged(&bad_len, &before);
+
+        let mut lazy_destination = expected.adjoint().unwrap();
+        let before = f64_bits(&lazy_destination);
+        assert!(source
+            .permute_overwrite_into(&mut lazy_destination, &[1], &[2, 0], 1.0)
+            .is_err());
+        assert_eq!(f64_bits(&lazy_destination), before);
+
+        let lazy_source = source.adjoint().unwrap();
+        let mut destination = expected.zeros_like();
+        poison_destination(&mut destination);
+        let before = f64_bits(&destination);
+        assert!(lazy_source
+            .permute_overwrite_into(&mut destination, &[1], &[2, 0], 1.0)
+            .is_err());
+        assert_unchanged(&destination, &before);
+
+        let square = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 1.0
+        })
+        .unwrap();
+        let compact = square.svd_compact().unwrap().1;
+        let mut compact_destination = compact.zeros_like();
+        let before = compact_destination.data().to_vec();
+        assert!(square
+            .permute_overwrite_into(&mut compact_destination, &[0], &[1], 1.0)
+            .is_err());
+        assert_eq!(compact_destination.data(), before);
+
+        let z2 = Arc::new(ZNFusionRule::new(2).unwrap());
+        let z3 = Arc::new(ZNFusionRule::new(3).unwrap());
+        let z2_leg = GradedSpace::try_new(Arc::clone(&z2), [(z2.irrep(0), 1)], false).unwrap();
+        let z3_leg = GradedSpace::try_new(Arc::clone(&z3), [(z3.irrep(0), 1)], false).unwrap();
+        let z2_source =
+            TensorMap::from_block_fn(&runtime, [&z2_leg], [&z2_leg], |_, _| 2.0).unwrap();
+        let mut z3_destination =
+            TensorMap::from_block_fn(&runtime, [&z3_leg], [&z3_leg], |_, _| f64::NAN).unwrap();
+        let before = f64_bits(&z3_destination);
+        assert_eq!(
+            z2_source
+                .permute_overwrite_into(&mut z3_destination, &[0], &[1], 1.0)
+                .unwrap_err(),
+            Error::RuleMismatch
+        );
+        assert_eq!(f64_bits(&z3_destination), before);
+    }
+
+    #[test]
+    fn typed_tree_overwrite_covers_boundary_ranks_and_runtime_cache_reuse() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new(provider, [(U1Irrep::new(0), 1)], false).unwrap();
+
+        let one_sided = TensorMap::from_block_fn(
+            &runtime,
+            [&leg],
+            std::iter::empty::<&GradedSpace<U1FusionRule>>(),
+            |_, _| 3.0,
+        )
+        .unwrap();
+        let moved = one_sided.repartition(0).unwrap();
+        assert_overwrite_matches(&one_sided, moved, 2.0, |destination| {
+            one_sided.repartition_overwrite_into(destination, 2.0)
+        });
+
+        let square = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 4.0).unwrap();
+        let scalar = square.trace_pairs(&[(0, 1)]).unwrap();
+        let scalar_destination = scalar.transpose().unwrap();
+        assert_overwrite_matches(&scalar, scalar_destination, -0.5, |destination| {
+            scalar.transpose_overwrite_into(destination, -0.5)
+        });
+
+        let high_rank = TensorMap::from_block_fn(
+            &runtime,
+            (0..9).map(|_| &leg),
+            (0..8).map(|_| &leg),
+            |_, _| 1.0,
+        )
+        .unwrap();
+        let mut high_rank_destination = high_rank.zeros_like();
+        poison_destination(&mut high_rank_destination);
+        let before = f64_bits(&high_rank_destination);
+        assert!(high_rank
+            .permute_overwrite_into(
+                &mut high_rank_destination,
+                &[0, 1, 2, 3, 4, 5, 6, 7, 17],
+                &[8, 9, 10, 11, 12, 13, 14, 15],
+                1.0,
+            )
+            .is_err());
+        assert_eq!(f64_bits(&high_rank_destination), before);
+
+        runtime.clear_tree_transform_cache();
+        let source = TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 1.0
+        })
+        .unwrap();
+        let expected = source.permute(&[1], &[2, 0]).unwrap();
+        runtime.clear_tree_transform_cache();
+        let mut first = expected.zeros_like();
+        source
+            .permute_overwrite_into(&mut first, &[1], &[2, 0], 1.0)
+            .unwrap();
+        let cold = runtime.tree_transform_cache_info();
+        let mut second = expected.zeros_like();
+        source
+            .permute_overwrite_into(&mut second, &[1], &[2, 0], 1.0)
+            .unwrap();
+        let warm = runtime.tree_transform_cache_info();
+        assert_eq!(warm.entries(), cold.entries());
+        assert!(warm.hits() > cold.hits());
+        assert_eq!(first.data(), second.data());
     }
 
     #[test]
