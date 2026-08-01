@@ -7,18 +7,23 @@
 //! layout/gauge artifact. Guards that TeNeT's fermionic contract, and the
 //! diagonal-`contract` fast path on top of it, agree with TensorKit.
 
-use tenet::prelude::*;
+use std::sync::Arc;
+
+use tenet::core::{FermionParityFusionRule, Z2Irrep};
+use tenet::prelude::Complex64;
+use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use tenet_network::tensor;
 
 /// FZ2 map `V <- V`, degeneracy 1, with `even`/`odd` block values — the exact
 /// tensor `build(f)` produces in the Julia reference.
-fn fz2_map(rt: &Runtime, even: f64, odd: f64) -> Tensor {
-    let v = Space::fz2([(0, 1), (1, 1)]).unwrap();
-    Tensor::from_block_fn(rt, [&v], [&v], move |key, _| {
-        let BlockKey::FusionTree(key) = key else {
-            return 0.0;
-        };
-        if key.codomain_uncoupled()[0].id() == 0 {
+fn fz2_map(
+    rt: &Runtime,
+    v: &GradedSpace<FermionParityFusionRule>,
+    even: f64,
+    odd: f64,
+) -> TensorMap<FermionParityFusionRule, f64> {
+    TensorMap::from_block_fn(rt, [v], [v], move |trees, _| {
+        if *trees.coupled() == Z2Irrep::EVEN {
             even
         } else {
             odd
@@ -27,49 +32,59 @@ fn fz2_map(rt: &Runtime, even: f64, odd: f64) -> Tensor {
     .unwrap()
 }
 
-fn scalar(t: Tensor) -> f64 {
-    t.scalar().unwrap().try_f64().unwrap()
+fn scalar(t: TensorMap<FermionParityFusionRule, f64>) -> f64 {
+    t.scalar().unwrap()
 }
 
 #[test]
 fn fz2_contractions_match_tensorkit() {
     let rt = Runtime::builder().build().unwrap();
-    let a = fz2_map(&rt, 1.0, 4.0);
-    let b = fz2_map(&rt, 2.0, 1.5);
-    let c = fz2_map(&rt, 0.5, 2.5);
-    let t = fz2_map(&rt, 3.0, 2.0);
+    let v = GradedSpace::try_new(
+        Arc::new(FermionParityFusionRule),
+        [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
+        false,
+    )
+    .unwrap();
+    let a = fz2_map(&rt, &v, 1.0, 4.0);
+    let b = fz2_map(&rt, &v, 2.0, 1.5);
+    let c = fz2_map(&rt, &v, 0.5, 2.5);
+    let t = fz2_map(&rt, &v, 3.0, 2.0);
 
     // S from an SVD is a Data::Diagonal factor; singular values = |T| per sector.
     let (_, s, _) = t.svd_compact().unwrap();
     let sv = s.svd_vals().unwrap();
     for entry in &sv {
-        let expect = if entry.sector.id() == 0 { 3.0 } else { 2.0 };
+        let expect = if entry.sector == Z2Irrep::EVEN {
+            3.0
+        } else {
+            2.0
+        };
         assert!(
             (entry.values[0] - expect).abs() < 1e-12,
-            "singular value for sector {}: {} vs {expect}",
-            entry.sector.id(),
+            "singular value for sector {:?}: {} vs {expect}",
+            entry.sector,
             entry.values[0]
         );
     }
 
     // What: TensorKit `tr` is the positive ordinary trace, while an explicit
     // parity twist (or a closed `@tensor` loop) is the fermionic supertrace.
-    let d = fz2_map(&rt, 2.0, 3.0);
-    let ordinary = d.tr().unwrap().try_f64().unwrap();
-    let twisted = d.twist(&[0]).unwrap().tr().unwrap().try_f64().unwrap();
+    let d = fz2_map(&rt, &v, 2.0, 3.0);
+    let ordinary = d.tr().unwrap();
+    let twisted = d.twist(&[0]).unwrap().tr().unwrap();
     assert!((ordinary - 5.0).abs() < 1e-12, "ordinary = {ordinary}");
     assert!((twisted - (-1.0)).abs() < 1e-12, "twisted = {twisted}");
 
     // The SVD factor uses compact diagonal storage and must keep the same
     // ordinary trace without materializing its dense block matrices.
     let (_, compact_d, _) = d.svd_compact().unwrap();
-    let compact_ordinary = compact_d.tr().unwrap().try_f64().unwrap();
+    let compact_ordinary = compact_d.tr().unwrap();
     assert!(
         (compact_ordinary - 5.0).abs() < 1e-12,
         "compact ordinary = {compact_ordinary}"
     );
     let (_, compact_c64, _) = d.to_c64().svd_compact().unwrap();
-    let compact_c64_ordinary = compact_c64.tr().unwrap().to_c64();
+    let compact_c64_ordinary = compact_c64.tr().unwrap();
     assert!(
         (compact_c64_ordinary - Complex64::new(5.0, 0.0)).norm() < 1e-12,
         "compact c64 ordinary = {compact_c64_ordinary}"
@@ -77,12 +92,8 @@ fn fz2_contractions_match_tensorkit() {
 
     // What: `eig_full().d` uses genuine complex diagonal storage. Its ordinary
     // trace sums both sectors without the odd parity twist.
-    let v = Space::fz2([(0, 1), (1, 1)]).unwrap();
-    let complex_source = Tensor::from_block_fn(&rt, [&v], [&v], |key, _| {
-        let BlockKey::FusionTree(key) = key else {
-            return Complex64::new(0.0, 0.0);
-        };
-        if key.codomain_uncoupled()[0].id() == 0 {
+    let complex_source = TensorMap::from_block_fn(&rt, [&v], [&v], |trees, _| {
+        if *trees.coupled() == Z2Irrep::EVEN {
             Complex64::new(2.0, 1.0)
         } else {
             Complex64::new(3.0, 4.0)
@@ -90,14 +101,14 @@ fn fz2_contractions_match_tensorkit() {
     })
     .unwrap();
     let (complex_d, _) = complex_source.eig_full().unwrap();
-    let complex_trace = complex_d.tr().unwrap().to_c64();
+    let complex_trace = complex_d.tr().unwrap();
     let expected_complex_trace = Complex64::new(5.0, 5.0);
     assert!(
         (complex_trace - expected_complex_trace).norm() < 1e-12,
         "complex ordinary = {complex_trace}"
     );
 
-    let ordinary_ab = a.compose(&b).unwrap().tr().unwrap().try_f64().unwrap();
+    let ordinary_ab = a.compose(&b).unwrap().tr().unwrap();
     assert!(
         (ordinary_ab - 8.0).abs() < 1e-12,
         "ordinary_ab = {ordinary_ab}"
@@ -122,11 +133,11 @@ fn fz2_contractions_match_tensorkit() {
     // Force the single-axis diagonal `contract` fast path explicitly (rather than
     // whatever order the macro picks): A[i;j] · S[j;k] goes through scale+permute
     // + the fermionic twist fold, and closing with B must still give TK's -6.
-    let as_ = a.contract(&s, &[1], &[0]).unwrap();
+    let as_ = a.contract(&s, &[1], &[0], &[0, 1]).unwrap();
     let s3_fast = scalar(tensor!([] = as_[i; k] * b[k; i]).unwrap());
     assert!((s3_fast - (-6.0)).abs() < 1e-12, "s3_fast = {s3_fast}");
     // And the leading (D * A) order on `s`.
-    let sa = s.contract(&a, &[1], &[0]).unwrap();
+    let sa = s.contract(&a, &[1], &[0], &[0, 1]).unwrap();
     let s4_fast = scalar(tensor!([] = sa[i; k] * b[k; i]).unwrap());
     assert!((s4_fast - (-6.0)).abs() < 1e-12, "s4_fast = {s4_fast}");
 }

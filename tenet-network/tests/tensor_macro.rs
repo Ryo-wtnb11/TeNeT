@@ -8,7 +8,7 @@ use tenet::core::{
 };
 use tenet::prelude::{Complex64, Error, TensorScalar};
 use tenet::typed::{GradedSpace, Runtime, TensorMap, Truncation};
-use tenet_network::tensor;
+use tenet_network::{plan_cache_stats, tensor};
 
 fn space() -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)], false).unwrap()
@@ -119,6 +119,17 @@ fn typed_host_macro_provider_dtype_matrix_matches_direct_contract() {
     .unwrap();
     assert_pair_case::<_, f64>(&runtime, &product, 750_130);
     assert_pair_case::<_, Complex64>(&runtime, &product, 750_132);
+
+    let stats = plan_cache_stats(&runtime);
+    assert_eq!(stats.entries, 1, "one structural topology is shared");
+    assert_eq!(
+        stats.workspaces_created, 8,
+        "each (provider, dtype) pair has its own downcast-safe Host pool"
+    );
+    assert_eq!(
+        stats.idle_workspaces, 8,
+        "each one-shot typed workspace returns to its own pool"
+    );
 }
 
 #[test]
