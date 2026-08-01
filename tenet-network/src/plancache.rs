@@ -25,7 +25,7 @@
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use lru::LruCache;
@@ -72,6 +72,15 @@ struct CacheEntry {
     dims_snapshot: Vec<Vec<usize>>,
 }
 
+impl Drop for CacheEntry {
+    fn drop(&mut self) {
+        // Why: an executing CachedPlan can outlive map eviction/clear. Marking
+        // its pools inactive makes those late lease returns quarantine their
+        // buffers instead of repopulating an orphaned cache entry.
+        self.workspaces.deactivate_all();
+    }
+}
+
 #[derive(Default)]
 struct WorkspacePoolCounters {
     created: AtomicU64,
@@ -80,25 +89,48 @@ struct WorkspacePoolCounters {
     idle: AtomicU64,
 }
 
-#[derive(Default)]
 struct WorkspacePools {
-    pools: Mutex<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
+    pools: Mutex<LruCache<TypeId, Arc<dyn ErasedWorkspacePool>>>,
     counters: Arc<WorkspacePoolCounters>,
 }
 
 struct WorkspacePool<R: FusionRule, D> {
     available: Mutex<Vec<NetworkExecutionWorkspace<R, D>>>,
     counters: Arc<WorkspacePoolCounters>,
+    registered: AtomicBool,
 }
 
 const MAX_IDLE_WORKSPACES_PER_PLAN: usize = 2;
+// Empty typed pool shells have no reuse value beyond the plan-wide number of
+// buffers that can remain idle, so the same bound caps the TypeId registry.
+
+trait ErasedWorkspacePool: Any + Send + Sync {
+    fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync>;
+    fn deactivate(&self);
+}
 
 struct WorkspaceLease<R: FusionRule, D> {
     pool: Arc<WorkspacePool<R, D>>,
     workspace: Option<NetworkExecutionWorkspace<R, D>>,
 }
 
+impl Default for WorkspacePools {
+    fn default() -> Self {
+        Self {
+            pools: Mutex::new(LruCache::new(lru_capacity(MAX_IDLE_WORKSPACES_PER_PLAN))),
+            counters: Arc::new(WorkspacePoolCounters::default()),
+        }
+    }
+}
+
 impl WorkspacePools {
+    fn deactivate_all(&self) {
+        let mut pools = self.pools.lock().expect("network pool registry poisoned");
+        while let Some((_, pool)) = pools.pop_lru() {
+            pool.deactivate();
+        }
+    }
+
     fn host_pool<R, D>(&self) -> Arc<WorkspacePool<R, D>>
     where
         R: FusionRule + Send + Sync,
@@ -108,29 +140,61 @@ impl WorkspacePools {
         let mut pools = self.pools.lock().expect("network pool registry poisoned");
         if let Some(pool) = pools.get(&key) {
             return Arc::clone(pool)
+                .as_any_arc()
                 .downcast::<WorkspacePool<R, D>>()
                 .expect("workspace TypeId mapped to the wrong pool type");
         }
         let pool = Arc::new(WorkspacePool {
             available: Mutex::new(Vec::new()),
             counters: Arc::clone(&self.counters),
+            registered: AtomicBool::new(true),
         });
-        pools.insert(key, Arc::clone(&pool) as Arc<dyn Any + Send + Sync>);
+        if let Some((_, evicted)) =
+            pools.push(key, Arc::clone(&pool) as Arc<dyn ErasedWorkspacePool>)
+        {
+            evicted.deactivate();
+        }
         pool
+    }
+}
+
+impl<R, D> ErasedWorkspacePool for WorkspacePool<R, D>
+where
+    R: FusionRule + Send + Sync,
+    D: Send + Sync + 'static,
+{
+    fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+        self
+    }
+
+    fn deactivate(&self) {
+        self.registered.store(false, Ordering::SeqCst);
+        let mut available = self
+            .available
+            .lock()
+            .expect("network workspace pool poisoned");
+        let removed = available.len() as u64;
+        available.clear();
+        self.counters.idle.fetch_sub(removed, Ordering::SeqCst);
     }
 }
 
 impl<R: FusionRule, D> WorkspacePool<R, D> {
     fn lease(self: &Arc<Self>) -> WorkspaceLease<R, D> {
-        let workspace = self
-            .available
-            .lock()
-            .expect("network workspace pool poisoned")
-            .pop();
+        let workspace = {
+            let mut available = self
+                .available
+                .lock()
+                .expect("network workspace pool poisoned");
+            let workspace = available.pop();
+            if workspace.is_some() {
+                self.counters.idle.fetch_sub(1, Ordering::SeqCst);
+            }
+            workspace
+        };
         let workspace = match workspace {
             Some(workspace) => {
                 self.counters.reused.fetch_add(1, Ordering::Relaxed);
-                self.counters.idle.fetch_sub(1, Ordering::Relaxed);
                 workspace
             }
             None => {
@@ -167,9 +231,19 @@ impl<R: FusionRule, D> Drop for WorkspaceLease<R, D> {
                 .available
                 .lock()
                 .expect("network workspace pool poisoned");
-            if available.len() < MAX_IDLE_WORKSPACES_PER_PLAN {
+            if !self.pool.registered.load(Ordering::SeqCst) {
+                return;
+            }
+            let reserved = self
+                .pool
+                .counters
+                .idle
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |idle| {
+                    (idle < MAX_IDLE_WORKSPACES_PER_PLAN as u64).then_some(idle + 1)
+                })
+                .is_ok();
+            if reserved {
                 available.push(workspace);
-                self.pool.counters.idle.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -360,6 +434,7 @@ pub fn plan_cache_config(runtime: &Runtime) -> PlanCacheConfig {
 }
 
 /// Hit/miss/re-plan counters and the current entry count.
+#[allow(deprecated)]
 pub fn plan_cache_stats(runtime: &Runtime) -> PlanCacheStats {
     runtime.with_extension_slot(|slot| {
         let cache = cache_mut(slot);
@@ -389,6 +464,7 @@ pub fn plan_cache_stats(runtime: &Runtime) -> PlanCacheStats {
             workspace_slot_grows,
             topology_materializations: cache.topology_materializations,
             idle_workspaces,
+            dynamic_aliases: 0,
         }
     })
 }
@@ -783,6 +859,7 @@ pub(crate) fn get_or_plan_static<R, D, S>(
     tensors: &[&TensorMap<R, D, S>],
     codomain_ranks: &[usize],
     optimizer: &Optimizer,
+    validate_plan: impl Fn(&PlannedNetwork) -> Result<(), Error>,
     make_network: impl FnOnce() -> Result<Network, Error>,
 ) -> Result<CachedPlan, Error>
 where
@@ -807,7 +884,7 @@ where
             return Ok(Lookup::Disabled);
         }
         let cache = cache_mut(slot);
-        let Some(aliases) = cache.static_aliases.get(&key) else {
+        let Some(aliases) = cache.static_aliases.peek(&key) else {
             return Ok(Lookup::Miss);
         };
         let Some(alias) = aliases
@@ -822,7 +899,9 @@ where
         let Some(cached) = alias.cached() else {
             return Ok(Lookup::Miss);
         };
+        validate_plan(&cached.planned)?;
         let topology = alias.topology.clone();
+        cache.static_aliases.promote(&key);
         Ok(match promote_if_resident(cache, &topology, cached) {
             Some(cached) => Lookup::Hit(cached),
             None => Lookup::Miss,
@@ -834,12 +913,13 @@ where
 
     let network = make_network()?;
     if matches!(lookup, Lookup::Disabled) {
+        let planned = Arc::new(plan_fresh(&network, tensors, optimizer)?);
+        validate_plan(&planned)?;
         return Ok(CachedPlan {
-            planned: Arc::new(plan_fresh(&network, tensors, optimizer)?),
+            planned,
             workspaces: Arc::new(WorkspacePools::default()),
         });
     }
-    runtime.with_extension_slot(|slot| cache_mut(slot).topology_materializations += 1);
 
     let dims: Vec<Vec<usize>> = tensors
         .iter()
@@ -853,25 +933,26 @@ where
         Replan,
         Miss,
     }
-    let outcome = runtime.with_plan_cache(|config, slot| {
+    let outcome = runtime.with_plan_cache(|config, slot| -> Result<Outcome, Error> {
         let cache = cache_mut(slot);
         // `peek` inspects without touching LRU order, so a stale entry that will
         // be replanned does not count as a use; a genuine hit is promoted to
         // most-recently-used with an O(1) `promote`.
         match cache.map.peek(&topology) {
             Some(entry) if !needs_replan(config.replan, &entry.dims_snapshot, &dims) => {
+                validate_plan(&entry.planned)?;
                 let planned = CachedPlan {
                     planned: Arc::clone(&entry.planned),
                     workspaces: Arc::clone(&entry.workspaces),
                 };
                 cache.hits += 1;
                 cache.map.promote(&topology);
-                Outcome::Hit(planned)
+                Ok(Outcome::Hit(planned))
             }
-            Some(_) => Outcome::Replan,
-            None => Outcome::Miss,
+            Some(_) => Ok(Outcome::Replan),
+            None => Ok(Outcome::Miss),
         }
-    });
+    })?;
     if let Outcome::Hit(planned) = outcome.clone() {
         runtime.with_plan_cache(|config, slot| {
             install_static_alias(
@@ -902,8 +983,8 @@ where
             .then(|| cache.disk.get(&topo_key).cloned())
             .flatten()
     });
-    let planned = match disk_plan {
-        Some(plan) => Arc::new(network.plan_with(tensors, plan)?),
+    let (planned, fresh_plan_copy) = match disk_plan {
+        Some(plan) => (Arc::new(network.plan_with(tensors, plan)?), None),
         None => {
             let fresh = Arc::new(plan_fresh(&network, tensors, optimizer)?);
             // Record the freshly searched order so a later process reusing
@@ -911,26 +992,19 @@ where
             // only when searched at non-degenerate dims. A degenerate seed
             // (dim ≤ 1) yields the outer-product-heavy order `BakeOnce` exists
             // to reject; persisting it would replay that bad order on reuse.
-            if !snapshot_is_degenerate(&dims) {
-                let plan_copy = fresh.plan().clone();
-                runtime.with_extension_slot(|slot| {
-                    let cache = cache_mut(slot);
-                    if cache.persist {
-                        cache.disk.insert(topo_key, plan_copy);
-                    }
-                });
-            }
-            fresh
+            let plan_copy = (!snapshot_is_degenerate(&dims)).then(|| fresh.plan().clone());
+            (fresh, plan_copy)
         }
     };
+    validate_plan(&planned)?;
     let candidate = CachedPlan {
         planned,
         workspaces: Arc::new(WorkspacePools::default()),
     };
-    let winner = runtime.with_plan_cache(|config, slot| {
+    let winner = runtime.with_plan_cache(|config, slot| -> Result<CachedPlan, Error> {
         let cache = cache_mut(slot);
         if !config.enabled {
-            return candidate.clone();
+            return Ok(candidate.clone());
         }
         let capacity = lru_capacity(config.capacity);
         if cache.map.cap() != capacity {
@@ -938,6 +1012,7 @@ where
         }
         let cached = match cache.map.peek(&topology) {
             Some(entry) if !needs_replan(config.replan, &entry.dims_snapshot, &dims) => {
+                validate_plan(&entry.planned)?;
                 cache.hits += 1;
                 CachedPlan {
                     planned: Arc::clone(&entry.planned),
@@ -945,6 +1020,12 @@ where
                 }
             }
             _ => {
+                cache.topology_materializations += 1;
+                if cache.persist {
+                    if let Some(plan_copy) = &fresh_plan_copy {
+                        cache.disk.insert(topo_key.clone(), plan_copy.clone());
+                    }
+                }
                 match outcome {
                     Outcome::Replan => cache.replans += 1,
                     _ => cache.misses += 1,
@@ -971,15 +1052,17 @@ where
             &cached,
             capacity,
         );
-        cached
-    });
+        Ok(cached)
+    })?;
     Ok(winner)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{needs_replan, ReplanPolicy, WorkspacePools};
-    use tenet::core::U1FusionRule;
+    use std::sync::atomic::Ordering;
+    use tenet::core::{SU2FusionRule, U1FusionRule};
+    use tenet::prelude::Complex64;
 
     #[test]
     fn replan_policy_matches_dimension_drift_semantics() {
@@ -1022,5 +1105,29 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             2
         );
+    }
+
+    #[test]
+    fn active_lease_return_after_typed_pool_eviction_is_not_retained() {
+        let pools = WorkspacePools::default();
+        let first = pools.host_pool::<U1FusionRule, f64>();
+        let lease = first.lease();
+        drop(pools.host_pool::<U1FusionRule, Complex64>());
+        drop(pools.host_pool::<SU2FusionRule, f64>());
+        assert!(!first.registered.load(Ordering::SeqCst));
+        drop(lease);
+        assert!(first.available.lock().unwrap().is_empty());
+        assert_eq!(pools.counters.idle.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn active_lease_return_after_plan_clear_is_not_retained() {
+        let pools = WorkspacePools::default();
+        let pool = pools.host_pool::<U1FusionRule, f64>();
+        let lease = pool.lease();
+        pools.deactivate_all();
+        drop(lease);
+        assert!(pool.available.lock().unwrap().is_empty());
+        assert_eq!(pools.counters.idle.load(Ordering::SeqCst), 0);
     }
 }

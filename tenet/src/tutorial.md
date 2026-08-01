@@ -2,8 +2,9 @@
 
 Everyday TeNeT code uses the **user layer**: one `use tenet::prelude::*;`
 import gives [`prelude::Runtime`], [`prelude::Space`], [`prelude::Tensor`],
-and [`prelude::Truncation`]; the `tensor!` macro (from the `tenet-network`
-crate) is the contraction frontend. The expert layers ([`core`],
+and [`prelude::Truncation`]. The provider-typed sibling [`typed::TensorMap`]
+adds the `tensor!` contraction frontend from the `tenet-network` crate; erased
+[`prelude::Tensor`] values use their explicit contraction methods. The expert layers ([`core`],
 [`operations`], [`dense`], [`matrixalgebra`]) stay available underneath —
 see the appendix at the end.
 
@@ -130,10 +131,11 @@ domain leg built from the same `v`. To contract two same-side legs
 See [`mathematics`] for the full tensor-map convention, dual, same-side
 contraction, and TensorKit-style `flip` conventions.
 
-Space or rule mismatches are **runtime** typed errors ([`prelude::Error`]:
+Space or rule mismatches in the erased facade are **runtime** typed errors ([`prelude::Error`]:
 `RuleMismatch`, `RuntimeMismatch`, `InvalidArgument`, or a bubbled-up
-expert-layer error). Label mistakes inside `tensor!` (dangling or repeated
-labels) are **compile-time** errors.
+expert-layer error). A `tensor!` invocation instead requires homogeneous
+provider, scalar, and storage types; those mismatches and label mistakes
+(dangling or repeated labels) are **compile-time** errors.
 
 ```rust
 use tenet::prelude::*;
@@ -167,9 +169,10 @@ assert!(matches!(a.compose(&c), Err(Error::RuntimeMismatch)));
 ### `tensor!` — the way to contract
 
 The `tensor!` macro (crate `tenet-network`) is @tensor-style index
-notation. The output signature comes first: `[codomain; domain]`; the `;`
+notation over homogeneous [`typed::TensorMap`] operands. The output signature
+comes first: `[codomain; domain]`; the `;`
 is optional (`[a, b]` = all-codomain output) and `[]` is a rank-0 (scalar)
-output, read out with [`prelude::Tensor::scalar`]. `conj(x)` marks an
+output, read out with [`typed::TensorMap::scalar`]. `conj(x)` marks an
 adjoint operand. A label appearing on two operands is contracted; a label
 appearing once must be listed in the output — violations are compile
 errors. With three or more operands the pairwise order is chosen
@@ -215,20 +218,27 @@ automatically by a greedy planner. There are no einsum strings anywhere.
 </div>
 
 ```rust
-use tenet::prelude::*;
+use std::sync::Arc;
+use tenet::core::{U1FusionRule, U1Irrep};
+use tenet::prelude::Error;
+use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use tenet_network::tensor;
 
 let rt = Runtime::builder().build()?;
-let v = Space::u1([(-1, 1), (0, 2), (1, 1)]);
-let a = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v, &v])?;
-let b = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v, &v])?;
+let v = GradedSpace::try_new(
+    Arc::new(U1FusionRule),
+    [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
+    false,
+)?;
+let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v, &v], [&v, &v], 1)?;
+let b = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v, &v], [&v, &v], 2)?;
 
 // Pairwise contraction with an explicit output signature.
 let c = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n])?;
 assert_eq!((c.codomain_rank(), c.domain_rank()), (2, 2));
 
 // conj() + rank-0 output computes the weighted self inner product.
-let n2 = tensor!([] = conj(a)[i, j; k, l] * a[i, j; k, l])?.scalar()?.try_f64()?;
+let n2 = tensor!([] = conj(a)[i, j; k, l] * a[i, j; k, l])?.scalar()?;
 let norm = a.norm()?;
 assert!((n2 - norm * norm).abs() <= 1e-10 * (1.0 + norm * norm));
 
@@ -237,9 +247,9 @@ let p = tensor!([j, i; m, n] = c[i, j; m, n])?;
 assert_eq!(p.rank(), 4);
 
 // N-ary: an energy contraction; greedy planning picks the order.
-let psi = Tensor::rand(&rt, Dtype::F64, [&v], [&v, &v])?;
-let h = Tensor::rand(&rt, Dtype::F64, [&v], [&v])?;
-let e = tensor!([] = conj(psi)[p; l, r] * h[p; q] * psi[q; l, r])?.scalar()?.try_f64()?;
+let psi = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v], [&v, &v], 3)?;
+let h = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v], [&v], 4)?;
+let e = tensor!([] = conj(psi)[p; l, r] * h[p; q] * psi[q; l, r])?.scalar()?;
 assert!(e.is_finite());
 # Ok::<(), Error>(())
 ```
@@ -248,10 +258,15 @@ Label errors do not survive to runtime — this does not compile because `k`
 and `j` each appear once without being output labels:
 
 ```rust,compile_fail
-use tenet::prelude::*;
+use tenet::core::U1FusionRule;
+use tenet::prelude::Error;
+use tenet::typed::TensorMap;
 use tenet_network::tensor;
 
-fn wrong(a: &Tensor, b: &Tensor) -> Result<Tensor, Error> {
+fn wrong(
+    a: &TensorMap<U1FusionRule, f64>,
+    b: &TensorMap<U1FusionRule, f64>,
+) -> Result<TensorMap<U1FusionRule, f64>, Error> {
     tensor!([i; m] = a[i; k] * b[j; m])
 }
 ```
@@ -262,22 +277,21 @@ see the tensor's shape.
 
 ### The method API underneath
 
-`tensor!` lowers to pairwise steps over the explicit method API, which is
+`tensor!` lowers to pairwise steps over the typed explicit method API, which is
 available directly when you want to spell the axes:
 
-- [`prelude::Tensor::compose`] — categorical composition (TensorKit
+- [`typed::TensorMap::compose`] — categorical composition (TensorKit
   `A * B` / `mul!`), also spelled `&a * &b`. **No** fermionic supertrace
   twist on dual composed legs.
-- [`prelude::Tensor::contract`] — contract arbitrary axis pairs (TensorKit
+- [`typed::TensorMap::contract`] — contract arbitrary axis pairs (TensorKit
   `tensorcontract!`); output is `a`'s open axes (ascending) as codomain,
   `b`'s open axes as domain. Like `tensor!`, this **twists** dual
   contracted legs on fermionic rules — bosonic results are identical to
-  `compose`, fermionic ones can differ by signs; see the fermionic note on
-  [`prelude::Tensor::compose`].
-- [`prelude::Tensor::contract_ordered`] — same with an explicit output
+  `compose`, fermionic ones can differ by signs.
+- [`typed::TensorMap::contract_ordered`] — same with an explicit output
   axis order (TensorKit's `pAB`).
-- [`prelude::Tensor::permute`] / [`prelude::Tensor::braid`] /
-  [`prelude::Tensor::transpose`] — TensorKit's leg re-arrangements
+- [`typed::TensorMap::permute`] / [`typed::TensorMap::braid`] /
+  [`typed::TensorMap::transpose`] — TensorKit's leg re-arrangements
   (symmetric braiding / explicit braid levels / planar transpose).
 - [`prelude::Tensor::adjoint`] — dagger: swaps codomain and domain.
 
@@ -536,7 +550,7 @@ assert_eq!(vecs.dtype(), Dtype::F64);
 ```
 
 To split a tensor along a different bipartition than its current
-codomain | domain split, `permute` (or a single-operand `tensor!`) first —
+codomain | domain split, `permute` first —
 that is exactly what the next section does.
 
 For the QR path, the compact factor obeys the usual isometry relation:
@@ -600,23 +614,34 @@ bond back with `svd_trunc`.
 </div>
 
 ```rust
-use tenet::prelude::*;
+use std::sync::Arc;
+use tenet::core::{U1FusionRule, U1Irrep};
+use tenet::prelude::{Error, Truncation};
+use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use tenet_network::tensor;
 
 let rt = Runtime::builder().build()?;
 
 // Physical leg: spin-1/2 with U(1) Sz charges +-1. Virtual bond legs.
-let p = Space::u1([(-1, 1), (1, 1)]);
-let v = Space::u1([(-1, 1), (0, 2), (1, 1)]);
+let p = GradedSpace::try_new(
+    Arc::new(U1FusionRule),
+    [(-1, 1), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
+    false,
+)?;
+let v = GradedSpace::try_new(
+    Arc::new(U1FusionRule),
+    [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
+    false,
+)?;
 
 // Two-site wavefunction with two physical and two virtual legs.
-let psi = Tensor::rand(&rt, Dtype::F64, [&p, &p], [&v, &v])?;
+let psi = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&p, &p], [&v, &v], 10)?;
 
 // Hermitian two-site Hamiltonian and the imaginary-time gate.
-let h0 = Tensor::rand(&rt, Dtype::F64, [&p, &p], [&p, &p])?;
+let h0 = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&p, &p], [&p, &p], 11)?;
 let h = h0.add(&h0.adjoint()?, 0.5, 0.5)?;
 let tau = 0.05;
-let gate = h.scale(-tau)?.exp()?;
+let gate = h.scale(-tau).exp()?;
 
 // Apply the gate and regroup (site 1 + left bond | site 2 + right bond).
 let theta = tensor!([a, l; b, r] = gate[a, b; p, q] * psi[p, q; l, r])?;
@@ -664,7 +689,8 @@ The user layer is a thin, rule-erased face over four expert modules:
   require a direct `tenet-matrixalgebra` dependency.
 - `tenet-network` (separate crate) — the `tensor!` macro, the label
   planner (`NetworkIR`, greedy and optional `opt-einsum-path`
-  optimizers, slicing types), and the pairwise executor over `Tensor`.
+  optimizers, slicing types), and the pairwise executor over homogeneous
+  [`typed::TensorMap`] operands.
 
 Storage is column-major inside each dense block; symmetric tensors use the
 TensorKit-equivalent **coupled-sector matrix layout** ([`prelude::Tensor::data`]
@@ -715,7 +741,7 @@ for broader unstable dynamic workflows.
 | `TensorMap` | [`prelude::Tensor`] | [`core::TensorMap`], [`operations::DynamicFusionMapSpace`] + flat data |
 | `U1Space(-1 => 2, ...)`, `Vect[...]` | [`prelude::Space`] (`u1`/`z2`/`fz2`/`su2`/`product`) | [`core::SectorLeg`] + per-sector degeneracies |
 | `V'` (dual space) | [`prelude::Space::dual`] | dual flag + dualized sectors on [`core::SectorLeg`] |
-| `@tensor` | `tensor!` (crate `tenet-network`) | planner IR -> pairwise [`operations::tensorcontract_fusion_into`] |
+| `@tensor` | `tensor!` over [`typed::TensorMap`] (crate `tenet-network`) | planner IR -> pairwise [`operations::tensorcontract_fusion_into`] |
 | `permute` / `braid` / `transpose` | [`prelude::Tensor`] methods of the same names | [`operations::permute_into`] / `braid_into` / `transpose_into` |
 | SVD / QR / LQ / orthogonalization / eigensolvers | [`prelude::Tensor`] methods with the TensorKit 0.17 names | curated [`matrixalgebra::svd_compact`] typed workflow; broader unstable APIs are in `tenet-matrixalgebra` |
 | `dot` / `norm` / `axpby` | [`prelude::Tensor::inner`] / `norm` / `add` / `scale` | weighted block inner products |
@@ -772,9 +798,9 @@ assert!(a.runtime().shares_state_with(&rt));
 
 **Performance notes.** The hot loop wants a shared, reused `Runtime`: the plan
 cache amortizes order search, and the per-rule recoupling/structure caches warm
-up on first use and stay warm. Prefer `compose` / the `tensor!` macro over
-hand-spelling `contract` axis lists when the categorical composition is what you
-mean (it can skip the fermionic twist). Truncated factorizations are
+up on first use and stay warm. For typed workloads, prefer `compose` or
+`tensor!` over hand-spelling `contract` axis lists when the categorical
+composition is what you mean (`compose` can skip the fermionic twist). Truncated factorizations are
 quantum-dimension weighted, so a `Rank(n)` budget bounds the *weighted* bond
 dimension — size budgets against `Space::dim`, not raw sector counts.
 
@@ -791,8 +817,8 @@ Honest list, as of this writing:
 - **No hyperedge/batch labels in `tensor!`** (a label appearing three or
   more times is a compile error). Partial traces (`a[i, i; j]`) and full
   traces are supported.
-- **No automatic dtype promotion**: mixing `f64` and `c64` operands is a
-  typed error; widen explicitly with `to_c64()`.
+- **No automatic dtype promotion**: mixing `f64` and `c64` operands in
+  `tensor!` is rejected at compile time; widen explicitly with `to_c64()`.
 - **Memory-bounded slicing is planned but not executable yet**: the
   slicing planner IR is ported, the sliced executor over symmetric legs
   is future work (sector-granular slicing).

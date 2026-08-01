@@ -35,6 +35,10 @@ fn typed_static_cache_preserves_hit_clear_and_workspace_stats() {
     assert_eq!(cold.topology_materializations, 1);
     assert_eq!(cold.workspaces_created, 1);
     assert_eq!(cold.idle_workspaces, 1);
+    #[allow(deprecated)]
+    {
+        assert_eq!(cold.dynamic_aliases, 0);
+    }
 
     let second = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
     let warm = plan_cache_stats(&runtime);
@@ -64,6 +68,24 @@ fn parked_host_workspace_releases_provider_and_rebinds_exact_current_arc() {
     let output = tensor!([i; k] = c[i; j] * d[j; k]).unwrap();
     assert!(std::ptr::eq(output.provider(), current_provider.as_ref()));
     assert_eq!(plan_cache_stats(&runtime).workspace_reuses, 1);
+}
+
+#[test]
+fn trace_lowering_and_cache_release_provider_authority() {
+    let runtime = Runtime::builder().build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let weak = Arc::downgrade(&provider);
+    let traced_space = space(Arc::clone(&provider), 2);
+    let tensor = TensorMap::<U1FusionRule, f64>::rand_with_seed(
+        &runtime,
+        [&traced_space],
+        [&traced_space],
+        35,
+    )
+    .unwrap();
+    drop(tensor!([] = tensor[i; i]).unwrap());
+    drop((tensor, traced_space, provider));
+    assert!(weak.upgrade().is_none());
 }
 
 #[test]
@@ -152,16 +174,21 @@ fn concurrent_macro_calls_share_one_plan_and_bound_idle_pool() {
     let runtime = Runtime::builder().build().unwrap();
     let space = space(Arc::new(U1FusionRule), 8);
     let (a, b) = pair(&runtime, &space, 90);
+    let expected = a.contract(&b, &[1], &[0], &[0, 1]).unwrap();
     let barrier = Arc::new(Barrier::new(8));
     std::thread::scope(|scope| {
+        let mut handles = Vec::new();
         for _ in 0..8 {
             let barrier = Arc::clone(&barrier);
             let a = &a;
             let b = &b;
-            scope.spawn(move || {
+            handles.push(scope.spawn(move || {
                 barrier.wait();
-                drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
-            });
+                tensor!([i; k] = a[i; j] * b[j; k]).unwrap()
+            }));
+        }
+        for handle in handles {
+            assert_eq!(handle.join().unwrap().data(), expected.data());
         }
     });
     let stats = plan_cache_stats(&runtime);

@@ -87,6 +87,43 @@ fn cuda_macro_rejects_trace_before_cache_or_execution() {
 
 #[test]
 #[ignore = "requires a real CUDA device"]
+fn noncanonical_cuda_macro_never_publishes_or_touches_cache_state() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let space =
+        GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)], false).unwrap();
+    let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&space], [&space], 748_091).unwrap();
+    let b = TensorMap::<_, f64>::rand_with_seed(&runtime, [&space], [&space], 748_092).unwrap();
+    let c = TensorMap::<_, f64>::rand_with_seed(&runtime, [&space], [&space], 748_093).unwrap();
+    let a_cuda = a.to_cuda().unwrap();
+    let b_cuda = b.to_cuda().unwrap();
+    let c_cuda = c.to_cuda().unwrap();
+
+    let empty = plan_cache_stats(&runtime);
+    for _ in 0..2 {
+        let error = tensor!([c; d] = a_cuda[a; b] * b_cuda[b; c] * c_cuda[a; d]).unwrap_err();
+        assert!(matches!(
+            error,
+            tenet::prelude::Error::UnsupportedOnDevice(_)
+        ));
+        assert_eq!(plan_cache_stats(&runtime), empty);
+    }
+
+    // Publish the same structural plan from Host. CUDA must validate the
+    // cached plan before alias/LRU promotion or hit-counter mutation.
+    drop(tensor!([c; d] = a[a; b] * b[b; c] * c[a; d]).unwrap());
+    let preseeded = plan_cache_stats(&runtime);
+    for _ in 0..2 {
+        let error = tensor!([c; d] = a_cuda[a; b] * b_cuda[b; c] * c_cuda[a; d]).unwrap_err();
+        assert!(matches!(
+            error,
+            tenet::prelude::Error::UnsupportedOnDevice(_)
+        ));
+        assert_eq!(plan_cache_stats(&runtime), preseeded);
+    }
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
 fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
     let u1 = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)], false).unwrap();

@@ -1,6 +1,6 @@
 //! `tensor!` — @tensor-style index-notation contraction for TeNeT.
 //!
-//! Expression form (returns `Result<Tensor, Error>`):
+//! Expression form (returns `Result<TensorMap<R, D, S>, Error>`):
 //!
 //! ```text
 //! let c = tensor!([a, b; g, h] = x[a, b; i, j] * y[i, j; g, h])?;
@@ -12,7 +12,7 @@
 //! - RHS terms are `expr[labels]` products; `expr` is an identifier, a
 //!   field-access chain (`svd.u`, `pair.0`), a parenthesized expression, or
 //!   `conj(expr)` marking an adjoint operand. Each `expr` must evaluate to
-//!   a `Tensor` or `&Tensor`.
+//!   a homogeneous provider-typed `TensorMap<R, D, S>` or a borrow of one.
 //! - A label appearing on two operands is contracted; a label appearing
 //!   twice on ONE operand is a partial trace of that operand (TensorKit
 //!   `@tensor a[i, i; j]`); a label appearing once must be listed in the
@@ -201,8 +201,9 @@ fn check_labels(inputs: &[Vec<String>], output: &[String]) -> Result<(), String>
     Ok(())
 }
 
-/// @tensor-style contraction over TeNeT user-layer tensors; see the crate
-/// docs for the syntax. Evaluates to `Result<Tensor, tenet::prelude::Error>`.
+/// @tensor-style contraction over homogeneous provider-typed TeNeT tensors;
+/// see the crate docs for the syntax. Evaluates to
+/// `Result<TensorMap<R, D, S>, tenet::prelude::Error>`.
 #[proc_macro]
 pub fn tensor(input: TokenStream) -> TokenStream {
     let parsed = syn::parse_macro_input!(input as TensorExpr);

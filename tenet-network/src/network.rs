@@ -227,12 +227,24 @@ impl Network {
             self.output_codomain_rank,
             &lowered_codomain_ranks,
         )?;
+        #[cfg(feature = "cuda")]
+        let cuda_direct = cuda_schedule_is_direct(
+            &schedule,
+            &schedule
+                .input_ranks
+                .iter()
+                .copied()
+                .zip(lowered_codomain_ranks.iter().copied())
+                .collect::<Vec<_>>(),
+        );
         Ok(PlannedNetwork {
             owner_token: NEXT_PLAN_OWNER_TOKEN.fetch_add(1, Ordering::Relaxed),
             plan,
             conj: self.conj.clone(),
             input_codomain_ranks,
             schedule,
+            #[cfg(feature = "cuda")]
+            cuda_direct,
         })
     }
 
@@ -450,6 +462,8 @@ pub struct PlannedNetwork {
     conj: Vec<bool>,
     input_codomain_ranks: Vec<usize>,
     schedule: CompiledSchedule,
+    #[cfg(feature = "cuda")]
+    cuda_direct: bool,
 }
 
 struct CompiledSchedule {
@@ -639,6 +653,17 @@ impl PlannedNetwork {
         &self.plan
     }
 
+    /// Pure, allocation-free validation used before a CUDA macro call may
+    /// observe or publish plan-cache state.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn validate_cuda_plan_structure(&self) -> Result<(), Error> {
+        if self.cuda_direct {
+            Ok(())
+        } else {
+            Err(unsupported_cuda_network())
+        }
+    }
+
     /// Executes a schedule expressible entirely by the canonical returning CUDA kernel.
     /// The complete schedule is preflighted before any output allocation or kernel;
     /// unsupported layouts fail without a Host fallback or transfer.
@@ -741,40 +766,46 @@ impl PlannedNetwork {
 
     #[cfg(feature = "cuda")]
     fn preflight_cuda_schedule(&self, input_shapes: &[(usize, usize)]) -> Result<(), Error> {
-        let mut shapes = vec![None; self.schedule.slot_count];
-        for (index, &shape) in input_shapes.iter().enumerate() {
-            shapes[index] = Some(shape);
+        if cuda_schedule_is_direct(&self.schedule, input_shapes) {
+            Ok(())
+        } else {
+            Err(unsupported_cuda_network())
         }
-        for step in &self.schedule.steps {
-            let (lhs_rank, lhs_codomain_rank) = shapes[step.lhs_slot]
-                .take()
-                .ok_or_else(|| invalid("lhs shape already consumed"))?;
-            let (rhs_rank, rhs_codomain_rank) = shapes[step.rhs_slot]
-                .take()
-                .ok_or_else(|| invalid("rhs shape already consumed"))?;
-            let result_rank = lhs_codomain_rank + rhs_rank - rhs_codomain_rank;
-            if !step
-                .lhs_contract_axes
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_schedule_is_direct(schedule: &CompiledSchedule, input_shapes: &[(usize, usize)]) -> bool {
+    let mut shapes = vec![None; schedule.slot_count];
+    for (index, &shape) in input_shapes.iter().enumerate() {
+        shapes[index] = Some(shape);
+    }
+    for step in &schedule.steps {
+        let Some((lhs_rank, lhs_codomain_rank)) = shapes[step.lhs_slot].take() else {
+            return false;
+        };
+        let Some((rhs_rank, rhs_codomain_rank)) = shapes[step.rhs_slot].take() else {
+            return false;
+        };
+        let result_rank = lhs_codomain_rank + rhs_rank - rhs_codomain_rank;
+        if !step
+            .lhs_contract_axes
+            .iter()
+            .copied()
+            .eq(lhs_codomain_rank..lhs_rank)
+            || !step
+                .rhs_contract_axes
                 .iter()
                 .copied()
-                .eq(lhs_codomain_rank..lhs_rank)
-                || !step
-                    .rhs_contract_axes
-                    .iter()
-                    .copied()
-                    .eq(0..rhs_codomain_rank)
-                || !step.contract_output_axes.iter().copied().eq(0..result_rank)
-                || step.result_permutation.is_some()
-            {
-                return Err(unsupported_cuda_network());
-            }
-            shapes[step.result_slot] = Some((result_rank, lhs_codomain_rank));
+                .eq(0..rhs_codomain_rank)
+            || !step.contract_output_axes.iter().copied().eq(0..result_rank)
+            || step.result_permutation.is_some()
+        {
+            return false;
         }
-        if self.schedule.final_permutation.is_some() {
-            return Err(unsupported_cuda_network());
-        }
-        Ok(())
+        shapes[step.result_slot] = Some((result_rank, lhs_codomain_rank));
     }
+    schedule.final_permutation.is_none()
 }
 
 impl PlannedNetwork {
@@ -1346,6 +1377,72 @@ mod static_operand_sealed {
 }
 
 /// Closed dispatch surface used by the `tensor!` expansion.
+///
+/// Every operand in one invocation must have the same provider, scalar, and
+/// supported storage type. These mismatches are rejected by Rust before a
+/// network can be planned or executed:
+///
+/// ```compile_fail
+/// use tenet::core::{SU2FusionRule, U1FusionRule};
+/// use tenet::typed::TensorMap;
+/// use tenet_network::tensor;
+///
+/// fn mixed_provider(
+///     a: &TensorMap<U1FusionRule, f64>,
+///     b: &TensorMap<SU2FusionRule, f64>,
+/// ) {
+///     let _ = tensor!([i; k] = a[i; j] * b[j; k]);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use tenet::core::U1FusionRule;
+/// use tenet::prelude::Complex64;
+/// use tenet::typed::TensorMap;
+/// use tenet_network::tensor;
+///
+/// fn mixed_scalar(
+///     a: &TensorMap<U1FusionRule, f64>,
+///     b: &TensorMap<U1FusionRule, Complex64>,
+/// ) {
+///     let _ = tensor!([i; k] = a[i; j] * b[j; k]);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use tenet::core::{Placement, TensorStorage, U1FusionRule};
+/// use tenet::typed::TensorMap;
+/// use tenet_network::tensor;
+///
+/// struct DeviceStorage;
+/// impl TensorStorage<f64> for DeviceStorage {
+///     fn len(&self) -> usize { 0 }
+///     fn placement(&self) -> Placement { Placement::Cuda(0) }
+/// }
+///
+/// fn mixed_storage(
+///     a: &TensorMap<U1FusionRule, f64>,
+///     b: &TensorMap<U1FusionRule, f64, DeviceStorage>,
+/// ) {
+///     let _ = tensor!([i; k] = a[i; j] * b[j; k]);
+/// }
+/// ```
+///
+/// Checked Generic providers remain outside this multiplicity-free dispatch
+/// surface:
+///
+/// ```compile_fail
+/// use tenet::core::Su3FusionRule;
+/// use tenet::typed::TensorMap;
+/// use tenet_network::tensor;
+///
+/// fn checked_generic(
+///     a: &TensorMap<Su3FusionRule, f64>,
+///     b: &TensorMap<Su3FusionRule, f64>,
+/// ) {
+///     let _ = tensor!([i; k] = a[i; j] * b[j; k]);
+/// }
+/// ```
 #[doc(hidden)]
 pub trait StaticNetworkOperand: static_operand_sealed::Sealed + Sized {
     fn contract_static(tensors: &[&Self], spec: &'static StaticTopologySpec)
@@ -1429,6 +1526,7 @@ where
                 tensors,
                 &codomain_ranks,
                 &optimizer,
+                |_| Ok(()),
                 || spec.network(),
             )?
             .execute_host(tensors);
@@ -1480,18 +1578,25 @@ where
             .zip(&lowered)
             .map(|(tensor, traced)| traced.as_ref().unwrap_or(tensor))
             .collect::<Vec<_>>();
-        crate::plancache::get_or_plan_static(spec, &reduced, &codomain_ranks, &optimizer, || {
-            Network::new(
-                inputs,
-                conj,
-                splits,
-                spec.output
-                    .iter()
-                    .map(|label| TemporaryLabel::from(*label))
-                    .collect(),
-                spec.output_codomain_rank,
-            )
-        })?
+        crate::plancache::get_or_plan_static(
+            spec,
+            &reduced,
+            &codomain_ranks,
+            &optimizer,
+            |_| Ok(()),
+            || {
+                Network::new(
+                    inputs,
+                    conj,
+                    splits,
+                    spec.output
+                        .iter()
+                        .map(|label| TemporaryLabel::from(*label))
+                        .collect(),
+                    spec.output_codomain_rank,
+                )
+            },
+        )?
         .execute_host(&reduced)
     }
 }
@@ -1535,9 +1640,14 @@ where
             .first()
             .map(|tensor| tensor.runtime().plan_cache_config().optimizer)
             .unwrap_or_default();
-        crate::plancache::get_or_plan_static(spec, tensors, &codomain_ranks, &optimizer, || {
-            spec.network()
-        })?
+        crate::plancache::get_or_plan_static(
+            spec,
+            tensors,
+            &codomain_ranks,
+            &optimizer,
+            PlannedNetwork::validate_cuda_plan_structure,
+            || spec.network(),
+        )?
         .execute_cuda(tensors)
     }
 }
@@ -1654,6 +1764,8 @@ mod typed_replay_tests {
             conj: vec![false; 3],
             input_codomain_ranks: vec![1; 3],
             schedule,
+            #[cfg(feature = "cuda")]
+            cuda_direct: false,
         }
     }
 

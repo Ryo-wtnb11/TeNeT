@@ -126,10 +126,31 @@ fn typed_host_macro_provider_dtype_matrix_matches_direct_contract() {
         stats.workspaces_created, 8,
         "each (provider, dtype) pair has its own downcast-safe Host pool"
     );
-    assert_eq!(
-        stats.idle_workspaces, 8,
-        "each one-shot typed workspace returns to its own pool"
+    assert!(
+        stats.idle_workspaces <= 2,
+        "the plan-wide idle budget is shared by all typed pools"
     );
+}
+
+#[test]
+fn typed_workspace_pool_registry_evicts_cold_types_and_recreates_them() {
+    let runtime = Runtime::builder().build().unwrap();
+    let u1 = u1_space();
+    assert_pair_case::<_, f64>(&runtime, &u1, 750_200);
+    assert_pair_case::<_, Complex64>(&runtime, &u1, 750_202);
+
+    let su2 = su2_space();
+    assert_pair_case::<_, f64>(&runtime, &su2, 750_210);
+
+    // The third typed pool evicts the first from the bounded registry. A later
+    // visit must create a fresh pool without growing the plan-wide idle budget.
+    assert_pair_case::<_, f64>(&runtime, &u1, 750_230);
+
+    let stats = plan_cache_stats(&runtime);
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.workspaces_created, 4);
+    assert_eq!(stats.workspace_reuses, 0);
+    assert!(stats.idle_workspaces <= 2);
 }
 
 #[test]
