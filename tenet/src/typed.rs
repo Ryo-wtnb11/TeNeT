@@ -224,7 +224,7 @@ use tenet_core::{
 };
 use tenet_tensors::{
     tree_transform_dyn_owned_checked_generic, BoundDynamicFusionMapSpace, BoundDynamicTensorRef,
-    DynamicFusionMapSpace, OutputAxisOrder, TreeTransformOperation,
+    DynamicFusionMapSpace, OutputAxisOrder, TensorContractSpec, TreeTransformOperation,
 };
 
 pub use tenet_core::SectorCodec;
@@ -3282,6 +3282,150 @@ where
             alpha,
         )?;
         Ok(())
+    }
+
+    /// Overwrites `destination` with
+    /// `alpha * self.contract(other, lhs_axes, rhs_axes, output_axes)` while
+    /// preserving the destination's provider, space, body, and dense Host
+    /// allocation.
+    ///
+    /// # Errors
+    ///
+    /// Admission failures through runtime-context leasing leave `destination`
+    /// unchanged. The destination is cleared immediately before shared-engine
+    /// compilation/replay, so a later engine error may leave it zeroed or
+    /// partially overwritten.
+    #[allow(clippy::too_many_arguments)]
+    pub fn contract_overwrite_into(
+        &self,
+        other: &Self,
+        destination: &mut Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+        alpha: D,
+    ) -> Result<(), Error> {
+        if !self.runtime.same_runtime(&other.runtime)
+            || !self.runtime.same_runtime(&destination.runtime)
+        {
+            return Err(Error::RuntimeMismatch);
+        }
+        let identity = TypedSectorAdmission::typed_rule_identity(self.provider());
+        if identity != TypedSectorAdmission::typed_rule_identity(other.provider())
+            || identity != TypedSectorAdmission::typed_rule_identity(destination.provider())
+        {
+            return Err(Error::RuleMismatch);
+        }
+
+        let destination_body = match &destination.repr {
+            TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Dense(_)) => {
+                body
+            }
+            _ => {
+                return Err(Error::InvalidArgument(
+                    "contraction destination must use ordinary dense host storage".to_string(),
+                ))
+            }
+        };
+        if Arc::ptr_eq(&destination_body.data, &self.storage_body().data)
+            || Arc::ptr_eq(&destination_body.data, &other.storage_body().data)
+        {
+            return Err(Error::InvalidArgument(
+                "destination storage must not alias an input".to_string(),
+            ));
+        }
+
+        let output_order = OutputAxisOrder::from_axes(output_axes);
+        let expected = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
+            self.logical_space(),
+            other.logical_space(),
+            lhs_axes,
+            rhs_axes,
+            output_order,
+        )?;
+        if destination_body.space.space() != expected.space() {
+            return Err(Error::InvalidArgument(
+                "destination fusion space or block layout does not match the contraction result"
+                    .to_string(),
+            ));
+        }
+        let execution_destination = self
+            .logical_space()
+            .rebind_validated(&destination_body.space.validated_layout())?;
+
+        let (lhs, lhs_data) = self.fusion_operand_and_data();
+        let (rhs, rhs_data) = other.fusion_operand_and_data();
+        let required_destination = destination_body.space.space().required_len()?;
+        let actual_destination = match destination_body.data.as_ref() {
+            TypedData::Dense(data) => data.len(),
+            TypedData::Diagonal(_) => unreachable!("dense destination checked above"),
+        };
+        for (tensor, actual, required) in [
+            ("lhs", lhs_data.len(), lhs.storage_space().required_len()?),
+            ("rhs", rhs_data.len(), rhs.storage_space().required_len()?),
+            ("destination", actual_destination, required_destination),
+        ] {
+            if actual != required {
+                return Err(Error::InvalidArgument(format!(
+                    "{tensor} storage length {actual} does not match required length {required}"
+                )));
+            }
+        }
+        if Arc::strong_count(destination_body) != 1
+            || Arc::strong_count(&destination_body.data) != 1
+        {
+            return Err(Error::InvalidArgument(
+                "destination storage must be uniquely owned".to_string(),
+            ));
+        }
+
+        let mut lease = self.runtime.lease_context()?;
+        let context = lease.context().multiplicity_free_lane::<D>();
+        let TypedTensorRepr::Owned(destination_body) = &mut destination.repr else {
+            unreachable!("ordinary destination checked above")
+        };
+        let destination_body =
+            Arc::get_mut(destination_body).expect("unique destination body checked above");
+        let destination_data = Arc::get_mut(&mut destination_body.data)
+            .expect("unique destination payload checked above");
+        let TypedData::Dense(destination_data) = destination_data else {
+            unreachable!("dense destination checked above")
+        };
+        let zero = D::from_real(0.0);
+        destination_data.fill(zero);
+        context.tensorcontract_fusion_dyn_prelowered_into(
+            &execution_destination,
+            destination_data,
+            lhs,
+            lhs_data,
+            rhs,
+            rhs_data,
+            TensorContractSpec::new_with_conjugation(
+                lhs_axes,
+                rhs_axes,
+                output_order,
+                lhs.storage_conjugate(),
+                rhs.storage_conjugate(),
+            ),
+            alpha,
+            zero,
+        )?;
+        Ok(())
+    }
+
+    /// Total alias of [`Self::contract_overwrite_into`].
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    pub fn contract_ordered_overwrite_into(
+        &self,
+        other: &Self,
+        destination: &mut Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+        alpha: D,
+    ) -> Result<(), Error> {
+        self.contract_overwrite_into(other, destination, lhs_axes, rhs_axes, output_axes, alpha)
     }
 }
 
@@ -7217,8 +7361,8 @@ mod representation_gates {
     use super::*;
     use tenet_core::{product_sector, ProductFusionRuleExt};
     use tenet_core::{
-        FermionParityFusionRule, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep, Z2FusionRule,
-        Z2Irrep, ZNFusionRule,
+        CU1FusionRule, CU1Irrep, FermionParityFusionRule, SU2FusionRule, SU2Irrep, U1FusionRule,
+        U1Irrep, Z2FusionRule, Z2Irrep, ZNFusionRule,
     };
     use tenet_dense::{
         DefaultDenseExecutor, DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseRead,
@@ -10906,6 +11050,72 @@ mod representation_gates {
         assert_eq!(destination.data().as_ptr(), storage);
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn assert_contract_overwrite_matches<R, D>(
+        label: &str,
+        lhs: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+        alpha: D,
+        ordered_alias: bool,
+    ) where
+        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+            + MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec,
+        D: TensorScalar + core::fmt::Debug,
+    {
+        let expected = lhs
+            .contract(rhs, lhs_axes, rhs_axes, output_axes)
+            .unwrap_or_else(|error| panic!("{label} returning oracle failed: {error:?}"));
+        let lhs_before = lhs.data().to_vec();
+        let rhs_before = rhs.data().to_vec();
+        let mut destination = expected.zeros_like();
+        poison_destination(&mut destination);
+        let provider = Arc::as_ptr(destination.logical_space().provider_arc());
+        let body = Arc::as_ptr(owned(&destination));
+        let space = destination.logical_space().space() as *const DynamicFusionMapSpace;
+        let storage = destination.data().as_ptr();
+
+        if ordered_alias {
+            lhs.contract_ordered_overwrite_into(
+                rhs,
+                &mut destination,
+                lhs_axes,
+                rhs_axes,
+                output_axes,
+                alpha,
+            )
+            .unwrap_or_else(|error| panic!("{label} ordered overwrite failed: {error:?}"));
+        } else {
+            lhs.contract_overwrite_into(
+                rhs,
+                &mut destination,
+                lhs_axes,
+                rhs_axes,
+                output_axes,
+                alpha,
+            )
+            .unwrap_or_else(|error| panic!("{label} overwrite failed: {error:?}"));
+        }
+
+        assert_eq!(destination.data(), expected.scale(alpha).data());
+        assert_eq!(lhs.data(), lhs_before);
+        assert_eq!(rhs.data(), rhs_before);
+        assert_eq!(
+            Arc::as_ptr(destination.logical_space().provider_arc()),
+            provider
+        );
+        assert_eq!(Arc::as_ptr(owned(&destination)), body);
+        assert_eq!(
+            destination.logical_space().space() as *const DynamicFusionMapSpace,
+            space
+        );
+        assert_eq!(destination.data().as_ptr(), storage);
+    }
+
     #[test]
     fn typed_tree_overwrite_matches_owned_provider_and_scalar_matrix() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -11045,6 +11255,30 @@ mod representation_gates {
 
     fn f64_bits<R>(tensor: &TensorMap<R, f64>) -> Vec<u64> {
         tensor.data().iter().map(|value| value.to_bits()).collect()
+    }
+
+    fn f64_destination_state<R>(tensor: &TensorMap<R, f64>) -> (Vec<u64>, [usize; 4]) {
+        (
+            f64_bits(tensor),
+            [
+                Arc::as_ptr(tensor.logical_space().provider_arc()) as usize,
+                Arc::as_ptr(owned(tensor)) as usize,
+                tensor.logical_space().space() as *const DynamicFusionMapSpace as usize,
+                tensor.data().as_ptr() as usize,
+            ],
+        )
+    }
+
+    fn pop_dense_element<R, D>(tensor: &mut TensorMap<R, D>) {
+        let TypedTensorRepr::Owned(body) = &mut tensor.repr else {
+            panic!("malformed-storage fixture must be owned")
+        };
+        let body = Arc::get_mut(body).expect("malformed-storage body must be unique");
+        let data = Arc::get_mut(&mut body.data).expect("malformed-storage payload must be unique");
+        let TypedData::Dense(data) = data else {
+            panic!("malformed-storage fixture must be dense")
+        };
+        data.pop();
     }
 
     #[test]
@@ -11267,6 +11501,491 @@ mod representation_gates {
         assert_eq!(warm.entries(), cold.entries());
         assert!(warm.hits() > cold.hits());
         assert_eq!(first.data(), second.data());
+    }
+
+    #[test]
+    fn typed_contract_overwrite_matches_provider_scalar_and_order_matrix() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+
+        let u1_leg = GradedSpace::try_new(
+            Arc::new(U1FusionRule),
+            [
+                (U1Irrep::new(-1), 1),
+                (U1Irrep::new(0), 2),
+                (U1Irrep::new(1), 1),
+            ],
+            false,
+        )
+        .unwrap();
+        let u1 = TensorMap::from_block_fn(&runtime, [&u1_leg], [&u1_leg], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 1.0
+        })
+        .unwrap();
+        assert_contract_overwrite_matches("u1", &u1, &u1, &[1], &[0], &[0, 1], -1.5, false);
+
+        let su2_leg = GradedSpace::try_new(
+            Arc::new(SU2FusionRule),
+            [
+                (SU2Irrep::from_twice_spin(0), 2),
+                (SU2Irrep::from_twice_spin(1), 1),
+            ],
+            false,
+        )
+        .unwrap();
+        let su2 = TensorMap::from_block_fn(&runtime, [&su2_leg], [&su2_leg], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 1.0
+        })
+        .unwrap()
+        .to_c64();
+        assert_contract_overwrite_matches(
+            "su2",
+            &su2,
+            &su2,
+            &[1],
+            &[0],
+            &[1, 0],
+            num_complex::Complex64::new(0.75, -0.25),
+            true,
+        );
+
+        let odd = GradedSpace::try_new(
+            Arc::new(FermionParityFusionRule),
+            [(Z2Irrep::ODD, 2)],
+            false,
+        )
+        .unwrap();
+        let fermionic = TensorMap::from_block_fn(&runtime, [&odd], [&odd], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 1.0
+        })
+        .unwrap();
+        assert_contract_overwrite_matches(
+            "fz2",
+            &fermionic,
+            &fermionic,
+            &[0, 1],
+            &[1, 0],
+            &[],
+            0.0,
+            false,
+        );
+
+        let product_leg = GradedSpace::try_new(
+            Arc::new(U1FusionRule.product(FermionParityFusionRule)),
+            [
+                (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
+                (product_sector(U1Irrep::new(1), Z2Irrep::ODD), 1),
+            ],
+            false,
+        )
+        .unwrap();
+        let product =
+            TensorMap::from_block_fn(&runtime, [&product_leg], [&product_leg], |_, indices| {
+                indices.iter().sum::<usize>() as f64 + 1.0
+            })
+            .unwrap();
+        assert_contract_overwrite_matches(
+            "product",
+            &product,
+            &product,
+            &[1],
+            &[0],
+            &[0, 1],
+            2.0,
+            false,
+        );
+
+        let q = GradedSpace::try_new(
+            Arc::new(CU1FusionRule),
+            [(CU1Irrep::from_twice_charge(1), 1)],
+            false,
+        )
+        .unwrap();
+        let cu1 = TensorMap::from_block_fn(&runtime, [&q, &q, &q], [&q], |_, _| 1.0).unwrap();
+        let cu1_expected = cu1.contract(&cu1, &[3], &[0], &[5, 1, 3, 0, 4, 2]).unwrap();
+        assert!(cu1_expected.data().contains(&0.0));
+        assert_contract_overwrite_matches(
+            "cu1",
+            &cu1,
+            &cu1,
+            &[3],
+            &[0],
+            &[5, 1, 3, 0, 4, 2],
+            1.0,
+            false,
+        );
+    }
+
+    #[test]
+    fn typed_contract_overwrite_keeps_distinct_destination_provider_authority() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let build = |provider: Arc<U1FusionRule>, offset: f64| {
+            let leg = GradedSpace::try_new(
+                provider,
+                [
+                    (U1Irrep::new(-1), 1),
+                    (U1Irrep::new(0), 2),
+                    (U1Irrep::new(1), 1),
+                ],
+                false,
+            )
+            .unwrap();
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+                offset + indices.iter().sum::<usize>() as f64
+            })
+            .unwrap()
+        };
+
+        let lhs = build(Arc::new(U1FusionRule), 1.0);
+        let rhs = build(Arc::new(U1FusionRule), 10.0);
+        let destination_provider = Arc::new(U1FusionRule);
+        let destination_lhs = build(Arc::clone(&destination_provider), 0.0);
+        let destination_rhs = build(destination_provider, 0.0);
+        let expected = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
+        let mut destination = destination_lhs
+            .contract(&destination_rhs, &[1], &[0], &[0, 1])
+            .unwrap()
+            .zeros_like();
+        poison_destination(&mut destination);
+
+        assert!(!Arc::ptr_eq(
+            lhs.logical_space().provider_arc(),
+            rhs.logical_space().provider_arc()
+        ));
+        assert!(!Arc::ptr_eq(
+            lhs.logical_space().provider_arc(),
+            destination.logical_space().provider_arc()
+        ));
+        let provider = Arc::as_ptr(destination.logical_space().provider_arc());
+        let body = Arc::as_ptr(owned(&destination));
+        let space = destination.logical_space().space() as *const DynamicFusionMapSpace;
+        let storage = destination.data().as_ptr();
+
+        lhs.contract_overwrite_into(&rhs, &mut destination, &[1], &[0], &[0, 1], 1.0)
+            .unwrap();
+
+        assert_eq!(destination.data(), expected.data());
+        assert_eq!(
+            Arc::as_ptr(destination.logical_space().provider_arc()),
+            provider
+        );
+        assert_eq!(Arc::as_ptr(owned(&destination)), body);
+        assert_eq!(
+            destination.logical_space().space() as *const DynamicFusionMapSpace,
+            space
+        );
+        assert_eq!(destination.data().as_ptr(), storage);
+    }
+
+    #[test]
+    fn typed_contract_overwrite_accepts_lazy_and_compact_inputs_without_warming_adjoint() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let leg = GradedSpace::try_new(
+            Arc::new(U1FusionRule),
+            [(U1Irrep::new(0), 3), (U1Irrep::new(1), 1)],
+            false,
+        )
+        .unwrap();
+        let lhs = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            (indices[0] + 2 * indices[1] + 1) as f64
+        })
+        .unwrap();
+        let rhs = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            (2 * indices[0] + indices[1] + 1) as f64
+        })
+        .unwrap();
+        let lazy_lhs = lhs.adjoint().unwrap();
+        let lazy_rhs = rhs.adjoint().unwrap();
+        let expected = lazy_lhs.contract(&lazy_rhs, &[1], &[0], &[0, 1]).unwrap();
+        let mut destination = expected.zeros_like();
+        poison_destination(&mut destination);
+        lazy_lhs
+            .contract_overwrite_into(&lazy_rhs, &mut destination, &[1], &[0], &[0, 1], 1.0)
+            .unwrap();
+        assert_eq!(destination.data(), expected.data());
+        assert_eq!(materialized_adjoint_builds(&lazy_lhs), 0);
+        assert_eq!(materialized_adjoint_builds(&lazy_rhs), 0);
+        for lazy in [&lazy_lhs, &lazy_rhs] {
+            let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+                unreachable!()
+            };
+            assert!(view.materialized.get().is_none());
+        }
+
+        let (u, s, _) = lhs.svd_compact().unwrap();
+        assert!(owned(&s).dense_cache.get().is_none());
+        let expected = u.contract(&s, &[1], &[0], &[0, 1]).unwrap();
+        let mut destination = expected.zeros_like();
+        poison_destination(&mut destination);
+        u.contract_overwrite_into(&s, &mut destination, &[1], &[0], &[0, 1], 1.0)
+            .unwrap();
+        assert_eq!(destination.data(), expected.data());
+        assert!(owned(&s).dense_cache.get().is_some());
+    }
+
+    #[test]
+    fn typed_contract_overwrite_rejections_are_preclear_and_atomic() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new(
+            provider,
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+            false,
+        )
+        .unwrap();
+        let lhs = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            (indices[0] + 2 * indices[1] + 1) as f64
+        })
+        .unwrap();
+        let rhs = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            (2 * indices[0] + indices[1] + 1) as f64
+        })
+        .unwrap();
+        let expected = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
+        let destination = || {
+            let mut destination = expected.zeros_like();
+            poison_destination(&mut destination);
+            destination
+        };
+
+        let mut foreign = destination();
+        foreign.runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let before = f64_destination_state(&foreign);
+        assert_eq!(
+            lhs.contract_overwrite_into(&rhs, &mut foreign, &[9], &[0], &[0, 1], 1.0,)
+                .unwrap_err(),
+            Error::RuntimeMismatch
+        );
+        assert_eq!(f64_destination_state(&foreign), before);
+
+        let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let foreign_rhs = TensorMap::from_block_fn(&other_runtime, [&leg], [&leg], |_, indices| {
+            (indices[0] + indices[1] + 1) as f64
+        })
+        .unwrap();
+        let mut rejected = destination();
+        let before = f64_destination_state(&rejected);
+        assert_eq!(
+            lhs.contract_overwrite_into(&foreign_rhs, &mut rejected, &[9], &[0], &[0, 1], 1.0,)
+                .unwrap_err(),
+            Error::RuntimeMismatch
+        );
+        assert_eq!(f64_destination_state(&rejected), before);
+
+        for (lhs_axes, rhs_axes, output_axes) in [
+            (&[1, 1][..], &[0, 0][..], &[][..]),
+            (&[2][..], &[0][..], &[0, 1][..]),
+            (&[1][..], &[0][..], &[0, 0][..]),
+        ] {
+            let mut rejected = destination();
+            let before = f64_destination_state(&rejected);
+            assert!(lhs
+                .contract_overwrite_into(&rhs, &mut rejected, lhs_axes, rhs_axes, output_axes, 1.0,)
+                .is_err());
+            assert_eq!(f64_destination_state(&rejected), before);
+        }
+
+        let bad_leg = GradedSpace::try_new(
+            Arc::clone(lhs.logical_space().provider_arc()),
+            [(U1Irrep::new(7), 1)],
+            false,
+        )
+        .unwrap();
+        let bad_rhs =
+            TensorMap::from_block_fn(&runtime, [&bad_leg], [&bad_leg], |_, _| 1.0).unwrap();
+        let mut rejected = destination();
+        let before = f64_destination_state(&rejected);
+        assert!(lhs
+            .contract_overwrite_into(&bad_rhs, &mut rejected, &[1], &[0], &[0, 1], 1.0,)
+            .is_err());
+        assert_eq!(f64_destination_state(&rejected), before);
+
+        let mut wrong_layout = lhs.insert_left_unit(0, false).unwrap().zeros_like();
+        poison_destination(&mut wrong_layout);
+        let before = f64_destination_state(&wrong_layout);
+        assert!(lhs
+            .contract_overwrite_into(&rhs, &mut wrong_layout, &[1], &[0], &[0, 1], 1.0,)
+            .is_err());
+        assert_eq!(f64_destination_state(&wrong_layout), before);
+
+        for malformed in ["lhs", "rhs", "destination"] {
+            let mut bad_lhs = lhs.scale(1.0);
+            let mut bad_rhs = rhs.scale(1.0);
+            let mut rejected = destination();
+            match malformed {
+                "lhs" => pop_dense_element(&mut bad_lhs),
+                "rhs" => pop_dense_element(&mut bad_rhs),
+                "destination" => pop_dense_element(&mut rejected),
+                _ => unreachable!(),
+            }
+            let before = f64_destination_state(&rejected);
+            assert!(bad_lhs
+                .contract_overwrite_into(&bad_rhs, &mut rejected, &[1], &[0], &[0, 1], 1.0,)
+                .is_err());
+            assert_eq!(f64_destination_state(&rejected), before);
+        }
+
+        let mut lhs_alias = lhs
+            .insert_left_unit(0, false)
+            .unwrap()
+            .remove_unit(0)
+            .unwrap();
+        let before = f64_destination_state(&lhs_alias);
+        assert!(lhs
+            .contract_overwrite_into(&rhs, &mut lhs_alias, &[1], &[0], &[0, 1], 1.0,)
+            .is_err());
+        assert_eq!(f64_destination_state(&lhs_alias), before);
+
+        let mut rhs_alias = rhs
+            .insert_left_unit(0, false)
+            .unwrap()
+            .remove_unit(0)
+            .unwrap();
+        let before = f64_destination_state(&rhs_alias);
+        assert!(lhs
+            .contract_overwrite_into(&rhs, &mut rhs_alias, &[1], &[0], &[0, 1], 1.0,)
+            .is_err());
+        assert_eq!(f64_destination_state(&rhs_alias), before);
+
+        let mut shared_body = destination();
+        let shared_body_handle = shared_body.clone();
+        let before = f64_destination_state(&shared_body);
+        assert!(lhs
+            .contract_overwrite_into(&rhs, &mut shared_body, &[1], &[0], &[0, 1], 1.0,)
+            .is_err());
+        assert_eq!(f64_destination_state(&shared_body), before);
+        drop(shared_body_handle);
+
+        let mut shared_payload = destination();
+        let shared_payload_handle = shared_payload.insert_left_unit(0, false).unwrap();
+        let before = f64_destination_state(&shared_payload);
+        assert!(lhs
+            .contract_overwrite_into(&rhs, &mut shared_payload, &[1], &[0], &[0, 1], 1.0,)
+            .is_err());
+        assert_eq!(f64_destination_state(&shared_payload), before);
+        drop(shared_payload_handle);
+
+        let mut lazy_destination = expected.adjoint().unwrap();
+        let TypedTensorRepr::Adjoint(view) = &lazy_destination.repr else {
+            unreachable!()
+        };
+        let view = Arc::as_ptr(view);
+        assert!(lhs
+            .contract_overwrite_into(&rhs, &mut lazy_destination, &[1], &[0], &[0, 1], 1.0,)
+            .is_err());
+        let TypedTensorRepr::Adjoint(after) = &lazy_destination.repr else {
+            unreachable!()
+        };
+        assert_eq!(Arc::as_ptr(after), view);
+        assert!(after.materialized.get().is_none());
+
+        let mut compact_destination = lhs.svd_compact().unwrap().1;
+        let payload = Arc::clone(&owned(&compact_destination).data);
+        assert!(owned(&compact_destination).dense_cache.get().is_none());
+        assert!(lhs
+            .contract_overwrite_into(&rhs, &mut compact_destination, &[1], &[0], &[0, 1], 1.0,)
+            .is_err());
+        assert!(Arc::ptr_eq(&owned(&compact_destination).data, &payload));
+        assert!(owned(&compact_destination).dense_cache.get().is_none());
+
+        let z2 = Arc::new(ZNFusionRule::new(2).unwrap());
+        let z3 = Arc::new(ZNFusionRule::new(3).unwrap());
+        let z2_leg = GradedSpace::try_new(Arc::clone(&z2), [(z2.irrep(0), 1)], false).unwrap();
+        let z3_leg = GradedSpace::try_new(Arc::clone(&z3), [(z3.irrep(0), 1)], false).unwrap();
+        let z2_lhs = TensorMap::from_block_fn(&runtime, [&z2_leg], [&z2_leg], |_, _| 1.0).unwrap();
+        let z2_rhs = TensorMap::from_block_fn(&runtime, [&z2_leg], [&z2_leg], |_, _| 2.0).unwrap();
+        let z3_rhs = TensorMap::from_block_fn(&runtime, [&z3_leg], [&z3_leg], |_, _| 2.0).unwrap();
+        let mut rejected = z2_lhs
+            .contract(&z2_rhs, &[1], &[0], &[0, 1])
+            .unwrap()
+            .zeros_like();
+        poison_destination(&mut rejected);
+        let before = f64_destination_state(&rejected);
+        assert_eq!(
+            z2_lhs
+                .contract_overwrite_into(&z3_rhs, &mut rejected, &[1], &[0], &[0, 1], 1.0,)
+                .unwrap_err(),
+            Error::RuleMismatch
+        );
+        assert_eq!(f64_destination_state(&rejected), before);
+
+        let z3_lhs = TensorMap::from_block_fn(&runtime, [&z3_leg], [&z3_leg], |_, _| 1.0).unwrap();
+        let mut z3_destination = z3_lhs
+            .contract(&z3_rhs, &[1], &[0], &[0, 1])
+            .unwrap()
+            .zeros_like();
+        poison_destination(&mut z3_destination);
+        let before = f64_destination_state(&z3_destination);
+        assert_eq!(
+            z2_lhs
+                .contract_overwrite_into(&z2_rhs, &mut z3_destination, &[1], &[0], &[0, 1], 1.0,)
+                .unwrap_err(),
+            Error::RuleMismatch
+        );
+        assert_eq!(f64_destination_state(&z3_destination), before);
+    }
+
+    #[test]
+    fn typed_contract_overwrite_handles_unmatched_sectors_and_reuses_runtime_cache() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let bond =
+            GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 2)], false).unwrap();
+        let left = GradedSpace::try_new(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
+            false,
+        )
+        .unwrap();
+        let partly_disjoint = GradedSpace::try_new(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), 1), (U1Irrep::new(2), 1)],
+            false,
+        )
+        .unwrap();
+        let disjoint = GradedSpace::try_new(provider, [(U1Irrep::new(3), 1)], false).unwrap();
+        let lhs = TensorMap::from_block_fn(&runtime, [&left], [&bond], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 1.0
+        })
+        .unwrap();
+        for open in [&partly_disjoint, &disjoint] {
+            let rhs = TensorMap::from_block_fn(&runtime, [&bond], [open], |_, indices| {
+                indices.iter().sum::<usize>() as f64 + 2.0
+            })
+            .unwrap();
+            assert_contract_overwrite_matches(
+                "unmatched sectors",
+                &lhs,
+                &rhs,
+                &[1],
+                &[0],
+                &[0, 1],
+                1.0,
+                false,
+            );
+        }
+
+        let provider = Arc::new(CU1FusionRule);
+        let q =
+            GradedSpace::try_new(provider, [(CU1Irrep::from_twice_charge(1), 1)], false).unwrap();
+        let source = TensorMap::from_block_fn(&runtime, [&q, &q, &q], [&q], |_, _| 1.0).unwrap();
+        let axes = [5, 1, 3, 0, 4, 2];
+        let expected = source.contract(&source, &[3], &[0], &axes).unwrap();
+        runtime.clear_tree_transform_cache();
+        let mut first = expected.zeros_like();
+        poison_destination(&mut first);
+        source
+            .contract_overwrite_into(&source, &mut first, &[3], &[0], &axes, 1.0)
+            .unwrap();
+        let cold = runtime.tree_transform_cache_info();
+        let mut second = expected.zeros_like();
+        poison_destination(&mut second);
+        source
+            .contract_overwrite_into(&source, &mut second, &[3], &[0], &axes, 1.0)
+            .unwrap();
+        let warm = runtime.tree_transform_cache_info();
+        assert_eq!(first.data(), second.data());
+        assert_eq!(warm.entries(), cold.entries());
+        assert!(warm.hits() > cold.hits());
     }
 
     #[test]
