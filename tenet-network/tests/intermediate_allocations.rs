@@ -9,9 +9,55 @@ use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::prelude::*;
 use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap as TypedTensorMap};
 use tenet_network::{
-    ContractionPlan, ContractionStep, Network, NetworkExecutionWorkspace, PlannedNetwork,
+    tensor, ContractionPlan, ContractionStep, Network, NetworkExecutionWorkspace, PlannedNetwork,
     TemporaryLabel, TensorId,
 };
+
+#[test]
+fn warm_macro_pool_reuses_receiver_sized_dense_payloads() {
+    let _test_guard = lock_unpoisoned(&TEST_LOCK);
+    let runtime = Runtime::builder().build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let bond = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 7)], false).unwrap();
+    let left = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 5)], false).unwrap();
+    let right = GradedSpace::try_new(provider, [(U1Irrep::new(0), 11)], false).unwrap();
+    let left_dual = left.try_dual().unwrap();
+    let a =
+        TypedTensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&left], [&bond], 750_001)
+            .unwrap();
+    let b =
+        TypedTensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&bond], [&right], 750_002)
+            .unwrap();
+    let c = TypedTensorMap::<U1FusionRule, f64>::rand_with_seed(
+        &runtime,
+        [&left_dual],
+        [&right],
+        750_003,
+    )
+    .unwrap();
+    for _ in 0..3 {
+        drop(tensor!([c_out; d] = a[a_leg; b_leg] * b[b_leg; c_out] * c[a_leg; d]).unwrap());
+    }
+
+    // Depending on the greedy tie break, the sole receiver is either 5x11
+    // (A*B) or 7x11 (A*C). Both are distinct from the 11x11 escaped output;
+    // neither receiver-sized Vec may be allocated after the pool is warm.
+    for receiver_elements in [5 * 11, 7 * 11] {
+        reset_event_counters();
+        PAYLOAD_SIZE.store(
+            receiver_elements * std::mem::size_of::<f64>(),
+            Ordering::Relaxed,
+        );
+        reset_live_registry();
+        ENABLED.store(true, Ordering::SeqCst);
+        let output = tensor!([c_out; d] = a[a_leg; b_leg] * b[b_leg; c_out] * c[a_leg; d]).unwrap();
+        assert_eq!(output.data().len(), 11 * 11);
+        drop(output);
+        ENABLED.store(false, Ordering::SeqCst);
+        assert_eq!(PAYLOAD_ALLOC_CALLS.load(Ordering::Relaxed), 0);
+        assert_eq!(REGISTRY_OVERFLOWS.load(Ordering::Relaxed), 0);
+    }
+}
 
 struct CountingAllocator;
 

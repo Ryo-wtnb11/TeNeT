@@ -1,5 +1,4 @@
-//! Topology-keyed contraction-plan cache for the private erased compatibility
-//! path behind [`tenet_macros::tensor`].
+//! Topology-keyed contraction-plan cache behind [`tenet_macros::tensor`].
 //!
 //! The cache key is the network *topology*: per-operand label lists, conj
 //! flags, codomain ranks and written `;` splits, plus the output labels and
@@ -23,14 +22,21 @@
 //! operands' runtime is resolved per call, so different runtimes never share
 //! plans or counters.
 
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use lru::LruCache;
-use tenet::prelude::{Error, Runtime, Tensor};
+use tenet::core::{
+    CheckedFusionAlgebra, FusionAlgebraError, FusionRule, MultiplicityFreeAdmissionMode,
+    MultiplicityFreeRigidSymbols, SectorCodec, TensorStorage, TypedSectorAdmission,
+};
+use tenet::prelude::{Error, Runtime, TensorScalar};
+#[cfg(feature = "cuda")]
+use tenet::typed::CudaStorage;
+use tenet::typed::TensorMap;
 
 pub use tenet::plancache::{
     Optimizer, PlanCacheConfig, PlanCacheStats, ReplanPolicy, DEFAULT_PLAN_CACHE_CAPACITY,
@@ -38,9 +44,7 @@ pub use tenet::plancache::{
 };
 
 use crate::labels::TemporaryLabel;
-use crate::network::{
-    ErasedNetworkExecutionWorkspace, Network, PlannedNetwork, StaticTopologySpec,
-};
+use crate::network::{Network, NetworkExecutionWorkspace, PlannedNetwork, StaticTopologySpec};
 use crate::optimizer::GreedyDenseOptimizer;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -63,28 +67,61 @@ struct NetworkTopology {
 
 struct CacheEntry {
     planned: Arc<PlannedNetwork>,
-    workspaces: Arc<WorkspacePool>,
+    workspaces: Arc<WorkspacePools>,
     /// Flat leg dims per operand at plan time (written leg order).
     dims_snapshot: Vec<Vec<usize>>,
 }
 
 #[derive(Default)]
-struct WorkspacePool {
-    available: Mutex<Vec<ErasedNetworkExecutionWorkspace>>,
+struct WorkspacePoolCounters {
     created: AtomicU64,
     reused: AtomicU64,
     slot_grows: AtomicU64,
+    idle: AtomicU64,
+}
+
+#[derive(Default)]
+struct WorkspacePools {
+    pools: Mutex<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
+    counters: Arc<WorkspacePoolCounters>,
+}
+
+struct WorkspacePool<R: FusionRule, D> {
+    available: Mutex<Vec<NetworkExecutionWorkspace<R, D>>>,
+    counters: Arc<WorkspacePoolCounters>,
 }
 
 const MAX_IDLE_WORKSPACES_PER_PLAN: usize = 2;
 
-struct WorkspaceLease {
-    pool: Arc<WorkspacePool>,
-    workspace: Option<ErasedNetworkExecutionWorkspace>,
+struct WorkspaceLease<R: FusionRule, D> {
+    pool: Arc<WorkspacePool<R, D>>,
+    workspace: Option<NetworkExecutionWorkspace<R, D>>,
 }
 
-impl WorkspacePool {
-    fn lease(self: &Arc<Self>) -> WorkspaceLease {
+impl WorkspacePools {
+    fn host_pool<R, D>(&self) -> Arc<WorkspacePool<R, D>>
+    where
+        R: FusionRule + Send + Sync,
+        D: Send + Sync + 'static,
+    {
+        let key = TypeId::of::<(R, D)>();
+        let mut pools = self.pools.lock().expect("network pool registry poisoned");
+        if let Some(pool) = pools.get(&key) {
+            return Arc::clone(pool)
+                .downcast::<WorkspacePool<R, D>>()
+                .expect("workspace TypeId mapped to the wrong pool type");
+        }
+        let pool = Arc::new(WorkspacePool {
+            available: Mutex::new(Vec::new()),
+            counters: Arc::clone(&self.counters),
+        });
+        pools.insert(key, Arc::clone(&pool) as Arc<dyn Any + Send + Sync>);
+        pool
+    }
+}
+
+impl<R: FusionRule, D> WorkspacePool<R, D> {
+    fn lease(self: &Arc<Self>) -> WorkspaceLease<R, D> {
         let workspace = self
             .available
             .lock()
@@ -92,12 +129,13 @@ impl WorkspacePool {
             .pop();
         let workspace = match workspace {
             Some(workspace) => {
-                self.reused.fetch_add(1, Ordering::Relaxed);
+                self.counters.reused.fetch_add(1, Ordering::Relaxed);
+                self.counters.idle.fetch_sub(1, Ordering::Relaxed);
                 workspace
             }
             None => {
-                self.created.fetch_add(1, Ordering::Relaxed);
-                ErasedNetworkExecutionWorkspace::default()
+                self.counters.created.fetch_add(1, Ordering::Relaxed);
+                NetworkExecutionWorkspace::default()
             }
         };
         WorkspaceLease {
@@ -107,22 +145,22 @@ impl WorkspacePool {
     }
 }
 
-impl WorkspaceLease {
-    fn workspace(&mut self) -> &mut ErasedNetworkExecutionWorkspace {
+impl<R: FusionRule, D> WorkspaceLease<R, D> {
+    fn workspace(&mut self) -> &mut NetworkExecutionWorkspace<R, D> {
         self.workspace
             .as_mut()
             .expect("workspace lease always owns a workspace")
     }
 }
 
-impl Drop for WorkspaceLease {
+impl<R: FusionRule, D> Drop for WorkspaceLease<R, D> {
     fn drop(&mut self) {
         if std::thread::panicking() {
             self.workspace.take();
             return;
         }
         if let Some(mut workspace) = self.workspace.take() {
-            workspace.clear();
+            workspace.clear_slots();
             workspace.park_runtime_owners();
             let mut available = self
                 .pool
@@ -131,6 +169,7 @@ impl Drop for WorkspaceLease {
                 .expect("network workspace pool poisoned");
             if available.len() < MAX_IDLE_WORKSPACES_PER_PLAN {
                 available.push(workspace);
+                self.pool.counters.idle.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -139,20 +178,46 @@ impl Drop for WorkspaceLease {
 #[derive(Clone)]
 pub(crate) struct CachedPlan {
     planned: Arc<PlannedNetwork>,
-    workspaces: Arc<WorkspacePool>,
+    workspaces: Arc<WorkspacePools>,
 }
 
 impl CachedPlan {
-    pub(crate) fn execute(&self, tensors: &[&Tensor]) -> Result<Tensor, Error> {
-        let mut lease = self.workspaces.lease();
+    pub(crate) fn execute_host<R, D>(
+        &self,
+        tensors: &[&TensorMap<R, D>],
+    ) -> Result<TensorMap<R, D>, Error>
+    where
+        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+            + MultiplicityFreeRigidSymbols<Scalar = f64>
+            + CheckedFusionAlgebra
+            + SectorCodec
+            + Send,
+        D: TensorScalar + Send + Sync + 'static,
+    {
+        let pool = self.workspaces.host_pool::<R, D>();
+        let mut lease = pool.lease();
         let previous_capacity = lease.workspace().slot_capacity();
         let result = self
             .planned
-            .execute_erased_with_workspace(tensors, lease.workspace());
+            .execute_with_workspace(tensors, lease.workspace());
         if lease.workspace().slot_capacity() > previous_capacity {
-            self.workspaces.slot_grows.fetch_add(1, Ordering::Relaxed);
+            self.workspaces
+                .counters
+                .slot_grows
+                .fetch_add(1, Ordering::Relaxed);
         }
         result
+    }
+
+    #[cfg(feature = "cuda")]
+    pub(crate) fn execute_cuda<R>(
+        &self,
+        tensors: &[&TensorMap<R, f64, CudaStorage>],
+    ) -> Result<TensorMap<R, f64, CudaStorage>, Error>
+    where
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    {
+        self.planned.execute_cuda(tensors)
     }
 }
 
@@ -167,7 +232,6 @@ struct PlanCache {
     /// insert if the configured capacity changed.
     map: LruCache<Arc<NetworkTopology>, CacheEntry>,
     static_aliases: LruCache<StaticTopologyKey, Vec<StaticAlias>>,
-    dynamic_aliases: LruCache<DynamicTopologyKey, Vec<StaticAlias>>,
     /// Persisted contraction orders keyed by stable topology text (see
     /// [`topology_text`]), populated by [`load_plan_cache`] and grown on
     /// every fresh search. A disk hit skips the (cold) optimal-order search
@@ -188,18 +252,12 @@ struct StaticTopologyKey {
     optimizer: Optimizer,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct DynamicTopologyKey {
-    network_id: u64,
-    optimizer: Optimizer,
-}
-
 struct StaticAlias {
     codomain_ranks: Vec<usize>,
     dims_snapshot: Vec<Vec<usize>>,
     topology: Arc<NetworkTopology>,
     planned: Weak<PlannedNetwork>,
-    workspaces: Weak<WorkspacePool>,
+    workspaces: Weak<WorkspacePools>,
 }
 
 impl StaticAlias {
@@ -226,7 +284,6 @@ impl Default for PlanCache {
             topology_materializations: 0,
             map: LruCache::new(lru_capacity(DEFAULT_PLAN_CACHE_CAPACITY)),
             static_aliases: LruCache::new(lru_capacity(DEFAULT_PLAN_CACHE_CAPACITY)),
-            dynamic_aliases: LruCache::new(lru_capacity(DEFAULT_PLAN_CACHE_CAPACITY)),
             disk: HashMap::new(),
             persist: false,
         }
@@ -312,27 +369,15 @@ pub fn plan_cache_stats(runtime: &Runtime) -> PlanCacheStats {
                 .iter()
                 .fold((0, 0, 0), |(created, reused, grows), (_, entry)| {
                     (
-                        created + entry.workspaces.created.load(Ordering::Relaxed),
-                        reused + entry.workspaces.reused.load(Ordering::Relaxed),
-                        grows + entry.workspaces.slot_grows.load(Ordering::Relaxed),
+                        created + entry.workspaces.counters.created.load(Ordering::Relaxed),
+                        reused + entry.workspaces.counters.reused.load(Ordering::Relaxed),
+                        grows + entry.workspaces.counters.slot_grows.load(Ordering::Relaxed),
                     )
                 });
         let idle_workspaces = cache
             .map
             .iter()
-            .map(|(_, entry)| {
-                entry
-                    .workspaces
-                    .available
-                    .lock()
-                    .expect("network workspace pool poisoned")
-                    .len()
-            })
-            .sum();
-        let dynamic_aliases = cache
-            .dynamic_aliases
-            .iter()
-            .map(|(_, aliases)| aliases.len())
+            .map(|(_, entry)| entry.workspaces.counters.idle.load(Ordering::Relaxed) as usize)
             .sum();
         PlanCacheStats {
             hits: cache.hits,
@@ -344,7 +389,6 @@ pub fn plan_cache_stats(runtime: &Runtime) -> PlanCacheStats {
             workspace_slot_grows,
             topology_materializations: cache.topology_materializations,
             idle_workspaces,
-            dynamic_aliases,
         }
     })
 }
@@ -355,7 +399,6 @@ pub fn clear_plan_cache(runtime: &Runtime) {
         let cache = cache_mut(slot);
         cache.map.clear();
         cache.static_aliases.clear();
-        cache.dynamic_aliases.clear();
         cache.hits = 0;
         cache.misses = 0;
         cache.replans = 0;
@@ -483,11 +526,18 @@ fn needs_replan(policy: ReplanPolicy, snapshot: &[Vec<usize>], current: &[Vec<us
     }
 }
 
-fn needs_replan_tensors(
+fn needs_replan_tensors<R, D, S>(
     policy: ReplanPolicy,
     snapshot: &[Vec<usize>],
-    tensors: &[&Tensor],
-) -> Result<bool, Error> {
+    tensors: &[&TensorMap<R, D, S>],
+) -> Result<bool, Error>
+where
+    R: TypedSectorAdmission
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    S: TensorStorage<D>,
+{
     // The per-operand rank guard must run for every policy: a cache hit can
     // arrive via `static_alias_matches`, which compares codomain rank only, so a
     // tensor whose full rank differs from the snapshot reaches here and must
@@ -504,7 +554,7 @@ fn needs_replan_tensors(
     // policies whose result never depends on it: `AlwaysReuse` never replans on
     // drift, and a non-degenerate `BakeOnce` snapshot is frozen for any real
     // dims. Skipping the scan drops `leg_dim(axis)?`, but that call errors only
-    // on `axis >= rank` (see `Tensor::leg_dim`), which the guard above already
+    // on `axis >= rank` (see `TensorMap::leg_dim`), which the guard above already
     // precludes — so no error side effect is lost. `DriftFactor` (and a
     // degenerate `BakeOnce` seed) still need the full comparison.
     match policy {
@@ -537,34 +587,10 @@ fn needs_replan_tensors(
     })
 }
 
-fn static_alias_matches(alias: &StaticAlias, tensors: &[&Tensor]) -> bool {
-    alias.codomain_ranks.len() == tensors.len()
-        && alias
-            .codomain_ranks
-            .iter()
-            .zip(tensors)
-            .all(|(&rank, tensor)| rank == tensor.codomain_rank())
+fn static_alias_matches(alias: &StaticAlias, codomain_ranks: &[usize]) -> bool {
+    alias.codomain_ranks == codomain_ranks
 }
 
-fn dynamic_alias_matches(alias: &StaticAlias, network: &Network, tensors: &[&Tensor]) -> bool {
-    static_alias_matches(alias, tensors)
-        && alias.topology.operands.len() == network.inputs.len()
-        && alias
-            .topology
-            .operands
-            .iter()
-            .zip(&network.inputs)
-            .zip(&network.conj)
-            .zip(&network.codomain_splits)
-            .all(|(((cached, labels), &conj), &split)| {
-                cached.labels == *labels && cached.conj == conj && cached.written_split == split
-            })
-        && alias.topology.output == network.output
-        && alias.topology.output_codomain_rank == network.output_codomain_rank
-}
-
-/// Outcome of a warm-path alias lookup done under the single plan-cache lock
-/// (shared by the static and dynamic paths; `Disabled` fallbacks differ).
 enum Lookup {
     /// Caching is off; execute uncached.
     Disabled,
@@ -600,120 +626,23 @@ fn promote_if_resident(
     }
 }
 
-pub(crate) fn execute_static(
-    spec: &'static StaticTopologySpec,
-    tensors: &[&Tensor],
-    optimizer: &Optimizer,
-) -> Result<Tensor, Error> {
-    let Some(runtime) = tensors.first().map(|tensor| tensor.runtime()) else {
-        return spec.network()?.contract_with_erased(tensors, optimizer);
-    };
-    let key = StaticTopologyKey {
-        spec,
-        optimizer: topology_optimizer(optimizer),
-    };
-    // Warm hit path under ONE plan-cache lock (#155): resolve enable/replan
-    // policy and do the alias lookup + LRU touch together instead of a separate
-    // `plan_cache_config()` acquisition followed by a `with_extension_slot` one.
-    // `needs_replan_tensors` stays inside — for the default `BakeOnce` policy it
-    // is a rank-only guard (no leg-dim scan, no lock), so it is not the hot
-    // cost; the two `NetworkTopology` hashes were, and residency + promote now
-    // fold into one `LruCache::get`.
-    let lookup = runtime.with_plan_cache(|config, slot| -> Result<Lookup, Error> {
-        if !config.enabled {
-            return Ok(Lookup::Disabled);
-        }
-        let cache = cache_mut(slot);
-        let Some(aliases) = cache.static_aliases.get(&key) else {
-            return Ok(Lookup::Miss);
-        };
-        let Some(alias) = aliases
-            .iter()
-            .find(|alias| static_alias_matches(alias, tensors))
-        else {
-            return Ok(Lookup::Miss);
-        };
-        if needs_replan_tensors(config.replan, &alias.dims_snapshot, tensors)? {
-            return Ok(Lookup::Miss);
-        }
-        let Some(cached) = alias.cached() else {
-            return Ok(Lookup::Miss);
-        };
-        let topology = alias.topology.clone();
-        Ok(match promote_if_resident(cache, &topology, cached) {
-            Some(cached) => Lookup::Hit(cached),
-            None => Lookup::Miss,
-        })
-    })?;
-    match lookup {
-        Lookup::Disabled => return spec.network()?.contract_with_erased(tensors, optimizer),
-        Lookup::Hit(cached) => return cached.execute(tensors),
-        Lookup::Miss => {}
-    }
-
-    let network = spec.network()?;
-    let cached = get_or_plan_internal(&network, tensors, optimizer, false)?;
-    let topology = topology_for(&network, tensors, optimizer);
-    let codomain_ranks = tensors
-        .iter()
-        .map(|tensor| tensor.codomain_rank())
-        .collect();
-    let dims_snapshot = tensors
-        .iter()
-        .map(|tensor| tensor.leg_dims())
-        .collect::<Result<_, _>>()?;
-    runtime.with_plan_cache(|config, slot| {
-        let cache = cache_mut(slot);
-        let capacity = lru_capacity(config.capacity);
-        if cache.static_aliases.cap() != capacity {
-            cache.static_aliases.resize(capacity);
-        }
-        if let Some(aliases) = cache.static_aliases.get_mut(&key) {
-            if let Some(alias) = aliases
-                .iter_mut()
-                .find(|alias| static_alias_matches(alias, tensors))
-            {
-                *alias = StaticAlias {
-                    codomain_ranks,
-                    dims_snapshot,
-                    topology,
-                    planned: Arc::downgrade(&cached.planned),
-                    workspaces: Arc::downgrade(&cached.workspaces),
-                };
-            } else {
-                aliases.push(StaticAlias {
-                    codomain_ranks,
-                    dims_snapshot,
-                    topology,
-                    planned: Arc::downgrade(&cached.planned),
-                    workspaces: Arc::downgrade(&cached.workspaces),
-                });
-            }
-        } else {
-            cache.static_aliases.put(
-                key,
-                vec![StaticAlias {
-                    codomain_ranks,
-                    dims_snapshot,
-                    topology,
-                    planned: Arc::downgrade(&cached.planned),
-                    workspaces: Arc::downgrade(&cached.workspaces),
-                }],
-            );
-        }
-    });
-    cached.execute(tensors)
-}
-
-fn plan_fresh(
+fn plan_fresh<R, D, S>(
     network: &Network,
-    tensors: &[&Tensor],
+    tensors: &[&TensorMap<R, D, S>],
     optimizer: &Optimizer,
-) -> Result<PlannedNetwork, Error> {
+) -> Result<PlannedNetwork, Error>
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+    S: TensorStorage<D>,
+{
     match optimizer {
-        Optimizer::Greedy => network.plan_erased(tensors, &GreedyDenseOptimizer),
+        Optimizer::Greedy => network.plan(tensors, &GreedyDenseOptimizer),
         #[cfg(feature = "opt-path")]
-        Optimizer::Optimal => network.plan_erased(
+        Optimizer::Optimal => network.plan(
             tensors,
             &crate::pathopt::OptEinsumPathOptimizer::new(crate::pathopt::PathStrategy::Optimal),
         ),
@@ -725,12 +654,12 @@ fn plan_fresh(
         #[cfg(feature = "opt-path")]
         Optimizer::DynamicProgramming => {
             use crate::pathopt::{OptEinsumPathOptimizer, PathStrategy};
-            match network.plan_erased(
+            match network.plan(
                 tensors,
                 &OptEinsumPathOptimizer::new(PathStrategy::DynamicProgramming),
             ) {
                 Ok(plan) => Ok(plan),
-                Err(_) => network.plan_erased(tensors, &GreedyDenseOptimizer),
+                Err(_) => network.plan(tensors, &GreedyDenseOptimizer),
             }
         }
         // Legacy `default_dense_plan` fallback chain: auto-hq -> auto -> dp
@@ -745,16 +674,16 @@ fn plan_fresh(
                 PathStrategy::Auto,
                 PathStrategy::DynamicProgramming,
             ] {
-                match network.plan_erased(tensors, &OptEinsumPathOptimizer::new(strategy)) {
+                match network.plan(tensors, &OptEinsumPathOptimizer::new(strategy)) {
                     Ok(plan) => return Ok(plan),
                     Err(err) => last_error = Some(err),
                 }
             }
             let _ = last_error;
-            network.plan_erased(tensors, &GreedyDenseOptimizer)
+            network.plan(tensors, &GreedyDenseOptimizer)
         }
         #[cfg(feature = "cotengra-python")]
-        Optimizer::CotengraPython(config) => network.plan_erased(
+        Optimizer::CotengraPython(config) => network.plan(
             tensors,
             &crate::cotengra_python::CotengraPythonOptimizer::new(config.clone()),
         ),
@@ -782,11 +711,15 @@ fn topology_optimizer(optimizer: &Optimizer) -> Optimizer {
     optimizer.clone()
 }
 
-fn topology_for(
+fn topology_for<R, D, S>(
     network: &Network,
-    tensors: &[&Tensor],
+    tensors: &[&TensorMap<R, D, S>],
     optimizer: &Optimizer,
-) -> Arc<NetworkTopology> {
+) -> Arc<NetworkTopology>
+where
+    R: TypedSectorAdmission,
+    S: TensorStorage<D>,
+{
     Arc::new(NetworkTopology {
         operands: network
             .inputs
@@ -809,52 +742,77 @@ fn topology_for(
     })
 }
 
-/// Cache-aware erased compatibility planning: reuse a topology-matched plan
-/// from the operands' runtime (subject to the drift policy), otherwise plan
-/// fresh and cache.
-pub(crate) fn get_or_plan(
-    network: &Network,
-    tensors: &[&Tensor],
-    optimizer: &Optimizer,
-) -> Result<CachedPlan, Error> {
-    get_or_plan_internal(network, tensors, optimizer, true)
+fn install_static_alias(
+    cache: &mut PlanCache,
+    key: StaticTopologyKey,
+    codomain_ranks: Vec<usize>,
+    dims_snapshot: Vec<Vec<usize>>,
+    topology: Arc<NetworkTopology>,
+    cached: &CachedPlan,
+    capacity: NonZeroUsize,
+) {
+    if cache.static_aliases.cap() != capacity {
+        cache.static_aliases.resize(capacity);
+    }
+    let alias = StaticAlias {
+        codomain_ranks: codomain_ranks.clone(),
+        dims_snapshot,
+        topology,
+        planned: Arc::downgrade(&cached.planned),
+        workspaces: Arc::downgrade(&cached.workspaces),
+    };
+    if let Some(aliases) = cache.static_aliases.get_mut(&key) {
+        if let Some(existing) = aliases
+            .iter_mut()
+            .find(|existing| static_alias_matches(existing, &codomain_ranks))
+        {
+            *existing = alias;
+        } else {
+            aliases.push(alias);
+        }
+    } else {
+        cache.static_aliases.put(key, vec![alias]);
+    }
 }
 
-fn get_or_plan_internal(
-    network: &Network,
-    tensors: &[&Tensor],
+/// Static macro planning over reduced typed operands. `codomain_ranks` are
+/// from the original expressions and guard trace/conj lowering; dimensions
+/// and the structural plan come from `tensors` after call-local trace lowering.
+pub(crate) fn get_or_plan_static<R, D, S>(
+    spec: &'static StaticTopologySpec,
+    tensors: &[&TensorMap<R, D, S>],
+    codomain_ranks: &[usize],
     optimizer: &Optimizer,
-    register_dynamic_alias: bool,
-) -> Result<CachedPlan, Error> {
-    // The cache lives on the operands' runtime; step execution would reject
-    // mixed-runtime operands anyway, so the first operand's runtime is it.
+    make_network: impl FnOnce() -> Result<Network, Error>,
+) -> Result<CachedPlan, Error>
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+    S: TensorStorage<D>,
+{
     let Some(runtime) = tensors.first().map(|tensor| tensor.runtime()) else {
-        return Ok(CachedPlan {
-            planned: Arc::new(plan_fresh(network, tensors, optimizer)?),
-            workspaces: Arc::new(WorkspacePool::default()),
-        });
+        return Err(Error::InvalidArgument(
+            "network execution requires at least one operand".to_string(),
+        ));
     };
-    let dynamic_key = register_dynamic_alias.then(|| DynamicTopologyKey {
-        network_id: network.cache_id(),
+    let key = StaticTopologyKey {
+        spec,
         optimizer: topology_optimizer(optimizer),
-    });
-    // Warm alias hit path under ONE plan-cache lock (#155): same shrink as
-    // `execute_static` — config + alias lookup + LRU touch in one acquisition,
-    // residency + promote folded into one `LruCache::get`.
+    };
     let lookup = runtime.with_plan_cache(|config, slot| -> Result<Lookup, Error> {
         if !config.enabled {
             return Ok(Lookup::Disabled);
         }
-        let Some(key) = dynamic_key.as_ref() else {
-            return Ok(Lookup::Miss);
-        };
         let cache = cache_mut(slot);
-        let Some(aliases) = cache.dynamic_aliases.get(key) else {
+        let Some(aliases) = cache.static_aliases.get(&key) else {
             return Ok(Lookup::Miss);
         };
         let Some(alias) = aliases
             .iter()
-            .find(|alias| dynamic_alias_matches(alias, network, tensors))
+            .find(|alias| static_alias_matches(alias, codomain_ranks))
         else {
             return Ok(Lookup::Miss);
         };
@@ -870,25 +828,26 @@ fn get_or_plan_internal(
             None => Lookup::Miss,
         })
     })?;
-    match lookup {
-        Lookup::Disabled => {
-            return Ok(CachedPlan {
-                planned: Arc::new(plan_fresh(network, tensors, optimizer)?),
-                workspaces: Arc::new(WorkspacePool::default()),
-            })
-        }
-        Lookup::Hit(cached) => return Ok(cached),
-        Lookup::Miss => {}
+    if let Lookup::Hit(cached) = lookup {
+        return Ok(cached);
     }
 
+    let network = make_network()?;
+    if matches!(lookup, Lookup::Disabled) {
+        return Ok(CachedPlan {
+            planned: Arc::new(plan_fresh(&network, tensors, optimizer)?),
+            workspaces: Arc::new(WorkspacePools::default()),
+        });
+    }
     runtime.with_extension_slot(|slot| cache_mut(slot).topology_materializations += 1);
 
     let dims: Vec<Vec<usize>> = tensors
         .iter()
         .map(|tensor| tensor.leg_dims())
         .collect::<Result<_, _>>()?;
-    let topology = topology_for(network, tensors, optimizer);
+    let topology = topology_for(&network, tensors, optimizer);
 
+    #[derive(Clone)]
     enum Outcome {
         Hit(CachedPlan),
         Replan,
@@ -913,27 +872,18 @@ fn get_or_plan_internal(
             None => Outcome::Miss,
         }
     });
-    if let Outcome::Hit(planned) = outcome {
-        let alias = StaticAlias {
-            codomain_ranks: tensors
-                .iter()
-                .map(|tensor| tensor.codomain_rank())
-                .collect(),
-            dims_snapshot: dims,
-            topology,
-            planned: Arc::downgrade(&planned.planned),
-            workspaces: Arc::downgrade(&planned.workspaces),
-        };
-        if let Some(dynamic_key) = dynamic_key {
-            runtime.with_plan_cache(|config, slot| {
-                let cache = cache_mut(slot);
-                let capacity = lru_capacity(config.capacity);
-                if cache.dynamic_aliases.cap() != capacity {
-                    cache.dynamic_aliases.resize(capacity);
-                }
-                cache.dynamic_aliases.put(dynamic_key, vec![alias]);
-            });
-        }
+    if let Outcome::Hit(planned) = outcome.clone() {
+        runtime.with_plan_cache(|config, slot| {
+            install_static_alias(
+                cache_mut(slot),
+                key,
+                codomain_ranks.to_vec(),
+                dims,
+                topology,
+                &planned,
+                lru_capacity(config.capacity),
+            )
+        });
         return Ok(planned);
     }
 
@@ -953,9 +903,9 @@ fn get_or_plan_internal(
             .flatten()
     });
     let planned = match disk_plan {
-        Some(plan) => Arc::new(network.plan_with_erased(tensors, plan)?),
+        Some(plan) => Arc::new(network.plan_with(tensors, plan)?),
         None => {
-            let fresh = Arc::new(plan_fresh(network, tensors, optimizer)?);
+            let fresh = Arc::new(plan_fresh(&network, tensors, optimizer)?);
             // Record the freshly searched order so a later process reusing
             // this cache file skips the search — but only under persistence and
             // only when searched at non-degenerate dims. A degenerate seed
@@ -973,400 +923,104 @@ fn get_or_plan_internal(
             fresh
         }
     };
-    let workspaces = Arc::new(WorkspacePool::default());
-    let alias = StaticAlias {
-        codomain_ranks: tensors
-            .iter()
-            .map(|tensor| tensor.codomain_rank())
-            .collect(),
-        dims_snapshot: dims.clone(),
-        topology: topology.clone(),
-        planned: Arc::downgrade(&planned),
-        workspaces: Arc::downgrade(&workspaces),
+    let candidate = CachedPlan {
+        planned,
+        workspaces: Arc::new(WorkspacePools::default()),
     };
-    runtime.with_plan_cache(|config, slot| {
+    let winner = runtime.with_plan_cache(|config, slot| {
         let cache = cache_mut(slot);
-        match outcome {
-            Outcome::Replan => cache.replans += 1,
-            _ => cache.misses += 1,
+        if !config.enabled {
+            return candidate.clone();
         }
-        // Track the configured capacity (it may change between calls), then
-        // `put`, which inserts as most-recently-used and evicts the LRU entry
-        // in O(1) when at capacity.
         let capacity = lru_capacity(config.capacity);
         if cache.map.cap() != capacity {
             cache.map.resize(capacity);
         }
-        if register_dynamic_alias && cache.dynamic_aliases.cap() != capacity {
-            cache.dynamic_aliases.resize(capacity);
-        }
-        cache.map.put(
-            topology.clone(),
-            CacheEntry {
-                planned: Arc::clone(&planned),
-                workspaces: Arc::clone(&workspaces),
-                dims_snapshot: dims,
-            },
-        );
-        if let Some(dynamic_key) = dynamic_key {
-            if let Some(aliases) = cache.dynamic_aliases.get_mut(&dynamic_key) {
-                if let Some(existing) = aliases
-                    .iter_mut()
-                    .find(|existing| existing.codomain_ranks == alias.codomain_ranks)
-                {
-                    *existing = alias;
-                } else {
-                    aliases.push(alias);
+        let cached = match cache.map.peek(&topology) {
+            Some(entry) if !needs_replan(config.replan, &entry.dims_snapshot, &dims) => {
+                cache.hits += 1;
+                CachedPlan {
+                    planned: Arc::clone(&entry.planned),
+                    workspaces: Arc::clone(&entry.workspaces),
                 }
-            } else {
-                cache.dynamic_aliases.put(dynamic_key, vec![alias]);
             }
-        }
+            _ => {
+                match outcome {
+                    Outcome::Replan => cache.replans += 1,
+                    _ => cache.misses += 1,
+                }
+                let cached = candidate.clone();
+                cache.map.put(
+                    topology.clone(),
+                    CacheEntry {
+                        planned: Arc::clone(&cached.planned),
+                        workspaces: Arc::clone(&cached.workspaces),
+                        dims_snapshot: dims.clone(),
+                    },
+                );
+                cached
+            }
+        };
+        cache.map.promote(&topology);
+        install_static_alias(
+            cache,
+            key,
+            codomain_ranks.to_vec(),
+            dims.clone(),
+            topology.clone(),
+            &cached,
+            capacity,
+        );
+        cached
     });
-    Ok(CachedPlan {
-        planned,
-        workspaces,
-    })
+    Ok(winner)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        configure_plan_cache, get_or_plan, needs_replan_tensors, plan_cache_stats, Optimizer,
-        PlanCacheConfig, ReplanPolicy, WorkspacePool, MAX_IDLE_WORKSPACES_PER_PLAN,
-    };
-    use crate::{Network, TemporaryLabel};
-    use std::sync::atomic::Ordering;
-    use std::sync::Arc;
-    use tenet::prelude::{Dtype, Runtime, Space, Tensor};
+    use super::{needs_replan, ReplanPolicy, WorkspacePools};
+    use tenet::core::U1FusionRule;
 
-    /// A concurrent burst gets independent leases, while only the explicit
-    /// idle cap and its bounded slot capacity survive after return.
     #[test]
-    fn nested_workspace_leases_bound_idle_retention() {
-        let pool = Arc::new(WorkspacePool::default());
-        let mut burst = (0..6).map(|_| pool.lease()).collect::<Vec<_>>();
-        for lease in &mut burst {
-            lease.workspace().reserve_slots(64);
-        }
-        assert_eq!(pool.created.load(Ordering::Relaxed), 6);
-        drop(burst);
-
-        let available = pool.available.lock().unwrap();
-        assert_eq!(available.len(), MAX_IDLE_WORKSPACES_PER_PLAN);
-        assert!(available.iter().all(|workspace| workspace.slot_len() == 0));
-        let maximum = available
-            .iter()
-            .map(|workspace| workspace.slot_capacity())
-            .max()
-            .unwrap();
-        let retained: usize = available
-            .iter()
-            .map(|workspace| workspace.slot_capacity())
-            .sum();
-        assert!(retained <= MAX_IDLE_WORKSPACES_PER_PLAN * maximum);
-        drop(available);
-
-        let first = pool.lease();
-        let second = pool.lease();
-        let third = pool.lease();
-        assert_eq!(pool.reused.load(Ordering::Relaxed), 2);
-        assert_eq!(pool.created.load(Ordering::Relaxed), 7);
-        drop((first, second, third));
+    fn replan_policy_matches_dimension_drift_semantics() {
+        let snapshot = vec![vec![2, 3]];
+        assert!(!needs_replan(
+            ReplanPolicy::AlwaysReuse,
+            &snapshot,
+            &[vec![2]],
+        ));
+        assert!(!needs_replan(
+            ReplanPolicy::AlwaysReuse,
+            &snapshot,
+            &[vec![9, 11]],
+        ));
+        assert!(needs_replan(
+            ReplanPolicy::DriftFactor(2.0),
+            &snapshot,
+            &[vec![5, 3]],
+        ));
     }
 
-    /// An active lease owns its runtime until return; the parked idle form does
-    /// not keep the last external owner alive.
     #[test]
-    fn active_lease_lifetime_ends_when_workspace_is_parked() {
-        let pool = Arc::new(WorkspacePool::default());
-        let runtime = Runtime::builder().build().unwrap();
-        let identity = runtime.identity();
-        let space = Space::u1([(0, 2)]);
-        let tensor =
-            Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 247_010).unwrap();
-        let mut lease = pool.lease();
-        lease.workspace().retain_tensor(tensor);
-
-        drop(runtime);
-        assert!(identity.is_alive());
-        drop(lease);
-        assert!(!identity.is_alive());
-        assert_eq!(pool.available.lock().unwrap().len(), 1);
-    }
-
-    /// Parking removes Runtime ownership, not the numerical destinations that
-    /// make the cached network path allocation-efficient.
-    #[test]
-    fn parked_cached_workspace_reuses_intermediate_storage_and_values() {
-        let runtime = Runtime::builder().build().unwrap();
-        let space = Space::u1([(0, 3)]);
-        let tensors = (0..3)
-            .map(|index| {
-                Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 247_030 + index)
-                    .unwrap()
-            })
-            .collect::<Vec<_>>();
-        let labels = |names: &[&str]| {
-            names
-                .iter()
-                .map(|name| TemporaryLabel::from(*name))
-                .collect::<Vec<_>>()
-        };
-        let network = Network::new(
-            vec![
-                labels(&["i", "j"]),
-                labels(&["j", "k"]),
-                labels(&["k", "l"]),
-            ],
-            vec![false; 3],
-            vec![None; 3],
-            labels(&["i", "l"]),
-            None,
-        )
-        .unwrap();
-        let refs = tensors.iter().collect::<Vec<_>>();
-        let cached = get_or_plan(&network, &refs, &Optimizer::Greedy).unwrap();
-
-        let first = cached.execute(&refs).unwrap();
-        let first_stats = cached.workspaces.available.lock().unwrap()[0].stats();
-        let second = cached.execute(&refs).unwrap();
-        let second_stats = cached.workspaces.available.lock().unwrap()[0].stats();
-
-        assert_eq!(first.data(), second.data());
-        assert!(second_stats.reused_intermediates > first_stats.reused_intermediates);
-        assert!(second_stats.reused_contractions > first_stats.reused_contractions);
-        assert_eq!(cached.workspaces.created.load(Ordering::Relaxed), 1);
-        assert_eq!(cached.workspaces.reused.load(Ordering::Relaxed), 1);
-    }
-
-    /// The erased macro cache still distinguishes explicit optimizer keys even
-    /// though direct erased `Network` execution is no longer public.
-    #[cfg(feature = "opt-path")]
-    #[test]
-    fn optimizer_override_keys_separately() {
-        let runtime = Runtime::builder().build().unwrap();
-        let space = Space::u1([(0, 2)]);
-        let a = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 361).unwrap();
-        let b = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 362).unwrap();
-        let labels = |names: &[&str]| {
-            names
-                .iter()
-                .map(|name| TemporaryLabel::from(*name))
-                .collect::<Vec<_>>()
-        };
-        let network = Network::new(
-            vec![labels(&["i", "k"]), labels(&["k", "m"])],
-            vec![false; 2],
-            vec![Some(1); 2],
-            labels(&["i", "m"]),
-            Some(1),
-        )
-        .unwrap();
-        let tensors = [&a, &b];
-
-        let greedy = get_or_plan(&network, &tensors, &Optimizer::Greedy).unwrap();
-        let optimal = get_or_plan(&network, &tensors, &Optimizer::Optimal).unwrap();
-        assert_eq!(
-            (
-                plan_cache_stats(&runtime).misses,
-                plan_cache_stats(&runtime).entries
-            ),
-            (2, 2)
-        );
-        let _ = get_or_plan(&network, &tensors, &Optimizer::Optimal).unwrap();
-        assert_eq!(plan_cache_stats(&runtime).hits, 1);
-        assert_eq!(
-            greedy.execute(&tensors).unwrap().data(),
-            optimal.execute(&tensors).unwrap().data()
-        );
-    }
-
-    /// Clearing cache ownership cannot invalidate a lease that was already
-    /// checked out for execution.
-    #[test]
-    fn active_workspace_completes_after_plan_cache_clear() {
-        let runtime = Runtime::builder().build().unwrap();
-        let space = Space::u1([(0, 2)]);
-        let a = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 247_040).unwrap();
-        let b = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 247_041).unwrap();
-        let labels = |names: &[&str]| {
-            names
-                .iter()
-                .map(|name| TemporaryLabel::from(*name))
-                .collect::<Vec<_>>()
-        };
-        let network = Network::new(
-            vec![labels(&["i", "j"]), labels(&["j", "k"])],
-            vec![false; 2],
-            vec![None; 2],
-            labels(&["i", "k"]),
-            None,
-        )
-        .unwrap();
-        let tensors = [&a, &b];
-        let cached = get_or_plan(&network, &tensors, &Optimizer::Greedy).unwrap();
-        let mut lease = cached.workspaces.lease();
-        let expected = cached.planned.execute_erased(&tensors).unwrap();
-
-        super::clear_plan_cache(&runtime);
-        let actual = cached
-            .planned
-            .execute_erased_with_workspace(&tensors, lease.workspace())
-            .unwrap();
-
-        assert_eq!(actual.data(), expected.data());
-        assert_eq!(plan_cache_stats(&runtime).entries, 0);
-    }
-
-    /// Unwinding quarantines the whole workspace because backend context and
-    /// arena contents may have been partially mutated before the panic.
-    #[test]
-    fn injected_backend_panic_quarantines_workspace() {
-        let pool = Arc::new(WorkspacePool::default());
-        let runtime = Runtime::builder().build().unwrap();
-        let identity = runtime.identity();
-        let space = Space::u1([(0, 2)]);
-        let tensor =
-            Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 12421).unwrap();
-        let retained_before = tensor.storage_strong_count();
+    fn panic_quarantines_typed_workspace_lease() {
+        let pools = WorkspacePools::default();
+        let pool = pools.host_pool::<U1FusionRule, f64>();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
-            let pool = Arc::clone(&pool);
-            let tensor = tensor.clone();
+            let pool = pool.clone();
             move || {
-                let mut lease = pool.lease();
-                lease.workspace().retain_tensor(tensor);
-                let injected_backend = || panic!("injected backend panic fixture");
-                injected_backend();
+                let _lease = pool.lease();
+                panic!("injected workspace panic");
             }
         }));
         assert!(result.is_err());
-        assert_eq!(tensor.storage_strong_count(), retained_before);
         assert!(pool.available.lock().unwrap().is_empty());
-        let mut replacement = pool.lease();
-        assert_eq!(pool.created.load(Ordering::Relaxed), 2);
-        assert_eq!(replacement.workspace().slot_len(), 0);
-        replacement.workspace().retain_tensor(tensor.clone());
-        drop(replacement);
-        assert_eq!(pool.available.lock().unwrap().len(), 1);
-        drop(tensor);
-        drop(runtime);
-        assert!(!identity.is_alive());
-    }
-
-    /// An in-flight strong reference cannot make a weak alias valid after its
-    /// owning LRU entry has been evicted.
-    #[test]
-    fn alias_does_not_resurrect_evicted_in_flight_plan() {
-        let runtime = Runtime::builder().build().unwrap();
-        configure_plan_cache(
-            &runtime,
-            PlanCacheConfig {
-                capacity: 1,
-                replan: ReplanPolicy::AlwaysReuse,
-                ..PlanCacheConfig::default()
-            },
-        );
-        let space = Space::u1([(0, 2)]);
-        let a = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 12411).unwrap();
-        let b = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 12412).unwrap();
-        let labels = |names: &[&str]| {
-            names
-                .iter()
-                .map(|name| TemporaryLabel::from(*name))
-                .collect::<Vec<_>>()
-        };
-        let first = Network::new(
-            vec![labels(&["i", "j"]), labels(&["j", "k"])],
-            vec![false; 2],
-            vec![None; 2],
-            labels(&["i", "k"]),
-            None,
-        )
-        .unwrap();
-        let second = Network::new(
-            vec![labels(&["a", "b"]), labels(&["b", "c"])],
-            vec![false; 2],
-            vec![None; 2],
-            labels(&["c", "a"]),
-            None,
-        )
-        .unwrap();
-        let tensors = [&a, &b];
-
-        let in_flight = get_or_plan(&first, &tensors, &Optimizer::Greedy).unwrap();
-        let _replacement = get_or_plan(&second, &tensors, &Optimizer::Greedy).unwrap();
-        let _replanned = get_or_plan(&first, &tensors, &Optimizer::Greedy).unwrap();
-        drop(in_flight);
-
-        let stats = plan_cache_stats(&runtime);
-        assert_eq!((stats.hits, stats.misses, stats.entries), (0, 3, 1));
-    }
-
-    /// The rank guard in `needs_replan_tensors` fires for *every* policy,
-    /// including the ones whose dim-drift result would otherwise early-out to
-    /// `Ok(false)`. This pins the reachability the issue #149 fix depends on: a
-    /// static-alias hit compares codomain rank only, so a full-rank mismatch
-    /// must still force a replan and the early-out must sit below the guard.
-    #[test]
-    fn rank_mismatch_forces_replan_for_all_policies() {
-        let runtime = Runtime::builder().build().unwrap();
-        let space = Space::u1([(0, 2)]);
-        // rank-2 tensor (one codomain, one domain leg).
-        let t = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 1491).unwrap();
-        let tensors = [&t];
-        // Snapshot claims rank 3, non-degenerate dims — the BakeOnce/AlwaysReuse
-        // early-out would say "reuse" if it ran before the rank guard.
-        let snapshot = vec![vec![2, 2, 2]];
-        for policy in [
-            ReplanPolicy::AlwaysReuse,
-            ReplanPolicy::BakeOnce,
-            ReplanPolicy::DriftFactor(2.0),
-        ] {
-            assert!(
-                needs_replan_tensors(policy, &snapshot, &tensors).unwrap(),
-                "rank mismatch must force replan for {policy:?}"
-            );
-        }
-    }
-
-    /// Observable dim-drift behavior is identical before and after the #149
-    /// early-out for all three policies.
-    #[test]
-    fn needs_replan_tensors_matches_policy_semantics() {
-        let runtime = Runtime::builder().build().unwrap();
-        // rank-2 tensor with both legs dim 2.
-        let d2 = Space::u1([(0, 2)]);
-        let t = Tensor::rand_with_seed(&runtime, Dtype::F64, [&d2], [&d2], 1492).unwrap();
-        let tensors = [&t];
-
-        // AlwaysReuse: never replans on drift (matching rank).
-        assert!(
-            !needs_replan_tensors(ReplanPolicy::AlwaysReuse, &vec![vec![8, 8]], &tensors).unwrap()
-        );
-
-        // BakeOnce, non-degenerate snapshot: frozen even when dims drift (the
-        // early-out path).
-        assert!(
-            !needs_replan_tensors(ReplanPolicy::BakeOnce, &vec![vec![8, 8]], &tensors).unwrap()
-        );
-
-        // BakeOnce, degenerate seed: replans once dims move off the seed...
-        assert!(needs_replan_tensors(ReplanPolicy::BakeOnce, &vec![vec![1, 2]], &tensors).unwrap());
-        // ...but a degenerate seed that still matches current dims stays put.
-        let d1 = Space::u1([(0, 1)]);
-        let deg = Tensor::rand_with_seed(&runtime, Dtype::F64, [&d1], [&d1], 1493).unwrap();
-        assert!(!needs_replan_tensors(ReplanPolicy::BakeOnce, &vec![vec![1, 1]], &[&deg]).unwrap());
-
-        // DriftFactor: replans past the factor, holds within it. Current dims
-        // are 2, snapshot 8 → ratio 4.
-        assert!(
-            needs_replan_tensors(ReplanPolicy::DriftFactor(2.0), &vec![vec![8, 8]], &tensors)
-                .unwrap()
-        );
-        assert!(
-            !needs_replan_tensors(ReplanPolicy::DriftFactor(8.0), &vec![vec![8, 8]], &tensors)
-                .unwrap()
+        drop(pool.lease());
+        assert_eq!(
+            pools
+                .counters
+                .created
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
         );
     }
 }

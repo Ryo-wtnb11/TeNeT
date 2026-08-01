@@ -320,6 +320,4 @@ pub struct PlanCacheStats {
     pub topology_materializations: u64,
     /// Idle execution workspaces retained by current cached plans.
     pub idle_workspaces: usize,
-    /// Process-local aliases retained for reusable `Network` instances.
-    pub dynamic_aliases: usize,
 }

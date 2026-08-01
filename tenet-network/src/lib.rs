@@ -7,8 +7,8 @@
 //! `tenet-contract` crate: it is **pure structure** over labels and leg
 //! dimensions and never touches tensor data. Explicit execution uses homogeneous
 //! typed Host [`tenet::typed::TensorMap`] operands and a caller-owned typed
-//! workspace. The erased loop remains private for the `tensor!` compatibility
-//! path until its separate cutover.
+//! workspace. The `tensor!` macro dispatches directly to that typed Host path
+//! (or to the returning-only CUDA path when enabled).
 //!
 //! ## Pipeline
 //!
@@ -61,7 +61,8 @@ pub use error::{ContractError, Result};
 pub use ir::{HyperEdge, NetworkIR, TensorNode};
 pub use labels::{LabelOccurrence, TemporaryLabel, TensorAxis, TensorId};
 pub use network::{
-    contract_static_network, Network, NetworkExecutionWorkspace, PlannedNetwork, StaticTopologySpec,
+    contract_static_network, normalize_tensor_operand, Network, NetworkExecutionWorkspace,
+    PlannedNetwork, StaticNetworkOperand, StaticTopologySpec,
 };
 pub use optimizer::{
     block_sparse_order_from_labels, greedy_order, greedy_order_block_sparse,

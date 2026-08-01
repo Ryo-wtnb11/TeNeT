@@ -17,8 +17,12 @@
 //!   twice on ONE operand is a partial trace of that operand (TensorKit
 //!   `@tensor a[i, i; j]`); a label appearing once must be listed in the
 //!   output. Violations are compile errors.
-//! - Lowers to `tenet_network::contract_network` (planner IR directly; no
-//!   einsum strings).
+//! - Lowers directly to the typed static topology/cache entrypoint (no einsum
+//!   strings and no rule-erased tensor conversion).
+//!
+//! Every operand must be a homogeneous provider-typed `TensorMap<R, D>` (or
+//! a borrow of one). Host execution reuses a typed per-plan workspace; CUDA
+//! execution is returning-only and rejects intra-operand traces.
 //!
 //! **Fermionic semantics**: `tensor!` follows TensorKit `@tensor` /
 //! `tensorcontract!` — dual contracted legs are twisted with the fermionic
@@ -28,7 +32,7 @@
 //! `Tensor::compose`.
 
 use proc_macro::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::{parenthesized, Expr, Ident, Token};
@@ -214,10 +218,20 @@ pub fn tensor(input: TokenStream) -> TokenStream {
             .into();
     }
 
-    let tensors = parsed.operands.iter().map(|op| {
-        let tensor = &op.tensor;
-        quote! { &#tensor }
-    });
+    let tensors = parsed
+        .operands
+        .iter()
+        .map(|op| {
+            let tensor = &op.tensor;
+            quote! { &#tensor }
+        })
+        .collect::<Vec<_>>();
+    let raw_bindings = (0..parsed.operands.len())
+        .map(|index| format_ident!("__tenet_raw_operand_{index}"))
+        .collect::<Vec<_>>();
+    let normalized_bindings = (0..parsed.operands.len())
+        .map(|index| format_ident!("__tenet_operand_{index}"))
+        .collect::<Vec<_>>();
     let labels = parsed.operands.iter().map(|op| &op.group.labels);
     let conj = parsed.operands.iter().map(|op| op.conj);
     let splits = parsed
@@ -237,8 +251,13 @@ pub fn tensor(input: TokenStream) -> TokenStream {
                     output: &[#(#output),*],
                     output_codomain_rank: #out_split,
                 };
+            #(let #raw_bindings = #tensors;)*
+            #(
+                let #normalized_bindings =
+                    ::tenet_network::normalize_tensor_operand(#raw_bindings);
+            )*
             ::tenet_network::contract_static_network(
-                &[#(#tensors),*],
+                &[#(#normalized_bindings),*],
                 &__TENET_TOPOLOGY,
             )
         }

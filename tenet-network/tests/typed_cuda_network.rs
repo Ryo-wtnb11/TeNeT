@@ -9,7 +9,8 @@ use tenet::core::{
 };
 use tenet::typed::{CudaStorage, GradedSpace, Runtime, TensorMap};
 use tenet_network::{
-    ContractionPlan, ContractionStep, GreedyDenseOptimizer, Network, TemporaryLabel, TensorId,
+    plan_cache_stats, tensor, ContractionPlan, ContractionStep, GreedyDenseOptimizer, Network,
+    TemporaryLabel, TensorId,
 };
 
 fn labels(names: &[&str]) -> Vec<TemporaryLabel> {
@@ -47,6 +48,8 @@ where
         .unwrap();
     assert_eq!(host_plan.plan().steps(), cuda_plan.plan().steps());
     let actual = cuda_plan.execute_cuda(&cuda_refs).unwrap();
+    let macro_actual = tensor!([a; b] = lhs_cuda[a; k] * rhs_cuda[k; b]).unwrap();
+    let macro_warm = tensor!([a; b] = lhs_cuda[a; k] * rhs_cuda[k; b]).unwrap();
     let manual = lhs_cuda.contract(&rhs_cuda, &[1], &[0], &[0, 1]).unwrap();
     let host_oracle = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
     assert_eq!(actual.placement(), lhs_cuda.placement());
@@ -56,6 +59,30 @@ where
     let actual_host = actual.to_host().unwrap();
     assert_eq!(actual_host.data(), manual.to_host().unwrap().data());
     assert_eq!(actual_host.data(), host_oracle.data());
+    assert_eq!(macro_actual.to_host().unwrap().data(), host_oracle.data());
+    assert_eq!(macro_warm.to_host().unwrap().data(), host_oracle.data());
+    assert_eq!(macro_actual.placement(), lhs_cuda.placement());
+    assert_eq!(plan_cache_stats(runtime).workspaces_created, 0);
+    assert_eq!(plan_cache_stats(runtime).idle_workspaces, 0);
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn cuda_macro_rejects_trace_before_cache_or_execution() {
+    let runtime = Runtime::builder().cuda(0).build().unwrap();
+    let space =
+        GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)], false).unwrap();
+    let tensor = TensorMap::<_, f64>::rand_with_seed(&runtime, [&space], [&space], 748_090)
+        .unwrap()
+        .to_cuda()
+        .unwrap();
+    let error = tensor!([] = tensor[i; i]).unwrap_err();
+    assert!(matches!(
+        error,
+        tenet::prelude::Error::UnsupportedOnDevice(_)
+    ));
+    assert_eq!(plan_cache_stats(&runtime).entries, 0);
+    assert_eq!(plan_cache_stats(&runtime).workspaces_created, 0);
 }
 
 #[test]
@@ -135,12 +162,19 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
         .unwrap()
         .contract(&tensors[2], &[1], &[0], &[0, 1])
         .unwrap();
+    let chain_macro =
+        tensor!([a; d] = (tensors[0])[a; b] * (tensors[1])[b; c] * (tensors[2])[c; d]).unwrap();
     assert_eq!(actual.codomain(), manual.codomain());
     assert_eq!(actual.domain(), manual.domain());
     assert_eq!(
         actual.to_host().unwrap().data(),
         manual.to_host().unwrap().data()
     );
+    assert_eq!(
+        chain_macro.to_host().unwrap().data(),
+        manual.to_host().unwrap().data()
+    );
+    assert_eq!(chain_macro.placement(), tensors[0].placement());
 
     let conj_network = Network::new(
         vec![labels(&["k", "i"]), labels(&["k", "j"])],
@@ -161,10 +195,15 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
         .unwrap()
         .contract(&tensors[1], &[1], &[0], &[0, 1])
         .unwrap();
+    let conj_macro = tensor!([i; j] = conj((tensors[0]))[k; i] * (tensors[1])[k; j]).unwrap();
     assert_eq!(conj_actual.codomain(), conj_manual.codomain());
     assert_eq!(conj_actual.domain(), conj_manual.domain());
     assert_eq!(
         conj_actual.to_host().unwrap().data(),
+        conj_manual.to_host().unwrap().data()
+    );
+    assert_eq!(
+        conj_macro.to_host().unwrap().data(),
         conj_manual.to_host().unwrap().data()
     );
 
@@ -182,6 +221,7 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
         .execute_cuda(&[&tensors[0]])
         .unwrap();
     let single_expected = tensors[0].adjoint().unwrap();
+    let single_macro = tensor!([i; k] = conj(tensors[0])[k; i]).unwrap();
     assert!(std::ptr::eq(
         single_actual.provider(),
         tensors[0].provider()
@@ -190,6 +230,10 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     assert_eq!(single_actual.domain(), single_expected.domain());
     assert_eq!(
         single_actual.to_host().unwrap().data(),
+        single_expected.to_host().unwrap().data()
+    );
+    assert_eq!(
+        single_macro.to_host().unwrap().data(),
         single_expected.to_host().unwrap().data()
     );
 
@@ -224,8 +268,16 @@ fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
         .unwrap()
         .execute_cuda(&[&ket, &bra])
         .unwrap();
+    let scalar_macro = tensor!([] = ket[; k] * bra[k;]).unwrap();
     assert_eq!(scalar.rank(), 0);
     assert!(scalar.codomain().is_empty());
     assert!(scalar.domain().is_empty());
     assert!(std::ptr::eq(scalar.provider(), ket.provider()));
+    assert_eq!(
+        scalar_macro.to_host().unwrap().data(),
+        scalar.to_host().unwrap().data()
+    );
+    let stats = plan_cache_stats(&runtime);
+    assert_eq!(stats.workspaces_created, 0);
+    assert_eq!(stats.idle_workspaces, 0);
 }

@@ -225,6 +225,7 @@ use tenet_core::{
 use tenet_tensors::{
     tree_transform_dyn_owned_checked_generic, BoundDynamicFusionMapSpace, BoundDynamicTensorRef,
     DynamicFusionMapSpace, OutputAxisOrder, TensorContractSpec, TreeTransformOperation,
+    ValidatedDynamicFusionLayout,
 };
 
 pub use tenet_core::SectorCodec;
@@ -269,6 +270,7 @@ use crate::tensor_core::{
     tensorproduct_owned_checked_generic, tensorproduct_owned_multiplicity_free,
     tree_transform_owned_multiplicity_free, OrientedContractionKind,
 };
+use crate::RuntimeIdentity;
 
 /// Facade error for checked Generic providers.
 #[non_exhaustive]
@@ -1928,6 +1930,25 @@ pub struct TensorMap<R, D, S = Vec<D>> {
     repr: TypedTensorRepr<R, D, S>,
 }
 
+impl<R, D, S> AsRef<Self> for TensorMap<R, D, S> {
+    fn as_ref(&self) -> &Self {
+        self
+    }
+}
+
+/// Host tensor authority parked without retaining its [`Runtime`].
+///
+/// This is an internal ownership seam for the Runtime-owned `tensor!` workspace
+/// pool. It retains only a validated provider-neutral layout and an owned dense
+/// payload; detach/attach never copies or materializes tensor data, and attach
+/// binds the layout to the current execution authority's exact provider.
+#[doc(hidden)]
+pub struct RuntimeDetachedTensorMap<D> {
+    runtime: RuntimeIdentity,
+    layout: ValidatedDynamicFusionLayout,
+    data: Arc<TypedData<D, Vec<D>>>,
+}
+
 /// Storage route used by typed network replay admission.
 #[doc(hidden)]
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1948,6 +1969,74 @@ impl<R, D, S> Clone for TensorMap<R, D, S> {
                 TypedTensorRepr::Adjoint(view) => TypedTensorRepr::Adjoint(Arc::clone(view)),
             },
         }
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: tenet_core::FusionRule,
+{
+    /// Removes Runtime and provider ownership from an ordinary dense Host
+    /// destination while preserving its validated layout and payload allocation.
+    #[doc(hidden)]
+    pub fn detach_runtime(self) -> Option<RuntimeDetachedTensorMap<D>> {
+        let TensorMap { runtime, repr } = self;
+        let TypedTensorRepr::Owned(body) = repr else {
+            return None;
+        };
+        let body = Arc::try_unwrap(body).ok()?;
+        if Arc::strong_count(&body.data) != 1 || !matches!(body.data.as_ref(), TypedData::Dense(_))
+        {
+            return None;
+        }
+        Some(RuntimeDetachedTensorMap {
+            runtime: runtime.identity(),
+            layout: body.space.validated_layout(),
+            data: body.data,
+        })
+    }
+}
+
+impl<D> RuntimeDetachedTensorMap<D> {
+    /// Whether this parked tensor belongs to `runtime`.
+    #[doc(hidden)]
+    pub fn matches_runtime(&self, runtime: &Runtime) -> bool {
+        self.runtime.matches(runtime)
+    }
+
+    /// Validates Runtime identity and layout rebinding against the current
+    /// authority without consuming this parked destination.
+    #[doc(hidden)]
+    pub fn can_attach<R>(&self, runtime: &Runtime, authority: &TensorMap<R, D>) -> Result<(), Error>
+    where
+        R: tenet_core::FusionRule,
+    {
+        if !self.matches_runtime(runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        authority.logical_space().rebind_validated(&self.layout)?;
+        Ok(())
+    }
+
+    /// Rebinds this provider-neutral destination to the current authority's
+    /// exact provider allocation after [`Self::can_attach`] succeeds.
+    #[doc(hidden)]
+    pub fn attach_runtime<R>(
+        self,
+        runtime: &Runtime,
+        authority: &TensorMap<R, D>,
+    ) -> Result<TensorMap<R, D>, Error>
+    where
+        R: tenet_core::FusionRule,
+    {
+        if !self.matches_runtime(runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        let space = authority.logical_space().rebind_validated(&self.layout)?;
+        Ok(TensorMap {
+            runtime: runtime.clone(),
+            repr: owned_repr(TypedTensorBody::with_shared_payload(space, self.data)),
+        })
     }
 }
 

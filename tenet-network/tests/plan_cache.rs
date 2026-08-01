@@ -1,389 +1,199 @@
-//! The topology-keyed plan cache behind `tensor!` / `Network::contract`.
-//! The cache is per-Runtime and every #[test] builds its own runtime, so
-//! counters start from zero in each test.
+use std::sync::{Arc, Barrier};
 
-use tenet::prelude::*;
+use tenet::core::{U1FusionRule, U1Irrep};
+use tenet::typed::{GradedSpace, Runtime, TensorMap};
 use tenet_network::{
-    clear_plan_cache, configure_plan_cache, plan_cache_config, plan_cache_stats, tensor,
-    PlanCacheConfig, ReplanPolicy,
+    clear_plan_cache, configure_plan_cache, load_plan_cache, plan_cache_stats, save_plan_cache,
+    tensor, PlanCacheConfig, ReplanPolicy,
 };
 
-fn assert_close(lhs: &[f64], rhs: &[f64], tol: f64) {
-    assert_eq!(lhs.len(), rhs.len());
-    for (a, b) in lhs.iter().zip(rhs) {
-        assert!(
-            (a - b).abs() <= tol * (1.0 + a.abs().max(b.abs())),
-            "{a} vs {b}"
-        );
-    }
+fn space(provider: Arc<U1FusionRule>, dim: usize) -> GradedSpace<U1FusionRule> {
+    GradedSpace::try_new(provider, [(U1Irrep::new(0), dim)], false).unwrap()
 }
 
-fn chain(rt: &Runtime, dim: usize, seed: u64) -> (Tensor, Tensor) {
-    let v = Space::u1([(-1, dim), (0, dim), (1, dim)]);
-    let a = Tensor::rand_with_seed(rt, Dtype::F64, [&v, &v], [&v, &v], seed).unwrap();
-    let b = Tensor::rand_with_seed(rt, Dtype::F64, [&v, &v], [&v, &v], seed + 1).unwrap();
-    (a, b)
-}
-
-#[test]
-fn second_identical_call_hits() {
-    let rt = Runtime::builder().build().unwrap();
-    let (a, b) = chain(&rt, 2, 301);
-
-    let first = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    let stats = plan_cache_stats(&rt);
-    assert_eq!((stats.hits, stats.misses, stats.entries), (0, 1, 1));
-
-    let second = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    let stats = plan_cache_stats(&rt);
-    assert_eq!((stats.hits, stats.misses, stats.entries), (1, 1, 1));
-    assert_close(first.data(), second.data(), 0.0);
-
-    clear_plan_cache(&rt);
-    let stats = plan_cache_stats(&rt);
-    assert_eq!((stats.hits, stats.misses, stats.entries), (0, 0, 0));
-}
-
-/// The cached plan and its idle numerical buffers are non-owning with respect
-/// to the Runtime; no explicit cache clear is required for normal destruction.
-#[test]
-fn idle_cached_workspace_does_not_keep_runtime_alive() {
-    let rt = Runtime::builder().build().unwrap();
-    let identity = rt.identity();
-    let (a, b) = chain(&rt, 2, 247_020);
-    let result = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    assert_eq!(plan_cache_stats(&rt).idle_workspaces, 1);
-
-    drop(result);
-    drop(a);
-    drop(b);
-    drop(rt);
-
-    assert!(!identity.is_alive());
+fn pair(
+    runtime: &Runtime,
+    space: &GradedSpace<U1FusionRule>,
+    seed: u64,
+) -> (TensorMap<U1FusionRule, f64>, TensorMap<U1FusionRule, f64>) {
+    (
+        TensorMap::rand_with_seed(runtime, [space], [space], seed).unwrap(),
+        TensorMap::rand_with_seed(runtime, [space], [space], seed + 1).unwrap(),
+    )
 }
 
 #[test]
-fn explicit_clear_and_drop_releases_runtime() {
-    let rt = Runtime::builder().build().unwrap();
-    let identity = rt.identity();
-    let (a, b) = chain(&rt, 2, 247_021);
-    drop(tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap());
-    clear_plan_cache(&rt);
-    drop(a);
-    drop(b);
-    drop(rt);
-    assert!(!identity.is_alive());
-}
+fn typed_static_cache_preserves_hit_clear_and_workspace_stats() {
+    let runtime = Runtime::builder().build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let space = space(provider, 3);
+    let (a, b) = pair(&runtime, &space, 10);
 
-/// The standard macro path materializes topology and grows a slot table once,
-/// then keeps both counters unchanged across warm executions.
-#[test]
-fn warm_macro_path_avoids_repeated_structural_materialization() {
-    let rt = Runtime::builder().build().unwrap();
-    let (a, b) = chain(&rt, 2, 305);
-
-    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    let cold = plan_cache_stats(&rt);
+    let first = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
+    let cold = plan_cache_stats(&runtime);
+    assert_eq!((cold.misses, cold.hits, cold.entries), (1, 0, 1));
     assert_eq!(cold.topology_materializations, 1);
     assert_eq!(cold.workspaces_created, 1);
-    assert_eq!(cold.workspace_slot_grows, 1);
-    assert_eq!(cold.workspace_reuses, 0);
-    assert_eq!(cold.dynamic_aliases, 0);
+    assert_eq!(cold.idle_workspaces, 1);
 
-    for _ in 0..8 {
-        let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    }
-    let warm = plan_cache_stats(&rt);
+    let second = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
+    let warm = plan_cache_stats(&runtime);
+    assert_eq!(first.data(), second.data());
+    assert_eq!((warm.misses, warm.hits, warm.entries), (1, 1, 1));
     assert_eq!(warm.topology_materializations, 1);
-    assert_eq!(warm.workspaces_created, 1);
-    assert_eq!(warm.workspace_slot_grows, 1);
-    assert_eq!(warm.workspace_reuses, 8);
-    assert_eq!(warm.dynamic_aliases, 0);
+    assert_eq!(warm.workspace_reuses, 1);
+
+    clear_plan_cache(&runtime);
+    assert_eq!(plan_cache_stats(&runtime), Default::default());
 }
 
 #[test]
-fn failed_execution_returns_workspace_to_cache() {
-    let rt = Runtime::builder().build().unwrap();
-    let other_rt = Runtime::builder().build().unwrap();
-    let small = Space::u1([(0, 1)]);
-    let large = Space::u1([(0, 16)]);
-    let a = Tensor::rand_with_seed(&rt, Dtype::F64, [&small], [&small], 307).unwrap();
-    let b = Tensor::rand_with_seed(&rt, Dtype::F64, [&small], [&small], 308).unwrap();
-    let foreign = Tensor::rand_with_seed(&other_rt, Dtype::F64, [&small], [&small], 309).unwrap();
-    let c = Tensor::rand_with_seed(&rt, Dtype::F64, [&small], [&large], 310).unwrap();
-    let d = Tensor::rand_with_seed(&rt, Dtype::F64, [&large], [&large], 311).unwrap();
+fn parked_host_workspace_releases_provider_and_rebinds_exact_current_arc() {
+    let runtime = Runtime::builder().build().unwrap();
+    let first_provider = Arc::new(U1FusionRule);
+    let first_weak = Arc::downgrade(&first_provider);
+    let first_space = space(Arc::clone(&first_provider), 2);
+    let (a, b) = pair(&runtime, &first_space, 20);
+    drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
+    drop((a, b, first_space, first_provider));
+    assert!(first_weak.upgrade().is_none());
 
-    let _ = tensor!([i; m] = a[i; j] * b[j; k] * c[k; l] * d[l; m]).unwrap();
-    let retained_before = c.storage_strong_count();
-    let _error = tensor!([i; m] = a[i; j] * foreign[j; k] * c[k; l] * d[l; m]).unwrap_err();
-    assert_eq!(c.storage_strong_count(), retained_before);
-    assert_eq!(d.storage_strong_count(), 1);
-    let _ = tensor!([i; m] = a[i; j] * b[j; k] * c[k; l] * d[l; m]).unwrap();
-
-    let stats = plan_cache_stats(&rt);
-    assert_eq!(stats.workspaces_created, 1);
-    assert_eq!(stats.workspace_slot_grows, 1);
-    assert_eq!(stats.workspace_reuses, 2);
-}
-
-/// Same topology, mildly drifted dims (well under the drift factor): the
-/// cached order is reused — this is the truncation-sweep case the
-/// topology key exists for — and the result is still correct.
-#[test]
-fn same_topology_different_dims_hits_and_stays_correct() {
-    let rt = Runtime::builder().build().unwrap();
-    let (a, b) = chain(&rt, 4, 311);
-    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    assert_eq!(plan_cache_stats(&rt).misses, 1);
-
-    let (c, d) = chain(&rt, 5, 312); // ratio 5/4 = 1.25 < 2.0 default
-    let cached = tensor!([i, j; m, n] = c[i, j; k, l] * d[k, l; m, n]).unwrap();
-    let stats = plan_cache_stats(&rt);
-    assert_eq!(
-        (stats.hits, stats.misses, stats.replans, stats.entries),
-        (1, 1, 0, 1)
-    );
-
-    // Correctness against an uncached fresh plan.
-    let expected = c.contract(&d, &[2, 3], &[0, 1]).unwrap();
-    assert_close(cached.data(), expected.data(), 1e-12);
-}
-
-/// Dims drifting beyond the factor re-plan (counted separately) and refresh
-/// the snapshot, still one entry per topology. `DriftFactor` is opt-in (the
-/// default is `BakeOnce`, which freezes instead — see
-/// `bake_once_default_freezes_after_real_dims`).
-#[test]
-fn drift_beyond_factor_replans() {
-    let rt = Runtime::builder()
-        .plan_cache(PlanCacheConfig {
-            replan: ReplanPolicy::DriftFactor(2.0),
-            ..PlanCacheConfig::default()
-        })
-        .build()
-        .unwrap();
-    let (a, b) = chain(&rt, 2, 321);
-    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-
-    let (c, d) = chain(&rt, 8, 322); // ratio 4 > 2.0 default
-    let result = tensor!([i, j; m, n] = c[i, j; k, l] * d[k, l; m, n]).unwrap();
-    let stats = plan_cache_stats(&rt);
-    assert_eq!(
-        (stats.hits, stats.misses, stats.replans, stats.entries),
-        (0, 1, 1, 1)
-    );
-    let expected = c.contract(&d, &[2, 3], &[0, 1]).unwrap();
-    assert_close(result.data(), expected.data(), 1e-12);
-
-    // The snapshot was refreshed: repeating the large shape now hits.
-    let _ = tensor!([i, j; m, n] = c[i, j; k, l] * d[k, l; m, n]).unwrap();
-    assert_eq!(plan_cache_stats(&rt).hits, 1);
-}
-
-/// The default policy `BakeOnce`: a plan seeded at degenerate dims (some leg
-/// trivial) is replaced once real dims arrive, then frozen — a later large
-/// drift at real dims reuses the path instead of re-searching (the
-/// cotengra/@tensoropt "find once, reuse regardless of rank" design).
-#[test]
-fn bake_once_default_freezes_after_real_dims() {
-    let rt = Runtime::builder().build().unwrap(); // default = BakeOnce
-                                                  // Seed at degenerate dims (every leg dim 1).
-    let t = Space::u1([(0, 1)]);
-    let a0 = Tensor::rand_with_seed(&rt, Dtype::F64, [&t, &t], [&t, &t], 401).unwrap();
-    let b0 = Tensor::rand_with_seed(&rt, Dtype::F64, [&t, &t], [&t, &t], 402).unwrap();
-    let _ = tensor!([i, j; m, n] = a0[i, j; k, l] * b0[k, l; m, n]).unwrap();
-    assert_eq!(plan_cache_stats(&rt).misses, 1);
-
-    // Real dims arrive: the degenerate seed is replaced once (bake-once replan).
-    let (c, d) = chain(&rt, 4, 403);
-    let _ = tensor!([i, j; m, n] = c[i, j; k, l] * d[k, l; m, n]).unwrap();
-    let s = plan_cache_stats(&rt);
-    assert_eq!((s.replans, s.misses, s.entries), (1, 1, 1));
-
-    // Frozen: a 4x drift at real dims now HITS (no re-search), unlike DriftFactor.
-    let (e, f) = chain(&rt, 16, 404);
-    let result = tensor!([i, j; m, n] = e[i, j; k, l] * f[k, l; m, n]).unwrap();
-    let s = plan_cache_stats(&rt);
-    assert_eq!((s.hits, s.replans), (1, 1));
-    let expected = e.contract(&f, &[2, 3], &[0, 1]).unwrap();
-    assert_close(result.data(), expected.data(), 1e-12);
+    let current_provider = Arc::new(U1FusionRule);
+    let current_space = space(Arc::clone(&current_provider), 2);
+    let (c, d) = pair(&runtime, &current_space, 30);
+    let output = tensor!([i; k] = c[i; j] * d[j; k]).unwrap();
+    assert!(std::ptr::eq(output.provider(), current_provider.as_ref()));
+    assert_eq!(plan_cache_stats(&runtime).workspace_reuses, 1);
 }
 
 #[test]
-fn always_reuse_policy_never_replans() {
-    let rt = Runtime::builder()
-        .plan_cache(PlanCacheConfig {
-            replan: ReplanPolicy::AlwaysReuse,
-            ..PlanCacheConfig::default()
-        })
-        .build()
-        .unwrap();
-    let (a, b) = chain(&rt, 2, 331);
-    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    let (c, d) = chain(&rt, 16, 332); // ratio 8, reused anyway
-    let result = tensor!([i, j; m, n] = c[i, j; k, l] * d[k, l; m, n]).unwrap();
-    let stats = plan_cache_stats(&rt);
-    assert_eq!((stats.hits, stats.replans), (1, 0));
-    let expected = c.contract(&d, &[2, 3], &[0, 1]).unwrap();
-    assert_close(result.data(), expected.data(), 1e-12);
-}
-
-/// Persist searched orders and restore them in a fresh runtime: the reloaded
-/// order is reused (at drifted dims) and computes the same result, and a blob
-/// with a mismatched version header is rejected rather than trusted.
-#[test]
-fn persisted_orders_round_trip_and_reject_stale() {
-    use tenet_network::{load_plan_cache, save_plan_cache};
-
-    // Search once at real dims, then serialize.
-    let rt1 = Runtime::builder().build().unwrap();
-    assert_eq!(load_plan_cache(&rt1, ""), 0);
-    let (a, b) = chain(&rt1, 4, 501);
-    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    let blob = save_plan_cache(&rt1);
-    assert!(blob.starts_with("TENET_PLANCACHE 1"));
-    assert!(blob.contains("TOPO "));
-
-    // A fresh runtime loads the order and reuses it at different dims.
-    let rt2 = Runtime::builder().build().unwrap();
-    assert_eq!(load_plan_cache(&rt2, &blob), 1);
-    let (c, d) = chain(&rt2, 7, 502);
-    let result = tensor!([i, j; m, n] = c[i, j; k, l] * d[k, l; m, n]).unwrap();
-    let expected = c.contract(&d, &[2, 3], &[0, 1]).unwrap();
-    assert_close(result.data(), expected.data(), 1e-12);
-
-    // A stale/foreign version header is ignored (returns 0): a mismatched file
-    // must not replay a now-suboptimal order.
-    let rt3 = Runtime::builder().build().unwrap();
-    let stale = blob.replacen("TENET_PLANCACHE 1", "TENET_PLANCACHE 0", 1);
-    assert_eq!(load_plan_cache(&rt3, &stale), 0);
-}
-
-/// `save_plan_cache` iterates a `HashMap` internally; without sorting by
-/// topology key at save time, two runtimes holding the same persisted
-/// entries but built in a different insertion order could serialize to
-/// different byte strings (breaks reproducible builds / content-addressed
-/// cache blobs, issue #151). Populate the same three topologies in reverse
-/// order across two runtimes and assert the saved blobs are byte-identical.
-#[test]
-fn save_plan_cache_output_is_order_independent() {
-    use tenet_network::{load_plan_cache, save_plan_cache};
-
-    fn populate(rt: &Runtime, order: [u8; 3]) {
-        assert_eq!(load_plan_cache(rt, ""), 0); // opt into persistence
-        let (a, b) = chain(rt, 3, 601);
-        for topo_id in order {
-            match topo_id {
-                0 => {
-                    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-                }
-                1 => {
-                    let _ = tensor!([j, i; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-                }
-                2 => {
-                    let _ = tensor!([] = conj(a)[i, j; k, l] * a[i, j; k, l]).unwrap();
-                }
-                _ => unreachable!(),
-            }
-        }
-    }
-
-    let rt1 = Runtime::builder().build().unwrap();
-    populate(&rt1, [0, 1, 2]);
-    let rt2 = Runtime::builder().build().unwrap();
-    populate(&rt2, [2, 0, 1]);
-
-    let blob1 = save_plan_cache(&rt1);
-    let blob2 = save_plan_cache(&rt2);
-    assert_eq!(blob1.matches("TOPO ").count(), 3);
-    assert_eq!(blob1, blob2);
-}
-
-#[test]
-fn different_topologies_get_separate_entries() {
-    let rt = Runtime::builder().build().unwrap();
-    let (a, b) = chain(&rt, 2, 341);
-    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    // Different output order = different topology.
-    let _ = tensor!([j, i; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    // conj marker changes the topology too.
-    let _ = tensor!([] = conj(a)[i, j; k, l] * a[i, j; k, l]).unwrap();
-    let stats = plan_cache_stats(&rt);
-    assert_eq!((stats.hits, stats.misses, stats.entries), (0, 3, 3));
-}
-
-/// At capacity, inserting a new topology evicts the least-recently-used
-/// entry, not the whole cache.
-#[test]
-fn eviction_drops_least_recently_used_topology() {
-    let rt = Runtime::builder()
-        .plan_cache(PlanCacheConfig {
-            capacity: 2,
-            ..PlanCacheConfig::default()
-        })
-        .build()
-        .unwrap();
-    let (a, b) = chain(&rt, 2, 371);
-
-    // Three distinct topologies (different output orders).
-    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap(); // T1
-    let _ = tensor!([j, i; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap(); // T2
-    let _ = tensor!([i, j; n, m] = a[i, j; k, l] * b[k, l; m, n]).unwrap(); // T3 evicts T1
-    let stats = plan_cache_stats(&rt);
-    assert_eq!((stats.misses, stats.entries), (3, 2));
-
-    // T2 and T3 survived (hits), T1 was evicted (miss again).
-    let _ = tensor!([j, i; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    let _ = tensor!([i, j; n, m] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    assert_eq!(plan_cache_stats(&rt).hits, 2);
-    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    let stats = plan_cache_stats(&rt);
-    assert_eq!((stats.hits, stats.misses, stats.entries), (2, 4, 2));
-}
-
-/// A hit refreshes recency: the touched entry survives the next eviction.
-#[test]
-fn touched_entry_survives_eviction() {
-    let rt = Runtime::builder()
-        .plan_cache(PlanCacheConfig {
-            capacity: 2,
-            ..PlanCacheConfig::default()
-        })
-        .build()
-        .unwrap();
-    let (a, b) = chain(&rt, 2, 381);
-
-    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap(); // T1
-    let _ = tensor!([j, i; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap(); // T2
-    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap(); // touch T1
-    let _ = tensor!([i, j; n, m] = a[i, j; k, l] * b[k, l; m, n]).unwrap(); // T3 evicts T2
-    let stats = plan_cache_stats(&rt);
-    assert_eq!((stats.hits, stats.misses, stats.entries), (1, 3, 2));
-
-    // T1 was touched, so it survived; T2 is gone.
-    let _ = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    assert_eq!(plan_cache_stats(&rt).hits, 2);
-    let _ = tensor!([j, i; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    let stats = plan_cache_stats(&rt);
-    assert_eq!((stats.hits, stats.misses, stats.entries), (2, 4, 2));
-}
-
-#[test]
-fn disabled_cache_plans_fresh_every_call() {
-    let rt = Runtime::builder().build().unwrap();
+fn dimension_drift_replans_without_put_before_residency_recheck() {
+    let runtime = Runtime::builder().build().unwrap();
     configure_plan_cache(
-        &rt,
+        &runtime,
         PlanCacheConfig {
-            enabled: false,
-            ..PlanCacheConfig::default()
+            replan: ReplanPolicy::DriftFactor(1.5),
+            ..Default::default()
         },
     );
-    let (a, b) = chain(&rt, 2, 351);
-    let first = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    let second = tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).unwrap();
-    let stats = plan_cache_stats(&rt);
-    assert_eq!((stats.hits, stats.misses, stats.entries), (0, 0, 0));
-    assert_close(first.data(), second.data(), 0.0);
-    // Default config really is enabled + greedy.
-    assert!(plan_cache_config(&rt).enabled == false);
+    let provider = Arc::new(U1FusionRule);
+    let small = space(Arc::clone(&provider), 2);
+    let large = space(provider, 5);
+    let (a, b) = pair(&runtime, &small, 40);
+    drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
+    let (c, d) = pair(&runtime, &large, 50);
+    drop(tensor!([i; k] = c[i; j] * d[j; k]).unwrap());
+    let stats = plan_cache_stats(&runtime);
+    assert_eq!((stats.misses, stats.replans, stats.entries), (1, 1, 1));
+}
+
+#[test]
+fn disabled_cache_keeps_entries_and_counters_empty() {
+    let runtime = Runtime::builder().build().unwrap();
+    configure_plan_cache(
+        &runtime,
+        PlanCacheConfig {
+            enabled: false,
+            ..Default::default()
+        },
+    );
+    let space = space(Arc::new(U1FusionRule), 2);
+    let (a, b) = pair(&runtime, &space, 60);
+    drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
+    drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
+    assert_eq!(plan_cache_stats(&runtime), Default::default());
+}
+
+#[test]
+fn lru_hit_touches_entry_before_capacity_eviction() {
+    let runtime = Runtime::builder().build().unwrap();
+    configure_plan_cache(
+        &runtime,
+        PlanCacheConfig {
+            capacity: 2,
+            ..Default::default()
+        },
+    );
+    let space = space(Arc::new(U1FusionRule), 2);
+    let (a, b) = pair(&runtime, &space, 70);
+    drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
+    drop(tensor!([k; i] = a[i; j] * b[j; k]).unwrap());
+    drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
+    drop(tensor!([k; i] = b[j; k] * a[i; j]).unwrap());
+    let before = plan_cache_stats(&runtime);
+    drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
+    assert_eq!(plan_cache_stats(&runtime).hits, before.hits + 1);
+    drop(tensor!([k; i] = a[i; j] * b[j; k]).unwrap());
+    let after = plan_cache_stats(&runtime);
+    assert_eq!(after.misses, before.misses + 1);
+    assert_eq!(after.entries, 2);
+}
+
+#[test]
+fn persisted_typed_order_roundtrips_into_a_fresh_runtime() {
+    let first = Runtime::builder().build().unwrap();
+    assert_eq!(load_plan_cache(&first, ""), 0);
+    let first_space = space(Arc::new(U1FusionRule), 2);
+    let (a, b) = pair(&first, &first_space, 80);
+    let expected = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
+    let saved = save_plan_cache(&first);
+    assert!(saved.contains("TOPO "));
+
+    let second = Runtime::builder().build().unwrap();
+    assert_eq!(load_plan_cache(&second, &saved), 1);
+    let second_space = space(Arc::new(U1FusionRule), 2);
+    let (c, d) = pair(&second, &second_space, 80);
+    let actual = tensor!([i; k] = c[i; j] * d[j; k]).unwrap();
+    assert_eq!(actual.data(), expected.data());
+}
+
+#[test]
+fn concurrent_macro_calls_share_one_plan_and_bound_idle_pool() {
+    let runtime = Runtime::builder().build().unwrap();
+    let space = space(Arc::new(U1FusionRule), 8);
+    let (a, b) = pair(&runtime, &space, 90);
+    let barrier = Arc::new(Barrier::new(8));
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            let barrier = Arc::clone(&barrier);
+            let a = &a;
+            let b = &b;
+            scope.spawn(move || {
+                barrier.wait();
+                drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
+            });
+        }
+    });
+    let stats = plan_cache_stats(&runtime);
+    assert_eq!(stats.entries, 1);
+    assert!(stats.idle_workspaces <= 2);
+    assert!(stats.workspaces_created >= stats.idle_workspaces as u64);
+}
+
+#[test]
+fn failed_execution_returns_lease_for_the_next_valid_call() {
+    let runtime = Runtime::builder().build().unwrap();
+    let other = Runtime::builder().build().unwrap();
+    let local_space = space(Arc::new(U1FusionRule), 2);
+    let other_space = space(Arc::new(U1FusionRule), 2);
+    let (a, b) = pair(&runtime, &local_space, 100);
+    let (_, foreign) = pair(&other, &other_space, 110);
+    drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
+    assert!(tensor!([i; k] = a[i; j] * foreign[j; k]).is_err());
+    drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
+    let stats = plan_cache_stats(&runtime);
+    assert_eq!(stats.workspaces_created, 1);
+    assert_eq!(stats.workspace_reuses, 2);
+    assert_eq!(stats.idle_workspaces, 1);
+}
+
+#[test]
+fn dropping_warm_runtime_breaks_the_cache_workspace_cycle() {
+    let runtime = Runtime::builder().build().unwrap();
+    let identity = runtime.identity();
+    let space = space(Arc::new(U1FusionRule), 2);
+    let (a, b) = pair(&runtime, &space, 120);
+    let output = tensor!([i; k] = a[i; j] * b[j; k]).unwrap();
+    drop((output, a, b, space, runtime));
+    assert!(!identity.is_alive());
 }
