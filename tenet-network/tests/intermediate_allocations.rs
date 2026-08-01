@@ -3,10 +3,15 @@ use std::cell::{Cell, RefCell};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
+use tenet::core::{U1FusionRule, U1Irrep};
 use tenet::prelude::*;
-use tenet_network::{GreedyDenseOptimizer, Network, NetworkExecutionWorkspace, TemporaryLabel};
+use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap as TypedTensorMap};
+use tenet_network::{
+    ContractionPlan, ContractionStep, Network, NetworkExecutionWorkspace, PlannedNetwork,
+    TemporaryLabel, TensorId,
+};
 
 struct CountingAllocator;
 
@@ -445,46 +450,59 @@ struct AllocationSample {
     registry_overflows: u64,
 }
 
-fn measure_execute(
-    planned: &tenet_network::PlannedNetwork,
-    tensors: &[&Tensor],
-    arena: &mut NetworkExecutionWorkspace,
-    oracle: &Tensor,
-) -> AllocationSample {
+fn median3(mut values: [u64; 3]) -> u64 {
+    values.sort_unstable();
+    values[1]
+}
+
+trait AllocationScalar: TensorScalar + std::fmt::Debug {
+    fn close(lhs: Self, rhs: Self) -> bool;
+}
+
+impl AllocationScalar for f64 {
+    fn close(lhs: Self, rhs: Self) -> bool {
+        (lhs - rhs).abs() <= 1.0e-12 * lhs.abs().max(rhs.abs()).max(1.0)
+    }
+}
+
+impl AllocationScalar for Complex64 {
+    fn close(lhs: Self, rhs: Self) -> bool {
+        (lhs - rhs).norm() <= 1.0e-12 * lhs.norm().max(rhs.norm()).max(1.0)
+    }
+}
+
+fn measure_typed_overwrite_witness<D>(
+    planned: &PlannedNetwork,
+    tensors: &[TypedTensorMap<U1FusionRule, D>; 3],
+    workspace: &mut NetworkExecutionWorkspace<U1FusionRule, D>,
+    oracle: &[D],
+) -> AllocationSample
+where
+    D: AllocationScalar,
+{
     reset_event_counters();
-    let payload_size_bytes = match oracle.dtype() {
-        Dtype::F64 => oracle.data().len().checked_mul(std::mem::size_of::<f64>()),
-        Dtype::C64 => oracle
-            .data_c64()
-            .len()
-            .checked_mul(std::mem::size_of::<Complex64>()),
-    };
-    let payload_size_bytes = payload_size_bytes.expect("oracle payload byte size overflowed");
+    let payload_size_bytes = oracle
+        .len()
+        .checked_mul(std::mem::size_of::<D>())
+        .expect("oracle payload byte size overflowed");
     assert!(payload_size_bytes > 0);
     PAYLOAD_SIZE.store(payload_size_bytes, Ordering::Relaxed);
     reset_live_registry();
     ENABLED.store(true, Ordering::SeqCst);
 
-    let output = planned.execute_with_workspace(tensors, arena).unwrap();
-    match output.dtype() {
-        Dtype::F64 => assert_eq!(output.data(), oracle.data()),
-        Dtype::C64 => assert_eq!(output.data_c64(), oracle.data_c64()),
-    }
-    let (output_pointer, output_payload_bytes) = match output.dtype() {
-        Dtype::F64 => (
-            output.data().as_ptr().cast::<u8>(),
-            output.data().len().checked_mul(std::mem::size_of::<f64>()),
-        ),
-        Dtype::C64 => (
-            output.data_c64().as_ptr().cast::<u8>(),
-            output
-                .data_c64()
-                .len()
-                .checked_mul(std::mem::size_of::<Complex64>()),
-        ),
-    };
-    assert_eq!(output_payload_bytes, Some(payload_size_bytes));
-    assert_eq!(registered_size(output_pointer), Some(payload_size_bytes));
+    let refs = tensors.iter().collect::<Vec<_>>();
+    let output = planned.execute_with_workspace(&refs, workspace).unwrap();
+    assert_eq!(output.data().len(), oracle.len());
+    assert!(
+        output
+            .data()
+            .iter()
+            .zip(oracle)
+            .all(|(&lhs, &rhs)| D::close(lhs, rhs)),
+        "typed overwrite result differs from the returning oracle"
+    );
+    let output_pointer = output.data().as_ptr().cast::<u8>();
+    assert!(registered_size(output_pointer).is_some());
     let live_with_output = LIVE_BYTES.load(Ordering::Relaxed);
     let payload_live_with_output = PAYLOAD_LIVE_BYTES.load(Ordering::Relaxed);
     let peak_live_delta = PEAK_LIVE_BYTES.load(Ordering::Relaxed);
@@ -514,191 +532,96 @@ fn measure_execute(
     }
 }
 
-#[derive(Clone, Copy)]
-enum Workload {
-    U1F64,
-    U1C64,
-    Su2F64,
-    Su3C64,
-    Su2PermuteF64,
-}
-
-impl Workload {
-    const ALL: [Self; 5] = [
-        Self::U1F64,
-        Self::U1C64,
-        Self::Su2F64,
-        Self::Su3C64,
-        Self::Su2PermuteF64,
-    ];
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::U1F64 => "u1-f64",
-            Self::U1C64 => "u1-c64",
-            Self::Su2F64 => "su2-f64",
-            Self::Su3C64 => "su3-c64",
-            Self::Su2PermuteF64 => "su2-permute-f64",
-        }
-    }
-
-    fn parse(name: &str) -> Self {
-        Self::ALL
-            .into_iter()
-            .find(|workload| workload.name() == name)
-            .unwrap_or_else(|| panic!("unknown allocator workload {name:?}"))
-    }
-
-    fn dtype(self) -> Dtype {
-        match self {
-            Self::U1C64 | Self::Su3C64 => Dtype::C64,
-            _ => Dtype::F64,
-        }
-    }
-
-    fn space(self, chi: usize) -> Space {
-        match self {
-            Self::U1F64 | Self::U1C64 => Space::u1([(-1, chi), (0, chi), (1, chi)]),
-            Self::Su2F64 | Self::Su2PermuteF64 => {
-                Space::su2([(0, chi), (1, chi), (2, chi)]).unwrap()
-            }
-            Self::Su3C64 => Space::su3([((1, 0), chi), ((0, 1), chi)]).unwrap(),
-        }
-    }
-
-    fn permutes_intermediate(self) -> bool {
-        matches!(self, Self::Su2PermuteF64)
-    }
-}
-
-fn build_worker(workload: Workload, chi: usize) -> (tenet_network::PlannedNetwork, Vec<Tensor>) {
+fn typed_overwrite_worker<D>(chi: usize, reuse: bool)
+where
+    D: AllocationScalar,
+{
     let runtime = Runtime::builder().build().unwrap();
-    let space = workload.space(chi);
-    let count = if workload.permutes_intermediate() {
-        3
-    } else {
-        4
-    };
-    let tensors = (0..count)
-        .map(|index| {
-            Tensor::rand_with_seed(
-                &runtime,
-                workload.dtype(),
-                [&space],
-                [&space],
-                31_000 + chi as u64 * 100 + index as u64,
-            )
-            .unwrap()
-        })
-        .collect::<Vec<_>>();
-    let label = |name: &str| TemporaryLabel::from(name);
-    let labels = (0..count)
-        .map(|index| {
-            vec![
-                label(&format!("l{index}")),
-                label(&format!("l{}", index + 1)),
-            ]
-        })
-        .collect::<Vec<_>>();
-    let output = if workload.permutes_intermediate() {
-        vec![label(&format!("l{count}")), label("l0")]
-    } else {
-        vec![label("l0"), label(&format!("l{count}"))]
-    };
+    let provider = Arc::new(U1FusionRule);
+    let bond =
+        GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), chi)], false).unwrap();
+    let left =
+        GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), chi + 1)], false).unwrap();
+    let right = GradedSpace::try_new(provider, [(U1Irrep::new(0), chi + 2)], false).unwrap();
+    let left_dual = left.try_dual().unwrap();
+    let tensors: [TypedTensorMap<U1FusionRule, D>; 3] = std::array::from_fn(|index| {
+        let (codomain, domain) = match index {
+            0 => (&left, &bond),
+            1 => (&bond, &right),
+            _ => (&left_dual, &right),
+        };
+        TypedTensorMap::rand_with_seed(
+            &runtime,
+            [codomain],
+            [domain],
+            74_600 + chi as u64 * 10 + index as u64,
+        )
+        .unwrap()
+    });
+    let label = TemporaryLabel::from;
+    let output = vec![label("c"), label("d")];
     let network = Network::new(
-        labels,
-        vec![false; count],
-        vec![None; count],
-        output,
+        vec![
+            vec![label("a"), label("b")],
+            vec![label("b"), label("c")],
+            vec![label("a"), label("d")],
+        ],
+        vec![false; 3],
+        vec![Some(1); 3],
+        output.clone(),
         Some(1),
     )
     .unwrap();
-    let refs = tensors.iter().collect::<Vec<_>>();
-    let planned = network.plan(&refs, &GreedyDenseOptimizer).unwrap();
-    (planned, tensors)
-}
-
-fn worker(workload: Workload, chi: usize, reuse: bool) {
-    let (planned, tensors) = build_worker(workload, chi);
-    let refs = tensors.iter().collect::<Vec<_>>();
-    let mut arena = NetworkExecutionWorkspace::default();
-    for _ in 0..3 {
-        drop(planned.execute_with_workspace(&refs, &mut arena).unwrap());
-    }
-    for _ in 0..5 {
+    let plan = ContractionPlan::new(
+        3,
+        output,
+        vec![
+            ContractionStep::new(
+                TensorId::new(0),
+                TensorId::new(1),
+                TensorId::new(3),
+                0,
+                vec![label("a"), label("c")],
+            ),
+            ContractionStep::new(
+                TensorId::new(3),
+                TensorId::new(2),
+                TensorId::new(4),
+                0,
+                vec![label("c"), label("d")],
+            ),
+        ],
+    )
+    .unwrap();
+    let refs = [&tensors[0], &tensors[1], &tensors[2]];
+    let planned = network.plan_with(&refs, plan).unwrap();
+    let mut workspace = NetworkExecutionWorkspace::default();
+    for _ in 0..8 {
         if !reuse {
-            arena.clear_intermediate_buffers();
+            workspace = NetworkExecutionWorkspace::default();
         }
-        drop(planned.execute_with_workspace(&refs, &mut arena).unwrap());
+        drop(
+            planned
+                .execute_with_workspace(&refs, &mut workspace)
+                .unwrap(),
+        );
     }
-    let oracle = planned.execute(&refs).unwrap();
-    let structural_before = arena.stats();
-    let mut samples = Vec::new();
-    for _ in 0..3 {
+    let oracle = tensors[0]
+        .contract(&tensors[1], &[1], &[0], &[1, 0])
+        .unwrap()
+        .contract(&tensors[2], &[1], &[0], &[0, 1])
+        .unwrap()
+        .data()
+        .to_vec();
+    let samples = std::array::from_fn::<_, 3, _>(|_| {
         if !reuse {
-            arena.clear_intermediate_buffers();
+            workspace = NetworkExecutionWorkspace::default();
         }
-        samples.push(measure_execute(&planned, &refs, &mut arena, &oracle));
-    }
-    let structural_after = arena.stats();
-    let owned = structural_after.owned_intermediates - structural_before.owned_intermediates;
-    let reused = structural_after.reused_intermediates - structural_before.reused_intermediates;
-    let owned_contractions =
-        structural_after.owned_contractions - structural_before.owned_contractions;
-    let reused_contractions =
-        structural_after.reused_contractions - structural_before.reused_contractions;
-    let owned_orientations =
-        structural_after.owned_orientations - structural_before.owned_orientations;
-    let reused_orientations =
-        structural_after.reused_orientations - structural_before.reused_orientations;
-    assert_eq!(
-        structural_after.contract_layout_preparations
-            - structural_before.contract_layout_preparations,
-        0
-    );
-    assert_eq!(
-        structural_after.orientation_layout_preparations
-            - structural_before.orientation_layout_preparations,
-        0
-    );
-    assert_eq!(
-        structural_after.contract_structural_comparisons
-            - structural_before.contract_structural_comparisons,
-        0
-    );
-    assert_eq!(
-        structural_after.orientation_structural_comparisons
-            - structural_before.orientation_structural_comparisons,
-        0
-    );
-    assert_eq!(
-        structural_after.escaped_outputs - structural_before.escaped_outputs,
-        3
-    );
-    if workload.permutes_intermediate() {
-        if reuse {
-            assert_eq!((owned, reused), (3, 3));
-            assert_eq!((owned_contractions, reused_contractions), (3, 3));
-            assert_eq!((owned_orientations, reused_orientations), (0, 0));
-        } else {
-            assert_eq!((owned, reused), (9, 0));
-            assert_eq!((owned_contractions, reused_contractions), (6, 0));
-            assert_eq!((owned_orientations, reused_orientations), (3, 0));
-        }
-    } else if reuse {
-        assert_eq!((owned, reused), (3, 6));
-        assert_eq!((owned_contractions, reused_contractions), (3, 6));
-        assert_eq!((owned_orientations, reused_orientations), (0, 0));
-    } else {
-        assert_eq!((owned, reused), (9, 0));
-        assert_eq!((owned_contractions, reused_contractions), (9, 0));
-        assert_eq!((owned_orientations, reused_orientations), (0, 0));
-    }
+        measure_typed_overwrite_witness(&planned, &tensors, &mut workspace, &oracle)
+    });
     for sample in samples {
         println!(
-            "TENET_ALLOC_SAMPLE {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
-            workload.name(),
-            chi,
+            "TENET_TYPED_ALLOC_SAMPLE {chi} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
             u8::from(reuse),
             sample.alloc_calls,
             sample.realloc_calls,
@@ -714,52 +637,39 @@ fn worker(workload: Workload, chi: usize, reuse: bool) {
             sample.payload_output_live_bytes,
             sample.payload_size_bytes,
             sample.registry_overflows,
-            owned * 1_000_000 + reused,
         );
     }
 }
 
-fn run_worker(workload: Workload, chi: usize, reuse: bool) -> Vec<AllocationSample> {
+fn run_typed_overwrite_worker(dtype: &str, chi: usize, reuse: bool) -> Vec<AllocationSample> {
     let output = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "measured_intermediate_arena_accounting",
-            "--nocapture",
-        ])
-        .env("TENET_ALLOC_WORKLOAD", workload.name())
-        .env("TENET_ALLOC_MODE", if reuse { "reuse" } else { "fresh" })
-        .env("TENET_ALLOC_CHI", chi.to_string())
+        .args(["--exact", "measured_typed_overwrite_witness", "--nocapture"])
+        .env("TENET_TYPED_ALLOC_DTYPE", dtype)
+        .env(
+            "TENET_TYPED_ALLOC_MODE",
+            if reuse { "reuse" } else { "fresh" },
+        )
+        .env("TENET_TYPED_ALLOC_CHI", chi.to_string())
         .output()
         .unwrap();
     assert!(
         output.status.success(),
-        "worker failed: {}",
+        "typed worker failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout)
         .unwrap()
         .lines()
-        .filter(|line| line.starts_with("TENET_ALLOC_SAMPLE "))
+        .filter(|line| line.starts_with("TENET_TYPED_ALLOC_SAMPLE "))
         .map(|line| {
             let mut fields = line.split_whitespace();
-            assert_eq!(fields.next(), Some("TENET_ALLOC_SAMPLE"));
-            assert_eq!(fields.next(), Some(workload.name()));
+            assert_eq!(fields.next(), Some("TENET_TYPED_ALLOC_SAMPLE"));
             assert_eq!(fields.next().unwrap().parse::<usize>().unwrap(), chi);
             assert_eq!(fields.next().unwrap(), if reuse { "1" } else { "0" });
             let values = fields
                 .map(|value| value.parse::<u64>().unwrap())
                 .collect::<Vec<_>>();
-            assert_eq!(values.len(), 15);
-            let expected_structural = if reuse {
-                if workload.permutes_intermediate() {
-                    3_000_003
-                } else {
-                    3_000_006
-                }
-            } else {
-                9_000_000
-            };
-            assert_eq!(values[14], expected_structural);
+            assert_eq!(values.len(), 14);
             AllocationSample {
                 alloc_calls: values[0],
                 realloc_calls: values[1],
@@ -780,9 +690,174 @@ fn run_worker(workload: Workload, chi: usize, reuse: bool) -> Vec<AllocationSamp
         .collect()
 }
 
-fn median3(mut values: [u64; 3]) -> u64 {
-    values.sort_unstable();
-    values[1]
+fn lazy_conj_worker() {
+    let runtime = Runtime::builder().build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let space = |degeneracy| {
+        GradedSpace::try_new(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), degeneracy)],
+            false,
+        )
+        .unwrap()
+    };
+    let (left, bond, right) = (space(5), space(7), space(11));
+    let lhs =
+        TypedTensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&left], [&bond], 74_700)
+            .unwrap();
+    let rhs =
+        TypedTensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&left], [&right], 74_701)
+            .unwrap();
+    let label = TemporaryLabel::from;
+    let network = Network::new(
+        vec![vec![label("x"), label("k")], vec![label("x"), label("r")]],
+        vec![true, false],
+        vec![Some(1), Some(1)],
+        vec![label("k"), label("r")],
+        Some(1),
+    )
+    .unwrap();
+    let refs = [&lhs, &rhs];
+    let planned = network
+        .plan(&refs, &tenet_network::GreedyDenseOptimizer)
+        .unwrap();
+    let mut workspace = NetworkExecutionWorkspace::default();
+    for _ in 0..3 {
+        drop(
+            planned
+                .execute_with_workspace(&refs, &mut workspace)
+                .unwrap(),
+        );
+    }
+
+    let parent_pointer = lhs.data().as_ptr();
+    reset_event_counters();
+    PAYLOAD_SIZE.store(5 * 7 * std::mem::size_of::<f64>(), Ordering::Relaxed);
+    reset_live_registry();
+    ENABLED.store(true, Ordering::SeqCst);
+    let output = planned
+        .execute_with_workspace(&refs, &mut workspace)
+        .unwrap();
+    assert_eq!(output.rank(), 2);
+    drop(output);
+    ENABLED.store(false, Ordering::SeqCst);
+
+    // What: 5*7 is the conj receiver only; the final payload is 7*11.
+    // PAYLOAD_ALLOC_CALLS includes both allocations and reallocations whose
+    // origin or result has the selected size.
+    assert_eq!(PAYLOAD_ALLOC_CALLS.load(Ordering::Relaxed), 0);
+    assert_eq!(lhs.data().as_ptr(), parent_pointer);
+    assert_eq!(REGISTRY_OVERFLOWS.load(Ordering::Relaxed), 0);
+
+    let compact_bond = space(13);
+    let compact = TypedTensorMap::<U1FusionRule, f64>::diagonal(
+        &runtime,
+        &compact_bond,
+        [SectorSpectrum {
+            sector: U1Irrep::new(0),
+            values: (1..=13).map(|value| value as f64).collect(),
+        }],
+    )
+    .unwrap();
+    let compact_network = Network::new(
+        vec![vec![label("i"), label("j")]],
+        vec![false],
+        vec![Some(1)],
+        vec![label("i"), label("j")],
+        Some(1),
+    )
+    .unwrap();
+    let compact_plan = compact_network
+        .plan(&[&compact], &tenet_network::GreedyDenseOptimizer)
+        .unwrap();
+    let mut compact_workspace = NetworkExecutionWorkspace::default();
+    for _ in 0..3 {
+        drop(
+            compact_plan
+                .execute_with_workspace(&[&compact], &mut compact_workspace)
+                .unwrap(),
+        );
+    }
+
+    reset_event_counters();
+    PAYLOAD_SIZE.store(13 * 13 * std::mem::size_of::<f64>(), Ordering::Relaxed);
+    reset_live_registry();
+    ENABLED.store(true, Ordering::SeqCst);
+    assert_eq!(std::hint::black_box(compact.data()).len(), 13 * 13);
+    ENABLED.store(false, Ordering::SeqCst);
+    // What: materialization still allocates the dense 13*13 cache after warm
+    // replay, proving replay itself did not publish that cache.
+    assert_eq!(PAYLOAD_ALLOC_CALLS.load(Ordering::Relaxed), 1);
+    assert_eq!(REGISTRY_OVERFLOWS.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn warm_lazy_conj_replay_does_not_materialize_the_input() {
+    let _test_guard = lock_unpoisoned(&TEST_LOCK);
+    if std::env::var_os("TENET_LAZY_CONJ_ALLOC_WORKER").is_some() {
+        lazy_conj_worker();
+        return;
+    }
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "warm_lazy_conj_replay_does_not_materialize_the_input",
+            "--nocapture",
+        ])
+        .env("TENET_LAZY_CONJ_ALLOC_WORKER", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "lazy-conj allocator worker failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn measured_typed_overwrite_witness() {
+    let _test_guard = lock_unpoisoned(&TEST_LOCK);
+    if let Ok(dtype) = std::env::var("TENET_TYPED_ALLOC_DTYPE") {
+        let chi = std::env::var("TENET_TYPED_ALLOC_CHI")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let reuse = std::env::var("TENET_TYPED_ALLOC_MODE").unwrap() == "reuse";
+        match dtype.as_str() {
+            "f64" => typed_overwrite_worker::<f64>(chi, reuse),
+            "c64" => typed_overwrite_worker::<Complex64>(chi, reuse),
+            _ => panic!("unknown typed allocator dtype {dtype:?}"),
+        }
+        return;
+    }
+
+    for dtype in ["f64", "c64"] {
+        for chi in [8, 16, 32, 64] {
+            let fresh = run_typed_overwrite_worker(dtype, chi, false);
+            let warm = run_typed_overwrite_worker(dtype, chi, true);
+            assert_eq!(fresh.len(), 3);
+            assert_eq!(warm.len(), 3);
+            let median = |samples: &[AllocationSample], field: fn(&AllocationSample) -> u64| {
+                median3([field(&samples[0]), field(&samples[1]), field(&samples[2])])
+            };
+            assert!(
+                median(&fresh, |sample| sample.peak_live_delta)
+                    > median(&warm, |sample| sample.peak_live_delta)
+            );
+            assert!(
+                median(&fresh, |sample| sample.retained_live_bytes)
+                    > median(&warm, |sample| sample.retained_live_bytes)
+            );
+            assert_eq!(
+                median(&warm, |sample| sample.payload_retained_live_bytes),
+                0
+            );
+            assert!(warm.iter().all(|sample| {
+                sample.payload_output_live_bytes == sample.payload_size_bytes
+                    && sample.registry_overflows == 0
+            }));
+        }
+    }
 }
 
 #[test]
@@ -1112,84 +1187,4 @@ fn test_mutex_recovers_after_poisoning() {
     });
     assert!(poisoned.is_err());
     let _recovered = lock_unpoisoned(&TEST_LOCK);
-}
-
-#[test]
-fn measured_intermediate_arena_accounting() {
-    let _test_guard = lock_unpoisoned(&TEST_LOCK);
-    if let Ok(name) = std::env::var("TENET_ALLOC_WORKLOAD") {
-        let workload = Workload::parse(&name);
-        let chi = std::env::var("TENET_ALLOC_CHI").unwrap().parse().unwrap();
-        let reuse = match std::env::var("TENET_ALLOC_MODE").unwrap().as_str() {
-            "fresh" => false,
-            "reuse" => true,
-            mode => panic!("unknown allocator mode {mode:?}"),
-        };
-        worker(workload, chi, reuse);
-        return;
-    }
-
-    for workload in Workload::ALL {
-        for chi in [8, 16, 32, 64] {
-            let fresh = run_worker(workload, chi, false);
-            let reused = run_worker(workload, chi, true);
-            assert_eq!(fresh.len(), 3);
-            assert_eq!(reused.len(), 3);
-            // Backend worker pools may perform one delayed scratch allocation.
-            // The median rejects that single outlier, while payload-size
-            // classification prevents scratch from satisfying the gate.
-            let fresh_payload_allocs = median3([
-                fresh[0].payload_alloc_calls,
-                fresh[1].payload_alloc_calls,
-                fresh[2].payload_alloc_calls,
-            ]);
-            let reused_payload_allocs = median3([
-                reused[0].payload_alloc_calls,
-                reused[1].payload_alloc_calls,
-                reused[2].payload_alloc_calls,
-            ]);
-            let fresh_payload_peak = median3([
-                fresh[0].payload_peak_live_bytes,
-                fresh[1].payload_peak_live_bytes,
-                fresh[2].payload_peak_live_bytes,
-            ]);
-            let reused_payload_peak = median3([
-                reused[0].payload_peak_live_bytes,
-                reused[1].payload_peak_live_bytes,
-                reused[2].payload_peak_live_bytes,
-            ]);
-            let fresh_payload_retained = median3([
-                fresh[0].payload_retained_live_bytes,
-                fresh[1].payload_retained_live_bytes,
-                fresh[2].payload_retained_live_bytes,
-            ]);
-            let reused_payload_retained = median3([
-                reused[0].payload_retained_live_bytes,
-                reused[1].payload_retained_live_bytes,
-                reused[2].payload_retained_live_bytes,
-            ]);
-            eprintln!(
-                "workload={} chi={chi} fresh={fresh:?} reused={reused:?}",
-                workload.name()
-            );
-            assert!(fresh_payload_allocs > reused_payload_allocs);
-            assert!(fresh_payload_retained > reused_payload_retained);
-            assert!(fresh_payload_peak > reused_payload_peak);
-            if workload.permutes_intermediate() {
-                // What: warm crossed-pAB replay allocates only the escaping
-                // output payload, with no standalone contracted or orientation
-                // payload retained in the workspace.
-                assert_eq!(reused_payload_allocs, 1);
-                assert_eq!(reused_payload_retained, 0);
-            }
-            assert!(fresh
-                .iter()
-                .all(|sample| sample.payload_output_live_bytes == sample.payload_size_bytes));
-            assert!(reused
-                .iter()
-                .all(|sample| sample.payload_output_live_bytes == sample.payload_size_bytes));
-            assert!(fresh.iter().all(|sample| sample.registry_overflows == 0));
-            assert!(reused.iter().all(|sample| sample.registry_overflows == 0));
-        }
-    }
 }

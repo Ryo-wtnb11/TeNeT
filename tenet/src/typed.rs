@@ -693,6 +693,19 @@ impl<R> Clone for GradedSpace<R> {
     }
 }
 
+impl<R> PartialEq for GradedSpace<R>
+where
+    R: TypedSectorAdmission,
+{
+    fn eq(&self, other: &Self) -> bool {
+        TypedSectorAdmission::typed_rule_identity(self.provider())
+            == TypedSectorAdmission::typed_rule_identity(other.provider())
+            && self.leg == other.leg
+    }
+}
+
+impl<R> Eq for GradedSpace<R> where R: TypedSectorAdmission {}
+
 impl<R> core::fmt::Debug for GradedSpace<R> {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
@@ -1062,6 +1075,12 @@ impl<R> GradedSpace<R> {
     // Bound-free so the crate-internal accessors stay usable wherever the leg
     // travels, independently of what the caller has to certify.
     pub(crate) fn leg(&self) -> &SectorLeg {
+        &self.leg
+    }
+
+    /// Raw logical leg snapshot used by typed network replay admission.
+    #[doc(hidden)]
+    pub fn network_sector_leg(&self) -> &SectorLeg {
         &self.leg
     }
 
@@ -1909,6 +1928,15 @@ pub struct TensorMap<R, D, S = Vec<D>> {
     repr: TypedTensorRepr<R, D, S>,
 }
 
+/// Storage route used by typed network replay admission.
+#[doc(hidden)]
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum NetworkReuseClass {
+    OwnedDense,
+    Compact,
+    LazyAdjoint,
+}
+
 // Why hand-written: the derive would demand `R: Clone`, `D: Clone`, and
 // `S: Clone`; none is needed because the representation sits behind `Arc`.
 impl<R, D, S> Clone for TensorMap<R, D, S> {
@@ -1948,6 +1976,57 @@ where
 }
 
 impl<R, D, S> TensorMap<R, D, S> {
+    /// Classifies the representation produced after an optional adjoint.
+    #[doc(hidden)]
+    pub fn network_reuse_class(&self, adjoint: bool) -> NetworkReuseClass {
+        match &self.repr {
+            TypedTensorRepr::Owned(body) => match body.data.as_ref() {
+                TypedData::Diagonal(_) => NetworkReuseClass::Compact,
+                TypedData::Dense(_) if adjoint => NetworkReuseClass::LazyAdjoint,
+                TypedData::Dense(_) => NetworkReuseClass::OwnedDense,
+            },
+            TypedTensorRepr::Adjoint(_) if adjoint => NetworkReuseClass::OwnedDense,
+            TypedTensorRepr::Adjoint(_) => NetworkReuseClass::LazyAdjoint,
+        }
+    }
+
+    /// Matches the metadata produced after an optional adjoint without allocation.
+    #[doc(hidden)]
+    pub fn network_input_metadata_matches(
+        &self,
+        adjoint: bool,
+        expected_legs: &[SectorLeg],
+        expected_class: NetworkReuseClass,
+    ) -> bool
+    where
+        R: TypedSectorAdmission,
+    {
+        if self.network_reuse_class(adjoint) != expected_class || self.rank() != expected_legs.len()
+        {
+            return false;
+        }
+        (0..self.rank()).all(|axis| {
+            let source_axis = if adjoint {
+                (axis + self.codomain_rank()) % self.rank()
+            } else {
+                axis
+            };
+            let Some(actual) = self.network_source_leg(source_axis) else {
+                return false;
+            };
+            actual == &expected_legs[axis]
+        })
+    }
+
+    fn network_source_leg(&self, axis: usize) -> Option<&SectorLeg> {
+        let homspace = self.logical_space().space().homspace();
+        if axis < self.codomain_rank() {
+            homspace.codomain().legs().get(axis)
+        } else {
+            homspace.domain().legs().get(axis - self.codomain_rank())
+        }
+    }
+
     fn storage_body(&self) -> &Arc<TypedTensorBody<R, D, S>> {
         match &self.repr {
             TypedTensorRepr::Owned(body) => body,

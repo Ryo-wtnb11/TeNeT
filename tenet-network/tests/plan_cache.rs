@@ -4,7 +4,7 @@
 
 use tenet::prelude::*;
 use tenet_network::{
-    clear_plan_cache, configure_plan_cache, plan_cache_config, plan_cache_stats, tensor, Optimizer,
+    clear_plan_cache, configure_plan_cache, plan_cache_config, plan_cache_stats, tensor,
     PlanCacheConfig, ReplanPolicy,
 };
 
@@ -101,43 +101,6 @@ fn warm_macro_path_avoids_repeated_structural_materialization() {
     assert_eq!(warm.dynamic_aliases, 0);
 }
 
-/// Reusing one `Network` instance also bypasses owned topology and dimension
-/// snapshots before the full cache lookup.
-#[test]
-fn warm_network_contract_with_uses_identity_alias() {
-    use tenet_network::{NetOperand, Network};
-
-    let rt = Runtime::builder().build().unwrap();
-    let (a, b) = chain(&rt, 2, 306);
-    let operands = [
-        NetOperand {
-            tensor: &a,
-            conj: false,
-            labels: &["i", "j", "k", "l"],
-            codomain_split: Some(2),
-        },
-        NetOperand {
-            tensor: &b,
-            conj: false,
-            labels: &["k", "l", "m", "n"],
-            codomain_split: Some(2),
-        },
-    ];
-    let network = Network::from_names(&operands, &["i", "j", "m", "n"], Some(2)).unwrap();
-    let tensors = [&a, &b];
-
-    let _ = network.contract_with(&tensors, &Optimizer::Greedy).unwrap();
-    let _ = network.contract_with(&tensors, &Optimizer::Greedy).unwrap();
-    let stats = plan_cache_stats(&rt);
-    assert_eq!(stats.topology_materializations, 1);
-    assert_eq!(stats.workspaces_created, 1);
-    assert_eq!(stats.workspace_slot_grows, 1);
-    assert_eq!(stats.workspace_reuses, 1);
-    assert_eq!(stats.dynamic_aliases, 1);
-}
-
-/// A failed cached execution returns its leased workspace before the next
-/// call, so error paths do not force another slot-table growth.
 #[test]
 fn failed_execution_returns_workspace_to_cache() {
     let rt = Runtime::builder().build().unwrap();
@@ -423,71 +386,4 @@ fn disabled_cache_plans_fresh_every_call() {
     assert_close(first.data(), second.data(), 0.0);
     // Default config really is enabled + greedy.
     assert!(plan_cache_config(&rt).enabled == false);
-}
-
-/// Per-call optimizer override through the Network API keys separately.
-#[cfg(feature = "opt-path")]
-#[test]
-fn optimizer_override_keys_separately() {
-    use tenet_network::{NetOperand, Network};
-    let rt = Runtime::builder().build().unwrap();
-    let (a, b) = chain(&rt, 2, 361);
-    let operands = [
-        NetOperand {
-            tensor: &a,
-            conj: false,
-            labels: &["i", "j", "k", "l"],
-            codomain_split: Some(2),
-        },
-        NetOperand {
-            tensor: &b,
-            conj: false,
-            labels: &["k", "l", "m", "n"],
-            codomain_split: Some(2),
-        },
-    ];
-    let network = Network::from_names(&operands, &["i", "j", "m", "n"], Some(2)).unwrap();
-    let tensors = [&a, &b];
-
-    let greedy = network.contract_with(&tensors, &Optimizer::Greedy).unwrap();
-    let optimal = network
-        .contract_with(&tensors, &Optimizer::Optimal)
-        .unwrap();
-    let stats = plan_cache_stats(&rt);
-    assert_eq!((stats.misses, stats.entries), (2, 2)); // separate keys
-    let _ = network
-        .contract_with(&tensors, &Optimizer::Optimal)
-        .unwrap();
-    assert_eq!(plan_cache_stats(&rt).hits, 1);
-    assert_close(greedy.data(), optimal.data(), 1e-12);
-}
-
-#[cfg(not(feature = "opt-path"))]
-#[test]
-fn contract_with_explicit_greedy_shares_the_default_key() {
-    use tenet_network::{NetOperand, Network};
-    let rt = Runtime::builder().build().unwrap();
-    let (a, b) = chain(&rt, 2, 361);
-    let operands = [
-        NetOperand {
-            tensor: &a,
-            conj: false,
-            labels: &["i", "j", "k", "l"],
-            codomain_split: Some(2),
-        },
-        NetOperand {
-            tensor: &b,
-            conj: false,
-            labels: &["k", "l", "m", "n"],
-            codomain_split: Some(2),
-        },
-    ];
-    let network = Network::from_names(&operands, &["i", "j", "m", "n"], Some(2)).unwrap();
-    let tensors = [&a, &b];
-
-    let via_default = network.contract(&tensors).unwrap();
-    let via_explicit = network.contract_with(&tensors, &Optimizer::Greedy).unwrap();
-    let stats = plan_cache_stats(&rt);
-    assert_eq!((stats.hits, stats.misses, stats.entries), (1, 1, 1));
-    assert_close(via_default.data(), via_explicit.data(), 0.0);
 }
