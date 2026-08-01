@@ -174,10 +174,12 @@
 //!   `repartition` methods through their retained provider authority, but
 //!   planar `transpose`, contractions, and factorizations still retain their
 //!   multiplicity-free bounds.
-//! - **Device placement** is absent for the same structural reason: the payload
-//!   is a `Vec<D>` host buffer by construction, and there is no dtype or
-//!   placement token to reconcile because `D` is a type parameter. Adding a
-//!   device would change what the body holds, not what a method promises.
+//! - **Device execution** is absent, not device representation: the body can
+//!   carry a non-host `S` through [`TensorMap<R, D, S>`], while public
+//!   construction and arithmetic deliberately remain on the default `Vec<D>`
+//!   storage. Non-host operations wait for an explicit, [`Runtime`]-dependent
+//!   transfer/device leaf. [`tenet_core::Placement`] is diagnostic metadata;
+//!   no operation dispatches on it.
 //! - The **operator overloads** (`impl Add`, `impl Mul`) are out on the
 //!   `Result` argument alone. An operator cannot return one: the erased
 //!   `Mul` precedent panics, and a panicking `*` or `+` as the only spelling
@@ -208,7 +210,9 @@ use tenet_core::{
     MultiplicityFreeRigidSymbols, MultiplicityIndex, ProductFusionRule, ProductSector,
     ProductSectorCodec, SectorId, SectorLeg, TypedSectorAdmission, UnitLegInsertion,
 };
-use tenet_core::{CheckedGenericFusion, CheckedGenericRigidSymbols};
+use tenet_core::{
+    CheckedGenericFusion, CheckedGenericRigidSymbols, HostReadableStorage, TensorStorage,
+};
 use tenet_tensors::{
     tree_transform_dyn_owned_checked_generic, BoundDynamicFusionMapSpace, BoundDynamicTensorRef,
     DynamicFusionMapSpace, OutputAxisOrder, TreeTransformOperation,
@@ -1367,14 +1371,14 @@ pub struct SectorSpectrum<S, V = f64> {
 /// bond (TensorKit 0.17 `svd_trunc`, which returns `(U, S, Vᴴ, ϵ)`).
 // The `SectorCodec` bound is the field types' own: `singular_values` is
 // labelled, so the struct cannot be spelled without it.
-pub struct SvdTrunc<R: SectorCodec, D> {
+pub struct SvdTrunc<R: SectorCodec, D, S = Vec<D>> {
     /// Left isometry `u : codomain <- bond`.
-    pub u: TensorMap<R, D>,
+    pub u: TensorMap<R, D, S>,
     /// Singular-value factor `s : bond <- bond`, in compact diagonal storage
     /// (TensorKit's `DiagonalTensorMap`); see [`TensorMap::svd_compact`].
-    pub s: TensorMap<R, D>,
+    pub s: TensorMap<R, D, S>,
     /// Right isometry `vh : bond <- domain`.
-    pub vh: TensorMap<R, D>,
+    pub vh: TensorMap<R, D, S>,
     /// Kept singular values per coupled sector, sorted by provider label.
     pub singular_values: Vec<SectorSpectrum<R::Sector>>,
     /// Quantum-dimension-weighted 2-norm of everything discarded.
@@ -1384,7 +1388,7 @@ pub struct SvdTrunc<R: SectorCodec, D> {
 // Why hand-written, as for `TensorMap` itself: the derives would demand
 // `R: Clone + Debug`, and neither is needed — the provider lives behind an
 // `Arc` and its labels, not the rule, are what a diagnostic shows.
-impl<R, D> Clone for SvdTrunc<R, D>
+impl<R, D, S> Clone for SvdTrunc<R, D, S>
 where
     R: SectorCodec,
 {
@@ -1399,14 +1403,14 @@ where
     }
 }
 
-impl<R, D> core::fmt::Debug for SvdTrunc<R, D>
+impl<R, D, S> core::fmt::Debug for SvdTrunc<R, D, S>
 where
     R: SectorCodec,
+    S: TensorStorage<D>,
 {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // Every field is shown: `TensorMap`'s own `Debug` is bound-free, so
-        // there is nothing about the factors this impl cannot print, and the
-        // erased `SvdTrunc` shows its three tensors too.
+        // Every field is shown; the storage bound is exactly the one needed by
+        // `TensorMap` to report its stored element count.
         formatter
             .debug_struct("SvdTrunc")
             .field("u", &self.u)
@@ -1424,9 +1428,9 @@ where
 /// spectrum's dtype and whether it must widen on materialization; here `D` is a
 /// type parameter, so the whole question collapses to one arm holding values of
 /// exactly the payload type.
-enum TypedData<D> {
+enum TypedData<D, S = Vec<D>> {
     /// The dense coupled-sector buffer every operation can read.
-    Dense(Vec<D>),
+    Dense(S),
     /// Compact O(Σ_c k_c) storage for a spectrum factor (SVD `s`, `eigh`/`eig`
     /// `d`): only the per-sector diagonal values, keyed by the engine's raw
     /// [`tenet_core::SectorId`] — a stored payload never leaves this module, so
@@ -1477,11 +1481,11 @@ fn spectra_disagree() -> Error {
 /// `eigen`, whose `D` and `V` are `ComplexF64` even for a real argument.
 // `D: TensorScalar` rather than a bare parameter because the field types are
 // spelled through `D::Eig`, which is `FactorScalar`'s associated type.
-pub struct EigTrunc<R: SectorCodec, D: TensorScalar> {
+pub struct EigTrunc<R: SectorCodec, D: TensorScalar, S = Vec<<D as FactorScalar>::Eig>> {
     /// Eigenvalue factor `d : bond <- bond`, in compact diagonal storage.
-    pub d: TensorMap<R, <D as FactorScalar>::Eig>,
+    pub d: TensorMap<R, <D as FactorScalar>::Eig, S>,
     /// Eigenbasis `v : codomain <- bond`.
-    pub v: TensorMap<R, <D as FactorScalar>::Eig>,
+    pub v: TensorMap<R, <D as FactorScalar>::Eig, S>,
     /// Kept eigenvalues per coupled sector, sorted by provider label.
     pub eigenvalues: Vec<SectorSpectrum<R::Sector, num_complex::Complex64>>,
     /// Quantum-dimension-weighted 2-norm of the discarded `|eigenvalue|`s.
@@ -1489,7 +1493,7 @@ pub struct EigTrunc<R: SectorCodec, D: TensorScalar> {
 }
 
 // Hand-written for the reason [`SvdTrunc`]'s are.
-impl<R, D> Clone for EigTrunc<R, D>
+impl<R, D, S> Clone for EigTrunc<R, D, S>
 where
     R: SectorCodec,
     D: TensorScalar,
@@ -1504,10 +1508,11 @@ where
     }
 }
 
-impl<R, D> core::fmt::Debug for EigTrunc<R, D>
+impl<R, D, S> core::fmt::Debug for EigTrunc<R, D, S>
 where
     R: SectorCodec,
     D: TensorScalar,
+    S: TensorStorage<<D as FactorScalar>::Eig>,
 {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
@@ -1672,11 +1677,11 @@ fn is_diagonal_bond_space(space: &DynamicFusionMapSpace) -> bool {
 /// MatrixAlgebraKit's own `initialize_output`, so the two cannot be read the
 /// wrong way round against each other.
 // The `SectorCodec` bound is the field types' own, exactly as for [`SvdTrunc`].
-pub struct EighTrunc<R: SectorCodec, D> {
+pub struct EighTrunc<R: SectorCodec, D, S = Vec<D>> {
     /// Eigenvalue factor `d : bond <- bond`, in compact diagonal storage.
-    pub d: TensorMap<R, D>,
+    pub d: TensorMap<R, D, S>,
     /// Eigenvector isometry `v : codomain <- bond`.
-    pub v: TensorMap<R, D>,
+    pub v: TensorMap<R, D, S>,
     /// Kept eigenvalues per coupled sector, sorted by provider label. Real for
     /// both payload dtypes, as TensorKit's Hermitian `D` is.
     pub eigenvalues: Vec<SectorSpectrum<R::Sector>>,
@@ -1685,7 +1690,7 @@ pub struct EighTrunc<R: SectorCodec, D> {
 }
 
 // Hand-written for the reason [`SvdTrunc`]'s are.
-impl<R, D> Clone for EighTrunc<R, D>
+impl<R, D, S> Clone for EighTrunc<R, D, S>
 where
     R: SectorCodec,
 {
@@ -1699,9 +1704,10 @@ where
     }
 }
 
-impl<R, D> core::fmt::Debug for EighTrunc<R, D>
+impl<R, D, S> core::fmt::Debug for EighTrunc<R, D, S>
 where
     R: SectorCodec,
+    S: TensorStorage<D>,
 {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
@@ -1716,7 +1722,7 @@ where
 
 /// Storage shared by every clone of one typed tensor map: the admitted space
 /// and its block payload.
-struct TypedTensorBody<R, D> {
+struct TypedTensorBody<R, D, S = Vec<D>> {
     space: BoundDynamicFusionMapSpace<R>,
     /// Why the payload carries its own reference count rather than sitting
     /// inline in the body: an operation that rewrites only the *space* and
@@ -1752,7 +1758,7 @@ struct TypedTensorBody<R, D> {
     /// `tensor.rs` `TensorBody { space: Arc<..>, data: Arc<Data> }` has had
     /// exactly this two-`Arc` layout all along, so typed converges onto the
     /// established in-repo shape.
-    data: Arc<TypedData<D>>,
+    data: Arc<TypedData<D, S>>,
     /// Materialization of a [`TypedData::Diagonal`] payload into the dense
     /// coupled layout, computed at most once and shared by every clone of this
     /// body — the erased sibling's `compact_dense` cache, without its hand-copy
@@ -1768,21 +1774,13 @@ struct TypedTensorBody<R, D> {
     dense_cache: std::sync::OnceLock<Vec<D>>,
 }
 
-impl<R, D> TypedTensorBody<R, D> {
+impl<R, D, S> TypedTensorBody<R, D, S> {
     /// A body holding an already-dense payload.
-    fn dense(space: BoundDynamicFusionMapSpace<R>, data: Vec<D>) -> Self {
+    fn dense(space: BoundDynamicFusionMapSpace<R>, data: S) -> Self {
         Self::new(space, TypedData::Dense(data))
     }
 
-    /// A body holding a compact spectrum payload.
-    fn diagonal(
-        space: BoundDynamicFusionMapSpace<R>,
-        spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<D>>,
-    ) -> Self {
-        Self::new(space, TypedData::Diagonal(spectrum))
-    }
-
-    fn new(space: BoundDynamicFusionMapSpace<R>, data: TypedData<D>) -> Self {
+    fn new(space: BoundDynamicFusionMapSpace<R>, data: TypedData<D, S>) -> Self {
         Self {
             space,
             data: Arc::new(data),
@@ -1794,7 +1792,10 @@ impl<R, D> TypedTensorBody<R, D> {
     /// rewritten) space — the unit-leg operations' O(1) dense reuse
     /// (#580 PR 5). The cache starts cold on purpose: it belongs to the
     /// body's own space/payload pairing (see the `dense_cache` rationale).
-    fn with_shared_payload(space: BoundDynamicFusionMapSpace<R>, data: Arc<TypedData<D>>) -> Self {
+    fn with_shared_payload(
+        space: BoundDynamicFusionMapSpace<R>,
+        data: Arc<TypedData<D, S>>,
+    ) -> Self {
         Self {
             space,
             data,
@@ -1803,20 +1804,33 @@ impl<R, D> TypedTensorBody<R, D> {
     }
 }
 
-struct TypedAdjointView<R, D> {
-    parent: Arc<TypedTensorBody<R, D>>,
+impl<R, D> TypedTensorBody<R, D> {
+    /// A body holding a compact spectrum payload.
+    fn diagonal(
+        space: BoundDynamicFusionMapSpace<R>,
+        spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<D>>,
+    ) -> Self {
+        Self::new(space, TypedData::Diagonal(spectrum))
+    }
+}
+
+struct TypedAdjointView<R, D, S = Vec<D>> {
+    parent: Arc<TypedTensorBody<R, D, S>>,
     logical_space: BoundDynamicFusionMapSpace<R>,
+    // Lazy adjoint materialization is deliberately host-allocated. `S` names
+    // the canonical parent payload; it is not a promise that arbitrary storage
+    // can allocate a same-storage result.
     materialized: OnceLock<Arc<TypedTensorBody<R, D>>>,
     #[cfg(test)]
     materialized_body_builds: std::sync::atomic::AtomicUsize,
 }
 
-enum TypedTensorRepr<R, D> {
-    Owned(Arc<TypedTensorBody<R, D>>),
-    Adjoint(Arc<TypedAdjointView<R, D>>),
+enum TypedTensorRepr<R, D, S = Vec<D>> {
+    Owned(Arc<TypedTensorBody<R, D, S>>),
+    Adjoint(Arc<TypedAdjointView<R, D, S>>),
 }
 
-fn owned_repr<R, D>(body: TypedTensorBody<R, D>) -> TypedTensorRepr<R, D> {
+fn owned_repr<R, D, S>(body: TypedTensorBody<R, D, S>) -> TypedTensorRepr<R, D, S> {
     TypedTensorRepr::Owned(Arc::new(body))
 }
 
@@ -1826,16 +1840,64 @@ fn owned_repr<R, D>(body: TypedTensorBody<R, D>) -> TypedTensorRepr<R, D> {
 /// independent of the provider's real categorical coefficient scalar — the
 /// same separation TensorKit makes between a tensor's `T` and its sector type.
 ///
+/// `S` is the owned payload storage and defaults to [`Vec<D>`]. Runtime
+/// placement is diagnostic metadata from [`TensorStorage::placement`], not an
+/// operation-dispatch mechanism; the current arithmetic impls remain on the
+/// default host storage.
+///
+/// Host readback exists only when the storage implements
+/// [`HostReadableStorage`]:
+///
+/// ```compile_fail
+/// use tenet::core::{Placement, TensorStorage};
+/// use tenet::typed::TensorMap;
+///
+/// struct DeviceStorage(usize);
+/// impl TensorStorage<f64> for DeviceStorage {
+///     fn len(&self) -> usize { self.0 }
+///     fn placement(&self) -> Placement { Placement::Cuda(0) }
+/// }
+///
+/// fn cannot_read<R>(tensor: &TensorMap<R, f64, DeviceStorage>) {
+///     let _ = tensor.data();
+/// }
+/// ```
+///
+/// Naming a storage type and cloning its handle do not require the storage
+/// itself to implement [`Clone`]; decomposition result types preserve that
+/// storage parameter too:
+///
+/// ```
+/// use tenet::core::{Placement, TensorStorage, U1FusionRule};
+/// use tenet::typed::{EighTrunc, EigTrunc, SvdTrunc, TensorMap};
+///
+/// struct OpaqueStorage;
+/// impl TensorStorage<f64> for OpaqueStorage {
+///     fn len(&self) -> usize { 0 }
+///     fn placement(&self) -> Placement { Placement::Cuda(0) }
+/// }
+///
+/// fn clone_handle(tensor: &TensorMap<U1FusionRule, f64, OpaqueStorage>) {
+///     let _: TensorMap<U1FusionRule, f64, OpaqueStorage> = tensor.clone();
+/// }
+///
+/// fn name_results(
+///     _: Option<SvdTrunc<U1FusionRule, f64, OpaqueStorage>>,
+///     _: Option<EighTrunc<U1FusionRule, f64, OpaqueStorage>>,
+///     _: Option<EigTrunc<U1FusionRule, f64, OpaqueStorage>>,
+/// ) {}
+/// ```
+///
 /// Cloning is cheap: the runtime handle and the shared body are both
-/// reference-counted.
-pub struct TensorMap<R, D> {
+/// reference-counted, and cloning does not require `S: Clone`.
+pub struct TensorMap<R, D, S = Vec<D>> {
     runtime: Runtime,
-    repr: TypedTensorRepr<R, D>,
+    repr: TypedTensorRepr<R, D, S>,
 }
 
-// Why hand-written: the derives would demand `R: Clone` and `D: Clone`, and
-// neither is needed behind the shared `Arc`.
-impl<R, D> Clone for TensorMap<R, D> {
+// Why hand-written: the derive would demand `R: Clone`, `D: Clone`, and
+// `S: Clone`; none is needed because the representation sits behind `Arc`.
+impl<R, D, S> Clone for TensorMap<R, D, S> {
     fn clone(&self) -> Self {
         Self {
             runtime: self.runtime.clone(),
@@ -1847,7 +1909,10 @@ impl<R, D> Clone for TensorMap<R, D> {
     }
 }
 
-impl<R, D> core::fmt::Debug for TensorMap<R, D> {
+impl<R, D, S> core::fmt::Debug for TensorMap<R, D, S>
+where
+    S: TensorStorage<D>,
+{
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let stored = &self.storage_body().data;
         formatter
@@ -1868,8 +1933,8 @@ impl<R, D> core::fmt::Debug for TensorMap<R, D> {
     }
 }
 
-impl<R, D> TensorMap<R, D> {
-    fn storage_body(&self) -> &Arc<TypedTensorBody<R, D>> {
+impl<R, D, S> TensorMap<R, D, S> {
+    fn storage_body(&self) -> &Arc<TypedTensorBody<R, D, S>> {
         match &self.repr {
             TypedTensorRepr::Owned(body) => body,
             TypedTensorRepr::Adjoint(view) => &view.parent,
@@ -1883,7 +1948,7 @@ impl<R, D> TensorMap<R, D> {
         }
     }
 
-    fn owned_body(&self) -> Option<&Arc<TypedTensorBody<R, D>>> {
+    fn owned_body(&self) -> Option<&Arc<TypedTensorBody<R, D, S>>> {
         match &self.repr {
             TypedTensorRepr::Owned(body) => Some(body),
             TypedTensorRepr::Adjoint(_) => None,
@@ -1973,31 +2038,13 @@ where
         }
     }
 
-    /// Whole dense payload in the tensor's logical coupled-layout order.
-    ///
-    /// A lazy adjoint is materialized here at most once across all clones.
-    #[inline]
-    pub fn data(&self) -> &[D] {
-        self.materialized_body().materialized_dense_data()
-    }
-
     fn materialized_body(&self) -> &Arc<TypedTensorBody<R, D>> {
-        let TypedTensorRepr::Adjoint(view) = &self.repr else {
-            return self.owned_body().expect("owned representation");
-        };
-        view.materialized.get_or_init(|| {
-            let parent = &view.parent;
-            let data = tenet_tensors::materialize_adjoint_data_dyn(
-                parent.space.space(),
-                view.logical_space.space(),
-                parent.materialized_dense_data(),
-            )
-            .expect("a pre-admitted typed adjoint must materialize");
-            #[cfg(test)]
-            view.materialized_body_builds
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Arc::new(TypedTensorBody::dense(view.logical_space.clone(), data))
-        })
+        match &self.repr {
+            TypedTensorRepr::Owned(body) => body,
+            TypedTensorRepr::Adjoint(_) => self
+                .materialized_adjoint_body()
+                .expect("adjoint representation"),
+        }
     }
 
     /// Builds an operation-local logical tensor without publishing the
@@ -2020,13 +2067,54 @@ where
     }
 }
 
-impl<R, D> TypedTensorBody<R, D>
+impl<R, D, S> TensorMap<R, D, S>
 where
     D: TensorScalar,
+    S: HostReadableStorage<D>,
+{
+    /// Whole dense payload in the tensor's logical coupled-layout order.
+    ///
+    /// A lazy adjoint is materialized into host storage at most once across
+    /// all clones. The canonical parent payload remains in `S`.
+    #[inline]
+    pub fn data(&self) -> &[D] {
+        match &self.repr {
+            TypedTensorRepr::Owned(body) => body.materialized_dense_data(),
+            TypedTensorRepr::Adjoint(_) => self
+                .materialized_adjoint_body()
+                .expect("adjoint representation")
+                .materialized_dense_data(),
+        }
+    }
+
+    fn materialized_adjoint_body(&self) -> Option<&Arc<TypedTensorBody<R, D>>> {
+        let TypedTensorRepr::Adjoint(view) = &self.repr else {
+            return None;
+        };
+        Some(view.materialized.get_or_init(|| {
+            let parent = &view.parent;
+            let data = tenet_tensors::materialize_adjoint_data_dyn(
+                parent.space.space(),
+                view.logical_space.space(),
+                parent.materialized_dense_data(),
+            )
+            .expect("a pre-admitted typed adjoint must materialize");
+            #[cfg(test)]
+            view.materialized_body_builds
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Arc::new(TypedTensorBody::dense(view.logical_space.clone(), data))
+        }))
+    }
+}
+
+impl<R, D, S> TypedTensorBody<R, D, S>
+where
+    D: TensorScalar,
+    S: HostReadableStorage<D>,
 {
     fn materialized_dense_data(&self) -> &[D] {
         match &*self.data {
-            TypedData::Dense(data) => data,
+            TypedData::Dense(data) => data.as_slice(),
             TypedData::Diagonal(spectrum) => self.dense_cache.get_or_init(|| {
                 tenet_matrixalgebra::diagonal_bond_data(self.space.space(), spectrum, &|value| {
                     value
@@ -6560,6 +6648,24 @@ mod representation_gates {
         DenseTensor, DenseWrite,
     };
 
+    struct NonCloneHost(Vec<f64>);
+
+    impl TensorStorage<f64> for NonCloneHost {
+        fn len(&self) -> usize {
+            self.0.len()
+        }
+
+        fn placement(&self) -> tenet_core::Placement {
+            tenet_core::Placement::Host
+        }
+    }
+
+    impl HostReadableStorage<f64> for NonCloneHost {
+        fn as_slice(&self) -> &[f64] {
+            &self.0
+        }
+    }
+
     #[derive(Default)]
     struct FailSecondSvd {
         inner: DefaultDenseExecutor,
@@ -6655,7 +6761,7 @@ mod representation_gates {
         }
     }
 
-    fn owned<R, D>(tensor: &TensorMap<R, D>) -> &Arc<TypedTensorBody<R, D>> {
+    fn owned<R, D, S>(tensor: &TensorMap<R, D, S>) -> &Arc<TypedTensorBody<R, D, S>> {
         tensor.owned_body().expect("test fixture must be owned")
     }
 
@@ -6696,6 +6802,52 @@ mod representation_gates {
             indices.iter().sum::<usize>() as f64 + 1.0
         })
         .unwrap()
+    }
+
+    #[test]
+    fn storage_parameter_clone_shares_non_clone_payload() {
+        let source = u1_lazy_fixture();
+        let tensor: TensorMap<_, _, NonCloneHost> = TensorMap {
+            runtime: source.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(
+                source.logical_space().clone(),
+                NonCloneHost(source.data().to_vec()),
+            )),
+        };
+
+        let twin = tensor.clone();
+
+        assert!(Arc::ptr_eq(owned(&tensor), owned(&twin)));
+        assert!(std::ptr::eq(tensor.provider(), twin.provider()));
+        assert_eq!(tensor.data(), twin.data());
+    }
+
+    #[test]
+    fn generic_lazy_adjoint_keeps_parent_storage_and_caches_a_host_body() {
+        let source = u1_lazy_fixture();
+        let parent: Arc<TypedTensorBody<_, _, NonCloneHost>> = Arc::new(TypedTensorBody::dense(
+            source.logical_space().clone(),
+            NonCloneHost(source.data().to_vec()),
+        ));
+        let logical_space = tenet_tensors::adjoint_bound_space_dyn(&parent.space).unwrap();
+        let lazy = TensorMap {
+            runtime: source.runtime.clone(),
+            repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView {
+                parent: Arc::clone(&parent),
+                logical_space,
+                materialized: OnceLock::new(),
+                materialized_body_builds: std::sync::atomic::AtomicUsize::new(0),
+            })),
+        };
+
+        let expected = source.adjoint().unwrap();
+        assert_eq!(lazy.data(), expected.data());
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!("fixture is a lazy adjoint")
+        };
+        let _: &OnceLock<Arc<TypedTensorBody<U1FusionRule, f64, Vec<f64>>>> = &view.materialized;
+        assert!(view.materialized.get().is_some());
+        assert!(Arc::ptr_eq(&parent, &view.parent));
     }
 
     fn su2_lazy_fixture() -> TensorMap<SU2FusionRule, f64> {
