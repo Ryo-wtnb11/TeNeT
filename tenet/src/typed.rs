@@ -223,7 +223,7 @@ use tenet_core::{
     CheckedGenericFusion, CheckedGenericRigidSymbols, HostReadableStorage, Placement, TensorStorage,
 };
 #[cfg(feature = "cuda")]
-use tenet_dense::CudaDenseContext;
+use tenet_dense::{cuda_gemm_region_into, CudaDenseContext};
 #[cfg(feature = "cuda")]
 use tenet_operations::StorageGemm;
 use tenet_tensors::{
@@ -283,6 +283,24 @@ thread_local! {
         std::cell::Cell<Option<(usize, usize, usize)>> = const {
             std::cell::Cell::new(None)
         };
+    /// `(payload_zero_uploads, coefficient_uploads, kernels)`.
+    static CUDA_ARITHMETIC_OBSERVATION:
+        std::cell::Cell<Option<(usize, usize, usize)>> = const {
+            std::cell::Cell::new(None)
+        };
+}
+
+#[cfg(all(test, feature = "cuda"))]
+fn observe_cuda_arithmetic(zero_uploads: usize, coefficient_uploads: usize, kernels: usize) {
+    CUDA_ARITHMETIC_OBSERVATION.with(|observation| {
+        if let Some((zeros, coefficients, calls)) = observation.get() {
+            observation.set(Some((
+                zeros + zero_uploads,
+                coefficients + coefficient_uploads,
+                calls + kernels,
+            )));
+        }
+    });
 }
 
 #[cfg(feature = "cuda")]
@@ -2541,13 +2559,17 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 /// use tenet::core::Su3FusionRule;
 /// use tenet::typed::{CudaStorage, TensorMap};
 ///
-/// fn no_checked_generic_cuda_reductions(
+/// fn no_checked_generic_cuda_operations(
 ///     lhs: &TensorMap<Su3FusionRule, f64, CudaStorage>,
 ///     rhs: &TensorMap<Su3FusionRule, f64, CudaStorage>,
 /// ) {
 ///     let _ = lhs.norm();
 ///     let _ = lhs.inner(rhs);
 ///     let _ = lhs.dot(rhs);
+///     let _ = lhs.scale(2.0);
+///     let _ = lhs.add(rhs, 2.0, -3.0);
+///     let _ = lhs.zeros_like();
+///     let _ = lhs.normalize();
 /// }
 /// ```
 ///
@@ -2559,13 +2581,21 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 /// use tenet::core::U1FusionRule;
 /// use tenet::typed::{CudaStorage, TensorMap};
 ///
-/// fn no_c64_cuda_reductions(
+/// fn no_c64_cuda_operations(
 ///     lhs: &TensorMap<U1FusionRule, Complex64, CudaStorage>,
 ///     rhs: &TensorMap<U1FusionRule, Complex64, CudaStorage>,
 /// ) {
 ///     let _ = lhs.norm();
 ///     let _ = lhs.inner(rhs);
 ///     let _ = lhs.dot(rhs);
+///     let _ = lhs.scale(Complex64::new(2.0, 0.0));
+///     let _ = lhs.add(
+///         rhs,
+///         Complex64::new(2.0, 0.0),
+///         Complex64::new(-3.0, 0.0),
+///     );
+///     let _ = lhs.zeros_like();
+///     let _ = lhs.normalize();
 /// }
 /// ```
 impl<R> TensorMap<R, f64, CudaStorage>
@@ -2589,6 +2619,258 @@ where
                 "{operation} does not support lazy adjoint CUDA operands"
             ))),
         }
+    }
+
+    fn validate_cuda_arithmetic_metadata(
+        expected: Placement,
+        actual: Placement,
+        required_len: usize,
+        actual_len: usize,
+    ) -> Result<(), Error> {
+        if actual != expected {
+            return Err(Error::PlacementMismatch);
+        }
+        if actual_len != required_len {
+            return Err(internal_layout_error(
+                "CUDA payload length does not match its admitted tensor space",
+            ));
+        }
+        Ok(())
+    }
+
+    fn cuda_axpby_owned(
+        &self,
+        required_len: usize,
+        lhs: (&CudaStorage, f64),
+        rhs: Option<(&CudaStorage, f64)>,
+    ) -> Result<CudaStorage, Error> {
+        let (lhs, alpha) = lhs;
+        let mut state = self.runtime.lock();
+        let cuda = state.cuda.as_mut().ok_or_else(|| {
+            Error::InvalidArgument(
+                "this runtime was built without a CUDA device; use \
+                 Runtime::builder().cuda(device)"
+                    .to_string(),
+            )
+        })?;
+        let expected = Placement::Cuda(cuda.device());
+        Self::validate_cuda_arithmetic_metadata(
+            expected,
+            lhs.placement(),
+            required_len,
+            lhs.len(),
+        )?;
+        if let Some((rhs, _)) = rhs {
+            Self::validate_cuda_arithmetic_metadata(
+                expected,
+                rhs.placement(),
+                required_len,
+                rhs.len(),
+            )?;
+        }
+
+        // ponytail: #740 keeps these proven Host uploads until native device
+        // allocation publishes cross-stream writes correctly and wins a bench.
+        let coefficient_values = match rhs {
+            Some((_, beta)) => vec![alpha, beta],
+            None => vec![alpha],
+        };
+        // Keep coefficients as data operands: descriptor alpha == 0 permits
+        // CUDA to skip source reads and erase NaN/Inf propagation. Arithmetic
+        // does not promise signed-zero bit parity across storage backends.
+        let coefficients = CudaStorage::upload(cuda, &coefficient_values)?;
+        #[cfg(test)]
+        observe_cuda_arithmetic(0, 1, 0);
+        let mut output = CudaStorage::upload(cuda, &vec![0.0; required_len])?;
+        #[cfg(test)]
+        observe_cuda_arithmetic(1, 0, 0);
+        if required_len != 0 {
+            cuda_gemm_region_into(
+                cuda,
+                &mut output.0,
+                0,
+                required_len,
+                &lhs.0,
+                0,
+                required_len,
+                &coefficients.0,
+                0,
+                1,
+                required_len,
+                1,
+                1,
+                1.0,
+                0.0,
+            )
+            .map_err(|err| Error::from(tenet_tensors::OperationError::Dense(err)))?;
+            #[cfg(test)]
+            observe_cuda_arithmetic(0, 0, 1);
+            if let Some((rhs, _)) = rhs {
+                cuda_gemm_region_into(
+                    cuda,
+                    &mut output.0,
+                    0,
+                    required_len,
+                    &rhs.0,
+                    0,
+                    required_len,
+                    &coefficients.0,
+                    1,
+                    1,
+                    required_len,
+                    1,
+                    1,
+                    1.0,
+                    1.0,
+                )
+                .map_err(|err| Error::from(tenet_tensors::OperationError::Dense(err)))?;
+                #[cfg(test)]
+                observe_cuda_arithmetic(0, 0, 1);
+            }
+        }
+        Ok(output)
+    }
+
+    fn cuda_zeros_owned(
+        &self,
+        required_len: usize,
+        source: &CudaStorage,
+    ) -> Result<CudaStorage, Error> {
+        let mut state = self.runtime.lock();
+        let cuda = state.cuda.as_mut().ok_or_else(|| {
+            Error::InvalidArgument(
+                "this runtime was built without a CUDA device; use \
+                 Runtime::builder().cuda(device)"
+                    .to_string(),
+            )
+        })?;
+        Self::validate_cuda_arithmetic_metadata(
+            Placement::Cuda(cuda.device()),
+            source.placement(),
+            required_len,
+            source.len(),
+        )?;
+        let output = CudaStorage::upload(cuda, &vec![0.0; required_len])?;
+        #[cfg(test)]
+        observe_cuda_arithmetic(1, 0, 0);
+        Ok(output)
+    }
+
+    fn preflight_owned_cuda_arithmetic(
+        &self,
+        required_len: usize,
+        storage: &CudaStorage,
+    ) -> Result<(), Error> {
+        let mut state = self.runtime.lock();
+        let cuda = state.cuda.as_mut().ok_or_else(|| {
+            Error::InvalidArgument(
+                "this runtime was built without a CUDA device; use \
+                 Runtime::builder().cuda(device)"
+                    .to_string(),
+            )
+        })?;
+        Self::validate_cuda_arithmetic_metadata(
+            Placement::Cuda(cuda.device()),
+            storage.placement(),
+            required_len,
+            storage.len(),
+        )
+    }
+
+    fn with_owned_cuda_storage(&self, storage: CudaStorage) -> Self {
+        let body = self
+            .owned_body()
+            .expect("CUDA arithmetic output authority must be owned");
+        Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(body.space.clone(), storage)),
+        }
+    }
+
+    /// Fresh device result `factor * self` for owned storage; a lazy adjoint
+    /// redirects algebraically through its canonical parent. Zero factors
+    /// preserve nonfinite propagation, but signed-zero bits are backend-local.
+    pub fn scale(&self, factor: f64) -> Result<Self, Error> {
+        let required_len = self.logical_space().space().required_len()?;
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            let parent = Self {
+                runtime: self.runtime.clone(),
+                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+            };
+            return parent.scale(factor)?.adjoint();
+        }
+        let source = self.direct_cuda_storage("scale")?;
+        let output = self.cuda_axpby_owned(required_len, (source, factor), None)?;
+        Ok(self.with_owned_cuda_storage(output))
+    }
+
+    /// Fresh device result `alpha * self + beta * other`. Zero coefficients
+    /// preserve nonfinite propagation, but signed-zero bits are backend-local.
+    pub fn add(&self, other: &Self, alpha: f64, beta: f64) -> Result<Self, Error> {
+        let required_len = self.logical_space().space().required_len()?;
+        if !self.runtime.same_runtime(&other.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        if self.logical_space().space() != other.logical_space().space() {
+            return Err(Error::InvalidArgument(
+                "tensors live on different spaces or block layouts".to_string(),
+            ));
+        }
+        match (&self.repr, &other.repr) {
+            (TypedTensorRepr::Adjoint(lhs), TypedTensorRepr::Adjoint(rhs)) => {
+                let lhs = Self {
+                    runtime: self.runtime.clone(),
+                    repr: TypedTensorRepr::Owned(Arc::clone(&lhs.parent)),
+                };
+                let rhs = Self {
+                    runtime: other.runtime.clone(),
+                    repr: TypedTensorRepr::Owned(Arc::clone(&rhs.parent)),
+                };
+                return lhs.add(&rhs, alpha, beta)?.adjoint();
+            }
+            (TypedTensorRepr::Adjoint(_), TypedTensorRepr::Owned(_))
+            | (TypedTensorRepr::Owned(_), TypedTensorRepr::Adjoint(_)) => {
+                return Err(Error::UnsupportedOnDevice(
+                    "add does not support mixed owned/lazy CUDA operands".to_string(),
+                ));
+            }
+            (TypedTensorRepr::Owned(_), TypedTensorRepr::Owned(_)) => {}
+        }
+        let lhs = self.direct_cuda_storage("add")?;
+        let rhs = other.direct_cuda_storage("add")?;
+        let output = self.cuda_axpby_owned(required_len, (lhs, alpha), Some((rhs, beta)))?;
+        Ok(self.with_owned_cuda_storage(output))
+    }
+
+    /// Exact positive-zero device tensor, independent of source values.
+    pub fn zeros_like(&self) -> Result<Self, Error> {
+        let required_len = self.logical_space().space().required_len()?;
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            let parent = Self {
+                runtime: self.runtime.clone(),
+                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+            };
+            return parent.zeros_like()?.adjoint();
+        }
+        let source = self.direct_cuda_storage("zeros_like")?;
+        let output = self.cuda_zeros_owned(required_len, source)?;
+        Ok(self.with_owned_cuda_storage(output))
+    }
+
+    /// Dimension-weighted unit normalization. Zero norm deliberately follows
+    /// Host IEEE behavior and produces non-finite stored entries.
+    pub fn normalize(&self) -> Result<Self, Error> {
+        let required_len = self.logical_space().space().required_len()?;
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            let parent = Self {
+                runtime: self.runtime.clone(),
+                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+            };
+            return parent.normalize()?.adjoint();
+        }
+        let storage = self.direct_cuda_storage("normalize")?;
+        self.preflight_owned_cuda_arithmetic(required_len, storage)?;
+        self.scale(1.0 / self.norm()?)
     }
 
     /// Quantum-dimension-weighted Frobenius reduction over owned CUDA storage.
@@ -8102,6 +8384,38 @@ mod representation_gates {
 
     #[cfg(feature = "cuda")]
     #[test]
+    fn typed_cuda_arithmetic_metadata_validation_orders_ordinal_before_length() {
+        type DeviceTensor = TensorMap<U1FusionRule, f64, CudaStorage>;
+        assert!(DeviceTensor::validate_cuda_arithmetic_metadata(
+            Placement::Cuda(0),
+            Placement::Cuda(0),
+            7,
+            7
+        )
+        .is_ok());
+        assert_eq!(
+            DeviceTensor::validate_cuda_arithmetic_metadata(
+                Placement::Cuda(1),
+                Placement::Cuda(0),
+                7,
+                6
+            )
+            .unwrap_err(),
+            Error::PlacementMismatch
+        );
+        assert!(matches!(
+            DeviceTensor::validate_cuda_arithmetic_metadata(
+                Placement::Cuda(0),
+                Placement::Cuda(0),
+                7,
+                6
+            ),
+            Err(Error::InvalidArgument(message)) if message.contains("payload length")
+        ));
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
     fn missing_cuda_context_precedes_compact_expansion_and_lazy_materialization() {
         let source = u1_lazy_fixture();
         let diagonal = source.svd_compact().unwrap().1;
@@ -8213,6 +8527,94 @@ mod representation_gates {
         .len();
         assert_eq!(observed, (1, sector_count.max(1), sector_count.max(1)));
         assert!(source.data().len() > sector_count.max(1));
+
+        macro_rules! observed_arithmetic {
+            ($expression:expr, $arithmetic:expr, $reduction:expr) => {{
+                CUDA_ARITHMETIC_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0))));
+                CUDA_REDUCTION_BUFFER_OBSERVATION
+                    .with(|observation| observation.set(Some((0, 0, 0))));
+                let result = $expression;
+                CUDA_ARITHMETIC_OBSERVATION.with(|observation| {
+                    assert_eq!(observation.get(), Some($arithmetic));
+                    observation.set(None);
+                });
+                CUDA_REDUCTION_BUFFER_OBSERVATION.with(|observation| {
+                    assert_eq!(observation.get(), Some($reduction));
+                    observation.set(None);
+                });
+                result
+            }};
+        }
+
+        let source_device = source.to_cuda().unwrap();
+        let empty_storage = {
+            let state = runtime.lock();
+            CudaStorage::upload(state.cuda.as_ref().unwrap(), &[]).unwrap()
+        };
+        let malformed_length = TensorMap {
+            runtime: runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(
+                source.logical_space().clone(),
+                empty_storage,
+            )),
+        };
+        let work_sentinel = (usize::MAX, usize::MAX, usize::MAX);
+        CUDA_ARITHMETIC_OBSERVATION.with(|observation| observation.set(Some(work_sentinel)));
+        assert!(matches!(
+            malformed_length.scale(2.0),
+            Err(Error::InvalidArgument(message)) if message.contains("payload length")
+        ));
+        CUDA_ARITHMETIC_OBSERVATION.with(|observation| {
+            assert_eq!(observation.get(), Some(work_sentinel));
+            observation.set(None);
+        });
+
+        observed_arithmetic!(source_device.scale(-2.0), (1, 1, 1), (0, 0, 0)).unwrap();
+        observed_arithmetic!(
+            source_device.add(&source_device, 2.0, -3.0),
+            (1, 1, 2),
+            (0, 0, 0)
+        )
+        .unwrap();
+        observed_arithmetic!(source_device.zeros_like(), (1, 0, 0), (0, 0, 0)).unwrap();
+        observed_arithmetic!(
+            source_device.normalize(),
+            (1, 1, 1),
+            (1, sector_count.max(1), sector_count.max(1))
+        )
+        .unwrap();
+
+        let lazy_scale =
+            observed_arithmetic!(lazy_device.scale(-2.0), (1, 1, 1), (0, 0, 0)).unwrap();
+        let lazy_add = observed_arithmetic!(
+            lazy_device.add(&lazy_device, 2.0, -3.0),
+            (1, 1, 2),
+            (0, 0, 0)
+        )
+        .unwrap();
+        let lazy_zero =
+            observed_arithmetic!(lazy_device.zeros_like(), (1, 0, 0), (0, 0, 0)).unwrap();
+        let lazy_normalized = observed_arithmetic!(
+            lazy_device.normalize(),
+            (1, 1, 1),
+            (1, sector_count.max(1), sector_count.max(1))
+        )
+        .unwrap();
+        for result in [&lazy_scale, &lazy_add, &lazy_zero, &lazy_normalized] {
+            assert!(matches!(result.repr, TypedTensorRepr::Adjoint(_)));
+            assert_eq!(materialized_adjoint_builds(result), 0);
+        }
+        assert_eq!(materialized_adjoint_builds(&lazy_device), 0);
+        assert!(matches!(
+            observed_arithmetic!(
+                lazy_device.add(&source_device, 2.0, -3.0),
+                (0, 0, 0),
+                (0, 0, 0)
+            ),
+            Err(Error::UnsupportedOnDevice(_))
+        ));
+        assert_eq!(materialized_adjoint_builds(&lazy_device), 0);
+
         assert!(matches!(
             lazy_device.inner(&lazy_device),
             Err(Error::UnsupportedOnDevice(_))
@@ -8238,6 +8640,15 @@ mod representation_gates {
             observation.set(None);
         });
         assert_eq!(materialized_adjoint_builds(&missing_context), 0);
+        CUDA_ARITHMETIC_OBSERVATION.with(|observation| observation.set(Some(preflight_sentinel)));
+        assert!(matches!(
+            missing_context.zeros_like(),
+            Err(Error::InvalidArgument(message)) if message.contains("without a CUDA device")
+        ));
+        CUDA_ARITHMETIC_OBSERVATION.with(|observation| {
+            assert_eq!(observation.get(), Some(preflight_sentinel));
+            observation.set(None);
+        });
         let device_clone = lazy_device.clone();
         let TypedTensorRepr::Adjoint(clone_view) = &device_clone.repr else {
             unreachable!("clone preserves the lazy view")
