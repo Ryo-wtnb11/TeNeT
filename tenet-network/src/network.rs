@@ -2035,6 +2035,31 @@ mod typed_replay_tests {
 
     #[cfg(feature = "cuda")]
     #[test]
+    fn reversed_final_output_is_a_valid_but_nondirect_cuda_schedule() {
+        let runtime = Runtime::builder().build().unwrap();
+        let space =
+            GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)], false).unwrap();
+        let a =
+            TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space], [&space], 750_310)
+                .unwrap();
+        let b =
+            TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&space], [&space], 750_311)
+                .unwrap();
+        let network = Network::new(
+            vec![vec![label("i"), label("j")], vec![label("j"), label("k")]],
+            vec![false; 2],
+            vec![Some(1); 2],
+            vec![label("k"), label("i")],
+            Some(1),
+        )
+        .unwrap();
+        let planned = network.plan(&[&a, &b], &GreedyDenseOptimizer).unwrap();
+        assert!(planned.validate_cuda_plan_structure().is_err());
+        assert!(planned.schedule.final_permutation.is_some());
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
     #[ignore = "requires a real CUDA device"]
     fn cuda_rejections_happen_before_the_first_network_contract() {
         let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();

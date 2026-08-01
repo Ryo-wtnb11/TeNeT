@@ -103,24 +103,22 @@ fn noncanonical_cuda_macro_never_publishes_or_touches_cache_state() {
         GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)], false).unwrap();
     let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&space], [&space], 748_091).unwrap();
     let b = TensorMap::<_, f64>::rand_with_seed(&runtime, [&space], [&space], 748_092).unwrap();
-    let c = TensorMap::<_, f64>::rand_with_seed(&runtime, [&space], [&space], 748_093).unwrap();
     let a_cuda = a.to_cuda().unwrap();
     let b_cuda = b.to_cuda().unwrap();
-    let c_cuda = c.to_cuda().unwrap();
 
     assert!(runtime.with_extension_slot(|slot| slot.is_none()));
     for _ in 0..2 {
-        let error = tensor!([c; d] = a_cuda[a; b] * b_cuda[b; c] * c_cuda[a; d]).unwrap_err();
+        let error = tensor!([k; i] = a_cuda[i; j] * b_cuda[j; k]).unwrap_err();
         assert_unsupported_cuda_network(error);
         assert!(runtime.with_extension_slot(|slot| slot.is_none()));
     }
 
     // Publish the same structural plan from Host. CUDA must validate the
     // cached plan before alias/LRU promotion or hit-counter mutation.
-    drop(tensor!([c; d] = a[a; b] * b[b; c] * c[a; d]).unwrap());
+    drop(tensor!([k; i] = a[i; j] * b[j; k]).unwrap());
     let preseeded = plan_cache_stats(&runtime);
     for _ in 0..2 {
-        let error = tensor!([c; d] = a_cuda[a; b] * b_cuda[b; c] * c_cuda[a; d]).unwrap_err();
+        let error = tensor!([k; i] = a_cuda[i; j] * b_cuda[j; k]).unwrap_err();
         assert_unsupported_cuda_network(error);
         assert_eq!(plan_cache_stats(&runtime), preseeded);
     }
