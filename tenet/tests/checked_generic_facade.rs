@@ -661,6 +661,102 @@ fn checked_only_multiplicity_two_transforms_keep_the_source_authority() {
 }
 
 #[test]
+fn checked_only_contract_and_compose_keep_left_authority() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let left_provider = Arc::new(CheckedOnlyToy::new(0));
+    let right_provider = Arc::new(CheckedOnlyToy::new(0));
+    let left_leg =
+        GradedSpace::try_new(Arc::clone(&left_provider), [(Label::X, 1)], false).unwrap();
+    let right_leg =
+        GradedSpace::try_new(Arc::clone(&right_provider), [(Label::X, 1)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&left_leg, &left_leg], [&left_leg], |trees, _| {
+            trees.codomain_vertices()[0].get() as f64
+        })
+        .unwrap();
+    let identity: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&right_leg], [&right_leg], |_, _| 1.0).unwrap();
+    left_provider.r_queries.store(0, Ordering::Relaxed);
+
+    for output in [
+        source.contract(&identity, &[2], &[0], &[0, 1, 2]).unwrap(),
+        source
+            .contract_ordered(&identity, &[2], &[0], &[0, 1, 2])
+            .unwrap(),
+        source.compose(&identity).unwrap(),
+    ] {
+        assert!(std::ptr::eq(output.provider(), left_provider.as_ref()));
+        assert_eq!(output.data(), source.data());
+        for index in 0..source.block_count() {
+            assert_eq!(
+                output.block_fusion_trees(index).unwrap(),
+                source.block_fusion_trees(index).unwrap()
+            );
+        }
+    }
+    assert_eq!(left_provider.r_queries.load(Ordering::Relaxed), 0);
+
+    left_provider.r_queries.store(0, Ordering::Relaxed);
+    let noncanonical = source.contract(&identity, &[0], &[1], &[0, 1, 2]).unwrap();
+    assert!(left_provider.r_queries.load(Ordering::Relaxed) > 0);
+    let explicit = source
+        .permute(&[1, 2], &[0])
+        .unwrap()
+        .contract(
+            &identity.permute(&[1], &[0]).unwrap(),
+            &[2],
+            &[0],
+            &[0, 1, 2],
+        )
+        .unwrap();
+    assert_eq!(noncanonical.data(), explicit.data());
+    for index in 0..noncanonical.block_count() {
+        assert_eq!(
+            noncanonical.block_fusion_trees(index).unwrap(),
+            explicit.block_fusion_trees(index).unwrap()
+        );
+    }
+
+    let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let foreign_runtime_identity: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&other_runtime, [&right_leg], [&right_leg], |_, _| 1.0).unwrap();
+    left_provider.algebra_queries.store(0, Ordering::Relaxed);
+    right_provider.algebra_queries.store(0, Ordering::Relaxed);
+    assert!(matches!(
+        source.contract(&foreign_runtime_identity, &[2], &[0], &[0, 1, 2]),
+        Err(GenericTensorError::Facade(
+            tenet::prelude::Error::RuntimeMismatch
+        ))
+    ));
+    assert_eq!(left_provider.algebra_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(right_provider.algebra_queries.load(Ordering::Relaxed), 0);
+
+    let wrong_provider = Arc::new(CheckedOnlyToy::new(1));
+    let wrong_leg =
+        GradedSpace::try_new(Arc::clone(&wrong_provider), [(Label::X, 1)], false).unwrap();
+    let wrong_identity: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&wrong_leg], [&wrong_leg], |_, _| 1.0).unwrap();
+    left_provider.algebra_queries.store(0, Ordering::Relaxed);
+    wrong_provider.algebra_queries.store(0, Ordering::Relaxed);
+    assert!(source
+        .contract(&wrong_identity, &[2], &[0], &[0, 1, 2])
+        .is_err());
+    assert_eq!(left_provider.algebra_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(wrong_provider.algebra_queries.load(Ordering::Relaxed), 0);
+
+    left_provider.fail_algebra.store(true, Ordering::Relaxed);
+    let error = source
+        .contract(&identity, &[2], &[0], &[0, 1, 2])
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Provider(
+            ToyError::Algebra
+        ))
+    ));
+}
+
+#[test]
 fn checked_only_identity_transforms_make_no_provider_queries() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
@@ -1045,6 +1141,25 @@ fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() 
             assert_eq!(tensor.block(index).unwrap().shape(), &[1, 1, 1]);
         }
         assert_eq!(tensor.data(), &[1.0, 2.0]);
+
+        let identity: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
+        for output in [
+            tensor.contract(&identity, &[2], &[0], &[0, 1, 2]).unwrap(),
+            tensor
+                .contract_ordered(&identity, &[2], &[0], &[0, 1, 2])
+                .unwrap(),
+            tensor.compose(&identity).unwrap(),
+        ] {
+            assert!(std::ptr::eq(output.provider(), provider.as_ref()));
+            assert_eq!(output.data(), tensor.data());
+            for index in 0..tensor.block_count() {
+                assert_eq!(
+                    output.block_fusion_trees(index).unwrap(),
+                    tensor.block_fusion_trees(index).unwrap()
+                );
+            }
+        }
 
         let product = tensor.otimes(&tensor).unwrap();
         assert!(std::ptr::eq(product.provider(), provider.as_ref()));

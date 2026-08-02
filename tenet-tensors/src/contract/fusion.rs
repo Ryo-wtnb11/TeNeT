@@ -10,7 +10,8 @@ pub(crate) use plan::{
 };
 pub(crate) use plan::{
     compile_tensorcontract_fusion_plan_from_ranks, orient_fusion_contract_plan,
-    ContractAxisOrderCandidate, FusionContractOrientation,
+    select_complete_bosonic_contract_candidate, ContractAxisOrderCandidate,
+    FusionContractOrientation,
 };
 
 #[cfg(test)]

@@ -15,7 +15,8 @@ use crate::{ConjugateValue, DenseRecouplingScalar, OperationError, RecouplingCoe
 use super::dynamic_space::{BoundDynamicFusionMapSpace, PreparedCheckedGenericDynamicSpace};
 use super::fusion::{
     compile_tensorcontract_fusion_plan_from_ranks, orient_fusion_contract_plan,
-    ContractAxisOrderCandidate, FusionContractOrientation,
+    select_complete_bosonic_contract_candidate, ContractAxisOrderCandidate,
+    FusionContractOrientation,
 };
 use super::fusion_block::{
     compile_checked_generic_core_plan, BackendRank2Gemm, FusionBlockContractWorkspace, Rank2Gemm,
@@ -26,14 +27,40 @@ type CheckedContractResult<P, D> = Result<
     (BoundDynamicFusionMapSpace<P>, Vec<D>),
     CheckedGenericPlanError<<P as tenet_core::CheckedGenericFusion>::Error>,
 >;
-type CheckedStagedTransform<E> = Result<
-    (
-        PreparedCheckedGenericDynamicSpace,
-        tenet_operations::TreeTransformStructure<f64>,
-        Arc<tenet_core::BlockStructure>,
-    ),
-    CheckedGenericPlanError<E>,
->;
+// Why not box the transformed arm: this value is operation-local and boxing
+// would add a heap allocation to every nonidentity source transform.
+#[allow(clippy::large_enum_variant)]
+enum CheckedStagedOperand<'a> {
+    Borrowed(&'a super::DynamicFusionMapSpace),
+    Transformed {
+        prepared: PreparedCheckedGenericDynamicSpace,
+        replay: tenet_operations::TreeTransformStructure<f64>,
+        structure: Arc<tenet_core::BlockStructure>,
+    },
+}
+
+impl CheckedStagedOperand<'_> {
+    fn homspace(&self) -> &FusionTreeHomSpace {
+        match self {
+            Self::Borrowed(space) => space.homspace(),
+            Self::Transformed { prepared, .. } => prepared.homspace(),
+        }
+    }
+
+    fn nout(&self) -> usize {
+        match self {
+            Self::Borrowed(space) => space.nout(),
+            Self::Transformed { prepared, .. } => prepared.nout(),
+        }
+    }
+
+    fn structure(&self) -> &Arc<tenet_core::BlockStructure> {
+        match self {
+            Self::Borrowed(space) => space.structure(),
+            Self::Transformed { structure, .. } => structure,
+        }
+    }
+}
 
 fn same_axes(lhs: &[usize], rhs: &[usize]) -> bool {
     let mut lhs = lhs.to_vec();
@@ -50,15 +77,122 @@ fn validate_source_structure<E>(
     Ok(())
 }
 
-fn staged_transform<P>(
-    authority: &BoundDynamicFusionMapSpace<P>,
-    provider: &P,
-    source: &BoundDynamicFusionMapSpace<P>,
-    operation: &crate::TreeTransformOperation,
-) -> CheckedStagedTransform<P::Error>
+struct CheckedContractLocal {
+    output_rank: usize,
+    axis_plan: TensorContractAxisPlan,
+}
+
+fn validate_contract_local<P, D>(
+    lhs_space: &BoundDynamicFusionMapSpace<P>,
+    lhs_data: &[D],
+    rhs_space: &BoundDynamicFusionMapSpace<P>,
+    rhs_data: &[D],
+    axes: TensorContractSpec<'_>,
+    dst_nout: usize,
+) -> Result<CheckedContractLocal, CheckedGenericPlanError<P::Error>>
 where
     P: CheckedGenericRigidSymbols<Scalar = f64>,
 {
+    if axes.lhs_conjugate() || axes.rhs_conjugate() {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "checked Generic contraction currently requires eager direct operands",
+        }
+        .into());
+    }
+    let output_rank = lhs_space
+        .space()
+        .rank()
+        .checked_sub(axes.lhs_contracting_axes().len())
+        .and_then(|rank| {
+            rhs_space
+                .space()
+                .rank()
+                .checked_sub(axes.rhs_contracting_axes().len())
+                .and_then(|rhs| rank.checked_add(rhs))
+        })
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let axis_plan = TensorContractAxisPlan::compile(
+        lhs_space.space().rank(),
+        rhs_space.space().rank(),
+        output_rank,
+        axes,
+    )?;
+    if dst_nout > output_rank {
+        return Err(CoreError::StructureRankMismatch {
+            expected: output_rank,
+            actual: dst_nout,
+        }
+        .into());
+    }
+    for (data, space) in [(lhs_data, lhs_space), (rhs_data, rhs_space)] {
+        let expected = space.space().required_len()?;
+        if data.len() != expected {
+            return Err(OperationError::ElementCountMismatch {
+                expected,
+                actual: data.len(),
+            }
+            .into());
+        }
+        validate_source_structure::<P::Error>(space.space())?;
+    }
+    Ok(CheckedContractLocal {
+        output_rank,
+        axis_plan,
+    })
+}
+
+fn validate_contract_provider<'a, P>(
+    lhs_space: &'a BoundDynamicFusionMapSpace<P>,
+    rhs_space: &BoundDynamicFusionMapSpace<P>,
+) -> Result<&'a P, CheckedGenericPlanError<P::Error>>
+where
+    P: CheckedGenericRigidSymbols<Scalar = f64>,
+{
+    let provider = lhs_space.provider();
+    let lhs_identity = provider.rule_identity();
+    let rhs_identity = rhs_space.provider().rule_identity();
+    if lhs_identity != rhs_identity {
+        return Err(CoreError::FusionRuleMismatch {
+            expected: lhs_identity,
+            actual: rhs_identity,
+        }
+        .into());
+    }
+    for actual in [provider.fusion_style(), rhs_space.provider().fusion_style()] {
+        if actual != FusionStyleKind::Generic {
+            return Err(CoreError::UnsupportedFusionStyle {
+                expected: FusionStyleKind::Generic,
+                actual,
+            }
+            .into());
+        }
+    }
+    for actual in [
+        provider.braiding_style(),
+        rhs_space.provider().braiding_style(),
+    ] {
+        if actual != BraidingStyleKind::Bosonic {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "checked Generic contraction requires Bosonic braiding",
+            }
+            .into());
+        }
+    }
+    Ok(provider)
+}
+
+fn staged_transform<'a, P>(
+    authority: &BoundDynamicFusionMapSpace<P>,
+    provider: &P,
+    source: &'a BoundDynamicFusionMapSpace<P>,
+    operation: &crate::TreeTransformOperation,
+) -> Result<CheckedStagedOperand<'a>, CheckedGenericPlanError<P::Error>>
+where
+    P: CheckedGenericRigidSymbols<Scalar = f64>,
+{
+    if operation.is_identity_for(source.space().nout(), source.space().nin()) {
+        return Ok(CheckedStagedOperand::Borrowed(source.space()));
+    }
     let homspace = source.space().homspace().try_permute_generic_checked(
         provider,
         operation.codomain_permutation(),
@@ -72,7 +206,11 @@ where
         source.space().structure(),
     )?;
     let replay = plan.compile_structures(&destination, source.space().structure())?;
-    Ok((prepared, replay, destination))
+    Ok(CheckedStagedOperand::Transformed {
+        prepared,
+        replay,
+        structure: destination,
+    })
 }
 
 fn execute_transform<D>(
@@ -96,6 +234,105 @@ where
         source_data,
         D::one(),
         D::zero(),
+    )
+}
+
+fn execute_staged_transform<D>(
+    backend: &mut DenseTreeTransformOperations,
+    workspace: &mut <DenseTreeTransformOperations as TreeTransformBackend<D, f64>>::Workspace,
+    staged: &CheckedStagedOperand<'_>,
+    source: &Arc<tenet_core::BlockStructure>,
+    source_data: &[D],
+) -> Result<Option<Vec<D>>, OperationError>
+where
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64> + Copy + Zero,
+{
+    let CheckedStagedOperand::Transformed {
+        prepared,
+        replay,
+        structure,
+    } = staged
+    else {
+        return Ok(None);
+    };
+    let mut data = vec![D::zero(); prepared.required_len()];
+    execute_transform(
+        backend,
+        workspace,
+        replay,
+        structure,
+        source,
+        &mut data,
+        source_data,
+    )?;
+    Ok(Some(data))
+}
+
+/// Contracts two direct checked Generic tensors using the shared stable
+/// candidate policy. The result retains the left provider allocation.
+#[doc(hidden)]
+pub fn tensorcontract_owned_checked_generic<P, D>(
+    lhs_space: &BoundDynamicFusionMapSpace<P>,
+    lhs_data: &[D],
+    rhs_space: &BoundDynamicFusionMapSpace<P>,
+    rhs_data: &[D],
+    axes: TensorContractSpec<'_>,
+) -> CheckedContractResult<P, D>
+where
+    P: CheckedGenericRigidSymbols<Scalar = f64>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64> + ConjugateValue + Copy + Zero,
+{
+    let dst_nout = lhs_space
+        .space()
+        .rank()
+        .checked_sub(axes.lhs_contracting_axes().len())
+        .ok_or(OperationError::ElementCountOverflow)?;
+    let CheckedContractLocal {
+        output_rank,
+        axis_plan,
+    } = validate_contract_local(lhs_space, lhs_data, rhs_space, rhs_data, axes, dst_nout)?;
+    let provider = validate_contract_provider(lhs_space, rhs_space)?;
+    let destination_homspace = FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
+        provider,
+        lhs_space.space().homspace(),
+        rhs_space.space().homspace(),
+        axes.lhs_contracting_axes(),
+        axes.rhs_contracting_axes(),
+        &axis_plan.output_axes,
+        dst_nout,
+    )?;
+    let destination =
+        lhs_space.prepare_final_homspace_generic_with_checked(provider, destination_homspace)?;
+    let (candidate, orientation) = select_complete_bosonic_contract_candidate(
+        dst_nout,
+        output_rank,
+        destination.required_len(),
+        lhs_space.space().nout(),
+        lhs_space.space().rank(),
+        lhs_space.space().required_len()?,
+        rhs_space.space().nout(),
+        rhs_space.space().rank(),
+        rhs_space.space().required_len()?,
+        axes,
+    )?;
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = Default::default();
+    execute_preselected_checked_generic_contract(
+        lhs_space,
+        lhs_data,
+        rhs_space,
+        rhs_data,
+        axes,
+        dst_nout,
+        &candidate,
+        orientation,
+        provider,
+        output_rank,
+        destination,
+        &mut BackendRank2Gemm {
+            backend: &mut backend,
+            workspace: &mut workspace,
+        },
     )
 }
 
@@ -154,12 +391,6 @@ where
     D: DenseRecouplingScalar + RecouplingCoefficientAction<f64> + ConjugateValue + Copy + Zero,
     G: Rank2Gemm<D>,
 {
-    if axes.lhs_conjugate() || axes.rhs_conjugate() {
-        return Err(OperationError::UnsupportedTensorContractScope {
-            message: "checked Generic contraction currently requires eager direct operands",
-        }
-        .into());
-    }
     if !same_axes(axes.lhs_contracting_axes(), candidate.lhs())
         || !same_axes(axes.rhs_contracting_axes(), candidate.rhs())
     {
@@ -168,50 +399,69 @@ where
         }
         .into());
     }
-    let output_rank = lhs_space
-        .space()
-        .rank()
-        .checked_sub(candidate.lhs().len())
-        .and_then(|rank| {
-            rhs_space
-                .space()
-                .rank()
-                .checked_sub(candidate.rhs().len())
-                .and_then(|rhs| rank.checked_add(rhs))
-        })
-        .ok_or(OperationError::ElementCountOverflow)?;
     let candidate_axes =
         TensorContractSpec::new(candidate.lhs(), candidate.rhs(), axes.output_permutation());
-    let axis_plan = TensorContractAxisPlan::compile(
-        lhs_space.space().rank(),
-        rhs_space.space().rank(),
+    let CheckedContractLocal {
         output_rank,
+        axis_plan,
+    } = validate_contract_local(
+        lhs_space,
+        lhs_data,
+        rhs_space,
+        rhs_data,
         candidate_axes,
+        dst_nout,
     )?;
-    if dst_nout > output_rank {
-        return Err(CoreError::StructureRankMismatch {
-            expected: output_rank,
-            actual: dst_nout,
-        }
-        .into());
-    }
-    if lhs_data.len() != lhs_space.space().required_len()? {
-        return Err(OperationError::ElementCountMismatch {
-            expected: lhs_space.space().required_len()?,
-            actual: lhs_data.len(),
-        }
-        .into());
-    }
-    if rhs_data.len() != rhs_space.space().required_len()? {
-        return Err(OperationError::ElementCountMismatch {
-            expected: rhs_space.space().required_len()?,
-            actual: rhs_data.len(),
-        }
-        .into());
-    }
-    validate_source_structure::<P::Error>(lhs_space.space())?;
-    validate_source_structure::<P::Error>(rhs_space.space())?;
+    let provider = validate_contract_provider(lhs_space, rhs_space)?;
+    let destination_homspace = FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
+        provider,
+        lhs_space.space().homspace(),
+        rhs_space.space().homspace(),
+        candidate.lhs(),
+        candidate.rhs(),
+        &axis_plan.output_axes,
+        dst_nout,
+    )?;
+    let destination =
+        lhs_space.prepare_final_homspace_generic_with_checked(provider, destination_homspace)?;
+    execute_preselected_checked_generic_contract(
+        lhs_space,
+        lhs_data,
+        rhs_space,
+        rhs_data,
+        axes,
+        dst_nout,
+        candidate,
+        orientation,
+        provider,
+        output_rank,
+        destination,
+        core_gemm,
+    )
+}
 
+#[allow(clippy::too_many_arguments)]
+fn execute_preselected_checked_generic_contract<P, D, G>(
+    lhs_space: &BoundDynamicFusionMapSpace<P>,
+    lhs_data: &[D],
+    rhs_space: &BoundDynamicFusionMapSpace<P>,
+    rhs_data: &[D],
+    axes: TensorContractSpec<'_>,
+    dst_nout: usize,
+    candidate: &ContractAxisOrderCandidate,
+    orientation: FusionContractOrientation,
+    provider: &P,
+    output_rank: usize,
+    destination: PreparedCheckedGenericDynamicSpace,
+    core_gemm: &mut G,
+) -> CheckedContractResult<P, D>
+where
+    P: CheckedGenericRigidSymbols<Scalar = f64>,
+    D: DenseRecouplingScalar + RecouplingCoefficientAction<f64> + ConjugateValue + Copy + Zero,
+    G: Rank2Gemm<D>,
+{
+    let candidate_axes =
+        TensorContractSpec::new(candidate.lhs(), candidate.rhs(), axes.output_permutation());
     let plan = orient_fusion_contract_plan(
         compile_tensorcontract_fusion_plan_from_ranks(
             dst_nout,
@@ -225,61 +475,22 @@ where
         orientation,
     );
 
-    let provider = lhs_space.provider();
-    let lhs_identity = provider.rule_identity();
-    let rhs_identity = rhs_space.provider().rule_identity();
-    if lhs_identity != rhs_identity {
-        return Err(CoreError::FusionRuleMismatch {
-            expected: lhs_identity,
-            actual: rhs_identity,
-        }
-        .into());
-    }
-    for actual in [provider.fusion_style(), rhs_space.provider().fusion_style()] {
-        if actual != FusionStyleKind::Generic {
-            return Err(CoreError::UnsupportedFusionStyle {
-                expected: FusionStyleKind::Generic,
-                actual,
-            }
-            .into());
-        }
-    }
-    for actual in [
-        provider.braiding_style(),
-        rhs_space.provider().braiding_style(),
-    ] {
-        if actual != BraidingStyleKind::Bosonic {
-            return Err(OperationError::UnsupportedTensorContractScope {
-                message: "checked Generic contraction requires Bosonic braiding",
-            }
-            .into());
-        }
-    }
-
-    let destination_homspace = FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
-        provider,
-        lhs_space.space().homspace(),
-        rhs_space.space().homspace(),
-        candidate.lhs(),
-        candidate.rhs(),
-        &axis_plan.output_axes,
-        dst_nout,
-    )?;
-    let destination =
-        lhs_space.prepare_final_homspace_generic_with_checked(provider, destination_homspace)?;
-
-    let (lhs_prepared, lhs_replay, lhs_structure) =
-        staged_transform(lhs_space, provider, lhs_space, plan.lhs_transform())?;
-    let (rhs_prepared, rhs_replay, rhs_structure) =
-        staged_transform(lhs_space, provider, rhs_space, plan.rhs_transform())?;
+    let lhs_prepared = staged_transform(lhs_space, provider, lhs_space, plan.lhs_transform())?;
+    let rhs_prepared = staged_transform(lhs_space, provider, rhs_space, plan.rhs_transform())?;
 
     let (core_left, core_right, core_left_structure, core_right_structure) = match orientation {
-        FusionContractOrientation::LhsRhs => {
-            (&lhs_prepared, &rhs_prepared, &lhs_structure, &rhs_structure)
-        }
-        FusionContractOrientation::RhsLhs => {
-            (&rhs_prepared, &lhs_prepared, &rhs_structure, &lhs_structure)
-        }
+        FusionContractOrientation::LhsRhs => (
+            &lhs_prepared,
+            &rhs_prepared,
+            lhs_prepared.structure(),
+            rhs_prepared.structure(),
+        ),
+        FusionContractOrientation::RhsLhs => (
+            &rhs_prepared,
+            &lhs_prepared,
+            rhs_prepared.structure(),
+            lhs_prepared.structure(),
+        ),
     };
     let core_axes = plan.core_axes().as_spec();
     let core_axis_plan = TensorContractAxisPlan::compile(
@@ -311,67 +522,83 @@ where
     )?;
 
     let destination_structure = Arc::new(destination.structure().clone());
-    let output_plan = build_checked_generic_tree_pair_transform_group_plan(
-        provider,
-        plan.output_transform().clone(),
-        &core_structure,
-    )?;
-    let output_replay = output_plan.compile_structures(&destination_structure, &core_structure)?;
+    let output_replay = if plan.output_transform_is_identity() {
+        None
+    } else {
+        let output_plan = build_checked_generic_tree_pair_transform_group_plan(
+            provider,
+            plan.output_transform().clone(),
+            &core_structure,
+        )?;
+        Some(output_plan.compile_structures(&destination_structure, &core_structure)?)
+    };
 
     let mut transform_backend = DenseTreeTransformOperations::default();
     let mut transform_workspace = Default::default();
-    let mut lhs_transformed = vec![D::zero(); lhs_prepared.required_len()];
-    execute_transform(
+    let lhs_transformed = execute_staged_transform(
         &mut transform_backend,
         &mut transform_workspace,
-        &lhs_replay,
-        &lhs_structure,
+        &lhs_prepared,
         lhs_space.space().structure(),
-        &mut lhs_transformed,
         lhs_data,
     )?;
-    let mut rhs_transformed = vec![D::zero(); rhs_prepared.required_len()];
-    execute_transform(
+    let rhs_transformed = execute_staged_transform(
         &mut transform_backend,
         &mut transform_workspace,
-        &rhs_replay,
-        &rhs_structure,
+        &rhs_prepared,
         rhs_space.space().structure(),
-        &mut rhs_transformed,
         rhs_data,
     )?;
 
+    let lhs_core_data = lhs_transformed.as_deref().unwrap_or(lhs_data);
+    let rhs_core_data = rhs_transformed.as_deref().unwrap_or(rhs_data);
+
     let (core_lhs_data, core_rhs_data) = match orientation {
-        FusionContractOrientation::LhsRhs => (&lhs_transformed, &rhs_transformed),
-        FusionContractOrientation::RhsLhs => (&rhs_transformed, &lhs_transformed),
+        FusionContractOrientation::LhsRhs => (lhs_core_data, rhs_core_data),
+        FusionContractOrientation::RhsLhs => (rhs_core_data, lhs_core_data),
     };
-    let mut core_data = vec![D::zero(); core_destination.required_len()];
     let mut fusion_workspace = FusionBlockContractWorkspace::default();
     let mut kernels = crate::StridedHostKernelAdapter::default();
-    core_plan.execute_raw(
-        &mut kernels,
-        core_gemm,
-        &mut fusion_workspace,
-        &core_structure,
-        &mut core_data,
-        core_left_structure,
-        core_lhs_data,
-        core_right_structure,
-        core_rhs_data,
-        D::one(),
-        D::zero(),
-    )?;
-
     let mut data = vec![D::zero(); destination.required_len()];
-    execute_transform(
-        &mut transform_backend,
-        &mut transform_workspace,
-        &output_replay,
-        &destination_structure,
-        &core_structure,
-        &mut data,
-        &core_data,
-    )?;
+    if let Some(output_replay) = output_replay {
+        let mut core_data = vec![D::zero(); core_destination.required_len()];
+        core_plan.execute_raw(
+            &mut kernels,
+            core_gemm,
+            &mut fusion_workspace,
+            &core_structure,
+            &mut core_data,
+            core_left_structure,
+            core_lhs_data,
+            core_right_structure,
+            core_rhs_data,
+            D::one(),
+            D::zero(),
+        )?;
+        execute_transform(
+            &mut transform_backend,
+            &mut transform_workspace,
+            &output_replay,
+            &destination_structure,
+            &core_structure,
+            &mut data,
+            &core_data,
+        )?;
+    } else {
+        core_plan.execute_raw(
+            &mut kernels,
+            core_gemm,
+            &mut fusion_workspace,
+            &core_structure,
+            &mut data,
+            core_left_structure,
+            core_lhs_data,
+            core_right_structure,
+            core_rhs_data,
+            D::one(),
+            D::zero(),
+        )?;
+    }
     let destination = lhs_space.commit_final_homspace_generic_bound_checked(destination)?;
     Ok((destination, data))
 }
