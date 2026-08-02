@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use tenet::core::{SU2FusionRule, SU2Irrep};
-use tenet::prelude::{Complex64, Dtype, Error, Runtime, Scalar, Space, Tensor};
+use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
+use tenet::prelude::{Complex64, Runtime};
 use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap};
 
 fn runtime() -> Runtime {
@@ -9,76 +9,56 @@ fn runtime() -> Runtime {
 }
 
 #[test]
-fn erased_diagonal_preserves_canonical_positions_and_dual_leg() {
+fn typed_diagonal_preserves_canonical_positions_and_dual_leg() {
     let runtime = runtime();
-    let bond = Space::u1([(-1, 2), (1, 1)]).dual();
-    let values: Vec<Vec<Scalar>> = bond
+    let bond = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(-1), 2), (U1Irrep::new(1), 1)],
+        false,
+    )
+    .unwrap()
+    .try_dual()
+    .unwrap();
+    let values: Vec<_> = bond
         .sectors()
+        .unwrap()
         .iter()
         .enumerate()
-        .map(|(sector, &(_, degeneracy))| {
-            (0..degeneracy)
-                .map(|index| {
-                    Scalar::C64(Complex64::new((10 * sector + index) as f64, index as f64))
-                })
-                .collect()
+        .map(|(position, &sector)| SectorSpectrum {
+            sector,
+            values: (0..bond.degeneracies()[position])
+                .map(|index| Complex64::new((10 * position + index) as f64, index as f64))
+                .collect(),
         })
         .collect();
-    let tensor = Tensor::diagonal(&runtime, Dtype::C64, &bond, values.clone()).unwrap();
-    assert_eq!(tensor.codomain_spaces()[0], bond);
-    assert_eq!(tensor.domain_spaces()[0], bond);
+    let tensor =
+        TensorMap::<U1FusionRule, Complex64>::diagonal(&runtime, &bond, values.clone()).unwrap();
+    assert_eq!(tensor.codomain()[0], bond);
+    assert_eq!(tensor.domain()[0], bond);
     assert!(tensor.is_diagonal(0.0).unwrap());
     assert_eq!(tensor.diagonal_spectrum().unwrap().unwrap(), values);
-    let mut wrong_dtype = values.clone();
-    wrong_dtype[0][0] = Scalar::F64(1.0);
-    assert!(matches!(
-        Tensor::diagonal(&runtime, Dtype::C64, &bond, wrong_dtype),
-        Err(Error::DtypeMismatch)
-    ));
-
-    let product = Space::product([((0, 0), 1), ((1, 1), 2)]).unwrap();
-    let product_values: Vec<Vec<Scalar>> = product
-        .sectors()
-        .iter()
-        .enumerate()
-        .map(|(sector, &(_, degeneracy))| {
-            (0..degeneracy)
-                .map(|index| Scalar::F64((10 * sector + index) as f64))
-                .collect()
-        })
-        .collect();
-    assert_eq!(
-        Tensor::diagonal(&runtime, Dtype::F64, &product, product_values.clone())
-            .unwrap()
-            .diagonal_spectrum()
-            .unwrap()
-            .unwrap(),
-        product_values
-    );
 }
 
 #[test]
-fn real_c64_readback_stays_compact() {
+fn typed_real_c64_eigenvalue_readback_stays_compact() {
     let runtime = runtime();
-    let v = Space::u1([(0, 2)]);
-    let source = Tensor::from_block_fn(&runtime, [&v], [&v], |_, index| {
-        Complex64::new(
-            if index[0] == index[1] {
-                (index[0] + 1) as f64
-            } else {
-                0.0
-            },
-            0.0,
-        )
-    })
-    .unwrap();
+    let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)], false).unwrap();
+    let source =
+        TensorMap::<U1FusionRule, Complex64>::from_block_fn(&runtime, [&v], [&v], |_, index| {
+            Complex64::new(
+                if index[0] == index[1] {
+                    (index[0] + 1) as f64
+                } else {
+                    0.0
+                },
+                0.0,
+            )
+        })
+        .unwrap();
     let (diagonal, _) = source.eigh_full().unwrap();
     assert_eq!(
-        diagonal.diagonal_spectrum().unwrap().unwrap()[0],
-        vec![
-            Scalar::C64(Complex64::new(2.0, 0.0)),
-            Scalar::C64(Complex64::new(1.0, 0.0))
-        ]
+        diagonal.diagonal_spectrum().unwrap().unwrap()[0].values,
+        [Complex64::new(2.0, 0.0), Complex64::new(1.0, 0.0)]
     );
 }
 
@@ -170,8 +150,8 @@ fn typed_diagonal_canonicalizes_labels_and_dense_predicate_handles_nonfinite_off
     )
     .is_err());
 
-    let v = Space::u1([(0, 2)]);
-    let dense = Tensor::from_block_fn(&runtime, [&v], [&v], |_, index| {
+    let v = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)], false).unwrap();
+    let dense = TensorMap::<U1FusionRule, f64>::from_block_fn(&runtime, [&v], [&v], |_, index| {
         if index == [0, 1] {
             f64::NAN
         } else {
@@ -180,7 +160,7 @@ fn typed_diagonal_canonicalizes_labels_and_dense_predicate_handles_nonfinite_off
     })
     .unwrap();
     assert!(!dense.is_diagonal(1.0).unwrap());
-    let finite = Tensor::from_block_fn(&runtime, [&v], [&v], |_, index| {
+    let finite = TensorMap::<U1FusionRule, f64>::from_block_fn(&runtime, [&v], [&v], |_, index| {
         if index[0] == index[1] {
             4.0
         } else if index == [0, 1] {
@@ -192,9 +172,9 @@ fn typed_diagonal_canonicalizes_labels_and_dense_predicate_handles_nonfinite_off
     .unwrap();
     assert!(!finite.is_diagonal(0.05).unwrap());
     assert!(finite.is_diagonal(0.1).unwrap());
-    let exact = Tensor::id(&runtime, Dtype::F64, [&v]).unwrap();
+    let exact = TensorMap::<U1FusionRule, f64>::id(&runtime, [&v]).unwrap();
     assert!(exact.is_diagonal(0.0).unwrap());
-    let inf = Tensor::from_block_fn(&runtime, [&v], [&v], |_, index| {
+    let inf = TensorMap::<U1FusionRule, f64>::from_block_fn(&runtime, [&v], [&v], |_, index| {
         if index == [1, 0] {
             f64::INFINITY
         } else {
@@ -204,6 +184,6 @@ fn typed_diagonal_canonicalizes_labels_and_dense_predicate_handles_nonfinite_off
     .unwrap();
     assert!(!inf.is_diagonal(1.0).unwrap());
     assert!(dense.is_diagonal(-1.0).is_err());
-    let vector = Tensor::zeros(&runtime, Dtype::F64, [&v], []).unwrap();
+    let vector = TensorMap::<U1FusionRule, f64>::zeros(&runtime, [&v], []).unwrap();
     assert!(vector.is_diagonal(f64::NAN).is_err());
 }
