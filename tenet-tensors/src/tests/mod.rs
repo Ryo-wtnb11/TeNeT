@@ -31,7 +31,8 @@ use tenet_core::{
     multiplicity_free_repartition_tree_pair, unique_permute_tree_pair, BlockKey, BlockSpec,
     BlockStructure, BlockView, BlockViewMut, BraidingStyleKind, CoreError, DegeneracyStructure,
     FermionParityFusionRule, FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace,
-    FusionTreeGroupKey, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey, HostReadableStorage,
+    FusionTreeGroupKey, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey, GenericFArray,
+    GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols, HostReadableStorage,
     HostWritableStorage, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
     MultiplicityFreePivotalSymbols, MultiplicityFreeRigidSymbols, MultiplicityIndex, Placement,
     ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorStructure, SectorVec,
@@ -941,6 +942,66 @@ impl FusionRule for GenericMultiplicityRule {
             (1, 1, 1) => 2,
             _ => usize::from(self.fusion_channels(left, right).contains(&coupled)),
         }
+    }
+}
+
+impl GenericFusionSymbols for GenericMultiplicityRule {
+    type Scalar = f64;
+
+    fn f_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> GenericFArray<Self::Scalar> {
+        let shape = (
+            self.nsymbol(a, b, e),
+            self.nsymbol(e, c, d),
+            self.nsymbol(b, c, f),
+            self.nsymbol(a, f, d),
+        );
+        let rows = shape.0 * shape.1;
+        let columns = shape.2 * shape.3;
+        let mut data = vec![0.0; rows * columns];
+        for index in 0..rows.min(columns) {
+            data[index * columns + index] = 1.0;
+        }
+        GenericFArray::new(data, shape)
+    }
+
+    fn r_symbol_generic(
+        &self,
+        _a: SectorId,
+        _b: SectorId,
+        coupled: SectorId,
+    ) -> GenericRMatrix<Self::Scalar> {
+        let size = if coupled == SectorId::new(1) { 2 } else { 1 };
+        let mut data = vec![0.0; size * size];
+        for index in 0..size {
+            data[index * size + index] = 1.0;
+        }
+        GenericRMatrix::new(data, size, size)
+    }
+}
+
+impl GenericRigidSymbols for GenericMultiplicityRule {
+    fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        if sector == SectorId::new(1) {
+            (1.0 + 2.0_f64.sqrt()).sqrt()
+        } else {
+            1.0
+        }
+    }
+
+    fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
+        self.sqrt_dim_scalar(sector).recip()
+    }
+
+    fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
+        1.0
     }
 }
 

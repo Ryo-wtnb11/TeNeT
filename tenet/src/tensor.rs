@@ -11507,6 +11507,9 @@ mod unit_layout_tensor_tests {
 }
 
 #[cfg(test)]
+mod compact_diagonal_tests;
+
+#[cfg(test)]
 mod adjoint_parent_view_tests {
     use super::*;
     use crate::space::SectorLabel;

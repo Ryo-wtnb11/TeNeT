@@ -8,8 +8,9 @@ use tenet_core::{
     Z2FusionRule,
 };
 use tenet_tensors::{
-    BoundDynamicFusionMapSpace, DenseTreeTransformOperations, OperationError, OutputAxisOrder,
-    TensorContractFusionExecutionContext, TensorContractSpec, TreeTransformRuleCacheKey,
+    BoundDynamicFusionMapSpace, DenseTreeTransformOperations, DynamicFusionMapSpace,
+    OperationError, OutputAxisOrder, TensorContractFusionExecutionContext, TensorContractSpec,
+    TreeTransformRuleCacheKey,
 };
 
 use crate::factorize::{
@@ -1185,6 +1186,71 @@ fn generic_factorization_input() -> (BoundDynamicFusionMapSpace<FactorGenericRul
     (space, data)
 }
 
+fn padded_generic_factorization_input(
+    source: &BoundDynamicFusionMapSpace<FactorGenericRule>,
+    source_data: &[f64],
+) -> (BoundDynamicFusionMapSpace<FactorGenericRule>, Vec<f64>) {
+    let source_structure = source.space().structure();
+    let mut offset = 1usize;
+    let mut blocks = Vec::with_capacity(source_structure.block_count());
+    for index in 0..source_structure.block_count() {
+        let block = source_structure.block(index).unwrap();
+        blocks.push(
+            BlockSpec::column_major_with_key(block.key().clone(), block.shape().to_vec(), offset)
+                .unwrap(),
+        );
+        offset += block.shape().iter().product::<usize>() + 1;
+    }
+    let structure = BlockStructure::from_blocks_with_rank(source.space().rank(), blocks).unwrap();
+    let typed_space = FusionTensorMapSpace::new_unbound(
+        TensorMapSpace::<2, 2>::from_dims([2, 1], [1, 1]).unwrap(),
+        source.space().homspace().clone(),
+        structure,
+    )
+    .unwrap()
+    .try_bind_rule(source.provider())
+    .unwrap();
+    let tensor = TensorMap::<f64, 2, 2>::from_block_fn_with_fusion_space(
+        typed_space,
+        0.0,
+        |key, indices| {
+            let block = source_structure
+                .block(
+                    source_structure
+                        .find_block_index_by_key(key)
+                        .expect("copy preserves every key"),
+                )
+                .unwrap();
+            source_data[block.offset()
+                + indices
+                    .iter()
+                    .zip(block.strides())
+                    .map(|(&index, &stride)| index * stride)
+                    .sum::<usize>()]
+        },
+    )
+    .unwrap();
+    let dynamic = DynamicFusionMapSpace::from_typed(tensor.fusion_space().unwrap());
+    let bound =
+        BoundDynamicFusionMapSpace::bind_generic(dynamic, Arc::clone(source.provider_arc()))
+            .unwrap();
+    (bound, tensor.data().to_vec())
+}
+
+fn assert_generic_factor_close(
+    actual: &BoundDynFactor<FactorGenericRule, f64>,
+    expected: &BoundDynFactor<FactorGenericRule, f64>,
+) {
+    assert_eq!(
+        actual.space().space().homspace(),
+        expected.space().space().homspace()
+    );
+    assert_eq!(actual.data().len(), expected.data().len());
+    for (&actual, &expected) in actual.data().iter().zip(expected.data()) {
+        assert!((actual - expected).abs() < 1.0e-12);
+    }
+}
+
 #[test]
 fn provider_neutral_generic_compact_factorizations_remain_covered() {
     let (space, data) = generic_factorization_input();
@@ -1198,6 +1264,36 @@ fn provider_neutral_generic_compact_factorizations_remain_covered() {
     assert!(Arc::ptr_eq(vh.space().provider_arc(), space.provider_arc()));
     qr_compact_dyn_generic(&mut dense, &input).unwrap();
     lq_compact_dyn_generic(&mut dense, &input).unwrap();
+}
+
+#[test]
+fn provider_neutral_generic_factorizations_keep_the_strided_fallback() {
+    let (canonical_space, canonical_data) = generic_factorization_input();
+    let (padded_space, padded_data) =
+        padded_generic_factorization_input(&canonical_space, &canonical_data);
+    let canonical = BoundDynamicTensorRef::try_new(&canonical_space, &canonical_data).unwrap();
+    let padded = BoundDynamicTensorRef::try_new(&padded_space, &padded_data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let canonical_values = svd_vals_dyn_generic(&mut dense, &canonical).unwrap();
+    let padded_values = svd_vals_dyn_generic(&mut dense, &padded).unwrap();
+    assert_real_spectra_close(&padded_values, &canonical_values);
+
+    let canonical_svd = svd_compact_factors_dyn_generic(&mut dense, &canonical).unwrap();
+    let padded_svd = svd_compact_factors_dyn_generic(&mut dense, &padded).unwrap();
+    assert_generic_factor_close(&padded_svd.0, &canonical_svd.0);
+    assert_generic_factor_close(&padded_svd.1, &canonical_svd.1);
+    assert_real_spectra_close(&padded_svd.2, &canonical_svd.2);
+
+    let canonical_qr = qr_compact_dyn_generic(&mut dense, &canonical).unwrap();
+    let padded_qr = qr_compact_dyn_generic(&mut dense, &padded).unwrap();
+    assert_generic_factor_close(&padded_qr.0, &canonical_qr.0);
+    assert_generic_factor_close(&padded_qr.1, &canonical_qr.1);
+
+    let canonical_lq = lq_compact_dyn_generic(&mut dense, &canonical).unwrap();
+    let padded_lq = lq_compact_dyn_generic(&mut dense, &padded).unwrap();
+    assert_generic_factor_close(&padded_lq.0, &canonical_lq.0);
+    assert_generic_factor_close(&padded_lq.1, &canonical_lq.1);
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -5229,6 +5229,7 @@ mod lowered_metadata_tests {
 mod scratch_cache_tests {
     use super::*;
     use crate::test_support::CACHE_TEST_LOCK;
+    use crate::tests::GenericMultiplicityRule;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tenet_core::{
         BlockSpec, BraidingStyleKind, FusionProductSpace, FusionStyleKind,
@@ -5457,6 +5458,51 @@ mod scratch_cache_tests {
         )
         .is_err());
         assert_eq!(final_result_layout_builds(), 0);
+    }
+
+    #[test]
+    fn generic_transform_builds_only_the_final_layout() {
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_final_result_layout_test_state();
+        let rule = GenericMultiplicityRule;
+        let homspace = FusionTreeHomSpace::from_sector_ids([(0, 2)], [(0, 3)]);
+        let key_count = homspace.fusion_tree_keys_generic(&rule).unwrap().len();
+        let source = DynamicFusionMapSpace::from_degeneracy_shapes_generic(
+            &rule,
+            homspace,
+            vec![vec![2, 3]; key_count],
+        )
+        .unwrap();
+
+        let transformed = source
+            .transformed_generic(&rule, &TreeTransformOperation::permute([1], [0]))
+            .unwrap();
+        assert_eq!(final_result_layout_builds(), 1);
+        assert_eq!(transformed.structure().block_count(), key_count);
+    }
+
+    #[test]
+    fn generic_contraction_builds_only_the_final_layout() {
+        let _guard = CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_final_result_layout_test_state();
+        let rule = GenericMultiplicityRule;
+        let homspace = FusionTreeHomSpace::from_sector_ids([(0, 2)], [(0, 2)]);
+        let key_count = homspace.fusion_tree_keys_generic(&rule).unwrap().len();
+        let source = DynamicFusionMapSpace::from_degeneracy_shapes_generic(
+            &rule,
+            homspace,
+            vec![vec![2, 2]; key_count],
+        )
+        .unwrap();
+
+        let contracted =
+            DynamicFusionMapSpace::contracted_generic(&rule, &source, &source, &[1], &[0]).unwrap();
+        assert_eq!(final_result_layout_builds(), 1);
+        assert_eq!(contracted.structure().block_count(), key_count);
     }
 
     #[test]

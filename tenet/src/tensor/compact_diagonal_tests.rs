@@ -748,6 +748,60 @@ fn identity_compact_twist_shares_storage() {
 }
 
 #[test]
+fn compact_storage_reductions_match_dense_oracles_for_nontrivial_dimensions() {
+    let rt = Runtime::builder().dense_threads(1).build().unwrap();
+    let space = Space::su2([(0, 2), (1, 2), (2, 2)]).unwrap();
+
+    for dtype in [Dtype::F64, Dtype::C64] {
+        let make = |seed| {
+            if dtype == Dtype::F64 {
+                real_diagonal(&rt, &space, seed)
+            } else {
+                real_c64_diagonal(&rt, &space, seed)
+            }
+        };
+        let lhs = make(317_001);
+        let rhs = make(317_002);
+        let adjoint = lhs.adjoint().unwrap();
+        let scaled = lhs.scale(-0.5).unwrap();
+        let added = lhs.add(&rhs, 0.75, -0.5).unwrap();
+        for tensor in [&lhs, &adjoint, &scaled, &added] {
+            assert_compact_unmaterialized(tensor);
+        }
+
+        let dense_lhs = make(317_001).densified_if_diagonal();
+        let dense_rhs = make(317_002).densified_if_diagonal();
+        assert!((lhs.norm().unwrap() - dense_lhs.norm().unwrap()).abs() < 1e-11);
+        let actual_inner = lhs.inner(&rhs).unwrap().to_c64();
+        let expected_inner = dense_lhs.inner(&dense_rhs).unwrap().to_c64();
+        assert!((actual_inner - expected_inner).norm() < 1e-11);
+        assert_eq!(lhs.dot(&rhs).unwrap().to_c64(), actual_inner);
+        assert!(lhs.tr().unwrap().to_c64().norm().is_finite());
+
+        let dense = Tensor::rand_with_seed(&rt, dtype, [&space], [&space], 317_003).unwrap();
+        let actual_left = lhs.inner(&dense).unwrap().to_c64();
+        let expected_left = dense_lhs.inner(&dense).unwrap().to_c64();
+        assert!((actual_left - expected_left).norm() < 1e-11);
+        let actual_right = dense.inner(&rhs).unwrap().to_c64();
+        let expected_right = dense.inner(&dense_rhs).unwrap().to_c64();
+        assert!((actual_right - expected_right).norm() < 1e-11);
+        assert_compact_unmaterialized(&lhs);
+        assert_compact_unmaterialized(&rhs);
+    }
+
+    let lhs = complex_diagonal(&rt, &space, 317_011);
+    let rhs = complex_diagonal(&rt, &space, 317_012);
+    let dense_lhs = lhs.clone().densified_if_diagonal();
+    let dense_rhs = rhs.clone().densified_if_diagonal();
+    assert!(
+        (lhs.inner(&rhs).unwrap().to_c64() - dense_lhs.inner(&dense_rhs).unwrap().to_c64()).norm()
+            < 1e-11
+    );
+    assert_compact_unmaterialized(&lhs);
+    assert_compact_unmaterialized(&rhs);
+}
+
+#[test]
 fn nonselfdual_odd_product_routes_match_dense_oracles_and_storage() {
     let rt = Runtime::builder().dense_threads(1).build().unwrap();
     let space = Space::product([((1, 1), 1), ((-1, 1), 1)]).unwrap();

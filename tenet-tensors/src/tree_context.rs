@@ -201,6 +201,61 @@ where
     }
 }
 
+#[cfg(test)]
+mod generic_context_tests {
+    use super::*;
+    use crate::tests::GenericMultiplicityRule;
+    use crate::DynamicFusionMapSpace;
+    use tenet_core::{FusionTreeHomSpace, RuleIdentity};
+
+    #[test]
+    fn infallible_generic_context_executes_assign_and_overwrite() {
+        let rule = GenericMultiplicityRule;
+        let homspace = FusionTreeHomSpace::from_sector_ids([(0, 2)], [(0, 3)]);
+        let key_count = homspace.fusion_tree_keys_generic(&rule).unwrap().len();
+        let source = DynamicFusionMapSpace::from_degeneracy_shapes_generic(
+            &rule,
+            homspace,
+            vec![vec![2, 3]; key_count],
+        )
+        .unwrap();
+        let operation = TreeTransformOperation::braid([1], [0], [0], [1]);
+        let destination = source.transformed_generic(&rule, &operation).unwrap();
+        let source_data = (1..=source.required_len().unwrap())
+            .map(|value| value as f64)
+            .collect::<Vec<_>>();
+        let mut destination_data = vec![0.0; destination.required_len().unwrap()];
+        let mut context = TreeTransformExecutionContext::<f64, RuleIdentity>::default();
+
+        context
+            .tree_transform_dyn_into_generic(
+                &rule,
+                operation.clone(),
+                destination.structure(),
+                source.structure(),
+                &mut destination_data,
+                &source_data,
+                1.0,
+                0.0,
+            )
+            .unwrap();
+        let expected = destination_data.clone();
+        destination_data.fill(f64::NAN);
+        context
+            .tree_transform_dyn_overwrite_into_generic(
+                &rule,
+                operation,
+                destination.structure(),
+                source.structure(),
+                &mut destination_data,
+                &source_data,
+                1.0,
+            )
+            .unwrap();
+        assert_eq!(destination_data, expected);
+    }
+}
+
 impl<D, RuleKey, C>
     TreeTransformExecutionContext<D, RuleKey, C, DenseTreeTransformOperations<DefaultDenseExecutor>>
 where
