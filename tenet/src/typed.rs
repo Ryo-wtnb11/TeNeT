@@ -271,7 +271,7 @@ use crate::tensor::{
 };
 #[cfg(feature = "cuda")]
 use crate::tensor::{
-    assemble_left_factor, assemble_right_factor, cuda_qr_region, cuda_svd_region,
+    assemble_left_factor, assemble_right_factor, cuda_qr_region, cuda_svd_region, decide_kept,
     fill_diagonal_values, upload_selector,
 };
 pub use crate::tensor_core::CheckedGenericTensorProductError;
@@ -305,12 +305,97 @@ thread_local! {
     static CUDA_SVD_OBSERVATION: std::cell::Cell<Option<CudaSvdObservation>> = const {
             std::cell::Cell::new(None)
         };
+    /// `(successful_results, spectrum_scalars, final_storage_creations,
+    /// live_raw_factors, peak_raw_factors, live_raw_bytes, peak_raw_bytes)`.
+    static CUDA_SVD_TRUNC_OBSERVATION: std::cell::Cell<Option<CudaSvdTruncObservation>> = const {
+            std::cell::Cell::new(None)
+        };
+    static CUDA_SVD_TRUNC_EVENTS: std::cell::RefCell<Option<Vec<(&'static str, usize)>>> = const {
+        std::cell::RefCell::new(None)
+    };
+    static CUDA_SVD_TRUNC_LOCK_DEPTH: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+    static CUDA_SVD_TRUNC_FINAL_EXTENTS: std::cell::RefCell<Option<Vec<usize>>> = const {
+        std::cell::RefCell::new(None)
+    };
+    /// `(stage, one-based ordinal)` for operation-local failure injection.
+    static CUDA_SVD_TRUNC_FAILURE: std::cell::Cell<Option<(&'static str, usize)>> = const {
+        std::cell::Cell::new(None)
+    };
 }
 
 #[cfg(all(test, feature = "cuda"))]
 type CudaQrObservation = (usize, usize, usize, usize, usize, usize, usize);
 #[cfg(all(test, feature = "cuda"))]
 type CudaSvdObservation = (usize, usize, usize, usize, usize);
+#[cfg(all(test, feature = "cuda"))]
+type CudaSvdTruncObservation = (usize, usize, usize, usize, usize, usize, usize);
+
+#[cfg(all(test, feature = "cuda"))]
+fn update_cuda_svd_trunc_observation(
+    update: impl FnOnce(CudaSvdTruncObservation) -> CudaSvdTruncObservation,
+) {
+    CUDA_SVD_TRUNC_OBSERVATION.with(|observation| {
+        if let Some(current) = observation.get() {
+            observation.set(Some(update(current)));
+        }
+    });
+}
+
+#[cfg(all(test, feature = "cuda"))]
+fn observe_cuda_svd_trunc_decomposition(values: usize) {
+    update_cuda_svd_trunc_observation(
+        |(results, total, creations, live, peak, bytes, peak_bytes)| {
+            (
+                results + 1,
+                total + values,
+                creations,
+                live,
+                peak,
+                bytes,
+                peak_bytes,
+            )
+        },
+    );
+}
+
+#[cfg(all(test, feature = "cuda"))]
+fn observe_cuda_svd_trunc_final_storage_creation() {
+    update_cuda_svd_trunc_observation(
+        |(results, total, creations, live, peak, bytes, peak_bytes)| {
+            (results, total, creations + 1, live, peak, bytes, peak_bytes)
+        },
+    );
+}
+
+#[cfg(all(test, feature = "cuda"))]
+fn observe_cuda_svd_trunc_event(event: &'static str) {
+    let depth = CUDA_SVD_TRUNC_LOCK_DEPTH.with(|depth| depth.get());
+    CUDA_SVD_TRUNC_EVENTS.with(|events| {
+        if let Some(events) = events.borrow_mut().as_mut() {
+            events.push((event, depth));
+        }
+    });
+}
+
+#[cfg(all(test, feature = "cuda"))]
+struct CudaSvdTruncLockObservationGuard;
+
+#[cfg(all(test, feature = "cuda"))]
+impl CudaSvdTruncLockObservationGuard {
+    fn new() -> Self {
+        CUDA_SVD_TRUNC_LOCK_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+#[cfg(all(test, feature = "cuda"))]
+impl Drop for CudaSvdTruncLockObservationGuard {
+    fn drop(&mut self) {
+        CUDA_SVD_TRUNC_LOCK_DEPTH.with(|depth| depth.set(depth.get() - 1));
+    }
+}
 
 #[cfg(all(test, feature = "cuda"))]
 fn update_cuda_svd_observation(update: impl FnOnce(CudaSvdObservation) -> CudaSvdObservation) {
@@ -466,6 +551,75 @@ impl Drop for TypedCudaSvdScratch {
 }
 
 #[cfg(feature = "cuda")]
+struct TypedCudaSvdRetainedFactors {
+    left: CudaDenseStorage,
+    right: CudaDenseStorage,
+    #[cfg(test)]
+    bytes: usize,
+}
+
+#[cfg(feature = "cuda")]
+impl TypedCudaSvdRetainedFactors {
+    fn new(
+        left: CudaDenseStorage,
+        right: CudaDenseStorage,
+        rows: usize,
+        cols: usize,
+        rank: usize,
+    ) -> Result<Self, Error> {
+        #[cfg(not(test))]
+        let _ = (rows, cols, rank);
+        #[cfg(test)]
+        let bytes = rows
+            .checked_add(cols)
+            .and_then(|sum| sum.checked_mul(rank))
+            .and_then(|elements| elements.checked_mul(std::mem::size_of::<f64>()))
+            .ok_or_else(|| internal_layout_error("retained CUDA SVD factor bytes overflow"))?;
+        #[cfg(test)]
+        update_cuda_svd_trunc_observation(
+            |(results, total, creations, live, peak, live_bytes, peak_bytes)| {
+                let live = live + 1;
+                let live_bytes = live_bytes + bytes;
+                (
+                    results,
+                    total,
+                    creations,
+                    live,
+                    peak.max(live),
+                    live_bytes,
+                    peak_bytes.max(live_bytes),
+                )
+            },
+        );
+        Ok(Self {
+            left,
+            right,
+            #[cfg(test)]
+            bytes,
+        })
+    }
+}
+
+#[cfg(all(test, feature = "cuda"))]
+impl Drop for TypedCudaSvdRetainedFactors {
+    fn drop(&mut self) {
+        update_cuda_svd_trunc_observation(
+            |(results, total, creations, live, peak, bytes, peak_bytes)| {
+                (
+                    results,
+                    total,
+                    creations,
+                    live - 1,
+                    peak,
+                    bytes - self.bytes,
+                    peak_bytes,
+                )
+            },
+        );
+    }
+}
+
+#[cfg(feature = "cuda")]
 #[derive(Clone, Copy)]
 struct TypedCudaQrRoute {
     source: usize,
@@ -482,6 +636,27 @@ struct TypedCudaQrPlan<R> {
     left_regions: Arc<[CoupledSectorRegion]>,
     right_regions: Arc<[CoupledSectorRegion]>,
     routes: Vec<TypedCudaQrRoute>,
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Clone, Copy)]
+struct TypedCudaSvdTruncRoute {
+    source: usize,
+    left: usize,
+    right: usize,
+    full_rank: usize,
+    kept: usize,
+}
+
+#[cfg(feature = "cuda")]
+struct TypedCudaSvdTruncPlan<R> {
+    left_space: BoundDynamicFusionMapSpace<R>,
+    middle_space: BoundDynamicFusionMapSpace<R>,
+    right_space: BoundDynamicFusionMapSpace<R>,
+    source_regions: Arc<[CoupledSectorRegion]>,
+    left_regions: Arc<[CoupledSectorRegion]>,
+    right_regions: Arc<[CoupledSectorRegion]>,
+    routes: Vec<TypedCudaSvdTruncRoute>,
 }
 
 #[cfg(feature = "cuda")]
@@ -1741,8 +1916,10 @@ pub struct SectorSpectrum<S, V = f64> {
 pub struct SvdTrunc<R: SectorCodec, D, S = Vec<D>> {
     /// Left isometry `u : codomain <- bond`.
     pub u: TensorMap<R, D, S>,
-    /// Singular-value factor `s : bond <- bond`, in compact diagonal storage
-    /// (TensorKit's `DiagonalTensorMap`); see [`TensorMap::svd_compact`].
+    /// Singular-value factor `s : bond <- bond`. Host storage keeps TensorKit's
+    /// compact `DiagonalTensorMap` representation; CUDA storage returns the
+    /// same factor as a dense device block diagonal because CUDA diagonal
+    /// storage is not part of the current typed contract.
     pub s: TensorMap<R, D, S>,
     /// Right isometry `vh : bond <- domain`.
     pub vh: TensorMap<R, D, S>,
@@ -2909,6 +3086,29 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 ///     let _ = tensor.svd_compact();
 /// }
 /// ```
+///
+/// Truncated SVD is absent at the same checked-Generic/complex boundaries:
+///
+/// ```compile_fail
+/// use tenet::core::Su3FusionRule;
+/// use tenet::typed::{CudaStorage, TensorMap, Truncation};
+///
+/// fn no_checked_generic_cuda_svd_trunc(tensor: &TensorMap<Su3FusionRule, f64, CudaStorage>) {
+///     let _ = tensor.svd_trunc(&Truncation::Full);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use num_complex::Complex64;
+/// use tenet::core::U1FusionRule;
+/// use tenet::typed::{CudaStorage, TensorMap, Truncation};
+///
+/// fn no_complex_cuda_svd_trunc(
+///     tensor: &TensorMap<U1FusionRule, Complex64, CudaStorage>,
+/// ) {
+///     let _ = tensor.svd_trunc(&Truncation::Full);
+/// }
+/// ```
 impl<R> TensorMap<R, f64, CudaStorage>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
@@ -3028,6 +3228,140 @@ where
         }
         Ok(TypedCudaQrPlan {
             left_space,
+            right_space,
+            source_regions,
+            left_regions,
+            right_regions,
+            routes,
+        })
+    }
+
+    fn compile_cuda_svd_trunc_plan(
+        &self,
+        source_regions: Arc<[CoupledSectorRegion]>,
+        kept_spectra: &[tenet_matrixalgebra::SectorSpectrum<f64>],
+    ) -> Result<TypedCudaSvdTruncPlan<R>, Error> {
+        let source_space = self.logical_space().space();
+        let hom = source_space.homspace();
+        let bond = SectorLeg::new(
+            kept_spectra
+                .iter()
+                .map(|entry| (entry.sector, entry.values.len())),
+            false,
+        );
+        let left_space =
+            self.logical_space()
+                .derive_from_final_homspace(FusionTreeHomSpace::new(
+                    FusionProductSpace::new(hom.codomain().legs().iter().cloned()),
+                    FusionProductSpace::new([bond.clone()]),
+                ))?;
+        let middle_space =
+            self.logical_space()
+                .derive_from_final_homspace(FusionTreeHomSpace::new(
+                    FusionProductSpace::new([bond.clone()]),
+                    FusionProductSpace::new([bond.clone()]),
+                ))?;
+        let right_space =
+            self.logical_space()
+                .derive_from_final_homspace(FusionTreeHomSpace::new(
+                    FusionProductSpace::new([bond]),
+                    FusionProductSpace::new(hom.domain().legs().iter().cloned()),
+                ))?;
+        let left_regions =
+            sector_regions(left_space.space().structure(), left_space.space().nout())?;
+        let middle_regions = sector_regions(
+            middle_space.space().structure(),
+            middle_space.space().nout(),
+        )?;
+        let right_regions =
+            sector_regions(right_space.space().structure(), right_space.space().nout())?;
+        let index_by_sector = |regions: &[CoupledSectorRegion]| {
+            let mut indices = HashMap::with_capacity(regions.len());
+            for (index, region) in regions.iter().enumerate() {
+                if indices.insert(region.coupled(), index).is_some() {
+                    return Err(internal_layout_error(
+                        "compact SVD truncated factor contains a duplicate coupled sector",
+                    ));
+                }
+            }
+            Ok(indices)
+        };
+        let source_by_sector = index_by_sector(&source_regions)?;
+        let left_by_sector = index_by_sector(&left_regions)?;
+        let middle_by_sector = index_by_sector(&middle_regions)?;
+        let right_by_sector = index_by_sector(&right_regions)?;
+        let mut routes = Vec::with_capacity(kept_spectra.len());
+        for spectrum in kept_spectra {
+            let kept = spectrum.values.len();
+            if kept == 0 {
+                return Err(internal_layout_error(
+                    "compact SVD truncated plan retained an empty sector",
+                ));
+            }
+            let source = *source_by_sector.get(&spectrum.sector).ok_or_else(|| {
+                internal_layout_error("compact SVD truncated factor is missing a source sector")
+            })?;
+            let source_region = &source_regions[source];
+            let full_rank = source_region.rows().min(source_region.cols());
+            if kept > full_rank {
+                return Err(internal_layout_error(
+                    "compact SVD truncated rank exceeds its source route",
+                ));
+            }
+            let left = *left_by_sector.get(&spectrum.sector).ok_or_else(|| {
+                internal_layout_error("compact SVD truncated left factor is missing a sector")
+            })?;
+            let middle = *middle_by_sector.get(&spectrum.sector).ok_or_else(|| {
+                internal_layout_error("compact SVD truncated diagonal factor is missing a sector")
+            })?;
+            let right = *right_by_sector.get(&spectrum.sector).ok_or_else(|| {
+                internal_layout_error("compact SVD truncated right factor is missing a sector")
+            })?;
+            let left_region = &left_regions[left];
+            let middle_region = &middle_regions[middle];
+            let right_region = &right_regions[right];
+            let middle_len = middle_region
+                .range()
+                .end
+                .checked_sub(middle_region.range().start)
+                .ok_or_else(|| internal_layout_error("truncated SVD middle range is invalid"))?;
+            if (left_region.rows(), left_region.cols()) != (source_region.rows(), kept)
+                || (middle_region.rows(), middle_region.cols()) != (kept, kept)
+                || middle_len
+                    != kept.checked_mul(kept).ok_or_else(|| {
+                        internal_layout_error("truncated SVD middle length overflows")
+                    })?
+                || (right_region.rows(), right_region.cols()) != (kept, source_region.cols())
+                || !cuda_qr_tree_extents_match(source_region.row_trees(), left_region.row_trees())?
+                || !cuda_qr_tree_extents_match(
+                    middle_region.row_trees(),
+                    middle_region.col_trees(),
+                )?
+                || !cuda_qr_tree_extents_match(source_region.col_trees(), right_region.col_trees())?
+            {
+                return Err(internal_layout_error(
+                    "compact SVD truncated factor region does not match its source route",
+                ));
+            }
+            routes.push(TypedCudaSvdTruncRoute {
+                source,
+                left,
+                right,
+                full_rank,
+                kept,
+            });
+        }
+        if routes.len() != left_regions.len()
+            || routes.len() != middle_regions.len()
+            || routes.len() != right_regions.len()
+        {
+            return Err(internal_layout_error(
+                "compact SVD truncated factor contains an unrouted coupled sector",
+            ));
+        }
+        Ok(TypedCudaSvdTruncPlan {
+            left_space,
+            middle_space,
             right_space,
             source_regions,
             left_regions,
@@ -3279,6 +3613,293 @@ where
                 repr: owned_repr(TypedTensorBody::dense(plan.right_space, right_data)),
             },
         ))
+    }
+
+    fn upload_cuda_svd_trunc_final(
+        cuda: &CudaDenseContext,
+        values: &[f64],
+    ) -> Result<CudaStorage, Error> {
+        #[cfg(test)]
+        {
+            observe_cuda_svd_trunc_event("final_storage");
+            let ordinal = CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| {
+                let mut extents = extents.borrow_mut();
+                let Some(extents) = extents.as_mut() else {
+                    return 0;
+                };
+                extents.push(values.len());
+                extents.len()
+            });
+            if CUDA_SVD_TRUNC_FAILURE.with(|failure| failure.get()) == Some(("final", ordinal)) {
+                return Err(Error::InvalidArgument(
+                    "injected truncated SVD final storage failure".to_string(),
+                ));
+            }
+        }
+        let storage = CudaStorage::upload(cuda, values)?;
+        #[cfg(test)]
+        observe_cuda_svd_trunc_final_storage_creation();
+        Ok(storage)
+    }
+
+    #[cfg(test)]
+    fn inject_cuda_svd_trunc_assembly_failure(ordinal: usize) -> Result<(), Error> {
+        observe_cuda_svd_trunc_event("assembly");
+        if CUDA_SVD_TRUNC_FAILURE.with(|failure| failure.get()) == Some(("assembly", ordinal)) {
+            return Err(Error::InvalidArgument(
+                "injected truncated SVD assembly failure".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn inject_cuda_svd_trunc_failure(stage: &'static str, ordinal: usize) -> Result<(), Error> {
+        if CUDA_SVD_TRUNC_FAILURE.with(|failure| failure.get()) == Some((stage, ordinal)) {
+            return Err(Error::InvalidArgument(format!(
+                "injected truncated SVD {stage} failure"
+            )));
+        }
+        Ok(())
+    }
+
+    /// One-pass truncated SVD of owned dense CUDA storage.
+    ///
+    /// Raw per-sector U/Vh factors remain device-resident until the global,
+    /// quantum-dimension-weighted truncation decision is known. The returned
+    /// `s` is dense CUDA storage; U/Vh retain the raw CUDA backend gauge.
+    pub fn svd_trunc(
+        &self,
+        truncation: &Truncation,
+    ) -> Result<SvdTrunc<R, f64, CudaStorage>, Error> {
+        let source = self.direct_cuda_storage("svd_trunc")?;
+        let source_space = self.logical_space().space();
+        let required_len = source_space.required_len()?;
+        let source_regions = sector_regions(source_space.structure(), source_space.nout())?;
+
+        {
+            let mut state = self.runtime.lock();
+            let cuda = state.cuda.as_mut().ok_or_else(|| {
+                Error::InvalidArgument(
+                    "this runtime was built without a CUDA device; use \
+                     Runtime::builder().cuda(device)"
+                        .to_string(),
+                )
+            })?;
+            Self::validate_cuda_owned_metadata(
+                Placement::Cuda(cuda.device()),
+                source.placement(),
+                required_len,
+                source.len(),
+            )?;
+        }
+
+        // The shared selector remains the sole truncation-policy authority.
+        // An empty spectrum validates the policy and every TruncationSpace
+        // identity without invoking dimension queries or CUDA work.
+        #[cfg(test)]
+        observe_cuda_svd_trunc_event("policy_identity");
+        decide_kept(self.logical_space().provider(), &[], Some(truncation))?;
+
+        // This performs the same complete source/factor route preflight as
+        // compact SVD before the first decomposition. Its full-rank factor
+        // spaces are not published; the kept spaces are admitted below.
+        let source_plan = self.compile_cuda_qr_plan(source_regions)?;
+        let (raw_spectra, mut retained) = {
+            let mut state = self.runtime.lock();
+            #[cfg(test)]
+            let _lock_observation = CudaSvdTruncLockObservationGuard::new();
+            let cuda = state.cuda.as_mut().ok_or_else(|| {
+                Error::InvalidArgument(
+                    "this runtime was built without a CUDA device; use \
+                     Runtime::builder().cuda(device)"
+                        .to_string(),
+                )
+            })?;
+            let mut spectra = Vec::with_capacity(source_plan.source_regions.len());
+            let mut retained = Vec::with_capacity(source_plan.source_regions.len());
+            #[cfg(test)]
+            let mut decomposition_ordinal = 0;
+            for region in source_plan.source_regions.iter() {
+                #[cfg(test)]
+                {
+                    decomposition_ordinal += 1;
+                }
+                let rank = region.rows().min(region.cols());
+                if rank == 0 {
+                    spectra.push(tenet_matrixalgebra::SectorSpectrum {
+                        sector: region.coupled(),
+                        values: Vec::new(),
+                    });
+                    retained.push(None);
+                    continue;
+                }
+                #[cfg(test)]
+                {
+                    observe_cuda_svd_trunc_event("decomposition");
+                    Self::inject_cuda_svd_trunc_failure("decomposition", decomposition_ordinal)?;
+                }
+                let (raw_left, values, raw_right) = cuda_svd_region(
+                    cuda,
+                    &source.0,
+                    region.range().start,
+                    region.rows(),
+                    region.cols(),
+                )?;
+                #[cfg(test)]
+                observe_cuda_svd_trunc_decomposition(values.len());
+                if values.len() != rank {
+                    return Err(internal_layout_error(
+                        "truncated SVD spectrum length does not match its source route",
+                    ));
+                }
+                spectra.push(tenet_matrixalgebra::SectorSpectrum {
+                    sector: region.coupled(),
+                    values,
+                });
+                retained.push(Some(TypedCudaSvdRetainedFactors::new(
+                    raw_left,
+                    raw_right,
+                    region.rows(),
+                    region.cols(),
+                    rank,
+                )?));
+            }
+            (spectra, retained)
+        };
+
+        // Provider dimension queries, global selection, label decoding, and
+        // every kept-space admission are intentionally outside the CUDA lock.
+        #[cfg(test)]
+        {
+            observe_cuda_svd_trunc_event("selection");
+            Self::inject_cuda_svd_trunc_failure("selection", 1)?;
+        }
+        let (kept_spectra, error) = decide_kept(
+            self.logical_space().provider(),
+            &raw_spectra,
+            Some(truncation),
+        )?;
+        let kept_sectors: HashSet<_> = kept_spectra.iter().map(|entry| entry.sector).collect();
+        for (index, region) in source_plan.source_regions.iter().enumerate() {
+            if !kept_sectors.contains(&region.coupled()) {
+                retained[index] = None;
+            }
+        }
+        #[cfg(test)]
+        observe_cuda_svd_trunc_event("decode");
+        let mut singular_values: Vec<SectorSpectrum<R::Sector>> = kept_spectra
+            .iter()
+            .map(|entry| {
+                Ok(SectorSpectrum {
+                    sector: self
+                        .logical_space()
+                        .provider()
+                        .decode_sector(entry.sector)?,
+                    values: entry.values.clone(),
+                })
+            })
+            .collect::<Result<_, Error>>()?;
+        singular_values.sort_by(|left, right| left.sector.cmp(&right.sector));
+        #[cfg(test)]
+        {
+            observe_cuda_svd_trunc_event("final_admission");
+            Self::inject_cuda_svd_trunc_failure("admission", 1)?;
+        }
+        let plan = self
+            .compile_cuda_svd_trunc_plan(Arc::clone(&source_plan.source_regions), &kept_spectra)?;
+        let left_len = plan.left_space.space().required_len()?;
+        let middle_len = plan.middle_space.space().required_len()?;
+        let right_len = plan.right_space.space().required_len()?;
+        let mut middle_host = vec![0.0; middle_len];
+        fill_diagonal_values(
+            plan.middle_space.space().structure(),
+            &mut middle_host,
+            &kept_spectra,
+        )?;
+
+        let (left_data, middle_data, right_data) = {
+            let mut state = self.runtime.lock();
+            #[cfg(test)]
+            let _lock_observation = CudaSvdTruncLockObservationGuard::new();
+            let cuda = state.cuda.as_mut().ok_or_else(|| {
+                Error::InvalidArgument(
+                    "this runtime was built without a CUDA device; use \
+                     Runtime::builder().cuda(device)"
+                        .to_string(),
+                )
+            })?;
+            let mut left_data = Self::upload_cuda_svd_trunc_final(cuda, &vec![0.0; left_len])?;
+            let middle_data = Self::upload_cuda_svd_trunc_final(cuda, &middle_host)?;
+            let mut right_data = Self::upload_cuda_svd_trunc_final(cuda, &vec![0.0; right_len])?;
+            #[cfg(test)]
+            let mut assembly_ordinal = 0;
+            for route in plan.routes.iter() {
+                #[cfg(test)]
+                {
+                    assembly_ordinal += 1;
+                }
+                let source_region = &plan.source_regions[route.source];
+                let factors = retained[route.source].take().ok_or_else(|| {
+                    internal_layout_error("kept truncated SVD route has no retained factors")
+                })?;
+                #[cfg(test)]
+                Self::inject_cuda_svd_trunc_assembly_failure(assembly_ordinal)?;
+                let left_selector = upload_selector(
+                    cuda,
+                    route.full_rank,
+                    route.kept,
+                    (0..route.kept).map(|index| (index, index, 1.0)),
+                )?;
+                assemble_left_factor(
+                    cuda,
+                    &mut left_data,
+                    &plan.left_regions[route.left],
+                    source_region,
+                    &factors.left,
+                    route.full_rank,
+                    &left_selector,
+                    route.kept,
+                )?;
+                let right_selector = upload_selector(
+                    cuda,
+                    route.kept,
+                    route.full_rank,
+                    (0..route.kept).map(|index| (index, index, 1.0)),
+                )?;
+                assemble_right_factor(
+                    cuda,
+                    &mut right_data,
+                    &plan.right_regions[route.right],
+                    source_region,
+                    &right_selector,
+                    route.kept,
+                    route.full_rank,
+                    &factors.right,
+                )?;
+            }
+            (left_data, middle_data, right_data)
+        };
+
+        #[cfg(test)]
+        observe_cuda_svd_trunc_event("publication");
+
+        Ok(SvdTrunc {
+            u: Self {
+                runtime: self.runtime.clone(),
+                repr: owned_repr(TypedTensorBody::dense(plan.left_space, left_data)),
+            },
+            s: Self {
+                runtime: self.runtime.clone(),
+                repr: owned_repr(TypedTensorBody::dense(plan.middle_space, middle_data)),
+            },
+            vh: Self {
+                runtime: self.runtime.clone(),
+                repr: owned_repr(TypedTensorBody::dense(plan.right_space, right_data)),
+            },
+            singular_values,
+            error,
+        })
     }
 
     fn cuda_axpby_owned(
@@ -9098,6 +9719,10 @@ mod representation_gates {
             device_diagonal.svd_compact(),
             Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
         ));
+        assert!(matches!(
+            device_diagonal.svd_trunc(&Truncation::Full),
+            Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
+        ));
         let lazy = device_diagonal.adjoint().unwrap();
         assert!(matches!(
             lazy.qr_compact(),
@@ -9105,6 +9730,10 @@ mod representation_gates {
         ));
         assert!(matches!(
             lazy.svd_compact(),
+            Err(Error::UnsupportedOnDevice(message)) if message.contains("lazy adjoint")
+        ));
+        assert!(matches!(
+            lazy.svd_trunc(&Truncation::Full),
             Err(Error::UnsupportedOnDevice(message)) if message.contains("lazy adjoint")
         ));
     }
@@ -9317,6 +9946,164 @@ mod representation_gates {
             assert_eq!(observation.get(), Some((0, 0, 0, 0, 0)));
             observation.set(None);
         });
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn typed_cuda_svd_trunc_has_two_lock_phases_and_transactional_cleanup() {
+        // What: one-pass lifetime accounting, lock ordering, exact final-body
+        // allocation, rank-zero semantics, and every late failure stay atomic.
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+        let provider = Arc::new(SU2FusionRule);
+        let leg = GradedSpace::try_new(
+            Arc::clone(&provider),
+            [
+                (SU2Irrep::from_twice_spin(0), 2),
+                (SU2Irrep::from_twice_spin(1), 2),
+            ],
+            false,
+        )
+        .unwrap();
+        let source = TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 1.0
+        })
+        .unwrap();
+        let regions = sector_regions(
+            source.logical_space().space().structure(),
+            source.logical_space().space().nout(),
+        )
+        .unwrap();
+        let nonempty = regions
+            .iter()
+            .filter(|region| region.rows() != 0 && region.cols() != 0)
+            .count();
+        let spectrum_scalars = regions
+            .iter()
+            .map(|region| region.rows().min(region.cols()))
+            .sum();
+        let raw_bytes = regions
+            .iter()
+            .map(|region| {
+                (region.rows() + region.cols())
+                    * region.rows().min(region.cols())
+                    * std::mem::size_of::<f64>()
+            })
+            .sum();
+        let device = source.to_cuda().unwrap();
+
+        CUDA_SVD_TRUNC_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
+        CUDA_SVD_TRUNC_EVENTS.with(|events| *events.borrow_mut() = Some(Vec::new()));
+        CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| *extents.borrow_mut() = Some(Vec::new()));
+        let actual = device.svd_trunc(&Truncation::rank(2)).unwrap();
+        let extents =
+            CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| extents.borrow().clone().unwrap());
+        assert_eq!(
+            extents,
+            vec![
+                actual.u.to_host().unwrap().data().len(),
+                actual.s.to_host().unwrap().data().len(),
+                actual.vh.to_host().unwrap().data().len(),
+            ]
+        );
+        CUDA_SVD_TRUNC_OBSERVATION.with(|observation| {
+            assert_eq!(
+                observation.get(),
+                Some((nonempty, spectrum_scalars, 3, 0, nonempty, 0, raw_bytes,))
+            );
+        });
+        CUDA_SVD_TRUNC_EVENTS.with(|events| {
+            let events = events.borrow();
+            let events = events.as_ref().unwrap();
+            assert!(events.iter().all(|(name, depth)| match *name {
+                "decomposition" | "final_storage" | "assembly" => *depth == 1,
+                _ => *depth == 0,
+            }));
+            let admission = events
+                .iter()
+                .position(|(name, _)| *name == "final_admission")
+                .unwrap();
+            let allocation = events
+                .iter()
+                .position(|(name, _)| *name == "final_storage")
+                .unwrap();
+            let publication = events
+                .iter()
+                .position(|(name, _)| *name == "publication")
+                .unwrap();
+            assert!(admission < allocation && allocation < publication);
+        });
+
+        CUDA_SVD_TRUNC_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
+        CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| *extents.borrow_mut() = Some(Vec::new()));
+        let rank_zero = device.svd_trunc(&Truncation::rank(0)).unwrap();
+        assert!(rank_zero.singular_values.is_empty());
+        assert_eq!(
+            rank_zero.error,
+            source.svd_trunc(&Truncation::rank(0)).unwrap().error
+        );
+        assert_eq!(
+            CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| extents.borrow().clone().unwrap()),
+            vec![0, 0, 0]
+        );
+        CUDA_SVD_TRUNC_OBSERVATION.with(|observation| {
+            let observed = observation.get().unwrap();
+            assert_eq!(
+                (observed.0, observed.1, observed.2),
+                (nonempty, spectrum_scalars, 3)
+            );
+            assert_eq!((observed.3, observed.5), (0, 0));
+        });
+
+        let first_nonempty = regions
+            .iter()
+            .position(|region| region.rows() != 0 && region.cols() != 0)
+            .unwrap()
+            + 1;
+        let failures = [
+            ("decomposition", first_nonempty),
+            ("selection", 1),
+            ("admission", 1),
+            ("final", 1),
+            ("final", 2),
+            ("final", 3),
+            ("assembly", 1),
+        ];
+        for failure in failures {
+            CUDA_SVD_TRUNC_OBSERVATION
+                .with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
+            CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| *extents.borrow_mut() = Some(Vec::new()));
+            CUDA_SVD_TRUNC_FAILURE.with(|injected| injected.set(Some(failure)));
+            assert!(device.svd_trunc(&Truncation::rank(2)).is_err());
+            CUDA_SVD_TRUNC_FAILURE.with(|injected| injected.set(None));
+            CUDA_SVD_TRUNC_OBSERVATION.with(|observation| {
+                let observed = observation.get().unwrap();
+                assert_eq!((observed.3, observed.5), (0, 0));
+            });
+            assert!(device.svd_trunc(&Truncation::rank(2)).is_ok());
+        }
+
+        CUDA_SVD_TRUNC_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
+        CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| *extents.borrow_mut() = Some(Vec::new()));
+        let foreign_provider = Arc::new(U1FusionRule);
+        let foreign_space =
+            GradedSpace::try_new(foreign_provider, [(U1Irrep::new(0), 1)], false).unwrap();
+        assert!(device
+            .svd_trunc(&Truncation::space(foreign_space.truncspace()))
+            .is_err());
+        assert_eq!(
+            CUDA_SVD_TRUNC_OBSERVATION.with(|observation| observation.get()),
+            Some((0, 0, 0, 0, 0, 0, 0))
+        );
+        assert!(CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| extents
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .is_empty()));
+
+        CUDA_SVD_TRUNC_OBSERVATION.with(|observation| observation.set(None));
+        CUDA_SVD_TRUNC_EVENTS.with(|events| *events.borrow_mut() = None);
+        CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| *extents.borrow_mut() = None);
     }
 
     #[cfg(feature = "cuda")]

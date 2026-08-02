@@ -11320,7 +11320,7 @@ fn find_source<'a>(
 /// prefixes, empty sectors dropped, discarded weighted 2-norm as `error`;
 /// a no-op decision keeps the full factorization with `error == 0`).
 #[cfg(feature = "cuda")]
-fn decide_kept<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
+pub(crate) fn decide_kept<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
     rule: &R,
     spectra: &[SectorSpectrum],
     truncation: Option<&Truncation>,
