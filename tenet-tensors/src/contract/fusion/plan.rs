@@ -552,7 +552,7 @@ where
     Ok(orient_fusion_contract_plan(plan, orientation))
 }
 
-fn orient_fusion_contract_plan(
+pub(crate) fn orient_fusion_contract_plan(
     mut plan: FusionContractPlan,
     orientation: FusionContractOrientation,
 ) -> FusionContractPlan {
@@ -1290,7 +1290,7 @@ fn compile_tensorcontract_fusion_plan_from_spaces(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn compile_tensorcontract_fusion_plan_from_ranks(
+pub(crate) fn compile_tensorcontract_fusion_plan_from_ranks(
     dst_nout: usize,
     dst_rank: usize,
     lhs_rank: usize,

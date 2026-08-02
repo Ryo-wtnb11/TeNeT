@@ -199,6 +199,64 @@ fn hom() -> FusionTreeHomSpace {
     )
 }
 
+fn matrix_hom() -> FusionTreeHomSpace {
+    let leg = SectorLeg::new([(SectorId::new(1), 1)], false);
+    FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone()]),
+        FusionProductSpace::new([leg]),
+    )
+}
+
+#[test]
+fn checked_generic_contract_homspace_keeps_local_errors_before_typed_duality() {
+    let invalid = Toy::new(Failure::Dual);
+    let error = FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
+        &invalid,
+        &matrix_hom(),
+        &matrix_hom(),
+        &[2],
+        &[0],
+        &[0, 1],
+        1,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        CheckedGenericStructureError::Core(CoreError::InvalidPermutation { .. })
+    ));
+    assert_eq!(invalid.calls.get(), 0);
+
+    let failing = Toy::new(Failure::Dual);
+    let error = FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
+        &failing,
+        &matrix_hom(),
+        &matrix_hom(),
+        &[1],
+        &[0],
+        &[0, 1],
+        0,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        CheckedGenericStructureError::Provider(ToyError(Failure::Dual))
+    ));
+
+    let checked = Toy::new(Failure::None);
+    let destination = FusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
+        &checked,
+        &matrix_hom(),
+        &matrix_hom(),
+        &[1],
+        &[0],
+        &[0, 1],
+        1,
+    )
+    .unwrap();
+    assert_eq!(destination.codomain().len(), 1);
+    assert_eq!(destination.domain().len(), 1);
+}
+
 #[test]
 fn checked_generic_default_fold_keeps_channel_failure_live() {
     let error = hom()

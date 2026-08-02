@@ -1984,6 +1984,70 @@ where
     )
 }
 
+/// Compiles the coefficient-free Bosonic Generic core GEMM against staged,
+/// uncommitted structures.
+///
+/// The caller owns categorical validation and exact HomSpace derivation. This
+/// leaf only validates the preselected core geometry and compiles the existing
+/// provider-neutral block plan.
+pub(crate) fn compile_checked_generic_core_plan(
+    dst_structure: &Arc<tenet_core::BlockStructure>,
+    dst_nout: usize,
+    lhs_structure: &Arc<tenet_core::BlockStructure>,
+    lhs_nout: usize,
+    rhs_structure: &Arc<tenet_core::BlockStructure>,
+    rhs_nout: usize,
+    axes: TensorContractSpec<'_>,
+) -> Result<FusionBlockContractPlan, OperationError> {
+    reject_fusion_contract_conjugation(axes)?;
+    let axis_plan = TensorContractAxisPlan::compile(
+        lhs_structure.rank(),
+        rhs_structure.rank(),
+        dst_structure.rank(),
+        axes,
+    )?;
+    if !is_core_form_source(lhs_structure.rank(), lhs_nout, rhs_nout, &axis_plan)
+        || !is_core_form_output(
+            dst_nout,
+            lhs_nout,
+            rhs_structure.rank(),
+            rhs_nout,
+            &axis_plan,
+        )
+    {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "preselected checked Generic candidate did not lower to core form",
+        });
+    }
+
+    let lhs_layout = FusionBlockMatrixLayout::compile_generic_parts(lhs_structure, lhs_nout)?;
+    let rhs_layout = FusionBlockMatrixLayout::compile_generic_parts(rhs_structure, rhs_nout)?;
+    let dst_layout = FusionBlockMatrixLayout::compile_generic_parts(dst_structure, dst_nout)?;
+    let mut groups = Vec::new();
+    let mut active_dst_blocks = HashSet::<usize>::new();
+    for dst_group in dst_layout.groups {
+        let Some(lhs_group) = lhs_layout.group(dst_group.coupled) else {
+            continue;
+        };
+        let Some(rhs_group) = rhs_layout.group(dst_group.coupled) else {
+            continue;
+        };
+        active_dst_blocks.extend(dst_group.block_indices.iter().copied());
+        groups.push(FusionBlockContractGroupPlan::new(
+            lhs_group.clone(),
+            rhs_group.clone(),
+            dst_group,
+        )?);
+    }
+    FusionBlockContractPlan::from_parts(
+        Arc::clone(dst_structure),
+        Arc::clone(lhs_structure),
+        Arc::clone(rhs_structure),
+        fusion_scale_block_layouts_excluding(dst_structure, &active_dst_blocks)?,
+        groups,
+    )
+}
+
 /// Host implementation of [`StorageGemm`] over host-readable storages.
 #[allow(dead_code)]
 pub(crate) struct HostStorageGemm<'a, B, W> {
@@ -2200,12 +2264,19 @@ impl FusionBlockMatrixLayout {
     /// labels ride in the fusion-tree keys, so multiplicity blocks land in the
     /// right coupled group automatically.
     fn compile_generic(space: &DynamicFusionMapSpace) -> Result<Self, OperationError> {
+        Self::compile_generic_parts(space.structure(), space.nout())
+    }
+
+    fn compile_generic_parts(
+        structure: &Arc<tenet_core::BlockStructure>,
+        nout: usize,
+    ) -> Result<Self, OperationError> {
         #[cfg(test)]
         FUSION_LAYOUT_COMPILES.set(FUSION_LAYOUT_COMPILES.get() + 1);
         let mut builders = Vec::<FusionBlockMatrixGroupBuilder>::new();
         let mut group_indices = FxHashMap::<SectorId, usize>::default();
-        for block_index in 0..space.structure().block_count() {
-            let block = space.structure().block(block_index)?;
+        for block_index in 0..structure.block_count() {
+            let block = structure.block(block_index)?;
             let BlockKey::FusionTree(key) = block.key() else {
                 return Err(OperationError::ExpectedFusionTreeBlock {
                     tensor: "fusion",
@@ -2227,8 +2298,8 @@ impl FusionBlockMatrixLayout {
                 builders.push(FusionBlockMatrixGroupBuilder::new(coupled));
                 group_index
             };
-            let row_dim = element_count(&block.shape()[..space.nout()])?;
-            let col_dim = element_count(&block.shape()[space.nout()..])?;
+            let row_dim = element_count(&block.shape()[..nout])?;
+            let col_dim = element_count(&block.shape()[nout..])?;
             builders[group_index].add_tree_pair(
                 key.codomain_tree().clone(),
                 row_dim,
@@ -2239,7 +2310,7 @@ impl FusionBlockMatrixLayout {
         }
         let mut groups = Vec::with_capacity(builders.len());
         for builder in builders {
-            groups.push(builder.finish_generic(space)?);
+            groups.push(builder.finish_generic(structure, nout)?);
         }
         Ok(Self {
             groups,
@@ -2567,12 +2638,13 @@ impl FusionBlockMatrixGroupBuilder {
     /// sector).
     fn finish_generic(
         self,
-        space: &DynamicFusionMapSpace,
+        structure: &Arc<tenet_core::BlockStructure>,
+        nout: usize,
     ) -> Result<FusionBlockMatrixGroup, OperationError> {
         let mut subblocks = Vec::with_capacity(self.blocks.len());
         let block_indices = self.blocks;
         for &block_index in &block_indices {
-            let block = space.structure().block(block_index)?;
+            let block = structure.block(block_index)?;
             let BlockKey::FusionTree(key) = block.key() else {
                 return Err(OperationError::ExpectedFusionTreeBlock {
                     tensor: "fusion",
@@ -2588,8 +2660,8 @@ impl FusionBlockMatrixGroupBuilder {
                 .get(key.domain_tree())
                 .expect("column tree offset collected before finish");
             let mut matrix_strides = Vec::<isize>::with_capacity(block.shape().len());
-            matrix_strides.extend(column_major_strides_isize(&block.shape()[..space.nout()])?);
-            let domain_strides = column_major_strides_usize(&block.shape()[space.nout()..])?;
+            matrix_strides.extend(column_major_strides_isize(&block.shape()[..nout])?);
+            let domain_strides = column_major_strides_usize(&block.shape()[nout..])?;
             for stride in domain_strides {
                 let matrix_stride = stride
                     .checked_mul(self.rows)

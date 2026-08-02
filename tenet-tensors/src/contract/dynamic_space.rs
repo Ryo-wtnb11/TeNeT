@@ -1150,6 +1150,14 @@ impl PreparedCheckedGenericDynamicSpace {
         self.structure.required_len()
     }
 
+    pub(crate) fn homspace(&self) -> &FusionTreeHomSpace {
+        &self.homspace
+    }
+
+    pub(crate) fn nout(&self) -> usize {
+        self.nout
+    }
+
     pub(crate) fn commit(self) -> DynamicFusionMapSpace {
         DynamicFusionMapSpace {
             nout: self.nout,
