@@ -2,12 +2,15 @@ mod block_specs;
 mod plan;
 #[cfg(test)]
 pub(crate) use plan::contracted_axis_order_candidates;
-pub(crate) use plan::FusionContractOrientation;
 #[cfg(test)]
 pub(crate) use plan::{
     candidate_score_calls, prepare_tensorcontract_fusion_candidate_facts_dyn_raw,
     prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation,
     reset_candidate_score_calls, FusionContractCandidateFacts,
+};
+pub(crate) use plan::{
+    compile_tensorcontract_fusion_plan_from_ranks, orient_fusion_contract_plan,
+    ContractAxisOrderCandidate, FusionContractOrientation,
 };
 
 #[cfg(test)]

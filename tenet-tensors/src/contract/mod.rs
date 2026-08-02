@@ -1,5 +1,8 @@
 mod api;
 mod backend;
+// PR A stages the checked Generic transaction; PR B wires the sealed typed caller.
+#[allow(dead_code)]
+mod checked_generic;
 mod context;
 mod dynamic;
 #[cfg(test)]

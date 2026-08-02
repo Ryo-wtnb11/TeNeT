@@ -1858,6 +1858,46 @@ impl<'a> OrientedFusionTreeHomSpace<'a> {
         descriptor.try_materialize(rule).map_err(Into::into)
     }
 
+    /// Checked Generic sibling of [`Self::tensorcontract_homspace`].
+    ///
+    /// Provider failures remain typed, including dualization required by
+    /// oriented domain legs. Structural axis and leg-shape defects are
+    /// rejected before the first provider query.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_tensorcontract_homspace_generic_checked<R>(
+        rule: &R,
+        lhs: Self,
+        rhs: Self,
+        lhs_contracting_axes: &[usize],
+        rhs_contracting_axes: &[usize],
+        output_axes: &[usize],
+        dst_codomain_rank: usize,
+    ) -> Result<FusionTreeHomSpace, CheckedGenericStructureError<R::Error>>
+    where
+        R: CheckedGenericFusion,
+    {
+        let descriptor = tensorcontract_descriptor(
+            lhs,
+            rhs,
+            lhs_contracting_axes,
+            rhs_contracting_axes,
+            output_axes,
+            dst_codomain_rank,
+        )?;
+        for (&lhs_axis, &rhs_axis) in lhs_contracting_axes.iter().zip(rhs_contracting_axes) {
+            validate_oriented_composed_leg_generic_checked(
+                rule,
+                lhs.external_axis_leg_view(lhs_axis)
+                    .expect("validated axis belongs to the lhs")
+                    .toggled(),
+                rhs.external_axis_leg_view(rhs_axis)
+                    .expect("validated axis belongs to the rhs"),
+            )?;
+        }
+        descriptor.try_materialize_generic(rule)
+    }
+
     fn select_descriptor(
         self,
         codomain_axes: &[usize],
@@ -2511,6 +2551,32 @@ impl FusionTreeHomSpace {
         R: CheckedFusionAlgebra,
     {
         OrientedFusionTreeHomSpace::try_tensorcontract_homspace_checked(
+            rule,
+            OrientedFusionTreeHomSpace::new(lhs, FusionTreePairOrientation::Direct),
+            OrientedFusionTreeHomSpace::new(rhs, FusionTreePairOrientation::Direct),
+            lhs_contracting_axes,
+            rhs_contracting_axes,
+            output_axes,
+            dst_codomain_rank,
+        )
+    }
+
+    /// Checked Generic sibling of [`Self::tensorcontract_homspace`].
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_tensorcontract_homspace_generic_checked<R>(
+        rule: &R,
+        lhs: &Self,
+        rhs: &Self,
+        lhs_contracting_axes: &[usize],
+        rhs_contracting_axes: &[usize],
+        output_axes: &[usize],
+        dst_codomain_rank: usize,
+    ) -> Result<Self, CheckedGenericStructureError<R::Error>>
+    where
+        R: CheckedGenericFusion,
+    {
+        OrientedFusionTreeHomSpace::try_tensorcontract_homspace_generic_checked(
             rule,
             OrientedFusionTreeHomSpace::new(lhs, FusionTreePairOrientation::Direct),
             OrientedFusionTreeHomSpace::new(rhs, FusionTreePairOrientation::Direct),
@@ -3531,6 +3597,32 @@ where
         &rhs_codomain.try_materialize(rule)?,
     )
     .map_err(Into::into)
+}
+
+fn validate_oriented_composed_leg_generic_checked<R>(
+    rule: &R,
+    lhs_domain: OrientedLegView<'_>,
+    rhs_codomain: OrientedLegView<'_>,
+) -> Result<(), CheckedGenericStructureError<R::Error>>
+where
+    R: CheckedGenericFusion,
+{
+    if lhs_domain.is_dual() != rhs_codomain.is_dual() {
+        return Err(CoreError::MalformedFusionTree {
+            message: "contracted fusion leg duality flags do not match",
+        }
+        .into());
+    }
+    if lhs_domain.source.sectors().len() != rhs_codomain.source.sectors().len() {
+        return Err(CoreError::DimensionMismatch {
+            expected: lhs_domain.source.sectors().len(),
+            actual: rhs_codomain.source.sectors().len(),
+        }
+        .into());
+    }
+    let lhs = lhs_domain.try_materialize_generic(rule)?;
+    let rhs = rhs_codomain.try_materialize_generic(rule)?;
+    validate_composed_leg(&lhs, &rhs).map_err(Into::into)
 }
 
 fn degeneracy_shape_for_tree_side(
