@@ -2,15 +2,26 @@
 //! chooses the dense SVD/QR/eigh provider. Backend choice is performance-only —
 //! results stay identical across providers to numerical precision.
 
-use tenet::prelude::*;
+use std::sync::Arc;
 
-fn u1_space() -> Space {
-    Space::u1([(-1, 2), (0, 3), (1, 2)])
+use tenet::prelude::{GradedSpace, LinalgBackend, Runtime, TensorMap, U1FusionRule, U1Irrep};
+
+fn u1_space() -> GradedSpace<U1FusionRule> {
+    GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [
+            (U1Irrep::new(-1), 2),
+            (U1Irrep::new(0), 3),
+            (U1Irrep::new(1), 2),
+        ],
+        false,
+    )
+    .unwrap()
 }
 
 fn spectra(rt: &Runtime) -> Vec<f64> {
     let v = u1_space();
-    let t = Tensor::rand_with_seed(rt, Dtype::F64, [&v, &v], [&v, &v], 101).unwrap();
+    let t = TensorMap::<U1FusionRule, f64>::rand_with_seed(rt, [&v, &v], [&v, &v], 101).unwrap();
     let mut all: Vec<f64> = t
         .svd_vals()
         .unwrap()
@@ -25,8 +36,8 @@ fn spectra(rt: &Runtime) -> Vec<f64> {
 /// (contraction GEMM) seam rather than the factorization seam.
 fn contraction_norm(rt: &Runtime) -> f64 {
     let v = u1_space();
-    let a = Tensor::rand_with_seed(rt, Dtype::F64, [&v], [&v], 11).unwrap();
-    let b = Tensor::rand_with_seed(rt, Dtype::F64, [&v], [&v], 12).unwrap();
+    let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(rt, [&v], [&v], 11).unwrap();
+    let b = TensorMap::<U1FusionRule, f64>::rand_with_seed(rt, [&v], [&v], 12).unwrap();
     a.compose(&b).unwrap().norm().unwrap()
 }
 

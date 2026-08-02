@@ -10,7 +10,16 @@ use tenet::dense::{
     DefaultDenseExecutor, DenseDotConfig, DenseError, DenseExecutor, DenseGemmBatchJob, DenseRead,
     DenseScalar, DenseTensor, DenseWrite, MatrixOp,
 };
-use tenet::prelude::*;
+use tenet::prelude::{GradedSpace, Runtime, TensorMap, U1FusionRule, U1Irrep};
+
+fn u1_space(entries: [(i32, usize); 3]) -> GradedSpace<U1FusionRule> {
+    GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        entries.map(|(charge, degeneracy)| (U1Irrep::new(charge), degeneracy)),
+        false,
+    )
+    .unwrap()
+}
 
 /// Per-kernel call counts, so a test can prove both that the injected backend
 /// is the one the runtime drives and that a storage-local route never reaches
@@ -154,8 +163,8 @@ fn injected_dense_executor_is_used_and_preserves_results() {
         .build()
         .unwrap();
 
-    let v = Space::u1([(-1, 2), (0, 2), (1, 1)]);
-    let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 99).unwrap();
+    let v = u1_space([(-1, 2), (0, 2), (1, 1)]);
+    let t = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v, &v], [&v, &v], 99).unwrap();
     let (_, s, _) = t.svd_compact().unwrap();
 
     assert!(
@@ -168,7 +177,8 @@ fn injected_dense_executor_is_used_and_preserves_results() {
     // yields identical singular values.
     let rt_default = Runtime::builder().build().unwrap();
     let t_default =
-        Tensor::rand_with_seed(&rt_default, Dtype::F64, [&v, &v], [&v, &v], 99).unwrap();
+        TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt_default, [&v, &v], [&v, &v], 99)
+            .unwrap();
     let (_, s_default, _) = t_default.svd_compact().unwrap();
     assert_eq!(s.data().len(), s_default.data().len());
     for (a, b) in s.data().iter().zip(s_default.data()) {
@@ -195,8 +205,8 @@ fn compact_diagonal_exp_drives_no_dense_kernel() {
         .build()
         .unwrap();
 
-    let v = Space::u1([(-1, 3), (0, 4), (1, 3)]);
-    let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v], [&v], 578).unwrap();
+    let v = u1_space([(-1, 3), (0, 4), (1, 3)]);
+    let t = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v], [&v], 578).unwrap();
     let s = t.svd_compact().unwrap().1;
     let (svd, ..) = counts.read();
     assert!(svd > 0, "the fixture never reached the injected backend");
