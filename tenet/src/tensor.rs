@@ -11320,7 +11320,7 @@ fn find_source<'a>(
 /// prefixes, empty sectors dropped, discarded weighted 2-norm as `error`;
 /// a no-op decision keeps the full factorization with `error == 0`).
 #[cfg(feature = "cuda")]
-fn decide_kept<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
+pub(crate) fn decide_kept<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
     rule: &R,
     spectra: &[SectorSpectrum],
     truncation: Option<&Truncation>,
@@ -11373,7 +11373,10 @@ pub(crate) fn upload_selector(
     }
     let selector = CudaStorage::upload(cuda, &data).map_err(Error::from)?;
     #[cfg(test)]
-    crate::typed::observe_cuda_qr_selector_upload();
+    {
+        crate::typed::observe_cuda_qr_selector_upload();
+        crate::typed::observe_cuda_svd_trunc_allocation("selector", data.len());
+    }
     Ok(selector)
 }
 

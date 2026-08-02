@@ -808,11 +808,12 @@ dimension — size budgets against `Space::dim`, not raw sector counts.
 
 Honest list, as of this writing:
 
-- **CUDA support is phase 1.** `Runtime::builder().cuda(device)` +
-  `to_cuda()`/`to_host()` run fully-direct contractions on device
-  (verified on A100 against the host results). Everything else on a
-  device tensor — index manipulations, decompositions, norms, `c64` —
-  returns an explicit `UnsupportedOnDevice`-style error; nothing falls
+- **CUDA support remains deliberately narrow.**
+  `Runtime::builder().cuda(device)` + `to_cuda()`/`to_host()` support direct
+  dense-`f64` contractions, selected arithmetic and reductions (including
+  norms), and the typed compact QR, compact SVD, and truncated-SVD paths.
+  Unsupported storage/scalar/provider combinations and unwired operations
+  still return an explicit `UnsupportedOnDevice`-style error; nothing falls
   back to the CPU silently.
 - **No hyperedge/batch labels in `tensor!`** (a label appearing three or
   more times is a compile error). Partial traces (`a[i, i; j]`) and full

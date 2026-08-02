@@ -15,7 +15,7 @@ use tenet::core::{
     RuleIdentity, SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorVec, U1FusionRule, U1Irrep,
     Z2Irrep, ZNFusionRule,
 };
-use tenet::typed::{BlockFusionTrees, CudaStorage, GradedSpace, Runtime, TensorMap};
+use tenet::typed::{BlockFusionTrees, CudaStorage, GradedSpace, Runtime, TensorMap, Truncation};
 
 #[derive(Debug, Eq, PartialEq)]
 struct LegSnapshot<S> {
@@ -391,6 +391,69 @@ fn assert_cuda_svd_result<R>(
         .compose(&actual.2)
         .unwrap();
     assert_close(rebuilt.data(), source.data(), 1e-10);
+}
+
+fn assert_typed_cuda_svd_trunc_matches_host<R>(source: &TensorMap<R, f64>, truncation: &Truncation)
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+{
+    let provider = source.provider() as *const R;
+    let runtime = source.runtime().identity();
+    let source_bits: Vec<_> = source.data().iter().map(|value| value.to_bits()).collect();
+    let expected = source.svd_trunc(truncation).unwrap();
+    let source_device = source.to_cuda().unwrap();
+    let actual = source_device.svd_trunc(truncation).unwrap();
+
+    for factor in [&actual.u, &actual.s, &actual.vh] {
+        assert!(std::ptr::eq(factor.provider(), provider));
+        assert!(runtime.matches(factor.runtime()));
+        assert_eq!(factor.placement(), tenet::core::Placement::Cuda(0));
+    }
+    assert_eq!(actual.singular_values.len(), expected.singular_values.len());
+    for (actual, expected) in actual.singular_values.iter().zip(&expected.singular_values) {
+        assert_eq!(actual.sector, expected.sector);
+        assert_close(&actual.values, &expected.values, 1e-10);
+    }
+    assert!((actual.error - expected.error).abs() <= 1e-10 * (1.0 + expected.error));
+
+    let actual = (
+        actual.u.to_host().unwrap(),
+        actual.s.to_host().unwrap(),
+        actual.vh.to_host().unwrap(),
+    );
+    for (actual, expected) in [
+        (&actual.0, &expected.u),
+        (&actual.1, &expected.s),
+        (&actual.2, &expected.vh),
+    ] {
+        assert_eq!(structural_snapshot(actual), structural_snapshot(expected));
+    }
+    assert_close(actual.1.data(), expected.s.data(), 1e-10);
+    assert!(actual.0.is_isometric(1e-10).unwrap());
+    assert!(actual.2.adjoint().unwrap().is_isometric(1e-10).unwrap());
+    let actual_rebuilt = actual
+        .0
+        .compose(&actual.1)
+        .unwrap()
+        .compose(&actual.2)
+        .unwrap();
+    let expected_rebuilt = expected
+        .u
+        .compose(&expected.s)
+        .unwrap()
+        .compose(&expected.vh)
+        .unwrap();
+    assert_close(actual_rebuilt.data(), expected_rebuilt.data(), 1e-10);
+    assert_eq!(
+        source_device
+            .to_host()
+            .unwrap()
+            .data()
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>(),
+        source_bits
+    );
 }
 
 fn assert_finite_r_diagonal_nonnegative<R>(right: &TensorMap<R, f64>)
@@ -1141,6 +1204,172 @@ fn typed_cuda_svd_compact_handles_large_wide_sector() {
     .unwrap();
 
     assert_typed_cuda_svd_matches_host(&source);
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn typed_cuda_svd_trunc_handles_large_wide_sector() {
+    // What: the 8 x 1025 cuSOLVER path applies a kept prefix without a Host fallback.
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let rows = GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 8)], false).unwrap();
+    let cols =
+        GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), 1025)], false).unwrap();
+    let source = TensorMap::from_block_fn(&runtime, [&rows], [&cols], |_, indices| {
+        let row = indices[0];
+        let col = indices[1];
+        ((row * 17 + col * 13 + 3) % 31) as f64 / 31.0 - 0.5 + if row == col { 2.0 } else { 0.0 }
+    })
+    .unwrap();
+
+    assert_typed_cuda_svd_trunc_matches_host(&source, &Truncation::rank(4));
+}
+
+#[test]
+#[ignore = "requires a real CUDA device"]
+fn typed_cuda_svd_trunc_matches_host_policies_structure_and_ownership() {
+    // What: all truncation policies and supported provider families match the
+    // Host semantic oracle without comparing backend-dependent U/Vh gauges.
+    let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let rows = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
+        false,
+    )
+    .unwrap();
+    let cols = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(U1Irrep::new(0), 2), (U1Irrep::new(2), 1)],
+        false,
+    )
+    .unwrap();
+    let mixed = TensorMap::from_block_fn(&runtime, [&rows], [&cols], |_, indices| {
+        if indices[0] == indices[1] {
+            5.0 + indices[0] as f64
+        } else {
+            (1 + indices[0] + 2 * indices[1]) as f64
+        }
+    })
+    .unwrap();
+    let same_identity_space = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
+        false,
+    )
+    .unwrap();
+    let policies = [
+        Truncation::Full,
+        Truncation::rank(0),
+        Truncation::rank(2),
+        Truncation::rank(usize::MAX),
+        Truncation::absolute_cutoff(0.25).unwrap(),
+        Truncation::relative_inf_cutoff(0.2).unwrap(),
+        Truncation::relative_error(0.1).unwrap(),
+        Truncation::space(same_identity_space.truncspace()),
+        Truncation::rank(3).and(Truncation::absolute_cutoff(0.1).unwrap()),
+    ];
+    for policy in &policies {
+        assert_typed_cuda_svd_trunc_matches_host(&mixed, policy);
+    }
+
+    let dimension_calls = Arc::new(AtomicUsize::new(0));
+    let reentrant = Arc::new(ReentrantDimensionRule {
+        runtime: runtime.clone(),
+        calls: Arc::clone(&dimension_calls),
+    });
+    let reentrant_leg =
+        GradedSpace::try_new(Arc::clone(&reentrant), [(ProbeSector, 2)], false).unwrap();
+    let reentrant_source = TensorMap::from_block_fn(
+        &runtime,
+        [&reentrant_leg],
+        [&reentrant_leg],
+        |_, indices| (1 + indices[0] + indices[1]) as f64,
+    )
+    .unwrap();
+    assert_typed_cuda_svd_trunc_matches_host(&reentrant_source, &Truncation::rank(1));
+    assert!(dimension_calls.load(Ordering::SeqCst) > 0);
+
+    let rank_deficient = TensorMap::from_block_fn(&runtime, [&rows], [&rows], |_, indices| {
+        (indices[0] + 1) as f64 * (indices[1] + 1) as f64
+    })
+    .unwrap();
+    assert_typed_cuda_svd_trunc_matches_host(&rank_deficient, &Truncation::rank(1));
+    let all_zero: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&rows], [&rows]).unwrap();
+    assert_typed_cuda_svd_trunc_matches_host(&all_zero, &Truncation::relative_error(0.0).unwrap());
+
+    let no_intersection_rows =
+        GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(4), 2)], false).unwrap();
+    let no_intersection: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&no_intersection_rows], [&cols], |_, _| 1.0).unwrap();
+    assert!(no_intersection.data().is_empty());
+    assert_typed_cuda_svd_trunc_matches_host(&no_intersection, &Truncation::Full);
+
+    let su2 = Arc::new(SU2FusionRule);
+    let su2_leg = GradedSpace::try_new(
+        Arc::clone(&su2),
+        [
+            (SU2Irrep::from_twice_spin(0), 2),
+            (SU2Irrep::from_twice_spin(1), 2),
+        ],
+        false,
+    )
+    .unwrap();
+    let multi_tree =
+        TensorMap::from_block_fn(&runtime, [&su2_leg, &su2_leg], [&su2_leg], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 1.0
+        })
+        .unwrap();
+    assert_typed_cuda_svd_trunc_matches_host(&multi_tree, &Truncation::rank(3));
+
+    let fermion = Arc::new(FermionParityFusionRule);
+    let fermion_leg = GradedSpace::try_new(
+        Arc::clone(&fermion),
+        [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 1)],
+        false,
+    )
+    .unwrap();
+    let fermion_tensor =
+        TensorMap::from_block_fn(&runtime, [&fermion_leg], [&fermion_leg], |_, indices| {
+            (1 + indices[0] + 3 * indices[1]) as f64
+        })
+        .unwrap();
+    assert_typed_cuda_svd_trunc_matches_host(&fermion_tensor, &Truncation::rank(2));
+
+    let product = Arc::new(U1FusionRule.product(FermionParityFusionRule));
+    let product_leg = GradedSpace::try_new(
+        Arc::clone(&product),
+        [
+            (product_sector(U1Irrep::new(0), Z2Irrep::EVEN), 2),
+            (product_sector(U1Irrep::new(1), Z2Irrep::ODD), 1),
+        ],
+        false,
+    )
+    .unwrap();
+    let product_tensor =
+        TensorMap::from_block_fn(&runtime, [&product_leg], [&product_leg], |_, indices| {
+            (2 + indices[0] + indices[1]) as f64
+        })
+        .unwrap();
+    assert_typed_cuda_svd_trunc_matches_host(&product_tensor, &Truncation::rank(2));
+
+    let device = mixed.to_cuda().unwrap();
+    let expected = device.svd_trunc(&Truncation::rank(2)).unwrap();
+    for _ in 0..2 {
+        let actual = device.svd_trunc(&Truncation::rank(2)).unwrap();
+        assert_eq!(actual.singular_values, expected.singular_values);
+        assert_eq!(actual.error, expected.error);
+    }
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..2)
+            .map(|_| scope.spawn(|| device.svd_trunc(&Truncation::rank(2)).unwrap()))
+            .collect();
+        for worker in workers {
+            let actual = worker.join().unwrap();
+            assert_eq!(actual.singular_values, expected.singular_values);
+            assert_eq!(actual.error, expected.error);
+        }
+    });
 }
 
 #[test]
