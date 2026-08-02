@@ -24,9 +24,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::{Error, Truncation};
-use tenet::typed::{GradedSpace, Runtime, TensorMap};
+use tenet::prelude::{Error, GradedSpace, Runtime, TensorMap, Truncation, U1FusionRule, U1Irrep};
 use tenet_network::tensor;
 
 const E_EXACT: f64 = 0.25 - std::f64::consts::LN_2;

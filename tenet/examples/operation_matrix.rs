@@ -108,106 +108,94 @@ fn bench<T>(
     Ok(cold_output)
 }
 
-fn run_permute(symmetry: &str, space: Space, min_time: Duration) -> Result<(), Error> {
-    for form in ["owned", "destination"] {
-        let runtime = Runtime::builder().build()?;
-        let source = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space, &space], [&space], 724)?;
-        if form == "owned" {
-            let cold = bench(
-                &runtime,
-                symmetry,
-                "permute",
-                form,
-                "cold",
-                "warm",
-                min_time,
-                || source.permute(&[1], &[2, 0]),
-            )?;
-            assert!(cold.norm()?.is_finite());
-        } else {
-            let expected = source.permute(&[1], &[2, 0])?;
-            let mut destination = expected.zeros_like()?;
-            let mut context = TensorExecutionContext::for_runtime(&runtime)?;
-            bench(
-                &runtime,
-                symmetry,
-                "permute",
-                form,
-                "first_after_setup",
-                "warm_after_setup",
-                min_time,
-                || {
-                    context.permute_overwrite_into(
-                        &mut destination,
-                        &source,
-                        &[1],
-                        &[2, 0],
-                        Scalar::F64(1.0),
-                    )
-                },
-            )?;
-            assert_eq!(destination.data(), expected.data());
+macro_rules! run_provider {
+    ($symmetry:literal, $rule:ty, $space:expr, $min_time:expr) => {{
+        let space = $space;
+        for form in ["owned", "destination"] {
+            let runtime = Runtime::builder().build()?;
+            let source =
+                TensorMap::<$rule, f64>::rand_with_seed(&runtime, [&space, &space], [&space], 724)?;
+            if form == "owned" {
+                let cold = bench(
+                    &runtime,
+                    $symmetry,
+                    "permute",
+                    form,
+                    "cold",
+                    "warm",
+                    $min_time,
+                    || source.permute(&[1], &[2, 0]),
+                )?;
+                assert!(cold.norm()?.is_finite());
+            } else {
+                let expected = source.permute(&[1], &[2, 0])?;
+                let mut destination = expected.zeros_like();
+                bench(
+                    &runtime,
+                    $symmetry,
+                    "permute",
+                    form,
+                    "first_after_setup",
+                    "warm_after_setup",
+                    $min_time,
+                    || source.permute_overwrite_into(&mut destination, &[1], &[2, 0], 1.0),
+                )?;
+                assert_eq!(destination.data(), expected.data());
+            }
         }
-    }
-    Ok(())
-}
 
-fn run_contract(symmetry: &str, space: Space, min_time: Duration) -> Result<(), Error> {
-    for form in ["owned", "destination"] {
-        let runtime = Runtime::builder().build()?;
-        let lhs = Tensor::rand_with_seed(
-            &runtime,
-            Dtype::F64,
-            [&space, &space],
-            [&space, &space],
-            725,
-        )?;
-        let rhs = Tensor::rand_with_seed(
-            &runtime,
-            Dtype::F64,
-            [&space, &space],
-            [&space, &space],
-            726,
-        )?;
-        if form == "owned" {
-            let cold = bench(
+        for form in ["owned", "destination"] {
+            let runtime = Runtime::builder().build()?;
+            let lhs = TensorMap::<$rule, f64>::rand_with_seed(
                 &runtime,
-                symmetry,
-                "contract",
-                form,
-                "cold",
-                "warm",
-                min_time,
-                || lhs.contract(&rhs, &[3, 2], &[0, 1]),
+                [&space, &space],
+                [&space, &space],
+                725,
             )?;
-            assert!(cold.norm()?.is_finite());
-        } else {
-            let expected = lhs.contract(&rhs, &[3, 2], &[0, 1])?;
-            let mut destination = expected.zeros_like()?;
-            let mut context = TensorExecutionContext::for_runtime(&runtime)?;
-            bench(
+            let rhs = TensorMap::<$rule, f64>::rand_with_seed(
                 &runtime,
-                symmetry,
-                "contract",
-                form,
-                "first_after_setup",
-                "warm_after_setup",
-                min_time,
-                || {
-                    context.contract_overwrite_into(
-                        &mut destination,
-                        &lhs,
-                        &rhs,
-                        &[3, 2],
-                        &[0, 1],
-                        Scalar::F64(1.0),
-                    )
-                },
+                [&space, &space],
+                [&space, &space],
+                726,
             )?;
-            assert_eq!(destination.data(), expected.data());
+            if form == "owned" {
+                let cold = bench(
+                    &runtime,
+                    $symmetry,
+                    "contract",
+                    form,
+                    "cold",
+                    "warm",
+                    $min_time,
+                    || lhs.contract(&rhs, &[3, 2], &[0, 1], &[0, 1, 2, 3]),
+                )?;
+                assert!(cold.norm()?.is_finite());
+            } else {
+                let expected = lhs.contract(&rhs, &[3, 2], &[0, 1], &[0, 1, 2, 3])?;
+                let mut destination = expected.zeros_like();
+                bench(
+                    &runtime,
+                    $symmetry,
+                    "contract",
+                    form,
+                    "first_after_setup",
+                    "warm_after_setup",
+                    $min_time,
+                    || {
+                        lhs.contract_overwrite_into(
+                            &rhs,
+                            &mut destination,
+                            &[3, 2],
+                            &[0, 1],
+                            &[0, 1, 2, 3],
+                            1.0,
+                        )
+                    },
+                )?;
+                assert_eq!(destination.data(), expected.data());
+            }
         }
-    }
-    Ok(())
+    }};
 }
 
 fn main() -> Result<(), Error> {
@@ -235,13 +223,34 @@ fn main() -> Result<(), Error> {
     println!("symmetry,operation,form,phase,iterations,us_per_iter,tree_hits,tree_misses,tree_evictions,tree_bypasses,tree_entries_delta,tree_charged_payload_bytes_before,tree_charged_payload_bytes_after,tree_charged_payload_bytes_delta,destination_preparations,destination_structural_comparisons,output_allocation_bytes,operation_local_scratch_bytes,provider_queries,transform_passes,gemm_calls,host_device_transfers");
 
     let min_time = Duration::from_millis(min_ms);
-    for (name, space) in [
-        ("U1", Space::u1([(-1, 2), (0, 2), (1, 2)])),
-        ("SU2", Space::su2([(0, 2), (1, 2), (2, 2)])?),
-    ] {
-        run_permute(name, space.clone(), min_time)?;
-        run_contract(name, space, min_time)?;
-    }
+    run_provider!(
+        "U1",
+        U1FusionRule,
+        GradedSpace::try_new_owned(
+            U1FusionRule,
+            [
+                (U1Irrep::new(-1), 2),
+                (U1Irrep::new(0), 2),
+                (U1Irrep::new(1), 2),
+            ],
+            false,
+        )?,
+        min_time
+    );
+    run_provider!(
+        "SU2",
+        SU2FusionRule,
+        GradedSpace::try_new_owned(
+            SU2FusionRule,
+            [
+                (SU2Irrep::from_twice_spin(0), 2),
+                (SU2Irrep::from_twice_spin(1), 2),
+                (SU2Irrep::from_twice_spin(2), 2),
+            ],
+            false,
+        )?,
+        min_time
+    );
     Ok(())
 }
 

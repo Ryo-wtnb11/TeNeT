@@ -249,9 +249,8 @@ pub use tenet_tensors::CheckedGenericPlanError;
 pub use crate::error::Error;
 /// Re-exported for the same reason as [`Error`]: every constructor here takes
 /// a runtime. Both types are also in [`crate::prelude`]; re-exporting them
-/// here is what lets a caller glob-import this module alone. The module
-/// itself stays out of the prelude, because its [`TensorMap`] would collide
-/// with the erased [`tenet_core::TensorMap`] already exported there.
+/// here is what lets a caller glob-import this module alone. The canonical
+/// [`TensorMap`] and [`GradedSpace`] are also re-exported by [`crate::prelude`].
 pub use crate::runtime::Runtime;
 /// Re-exported for the same reason as [`Error`] and [`Runtime`]:
 /// [`TensorMap::svd_trunc`] takes one, so `use tenet::typed::*` would not be

@@ -5,18 +5,14 @@
 //!
 //! # Execution model
 //!
-//! A [`prelude::Tensor`] is a block-sparse symmetric tensor map stored as
+//! A [`prelude::TensorMap`] is a block-sparse symmetric tensor map stored as
 //! TensorKit-equivalent reduced blocks indexed by fusion trees (one coupled
 //! sector per block, column-major dense storage inside). Every op is dispatched
-//! through a symmetry **rule provider** inherited from the tensor's
-//! [`prelude::Space`]s (U(1), Z2, fZ2, SU(2), and their products —
-//! the core layer additionally supports anyonic rules such as Fibonacci), so the user
-//! layer is rule-erased while the machinery stays fusion-tree-aware.
-//!
-//! The erasure belongs to this ergonomic layer, not to the design: [`typed`]
-//! is the sibling facade that keeps the concrete provider type through
-//! monomorphized construction, so a fusion rule defined outside this workspace
-//! drives it too.
+//! through the symmetry **rule provider** owned by its
+//! [`prelude::GradedSpace`]s. The provider, scalar and storage are concrete type
+//! parameters, while tensor rank and sector content remain runtime values. A
+//! fusion rule defined outside this workspace therefore uses the same ordinary
+//! tensor API as the built-in U(1), Z2, fZ2, SU(2), and product providers.
 //!
 //! A [`prelude::Runtime`] owns the shared execution state: the per-rule
 //! contraction/tree-transform contexts, the dense backend (selectable per
@@ -47,8 +43,8 @@ pub mod typed;
 #[doc(hidden)]
 pub use runtime::RuntimeIdentity;
 pub use runtime::{clear_default_runtime, default_runtime, set_default_runtime};
-/// User-layer API: [`prelude::Runtime`], [`prelude::Space`], and
-/// [`prelude::Tensor`], plus the handful of expert-layer types their
+/// User-layer API: [`prelude::Runtime`], [`prelude::GradedSpace`], and
+/// [`prelude::TensorMap`], plus the handful of expert-layer types their
 /// signatures mention. `use tenet::prelude::*;` is the intended import for
 /// everyday tensor code; expert APIs stay available through [`core`], [`dense`],
 /// and the curated [`operations`] and [`matrixalgebra`] facades.
@@ -70,10 +66,19 @@ pub mod prelude {
         OverwriteOutcome, PermuteOverwriteCache, Scalar, SvdTrunc, Tensor, TensorExecutionContext,
         TensorScalar,
     };
+    pub use crate::typed::{GradedSpace, TensorMap};
     pub use num_complex::Complex64;
     #[allow(deprecated)]
     pub use tenet_core::FusionTreeBlockKey;
+    pub use tenet_core::{
+        product_fusion_rule, product_fusion_rule_with_codec, product_sector, CU1FusionRule,
+        CU1Irrep, FermionParityFusionRule, FibonacciFusionRule, ProductFusionRule,
+        ProductFusionRuleExt, ProductSector, SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep,
+        Z2FusionRule, Z2Irrep, ZNFusionRule, ZNIrrep,
+    };
     pub use tenet_core::{BlockKey, FusionTreePairKey, MultiplicityIndex, SectorId};
+    #[cfg(feature = "racah-generated")]
+    pub use tenet_core::{SUNFusionRule, SUNFusionRuleError};
     pub use tenet_matrixalgebra::{SectorSpectrum, Truncation, TruncationSpace};
 }
 

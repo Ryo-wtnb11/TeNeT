@@ -1,4 +1,4 @@
-//! Timing harness for the lazy adjoint (`Tensor::adjoint`) and its contraction
+//! Timing harness for the lazy adjoint (`TensorMap::adjoint`) and its contraction
 //! fold. Run with `cargo run --release --example adjoint_timing`.
 //!
 //! Measures three things per dtype:
@@ -37,23 +37,40 @@ fn main() {
     let rt = Runtime::builder().build().unwrap();
     // A few sectors with non-trivial degeneracies so the coupled blocks are big
     // enough for the conjugate-transpose copy to matter.
-    let v = Space::u1([(-1, 6), (0, 10), (1, 8), (2, 4)]);
+    let v = GradedSpace::try_new_owned(
+        U1FusionRule,
+        [
+            (U1Irrep::new(-1), 6),
+            (U1Irrep::new(0), 10),
+            (U1Irrep::new(1), 8),
+            (U1Irrep::new(2), 4),
+        ],
+        false,
+    )
+    .unwrap();
     let iters = 4000;
 
-    for dtype in [Dtype::F64, Dtype::C64] {
-        println!("{dtype:?} (endomorphism [v,v] <- [v,v], v dims 6/10/8/4):");
-        let a = Tensor::rand_with_seed(&rt, dtype, [&v, &v], [&v, &v], 1).unwrap();
-        let b = Tensor::rand_with_seed(&rt, dtype, [&v, &v], [&v, &v], 2).unwrap();
+    macro_rules! bench_dtype {
+        ($dtype:ty, $label:literal) => {{
+            println!("{} (endomorphism [v,v] <- [v,v], v dims 6/10/8/4):", $label);
+            let a = TensorMap::<U1FusionRule, $dtype>::rand_with_seed(&rt, [&v, &v], [&v, &v], 1)
+                .unwrap();
+            let b = TensorMap::<U1FusionRule, $dtype>::rand_with_seed(&rt, [&v, &v], [&v, &v], 2)
+                .unwrap();
 
-        bench("adjoint() only (lazy)", iters, || {
-            let _ = a.adjoint().unwrap();
-        });
-        bench("compose (baseline, no adjoint)", iters, || {
-            let _ = a.compose(&b).unwrap();
-        });
-        bench("adjoint().compose(b)", iters, || {
-            let _ = a.adjoint().unwrap().compose(&b).unwrap();
-        });
-        println!();
+            bench("adjoint() only (lazy)", iters, || {
+                let _ = a.adjoint().unwrap();
+            });
+            bench("compose (baseline, no adjoint)", iters, || {
+                let _ = a.compose(&b).unwrap();
+            });
+            bench("adjoint().compose(b)", iters, || {
+                let _ = a.adjoint().unwrap().compose(&b).unwrap();
+            });
+            println!();
+        }};
     }
+
+    bench_dtype!(f64, "f64");
+    bench_dtype!(Complex64, "c64");
 }
