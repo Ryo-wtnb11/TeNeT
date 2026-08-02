@@ -1029,7 +1029,13 @@ mod runtime_store_tests {
 
     struct TestRuleIdentity;
 
-    fn fixture(tag: usize) -> (RuntimeTreeTransformKey, Arc<TreeTransformStructure<f64>>) {
+    fn fixture(
+        tag: usize,
+    ) -> (
+        RuntimeTreeTransformKey,
+        Arc<TreeTransformStructure<f64>>,
+        BlockStructure,
+    ) {
         let block = BlockSpec::with_key(BlockKey::ordinal(tag), vec![1], vec![1], 0).unwrap();
         let structure = BlockStructure::from_blocks_with_rank(1, vec![block]).unwrap();
         let compiled = Arc::new(
@@ -1049,15 +1055,15 @@ mod runtime_store_tests {
             &structure,
         )
         .unwrap();
-        (key, compiled)
+        (key, compiled, structure)
     }
 
     #[test]
     fn runtime_store_enforces_resources_and_clear_keeps_returned_arcs_valid() {
         // What: entry and byte pressure evict, oversized entries bypass, and
         // clear resets accounting without invalidating caller-owned payloads.
-        let (key0, structure0) = fixture(0);
-        let (key1, structure1) = fixture(1);
+        let (key0, structure0, _) = fixture(0);
+        let (key1, structure1, _) = fixture(1);
         let charge0 = RuntimeTreeTransformStore::<f64>::charged_entry_bytes(&key0, &structure0);
         let charge1 = RuntimeTreeTransformStore::<f64>::charged_entry_bytes(&key1, &structure1);
 
@@ -1128,13 +1134,11 @@ mod runtime_store_tests {
         // What: an ordinary completed structure is not an exact typed-layout
         // proof; successful publication enables borrowed-operation reuse, and
         // clearing the one Runtime store removes both together.
-        let (key, structure) = fixture(0);
+        let (key, structure, layout) = fixture(0);
         let store = RuntimeTreeTransformStore::default();
         store
             .get_or_compile(key.clone(), || Ok::<_, Infallible>(structure))
             .unwrap();
-        let block = BlockSpec::with_key(BlockKey::ordinal(0), vec![1], vec![1], 0).unwrap();
-        let layout = BlockStructure::from_blocks_with_rank(1, vec![block]).unwrap();
         let source_homspace = FusionTreeHomSpace::from_sector_ids([(0, 1)], []);
         let destination_homspace = FusionTreeHomSpace::from_sector_ids([], [(0, 1)]);
         let source_id = source_homspace.id();
@@ -1211,7 +1215,7 @@ mod runtime_store_tests {
             usize::MAX,
             usize::MAX,
         ));
-        let (key, structure) = fixture(2);
+        let (key, structure, _) = fixture(2);
         let next_key = key.clone();
         let next_structure = Arc::clone(&structure);
         let started = Arc::new(Barrier::new(2));
