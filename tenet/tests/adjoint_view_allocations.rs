@@ -1,11 +1,11 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::hint::black_box;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::*;
-use tenet::typed::{GradedSpace, TensorMap as TypedTensorMap};
+use tenet::prelude::Runtime;
+use tenet::typed::{GradedSpace, TensorMap};
 
 struct CountingAllocator;
 
@@ -52,6 +52,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
+static MEASUREMENT_LOCK: Mutex<()> = Mutex::new(());
 
 fn measure(f: impl FnOnce()) -> (u64, u64) {
     let (allocations, bytes, _) = measure_peak(f);
@@ -73,12 +74,19 @@ fn tensor(
     runtime: &Runtime,
     sectors: impl IntoIterator<Item = (i32, usize)>,
     rank: usize,
-) -> Tensor {
+) -> TensorMap<U1FusionRule, num_complex::Complex64> {
     assert_eq!(rank % 2, 0);
-    let space = Space::u1(sectors);
-    Tensor::rand_with_seed(
+    let provider = Arc::new(U1FusionRule);
+    let space = GradedSpace::try_new(
+        provider,
+        sectors
+            .into_iter()
+            .map(|(charge, degeneracy)| (U1Irrep::new(charge), degeneracy)),
+        false,
+    )
+    .unwrap();
+    TensorMap::rand_with_seed(
         runtime,
-        Dtype::C64,
         std::iter::repeat_n(&space, rank / 2),
         std::iter::repeat_n(&space, rank / 2),
         261 + rank as u64,
@@ -87,23 +95,39 @@ fn tensor(
 }
 
 #[test]
-fn adjoint_creation_cost_is_independent_of_block_count() {
-    // What: lazy adjoint creation owns one fixed-size view, never a fusion-tree grid.
+fn adjoint_creation_allocates_metadata_not_a_receiver_sized_payload() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    // What: the fallible typed constructor transactionally admits the logical
+    // adjoint layout, so metadata may scale with rank and tree count. It must
+    // not scale with degeneracy: that would mean copying the parent payload.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let mut reference = None;
     for (rank, radius) in [(2, 0), (2, 2), (2, 6), (2, 12), (4, 4), (6, 1), (8, 0)] {
-        let source = tensor(&runtime, (-radius..=radius).map(|charge| (charge, 2)), rank);
-        let cost = measure(|| {
-            black_box(source.adjoint().unwrap());
+        let large_degeneracy = if rank == 2 { 16 } else { 2 };
+        let small = tensor(&runtime, (-radius..=radius).map(|charge| (charge, 1)), rank);
+        let large = tensor(
+            &runtime,
+            (-radius..=radius).map(|charge| (charge, large_degeneracy)),
+            rank,
+        );
+        let small_layout = small.adjoint().unwrap();
+        let small_cost = measure(|| {
+            black_box(small.adjoint().unwrap());
         });
-        let reference = *reference.get_or_insert(cost);
-        assert_eq!(cost, reference, "rank={rank}, sector radius={radius}");
+        let large_layout = large.adjoint().unwrap();
+        let large_cost = measure(|| {
+            black_box(large.adjoint().unwrap());
+        });
+        assert_eq!(
+            small_cost, large_cost,
+            "rank={rank}, sector radius={radius}: adjoint creation copied payload-sized state"
+        );
+        black_box((small_layout, large_layout));
     }
-    assert_eq!(reference.unwrap().0, 1, "adjoint allocates one shared view");
 }
 
 #[test]
 fn adjoint_involution_does_not_allocate() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     // What: the second dagger restores the parent body without allocating.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let source = tensor(&runtime, (-4..=4).map(|charge| (charge, 2)), 4);
@@ -117,59 +141,15 @@ fn adjoint_involution_does_not_allocate() {
 }
 
 #[test]
-fn compact_svd_keeps_total_and_peak_below_materialized_baseline() {
-    // What: factoring through the parent saves the prohibited owned-adjoint
-    // payload even while parent and final factors overlap.
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let space = Space::u1([(0, 32)]);
-    let parent = Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space], 603_674).unwrap();
-    black_box(parent.svd_compact().unwrap());
-
-    let input_bytes = std::mem::size_of_val(parent.try_data_c64().unwrap()) as u64;
-    let optimized = parent.adjoint().unwrap();
-    let baseline = parent.adjoint().unwrap();
-    let optimized_cost = measure_peak(|| {
-        black_box(optimized.svd_compact().unwrap());
-    });
-    let baseline_cost = measure_peak(|| {
-        black_box(baseline.try_data_c64().unwrap());
-        black_box(baseline.svd_compact().unwrap());
-    });
-    eprintln!("input={input_bytes} optimized={optimized_cost:?} materialized={baseline_cost:?}");
-
-    assert!(
-        optimized_cost.1 < baseline_cost.1,
-        "total bytes: optimized={optimized_cost:?}, baseline={baseline_cost:?}"
-    );
-    assert!(
-        optimized_cost.2 < baseline_cost.2,
-        "peak bytes: optimized={optimized_cost:?}, baseline={baseline_cost:?}"
-    );
-    assert!(
-        measure(|| {
-            black_box(optimized.try_data_c64().unwrap());
-        })
-        .1 >= input_bytes,
-        "optimized compact SVD materialized its lazy input"
-    );
-    assert_eq!(
-        measure(|| {
-            black_box(baseline.try_data_c64().unwrap());
-        }),
-        (0, 0),
-        "baseline materialization was not retained"
-    );
-}
-
-#[test]
 fn typed_compact_svd_keeps_total_and_peak_below_materialized_baseline() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     // What: the typed wrapper reuses the same parent-factor seam and does not
     // hide a receiver-sized logical-adjoint allocation around it.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let space = GradedSpace::try_new(provider, [(U1Irrep::new(0), 32)], false).unwrap();
-    let parent: TypedTensorMap<_, num_complex::Complex64> =
-        TypedTensorMap::rand_with_seed(&runtime, [&space], [&space], 693_695).unwrap();
+    let parent: TensorMap<_, num_complex::Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&space], [&space], 693_695).unwrap();
     black_box(parent.svd_compact().unwrap());
 
     let input_bytes = (parent.data().len() * std::mem::size_of::<num_complex::Complex64>()) as u64;
@@ -208,55 +188,13 @@ fn typed_compact_svd_keeps_total_and_peak_below_materialized_baseline() {
 }
 
 #[test]
-fn full_svd_keeps_total_and_peak_below_materialized_baseline() {
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let space = Space::u1([(0, 32)]);
-    let parent = Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space], 603_697).unwrap();
-    black_box(parent.svd_full().unwrap());
-
-    let input_bytes = std::mem::size_of_val(parent.try_data_c64().unwrap()) as u64;
-    let optimized = parent.adjoint().unwrap();
-    let baseline = parent.adjoint().unwrap();
-    let optimized_cost = measure_peak(|| {
-        black_box(optimized.svd_full().unwrap());
-    });
-    let baseline_cost = measure_peak(|| {
-        black_box(baseline.try_data_c64().unwrap());
-        black_box(baseline.svd_full().unwrap());
-    });
-    eprintln!("input={input_bytes} optimized={optimized_cost:?} materialized={baseline_cost:?}");
-
-    assert!(
-        optimized_cost.1 < baseline_cost.1,
-        "total bytes: optimized={optimized_cost:?}, baseline={baseline_cost:?}"
-    );
-    assert!(
-        optimized_cost.2 < baseline_cost.2,
-        "peak bytes: optimized={optimized_cost:?}, baseline={baseline_cost:?}"
-    );
-    assert!(
-        measure(|| {
-            black_box(optimized.try_data_c64().unwrap());
-        })
-        .1 >= input_bytes,
-        "optimized full SVD materialized its lazy input"
-    );
-    assert_eq!(
-        measure(|| {
-            black_box(baseline.try_data_c64().unwrap());
-        }),
-        (0, 0),
-        "baseline materialization was not retained"
-    );
-}
-
-#[test]
 fn typed_full_svd_keeps_total_and_peak_below_materialized_baseline() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let space = GradedSpace::try_new(provider, [(U1Irrep::new(0), 32)], false).unwrap();
-    let parent: TypedTensorMap<_, num_complex::Complex64> =
-        TypedTensorMap::rand_with_seed(&runtime, [&space], [&space], 693_697).unwrap();
+    let parent: TensorMap<_, num_complex::Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&space], [&space], 693_697).unwrap();
     black_box(parent.svd_full().unwrap());
 
     let input_bytes = (parent.data().len() * std::mem::size_of::<num_complex::Complex64>()) as u64;
@@ -297,14 +235,15 @@ fn typed_full_svd_keeps_total_and_peak_below_materialized_baseline() {
 
 #[test]
 fn typed_truncated_svd_keeps_total_and_peak_below_materialized_baseline() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     // What: typed truncation reuses the parent-factor seam without retaining
     // a receiver-sized logical-adjoint input.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let space = GradedSpace::try_new(provider, [(U1Irrep::new(0), 64)], false).unwrap();
-    let parent: TypedTensorMap<_, num_complex::Complex64> =
-        TypedTensorMap::rand_with_seed(&runtime, [&space], [&space], 693_696).unwrap();
-    let truncation = Truncation::rank(16);
+    let parent: TensorMap<_, num_complex::Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&space], [&space], 693_696).unwrap();
+    let truncation = tenet::typed::Truncation::rank(16);
     black_box(parent.svd_trunc(&truncation).unwrap());
 
     let input_bytes = (parent.data().len() * std::mem::size_of::<num_complex::Complex64>()) as u64;
@@ -343,58 +282,30 @@ fn typed_truncated_svd_keeps_total_and_peak_below_materialized_baseline() {
 }
 
 #[test]
-fn truncated_svd_keeps_total_and_peak_below_materialized_baseline() {
-    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let space = Space::u1([(0, 64)]);
-    let parent = Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space], 603_675).unwrap();
-    let truncation = Truncation::rank(16);
-    black_box(parent.svd_trunc(&truncation).unwrap());
-
-    let input_bytes = std::mem::size_of_val(parent.try_data_c64().unwrap()) as u64;
-    let optimized = parent.adjoint().unwrap();
-    let baseline = parent.adjoint().unwrap();
-    let optimized_cost = measure_peak(|| {
-        black_box(optimized.svd_trunc(&truncation).unwrap());
-    });
-    let baseline_cost = measure_peak(|| {
-        black_box(baseline.try_data_c64().unwrap());
-        black_box(baseline.svd_trunc(&truncation).unwrap());
-    });
-    eprintln!("input={input_bytes} optimized={optimized_cost:?} materialized={baseline_cost:?}");
-
-    assert!(
-        optimized_cost.1 < baseline_cost.1,
-        "total bytes: optimized={optimized_cost:?}, baseline={baseline_cost:?}"
-    );
-    assert!(
-        optimized_cost.2 < baseline_cost.2,
-        "peak bytes: optimized={optimized_cost:?}, baseline={baseline_cost:?}"
-    );
-    assert!(
-        measure(|| {
-            black_box(optimized.try_data_c64().unwrap());
-        })
-        .1 >= input_bytes
-    );
-}
-
-#[test]
 fn lazy_scale_and_add_allocate_only_one_input_sized_payload() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let space = Space::u1((-4..=4).map(|charge| (charge, 8)));
-    let parent =
-        Tensor::rand_with_seed(&runtime, Dtype::C64, [&space, &space], [&space], 666_401).unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let space = GradedSpace::try_new(
+        provider,
+        (-4..=4).map(|charge| (U1Irrep::new(charge), 8)),
+        false,
+    )
+    .unwrap();
+    let parent: TensorMap<_, num_complex::Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&space, &space], [&space], 666_401).unwrap();
     let other_parent =
-        Tensor::rand_with_seed(&runtime, Dtype::C64, [&space, &space], [&space], 666_402).unwrap();
-    let owned =
-        Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space, &space], 666_403).unwrap();
-    let payload_bytes = parent.try_data_c64().unwrap().len() as u64 * 16;
+        TensorMap::rand_with_seed(&runtime, [&space, &space], [&space], 666_402).unwrap();
+    let owned = TensorMap::rand_with_seed(&runtime, [&space], [&space, &space], 666_403).unwrap();
+    let payload_bytes = std::mem::size_of_val(parent.data()) as u64;
+    let alpha = num_complex::Complex64::new(0.5, 0.0);
+    let beta = num_complex::Complex64::new(-0.25, 0.0);
 
     let warm = parent.adjoint().unwrap();
     let warm_other = other_parent.adjoint().unwrap();
-    black_box(warm.scale(0.5).unwrap());
-    black_box(warm.add(&owned, 0.5, -0.25).unwrap());
-    black_box(warm.add(&warm_other, 0.5, -0.25).unwrap());
+    black_box(warm.scale(alpha));
+    black_box(warm.add(&owned, alpha, beta).unwrap());
+    black_box(warm.add(&warm_other, alpha, beta).unwrap());
 
     let scale_lazy = parent.adjoint().unwrap();
     let mixed_lazy = parent.adjoint().unwrap();
@@ -402,13 +313,13 @@ fn lazy_scale_and_add_allocate_only_one_input_sized_payload() {
     let other_pair_lazy = other_parent.adjoint().unwrap();
     for (_, bytes) in [
         measure(|| {
-            black_box(scale_lazy.scale(0.5).unwrap());
+            black_box(scale_lazy.scale(alpha));
         }),
         measure(|| {
-            black_box(mixed_lazy.add(&owned, 0.5, -0.25).unwrap());
+            black_box(mixed_lazy.add(&owned, alpha, beta).unwrap());
         }),
         measure(|| {
-            black_box(pair_lazy.add(&other_pair_lazy, 0.5, -0.25).unwrap());
+            black_box(pair_lazy.add(&other_pair_lazy, alpha, beta).unwrap());
         }),
     ] {
         assert!(
@@ -418,7 +329,7 @@ fn lazy_scale_and_add_allocate_only_one_input_sized_payload() {
     }
     for lazy in [&scale_lazy, &mixed_lazy, &pair_lazy, &other_pair_lazy] {
         let (_, bytes) = measure(|| {
-            black_box(lazy.try_data_c64().unwrap().len());
+            black_box(lazy.data().len());
         });
         assert!(
             bytes >= payload_bytes,
@@ -429,31 +340,29 @@ fn lazy_scale_and_add_allocate_only_one_input_sized_payload() {
 
 #[test]
 fn mixed_lazy_add_has_no_rank_dependent_stride_allocation() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let mut reference = None;
     for rank in [8, 10, 12] {
-        let space = Space::u1([(0, 1)]);
+        let provider = Arc::new(U1FusionRule);
+        let space = GradedSpace::try_new(provider, [(U1Irrep::new(0), 1)], false).unwrap();
         let codomain = std::iter::repeat_n(&space, rank / 2).collect::<Vec<_>>();
-        let parent = Tensor::rand_with_seed(
+        let parent: TensorMap<_, num_complex::Complex64> = TensorMap::rand_with_seed(
             &runtime,
-            Dtype::C64,
             codomain.clone(),
             codomain.clone(),
             666_500 + rank as u64,
         )
         .unwrap();
-        let owned = Tensor::rand_with_seed(
-            &runtime,
-            Dtype::C64,
-            codomain.clone(),
-            codomain,
-            666_600 + rank as u64,
-        )
-        .unwrap();
-        black_box(parent.adjoint().unwrap().add(&owned, 0.5, -0.25).unwrap());
+        let owned =
+            TensorMap::rand_with_seed(&runtime, codomain.clone(), codomain, 666_600 + rank as u64)
+                .unwrap();
+        let alpha = num_complex::Complex64::new(0.5, 0.0);
+        let beta = num_complex::Complex64::new(-0.25, 0.0);
+        black_box(parent.adjoint().unwrap().add(&owned, alpha, beta).unwrap());
         let lazy = parent.adjoint().unwrap();
         let cost = measure(|| {
-            black_box(lazy.add(&owned, 0.5, -0.25).unwrap());
+            black_box(lazy.add(&owned, alpha, beta).unwrap());
         });
         assert_eq!(
             cost,
@@ -462,7 +371,7 @@ fn mixed_lazy_add_has_no_rank_dependent_stride_allocation() {
         );
         assert!(
             measure(|| {
-                black_box(lazy.try_data_c64().unwrap().len());
+                black_box(lazy.data().len());
             })
             .0 > 0,
             "the mixed add materialized its lazy operand"
@@ -472,6 +381,7 @@ fn mixed_lazy_add_has_no_rank_dependent_stride_allocation() {
 
 #[test]
 fn identity_adjoint_transform_cost_is_independent_of_rank_and_block_count() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     // What: identity permute, braid, and repartition share the lazy view with
     // zero allocations across increasing rank and U1 sector counts.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -505,6 +415,7 @@ fn identity_adjoint_transform_cost_is_independent_of_rank_and_block_count() {
 
 #[test]
 fn ordinary_tensor_clone_does_not_allocate() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     // What: the representation split keeps an owned tensor's value-like Arc clone cost.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let source = tensor(&runtime, (-4..=4).map(|charge| (charge, 2)), 4);
@@ -516,12 +427,30 @@ fn ordinary_tensor_clone_does_not_allocate() {
     assert_eq!(cost, (0, 0));
 }
 
-fn measure_eager_lazy_core_compose(rows: Space, contracted: Space, cols: Space, seed: u64) -> u64 {
+fn measure_eager_lazy_core_compose(
+    rows: &[(i32, usize)],
+    contracted: &[(i32, usize)],
+    cols: &[(i32, usize)],
+    seed: u64,
+) -> u64 {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let parent =
-        Tensor::rand_with_seed(&runtime, Dtype::C64, [&contracted], [&rows], seed).unwrap();
-    let rhs =
-        Tensor::rand_with_seed(&runtime, Dtype::C64, [&contracted], [&cols], seed + 1).unwrap();
+    let provider = Arc::new(U1FusionRule);
+    let make_space = |sectors: &[(i32, usize)]| {
+        GradedSpace::try_new(
+            Arc::clone(&provider),
+            sectors
+                .iter()
+                .map(|&(charge, degeneracy)| (U1Irrep::new(charge), degeneracy)),
+            false,
+        )
+        .unwrap()
+    };
+    let rows = make_space(rows);
+    let contracted = make_space(contracted);
+    let cols = make_space(cols);
+    let parent: TensorMap<_, num_complex::Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&contracted], [&rows], seed).unwrap();
+    let rhs = TensorMap::rand_with_seed(&runtime, [&contracted], [&cols], seed + 1).unwrap();
     let lhs = parent.adjoint().unwrap();
     black_box(lhs.compose(&rhs).unwrap());
     measure(|| {
@@ -531,31 +460,28 @@ fn measure_eager_lazy_core_compose(rows: Space, contracted: Space, cols: Space, 
 }
 
 #[test]
-fn eager_single_group_lazy_core_does_not_return_to_structure_scale_allocations() {
-    // What: eager lazy-adjoint compose may allocate operation-local result
-    // metadata, but it stays below the old per-term Structure executor scale.
-    let calls = measure_eager_lazy_core_compose(
-        Space::u1([(0, 3)]),
-        Space::u1([(0, 2)]),
-        Space::u1([(0, 4)]),
-        272_001,
-    );
-    assert!(calls <= 128, "eager lazy Core allocated {calls} times");
+fn typed_single_group_lazy_compose_stays_below_the_measured_engine_margin() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    // What: warmed typed lazy-adjoint compose measured 40 allocations when
+    // admitted here; 64 leaves platform headroom without inheriting the erased
+    // facade's former 128-allocation ceiling.
+    let calls = measure_eager_lazy_core_compose(&[(0, 3)], &[(0, 2)], &[(0, 4)], 272_001);
+    assert!(calls <= 64, "typed lazy compose allocated {calls} times");
 }
 
 #[test]
-fn eager_multigroup_lazy_core_does_not_return_to_structure_scale_allocations() {
-    // What: until grouped GEMM grows N/T/C jobs, per-group prepared dot replay
-    // and eager result metadata may allocate, but remain below the old
-    // 289-call Structure path.
+fn typed_multigroup_lazy_compose_stays_below_the_measured_engine_margin() {
+    let _measurement = MEASUREMENT_LOCK.lock().unwrap();
+    // What: the corresponding multigroup route measured 52 allocations; 80
+    // keeps explicit headroom while still killing a return to per-term replay.
     let calls = measure_eager_lazy_core_compose(
-        Space::u1([(-1, 2), (0, 3), (1, 1)]),
-        Space::u1([(-1, 1), (0, 2), (1, 3)]),
-        Space::u1([(-1, 3), (0, 1), (1, 2)]),
+        &[(-1, 2), (0, 3), (1, 1)],
+        &[(-1, 1), (0, 2), (1, 3)],
+        &[(-1, 3), (0, 1), (1, 2)],
         272_011,
     );
     assert!(
-        calls <= 192,
-        "eager multigroup lazy Core allocated {calls} times"
+        calls <= 80,
+        "typed multigroup compose allocated {calls} times"
     );
 }
