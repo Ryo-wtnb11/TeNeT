@@ -15,10 +15,19 @@
 use std::sync::Arc;
 use std::thread;
 
-use tenet::prelude::{Dtype, Runtime, Space, Tensor};
+use tenet::prelude::{GradedSpace, Runtime, SU2FusionRule, SU2Irrep, TensorMap};
 
-fn space() -> Space {
-    Space::su2([(0, 3), (1, 2), (2, 1)]).unwrap()
+fn space() -> GradedSpace<SU2FusionRule> {
+    GradedSpace::try_new_owned(
+        SU2FusionRule,
+        [
+            (SU2Irrep::from_twice_spin(0), 3),
+            (SU2Irrep::from_twice_spin(1), 2),
+            (SU2Irrep::from_twice_spin(2), 1),
+        ],
+        false,
+    )
+    .unwrap()
 }
 
 /// A rank-4 contract, a permute, and a factorization (each hits a different
@@ -26,9 +35,9 @@ fn space() -> Space {
 /// value) as a deterministic fingerprint of the results.
 fn work(rt: &Runtime, seed: u64) -> (f64, f64) {
     let v = space();
-    let a = Tensor::rand_with_seed(rt, Dtype::F64, [&v, &v], [&v, &v], seed).unwrap();
-    let b = Tensor::rand_with_seed(rt, Dtype::F64, [&v, &v], [&v, &v], seed + 1).unwrap();
-    let c = a.contract(&b, &[2, 3], &[0, 1]).unwrap(); // ContextPool
+    let a: TensorMap<_, f64> = TensorMap::rand_with_seed(rt, [&v, &v], [&v, &v], seed).unwrap();
+    let b: TensorMap<_, f64> = TensorMap::rand_with_seed(rt, [&v, &v], [&v, &v], seed + 1).unwrap();
+    let c = a.contract(&b, &[2, 3], &[0, 1], &[0, 1, 2, 3]).unwrap(); // ContextPool
     let p = c.permute(&[1, 0], &[3, 2]).unwrap(); // ContextPool
     let s = p.svd_vals().unwrap(); // ExecutorPool
     let first = s
