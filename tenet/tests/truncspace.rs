@@ -1,4 +1,4 @@
-//! `truncspace` — fixed per-sector truncation on both facades (issue #597,
+//! `truncspace` — fixed per-sector truncation on the typed facade (issue #597,
 //! item 4).
 //!
 //! TensorKit `TruncationSpace` (`src/factorizations/truncation.jl:261-269`)
@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::prelude::{Dtype, Error, Runtime, SectorLabel, Space, Tensor, Truncation};
+use tenet::prelude::{Error, Runtime, Truncation};
 use tenet::typed::{GradedSpace, TensorMap};
 
 fn runtime() -> Runtime {
@@ -28,86 +28,6 @@ fn fill(state: &mut u64) -> f64 {
     *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
     ((*state >> 33) as f64) / (u32::MAX as f64) - 0.5
 }
-
-// ---------------------------------------------------------------------------
-// Erased facade
-// ---------------------------------------------------------------------------
-
-/// `V` carries spins 0, 1/2, 1 with room to truncate in each.
-fn erased_leg() -> Space {
-    Space::su2([(0, 4), (1, 4), (2, 4)]).unwrap()
-}
-
-fn erased_source(seed: u64) -> Tensor {
-    let leg = erased_leg();
-    let mut state = seed;
-    Tensor::from_block_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state)).unwrap()
-}
-
-#[test]
-fn erased_truncspace_produces_exactly_the_target_bond_space_on_every_sweep() {
-    // What: the same profile, applied to four different tensors on the same
-    // legs, yields the same bond space every time — and that space *is* the
-    // target. A magnitude-driven policy cannot do this: with random payloads
-    // its per-sector split moves from sweep to sweep.
-    let target = Space::su2([(0, 3), (2, 1)]).unwrap();
-    let truncation = Truncation::space(target.truncspace());
-
-    for seed in 0..4u64 {
-        let result = erased_source(0x5eed_0000 + seed)
-            .svd_trunc(&truncation)
-            .unwrap();
-        let bond = result.u.domain_spaces()[0].clone();
-        assert_eq!(
-            bond.sectors(),
-            target.sectors(),
-            "sweep {seed}: bond space is not the requested profile"
-        );
-        // Spin 1/2 is absent from the target, so it is dropped entirely —
-        // TensorKit's `dim(V, c)` is zero for a sector the space omits.
-        assert!(!bond.has_sector(SectorLabel::SU2 { twice_spin: 1 }));
-    }
-}
-
-#[test]
-fn erased_truncspace_clamps_a_request_longer_than_the_spectrum() {
-    // What: a target degeneracy above what the factorization can offer is a
-    // request the prefix cannot honour, not an error — the bond simply keeps
-    // everything that exists in that sector.
-    let source = erased_source(0x5eed_1000);
-    let greedy = Space::su2([(0, 99), (1, 99), (2, 99)]).unwrap();
-    let clamped = source
-        .svd_trunc(&Truncation::space(greedy.truncspace()))
-        .unwrap();
-    let full = source.svd_compact().unwrap();
-
-    assert_eq!(
-        clamped.u.domain_spaces()[0].sectors(),
-        full.0.domain_spaces()[0].sectors(),
-        "an over-long profile did not clamp to the untruncated bond"
-    );
-    assert_eq!(
-        clamped.error, 0.0,
-        "nothing was discarded, so the error is 0"
-    );
-}
-
-#[test]
-fn erased_truncspace_from_another_rule_is_a_typed_error() {
-    // What: `SectorId`s are rule-scoped opaque keys, so a U(1) profile read as
-    // SU(2) would name unrelated sectors and silently truncate to nothing.
-    // It has to fail instead, before any factor data is published.
-    let foreign = Space::u1([(-1, 1), (0, 2), (1, 1)]);
-    let result = erased_source(0x5eed_2000).svd_trunc(&Truncation::space(foreign.truncspace()));
-    assert!(
-        matches!(result, Err(Error::Operation(_))),
-        "a foreign-rule profile must be a typed error, got {result:?}"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Typed facade
-// ---------------------------------------------------------------------------
 
 fn typed_leg(entries: &[(usize, usize)]) -> GradedSpace<SU2FusionRule> {
     GradedSpace::try_new(
@@ -124,6 +44,17 @@ fn typed_source(seed: u64) -> TensorMap<SU2FusionRule, f64> {
     let leg = typed_leg(&[(0, 4), (1, 4), (2, 4)]);
     let mut state = seed;
     TensorMap::from_block_fn(&runtime(), [&leg], [&leg], move |_, _| fill(&mut state)).unwrap()
+}
+
+fn typed_u1_leg(entries: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
+    GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        entries
+            .iter()
+            .map(|&(charge, degeneracy)| (U1Irrep::new(charge), degeneracy)),
+        false,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -168,6 +99,25 @@ fn typed_truncspace_composes_with_a_magnitude_policy() {
 }
 
 #[test]
+fn typed_truncspace_clamps_a_request_longer_than_the_spectrum() {
+    let source = typed_source(0x5eed_1000);
+    let greedy = typed_leg(&[(0, 99), (1, 99), (2, 99)]);
+    let clamped = source
+        .svd_trunc(&Truncation::space(greedy.truncspace()))
+        .unwrap();
+    let full = source.svd_compact().unwrap();
+    let clamped_bond = &clamped.u.domain()[0];
+    let full_bond = &full.0.domain()[0];
+
+    assert_eq!(
+        clamped_bond.sectors().unwrap(),
+        full_bond.sectors().unwrap()
+    );
+    assert_eq!(clamped_bond.degeneracies(), full_bond.degeneracies());
+    assert_eq!(clamped.error, 0.0);
+}
+
+#[test]
 fn typed_truncspace_from_another_rule_is_a_typed_error() {
     // What: the typed facade reaches `select_truncation` through its own call
     // site, so the guard needs its own gate here. A U(1) leg's `SectorId`s
@@ -185,41 +135,63 @@ fn typed_truncspace_from_another_rule_is_a_typed_error() {
     );
 }
 
-/// A truncation target names sector *content*, not orientation — the claim
-/// both `truncspace` rustdocs make. On a non-self-dual rule that has teeth:
-/// `Space::dual` rewrites the stored sector ids to their duals *and* flips the
-/// flag, so the two halves have to be separated.
+/// A truncation target names sector *content*, not orientation. On a
+/// non-self-dual rule, dualization rewrites labels and flips the flag, so the
+/// two effects have to be separated.
 #[test]
-fn erased_truncspace_follows_stored_sectors_not_the_dual_flag() {
-    let rt = runtime();
-    let leg = Space::u1([(-1, 3), (0, 3), (1, 3)]);
-    let source = Tensor::rand_with_seed(&rt, Dtype::F64, [&leg], [&leg], 0x5eed_6000).unwrap();
-    let bond = |space: &Space| {
+fn typed_truncspace_follows_stored_sectors_not_the_dual_flag() {
+    let leg = typed_u1_leg(&[(-1, 3), (0, 3), (1, 3)]);
+    let source =
+        TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime(), [&leg], [&leg], 0x5eed_6000)
+            .unwrap();
+    let bond = |space: &GradedSpace<U1FusionRule>| {
         source
             .svd_trunc(&Truncation::space(space.truncspace()))
             .unwrap()
             .u
-            .domain_spaces()[0]
-            .sectors()
+            .domain()[0]
+            .clone()
     };
 
     // Content half: an asymmetric target and its dual carry mirrored charges,
     // so they must select mirrored bond spaces — the profile reads the dual's
     // rewritten ids, exactly as TensorKit's `dim(V', c)` does.
-    let skewed = Space::u1([(-1, 3), (0, 2), (1, 1)]);
-    assert_eq!(bond(&skewed), skewed.sectors());
-    assert_eq!(bond(&skewed.dual()), skewed.dual().sectors());
+    let skewed = typed_u1_leg(&[(-1, 3), (0, 2), (1, 1)]);
+    let skewed_dual = skewed.try_dual().unwrap();
+    let skewed_bond = bond(&skewed);
+    let skewed_dual_bond = bond(&skewed_dual);
+    assert_eq!(skewed_bond.sectors().unwrap(), skewed.sectors().unwrap());
+    assert_eq!(skewed_bond.degeneracies(), skewed.degeneracies());
+    assert_eq!(
+        skewed_dual_bond.sectors().unwrap(),
+        skewed_dual.sectors().unwrap()
+    );
+    assert_eq!(skewed_dual_bond.degeneracies(), skewed_dual.degeneracies());
     assert_ne!(
-        bond(&skewed),
-        bond(&skewed.dual()),
+        skewed_bond.degeneracies(),
+        skewed_dual_bond.degeneracies(),
         "a non-self-dual target and its dual must not select the same bond"
     );
 
     // Flag half: a charge-symmetric target has the *same* stored `(id, deg)`
     // pairs as its dual and differs only in the flag, so the two profiles must
     // agree. This is the assertion that dies if the flag ever leaks in.
-    let symmetric = Space::u1([(-1, 2), (0, 3), (1, 2)]);
-    assert!(symmetric.dual().is_dual() && !symmetric.is_dual());
-    assert_eq!(symmetric.sectors(), symmetric.dual().sectors());
-    assert_eq!(bond(&symmetric), bond(&symmetric.dual()));
+    let symmetric = typed_u1_leg(&[(-1, 2), (0, 3), (1, 2)]);
+    let symmetric_dual = symmetric.try_dual().unwrap();
+    assert!(symmetric_dual.is_dual() && !symmetric.is_dual());
+    assert_eq!(
+        symmetric.sectors().unwrap(),
+        symmetric_dual.sectors().unwrap()
+    );
+    assert_eq!(symmetric.degeneracies(), symmetric_dual.degeneracies());
+    let symmetric_bond = bond(&symmetric);
+    let symmetric_dual_bond = bond(&symmetric_dual);
+    assert_eq!(
+        symmetric_bond.sectors().unwrap(),
+        symmetric_dual_bond.sectors().unwrap()
+    );
+    assert_eq!(
+        symmetric_bond.degeneracies(),
+        symmetric_dual_bond.degeneracies()
+    );
 }
