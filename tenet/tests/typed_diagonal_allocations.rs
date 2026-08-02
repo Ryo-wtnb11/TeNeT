@@ -2,9 +2,8 @@
 //!
 //! The typed facade publishes no compact accessor — [`TensorMap::data`] always
 //! reports the dense buffer — so the `Σ_c k_c` storage claim cannot be asserted
-//! through the API. It is asserted here instead, the way the erased sibling's
-//! `tests/compact_diagonal_allocations.rs` asserts its own: by counting bytes
-//! through a global allocator while one operation runs.
+//! through the API. It is asserted here instead by counting bytes through a
+//! global allocator while one operation runs.
 //!
 //! Every measurement is warmed first. The engine's layout and fusion-tree
 //! caches allocate on first use, and those allocations belong to the cache, not
