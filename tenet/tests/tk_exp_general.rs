@@ -3,7 +3,7 @@
 #![allow(clippy::excessive_precision)]
 
 //! TensorKit `exp(::AbstractTensorMap)` correspondence for the general
-//! (non-Hermitian) arm of `Tensor::exp` / `TensorMap::exp` (issue #577).
+//! (non-Hermitian) arm of `TensorMap::exp` (issue #577).
 //!
 //! TensorKit 0.17 `src/tensors/linalg.jl`, `exp` at line 44 and `exp!` at
 //! lines 420-428:
@@ -53,7 +53,7 @@
 use std::sync::Arc;
 
 use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::{BlockKey, Complex64, Runtime, Space, Tensor};
+use tenet::prelude::{Complex64, Runtime};
 use tenet::typed::{BlockFusionTrees, GradedSpace, TensorMap};
 
 /// Relative agreement with the TensorKit oracle. The two engines evaluate the
@@ -75,42 +75,12 @@ fn imaginary_fill(indices: &[usize], scale: f64) -> f64 {
     scale * (0.125 * indices[0] as f64 + 0.375 * indices[1] as f64 - 0.25)
 }
 
-fn erased_charge(key: &BlockKey) -> i32 {
-    let pair = key.as_fusion_tree_pair().expect("fusion-tree block");
-    U1Irrep::from_sector_id(pair.codomain_tree().coupled())
-        .expect("built-in U(1) codec decodes its own ids")
-        .charge()
-}
-
-fn erased_space() -> Space {
-    Space::u1([(0, 3), (1, 2)])
-}
-
 fn typed_space() -> GradedSpace<U1FusionRule> {
     GradedSpace::try_new(
         Arc::new(U1FusionRule),
         [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
         false,
     )
-    .unwrap()
-}
-
-fn erased_real(runtime: &Runtime, scale: f64) -> Tensor {
-    let space = erased_space();
-    Tensor::from_block_fn(runtime, [&space], [&space], |key, indices| {
-        real_fill(erased_charge(key), indices, scale)
-    })
-    .unwrap()
-}
-
-fn erased_complex(runtime: &Runtime, scale: f64) -> Tensor {
-    let space = erased_space();
-    Tensor::from_block_fn(runtime, [&space], [&space], |key, indices| {
-        Complex64::new(
-            real_fill(erased_charge(key), indices, scale),
-            imaginary_fill(indices, scale),
-        )
-    })
     .unwrap()
 }
 
@@ -152,7 +122,7 @@ fn assert_close(actual: f64, expected: f64, what: &str) {
 }
 
 #[test]
-fn general_exp_matches_the_tensorkit_oracle_on_both_facades() {
+fn general_exp_matches_the_tensorkit_oracle() {
     let runtime = runtime();
 
     // (scale, norm(t), norm(exp(t))) from the Julia session quoted above.
@@ -160,55 +130,31 @@ fn general_exp_matches_the_tensorkit_oracle_on_both_facades() {
         (1.0, 2.2220486043288972, 3.1532168621506798),
         (4.0, 8.8881944173155887, 15.692503963067274),
     ] {
-        let erased = erased_real(&runtime, scale);
         let typed = typed_real(&runtime, scale);
-        assert_close(
-            erased.norm().unwrap(),
-            input_norm,
-            &format!("f64 scale {scale} input fixture"),
-        );
         assert_close(
             typed.norm().unwrap(),
             input_norm,
             &format!("f64 scale {scale} typed input fixture"),
         );
 
-        let erased_exp = erased.exp().unwrap();
         let typed_exp = typed.exp().unwrap();
         assert_close(
-            erased_exp.norm().unwrap(),
+            typed_exp.norm().unwrap(),
             exponential_norm,
             &format!("f64 scale {scale} exp"),
-        );
-        assert_eq!(
-            typed_exp.data(),
-            erased_exp.data(),
-            "f64 scale {scale}: the two facades published different bytes"
         );
     }
 
     // c64, where the blocks are non-Hermitian in both parts.
-    let erased = erased_complex(&runtime, 1.0);
     let typed = typed_complex(&runtime, 1.0);
-    assert_close(
-        erased.norm().unwrap(),
-        2.5678298230217673,
-        "c64 input fixture",
-    );
     assert_close(
         typed.norm().unwrap(),
         2.5678298230217673,
         "c64 typed input fixture",
     );
 
-    let erased_exp = erased.exp().unwrap();
     let typed_exp = typed.exp().unwrap();
-    assert_close(erased_exp.norm().unwrap(), 3.1806015158373824, "c64 exp");
-    assert_eq!(
-        typed_exp.data(),
-        erased_exp.data_c64(),
-        "c64: the two facades published different bytes"
-    );
+    assert_close(typed_exp.norm().unwrap(), 3.1806015158373824, "c64 exp");
 }
 
 /// `A = [0 1e16; 1e-16 0]`, whose exponential is closed form:
@@ -225,8 +171,9 @@ fn general_exp_balances_a_badly_scaled_block_like_julia() {
     // evaluated directly. The exact answer is the same either way, so only the
     // balancing shows up in the values.
     let runtime = runtime();
-    let space = Space::u1([(0, 2)]);
-    let tensor = Tensor::from_block_fn(&runtime, [&space], [&space], |_, indices| {
+    let space =
+        GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)], false).unwrap();
+    let tensor = TensorMap::from_block_fn(&runtime, [&space], [&space], |_, indices| {
         BALANCE_FIXTURE[indices[0] + 2 * indices[1]]
     })
     .unwrap();
