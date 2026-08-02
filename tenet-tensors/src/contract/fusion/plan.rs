@@ -217,6 +217,49 @@ pub(crate) fn contracted_axis_order_candidates(
     candidates
 }
 
+fn select_best_scored_contract_candidate<F>(
+    axes: TensorContractSpec<'_>,
+    orientations: &[FusionContractOrientation],
+    mut score: F,
+) -> Result<ScoredFusionContractCandidate, OperationError>
+where
+    F: FnMut(
+        &ContractAxisOrderCandidate,
+        FusionContractOrientation,
+    ) -> Result<ScoredFusionContractCandidate, OperationError>,
+{
+    let candidates =
+        contracted_axis_order_candidates(axes.lhs_contracting_axes(), axes.rhs_contracting_axes());
+    let mut best = None;
+    let mut first_error = None;
+    for &orientation in orientations {
+        for candidate in &candidates {
+            let scored = match score(candidate, orientation) {
+                Ok(scored) => scored,
+                Err(error) => {
+                    // Candidate-local layout capability does not invalidate a
+                    // later stable candidate. Provider errors remain terminal
+                    // in callers that cannot classify them as local.
+                    first_error.get_or_insert(error);
+                    continue;
+                }
+            };
+            if best
+                .as_ref()
+                .is_none_or(|best: &ScoredFusionContractCandidate| {
+                    scored.facts.total_materialized_elements()
+                        < best.facts.total_materialized_elements()
+                })
+            {
+                best = Some(scored);
+            }
+        }
+    }
+    best.ok_or_else(|| {
+        first_error.expect("paired contraction always has at least one stable candidate")
+    })
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FusionContractPlan {
     orientation: FusionContractOrientation,
@@ -897,82 +940,49 @@ where
         + Copy,
 {
     validate_tensorcontract_fusion_plan_inputs(rule, dst, lhs, rhs, axes, primer)?;
-    let candidates =
-        contracted_axis_order_candidates(axes.lhs_contracting_axes(), axes.rhs_contracting_axes());
     let complete = matches!(dst.admission(), FusionSpaceAdmission::Complete(_))
         && matches!(lhs.admission(), FusionSpaceAdmission::Complete(_))
         && matches!(rhs.admission(), FusionSpaceAdmission::Complete(_));
 
-    let mut best = None;
-    let mut first_candidate_error = None;
-    for &orientation in orientations {
-        for candidate in &candidates {
-            let scored = (|| {
-                let candidate_axes = TensorContractSpec::new(
-                    candidate.lhs(),
-                    candidate.rhs(),
-                    axes.output_permutation(),
-                );
-                let plan = orient_fusion_contract_plan(
-                    compile_tensorcontract_fusion_plan_from_ranks(
-                        dst.nout(),
-                        dst.rank(),
-                        lhs.rank(),
-                        rhs.rank(),
-                        candidate_axes,
-                        lhs_source_conjugate,
-                        rhs_source_conjugate,
-                    )?,
-                    orientation,
-                );
-                if complete {
-                    let facts = score_complete_fusion_contract_candidate(
-                        rule,
-                        dst,
-                        lhs,
-                        rhs,
-                        candidate.clone(),
-                        &plan,
-                    )?;
-                    Ok(ScoredFusionContractCandidate { plan, facts })
-                } else {
-                    score_fusion_contract_candidate(
-                        rule,
-                        dst,
-                        lhs,
-                        rhs,
-                        candidate.clone(),
-                        plan,
-                        probe,
-                        primer,
-                    )
-                }
-            })();
-            let scored = match scored {
-                Ok(scored) => scored,
-                Err(error) => {
-                    // Why not fail immediately: candidate-local layout capability
-                    // does not invalidate a later stable contraction candidate.
-                    first_candidate_error.get_or_insert(error);
-                    continue;
-                }
-            };
-            if best
-                .as_ref()
-                .is_none_or(|best: &ScoredFusionContractCandidate| {
-                    scored.facts.total_materialized_elements()
-                        < best.facts.total_materialized_elements()
-                })
-            {
-                best = Some(scored);
-            }
+    select_best_scored_contract_candidate(axes, orientations, |candidate, orientation| {
+        let candidate_axes =
+            TensorContractSpec::new(candidate.lhs(), candidate.rhs(), axes.output_permutation());
+        let plan = orient_fusion_contract_plan(
+            compile_tensorcontract_fusion_plan_from_ranks(
+                dst.nout(),
+                dst.rank(),
+                lhs.rank(),
+                rhs.rank(),
+                candidate_axes,
+                lhs_source_conjugate,
+                rhs_source_conjugate,
+            )?,
+            orientation,
+        );
+        if complete {
+            let facts = score_complete_fusion_contract_candidate(
+                rule,
+                dst,
+                lhs,
+                rhs,
+                candidate.clone(),
+                &plan,
+            )?;
+            Ok(ScoredFusionContractCandidate { plan, facts })
+        } else {
+            score_fusion_contract_candidate(
+                rule,
+                dst,
+                lhs,
+                rhs,
+                candidate.clone(),
+                plan,
+                probe,
+                primer,
+            )
         }
-    }
-    match best {
-        Some(best) => Ok(best.plan),
-        None => Err(first_candidate_error
-            .expect("paired contraction always has at least the LHS-sorted candidate")),
-    }
+    })
+    .map(|best| best.plan)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1112,6 +1122,55 @@ fn fusion_contract_candidate_facts(
         output_materialized_elements,
         total_materialized_elements,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn select_complete_bosonic_contract_candidate(
+    dst_nout: usize,
+    output_rank: usize,
+    destination_required_len: usize,
+    lhs_nout: usize,
+    lhs_rank: usize,
+    lhs_required_len: usize,
+    rhs_nout: usize,
+    rhs_rank: usize,
+    rhs_required_len: usize,
+    axes: TensorContractSpec<'_>,
+) -> Result<(ContractAxisOrderCandidate, FusionContractOrientation), OperationError> {
+    select_best_scored_contract_candidate(axes, &CACHED_ORIENTATIONS, |candidate, orientation| {
+        let candidate_axes =
+            TensorContractSpec::new(candidate.lhs(), candidate.rhs(), axes.output_permutation());
+        let plan = orient_fusion_contract_plan(
+            compile_tensorcontract_fusion_plan_from_ranks(
+                dst_nout,
+                output_rank,
+                lhs_rank,
+                rhs_rank,
+                candidate_axes,
+                false,
+                false,
+            )?,
+            orientation,
+        );
+        let facts = fusion_contract_candidate_facts(
+            candidate.clone(),
+            &plan,
+            FusionContractMaterializationInputs {
+                lhs_exact_identity_borrowable: plan
+                    .lhs_transform()
+                    .is_identity_for(lhs_nout, lhs_rank - lhs_nout),
+                rhs_exact_identity_borrowable: plan
+                    .rhs_transform()
+                    .is_identity_for(rhs_nout, rhs_rank - rhs_nout),
+                core_right_requires_twist: false,
+                lhs_required_len: CandidateRequiredLen::Known(lhs_required_len),
+                rhs_required_len: CandidateRequiredLen::Known(rhs_required_len),
+                output_required_len: CandidateRequiredLen::Known(destination_required_len),
+            },
+        )?;
+        Ok(ScoredFusionContractCandidate { plan, facts })
+    })
+    .map(|best| (best.facts.axis_order, best.plan.orientation()))
 }
 
 fn score_complete_fusion_contract_candidate<R, S>(
@@ -1347,7 +1406,8 @@ mod tests {
         prepare_tensorcontract_fusion_plan_dyn_raw,
         prepare_tensorcontract_fusion_plan_dyn_raw_canonical,
         prepare_tensorcontract_fusion_plan_dyn_raw_with_axis_order_and_orientation,
-        reset_candidate_build_calls, reset_candidate_score_calls, FusionContractOrientation,
+        reset_candidate_build_calls, reset_candidate_score_calls,
+        select_complete_bosonic_contract_candidate, FusionContractOrientation,
     };
     use crate::contract::dynamic_space::{encoded_layout_primer, MetadataOutput, MetadataRequest};
     use crate::contract::{DynamicFusionMapSpace, FusionOperand};
@@ -1960,5 +2020,26 @@ mod tests {
         assert_eq!(facts[0].rhs_materialized_elements(), 2);
         assert_eq!(facts[0].output_materialized_elements(), 2);
         assert_eq!(facts[0].total_materialized_elements(), 4);
+    }
+
+    #[test]
+    fn complete_bosonic_selector_keeps_zero_materialization_candidate() {
+        let (candidate, orientation) = select_complete_bosonic_contract_candidate(
+            2,
+            3,
+            17,
+            2,
+            3,
+            11,
+            1,
+            2,
+            7,
+            TensorContractSpec::new(&[2], &[0], OutputAxisOrder::from_axes(&[0, 1, 2])),
+        )
+        .unwrap();
+
+        assert_eq!(candidate.lhs(), &[2]);
+        assert_eq!(candidate.rhs(), &[0]);
+        assert_eq!(orientation, FusionContractOrientation::LhsRhs);
     }
 }

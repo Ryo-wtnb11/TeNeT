@@ -169,11 +169,11 @@
 //!   [`crate::prelude::Tensor::exp`] carried a complexity-parity gap against
 //!   this one — it densified a diagonal payload where this facade has an
 //!   O(rank) arm — until issue #578 gave it the same arm.
-//! - **Outer multiplicity contractions and factorizations** remain outside this
-//!   leaf. Checked `Generic` providers use the ordinary `permute`, `braid`, and
-//!   `repartition` methods through their retained provider authority, but
-//!   planar `transpose`, contractions, and factorizations still retain their
-//!   multiplicity-free bounds.
+//! - **Outer multiplicity factorizations** remain outside this leaf. Checked
+//!   `Generic` providers use the ordinary tree transforms, tensor product, and
+//!   direct-owned `contract` / `compose` routes through retained provider
+//!   authority. Lazy adjoint construction and factorizations still retain
+//!   their multiplicity-free bounds.
 //! - **Device execution** is absent, not device representation: the body can
 //!   carry a non-host `S` through [`TensorMap<R, D, S>`], while public
 //!   construction and arithmetic deliberately remain on the default `Vec<D>`
@@ -229,9 +229,9 @@ use tenet_dense::{cuda_gemm_region_into, CudaDenseContext, CudaDenseStorage};
 #[cfg(feature = "cuda")]
 use tenet_operations::StorageGemm;
 use tenet_tensors::{
-    tree_transform_dyn_owned_checked_generic, BoundDynamicFusionMapSpace, BoundDynamicTensorRef,
-    DynamicFusionMapSpace, OutputAxisOrder, TensorContractSpec, TreeTransformOperation,
-    ValidatedDynamicFusionLayout,
+    tensorcontract_owned_checked_generic, tree_transform_dyn_owned_checked_generic,
+    BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace, OutputAxisOrder,
+    TensorContractSpec, TreeTransformOperation, ValidatedDynamicFusionLayout,
 };
 
 pub use tenet_core::SectorCodec;
@@ -939,6 +939,27 @@ where
     ) -> Result<TensorMap<R, D>, Self::FacadeError>;
 }
 
+/// Contraction execution selected by a provider-owned mode.
+#[doc(hidden)]
+pub trait TypedTensorContractDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn contract(
+        lhs: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
+
+    fn compose(
+        lhs: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
+}
+
 mod typed_admission_private {
     use super::{CheckedGenericAdmissionMode, MultiplicityFreeAdmissionMode};
 
@@ -1202,6 +1223,195 @@ where
             repr: owned_repr(TypedTensorBody::dense(space, data)),
         })
     }
+}
+
+impl<R, D> TypedTensorContractDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn contract(
+        lhs: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        contract_multiplicity_free(lhs, rhs, lhs_axes, rhs_axes, output_axes)
+    }
+
+    fn compose(
+        lhs: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        compose_multiplicity_free(lhs, rhs)
+    }
+}
+
+impl<R, D> TypedTensorContractDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericRigidSymbols<Scalar = f64>,
+    D: TensorScalar,
+{
+    fn contract(
+        lhs: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        let (TypedTensorRepr::Owned(lhs_body), TypedTensorRepr::Owned(rhs_body)) =
+            (&lhs.repr, &rhs.repr)
+        else {
+            return Err(Error::InvalidArgument(
+                "checked Generic contraction currently requires direct owned tensors".to_string(),
+            )
+            .into());
+        };
+        let (space, data) = tensorcontract_owned_checked_generic(
+            &lhs_body.space,
+            lhs_body.materialized_dense_data(),
+            &rhs_body.space,
+            rhs_body.materialized_dense_data(),
+            TensorContractSpec::new(lhs_axes, rhs_axes, OutputAxisOrder::from_axes(output_axes)),
+        )?;
+        Ok(TensorMap {
+            runtime: lhs.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(space, data)),
+        })
+    }
+
+    fn compose(
+        lhs: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        let lhs_axes = (lhs.codomain_rank()..lhs.rank()).collect::<Vec<_>>();
+        let rhs_axes = (0..rhs.codomain_rank()).collect::<Vec<_>>();
+        Self::contract(
+            lhs,
+            rhs,
+            &lhs_axes,
+            &rhs_axes,
+            &(0..lhs.codomain_rank() + rhs.domain_rank()).collect::<Vec<_>>(),
+        )
+    }
+}
+
+fn contract_multiplicity_free<R, D>(
+    lhs: &TensorMap<R, D>,
+    rhs: &TensorMap<R, D>,
+    lhs_axes: &[usize],
+    rhs_axes: &[usize],
+    output_axes: &[usize],
+) -> Result<TensorMap<R, D>, Error>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+{
+    if let Some(compact) = lhs.try_contract_diagonal(rhs, lhs_axes, rhs_axes, output_axes)? {
+        return Ok(compact);
+    }
+    let mut lease = lhs.runtime.lease_context()?;
+    let output_order = OutputAxisOrder::from_axes(output_axes);
+    let (space, data) =
+        if let (TypedTensorRepr::Owned(lhs_body), TypedTensorRepr::Owned(rhs_body)) =
+            (&lhs.repr, &rhs.repr)
+        {
+            tensorcontract_owned_multiplicity_free(
+                lease.context().multiplicity_free_lane::<D>(),
+                BoundDynamicTensorRef::try_new(
+                    &lhs_body.space,
+                    lhs_body.materialized_dense_data(),
+                )?,
+                BoundDynamicTensorRef::try_new(
+                    &rhs_body.space,
+                    rhs_body.materialized_dense_data(),
+                )?,
+                lhs_axes,
+                rhs_axes,
+                output_order,
+            )?
+        } else {
+            let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
+            let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
+            tensorcontract_oriented_multiplicity_free(
+                lease.context().multiplicity_free_lane::<D>(),
+                lhs.logical_space(),
+                lhs_operand,
+                lhs_data,
+                rhs.logical_space(),
+                rhs_operand,
+                rhs_data,
+                lhs_axes,
+                rhs_axes,
+                output_order,
+                OrientedContractionKind::Contract,
+            )?
+        };
+    Ok(TensorMap {
+        runtime: lhs.runtime.clone(),
+        repr: owned_repr(TypedTensorBody::dense(space, data)),
+    })
+}
+
+fn compose_multiplicity_free<R, D>(
+    lhs: &TensorMap<R, D>,
+    rhs: &TensorMap<R, D>,
+) -> Result<TensorMap<R, D>, Error>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+{
+    if let Some(compact) = lhs.compose_compact(rhs)? {
+        return Ok(compact);
+    }
+    let lhs_axes = (lhs.codomain_rank()..lhs.rank()).collect::<Vec<_>>();
+    let rhs_axes = (0..rhs.codomain_rank()).collect::<Vec<_>>();
+    let mut lease = lhs.runtime.lease_context()?;
+    let (space, data) =
+        if let (TypedTensorRepr::Owned(lhs_body), TypedTensorRepr::Owned(rhs_body)) =
+            (&lhs.repr, &rhs.repr)
+        {
+            tensorcompose_owned_multiplicity_free(
+                lease.context().multiplicity_free_lane::<D>(),
+                BoundDynamicTensorRef::try_new(
+                    &lhs_body.space,
+                    lhs_body.materialized_dense_data(),
+                )?,
+                BoundDynamicTensorRef::try_new(
+                    &rhs_body.space,
+                    rhs_body.materialized_dense_data(),
+                )?,
+                &lhs_axes,
+                &rhs_axes,
+            )?
+        } else {
+            let (lhs_operand, lhs_data) = lhs.fusion_operand_and_data();
+            let (rhs_operand, rhs_data) = rhs.fusion_operand_and_data();
+            tensorcontract_oriented_multiplicity_free(
+                lease.context().multiplicity_free_lane::<D>(),
+                lhs.logical_space(),
+                lhs_operand,
+                lhs_data,
+                rhs.logical_space(),
+                rhs_operand,
+                rhs_data,
+                &lhs_axes,
+                &rhs_axes,
+                OutputAxisOrder::identity(),
+                OrientedContractionKind::Compose,
+            )?
+        };
+    Ok(TensorMap {
+        runtime: lhs.runtime.clone(),
+        repr: owned_repr(TypedTensorBody::dense(space, data)),
+    })
 }
 
 type TypedFacadeError<R> =
@@ -5830,7 +6040,14 @@ where
             repr: owned_repr(TypedTensorBody::dense(space, data)),
         })
     }
+}
 
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorContractDispatch<R, D>,
+    D: TensorScalar,
+{
     /// Contracts `lhs_axes` of `self` with `rhs_axes` of `other` (pairwise, in
     /// list order) and lays the open axes out in `output_axes`.
     ///
@@ -5908,6 +6125,8 @@ where
     ///   providers report different rule identities. Those all come back from
     ///   the expert layer, which owns the rules; re-checking them here would
     ///   be a second copy free to drift.
+    ///   Checked Generic providers preserve provider and replay failures in
+    ///   [`GenericTensorError::Plan`] and currently accept direct-owned inputs.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -5937,55 +6156,22 @@ where
         lhs_axes: &[usize],
         rhs_axes: &[usize],
         output_axes: &[usize],
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, TypedFacadeError<R>> {
         // The one check the expert layer cannot make: it never sees the two
         // runtimes, and mixing execution state across them is a trust-boundary
         // violation rather than an algebra error. Mirrors the erased facade's
         // `check_same_world`. Dtype and placement need no arm here — `D` is a
         // type parameter and the typed facade is host-only.
         if !self.runtime.same_runtime(&other.runtime) {
-            return Err(Error::RuntimeMismatch);
+            return Err(Error::RuntimeMismatch.into());
         }
-        if let Some(compact) = self.try_contract_diagonal(other, lhs_axes, rhs_axes, output_axes)? {
-            return Ok(compact);
-        }
-        let mut lease = self.runtime.lease_context()?;
-        let output_order = OutputAxisOrder::from_axes(output_axes);
-        let (space, data) = if let (TypedTensorRepr::Owned(lhs), TypedTensorRepr::Owned(rhs)) =
-            (&self.repr, &other.repr)
-        {
-            tensorcontract_owned_multiplicity_free(
-                lease.context().multiplicity_free_lane::<D>(),
-                BoundDynamicTensorRef::try_new(&lhs.space, lhs.materialized_dense_data())?,
-                BoundDynamicTensorRef::try_new(&rhs.space, rhs.materialized_dense_data())?,
-                lhs_axes,
-                rhs_axes,
-                output_order,
-            )?
-        } else {
-            let (lhs, lhs_data) = self.fusion_operand_and_data();
-            let (rhs, rhs_data) = other.fusion_operand_and_data();
-            tensorcontract_oriented_multiplicity_free(
-                lease.context().multiplicity_free_lane::<D>(),
-                self.logical_space(),
-                lhs,
-                lhs_data,
-                other.logical_space(),
-                rhs,
-                rhs_data,
-                lhs_axes,
-                rhs_axes,
-                // Why `OutputAxisOrder` stays out of the signature: it is
-                // an expert-layer borrow type, and `&[usize]` says the same
-                // thing at the facade without a second public vocabulary.
-                output_order,
-                OrientedContractionKind::Contract,
-            )?
-        };
-        Ok(Self {
-            runtime: self.runtime.clone(),
-            repr: owned_repr(TypedTensorBody::dense(space, data)),
-        })
+        <R::Mode as TypedTensorContractDispatch<R, D>>::contract(
+            self,
+            other,
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+        )
     }
 
     /// Documented alias of [`Self::contract`]: same arguments, same
@@ -6025,10 +6211,16 @@ where
         lhs_axes: &[usize],
         rhs_axes: &[usize],
         output_axes: &[usize],
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, TypedFacadeError<R>> {
         self.contract(other, lhs_axes, rhs_axes, output_axes)
     }
+}
 
+impl<R, D> TensorMap<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+{
     /// TensorKit `deligneproduct`: embeds `self` as `(a, 𝟙)` and `other` as
     /// `(𝟙, b)` in the supplied ordered product category, then combines the
     /// embedded tensors with the F-only [`Self::otimes`] route.
@@ -6091,7 +6283,14 @@ where
         let right = right.commit()?;
         left.otimes(&right)
     }
+}
 
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorContractDispatch<R, D>,
+    D: TensorScalar,
+{
     /// Categorical composition of two tensor maps, TensorKit `A * B` / `mul!`:
     /// `self`'s whole domain is contracted against `other`'s whole codomain,
     /// leaving `self.codomain() <- other.domain()`.
@@ -6143,53 +6342,24 @@ where
     ///   when the two are not composable — mismatched ranks, legs that are not
     ///   mutually dual, or providers reporting different rule identities.
     ///   Those come back from the expert layer, which owns the rules.
+    ///   Checked Generic failures use [`GenericTensorError::Plan`].
     #[doc(alias = "mul")]
-    pub fn compose(&self, other: &Self) -> Result<Self, Error> {
+    pub fn compose(&self, other: &Self) -> Result<Self, TypedFacadeError<R>> {
         // Runtime first, exactly as `contract`: crossing runtimes is a
         // trust-boundary violation rather than an algebra error, and the
         // expert layer never sees the two runtimes.
         if !self.runtime.same_runtime(&other.runtime) {
-            return Err(Error::RuntimeMismatch);
+            return Err(Error::RuntimeMismatch.into());
         }
-        if let Some(compact) = self.compose_compact(other)? {
-            return Ok(compact);
-        }
-        let lhs_axes: Vec<usize> = (self.codomain_rank()..self.rank()).collect();
-        let rhs_axes: Vec<usize> = (0..other.codomain_rank()).collect();
-        let mut lease = self.runtime.lease_context()?;
-        let (space, data) = if let (TypedTensorRepr::Owned(lhs), TypedTensorRepr::Owned(rhs)) =
-            (&self.repr, &other.repr)
-        {
-            tensorcompose_owned_multiplicity_free(
-                lease.context().multiplicity_free_lane::<D>(),
-                BoundDynamicTensorRef::try_new(&lhs.space, lhs.materialized_dense_data())?,
-                BoundDynamicTensorRef::try_new(&rhs.space, rhs.materialized_dense_data())?,
-                &lhs_axes,
-                &rhs_axes,
-            )?
-        } else {
-            let (lhs, lhs_data) = self.fusion_operand_and_data();
-            let (rhs, rhs_data) = other.fusion_operand_and_data();
-            tensorcontract_oriented_multiplicity_free(
-                lease.context().multiplicity_free_lane::<D>(),
-                self.logical_space(),
-                lhs,
-                lhs_data,
-                other.logical_space(),
-                rhs,
-                rhs_data,
-                &lhs_axes,
-                &rhs_axes,
-                OutputAxisOrder::identity(),
-                OrientedContractionKind::Compose,
-            )?
-        };
-        Ok(Self {
-            runtime: self.runtime.clone(),
-            repr: owned_repr(TypedTensorBody::dense(space, data)),
-        })
+        <R::Mode as TypedTensorContractDispatch<R, D>>::compose(self, other)
     }
+}
 
+impl<R, D> TensorMap<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+{
     /// Integer tensor-map power (TensorKit `t ^ p`), using `O(log |p|)`
     /// compositions. Zero returns the multiplicative identity (staying compact
     /// for compact input); negative powers invert once.
