@@ -44,7 +44,7 @@ Let `d` = per-sector bond degeneracy (the diagonal's essential size, `O(d)`),
 | Path | TK | TeNeT status |
 |------|----|--------------|
 | `compose` / `U*S*Vh` (mul!/lmul!/rmul!) | `O(d·n)` scale, `O(d)` store | **compliant** — explicit block scaling (#72) |
-| general `contract` / `tensor!` with a diagonal | `O(d·n)` scale, `O(d)` store | **compliant** — explicit block scaling on the erased facade (#75), the provider-typed one (#584), and typed macro execution (#750) |
+| general `contract` / `tensor!` with a diagonal | `O(d·n)` scale, `O(d)` store | **compliant** — explicit provider-typed block scaling (#584) and typed macro execution (#750) |
 
 That row was a genuine order regression — densifying to `O(d²)` and GEMMing
 `O(d²·n)`, a factor `d` in both FLOPs and transient storage — and it was closed

@@ -1,12 +1,12 @@
 # Tutorial
 
 Everyday TeNeT code uses the **user layer**: one `use tenet::prelude::*;`
-import gives [`prelude::Runtime`], [`prelude::Space`], [`prelude::Tensor`],
-and [`prelude::Truncation`]. The provider-typed sibling [`typed::TensorMap`]
-adds the `tensor!` contraction frontend from the `tenet-network` crate; erased
-[`prelude::Tensor`] values use their explicit contraction methods. The expert layers ([`core`],
-[`operations`], [`dense`], [`matrixalgebra`]) stay available underneath —
-see the appendix at the end.
+import gives [`prelude::Runtime`], [`prelude::GradedSpace`],
+[`prelude::TensorMap`], built-in providers and [`prelude::Truncation`]. The
+provider, scalar and storage are type parameters; rank and sector content remain
+runtime values. The `tensor!` contraction frontend is provided by the
+`tenet-network` crate. Expert layers ([`core`], [`operations`], [`dense`],
+[`matrixalgebra`]) stay available underneath — see the appendix at the end.
 
 Every code block in this tutorial runs as a doctest, so it is guaranteed to
 compile and pass against the current API.
@@ -15,9 +15,9 @@ compile and pass against the current API.
 
 A [`prelude::Runtime`] is built once and then carried implicitly by every
 tensor created from it (it owns the contraction/tree-transform caches and
-the dense backend). A [`prelude::Space`] is a graded vector space for one
+the dense backend). A [`prelude::GradedSpace`] is a graded vector space for one
 tensor leg: `(sector, degeneracy)` pairs plus a dual flag, in TensorKit's
-`U1Space(-1 => 2, 0 => 3, 1 => 2)` style. A [`prelude::Tensor`] is a
+`U1Space(-1 => 2, 0 => 3, 1 => 2)` style. A [`prelude::TensorMap`] is a
 block-sparse symmetric tensor `codomain <- domain` with dynamic rank.
 
 ```rust
@@ -26,24 +26,39 @@ use tenet::prelude::*;
 let rt = Runtime::builder().build()?;
 
 // U(1): (charge, degeneracy) pairs. dim = 2 + 3 + 2.
-let v = Space::u1([(-1, 2), (0, 3), (1, 2)]);
-assert_eq!(v.dim(), 7);
-assert_eq!(v.dual().dual(), v);
+let v = GradedSpace::try_new_owned(
+    U1FusionRule,
+    [
+        (U1Irrep::new(-1), 2),
+        (U1Irrep::new(0), 3),
+        (U1Irrep::new(1), 2),
+    ],
+    false,
+)?;
+assert_eq!(v.dim()?, 7.0);
+assert_eq!(v.try_dual()?.try_dual()?, v);
 
 // SU(2): (twice_spin, degeneracy) pairs; dim is quantum-dimension
 // weighted: 2 * 1 (spin 0) + 2 * 2 (spin 1/2).
-let s = Space::su2([(0, 2), (1, 2)]).unwrap();
-assert_eq!(s.dim(), 6);
+let s = GradedSpace::try_new_owned(
+    SU2FusionRule,
+    [
+        (SU2Irrep::from_twice_spin(0), 2),
+        (SU2Irrep::from_twice_spin(1), 2),
+    ],
+    false,
+)?;
+assert_eq!(s.dim()?, 6.0);
 
 // Tensors on codomain <- domain leg lists.
-let a = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v, &v])?;
+let a = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v, &v], [&v, &v])?;
 assert_eq!((a.codomain_rank(), a.domain_rank(), a.rank()), (2, 2, 4));
-let z = Tensor::zeros(&rt, Dtype::F64, [&v], [&v])?;
+let z = TensorMap::<U1FusionRule, f64>::zeros(&rt, [&v], [&v])?;
 assert_eq!(z.norm()?, 0.0);
 # Ok::<(), Error>(())
 ```
 
-[`prelude::Tensor::from_block_fn`] fills every symmetry-allowed block
+[`prelude::TensorMap::from_block_fn`] fills every symmetry-allowed block
 element from a closure over the block key and block-local degeneracy
 indices:
 
@@ -51,60 +66,58 @@ indices:
 use tenet::prelude::*;
 
 let rt = Runtime::builder().build()?;
-let v = Space::z2([(0, 1), (1, 1)]);
+let v = GradedSpace::try_new_owned(
+    Z2FusionRule,
+    [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
+    false,
+)?;
 
 // A diagonal Z2 matrix: 2 on the even block, 3 on the odd block.
-let a = Tensor::from_block_fn(&rt, [&v], [&v], |key, _indices| match key {
-    BlockKey::FusionTree(key) if key.codomain_uncoupled()[0].id() == 0 => 2.0,
-    _ => 3.0,
-})?;
-let b = Tensor::from_block_fn(&rt, [&v], [&v], |key, _| match key {
-    BlockKey::FusionTree(key) if key.codomain_uncoupled()[0].id() == 0 => 5.0,
-    _ => 7.0,
-})?;
+let a: TensorMap<Z2FusionRule, f64> =
+    TensorMap::from_block_fn(&rt, [&v], [&v], |trees, _| {
+        if *trees.coupled() == Z2Irrep::EVEN { 2.0 } else { 3.0 }
+    })?;
+let b: TensorMap<Z2FusionRule, f64> =
+    TensorMap::from_block_fn(&rt, [&v], [&v], |trees, _| {
+        if *trees.coupled() == Z2Irrep::EVEN { 5.0 } else { 7.0 }
+    })?;
 assert_eq!(a.compose(&b)?.data(), &[10.0, 21.0]);
 # Ok::<(), Error>(())
 ```
 
 ### Scalar dtype
 
-User-layer tensors store either `f64` or `c64`, fixed at construction by
-the [`prelude::Dtype`] token: `Tensor::zeros(&rt, Dtype::F64, ...)`,
-`Tensor::rand(&rt, Dtype::C64, ...)`, and so on (TensorKit's
-`rand(ComplexF64, W ← V)` leading type argument).
-[`prelude::Tensor::from_block_fn`] needs no token — the dtype follows the
-fill closure's return type (`f64` or [`prelude::Complex64`]). TeNeT does
-not promote mixed dtypes implicitly: widen explicitly with
-[`prelude::Tensor::to_c64`].
-
-Scalar results ([`prelude::Tensor::scalar`], [`prelude::Tensor::inner`],
-[`prelude::Tensor::tr`]) return a [`prelude::Scalar`] whose variant matches
-the tensor's dtype — real tensors give `Scalar::F64`, so no `.re` noise on
-real code paths; use `re()` / `im()` / `try_f64()` / `to_c64()` to unwrap.
+The scalar is the second type parameter: `TensorMap<R, f64>` or
+`TensorMap<R, Complex64>`, analogous to TensorKit's leading scalar argument.
+[`prelude::TensorMap::from_block_fn`] can infer it from the closure. Mixed
+scalar operations are rejected at compile time; widen explicitly with
+[`prelude::TensorMap::to_c64`]. Scalar-returning methods return `D` directly.
 
 ```rust
 use tenet::prelude::*;
 
 let rt = Runtime::builder().build()?;
-let v = Space::u1([(-1, 1), (0, 2), (1, 1)]);
+let v = GradedSpace::try_new_owned(
+    U1FusionRule,
+    [
+        (U1Irrep::new(-1), 1),
+        (U1Irrep::new(0), 2),
+        (U1Irrep::new(1), 1),
+    ],
+    false,
+)?;
 
-let re = Tensor::rand(&rt, Dtype::F64, [&v], [&v])?;
-let cx = Tensor::from_block_fn(&rt, [&v], [&v], |_, indices| {
+let re = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&v])?;
+let cx: TensorMap<U1FusionRule, Complex64> = TensorMap::from_block_fn(&rt, [&v], [&v], |_, indices| {
     Complex64::new(indices[0] as f64, -(indices[1] as f64))
 })?;
-assert_eq!(re.dtype(), Dtype::F64);
-assert_eq!(cx.dtype(), Dtype::C64);
 
-// inner on f64 tensors is Scalar::F64: exactly real, try_f64() succeeds.
-let inner = re.inner(&re)?.try_f64()?;
+let inner = re.inner(&re)?;
 assert!((inner - re.norm()?.powi(2)).abs() <= 1e-10 * (1.0 + inner));
 
-// inner on c64 tensors is Scalar::C64.
 let cc = cx.inner(&cx)?;
-assert!(matches!(cc, Scalar::C64(_)));
-assert!(cc.im().abs() <= 1e-12 * (1.0 + cc.re()));
+assert!(cc.im.abs() <= 1e-12 * (1.0 + cc.re));
 
-assert!(matches!(re.compose(&cx), Err(Error::DtypeMismatch)));
 assert!(re.to_c64().compose(&cx).is_ok());
 # Ok::<(), Error>(())
 ```
@@ -131,11 +144,10 @@ domain leg built from the same `v`. To contract two same-side legs
 See [`mathematics`] for the full tensor-map convention, dual, same-side
 contraction, and TensorKit-style `flip` conventions.
 
-Space or rule mismatches in the erased facade are **runtime** typed errors ([`prelude::Error`]:
-`RuleMismatch`, `RuntimeMismatch`, `InvalidArgument`, or a bubbled-up
-expert-layer error). A `tensor!` invocation instead requires homogeneous
-provider, scalar, and storage types; those mismatches and label mistakes
-(dangling or repeated labels) are **compile-time** errors.
+Provider, scalar, and storage mismatches are compile-time type errors. Separate
+provider allocations of the same type are admitted only when their semantic
+rule identities agree. Runtime and space mismatches return [`prelude::Error`].
+`tensor!` label mistakes (dangling or repeated labels) are compile-time errors.
 
 ```rust
 use tenet::prelude::*;
@@ -143,23 +155,24 @@ use tenet::prelude::*;
 let rt = Runtime::builder().build()?;
 // Works for any charge set, including ones that are not symmetric under
 // negation (a hardcore boson).
-let v = Space::u1([(0, 2), (1, 1)]);
+let v = GradedSpace::try_new_owned(
+    U1FusionRule,
+    [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+    false,
+)?;
 
 // Codomain-vs-domain legs of the same Space contract directly...
-let a = Tensor::rand(&rt, Dtype::F64, [&v], [&v])?;
+let a = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&v])?;
 let _ = a.compose(&a)?;
 
 // ...domain-vs-domain legs need one side built from the dual space.
-let b = Tensor::rand(&rt, Dtype::F64, [&v], [&v.dual()])?;
-let _ = a.contract(&b, &[1], &[1])?;
-
-// Mixing fusion rules is a typed runtime error.
-let z = Tensor::rand(&rt, Dtype::F64, [&Space::z2([(0, 1), (1, 1)])], [&Space::z2([(0, 1), (1, 1)])])?;
-assert!(matches!(a.compose(&z), Err(Error::RuleMismatch)));
+let dual = v.try_dual()?;
+let b = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&dual])?;
+let _ = a.contract(&b, &[1], &[1], &[0, 1])?;
 
 // So is mixing runtimes.
 let rt2 = Runtime::builder().build()?;
-let c = Tensor::rand(&rt2, Dtype::F64, [&v], [&v])?;
+let c = TensorMap::<U1FusionRule, f64>::rand(&rt2, [&v], [&v])?;
 assert!(matches!(a.compose(&c), Err(Error::RuntimeMismatch)));
 # Ok::<(), Error>(())
 ```
@@ -169,10 +182,10 @@ assert!(matches!(a.compose(&c), Err(Error::RuntimeMismatch)));
 ### `tensor!` — the way to contract
 
 The `tensor!` macro (crate `tenet-network`) is @tensor-style index
-notation over homogeneous [`typed::TensorMap`] operands. The output signature
+notation over homogeneous [`prelude::TensorMap`] operands. The output signature
 comes first: `[codomain; domain]`; the `;`
 is optional (`[a, b]` = all-codomain output) and `[]` is a rank-0 (scalar)
-output, read out with [`typed::TensorMap::scalar`]. `conj(x)` marks an
+output, read out with [`prelude::TensorMap::scalar`]. `conj(x)` marks an
 adjoint operand. A label appearing on two operands is contracted; a label
 appearing once must be listed in the output — violations are compile
 errors. With three or more operands the pairwise order is chosen
@@ -218,15 +231,12 @@ automatically by a greedy planner. There are no einsum strings anywhere.
 </div>
 
 ```rust
-use std::sync::Arc;
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::Error;
-use tenet::typed::{GradedSpace, Runtime, TensorMap};
+use tenet::prelude::*;
 use tenet_network::tensor;
 
 let rt = Runtime::builder().build()?;
-let v = GradedSpace::try_new(
-    Arc::new(U1FusionRule),
+let v = GradedSpace::try_new_owned(
+    U1FusionRule,
     [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
     false,
 )?;
@@ -258,9 +268,7 @@ Label errors do not survive to runtime — this does not compile because `k`
 and `j` each appear once without being output labels:
 
 ```rust,compile_fail
-use tenet::core::U1FusionRule;
-use tenet::prelude::Error;
-use tenet::typed::TensorMap;
+use tenet::prelude::{Error, TensorMap, U1FusionRule};
 use tenet_network::tensor;
 
 fn wrong(
@@ -280,20 +288,19 @@ see the tensor's shape.
 `tensor!` lowers to pairwise steps over the typed explicit method API, which is
 available directly when you want to spell the axes:
 
-- [`typed::TensorMap::compose`] — categorical composition (TensorKit
+- [`prelude::TensorMap::compose`] — categorical composition (TensorKit
   `A * B` / `mul!`), also spelled `&a * &b`. **No** fermionic supertrace
   twist on dual composed legs.
-- [`typed::TensorMap::contract`] — contract arbitrary axis pairs (TensorKit
-  `tensorcontract!`); output is `a`'s open axes (ascending) as codomain,
-  `b`'s open axes as domain. Like `tensor!`, this **twists** dual
+- [`prelude::TensorMap::contract`] — contract arbitrary axis pairs with an
+  explicit output order (TensorKit `tensorcontract!` and its `pAB`). Like
+  `tensor!`, this **twists** dual
   contracted legs on fermionic rules — bosonic results are identical to
   `compose`, fermionic ones can differ by signs.
-- [`typed::TensorMap::contract_ordered`] — same with an explicit output
-  axis order (TensorKit's `pAB`).
-- [`typed::TensorMap::permute`] / [`typed::TensorMap::braid`] /
-  [`typed::TensorMap::transpose`] — TensorKit's leg re-arrangements
+- [`prelude::TensorMap::contract_ordered`] — documented alias of `contract`.
+- [`prelude::TensorMap::permute`] / [`prelude::TensorMap::braid`] /
+  [`prelude::TensorMap::transpose`] — TensorKit's leg re-arrangements
   (symmetric braiding / explicit braid levels / planar transpose).
-- [`prelude::Tensor::adjoint`] — dagger: swaps codomain and domain.
+- [`prelude::TensorMap::adjoint`] — dagger: swaps codomain and domain.
 
 Axes are zero-based and flat: codomain axes first, then domain axes.
 
@@ -301,14 +308,18 @@ Axes are zero-based and flat: codomain axes first, then domain axes.
 use tenet::prelude::*;
 
 let rt = Runtime::builder().build()?;
-let v = Space::u1([(-1, 1), (0, 2), (1, 1)]);
-let a = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v, &v])?;
-let b = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v, &v])?;
+let v = GradedSpace::try_new_owned(
+    U1FusionRule,
+    [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
+    false,
+)?;
+let a = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v, &v], [&v, &v])?;
+let b = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v, &v], [&v, &v])?;
 
 let c1 = a.compose(&b)?;
-let c2 = a.contract(&b, &[2, 3], &[0, 1])?;
+let c2 = a.contract(&b, &[2, 3], &[0, 1], &[0, 1, 2, 3])?;
 assert_eq!(c1.data(), c2.data());
-let _c3 = a.contract_ordered(&b, &[2, 3], &[0, 1], &[1, 0, 2, 3])?;
+let _c3 = a.contract(&b, &[2, 3], &[0, 1], &[1, 0, 2, 3])?;
 
 let p = c1.permute(&[0, 2], &[1, 3])?;
 assert!((p.norm()? - c1.norm()?).abs() <= 1e-10 * (1.0 + c1.norm()?));
@@ -324,41 +335,45 @@ assert_eq!((h.codomain_rank(), h.domain_rank()), (2, 2));
 ### Vector interface
 
 The VectorInterface / LinearAlgebra surface mirrors TensorKit:
-[`prelude::Tensor::norm`], [`prelude::Tensor::normalize`],
-[`prelude::Tensor::inner`] / [`prelude::Tensor::dot`],
-[`prelude::Tensor::scale`], [`prelude::Tensor::add`] (the `α·self + β·other`
+[`prelude::TensorMap::norm`], [`prelude::TensorMap::normalize`],
+[`prelude::TensorMap::inner`] / [`prelude::TensorMap::dot`],
+[`prelude::TensorMap::scale`], [`prelude::TensorMap::add`] (the `α·self + β·other`
 combination, covering TensorKit's `axpy!`/`axpby!`),
-[`prelude::Tensor::tr`], and [`prelude::Tensor::zeros_like`] (TensorKit
+[`prelude::TensorMap::tr`], and [`prelude::TensorMap::zeros_like`] (TensorKit
 `zerovector`). Structural predicates match TensorKit's
 `ishermitian`/`isantihermitian`/`isisometric`/`isunitary`/`isposdef`, with the
-`(t ± t†)/2` projectors [`prelude::Tensor::project_hermitian`] /
-[`prelude::Tensor::project_antihermitian`].
+`(t ± t†)/2` projectors [`prelude::TensorMap::project_hermitian`] /
+[`prelude::TensorMap::project_antihermitian`].
 
 ```rust
 use tenet::prelude::*;
 
 let rt = Runtime::builder().build()?;
-let v = Space::u1([(-1, 1), (0, 2), (1, 1)]);
-let a = Tensor::rand(&rt, Dtype::F64, [&v], [&v])?;
-let b = Tensor::rand(&rt, Dtype::F64, [&v], [&v])?;
+let v = GradedSpace::try_new_owned(
+    U1FusionRule,
+    [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
+    false,
+)?;
+let a = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&v])?;
+let b = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&v])?;
 
 // α·a + β·b (TensorKit axpby), scaling, and unit normalization.
 let _diff = a.add(&b, 1.0, -1.0)?;    // a - b
-let _scaled = a.scale(2.0)?;
+let _scaled = a.scale(2.0);
 let unit = a.normalize()?;
 assert!((unit.norm()? - 1.0).abs() <= 1e-12);
 
 // inner / dot agree, and norm² == <a, a>.
-let ip = a.inner(&a)?.try_f64()?;
+let ip = a.inner(&a)?;
 assert!((ip - a.norm()?.powi(2)).abs() <= 1e-10 * (1.0 + ip));
 
 // A same-shape zero (zerovector) and the trace of an endomorphism.
-let zero = a.zeros_like()?;
+let zero = a.zeros_like();
 assert_eq!(zero.norm()?, 0.0);
 let _trace = a.tr()?;
 
 // Structural predicates: the identity is Hermitian, unitary, positive definite.
-let id = Tensor::id(&rt, Dtype::F64, [&v])?;
+let id = TensorMap::<U1FusionRule, f64>::id(&rt, [&v])?;
 assert!(id.is_hermitian(1e-12)? && id.is_unitary(1e-12)? && id.is_posdef(1e-12)?);
 # Ok::<(), Error>(())
 ```
@@ -366,19 +381,23 @@ assert!(id.is_hermitian(1e-12)? && id.is_unitary(1e-12)? && id.is_posdef(1e-12)?
 ### Index operations
 
 Leg rearrangements follow TensorKit's names. Axis lists are flat and
-zero-based (codomain axes first). [`prelude::Tensor::permute`] chooses new
-codomain/domain axis lists; [`prelude::Tensor::repartition`] re-splits the
+zero-based (codomain axes first). [`prelude::TensorMap::permute`] chooses new
+codomain/domain axis lists; [`prelude::TensorMap::repartition`] re-splits the
 legs at a codomain count while keeping their order (TensorKit `repartition`);
-[`prelude::Tensor::transpose`] is the planar transpose,
-[`prelude::Tensor::adjoint`] the dagger, and
-[`prelude::Tensor::twist`] / [`prelude::Tensor::flip`] act on chosen legs.
+[`prelude::TensorMap::transpose`] is the planar transpose,
+[`prelude::TensorMap::adjoint`] the dagger, and
+[`prelude::TensorMap::twist`] / [`prelude::TensorMap::flip`] act on chosen legs.
 
 ```rust
 use tenet::prelude::*;
 
 let rt = Runtime::builder().build()?;
-let v = Space::u1([(-1, 1), (0, 2), (1, 1)]);
-let a = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v, &v])?;
+let v = GradedSpace::try_new_owned(
+    U1FusionRule,
+    [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
+    false,
+)?;
+let a = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v, &v], [&v, &v])?;
 
 // permute: new codomain axes | new domain axes.
 let p = a.permute(&[0, 2], &[1, 3])?;
@@ -400,33 +419,46 @@ let _flipped = a.flip(&[0])?;
 
 ### Sectors and space algebra
 
-A [`prelude::Space`] carries `(sector, degeneracy)` content queried through
-[`prelude::Tensor`]-free space methods: [`prelude::Space::sectors`],
-[`prelude::Space::degeneracy`] (TensorKit `dim(V, c)`),
-[`prelude::Space::has_sector`] (TensorKit `hassector`),
-[`prelude::Space::fuse`] (`⊗`), and [`prelude::Space::oplus`] (`⊕`).
-SU(N) spaces use the provider-typed API so Dynkin labels are not erased into
-the closed [`prelude::SectorLabel`] enum.
+A [`prelude::GradedSpace`] carries provider-labelled `(sector, degeneracy)`
+content queried through [`prelude::GradedSpace::sectors`],
+[`prelude::GradedSpace::degeneracy`] (TensorKit `dim(V, c)`),
+[`prelude::GradedSpace::has_sector`] (TensorKit `hassector`),
+[`prelude::GradedSpace::fuse`] (`⊗`), and [`prelude::GradedSpace::oplus`] (`⊕`).
 
 ```rust
 use tenet::prelude::*;
 
-let v = Space::u1([(-1, 2), (0, 3), (1, 2)]);
+let v = GradedSpace::try_new_owned(
+    U1FusionRule,
+    [(-1, 2), (0, 3), (1, 2)].map(|(q, n)| (U1Irrep::new(q), n)),
+    false,
+)?;
 
 // Enumerate sectors and query membership / degeneracy.
-assert_eq!(v.sectors().len(), 3);
-assert_eq!(v.degeneracy(SectorLabel::U1(0)), Some(3));
-assert!(v.has_sector(SectorLabel::U1(1)));
-assert!(!v.has_sector(SectorLabel::U1(9)));
+assert_eq!(v.sectors()?.len(), 3);
+assert_eq!(v.degeneracy(&U1Irrep::new(0))?, 3);
+assert!(v.has_sector(&U1Irrep::new(1))?);
+assert!(!v.has_sector(&U1Irrep::new(9))?);
 
 // fuse (⊗) collapses two legs; oplus (⊕) sums per-sector degeneracies.
-let w = Space::u1([(0, 1), (1, 1)]);
-assert_eq!(v.fuse(&w)?.dim(), v.dim() * w.dim());
-assert_eq!(v.oplus(&w)?.degeneracy(SectorLabel::U1(0)), Some(3 + 1));
+let w = GradedSpace::try_new_owned(
+    U1FusionRule,
+    [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
+    false,
+)?;
+assert_eq!(v.fuse(&w)?.dim()?, v.dim()? * w.dim()?);
+assert_eq!(v.oplus(&w)?.degeneracy(&U1Irrep::new(0))?, 3 + 1);
 
 // SU(2) dims are quantum-dimension weighted.
-let s = Space::su2([(0, 1), (1, 1)]).unwrap();          // spin 0 ⊕ spin 1/2
-assert_eq!(s.dim(), 1 + 2);
+let s = GradedSpace::try_new_owned(
+    SU2FusionRule,
+    [
+        (SU2Irrep::from_twice_spin(0), 1),
+        (SU2Irrep::from_twice_spin(1), 1),
+    ],
+    false,
+)?;
+assert_eq!(s.dim()?, 3.0);
 # Ok::<(), Error>(())
 ```
 
@@ -439,24 +471,24 @@ TeNeT name, and the rationale for anything spelled or gated differently — see
 All decomposition names follow TensorKit 0.17 / MatrixAlgebraKit, applied
 per coupled sector across the codomain | domain split:
 
-- [`prelude::Tensor::svd_trunc`] — truncated SVD; see below.
-- [`prelude::Tensor::svd_compact`] / [`prelude::Tensor::svd_full`] /
-  [`prelude::Tensor::svd_vals`].
+- [`prelude::TensorMap::svd_trunc`] — truncated SVD; see below.
+- [`prelude::TensorMap::svd_compact`] / [`prelude::TensorMap::svd_full`] /
+  [`prelude::TensorMap::svd_vals`].
 
-- [`prelude::Tensor::qr_compact`] / [`prelude::Tensor::qr_full`],
-  [`prelude::Tensor::lq_compact`] / [`prelude::Tensor::lq_full`].
-- [`prelude::Tensor::left_orth`] / [`prelude::Tensor::right_orth`] —
+- [`prelude::TensorMap::qr_compact`] / [`prelude::TensorMap::qr_full`],
+  [`prelude::TensorMap::lq_compact`] / [`prelude::TensorMap::lq_full`].
+- [`prelude::TensorMap::left_orth`] / [`prelude::TensorMap::right_orth`] —
   TensorKit's default kinds (QR / LQ), including the positive-diagonal
   gauge (`positive = true`, MatrixAlgebraKit's default).
-- [`prelude::Tensor::left_null`] / [`prelude::Tensor::right_null`],
-  [`prelude::Tensor::left_polar`] / [`prelude::Tensor::right_polar`].
-- [`prelude::Tensor::eigh_full`] / [`prelude::Tensor::eigh_trunc`] /
-  [`prelude::Tensor::eigh_vals`] — Hermitian eigendecomposition.
-- [`prelude::Tensor::eig_full`] / [`prelude::Tensor::eig_trunc`] /
-  [`prelude::Tensor::eig_vals`] — general eigendecomposition; outputs are
+- [`prelude::TensorMap::left_null`] / [`prelude::TensorMap::right_null`],
+  [`prelude::TensorMap::left_polar`] / [`prelude::TensorMap::right_polar`].
+- [`prelude::TensorMap::eigh_full`] / [`prelude::TensorMap::eigh_trunc`] /
+  [`prelude::TensorMap::eigh_vals`] — Hermitian eigendecomposition.
+- [`prelude::TensorMap::eig_full`] / [`prelude::TensorMap::eig_trunc`] /
+  [`prelude::TensorMap::eig_vals`] — general eigendecomposition; outputs are
   `c64` even for real input.
-- [`prelude::Tensor::exp`] / [`prelude::Tensor::inv`] /
-  [`prelude::Tensor::pinv`] — matrix functions of endomorphisms.
+- [`prelude::TensorMap::exp`] / [`prelude::TensorMap::inv`] /
+  [`prelude::TensorMap::pinv`] — matrix functions of endomorphisms.
 
 Hermitian `eigh_*` keeps the input dtype and reports real eigenvalues.
 General `eig_*` is complex-valued by construction, so the returned
@@ -468,8 +500,8 @@ Truncation is controlled by [`prelude::Truncation`]: `Full`,
 `relative_error`, and `and` (intersection of rules). All bounds and reported
 errors are
 **quantum-dimension weighted**: `Rank(n)` bounds the weighted kept bond
-dimension, and the `error` field of [`prelude::SvdTrunc`] /
-[`prelude::EighTrunc`] is the weighted 2-norm of everything discarded, so
+dimension, and the `error` field of [`typed::SvdTrunc`] /
+[`typed::EighTrunc`] is the weighted 2-norm of everything discarded, so
 the reconstruction distance equals the reported error in the weighted
 Frobenius norm.
 
@@ -504,8 +536,12 @@ against the actual reconstruction distance:
 use tenet::prelude::*;
 
 let rt = Runtime::builder().build()?;
-let v = Space::u1([(-1, 1), (0, 2), (1, 1)]);
-let t = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v, &v])?;
+let v = GradedSpace::try_new_owned(
+    U1FusionRule,
+    [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
+    false,
+)?;
+let t = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v, &v], [&v, &v])?;
 
 // Truncated SVD across the codomain | domain split.
 let svd = t.svd_trunc(&Truncation::rank(6))?;
@@ -526,16 +562,16 @@ let qr = q.compose(&r)?;
 let diff = qr.add(&t, 1.0, -1.0)?.norm()?;
 assert!(diff <= 1e-10 * (1.0 + t.norm()?));
 
-// General eigendecomposition is c64 even for real input.
+// General eigendecomposition is complex-valued even for real input.
 let (d, w) = t.eig_full()?;
-assert_eq!(d.dtype(), Dtype::C64);
-assert_eq!(w.dtype(), Dtype::C64);
+let _: &TensorMap<U1FusionRule, Complex64> = &d;
+let _: &TensorMap<U1FusionRule, Complex64> = &w;
 
-// Hermitian eigendecomposition keeps the real dtype.
+// Hermitian eigendecomposition keeps the real scalar type.
 let h = t.add(&t.adjoint()?, 0.5, 0.5)?;
 let (evals, vecs) = h.eigh_full()?;
-assert_eq!(evals.dtype(), Dtype::F64);
-assert_eq!(vecs.dtype(), Dtype::F64);
+let _: &TensorMap<U1FusionRule, f64> = &evals;
+let _: &TensorMap<U1FusionRule, f64> = &vecs;
 # Ok::<(), Error>(())
 ```
 
@@ -604,22 +640,19 @@ bond back with `svd_trunc`.
 </div>
 
 ```rust
-use std::sync::Arc;
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::{Error, Truncation};
-use tenet::typed::{GradedSpace, Runtime, TensorMap};
+use tenet::prelude::*;
 use tenet_network::tensor;
 
 let rt = Runtime::builder().build()?;
 
 // Physical leg: spin-1/2 with U(1) Sz charges +-1. Virtual bond legs.
-let p = GradedSpace::try_new(
-    Arc::new(U1FusionRule),
+let p = GradedSpace::try_new_owned(
+    U1FusionRule,
     [(-1, 1), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
     false,
 )?;
-let v = GradedSpace::try_new(
-    Arc::new(U1FusionRule),
+let v = GradedSpace::try_new_owned(
+    U1FusionRule,
     [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
     false,
 )?;
@@ -658,7 +691,8 @@ the stored bond weights absorbed and re-extracted around each gate.
 
 ## 6. Under the Hood: the Expert Layers
 
-The user layer is a thin, rule-erased face over four expert modules:
+The provider-typed user layer delegates storage/layout work to four expert
+modules:
 
 - [`core`] — structural data layer: sectors and fusion rules
   ([`core::SectorLeg`], `U1FusionRule`, ...), fusion-tree spaces
@@ -680,10 +714,10 @@ The user layer is a thin, rule-erased face over four expert modules:
 - `tenet-network` (separate crate) — the `tensor!` macro, the label
   planner (`NetworkIR`, greedy and optional `opt-einsum-path`
   optimizers, slicing types), and the pairwise executor over homogeneous
-  [`typed::TensorMap`] operands.
+  [`prelude::TensorMap`] operands.
 
 Storage is column-major inside each dense block; symmetric tensors use the
-TensorKit-equivalent **coupled-sector matrix layout** ([`prelude::Tensor::data`]
+TensorKit-equivalent **coupled-sector matrix layout** ([`prelude::TensorMap::data`]
 exposes the flat storage). Axis numbers are zero-based, codomain axes
 first.
 
@@ -728,26 +762,25 @@ for broader unstable dynamic workflows.
 
 | TensorKit idea | TeNeT user layer | expert-layer internals |
 | --- | --- | --- |
-| `TensorMap` | [`prelude::Tensor`] | [`core::TensorMap`], [`operations::DynamicFusionMapSpace`] + flat data |
-| `U1Space(-1 => 2, ...)`, `Vect[...]` | [`prelude::Space`] (`u1`/`z2`/`fz2`/`su2`/`product`) | [`core::SectorLeg`] + per-sector degeneracies |
-| `V'` (dual space) | [`prelude::Space::dual`] | dual flag + dualized sectors on [`core::SectorLeg`] |
-| `@tensor` | `tensor!` over [`typed::TensorMap`] (crate `tenet-network`) | planner IR -> pairwise [`operations::tensorcontract_fusion_into`] |
-| `permute` / `braid` / `transpose` | [`prelude::Tensor`] methods of the same names | [`operations::permute_into`] / `braid_into` / `transpose_into` |
-| SVD / QR / LQ / orthogonalization / eigensolvers | [`prelude::Tensor`] methods with the TensorKit 0.17 names | curated [`matrixalgebra::svd_compact`] typed workflow; broader unstable APIs are in `tenet-matrixalgebra` |
-| `dot` / `norm` / `axpby` | [`prelude::Tensor::inner`] / `norm` / `add` / `scale` | weighted block inner products |
+| `TensorMap` | [`prelude::TensorMap`] | [`core::TensorMap`], [`operations::DynamicFusionMapSpace`] + flat data |
+| `U1Space(-1 => 2, ...)`, `Vect[...]` | [`prelude::GradedSpace`] with a concrete provider | [`core::SectorLeg`] + per-sector degeneracies |
+| `V'` (dual space) | [`prelude::GradedSpace::try_dual`] | dual flag + dualized sectors on [`core::SectorLeg`] |
+| `@tensor` | `tensor!` over [`prelude::TensorMap`] (crate `tenet-network`) | planner IR -> pairwise [`operations::tensorcontract_fusion_into`] |
+| `permute` / `braid` / `transpose` | [`prelude::TensorMap`] methods of the same names | [`operations::permute_into`] / `braid_into` / `transpose_into` |
+| SVD / QR / LQ / orthogonalization / eigensolvers | [`prelude::TensorMap`] methods with the TensorKit 0.17 names | curated [`matrixalgebra::svd_compact`] typed workflow; broader unstable APIs are in `tenet-matrixalgebra` |
+| `dot` / `norm` / `axpby` | [`prelude::TensorMap::inner`] / `norm` / `add` / `scale` | weighted block inner products |
 | implicit global caches | [`prelude::Runtime`] | [`operations::TensorContractFusionExecutionContext`], tree-transform caches, dense executor |
-| hom space / fusion-tree basis | (implicit in `Tensor` construction) | [`core::FusionTreeHomSpace`], [`core::FusionTensorMapSpace`] |
+| hom space / fusion-tree basis | (implicit in `TensorMap` construction) | [`core::FusionTreeHomSpace`], [`core::FusionTensorMapSpace`] |
 
 Two details when translating Julia examples: Julia is one-based, TeNeT
 axis lists are zero-based; and TensorKit hides flat block storage behind
-array syntax, while [`prelude::Tensor::data`] shows it directly.
+array syntax, while [`prelude::TensorMap::data`] shows it directly.
 
 For the per-export lookup table (every user-facing TensorKit 0.17 function,
 its TeNeT name, and why anything differs), see `docs/tk_api_parity.md`. For the
 internal naming correspondences and storage invariants, see
-`docs/tensorkit_compatibility_table.md`; for the user-layer design decisions
-(why `Runtime`, why no einsum strings, why no index objects), see
-`docs/user_api_design.md`.
+`docs/tensorkit_compatibility_table.md`; the current public-cutover rationale is
+recorded in issue #727.
 
 ## 7. Runtime, backends, and performance
 
@@ -780,8 +813,12 @@ let rt = Runtime::builder()
     .dense_threads(4)
     .plan_cache(PlanCacheConfig::default())
     .build()?;
-let v = Space::u1([(0, 2), (1, 1)]);
-let a = Tensor::rand(&rt, Dtype::F64, [&v], [&v])?;
+let v = GradedSpace::try_new_owned(
+    U1FusionRule,
+    [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+    false,
+)?;
+let a = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&v])?;
 assert!(a.runtime().shares_state_with(&rt));
 # Ok::<(), Error>(())
 ```
@@ -792,7 +829,7 @@ up on first use and stay warm. For typed workloads, prefer `compose` or
 `tensor!` over hand-spelling `contract` axis lists when the categorical
 composition is what you mean (`compose` can skip the fermionic twist). Truncated factorizations are
 quantum-dimension weighted, so a `Rank(n)` budget bounds the *weighted* bond
-dimension — size budgets against `Space::dim`, not raw sector counts.
+dimension — size budgets against `GradedSpace::dim`, not raw sector counts.
 
 ## 8. Current Limitations
 

@@ -2,17 +2,14 @@
 //!
 //! **What it measures.** Outer-thread throughput of a representative warm
 //! rank-4 SU(2) `contract`, when N independent driver threads each churn on
-//! THEIR OWN tensors (independent data, same rule + dtype). Three arms expose
-//! where the ceiling is:
+//! THEIR OWN tensors (independent data, same provider + scalar). Three arms
+//! expose where the ceiling is:
 //!   (a) `shared`  — one `Runtime` handle cloned into every thread, standalone
-//!       `Tensor::contract`. Every op takes the runtime's single coarse Mutex
-//!       for the whole computation, so different threads (even different data)
-//!       serialize. This is the suspected FLAT arm.
+//!       `TensorMap::contract`.
 //!   (b) `perthread` — each thread builds its own `Runtime`. No shared lock;
 //!       the expected ~linear arm, the throughput ceiling to compare against.
-//!   (c) `network` — shared `Runtime`, but typed `TensorMap` operands through
-//!       the `tensor!` cached-plan path, which clones a per-call workspace and
-//!       holds the lock only briefly. The claimed already-parallel path.
+//!   (c) `network` — shared `Runtime`, with the same typed operands through the
+//!       `tensor!` cached-plan path.
 //!
 //! **Why a fixed CPU budget.** Scaling numbers only mean something if the
 //! outer threads are the ONLY source of parallelism — otherwise inner BLAS /
@@ -35,9 +32,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use tenet::core::{SU2FusionRule, SU2Irrep};
-use tenet::prelude::{Dtype, Runtime, Space, Tensor};
-use tenet::typed::{GradedSpace, TensorMap};
+use tenet::prelude::{GradedSpace, Runtime, SU2FusionRule, SU2Irrep, TensorMap};
 use tenet_network::tensor;
 
 fn env_usizes(key: &str, default: &[usize]) -> Vec<usize> {
@@ -58,25 +53,9 @@ fn env_usize(key: &str, default: usize) -> usize {
 }
 
 /// SU(2) sectors {0, 1/2, 1} (twice-spin 0,1,2) each with degeneracy `d`.
-fn space(d: usize) -> Space {
-    Space::su2([(0, d), (1, d), (2, d)]).unwrap()
-}
-
-/// Rank-4 endomorphism `[v,v] <- [v,v]` with a deterministic per-thread seed.
-fn make_pair(rt: &Runtime, d: usize, seed: u64) -> (Tensor, Tensor) {
-    let v = space(d);
-    let a = Tensor::rand_with_seed(rt, Dtype::F64, [&v, &v], [&v, &v], seed).expect("lhs");
-    let b = Tensor::rand_with_seed(rt, Dtype::F64, [&v, &v], [&v, &v], seed + 1).expect("rhs");
-    (a, b)
-}
-
-fn make_typed_pair(
-    rt: &Runtime,
-    d: usize,
-    seed: u64,
-) -> (TensorMap<SU2FusionRule, f64>, TensorMap<SU2FusionRule, f64>) {
-    let v = GradedSpace::try_new(
-        Arc::new(SU2FusionRule),
+fn space(d: usize) -> GradedSpace<SU2FusionRule> {
+    GradedSpace::try_new_owned(
+        SU2FusionRule,
         [
             (SU2Irrep::from_twice_spin(0), d),
             (SU2Irrep::from_twice_spin(1), d),
@@ -84,7 +63,16 @@ fn make_typed_pair(
         ],
         false,
     )
-    .expect("SU(2) space");
+    .expect("SU(2) space")
+}
+
+/// Rank-4 endomorphism `[v,v] <- [v,v]` with a deterministic per-thread seed.
+fn make_pair(
+    rt: &Runtime,
+    d: usize,
+    seed: u64,
+) -> (TensorMap<SU2FusionRule, f64>, TensorMap<SU2FusionRule, f64>) {
+    let v = space(d);
     let a = TensorMap::rand_with_seed(rt, [&v, &v], [&v, &v], seed).expect("typed lhs");
     let b = TensorMap::rand_with_seed(rt, [&v, &v], [&v, &v], seed + 1).expect("typed rhs");
     (a, b)
@@ -92,8 +80,12 @@ fn make_typed_pair(
 
 /// Compose-form contract: `a[i,j;k,l] * b[k,l;m,n]` -> rank-4. lhs domain
 /// axes (2,3) with rhs codomain axes (0,1).
-fn contract_once(a: &Tensor, b: &Tensor) -> Tensor {
-    a.contract(b, &[2, 3], &[0, 1]).expect("contract")
+fn contract_once(
+    a: &TensorMap<SU2FusionRule, f64>,
+    b: &TensorMap<SU2FusionRule, f64>,
+) -> TensorMap<SU2FusionRule, f64> {
+    a.contract(b, &[2, 3], &[0, 1], &[0, 1, 2, 3])
+        .expect("contract")
 }
 
 fn build_runtime() -> Runtime {
@@ -109,12 +101,9 @@ fn build_runtime() -> Runtime {
 /// given runtime, single-threaded, before any timed region.
 fn warm(rt: &Runtime, d: usize) {
     let (a, b) = make_pair(rt, d, 1);
-    let (typed_a, typed_b) = make_typed_pair(rt, d, 1);
     for _ in 0..8 {
         black_box(contract_once(&a, &b));
-        black_box(
-            tensor!([i, j; m, n] = typed_a[i, j; k, l] * typed_b[k, l; m, n]).expect("warm net"),
-        );
+        black_box(tensor!([i, j; m, n] = a[i, j; k, l] * b[k, l; m, n]).expect("warm net"));
     }
 }
 
@@ -163,7 +152,7 @@ fn main() {
     );
     println!("arm,N,d,evals_per_sec,speedup_vs_N1");
 
-    // Arm (a): shared Runtime, standalone Tensor::contract.
+    // Arm (a): shared Runtime, standalone TensorMap::contract.
     // Arm (c): shared Runtime, cached network path.
     let shared = build_runtime();
     for &d in &ds {
@@ -191,7 +180,7 @@ fn main() {
                                 warm(&rt, d);
                             }
                             if arm == "network" {
-                                let (a, b) = make_typed_pair(&rt, d, seed);
+                                let (a, b) = make_pair(&rt, d, seed);
                                 let start = Instant::now();
                                 for _ in 0..m {
                                     black_box(

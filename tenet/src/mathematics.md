@@ -7,9 +7,9 @@ motivation, see the TensorKit paper
 
 The short version:
 
-- a [`crate::prelude::Space`] is a finite direct sum of sector irreps with
+- a [`crate::prelude::GradedSpace`] is a finite direct sum of sector irreps with
   ordinary degeneracy spaces;
-- a [`crate::prelude::Tensor`] is a morphism `codomain <- domain`;
+- a [`crate::prelude::TensorMap`] is a morphism `codomain <- domain`;
 - a domain leg is oriented as a dual object during contractions;
 - leg rearrangements are morphisms in a braided rigid category;
 - storage is one dense column-major matrix per coupled sector;
@@ -65,7 +65,7 @@ because every U(1) charge has quantum dimension `1`. For SU(2), TeNeT stores
 </math>
 </div>
 
-So `Space::su2([(0, 2), (1, 2)]).unwrap()` has dimension
+So an SU(2) `GradedSpace` with degeneracy two in twice-spin sectors 0 and 1 has dimension
 
 <div class="math" style="margin: 1.25rem 0; padding: 0.2rem 0; overflow-x: auto;">
 <math display="block" style="font-size: 1.12em; line-height: 1.8;" xmlns="http://www.w3.org/1998/Math/MathML">
@@ -122,7 +122,7 @@ For a graded space, duality acts on both the degeneracy space and the sector:
 </math>
 </div>
 
-In TeNeT, [`crate::prelude::Space::dual`] replaces every sector by its
+In TeNeT, [`crate::prelude::GradedSpace::try_dual`] replaces every sector by its
 fusion-rule dual and flips the leg's dual flag. For U(1), charge `q` dualizes
 to `-q`; for Z2 and SU(2), the exposed sectors are self-dual, though SU(2)
 still has nontrivial fusion and Frobenius-Schur data internally. Degeneracy
@@ -270,9 +270,9 @@ under negation; dualization constructs the corresponding dual sector set.
 
 ## Leg Re-Arrangements
 
-The current user API exposes [`crate::prelude::Tensor::permute`],
-[`crate::prelude::Tensor::braid`], [`crate::prelude::Tensor::transpose`], and
-[`crate::prelude::Tensor::adjoint`]. TensorKit also has `flip` and `twist`
+The current user API exposes [`crate::prelude::TensorMap::permute`],
+[`crate::prelude::TensorMap::braid`], [`crate::prelude::TensorMap::transpose`], and
+[`crate::prelude::TensorMap::adjoint`]. TensorKit also has `flip` and `twist`
 operations on fusion-tree legs; TeNeT's public user layer does not expose them
 as separate methods yet, but the mathematics is useful for understanding
 duality changes.
@@ -507,7 +507,7 @@ column-major order; individual fusion-tree subblocks are strided views into
 the sector matrix.
 
 This is the layout behind [`crate::core::FusionTensorMapSpace`]. The
-user-layer [`crate::prelude::Tensor::data`] method exposes the same flat
+user-layer [`crate::prelude::TensorMap::data`] method exposes the same flat
 storage.
 
 ## Inner Products, Norms, And Truncation
@@ -537,8 +537,8 @@ Consequently,
 </math>
 </div>
 
-This is the norm used by [`crate::prelude::Tensor::norm`] and
-[`crate::prelude::Tensor::inner`]. It is also the norm used by SVD and
+This is the norm used by [`crate::prelude::TensorMap::norm`] and
+[`crate::prelude::TensorMap::inner`]. It is also the norm used by SVD and
 Hermitian eigentruncation errors.
 
 For a sectorwise SVD,

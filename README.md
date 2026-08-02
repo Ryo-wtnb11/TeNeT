@@ -62,30 +62,18 @@ FermionParityFusionRule.product(U1FusionRule).product(SU2FusionRule)
 ```
 
 is `(fZ2 ⊠ U(1)) ⊠ SU(2)` — any ordered product of admitted components,
-recursively nested, without a new `RuleKind`, dispatch arm or `Space`
+recursively nested, without a new `RuleKind`, dispatch arm or group-specific
 constructor. Factor order and association are structure of the Rust type and of
 the `ProductSector` label, never an automatic equivalence: `U(1) ⊠ fZ2` and
-`fZ2 ⊠ U(1)` are both legal and are different types. `tenet::typed`'s module
-documentation carries the compiling example; the erased `Space::product` and
-`Space::fz2_u1_su2` are two fixed conveniences kept for compatibility and are
-not the extension mechanism.
+`fZ2 ⊠ U(1)` are both legal and are different types.
 
-TeNeT has two peer user facades. The provider-typed
-[`tenet::typed`](tenet/src/typed.rs) facade
-(`GradedSpace<R>`, `TensorMap<R, D>`) keeps `R` concrete, returns the provider's
-own labels (`SectorCodec::Sector`), and separates payload dtype `D` (`f64` /
-`Complex64`) from the categorical coefficient scalar. It ships construction,
-inspection, transforms and contractions, scalar/reduction operations,
-factorizations and matrix functions, and compact-diagonal paths. Construction
-uses transactional checked admission, so an invalid or unrepresentable algebra
-publishes no layout, cache, or admission state.
-
-The rule-erased `Runtime` / `Space` / `Tensor` facade is its peer for built-in
-providers. It owns runtime dtype and placement dispatch and its own
-lazy-adjoint state. `tensor!` belongs to the provider-typed facade: it executes
-typed Host tensors through a per-plan workspace and canonical CUDA tensors
-through the returning-only device path.
-Neither facade replaces or wraps the other.
+The ordinary user API is `GradedSpace<R>` / `TensorMap<R, D, S>`. It keeps `R`
+concrete, returns the provider's own labels (`SectorCodec::Sector`), and keeps
+payload scalar `D` and storage `S` orthogonal to the categorical coefficient
+scalar. Construction, transforms, contractions, reductions, factorizations,
+matrix functions, compact diagonal storage, Host execution and supported CUDA
+execution all use this ownership model. Checked admission is transactional: an
+invalid or unrepresentable algebra publishes no layout or cache state.
 
 SU(2) representation algebra itself is not reimplemented here: `tenet-sectors`
 delegates 3j/6j, F/R and Frobenius-Schur coefficients plus their caches to the
@@ -100,18 +88,26 @@ cargo test --workspace
 cargo doc --workspace --no-deps
 ```
 
-The erased user layer — the shortest path to a working contraction:
+The shortest path to a working contraction:
 
 ```rust
 use tenet::prelude::*;
 
 fn main() -> Result<(), Error> {
     let rt = Runtime::builder().build()?;
-    let v = Space::u1([(-1, 2), (0, 3), (1, 2)]);
+    let v = GradedSpace::try_new_owned(
+        U1FusionRule,
+        [
+            (U1Irrep::new(-1), 2),
+            (U1Irrep::new(0), 3),
+            (U1Irrep::new(1), 2),
+        ],
+        false,
+    )?;
 
     // Tensors are maps codomain <- domain.
-    let a = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v, &v])?;
-    let b = Tensor::rand(&rt, Dtype::F64, [&v, &v], [&v, &v])?;
+    let a = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v, &v], [&v, &v])?;
+    let b = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v, &v], [&v, &v])?;
 
     let c = a.compose(&b)?;
     assert_eq!((c.codomain_rank(), c.domain_rank()), (2, 2));
@@ -124,24 +120,20 @@ fn main() -> Result<(), Error> {
 inside the macro, `;` separates codomain and domain legs, `[]` is a scalar
 output, and `conj(x)[...]` marks an adjoint operand.
 
-The same U(1) space through the typed facade. The provider is an ordinary value
-here, so a fusion rule defined outside this workspace substitutes for
-`U1FusionRule` without touching the engine:
+The provider is an ordinary value, so a fusion rule defined outside this
+workspace substitutes for `U1FusionRule` without touching the engine.
+`try_new_owned` creates one shared provider authority internally; write `Arc`
+only when you already have an authority allocation that multiple spaces must
+share explicitly.
 
 ```rust
-use std::sync::Arc;
-
-use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::{Error, Runtime};
-use tenet::typed::{GradedSpace, TensorMap};
+use tenet::prelude::*;
 use tenet_network::tensor;
 
 fn main() -> Result<(), Error> {
     let rt = Runtime::builder().build()?;
-    let u1 = Arc::new(U1FusionRule);
-
-    let v = GradedSpace::try_new(
-        Arc::clone(&u1),
+    let v = GradedSpace::try_new_owned(
+        U1FusionRule,
         [(U1Irrep::new(-1), 2), (U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
         false,
     )?;
@@ -211,7 +203,7 @@ choice.
 
 | crate | role |
 | --- | --- |
-| `tenet` | Public facade: the erased `Runtime`, `Space`, `Tensor`, scalar dtype, tensor methods, decomposition wrappers, and the provider-typed `tenet::typed` facade. |
+| `tenet` | Public provider-typed `Runtime`, `GradedSpace<R>`, `TensorMap<R,D,S>`, tensor operations and decomposition results. |
 | `tenet-network` | `tensor!` frontend, `NetworkIR`, contraction-order optimizers, reusable `ContractionPlan`, plan cache, slicing metadata. |
 | `tenet-macros` | Procedural macro implementation for `tensor!`. |
 | `tenet-sectors` | Sector-algebra vocabulary: fusion-rule/codec traits, `SectorId`, and the built-in irrep providers (U(1), Z2, fZ2, SU(2), Fibonacci, products). No workspace dependencies; re-exported wholesale by `tenet-core`. |
@@ -231,7 +223,7 @@ tensor!(...) labels
   -> NetworkIR + DenseCostModel
   -> DenseContractionOptimizer
   -> ContractionPlan
-  -> Tensor::contract / Tensor::permute replay
+  -> TensorMap::contract / TensorMap::permute replay
 ```
 
 The planner sees only metadata:
@@ -244,7 +236,7 @@ The planner sees only metadata:
 It does not receive raw tensor storage, fusion-tree blocks, dense buffers, or
 tensor values. External optimizers return an active-pair path such as
 `[[0, 1], [0, 1]]`; TeNeT validates that path, builds a `ContractionPlan`, then
-executes the plan locally with `Tensor::contract`.
+executes the plan locally with `TensorMap::contract`.
 
 The plan cache is topology-keyed: labels, adjoint markers, codomain/domain
 splits, output labels, and optimizer choice are part of the key; concrete leg
@@ -303,10 +295,11 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
 
 ## Current Limitations
 
-- The typed facade admits checked multiplicity-free providers. It has no
-  conversion to or from the erased `Tensor`. `tensor!` supports Host tensors
-  and canonical returning CUDA schedules; intra-operand trace lowering remains
-  Host-only and returns `UnsupportedOnDevice` on CUDA.
+- Checked Generic providers use the same `TensorMap<R,D,S>` ownership model,
+  but operations that require capabilities not yet supplied by their provider
+  remain unavailable. `tensor!` supports Host tensors and canonical returning
+  CUDA schedules; intra-operand trace lowering remains Host-only and returns
+  `UnsupportedOnDevice` on CUDA.
 - Execution crates reject a no-default-features build because their convenience
   APIs require a concrete executor. Use `tenet-sectors` / `tenet-core` for
   backend-free types, or enable a CPU feature or `provider-inject` for the full
@@ -316,7 +309,7 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
   tests; host-only tree-transform replay is not silently used as device replay.
 - `cotengra-python` is a planner backend, not an executor backend.
 - Cotengra slicing decisions can be represented as `SlicedPlan`, but ordinary
-  sliced execution over `Tensor` is not wired yet.
+  sliced execution over `TensorMap` is not wired yet.
 - External planners use dense effective dimensions. Symmetric block execution,
   fusion-tree bookkeeping, fermionic signs, and storage layout remain TeNeT
   execution responsibilities.
@@ -335,8 +328,6 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
   parity table — every user-facing export, its TeNeT name, and the rationale
   for anything spelled or gated differently. The lookup surface for a
   TensorKit user.
-- [`docs/user_api_design.md`](docs/user_api_design.md): API design notes and
-  TensorKit vocabulary alignment.
 - [`docs/sector_id_compatibility.md`](docs/sector_id_compatibility.md):
   `SectorId`, product-codec, storage-order, seeded-random, and cache
   compatibility contract.
