@@ -57,7 +57,8 @@ use tenet_tensors::{
 };
 
 use crate::error::Error;
-use crate::runtime::{rule_lanes, Ctx, Ctxs, Runtime, RuntimeExecutionConfig, RuntimeIdentity};
+pub use crate::runtime::TensorExecutionContext;
+use crate::runtime::{Ctx, Ctxs, Runtime};
 use crate::space::{Fz2U1Su2Rule, RuleKind, Space, U1Fz2Rule, UserRuleContext};
 use crate::tensor_core::{
     pow_by_squaring, tensorcontract_owned_multiplicity_free, tensorproduct_owned_multiplicity_free,
@@ -834,104 +835,6 @@ impl UserScalar for Complex64 {
         Ok(self.sqrt())
     }
 }
-
-macro_rules! define_tensor_execution_context {
-    ($( $field:ident: $key:ty ),+ $(,)?) => {
-        /// Caller-owned host execution state for dynamic destination operations.
-        /// [`Self::default`] is independent of a [`Runtime`]; use
-        /// [`Self::for_runtime`] when execution must inherit and remain bound to a
-        /// runtime's backend configuration.
-        #[derive(Default)]
-        pub struct TensorExecutionContext {
-            runtime: Option<Runtime>,
-            runtime_identity: Option<RuntimeIdentity>,
-            $($field: Ctxs<$key>,)+
-        }
-
-        impl TensorExecutionContext {
-            // Why not retain a Runtime here: pooled contexts live inside that
-            // Runtime, so the back-reference would form an Arc cycle.
-            pub(crate) fn for_config(config: &RuntimeExecutionConfig) -> Result<Self, Error> {
-                let mut context = Self {
-                    runtime: None,
-                    runtime_identity: None,
-                    $($field: Ctxs::with_config(
-                        &config.shared_ctx,
-                        config.gemm_kind,
-                        config.tree_transform_store.clone(),
-                    )?,)+
-                };
-                if let Some(threads) = config.recoupling_threads {
-                    context.set_recoupling_threads(threads);
-                }
-                Ok(context)
-            }
-
-            fn set_recoupling_threads(&mut self, threads: usize) {
-                $(self.$field.set_recoupling_threads(threads);)+
-            }
-
-            /// The multiplicity-free lane's execution context for scalar `D`.
-            ///
-            /// Why an accessor rather than reaching the lane fields directly:
-            /// they are private to `mod tensor`, and a caller outside that
-            /// module (`crate::typed`) still has to land on the lane matching
-            /// `D` instead of minting per-context state of its own. Naming
-            /// only this lane also keeps the Generic-fusion lane out of the
-            /// typed facade's reach, which is the boundary, not an omission.
-            ///
-            /// Cache sharing between the facades is not what this buys:
-            /// completed transforms live in the Runtime-owned store, keyed by
-            /// rule identity, operation and interned structure ids, so every
-            /// runtime-leased context already sees the same entries.
-            pub(crate) fn multiplicity_free_lane<D: UserScalar>(
-                &mut self,
-            ) -> &mut Ctx<D, tenet_core::RuleIdentity> {
-                D::ctx_of(&mut self.mf)
-            }
-
-            #[doc(hidden)]
-            pub fn release_runtime_binding(&mut self) {
-                self.runtime = None;
-            }
-
-            #[doc(hidden)]
-            pub fn bind_runtime(&mut self, runtime: &Runtime) -> Result<(), Error> {
-                if self
-                    .runtime_identity
-                    .as_ref()
-                    .is_some_and(|identity| !identity.matches(runtime))
-                {
-                    return Err(Error::RuntimeMismatch);
-                }
-                self.runtime_identity = Some(runtime.identity());
-                self.runtime = Some(runtime.clone());
-                Ok(())
-            }
-
-            #[cfg(test)]
-            fn recoupling_threads_are(&mut self, expected: usize) -> bool {
-                true $(&& self.$field.recoupling_threads_are(expected))+
-            }
-
-            #[cfg(test)]
-            fn shares_cpu_context(&mut self, shared: &tenet_dense::SharedCpuContext) -> bool {
-                true $(&& self.$field.shares_cpu_context(shared))+
-            }
-
-            #[cfg(test)]
-            pub(crate) fn local_cache_policy_is(
-                &self,
-                expected: tenet_tensors::OperationCachePolicy,
-            ) -> bool {
-                true $(&& self.$field.local_cache_policy_is(expected))+
-            }
-
-        }
-    };
-}
-
-rule_lanes!(define_tensor_execution_context);
 
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2206,7 +2109,7 @@ fn cat_region_tree_orders_match(
 /// Shared validation-and-output-homspace core of `catdomain`/`catcodomain`
 /// (#580 PR 4): checks the rank-1 changed side and the identical unchanged
 /// product space, then direct-sums the changed legs through
-/// [`crate::space::oplus_sector_legs`] — the same `SectorLeg`-level sum the
+/// [`crate::typed::oplus_sector_legs`] — the same `SectorLeg`-level sum the
 /// erased [`Space::oplus`] routes through, so both facades produce the merged
 /// leg byte-identically in sector order. Rule identity is checked by the
 /// callers before this runs (erased `check_same_execution_world`, typed rule
@@ -2232,7 +2135,7 @@ pub(crate) fn cat_homspace(
                 ));
             }
             let leg =
-                crate::space::oplus_sector_legs(&lhs_domain.legs()[0], &rhs_domain.legs()[0])?;
+                crate::typed::oplus_sector_legs(&lhs_domain.legs()[0], &rhs_domain.legs()[0])?;
             Ok((
                 lhs_codomain.len(),
                 FusionTreeHomSpace::new(lhs_codomain.clone(), FusionProductSpace::new([leg])),
@@ -2250,7 +2153,7 @@ pub(crate) fn cat_homspace(
                 ));
             }
             let leg =
-                crate::space::oplus_sector_legs(&lhs_codomain.legs()[0], &rhs_codomain.legs()[0])?;
+                crate::typed::oplus_sector_legs(&lhs_codomain.legs()[0], &rhs_codomain.legs()[0])?;
             Ok((
                 0,
                 FusionTreeHomSpace::new(FusionProductSpace::new([leg]), lhs_domain.clone()),
