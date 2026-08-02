@@ -533,21 +533,13 @@ impl DenseExecutor for DefaultDenseExecutor {
                 actual: x.shape().to_vec(),
             });
         }
-        let solution = self
-            .backend
-            .solve_read(
+        self.backend
+            .solve_read_into(
                 TensorRead::from_view(tenferro_view(a)?),
                 TensorRead::from_view(tenferro_view(b)?),
-            )
-            .map_err(tenferro_solve_error)?;
-        // Keep the owned result until Tenferro exposes a destination solve;
-        // publishing only after success preserves error atomicity.
-        self.backend
-            .copy_read_into(
-                TensorRead::from_tensor(&solution),
                 TensorWrite::from_view(tenferro_view_mut(x)?),
             )
-            .map_err(|err| tenferro_error("solve_into", err))
+            .map_err(tenferro_solve_error)
     }
 
     // Values-only overrides route to tenferro's no-vector LAPACK entries
