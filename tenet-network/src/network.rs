@@ -1443,13 +1443,37 @@ mod static_operand_sealed {
 /// surface:
 ///
 /// ```compile_fail
-/// use tenet::core::U1FusionRule;
+/// use std::convert::Infallible;
+/// use tenet::core::{
+///     CheckedGenericAdmissionMode, RuleIdentity, SectorId, TypedSectorAdmission,
+/// };
 /// use tenet::typed::TensorMap;
 /// use tenet_network::tensor;
 ///
+/// struct CheckedGenericProvider;
+///
+/// impl TypedSectorAdmission for CheckedGenericProvider {
+///     type Sector = SectorId;
+///     type Error = Infallible;
+///     type Mode = CheckedGenericAdmissionMode;
+///
+///     fn typed_rule_identity(&self) -> RuleIdentity {
+///         RuleIdentity::of_type::<Self>()
+///     }
+///     fn try_encode_label(&self, sector: &SectorId) -> Result<SectorId, Infallible> {
+///         Ok(*sector)
+///     }
+///     fn try_decode_label(&self, sector: SectorId) -> Result<SectorId, Infallible> {
+///         Ok(sector)
+///     }
+///     fn try_dual_id(&self, sector: SectorId) -> Result<SectorId, Infallible> {
+///         Ok(sector)
+///     }
+/// }
+///
 /// fn checked_generic(
-///     a: &TensorMap<U1FusionRule, f64>,
-///     b: &TensorMap<U1FusionRule, f64>,
+///     a: &TensorMap<CheckedGenericProvider, f64>,
+///     b: &TensorMap<CheckedGenericProvider, f64>,
 /// ) {
 ///     let _ = tensor!([i; k] = a[i; j] * b[j; k]);
 /// }
