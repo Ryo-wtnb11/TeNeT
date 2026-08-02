@@ -16,6 +16,7 @@ use tenet_tensors::{
 
 use crate::error::Error;
 use crate::plancache::{Optimizer, PlanCacheConfig};
+use crate::tensor::UserScalar;
 pub type Ctx<D, Key> = TensorContractFusionExecutionContext<D, Key>;
 /// The pair of per-scalar execution contexts for one cache-key namespace.
 /// Tensor operations dispatch on the stored dtype once per call and pick one
@@ -162,7 +163,96 @@ macro_rules! rule_lanes {
     };
 }
 
-pub(crate) use rule_lanes;
+macro_rules! define_tensor_execution_context {
+    ($( $field:ident: $key:ty ),+ $(,)?) => {
+        /// Caller-owned host execution state for dynamic destination operations.
+        /// [`Self::default`] is independent of a [`Runtime`]; use
+        /// [`Self::for_runtime`] when execution must inherit and remain bound to a
+        /// runtime's backend configuration.
+        #[derive(Default)]
+        pub struct TensorExecutionContext {
+            pub(crate) runtime: Option<Runtime>,
+            pub(crate) runtime_identity: Option<RuntimeIdentity>,
+            $(pub(crate) $field: Ctxs<$key>,)+
+        }
+
+        impl TensorExecutionContext {
+            // Why not retain a Runtime here: pooled contexts live inside that
+            // Runtime, so the back-reference would form an Arc cycle.
+            pub(crate) fn for_config(config: &RuntimeExecutionConfig) -> Result<Self, Error> {
+                let mut context = Self {
+                    runtime: None,
+                    runtime_identity: None,
+                    $($field: Ctxs::with_config(
+                        &config.shared_ctx,
+                        config.gemm_kind,
+                        config.tree_transform_store.clone(),
+                    )?,)+
+                };
+                if let Some(threads) = config.recoupling_threads {
+                    context.set_recoupling_threads(threads);
+                }
+                Ok(context)
+            }
+
+            fn set_recoupling_threads(&mut self, threads: usize) {
+                $(self.$field.set_recoupling_threads(threads);)+
+            }
+
+            /// Returns the multiplicity-free lane matching scalar `D`.
+            ///
+            /// Only this lane is exposed to the typed facade; Generic-fusion
+            /// execution remains behind its provider-specific boundary.
+            pub(crate) fn multiplicity_free_lane<D: UserScalar>(
+                &mut self,
+            ) -> &mut Ctx<D, tenet_core::RuleIdentity> {
+                D::ctx_of(&mut self.mf)
+            }
+
+            #[doc(hidden)]
+            pub fn release_runtime_binding(&mut self) {
+                self.runtime = None;
+            }
+
+            #[doc(hidden)]
+            pub fn bind_runtime(&mut self, runtime: &Runtime) -> Result<(), Error> {
+                if self
+                    .runtime_identity
+                    .as_ref()
+                    .is_some_and(|identity| !identity.matches(runtime))
+                {
+                    return Err(Error::RuntimeMismatch);
+                }
+                self.runtime_identity = Some(runtime.identity());
+                self.runtime = Some(runtime.clone());
+                Ok(())
+            }
+
+            #[cfg(test)]
+            pub(crate) fn recoupling_threads_are(&mut self, expected: usize) -> bool {
+                true $(&& self.$field.recoupling_threads_are(expected))+
+            }
+
+            #[cfg(test)]
+            pub(crate) fn shares_cpu_context(
+                &mut self,
+                shared: &tenet_dense::SharedCpuContext,
+            ) -> bool {
+                true $(&& self.$field.shares_cpu_context(shared))+
+            }
+
+            #[cfg(test)]
+            pub(crate) fn local_cache_policy_is(
+                &self,
+                expected: tenet_tensors::OperationCachePolicy,
+            ) -> bool {
+                true $(&& self.$field.local_cache_policy_is(expected))+
+            }
+        }
+    };
+}
+
+rule_lanes!(define_tensor_execution_context);
 
 macro_rules! define_runtime_state {
     ($( $field:ident: $key:ty ),+ $(,)?) => {
@@ -278,7 +368,7 @@ struct RuntimeInner {
 /// execution state; profiling showed by-value moves were ~70% of a small
 /// standalone op's cost (issue #228). The pointer-size canary test below
 /// prevents that regression.
-type PooledContext = Box<crate::tensor::TensorExecutionContext>;
+type PooledContext = Box<TensorExecutionContext>;
 
 /// Mints a dense executor identical to the one `RuntimeBuilder::build` created
 /// from the same config. Only called when no custom executor was injected
@@ -305,7 +395,7 @@ pub(crate) struct ContextLease<'a> {
 }
 
 impl ContextLease<'_> {
-    pub(crate) fn context(&mut self) -> &mut crate::tensor::TensorExecutionContext {
+    pub(crate) fn context(&mut self) -> &mut TensorExecutionContext {
         self.context
             .as_mut()
             .expect("context lease always owns a context")
@@ -510,7 +600,7 @@ impl Runtime {
             .pop();
         let context = match pooled {
             Some(context) => context,
-            None => Box::new(crate::tensor::TensorExecutionContext::for_config(
+            None => Box::new(TensorExecutionContext::for_config(
                 &self.inner.execution_config,
             )?),
         };
@@ -1037,7 +1127,7 @@ mod tests {
         assert!(state.local_cache_policy_is(OperationCachePolicy::NoCache));
         drop(state);
 
-        let context = crate::tensor::TensorExecutionContext::for_runtime(&runtime).unwrap();
+        let context = TensorExecutionContext::for_runtime(&runtime).unwrap();
         assert!(context.local_cache_policy_is(OperationCachePolicy::NoCache));
     }
 }

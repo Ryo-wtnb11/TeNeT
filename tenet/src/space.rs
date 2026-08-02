@@ -835,7 +835,7 @@ impl Space {
             return Err(Error::RuleMismatch);
         }
         let fused = with_rule!(self.context.as_ref(), rule, {
-            fuse_sector_content(rule, &self.sectors, &other.sectors)
+            crate::typed::fuse_sector_content(rule, &self.sectors, &other.sectors)
         })?;
         Ok(Self {
             context: Arc::clone(&self.context),
@@ -881,7 +881,7 @@ impl Space {
         // `sector_leg`/`from_leg` are verbatim round trips of the stored
         // `(sector, degeneracy)` pairs and the dual flag, so routing through
         // the leg-level sum changes no byte of the result.
-        let leg = oplus_sector_legs(&self.sector_leg(), &other.sector_leg())?;
+        let leg = crate::typed::oplus_sector_legs(&self.sector_leg(), &other.sector_leg())?;
         Ok(Space::from_leg(Arc::clone(&self.context), &leg))
     }
 
@@ -900,69 +900,6 @@ impl Space {
             dual: leg.is_dual(),
         }
     }
-}
-
-/// The [`SectorLeg`]-level direct sum under [`Space::oplus`] (#580 PR 4): the
-/// degeneracy of each sector is the sum of its degeneracies in the two
-/// summands, sectors present in only one summand carried over unchanged,
-/// result sorted by [`SectorId`].
-///
-/// Shared on purpose: the erased `oplus` and the typed facade's
-/// `catdomain`/`catcodomain` changed-leg sum must be byte-identical in sector
-/// order — a second copy of this merge would be free to drift from the
-/// slab-order gates that hang on it. Rule identity is the caller's concern
-/// (the erased `oplus` checks it against its own context; the typed cat has
-/// already proven both operands share one provider identity).
-pub(crate) fn oplus_sector_legs(lhs: &SectorLeg, rhs: &SectorLeg) -> Result<SectorLeg, Error> {
-    if lhs.is_dual() != rhs.is_dual() {
-        return Err(Error::InvalidArgument(
-            "oplus: cannot direct-sum spaces of opposite duality (dualize one first)".into(),
-        ));
-    }
-    let mut sectors: Vec<(SectorId, usize)> = lhs.iter().collect();
-    for (sector, deg) in rhs.iter() {
-        match sectors.iter_mut().find(|(s, _)| *s == sector) {
-            Some(entry) => {
-                entry.1 = entry.1.checked_add(deg).ok_or_else(|| {
-                    Error::InvalidArgument(format!(
-                        "oplus: degeneracy overflow for sector {sector:?}"
-                    ))
-                })?;
-            }
-            None => sectors.push((sector, deg)),
-        }
-    }
-    sectors.retain(|&(_, deg)| deg > 0);
-    sectors.sort_by_key(|(sector, _)| *sector);
-    // No duplicates by construction, so `SectorLeg::new` cannot panic; its
-    // sort and zero-drop are no-ops on the already-normalized pairs.
-    Ok(SectorLeg::new(sectors, lhs.is_dual()))
-}
-
-/// Fused sector content of `left ⊗ right`: the degeneracy of an outcome `c`
-/// is `sum over (a, b) with c in a ⊗ b of deg_a * deg_b * N^c_ab`, sorted by
-/// [`SectorId`] (TensorKit `fuse(V₁, V₂)`, `spaces/gradedspace.jl:150-158`).
-///
-/// Provider-generic on purpose: this is the one fusion fold shared by the
-/// erased [`Space::fuse`] and the typed structural constructors'
-/// isomorphic/embeddable checks — a second copy of the fold would be free to
-/// drift from the byte-compared sibling. Inputs are *external* sector
-/// content; duality is the caller's concern (both callers drop it, exactly as
-/// TensorKit's `fuse` does).
-pub(crate) fn fuse_sector_content<R: CheckedFusionAlgebra + ?Sized>(
-    rule: &R,
-    left: &[(SectorId, usize)],
-    right: &[(SectorId, usize)],
-) -> Result<Vec<(SectorId, usize)>, tenet_core::FusionAlgebraError> {
-    let mut out = std::collections::BTreeMap::<SectorId, usize>::new();
-    for &(a, deg_a) in left {
-        for &(b, deg_b) in right {
-            for c in rule.try_fusion_channels(a, b)? {
-                *out.entry(c).or_insert(0) += rule.try_nsymbol(a, b, c)? * deg_a * deg_b;
-            }
-        }
-    }
-    Ok(out.into_iter().collect())
 }
 
 #[cfg(test)]

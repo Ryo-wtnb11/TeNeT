@@ -283,6 +283,48 @@ use crate::tensor_core::{
 };
 use crate::RuntimeIdentity;
 
+/// Direct-sums two sector legs by adding matching degeneracies.
+pub(crate) fn oplus_sector_legs(lhs: &SectorLeg, rhs: &SectorLeg) -> Result<SectorLeg, Error> {
+    if lhs.is_dual() != rhs.is_dual() {
+        return Err(Error::InvalidArgument(
+            "oplus: cannot direct-sum spaces of opposite duality (dualize one first)".into(),
+        ));
+    }
+    let mut sectors: Vec<(SectorId, usize)> = lhs.iter().collect();
+    for (sector, deg) in rhs.iter() {
+        match sectors.iter_mut().find(|(s, _)| *s == sector) {
+            Some(entry) => {
+                entry.1 = entry.1.checked_add(deg).ok_or_else(|| {
+                    Error::InvalidArgument(format!(
+                        "oplus: degeneracy overflow for sector {sector:?}"
+                    ))
+                })?;
+            }
+            None => sectors.push((sector, deg)),
+        }
+    }
+    sectors.retain(|&(_, deg)| deg > 0);
+    sectors.sort_by_key(|(sector, _)| *sector);
+    Ok(SectorLeg::new(sectors, lhs.is_dual()))
+}
+
+/// Fuses sector content, including fusion multiplicities, in sector-id order.
+pub(crate) fn fuse_sector_content<R: CheckedFusionAlgebra + ?Sized>(
+    rule: &R,
+    left: &[(SectorId, usize)],
+    right: &[(SectorId, usize)],
+) -> Result<Vec<(SectorId, usize)>, tenet_core::FusionAlgebraError> {
+    let mut out = std::collections::BTreeMap::<SectorId, usize>::new();
+    for &(a, deg_a) in left {
+        for &(b, deg_b) in right {
+            for c in rule.try_fusion_channels(a, b)? {
+                *out.entry(c).or_insert(0) += rule.try_nsymbol(a, b, c)? * deg_a * deg_b;
+            }
+        }
+    }
+    Ok(out.into_iter().collect())
+}
+
 #[cfg(all(test, feature = "cuda"))]
 thread_local! {
     /// `(download_calls, device_partials_len, host_partials_len)`.
@@ -1783,8 +1825,7 @@ where
     /// required; degeneracy addition is checked.
     pub fn oplus(&self, other: &Self) -> Result<Self, TypedFacadeError<R>> {
         self.require_same_identity(other)?;
-        let leg = crate::space::oplus_sector_legs(&self.leg, &other.leg)
-            .map_err(TypedFacadeError::<R>::from)?;
+        let leg = oplus_sector_legs(&self.leg, &other.leg).map_err(TypedFacadeError::<R>::from)?;
         Ok(Self {
             provider: Arc::clone(self.provider_arc()),
             leg,
@@ -5131,7 +5172,7 @@ where
         let mut fused: Vec<(tenet_core::SectorId, usize)> = first.leg().iter().collect();
         for leg in rest {
             let pairs: Vec<(tenet_core::SectorId, usize)> = leg.leg().iter().collect();
-            fused = crate::space::fuse_sector_content(provider, &fused, &pairs)?;
+            fused = fuse_sector_content(provider, &fused, &pairs)?;
         }
         Ok(fused)
     }
