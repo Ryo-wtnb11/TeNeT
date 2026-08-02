@@ -4718,6 +4718,27 @@ where
         }
     }
 
+    fn cat_operand(&self) -> Result<(CatOperandLayout<'_>, &[D]), Error> {
+        match &self.repr {
+            TypedTensorRepr::Owned(body) => Ok((
+                CatOperandLayout::owned(
+                    body.space.space().structure(),
+                    body.space.space().nout(),
+                    body.space.space().nin(),
+                )?,
+                body.materialized_dense_data(),
+            )),
+            TypedTensorRepr::Adjoint(view) => Ok((
+                CatOperandLayout::adjoint(
+                    view.parent.space.space().structure(),
+                    view.parent.space.space().nout(),
+                    view.parent.space.space().nin(),
+                )?,
+                view.parent.materialized_dense_data(),
+            )),
+        }
+    }
+
     fn materialized_body(&self) -> &Arc<TypedTensorBody<R, D>> {
         match &self.repr {
             TypedTensorRepr::Owned(body) => body,
@@ -8781,14 +8802,17 @@ where
     /// than semantic differences: both operands share one `D`, so the erased
     /// mixed-dtype widening arm (`execute_c64`) is unrepresentable — widen
     /// with [`Self::to_c64`] first; there are no device placements to check.
-    /// A lazy adjoint or compact diagonal operand is materialized dense once
-    /// at this owned-only concatenation boundary.
+    /// A lazy adjoint is read from parent storage through the oriented copy
+    /// plan without publishing a receiver-sized materialization. A compact
+    /// diagonal operand is materialized dense once on demand.
     ///
     /// # Complexity
     ///
     /// One output allocation and a single `O(len(self) + len(other))` copy
     /// pass over the compiled per-sector slab plan — the same plan object the
-    /// erased facade executes.
+    /// erased facade executes. If an oriented geometry is conservatively
+    /// declined, correctness falls back to operation-local uncached
+    /// materialization before retrying the owned plan.
     ///
     /// # Errors
     ///
@@ -8846,33 +8870,21 @@ where
         // (`build_bound_space_like` is `derive_from_final_homspace` on the
         // authority space); no new space-construction logic.
         let space = self.logical_space().derive_from_final_homspace(homspace)?;
-        let plan = compile_cat_plan(
+        let (lhs_layout, lhs_data) = self.cat_operand()?;
+        let (rhs_layout, rhs_data) = other.cat_operand()?;
+        let Some(plan) = compile_cat_plan(
             space.space().structure(),
             space.space().nout(),
-            [
-                CatOperandLayout::owned(
-                    self.logical_space().space().structure(),
-                    self.logical_space().space().nout(),
-                    self.logical_space().space().nin(),
-                )?,
-                CatOperandLayout::owned(
-                    other.logical_space().space().structure(),
-                    other.logical_space().space().nout(),
-                    other.logical_space().space().nin(),
-                )?,
-            ],
+            [lhs_layout, rhs_layout],
             axis,
             side,
         )?
-        // The erased owned route carries the same expectation: an all-owned
-        // pair never declines its layout.
-        .ok_or_else(|| {
-            internal_layout_error("owned concatenation unexpectedly declined its layout")
-        })?;
-        let data = plan.execute(
-            self.materialized_body().materialized_dense_data(),
-            other.materialized_body().materialized_dense_data(),
-        )?;
+        else {
+            let lhs = self.materialized_tensor_uncached()?;
+            let rhs = other.materialized_tensor_uncached()?;
+            return lhs.cat(&rhs, side);
+        };
+        let data = plan.execute(lhs_data, rhs_data)?;
         Ok(Self {
             runtime: self.runtime.clone(),
             repr: owned_repr(TypedTensorBody::dense(space, data)),
@@ -15265,6 +15277,53 @@ mod representation_gates {
         assert!(Arc::ptr_eq(owned(&bosonic_s), owned(&untouched)));
         let untouched_inverse = bosonic_s.twist_inverse(&[0]).unwrap();
         assert!(Arc::ptr_eq(owned(&bosonic_s), owned(&untouched_inverse)));
+    }
+
+    #[test]
+    fn lazy_cat_reads_parent_storage_without_publishing_adjoint_caches() {
+        let runtime = Runtime::builder().build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = |degeneracy| {
+            GradedSpace::try_new(
+                Arc::clone(&provider),
+                [(U1Irrep::new(0), degeneracy)],
+                false,
+            )
+            .unwrap()
+        };
+        let common = leg(3);
+        let left = leg(2);
+        let right = leg(4);
+        let lhs: TensorMap<U1FusionRule, num_complex::Complex64> =
+            TensorMap::rand_with_seed(&runtime, [&left], [&common], 773_101)
+                .unwrap()
+                .adjoint()
+                .unwrap();
+        let rhs: TensorMap<U1FusionRule, num_complex::Complex64> =
+            TensorMap::rand_with_seed(&runtime, [&right], [&common], 773_102)
+                .unwrap()
+                .adjoint()
+                .unwrap();
+
+        assert_eq!(materialized_adjoint_builds(&lhs), 0);
+        assert_eq!(materialized_adjoint_builds(&rhs), 0);
+        let _ = lhs.catdomain(&rhs).unwrap();
+        assert_eq!(materialized_adjoint_builds(&lhs), 0);
+        assert_eq!(materialized_adjoint_builds(&rhs), 0);
+
+        let upper: TensorMap<U1FusionRule, num_complex::Complex64> =
+            TensorMap::rand_with_seed(&runtime, [&common], [&left], 773_103)
+                .unwrap()
+                .adjoint()
+                .unwrap();
+        let lower: TensorMap<U1FusionRule, num_complex::Complex64> =
+            TensorMap::rand_with_seed(&runtime, [&common], [&right], 773_104)
+                .unwrap()
+                .adjoint()
+                .unwrap();
+        upper.catcodomain(&lower).unwrap();
+        assert_eq!(materialized_adjoint_builds(&upper), 0);
+        assert_eq!(materialized_adjoint_builds(&lower), 0);
     }
 
     #[test]
