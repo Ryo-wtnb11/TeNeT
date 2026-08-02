@@ -1066,8 +1066,6 @@ pub(crate) struct CatOperandLayout<'a> {
 
 impl<'a> CatOperandLayout<'a> {
     /// An owned (non-view) operand: logical and storage layouts coincide.
-    /// This is the only constructor the typed facade needs — it has no
-    /// adjoint views (its `adjoint` is eager).
     pub(crate) fn owned(
         structure: &'a Arc<BlockStructure>,
         nout: usize,
@@ -1080,6 +1078,24 @@ impl<'a> CatOperandLayout<'a> {
             logical_nout: nout,
             storage_nout: nout,
             rank: nout + nin,
+        })
+    }
+
+    /// An adjoint operand stored in its parent's layout. The typed facade uses
+    /// this narrow constructor without gaining access to the erased facade's
+    /// private orientation enum or metadata view.
+    pub(crate) fn adjoint(
+        structure: &'a Arc<BlockStructure>,
+        storage_nout: usize,
+        storage_nin: usize,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            structure,
+            regions: sector_regions(structure, storage_nout)?,
+            orientation: TensorOrientation::Adjoint,
+            logical_nout: storage_nin,
+            storage_nout,
+            rank: storage_nout + storage_nin,
         })
     }
 
@@ -1277,7 +1293,7 @@ impl CatCopyPlan {
 /// compiles the per-fusion-tree copy plan of `[lhs, rhs]` into the packed
 /// destination layout. Both facades route through this one function — the
 /// erased Owned and adjoint-view paths via [`CatDescriptor::compile`], the
-/// typed facade directly with two [`CatOperandLayout::owned`] operands.
+/// typed facade directly with owned or adjoint [`CatOperandLayout`]s.
 ///
 /// Returns `Ok(None)` when an adjoint-oriented layout declines (non-monotone
 /// region maps, mismatched tree orders); an all-owned pair never declines.
