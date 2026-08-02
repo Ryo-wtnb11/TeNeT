@@ -1,8 +1,11 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::hint::black_box;
+use std::sync::Arc;
 
-use tenet::prelude::*;
+use tenet::core::{SU2FusionRule, SU2Irrep};
+use tenet::prelude::Runtime;
+use tenet::typed::{GradedSpace, TensorMap};
 
 struct CountingAllocator;
 
@@ -39,18 +42,29 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 #[test]
 fn repartition_to_current_split_does_not_allocate() {
     // What: a repartition which leaves the boundary unchanged only clones Arc
-    // handles and performs no heap allocation.
+    // handles, preserves provider authority, and performs no heap allocation.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let space = Space::su2([(0, 1), (1, 2)]).unwrap();
-    let source =
-        Tensor::rand_with_seed(&runtime, Dtype::F64, [&space, &space], [&space], 191).unwrap();
+    let provider = Arc::new(SU2FusionRule);
+    let space = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [
+            (SU2Irrep::from_twice_spin(0), 1),
+            (SU2Irrep::from_twice_spin(1), 2),
+        ],
+        false,
+    )
+    .unwrap();
+    let source: TensorMap<SU2FusionRule, f64> =
+        TensorMap::rand_with_seed(&runtime, [&space, &space], [&space], 191).unwrap();
 
     black_box(source.repartition(source.codomain_rank()).unwrap());
     ALLOCATIONS.set(0);
     ENABLED.set(true);
     let output = black_box(source.repartition(source.codomain_rank()).unwrap());
     ENABLED.set(false);
-    black_box(output);
+    black_box(&output);
 
     assert_eq!(ALLOCATIONS.get(), 0);
+    assert!(std::ptr::eq(output.provider(), provider.as_ref()));
+    assert_eq!(output.data().as_ptr(), source.data().as_ptr());
 }
