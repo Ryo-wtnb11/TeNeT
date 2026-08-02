@@ -199,7 +199,7 @@ fn dense_powi_matches_hand_computed_matrix_powers() {
     let inverse = [[0.5, -1.0 / 6.0], [0.0, 1.0 / 3.0]];
     let expected_inverse =
         TensorMap::from_block_fn(&runtime, [&bond], [&bond], |_, i| inverse[i[0]][i[1]]).unwrap();
-    let identity = TensorMap::id(&runtime, [&bond]).unwrap();
+    let identity: TensorMap<Z2FusionRule, f64> = TensorMap::id(&runtime, [&bond]).unwrap();
 
     let typed_zero = typed.powi(0).unwrap();
     assert_ne!(typed_zero.data(), typed.data());
