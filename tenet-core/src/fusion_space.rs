@@ -1458,6 +1458,27 @@ pub struct HomSpaceId {
     key: Arc<HomSpaceInternKey>,
 }
 
+/// Non-owning process-local identity for one live [`HomSpaceId`].
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct WeakHomSpaceId(Weak<HomSpaceInternKey>);
+
+impl HomSpaceId {
+    /// A non-owning identity suitable for bounded runtime admission records.
+    #[doc(hidden)]
+    pub fn downgrade(&self) -> WeakHomSpaceId {
+        WeakHomSpaceId(Arc::downgrade(&self.key))
+    }
+}
+
+impl WeakHomSpaceId {
+    /// Whether `id` still names the same live interned semantic key.
+    #[doc(hidden)]
+    pub fn matches(&self, id: &HomSpaceId) -> bool {
+        Weak::ptr_eq(&self.0, &Arc::downgrade(&id.key))
+    }
+}
+
 impl PartialEq for HomSpaceId {
     fn eq(&self, other: &Self) -> bool {
         self.prehash == other.prehash

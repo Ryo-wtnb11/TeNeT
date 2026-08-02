@@ -231,7 +231,8 @@ use tenet_operations::StorageGemm;
 use tenet_tensors::{
     tensorcontract_owned_checked_generic, tree_transform_dyn_owned_checked_generic,
     BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace, OutputAxisOrder,
-    TensorContractSpec, TreeTransformOperation, ValidatedDynamicFusionLayout,
+    TensorContractSpec, TreeTransformOperation, TreeTransformOperationKind,
+    ValidatedDynamicFusionLayout,
 };
 
 pub use tenet_core::SectorCodec;
@@ -5386,6 +5387,17 @@ where
     }
 }
 
+fn tree_operation_matches_axes(
+    operation: &TreeTransformOperation,
+    kind: TreeTransformOperationKind,
+    codomain_axes: &[usize],
+    domain_axes: &[usize],
+) -> bool {
+    operation.kind() == kind
+        && operation.codomain_permutation() == codomain_axes
+        && operation.domain_permutation() == domain_axes
+}
+
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
@@ -5409,12 +5421,24 @@ where
         domain_axes: &[usize],
         alpha: D,
     ) -> Result<(), Error> {
-        self.overwrite_tree_transform(destination, alpha, |_, _| {
-            Ok(TreeTransformOperation::permute(
-                codomain_axes.iter().copied(),
-                domain_axes.iter().copied(),
-            ))
-        })
+        self.overwrite_tree_transform(
+            destination,
+            alpha,
+            |_, _| {
+                Ok(TreeTransformOperation::permute(
+                    codomain_axes.iter().copied(),
+                    domain_axes.iter().copied(),
+                ))
+            },
+            |operation| {
+                tree_operation_matches_axes(
+                    operation,
+                    TreeTransformOperationKind::Permute,
+                    codomain_axes,
+                    domain_axes,
+                )
+            },
+        )
     }
 
     /// Overwrites `destination` with `alpha * self.transpose()` while
@@ -5422,19 +5446,38 @@ where
     /// Validation and failure behavior matches
     /// [`Self::permute_overwrite_into`].
     pub fn transpose_overwrite_into(&self, destination: &mut Self, alpha: D) -> Result<(), Error> {
-        self.overwrite_tree_transform(destination, alpha, |source, _| {
-            with_planar_axes(
-                source.codomain_rank(),
-                source.rank(),
-                PlanarRequestKind::FullTranspose,
-                |codomain_axes, domain_axes| {
-                    Ok(TreeTransformOperation::transpose(
-                        codomain_axes.iter().copied(),
-                        domain_axes.iter().copied(),
-                    ))
-                },
-            )
-        })
+        let source_codomain_rank = self.codomain_rank();
+        let source_rank = self.rank();
+        self.overwrite_tree_transform(
+            destination,
+            alpha,
+            |source, _| {
+                with_planar_axes(
+                    source.codomain_rank(),
+                    source.rank(),
+                    PlanarRequestKind::FullTranspose,
+                    |codomain_axes, domain_axes| {
+                        Ok(TreeTransformOperation::transpose(
+                            codomain_axes.iter().copied(),
+                            domain_axes.iter().copied(),
+                        ))
+                    },
+                )
+            },
+            |operation| {
+                operation.kind() == TreeTransformOperationKind::Transpose
+                    && operation
+                        .codomain_permutation()
+                        .iter()
+                        .copied()
+                        .eq((source_codomain_rank..source_rank).rev())
+                    && operation
+                        .domain_permutation()
+                        .iter()
+                        .copied()
+                        .eq((0..source_codomain_rank).rev())
+            },
+        )
     }
 
     /// Overwrites `destination` with
@@ -5448,22 +5491,34 @@ where
         domain_axes: &[usize],
         alpha: D,
     ) -> Result<(), Error> {
-        self.overwrite_tree_transform(destination, alpha, |source, _| {
-            with_planar_axes(
-                source.codomain_rank(),
-                source.rank(),
-                PlanarRequestKind::Explicit {
+        self.overwrite_tree_transform(
+            destination,
+            alpha,
+            |source, _| {
+                with_planar_axes(
+                    source.codomain_rank(),
+                    source.rank(),
+                    PlanarRequestKind::Explicit {
+                        codomain_axes,
+                        domain_axes,
+                    },
+                    |codomain_axes, domain_axes| {
+                        Ok(TreeTransformOperation::transpose(
+                            codomain_axes.iter().copied(),
+                            domain_axes.iter().copied(),
+                        ))
+                    },
+                )
+            },
+            |operation| {
+                tree_operation_matches_axes(
+                    operation,
+                    TreeTransformOperationKind::Transpose,
                     codomain_axes,
                     domain_axes,
-                },
-                |codomain_axes, domain_axes| {
-                    Ok(TreeTransformOperation::transpose(
-                        codomain_axes.iter().copied(),
-                        domain_axes.iter().copied(),
-                    ))
-                },
-            )
-        })
+                )
+            },
+        )
     }
 
     /// Overwrites `destination` with
@@ -5475,28 +5530,57 @@ where
         destination: &mut Self,
         alpha: D,
     ) -> Result<(), Error> {
-        self.overwrite_tree_transform(destination, alpha, |source, destination| {
-            if destination.rank() != source.rank() {
-                return Err(Error::InvalidArgument(format!(
-                    "repartition destination rank {} does not match source rank {}",
-                    destination.rank(),
-                    source.rank()
-                )));
-            }
-            with_planar_axes(
-                source.codomain_rank(),
-                source.rank(),
-                PlanarRequestKind::Repartition {
-                    num_codomain: destination.codomain_rank(),
-                },
-                |codomain_axes, domain_axes| {
-                    Ok(TreeTransformOperation::transpose(
-                        codomain_axes.iter().copied(),
-                        domain_axes.iter().copied(),
-                    ))
-                },
-            )
-        })
+        let source_codomain_rank = self.codomain_rank();
+        let source_rank = self.rank();
+        let destination_codomain_rank = destination.codomain_rank();
+        self.overwrite_tree_transform(
+            destination,
+            alpha,
+            |source, destination| {
+                if destination.rank() != source.rank() {
+                    return Err(Error::InvalidArgument(format!(
+                        "repartition destination rank {} does not match source rank {}",
+                        destination.rank(),
+                        source.rank()
+                    )));
+                }
+                with_planar_axes(
+                    source.codomain_rank(),
+                    source.rank(),
+                    PlanarRequestKind::Repartition {
+                        num_codomain: destination.codomain_rank(),
+                    },
+                    |codomain_axes, domain_axes| {
+                        Ok(TreeTransformOperation::transpose(
+                            codomain_axes.iter().copied(),
+                            domain_axes.iter().copied(),
+                        ))
+                    },
+                )
+            },
+            |operation| {
+                let planar_axis = |position: usize| {
+                    if position < source_codomain_rank {
+                        position
+                    } else {
+                        source_rank - 1 - (position - source_codomain_rank)
+                    }
+                };
+                operation.kind() == TreeTransformOperationKind::Transpose
+                    && operation
+                        .codomain_permutation()
+                        .iter()
+                        .copied()
+                        .eq((0..destination_codomain_rank).map(planar_axis))
+                    && operation
+                        .domain_permutation()
+                        .iter()
+                        .copied()
+                        .eq((destination_codomain_rank..source_rank)
+                            .rev()
+                            .map(planar_axis))
+            },
+        )
     }
 
     /// One admission and replay boundary for every typed Host overwrite.
@@ -5505,13 +5589,13 @@ where
         destination: &mut Self,
         alpha: D,
         operation: impl FnOnce(&Self, &Self) -> Result<TreeTransformOperation, Error>,
+        admitted_operation_matches: impl FnMut(&TreeTransformOperation) -> bool,
     ) -> Result<(), Error> {
         if !self.runtime.same_runtime(&destination.runtime) {
             return Err(Error::RuntimeMismatch);
         }
-        if TypedSectorAdmission::typed_rule_identity(self.provider())
-            != TypedSectorAdmission::typed_rule_identity(destination.provider())
-        {
+        let identity = TypedSectorAdmission::typed_rule_identity(self.provider());
+        if identity != TypedSectorAdmission::typed_rule_identity(destination.provider()) {
             return Err(Error::RuleMismatch);
         }
 
@@ -5542,17 +5626,29 @@ where
             ));
         }
 
-        let operation = operation(self, destination)?;
-        let expected = source_body
-            .space
-            .transformed_multiplicity_free(&operation)?;
-        if destination_body.space.space() != expected.space() {
-            return Err(Error::InvalidArgument(
-                "destination fusion space or block layout does not match the operation result"
-                    .to_string(),
-            ));
+        let admitted_operation = self.runtime.admitted_tree_pair_operation(
+            &identity,
+            &source_body.space,
+            &destination_body.space,
+            admitted_operation_matches,
+        );
+        let exact_layout_admitted = admitted_operation.is_some();
+        let operation = match admitted_operation {
+            Some(operation) => operation,
+            None => operation(self, destination)?,
+        };
+        if !exact_layout_admitted {
+            let expected = source_body
+                .space
+                .transformed_multiplicity_free(&operation)?;
+            if destination_body.space.space() != expected.space() {
+                return Err(Error::InvalidArgument(
+                    "destination fusion space or block layout does not match the operation result"
+                        .to_string(),
+                ));
+            }
         }
-        let required = expected.space().required_len()?;
+        let required = destination_body.space.space().required_len()?;
         let actual = match destination_body.data.as_ref() {
             TypedData::Dense(data) => data.len(),
             TypedData::Diagonal(_) => unreachable!("dense destination checked above"),
@@ -5575,32 +5671,42 @@ where
             TypedData::Dense(data) => data.as_slice(),
             TypedData::Diagonal(_) => unreachable!("dense source checked above"),
         };
-        let mut lease = self.runtime.lease_context()?;
-        let context = lease
-            .context()
-            .multiplicity_free_lane::<D>()
-            .tree_context_mut();
-        let TypedTensorRepr::Owned(destination_body) = &mut destination.repr else {
-            unreachable!("ordinary destination checked above")
-        };
-        let destination_body =
-            Arc::get_mut(destination_body).expect("unique destination body checked above");
-        let destination_provider = destination_body.space.provider();
-        let destination_structure = destination_body.space.space().structure();
-        let destination_data = Arc::get_mut(&mut destination_body.data)
-            .expect("unique destination payload checked above");
-        let TypedData::Dense(destination_data) = destination_data else {
-            unreachable!("dense destination checked above")
-        };
-        context.tree_transform_dyn_overwrite_into_ref(
-            destination_provider,
-            &operation,
-            destination_structure,
-            source_structure,
-            destination_data.as_mut_slice(),
-            source_data,
-            alpha,
-        )?;
+        {
+            let mut lease = self.runtime.lease_context()?;
+            let context = lease
+                .context()
+                .multiplicity_free_lane::<D>()
+                .tree_context_mut();
+            let TypedTensorRepr::Owned(destination_body) = &mut destination.repr else {
+                unreachable!("ordinary destination checked above")
+            };
+            let destination_body =
+                Arc::get_mut(destination_body).expect("unique destination body checked above");
+            let destination_provider = destination_body.space.provider();
+            let destination_structure = destination_body.space.space().structure();
+            let destination_data = Arc::get_mut(&mut destination_body.data)
+                .expect("unique destination payload checked above");
+            let TypedData::Dense(destination_data) = destination_data else {
+                unreachable!("dense destination checked above")
+            };
+            context.tree_transform_dyn_overwrite_into_ref(
+                destination_provider,
+                &operation,
+                destination_structure,
+                source_structure,
+                destination_data.as_mut_slice(),
+                source_data,
+                alpha,
+            )?;
+        }
+        if !exact_layout_admitted {
+            self.runtime.admit_exact_tree_pair_layout(
+                identity,
+                &operation,
+                &source_body.space,
+                destination.logical_space(),
+            );
+        }
         Ok(())
     }
 
@@ -14630,6 +14736,49 @@ mod representation_gates {
         assert_eq!(warm.entries(), cold.entries());
         assert!(warm.hits() > cold.hits());
         assert_eq!(first.data(), second.data());
+    }
+
+    #[test]
+    fn typed_tree_overwrite_shared_runtime_is_concurrent_and_deterministic() {
+        // What: exact-layout admission and completed replay share one Runtime
+        // without serializing execution or changing results across callers.
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let leg = GradedSpace::try_new(
+            Arc::new(U1FusionRule),
+            [
+                (U1Irrep::new(-1), 2),
+                (U1Irrep::new(0), 3),
+                (U1Irrep::new(1), 2),
+            ],
+            false,
+        )
+        .unwrap();
+        let source = TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, indices| {
+            indices.iter().sum::<usize>() as f64 + 1.0
+        })
+        .unwrap();
+        let expected = source.permute(&[1], &[2, 0]).unwrap();
+        let mut warm = expected.zeros_like();
+        source
+            .permute_overwrite_into(&mut warm, &[1], &[2, 0], 1.0)
+            .unwrap();
+
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut destination = expected.zeros_like();
+                        source
+                            .permute_overwrite_into(&mut destination, &[1], &[2, 0], 1.0)
+                            .unwrap();
+                        destination
+                    })
+                })
+                .collect();
+            for handle in handles {
+                assert_eq!(handle.join().unwrap().data(), expected.data());
+            }
+        });
     }
 
     #[test]

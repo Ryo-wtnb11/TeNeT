@@ -8,8 +8,9 @@ use num_traits::Zero;
 use rustc_hash::FxHashMap;
 use tenet_core::{
     BlockStructure, FusionTreePairKey, FusionTreePairOrientation, GenericBraidScalar,
-    GenericRigidSymbols, LocallyValidatedFusionTreeBlockStructure, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, RuleIdentity, TensorMap, TensorStorage,
+    GenericRigidSymbols, HomSpaceId, LocallyValidatedFusionTreeBlockStructure,
+    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, RuleIdentity, TensorMap,
+    TensorStorage, WeakHomSpaceId,
 };
 
 use crate::cache::{OperationCachePolicy, TreeTransformStructureCacheKey};
@@ -58,6 +59,39 @@ type RuntimeTreeTransformKey = TreeTransformStructureCacheKey<RuntimeTreeTransfo
 struct RuntimeTreeTransformStoreEntry<T> {
     structure: Arc<TreeTransformStructure<T>>,
     charged_bytes: usize,
+    exact_layout: Option<RuntimeExactLayoutAdmission>,
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeExactLayoutAdmission {
+    source: RuntimeLayoutIdentity,
+    destination: RuntimeLayoutIdentity,
+}
+
+#[derive(Clone, Debug)]
+struct RuntimeLayoutIdentity {
+    homspace: WeakHomSpaceId,
+    structure: usize,
+    nout: usize,
+    nin: usize,
+}
+
+impl RuntimeLayoutIdentity {
+    fn new(homspace: &HomSpaceId, layout: [usize; 3]) -> Self {
+        Self {
+            homspace: homspace.downgrade(),
+            structure: layout[0],
+            nout: layout[1],
+            nin: layout[2],
+        }
+    }
+
+    fn matches(&self, homspace: &HomSpaceId, layout: [usize; 3]) -> bool {
+        self.structure == layout[0]
+            && self.nout == layout[1]
+            && self.nin == layout[2]
+            && self.homspace.matches(homspace)
+    }
 }
 
 struct RuntimeTreeTransformStoreState<T> {
@@ -219,7 +253,7 @@ impl<T> RuntimeTreeTransformStore<T> {
         const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
 
         core::mem::size_of::<RuntimeTreeTransformKey>()
-            .saturating_add(core::mem::size_of::<Arc<TreeTransformStructure<T>>>())
+            .saturating_add(core::mem::size_of::<RuntimeTreeTransformStoreEntry<T>>())
             .saturating_add(key.plan().rule.charged_retained_bytes())
             .saturating_add(key.plan().operation.charged_retained_bytes())
             .saturating_add(structure.charged_payload_bytes())
@@ -279,9 +313,77 @@ impl<T> RuntimeTreeTransformStore<T> {
             RuntimeTreeTransformStoreEntry {
                 structure: Arc::clone(&structure),
                 charged_bytes,
+                exact_layout: None,
             },
         );
         Ok(structure)
+    }
+
+    /// Returns a previously admitted exact-layout operation without rebuilding
+    /// its owned runtime-rank axis description.
+    #[doc(hidden)]
+    pub fn admitted_tree_pair_operation(
+        &self,
+        rule: &RuleIdentity,
+        source_homspace: &HomSpaceId,
+        source_layout: [usize; 3],
+        destination_homspace: &HomSpaceId,
+        destination_layout: [usize; 3],
+        mut matches: impl FnMut(&TreeTransformOperation) -> bool,
+    ) -> Option<TreeTransformOperation> {
+        let state = self
+            .state
+            .lock()
+            .expect("runtime tree-transform store poisoned");
+        // ponytail: the Runtime LRU is capped at 256 entries. A bounded scan
+        // avoids a second index and borrowed-key hierarchy; add one only if a
+        // profile shows this lookup, rather than replay, on the hot path.
+        state.entries.iter().find_map(|(key, entry)| {
+            (entry.exact_layout.as_ref().is_some_and(|admission| {
+                admission.source.matches(source_homspace, source_layout)
+                    && admission
+                        .destination
+                        .matches(destination_homspace, destination_layout)
+            }) && !key.storage_conjugate()
+                && &key.plan().rule == rule
+                && matches(&key.plan().operation))
+            .then(|| key.plan().operation.clone())
+        })
+    }
+
+    /// Marks one completed tree-pair entry as having passed exact typed layout
+    /// admission. Missing or evicted entries intentionally retain no proof.
+    #[doc(hidden)]
+    pub fn admit_exact_tree_pair_layout(
+        &self,
+        rule: RuleIdentity,
+        operation: &TreeTransformOperation,
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+        source: (&HomSpaceId, [usize; 3]),
+        destination: (&HomSpaceId, [usize; 3]),
+    ) -> Result<bool, OperationError> {
+        let key = TreeTransformStructureCacheKey::from_structures_with_storage_conjugation(
+            RuntimeTreeTransformOperationKey {
+                rule,
+                operation: operation.clone(),
+            },
+            dst_structure,
+            src_structure,
+            false,
+        )?;
+        let mut state = self
+            .state
+            .lock()
+            .expect("runtime tree-transform store poisoned");
+        let Some(entry) = state.entries.get_mut(&key) else {
+            return Ok(false);
+        };
+        entry.exact_layout = Some(RuntimeExactLayoutAdmission {
+            source: RuntimeLayoutIdentity::new(source.0, source.1),
+            destination: RuntimeLayoutIdentity::new(destination.0, destination.1),
+        });
+        Ok(true)
     }
 }
 
@@ -915,7 +1017,7 @@ mod runtime_store_tests {
     use std::convert::Infallible;
     use std::sync::{Arc, Barrier};
 
-    use tenet_core::{BlockKey, BlockSpec, BlockStructure, RuleIdentity};
+    use tenet_core::{BlockKey, BlockSpec, BlockStructure, FusionTreeHomSpace, RuleIdentity};
 
     use super::{
         RuntimeTreeTransformKey, RuntimeTreeTransformOperationKey, RuntimeTreeTransformStore,
@@ -1019,6 +1121,85 @@ mod runtime_store_tests {
         assert_eq!(cleared.evictions(), 0);
         assert_eq!(cleared.admission_bypasses(), 0);
         assert_eq!(active.block_count(), 1);
+    }
+
+    #[test]
+    fn exact_layout_admission_requires_explicit_publication_and_clear_removes_it() {
+        // What: an ordinary completed structure is not an exact typed-layout
+        // proof; successful publication enables borrowed-operation reuse, and
+        // clearing the one Runtime store removes both together.
+        let (key, structure) = fixture(0);
+        let store = RuntimeTreeTransformStore::default();
+        store
+            .get_or_compile(key.clone(), || Ok::<_, Infallible>(structure))
+            .unwrap();
+        let block = BlockSpec::with_key(BlockKey::ordinal(0), vec![1], vec![1], 0).unwrap();
+        let layout = BlockStructure::from_blocks_with_rank(1, vec![block]).unwrap();
+        let source_homspace = FusionTreeHomSpace::from_sector_ids([(0, 1)], []);
+        let destination_homspace = FusionTreeHomSpace::from_sector_ids([], [(0, 1)]);
+        let source_id = source_homspace.id();
+        let destination_id = destination_homspace.id();
+        let rule = RuleIdentity::of_type::<TestRuleIdentity>();
+        let operation = TreeTransformOperation::permute([0], []);
+        let source_layout = [layout.content_id(), 1, 0];
+        let destination_layout = [layout.content_id(), 0, 1];
+
+        assert!(store
+            .admitted_tree_pair_operation(
+                &rule,
+                &source_id,
+                source_layout,
+                &destination_id,
+                destination_layout,
+                |_| true,
+            )
+            .is_none());
+        assert!(store
+            .admit_exact_tree_pair_layout(
+                rule.clone(),
+                &operation,
+                &layout,
+                &layout,
+                (&source_id, source_layout),
+                (&destination_id, destination_layout),
+            )
+            .unwrap());
+        assert_eq!(
+            store
+                .admitted_tree_pair_operation(
+                    &rule,
+                    &source_id,
+                    source_layout,
+                    &destination_id,
+                    destination_layout,
+                    |candidate| candidate == &operation,
+                )
+                .unwrap(),
+            operation
+        );
+        let foreign_destination = FusionTreeHomSpace::from_sector_ids([], [(1, 1)]).id();
+        assert!(store
+            .admitted_tree_pair_operation(
+                &rule,
+                &source_id,
+                source_layout,
+                &foreign_destination,
+                destination_layout,
+                |_| true,
+            )
+            .is_none());
+
+        store.clear();
+        assert!(store
+            .admitted_tree_pair_operation(
+                &rule,
+                &source_id,
+                source_layout,
+                &destination_id,
+                destination_layout,
+                |_| true,
+            )
+            .is_none());
     }
 
     #[test]
