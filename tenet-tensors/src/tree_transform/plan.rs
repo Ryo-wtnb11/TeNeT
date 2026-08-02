@@ -1024,21 +1024,22 @@ type TransformRows<K, T> = Vec<(K, T)>;
 #[cfg(test)]
 mod generic_preflight_tests {
     use super::{validate_generic_tree_pair_preflight, TreeTransformOperation};
+    use crate::tests::GenericMultiplicityRule;
     use tenet_core::{
         BlockKey, BlockSpec, BlockStructure, CoreError, FusionTreeKey, FusionTreePairKey,
-        MultiplicityIndex, SectorId, Su3FusionRule,
+        MultiplicityIndex, SectorId,
     };
     use tenet_operations::OperationError;
 
     #[test]
-    fn su3_generic_preflight_accepts_valid_permute_and_braid_before_categorical_admission() {
-        let rule = Su3FusionRule::new();
-        let eight = rule.sector_of(1, 1).unwrap();
+    fn generic_preflight_accepts_valid_braid_before_categorical_admission() {
+        let rule = GenericMultiplicityRule;
+        let charge = SectorId::new(1);
         let vacuum = SectorId::new(0);
         let valid = FusionTreePairKey::pair(
             FusionTreeKey::try_new_for_rule(
                 &rule,
-                [eight, eight],
+                [charge, charge],
                 vacuum,
                 [false, false],
                 [],
@@ -1055,18 +1056,16 @@ mod generic_preflight_tests {
         .unwrap()])
         .unwrap();
 
-        for operation in [
-            TreeTransformOperation::permute([1, 0], []),
-            TreeTransformOperation::braid([1, 0], [], [0, 1], []),
-        ] {
-            // What: style-neutral syntax validation admits valid Generic
-            // operations without constructing an Artin execution plan.
-            validate_generic_tree_pair_preflight(&rule, &operation, &valid_structure).unwrap();
-        }
+        validate_generic_tree_pair_preflight(
+            &rule,
+            &TreeTransformOperation::braid([1, 0], [], [0, 1], []),
+            &valid_structure,
+        )
+        .unwrap();
 
         assert_eq!(
             FusionTreePairKey::try_pair_from_sector_ids(
-                [eight.id(), eight.id()],
+                [charge.id(), charge.id()],
                 [],
                 vacuum.id(),
                 [false, false],
@@ -1081,7 +1080,7 @@ mod generic_preflight_tests {
         );
 
         let malformed = FusionTreePairKey::try_pair_from_sector_ids(
-            [eight.id(), eight.id()],
+            [charge.id(), charge.id()],
             [],
             vacuum.id(),
             [false, false],
@@ -1122,7 +1121,7 @@ mod generic_preflight_tests {
 
     #[test]
     fn generic_preflight_checks_rank_syntax_before_opaque_namespace() {
-        let rule = Su3FusionRule::new();
+        let rule = GenericMultiplicityRule;
         let structure = BlockStructure::from_blocks(vec![BlockSpec::column_major_with_key(
             BlockKey::opaque([4, 2]),
             vec![1, 1],
@@ -1133,7 +1132,7 @@ mod generic_preflight_tests {
 
         let syntax_error = match validate_generic_tree_pair_preflight(
             &rule,
-            &TreeTransformOperation::permute([0, 0], []),
+            &TreeTransformOperation::braid([0, 0], [], [0, 1], []),
             &structure,
         ) {
             Ok(_) => panic!("invalid operation unexpectedly admitted"),
@@ -1149,7 +1148,7 @@ mod generic_preflight_tests {
 
         let namespace_error = match validate_generic_tree_pair_preflight(
             &rule,
-            &TreeTransformOperation::permute([0, 1], []),
+            &TreeTransformOperation::braid([0, 1], [], [0, 1], []),
             &structure,
         ) {
             Ok(_) => panic!("opaque namespace unexpectedly admitted"),
@@ -1888,7 +1887,7 @@ where
 }
 
 /// Generic-fusion (outer-multiplicity) tree-pair plan compile — the Stage B2c
-/// dispatch receptacle for SU(3)/SO(N≥7)/Sp(N) rules. Parallel entry to
+/// dispatch receptacle for outer-multiplicity rules. Parallel entry to
 /// `build_multiplicity_free_tree_pair_transform_group_plan`: non-identity groups
 /// are compiled as one ordered block map over full tree-pair keys, while the
 /// identity path keeps the existing identity assembly.

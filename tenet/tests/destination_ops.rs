@@ -311,36 +311,6 @@ fn destination_apis_reject_lazy_adjoint_inputs_without_panicking() {
 }
 
 #[test]
-fn su3_contract_overwrite_clears_structural_zero_output() {
-    let runtime = Runtime::builder().build().unwrap();
-    let space = Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap();
-    let lhs =
-        Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space, &space], 30131).unwrap();
-    let rhs =
-        Tensor::rand_with_seed(&runtime, Dtype::F64, [&space, &space], [&space], 30132).unwrap();
-    let shape = lhs.contract(&rhs, &[1, 2], &[0, 1]).unwrap();
-    let mut destination = shape.scale(f64::NAN).unwrap();
-    let mut context = TensorExecutionContext::for_runtime(&runtime).unwrap();
-
-    context
-        .contract_overwrite_into(
-            &mut destination,
-            &lhs,
-            &rhs,
-            &[1, 2],
-            &[0, 1],
-            Scalar::F64(0.0),
-        )
-        .unwrap();
-
-    assert!(destination.data().iter().all(|value| !value.is_nan()));
-    assert!(
-        destination.data().iter().all(|value| *value == 0.0),
-        "alpha=0 must clear every SU(3) output block, including blocks without a contributing GEMM"
-    );
-}
-
-#[test]
 fn ordered_contract_overwrite_rejects_invalid_pab_without_mutation() {
     let runtime = Runtime::builder().build().unwrap();
     let space = Space::su2([(0, 2), (1, 2), (2, 1)]).unwrap();
@@ -398,37 +368,6 @@ fn ordered_contract_overwrite_rejects_invalid_pab_without_mutation() {
 }
 
 #[test]
-fn ordered_contract_overwrite_declines_su3_without_preparing() {
-    let runtime = Runtime::builder().build().unwrap();
-    let space = Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap();
-    let lhs = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 30_151).unwrap();
-    let rhs = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 30_152).unwrap();
-    let contracted = lhs.contract(&rhs, &[1], &[0]).unwrap();
-    let mut destination = contracted.permute(&[1], &[0]).unwrap();
-    let before = destination.data().to_vec();
-    let mut context = TensorExecutionContext::for_runtime(&runtime).unwrap();
-    let mut cache = ContractOverwriteCache::default();
-
-    let outcome = context
-        .try_contract_ordered_overwrite_into(
-            &mut cache,
-            &mut destination,
-            &lhs,
-            &rhs,
-            &[1],
-            &[0],
-            &[1, 0],
-            Scalar::F64(1.0),
-        )
-        .unwrap();
-    // What: generic-fusion output recoupling stays on its established
-    // sequential contract-and-permute implementation.
-    assert_eq!(outcome, OverwriteOutcome::Incompatible);
-    assert_eq!(cache.preparations(), 0);
-    assert_eq!(destination.data(), before);
-}
-
-#[test]
 fn destination_dispatch_matches_owned_for_every_rule() {
     let runtime = Runtime::builder().build().unwrap();
     let spaces = vec![
@@ -438,7 +377,6 @@ fn destination_dispatch_matches_owned_for_every_rule() {
         Space::su2([(0, 2), (1, 1)]).unwrap(),
         Space::product([((0, 0), 2), ((1, 1), 1)]).unwrap(),
         Space::fz2_u1_su2([((0, 0, 0), 2), ((1, 1, 1), 1)]).unwrap(),
-        Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap(),
     ];
 
     for (index, space) in spaces.iter().enumerate() {
@@ -774,85 +712,6 @@ fn checked_contract_rejections_preserve_destination_bits() {
         OverwriteOutcome::Incompatible
     );
     assert_eq!(aliased.data(), before);
-}
-
-#[test]
-fn checked_permutation_cache_prepares_once_for_su3_c64() {
-    let runtime = Runtime::builder().build().unwrap();
-    let space = Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap();
-    let source =
-        Tensor::rand_with_seed(&runtime, Dtype::C64, [&space, &space], [&space], 30_311).unwrap();
-    let expected = source.permute(&[1], &[2, 0]).unwrap();
-    let mut destination = expected
-        .scale_c64(Complex64::new(f64::NAN, f64::NAN))
-        .unwrap();
-    let mut context = TensorExecutionContext::for_runtime(&runtime).unwrap();
-    let mut cache = PermuteOverwriteCache::default();
-
-    for replay in 0..2 {
-        if replay != 0 {
-            destination = expected
-                .scale_c64(Complex64::new(f64::NAN, f64::NAN))
-                .unwrap();
-        }
-        assert_eq!(
-            context
-                .try_permute_overwrite_into(
-                    &mut cache,
-                    &mut destination,
-                    &source,
-                    &[1],
-                    &[2, 0],
-                    Scalar::C64(Complex64::new(1.0, 0.0)),
-                )
-                .unwrap(),
-            OverwriteOutcome::Written
-        );
-        assert_close_c64(destination.data_c64(), expected.data_c64(), 1e-12);
-    }
-    assert_eq!(cache.preparations(), 1);
-
-    let held = destination.clone();
-    let nonunique_before = destination
-        .data_c64()
-        .iter()
-        .map(|value| (value.re.to_bits(), value.im.to_bits()))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        context
-            .try_permute_overwrite_into(
-                &mut cache,
-                &mut destination,
-                &source,
-                &[1],
-                &[2, 0],
-                Scalar::C64(Complex64::new(1.0, 0.0)),
-            )
-            .unwrap(),
-        OverwriteOutcome::Incompatible
-    );
-    assert_eq!(
-        destination
-            .data_c64()
-            .iter()
-            .map(|value| (value.re.to_bits(), value.im.to_bits()))
-            .collect::<Vec<_>>(),
-        nonunique_before
-    );
-    drop(held);
-
-    let before = destination.data_c64().to_vec();
-    assert!(context
-        .try_permute_overwrite_into(
-            &mut cache,
-            &mut destination,
-            &source,
-            &[4],
-            &[2, 0],
-            Scalar::C64(Complex64::new(1.0, 0.0)),
-        )
-        .is_err());
-    assert_eq!(destination.data_c64(), before);
 }
 
 #[test]

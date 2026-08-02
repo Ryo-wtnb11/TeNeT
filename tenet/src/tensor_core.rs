@@ -1,12 +1,11 @@
 use std::collections::HashMap;
 
 use tenet_core::{
-    merge_fusion_trees_generic, merge_fusion_trees_generic_checked,
-    merge_fusion_trees_multiplicity_free, BlockKey, CanonicalUnitFusionRule, CheckedFusionAlgebra,
-    CheckedFusionSpaceError, CheckedGenericFusion, CheckedGenericRigidSymbols,
-    CheckedGenericStructureError, CheckedGenericSymbolError, CoreError, FusionProductSpace,
-    FusionStyleKind, FusionTreeHomSpace, FusionTreePairKey, FusionTreePairOrientation,
-    GenericBraidScalar, GenericRigidSymbols, MultiplicityFreeRigidSymbols, MultiplicityIndex,
+    merge_fusion_trees_generic_checked, merge_fusion_trees_multiplicity_free, BlockKey,
+    CanonicalUnitFusionRule, CheckedFusionAlgebra, CheckedFusionSpaceError, CheckedGenericFusion,
+    CheckedGenericRigidSymbols, CheckedGenericStructureError, CheckedGenericSymbolError, CoreError,
+    FusionProductSpace, FusionStyleKind, FusionTreeHomSpace, FusionTreePairKey,
+    FusionTreePairOrientation, GenericBraidScalar, MultiplicityFreeRigidSymbols, MultiplicityIndex,
     OrientedFusionTreeHomSpace, PreparedTreePairOperation, RuleIdentity,
 };
 use tenet_matrixalgebra::SectorSpectrum;
@@ -746,161 +745,6 @@ where
             rhs_nout,
             &mut data,
             dst_block,
-            contribution.coefficient,
-        )?;
-    }
-    Ok((destination, data))
-}
-
-pub(crate) fn tensorproduct_owned_generic<R, D>(
-    lhs: BoundDynamicTensorRef<'_, R, D>,
-    rhs: BoundDynamicTensorRef<'_, R, D>,
-) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), tenet_tensors::OperationError>
-where
-    R: GenericRigidSymbols<Scalar = f64>,
-    D: UserScalar,
-{
-    let rule = lhs.space().provider();
-    if rule.rule_identity() != rhs.space().provider().rule_identity() {
-        return Err(tenet_tensors::OperationError::Core(
-            CoreError::FusionRuleMismatch {
-                expected: rule.rule_identity(),
-                actual: rhs.space().provider().rule_identity(),
-            },
-        ));
-    }
-    let lhs_hom = lhs.space().space().homspace();
-    let rhs_hom = rhs.space().space().homspace();
-    let homspace = FusionTreeHomSpace::new(
-        FusionProductSpace::new(
-            lhs_hom
-                .codomain()
-                .legs()
-                .iter()
-                .chain(rhs_hom.codomain().legs())
-                .cloned(),
-        ),
-        FusionProductSpace::new(
-            lhs_hom
-                .domain()
-                .legs()
-                .iter()
-                .chain(rhs_hom.domain().legs())
-                .cloned(),
-        ),
-    );
-    let destination_keys = homspace
-        .fusion_tree_keys_generic(rule)
-        .map_err(tenet_tensors::OperationError::Core)?;
-    let destination_indices = destination_keys
-        .iter()
-        .cloned()
-        .enumerate()
-        .map(|(index, key)| (key, index))
-        .collect::<HashMap<_, _>>();
-    struct Contribution {
-        lhs: usize,
-        rhs: usize,
-        destination: usize,
-        coefficient: f64,
-    }
-    let lhs_structure = lhs.space().space().structure();
-    let rhs_structure = rhs.space().space().structure();
-    let mut contributions = Vec::new();
-    for lhs_index in 0..lhs_structure.block_count() {
-        let BlockKey::FusionTree(lhs_key) = lhs_structure.block(lhs_index)?.key() else {
-            return Err(tenet_tensors::OperationError::ExpectedFusionTreeBlock {
-                tensor: "lhs",
-                index: lhs_index,
-            });
-        };
-        for rhs_index in 0..rhs_structure.block_count() {
-            let BlockKey::FusionTree(rhs_key) = rhs_structure.block(rhs_index)?.key() else {
-                return Err(tenet_tensors::OperationError::ExpectedFusionTreeBlock {
-                    tensor: "rhs",
-                    index: rhs_index,
-                });
-            };
-            for coupled in rule.fusion_channels(
-                lhs_key.codomain_tree().coupled(),
-                rhs_key.codomain_tree().coupled(),
-            ) {
-                let n = rule.nsymbol(
-                    lhs_key.codomain_tree().coupled(),
-                    rhs_key.codomain_tree().coupled(),
-                    coupled,
-                );
-                for mu in 1..=n {
-                    let mu = tenet_core::MultiplicityIndex::new(mu).ok_or(
-                        tenet_tensors::OperationError::InvalidArgument {
-                            message: "invalid Generic root multiplicity",
-                        },
-                    )?;
-                    let codomain = merge_fusion_trees_generic(
-                        rule,
-                        lhs_key.codomain_tree(),
-                        rhs_key.codomain_tree(),
-                        coupled,
-                        mu,
-                    )
-                    .map_err(tenet_tensors::OperationError::Core)?;
-                    let domain = merge_fusion_trees_generic(
-                        rule,
-                        lhs_key.domain_tree(),
-                        rhs_key.domain_tree(),
-                        coupled,
-                        mu,
-                    )
-                    .map_err(tenet_tensors::OperationError::Core)?;
-                    for (codomain, codomain_coefficient) in &codomain {
-                        for (domain, domain_coefficient) in &domain {
-                            let key = FusionTreePairKey::pair(codomain.clone(), domain.clone());
-                            let destination =
-                                destination_indices.get(&key).copied().ok_or_else(|| {
-                                    tenet_tensors::OperationError::MissingBlockKey {
-                                        key: Box::new(BlockKey::FusionTree(key)),
-                                    }
-                                })?;
-                            contributions.push(Contribution {
-                                lhs: lhs_index,
-                                rhs: rhs_index,
-                                destination,
-                                coefficient: *codomain_coefficient
-                                    * domain_coefficient.braid_conj(),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let destination = BoundDynamicFusionMapSpace::from_final_homspace_generic(
-        std::sync::Arc::clone(lhs.space().provider_arc()),
-        homspace,
-    )?;
-    let dst_structure = destination.space().structure();
-    if dst_structure.block_count() != destination_keys.len()
-        || destination_keys.iter().enumerate().any(|(index, key)| {
-            dst_structure.find_block_index_by_fusion_tree_pair(key) != Some(index)
-        })
-    {
-        return Err(tenet_tensors::OperationError::StructureMismatch {
-            tensor: "tensor-product destination",
-        });
-    }
-    let mut data = vec![D::from_real(0.0); destination.space().required_len()?];
-    let lhs_nout = lhs.space().space().nout();
-    let rhs_nout = rhs.space().space().nout();
-    for contribution in contributions {
-        scatter_tensor_product_block(
-            lhs.data(),
-            lhs_structure.block(contribution.lhs)?,
-            lhs_nout,
-            rhs.data(),
-            rhs_structure.block(contribution.rhs)?,
-            rhs_nout,
-            &mut data,
-            dst_structure.block(contribution.destination)?,
             contribution.coefficient,
         )?;
     }

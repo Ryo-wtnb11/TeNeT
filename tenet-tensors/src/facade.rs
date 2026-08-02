@@ -1560,7 +1560,7 @@ where
 //
 // These lift the Stage B2c plan builder
 // (`build_generic_tree_pair_transform_group_plan`) to the TensorMap facade so
-// SU(3)/SO(N≥7)/Sp(N) rules can drive `permute`/`braid`/`transpose` at the same
+// outer-multiplicity rules can drive `permute`/`braid`/`transpose` at the same
 // level as the multiplicity-free API. They are *siblings*, not runtime
 // branches: `GenericRigidSymbols` and `MultiplicityFreeRigidSymbols` are never
 // both implemented by a real rule, so a mult-free rule can never name these

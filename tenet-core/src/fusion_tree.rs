@@ -1129,13 +1129,13 @@ where
 /// [`fusion_trees_by_coupled_for_space`]: emits multiplicity-aware fusion-tree
 /// keys (one per vertex-label combination) via
 /// [`collect_generic_fusion_trees_for_coupled`]. `R: FusionRule` (not
-/// `MultiplicityFreeFusionRule`) so SU(3)/SO(N≥7)/Sp(N) rules can drive the
+/// `MultiplicityFreeFusionRule`) so outer-multiplicity rules can drive the
 /// Space layer.
 ///
 /// Escape semantics (Option A, refute/b3b-verify): the coupled candidates of
 /// each leg tuple are classified by [`FusionRule::coupled_sector_fold`]. Trees
 /// are enumerated for CLEAN sectors only (their tree set is exactly the
-/// full-SU(3) set); tainted / escaped / poisoned candidates are reported in the
+/// provider's complete set); tainted / escaped / poisoned candidates are reported in the
 /// returned aggregate so the caller can refuse construction with an `Err` —
 /// block dimensions are either exactly right or an error, never silently
 /// truncated. A sector clean in one tuple but tainted in another is tainted
@@ -1290,10 +1290,10 @@ fn fusion_fold_error_message(side: &str, fold: &CoupledSectorFold) -> String {
         ));
     }
     format!(
-        "SU(3) dim<=27 table cannot represent this space exactly ({}); block \
+        "bounded Generic provider cannot represent this space exactly ({}); block \
          dimensions are either exact or an error, never truncated. Use \
          fusion_tree_keys_generic_for_coupled for provably-clean sectors, or \
-         extend the table (Stage B3c).",
+         extend the provider catalog.",
         parts.join("; ")
     )
 }
@@ -9149,10 +9149,10 @@ where
     // the same rewrite the mult-free branch uses.
     //
     // `fusion_channels_in_table` (not `fusion_channels`): for a bounded table
-    // rule (SU(3)) the pair (a, d) can escape even on a legal tree (e.g.
+    // bounded rule the pair (a, d) can escape even on a legal tree (e.g.
     // a=27, d=8). Skipped frontier c′ are provably dead: transforms only run
     // on structures whose sectors the coupled fold admitted as clean, and a
-    // nonzero frontier-c′ term would be a full-SU(3) tree through an
+    // nonzero frontier-c′ term would be a complete tree through an
     // out-of-table inner line — contradicting cleanness.
     for c_prime in rule
         .try_fusion_channels_in_table(a, d)

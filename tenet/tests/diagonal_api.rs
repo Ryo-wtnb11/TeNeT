@@ -58,23 +58,8 @@ fn erased_diagonal_preserves_canonical_positions_and_dual_leg() {
 }
 
 #[test]
-fn erased_su3_and_real_c64_readback_stay_compact() {
+fn real_c64_readback_stays_compact() {
     let runtime = runtime();
-    let su3 = Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap();
-    let values: Vec<Vec<Scalar>> = su3
-        .su3_sectors()
-        .unwrap()
-        .iter()
-        .enumerate()
-        .map(|(sector, &(_, degeneracy))| {
-            (0..degeneracy)
-                .map(|index| Scalar::F64((10 * sector + index) as f64))
-                .collect()
-        })
-        .collect();
-    let tensor = Tensor::diagonal(&runtime, Dtype::F64, &su3, values.clone()).unwrap();
-    assert_eq!(tensor.diagonal_spectrum().unwrap().unwrap(), values);
-
     let v = Space::u1([(0, 2)]);
     let source = Tensor::from_block_fn(&runtime, [&v], [&v], |_, index| {
         Complex64::new(

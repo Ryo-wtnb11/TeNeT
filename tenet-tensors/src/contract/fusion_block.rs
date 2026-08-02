@@ -1896,7 +1896,7 @@ where
 /// the SU(N) core/compose (fully-direct GEMM) route. Byte-identical plan
 /// structure to the mult-free path — the coupled-block GEMM is symmetry-
 /// agnostic, so the ONLY difference is that outer-multiplicity fusion trees
-/// (vertex-labelled blocks, e.g. SU(3) `N(8,8,8)=2`) are grouped/paired
+/// (vertex-labelled outer-multiplicity blocks) are grouped/paired
 /// correctly by the group-agnostic block structure. The per-subblock
 /// coefficient is `1.0` (SU(N) is bosonic → no supertrace twist, exactly what
 /// the mult-free `rule.scalar_one()` returns for a bosonic rule).
@@ -2726,43 +2726,4 @@ fn coupled_sector(tree: &FusionTreeKey) -> SectorId {
 /// Generic-fusion sibling retained as a named algorithm boundary.
 fn coupled_sector_generic(tree: &FusionTreeKey) -> SectorId {
     tree.coupled()
-}
-
-#[cfg(test)]
-mod rule_identity_tests {
-    use super::*;
-    use tenet_core::{CoreError, FusionTreeHomSpace, TabulatedFusionRule};
-    use tenet_operations::OutputAxisOrder;
-
-    #[test]
-    fn generic_block_plan_rejects_spaces_from_different_tabulated_rules() {
-        const SU3: &[u8] = include_bytes!("../../../tenet-core/src/su3_table.bin");
-        const SU4: &[u8] = include_bytes!("../../../tenet-core/src/testdata/su4_table.bin");
-        let su3 = TabulatedFusionRule::try_from_bytes(SU3, "su3-table.bin").unwrap();
-        let su4 = TabulatedFusionRule::try_from_bytes(SU4, "su4-table.bin").unwrap();
-        let make = |rule: &TabulatedFusionRule| {
-            DynamicFusionMapSpace::from_degeneracy_shapes_generic(
-                rule,
-                FusionTreeHomSpace::from_sector_ids([], []),
-                [vec![]],
-            )
-            .unwrap()
-        };
-        let dst = make(&su3);
-        let lhs = make(&su3);
-        let rhs = make(&su4);
-
-        let error = compile_fusion_block_contract_plan_generic(
-            &su3,
-            &dst,
-            &lhs,
-            &rhs,
-            TensorContractSpec::new(&[], &[], OutputAxisOrder::identity()),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            OperationError::Core(CoreError::FusionRuleMismatch { .. })
-        ));
-    }
 }

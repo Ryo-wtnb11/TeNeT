@@ -28,7 +28,7 @@
 - 両者は private admitted-layout/operation seam へ lower する。compact diagonal は
   private storage であり、SVD/eigendecomposition の spectrum factor は必要になるまで
   dense materialization しない。共有化は transform/contract/compact の一部に留まり、
-  それ以外の収束は typed Generic/SU(3) admission 後の課題である。
+  それ以外の収束は typed Generic admission 後の課題である。
 
 ## erased facade の目標ユーザーコード
 

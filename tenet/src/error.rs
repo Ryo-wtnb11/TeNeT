@@ -55,7 +55,7 @@ pub enum Error {
     UnsupportedForRule {
         /// Stable public operation name, such as `Tensor::eigh_full`.
         operation: &'static str,
-        /// User-facing fusion-rule name, such as `SU(3)`.
+        /// User-facing fusion-rule name, such as `U(1)`.
         rule: &'static str,
     },
     /// Invalid user input (axes, sectors, spaces); the message says what.

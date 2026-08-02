@@ -269,26 +269,6 @@ fn space_try_dual_preserves_product_child_errors() {
 }
 
 #[test]
-fn space_try_dual_keeps_su3_table_duality_total() {
-    // What: SU3 checked dual conjugates each Dynkin label, retains exact
-    // degeneracies and table order, toggles variance, and is involutive.
-    let space = Space::su3([((1, 1), 4), ((0, 1), 1), ((1, 0), 2)]).unwrap();
-    assert!(!space.is_dual());
-    assert_eq!(
-        space.su3_sectors().unwrap(),
-        vec![((0, 1), 1), ((1, 0), 2), ((1, 1), 4)]
-    );
-
-    let dual = space.try_dual().unwrap();
-    assert!(dual.is_dual());
-    assert_eq!(
-        dual.su3_sectors().unwrap(),
-        vec![((0, 1), 2), ((1, 0), 1), ((1, 1), 4)]
-    );
-    assert_eq!(dual.try_dual().unwrap(), space);
-}
-
-#[test]
 fn compose_equals_contract_on_matching_axes() {
     let rt = Runtime::builder().build().unwrap();
     let v = u1_space();
@@ -1453,7 +1433,7 @@ fn invalid_builtin_sector_labels_are_absent() {
 #[test]
 fn try_sectors_matches_sectors_on_multiplicity_free_rules() {
     // try_sectors is Ok with byte-identical content to sectors() on every
-    // mult-free rule (the SU(3) Err path lives in su3_panic_firewall.rs).
+    // multiplicity-free rule.
     for space in [
         Space::u1([(-1, 2), (0, 3), (1, 2)]),
         Space::z2([(0, 2), (1, 3)]),

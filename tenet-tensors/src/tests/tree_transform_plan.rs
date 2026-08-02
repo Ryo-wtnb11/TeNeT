@@ -7533,7 +7533,7 @@ fn tree_transform_replay_dispatches_through_kernel_adapter() {
 // below couple [1,1] to the vacuum (N(1,1,0)=1), so the rank-2 codomain
 // braid is a pure 1×1 R-symbol — no bends, no F-moves. This exercises the
 // `build_generic_tree_pair_transform_group_plan` wiring (style guard, group
-// iteration, shared assembly, core-row dispatch) without a full SU(3) symbol
+// iteration, shared assembly, core-row dispatch) without an external symbol
 // table; the recoupling math itself is proven in tenet-core's B2c tests.
 // ======================================================================
 use tenet_core::{
@@ -7658,14 +7658,26 @@ impl GenericFusionSymbols for DenseGenericRule {
     type Scalar = f64;
     fn f_symbol_generic(
         &self,
-        _a: SectorId,
-        _b: SectorId,
-        _c: SectorId,
-        _d: SectorId,
-        _e: SectorId,
-        _f: SectorId,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
     ) -> GenericFArray<Self::Scalar> {
-        GenericFArray::new(vec![1.0], (1, 1, 1, 1))
+        let shape = (
+            self.nsymbol(a, b, e),
+            self.nsymbol(e, c, d),
+            self.nsymbol(b, c, f),
+            self.nsymbol(a, f, d),
+        );
+        let rows = shape.0 * shape.1;
+        let cols = shape.2 * shape.3;
+        let mut data = vec![0.0; rows * cols];
+        for index in 0..rows.min(cols) {
+            data[index * cols + index] = 1.0;
+        }
+        GenericFArray::new(data, shape)
     }
     fn r_symbol_generic(
         &self,
@@ -7892,15 +7904,15 @@ where
     }
 }
 
-struct SynchronizedCheckedSu3 {
-    rule: tenet_core::Su3FusionRule,
+struct SynchronizedCheckedGeneric {
+    rule: DenseGenericRule,
     calls: std::sync::Mutex<usize>,
 }
 
-impl SynchronizedCheckedSu3 {
+impl SynchronizedCheckedGeneric {
     fn new() -> Self {
         Self {
-            rule: tenet_core::Su3FusionRule::new(),
+            rule: DenseGenericRule,
             calls: std::sync::Mutex::new(0),
         }
     }
@@ -7910,7 +7922,7 @@ impl SynchronizedCheckedSu3 {
     }
 }
 
-impl CheckedGenericFusion for SynchronizedCheckedSu3 {
+impl CheckedGenericFusion for SynchronizedCheckedGeneric {
     type Error = std::convert::Infallible;
 
     fn rule_identity(&self) -> tenet_core::RuleIdentity {
@@ -7956,7 +7968,7 @@ impl CheckedGenericFusion for SynchronizedCheckedSu3 {
     }
 }
 
-impl CheckedGenericRigidSymbols for SynchronizedCheckedSu3 {
+impl CheckedGenericRigidSymbols for SynchronizedCheckedGeneric {
     type Scalar = f64;
 
     fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
@@ -8102,6 +8114,25 @@ fn dense_generic_source_pairs(rule: &DenseGenericRule) -> [FusionTreePairKey; 2]
     })
 }
 
+fn dense_generic_rank3_pairs(rule: &DenseGenericRule) -> [FusionTreePairKey; 2] {
+    let charge = SectorId::new(1);
+    let vacuum = SectorId::new(0);
+    [MultiplicityIndex::ONE, MultiplicityIndex::new(2).unwrap()].map(|vertex| {
+        FusionTreePairKey::pair(
+            FusionTreeKey::try_new_for_rule(
+                rule,
+                [charge, charge, charge],
+                vacuum,
+                [false, false, false],
+                [charge],
+                [vertex, MultiplicityIndex::ONE],
+            )
+            .unwrap(),
+            FusionTreeKey::try_new_for_rule(rule, [], vacuum, [], [], []).unwrap(),
+        )
+    })
+}
+
 fn dense_generic_dual_source_pair(rule: &DenseGenericRule) -> FusionTreePairKey {
     FusionTreePairKey::pair(
         FusionTreeKey::try_new_for_rule(
@@ -8123,6 +8154,18 @@ fn dense_generic_dual_source_pair(rule: &DenseGenericRule) -> FusionTreePairKey 
         )
         .unwrap(),
     )
+}
+
+fn dense_generic_dynamic_space() -> crate::contract::DynamicFusionMapSpace {
+    let sector = SectorId::new(1);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new(
+            [2usize, 3].map(|degeneracy| SectorLeg::new([(sector, degeneracy)], false)),
+        ),
+        FusionProductSpace::new([SectorLeg::new([(sector, 5)], false)]),
+    );
+    crate::contract::DynamicFusionMapSpace::from_final_homspace_generic(&DenseGenericRule, homspace)
+        .unwrap()
 }
 
 // The generic plan compile reproduces the core `generic_permute_tree_pair`
@@ -8326,168 +8369,6 @@ fn generic_dense_block_plan_matches_per_source_oracle_matrix() {
     );
 }
 
-fn su3_rank3_outer_multiplicity_pairs(rule: &tenet_core::Su3FusionRule) -> Vec<FusionTreePairKey> {
-    let eight = rule.sector_of(1, 1).unwrap();
-    let vacuum = SectorId::new(0);
-    [1, 2]
-        .map(|multiplicity| {
-            FusionTreePairKey::pair(
-                FusionTreeKey::try_new_for_rule(
-                    rule,
-                    [eight, eight, eight],
-                    vacuum,
-                    [false, false, false],
-                    [eight],
-                    [
-                        MultiplicityIndex::new(multiplicity).unwrap(),
-                        MultiplicityIndex::ONE,
-                    ],
-                )
-                .unwrap(),
-                FusionTreeKey::try_new_for_rule(rule, [], vacuum, [], [], []).unwrap(),
-            )
-        })
-        .to_vec()
-}
-
-fn su3_rank3_dynamic_space(
-    rule: &tenet_core::Su3FusionRule,
-) -> crate::contract::DynamicFusionMapSpace {
-    let eight = rule.sector_of(1, 1).unwrap();
-    let homspace = FusionTreeHomSpace::new(
-        FusionProductSpace::new(
-            [2usize, 3].map(|degeneracy| SectorLeg::new([(eight, degeneracy)], false)),
-        ),
-        FusionProductSpace::new([SectorLeg::new([(eight, 5)], false)]),
-    );
-    crate::contract::DynamicFusionMapSpace::from_final_homspace_generic(rule, homspace).unwrap()
-}
-
-#[test]
-fn checked_generic_rank3_plan_matches_legacy_rows_coefficients_and_order() {
-    use tenet_core::{InfallibleGeneric, Su3FusionRule};
-
-    let rule = Su3FusionRule::new();
-    let pairs = su3_rank3_outer_multiplicity_pairs(&rule);
-    let structure = packed_fixture_structure(
-        3,
-        pairs
-            .iter()
-            .cloned()
-            .map(BlockKey::from)
-            .map(|key| (key, vec![1usize; 3])),
-    )
-    .unwrap();
-    for operation in [
-        // The adjacent 8×8 exchange is R-only.
-        TreeTransformOperation::permute([1, 0, 2], []),
-        // Moving the right 8 past the middle 8 exercises the inner F-R-F path.
-        TreeTransformOperation::braid([0, 2, 1], [], [0, 1, 2], []),
-        // A planar rotation exercises repartition plus fold/bend lowering.
-        TreeTransformOperation::transpose([1, 2, 0], []),
-    ] {
-        let legacy =
-            build_generic_tree_pair_transform_group_plan(&rule, operation.clone(), &structure)
-                .unwrap();
-        let checked_rule = InfallibleGeneric::new(&rule);
-        let checked = build_checked_generic_tree_pair_transform_group_plan(
-            &checked_rule,
-            operation,
-            &structure,
-        )
-        .unwrap();
-        assert_eq!(checked.specs().len(), legacy.specs().len());
-        for (checked, legacy) in checked.specs().iter().zip(legacy.specs()) {
-            assert_eq!(checked.src_keys(), legacy.src_keys());
-            assert_eq!(checked.dst_keys(), legacy.dst_keys());
-            assert_eq!(
-                checked.recoupling_coefficients_dst_src(),
-                legacy.recoupling_coefficients_dst_src()
-            );
-        }
-    }
-}
-
-#[test]
-fn checked_generic_owned_transform_matches_legacy_for_r_and_inner_f_r() {
-    use tenet_core::{InfallibleGeneric, Su3FusionRule};
-
-    const TENSORKIT_ORACLE: &str = include_str!("fixtures/issue645_tensorkit_su3_owned_oracle.txt");
-    let rule = Su3FusionRule::new();
-    let src_space = su3_rank3_dynamic_space(&rule);
-    let src_data = (0..src_space.required_len().unwrap())
-        .map(|index| index as f64)
-        .collect::<Vec<_>>();
-    let provider = Arc::new(InfallibleGeneric::new(&rule));
-    let bound_src = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
-        Arc::clone(&provider),
-        src_space.homspace().clone(),
-    )
-    .unwrap();
-    assert_eq!(bound_src.space(), &src_space);
-    let source_before = src_space.clone();
-    let data_before = src_data.clone();
-
-    for (operation, oracle_name) in [
-        (
-            TreeTransformOperation::permute([1, 0], [2]),
-            Some("r_only.flat="),
-        ),
-        (
-            TreeTransformOperation::braid([0, 2], [1], [0, 1], [2]),
-            Some("inner_f_r.flat="),
-        ),
-        (TreeTransformOperation::transpose([1, 2], [0]), None),
-    ] {
-        let (actual_space, actual_data) = crate::tree_transform_dyn_owned_checked_generic(
-            operation.clone(),
-            &bound_src,
-            &src_data,
-            1.0,
-        )
-        .unwrap();
-
-        let expected_space = src_space.transformed_generic(&rule, &operation).unwrap();
-        let mut expected_data = vec![0.0; expected_space.required_len().unwrap()];
-        TreeTransformExecutionContext::<f64, tenet_core::RuleIdentity>::default()
-            .tree_transform_dyn_into_generic(
-                &rule,
-                operation,
-                expected_space.structure(),
-                src_space.structure(),
-                &mut expected_data,
-                &src_data,
-                1.0,
-                0.0,
-            )
-            .unwrap();
-
-        assert_eq!(actual_space.space(), &expected_space);
-        assert!(Arc::ptr_eq(actual_space.provider_arc(), &provider));
-        assert_eq!(actual_data, expected_data);
-        if let Some(oracle_name) = oracle_name {
-            let oracle = TENSORKIT_ORACLE
-                .lines()
-                .find_map(|line| line.strip_prefix(oracle_name))
-                .unwrap()
-                .split(',')
-                .map(|value| value.parse::<f64>().unwrap())
-                .collect::<Vec<_>>();
-            assert_eq!(actual_data.len(), oracle.len());
-            for (index, (actual, expected)) in actual_data.iter().zip(&oracle).enumerate() {
-                assert!(
-                    (actual - expected).abs() <= 1e-12,
-                    "{oracle_name}[{index}]: {actual} != TensorKit {expected}"
-                );
-            }
-        }
-        assert_eq!(src_space, source_before);
-        assert_eq!(src_data, data_before);
-    }
-    assert!(TENSORKIT_ORACLE.contains("TensorKit_version=0.16.2"));
-    assert!(TENSORKIT_ORACLE.contains("SUNRepresentations_version=0.4.0"));
-}
-
 #[cfg(feature = "racah-generated")]
 #[test]
 fn racah_generated_sun_adjoint_checked_bound_round_trips() {
@@ -8582,12 +8463,11 @@ fn racah_generated_sun_adjoint_checked_bound_round_trips() {
 
 #[test]
 fn checked_generic_shared_provider_builds_identical_plans_concurrently() {
-    let oracle_rule = tenet_core::Su3FusionRule::new();
-    let raw = su3_rank3_dynamic_space(&oracle_rule);
+    let raw = dense_generic_dynamic_space();
     let data = (0..raw.required_len().unwrap())
         .map(|index| index as f64)
         .collect::<Vec<_>>();
-    let provider = Arc::new(SynchronizedCheckedSu3::new());
+    let provider = Arc::new(SynchronizedCheckedGeneric::new());
     let source = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
         Arc::clone(&provider),
         raw.homspace().clone(),
@@ -8625,7 +8505,7 @@ fn checked_generic_shared_provider_builds_identical_plans_concurrently() {
 fn checked_generic_owned_failure_does_not_publish_destination_state() {
     use tenet_core::{
         block_structure_intern_cache_info, complete_hom_space_structure_cache_info,
-        fusion_tree_layout_cache_info, Su3FusionRule,
+        fusion_tree_layout_cache_info,
     };
 
     const ISOLATED: &str = "TENET_CHECKED_GENERIC_OWNED_FAILURE_ISOLATED";
@@ -8652,8 +8532,8 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
     let _guard = crate::test_support::CACHE_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let rule = Su3FusionRule::new();
-    let src_space = su3_rank3_dynamic_space(&rule);
+    let rule = DenseGenericRule;
+    let src_space = dense_generic_dynamic_space();
     let src_data = vec![1.0; src_space.required_len().unwrap()];
     let source_before = src_space.clone();
     let data_before = src_data.clone();
@@ -8661,7 +8541,7 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
     let store = RuntimeTreeTransformStore::<f64>::default();
 
     for mismatch in [
-        Some(tenet_core::RuleIdentity::of_type::<DenseGenericRule>()),
+        Some(tenet_core::RuleIdentity::of_type::<ToyGenericRule>()),
         None,
     ] {
         let style_mismatch = mismatch.is_none();
@@ -8805,10 +8685,8 @@ fn checked_generic_owned_failure_does_not_publish_destination_state() {
 
 #[test]
 fn checked_generic_plan_preserves_provider_sources_and_rejects_bad_f_r_shapes() {
-    use tenet_core::Su3FusionRule;
-
-    let rule = Su3FusionRule::new();
-    let pairs = su3_rank3_outer_multiplicity_pairs(&rule);
+    let rule = DenseGenericRule;
+    let pairs = dense_generic_rank3_pairs(&rule);
     let structure = packed_fixture_structure(
         3,
         pairs
@@ -8833,10 +8711,13 @@ fn checked_generic_plan_preserves_provider_sources_and_rejects_bad_f_r_shapes() 
         let error =
             build_checked_generic_tree_pair_transform_group_plan(&provider, operation, &structure)
                 .unwrap_err();
-        assert!(matches!(
-            error,
-            CheckedGenericPlanError::Provider(CheckedPlanSpyError(found)) if found == call
-        ));
+        assert!(
+            matches!(
+                error,
+                CheckedGenericPlanError::Provider(CheckedPlanSpyError(found)) if found == call
+            ),
+            "{error:?}"
+        );
         assert_eq!(
             std::error::Error::source(&error)
                 .and_then(|source| source.downcast_ref::<CheckedPlanSpyError>()),
@@ -8869,10 +8750,8 @@ fn checked_generic_plan_preserves_provider_sources_and_rejects_bad_f_r_shapes() 
 
 #[test]
 fn checked_generic_plan_rejects_style_before_structure_or_symbol_queries() {
-    use tenet_core::Su3FusionRule;
-
-    let rule = Su3FusionRule::new();
-    let pairs = su3_rank3_outer_multiplicity_pairs(&rule);
+    let rule = DenseGenericRule;
+    let pairs = dense_generic_rank3_pairs(&rule);
     let structure = packed_fixture_structure(
         3,
         pairs
@@ -9213,270 +9092,4 @@ fn generic_facade_structure_rejects_multiplicity_free_style() {
     )
     .unwrap_err();
     assert!(matches!(err, OperationError::UnsupportedFusionStyle { .. }));
-}
-
-// Stage B3b: the non-memoized generic cache sibling
-// (`get_or_compile_tree_pair_generic`) drives the REAL SU(3) table provider and
-// must reproduce the (proven) non-cached facade path byte-for-byte.
-#[test]
-fn b3b_su3_cache_generic_sibling_matches_facade() {
-    use tenet_core::{FusionRule, Su3FusionRule};
-
-    let rule = Su3FusionRule::new();
-    assert_eq!(rule.rule_identity(), Su3FusionRule::new().rule_identity());
-    assert_ne!(rule.provenance(), 0);
-
-    let eight = rule.sector_of(1, 1).unwrap();
-    let vac = tenet_core::SectorId::new(0);
-    // codomain [8,8]->vac (single vertex), domain []->vac: one 1-element block.
-    let make = |value: f64| {
-        let cod = FusionTreeKey::try_new_for_rule(
-            &rule,
-            [eight, eight],
-            vac,
-            [false, false],
-            [],
-            [tenet_core::MultiplicityIndex::ONE],
-        )
-        .unwrap();
-        let dom = FusionTreeKey::try_new_for_rule(&rule, [], vac, [], [], []).unwrap();
-        let key = BlockKey::from(FusionTreePairKey::pair(cod, dom));
-        let structure = packed_fixture_structure(2, [(key, vec![1, 1])]).unwrap();
-        let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
-        TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![value], space, structure).unwrap()
-    };
-
-    let src = make(7.0);
-    // Facade (non-cached) reference.
-    let mut dst_facade = make(0.0);
-    permute_into_generic(&rule, [1, 0], [], &mut dst_facade, &src, 1.0, 0.0).unwrap();
-
-    // Cache sibling: compile via get_or_compile_tree_pair_generic, then execute.
-    let mut cache = TreeTransformCache::<f64, crate::RuleIdentity>::new();
-    let mut dst_cache = make(0.0);
-    let structure = cache
-        .get_or_compile_tree_pair_generic(
-            &rule,
-            TreeTransformOperation::permute([1, 0], []),
-            &dst_cache,
-            &src,
-        )
-        .unwrap();
-    let mut backend = DenseTreeTransformOperations::default();
-    let mut workspace = TreeTransformWorkspace::default();
-    tree_transform_execute_with(
-        &mut backend,
-        &mut workspace,
-        &structure,
-        &mut dst_cache,
-        &src,
-        1.0,
-        0.0,
-    )
-    .unwrap();
-
-    assert_eq!(dst_cache.data(), dst_facade.data());
-
-    // What: the generic-fusion overwrite entry point writes directly over dirty
-    // destination storage on repeated non-memoized compilation.
-    let mut context = TreeTransformExecutionContext::<f64, crate::RuleIdentity>::default();
-    let mut dst_overwrite = make(f64::NAN);
-    let dst_structure = Arc::clone(dst_overwrite.structure());
-    let src_structure = Arc::clone(src.structure());
-    for _ in 0..2 {
-        dst_overwrite.data_mut().fill(f64::NAN);
-        context
-            .tree_transform_dyn_overwrite_into_generic(
-                &rule,
-                TreeTransformOperation::permute([1, 0], []),
-                &dst_structure,
-                &src_structure,
-                dst_overwrite.data_mut(),
-                src.data(),
-                1.0,
-            )
-            .unwrap();
-        assert_eq!(dst_overwrite.data(), dst_facade.data());
-    }
-    assert_eq!(context.cache().structure_len(), 0);
-}
-
-// ===================== Stage B3c-1: SU(4) DATA-ONLY smoke ==================
-//
-// The identical Generic pipeline — the `R: FusionRule` / `GenericRigidSymbols`
-// tree-transform and contract siblings — driven from a *different* group's
-// checked-in blob (a small SU(4), dim ≤ 15) via `TabulatedFusionRule::try_from_bytes`,
-// with ZERO Rust changes. Proves permute (real SU(4) F-symbol recoupling) and
-// contract (core/compose GEMM) are group-agnostic: a new group is data only.
-#[cfg(test)]
-mod b3c1_su4_smoke {
-    use super::*;
-    use crate::permute_into_generic;
-    use crate::{
-        BoundDynamicFusionMapSpace, DynamicFusionMapSpace, HostTreeFusionExecutionContext,
-    };
-    use std::sync::Arc;
-    use tenet_core::{
-        FusionProductSpace, FusionTreeHomSpace, FusionTreeKey, SectorLeg, TabulatedFusionRule,
-    };
-
-    static SU4_BYTES: &[u8] = include_bytes!("../../../tenet-core/src/testdata/su4_table.bin");
-
-    fn su4() -> TabulatedFusionRule {
-        TabulatedFusionRule::try_from_bytes(SU4_BYTES, "su4_table.bin").unwrap()
-    }
-
-    // Construction + permute: a `[4,4̄] <- vac` singlet tensor; swapping the two
-    // codomain legs genuinely recouples through the SU(4) F-symbol, and swapping
-    // back returns the original data (invertibility over the su4 table).
-    #[test]
-    fn su4_permute_round_trip_is_data_only() {
-        let rule = su4();
-        let four = rule.sector_of_label(&[1, 0, 0]).unwrap();
-        let fourbar = rule.dual(four); // 4 ⊗ 4̄ ∋ 1 (covered), and 4 ≠ 4̄.
-        let vac = SectorId::new(0);
-        // `[a, b] <- vac` singlet map. The two codomain sectors differ, so a
-        // leg swap really reorders the fusion tree (recouples via SU(4) F/R).
-        let make = |a: SectorId, b: SectorId, value: f64| {
-            let cod = FusionTreeKey::try_new_for_rule(
-                &rule,
-                [a, b],
-                vac,
-                [false, false],
-                [],
-                [MultiplicityIndex::ONE],
-            )
-            .unwrap();
-            let dom = FusionTreeKey::try_new_for_rule(&rule, [], vac, [], [], []).unwrap();
-            let key = BlockKey::from(FusionTreePairKey::pair(cod, dom));
-            let structure = packed_fixture_structure(2, [(key, vec![1, 1])]).unwrap();
-            let space = TensorMapSpace::<2, 0>::from_dims([1, 1], []).unwrap();
-            TensorMap::<f64, 2, 0>::from_vec_with_structure(vec![value], space, structure).unwrap()
-        };
-        let src = make(four, fourbar, 3.5);
-        let mut swapped = make(fourbar, four, 0.0); // permuted leg order
-        permute_into_generic(&rule, [1, 0], [], &mut swapped, &src, 1.0, 0.0).unwrap();
-        let mut back = make(four, fourbar, 0.0);
-        permute_into_generic(&rule, [1, 0], [], &mut back, &swapped, 1.0, 0.0).unwrap();
-        assert_eq!(back.data().len(), src.data().len());
-        for (x, y) in back.data().iter().zip(src.data().iter()) {
-            assert!((x - y).abs() < 1e-12, "su4 permute round-trip: {x} vs {y}");
-        }
-    }
-
-    // Contract (core/compose): `A:[4]<-[4]` composed with `B:[4]<-[4]` over the
-    // shared coupled-4 leg. Proves the generic block-GEMM contract plan compiles
-    // and executes on SU(4) data. Value = a·b in the single 1×1 coupled block.
-    #[test]
-    fn su4_contract_core_route_is_data_only() {
-        let rule = su4();
-        let four = rule.sector_of_label(&[1, 0, 0]).unwrap();
-        let map4 = |value: f64| {
-            let leg = SectorLeg::new([(four, 1usize)], false);
-            let hom = FusionTreeHomSpace::new(
-                FusionProductSpace::new([leg.clone()]),
-                FusionProductSpace::new([leg]),
-            );
-            let keys = hom.fusion_tree_keys_generic(&rule).unwrap();
-            let shapes: Vec<Vec<usize>> = keys.iter().map(|_| vec![1, 1]).collect();
-            let space =
-                DynamicFusionMapSpace::from_degeneracy_shapes_generic(&rule, hom, shapes).unwrap();
-            let data = vec![value; space.required_len().unwrap()];
-            (space, data)
-        };
-        let (a_space, a_data) = map4(2.0);
-        let (b_space, b_data) = map4(5.0);
-        // A domain leg 0 with B codomain leg 0 (compose): [4]<-[4].
-        let dst = DynamicFusionMapSpace::contracted_generic(&rule, &a_space, &b_space, &[1], &[0])
-            .unwrap();
-        let provider = Arc::new(rule);
-        let dst = BoundDynamicFusionMapSpace::bind_generic(dst, Arc::clone(&provider)).unwrap();
-        let a_space =
-            BoundDynamicFusionMapSpace::bind_generic(a_space, Arc::clone(&provider)).unwrap();
-        let b_space =
-            BoundDynamicFusionMapSpace::bind_generic(b_space, Arc::clone(&provider)).unwrap();
-        let mut dst_data = vec![0.0f64; dst.space().required_len().unwrap()];
-        let mut ctx = HostTreeFusionExecutionContext::<f64, u64>::default();
-        ctx.tensorcontract_fusion_dyn_into_generic(
-            &dst,
-            &mut dst_data,
-            &a_space,
-            &a_data,
-            &b_space,
-            &b_data,
-            tenet_operations::TensorContractSpec::with_default_output_order(&[1], &[0]),
-            1.0,
-            0.0,
-        )
-        .unwrap();
-        assert_eq!(dst_data.len(), 1, "single coupled-4 block");
-        assert!(
-            (dst_data[0] - 10.0).abs() < 1e-12,
-            "A∘B = 2·5 = 10, got {}",
-            dst_data[0]
-        );
-    }
-
-    #[test]
-    fn baked_fused_layouts_match_recompute_for_su2_plans() {
-        // What: on real degeneracy-2 SU(2) plans, every baked fused layout is
-        // byte-identical to a fresh fuse_pair_layout of its (block, role) stride
-        // pair (issue #232) — covering all three roles: pack + scatter from a
-        // generic recoupling Multi block, single from a first-pair braid that
-        // lowers to Singles.
-        let src_key0 = all_codomain_fusion_tree_test_key_for_rule(
-            &SU2FusionRule,
-            [1, 1, 1, 1],
-            0,
-            [false, false, false, false],
-            [0, 1],
-            [1, 1, 1],
-        );
-        let src_key1 = all_codomain_fusion_tree_test_key_for_rule(
-            &SU2FusionRule,
-            [1, 1, 1, 1],
-            0,
-            [false, false, false, false],
-            [2, 1],
-            [1, 1, 1],
-        );
-
-        let recoupling_structure = packed_fixture_structure(
-            4,
-            [
-                (src_key0.clone(), vec![2, 2, 2, 2]),
-                (src_key1.clone(), vec![2, 2, 2, 2]),
-            ],
-        )
-        .unwrap();
-        let recoupling = build_all_codomain_tree_transform_group_plan(
-            &SU2FusionRule,
-            TreeTransformOperation::braid([0, 2, 1, 3], [], [0, 1, 2, 3], []),
-            &recoupling_structure,
-        )
-        .unwrap()
-        .compile_structures(&recoupling_structure, &recoupling_structure)
-        .unwrap();
-        assert!(recoupling.has_pack_gemm_scatter_blocks());
-        assert!(recoupling.baked_layouts_match_recomputed());
-
-        let single_structure = packed_fixture_structure(
-            4,
-            [
-                (src_key0.clone(), vec![2, 2, 2, 2]),
-                (src_key1.clone(), vec![2, 2, 2, 2]),
-            ],
-        )
-        .unwrap();
-        let singles = build_all_codomain_tree_transform_group_plan(
-            &SU2FusionRule,
-            TreeTransformOperation::braid([1, 0, 2, 3], [], [0, 1, 2, 3], []),
-            &single_structure,
-        )
-        .unwrap()
-        .compile_structures(&single_structure, &single_structure)
-        .unwrap();
-        assert!(!singles.has_pack_gemm_scatter_blocks());
-        assert!(singles.baked_layouts_match_recomputed());
-    }
 }

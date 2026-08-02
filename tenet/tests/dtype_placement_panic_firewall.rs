@@ -5,7 +5,7 @@
 //! resident). Each has a recoverable `try_*` counterpart that returns a typed
 //! [`Error`] instead. This firewall pins that both halves stay wired, and the
 //! census guard at the bottom makes a new dtype/placement accessor fail here
-//! unless it is added with a `try_*` row (mirrors the SU(3) firewall, #148).
+//! unless it is added with a `try_*` row.
 
 use std::collections::BTreeSet;
 use std::panic::{catch_unwind, AssertUnwindSafe};

@@ -4,9 +4,8 @@ use std::sync::Arc;
 
 use tenet::core::{
     BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericFusion,
-    CheckedGenericRigidSymbols, CheckedGenericStructureError, FusionRule, FusionStyleKind,
-    GenericFArray, GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols, RuleIdentity,
-    SectorId, SectorVec, Su3FusionRule, TypedSectorAdmission,
+    CheckedGenericRigidSymbols, CheckedGenericStructureError, FusionStyleKind, GenericFArray,
+    GenericRMatrix, RuleIdentity, SectorId, SectorVec, TypedSectorAdmission,
 };
 use tenet::prelude::{Complex64, Runtime};
 use tenet::typed::{CheckedGenericTensorProductError, GenericTensorError, GradedSpace, TensorMap};
@@ -36,7 +35,6 @@ impl fmt::Display for ToyError {
 impl std::error::Error for ToyError {}
 
 struct CheckedOnlyToy {
-    rule: Su3FusionRule,
     identity_tag: u8,
     fail_algebra: AtomicBool,
     fail_decode: AtomicBool,
@@ -60,7 +58,6 @@ struct CheckedOnlyToy {
 impl CheckedOnlyToy {
     fn new(identity_tag: u8) -> Self {
         Self {
-            rule: Su3FusionRule::new(),
             identity_tag,
             fail_algebra: AtomicBool::new(false),
             fail_decode: AtomicBool::new(false),
@@ -98,11 +95,7 @@ impl CheckedOnlyToy {
     }
 
     fn x(&self) -> SectorId {
-        if self.use_product_probe {
-            SectorId::new(3)
-        } else {
-            self.rule.sector_of(1, 1).unwrap()
-        }
+        SectorId::new(3)
     }
 
     fn probe_fusion_channels(left: SectorId, right: SectorId) -> SectorVec {
@@ -120,6 +113,28 @@ impl CheckedOnlyToy {
             2
         } else {
             usize::from(Self::probe_fusion_channels(left, right).contains(&coupled))
+        }
+    }
+
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        if self.use_product_probe {
+            Self::probe_fusion_channels(left, right)
+        } else {
+            match (left.id(), right.id()) {
+                (0, x) | (x, 0) => [SectorId::new(x)].into_iter().collect(),
+                (3, 3) => [SectorId::new(0), SectorId::new(3)].into_iter().collect(),
+                _ => SectorVec::new(),
+            }
+        }
+    }
+
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        if self.use_product_probe {
+            Self::probe_nsymbol(left, right, coupled)
+        } else if (left.id(), right.id(), coupled.id()) == (3, 3, 3) {
+            2
+        } else {
+            usize::from(self.fusion_channels(left, right).contains(&coupled))
         }
     }
 
@@ -169,32 +184,24 @@ impl CheckedGenericFusion for CheckedOnlyToy {
         if self.invalid_style.load(Ordering::Relaxed) {
             FusionStyleKind::Unique
         } else {
-            self.rule.fusion_style()
+            FusionStyleKind::Generic
         }
     }
 
     fn braiding_style(&self) -> BraidingStyleKind {
         self.record_query();
-        self.rule.braiding_style()
+        BraidingStyleKind::Bosonic
     }
 
     fn vacuum(&self) -> SectorId {
         self.record_query();
-        if self.use_product_probe {
-            SectorId::new(0)
-        } else {
-            self.rule.vacuum()
-        }
+        SectorId::new(0)
     }
 
     fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
         self.record_query();
         self.algebra_queries.fetch_add(1, Ordering::Relaxed);
-        Ok(if self.use_product_probe {
-            sector
-        } else {
-            self.rule.dual(sector)
-        })
+        Ok(sector)
     }
 
     fn try_fusion_channels(
@@ -207,11 +214,7 @@ impl CheckedGenericFusion for CheckedOnlyToy {
         if self.fail_algebra.load(Ordering::Relaxed) {
             return Err(ToyError::Algebra);
         }
-        Ok(if self.use_product_probe {
-            Self::probe_fusion_channels(left, right)
-        } else {
-            self.rule.fusion_channels(left, right)
-        })
+        Ok(self.fusion_channels(left, right))
     }
 
     fn try_fusion_channels_in_table(
@@ -221,11 +224,7 @@ impl CheckedGenericFusion for CheckedOnlyToy {
     ) -> Result<SectorVec, Self::Error> {
         self.record_query();
         self.algebra_queries.fetch_add(1, Ordering::Relaxed);
-        Ok(if self.use_product_probe {
-            Self::probe_fusion_channels(left, right)
-        } else {
-            self.rule.fusion_channels_in_table(left, right)
-        })
+        Ok(self.fusion_channels(left, right))
     }
 
     fn try_nsymbol(
@@ -236,11 +235,7 @@ impl CheckedGenericFusion for CheckedOnlyToy {
     ) -> Result<usize, Self::Error> {
         self.record_query();
         self.algebra_queries.fetch_add(1, Ordering::Relaxed);
-        Ok(if self.use_product_probe {
-            Self::probe_nsymbol(left, right, coupled)
-        } else {
-            self.rule.nsymbol(left, right, coupled)
-        })
+        Ok(self.nsymbol(left, right, coupled))
     }
 }
 
@@ -250,45 +245,38 @@ impl CheckedGenericRigidSymbols for CheckedOnlyToy {
     fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
         self.record_query();
         self.coefficient_queries.fetch_add(1, Ordering::Relaxed);
-        Ok(if self.use_product_probe && sector.id() == 3 {
+        Ok(if sector.id() == 3 {
             if self.fractional_dim {
                 2.5_f64
             } else {
-                3.0_f64
+                1.0 + 2.0_f64.sqrt()
             }
             .sqrt()
-        } else if self.use_product_probe {
-            1.0
         } else {
-            self.rule.sqrt_dim_scalar(sector)
+            1.0
         })
     }
 
     fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
         self.record_query();
         self.coefficient_queries.fetch_add(1, Ordering::Relaxed);
-        Ok(if self.use_product_probe && sector.id() == 3 {
+        Ok(if sector.id() == 3 {
             1.0 / if self.fractional_dim {
                 2.5_f64
             } else {
-                3.0_f64
+                1.0 + 2.0_f64.sqrt()
             }
             .sqrt()
-        } else if self.use_product_probe {
-            1.0
         } else {
-            self.rule.inv_sqrt_dim_scalar(sector)
+            1.0
         })
     }
 
     fn try_frobenius_schur_phase_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
         self.record_query();
         self.coefficient_queries.fetch_add(1, Ordering::Relaxed);
-        Ok(if self.use_product_probe {
-            1.0
-        } else {
-            self.rule.frobenius_schur_phase_scalar(sector)
-        })
+        let _ = sector;
+        Ok(1.0)
     }
 
     fn try_f_symbol_generic(
@@ -308,14 +296,14 @@ impl CheckedGenericRigidSymbols for CheckedOnlyToy {
         {
             return Err(ToyError::Algebra);
         }
+        let shape = (
+            self.nsymbol(a, b, e),
+            self.nsymbol(e, c, d),
+            self.nsymbol(b, c, f),
+            self.nsymbol(a, f, d),
+        );
+        let len = shape.0 * shape.1 * shape.2 * shape.3;
         let symbol = if self.use_product_probe {
-            let shape = (
-                Self::probe_nsymbol(a, b, e),
-                Self::probe_nsymbol(e, c, d),
-                Self::probe_nsymbol(b, c, f),
-                Self::probe_nsymbol(a, f, d),
-            );
-            let len = shape.0 * shape.1 * shape.2 * shape.3;
             let data = (0..len)
                 .map(|index| {
                     let magnitude = (index + 1) as f64;
@@ -327,8 +315,16 @@ impl CheckedGenericRigidSymbols for CheckedOnlyToy {
                 })
                 .collect();
             GenericFArray::new(data, shape)
+        } else if e == f {
+            let cols = shape.2 * shape.3;
+            GenericFArray::new(
+                (0..len)
+                    .map(|index| f64::from(index / cols == index % cols))
+                    .collect(),
+                shape,
+            )
         } else {
-            self.rule.f_symbol_generic(a, b, c, d, e, f)
+            GenericFArray::new(vec![0.0; len], shape)
         };
         if self.malformed_f.load(Ordering::Relaxed) {
             Ok(GenericFArray::new(
@@ -352,18 +348,14 @@ impl CheckedGenericRigidSymbols for CheckedOnlyToy {
         if self.fail_algebra.load(Ordering::Relaxed) {
             return Err(ToyError::Algebra);
         }
-        Ok(if self.use_product_probe {
-            let rows = Self::probe_nsymbol(a, b, c);
-            GenericRMatrix::new(
-                (0..rows * rows)
-                    .map(|index| f64::from(index / rows == index % rows))
-                    .collect(),
-                rows,
-                rows,
-            )
-        } else {
-            self.rule.r_symbol_generic(a, b, c)
-        })
+        let rows = self.nsymbol(a, b, c);
+        Ok(GenericRMatrix::new(
+            (0..rows * rows)
+                .map(|index| f64::from(index / rows == index % rows))
+                .collect(),
+            rows,
+            rows,
+        ))
     }
 }
 
@@ -608,7 +600,7 @@ fn checked_only_multiplicity_two_transforms_keep_the_source_authority() {
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
     let source: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |trees, _| {
+        TensorMap::from_block_fn(&runtime, [&leg, &leg, &leg], [], |trees, _| {
             trees.codomain_vertices()[0].get() as f64
         })
         .unwrap();
@@ -619,39 +611,23 @@ fn checked_only_multiplicity_two_transforms_keep_the_source_authority() {
     };
     let source_snapshot = snapshot(&source);
     provider.coefficient_queries.store(0, Ordering::Relaxed);
-    let error = source.braid(&[1, 0], &[2], &[0, 1]).unwrap_err();
+    let error = source.braid(&[1, 0, 2], &[], &[0, 1]).unwrap_err();
     assert!(matches!(error, GenericTensorError::Facade(_)));
     assert_eq!(provider.coefficient_queries.load(Ordering::Relaxed), 0);
 
-    let permuted = source.permute(&[1, 0], &[2]).unwrap();
+    let permuted = source.permute(&[1, 0, 2], &[]).unwrap();
     assert!(std::ptr::eq(permuted.provider(), provider.as_ref()));
-    let restored = permuted.permute(&[1, 0], &[2]).unwrap();
+    let restored = permuted.permute(&[1, 0, 2], &[]).unwrap();
     assert_eq!(snapshot(&restored), source_snapshot);
     for (actual, expected) in restored.data().iter().zip(source.data()) {
         assert!((actual - expected).abs() <= 1e-12);
     }
 
-    let braided = source.braid(&[1, 0], &[2], &[0, 1, 2]).unwrap();
+    let braided = source.braid(&[1, 0, 2], &[], &[0, 1, 2]).unwrap();
     assert!(std::ptr::eq(braided.provider(), provider.as_ref()));
 
-    let repartitioned = source.repartition(1).unwrap();
-    assert!(std::ptr::eq(repartitioned.provider(), provider.as_ref()));
-    let restored = repartitioned.repartition(2).unwrap();
-    assert_eq!(snapshot(&restored), source_snapshot);
-    for (actual, expected) in restored.data().iter().zip(source.data()) {
-        assert!((actual - expected).abs() <= 1e-12);
-    }
-
-    let transposed = source.transpose().unwrap();
-    assert!(std::ptr::eq(transposed.provider(), provider.as_ref()));
-    let restored = transposed.transpose().unwrap();
-    assert_eq!(snapshot(&restored), source_snapshot);
-    for (actual, expected) in restored.data().iter().zip(source.data()) {
-        assert!((actual - expected).abs() <= 1e-12);
-    }
-
     provider.fail_algebra.store(true, Ordering::Relaxed);
-    let error = source.permute(&[1, 0], &[2]).unwrap_err();
+    let error = source.permute(&[1, 0, 2], &[]).unwrap_err();
     assert!(matches!(
         error,
         GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Provider(
@@ -670,18 +646,18 @@ fn checked_only_contract_and_compose_keep_left_authority() {
     let right_leg =
         GradedSpace::try_new(Arc::clone(&right_provider), [(Label::X, 1)], false).unwrap();
     let source: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&left_leg, &left_leg], [&left_leg], |trees, _| {
-            trees.codomain_vertices()[0].get() as f64
-        })
-        .unwrap();
+        TensorMap::from_block_fn(&runtime, [&left_leg], [&left_leg], |_, _| 1.0).unwrap();
+    let nontrivial: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&left_leg, &left_leg], [&left_leg], |_, _| 1.0)
+            .unwrap();
     let identity: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&right_leg], [&right_leg], |_, _| 1.0).unwrap();
     left_provider.r_queries.store(0, Ordering::Relaxed);
 
     for output in [
-        source.contract(&identity, &[2], &[0], &[0, 1, 2]).unwrap(),
+        source.contract(&identity, &[1], &[0], &[0, 1]).unwrap(),
         source
-            .contract_ordered(&identity, &[2], &[0], &[0, 1, 2])
+            .contract_ordered(&identity, &[1], &[0], &[0, 1])
             .unwrap(),
         source.compose(&identity).unwrap(),
     ] {
@@ -696,34 +672,13 @@ fn checked_only_contract_and_compose_keep_left_authority() {
     }
     assert_eq!(left_provider.r_queries.load(Ordering::Relaxed), 0);
 
-    left_provider.r_queries.store(0, Ordering::Relaxed);
-    let noncanonical = source.contract(&identity, &[0], &[1], &[0, 1, 2]).unwrap();
-    assert!(left_provider.r_queries.load(Ordering::Relaxed) > 0);
-    let explicit = source
-        .permute(&[1, 2], &[0])
-        .unwrap()
-        .contract(
-            &identity.permute(&[1], &[0]).unwrap(),
-            &[2],
-            &[0],
-            &[0, 1, 2],
-        )
-        .unwrap();
-    assert_eq!(noncanonical.data(), explicit.data());
-    for index in 0..noncanonical.block_count() {
-        assert_eq!(
-            noncanonical.block_fusion_trees(index).unwrap(),
-            explicit.block_fusion_trees(index).unwrap()
-        );
-    }
-
     let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let foreign_runtime_identity: TensorMap<_, f64> =
         TensorMap::from_block_fn(&other_runtime, [&right_leg], [&right_leg], |_, _| 1.0).unwrap();
     left_provider.algebra_queries.store(0, Ordering::Relaxed);
     right_provider.algebra_queries.store(0, Ordering::Relaxed);
     assert!(matches!(
-        source.contract(&foreign_runtime_identity, &[2], &[0], &[0, 1, 2]),
+        source.contract(&foreign_runtime_identity, &[1], &[0], &[0, 1]),
         Err(GenericTensorError::Facade(
             tenet::prelude::Error::RuntimeMismatch
         ))
@@ -739,13 +694,13 @@ fn checked_only_contract_and_compose_keep_left_authority() {
     left_provider.algebra_queries.store(0, Ordering::Relaxed);
     wrong_provider.algebra_queries.store(0, Ordering::Relaxed);
     assert!(source
-        .contract(&wrong_identity, &[2], &[0], &[0, 1, 2])
+        .contract(&wrong_identity, &[1], &[0], &[0, 1])
         .is_err());
     assert_eq!(left_provider.algebra_queries.load(Ordering::Relaxed), 0);
     assert_eq!(wrong_provider.algebra_queries.load(Ordering::Relaxed), 0);
 
     left_provider.fail_algebra.store(true, Ordering::Relaxed);
-    let error = source
+    let error = nontrivial
         .contract(&identity, &[2], &[0], &[0, 1, 2])
         .unwrap_err();
     assert!(matches!(

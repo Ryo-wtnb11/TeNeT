@@ -4,7 +4,7 @@ use tenet_core::{
     product_fusion_rule, BlockKey, BlockSpec, BlockStructure, BraidingStyleKind, CoreError,
     FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace,
     FusionTreeKey, FusionTreePairKey, MultiplicityFreeFusionRule, MultiplicityIndex, RuleIdentity,
-    SectorId, SectorLeg, SectorVec, TabulatedFusionRule, TensorMapSpace, Z2FusionRule,
+    SectorId, SectorLeg, SectorVec, TensorMapSpace, Z2FusionRule,
 };
 
 #[derive(Clone, Debug)]
@@ -87,17 +87,6 @@ fn cloned_stateful_rule_preserves_identity() {
     assert_eq!(rule.rule_identity(), rule.clone().rule_identity());
 }
 
-#[test]
-fn independently_loaded_identical_tables_share_full_content_identity() {
-    const TABLE: &[u8] = include_bytes!("../src/su3_table.bin");
-    let first = TabulatedFusionRule::try_from_bytes(TABLE, "first-su3-table.bin").unwrap();
-    let second = TabulatedFusionRule::try_from_bytes(TABLE, "second-su3-table.bin").unwrap();
-
-    assert_eq!(first.provenance(), second.provenance());
-    assert_eq!(first.rule_identity(), second.rule_identity());
-    assert_eq!(first.rule_identity(), first.clone().rule_identity());
-}
-
 #[derive(Default)]
 struct CountingHasher(usize);
 
@@ -167,12 +156,6 @@ fn raw_scalar_space_with_key(key: BlockKey) -> FusionTensorMapSpace<0, 0> {
         .unwrap(),
     )
     .unwrap()
-}
-
-fn raw_scalar_space_for_rule<R: FusionRule>(rule: &R) -> FusionTensorMapSpace<0, 0> {
-    let empty_tree = FusionTreeKey::try_new_for_rule(rule, [], rule.vacuum(), [], [], []).unwrap();
-    let key = FusionTreePairKey::pair(empty_tree.clone(), empty_tree);
-    raw_scalar_space_with_key(key.into())
 }
 
 fn z2_rank_one_pair(sector: SectorId, is_dual: bool) -> FusionTreePairKey {
@@ -285,20 +268,6 @@ fn bound_space_rejects_rebinding_to_same_type_with_different_semantics() {
 
     assert!(matches!(
         space.try_bind_rule(&second),
-        Err(CoreError::FusionRuleMismatch { .. })
-    ));
-}
-
-#[test]
-fn generic_space_rejects_a_different_tabulated_rule() {
-    const SU3: &[u8] = include_bytes!("../src/su3_table.bin");
-    const SU4: &[u8] = include_bytes!("../src/testdata/su4_table.bin");
-    let su3 = TabulatedFusionRule::try_from_bytes(SU3, "su3-table.bin").unwrap();
-    let su4 = TabulatedFusionRule::try_from_bytes(SU4, "su4-table.bin").unwrap();
-    let space = raw_scalar_space_for_rule(&su3).try_bind_rule(&su3).unwrap();
-
-    assert!(matches!(
-        space.validate_rule(&su4),
         Err(CoreError::FusionRuleMismatch { .. })
     ));
 }
