@@ -664,10 +664,10 @@ where
         )
     }
 
-    /// Generic-fusion (SU(3)) dynamic-rank tree transform: the raw-slice
+    /// Generic-fusion dynamic-rank tree transform: the raw-slice
     /// analogue of [`Self::tree_transform_dyn_into`], routed through the
     /// non-memoized generic cache sibling. This is the path the top-level
-    /// `tenet::Tensor` SU(3) `permute`/`braid`/`transpose` take.
+    /// provider-typed Generic `permute`/`braid`/`transpose` take.
     #[allow(clippy::too_many_arguments)]
     pub fn tree_transform_dyn_into_generic<R>(
         &mut self,

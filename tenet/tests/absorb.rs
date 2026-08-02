@@ -230,7 +230,6 @@ fn absorb_uses_complete_tree_identity_across_supported_fusion_styles() {
         &runtime,
         &Space::product([((0, 0), 1), ((1, 1), 1)]).unwrap(),
     );
-    check(&runtime, &Space::su3([((1, 1), 1)]).unwrap());
 }
 
 #[test]

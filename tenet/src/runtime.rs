@@ -157,7 +157,7 @@ macro_rules! rule_lanes {
     ($callback:ident) => {
         $callback! {
             mf: tenet_core::RuleIdentity,
-            su3: tenet_core::RuleIdentity,
+            generic: tenet_core::RuleIdentity,
         }
     };
 }
@@ -167,7 +167,7 @@ pub(crate) use rule_lanes;
 macro_rules! define_runtime_state {
     ($( $field:ident: $key:ty ),+ $(,)?) => {
         /// Expert-layer execution contexts for the multiplicity-free and
-        /// Generic-SU(3) namespaces, plus the rule-independent dense executor.
+        /// Generic-fusion namespaces, plus the rule-independent dense executor.
         pub(crate) struct RuntimeState {
             $(pub(crate) $field: Ctxs<$key>,)+
             pub(crate) dense: Box<dyn tenet_dense::DenseExecutor + Send>,
@@ -273,7 +273,7 @@ struct RuntimeInner {
 }
 
 /// Pool entry for `RuntimeInner::context_pool`. Boxed: a context owns both the
-/// multiplicity-free and Generic-SU(3) lanes, each with `f64` and `c64`
+/// multiplicity-free and Generic-fusion lanes, each with `f64` and `c64`
 /// state. `Vec::pop`/`push` must move only a pointer rather than that complete
 /// execution state; profiling showed by-value moves were ~70% of a small
 /// standalone op's cost (issue #228). The pointer-size canary test below
@@ -387,7 +387,7 @@ pub(crate) struct RuntimeExecutionConfig {
     /// THE runtime's CPU context: one rayon pool shared by every executor this
     /// runtime mints — the state's, the executor pool's, and the eight
     /// transform backends of every pooled `TensorExecutionContext`
-    /// (multiplicity-free and Generic-SU(3) lanes × `f64`/`c64` ×
+    /// (multiplicity-free and Generic-fusion lanes × `f64`/`c64` ×
     /// tree/contract). Without it each
     /// executor built its own eager env-sized pool, and the #155 context pool
     /// multiplied that into a process-thread-cap failure (macOS `WouldBlock`)
@@ -495,7 +495,7 @@ impl Runtime {
 
     /// Leases an execution context for one standalone op (#155): pop an idle
     /// one or mint a fresh config-bound one. Each context owns one
-    /// `RuleIdentity`-keyed multiplicity-free lane and a separate Generic-SU(3)
+    /// `RuleIdentity`-keyed multiplicity-free lane and a separate Generic-fusion
     /// lane. The op runs on the leased context, not under the coarse `state`
     /// lock, so ops on a shared runtime run concurrently. Byte-identical to the
     /// old locked path: the machinery is the same `Ctxs`. Completed tree

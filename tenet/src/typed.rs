@@ -3038,8 +3038,7 @@ where
     ///
     /// Same rounding formula as the erased facade:
     /// `Σ_sector round(degeneracy * dim(sector))` per leg. The erased sibling
-    /// needs a dedicated SU(3) branch because its rule set is a closed enum
-    /// whose SU(3) arm speaks a different symbol trait; here the provider
+    /// needs dedicated branches because its rule set is a closed enum; here the provider
     /// abstraction carries `dim_scalar` uniformly, so there is deliberately
     /// **no special case** — fewer branches, identical semantics.
     ///
@@ -3236,12 +3235,12 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 /// this leaf:
 ///
 /// ```compile_fail
-/// use tenet::core::Su3FusionRule;
+/// use tenet::core::U1FusionRule;
 /// use tenet::typed::{CudaStorage, TensorMap};
 ///
 /// fn no_checked_generic_cuda_operations(
-///     lhs: &TensorMap<Su3FusionRule, f64, CudaStorage>,
-///     rhs: &TensorMap<Su3FusionRule, f64, CudaStorage>,
+///     lhs: &TensorMap<U1FusionRule, f64, CudaStorage>,
+///     rhs: &TensorMap<U1FusionRule, f64, CudaStorage>,
 /// ) {
 ///     let _ = lhs.norm();
 ///     let _ = lhs.inner(rhs);
@@ -3287,10 +3286,10 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 /// tensors independently of the reduction/arithmetic surface above:
 ///
 /// ```compile_fail
-/// use tenet::core::Su3FusionRule;
+/// use tenet::core::U1FusionRule;
 /// use tenet::typed::{CudaStorage, TensorMap};
 ///
-/// fn no_checked_generic_cuda_qr(tensor: &TensorMap<Su3FusionRule, f64, CudaStorage>) {
+/// fn no_checked_generic_cuda_qr(tensor: &TensorMap<U1FusionRule, f64, CudaStorage>) {
 ///     let _ = tensor.qr_compact();
 /// }
 /// ```
@@ -3308,10 +3307,10 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 /// Compact SVD has the same deliberately narrow typed CUDA surface:
 ///
 /// ```compile_fail
-/// use tenet::core::Su3FusionRule;
+/// use tenet::core::U1FusionRule;
 /// use tenet::typed::{CudaStorage, TensorMap};
 ///
-/// fn no_checked_generic_cuda_svd(tensor: &TensorMap<Su3FusionRule, f64, CudaStorage>) {
+/// fn no_checked_generic_cuda_svd(tensor: &TensorMap<U1FusionRule, f64, CudaStorage>) {
 ///     let _ = tensor.svd_compact();
 /// }
 /// ```
@@ -3329,10 +3328,10 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 /// Truncated SVD is absent at the same checked-Generic/complex boundaries:
 ///
 /// ```compile_fail
-/// use tenet::core::Su3FusionRule;
+/// use tenet::core::U1FusionRule;
 /// use tenet::typed::{CudaStorage, TensorMap, Truncation};
 ///
-/// fn no_checked_generic_cuda_svd_trunc(tensor: &TensorMap<Su3FusionRule, f64, CudaStorage>) {
+/// fn no_checked_generic_cuda_svd_trunc(tensor: &TensorMap<U1FusionRule, f64, CudaStorage>) {
 ///     let _ = tensor.svd_trunc(&Truncation::Full);
 /// }
 /// ```
@@ -5115,9 +5114,8 @@ where
     /// provider-generic fold. Duality is dropped exactly as there: stored
     /// sector content is already external.
     ///
-    /// No SU(3) `UnsupportedForRule` guard, unlike the erased `Space::fuse`:
-    /// the typed facade's `R` bound is `MultiplicityFreeRigidSymbols`, which
-    /// the SU(3) provider does not implement, so an SU(3) rule cannot reach
+    /// The typed facade's `R` bound is `MultiplicityFreeRigidSymbols`, so a
+    /// Generic-fusion provider cannot reach
     /// this fold from the typed surface at all — the guard would be dead
     /// code here. A multiplicity-carrying *external* provider is likewise
     /// excluded by the same bound; the fold's `N`-symbol weighting is still
@@ -8963,7 +8961,7 @@ where
     /// A lazy dense adjoint is materialized once before this owned-only
     /// per-block path; compact adjoints remain compact and use the spectrum
     /// arm above. There is no device arm (the payload is a host `Vec<D>` by
-    /// construction). The erased route's SU(3) rejection is dead here: the
+    /// construction). The erased route's Generic rejection is dead here: the
     /// multiplicity-free admission bound keeps a `Generic` provider out at
     /// construction.
     ///
@@ -9072,7 +9070,7 @@ where
     /// longer a bond space, so the result cannot stay compact). The same
     /// facade narrowings as [`Self::twist`] apply: a lazy dense adjoint
     /// materializes once at this owned-only boundary, there is no device arm,
-    /// and SU(3) is dead at the admission bound.
+    /// and Generic fusion is dead at the admission bound.
     ///
     /// # Errors
     ///
@@ -9146,7 +9144,7 @@ where
     /// certification that its vacuum obeys the canonical unit laws — the
     /// hom-space transform and the layout validator both demand it, so an
     /// external provider opts in with one marker impl. No adjoint/device
-    /// arms; SU(3) dead at the admission bound (see [`Self::twist`]).
+    /// arms; Generic fusion is dead at the admission bound (see [`Self::twist`]).
     ///
     /// # Errors
     ///

@@ -6,8 +6,7 @@ use tenet_core::{
     CU1FusionRule, CU1Irrep, CheckedFusionAlgebra, FermionParityFusionRule, FusionAlgebraError,
     FusionRule, Fz2SectorLayout, PackedProductCodec, ProductFusionRule, ProductSectorCodec,
     ProductSectorLayout, RuleIdentity, SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorLeg,
-    Su2SectorLayout, Su3FusionRule, U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep,
-    ZNFusionRule,
+    Su2SectorLayout, U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep, ZNFusionRule,
 };
 use tenet_matrixalgebra::TruncationSpace;
 
@@ -48,13 +47,6 @@ pub enum SectorLabel {
         /// Twice the spin, `2j` (integer).
         twice_spin: usize,
     },
-    // NOTE: no SU(3) variant. Adding one would break every downstream
-    // exhaustive `match` on this public enum (a real consumer does exactly
-    // that). The SU(3) label read-back is therefore a *separate*, non-breaking
-    // accessor — [`Space::su3_sectors`] / [`Space::su3_degeneracy`], returning
-    // the concrete `(p, q)` Dynkin labels — instead of an enum variant. The
-    // internal `RuleKind::Su3` (pub(crate)) does not leak, so the shared
-    // dispatch enum can grow without a downstream break.
 }
 
 /// The fusion rule a [`Space`] (and every [`crate::prelude::Tensor`] built
@@ -70,15 +62,6 @@ pub(crate) enum RuleKind {
     SU2,
     U1FZ2,
     FZ2U1SU2,
-    /// Stage B3b: SU(3) table provider ([`tenet_core::Su3FusionRule`]). The
-    /// first `FusionStyleKind::Generic` (outer-multiplicity) rule reachable from
-    /// the user layer. Adding this variant is compile-time zero-cost for the
-    /// mult-free path (the χ32 anchor is re-measured to prove it): the
-    /// `with_rule!` / `with_rule_ctx!` dispatch macros bind a mult-free rule per
-    /// arm, and Su3 is `Generic`, so it takes dedicated non-macro paths
-    /// (`*_generic` siblings) for the supported ops (permute/braid/transpose)
-    /// and a clear panic for the rest (svd/trace/… are Stage B3c+).
-    Su3,
 }
 
 type U1Fz2Codec = PackedProductCodec<U1SectorLayout, Fz2SectorLayout>;
@@ -128,7 +111,6 @@ pub(crate) enum UserRuleContext {
     SU2(Arc<SU2FusionRule>),
     U1FZ2(Arc<U1Fz2Rule>),
     FZ2U1SU2(Arc<Fz2U1Su2Rule>),
-    Su3(Arc<Su3FusionRule>),
 }
 
 impl UserRuleContext {
@@ -142,7 +124,6 @@ impl UserRuleContext {
             Self::SU2(_) => RuleKind::SU2,
             Self::U1FZ2(_) => RuleKind::U1FZ2,
             Self::FZ2U1SU2(_) => RuleKind::FZ2U1SU2,
-            Self::Su3(_) => RuleKind::Su3,
         }
     }
 
@@ -156,7 +137,6 @@ impl UserRuleContext {
             Self::SU2(rule) => rule.rule_identity(),
             Self::U1FZ2(rule) => rule.rule_identity(),
             Self::FZ2U1SU2(rule) => rule.rule_identity(),
-            Self::Su3(rule) => rule.rule_identity(),
         }
     }
 }
@@ -211,20 +191,6 @@ macro_rules! with_rule {
             $crate::space::UserRuleContext::FZ2U1SU2(provider) => {
                 let $rule = provider.as_ref();
                 $body
-            }
-            // Su3 is `FusionStyleKind::Generic`, so it CANNOT bind through this
-            // macro (the shared `$body` calls mult-free-only methods on `$rule`).
-            // The supported SU(3) ops (permute/braid/transpose, construction)
-            // take dedicated `*_generic` paths that branch on `RuleKind::Su3`
-            // BEFORE reaching here; anything else is not yet implemented. This
-            // arm is `!`-typed, so it needs no `$body` and keeps every mult-free
-            // call site byte-for-byte unchanged (the χ32 zero-cost guarantee).
-            $crate::space::UserRuleContext::Su3(_) => {
-                unimplemented!(
-                    "this operation is not yet supported for SU(3) tensors \
-                     (Stage B3b implements permute/braid/transpose; svd/qr/trace/\
-                     norm/adjoint/contract are Stage B3c+)"
-                )
             }
         }
     };
@@ -435,35 +401,6 @@ impl Space {
         ))
     }
 
-    /// SU(3)-graded space from `((p, q), degeneracy)` pairs, where `(p, q)` is
-    /// the Dynkin label of an irrep in the Stage B3b `dim ≤ 27` table (e.g.
-    /// `(1, 0)` = **3**, `(0, 1)` = **3̄**, `(1, 1)` = **8**, `(2, 2)` = **27**).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidArgument`] for a `(p, q)` outside the table
-    /// (`dim > 27`) — the SU(3) provider is deliberately bounded (Stage B3c
-    /// lifts the cut). Panics on a duplicate label, as [`Self::u1`].
-    pub fn su3<I>(irreps: I) -> Result<Self, Error>
-    where
-        I: IntoIterator<Item = ((u8, u8), usize)>,
-    {
-        let rule = Arc::new(Su3FusionRule::new());
-        let sectors = irreps
-            .into_iter()
-            .map(|((p, q), deg)| {
-                rule.sector_of(p, q)
-                    .map(|sector| (sector, deg))
-                    .ok_or_else(|| {
-                        Error::InvalidArgument(format!(
-                            "SU(3) irrep ({p},{q}) is outside the dim<=27 table"
-                        ))
-                    })
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
-        Ok(Self::new(Arc::new(UserRuleContext::Su3(rule)), sectors))
-    }
-
     /// U(1) x fermion-parity product space from `((charge, parity),
     /// degeneracy)` pairs, using the association-independent packed
     /// product-sector encoding.
@@ -568,21 +505,6 @@ impl Space {
     /// Returns [`Error::FusionAlgebra`] when the finite encoded algebra cannot
     /// represent a mathematical dual, such as U(1) charge `i32::MIN`.
     pub fn try_dual(&self) -> Result<Self, Error> {
-        // Why not force Su3 through the checked companion: its bounded table
-        // dual is total, while checked generic-fusion semantics remain deferred.
-        if let UserRuleContext::Su3(rule) = self.context.as_ref() {
-            let mut sectors: Vec<(SectorId, usize)> = self
-                .sectors
-                .iter()
-                .map(|&(sector, deg)| (rule.dual(sector), deg))
-                .collect();
-            sectors.sort_by_key(|(sector, _)| *sector);
-            return Ok(Self {
-                context: Arc::clone(&self.context),
-                sectors,
-                dual: !self.dual,
-            });
-        }
         let sectors = with_rule!(self.context.as_ref(), rule, {
             fn dualize<R: CheckedFusionAlgebra>(
                 rule: &R,
@@ -623,18 +545,6 @@ impl Space {
     /// SU(2)).
     pub fn dim(&self) -> usize {
         use tenet_core::MultiplicityFreeRigidSymbols;
-        if let UserRuleContext::Su3(rule) = self.context.as_ref() {
-            use tenet_core::GenericRigidSymbols;
-            return self
-                .sectors
-                .iter()
-                .map(|&(sector, deg)| {
-                    // quantum dim = (sqrt_dim)^2, integer for SU(3).
-                    let sqrt = rule.sqrt_dim_scalar(sector);
-                    deg * (sqrt * sqrt).round() as usize
-                })
-                .sum();
-        }
         with_rule!(self.context.as_ref(), rule, {
             self.sectors
                 .iter()
@@ -657,12 +567,6 @@ impl Space {
     /// Unit object for this space's fusion rule: exactly one vacuum sector
     /// with degeneracy 1 and non-dual orientation.
     pub fn unitspace(&self) -> Result<Space, Error> {
-        if self.rule_kind() == RuleKind::Su3 {
-            return Err(Error::UnsupportedForRule {
-                operation: "Space::unitspace",
-                rule: "SU(3)",
-            });
-        }
         let vacuum = with_rule!(self.context.as_ref(), rule, rule.vacuum());
         Ok(Self {
             context: Arc::clone(&self.context),
@@ -676,9 +580,6 @@ impl Space {
     /// The dual flag is ignored, matching TensorKit's unit-space predicate on
     /// sector content.
     pub fn isunitspace(&self) -> bool {
-        if self.rule_kind() == RuleKind::Su3 {
-            return false;
-        }
         let vacuum = with_rule!(self.context.as_ref(), rule, rule.vacuum());
         self.sectors.len() == 1 && self.sectors[0] == (vacuum, 1)
     }
@@ -704,14 +605,7 @@ impl Space {
     /// `O(k log k)` in the number of sectors (one `BTreeMap` build), and no
     /// spectrum or payload is touched.
     pub fn truncspace(&self) -> TruncationSpace {
-        // Why not `with_rule!`: that macro is multiplicity-free only and
-        // `unimplemented!()`s on SU(3). A truncation profile is pure metadata
-        // — no recoupling coefficient is involved — so there is no reason to
-        // exclude the Generic rule here, and `svd_trunc` supports it.
-        let rule = match self.context.as_ref() {
-            UserRuleContext::Su3(rule) => rule.rule_identity(),
-            context => with_rule!(context, rule, rule.rule_identity()),
-        };
+        let rule = with_rule!(self.context.as_ref(), rule, rule.rule_identity());
         TruncationSpace::new(rule, self.sectors.iter().copied())
     }
 
@@ -758,11 +652,6 @@ impl Space {
                     twice_spin: SU2Irrep::from_sector_id(su2).twice_spin(),
                 }
             }
-            RuleKind::Su3 => unimplemented!(
-                "SU(3) sectors do not fit the `SectorLabel` enum without a breaking \
-                 `Su3` variant; use the dedicated non-breaking accessors \
-                 `Space::su3_sectors` / `Space::su3_degeneracy` instead."
-            ),
         }
     }
 
@@ -812,10 +701,10 @@ impl Space {
     ///
     /// # Panics
     ///
-    /// Panics on SU(3), Z_N, or CU(1) spaces: their labels do not fit the
+    /// Panics on Z_N or CU(1) spaces: their labels do not fit the
     /// closed [`SectorLabel`] enum. Use [`Self::try_sectors`] to receive an
     /// [`Error::UnsupportedForRule`], then read the concrete labels with
-    /// [`Self::su3_sectors`], [`Self::zn_sectors`], or [`Self::cu1_sectors`].
+    /// [`Self::zn_sectors`] or [`Self::cu1_sectors`].
     pub fn sectors(&self) -> Vec<(SectorLabel, usize)> {
         self.sectors
             .iter()
@@ -891,23 +780,19 @@ impl Space {
 
     /// Fallible sibling of [`Self::sectors`]: `Ok` with byte-identical content
     /// when labels fit [`SectorLabel`], or [`Error::UnsupportedForRule`] for
-    /// SU(3), Z_N, and CU(1). Read those labels with [`Self::su3_sectors`],
-    /// [`Self::zn_sectors`], and [`Self::cu1_sectors`], respectively.
+    /// Z_N and CU(1). Read those labels with [`Self::zn_sectors`] and
+    /// [`Self::cu1_sectors`], respectively.
     ///
     /// A separate method rather than changing [`Self::sectors`] to return
-    /// `Result`: that signature change breaks every multiplicity-free caller,
-    /// a breaking change disproportionate to closing one SU(3) panic surface.
+    /// `Result`: that signature change breaks every multiplicity-free caller.
     pub fn try_sectors(&self) -> Result<Vec<(SectorLabel, usize)>, Error> {
-        if matches!(
-            self.rule_kind(),
-            RuleKind::Su3 | RuleKind::ZN | RuleKind::CU1
-        ) {
+        if matches!(self.rule_kind(), RuleKind::ZN | RuleKind::CU1) {
             return Err(Error::UnsupportedForRule {
                 operation: "Space::try_sectors",
                 rule: match self.rule_kind() {
                     RuleKind::ZN => "Z_N",
                     RuleKind::CU1 => "CU(1)",
-                    _ => "SU(3)",
+                    _ => unreachable!("only Z_N and CU(1) reach this branch"),
                 },
             });
         }
@@ -928,58 +813,9 @@ impl Space {
     }
 
     /// Whether this space carries the given (external) sector label with
-    /// nonzero degeneracy (TensorKit `hassector`). For SU(3), probe with
-    /// [`Self::su3_degeneracy`] instead (its `(p, q)` irreps do not fit
-    /// [`SectorLabel`]).
+    /// nonzero degeneracy (TensorKit `hassector`).
     pub fn has_sector(&self, label: SectorLabel) -> bool {
         self.degeneracy(label).is_some()
-    }
-
-    /// SU(3) sector read-back: the `((p, q), degeneracy)` content of an SU(3)
-    /// space in the same `(p, q)` Dynkin-label form [`Self::su3`] accepts,
-    /// sorted by internal sector id (external sectors, as [`Self::sectors`]).
-    ///
-    /// This is the SU(3) analog of [`Self::sectors`]. It is a *separate*
-    /// accessor rather than an `SectorLabel::Su3` variant on purpose: adding a
-    /// variant to the public [`SectorLabel`] enum breaks every downstream
-    /// exhaustive `match` (a real consumer does exactly that), so the
-    /// non-breaking read-back is a dedicated method returning the concrete
-    /// `(p, q)` labels. [`Error::RuleMismatch`] on a non-SU(3) space.
-    pub fn su3_sectors(&self) -> Result<Vec<((u8, u8), usize)>, Error> {
-        if self.rule_kind() != RuleKind::Su3 {
-            return Err(Error::RuleMismatch);
-        }
-        let UserRuleContext::Su3(rule) = self.context.as_ref() else {
-            unreachable!("rule kind and provider context are coherent")
-        };
-        Ok(self
-            .sectors
-            .iter()
-            .map(|&(sector, deg)| (rule.dynkin(sector), deg))
-            .collect())
-    }
-
-    /// SU(3) sibling of [`Self::degeneracy`]: degeneracy of the `(p, q)` irrep
-    /// (external label), `None` when the sector is absent from this space.
-    /// [`Error::RuleMismatch`] on a non-SU(3) space, [`Error::InvalidArgument`]
-    /// for a `(p, q)` outside the `dim <= 27` table.
-    pub fn su3_degeneracy(&self, p: u8, q: u8) -> Result<Option<usize>, Error> {
-        if self.rule_kind() != RuleKind::Su3 {
-            return Err(Error::RuleMismatch);
-        }
-        let UserRuleContext::Su3(rule) = self.context.as_ref() else {
-            unreachable!("rule kind and provider context are coherent")
-        };
-        let sector = rule.sector_of(p, q).ok_or_else(|| {
-            Error::InvalidArgument(format!(
-                "SU(3) irrep ({p},{q}) is outside the dim<=27 table"
-            ))
-        })?;
-        Ok(self
-            .sectors
-            .iter()
-            .find(|&&(s, _)| s == sector)
-            .map(|&(_, deg)| deg))
     }
 
     /// The fused space `V1 ⊗ V2` collapsed to a single leg: every fusion
@@ -997,14 +833,6 @@ impl Space {
     pub fn fuse(&self, other: &Space) -> Result<Space, Error> {
         if !self.same_rule(other) {
             return Err(Error::RuleMismatch);
-        }
-        // SU(3) cannot use the multiplicity-free dispatch below; keep the
-        // public Result boundary recoverable until a generic fuse is wired.
-        if self.rule_kind() == RuleKind::Su3 {
-            return Err(Error::UnsupportedForRule {
-                operation: "Space::fuse",
-                rule: "SU(3)",
-            });
         }
         let fused = with_rule!(self.context.as_ref(), rule, {
             fuse_sector_content(rule, &self.sectors, &other.sectors)
@@ -1026,15 +854,6 @@ impl Space {
         let (first, rest) = spaces
             .split_first()
             .ok_or_else(|| Error::InvalidArgument("fuse_all needs at least one space".into()))?;
-        if !rest.is_empty()
-            && first.rule_kind() == RuleKind::Su3
-            && rest.iter().all(|space| first.same_rule(space))
-        {
-            return Err(Error::UnsupportedForRule {
-                operation: "Space::fuse_all",
-                rule: "SU(3)",
-            });
-        }
         // flip: stored sectors are already external, so dropping the dual
         // flag yields the isomorphic non-dual space.
         let mut fused = Space {
@@ -1301,21 +1120,6 @@ mod tk_space_api_tests {
         assert!(!Space::u1([(1, 1)]).isunitspace());
         assert!(!Space::u1([(0, 2)]).isunitspace());
         assert!(!Space::u1([(0, 1), (1, 1)]).isunitspace());
-    }
-
-    #[test]
-    fn unitspace_reports_su3_unsupported_and_su3_is_never_unitspace() {
-        // What: SU(3) has no user-layer unitspace helper until generic support is wired.
-        let su3_unit_content = Space::su3([((0, 0), 1)]).unwrap();
-
-        assert!(matches!(
-            su3_unit_content.unitspace(),
-            Err(Error::UnsupportedForRule {
-                operation: "Space::unitspace",
-                rule: "SU(3)"
-            })
-        ));
-        assert!(!su3_unit_content.isunitspace());
     }
 
     #[test]

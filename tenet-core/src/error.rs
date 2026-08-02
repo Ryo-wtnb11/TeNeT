@@ -105,7 +105,7 @@ pub enum CoreError {
         key: Box<BlockKey>,
     },
     MissingFusionSpace,
-    /// A bounded fusion table (SU(3) dim<=27, Stage B3b) cannot represent the
+    /// A bounded Generic provider cannot represent the
     /// requested space/sector exactly. Carries the full human-readable
     /// diagnosis; block dimensions are either exact or this error — never
     /// silently truncated.

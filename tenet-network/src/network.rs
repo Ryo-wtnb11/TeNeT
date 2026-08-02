@@ -1443,13 +1443,13 @@ mod static_operand_sealed {
 /// surface:
 ///
 /// ```compile_fail
-/// use tenet::core::Su3FusionRule;
+/// use tenet::core::U1FusionRule;
 /// use tenet::typed::TensorMap;
 /// use tenet_network::tensor;
 ///
 /// fn checked_generic(
-///     a: &TensorMap<Su3FusionRule, f64>,
-///     b: &TensorMap<Su3FusionRule, f64>,
+///     a: &TensorMap<U1FusionRule, f64>,
+///     b: &TensorMap<U1FusionRule, f64>,
 /// ) {
 ///     let _ = tensor!([i; k] = a[i; j] * b[j; k]);
 /// }

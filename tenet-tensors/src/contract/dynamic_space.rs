@@ -650,7 +650,7 @@ pub(crate) fn scratch_publication_observations() -> (usize, usize, usize, usize)
 /// grid is always complete; there is no other layout.
 // `R: FusionRule` (not mult-free): the coupled-sector matrix layout only needs
 // fusion channels/dual, so this helper serves both the mult-free and the
-// Generic (SU(3)) space builders. Relaxing the bound leaves the mult-free
+// Generic-fusion space builders. Relaxing the bound leaves the mult-free
 // callers unchanged.
 fn scratch_subblock_structure<R>(
     rule: &R,
@@ -2382,7 +2382,7 @@ impl DynamicFusionMapSpace {
         })
     }
 
-    /// Generic-fusion (SU(3)) sibling of [`Self::transformed`]: the permuted /
+    /// Generic-fusion sibling of [`Self::transformed`]: the permuted /
     /// braided / transposed result space, enumerated with multiplicity-aware
     /// keys. Not cached (the Generic path is not on a hot loop yet — same
     /// non-memoized rationale as the Stage B3b cache siblings).
@@ -2830,8 +2830,8 @@ mod bound_invariant_tests {
         CoupledSectorFold, FermionParityFusionRule, FusionAlgebraError, FusionProductSpace,
         FusionTreePairKey, Fz2SectorLayout, InfallibleGeneric, PackedProductCodec,
         ProductFusionRule, ProductSectorCodec, ProductSectorLayout, SU2FusionRule, SU2Irrep,
-        SectorId, SectorLeg, SectorVec, Su2SectorLayout, Su3FusionRule, TensorMapSpace,
-        U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep,
+        SectorId, SectorLeg, SectorVec, Su2SectorLayout, TensorMapSpace, U1FusionRule, U1Irrep,
+        U1SectorLayout, Z2FusionRule, Z2Irrep,
     };
 
     type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
@@ -3023,11 +3023,11 @@ mod bound_invariant_tests {
     #[test]
     #[allow(clippy::arc_with_non_send_sync)] // Bound ownership requires Arc; this local equality checker borrows a non-Sync rule.
     fn checked_generic_equal_identity_checker_commits_under_source_arc() {
-        let rule = Su3FusionRule::new();
-        let eight = rule.sector_of(1, 1).unwrap();
+        let rule = GenericMultiplicityRule;
+        let charge = SectorId::new(1);
         let homspace = FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([(eight, 1)], false)]),
-            FusionProductSpace::new([SectorLeg::new([(eight, 1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(charge, 1)], false)]),
+            FusionProductSpace::new([SectorLeg::new([(charge, 1)], false)]),
         );
         let source_provider = Arc::new(InfallibleGeneric::new(&rule));
         let checker_provider = Arc::new(InfallibleGeneric::new(&rule));
@@ -3841,19 +3841,17 @@ mod bound_invariant_tests {
             [vec![1, 1]],
         )
         .unwrap();
-        let generic_provider = Arc::new(Su3FusionRule::default());
-        let octet = generic_provider
-            .sector_of(1, 1)
-            .expect("the production SU(3) table contains the octet");
+        let generic_provider = Arc::new(GenericMultiplicityRule);
+        let charge = SectorId::new(1);
         let generic_homspace = FusionTreeHomSpace::from_sector_ids(
-            [(octet.id(), 2), (octet.id(), 3)],
-            [(octet.id(), 4)],
+            [(charge.id(), 2), (charge.id(), 3)],
+            [(charge.id(), 4)],
         );
         let generic_key_count = generic_homspace
             .fusion_tree_keys_generic(generic_provider.as_ref())
-            .expect("8 x 8 -> 8 is covered by the production SU(3) table")
+            .unwrap()
             .len();
-        assert_eq!(generic_key_count, 2, "8 x 8 -> 8 has multiplicity two");
+        assert_eq!(generic_key_count, 2);
         let expert = BoundDynamicFusionMapSpace::from_degeneracy_shapes_generic(
             Arc::clone(&generic_provider),
             generic_homspace.clone(),
@@ -5459,54 +5457,6 @@ mod scratch_cache_tests {
         )
         .is_err());
         assert_eq!(final_result_layout_builds(), 0);
-    }
-
-    #[test]
-    fn generic_transform_still_uses_one_final_layout_build() {
-        use tenet_core::Su3FusionRule;
-
-        let _guard = CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        reset_final_result_layout_test_state();
-        let rule = Su3FusionRule::new();
-        let homspace = FusionTreeHomSpace::from_sector_ids([(0, 2)], [(0, 3)]);
-        let key_count = homspace.fusion_tree_keys_generic(&rule).unwrap().len();
-        let source = DynamicFusionMapSpace::from_degeneracy_shapes_generic(
-            &rule,
-            homspace,
-            vec![vec![2, 3]; key_count],
-        )
-        .unwrap();
-        let operation = TreeTransformOperation::permute([1], [0]);
-
-        let transformed = source.transformed_generic(&rule, &operation).unwrap();
-        assert_eq!(final_result_layout_builds(), 1);
-        assert_eq!(transformed.structure().block_count(), key_count);
-    }
-
-    #[test]
-    fn generic_contraction_still_uses_one_final_layout_build() {
-        use tenet_core::Su3FusionRule;
-
-        let _guard = CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        reset_final_result_layout_test_state();
-        let rule = Su3FusionRule::new();
-        let homspace = FusionTreeHomSpace::from_sector_ids([(0, 2)], [(0, 2)]);
-        let key_count = homspace.fusion_tree_keys_generic(&rule).unwrap().len();
-        let source = DynamicFusionMapSpace::from_degeneracy_shapes_generic(
-            &rule,
-            homspace,
-            vec![vec![2, 2]; key_count],
-        )
-        .unwrap();
-
-        let contracted =
-            DynamicFusionMapSpace::contracted_generic(&rule, &source, &source, &[1], &[0]).unwrap();
-        assert_eq!(final_result_layout_builds(), 1);
-        assert_eq!(contracted.structure().block_count(), key_count);
     }
 
     #[test]

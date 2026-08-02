@@ -31,9 +31,8 @@ use tenet_core::{
     validate_unit_layout_correspondence_checked, BlockKey, BlockStructure, BlockView, BlockViewMut,
     CheckedFusionAlgebra, CheckedFusionSpaceError, CoupledSectorRegion, FusionProductSpace,
     FusionRule, FusionTreeHomSpace, FusionTreePairKey, FusionTreePairOrientation,
-    GenericRigidSymbols, LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols,
-    OrientedFusionTreeHomSpace, Placement, PreparedTreePairOperation, SectorId, Su3FusionRule,
-    UnitLegInsertion,
+    LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace,
+    Placement, PreparedTreePairOperation, SectorId, UnitLegInsertion,
 };
 #[cfg(feature = "cuda")]
 use tenet_core::{SectorLeg, TensorStorage};
@@ -61,8 +60,8 @@ use crate::error::Error;
 use crate::runtime::{rule_lanes, Ctx, Ctxs, Runtime, RuntimeExecutionConfig, RuntimeIdentity};
 use crate::space::{Fz2U1Su2Rule, RuleKind, Space, U1Fz2Rule, UserRuleContext};
 use crate::tensor_core::{
-    pow_by_squaring, tensorcontract_owned_multiplicity_free, tensorproduct_owned_generic,
-    tensorproduct_owned_multiplicity_free, tree_transform_owned_multiplicity_free,
+    pow_by_squaring, tensorcontract_owned_multiplicity_free, tensorproduct_owned_multiplicity_free,
+    tree_transform_owned_multiplicity_free,
 };
 
 mod diagonal;
@@ -878,7 +877,7 @@ macro_rules! define_tensor_execution_context {
             /// they are private to `mod tensor`, and a caller outside that
             /// module (`crate::typed`) still has to land on the lane matching
             /// `D` instead of minting per-context state of its own. Naming
-            /// only this lane also keeps the Generic-SU(3) lane out of the
+            /// only this lane also keeps the Generic-fusion lane out of the
             /// typed facade's reach, which is the boundary, not an omission.
             ///
             /// Cache sharing between the facades is not what this buys:
@@ -1815,40 +1814,6 @@ mod absorb_tests {
         let destination_keys = vec![inner_zero.clone(), inner_two.clone(), coupled_three.clone()];
         assert_exact_key_oracle(destination_keys.clone(), vec![inner_two]);
         assert_exact_key_oracle(destination_keys, vec![inner_zero, coupled_three]);
-
-        // What: GenericFusion outer-multiplicity vertices remain part of exact
-        // identity on the smallest SU(3) N(8,8,8)=2 route.
-        let rule = Su3FusionRule::new();
-        let eight = rule.sector_of_label(&[1, 1]).unwrap().id();
-        let pair = |vertex| {
-            let codomain = FusionTreeKey::try_from_sector_ids_for_rule(
-                &rule,
-                [eight, eight],
-                eight,
-                [false; 2],
-                [],
-                [vertex],
-            )
-            .unwrap();
-            let domain =
-                FusionTreeKey::try_from_sector_ids_for_rule(&rule, [eight], eight, [false], [], [])
-                    .unwrap();
-            FusionTreePairKey::pair(codomain, domain)
-        };
-        let mut vertices = vec![pair(1), pair(2)];
-        vertices.sort();
-        let destination_structure = scalar_structure(&vertices);
-        let source_structure = scalar_structure(&vertices[1..]);
-        let mut destination = vec![100.0, 101.0];
-        absorb_mapped(
-            &destination_structure,
-            &mut destination,
-            &source_structure,
-            &[20.0],
-            Ok,
-        )
-        .unwrap();
-        assert_eq!(destination, [100.0, 20.0]);
     }
 
     #[test]
@@ -2333,15 +2298,8 @@ fn build_bound_space_like<
         .map_err(Into::into)
 }
 
-fn build_bound_space_generic<R: FusionRule>(
-    provider: Arc<R>,
-    hom: FusionTreeHomSpace,
-) -> Result<BoundDynamicFusionMapSpace<R>, Error> {
-    BoundDynamicFusionMapSpace::from_final_homspace_generic(provider, hom).map_err(Into::into)
-}
-
 /// Fills a freshly-built coupled space (rule-agnostic: only touches the block
-/// structure). Shared by the mult-free and SU(3) construction paths.
+/// structure). Shared by the multiplicity-free construction paths.
 pub(crate) fn apply_fill<S: UserScalar>(
     space: &DynamicFusionMapSpace,
     fill: Fill<'_, S>,
@@ -2751,84 +2709,6 @@ where
     coupled_region_inner(structure, nout, a, b, |coupled| rule.dim_scalar(coupled))
 }
 
-/// Generic-fusion (Stage B3c-1) sibling of [`weighted_inner`] for an
-/// outer-multiplicity rule (SU(N)): `sum_c dim(c) * <a_c, b_c>`. Identical block
-/// loop; the only difference is the coupled-sector weight. [`GenericRigidSymbols`]
-/// exposes `sqrt_dim` rather than `dim`, and `dim(c) = sqrt_dim(c)^2` (an
-/// integer for SU(N)) — so a Frobenius norm sums every multiplicity block
-/// (e.g. both SU(3) `N(8,8,8)=2` vertices) weighted by the quantum dimension,
-/// exactly matching TensorKit's `norm`. No Unique fast path: Generic is never
-/// abelian.
-fn weighted_inner_generic<R, D>(
-    rule: &R,
-    structure: &BlockStructure,
-    nout: usize,
-    a: &[D],
-    b: &[D],
-) -> Result<Complex64, Error>
-where
-    R: tenet_core::GenericRigidSymbols<Scalar = f64>,
-    D: UserScalar,
-{
-    coupled_region_inner(structure, nout, a, b, |coupled| {
-        let sqrt = rule.sqrt_dim_scalar(coupled);
-        sqrt * sqrt
-    })
-}
-
-/// Generic-fusion (Stage B3c-2) sibling of [`weighted_trace`] for an
-/// outer-multiplicity rule (SU(N)): identical diagonal-block walk; the weight
-/// is `dim(c) = sqrt_dim(c)²`.
-/// A vertex-labelled (OM) block contributes only when its codomain and domain
-/// trees coincide INCLUDING the vertex labels — off-diagonal vertex pairs are
-/// off the coupled-block diagonal exactly like any other tree mismatch.
-fn weighted_trace_generic<R, D>(
-    rule: &R,
-    structure: &BlockStructure,
-    nout: usize,
-    data: &[D],
-) -> Result<Complex64, Error>
-where
-    R: tenet_core::GenericRigidSymbols<Scalar = f64>,
-    D: UserScalar,
-{
-    let mut total = Complex64::new(0.0, 0.0);
-    for index in 0..structure.block_count() {
-        let block = structure.block(index)?;
-        let key = match block.key() {
-            BlockKey::FusionTree(key) => key,
-            _ => {
-                return Err(Error::InvalidArgument(
-                    "tr() requires fusion-tree blocks".to_string(),
-                ))
-            }
-        };
-        if key.codomain_tree() != key.domain_tree() {
-            continue;
-        }
-        let coupled = key.codomain_tree().coupled();
-        let sqrt = rule.sqrt_dim_scalar(coupled);
-        let weight = sqrt * sqrt;
-        let shape = block.shape();
-        let strides = block.strides();
-        let offset = block.offset();
-        let count: usize = shape[..nout].iter().product();
-        let mut partial = D::from_real(0.0);
-        for linear in 0..count {
-            let mut remainder = linear;
-            let mut position = offset;
-            for axis in 0..nout {
-                let coordinate = remainder % shape[axis];
-                remainder /= shape[axis];
-                position += coordinate * (strides[axis] + strides[nout + axis]);
-            }
-            partial = partial + data[position];
-        }
-        total += partial.widen_complex() * weight;
-    }
-    Ok(total)
-}
-
 /// Quantum-dimension-weighted block trace of an endomorphism:
 /// `sum_c dim(c) * tr(b_c)`, matching TensorKit's `tr` (`linalg.jl`, the
 /// native `sum_c dim(c) * tr(block)`). Only fusion-tree blocks whose codomain
@@ -3117,7 +2997,6 @@ enum UserBoundSpace {
     SU2(BoundDynamicFusionMapSpace<tenet_core::SU2FusionRule>),
     U1FZ2(BoundDynamicFusionMapSpace<U1Fz2Rule>),
     FZ2U1SU2(BoundDynamicFusionMapSpace<Fz2U1Su2Rule>),
-    Su3(BoundDynamicFusionMapSpace<Su3FusionRule>),
 }
 
 trait IntoUserBoundDynamicSpace: FusionRule + Sized {
@@ -3160,7 +3039,6 @@ impl_into_user_bound!(tenet_core::FermionParityFusionRule, FZ2, FZ2);
 impl_into_user_bound!(tenet_core::SU2FusionRule, SU2, SU2);
 impl_into_user_bound!(U1Fz2Rule, U1FZ2, U1FZ2);
 impl_into_user_bound!(Fz2U1Su2Rule, FZ2U1SU2, FZ2U1SU2);
-impl_into_user_bound!(Su3FusionRule, Su3, Su3);
 
 impl PartialEq for UserBoundSpace {
     fn eq(&self, other: &Self) -> bool {
@@ -3216,9 +3094,6 @@ impl UserBoundSpace {
             (Self::FZ2U1SU2(lhs), Self::FZ2U1SU2(rhs)) => {
                 contract!(lhs, rhs, FZ2U1SU2, contracted_multiplicity_free)
             }
-            (Self::Su3(lhs), Self::Su3(rhs)) => {
-                contract!(lhs, rhs, Su3, contracted_generic)
-            }
             _ => Err(Error::RuleMismatch),
         }
     }
@@ -3233,17 +3108,6 @@ impl UserBoundSpace {
         let OutputAxisOrder::Axes(output_axes) = output_order else {
             return self.contracted(rhs, lhs_axes, rhs_axes);
         };
-
-        // The Generic facade stays on its separately proved sequential path.
-        if matches!((self, rhs), (Self::Su3(_), Self::Su3(_))) {
-            let default = self.contracted(rhs, lhs_axes, rhs_axes)?;
-            validate_axis_permutation(output_axes, default.raw().rank())?;
-            let split = default.raw().nout();
-            return default.transformed(&TreeTransformOperation::permute(
-                output_axes[..split].iter().copied(),
-                output_axes[split..].iter().copied(),
-            ));
-        }
 
         let output_rank = match self
             .raw()
@@ -3342,7 +3206,6 @@ impl UserBoundSpace {
             Self::FZ2U1SU2(space) => {
                 transform!(space, FZ2U1SU2, transformed_multiplicity_free)
             }
-            Self::Su3(space) => transform!(space, Su3, transformed_generic),
         }
     }
 
@@ -3363,10 +3226,6 @@ impl UserBoundSpace {
             Self::SU2(space) => build!(space, SU2),
             Self::U1FZ2(space) => build!(space, U1FZ2),
             Self::FZ2U1SU2(space) => build!(space, FZ2U1SU2),
-            Self::Su3(space) => Ok(UserBoundSpace::Su3(build_bound_space_generic(
-                Arc::clone(space.provider_arc()),
-                homspace,
-            )?)),
         }
     }
 
@@ -3389,12 +3248,6 @@ impl UserBoundSpace {
             Self::SU2(space) => build!(space, SU2),
             Self::U1FZ2(space) => build!(space, U1FZ2),
             Self::FZ2U1SU2(space) => build!(space, FZ2U1SU2),
-            Self::Su3(space) => Ok(UserBoundSpace::Su3(
-                BoundDynamicFusionMapSpace::from_final_homspace_generic(
-                    Arc::clone(space.provider_arc()),
-                    homspace,
-                )?,
-            )),
         }
     }
 
@@ -3408,7 +3261,6 @@ impl UserBoundSpace {
             UserBoundSpace::SU2(space) => space.space(),
             UserBoundSpace::U1FZ2(space) => space.space(),
             UserBoundSpace::FZ2U1SU2(space) => space.space(),
-            UserBoundSpace::Su3(space) => space.space(),
         }
     }
 
@@ -3426,7 +3278,6 @@ impl UserBoundSpace {
             UserBoundSpace::FZ2U1SU2(space) => {
                 UserRuleContext::FZ2U1SU2(Arc::clone(space.provider_arc()))
             }
-            UserBoundSpace::Su3(space) => UserRuleContext::Su3(Arc::clone(space.provider_arc())),
         }
     }
 
@@ -3440,7 +3291,6 @@ impl UserBoundSpace {
             UserBoundSpace::SU2(_) => RuleKind::SU2,
             UserBoundSpace::U1FZ2(_) => RuleKind::U1FZ2,
             UserBoundSpace::FZ2U1SU2(_) => RuleKind::FZ2U1SU2,
-            UserBoundSpace::Su3(_) => RuleKind::Su3,
         }
     }
 
@@ -3454,7 +3304,6 @@ impl UserBoundSpace {
             UserBoundSpace::SU2(space) => space.provider().rule_identity(),
             UserBoundSpace::U1FZ2(space) => space.provider().rule_identity(),
             UserBoundSpace::FZ2U1SU2(space) => space.provider().rule_identity(),
-            UserBoundSpace::Su3(space) => space.provider().rule_identity(),
         }
     }
 
@@ -3485,9 +3334,6 @@ impl UserBoundSpace {
             (Self::FZ2U1SU2(space), UserRuleContext::FZ2U1SU2(provider)) => {
                 Arc::ptr_eq(space.provider_arc(), provider)
             }
-            (Self::Su3(space), UserRuleContext::Su3(provider)) => {
-                Arc::ptr_eq(space.provider_arc(), provider)
-            }
             _ => false,
         }
     }
@@ -3512,9 +3358,6 @@ macro_rules! with_bound_multiplicity_free {
             UserBoundSpace::SU2($bound) => $body,
             UserBoundSpace::U1FZ2($bound) => $body,
             UserBoundSpace::FZ2U1SU2($bound) => $body,
-            UserBoundSpace::Su3(_) => {
-                unreachable!("generic provider uses the dedicated SVD path")
-            }
         }
     };
 }
@@ -3558,9 +3401,6 @@ macro_rules! with_user_rule {
                 let $rule = bound.provider();
                 $body
             }
-            UserBoundSpace::Su3(_) => {
-                unreachable!("generic provider requires a dedicated operation path")
-            }
         }
     };
 }
@@ -3600,7 +3440,6 @@ macro_rules! with_bound_ctx {
                 let $ctxs = &mut $state.mf;
                 $body
             }
-            UserBoundSpace::Su3(_) => unreachable!("generic provider is unsupported"),
         }
     };
 }
@@ -3870,19 +3709,8 @@ impl Tensor {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    fn rule_kind(&self) -> RuleKind {
-        self.rule_authority_space().kind()
-    }
-
     fn rule_context(&self) -> UserRuleContext {
         self.rule_authority_space().context()
-    }
-
-    fn su3_rule(&self) -> &Su3FusionRule {
-        match self.rule_authority_space().as_ref() {
-            UserBoundSpace::Su3(space) => space.provider(),
-            _ => unreachable!("SU(3) dispatch requires an SU(3) tensor context"),
-        }
     }
 
     fn build<'a, C, D, S>(
@@ -3936,11 +3764,6 @@ impl Tensor {
             UserRuleContext::SU2(provider) => build!(provider, SU2),
             UserRuleContext::U1FZ2(provider) => build!(provider, U1FZ2),
             UserRuleContext::FZ2U1SU2(provider) => build!(provider, FZ2U1SU2),
-            UserRuleContext::Su3(provider) => {
-                let bound = build_bound_space_generic(Arc::clone(provider), hom)?;
-                let data = S::lift(apply_fill(bound.space(), fill)?);
-                Ok((UserBoundSpace::Su3(bound), data))
-            }
         }?;
         Ok(Self::owned(rt.clone(), Arc::new(space), Arc::new(data)))
     }
@@ -4331,15 +4154,13 @@ impl Tensor {
     /// This is TeNeT's immutable, type-erased counterpart of TensorKit's
     /// `DiagonalTensorMap` / `diagm` (`tensors/diagonal.jl`): it stores only
     /// `Σ_c k_c` values, not the dense `Σ_c k_c²` diagonal blocks. The vectors
-    /// are positional in [`Space::sectors`] order (or [`Space::su3_sectors`]
-    /// for SU(3)); their order is therefore not inferred from their values.
+    /// are positional in [`Space::sectors`] order; their order is therefore
+    /// not inferred from their values.
     ///
     /// Every vector must have its sector's exact degeneracy and every scalar
     /// must match `dtype` exactly. Validation completes before layout admission.
-    /// Multiplicity-free rules use the checked admission root; the erased SU(3)
-    /// lane uses its existing Generic admission root, which is not that checked
-    /// multiplicity-free contract. Both retain the supplied leg, including its
-    /// dual flag.
+    /// The checked admission root retains the supplied leg, including its dual
+    /// flag.
     ///
     /// # Complexity
     ///
@@ -4403,9 +4224,6 @@ impl Tensor {
             }
             UserRuleContext::FZ2U1SU2(provider) => {
                 UserBoundSpace::FZ2U1SU2(build_bound_space(Arc::clone(provider), hom)?)
-            }
-            UserRuleContext::Su3(provider) => {
-                UserBoundSpace::Su3(build_bound_space_generic(Arc::clone(provider), hom)?)
             }
         };
         let data = match dtype {
@@ -4650,7 +4468,6 @@ impl Tensor {
     /// - [`Error::InvalidArgument`] when a leg index is out of range, or when
     ///   the fusion rule has no braiding and a requested leg carries non-unit
     ///   sectors.
-    /// - [`Error::UnsupportedForRule`] for SU(3).
     /// - [`Error::UnsupportedOnDevice`] for a device payload.
     /// - [`Error::Core`] when the stored block layout cannot be walked — an
     ///   engine invariant, not a caller mistake.
@@ -4680,7 +4497,6 @@ impl Tensor {
         if legs.is_empty() {
             return Ok(self.clone());
         }
-        self.reject_unwired_su3("Tensor::twist")?;
         with_user_rule!(self.ordinary_body().space, rule, {
             reject_unbraided_nonunit_legs(
                 rule,
@@ -4746,7 +4562,6 @@ impl Tensor {
     ///   stricter than [`Self::twist`] — when the fusion rule has no braiding
     ///   and *any* leg is requested: a flip always needs the twist and
     ///   Frobenius-Schur coefficients.
-    /// - [`Error::UnsupportedForRule`] for SU(3).
     /// - [`Error::UnsupportedOnDevice`] for a device payload.
     /// - [`Error::Core`] / [`Error::InvalidArgument`] (with a "please report
     ///   this" message) when the toggled layout does not match the stored one
@@ -4781,7 +4596,6 @@ impl Tensor {
         if legs.is_empty() {
             return Ok(self.clone());
         }
-        self.reject_unwired_su3("Tensor::flip")?;
         let hom = self.ordinary_body().space.homspace();
         with_user_rule!(self.ordinary_body().space, rule, {
             reject_unbraided_nonunit_legs(rule, hom, legs, "flip", false)
@@ -4942,7 +4756,6 @@ impl Tensor {
                 self.rank()
             )));
         }
-        self.reject_unwired_su3(operation)?;
         #[cfg(feature = "cuda")]
         if matches!(self.stored_data(), Data::CudaF64(_)) {
             return Err(device_unsupported(operation));
@@ -4980,7 +4793,6 @@ impl Tensor {
                 self.rank()
             )));
         }
-        self.reject_unwired_su3("Tensor::remove_unit")?;
         with_user_rule!(self.rule_authority_space(), rule, {
             let metadata = self.metadata();
             let leg = if axis < metadata.nout() {
@@ -5090,12 +4902,6 @@ impl Tensor {
             }
             (UserBoundSpace::FZ2U1SU2(space), Data::C64(data)) => {
                 materialize!(space, FZ2U1SU2, adjoint_bound_dyn, data, C64)
-            }
-            (UserBoundSpace::Su3(space), Data::F64(data)) => {
-                materialize!(space, Su3, adjoint_bound_dyn_generic, data, F64)
-            }
-            (UserBoundSpace::Su3(space), Data::C64(data)) => {
-                materialize!(space, Su3, adjoint_bound_dyn_generic, data, C64)
             }
             (_, Data::Diagonal(_)) => Err(Error::InvalidArgument(
                 "compact diagonal tensors do not use the lazy adjoint representation".to_string(),
@@ -5479,24 +5285,6 @@ impl Tensor {
     /// planners use it as a size/FLOP proxy.
     pub fn leg_dims(&self) -> Result<Vec<usize>, Error> {
         let metadata = self.metadata();
-        if self.rule_kind() == RuleKind::Su3 {
-            use tenet_core::GenericRigidSymbols;
-            let rule = self.su3_rule();
-            return Ok(metadata
-                .codomain()
-                .legs()
-                .iter()
-                .chain(metadata.domain().legs())
-                .map(|leg| {
-                    leg.iter()
-                        .map(|(sector, deg)| {
-                            let sqrt = rule.sqrt_dim_scalar(sector);
-                            deg * (sqrt * sqrt).round() as usize
-                        })
-                        .sum()
-                })
-                .collect());
-        }
         with_user_rule!(self.rule_authority_space(), rule, {
             Ok(metadata
                 .codomain()
@@ -5527,17 +5315,6 @@ impl Tensor {
                 metadata.rank()
             )));
         };
-        if self.rule_kind() == RuleKind::Su3 {
-            use tenet_core::GenericRigidSymbols;
-            let rule = self.su3_rule();
-            return Ok(leg
-                .iter()
-                .map(|(sector, deg)| {
-                    let sqrt = rule.sqrt_dim_scalar(sector);
-                    deg * (sqrt * sqrt).round() as usize
-                })
-                .sum());
-        }
         with_user_rule!(self.rule_authority_space(), rule, {
             Ok(leg
                 .iter()
@@ -5820,10 +5597,9 @@ impl Tensor {
             }
             _ => {}
         }
-        let fermionic = self.rule_kind() != RuleKind::Su3
-            && with_user_rule!(self.rule_authority_space(), rule, {
-                rule.braiding_style() == tenet_core::BraidingStyleKind::Fermionic
-            });
+        let fermionic = with_user_rule!(self.rule_authority_space(), rule, {
+            rule.braiding_style() == tenet_core::BraidingStyleKind::Fermionic
+        });
         if fermionic {
             match (self.stored_data(), rhs.stored_data()) {
                 (Data::F64(_), Data::F64(_)) | (Data::C64(_), Data::C64(_)) => {
@@ -5914,28 +5690,6 @@ impl Tensor {
         }
         validate_contracted_axes(lhs_axes, self.rank())?;
         validate_contracted_axes(rhs_axes, rhs.rank())?;
-        // SU(N) (Generic): a lazy-adjoint operand is materialized to plain
-        // coupled data BEFORE contracting, rather than folded into the GEMM seam.
-        // The mult-free seam folds a conjugate via its Structure route, whose
-        // non-self-dual coupled-sector mislabel was the historical bug; SU(3) is
-        // non-self-dual (3 <-> 3̄), so we route it through the mislabel-proof
-        // eager materialization (`materialize_adjoint`, generic block-relabel)
-        // instead. Both operands then take the direct core/compose GEMM with no
-        // conjugate flag. Gated on `Su3` to
-        // keep the mult-free seam byte-for-byte unchanged (the χ32 guarantee).
-        if self.rule_kind() == RuleKind::Su3 && (self.is_adjoint_view() || rhs.is_adjoint_view()) {
-            let lhs = if self.is_adjoint_view() {
-                self.materialized_tensor()?
-            } else {
-                self.clone()
-            };
-            let rhs = if rhs.is_adjoint_view() {
-                rhs.materialized_tensor()?
-            } else {
-                rhs.clone()
-            };
-            return lhs.contract(&rhs, lhs_axes, rhs_axes);
-        }
         // Order-parity fast path for a real or complex diagonal operand (#75): instead of
         // densifying it to an O(d²) block-diagonal and running an O(d²·n) GEMM,
         // scale the OTHER operand's contracted leg by the spectrum (O(d·n)) and
@@ -5951,11 +5705,6 @@ impl Tensor {
         // externally dual contracted legs; `mul!` does not. The canonical
         // diagonal routes below therefore fold that RHS twist into the scaled
         // operand. θ = ±1 by charge parity, identity for bosonic rules.
-        // SU(N) (Generic) is bosonic and cannot ride the mult-free `with_rule!`
-        // binding; short-circuit the twist probe (the diagonal fast path below
-        // rides that binding, so it never fires for SU(N) — an SU(3)
-        // `Data::Diagonal` factor, e.g. `svd_trunc`'s `s`, takes the dense
-        // route here).
         if let Some(output) = self.try_contract_diagonal_fast_path(
             rhs,
             lhs_axes,
@@ -5976,34 +5725,6 @@ impl Tensor {
                 lhs_axes,
                 rhs_axes,
             );
-        }
-        // SU(N) (Generic), Stage B3c-2 source-transform route: the direct GEMM
-        // engine only accepts core/compose form (lhs contracted axes == its whole
-        // domain in order, rhs contracted axes == its whole codomain in order).
-        // Any other arrangement is canonicalized here by composing ALREADY
-        // TK-pinned primitives — one generic permute per operand (the B3a tree
-        // transform, which carries all the recoupling) followed by the core
-        // contract — so this wiring adds no mathematics of its own; the route-
-        // equivalence gate pins `contract == explicit permute + core contract`.
-        // Recursion is bounded: the permuted arrangement is canonical by
-        // construction, so the recursive call falls through to the seam below.
-        // Placed after the diagonal fast paths so a diagonal bond operand keeps
-        // its O(d·n) scaling route, and after the adjoint materialization so
-        // operands here are plain dense tensors.
-        if self.rule_kind() == RuleKind::Su3 {
-            let canonical_lhs = (self.codomain_rank()..self.rank()).collect::<Vec<_>>();
-            let canonical_rhs = (0..rhs.codomain_rank()).collect::<Vec<_>>();
-            if lhs_axes != canonical_lhs.as_slice() || rhs_axes != canonical_rhs.as_slice() {
-                let lhs_open: Vec<usize> =
-                    (0..self.rank()).filter(|a| !lhs_axes.contains(a)).collect();
-                let rhs_open: Vec<usize> =
-                    (0..rhs.rank()).filter(|a| !rhs_axes.contains(a)).collect();
-                let lhs = self.permute(&lhs_open, lhs_axes)?;
-                let rhs = rhs.permute(rhs_axes, &rhs_open)?;
-                let contracted = (lhs_open.len()..lhs.rank()).collect::<Vec<_>>();
-                let rhs_contracted = (0..rhs_axes.len()).collect::<Vec<_>>();
-                return lhs.contract(&rhs, &contracted, &rhs_contracted);
-            }
         }
         // Fold a lazy adjoint into contraction without copying its blocks.
         // Planning derives logical HomSpace geometry from parent storage plus
@@ -6180,18 +5901,8 @@ impl Tensor {
                 _ => {}
             }
         }
-        let dst_bound = if self.rule_kind() == RuleKind::Su3 {
-            self.materialized_body()?
-                .space
-                .contracted_with_output_order(
-                    &rhs.materialized_body()?.space,
-                    lhs_axes,
-                    rhs_axes,
-                    output_order,
-                )?
-        } else {
-            self.contraction_output_space_oriented(rhs, lhs_axes, rhs_axes, output_order)?
-        };
+        let dst_bound =
+            self.contraction_output_space_oriented(rhs, lhs_axes, rhs_axes, output_order)?;
         let mut data = vec![D::from_real(0.0); dst_bound.raw().required_len()?];
         let lhs_is_adjoint = lhs_orientation == FusionTreePairOrientation::Adjoint;
         let rhs_is_adjoint = rhs_orientation == FusionTreePairOrientation::Adjoint;
@@ -6313,25 +6024,6 @@ impl Tensor {
                 UserBoundSpace::FZ2U1SU2(lhs_storage),
                 UserBoundSpace::FZ2U1SU2(rhs_storage),
             ) => contract_bound!(&mut context.mf, dst, lhs_storage, rhs_storage),
-            (UserBoundSpace::Su3(dst), UserBoundSpace::Su3(lhs), UserBoundSpace::Su3(rhs)) => {
-                if lhs_is_adjoint || rhs_is_adjoint {
-                    return Err(Error::InvalidArgument(
-                        "internal: SU(N) contraction reached the seam with a conjugate flag"
-                            .to_string(),
-                    ));
-                }
-                D::ctx_of(&mut context.su3).tensorcontract_fusion_dyn_into_generic(
-                    dst,
-                    &mut data,
-                    lhs,
-                    lhs_data,
-                    rhs,
-                    rhs_data,
-                    TensorContractSpec::new(lhs_axes, rhs_axes, output_order),
-                    D::from_real(1.0),
-                    D::from_real(0.0),
-                )
-            }
             _ => return Err(Error::RuleMismatch),
         }?;
         let data = D::lift(data);
@@ -6424,11 +6116,6 @@ impl Tensor {
                 UserBoundSpace::FZ2U1SU2(lhs),
                 UserBoundSpace::FZ2U1SU2(rhs),
             ) => contract_cuda_bound!(&mut state.mf, dst, lhs, rhs),
-            (UserBoundSpace::Su3(_), UserBoundSpace::Su3(_), UserBoundSpace::Su3(_)) => {
-                return Err(Error::InvalidArgument(
-                    "CUDA contraction is not yet supported for SU(3) tensors".to_string(),
-                ));
-            }
             _ => return Err(Error::RuleMismatch),
         }?;
         let data = Data::CudaF64(Arc::new(dst));
@@ -6460,8 +6147,7 @@ impl Tensor {
         validate_contracted_axes(rhs_axes, rhs.rank())?;
         let open_rank = self.rank() - lhs_axes.len() + rhs.rank() - rhs_axes.len();
 
-        let host_mult_free_dense = self.rule_kind() != RuleKind::Su3
-            && self.placement() == Placement::Host
+        let host_mult_free_dense = self.placement() == Placement::Host
             && !matches!(self.stored_data(), Data::Diagonal(_))
             && !matches!(rhs.stored_data(), Data::Diagonal(_));
         if host_mult_free_dense {
@@ -6578,15 +6264,6 @@ impl Tensor {
                     return self.with_bound(UserBoundSpace::$variant(space), Data::$data(data));
                 }};
             }
-            macro_rules! generic_product {
-                ($data:ident, $lhs:expr, $lhs_data:expr, $rhs:expr, $rhs_data:expr) => {{
-                    let (space, data) = tensorproduct_owned_generic(
-                        BoundDynamicTensorRef::try_new($lhs, $lhs_data)?,
-                        BoundDynamicTensorRef::try_new($rhs, $rhs_data)?,
-                    )?;
-                    return self.with_bound(UserBoundSpace::Su3(space), Data::$data(data));
-                }};
-            }
             match (
                 self.ordinary_body().space.as_ref(),
                 self.stored_data(),
@@ -6623,9 +6300,6 @@ impl Tensor {
                     UserBoundSpace::FZ2U1SU2(b),
                     Data::F64(bd),
                 ) => product!(FZ2U1SU2, F64, a, ad, b, bd),
-                (UserBoundSpace::Su3(a), Data::F64(ad), UserBoundSpace::Su3(b), Data::F64(bd)) => {
-                    generic_product!(F64, a, ad, b, bd)
-                }
                 (UserBoundSpace::U1(a), Data::C64(ad), UserBoundSpace::U1(b), Data::C64(bd)) => {
                     product!(U1, C64, a, ad, b, bd)
                 }
@@ -6656,9 +6330,6 @@ impl Tensor {
                     UserBoundSpace::FZ2U1SU2(b),
                     Data::C64(bd),
                 ) => product!(FZ2U1SU2, C64, a, ad, b, bd),
-                (UserBoundSpace::Su3(a), Data::C64(ad), UserBoundSpace::Su3(b), Data::C64(bd)) => {
-                    generic_product!(C64, a, ad, b, bd)
-                }
                 _ => {}
             }
         }
@@ -6834,7 +6505,7 @@ impl Tensor {
                 self.domain_rank(),
                 &operation,
             );
-            if is_rank_one_swap && self.rule_kind() != RuleKind::Su3 {
+            if is_rank_one_swap {
                 let destination = self.ordinary_body().space.transformed(&operation)?;
                 let data = with_user_rule!(self.ordinary_body().space, rule, {
                     diagonal.transformed_rank_one_swap(
@@ -6860,29 +6531,6 @@ impl Tensor {
         // proof in the derived destination.
         let mut lease = self.rt.lease_context()?;
         let context = lease.context();
-        // SU(3) (Generic): dedicated non-macro path — build the generic result
-        // space and drive the non-memoized generic tree-transform. The recoupling
-        // coefficient scalar is f64 for either data dtype, so the generic braid
-        // math is identical to the tree-level layer this stage proved against TK.
-        if self.rule_kind() == RuleKind::Su3 {
-            let rule = self.su3_rule();
-            let dst_bound = self.ordinary_body().space.transformed(&operation)?;
-            let dst_space = dst_bound.raw();
-            let mut data = vec![D::from_real(0.0); dst_space.required_len()?];
-            D::ctx_of(&mut context.su3)
-                .tree_context_mut()
-                .tree_transform_dyn_into_generic(
-                    rule,
-                    operation,
-                    &Arc::clone(dst_space.structure()),
-                    self.ordinary_body().space.structure(),
-                    &mut data,
-                    src_data,
-                    D::from_real(1.0),
-                    D::from_real(0.0),
-                )?;
-            return self.with_bound(dst_bound, D::lift(data));
-        }
         with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
             let (dst_bound, data) = tree_transform_owned_multiplicity_free(
                 context.multiplicity_free_lane::<D>(),
@@ -6903,15 +6551,6 @@ impl Tensor {
     /// rules apply the categorical trace coefficients (quantum-dimension
     /// factors, and twists for fermionic rules: the supertrace).
     pub fn trace_pairs(&self, pairs: &[(usize, usize)]) -> Result<Self, Error> {
-        // SU(N) (Generic): the partial-trace engine rides the mult-free
-        // recoupling (`multiplicity_free_permute_tree_pair`); its generic
-        // sibling is Stage B3c-3. Full trace (`tr`) IS wired generically.
-        if self.rule_kind() == RuleKind::Su3 {
-            return Err(Error::UnsupportedForRule {
-                operation: "Tensor::trace_pairs",
-                rule: "SU(3)",
-            });
-        }
         let rank = self.rank();
         let mut seen = vec![false; rank];
         for &(lhs, rhs) in pairs {
@@ -7082,9 +6721,6 @@ impl Tensor {
             (UserBoundSpace::FZ2U1SU2(dst), UserBoundSpace::FZ2U1SU2(src)) => {
                 trace_bound!(dst, src)
             }
-            (UserBoundSpace::Su3(_), UserBoundSpace::Su3(_)) => {
-                unreachable!("partial SU(3) trace is rejected while selecting its homspace")
-            }
             _ => return Err(Error::RuleMismatch),
         }?;
         let data = D::lift(data);
@@ -7134,41 +6770,15 @@ impl Tensor {
         // former `trace_pairs` route paid to produce a single scalar.
         let nout = self.codomain_rank();
         if let Data::Diagonal(diagonal) = self.stored_data() {
-            let value = if self.rule_kind() == RuleKind::Su3 {
-                let rule = self.su3_rule();
-                diagonal.ordinary_trace_with(|sector| {
-                    let sqrt = tenet_core::GenericRigidSymbols::sqrt_dim_scalar(rule, sector);
-                    sqrt * sqrt
-                })
-            } else {
-                with_user_rule!(
-                    self.ordinary_body().space,
-                    rule,
-                    diagonal.ordinary_trace(rule)
-                )
-            };
+            let value = with_user_rule!(
+                self.ordinary_body().space,
+                rule,
+                diagonal.ordinary_trace(rule)
+            );
             return Ok(match diagonal {
                 DiagonalData::RealF64(_) => Scalar::F64(value.re),
                 DiagonalData::RealC64(_) | DiagonalData::C64(_) => Scalar::C64(value),
             });
-        }
-        // SU(N) (Generic): same block-local weighted trace through the
-        // generic-dim sibling (mult-free `with_rule!` cannot host it).
-        if self.rule_kind() == RuleKind::Su3 {
-            let rule = self.su3_rule();
-            return match self.coupled_data()? {
-                Data::F64(data) => {
-                    weighted_trace_generic(rule, self.ordinary_body().space.structure(), nout, data)
-                        .map(|v| Scalar::F64(v.re))
-                }
-                Data::C64(data) => {
-                    weighted_trace_generic(rule, self.ordinary_body().space.structure(), nout, data)
-                        .map(Scalar::C64)
-                }
-                Data::Diagonal(_) => unreachable!("coupled_data materializes Data::Diagonal"),
-                #[cfg(feature = "cuda")]
-                Data::CudaF64(_) => Err(device_unsupported("tr()")),
-            };
         }
         match self.coupled_data()? {
             Data::F64(data) => with_user_rule!(self.ordinary_body().space, rule, {
@@ -7286,34 +6896,11 @@ impl Tensor {
                     }
                 };
             }
-            let value = if self.rule_kind() == RuleKind::Su3 {
-                let rule = self.su3_rule();
-                reduce!(|sector| {
-                    let sqrt = rule.sqrt_dim_scalar(sector);
-                    sqrt * sqrt
-                })
-            } else {
-                with_user_rule!(self.ordinary_body().space, rule, {
-                    reduce!(|sector| rule.dim_scalar(sector))
-                })
-            }
+            let value = with_user_rule!(self.ordinary_body().space, rule, {
+                reduce!(|sector| rule.dim_scalar(sector))
+            })
             .ok_or_else(|| {
                 internal_layout_error("a diagonal spectrum is incompatible with itself")
-            })?;
-            return Ok(value.re.sqrt());
-        }
-        // SU(N) (Generic): dedicated non-macro path — the Frobenius norm is a
-        // storage-level block sum weighted by dim(c) = sqrt_dim(c)², so it needs
-        // only `GenericRigidSymbols`, no contract. Sums over OM vertices.
-        if self.rule_kind() == RuleKind::Su3 {
-            let value = with_data!(self, data, {
-                weighted_inner_generic(
-                    self.su3_rule(),
-                    self.ordinary_body().space.structure(),
-                    self.ordinary_body().space.nout(),
-                    data,
-                    data,
-                )
             })?;
             return Ok(value.re.sqrt());
         }
@@ -7420,35 +7007,10 @@ impl Tensor {
             return Err(device_unsupported("norm_p()"));
         }
         if let Data::Diagonal(diagonal) = self.stored_data() {
-            let total = if self.rule_kind() == RuleKind::Su3 {
-                let rule = self.su3_rule();
-                diagonal.abs_pow_sum_with(p, |sector| {
-                    let sqrt = rule.sqrt_dim_scalar(sector);
-                    sqrt * sqrt
-                })
-            } else {
-                with_user_rule!(self.ordinary_body().space, rule, {
-                    diagonal.abs_pow_sum_with(p, |sector| rule.dim_scalar(sector))
-                })
-            };
-            return Ok(total.powf(p.recip()));
-        }
-        // SU(N) (Generic) needs its own arm for the same reason `norm` does:
-        // `GenericRigidSymbols` exposes `sqrt_dim`, not `dim`.
-        if self.rule_kind() == RuleKind::Su3 {
-            let rule = self.su3_rule();
-            return with_data!(self, data, {
-                coupled_region_pow_sum(
-                    self.ordinary_body().space.structure(),
-                    self.ordinary_body().space.nout(),
-                    data,
-                    p,
-                    |coupled| {
-                        let sqrt = rule.sqrt_dim_scalar(coupled);
-                        sqrt * sqrt
-                    },
-                )
+            let total = with_user_rule!(self.ordinary_body().space, rule, {
+                diagonal.abs_pow_sum_with(p, |sector| rule.dim_scalar(sector))
             });
+            return Ok(total.powf(p.recip()));
         }
         with_data!(self, data, {
             with_user_rule!(self.ordinary_body().space, rule, {
@@ -7799,17 +7361,9 @@ impl Tensor {
                     }
                 };
             }
-            return if self.rule_kind() == RuleKind::Su3 {
-                let rule = self.su3_rule();
-                reduce!(|sector| {
-                    let sqrt = rule.sqrt_dim_scalar(sector);
-                    sqrt * sqrt
-                })
-            } else {
-                with_user_rule!(self.rule_authority_space(), rule, {
-                    reduce!(|sector| rule.dim_scalar(sector))
-                })
-            };
+            return with_user_rule!(self.rule_authority_space(), rule, {
+                reduce!(|sector| rule.dim_scalar(sector))
+            });
         }
         self.check_same_space(other)?;
         match (self.diagonal_data(), other.diagonal_data()) {
@@ -7871,17 +7425,9 @@ impl Tensor {
                         }
                     };
                 }
-                let value = if self.rule_kind() == RuleKind::Su3 {
-                    let rule = self.su3_rule();
-                    reduce!(|sector| {
-                        let sqrt = rule.sqrt_dim_scalar(sector);
-                        sqrt * sqrt
-                    })
-                } else {
-                    with_user_rule!(self.ordinary_body().space, rule, {
-                        reduce!(|sector| rule.dim_scalar(sector))
-                    })
-                }
+                let value = with_user_rule!(self.ordinary_body().space, rule, {
+                    reduce!(|sector| rule.dim_scalar(sector))
+                })
                 .ok_or(Error::DtypeMismatch)?;
                 return Ok(value);
             }
@@ -7927,17 +7473,9 @@ impl Tensor {
                         }
                     };
                 }
-                let value = if self.rule_kind() == RuleKind::Su3 {
-                    let rule = self.su3_rule();
-                    reduce!(|sector| {
-                        let sqrt = rule.sqrt_dim_scalar(sector);
-                        sqrt * sqrt
-                    })
-                } else {
-                    with_user_rule!(self.ordinary_body().space, rule, {
-                        reduce!(|sector| rule.dim_scalar(sector))
-                    })
-                }?;
+                let value = with_user_rule!(self.ordinary_body().space, rule, {
+                    reduce!(|sector| rule.dim_scalar(sector))
+                })?;
                 return Ok(value);
             }
             (None, Some(diagonal)) => {
@@ -7982,42 +7520,14 @@ impl Tensor {
                         }
                     };
                 }
-                let value = if self.rule_kind() == RuleKind::Su3 {
-                    let rule = self.su3_rule();
-                    reduce!(|sector| {
-                        let sqrt = rule.sqrt_dim_scalar(sector);
-                        sqrt * sqrt
-                    })
-                } else {
-                    with_user_rule!(self.ordinary_body().space, rule, {
-                        reduce!(|sector| rule.dim_scalar(sector))
-                    })
-                }?;
+                let value = with_user_rule!(self.ordinary_body().space, rule, {
+                    reduce!(|sector| rule.dim_scalar(sector))
+                })?;
                 return Ok(value);
             }
             (None, None) => {}
         }
         match (self.coupled_data()?, other.coupled_data()?) {
-            (Data::F64(a), Data::F64(b)) if self.rule_kind() == RuleKind::Su3 => {
-                weighted_inner_generic(
-                    self.su3_rule(),
-                    self.ordinary_body().space.structure(),
-                    self.ordinary_body().space.nout(),
-                    a,
-                    b,
-                )
-                .map(|v| Scalar::F64(v.re))
-            }
-            (Data::C64(a), Data::C64(b)) if self.rule_kind() == RuleKind::Su3 => {
-                weighted_inner_generic(
-                    self.su3_rule(),
-                    self.ordinary_body().space.structure(),
-                    self.ordinary_body().space.nout(),
-                    a,
-                    b,
-                )
-                .map(Scalar::C64)
-            }
             (Data::F64(a), Data::F64(b)) => {
                 with_user_rule!(self.ordinary_body().space, rule, {
                     weighted_inner(
@@ -8217,17 +7727,6 @@ impl Tensor {
         Ok(())
     }
 
-    /// Stops Generic rules before they reach multiplicity-free-only dispatch.
-    fn reject_unwired_su3(&self, operation: &'static str) -> Result<(), Error> {
-        if self.rule_kind() == RuleKind::Su3 {
-            return Err(Error::UnsupportedForRule {
-                operation,
-                rule: "SU(3)",
-            });
-        }
-        Ok(())
-    }
-
     // -----------------------------------------------------------------------
     // Decompositions and matrix functions (TensorKit 0.17 / MatrixAlgebraKit
     // names, transparently over the tenet-matrixalgebra dynamic cores).
@@ -8303,20 +7802,10 @@ impl Tensor {
         spectrum.sort_unstable_by_key(|entry| entry.sector);
         #[cfg(test)]
         observe_diagonal_result_layout_build();
-        // SU(N) (Generic): the bond space is a rank-1/rank-1 hom whose trees
-        // are trivial, but the key enumeration must still be the generic one.
-        let space = if let UserBoundSpace::Su3(bound) = self.ordinary_body().space.as_ref() {
-            let space = tenet_matrixalgebra::diagonal_bond_bound_space_generic(
-                Arc::clone(bound.provider_arc()),
-                &spectrum,
-            )?;
-            UserBoundSpace::from_bound(self.ordinary_body().space.as_ref(), space)?
-        } else {
-            with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
-                let space = tenet_matrixalgebra::diagonal_bond_bound_space_like(bound, &spectrum)?;
-                UserBoundSpace::from_bound(self.ordinary_body().space.as_ref(), space)
-            })?
-        };
+        let space = with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
+            let space = tenet_matrixalgebra::diagonal_bond_bound_space_like(bound, &spectrum)?;
+            UserBoundSpace::from_bound(self.ordinary_body().space.as_ref(), space)
+        })?;
         let data = if complex {
             DiagonalData::RealC64(spectrum)
         } else {
@@ -8382,20 +7871,7 @@ impl Tensor {
         lhs_axes: &[usize],
         rhs_axes: &[usize],
     ) -> Result<UserBoundSpace, Error> {
-        if self.rule_kind() == RuleKind::Su3 {
-            self.materialized_body()?.space.contracted(
-                &rhs.materialized_body()?.space,
-                lhs_axes,
-                rhs_axes,
-            )
-        } else {
-            self.contraction_output_space_oriented(
-                rhs,
-                lhs_axes,
-                rhs_axes,
-                OutputAxisOrder::identity(),
-            )
-        }
+        self.contraction_output_space_oriented(rhs, lhs_axes, rhs_axes, OutputAxisOrder::identity())
     }
 
     fn contraction_output_space_ordered(
@@ -8405,26 +7881,7 @@ impl Tensor {
         rhs_axes: &[usize],
         output_order: OutputAxisOrder<'_>,
     ) -> Result<UserBoundSpace, Error> {
-        if self.rule_kind() == RuleKind::Su3 {
-            match output_order {
-                OutputAxisOrder::Identity => self.materialized_body()?.space.contracted(
-                    &rhs.materialized_body()?.space,
-                    lhs_axes,
-                    rhs_axes,
-                ),
-                OutputAxisOrder::Axes(_) => self
-                    .materialized_body()?
-                    .space
-                    .contracted_with_output_order(
-                        &rhs.materialized_body()?.space,
-                        lhs_axes,
-                        rhs_axes,
-                        output_order,
-                    ),
-            }
-        } else {
-            self.contraction_output_space_oriented(rhs, lhs_axes, rhs_axes, output_order)
-        }
+        self.contraction_output_space_oriented(rhs, lhs_axes, rhs_axes, output_order)
     }
 
     fn contraction_output_space_oriented(
@@ -8537,8 +7994,7 @@ impl Tensor {
         rhs_axes: &[usize],
         output_order: OutputAxisOrder<'_>,
     ) -> Result<Option<Self>, Error> {
-        if self.rule_kind() == RuleKind::Su3
-            || lhs_axes.len() != 1
+        if lhs_axes.len() != 1
             || rhs_axes.len() != 1
             || (self.diagonal_data().is_none() && rhs.diagonal_data().is_none())
         {
@@ -8738,9 +8194,6 @@ impl Tensor {
             if matches!(self.stored_data(), Data::CudaF64(_)) {
                 return Err(device_unsupported("materializing an adjoint device tensor"));
             }
-            if self.rule_kind() == RuleKind::Su3 {
-                return self.materialized_tensor_uncached()?.svd_compact();
-            }
             let parent = self.parent_tensor_for_lowering();
             let complex = parent.dtype() == Dtype::C64;
             let mut dense = parent.rt.lease_dense();
@@ -8765,23 +8218,13 @@ impl Tensor {
         // (#155); byte-identical single-threaded.
         let mut dense = self.rt.lease_dense();
         with_data!(self, data, {
-            // SU(N) (Generic): the block-level SVD engine is symmetry-agnostic;
-            // only the factor-space builders differ (multiplicity-aware keys).
-            if let UserBoundSpace::Su3(bound) = self.ordinary_body().space.as_ref() {
-                let factors = tenet_matrixalgebra::svd_compact_factors_dyn_generic(
+            with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
+                let factors = tenet_matrixalgebra::svd_compact_factors_dyn(
                     dense.dense(),
                     &BoundDynamicTensorRef::try_new(&bound, data)?,
                 )?;
                 self.from_bound_factors(factors, complex)
-            } else {
-                with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
-                    let factors = tenet_matrixalgebra::svd_compact_factors_dyn(
-                        dense.dense(),
-                        &BoundDynamicTensorRef::try_new(&bound, data)?,
-                    )?;
-                    self.from_bound_factors(factors, complex)
-                })
-            }
+            })
         })
     }
 
@@ -8792,9 +8235,6 @@ impl Tensor {
             #[cfg(feature = "cuda")]
             if matches!(self.stored_data(), Data::CudaF64(_)) {
                 return Err(device_unsupported("materializing an adjoint device tensor"));
-            }
-            if self.rule_kind() == RuleKind::Su3 {
-                return self.materialized_tensor_uncached()?.svd_full();
             }
             let parent = self.parent_tensor_for_lowering();
             let mut dense = parent.rt.lease_dense();
@@ -8811,16 +8251,6 @@ impl Tensor {
                         parent.from_bound_factor(vh)?,
                     ))
                 })
-            });
-        }
-        // Why not dispatch SU(3): the square-unitary completion path has no
-        // generic sibling yet. Compact and truncated SVD are supported, but
-        // silently using the multiplicity-free builder would produce an
-        // invalid generic fusion-tree space.
-        if self.rule_kind() == RuleKind::Su3 {
-            return Err(Error::UnsupportedForRule {
-                operation: "Tensor::svd_full",
-                rule: "SU(3)",
             });
         }
         // Lease a dense executor for this op instead of the coarse runtime lock,
@@ -8872,12 +8302,6 @@ impl Tensor {
                 return Err(device_unsupported("materializing an adjoint device tensor"));
             }
             let parent = self.parent_tensor_for_lowering();
-            if matches!(
-                parent.ordinary_body().space.as_ref(),
-                UserBoundSpace::Su3(_)
-            ) {
-                return self.materialized_tensor_uncached()?.svd_trunc(truncation);
-            }
             let complex = parent.dtype() == Dtype::C64;
             let mut dense = parent.rt.lease_dense();
             return with_data!(parent, data, {
@@ -8904,25 +8328,14 @@ impl Tensor {
         // (#155); byte-identical single-threaded.
         let mut dense = self.rt.lease_dense();
         with_data!(self, data, {
-            // SU(N) (Generic): same engine and generic factor spaces; the
-            // sqrt_dim² truncation weight remains a real quantum dimension.
-            if let UserBoundSpace::Su3(bound) = self.ordinary_body().space.as_ref() {
-                let output = tenet_matrixalgebra::svd_trunc_factors_dyn_generic(
+            with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
+                let output = tenet_matrixalgebra::svd_trunc_factors_dyn(
                     dense.dense(),
                     &BoundDynamicTensorRef::try_new(&bound, data)?,
                     truncation,
                 )?;
                 self.from_svd_trunc_factors(output, complex)
-            } else {
-                with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
-                    let output = tenet_matrixalgebra::svd_trunc_factors_dyn(
-                        dense.dense(),
-                        &BoundDynamicTensorRef::try_new(&bound, data)?,
-                        truncation,
-                    )?;
-                    self.from_svd_trunc_factors(output, complex)
-                })
-            }
+            })
         })
     }
 
@@ -8941,19 +8354,12 @@ impl Tensor {
         // (#155); byte-identical single-threaded.
         let mut dense = self.rt.lease_dense();
         with_data!(self, data, {
-            if let UserBoundSpace::Su3(bound) = self.ordinary_body().space.as_ref() {
-                tenet_matrixalgebra::svd_vals_dyn_generic(
+            with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
+                tenet_matrixalgebra::svd_vals_dyn(
                     dense.dense(),
                     &BoundDynamicTensorRef::try_new(&bound, data)?,
                 )
-            } else {
-                with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
-                    tenet_matrixalgebra::svd_vals_dyn(
-                        dense.dense(),
-                        &BoundDynamicTensorRef::try_new(&bound, data)?,
-                    )
-                })
-            }
+            })
             .map_err(Into::into)
         })
     }
@@ -8969,9 +8375,6 @@ impl Tensor {
     /// the rules.
     pub fn qr_compact(&self) -> Result<(Self, Self), Error> {
         if self.is_adjoint_view() {
-            if self.rule_kind() == RuleKind::Su3 {
-                return self.materialized_tensor_uncached()?.qr_compact();
-            }
             #[cfg(feature = "cuda")]
             if matches!(self.stored_data(), Data::CudaF64(_)) {
                 return self.materialized_tensor()?.qr_compact();
@@ -8987,35 +8390,19 @@ impl Tensor {
         // (#155); byte-identical single-threaded.
         let mut dense = self.rt.lease_dense();
         with_data!(self, data, {
-            if let UserBoundSpace::Su3(bound) = self.ordinary_body().space.as_ref() {
-                let (q, r) = tenet_matrixalgebra::qr_compact_dyn_generic(
+            with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
+                let (q, r) = tenet_matrixalgebra::qr_compact_dyn(
                     dense.dense(),
                     &BoundDynamicTensorRef::try_new(bound, data)?,
                 )?;
-                Ok((self.from_bound_factor(q)?, self.from_bound_factor(r)?))
-            } else {
-                with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
-                    let (q, r) = tenet_matrixalgebra::qr_compact_dyn(
-                        dense.dense(),
-                        &BoundDynamicTensorRef::try_new(bound, data)?,
-                    )?;
-                    Ok::<_, Error>((self.from_bound_factor(q)?, self.from_bound_factor(r)?))
-                })
-            }
+                Ok::<_, Error>((self.from_bound_factor(q)?, self.from_bound_factor(r)?))
+            })
         })
     }
 
     /// Full QR `t = q * r` (MatrixAlgebraKit `qr_full`): square `q` per
     /// sector.
     pub fn qr_full(&self) -> Result<(Self, Self), Error> {
-        // ponytail: see svd_full — the square-Q completion has no generic
-        // sibling yet (B3c-3); qr_compact covers left_orth and the workflows.
-        if self.rule_kind() == RuleKind::Su3 {
-            return Err(Error::UnsupportedForRule {
-                operation: "Tensor::qr_full",
-                rule: "SU(3)",
-            });
-        }
         if self.is_adjoint_view() {
             #[cfg(feature = "cuda")]
             if matches!(self.stored_data(), Data::CudaF64(_)) {
@@ -9057,34 +8444,19 @@ impl Tensor {
         // (#155); byte-identical single-threaded.
         let mut dense = self.rt.lease_dense();
         with_data!(self, data, {
-            if let UserBoundSpace::Su3(bound) = self.ordinary_body().space.as_ref() {
-                let (l, q) = tenet_matrixalgebra::lq_compact_dyn_generic(
+            with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
+                let (l, q) = tenet_matrixalgebra::lq_compact_dyn(
                     dense.dense(),
                     &BoundDynamicTensorRef::try_new(bound, data)?,
                 )?;
-                Ok((self.from_bound_factor(l)?, self.from_bound_factor(q)?))
-            } else {
-                with_bound_multiplicity_free!(self.ordinary_body().space, bound, {
-                    let (l, q) = tenet_matrixalgebra::lq_compact_dyn(
-                        dense.dense(),
-                        &BoundDynamicTensorRef::try_new(bound, data)?,
-                    )?;
-                    Ok::<_, Error>((self.from_bound_factor(l)?, self.from_bound_factor(q)?))
-                })
-            }
+                Ok::<_, Error>((self.from_bound_factor(l)?, self.from_bound_factor(q)?))
+            })
         })
     }
 
     /// Full LQ `t = l * q` (MatrixAlgebraKit `lq_full`): square `q` per
     /// sector.
     pub fn lq_full(&self) -> Result<(Self, Self), Error> {
-        // ponytail: see svd_full/qr_full (B3c-3); lq_compact covers right_orth.
-        if self.rule_kind() == RuleKind::Su3 {
-            return Err(Error::UnsupportedForRule {
-                operation: "Tensor::lq_full",
-                rule: "SU(3)",
-            });
-        }
         if self.is_adjoint_view() {
             #[cfg(feature = "cuda")]
             if matches!(self.stored_data(), Data::CudaF64(_)) {
@@ -9127,7 +8499,6 @@ impl Tensor {
     /// `left_null`). A host lazy adjoint redirects through the owned parent's
     /// right null space and returns a detached owned factor.
     pub fn left_null(&self) -> Result<Self, Error> {
-        self.reject_unwired_su3("Tensor::left_null")?;
         if self.is_adjoint_view() {
             #[cfg(feature = "cuda")]
             if matches!(self.stored_data(), Data::CudaF64(_)) {
@@ -9158,7 +8529,6 @@ impl Tensor {
     /// `right_null`). A host lazy adjoint redirects through the owned parent's
     /// left null space and returns a detached owned factor.
     pub fn right_null(&self) -> Result<Self, Error> {
-        self.reject_unwired_su3("Tensor::right_null")?;
         if self.is_adjoint_view() {
             #[cfg(feature = "cuda")]
             if matches!(self.stored_data(), Data::CudaF64(_)) {
@@ -9189,7 +8559,6 @@ impl Tensor {
     /// `w` isometric, `p` positive on the domain. Every coupled-sector matrix
     /// must have at least as many rows as columns.
     pub fn left_polar(&self) -> Result<(Self, Self), Error> {
-        self.reject_unwired_su3("Tensor::left_polar")?;
         if self.is_adjoint_view() {
             #[cfg(feature = "cuda")]
             if matches!(self.stored_data(), Data::CudaF64(_)) {
@@ -9233,7 +8602,6 @@ impl Tensor {
     /// `right_polar`): `p` positive on the codomain, `w` isometric. Every
     /// coupled-sector matrix must have at least as many columns as rows.
     pub fn right_polar(&self) -> Result<(Self, Self), Error> {
-        self.reject_unwired_su3("Tensor::right_polar")?;
         if self.is_adjoint_view() {
             #[cfg(feature = "cuda")]
             if matches!(self.stored_data(), Data::CudaF64(_)) {
@@ -9291,7 +8659,6 @@ impl Tensor {
     ///
     /// # Errors
     ///
-    /// - [`Error::UnsupportedForRule`] for SU(3).
     /// - [`Error::Operation`] when the tensor is not an endomorphism or its
     ///   coupled blocks are not Hermitian — the seam is where that surfaces.
     ///   On a device receiver the endomorphism check runs here instead, ahead
@@ -9304,7 +8671,6 @@ impl Tensor {
         if self.is_adjoint_view() {
             return self.materialized_tensor_uncached()?.eigh_full();
         }
-        self.reject_unwired_su3("Tensor::eigh_full")?;
         #[cfg(feature = "cuda")]
         if let Data::CudaF64(storage) = self.stored_data() {
             let out = self.eigh_cuda(storage, None)?;
@@ -9340,7 +8706,6 @@ impl Tensor {
         if self.is_adjoint_view() {
             return self.materialized_tensor_uncached()?.eigh_trunc(truncation);
         }
-        self.reject_unwired_su3("Tensor::eigh_trunc")?;
         #[cfg(feature = "cuda")]
         if let Data::CudaF64(storage) = self.stored_data() {
             return self.eigh_cuda(storage, Some(truncation));
@@ -9377,7 +8742,6 @@ impl Tensor {
         if self.is_adjoint_view() {
             return self.materialized_tensor_uncached()?.eigh_vals();
         }
-        self.reject_unwired_su3("Tensor::eigh_vals")?;
         // Lease a dense executor for this op instead of the coarse runtime lock,
         // so concurrent factorizations on a shared runtime run in parallel
         // (#155); byte-identical single-threaded.
@@ -9402,7 +8766,6 @@ impl Tensor {
         if self.is_adjoint_view() {
             return self.materialized_tensor_uncached()?.eig_full();
         }
-        self.reject_unwired_su3("Tensor::eig_full")?;
         // Lease a dense executor for this op instead of the coarse runtime lock,
         // so concurrent factorizations on a shared runtime run in parallel
         // (#155); byte-identical single-threaded.
@@ -9429,7 +8792,6 @@ impl Tensor {
         if self.is_adjoint_view() {
             return self.materialized_tensor_uncached()?.eig_trunc(truncation);
         }
-        self.reject_unwired_su3("Tensor::eig_trunc")?;
         // Lease a dense executor for this op instead of the coarse runtime lock,
         // so concurrent factorizations on a shared runtime run in parallel
         // (#155); byte-identical single-threaded.
@@ -9458,7 +8820,6 @@ impl Tensor {
         if self.is_adjoint_view() {
             return self.materialized_tensor_uncached()?.eig_vals();
         }
-        self.reject_unwired_su3("Tensor::eig_vals")?;
         // Lease a dense executor for this op instead of the coarse runtime lock,
         // so concurrent factorizations on a shared runtime run in parallel
         // (#155); byte-identical single-threaded.
@@ -9527,8 +8888,6 @@ impl Tensor {
     ///   including `DenseError::Unsupported` when the selected executor has no
     ///   dense solve — the general route needs one, and there is no implicit
     ///   host copy. Nothing is published unless every coupled sector succeeded;
-    /// - [`Error::UnsupportedForRule`] for an SU(3) payload, whose dense
-    ///   matrix-function seam is not wired.
     pub fn exp(&self) -> Result<Self, Error> {
         if self.is_adjoint_view() {
             return self.materialized_tensor_uncached()?.exp();
@@ -9540,7 +8899,6 @@ impl Tensor {
         if let Data::Diagonal(diagonal) = self.stored_data() {
             return Ok(self.with_diagonal(diagonal.exp()));
         }
-        self.reject_unwired_su3("Tensor::exp")?;
         with_data!(self, data, self.exp_impl(data))
     }
 
@@ -9564,7 +8922,6 @@ impl Tensor {
     /// allocating or publishing a separate receiver-materialization payload.
     pub fn inv(&self) -> Result<Self, Error> {
         if self.is_adjoint_view() {
-            self.reject_unwired_su3("Tensor::inv")?;
             #[cfg(feature = "cuda")]
             if matches!(self.stored_data(), Data::CudaF64(_)) {
                 return self.materialized_tensor()?.inv();
@@ -9582,7 +8939,6 @@ impl Tensor {
         if let Data::Diagonal(diagonal) = self.stored_data() {
             return Ok(self.with_diagonal(diagonal.try_recip()?));
         }
-        self.reject_unwired_su3("Tensor::inv")?;
         with_data!(self, data, self.inv_impl(data))
     }
 
@@ -9614,9 +8970,6 @@ impl Tensor {
     ///
     /// - [`Error::InvalidArgument`] when `rcond` is not finite or is
     ///   negative — checked before any work, on both storages.
-    /// - [`Error::UnsupportedForRule`] for SU(3) on the dense arm only — a
-    ///   compact-diagonal SU(3) factor (e.g. an SU(3) `svd_trunc` `s`) takes
-    ///   the elementwise arm above, which precedes the rejection.
     /// - [`Error::Operation`] / [`Error::Core`] from the SVD, on the dense
     ///   arm; [`Error::UnsupportedOnDevice`] for a device payload.
     ///
@@ -9634,7 +8987,6 @@ impl Tensor {
         if let Data::Diagonal(diagonal) = self.stored_data() {
             return Ok(self.with_diagonal(diagonal.pinv(rcond)));
         }
-        self.reject_unwired_su3("Tensor::pinv")?;
         if self.is_adjoint_view() {
             #[cfg(feature = "cuda")]
             if matches!(self.stored_data(), Data::CudaF64(_)) {
@@ -9802,10 +9154,10 @@ impl TensorExecutionContext {
                 Data::F64(rhs_data),
                 Scalar::F64(alpha),
             ) => {
-                // SU(3)'s generic plan and CU(1)'s lowered plan can omit
-                // structurally zero destinations. Clear those layouts before
-                // replay; other built-in plans overwrite every storage slot.
-                if matches!(rule_kind, RuleKind::CU1 | RuleKind::Su3) {
+                // CU(1)'s lowered plan can omit structurally zero destinations.
+                // Clear that layout before replay; other built-in plans
+                // overwrite every storage slot.
+                if rule_kind == RuleKind::CU1 {
                     dst_data.fill(0.0);
                 }
                 dispatch_contract_into(
@@ -9830,7 +9182,7 @@ impl TensorExecutionContext {
                 Data::C64(rhs_data),
                 Scalar::C64(alpha),
             ) => {
-                if matches!(rule_kind, RuleKind::CU1 | RuleKind::Su3) {
+                if rule_kind == RuleKind::CU1 {
                     dst_data.fill(Complex64::new(0.0, 0.0));
                 }
                 dispatch_contract_into(
@@ -10000,12 +9352,6 @@ impl TensorExecutionContext {
         output_axes: &[usize],
         alpha: Scalar,
     ) -> Result<OverwriteOutcome, Error> {
-        if lhs.rule_kind() == RuleKind::Su3
-            || rhs.rule_kind() == RuleKind::Su3
-            || dst.rule_kind() == RuleKind::Su3
-        {
-            return Ok(OverwriteOutcome::Incompatible);
-        }
         self.try_contract_overwrite_with_order(
             cache,
             dst,
@@ -10651,24 +9997,6 @@ fn dispatch_contract_into<D: UserScalar>(
             alpha,
             beta,
         ),
-        (
-            UserBoundSpace::Su3(_),
-            UserBoundSpace::Su3(dst),
-            UserBoundSpace::Su3(lhs_space),
-            UserBoundSpace::Su3(rhs_space),
-        ) => D::ctx_of(&mut context.su3)
-            .tensorcontract_fusion_dyn_into_generic(
-                dst,
-                dst_data,
-                lhs_space,
-                lhs_data,
-                rhs_space,
-                rhs_data,
-                TensorContractSpec::new(lhs_axes, rhs_axes, output_order),
-                alpha,
-                beta,
-            )
-            .map_err(Into::into),
         _ => Err(Error::RuleMismatch),
     }
 }
@@ -10751,20 +10079,6 @@ fn dispatch_permute_into<D: UserScalar>(
     src_data: &[D],
     alpha: D,
 ) -> Result<(), Error> {
-    if let UserBoundSpace::Su3(space) = authority {
-        return D::ctx_of(&mut context.su3)
-            .tree_context_mut()
-            .tree_transform_dyn_overwrite_into_generic(
-                space.provider(),
-                operation,
-                dst_space.structure(),
-                src.ordinary_body().space.structure(),
-                dst_data,
-                src_data,
-                alpha,
-            )
-            .map_err(Into::into);
-    }
     dispatch_permute_into_ref(
         context, authority, &operation, dst_space, dst_data, src, src_data, alpha,
     )
@@ -10796,21 +10110,7 @@ fn dispatch_permute_into_ref<D: UserScalar>(
         UserBoundSpace::FZ2(space) => apply!(&mut context.mf, space.provider()),
         UserBoundSpace::SU2(space) => apply!(&mut context.mf, space.provider()),
         UserBoundSpace::U1FZ2(space) => apply!(&mut context.mf, space.provider()),
-        UserBoundSpace::FZ2U1SU2(space) => {
-            apply!(&mut context.mf, space.provider())
-        }
-        UserBoundSpace::Su3(space) => D::ctx_of(&mut context.su3)
-            .tree_context_mut()
-            .tree_transform_dyn_overwrite_into_generic(
-                space.provider(),
-                operation.clone(),
-                dst_space.structure(),
-                src.ordinary_body().space.structure(),
-                dst_data,
-                src_data,
-                alpha,
-            )
-            .map_err(Into::into),
+        UserBoundSpace::FZ2U1SU2(space) => apply!(&mut context.mf, space.provider()),
     }
 }
 
@@ -11134,7 +10434,6 @@ where
 #[cfg(test)]
 mod coupled_region_inner_tests {
     use super::*;
-    use tenet_core::GenericRigidSymbols;
 
     fn assert_close(actual: Complex64, expected: Complex64) {
         assert!(
@@ -11192,33 +10491,6 @@ mod coupled_region_inner_tests {
             ])
             .unwrap(),
             282_101,
-        );
-    }
-
-    #[test]
-    fn generic_outer_multiplicity_norm_matches_the_block_odometer_oracle() {
-        // What: SU(3) norm includes every outer-multiplicity vertex with the
-        // generic sqrt-dimension-squared weight.
-        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-        let space = Space::su3([((1, 1), 2)]).unwrap();
-        let tensor =
-            Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space, &space], 282_201)
-                .unwrap();
-        let rule = tensor.su3_rule();
-        let data = tensor.data_c64();
-        let expected = odometer_inner_oracle(
-            tensor.ordinary_body().space.structure(),
-            data,
-            data,
-            |coupled| {
-                let sqrt = rule.sqrt_dim_scalar(coupled);
-                sqrt * sqrt
-            },
-        )
-        .unwrap();
-        assert_close(
-            Complex64::new(tensor.norm().unwrap().powi(2), 0.0),
-            expected,
         );
     }
 
@@ -12206,39 +11478,6 @@ mod unit_layout_tensor_tests {
     }
 
     #[test]
-    fn unit_layout_rejects_generic_rule_before_lazy_materialization() {
-        // What: the multiplicity-bearing provider has no unit-layout wrapper
-        // yet, and the typed boundary does not build its lazy adjoint body.
-        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-        let su3 = Space::su3([((1, 0), 1), ((0, 1), 1)]).unwrap();
-        let lazy = Tensor::zeros(&runtime, Dtype::F64, [&su3], [&su3])
-            .unwrap()
-            .adjoint()
-            .unwrap();
-
-        assert_eq!(
-            lazy.insert_right_unit(0, false).unwrap_err(),
-            Error::UnsupportedForRule {
-                operation: "Tensor::insert_right_unit",
-                rule: "SU(3)",
-            }
-        );
-        assert_eq!(lazy.adjoint_body_builds(), 0);
-    }
-}
-
-#[cfg(test)]
-mod compact_diagonal_tests;
-
-/// #618: a cat copy plan the fast-path prover declines is an internal
-/// error, not a silent slow path. The plan is constructed directly because
-/// no public-API cat can decline (see the `execute` rationale comment);
-/// reversed region order is the minimal unproven geometry.
-#[cfg(test)]
-mod cat_fallback_tests {
-    use super::*;
-
-    #[test]
     fn declined_plan_is_an_internal_layout_error() {
         let plan = CatCopyPlan {
             required_len: 10,
@@ -12402,7 +11641,7 @@ mod adjoint_parent_view_tests {
     }
 
     #[test]
-    fn erased_eigh_dense_lazy_complex_failure_and_su3_match_logical_oracles() {
+    fn erased_eigh_dense_lazy_complex_failure_matches_logical_oracles() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let leg = Space::u1([(0, 2)]);
         let hermitian = Tensor::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
@@ -12468,28 +11707,6 @@ mod adjoint_parent_view_tests {
                 expected[2]
             );
         }
-        assert_eq!(lazy.adjoint_body_builds(), 0);
-        assert!(!lazy.has_cached_materialization());
-
-        let su3 = Space::su3([((1, 0), 1)]).unwrap();
-        let parent = Tensor::rand_with_seed(&runtime, Dtype::C64, [&su3], [&su3], 716_001).unwrap();
-        let eager = parent
-            .adjoint()
-            .unwrap()
-            .materialized_tensor_uncached()
-            .unwrap();
-        let expected = [
-            eager.eigh_vals().unwrap_err(),
-            eager.eigh_full().unwrap_err(),
-            eager.eigh_trunc(&Truncation::rank(1)).unwrap_err(),
-        ];
-        let lazy = parent.adjoint().unwrap();
-        assert_eq!(lazy.eigh_vals().unwrap_err(), expected[0]);
-        assert_eq!(lazy.eigh_full().unwrap_err(), expected[1]);
-        assert_eq!(
-            lazy.eigh_trunc(&Truncation::rank(1)).unwrap_err(),
-            expected[2]
-        );
         assert_eq!(lazy.adjoint_body_builds(), 0);
         assert!(!lazy.has_cached_materialization());
     }
@@ -12669,7 +11886,7 @@ mod adjoint_parent_view_tests {
     }
 
     #[test]
-    fn erased_eig_dense_lazy_failures_and_su3_match_exact_logical_errors() {
+    fn erased_eig_dense_lazy_failures_match_exact_logical_errors() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let left = Space::u1([(0, 2)]);
         let right = Space::u1([(0, 3)]);
@@ -12701,28 +11918,6 @@ mod adjoint_parent_view_tests {
                 expected[2]
             );
         }
-        assert_eq!(lazy.adjoint_body_builds(), 0);
-        assert!(!lazy.has_cached_materialization());
-
-        let su3 = Space::su3([((1, 0), 1)]).unwrap();
-        let parent = Tensor::rand_with_seed(&runtime, Dtype::C64, [&su3], [&su3], 719_001).unwrap();
-        let eager = parent
-            .adjoint()
-            .unwrap()
-            .materialized_tensor_uncached()
-            .unwrap();
-        let expected = [
-            eager.eig_vals().unwrap_err(),
-            eager.eig_full().unwrap_err(),
-            eager.eig_trunc(&Truncation::rank(1)).unwrap_err(),
-        ];
-        let lazy = parent.adjoint().unwrap();
-        assert_eq!(lazy.eig_vals().unwrap_err(), expected[0]);
-        assert_eq!(lazy.eig_full().unwrap_err(), expected[1]);
-        assert_eq!(
-            lazy.eig_trunc(&Truncation::rank(1)).unwrap_err(),
-            expected[2]
-        );
         assert_eq!(lazy.adjoint_body_builds(), 0);
         assert!(!lazy.has_cached_materialization());
     }
@@ -12838,7 +12033,7 @@ mod adjoint_parent_view_tests {
     }
 
     #[test]
-    fn erased_exp_failures_and_su3_rejection_keep_the_receiver_cold() {
+    fn erased_exp_failures_keep_the_receiver_cold() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let leg = Space::u1([(0, 2)]);
         let parent = Tensor::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
@@ -12862,21 +12057,6 @@ mod adjoint_parent_view_tests {
                     && actual.im.to_bits() == expected.im.to_bits()
             }));
         assert!(Arc::ptr_eq(&parent.ordinary_body().data, &data));
-        assert_eq!(lazy.adjoint_body_builds(), 0);
-        assert!(!lazy.has_cached_materialization());
-
-        let su3 = Space::su3([((1, 0), 1)]).unwrap();
-        let lazy = Tensor::rand_with_seed(&runtime, Dtype::C64, [&su3], [&su3], 713_001)
-            .unwrap()
-            .adjoint()
-            .unwrap();
-        assert_eq!(
-            lazy.exp().unwrap_err(),
-            Error::UnsupportedForRule {
-                operation: "Tensor::exp",
-                rule: "SU(3)",
-            }
-        );
         assert_eq!(lazy.adjoint_body_builds(), 0);
         assert!(!lazy.has_cached_materialization());
     }
@@ -13375,10 +12555,6 @@ mod adjoint_parent_view_tests {
             Space::product([((-1, 0), 1), ((0, 1), 2), ((1, 0), 1)]).unwrap(),
             261_004,
         );
-        assert_metadata_and_materialization(
-            Space::su3([((1, 0), 1), ((0, 1), 1)]).unwrap(),
-            261_005,
-        );
     }
 
     #[test]
@@ -13456,10 +12632,6 @@ mod adjoint_parent_view_tests {
             (
                 Space::product([((-1, 0), 1), ((0, 1), 3)]).unwrap(),
                 Space::product([((-1, 0), 2), ((0, 1), 1)]).unwrap(),
-            ),
-            (
-                Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap(),
-                Space::su3([((1, 0), 1), ((0, 1), 2)]).unwrap(),
             ),
         ];
 
@@ -13607,190 +12779,6 @@ mod adjoint_parent_view_tests {
     }
 
     #[test]
-    fn compact_svd_keeps_generic_adjoint_fallback() {
-        // What: this leaf does not silently extend factor remapping to
-        // outer-multiplicity metadata.
-        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-        let left = Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap();
-        let right = Space::su3([((1, 0), 1), ((0, 1), 2)]).unwrap();
-        let parent =
-            Tensor::rand_with_seed(&runtime, Dtype::C64, [&left], [&right], 603_500).unwrap();
-        let lazy = parent.adjoint().unwrap();
-        let eager = parent.adjoint().unwrap().materialized_tensor().unwrap();
-        let (actual_u, actual_s, actual_vh) = lazy.svd_compact().unwrap();
-        let (expected_u, expected_s, expected_vh) = eager.svd_compact().unwrap();
-
-        assert_close(&actual_u, &expected_u);
-        assert_close(&actual_s, &expected_s);
-        assert_close(&actual_vh, &expected_vh);
-        assert_eq!(lazy.adjoint_body_builds(), 0);
-        assert!(!lazy.has_cached_materialization());
-    }
-
-    fn assert_su3_factor_semantics(actual: &Tensor, expected: &Tensor, source: &Tensor) {
-        assert_close(actual, expected);
-        assert!(!actual.is_adjoint_view());
-        assert_eq!(
-            actual
-                .ordinary_body()
-                .space
-                .structure()
-                .sector_structure()
-                .blocks(),
-            expected
-                .ordinary_body()
-                .space
-                .structure()
-                .sector_structure()
-                .blocks()
-        );
-        let UserBoundSpace::Su3(actual_space) = actual.ordinary_body().space.as_ref() else {
-            panic!("factor must retain the SU(3) provider")
-        };
-        let UserBoundSpace::Su3(source_space) = source.ordinary_body().space.as_ref() else {
-            unreachable!()
-        };
-        assert!(Arc::ptr_eq(
-            actual_space.provider_arc(),
-            source_space.provider_arc()
-        ));
-    }
-
-    fn assert_true_om_su3_lazy_decompositions(dtype: Dtype, seed: u64) {
-        let runtime = Runtime::builder().dense_threads(4).build().unwrap();
-        let eight = Space::su3([((1, 1), 1)]).unwrap();
-        let parent =
-            Tensor::rand_with_seed(&runtime, dtype, [&eight, &eight], [&eight, &eight], seed)
-                .unwrap();
-        let vertex_pairs = parent
-            .ordinary_body()
-            .space
-            .structure()
-            .sector_structure()
-            .blocks()
-            .iter()
-            .filter_map(|block| match block.key() {
-                BlockKey::FusionTree(key) => Some((
-                    key.codomain_tree().vertices().to_vec(),
-                    key.domain_tree().vertices().to_vec(),
-                )),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert!(vertex_pairs.iter().any(|(codomain, domain)| {
-            codomain.iter().any(|vertex| vertex.get() == 2)
-                && domain.iter().any(|vertex| vertex.get() == 2)
-        }));
-        if dtype == Dtype::C64 {
-            assert!(parent.data_c64().iter().any(|value| value.im != 0.0));
-        }
-
-        let eager = parent
-            .adjoint()
-            .unwrap()
-            .materialized_tensor_uncached()
-            .unwrap();
-        let expected_svd = eager.svd_compact().unwrap();
-        let expected_trunc = eager.svd_trunc(&Truncation::rank(8)).unwrap();
-        let expected_qr = eager.qr_compact().unwrap();
-        let parent_space = Arc::clone(&parent.ordinary_body().space);
-        let parent_data = Arc::clone(&parent.ordinary_body().data);
-        let lazy = parent.adjoint().unwrap();
-
-        for _ in 0..2 {
-            let actual_svd = lazy.clone().svd_compact().unwrap();
-            assert_su3_factor_semantics(&actual_svd.0, &expected_svd.0, &parent);
-            assert_su3_factor_semantics(&actual_svd.1, &expected_svd.1, &parent);
-            assert_su3_factor_semantics(&actual_svd.2, &expected_svd.2, &parent);
-            let reconstruction = actual_svd
-                .0
-                .contract(&actual_svd.1, &[2], &[0])
-                .unwrap()
-                .contract(&actual_svd.2, &[2], &[0])
-                .unwrap();
-            assert_close(&reconstruction, &eager);
-            assert!(actual_svd.0.is_isometric(1.0e-11).unwrap());
-            assert!(actual_svd
-                .2
-                .adjoint()
-                .unwrap()
-                .is_isometric(1.0e-11)
-                .unwrap());
-
-            let actual_trunc = lazy.clone().svd_trunc(&Truncation::rank(8)).unwrap();
-            assert_su3_factor_semantics(&actual_trunc.u, &expected_trunc.u, &parent);
-            assert_su3_factor_semantics(&actual_trunc.s, &expected_trunc.s, &parent);
-            assert_su3_factor_semantics(&actual_trunc.vh, &expected_trunc.vh, &parent);
-            assert_spectra_close(
-                &actual_trunc.singular_values,
-                &expected_trunc.singular_values,
-            );
-            assert_eq!(actual_trunc.error, expected_trunc.error);
-            let actual_approximation = actual_trunc
-                .u
-                .contract(&actual_trunc.s, &[2], &[0])
-                .unwrap()
-                .contract(&actual_trunc.vh, &[2], &[0])
-                .unwrap();
-            let expected_approximation = expected_trunc
-                .u
-                .contract(&expected_trunc.s, &[2], &[0])
-                .unwrap()
-                .contract(&expected_trunc.vh, &[2], &[0])
-                .unwrap();
-            assert_close(&actual_approximation, &expected_approximation);
-
-            let actual_qr = lazy.clone().qr_compact().unwrap();
-            assert_su3_factor_semantics(&actual_qr.0, &expected_qr.0, &parent);
-            assert_su3_factor_semantics(&actual_qr.1, &expected_qr.1, &parent);
-            assert_close(
-                &actual_qr.0.contract(&actual_qr.1, &[2], &[0]).unwrap(),
-                &eager,
-            );
-            assert!(actual_qr.0.is_isometric(1.0e-11).unwrap());
-            let left_orth = lazy.clone().left_orth().unwrap();
-            assert_su3_factor_semantics(&left_orth.0, &expected_qr.0, &parent);
-            assert_su3_factor_semantics(&left_orth.1, &expected_qr.1, &parent);
-        }
-
-        std::thread::scope(|scope| {
-            let calls = (0..4)
-                .map(|_| {
-                    let clone = lazy.clone();
-                    scope.spawn(move || {
-                        (
-                            clone.svd_compact().unwrap(),
-                            clone.svd_trunc(&Truncation::rank(8)).unwrap(),
-                            clone.qr_compact().unwrap(),
-                        )
-                    })
-                })
-                .collect::<Vec<_>>();
-            for call in calls {
-                let (svd, trunc, qr) = call.join().unwrap();
-                assert_su3_factor_semantics(&svd.1, &expected_svd.1, &parent);
-                assert_spectra_close(&trunc.singular_values, &expected_trunc.singular_values);
-                assert_eq!(trunc.error, expected_trunc.error);
-                assert_su3_factor_semantics(&qr.0, &expected_qr.0, &parent);
-            }
-        });
-        assert!(Arc::ptr_eq(&parent.ordinary_body().space, &parent_space));
-        assert!(Arc::ptr_eq(&parent.ordinary_body().data, &parent_data));
-        assert_eq!(lazy.adjoint_body_builds(), 0);
-        assert!(!lazy.has_cached_materialization());
-
-        let _ = lazy.coupled_data().unwrap();
-        assert_eq!(lazy.adjoint_body_builds(), 1);
-        assert!(lazy.has_cached_materialization());
-    }
-
-    #[test]
-    fn generic_true_outer_multiplicity_lazy_decompositions_are_operation_local() {
-        assert_true_om_su3_lazy_decompositions(Dtype::F64, 721_001);
-        assert_true_om_su3_lazy_decompositions(Dtype::C64, 721_002);
-    }
-
-    #[test]
     fn compact_svd_whole_degenerate_cluster_uses_semantic_oracle() {
         // What: a fully retained repeated-singular-value cluster is checked by
         // reconstruction and isometry rather than an arbitrary raw basis.
@@ -13924,81 +12912,6 @@ mod adjoint_parent_view_tests {
     }
 
     #[test]
-    fn truncated_svd_keeps_generic_adjoint_fallback() {
-        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-        let left = Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap();
-        let right = Space::su3([((1, 0), 1), ((0, 1), 2)]).unwrap();
-        let parent =
-            Tensor::rand_with_seed(&runtime, Dtype::C64, [&left], [&right], 603_700).unwrap();
-        let lazy = parent.adjoint().unwrap();
-        let eager = parent.adjoint().unwrap().materialized_tensor().unwrap();
-        let actual = lazy.svd_trunc(&Truncation::rank(4)).unwrap();
-        let expected = eager.svd_trunc(&Truncation::rank(4)).unwrap();
-
-        assert_close(&actual.u, &expected.u);
-        assert_close(&actual.s, &expected.s);
-        assert_close(&actual.vh, &expected.vh);
-        assert_spectra_close(&actual.singular_values, &expected.singular_values);
-        assert!((actual.error - expected.error).abs() < 1e-12);
-        assert_eq!(lazy.adjoint_body_builds(), 0);
-        assert!(!lazy.has_cached_materialization());
-    }
-
-    #[test]
-    fn generic_lazy_full_svd_and_invalid_truncation_fail_without_cache_publication() {
-        let runtime = Runtime::builder().dense_threads(4).build().unwrap();
-        let eight = Space::su3([((1, 1), 1)]).unwrap();
-        let parent = Tensor::rand_with_seed(
-            &runtime,
-            Dtype::C64,
-            [&eight, &eight],
-            [&eight, &eight],
-            721_003,
-        )
-        .unwrap();
-        let lazy = parent.adjoint().unwrap();
-        let expected = Error::UnsupportedForRule {
-            operation: "Tensor::svd_full",
-            rule: "SU(3)",
-        };
-        for _ in 0..2 {
-            assert_eq!(lazy.clone().svd_full().unwrap_err(), expected);
-        }
-        std::thread::scope(|scope| {
-            let calls = (0..4)
-                .map(|_| {
-                    let clone = lazy.clone();
-                    scope.spawn(move || clone.svd_full().unwrap_err())
-                })
-                .collect::<Vec<_>>();
-            for call in calls {
-                assert_eq!(call.join().unwrap(), expected);
-            }
-        });
-        assert_eq!(lazy.adjoint_body_builds(), 0);
-        assert!(!lazy.has_cached_materialization());
-
-        let foreign = Space::u1([(0, 1)]);
-        let truncation = Truncation::space(foreign.truncspace());
-        let eager_error = parent
-            .adjoint()
-            .unwrap()
-            .materialized_tensor_uncached()
-            .unwrap()
-            .svd_trunc(&truncation)
-            .unwrap_err();
-        let cold = parent.adjoint().unwrap();
-        for _ in 0..2 {
-            assert_eq!(
-                cold.clone().svd_trunc(&truncation).unwrap_err(),
-                eager_error
-            );
-        }
-        assert_eq!(cold.adjoint_body_builds(), 0);
-        assert!(!cold.has_cached_materialization());
-    }
-
-    #[test]
     fn truncated_svd_rejects_foreign_truncspace_without_materialization() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let space = Space::u1([(-1, 2), (0, 3), (1, 1)]);
@@ -14093,42 +13006,6 @@ mod adjoint_parent_view_tests {
         );
     }
 
-    #[test]
-    fn qr_adjoint_dispatch_does_not_expand_su3_and_full_errors_keep_requested_names() {
-        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-        let left = Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap();
-        let right = Space::su3([((1, 0), 1), ((0, 1), 2)]).unwrap();
-        let source =
-            Tensor::rand_with_seed(&runtime, Dtype::C64, [&left], [&right], 261_205).unwrap();
-        let eager = source.adjoint().unwrap().materialized_tensor().unwrap();
-        let lazy = source.adjoint().unwrap();
-
-        let actual = lazy.qr_compact().unwrap();
-        let expected = eager.qr_compact().unwrap();
-        assert_close(&actual.0, &expected.0);
-        assert_close(&actual.1, &expected.1);
-        assert_eq!(lazy.adjoint_body_builds(), 0);
-        assert!(!lazy.has_cached_materialization());
-
-        let cold = source.adjoint().unwrap();
-        assert_eq!(
-            cold.qr_full().unwrap_err(),
-            Error::UnsupportedForRule {
-                operation: "Tensor::qr_full",
-                rule: "SU(3)",
-            }
-        );
-        assert_eq!(
-            cold.lq_full().unwrap_err(),
-            Error::UnsupportedForRule {
-                operation: "Tensor::lq_full",
-                rule: "SU(3)",
-            }
-        );
-        assert_eq!(cold.adjoint_body_builds(), 0);
-        assert!(!cold.has_cached_materialization());
-    }
-
     fn assert_adjoint_null_spaces(source: &Tensor) {
         let lazy = source.adjoint().unwrap();
         let eager = source.adjoint().unwrap().materialized_tensor().unwrap();
@@ -14171,83 +13048,6 @@ mod adjoint_parent_view_tests {
             });
             let _ = actual.coupled_data().unwrap();
         }
-        assert_eq!(lazy.adjoint_body_builds(), 0);
-        assert!(!lazy.has_cached_materialization());
-    }
-
-    #[test]
-    fn erased_null_spaces_redirect_through_the_parent_without_materializing_the_adjoint() {
-        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-        let matched_left = Space::u1([(0, 3)]);
-        let matched_right = Space::u1([(0, 2)]);
-        let unmatched_left = Space::u1([(0, 3), (1, 2)]);
-        let unmatched_right = Space::u1([(0, 2), (1, 2)]);
-        let disjoint_left = Space::u1([(1, 2)]);
-        let disjoint_right = Space::u1([(0, 3)]);
-        for (fixture, (left, right)) in [
-            (&matched_left, &matched_right),
-            (&unmatched_left, &matched_right),
-            (&matched_left, &unmatched_right),
-            (&disjoint_left, &disjoint_right),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            for (dtype, lane) in [(Dtype::F64, 0), (Dtype::C64, 1)] {
-                let source = Tensor::rand_with_seed(
-                    &runtime,
-                    dtype,
-                    [left],
-                    [right],
-                    703_000 + 2 * fixture as u64 + lane,
-                )
-                .unwrap();
-                assert_adjoint_null_spaces(&source);
-            }
-        }
-
-        let rank_deficient =
-            Tensor::from_block_fn(&runtime, [&matched_left], [&matched_left], |_, indices| {
-                Complex64::new(
-                    (indices[0] + indices[1] + 1) as f64,
-                    (indices[0] + indices[1] + 1) as f64 / 7.0,
-                )
-            })
-            .unwrap();
-        assert_adjoint_null_spaces(&rank_deficient);
-
-        let su2 = Space::su2([(0, 2), (1, 1)]).unwrap();
-        for (dtype, seed) in [(Dtype::F64, 703_010), (Dtype::C64, 703_011)] {
-            let source =
-                Tensor::rand_with_seed(&runtime, dtype, [&su2, &su2], [&su2], seed).unwrap();
-            assert!(source.ordinary_body().space.structure().block_count() > 1);
-            assert_adjoint_null_spaces(&source);
-        }
-    }
-
-    #[test]
-    fn erased_null_redirect_preserves_the_su3_boundary() {
-        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-        let space = Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap();
-        let lazy = Tensor::rand_with_seed(&runtime, Dtype::C64, [&space], [&space], 703_012)
-            .unwrap()
-            .adjoint()
-            .unwrap();
-
-        assert_eq!(
-            lazy.left_null().unwrap_err(),
-            Error::UnsupportedForRule {
-                operation: "Tensor::left_null",
-                rule: "SU(3)",
-            }
-        );
-        assert_eq!(
-            lazy.right_null().unwrap_err(),
-            Error::UnsupportedForRule {
-                operation: "Tensor::right_null",
-                rule: "SU(3)",
-            }
-        );
         assert_eq!(lazy.adjoint_body_builds(), 0);
         assert!(!lazy.has_cached_materialization());
     }
@@ -14314,7 +13114,6 @@ mod adjoint_parent_view_tests {
             assert!(!Arc::ptr_eq(&actual.ordinary_body().data, &parent_data));
             let _ = actual.coupled_data().unwrap();
         }
-
         let calls = (0..4)
             .map(|_| {
                 let clone = lazy.clone();
@@ -14324,11 +13123,60 @@ mod adjoint_parent_view_tests {
         for call in calls {
             assert_close(&call.join().unwrap(), &expected);
         }
-
         assert!(Arc::ptr_eq(&parent.ordinary_body().space, &parent_space));
         assert!(Arc::ptr_eq(&parent.ordinary_body().data, &parent_data));
         assert_eq!(lazy.adjoint_body_builds(), 0);
         assert!(!lazy.has_cached_materialization());
+    }
+
+    #[test]
+    fn erased_null_spaces_redirect_through_the_parent_without_materializing_the_adjoint() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let matched_left = Space::u1([(0, 3)]);
+        let matched_right = Space::u1([(0, 2)]);
+        let unmatched_left = Space::u1([(0, 3), (1, 2)]);
+        let unmatched_right = Space::u1([(0, 2), (1, 2)]);
+        let disjoint_left = Space::u1([(1, 2)]);
+        let disjoint_right = Space::u1([(0, 3)]);
+        for (fixture, (left, right)) in [
+            (&matched_left, &matched_right),
+            (&unmatched_left, &matched_right),
+            (&matched_left, &unmatched_right),
+            (&disjoint_left, &disjoint_right),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            for (dtype, lane) in [(Dtype::F64, 0), (Dtype::C64, 1)] {
+                let source = Tensor::rand_with_seed(
+                    &runtime,
+                    dtype,
+                    [left],
+                    [right],
+                    703_000 + 2 * fixture as u64 + lane,
+                )
+                .unwrap();
+                assert_adjoint_null_spaces(&source);
+            }
+        }
+
+        let rank_deficient =
+            Tensor::from_block_fn(&runtime, [&matched_left], [&matched_left], |_, indices| {
+                Complex64::new(
+                    (indices[0] + indices[1] + 1) as f64,
+                    (indices[0] + indices[1] + 1) as f64 / 7.0,
+                )
+            })
+            .unwrap();
+        assert_adjoint_null_spaces(&rank_deficient);
+
+        let su2 = Space::su2([(0, 2), (1, 1)]).unwrap();
+        for (dtype, seed) in [(Dtype::F64, 703_010), (Dtype::C64, 703_011)] {
+            let source =
+                Tensor::rand_with_seed(&runtime, dtype, [&su2, &su2], [&su2], seed).unwrap();
+            assert!(source.ordinary_body().space.structure().block_count() > 1);
+            assert_adjoint_null_spaces(&source);
+        }
     }
 
     #[test]
@@ -14386,7 +13234,7 @@ mod adjoint_parent_view_tests {
     }
 
     #[test]
-    fn erased_inverse_redirect_failure_powi_and_su3_rejection_stay_cold() {
+    fn erased_inverse_redirect_failure_and_powi_stay_cold() {
         // What: negative powers inherit the redirect; singular and unsupported
         // inputs preserve parent Arc/bytes and reject with a cold receiver.
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -14441,21 +13289,6 @@ mod adjoint_parent_view_tests {
         assert!(Arc::ptr_eq(&late.ordinary_body().data, &data));
         assert_eq!(cold.adjoint_body_builds(), 0);
         assert!(!cold.has_cached_materialization());
-
-        let su3 = Space::su3([((1, 0), 1)]).unwrap();
-        let cold = Tensor::rand_with_seed(&runtime, Dtype::C64, [&su3], [&su3], 708_003)
-            .unwrap()
-            .adjoint()
-            .unwrap();
-        assert_eq!(
-            cold.inv().unwrap_err(),
-            Error::UnsupportedForRule {
-                operation: "Tensor::inv",
-                rule: "SU(3)",
-            }
-        );
-        assert_eq!(cold.adjoint_body_builds(), 0);
-        assert!(!cold.has_cached_materialization());
     }
 
     #[test]
@@ -14472,21 +13305,6 @@ mod adjoint_parent_view_tests {
             assert_eq!(lazy.adjoint_body_builds(), 0);
             assert!(!lazy.has_cached_materialization());
         }
-
-        let su3 = Space::su3([((1, 0), 1)]).unwrap();
-        let lazy = Tensor::rand_with_seed(&runtime, Dtype::C64, [&su3], [&su3], 711_002)
-            .unwrap()
-            .adjoint()
-            .unwrap();
-        assert_eq!(
-            lazy.pinv(0.0).unwrap_err(),
-            Error::UnsupportedForRule {
-                operation: "Tensor::pinv",
-                rule: "SU(3)",
-            }
-        );
-        assert_eq!(lazy.adjoint_body_builds(), 0);
-        assert!(!lazy.has_cached_materialization());
     }
 
     fn assert_erased_pinv_redirect(parent: &Tensor, rcond: f64, exact_original: bool) {
@@ -14659,7 +13477,7 @@ mod adjoint_parent_view_tests {
     }
 
     #[test]
-    fn erased_polar_redirect_errors_keep_requested_names_and_su3_stays_cold() {
+    fn erased_polar_redirect_errors_keep_requested_names() {
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         for (source, left, message) in [
             (
@@ -14705,28 +13523,6 @@ mod adjoint_parent_view_tests {
             assert_eq!(lazy.adjoint_body_builds(), 0);
             assert!(!lazy.has_cached_materialization());
         }
-
-        let su3 = Space::su3([((1, 0), 1)]).unwrap();
-        let lazy = Tensor::rand_with_seed(&runtime, Dtype::C64, [&su3], [&su3], 706_003)
-            .unwrap()
-            .adjoint()
-            .unwrap();
-        assert_eq!(
-            lazy.left_polar().unwrap_err(),
-            Error::UnsupportedForRule {
-                operation: "Tensor::left_polar",
-                rule: "SU(3)",
-            }
-        );
-        assert_eq!(
-            lazy.right_polar().unwrap_err(),
-            Error::UnsupportedForRule {
-                operation: "Tensor::right_polar",
-                rule: "SU(3)",
-            }
-        );
-        assert_eq!(lazy.adjoint_body_builds(), 0);
-        assert!(!lazy.has_cached_materialization());
     }
 
     fn assert_adjoint_trace_matches_eager_oracle(
@@ -15098,22 +13894,11 @@ mod adjoint_parent_view_tests {
                 Err(Error::InvalidArgument(_))
             ));
         }
-
-        let su3 = Space::su3([((1, 0), 1), ((0, 1), 1)]).unwrap();
-        let su3_tensor = Tensor::zeros(&runtime, Dtype::F64, [&su3], [&su3]).unwrap();
-        assert_eq!(
-            su3_tensor.trace_pairs(&[(0, 2)]).unwrap_err(),
-            Error::UnsupportedForRule {
-                operation: "Tensor::trace_pairs",
-                rule: "SU(3)",
-            }
-        );
     }
 
     #[test]
-    fn empty_trace_pairs_is_metadata_noop_after_supported_boundary() {
-        // What: an explicit empty trace pair list is a no-op for supported
-        // rules, while unsupported rules keep their existing public boundary.
+    fn empty_trace_pairs_is_metadata_noop() {
+        // What: an explicit empty trace pair list is a metadata-only no-op.
         let runtime = Runtime::builder().dense_threads(1).build().unwrap();
         let space = Space::u1([(0, 2), (1, 1)]);
         let tensor =
@@ -15128,16 +13913,6 @@ mod adjoint_parent_view_tests {
             &traced.ordinary_body().data,
             &tensor.ordinary_body().data
         ));
-
-        let su3 = Space::su3([((1, 0), 1), ((0, 1), 1)]).unwrap();
-        let su3_tensor = Tensor::zeros(&runtime, Dtype::F64, [&su3], [&su3]).unwrap();
-        assert_eq!(
-            su3_tensor.trace_pairs(&[]).unwrap_err(),
-            Error::UnsupportedForRule {
-                operation: "Tensor::trace_pairs",
-                rule: "SU(3)",
-            }
-        );
     }
 
     #[test]
@@ -17925,41 +16700,6 @@ mod cat_tests {
     }
 
     #[test]
-    fn catdomain_generic_su3_routes_complete_vertex_keys() {
-        let runtime = Runtime::builder().build().unwrap();
-        let eight = Space::su3([((1, 1), 1)]).unwrap();
-        let left = Space::su3([((1, 1), 1)]).unwrap();
-        let right = Space::su3([((1, 1), 2)]).unwrap();
-        let lhs = Tensor::from_block_fn(&runtime, [&eight, &eight], [&left], |key, indices| {
-            oracle_value(0, key, indices)
-        })
-        .unwrap();
-        let rhs = Tensor::from_block_fn(&runtime, [&eight, &eight], [&right], |key, indices| {
-            oracle_value(1, key, indices)
-        })
-        .unwrap();
-
-        let output = lhs.catdomain(&rhs).unwrap();
-
-        let mut vertices = output
-            .ordinary_body()
-            .space
-            .structure()
-            .sector_structure()
-            .blocks()
-            .iter()
-            .filter_map(|block| match block.key() {
-                BlockKey::FusionTree(key) => Some(key.codomain_tree().vertices().to_vec()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        vertices.sort();
-        vertices.dedup();
-        assert!(vertices.len() > 1);
-        assert_f64_oracle(&lhs, &output, CatSide::Domain);
-    }
-
-    #[test]
     fn cat_promotes_mixed_f64_c64_in_both_operand_orders() {
         let runtime = Runtime::builder().build().unwrap();
         let codomain = Space::u1([(0, 2)]);
@@ -18275,48 +17015,6 @@ mod cat_tests {
             &p_rhs_parent.adjoint().unwrap(),
             CatSide::Codomain,
         );
-    }
-
-    #[test]
-    fn lazy_adjoint_catdomain_generic_su3_preserves_vertex_labels() {
-        // What: generic SU3 outer-multiplicity vertex labels remain part of
-        // the exact swapped key instead of collapsing to uncoupled sectors.
-        let runtime = Runtime::builder().build().unwrap();
-        let eight = Space::su3([((1, 1), 1)]).unwrap();
-        let left = Space::su3([((1, 1), 1)]).unwrap();
-        let right = Space::su3([((1, 1), 2)]).unwrap();
-        let lhs_parent =
-            Tensor::from_block_fn(&runtime, [&left], [&eight, &eight], |key, indices| {
-                let value = oracle_value(0, key, indices);
-                Complex64::new(value, value / 17.0 + 0.5)
-            })
-            .unwrap();
-        let rhs_parent =
-            Tensor::from_block_fn(&runtime, [&right], [&eight, &eight], |key, indices| {
-                let value = oracle_value(1, key, indices);
-                Complex64::new(value, -value / 19.0 - 0.25)
-            })
-            .unwrap();
-        let output = assert_lazy_cat_matches_eager(
-            &lhs_parent.adjoint().unwrap(),
-            &rhs_parent.adjoint().unwrap(),
-            CatSide::Domain,
-        );
-        let mut vertices = output
-            .ordinary_body()
-            .space
-            .structure()
-            .sector_structure()
-            .blocks()
-            .iter()
-            .filter_map(|block| match block.key() {
-                BlockKey::FusionTree(key) => Some(key.codomain_tree().vertices().to_vec()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        vertices.sort();
-        vertices.dedup();
-        assert!(vertices.len() > 1);
     }
 
     #[test]
@@ -18664,33 +17362,6 @@ mod ordered_contract_route_tests {
             .permute(&[1], &[0])
             .unwrap();
 
-        assert_eq!(actual.data().len(), expected.data().len());
-        for (&actual, &expected) in actual.data().iter().zip(expected.data()) {
-            assert!((actual - expected).abs() < 1.0e-11);
-        }
-    }
-
-    #[test]
-    fn generic_fusion_ordered_contract_keeps_sequential_fallback() {
-        // What: outer-multiplicity-capable generic fusion remains on its
-        // separately proved contract and permute implementations.
-        let runtime = Runtime::builder().build().unwrap();
-        let space = Space::su3([((1, 0), 1), ((0, 1), 1)]).unwrap();
-        let lhs =
-            Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 224_504).unwrap();
-        let rhs =
-            Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 224_505).unwrap();
-
-        ORDERED_CONTRACT_FUSED_ROUTE.with(|observation| observation.set(Some(false)));
-        let actual = lhs.contract_ordered(&rhs, &[1], &[0], &[1, 0]).unwrap();
-        let observed = ORDERED_CONTRACT_FUSED_ROUTE.with(|observation| observation.replace(None));
-        let expected = lhs
-            .contract(&rhs, &[1], &[0])
-            .unwrap()
-            .permute(&[1], &[0])
-            .unwrap();
-
-        assert_eq!(observed, Some(false));
         assert_eq!(actual.data().len(), expected.data().len());
         for (&actual, &expected) in actual.data().iter().zip(expected.data()) {
             assert!((actual - expected).abs() < 1.0e-11);

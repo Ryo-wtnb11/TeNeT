@@ -3023,12 +3023,12 @@ impl FusionTreeHomSpace {
 
     /// Generic-fusion (outer-multiplicity) sibling of [`Self::fusion_tree_keys`]:
     /// enumerates multiplicity-aware block keys (codomain × domain tree pairs)
-    /// for a `FusionRule` whose `nsymbol` can exceed 1 (SU(3), …). Not cached —
+    /// for a `FusionRule` whose `nsymbol` can exceed 1. Not cached —
     /// the Generic path is not on any hot loop yet (mirrors the non-memoized
-    /// Stage B3b cache siblings); add a cache when a Generic workload measures it.
+    /// add a cache only when a Generic workload measures a benefit.
     ///
     /// Bounded-table semantics (Option A, refute/b3b-verify): the result is
-    /// either the EXACT full-SU(3) block key set or an `Err` — never a silently
+    /// either the exact provider-defined block key set or an `Err` — never a silently
     /// truncated one. Full-space enumeration errs as soon as either side's
     /// coupled fold reports escaped candidates, tainted sectors, or a poisoned
     /// (beyond one-hop) fold, even when the offending sectors could not survive
@@ -3099,7 +3099,7 @@ impl FusionTreeHomSpace {
 
     /// Block keys of ONE coupled sector, for spaces whose full enumeration is
     /// an `Err` but whose requested sector is provably clean (its complete
-    /// full-SU(3) tree set stays inside the table). `Err` when the sector is
+    /// complete tree set stays inside the provider catalog). `Err` when the sector is
     /// tainted on either side (its trees would need out-of-table intermediates)
     /// or the fold is poisoned; `Ok(vec![])` when the sector is simply not a
     /// shared coupled candidate.
@@ -3122,7 +3122,7 @@ impl FusionTreeHomSpace {
             coupled,
             |side, fold, coupled| CoreError::FusionOutsideTable {
                 message: format!(
-                    "SU(3) coupled sector {coupled:?} on the {side} side requires                          out-of-table intermediates (dim<=27 cut); extend the table                          (Stage B3c). {}",
+                    "coupled sector {coupled:?} on the {side} side requires out-of-catalog intermediates. {}",
                     fusion_fold_error_message(side, fold),
                 ),
             },

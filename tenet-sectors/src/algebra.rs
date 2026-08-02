@@ -8,11 +8,11 @@ use num_complex::Complex64;
 use crate::{BraidingStyleKind, FusionStyleKind, RuleIdentity, SectorId, SectorVec};
 
 /// Classification of a leg tuple's coupled-sector candidates for a possibly
-/// table-bounded rule (Stage B3b Option A). For unbounded rules every
-/// candidate is `clean`; for the bounded SU(3) table:
+/// catalog-bounded rule. For unbounded rules every candidate is `clean`; for
+/// a bounded provider:
 /// * `clean`: every fusion tree ending in this sector stays inside the table —
-///   enumeration is exactly the full-SU(3) tree set;
-/// * `tainted`: some full-SU(3) tree for this sector passes through an
+///   enumeration is exactly the provider's complete tree set;
+/// * `tainted`: some complete tree for this sector passes through an
 ///   out-of-table inner line — the table cannot enumerate (or recouple) the
 ///   complete set, so constructing this sector must be an error, NEVER a
 ///   silently truncated block;
@@ -77,7 +77,7 @@ pub trait FusionRule: 'static {
 
     /// The representable channels of `left ⊗ right` — identical to
     /// [`Self::fusion_channels`] for unbounded rules (the default). A
-    /// table-bounded rule (SU(3), Stage B3b) overrides this to return the
+    /// catalog-bounded rule overrides this to return the
     /// in-table channels of an ESCAPING pair instead of panicking.
     ///
     /// Safety contract: callers may only rely on this being the complete
@@ -786,13 +786,7 @@ where
 /// sibling of [`MultiplicityFreeFusionSymbols`]. Where the multiplicity-free
 /// trait returns a bare `Scalar` per (a,b,c,...) because `nsymbol` is always
 /// 0 or 1, this trait returns a dense rank-4 array / matrix because
-/// `nsymbol` can exceed 1 (SU(3), SO(N>=7), Sp(N), ...).
-///
-/// Stage A only: this trait is defined so the shape of the eventual
-/// recoupling API type-checks against a toy rule in tests. Nobody implements
-/// it outside `tests.rs` yet, and nothing in the recoupling engine consumes
-/// it — that wiring (the recouple wrapper, `UnsupportedFusionStyle` guard
-/// removal) is explicitly deferred to Stage B pending review of this diff.
+/// `nsymbol` can exceed 1.
 pub trait GenericFusionSymbols: FusionRule {
     type Scalar: Clone + Send + Sync;
 

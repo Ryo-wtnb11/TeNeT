@@ -42,68 +42,6 @@ fn real_c64_diagonal(rt: &Runtime, space: &Space, seed: u64) -> Tensor {
     source.svd_compact().unwrap().1
 }
 
-fn su3_diagonal(rt: &Runtime, dtype: Dtype, space: &Space, seed: u64) -> Tensor {
-    if dtype == Dtype::F64 {
-        real_diagonal(rt, space, seed)
-    } else {
-        real_c64_diagonal(rt, space, seed)
-    }
-}
-
-fn compact_su3_inner_oracle(lhs: &Tensor, rhs: &Tensor) -> Complex64 {
-    fn reduce<VL, VR>(
-        rule: &Su3FusionRule,
-        lhs: &[SectorSpectrum<VL>],
-        rhs: &[SectorSpectrum<VR>],
-        map_lhs: impl Fn(VL) -> Complex64,
-        map_rhs: impl Fn(VR) -> Complex64,
-    ) -> Complex64
-    where
-        VL: Copy,
-        VR: Copy,
-    {
-        assert_eq!(lhs.len(), rhs.len());
-        let mut total = Complex64::new(0.0, 0.0);
-        for (lhs, rhs) in lhs.iter().zip(rhs) {
-            assert_eq!(lhs.sector, rhs.sector);
-            assert_eq!(lhs.values.len(), rhs.values.len());
-            let sqrt = rule.sqrt_dim_scalar(lhs.sector);
-            let weight = sqrt * sqrt;
-            let mut partial = Complex64::new(0.0, 0.0);
-            for (&lhs, &rhs) in lhs.values.iter().zip(&rhs.values) {
-                partial += map_lhs(lhs).conj() * map_rhs(rhs);
-            }
-            total += weight * partial;
-        }
-        total
-    }
-
-    let rule = lhs.su3_rule();
-    match (lhs.stored_data(), rhs.stored_data()) {
-        (
-            Data::Diagonal(DiagonalData::RealF64(lhs)),
-            Data::Diagonal(DiagonalData::RealF64(rhs)),
-        ) => reduce(
-            rule,
-            lhs,
-            rhs,
-            |value| Complex64::new(value, 0.0),
-            |value| Complex64::new(value, 0.0),
-        ),
-        (
-            Data::Diagonal(DiagonalData::RealC64(lhs)),
-            Data::Diagonal(DiagonalData::RealC64(rhs)),
-        ) => reduce(
-            rule,
-            lhs,
-            rhs,
-            |value| Complex64::new(value, 0.0),
-            |value| Complex64::new(value, 0.0),
-        ),
-        pair => panic!("expected matching compact SU(3) diagonal storage, got {pair:?}"),
-    }
-}
-
 fn assert_svd_trunc_builds_one_compact_diagonal_layout(space: Space, dtype: Dtype, seed: u64) {
     let rt = Runtime::builder().dense_threads(1).build().unwrap();
     let tensor = Tensor::rand_with_seed(&rt, dtype, [&space], [&space], seed).unwrap();
@@ -117,18 +55,13 @@ fn assert_svd_trunc_builds_one_compact_diagonal_layout(space: Space, dtype: Dtyp
 }
 
 #[test]
-fn public_svd_trunc_builds_one_compact_diagonal_layout_for_both_rule_paths() {
-    // What: multiplicity-free and Generic truncation each assemble one compact
-    // diagonal result after their factor-only matrixalgebra call.
+fn public_svd_trunc_builds_one_compact_diagonal_layout() {
+    // What: truncation assembles one compact diagonal result after its
+    // factor-only matrixalgebra call.
     assert_svd_trunc_builds_one_compact_diagonal_layout(
         Space::u1([(-1, 2), (0, 3), (1, 2)]),
         Dtype::F64,
         428_001,
-    );
-    assert_svd_trunc_builds_one_compact_diagonal_layout(
-        Space::su3([((1, 0), 2), ((0, 1), 2)]).unwrap(),
-        Dtype::C64,
-        428_002,
     );
 }
 
@@ -815,110 +748,6 @@ fn identity_compact_twist_shares_storage() {
 }
 
 #[test]
-fn su3_compact_storage_ops_and_fallback_boundaries_are_explicit() {
-    // What: storage-local SU(3) operations and ordinary trace remain compact;
-    // norm uses the same storage-local quantum-dimension reduction.
-    let rt = Runtime::builder().dense_threads(1).build().unwrap();
-    let space = Space::su3([((1, 0), 2), ((0, 1), 1)]).unwrap();
-    for dtype in [Dtype::F64, Dtype::C64] {
-        let source = Tensor::rand_with_seed(&rt, dtype, [&space], [&space], 851).unwrap();
-        let diagonal = source.svd_compact().unwrap().1;
-        let adjoint = diagonal.adjoint().unwrap();
-        let scaled = diagonal.scale(-0.5).unwrap();
-        let added = diagonal.add(&diagonal, 0.75, -0.5).unwrap();
-        for tensor in [&diagonal, &adjoint, &scaled, &added] {
-            assert_compact_unmaterialized(tensor);
-        }
-        assert!(Arc::ptr_eq(
-            &adjoint.ordinary_body().data,
-            &diagonal.ordinary_body().data
-        ));
-
-        let norm_input = diagonal.clone();
-        assert!(!norm_input.has_cached_materialization());
-        assert!(norm_input.norm().unwrap().is_finite());
-        assert!(!norm_input.has_cached_materialization());
-
-        let trace_input = diagonal.clone();
-        assert!(!trace_input.has_cached_materialization());
-        assert!(trace_input.tr().unwrap().to_c64().norm().is_finite());
-        assert!(!trace_input.has_cached_materialization());
-    }
-}
-
-#[test]
-fn su3_compact_norm_inner_and_dot_match_dense_oracles_without_materialization() {
-    // What: Generic compact diagonal norm/inner/dot reduce stored spectra with
-    // the same quantum-dimension weighting as TensorKit, without densifying the
-    // compact operand.
-    let rt = Runtime::builder().dense_threads(1).build().unwrap();
-    let space = Space::su3([((1, 0), 2), ((0, 1), 2), ((1, 1), 2)]).unwrap();
-
-    for dtype in [Dtype::F64, Dtype::C64] {
-        let lhs = su3_diagonal(&rt, dtype, &space, 317_001);
-        let rhs = su3_diagonal(&rt, dtype, &space, 317_002);
-        let has_dim8_multiplicity = match lhs.stored_data() {
-            Data::Diagonal(DiagonalData::RealF64(spectrum)) => spectrum.iter().any(|entry| {
-                let sqrt = lhs.su3_rule().sqrt_dim_scalar(entry.sector);
-                (sqrt * sqrt - 8.0).abs() < 1e-12 && entry.values.len() >= 2
-            }),
-            Data::Diagonal(DiagonalData::RealC64(spectrum)) => spectrum.iter().any(|entry| {
-                let sqrt = lhs.su3_rule().sqrt_dim_scalar(entry.sector);
-                (sqrt * sqrt - 8.0).abs() < 1e-12 && entry.values.len() >= 2
-            }),
-            _ => false,
-        };
-        assert!(has_dim8_multiplicity);
-
-        let expected_norm = su3_diagonal(&rt, dtype, &space, 317_001)
-            .densified_if_diagonal()
-            .norm()
-            .unwrap();
-        let actual_norm = lhs.norm().unwrap();
-        assert!((actual_norm - expected_norm).abs() < 1e-11);
-        let direct_norm = compact_su3_inner_oracle(&lhs, &lhs).re.sqrt();
-        assert!((actual_norm - direct_norm).abs() < 1e-11);
-        assert!(!lhs.has_cached_materialization());
-
-        let expected_inner = {
-            let lhs_dense = su3_diagonal(&rt, dtype, &space, 317_001).densified_if_diagonal();
-            let rhs_dense = su3_diagonal(&rt, dtype, &space, 317_002).densified_if_diagonal();
-            lhs_dense.inner(&rhs_dense).unwrap()
-        };
-        let actual_inner = lhs.inner(&rhs).unwrap();
-        assert!((actual_inner.to_c64() - expected_inner.to_c64()).norm() < 1e-11);
-        let direct_inner = compact_su3_inner_oracle(&lhs, &rhs);
-        assert!((actual_inner.to_c64() - direct_inner).norm() < 1e-11);
-        assert_eq!(lhs.dot(&rhs).unwrap().to_c64(), actual_inner.to_c64());
-        assert!(!lhs.has_cached_materialization());
-        assert!(!rhs.has_cached_materialization());
-
-        let dense_rhs = Tensor::rand_with_seed(&rt, dtype, [&space], [&space], 317_003).unwrap();
-        let expected_left = {
-            let lhs_dense = su3_diagonal(&rt, dtype, &space, 317_001).densified_if_diagonal();
-            lhs_dense.inner(&dense_rhs).unwrap()
-        };
-        let actual_left = lhs.inner(&dense_rhs).unwrap();
-        assert!((actual_left.to_c64() - expected_left.to_c64()).norm() < 1e-11);
-        assert!(!lhs.has_cached_materialization());
-
-        let expected_right = {
-            let rhs_dense = su3_diagonal(&rt, dtype, &space, 317_002).densified_if_diagonal();
-            dense_rhs.inner(&rhs_dense).unwrap()
-        };
-        let actual_right = dense_rhs.inner(&rhs).unwrap();
-        assert!((actual_right.to_c64() - expected_right.to_c64()).norm() < 1e-11);
-        if dtype == Dtype::C64 {
-            assert!(
-                (actual_left.to_c64() - actual_right.to_c64()).im.abs() > 1e-12,
-                "fixture must distinguish C64 conjugation order"
-            );
-        }
-        assert!(!rhs.has_cached_materialization());
-    }
-}
-
-#[test]
 fn nonselfdual_odd_product_routes_match_dense_oracles_and_storage() {
     let rt = Runtime::builder().dense_threads(1).build().unwrap();
     let space = Space::product([((1, 1), 1), ((-1, 1), 1)]).unwrap();
@@ -1387,26 +1216,6 @@ fn compact_exp_is_elementwise_and_matches_the_dense_route() {
         let image = source.exp().unwrap();
         assert_tensor_close(&image, &dense_oracle(&source).exp().unwrap());
         assert_compact_unmaterialized(&image);
-        assert_elementwise_exp(&source, &image);
-        assert_compact_unmaterialized(&source);
-    }
-}
-
-#[test]
-fn compact_su3_exp_stays_compact_before_the_unwired_su3_rejection() {
-    // What: the compact arm sits *before* `reject_unwired_su3` in `exp`, and
-    // must: a Generic SU(3) spectrum has no dense route at all (the firewall
-    // refuses it, see `su3_panic_firewall.rs`), so ordering the arm after the
-    // rejection would turn an operation that is pure elementwise arithmetic on
-    // stored values — needing no fusion wiring whatsoever — into an error.
-    // Same placement as the `inv`/`pinv` compact arms.
-    let rt = Runtime::builder().dense_threads(1).build().unwrap();
-    let space = Space::su3([((1, 0), 2), ((0, 1), 2), ((1, 1), 2)]).unwrap();
-    for dtype in [Dtype::F64, Dtype::C64] {
-        let source = su3_diagonal(&rt, dtype, &space, 578_031);
-        let image = source.exp().unwrap();
-        assert_compact_unmaterialized(&image);
-        assert_eq!(image.dtype(), source.dtype());
         assert_elementwise_exp(&source, &image);
         assert_compact_unmaterialized(&source);
     }

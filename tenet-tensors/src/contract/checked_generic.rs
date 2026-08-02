@@ -607,10 +607,11 @@ where
 mod tests {
     use std::cell::{Cell, RefCell};
 
+    use crate::tests::GenericMultiplicityRule;
     use tenet_core::{
         BraidingStyleKind, CheckedGenericFusion, CoupledSectorFold, FusionProductSpace, FusionRule,
-        FusionStyleKind, GenericFArray, GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols,
-        RuleIdentity, SectorId, SectorLeg, SectorVec, Su3FusionRule,
+        FusionStyleKind, GenericFArray, GenericRMatrix, RuleIdentity, SectorId, SectorLeg,
+        SectorVec,
     };
 
     use super::*;
@@ -650,18 +651,18 @@ mod tests {
     impl std::error::Error for SpyError {}
 
     /// Checked-only wrapper: deliberately does not implement `FusionRule`.
-    struct CheckedSu3Spy {
-        rule: Su3FusionRule,
+    struct CheckedGenericSpy {
+        rule: GenericMultiplicityRule,
         calls: Cell<[usize; Query::COUNT]>,
         events: RefCell<Vec<Event>>,
         fail: Cell<Option<Query>>,
         malformed: Cell<Option<Query>>,
     }
 
-    impl CheckedSu3Spy {
+    impl CheckedGenericSpy {
         fn new() -> Self {
             Self {
-                rule: Su3FusionRule::new(),
+                rule: GenericMultiplicityRule,
                 calls: Cell::new([0; Query::COUNT]),
                 events: RefCell::new(Vec::new()),
                 fail: Cell::new(None),
@@ -697,7 +698,7 @@ mod tests {
         }
     }
 
-    impl CheckedGenericFusion for CheckedSu3Spy {
+    impl CheckedGenericFusion for CheckedGenericSpy {
         type Error = SpyError;
 
         fn rule_identity(&self) -> RuleIdentity {
@@ -712,7 +713,7 @@ mod tests {
 
         fn braiding_style(&self) -> BraidingStyleKind {
             self.events.borrow_mut().push(Event::Braiding);
-            FusionRule::braiding_style(&self.rule)
+            BraidingStyleKind::Bosonic
         }
 
         fn vacuum(&self) -> SectorId {
@@ -763,24 +764,25 @@ mod tests {
         }
     }
 
-    impl CheckedGenericRigidSymbols for CheckedSu3Spy {
+    impl CheckedGenericRigidSymbols for CheckedGenericSpy {
         type Scalar = f64;
 
         fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
             self.hit(Query::Rigidity)?;
-            Ok(GenericRigidSymbols::sqrt_dim_scalar(&self.rule, sector))
+            let _ = sector;
+            Ok(1.0)
         }
 
         fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
             self.hit(Query::Rigidity)?;
-            Ok(GenericRigidSymbols::inv_sqrt_dim_scalar(&self.rule, sector))
+            let _ = sector;
+            Ok(1.0)
         }
 
         fn try_frobenius_schur_phase_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
             self.hit(Query::Rigidity)?;
-            Ok(GenericRigidSymbols::frobenius_schur_phase_scalar(
-                &self.rule, sector,
-            ))
+            let _ = sector;
+            Ok(1.0)
         }
 
         fn try_f_symbol_generic(
@@ -793,7 +795,19 @@ mod tests {
             f: SectorId,
         ) -> Result<GenericFArray<f64>, Self::Error> {
             self.hit(Query::F)?;
-            let symbol = GenericFusionSymbols::f_symbol_generic(&self.rule, a, b, c, d, e, f);
+            let shape = (
+                self.rule.nsymbol(a, b, e),
+                self.rule.nsymbol(e, c, d),
+                self.rule.nsymbol(b, c, f),
+                self.rule.nsymbol(a, f, d),
+            );
+            let mut data = vec![0.0; shape.0 * shape.1 * shape.2 * shape.3];
+            let cols = shape.0 * shape.1;
+            let rows = shape.2 * shape.3;
+            for index in 0..cols.min(rows) {
+                data[index * rows + index] = 1.0;
+            }
+            let symbol = GenericFArray::new(data, shape);
             if self.malformed.get() == Some(Query::F) {
                 Ok(GenericFArray::new(
                     symbol.data().to_vec(),
@@ -811,7 +825,12 @@ mod tests {
             c: SectorId,
         ) -> Result<GenericRMatrix<f64>, Self::Error> {
             self.hit(Query::R)?;
-            let symbol = GenericFusionSymbols::r_symbol_generic(&self.rule, a, b, c);
+            let size = self.rule.nsymbol(a, b, c);
+            let mut data = vec![0.0; size * size];
+            for index in 0..size {
+                data[index * size + index] = 1.0;
+            }
+            let symbol = GenericRMatrix::new(data, size, size);
             if self.malformed.get() == Some(Query::R) {
                 Ok(GenericRMatrix::new(
                     symbol.data().to_vec(),
@@ -845,9 +864,8 @@ mod tests {
         }
     }
 
-    fn homspace(rule: &Su3FusionRule, nout: usize, nin: usize) -> FusionTreeHomSpace {
-        let eight = rule.sector_of(1, 1).unwrap();
-        let leg = || SectorLeg::new([(eight, 1)], false);
+    fn homspace(_rule: &GenericMultiplicityRule, nout: usize, nin: usize) -> FusionTreeHomSpace {
+        let leg = || SectorLeg::new([(SectorId::new(1), 1)], false);
         FusionTreeHomSpace::new(
             FusionProductSpace::new((0..nout).map(|_| leg())),
             FusionProductSpace::new((0..nin).map(|_| leg())),
@@ -859,13 +877,13 @@ mod tests {
         nout: usize,
         nin: usize,
     ) -> (
-        Arc<CheckedSu3Spy>,
-        BoundDynamicFusionMapSpace<CheckedSu3Spy>,
-        Arc<CheckedSu3Spy>,
-        BoundDynamicFusionMapSpace<CheckedSu3Spy>,
+        Arc<CheckedGenericSpy>,
+        BoundDynamicFusionMapSpace<CheckedGenericSpy>,
+        Arc<CheckedGenericSpy>,
+        BoundDynamicFusionMapSpace<CheckedGenericSpy>,
     ) {
-        let left = Arc::new(CheckedSu3Spy::new());
-        let right = Arc::new(CheckedSu3Spy::new());
+        let left = Arc::new(CheckedGenericSpy::new());
+        let right = Arc::new(CheckedGenericSpy::new());
         let homspace = homspace(&left.rule, nout, nin);
         let lhs = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
             Arc::clone(&left),

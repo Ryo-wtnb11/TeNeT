@@ -50,8 +50,8 @@ QSpace-style compiled block engine, whose kernels are selectable at
 `tenet-sectors` owns the provider vocabulary — `FusionRule`,
 `CheckedFusionAlgebra`, `SectorCodec`, `MultiplicityFreeRigidSymbols`,
 `GenericRigidSymbols`, `RuleIdentity` — and the built-in symmetries (U(1), Z2,
-fZ2, SU(2), Fibonacci, and their products; SU(3)'s tabulated rule lives in
-`tenet-core`) are ordinary implementations of those traits, with no privileged
+fZ2, SU(2), Fibonacci, and their products) are ordinary implementations of
+those traits, with no privileged
 status in the engine. The crate has zero workspace dependencies.
 
 Products are a provider combinator, not a list of blessed symmetries. A
@@ -215,7 +215,7 @@ choice.
 | `tenet-network` | `tensor!` frontend, `NetworkIR`, contraction-order optimizers, reusable `ContractionPlan`, plan cache, slicing metadata. |
 | `tenet-macros` | Procedural macro implementation for `tensor!`. |
 | `tenet-sectors` | Sector-algebra vocabulary: fusion-rule/codec traits, `SectorId`, and the built-in irrep providers (U(1), Z2, fZ2, SU(2), Fibonacci, products). No workspace dependencies; re-exported wholesale by `tenet-core`. |
-| `tenet-core` | Fusion-tree spaces and keys, block structures, low-level statically-ranked tensor-map storage, and the tabulated SU(3) rule. |
+| `tenet-core` | Fusion-tree spaces and keys, block structures, and low-level statically-ranked tensor-map storage. |
 | `tenet-tensors` | Symmetric tensor maps, tensor contraction/transform resolution, execution contexts, caches. |
 | `tenet-operations` | TensorOperations-style tensoradd/contract/trace/permute lowering and replay support. |
 | `tenet-dense` | Dense block execution boundary and CPU/GPU backend selection. |

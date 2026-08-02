@@ -404,9 +404,9 @@ A [`prelude::Space`] carries `(sector, degeneracy)` content queried through
 [`prelude::Tensor`]-free space methods: [`prelude::Space::sectors`],
 [`prelude::Space::degeneracy`] (TensorKit `dim(V, c)`),
 [`prelude::Space::has_sector`] (TensorKit `hassector`),
-[`prelude::Space::fuse`] (`⊗`), and [`prelude::Space::oplus`] (`⊕`). SU(3)
-irreps do not fit the [`prelude::SectorLabel`] enum, so they read back through
-[`prelude::Space::su3_sectors`] / `su3_degeneracy` as `(p, q)` Dynkin labels.
+[`prelude::Space::fuse`] (`⊗`), and [`prelude::Space::oplus`] (`⊕`).
+SU(N) spaces use the provider-typed API so Dynkin labels are not erased into
+the closed [`prelude::SectorLabel`] enum.
 
 ```rust
 use tenet::prelude::*;
@@ -424,11 +424,9 @@ let w = Space::u1([(0, 1), (1, 1)]);
 assert_eq!(v.fuse(&w)?.dim(), v.dim() * w.dim());
 assert_eq!(v.oplus(&w)?.degeneracy(SectorLabel::U1(0)), Some(3 + 1));
 
-// SU(2) dims are quantum-dimension weighted; SU(3) reads back (p, q) irreps.
+// SU(2) dims are quantum-dimension weighted.
 let s = Space::su2([(0, 1), (1, 1)]).unwrap();          // spin 0 ⊕ spin 1/2
 assert_eq!(s.dim(), 1 + 2);
-let fundamental = Space::su3([((1, 0), 1)])?;  // the 3
-assert_eq!(fundamental.su3_sectors()?, vec![((1, 0), 1)]);
 # Ok::<(), Error>(())
 ```
 
@@ -445,14 +443,6 @@ per coupled sector across the codomain | domain split:
 - [`prelude::Tensor::svd_compact`] / [`prelude::Tensor::svd_full`] /
   [`prelude::Tensor::svd_vals`].
 
-For generic-fusion SU(3) tensors, the supported decomposition subset is
-`svd_compact`, `svd_trunc`, `svd_vals`, `qr_compact`, `lq_compact`,
-`left_orth`, and `right_orth`. Full SVD/QR/LQ, null spaces, spectral
-decompositions, polar decompositions, and `inv`/`pinv`/`exp` are currently
-unsupported. The full and complementary-space operations require a
-multiplicity-aware completion; TeNeT returns `Error::UnsupportedForRule`
-instead of applying a multiplicity-free construction that would produce the
-wrong space.
 - [`prelude::Tensor::qr_compact`] / [`prelude::Tensor::qr_full`],
   [`prelude::Tensor::lq_compact`] / [`prelude::Tensor::lq_full`].
 - [`prelude::Tensor::left_orth`] / [`prelude::Tensor::right_orth`] —
