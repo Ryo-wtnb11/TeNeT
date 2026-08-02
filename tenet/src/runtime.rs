@@ -8,10 +8,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use num_complex::Complex64;
+use tenet_core::{HomSpaceId, RuleIdentity};
 pub use tenet_tensors::RuntimeTreeTransformCacheInfo;
 use tenet_tensors::{
-    DenseTreeTransformOperations, OperationCachePolicy, RuntimeTreeTransformStore,
-    TensorContractFusionExecutionContext,
+    BoundDynamicFusionMapSpace, DenseTreeTransformOperations, OperationCachePolicy,
+    RuntimeTreeTransformStore, TensorContractFusionExecutionContext, TreeTransformOperation,
 };
 
 use crate::error::Error;
@@ -583,6 +584,50 @@ impl Runtime {
         self.inner.tree_transform_store.clear();
     }
 
+    pub(crate) fn admitted_tree_pair_operation<R>(
+        &self,
+        rule: &RuleIdentity,
+        source: &BoundDynamicFusionMapSpace<R>,
+        destination: &BoundDynamicFusionMapSpace<R>,
+        matches: impl FnMut(&TreeTransformOperation) -> bool,
+    ) -> Option<TreeTransformOperation> {
+        let (source_homspace, source_layout) = bound_layout_identity(source);
+        let (destination_homspace, destination_layout) = bound_layout_identity(destination);
+        self.inner
+            .tree_transform_store
+            .admitted_tree_pair_operation(
+                rule,
+                &source_homspace,
+                source_layout,
+                &destination_homspace,
+                destination_layout,
+                matches,
+            )
+    }
+
+    pub(crate) fn admit_exact_tree_pair_layout<R>(
+        &self,
+        rule: RuleIdentity,
+        operation: &TreeTransformOperation,
+        source: &BoundDynamicFusionMapSpace<R>,
+        destination: &BoundDynamicFusionMapSpace<R>,
+    ) {
+        let (source_homspace, source_layout) = bound_layout_identity(source);
+        let (destination_homspace, destination_layout) = bound_layout_identity(destination);
+        // Cache retention must not change an already-successful operation.
+        let _ = self
+            .inner
+            .tree_transform_store
+            .admit_exact_tree_pair_layout(
+                rule,
+                operation,
+                destination.space().structure(),
+                source.space().structure(),
+                (&source_homspace, source_layout),
+                (&destination_homspace, destination_layout),
+            );
+    }
+
     /// Leases an execution context for one standalone op (#155): pop an idle
     /// one or mint a fresh config-bound one. Each context owns one
     /// `RuleIdentity`-keyed multiplicity-free lane and a separate Generic-fusion
@@ -688,6 +733,18 @@ impl Runtime {
         // still produce distinct tensors.
         0x9E37_79B9_7F4A_7C15 ^ self.inner.rand_counter.fetch_add(1, Ordering::Relaxed)
     }
+}
+
+fn bound_layout_identity<R>(space: &BoundDynamicFusionMapSpace<R>) -> (HomSpaceId, [usize; 3]) {
+    let space = space.space();
+    (
+        space.homspace().id(),
+        [
+            space.structure().content_id(),
+            space.homspace().codomain().len(),
+            space.homspace().domain().len(),
+        ],
+    )
 }
 
 impl std::fmt::Debug for Runtime {
