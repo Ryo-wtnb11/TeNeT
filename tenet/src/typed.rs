@@ -319,6 +319,12 @@ thread_local! {
     static CUDA_SVD_TRUNC_FINAL_EXTENTS: std::cell::RefCell<Option<Vec<usize>>> = const {
         std::cell::RefCell::new(None)
     };
+    static CUDA_SVD_TRUNC_ALLOCATIONS: std::cell::RefCell<Option<Vec<(&'static str, usize)>>> = const {
+        std::cell::RefCell::new(None)
+    };
+    static CUDA_SVD_TRUNC_RELEASES: std::cell::RefCell<Option<Vec<(usize, usize)>>> = const {
+        std::cell::RefCell::new(None)
+    };
     /// `(stage, one-based ordinal)` for operation-local failure injection.
     static CUDA_SVD_TRUNC_FAILURE: std::cell::Cell<Option<(&'static str, usize)>> = const {
         std::cell::Cell::new(None)
@@ -367,6 +373,29 @@ fn observe_cuda_svd_trunc_final_storage_creation() {
             (results, total, creations + 1, live, peak, bytes, peak_bytes)
         },
     );
+}
+
+#[cfg(all(test, feature = "cuda"))]
+pub(crate) fn observe_cuda_svd_trunc_allocation(kind: &'static str, extent: usize) {
+    CUDA_SVD_TRUNC_ALLOCATIONS.with(|allocations| {
+        if let Some(allocations) = allocations.borrow_mut().as_mut() {
+            allocations.push((kind, extent));
+        }
+    });
+}
+
+#[cfg(all(test, feature = "cuda"))]
+fn observe_cuda_svd_trunc_release() {
+    CUDA_SVD_TRUNC_OBSERVATION.with(|observation| {
+        let Some((_, _, _, live, _, bytes, _)) = observation.get() else {
+            return;
+        };
+        CUDA_SVD_TRUNC_RELEASES.with(|releases| {
+            if let Some(releases) = releases.borrow_mut().as_mut() {
+                releases.push((live, bytes));
+            }
+        });
+    });
 }
 
 #[cfg(all(test, feature = "cuda"))]
@@ -3255,6 +3284,21 @@ where
                     FusionProductSpace::new(hom.codomain().legs().iter().cloned()),
                     FusionProductSpace::new([bond.clone()]),
                 ))?;
+        #[cfg(test)]
+        {
+            observe_cuda_svd_trunc_event("admission_left");
+            if CUDA_SVD_TRUNC_FAILURE.with(|failure| failure.get()) == Some(("admission", 1)) {
+                let invalid_bond = SectorLeg::new([(SectorId::new(usize::MAX), 1)], false);
+                self.logical_space()
+                    .derive_from_final_homspace(FusionTreeHomSpace::new(
+                        FusionProductSpace::new(hom.codomain().legs().iter().cloned()),
+                        FusionProductSpace::new([invalid_bond]),
+                    ))?;
+                return Err(internal_layout_error(
+                    "provider accepted an invalid final-admission sector",
+                ));
+            }
+        }
         let middle_space =
             self.logical_space()
                 .derive_from_final_homspace(FusionTreeHomSpace::new(
@@ -3638,7 +3682,10 @@ where
         }
         let storage = CudaStorage::upload(cuda, values)?;
         #[cfg(test)]
-        observe_cuda_svd_trunc_final_storage_creation();
+        {
+            observe_cuda_svd_trunc_final_storage_creation();
+            observe_cuda_svd_trunc_allocation("final", values.len());
+        }
         Ok(storage)
     }
 
@@ -3735,10 +3782,7 @@ where
                     continue;
                 }
                 #[cfg(test)]
-                {
-                    observe_cuda_svd_trunc_event("decomposition");
-                    Self::inject_cuda_svd_trunc_failure("decomposition", decomposition_ordinal)?;
-                }
+                observe_cuda_svd_trunc_event("decomposition");
                 let (raw_left, values, raw_right) = cuda_svd_region(
                     cuda,
                     &source.0,
@@ -3753,17 +3797,20 @@ where
                         "truncated SVD spectrum length does not match its source route",
                     ));
                 }
-                spectra.push(tenet_matrixalgebra::SectorSpectrum {
-                    sector: region.coupled(),
-                    values,
-                });
-                retained.push(Some(TypedCudaSvdRetainedFactors::new(
+                let factors = TypedCudaSvdRetainedFactors::new(
                     raw_left,
                     raw_right,
                     region.rows(),
                     region.cols(),
                     rank,
-                )?));
+                )?;
+                #[cfg(test)]
+                Self::inject_cuda_svd_trunc_failure("decomposition", decomposition_ordinal)?;
+                spectra.push(tenet_matrixalgebra::SectorSpectrum {
+                    sector: region.coupled(),
+                    values,
+                });
+                retained.push(Some(factors));
             }
             (spectra, retained)
         };
@@ -3802,10 +3849,7 @@ where
             .collect::<Result<_, Error>>()?;
         singular_values.sort_by(|left, right| left.sector.cmp(&right.sector));
         #[cfg(test)]
-        {
-            observe_cuda_svd_trunc_event("final_admission");
-            Self::inject_cuda_svd_trunc_failure("admission", 1)?;
-        }
+        observe_cuda_svd_trunc_event("final_admission");
         let plan = self
             .compile_cuda_svd_trunc_plan(Arc::clone(&source_plan.source_regions), &kept_spectra)?;
         let left_len = plan.left_space.space().required_len()?;
@@ -3861,6 +3905,8 @@ where
                     &left_selector,
                     route.kept,
                 )?;
+                #[cfg(test)]
+                Self::inject_cuda_svd_trunc_failure("right_assembly", assembly_ordinal)?;
                 let right_selector = upload_selector(
                     cuda,
                     route.kept,
@@ -3877,6 +3923,9 @@ where
                     route.full_rank,
                     &factors.right,
                 )?;
+                drop(factors);
+                #[cfg(test)]
+                observe_cuda_svd_trunc_release();
             }
             (left_data, middle_data, right_data)
         };
@@ -9990,12 +10039,24 @@ mod representation_gates {
                     * std::mem::size_of::<f64>()
             })
             .sum();
+        let route_bytes: Vec<_> = regions
+            .iter()
+            .filter(|region| region.rows() != 0 && region.cols() != 0)
+            .map(|region| {
+                (region.rows() + region.cols())
+                    * region.rows().min(region.cols())
+                    * std::mem::size_of::<f64>()
+            })
+            .collect();
+        assert!(nonempty >= 2, "fixture must exercise later-route failures");
         let device = source.to_cuda().unwrap();
 
         CUDA_SVD_TRUNC_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
         CUDA_SVD_TRUNC_EVENTS.with(|events| *events.borrow_mut() = Some(Vec::new()));
         CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| *extents.borrow_mut() = Some(Vec::new()));
-        let actual = device.svd_trunc(&Truncation::rank(2)).unwrap();
+        CUDA_SVD_TRUNC_ALLOCATIONS.with(|allocations| *allocations.borrow_mut() = Some(Vec::new()));
+        CUDA_SVD_TRUNC_RELEASES.with(|releases| *releases.borrow_mut() = Some(Vec::new()));
+        let actual = device.svd_trunc(&Truncation::Full).unwrap();
         let extents =
             CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| extents.borrow().clone().unwrap());
         assert_eq!(
@@ -10005,6 +10066,41 @@ mod representation_gates {
                 actual.s.to_host().unwrap().data().len(),
                 actual.vh.to_host().unwrap().data().len(),
             ]
+        );
+        let allocations =
+            CUDA_SVD_TRUNC_ALLOCATIONS.with(|allocations| allocations.borrow().clone().unwrap());
+        assert_eq!(
+            allocations
+                .iter()
+                .filter(|(kind, _)| *kind == "final")
+                .map(|(_, extent)| *extent)
+                .collect::<Vec<_>>(),
+            extents
+        );
+        assert_eq!(allocations.len(), 3 + 2 * nonempty);
+        assert!(allocations
+            .iter()
+            .all(|(kind, _)| matches!(*kind, "final" | "selector")));
+        assert_eq!(
+            allocations
+                .iter()
+                .filter(|(_, extent)| extents.contains(extent))
+                .count(),
+            3,
+            "an operation-local scratch allocation reused a final-output extent"
+        );
+        let mut remaining_bytes = raw_bytes;
+        let expected_releases = route_bytes
+            .iter()
+            .enumerate()
+            .map(|(index, bytes)| {
+                remaining_bytes -= bytes;
+                (nonempty - index - 1, remaining_bytes)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            CUDA_SVD_TRUNC_RELEASES.with(|releases| releases.borrow().clone().unwrap()),
+            expected_releases
         );
         CUDA_SVD_TRUNC_OBSERVATION.with(|observation| {
             assert_eq!(
@@ -10055,32 +10151,80 @@ mod representation_gates {
             assert_eq!((observed.3, observed.5), (0, 0));
         });
 
-        let first_nonempty = regions
+        let second_nonempty = regions
             .iter()
-            .position(|region| region.rows() != 0 && region.cols() != 0)
+            .enumerate()
+            .filter(|(_, region)| region.rows() != 0 && region.cols() != 0)
+            .nth(1)
+            .map(|(index, _)| index)
             .unwrap()
             + 1;
         let failures = [
-            ("decomposition", first_nonempty),
+            ("decomposition", second_nonempty),
             ("selection", 1),
             ("admission", 1),
             ("final", 1),
             ("final", 2),
             ("final", 3),
-            ("assembly", 1),
+            ("assembly", 2),
+            ("right_assembly", 2),
         ];
         for failure in failures {
             CUDA_SVD_TRUNC_OBSERVATION
                 .with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
+            CUDA_SVD_TRUNC_EVENTS.with(|events| *events.borrow_mut() = Some(Vec::new()));
             CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| *extents.borrow_mut() = Some(Vec::new()));
+            CUDA_SVD_TRUNC_ALLOCATIONS
+                .with(|allocations| *allocations.borrow_mut() = Some(Vec::new()));
+            CUDA_SVD_TRUNC_RELEASES.with(|releases| *releases.borrow_mut() = Some(Vec::new()));
             CUDA_SVD_TRUNC_FAILURE.with(|injected| injected.set(Some(failure)));
-            assert!(device.svd_trunc(&Truncation::rank(2)).is_err());
+            assert!(device.svd_trunc(&Truncation::Full).is_err());
             CUDA_SVD_TRUNC_FAILURE.with(|injected| injected.set(None));
             CUDA_SVD_TRUNC_OBSERVATION.with(|observation| {
                 let observed = observation.get().unwrap();
                 assert_eq!((observed.3, observed.5), (0, 0));
+                if failure.0 == "decomposition" {
+                    assert_eq!((observed.0, observed.4), (2, 2));
+                }
             });
-            assert!(device.svd_trunc(&Truncation::rank(2)).is_ok());
+            assert!(CUDA_SVD_TRUNC_EVENTS.with(|events| events
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|(name, _)| *name != "publication")));
+            if failure.0 == "final" {
+                let attempted =
+                    CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| extents.borrow().clone().unwrap());
+                assert_eq!(
+                    CUDA_SVD_TRUNC_ALLOCATIONS
+                        .with(|allocations| allocations.borrow().clone().unwrap()),
+                    attempted[..failure.1 - 1]
+                        .iter()
+                        .map(|&extent| ("final", extent))
+                        .collect::<Vec<_>>()
+                );
+            }
+            if matches!(failure.0, "assembly" | "right_assembly") {
+                assert_eq!(
+                    CUDA_SVD_TRUNC_RELEASES.with(|releases| releases.borrow().clone().unwrap()),
+                    vec![expected_releases[0]]
+                );
+            }
+            if failure.0 == "admission" {
+                assert!(CUDA_SVD_TRUNC_EVENTS.with(|events| events
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .any(|(name, depth)| *name == "admission_left" && *depth == 0)));
+                assert!(CUDA_SVD_TRUNC_ALLOCATIONS.with(|allocations| allocations
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .is_empty()));
+            }
+            assert!(device.svd_trunc(&Truncation::Full).is_ok());
         }
 
         CUDA_SVD_TRUNC_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
@@ -10104,6 +10248,137 @@ mod representation_gates {
         CUDA_SVD_TRUNC_OBSERVATION.with(|observation| observation.set(None));
         CUDA_SVD_TRUNC_EVENTS.with(|events| *events.borrow_mut() = None);
         CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| *extents.borrow_mut() = None);
+        CUDA_SVD_TRUNC_ALLOCATIONS.with(|allocations| *allocations.borrow_mut() = None);
+        CUDA_SVD_TRUNC_RELEASES.with(|releases| *releases.borrow_mut() = None);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn typed_cuda_svd_trunc_observes_empty_mixed_and_discard_all_routes() {
+        // What: structural emptiness and policy-selected emptiness create no
+        // selectors, while mixed inputs decompose only their matched route.
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let mixed_rows = GradedSpace::try_new(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 2)],
+            false,
+        )
+        .unwrap();
+        let mixed_cols = GradedSpace::try_new(
+            Arc::clone(&provider),
+            [(U1Irrep::new(0), 3), (U1Irrep::new(2), 1)],
+            false,
+        )
+        .unwrap();
+        let mixed =
+            TensorMap::from_block_fn(&runtime, [&mixed_rows], [&mixed_cols], |_, indices| {
+                (1 + indices[0] + 2 * indices[1]) as f64
+            })
+            .unwrap();
+        let mixed_regions = sector_regions(
+            mixed.logical_space().space().structure(),
+            mixed.logical_space().space().nout(),
+        )
+        .unwrap();
+        let mixed_nonempty = mixed_regions
+            .iter()
+            .filter(|region| region.rows() != 0 && region.cols() != 0)
+            .count();
+        let mixed_scalars = mixed_regions
+            .iter()
+            .map(|region| region.rows().min(region.cols()))
+            .sum();
+        assert_eq!(mixed_nonempty, 1);
+        let mixed_device = mixed.to_cuda().unwrap();
+
+        CUDA_SVD_TRUNC_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
+        CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| *extents.borrow_mut() = Some(Vec::new()));
+        CUDA_SVD_TRUNC_ALLOCATIONS.with(|allocations| *allocations.borrow_mut() = Some(Vec::new()));
+        let mixed_result = mixed_device.svd_trunc(&Truncation::Full).unwrap();
+        let mixed_extents = vec![
+            mixed_result.u.to_host().unwrap().data().len(),
+            mixed_result.s.to_host().unwrap().data().len(),
+            mixed_result.vh.to_host().unwrap().data().len(),
+        ];
+        assert_eq!(
+            CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| extents.borrow().clone().unwrap()),
+            mixed_extents
+        );
+        CUDA_SVD_TRUNC_OBSERVATION.with(|observation| {
+            let observed = observation.get().unwrap();
+            assert_eq!((observed.0, observed.1, observed.2), (1, mixed_scalars, 3));
+            assert_eq!((observed.3, observed.5), (0, 0));
+        });
+        assert_eq!(
+            CUDA_SVD_TRUNC_ALLOCATIONS.with(|allocations| allocations
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .len()),
+            3 + 2 * mixed_nonempty
+        );
+
+        let empty_rows =
+            GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(4), 2)], false).unwrap();
+        let empty: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&empty_rows], [&mixed_cols], |_, _| 1.0).unwrap();
+        assert!(empty.data().is_empty());
+        CUDA_SVD_TRUNC_OBSERVATION.with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
+        CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| *extents.borrow_mut() = Some(Vec::new()));
+        CUDA_SVD_TRUNC_ALLOCATIONS.with(|allocations| *allocations.borrow_mut() = Some(Vec::new()));
+        empty
+            .to_cuda()
+            .unwrap()
+            .svd_trunc(&Truncation::Full)
+            .unwrap();
+        assert_eq!(
+            CUDA_SVD_TRUNC_OBSERVATION.with(|observation| observation.get()),
+            Some((0, 0, 3, 0, 0, 0, 0))
+        );
+        assert_eq!(
+            CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| extents.borrow().clone().unwrap()),
+            vec![0, 0, 0]
+        );
+        assert_eq!(
+            CUDA_SVD_TRUNC_ALLOCATIONS.with(|allocations| allocations.borrow().clone().unwrap()),
+            vec![("final", 0), ("final", 0), ("final", 0)]
+        );
+
+        let absent = GradedSpace::try_new(Arc::new(U1FusionRule), [(U1Irrep::new(9), 1)], false)
+            .unwrap()
+            .truncspace();
+        for policy in [
+            Truncation::space(absent.clone()),
+            Truncation::rank(usize::MAX).and(Truncation::space(absent.clone())),
+        ] {
+            CUDA_SVD_TRUNC_OBSERVATION
+                .with(|observation| observation.set(Some((0, 0, 0, 0, 0, 0, 0))));
+            CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| *extents.borrow_mut() = Some(Vec::new()));
+            CUDA_SVD_TRUNC_ALLOCATIONS
+                .with(|allocations| *allocations.borrow_mut() = Some(Vec::new()));
+            let result = mixed_device.svd_trunc(&policy).unwrap();
+            assert!(result.singular_values.is_empty());
+            CUDA_SVD_TRUNC_OBSERVATION.with(|observation| {
+                let observed = observation.get().unwrap();
+                assert_eq!((observed.0, observed.1, observed.2), (1, mixed_scalars, 3));
+                assert_eq!((observed.3, observed.5), (0, 0));
+            });
+            assert_eq!(
+                CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| extents.borrow().clone().unwrap()),
+                vec![0, 0, 0]
+            );
+            assert_eq!(
+                CUDA_SVD_TRUNC_ALLOCATIONS
+                    .with(|allocations| allocations.borrow().clone().unwrap()),
+                vec![("final", 0), ("final", 0), ("final", 0)]
+            );
+        }
+
+        CUDA_SVD_TRUNC_OBSERVATION.with(|observation| observation.set(None));
+        CUDA_SVD_TRUNC_FINAL_EXTENTS.with(|extents| *extents.borrow_mut() = None);
+        CUDA_SVD_TRUNC_ALLOCATIONS.with(|allocations| *allocations.borrow_mut() = None);
     }
 
     #[cfg(feature = "cuda")]

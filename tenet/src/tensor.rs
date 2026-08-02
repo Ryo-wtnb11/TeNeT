@@ -11373,7 +11373,10 @@ pub(crate) fn upload_selector(
     }
     let selector = CudaStorage::upload(cuda, &data).map_err(Error::from)?;
     #[cfg(test)]
-    crate::typed::observe_cuda_qr_selector_upload();
+    {
+        crate::typed::observe_cuda_qr_selector_upload();
+        crate::typed::observe_cuda_svd_trunc_allocation("selector", data.len());
+    }
     Ok(selector)
 }
 
