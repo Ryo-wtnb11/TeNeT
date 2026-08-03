@@ -138,8 +138,8 @@ jobs:
         include:
           - { name: opt-path, package: tenet-network, features: "opt-path,cpu-faer", tenferro_ref: main }
           - { name: cotengra-python, package: tenet-network, features: "cotengra-python,cpu-faer", tenferro_ref: main }
-          - { name: racah-generated, package: tenet-sectors, features: racah-generated, tenferro_ref: 10c4e9af77fd6634712c5e13e45e943c7784c395 }
-          - { name: racah-generated-tensors, package: tenet-tensors, features: "racah-generated,cpu-faer", tenferro_ref: 10c4e9af77fd6634712c5e13e45e943c7784c395 }
+          - { name: racah-generated, package: tenet-sectors, features: racah-generated, tenferro_ref: 5bbd4a0613b3c801ce924cdc4339df2c77c1ab62 }
+          - { name: racah-generated-tensors, package: tenet-tensors, features: "racah-generated,cpu-faer", tenferro_ref: 5bbd4a0613b3c801ce924cdc4339df2c77c1ab62 }
     steps:
       - uses: actions/checkout@v4
         with:
