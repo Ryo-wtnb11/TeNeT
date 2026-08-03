@@ -3253,36 +3253,15 @@ fn adjoint_carries_an_external_provider() {
 // Phase 5 (issue #568), slice 5: `TensorMap::trace_pairs`.
 // ---------------------------------------------------------------------------
 
-/// The erased sibling of [`fermionic_rank_three`], as an endomorphism
-/// `[v] <- [v]`: the shape `tr` needs, on the one provider here whose braiding
-/// is not symmetric.
-fn fermionic_endo_pair(
-    runtime: &Runtime,
-) -> (
-    tenet::prelude::Tensor,
-    TensorMap<tenet::core::FermionParityFusionRule, f64>,
-) {
-    let space = tenet::prelude::Space::fz2([(0, 1), (1, 1)]).unwrap();
-    let mut next = 0.0;
-    let erased = tenet::prelude::Tensor::from_block_fn(
-        runtime,
-        [&space],
-        [&space],
-        |_: &tenet::prelude::BlockKey, _: &[usize]| {
-            next += 1.0;
-            next
-        },
-    )
-    .unwrap();
+/// A fermionic endomorphism `[v] <- [v]` with distinct sector values.
+fn fermionic_endo(runtime: &Runtime) -> TensorMap<tenet::core::FermionParityFusionRule, f64> {
     let leg = fermionic_leg();
     let mut next = 0.0;
-    let typed = TensorMap::from_block_fn(runtime, [&leg], [&leg], |_, _| {
+    TensorMap::from_block_fn(runtime, [&leg], [&leg], |_, _| {
         next += 1.0;
         next
     })
-    .unwrap();
-    assert_eq!(typed.data(), erased.data());
-    (erased, typed)
+    .unwrap()
 }
 
 #[test]
@@ -3377,7 +3356,7 @@ fn fermionic_trace_pairs_is_the_supertrace_and_tr_is_not() {
     // numbers differ.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = fermionic_endo_pair(&runtime);
+    let typed = fermionic_endo(&runtime);
 
     let positive = typed.tr().unwrap();
     let super_trace = typed.trace_pairs(&[(0, 1)]).unwrap();
@@ -5088,96 +5067,45 @@ fn diagonal_contract_preserves_left_provider_authority_on_every_compact_arm() {
 }
 
 #[test]
-fn typed_and_erased_diagonal_contract_agree_byte_for_byte() {
-    // What: every axis pattern of the compact diagonal arm is the erased
-    // facade's `contract_ordered` byte for byte — the erased side has taken its
-    // own diagonal fast path since #75, so this compares two fast paths for the
-    // patterns they share and fast against dense for the ones they do not.
+fn complex_diagonal_contract_matches_the_typed_dense_route() {
+    // What: every complex compact arm agrees with the ordinary typed engine
+    // route on the same spaces, including a compact `D · D` result.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
-    let erased_s = erased.svd_compact().unwrap().1;
+    let (_, typed) = z2_complex_oracle_pair(&runtime);
     let typed_s = typed.svd_compact().unwrap().1;
-    assert_eq!(typed_s.data(), erased_s.data());
+    let dense_s = forced_dense(&typed_s);
 
-    for &(name, spectrum_on_the_right, lhs_axes, rhs_axes, output_axes) in DIAGONAL_CONTRACT_CASES {
-        let (erased_lhs, erased_rhs, typed_lhs, typed_rhs) = if spectrum_on_the_right {
-            (&erased, &erased_s, &typed, &typed_s)
+    for &(_name, spectrum_on_the_right, lhs_axes, rhs_axes, output_axes) in DIAGONAL_CONTRACT_CASES
+    {
+        let (fast_lhs, fast_rhs, dense_lhs, dense_rhs) = if spectrum_on_the_right {
+            (&typed, &typed_s, &typed, &dense_s)
         } else {
-            (&erased_s, &erased, &typed_s, &typed)
+            (&typed_s, &typed, &dense_s, &typed)
         };
-        let expected = erased_lhs
-            .contract_ordered(erased_rhs, lhs_axes, rhs_axes, output_axes)
+        let expected = dense_lhs
+            .contract(dense_rhs, lhs_axes, rhs_axes, output_axes)
             .unwrap();
-        let got = typed_lhs
-            .contract(typed_rhs, lhs_axes, rhs_axes, output_axes)
+        let got = fast_lhs
+            .contract(fast_rhs, lhs_axes, rhs_axes, output_axes)
             .unwrap();
-        assert_eq!(got.data(), expected.data(), "{name} payload");
-        assert_eq!(
-            got.codomain().len(),
-            expected.codomain_rank(),
-            "{name} split"
-        );
-        assert!(
-            got.data().iter().any(|&value| value != 0.0),
-            "{name} is all zeros, so it proves nothing"
-        );
+        assert_same_legs(&got.codomain(), &expected.codomain());
+        assert_same_legs(&got.domain(), &expected.domain());
+        assert_data_close_c64(got.data(), expected.data());
     }
 
-    // `s · s` is the compose-shaped product of two spectra: compact in, compact
-    // out, and the same bytes as the erased product.
-    let expected = erased_s
-        .contract_ordered(&erased_s, &[1], &[0], &[0, 1])
-        .unwrap();
+    let expected = dense_s.contract(&dense_s, &[1], &[0], &[0, 1]).unwrap();
     let got = typed_s.contract(&typed_s, &[1], &[0], &[0, 1]).unwrap();
-    assert_eq!(got.data(), expected.data());
-}
-
-#[test]
-fn typed_and_erased_diagonal_contract_agree_for_a_complex_payload() {
-    // What: the arm is dtype-generic — `D` is a type parameter, so a c64
-    // spectrum scales exactly the same way with no widening variant.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased, typed) = z2_complex_oracle_pair(&runtime);
-    let erased_s = erased.svd_compact().unwrap().1;
-    let typed_s = typed.svd_compact().unwrap().1;
-
-    for &(name, spectrum_on_the_right, lhs_axes, rhs_axes, output_axes) in DIAGONAL_CONTRACT_CASES {
-        let (erased_lhs, erased_rhs, typed_lhs, typed_rhs) = if spectrum_on_the_right {
-            (&erased, &erased_s, &typed, &typed_s)
-        } else {
-            (&erased_s, &erased, &typed_s, &typed)
-        };
-        let expected = erased_lhs
-            .contract_ordered(erased_rhs, lhs_axes, rhs_axes, output_axes)
-            .unwrap();
-        let got = typed_lhs
-            .contract(typed_rhs, lhs_axes, rhs_axes, output_axes)
-            .unwrap();
-        // The erased spectrum of a c64 SVD is `RealC64` — real values in a
-        // complex payload — while the typed one is plain `D`, so the two can
-        // differ by a rounding on the scaled entries (the same divergence the
-        // compact matrix-function comparison above documents). Values, not
-        // bytes, is what this asserts; the f64 case above is the byte oracle.
-        let expected = expected.try_data_c64().unwrap();
-        assert_eq!(got.data().len(), expected.len(), "{name} length");
-        for (index, (mine, theirs)) in got.data().iter().zip(expected).enumerate() {
-            let scale = theirs.norm().max(f64::MIN_POSITIVE);
-            assert!(
-                (mine - theirs).norm() / scale < 1e-14,
-                "c64 {name} entry {index}: {mine} vs {theirs}"
-            );
-        }
-    }
+    assert_same_legs(&got.codomain(), &expected.codomain());
+    assert_same_legs(&got.domain(), &expected.domain());
+    assert_data_close_c64(got.data(), expected.data());
+    assert!(got.diagonal_spectrum().unwrap().is_some());
 }
 
 #[test]
 fn the_diagonal_contract_arm_keeps_fermionic_signs() {
-    // What: a fermionic provider (`FermionParity`, the one rule here whose
-    // braiding is not symmetric) takes the same arm, and the result is still
-    // the erased facade's byte for byte — bends inside the arm's `permute` pick
-    // up the parity signs the dense route would.
+    // What: bends inside the compact arm's `permute` pick up the same parity
+    // signs as the ordinary typed engine route.
     //
     // The supertrace twist `contract` applies to a **dual** contracted leg of
     // the right operand cannot be reached from this facade, so it is not
@@ -5190,30 +5118,37 @@ fn the_diagonal_contract_arm_keeps_fermionic_signs() {
     // became constructible here.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = fermionic_endo_pair(&runtime);
-    let erased_s = erased.svd_compact().unwrap().1;
+    let typed = fermionic_endo(&runtime);
     let typed_s = typed.svd_compact().unwrap().1;
-    assert_eq!(typed_s.data(), erased_s.data());
+    let dense_s = forced_dense(&typed_s);
 
-    for &(name, lhs_axes, rhs_axes, output_axes, spectrum_on_the_right) in &[
-        ("t*s", &[1usize][..], &[0usize][..], &[0usize, 1][..], true),
-        ("t*s reordered", &[1][..], &[0][..], &[1, 0][..], true),
-        ("s*t", &[1][..], &[0][..], &[0, 1][..], false),
-        ("s*s", &[1][..], &[0][..], &[0, 1][..], false),
+    for &(name, spectrum_on_the_right, output_axes) in &[
+        ("t*s", true, &[0usize, 1][..]),
+        ("t*s reordered", true, &[1, 0][..]),
+        ("s*t", false, &[0, 1][..]),
     ] {
-        let (erased_lhs, erased_rhs, typed_lhs, typed_rhs) = if spectrum_on_the_right {
-            (&erased, &erased_s, &typed, &typed_s)
+        let (fast_lhs, fast_rhs, dense_lhs, dense_rhs) = if spectrum_on_the_right {
+            (&typed, &typed_s, &typed, &dense_s)
         } else {
-            (&erased_s, &erased, &typed_s, &typed)
+            (&typed_s, &typed, &dense_s, &typed)
         };
-        let expected = erased_lhs
-            .contract_ordered(erased_rhs, lhs_axes, rhs_axes, output_axes)
+        let expected = dense_lhs
+            .contract(dense_rhs, &[1], &[0], output_axes)
             .unwrap();
-        let got = typed_lhs
-            .contract(typed_rhs, lhs_axes, rhs_axes, output_axes)
+        let got = fast_lhs
+            .contract(fast_rhs, &[1], &[0], output_axes)
             .unwrap();
+        assert_same_legs(&got.codomain(), &expected.codomain());
+        assert_same_legs(&got.domain(), &expected.domain());
         assert_eq!(got.data(), expected.data(), "fermionic {name}");
     }
+
+    let expected = dense_s.contract(&dense_s, &[1], &[0], &[0, 1]).unwrap();
+    let got = typed_s.contract(&typed_s, &[1], &[0], &[0, 1]).unwrap();
+    assert_same_legs(&got.codomain(), &expected.codomain());
+    assert_same_legs(&got.domain(), &expected.domain());
+    assert_eq!(got.data(), expected.data(), "fermionic s*s");
+    assert!(got.diagonal_spectrum().unwrap().is_some());
 }
 
 #[test]
@@ -5334,21 +5269,19 @@ fn the_diagonal_contract_arm_is_its_own_dense_route_on_every_axis_pattern() {
     // for `D · t`) diverge from the one the engine would build.
     //
     // Here the comparison is fast against dense *inside this facade*:
-    // `repartition(1)` on a bond space is the identity partition, so it returns
-    // the same values on the same space with a **dense** payload, which no
-    // compact arm can fire on. Every single-axis pattern and every output order
-    // is swept on both codomain/domain splits, so `t · D` is covered at an
-    // inner domain axis (which `[v, v] <- [v]` cannot reach: it has one domain
+    // `forced_dense` adds an exact dense zero on the same space, which preserves
+    // the values while forcing an ordinary dense payload. Every single-axis
+    // pattern and output order is swept on both codomain/domain splits, so
+    // `t · D` is covered at an inner domain axis (which `[v, v] <- [v]` cannot
+    // reach: it has one domain
     // leg) as well as at the trailing one, and an inadmissible pattern must be
     // refused by both routes rather than answered by one.
     let _guard = cache_lock();
     let runtime = runtime();
     for split in [1, 2] {
-        let (_erased, t) = z2_oracle_pair_split(&runtime, split);
+        let (_, t) = z2_oracle_pair_split(&runtime, split);
         let s = t.svd_compact().unwrap().1;
-        // Dense twin of `s`: same space, same bytes, no compact payload.
-        let s_dense = s.repartition(1).unwrap();
-        assert_eq!(s_dense.data(), s.data());
+        let s_dense = forced_dense(&s);
 
         let mut fired = 0usize;
         for orders in [&all_output_orders(3)] {
@@ -5434,9 +5367,9 @@ fn the_diagonal_contract_arm_is_its_own_dense_route_on_every_axis_pattern() {
 // Issue #585: compact diagonal parity, round 2.
 //
 // The value oracles below are what pin the compact arms that follow. They are
-// written against the routes those arms replace — the forced-dense twin inside
-// this facade, and the erased sibling — so they are independent of whatever
-// shared helper the compact arms end up calling.
+// written against the typed dense and pointwise routes those arms replace, so
+// they are independent of whatever shared helper the compact arms end up
+// calling.
 // ---------------------------------------------------------------------------
 
 /// A dense twin of a compact bond factor. Adding an exact dense zero keeps the
