@@ -1200,7 +1200,10 @@ where
         tensor: &TensorMap<R, D>,
         operation: TreeTransformOperation,
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        let body = tensor.materialized_body();
+        let materialized = tensor.materialized_tensor_uncached()?;
+        let body = materialized
+            .owned_body()
+            .expect("uncached materialization is owned");
         let (space, data) = tree_transform_dyn_owned_checked_generic(
             operation,
             &body.space,
@@ -1227,8 +1230,14 @@ where
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        let lhs_body = lhs.materialized_body();
-        let rhs_body = rhs.materialized_body();
+        let lhs_owned = lhs.materialized_tensor_uncached()?;
+        let rhs_owned = rhs.materialized_tensor_uncached()?;
+        let lhs_body = lhs_owned
+            .owned_body()
+            .expect("uncached materialization is owned");
+        let rhs_body = rhs_owned
+            .owned_body()
+            .expect("uncached materialization is owned");
         let (space, data) = tensorproduct_owned_multiplicity_free(
             BoundDynamicTensorRef::try_new(&lhs_body.space, lhs_body.materialized_dense_data())?,
             BoundDynamicTensorRef::try_new(&rhs_body.space, rhs_body.materialized_dense_data())?,
@@ -1252,8 +1261,14 @@ where
         lhs: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
-        let lhs_body = lhs.materialized_body();
-        let rhs_body = rhs.materialized_body();
+        let lhs_owned = lhs.materialized_tensor_uncached()?;
+        let rhs_owned = rhs.materialized_tensor_uncached()?;
+        let lhs_body = lhs_owned
+            .owned_body()
+            .expect("uncached materialization is owned");
+        let rhs_body = rhs_owned
+            .owned_body()
+            .expect("uncached materialization is owned");
         let (space, data) = tensorproduct_owned_checked_generic(
             &lhs_body.space,
             lhs_body.materialized_dense_data(),
@@ -4744,15 +4759,6 @@ where
         }
     }
 
-    fn materialized_body(&self) -> &Arc<TypedTensorBody<R, D>> {
-        match &self.repr {
-            TypedTensorRepr::Owned(body) => body,
-            TypedTensorRepr::Adjoint(_) => self
-                .materialized_adjoint_body()
-                .expect("adjoint representation"),
-        }
-    }
-
     /// Builds an operation-local logical tensor without publishing the
     /// receiver's reusable materialization cache, but still constructs a full
     /// receiver-sized logical payload. Prefer an oriented kernel or algebraic
@@ -4786,30 +4792,22 @@ where
     pub fn data(&self) -> &[D] {
         match &self.repr {
             TypedTensorRepr::Owned(body) => body.materialized_dense_data(),
-            TypedTensorRepr::Adjoint(_) => self
-                .materialized_adjoint_body()
-                .expect("adjoint representation")
+            TypedTensorRepr::Adjoint(view) => view
+                .materialized
+                .get_or_init(|| {
+                    let data = tenet_tensors::materialize_adjoint_data_dyn(
+                        view.parent.space.space(),
+                        view.logical_space.space(),
+                        view.parent.materialized_dense_data(),
+                    )
+                    .expect("a pre-admitted typed adjoint must materialize");
+                    #[cfg(test)]
+                    view.materialized_body_builds
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Arc::new(TypedTensorBody::dense(view.logical_space.clone(), data))
+                })
                 .materialized_dense_data(),
         }
-    }
-
-    fn materialized_adjoint_body(&self) -> Option<&Arc<TypedTensorBody<R, D>>> {
-        let TypedTensorRepr::Adjoint(view) = &self.repr else {
-            return None;
-        };
-        Some(view.materialized.get_or_init(|| {
-            let parent = &view.parent;
-            let data = tenet_tensors::materialize_adjoint_data_dyn(
-                parent.space.space(),
-                view.logical_space.space(),
-                parent.materialized_dense_data(),
-            )
-            .expect("a pre-admitted typed adjoint must materialize");
-            #[cfg(test)]
-            view.materialized_body_builds
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Arc::new(TypedTensorBody::dense(view.logical_space.clone(), data))
-        }))
     }
 }
 
