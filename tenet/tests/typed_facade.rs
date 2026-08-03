@@ -2598,24 +2598,6 @@ fn repartition_is_sign_free_even_for_a_fermionic_provider() {
 // against the erased facade, which routes through the same `*_dyn` seams.
 // ---------------------------------------------------------------------------
 
-/// Decodes an erased spectrum's raw ids into `Z2Irrep` labels, so an erased
-/// spectrum can be compared to a typed one label-for-label.
-fn erased_z2_spectrum(
-    spectrum: &[tenet::prelude::SectorSpectrum],
-) -> Vec<(tenet::core::Z2Irrep, Vec<f64>)> {
-    let mut decoded: Vec<_> = spectrum
-        .iter()
-        .map(|entry| {
-            (
-                SectorCodec::decode_sector(&tenet::core::Z2FusionRule, entry.sector).unwrap(),
-                entry.values.clone(),
-            )
-        })
-        .collect();
-    decoded.sort_by_key(|(sector, _)| *sector);
-    decoded
-}
-
 fn typed_z2_spectrum(
     spectrum: &[tenet::typed::SectorSpectrum<tenet::core::Z2Irrep>],
 ) -> Vec<(tenet::core::Z2Irrep, Vec<f64>)> {
@@ -2793,23 +2775,41 @@ fn a_spectrum_decode_failure_comes_back_as_the_codec_error() {
 }
 
 #[test]
-fn svd_vals_reports_decoded_labels_sorted_by_label() {
+fn svd_vals_reports_exact_per_label_spectra() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
+    let leg = GradedSpace::try_new(
+        Arc::new(tenet::core::Z2FusionRule),
+        [
+            (tenet::core::Z2Irrep::EVEN, 3),
+            (tenet::core::Z2Irrep::ODD, 2),
+        ],
+        false,
+    )
+    .unwrap();
+    // Each block is diagonal, so its singular values are the absolute diagonal
+    // entries. Both sectors are deliberately signed and out of magnitude order.
+    let typed = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, indices| {
+        if indices[0] != indices[1] {
+            return 0.0;
+        }
+        if *trees.coupled() == tenet::core::Z2Irrep::EVEN {
+            [-2.0, 5.0, -1.0][indices[0]]
+        } else {
+            assert_eq!(*trees.coupled(), tenet::core::Z2Irrep::ODD);
+            [3.0, -4.0][indices[0]]
+        }
+    })
+    .unwrap();
 
     let spectrum = typed.svd_vals().unwrap();
-    assert_eq!(spectrum.len(), 2);
-    // The oracle: same values as the erased facade, label for label.
     assert_eq!(
         typed_z2_spectrum(&spectrum),
-        erased_z2_spectrum(&erased.svd_vals().unwrap())
+        [
+            (tenet::core::Z2Irrep::EVEN, vec![5.0, 2.0, 1.0]),
+            (tenet::core::Z2Irrep::ODD, vec![4.0, 3.0]),
+        ]
     );
-    assert!(spectrum.windows(2).all(|w| w[0].sector < w[1].sector));
-    // Descending by magnitude within a sector, as the seam guarantees.
-    for entry in &spectrum {
-        assert!(entry.values.windows(2).all(|w| w[0] >= w[1]));
-    }
     // `Z2Irrep` orders exactly as its ids do, so this fixture cannot tell a
     // label sort from an id sort. The next test does.
 }
@@ -6979,37 +6979,39 @@ fn assert_reductions_and_factorizations_agree<R>(
     assert_nonzero(what, typed_c.data());
     assert_nonzero(what, typed_vh.data());
 
-    // `svd_vals` reports labels typed and raw ids erased, so the typed labels
-    // are re-encoded through the provider's own codec rather than compared by
-    // position: the two facades are free to order the spectrum differently.
-    let mut erased_spectrum: Vec<(SectorId, Vec<f64>)> = erased
-        .0
-        .svd_vals()
-        .unwrap()
-        .into_iter()
-        .map(|entry| (entry.sector, entry.values))
-        .collect();
-    let mut typed_spectrum: Vec<(SectorId, Vec<f64>)> = typed
-        .0
-        .svd_vals()
-        .unwrap()
-        .into_iter()
-        .map(|entry| {
-            (
-                SectorCodec::encode_sector(typed.0.codomain()[0].provider(), &entry.sector)
-                    .unwrap(),
-                entry.values,
-            )
-        })
-        .collect();
-    erased_spectrum.sort_by_key(|(sector, _)| *sector);
-    typed_spectrum.sort_by_key(|(sector, _)| *sector);
-    assert_eq!(typed_spectrum, erased_spectrum, "{what}: svd_vals");
+    let typed_spectrum = typed.0.svd_vals().unwrap();
+    assert!(
+        typed_spectrum
+            .windows(2)
+            .all(|pair| pair[0].sector < pair[1].sector),
+        "{what}: svd_vals labels are not strictly sorted"
+    );
+    assert!(
+        typed_spectrum.iter().all(|entry| {
+            entry.values.iter().all(|value| *value >= 0.0)
+                && entry.values.windows(2).all(|pair| pair[0] >= pair[1])
+        }),
+        "{what}: svd_vals are not nonnegative and descending"
+    );
     assert!(
         typed_spectrum
             .iter()
-            .any(|(_, values)| values.iter().any(|value| *value != 0.0)),
+            .any(|entry| entry.values.iter().any(|value| *value != 0.0)),
         "{what}: svd_vals is vacuously zero"
+    );
+    let codomain = typed.0.codomain();
+    let provider = codomain[0].provider();
+    let spectral_weight: f64 = typed_spectrum
+        .iter()
+        .map(|entry| {
+            let sector = SectorCodec::encode_sector(provider, &entry.sector).unwrap();
+            provider.dim_scalar(sector)
+                * entry.values.iter().map(|value| value * value).sum::<f64>()
+        })
+        .sum();
+    assert!(
+        (spectral_weight - self_inner).abs() < 1e-9 * self_inner.abs().max(1.0),
+        "{what}: weighted sum(sigma^2) = {spectral_weight}, <t, t> = {self_inner}"
     );
 }
 
