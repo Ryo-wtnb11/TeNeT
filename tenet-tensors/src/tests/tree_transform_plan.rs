@@ -8612,6 +8612,7 @@ fn racah_generated_sun_adjoint_checked_bound_round_trips() {
 #[cfg(feature = "racah-generated")]
 fn measured_provider_phase<T>(
     provider: &MeasurementProvider<tenet_sectors::SUNFusionRule>,
+    case: &str,
     phase: &str,
     run: impl FnOnce() -> T,
 ) -> T {
@@ -8619,28 +8620,26 @@ fn measured_provider_phase<T>(
     let started = std::time::Instant::now();
     let output = run();
     println!(
-        "phase={phase} ns={} calls={:?}",
+        "case={case} phase={phase} ns={} calls={:?}",
         started.elapsed().as_nanos(),
         provider.calls.get()
     );
     output
 }
 
-/// Measurement only: direct private-phase timings are intentionally kept in
-/// the unit-test crate rather than exposed as production APIs. Allocation
-/// counts for these private phases are unavailable under `forbid(unsafe_code)`;
-/// the companion integration measurement covers public compile/replay/owned
-/// calls with its existing counting allocator.
 #[cfg(feature = "racah-generated")]
-#[test]
-#[ignore = "manual checked-Generic transform phase measurement"]
 #[allow(clippy::arc_with_non_send_sync)]
-fn measure_checked_generic_transform_phases() {
+fn measure_checked_generic_transform_case(
+    n: usize,
+    adjoint_labels: &[i64],
+    case: &str,
+    operation: TreeTransformOperation,
+) {
     use tenet_sectors::SUNFusionRule;
 
-    println!("call_order=channels,dual,n,sqrt_dim,inv_sqrt_dim,frobenius_schur,f,r");
-    let inner = SUNFusionRule::new(3).unwrap();
-    let adjoint = inner.encode_dynkin(&[1, 1]).unwrap();
+    tenet_sectors::su2_coefficient_cache::reset();
+    let inner = SUNFusionRule::new(n).unwrap();
+    let adjoint = inner.encode_dynkin(adjoint_labels).unwrap();
     let provider = Arc::new(MeasurementProvider::new(inner));
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new(
@@ -8648,8 +8647,6 @@ fn measure_checked_generic_transform_phases() {
         ),
         FusionProductSpace::new([SectorLeg::new([(adjoint, 1)], false)]),
     );
-    let operation = TreeTransformOperation::permute([1, 0], [2]);
-
     // Warm only Racah's product enumeration before measuring TeNeT's residual
     // lifecycle. Coefficient generation remains cold for the separately
     // reported first plan build below.
@@ -8661,7 +8658,7 @@ fn measure_checked_generic_transform_phases() {
         .unwrap();
     provider.reset_calls();
 
-    let source = measured_provider_phase(provider.as_ref(), "source_admission", || {
+    let source = measured_provider_phase(provider.as_ref(), case, "source_admission", || {
         crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
             Arc::clone(&provider),
             homspace,
@@ -8672,7 +8669,7 @@ fn measure_checked_generic_transform_phases() {
         .map(|index| index as f64 + 1.0)
         .collect::<Vec<_>>();
 
-    let identity = measured_provider_phase(provider.as_ref(), "owned_preflight", || {
+    let identity = measured_provider_phase(provider.as_ref(), case, "owned_preflight", || {
         let identity = source
             .space()
             .validate_transformed_generic_checked_identity(provider.as_ref())
@@ -8685,20 +8682,25 @@ fn measure_checked_generic_transform_phases() {
         .unwrap();
         identity
     });
-    let prepared = measured_provider_phase(provider.as_ref(), "destination_layout", || {
+    let prepared = measured_provider_phase(provider.as_ref(), case, "destination_layout", || {
         source
             .space()
             .prepare_transformed_generic_checked(provider.as_ref(), &operation, identity)
             .unwrap()
     });
-    let plan = measured_provider_phase(provider.as_ref(), "coefficient_plan_cold", || {
-        build_checked_generic_tree_pair_transform_group_plan(
-            provider.as_ref(),
-            operation.clone(),
-            source.space().structure(),
-        )
-        .unwrap()
-    });
+    let plan = measured_provider_phase(
+        provider.as_ref(),
+        case,
+        "plan_build_including_repeated_preflight_first",
+        || {
+            build_checked_generic_tree_pair_transform_group_plan(
+                provider.as_ref(),
+                operation.clone(),
+                source.space().structure(),
+            )
+            .unwrap()
+        },
+    );
     let mut warm_plan_ns = Vec::with_capacity(7);
     let mut warm_plan_calls = None;
     for _ in 0..7 {
@@ -8721,16 +8723,16 @@ fn measure_checked_generic_transform_phases() {
     }
     warm_plan_ns.sort_unstable();
     println!(
-        "phase=coefficient_plan_warm samples_ns={warm_plan_ns:?} median_ns={} calls={:?}",
+        "case={case} phase=plan_build_including_repeated_preflight_repeat samples_ns={warm_plan_ns:?} median_ns={} calls={:?}",
         warm_plan_ns[warm_plan_ns.len() / 2],
         warm_plan_calls.unwrap()
     );
-    let replay = measured_provider_phase(provider.as_ref(), "structure_compile", || {
+    let replay = measured_provider_phase(provider.as_ref(), case, "structure_compile", || {
         plan.compile_structures(prepared.structure(), source.space().structure())
             .unwrap()
     });
     println!(
-        "structure retained_bytes={}",
+        "case={case} structure_retained_payload_bytes={} excludes_dependent_layouts=true excludes_runtime_entry=true",
         replay.charged_payload_bytes()
     );
 
@@ -8752,7 +8754,7 @@ fn measure_checked_generic_transform_phases() {
         .unwrap();
     destination_data.fill(0.0);
     let mut replay_profile = TreeTransformReplayProfile::default();
-    measured_provider_phase(provider.as_ref(), "replay_preallocated", || {
+    measured_provider_phase(provider.as_ref(), case, "replay_preallocated", || {
         backend
             .tree_transform_structure_into_raw_profiled(
                 &mut workspace,
@@ -8768,20 +8770,20 @@ fn measure_checked_generic_transform_phases() {
             .unwrap()
     });
     println!(
-        "replay profile_ns={} temporary_source={} temporary_destination={} temporary_bytes={}",
+        "case={case} replay_profile_ns={} workspace_source_len_after_warmup={} workspace_destination_len_after_warmup={} workspace_logical_bytes_after_warmup={}",
         replay_profile.total.as_nanos(),
         workspace.source_len(),
         workspace.destination_len(),
         (workspace.source_len() + workspace.destination_len()) * core::mem::size_of::<f64>()
     );
 
-    let committed = measured_provider_phase(provider.as_ref(), "commit", || {
+    let committed = measured_provider_phase(provider.as_ref(), case, "commit", || {
         source
             .commit_final_homspace_generic_bound_checked(prepared)
             .unwrap()
     });
     let (first_space, first_data) =
-        measured_provider_phase(provider.as_ref(), "owned_warm_first", || {
+        measured_provider_phase(provider.as_ref(), case, "owned_warm_first", || {
             crate::tree_transform_dyn_owned_checked_generic(
                 operation.clone(),
                 &source,
@@ -8791,7 +8793,7 @@ fn measure_checked_generic_transform_phases() {
             .unwrap()
         });
     let (repeated_space, repeated_data) =
-        measured_provider_phase(provider.as_ref(), "owned_warm_repeat", || {
+        measured_provider_phase(provider.as_ref(), case, "owned_warm_repeat", || {
             crate::tree_transform_dyn_owned_checked_generic(operation, &source, &source_data, 1.0)
                 .unwrap()
         });
@@ -8806,6 +8808,35 @@ fn measure_checked_generic_transform_phases() {
     }
     assert!(Arc::ptr_eq(first_space.provider_arc(), &provider));
     assert!(Arc::ptr_eq(repeated_space.provider_arc(), &provider));
+}
+
+/// Measurement only: direct private-phase timings are intentionally kept in
+/// the unit-test crate rather than exposed as production APIs. Allocation
+/// counts for these private phases are unavailable under `forbid(unsafe_code)`;
+/// the companion integration measurement covers public owned calls with its
+/// existing counting allocator.
+#[cfg(feature = "racah-generated")]
+#[test]
+#[ignore = "manual checked-Generic transform phase measurement"]
+fn measure_checked_generic_transform_phases() {
+    println!("call_order=channels,dual,n,sqrt_dim,inv_sqrt_dim,frobenius_schur,f,r");
+    println!("spy_instrumented_phase_timings_auxiliary_only=true");
+    for (n, adjoint_labels) in [(3, &[1, 1][..]), (4, &[1, 0, 1][..])] {
+        for (operation_name, operation) in [
+            ("permute", TreeTransformOperation::permute([1, 0], [2])),
+            (
+                "braid",
+                TreeTransformOperation::braid([1, 0], [2], [0, 1], [2]),
+            ),
+            (
+                "repartition",
+                TreeTransformOperation::transpose([0], [2, 1]),
+            ),
+        ] {
+            let case = format!("su{n}_{operation_name}");
+            measure_checked_generic_transform_case(n, adjoint_labels, &case, operation);
+        }
+    }
 }
 
 #[test]
