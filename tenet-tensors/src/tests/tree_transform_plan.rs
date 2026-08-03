@@ -7904,6 +7904,154 @@ where
     }
 }
 
+#[cfg(feature = "racah-generated")]
+#[derive(Clone, Copy, Debug)]
+enum MeasurementProviderCall {
+    Channels,
+    Dual,
+    N,
+    SqrtDim,
+    InvSqrtDim,
+    FrobeniusSchur,
+    F,
+    R,
+}
+
+#[cfg(feature = "racah-generated")]
+impl MeasurementProviderCall {
+    const COUNT: usize = 8;
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+#[cfg(feature = "racah-generated")]
+struct MeasurementProvider<P> {
+    inner: P,
+    calls: std::cell::Cell<[usize; MeasurementProviderCall::COUNT]>,
+}
+
+#[cfg(feature = "racah-generated")]
+impl<P> MeasurementProvider<P> {
+    fn new(inner: P) -> Self {
+        Self {
+            inner,
+            calls: std::cell::Cell::new([0; MeasurementProviderCall::COUNT]),
+        }
+    }
+
+    fn hit(&self, call: MeasurementProviderCall) {
+        let mut calls = self.calls.get();
+        calls[call.index()] += 1;
+        self.calls.set(calls);
+    }
+
+    fn reset_calls(&self) {
+        self.calls.set([0; MeasurementProviderCall::COUNT]);
+    }
+}
+
+#[cfg(feature = "racah-generated")]
+impl<P: CheckedGenericFusion> CheckedGenericFusion for MeasurementProvider<P> {
+    type Error = P::Error;
+
+    fn rule_identity(&self) -> tenet_core::RuleIdentity {
+        self.inner.rule_identity()
+    }
+
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.inner.fusion_style()
+    }
+
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.inner.braiding_style()
+    }
+
+    fn vacuum(&self) -> SectorId {
+        self.inner.vacuum()
+    }
+
+    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+        self.hit(MeasurementProviderCall::Dual);
+        self.inner.try_dual(sector)
+    }
+
+    fn try_fusion_channels(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        self.hit(MeasurementProviderCall::Channels);
+        self.inner.try_fusion_channels(left, right)
+    }
+
+    fn try_fusion_channels_in_table(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        self.hit(MeasurementProviderCall::Channels);
+        self.inner.try_fusion_channels_in_table(left, right)
+    }
+
+    fn try_nsymbol(
+        &self,
+        left: SectorId,
+        right: SectorId,
+        coupled: SectorId,
+    ) -> Result<usize, Self::Error> {
+        self.hit(MeasurementProviderCall::N);
+        self.inner.try_nsymbol(left, right, coupled)
+    }
+}
+
+#[cfg(feature = "racah-generated")]
+impl<P: CheckedGenericRigidSymbols> CheckedGenericRigidSymbols for MeasurementProvider<P> {
+    type Scalar = P::Scalar;
+
+    fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        self.hit(MeasurementProviderCall::SqrtDim);
+        self.inner.try_sqrt_dim_scalar(sector)
+    }
+
+    fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
+        self.hit(MeasurementProviderCall::InvSqrtDim);
+        self.inner.try_inv_sqrt_dim_scalar(sector)
+    }
+
+    fn try_frobenius_schur_phase_scalar(
+        &self,
+        sector: SectorId,
+    ) -> Result<Self::Scalar, Self::Error> {
+        self.hit(MeasurementProviderCall::FrobeniusSchur);
+        self.inner.try_frobenius_schur_phase_scalar(sector)
+    }
+
+    fn try_f_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+        d: SectorId,
+        e: SectorId,
+        f: SectorId,
+    ) -> Result<GenericFArray<Self::Scalar>, Self::Error> {
+        self.hit(MeasurementProviderCall::F);
+        self.inner.try_f_symbol_generic(a, b, c, d, e, f)
+    }
+
+    fn try_r_symbol_generic(
+        &self,
+        a: SectorId,
+        b: SectorId,
+        c: SectorId,
+    ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> {
+        self.hit(MeasurementProviderCall::R);
+        self.inner.try_r_symbol_generic(a, b, c)
+    }
+}
+
 struct SynchronizedCheckedGeneric {
     rule: DenseGenericRule,
     calls: std::sync::Mutex<usize>,
@@ -8459,6 +8607,205 @@ fn racah_generated_sun_adjoint_checked_bound_round_trips() {
             }
         }
     }
+}
+
+#[cfg(feature = "racah-generated")]
+fn measured_provider_phase<T>(
+    provider: &MeasurementProvider<tenet_sectors::SUNFusionRule>,
+    phase: &str,
+    run: impl FnOnce() -> T,
+) -> T {
+    provider.reset_calls();
+    let started = std::time::Instant::now();
+    let output = run();
+    println!(
+        "phase={phase} ns={} calls={:?}",
+        started.elapsed().as_nanos(),
+        provider.calls.get()
+    );
+    output
+}
+
+/// Measurement only: direct private-phase timings are intentionally kept in
+/// the unit-test crate rather than exposed as production APIs. Allocation
+/// counts for these private phases are unavailable under `forbid(unsafe_code)`;
+/// the companion integration measurement covers public compile/replay/owned
+/// calls with its existing counting allocator.
+#[cfg(feature = "racah-generated")]
+#[test]
+#[ignore = "manual checked-Generic transform phase measurement"]
+#[allow(clippy::arc_with_non_send_sync)]
+fn measure_checked_generic_transform_phases() {
+    use tenet_sectors::SUNFusionRule;
+
+    println!("call_order=channels,dual,n,sqrt_dim,inv_sqrt_dim,frobenius_schur,f,r");
+    let inner = SUNFusionRule::new(3).unwrap();
+    let adjoint = inner.encode_dynkin(&[1, 1]).unwrap();
+    let provider = Arc::new(MeasurementProvider::new(inner));
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new(
+            [1usize, 1].map(|degeneracy| SectorLeg::new([(adjoint, degeneracy)], false)),
+        ),
+        FusionProductSpace::new([SectorLeg::new([(adjoint, 1)], false)]),
+    );
+    let operation = TreeTransformOperation::permute([1, 0], [2]);
+
+    // Warm only Racah's product enumeration before measuring TeNeT's residual
+    // lifecycle. Coefficient generation remains cold for the separately
+    // reported first plan build below.
+    let _product_warm_source =
+        crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+            Arc::clone(&provider),
+            homspace.clone(),
+        )
+        .unwrap();
+    provider.reset_calls();
+
+    let source = measured_provider_phase(provider.as_ref(), "source_admission", || {
+        crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+            Arc::clone(&provider),
+            homspace,
+        )
+        .unwrap()
+    });
+    let source_data = (0..source.space().required_len().unwrap())
+        .map(|index| index as f64 + 1.0)
+        .collect::<Vec<_>>();
+
+    let identity = measured_provider_phase(provider.as_ref(), "owned_preflight", || {
+        let identity = source
+            .space()
+            .validate_transformed_generic_checked_identity(provider.as_ref())
+            .unwrap();
+        crate::tree_transform::validate_checked_generic_tree_pair_plan_preflight(
+            provider.as_ref(),
+            &operation,
+            source.space().structure(),
+        )
+        .unwrap();
+        identity
+    });
+    let prepared = measured_provider_phase(provider.as_ref(), "destination_layout", || {
+        source
+            .space()
+            .prepare_transformed_generic_checked(provider.as_ref(), &operation, identity)
+            .unwrap()
+    });
+    let plan = measured_provider_phase(provider.as_ref(), "coefficient_plan_cold", || {
+        build_checked_generic_tree_pair_transform_group_plan(
+            provider.as_ref(),
+            operation.clone(),
+            source.space().structure(),
+        )
+        .unwrap()
+    });
+    let mut warm_plan_ns = Vec::with_capacity(7);
+    let mut warm_plan_calls = None;
+    for _ in 0..7 {
+        provider.reset_calls();
+        let started = std::time::Instant::now();
+        let warm_plan = build_checked_generic_tree_pair_transform_group_plan(
+            provider.as_ref(),
+            operation.clone(),
+            source.space().structure(),
+        )
+        .unwrap();
+        std::hint::black_box(warm_plan);
+        warm_plan_ns.push(started.elapsed().as_nanos());
+        let calls = provider.calls.get();
+        if let Some(expected) = warm_plan_calls {
+            assert_eq!(calls, expected);
+        } else {
+            warm_plan_calls = Some(calls);
+        }
+    }
+    warm_plan_ns.sort_unstable();
+    println!(
+        "phase=coefficient_plan_warm samples_ns={warm_plan_ns:?} median_ns={} calls={:?}",
+        warm_plan_ns[warm_plan_ns.len() / 2],
+        warm_plan_calls.unwrap()
+    );
+    let replay = measured_provider_phase(provider.as_ref(), "structure_compile", || {
+        plan.compile_structures(prepared.structure(), source.space().structure())
+            .unwrap()
+    });
+    println!(
+        "structure retained_bytes={}",
+        replay.charged_payload_bytes()
+    );
+
+    let destination_structure = Arc::new(prepared.structure().clone());
+    let mut destination_data = vec![0.0; prepared.required_len()];
+    let mut backend = DenseTreeTransformOperations::default();
+    let mut workspace = TreeTransformWorkspace::<f64>::default();
+    backend
+        .tree_transform_structure_into_raw(
+            &mut workspace,
+            &replay,
+            &destination_structure,
+            source.space().structure(),
+            &mut destination_data,
+            &source_data,
+            1.0,
+            0.0,
+        )
+        .unwrap();
+    destination_data.fill(0.0);
+    let mut replay_profile = TreeTransformReplayProfile::default();
+    measured_provider_phase(provider.as_ref(), "replay_preallocated", || {
+        backend
+            .tree_transform_structure_into_raw_profiled(
+                &mut workspace,
+                &replay,
+                &destination_structure,
+                source.space().structure(),
+                &mut destination_data,
+                &source_data,
+                1.0,
+                0.0,
+                &mut replay_profile,
+            )
+            .unwrap()
+    });
+    println!(
+        "replay profile_ns={} temporary_source={} temporary_destination={} temporary_bytes={}",
+        replay_profile.total.as_nanos(),
+        workspace.source_len(),
+        workspace.destination_len(),
+        (workspace.source_len() + workspace.destination_len()) * core::mem::size_of::<f64>()
+    );
+
+    let committed = measured_provider_phase(provider.as_ref(), "commit", || {
+        source
+            .commit_final_homspace_generic_bound_checked(prepared)
+            .unwrap()
+    });
+    let (first_space, first_data) =
+        measured_provider_phase(provider.as_ref(), "owned_warm_first", || {
+            crate::tree_transform_dyn_owned_checked_generic(
+                operation.clone(),
+                &source,
+                &source_data,
+                1.0,
+            )
+            .unwrap()
+        });
+    let (repeated_space, repeated_data) =
+        measured_provider_phase(provider.as_ref(), "owned_warm_repeat", || {
+            crate::tree_transform_dyn_owned_checked_generic(operation, &source, &source_data, 1.0)
+                .unwrap()
+        });
+
+    assert_eq!(committed.space(), first_space.space());
+    assert_eq!(first_space.space(), repeated_space.space());
+    for (actual, expected) in destination_data.iter().zip(&first_data) {
+        assert!((actual - expected).abs() <= 1e-12);
+    }
+    for (actual, expected) in first_data.iter().zip(&repeated_data) {
+        assert!((actual - expected).abs() <= 1e-12);
+    }
+    assert!(Arc::ptr_eq(first_space.provider_arc(), &provider));
+    assert!(Arc::ptr_eq(repeated_space.provider_arc(), &provider));
 }
 
 #[test]
