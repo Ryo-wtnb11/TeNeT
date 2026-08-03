@@ -9633,6 +9633,8 @@ fn typed_contract_ordered_handles_a_zero_codomain_output_split() {
 
 #[test]
 fn typed_contract_ordered_parallel_su2_replay_matches_serial() {
+    let _guard = cache_lock();
+
     fn run(runtime: &Runtime) -> Vec<f64> {
         let provider = Arc::new(SU2FusionRule);
         let leg = GradedSpace::try_new(
