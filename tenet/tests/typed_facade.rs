@@ -9552,6 +9552,48 @@ fn typed_absorb_pins_the_common_prefix_by_value() {
 }
 
 #[test]
+fn typed_absorb_is_total_for_disjoint_zero_extent_and_rank_zero() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(tenet::core::U1FusionRule);
+    let zero = u1_leg(&provider, &[(0, 2)]);
+    let one = u1_leg(&provider, &[(1, 3)]);
+    let destination: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::from_block_fn(&runtime, [&zero], [&zero], |_, i| (i[0] + 10 * i[1]) as f64)
+            .unwrap();
+    let disjoint: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::from_block_fn(&runtime, [&one], [&one], |_, _| 7.0).unwrap();
+    assert_eq!(
+        destination.absorb(&disjoint).unwrap().data(),
+        destination.data()
+    );
+
+    let zero_extent = u1_leg(&provider, &[(0, 0)]);
+    let empty: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::zeros(&runtime, [&zero_extent], [&zero_extent]).unwrap();
+    assert!(empty.absorb(&destination).unwrap().data().is_empty());
+
+    let vector: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::from_block_fn(&runtime, [&zero], [], |_, _| 2.0).unwrap();
+    let covector: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::from_block_fn(&runtime, [], [&zero], |_, _| 3.0).unwrap();
+    let source_vector: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::from_block_fn(&runtime, [&zero], [], |_, _| 5.0).unwrap();
+    let source_covector: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::from_block_fn(&runtime, [], [&zero], |_, _| 7.0).unwrap();
+    let scalar_destination = covector.compose(&vector).unwrap();
+    let scalar_source = source_covector.compose(&source_vector).unwrap();
+    assert_eq!(
+        scalar_destination
+            .absorb(&scalar_source)
+            .unwrap()
+            .scalar()
+            .unwrap(),
+        scalar_source.scalar().unwrap()
+    );
+}
+
+#[test]
 fn typed_cat_and_absorb_error_classes_match_the_erased_facade() {
     // What (gate 4): every validation failure reports the erased facade's
     // error class, in the erased facade's order. For the checks whose
@@ -9748,6 +9790,34 @@ fn typed_cat_and_absorb_reject_a_foreign_rule_identity_first() {
     ] {
         assert!(matches!(error, tenet::prelude::Error::RuleMismatch));
     }
+
+    let other_runtime = Runtime::builder().build().unwrap();
+    let foreign = Arc::new(ExternalZ3::tagged(7));
+    let foreign_leg = GradedSpace::try_new(
+        Arc::clone(&foreign),
+        [(Z3Charge(0), 1), (Z3Charge(1), 1)],
+        false,
+    )
+    .unwrap();
+    let foreign_runtime: TensorMap<ExternalZ3, f64> =
+        TensorMap::from_block_fn(&other_runtime, [&foreign_leg], [&foreign_leg], |_, _| 1.0)
+            .unwrap();
+    assert!(matches!(
+        ours.absorb(&foreign_runtime).unwrap_err(),
+        tenet::prelude::Error::RuleMismatch
+    ));
+
+    let foreign_bad_rank: TensorMap<ExternalZ3, f64> = TensorMap::from_block_fn(
+        &other_runtime,
+        [&foreign_leg, &foreign_leg],
+        [&foreign_leg],
+        |_, _| 1.0,
+    )
+    .unwrap();
+    assert!(matches!(
+        ours.absorb(&foreign_bad_rank).unwrap_err(),
+        tenet::prelude::Error::InvalidArgument(_)
+    ));
 }
 
 #[test]
@@ -11111,6 +11181,61 @@ fn contract_ordered_error_classes_and_their_both_defect_precedence() {
         1.0,
     );
     assert!(lhs.contract_ordered(&rhs, &[1], &[0], &[0, 1]).is_err());
+}
+
+#[test]
+fn typed_contract_ordered_handles_a_zero_codomain_output_split() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+    let provider = Arc::new(tenet::core::U1FusionRule);
+    let leg = u1_leg(&provider, &[(-1, 1), (0, 2), (1, 1)]);
+    let lhs: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::rand_with_seed(&runtime, [], [&leg], 224_303).unwrap();
+    let rhs: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::rand_with_seed(&runtime, [&leg], [&leg, &leg], 224_304).unwrap();
+
+    let actual = lhs.contract_ordered(&rhs, &[0], &[0], &[1, 0]).unwrap();
+    let expected = lhs
+        .contract(&rhs, &[0], &[0], &[0, 1])
+        .unwrap()
+        .permute(&[], &[1, 0])
+        .unwrap();
+    assert_eq!(actual.data(), expected.data());
+}
+
+#[test]
+fn typed_contract_ordered_parallel_su2_replay_matches_serial() {
+    fn run(runtime: &Runtime) -> Vec<f64> {
+        let provider = Arc::new(SU2FusionRule);
+        let leg = GradedSpace::try_new(
+            provider,
+            [
+                (SU2Irrep::from_twice_spin(0), 2),
+                (SU2Irrep::from_twice_spin(1), 3),
+                (SU2Irrep::from_twice_spin(2), 2),
+            ],
+            false,
+        )
+        .unwrap();
+        let lhs: TensorMap<SU2FusionRule, f64> =
+            TensorMap::rand_with_seed(runtime, [&leg, &leg], [&leg, &leg], 224_401).unwrap();
+        let rhs: TensorMap<SU2FusionRule, f64> =
+            TensorMap::rand_with_seed(runtime, [&leg, &leg], [&leg, &leg], 224_402).unwrap();
+        lhs.contract_ordered(&rhs, &[3, 2], &[0, 1], &[2, 0, 3, 1])
+            .unwrap()
+            .data()
+            .to_vec()
+    }
+
+    let serial = Runtime::builder().recoupling_threads(1).build().unwrap();
+    let parallel = Runtime::builder().recoupling_threads(2).build().unwrap();
+    let serial = run(&serial);
+    let parallel = run(&parallel);
+    assert_eq!(serial.len(), parallel.len());
+    assert!(serial
+        .iter()
+        .zip(parallel)
+        .all(|(&serial, parallel)| (serial - parallel).abs() < 1e-12));
 }
 
 #[test]
