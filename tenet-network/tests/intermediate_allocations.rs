@@ -588,7 +588,7 @@ where
         GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), chi)], false).unwrap();
     let left =
         GradedSpace::try_new(Arc::clone(&provider), [(U1Irrep::new(0), chi + 1)], false).unwrap();
-    let right = GradedSpace::try_new(provider, [(U1Irrep::new(0), chi + 2)], false).unwrap();
+    let right = GradedSpace::try_new(provider, [(U1Irrep::new(0), chi + 1)], false).unwrap();
     let left_dual = left.try_dual().unwrap();
     let tensors: [TypedTensorMap<U1FusionRule, D>; 3] = std::array::from_fn(|index| {
         let (codomain, domain) = match index {
@@ -883,25 +883,43 @@ fn measured_typed_overwrite_witness() {
             let warm = run_typed_overwrite_worker(dtype, chi, true);
             assert_eq!(fresh.len(), 3);
             assert_eq!(warm.len(), 3);
-            let median = |samples: &[AllocationSample], field: fn(&AllocationSample) -> u64| {
-                median3([field(&samples[0]), field(&samples[1]), field(&samples[2])])
+            let values = |samples: &[AllocationSample], field: fn(&AllocationSample) -> u64| {
+                [field(&samples[0]), field(&samples[1]), field(&samples[2])]
             };
-            assert!(
-                median(&fresh, |sample| sample.peak_live_delta)
-                    > median(&warm, |sample| sample.peak_live_delta)
+            let fresh_peak = values(&fresh, |sample| sample.peak_live_delta);
+            let warm_peak = values(&warm, |sample| sample.peak_live_delta);
+            let fresh_retained = values(&fresh, |sample| sample.retained_live_bytes);
+            let warm_retained = values(&warm, |sample| sample.retained_live_bytes);
+            let fresh_payload_retained =
+                values(&fresh, |sample| sample.payload_retained_live_bytes);
+            let warm_payload_retained = values(&warm, |sample| sample.payload_retained_live_bytes);
+            let diagnostics = format!(
+                "dtype={dtype}, chi={chi}, fresh peak={fresh_peak:?} (median {}), warm peak={warm_peak:?} (median {}), fresh retained={fresh_retained:?} (median {}), warm retained={warm_retained:?} (median {}), fresh payload retained={fresh_payload_retained:?} (median {}), warm payload retained={warm_payload_retained:?} (median {})",
+                median3(fresh_peak),
+                median3(warm_peak),
+                median3(fresh_retained),
+                median3(warm_retained),
+                median3(fresh_payload_retained),
+                median3(warm_payload_retained),
             );
             assert!(
-                median(&fresh, |sample| sample.retained_live_bytes)
-                    > median(&warm, |sample| sample.retained_live_bytes)
+                fresh.iter().all(|sample| {
+                    sample.payload_retained_live_bytes == sample.payload_size_bytes
+                        && sample.payload_output_live_bytes == sample.payload_size_bytes
+                        && sample.payload_alloc_calls == 2
+                        && sample.registry_overflows == 0
+                }),
+                "{diagnostics}; fresh samples={fresh:?}"
             );
-            assert_eq!(
-                median(&warm, |sample| sample.payload_retained_live_bytes),
-                0
+            assert!(
+                warm.iter().all(|sample| {
+                    sample.payload_retained_live_bytes == 0
+                        && sample.payload_output_live_bytes == sample.payload_size_bytes
+                        && sample.payload_alloc_calls == 1
+                        && sample.registry_overflows == 0
+                }),
+                "{diagnostics}; warm samples={warm:?}"
             );
-            assert!(warm.iter().all(|sample| {
-                sample.payload_output_live_bytes == sample.payload_size_bytes
-                    && sample.registry_overflows == 0
-            }));
         }
     }
 }

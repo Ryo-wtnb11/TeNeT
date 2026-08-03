@@ -9,13 +9,18 @@ probe; the reuse mode retains them.
 
 The allocator records alloc, realloc, and dealloc calls and bytes. A fixed,
 allocation-free pointer registry tracks allocations originating inside the
-probe, which makes current and peak live bytes independent of delayed frees for
-objects allocated during warm-up. Three probes are reported; hard gates use the
-median so one delayed backend-worker allocation cannot select the result.
+probe, which makes current live bytes independent of delayed frees for objects
+allocated during warm-up. Three probes are reported. Global total peak-live
+bytes remain diagnostic: legitimate backend and harness transients can overlap
+a probe and dominate that process-wide maximum. Hard gates instead use the
+fixture-local payload ownership fields below. Total retained bytes after the
+escaping output is dropped remain diagnostic for the same reason as total peak
+bytes.
 
-Payload allocations are classified by the oracle output storage size. These
-matrix-chain fixtures have equal-sized contraction, orientation, and final
-payloads. The gate therefore distinguishes:
+Payload allocations are classified by the oracle output storage size. In these
+matrix-chain fixtures, both left and right spaces have degeneracy `chi + 1`, so
+the first contraction intermediate, its orientation buffer, and the final
+output each hold `(chi + 1)^2` scalar values. The gate therefore distinguishes:
 
 - payload alloc calls and peak payload bytes;
 - payload bytes retained by non-final intermediates after the output is freed;
