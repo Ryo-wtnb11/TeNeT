@@ -57,6 +57,7 @@ fn measure(f: impl FnOnce()) -> (usize, usize) {
     (ALLOCATIONS.get(), BYTES.get())
 }
 
+#[cfg(feature = "racah-generated")]
 fn measure_value<T>(f: impl FnOnce() -> T) -> (T, usize, usize, u128) {
     ALLOCATIONS.set(0);
     BYTES.set(0);
