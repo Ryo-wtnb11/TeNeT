@@ -1016,28 +1016,12 @@ fn typed_fill_value(
 }
 
 #[test]
-fn typed_and_erased_block_fill_produce_identical_storage_on_a_builtin_rule() {
-    // What: for a built-in rule reachable from both facades, the typed checked
-    // construction and the erased one agree byte for byte and block for block —
-    // same layout, same block order, same element order.
+fn typed_block_fill_preserves_tree_and_storage_order() {
+    // What: each typed block exposes the same tree and column-major indices
+    // that drove its fill closure, without borrowing the retired facade as an
+    // oracle.
     let _guard = cache_lock();
     let runtime = runtime();
-
-    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
-    let mut erased_keys: Vec<tenet::prelude::BlockKey> = Vec::new();
-    let erased = tenet::prelude::Tensor::from_block_fn(
-        &runtime,
-        [&space, &space],
-        [&space],
-        |key, indices| {
-            if erased_keys.last() != Some(key) {
-                erased_keys.push(key.clone());
-            }
-            erased_fill_value(key, indices)
-        },
-    )
-    .unwrap();
-
     let provider = Arc::new(tenet::core::Z2FusionRule);
     let leg = GradedSpace::try_new(
         provider,
@@ -1051,23 +1035,29 @@ fn typed_and_erased_block_fill_produce_identical_storage_on_a_builtin_rule() {
     let typed: TensorMap<tenet::core::Z2FusionRule, f64> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], typed_fill_value).unwrap();
 
-    assert_eq!(typed.data(), erased.data());
-    assert_eq!(typed.block_count(), erased_keys.len());
-    for (index, key) in erased_keys.iter().enumerate() {
-        let pair = key.as_fusion_tree_pair().unwrap();
+    assert!(typed.block_count() > 1);
+    for index in 0..typed.block_count() {
+        let block = typed.block(index).unwrap();
         let sectors = typed.block_fusion_trees(index).unwrap();
-        let expected: Vec<tenet::core::Z2Irrep> = pair
-            .codomain_tree()
-            .uncoupled()
-            .iter()
-            .map(|&id| SectorCodec::decode_sector(&tenet::core::Z2FusionRule, id).unwrap())
-            .collect();
-        assert_eq!(sectors.codomain_uncoupled(), expected.as_slice());
-        assert_eq!(
-            sectors.coupled(),
-            &SectorCodec::decode_sector(&tenet::core::Z2FusionRule, pair.codomain_tree().coupled())
-                .unwrap()
-        );
+        for local in 0..block.element_count().unwrap() {
+            let mut remainder = local;
+            let indices: Vec<_> = block
+                .shape()
+                .iter()
+                .map(|&extent| {
+                    let index = remainder % extent;
+                    remainder /= extent;
+                    index
+                })
+                .collect();
+            let offset = block.offset()
+                + indices
+                    .iter()
+                    .zip(block.strides())
+                    .map(|(&index, &stride)| index * stride)
+                    .sum::<usize>();
+            assert_eq!(typed.data()[offset], typed_fill_value(&sectors, &indices));
+        }
     }
 }
 
@@ -8034,7 +8024,11 @@ fn u1_facade_legs() -> (
     GradedSpace<tenet::core::U1FusionRule>,
 ) {
     let erased = tenet::prelude::Space::u1([(0, 2), (1, 1), (-1, 3)]);
-    let typed = GradedSpace::try_new(
+    (erased, u1_typed_leg())
+}
+
+fn u1_typed_leg() -> GradedSpace<tenet::core::U1FusionRule> {
+    GradedSpace::try_new(
         Arc::new(tenet::core::U1FusionRule),
         [
             (tenet::core::U1Irrep::new(0), 2),
@@ -8043,8 +8037,7 @@ fn u1_facade_legs() -> (
         ],
         false,
     )
-    .unwrap();
-    (erased, typed)
+    .unwrap()
 }
 
 /// fZ2 leg pair (erased space, typed graded space) with identical content.
@@ -8053,7 +8046,11 @@ fn fz2_facade_legs() -> (
     GradedSpace<tenet::core::FermionParityFusionRule>,
 ) {
     let erased = tenet::prelude::Space::fz2([(0, 2), (1, 3)]).unwrap();
-    let typed = GradedSpace::try_new(
+    (erased, fz2_typed_leg())
+}
+
+fn fz2_typed_leg() -> GradedSpace<tenet::core::FermionParityFusionRule> {
+    GradedSpace::try_new(
         Arc::new(tenet::core::FermionParityFusionRule),
         [
             (tenet::core::Z2Irrep::EVEN, 2),
@@ -8061,55 +8058,41 @@ fn fz2_facade_legs() -> (
         ],
         false,
     )
-    .unwrap();
-    (erased, typed)
+    .unwrap()
 }
 
 #[test]
-fn typed_and_erased_rand_with_seed_agree_byte_for_byte_f64() {
-    // What: the typed `rand_with_seed` is the erased fill machinery on the
-    // same layout — same splitmix64 stream, same storage order, same bytes —
-    // on a built-in U(1) rule.
+fn typed_rand_with_seed_is_deterministic_f64() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (space, leg) = u1_facade_legs();
-
-    let erased = tenet::prelude::Tensor::rand_with_seed(
-        &runtime,
-        tenet::prelude::Dtype::F64,
-        [&space, &space],
-        [&space],
-        7,
-    )
-    .unwrap();
-    let typed: TensorMap<tenet::core::U1FusionRule, f64> =
+    let leg = u1_typed_leg();
+    let first: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 7).unwrap();
+    let replay: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 7).unwrap();
+    let other: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 8).unwrap();
 
-    assert!(!typed.data().is_empty());
-    assert_eq!(typed.data(), erased.data());
+    assert!(!first.data().is_empty());
+    assert_eq!(first.data(), replay.data());
+    assert_ne!(first.data(), other.data());
 }
 
 #[test]
-fn typed_and_erased_rand_with_seed_agree_byte_for_byte_c64() {
-    // What: the c64 sibling, on the built-in fermionic Z2 rule; real and
-    // imaginary parts both come from the one stream, in the erased order.
+fn typed_rand_with_seed_is_deterministic_c64() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (space, leg) = fz2_facade_legs();
-
-    let erased = tenet::prelude::Tensor::rand_with_seed(
-        &runtime,
-        tenet::prelude::Dtype::C64,
-        [&space, &space],
-        [&space],
-        11,
-    )
-    .unwrap();
-    let typed: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
+    let leg = fz2_typed_leg();
+    let first: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
         TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 11).unwrap();
+    let replay: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 11).unwrap();
+    let other: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
+        TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 12).unwrap();
 
-    assert!(!typed.data().is_empty());
-    assert_eq!(typed.data(), erased.data_c64());
+    assert!(first.data().iter().any(|value| value.im != 0.0));
+    assert_eq!(first.data(), replay.data());
+    assert_ne!(first.data(), other.data());
 }
 
 #[test]
@@ -8145,7 +8128,7 @@ fn typed_isomorphism_satisfies_the_identity_law_on_a_builtin_rule() {
     // below.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, leg) = u1_facade_legs();
+    let leg = u1_typed_leg();
     let dual = leg.try_dual().unwrap();
 
     let f: TensorMap<tenet::core::U1FusionRule, f64> =
@@ -8161,11 +8144,11 @@ fn typed_isomorphism_satisfies_the_identity_law_on_a_builtin_rule() {
 #[test]
 fn typed_unitary_byte_equals_isomorphism() {
     // What: `unitary` is `isomorphism` plus TensorKit's Euclidean
-    // inner-product check, which every tenet fusion rule satisfies — so the
-    // two are byte-identical here, exactly as on the erased facade.
+    // inner-product check, which every tenet fusion rule satisfies, so the two
+    // typed constructors are byte-identical here.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, leg) = fz2_facade_legs();
+    let leg = fz2_typed_leg();
 
     let u: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
         TensorMap::unitary(&runtime, [&leg], [&leg]).unwrap();
@@ -8212,13 +8195,10 @@ fn typed_isometry_embeds_and_satisfies_the_identity_law() {
 }
 
 #[test]
-fn typed_isometry_error_parity_with_erased_on_a_non_embeddable_pair() {
-    // What: a domain that does not embed sectorwise into the codomain is the
-    // same error class on both facades.
+fn typed_isometry_rejects_a_non_embeddable_pair() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (small_space, small) = u1_facade_legs();
-    let big_space = tenet::prelude::Space::u1([(0, 1)]);
+    let small = u1_typed_leg();
     let big = GradedSpace::try_new(
         Arc::new(tenet::core::U1FusionRule),
         [(tenet::core::U1Irrep::new(0), 1)],
@@ -8227,21 +8207,10 @@ fn typed_isometry_error_parity_with_erased_on_a_non_embeddable_pair() {
     .unwrap();
 
     // Domain strictly larger than the codomain: not embeddable.
-    let erased_error = tenet::prelude::Tensor::isometry(
-        &runtime,
-        tenet::prelude::Dtype::F64,
-        [&big_space],
-        [&small_space],
-    )
-    .unwrap_err();
     let typed_error =
         TensorMap::<tenet::core::U1FusionRule, f64>::isometry(&runtime, [&big], [&small])
             .unwrap_err();
 
-    assert!(matches!(
-        erased_error,
-        tenet::prelude::Error::InvalidArgument(_)
-    ));
     assert!(matches!(
         typed_error,
         tenet::prelude::Error::InvalidArgument(_)
@@ -8308,13 +8277,11 @@ fn typed_seedless_rand_does_not_advance_the_stream_on_failure() {
 fn typed_isomorphism_and_unitary_reject_embeddable_but_not_isomorphic_content() {
     // What: the isomorphism gate is `domain ≅ codomain`, strictly stronger
     // than the isometry embedding — a domain that embeds but is smaller must
-    // be rejected by both `isomorphism` and `unitary`, on both facades. The
+    // be rejected by both `isomorphism` and `unitary`. The
     // embeddable-but-not-isomorphic fixture is deliberate: it also proves
     // `unitary` routes through the isomorphism check, not the isometry one.
     let _guard = cache_lock();
     let runtime = runtime();
-    let small_space = tenet::prelude::Space::u1([(0, 1), (1, 2)]);
-    let big_space = tenet::prelude::Space::u1([(0, 2), (1, 3)]);
     let provider = Arc::new(tenet::core::U1FusionRule);
     let small = GradedSpace::try_new(
         Arc::clone(&provider),
@@ -8335,36 +8302,14 @@ fn typed_isomorphism_and_unitary_reject_embeddable_but_not_isomorphic_content() 
     )
     .unwrap();
 
-    for (typed_error, erased_error) in [
-        (
-            TensorMap::<tenet::core::U1FusionRule, f64>::isomorphism(&runtime, [&big], [&small])
-                .unwrap_err(),
-            tenet::prelude::Tensor::isomorphism(
-                &runtime,
-                tenet::prelude::Dtype::F64,
-                [&big_space],
-                [&small_space],
-            )
+    for typed_error in [
+        TensorMap::<tenet::core::U1FusionRule, f64>::isomorphism(&runtime, [&big], [&small])
             .unwrap_err(),
-        ),
-        (
-            TensorMap::<tenet::core::U1FusionRule, f64>::unitary(&runtime, [&big], [&small])
-                .unwrap_err(),
-            tenet::prelude::Tensor::unitary(
-                &runtime,
-                tenet::prelude::Dtype::F64,
-                [&big_space],
-                [&small_space],
-            )
+        TensorMap::<tenet::core::U1FusionRule, f64>::unitary(&runtime, [&big], [&small])
             .unwrap_err(),
-        ),
     ] {
         assert!(matches!(
             typed_error,
-            tenet::prelude::Error::InvalidArgument(_)
-        ));
-        assert!(matches!(
-            erased_error,
             tenet::prelude::Error::InvalidArgument(_)
         ));
     }
@@ -8374,13 +8319,11 @@ fn typed_isomorphism_and_unitary_reject_embeddable_but_not_isomorphic_content() 
 fn typed_isometry_rejects_a_larger_domain_degeneracy_with_identical_sector_sets() {
     // What: the embedding check is sectorwise `deg_domain <= deg_codomain`,
     // not sector-set containment — identical sector sets with one domain
-    // degeneracy exactly one above its codomain sibling must fail, on both
-    // facades. The off-by-one fixture makes a `deg + 1` slip in the
+    // degeneracy exactly one above its codomain sibling must fail. The
+    // off-by-one fixture makes a `deg + 1` slip in the
     // comparison visible.
     let _guard = cache_lock();
     let runtime = runtime();
-    let codomain_space = tenet::prelude::Space::u1([(0, 1), (1, 2)]);
-    let domain_space = tenet::prelude::Space::u1([(0, 2), (1, 1)]);
     let provider = Arc::new(tenet::core::U1FusionRule);
     let codomain = GradedSpace::try_new(
         Arc::clone(&provider),
@@ -8404,44 +8347,18 @@ fn typed_isometry_rejects_a_larger_domain_degeneracy_with_identical_sector_sets(
     let typed_error =
         TensorMap::<tenet::core::U1FusionRule, f64>::isometry(&runtime, [&codomain], [&domain])
             .unwrap_err();
-    let erased_error = tenet::prelude::Tensor::isometry(
-        &runtime,
-        tenet::prelude::Dtype::F64,
-        [&codomain_space],
-        [&domain_space],
-    )
-    .unwrap_err();
-
     assert!(matches!(
         typed_error,
-        tenet::prelude::Error::InvalidArgument(_)
-    ));
-    assert!(matches!(
-        erased_error,
         tenet::prelude::Error::InvalidArgument(_)
     ));
 }
 
 #[test]
-fn typed_and_erased_isomorphism_agree_byte_for_byte_on_the_norm_fuser_shape() {
-    // What: the typed structural fill is the erased one, bytes and blocks —
-    // on the norm-fuser shape `isomorphism(fuse(dual(v) ⊗ v) <- dual(v) ⊗ v)`,
-    // whose dual arrangement is codomain/domain-asymmetric (the dual leg
-    // appears only in the domain), so a dual-handling drift between the two
-    // fits-check/fill copies cannot cancel out.
+fn typed_isomorphism_is_unitary_on_the_norm_fuser_shape() {
+    // What: the norm-fuser shape carries an asymmetric dual arrangement and
+    // still satisfies the defining isomorphism law.
     let _guard = cache_lock();
     let runtime = runtime();
-    let v = tenet::prelude::Space::u1([(0, 1), (1, 1)]);
-    let dual = v.dual();
-    let fused = dual.fuse(&v).unwrap();
-    let erased = tenet::prelude::Tensor::isomorphism(
-        &runtime,
-        tenet::prelude::Dtype::F64,
-        [&fused],
-        [&dual, &v],
-    )
-    .unwrap();
-
     let provider = Arc::new(tenet::core::U1FusionRule);
     let typed_v = GradedSpace::try_new(
         Arc::clone(&provider),
@@ -8466,45 +8383,36 @@ fn typed_and_erased_isomorphism_agree_byte_for_byte_on_the_norm_fuser_shape() {
     .unwrap();
     let typed: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::isomorphism(&runtime, [&typed_fused], [&typed_dual, &typed_v]).unwrap();
+    let identity: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::id(&runtime, [&typed_dual, &typed_v]).unwrap();
 
-    assert!(!typed.data().is_empty());
-    assert_eq!(typed.data(), erased.data());
+    assert_eq!(
+        typed.adjoint().unwrap().compose(&typed).unwrap().data(),
+        identity.data()
+    );
 }
 
 #[test]
-fn typed_and_erased_unitary_agree_byte_for_byte() {
-    // What: the c64 unitary is byte-identical across facades — the erased
-    // side builds f64 and widens, the typed side writes `D` directly, and
-    // the two must land on the same bytes.
+fn typed_c64_unitary_satisfies_the_identity_law() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (space, leg) = fz2_facade_legs();
-    let space_dual = space.dual();
+    let leg = fz2_typed_leg();
     let leg_dual = leg.try_dual().unwrap();
-
-    let erased = tenet::prelude::Tensor::unitary(
-        &runtime,
-        tenet::prelude::Dtype::C64,
-        [&space, &space_dual],
-        [&space_dual, &space],
-    )
-    .unwrap();
     let typed: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
         TensorMap::unitary(&runtime, [&leg, &leg_dual], [&leg_dual, &leg]).unwrap();
+    let identity: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
+        TensorMap::id(&runtime, [&leg_dual, &leg]).unwrap();
 
-    assert!(!typed.data().is_empty());
-    assert_eq!(typed.data(), erased.data_c64());
+    assert_eq!(
+        typed.adjoint().unwrap().compose(&typed).unwrap().data(),
+        identity.data()
+    );
 }
 
 #[test]
-fn typed_and_erased_isometry_agree_byte_for_byte_on_a_dual_domain() {
-    // What: the isometry partial-identity fill matches the erased bytes on a
-    // strictly-embedding fixture whose domain is a dual leg (the codomain is
-    // not), keeping the dual arrangement asymmetric here too.
+fn typed_isometry_on_a_dual_domain_satisfies_the_identity_law() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let small_space = tenet::prelude::Space::u1([(0, 1), (1, 2)]).dual();
-    let big_space = tenet::prelude::Space::u1([(0, 2), (1, 3), (-1, 3)]);
     let provider = Arc::new(tenet::core::U1FusionRule);
     let small = GradedSpace::try_new(
         Arc::clone(&provider),
@@ -8528,18 +8436,15 @@ fn typed_and_erased_isometry_agree_byte_for_byte_on_a_dual_domain() {
     )
     .unwrap();
 
-    let erased = tenet::prelude::Tensor::isometry(
-        &runtime,
-        tenet::prelude::Dtype::F64,
-        [&big_space],
-        [&small_space],
-    )
-    .unwrap();
     let typed: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::isometry(&runtime, [&big], [&small]).unwrap();
+    let identity: TensorMap<tenet::core::U1FusionRule, f64> =
+        TensorMap::id(&runtime, [&small]).unwrap();
 
-    assert!(!typed.data().is_empty());
-    assert_eq!(typed.data(), erased.data());
+    assert_eq!(
+        typed.adjoint().unwrap().compose(&typed).unwrap().data(),
+        identity.data()
+    );
 }
 
 #[test]
@@ -8790,17 +8695,11 @@ fn typed_polar_carries_an_external_provider() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn typed_rank_accessors_match_the_erased_facade_and_pin_the_aliases() {
-    // Gate 1: ranks on a mixed 2 <- 1 fixture, against the erased sibling,
-    // and the TensorKit-named aliases pinned to the primary names so neither
-    // can drift.
+fn typed_rank_accessors_pin_the_aliases() {
+    // Gate 1: ranks on a mixed 2 <- 1 fixture and the TensorKit-named aliases.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
-
-    assert_eq!(typed.codomain_rank(), erased.codomain_rank());
-    assert_eq!(typed.domain_rank(), erased.domain_rank());
-    assert_eq!(typed.rank(), erased.rank());
+    let (_, typed) = z2_oracle_pair(&runtime);
     assert_eq!(typed.codomain_rank(), 2);
     assert_eq!(typed.domain_rank(), 1);
     assert_eq!(typed.rank(), 3);
@@ -8811,30 +8710,23 @@ fn typed_rank_accessors_match_the_erased_facade_and_pin_the_aliases() {
 }
 
 #[test]
-fn typed_and_erased_leg_dims_agree_including_quantum_dimensions() {
-    // Gate 2: `leg_dims`/`leg_dim` values against the erased facade on a
-    // built-in abelian rule and on built-in SU(2), whose non-abelian sectors
+fn typed_leg_dims_include_quantum_dimensions() {
+    // Gate 2: `leg_dims`/`leg_dim` values on a built-in abelian rule and on
+    // built-in SU(2), whose non-abelian sectors
     // are what make the quantum-dimension weighting visible (spin-1/2 with
     // degeneracy 2 contributes 4, not 2).
     let _guard = cache_lock();
     let runtime = runtime();
 
-    let (erased, typed) = z2_oracle_pair(&runtime);
-    assert_eq!(typed.leg_dims().unwrap(), erased.leg_dims().unwrap());
+    let (_, typed) = z2_oracle_pair(&runtime);
+    assert_eq!(typed.leg_dims().unwrap(), vec![5, 5, 5]);
     for axis in 0..typed.rank() {
-        assert_eq!(typed.leg_dim(axis).unwrap(), erased.leg_dim(axis).unwrap());
+        assert_eq!(typed.leg_dim(axis).unwrap(), 5);
     }
 
-    let (su2_erased, su2_typed) = su2_oracle_pair(&runtime);
+    let (_, su2_typed) = su2_oracle_pair(&runtime);
     assert_eq!(su2_typed.leg_dims().unwrap(), vec![5, 5]);
-    assert_eq!(
-        su2_typed.leg_dims().unwrap(),
-        su2_erased.leg_dims().unwrap()
-    );
-    assert_eq!(
-        su2_typed.leg_dim(1).unwrap(),
-        su2_erased.leg_dim(1).unwrap()
-    );
+    assert_eq!(su2_typed.leg_dim(1).unwrap(), 5);
 }
 
 #[test]
@@ -8854,19 +8746,12 @@ fn typed_leg_dims_carry_an_external_provider_with_nontrivial_dimensions() {
 }
 
 #[test]
-fn typed_leg_dim_out_of_range_is_the_erased_error_class() {
-    // Gate 2's error leg: axis == rank is out of range on both facades, with
-    // the same error class.
+fn typed_leg_dim_out_of_range_is_an_invalid_argument() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
+    let (_, typed) = z2_oracle_pair(&runtime);
 
     let typed_error = typed.leg_dim(3).unwrap_err();
-    let erased_error = erased.leg_dim(3).unwrap_err();
-    assert_eq!(
-        std::mem::discriminant(&typed_error),
-        std::mem::discriminant(&erased_error)
-    );
     assert!(matches!(
         typed_error,
         tenet::prelude::Error::InvalidArgument(_)
@@ -8888,42 +8773,22 @@ fn typed_codomain_and_domain_spaces_alias_the_primary_accessors() {
 }
 
 #[test]
-fn typed_and_erased_scalar_agree_on_a_full_contraction() {
-    // Gate 4: the rank-0 result of a full trace reads back the same value
-    // through both facades; the typed one comes back as a bare `D` rather
-    // than the erased `Scalar` enum.
+fn typed_scalar_reads_a_real_full_contraction() {
+    // Gate 4: a rank-0 trace reads back as the payload type itself.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+    let (_, typed) = z2_endo_oracle_pair(&runtime);
 
     let typed_value: f64 = typed.trace_pairs(&[(0, 1)]).unwrap().scalar().unwrap();
-    let erased_value: f64 = erased
-        .trace_pairs(&[(0, 1)])
-        .unwrap()
-        .scalar()
-        .unwrap()
-        .try_f64()
-        .unwrap();
-    assert_eq!(typed_value, erased_value);
+    assert_eq!(typed_value, typed.tr().unwrap());
 }
 
 #[test]
 fn typed_scalar_reads_a_complex_full_contraction() {
-    // Gate 4's c64 leg: a complex endomorphism traced to rank 0, against the
-    // erased sibling built from the same fill.
+    // Gate 4's c64 leg: a complex endomorphism traced to rank 0.
     let _guard = cache_lock();
     let runtime = runtime();
     let complex = |value: f64| Complex64::new(value, 1.0 + value % 5.0);
-    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
-    let erased = tenet::prelude::Tensor::from_block_fn(
-        &runtime,
-        [&space],
-        [&space],
-        |key: &tenet::prelude::BlockKey, indices: &[usize]| {
-            complex(erased_fill_value(key, indices))
-        },
-    )
-    .unwrap();
     let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
@@ -8940,29 +8805,16 @@ fn typed_scalar_reads_a_complex_full_contraction() {
         .unwrap();
 
     let typed_value: Complex64 = typed.trace_pairs(&[(0, 1)]).unwrap().scalar().unwrap();
-    let erased_value: Complex64 = erased
-        .trace_pairs(&[(0, 1)])
-        .unwrap()
-        .scalar()
-        .unwrap()
-        .to_c64();
-    assert_eq!(typed_value, erased_value);
+    assert_eq!(typed_value, typed.tr().unwrap());
 }
 
 #[test]
-fn typed_scalar_on_a_tensor_with_legs_is_the_erased_error_class() {
-    // Gate 4's error leg: `scalar()` on a rank-3 tensor errors with the same
-    // class on both facades.
+fn typed_scalar_on_a_tensor_with_legs_is_an_invalid_argument() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
+    let (_, typed) = z2_oracle_pair(&runtime);
 
     let typed_error = typed.scalar().unwrap_err();
-    let erased_error = erased.scalar().unwrap_err();
-    assert_eq!(
-        std::mem::discriminant(&typed_error),
-        std::mem::discriminant(&erased_error)
-    );
     assert!(matches!(
         typed_error,
         tenet::prelude::Error::InvalidArgument(_)
@@ -8992,22 +8844,27 @@ fn typed_zeros_like_keeps_the_spaces_and_zeroes_the_payload() {
 }
 
 #[test]
-fn typed_and_erased_to_c64_agree_byte_for_byte() {
-    // Gate 6: the widened payload is the erased one, on a dense payload and on
-    // a compact diagonal payload (`svd_compact`'s `s`), whose dense
-    // materialization must also agree.
+fn typed_to_c64_widens_dense_and_compact_values_exactly() {
+    // Gate 6: widening adds an exactly zero imaginary component on dense and
+    // compact diagonal payloads.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
+    let (_, typed) = z2_oracle_pair(&runtime);
 
     let typed_wide: TensorMap<tenet::core::Z2FusionRule, Complex64> = typed.to_c64();
-    let erased_wide = erased.to_c64();
-    assert_eq!(typed_wide.data(), erased_wide.data_c64());
+    assert!(typed_wide
+        .data()
+        .iter()
+        .zip(typed.data())
+        .all(|(&wide, &real)| wide == Complex64::new(real, 0.0)));
 
-    let erased_s = erased.svd_compact().unwrap().1;
     let typed_s: TensorMap<tenet::core::Z2FusionRule, f64> = typed.svd_compact().unwrap().1;
     let typed_s_wide: TensorMap<tenet::core::Z2FusionRule, Complex64> = typed_s.to_c64();
-    assert_eq!(typed_s_wide.data(), erased_s.to_c64().data_c64());
+    assert!(typed_s_wide
+        .data()
+        .iter()
+        .zip(typed_s.data())
+        .all(|(&wide, &real)| wide == Complex64::new(real, 0.0)));
 }
 
 #[test]
@@ -9068,8 +8925,7 @@ fn typed_leg_dim_routes_each_axis_to_its_own_leg() {
     // Gate 2's axis-routing leg: every earlier fixture has homogeneous leg
     // dimensions, so a leg_dim that reads the wrong leg (e.g. domain[0] for
     // the last codomain axis) still passes them. Three pairwise-distinct
-    // dimensions in a 2 <- 1 split make any misrouting visible, per axis and
-    // against the erased facade.
+    // dimensions in a 2 <- 1 split make any misrouting visible, per axis.
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(tenet::core::Z2FusionRule);
@@ -9084,23 +8940,10 @@ fn typed_leg_dim_routes_each_axis_to_its_own_leg() {
     let c = GradedSpace::try_new(Arc::clone(&provider), z2_pairs(3, 4), false).unwrap();
     let typed: TensorMap<tenet::core::Z2FusionRule, f64> =
         TensorMap::zeros(&runtime, [&a, &b], [&c]).unwrap();
-    let erased = tenet::prelude::Tensor::zeros(
-        &runtime,
-        tenet::prelude::Dtype::F64,
-        [
-            &tenet::prelude::Space::z2([(0, 2), (1, 3)]),
-            &tenet::prelude::Space::z2([(0, 1), (1, 1)]),
-        ],
-        [&tenet::prelude::Space::z2([(0, 3), (1, 4)])],
-    )
-    .unwrap();
-
     let dims = typed.leg_dims().unwrap();
     assert_eq!(dims, vec![5, 2, 7]);
-    assert_eq!(dims, erased.leg_dims().unwrap());
     for (axis, &dim) in dims.iter().enumerate() {
         assert_eq!(typed.leg_dim(axis).unwrap(), dim);
-        assert_eq!(typed.leg_dim(axis).unwrap(), erased.leg_dim(axis).unwrap());
     }
 }
 
