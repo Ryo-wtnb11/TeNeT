@@ -1339,19 +1339,15 @@ fn cu1_complex_oracle_pair(
 }
 
 #[test]
-fn cu1_typed_and_erased_rank_three_permute_match_the_published_gauge() {
+fn cu1_typed_rank_three_permute_matches_the_published_gauge() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = cu1_oracle_pair(&runtime);
-    assert_eq!(erased.data(), [1.0, 1.0, 1.0]);
-    assert_eq!(typed.data(), erased.data());
-    let erased = erased.permute(&[2, 0, 1], &[3]).unwrap();
+    let (_, typed) = cu1_oracle_pair(&runtime);
+    assert_eq!(typed.data(), [1.0, 1.0, 1.0]);
     let typed = typed.permute(&[2, 0, 1], &[3]).unwrap();
     let expected = [2.0_f64.sqrt() / 2.0, -2.0_f64.sqrt() / 2.0, 2.0_f64.sqrt()];
-    assert_eq!(erased.data().len(), 3);
     assert_eq!(typed.data().len(), 3);
-    for ((erased, typed), expected) in erased.data().iter().zip(typed.data()).zip(expected) {
-        assert!((erased - expected).abs() <= 1e-12, "{erased} vs {expected}");
+    for (typed, expected) in typed.data().iter().zip(expected) {
         assert!((typed - expected).abs() <= 1e-12, "{typed} vs {expected}");
     }
     assert_eq!(typed.codomain().len(), 3);
@@ -1421,44 +1417,6 @@ fn cu1_c64_lazy_adjoint_contract_ordered_matches_typed_values_and_spaces() {
                 .collect::<Vec<_>>()
         );
     }
-}
-
-#[test]
-fn cu1_otimes_matches_the_typed_facade_for_real_and_complex_payloads() {
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased_left, typed_left) = cu1_oracle_pair(&runtime);
-    let (erased_right, typed_right) = cu1_oracle_pair(&runtime);
-    assert_eq!(
-        typed_left.otimes(&typed_right).unwrap().data(),
-        erased_left.otimes(&erased_right).unwrap().data()
-    );
-    let (erased_left, typed_left) = cu1_complex_oracle_pair(&runtime);
-    let (erased_right, typed_right) = cu1_complex_oracle_pair(&runtime);
-    assert_eq!(
-        typed_left.otimes(&typed_right).unwrap().data(),
-        erased_left
-            .otimes(&erased_right)
-            .unwrap()
-            .try_data_c64()
-            .unwrap()
-    );
-}
-
-#[test]
-fn typed_and_erased_permute_agree_byte_for_byte_on_a_builtin_rule() {
-    // What: the typed permute is the erased permute, not a lookalike — same
-    // destination layout, same block order, same bytes. A non-identity order is
-    // used deliberately, so neither side can take an identity shortcut.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
-
-    let erased_permuted = erased.permute(&[2, 0], &[1]).unwrap();
-    let typed_permuted = typed.permute(&[2, 0], &[1]).unwrap();
-
-    assert_eq!(typed_permuted.data(), erased_permuted.data());
-    assert_ne!(typed_permuted.data(), typed.data());
 }
 
 // ---------------------------------------------------------------------------
@@ -1686,29 +1644,6 @@ fn typed_and_erased_contract_agree_byte_for_byte_on_a_builtin_rule() {
 
     assert_eq!(typed_contracted.data(), erased_contracted.data());
     assert!(typed_contracted.data().iter().any(|&value| value != 0.0));
-}
-
-#[test]
-fn otimes_keeps_tensor_map_sides_and_matches_both_facades() {
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased_lhs, typed_lhs) = z2_oracle_pair_split(&runtime, 1);
-    let (erased_rhs, typed_rhs) = z2_oracle_pair_split(&runtime, 2);
-
-    let erased = erased_lhs.otimes(&erased_rhs).unwrap();
-    let typed = typed_lhs.otimes(&typed_rhs).unwrap();
-
-    assert_eq!((typed.numout(), typed.numin()), (3, 3));
-    assert_eq!(typed.data(), erased.data());
-    assert_eq!(
-        typed
-            .codomain_spaces()
-            .into_iter()
-            .chain(typed.domain_spaces())
-            .map(|leg| (leg.is_dual(), leg.degeneracies().to_vec()))
-            .collect::<Vec<_>>(),
-        erased_leg_shapes(&erased)
-    );
 }
 
 #[test]
@@ -2303,38 +2238,6 @@ fn typed_deligne_product_prepares_both_embeddings_before_publishing_either() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_typed_operation_reads_the_runtime_owned_transform_store() {
-    // What: the typed permute runs on a context leased from the tensor's own
-    // runtime, so it reads the completed transform the erased permute of the
-    // same built-in layout already put in that runtime's store — one entry,
-    // and a hit rather than a second computation. A typed path that executed
-    // on an unbound default context would miss and add its own entry.
-    //
-    // What this deliberately does not claim: that the two facades use the same
-    // execution lane. Lane identity has no observable — the store is owned by
-    // the Runtime and keyed by rule identity, operation and interned structure
-    // ids, so any leased context sees the same entries.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
-    runtime.clear_tree_transform_cache();
-    assert_eq!(runtime.tree_transform_cache_info().entries(), 0);
-
-    erased.permute(&[2, 0], &[1]).unwrap();
-    let after_erased = runtime.tree_transform_cache_info().entries();
-    assert_eq!(after_erased, 1);
-
-    let hits_before = runtime.tree_transform_cache_info().hits();
-    typed.permute(&[2, 0], &[1]).unwrap();
-
-    let after_typed = runtime.tree_transform_cache_info();
-    assert_eq!(after_typed.entries(), after_erased);
-    // Non-vacuous: the typed run did not merely fail to add an entry, it read
-    // the entry the erased run left behind.
-    assert!(after_typed.hits() > hits_before);
-}
-
-#[test]
 fn a_failing_typed_operation_publishes_no_cache_state() {
     // What: an operation rejected by the expert layer leaves both process-global
     // layout caches and the runtime's tree-transform cache exactly as they were,
@@ -2420,32 +2323,6 @@ fn braid_rejects_a_wrong_length_levels_list() {
     assert!(tensor.braid(&[0, 0], &[2, 3], &[0, 1, 2, 3]).is_err());
 }
 
-#[test]
-fn typed_and_erased_braid_agree_byte_for_byte_on_a_builtin_rule() {
-    // What: the typed braid is the erased braid — same destination layout, same
-    // bytes — including how `levels` is split by the *source* codomain rank.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
-
-    let erased_braided = erased.braid(&[2, 0], &[1], &[2, 0, 1]).unwrap();
-    let typed_braided = typed.braid(&[2, 0], &[1], &[2, 0, 1]).unwrap();
-
-    assert_eq!(typed_braided.data(), erased_braided.data());
-    assert_ne!(typed_braided.data(), typed.data());
-
-    // The source is `2 <- 1`, so this destination split (`1 <- 2`) has a
-    // codomain axis list of a different length. That is what pins the levels
-    // being split by the *source* codomain rank: splitting by the requested
-    // codomain length instead is a plausible misreading, and one the case
-    // above cannot see because there the two coincide.
-    let erased_moved = erased.braid(&[2], &[0, 1], &[2, 0, 1]).unwrap();
-    let typed_moved = typed.braid(&[2], &[0, 1], &[2, 0, 1]).unwrap();
-
-    assert_eq!(typed_moved.data(), erased_moved.data());
-    assert_eq!(typed_moved.codomain().len(), 1);
-}
-
 // ---------------------------------------------------------------------------
 // Phase 4, slice 2: `TensorMap::transpose` and `TensorMap::transpose_axes`.
 // ---------------------------------------------------------------------------
@@ -2511,48 +2388,6 @@ fn transpose_twice_returns_the_source_layout() {
 }
 
 #[test]
-fn typed_and_erased_transpose_agree_byte_for_byte_on_a_builtin_rule() {
-    // What: the typed transpose is the erased planar transpose — same bent
-    // spaces (dual flags included) and same bytes. It must not be a permute in
-    // disguise: on this rank-3 layout the two differ, which the assertion
-    // against the permuted buffer pins.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
-
-    let erased_transposed = erased.transpose().unwrap();
-    let typed_transposed = typed.transpose().unwrap();
-
-    assert_eq!(typed_transposed.data(), erased_transposed.data());
-    assert_eq!(
-        typed_leg_shapes(&typed_transposed),
-        erased_leg_shapes(&erased_transposed)
-    );
-    assert_eq!(typed_transposed.codomain().len(), 1);
-    assert_eq!(typed_transposed.domain().len(), 2);
-}
-
-#[test]
-fn typed_and_erased_transpose_axes_agree_byte_for_byte_on_a_builtin_rule() {
-    // What: an explicit cyclic rotation other than the full transpose agrees
-    // with the erased sibling, bytes and bent spaces.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
-
-    // Planar source order is `0, 1, 2` (codomain then reversed domain); this is
-    // the one-step rotation of it.
-    let erased_rotated = erased.transpose_axes(&[1, 2], &[0]).unwrap();
-    let typed_rotated = typed.transpose_axes(&[1, 2], &[0]).unwrap();
-
-    assert_eq!(typed_rotated.data(), erased_rotated.data());
-    assert_eq!(
-        typed_leg_shapes(&typed_rotated),
-        erased_leg_shapes(&erased_rotated)
-    );
-}
-
-#[test]
 fn transpose_axes_rejects_malformed_axes_without_panicking() {
     // What: out-of-range axes, a wrong-length list and a non-planar
     // re-arrangement (a permute, which `transpose_axes` must refuse rather than
@@ -2598,41 +2433,6 @@ fn repartition_moves_the_boundary_and_round_trips_at_every_split() {
             );
         }
     }
-}
-
-#[test]
-fn typed_and_erased_repartition_agree_on_bytes_and_on_the_bent_spaces() {
-    // What: every split point matches the erased sibling in bytes and in the
-    // resulting spaces. The space comparison is the load-bearing half: a leg
-    // that crosses the boundary is bent, which flips its dual flag and dualizes
-    // its sectors (so a Z2-even/odd degeneracy pair can reorder), and the
-    // erased result — not an assumption about which way that goes — is the
-    // reference.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
-
-    for num_codomain in 0..=3 {
-        let erased_moved = erased.repartition(num_codomain).unwrap();
-        let typed_moved = typed.repartition(num_codomain).unwrap();
-
-        assert_eq!(typed_moved.data(), erased_moved.data(), "{num_codomain}");
-        assert_eq!(
-            typed_leg_shapes(&typed_moved),
-            erased_leg_shapes(&erased_moved),
-            "{num_codomain}"
-        );
-    }
-    // Non-vacuous: at least one split really does flip a dual flag relative to
-    // the source, so the comparison above is not comparing three copies of the
-    // identity.
-    let flipped = typed.repartition(0).unwrap();
-    assert!(typed_leg_shapes(&flipped)
-        .iter()
-        .any(|(is_dual, _)| *is_dual));
-    assert!(typed_leg_shapes(&typed)
-        .iter()
-        .all(|(is_dual, _)| !*is_dual));
 }
 
 #[test]
@@ -6264,6 +6064,10 @@ fn z2_bond_pair(
     let erased =
         tenet::prelude::Tensor::from_block_fn(runtime, [&space], [&space], erased_fill_value)
             .unwrap();
+    (erased.svd_compact().unwrap().1, z2_bond(runtime))
+}
+
+fn z2_bond(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, f64> {
     let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
@@ -6274,10 +6078,7 @@ fn z2_bond_pair(
     )
     .unwrap();
     let typed = TensorMap::from_block_fn(runtime, [&leg], [&leg], typed_fill_value).unwrap();
-    (
-        erased.svd_compact().unwrap().1,
-        typed.svd_compact().unwrap().1,
-    )
+    typed.svd_compact().unwrap().1
 }
 
 /// The three rank-(1,1) re-orderings that reduce to the proved swap, plus the
@@ -6299,12 +6100,9 @@ where
 }
 
 #[test]
-fn compact_rank_one_swaps_match_the_forced_dense_and_erased_routes() {
+fn compact_rank_one_swaps_match_the_forced_dense_route() {
     // What: every re-ordering of a compact bond factor returns the tensor the
-    // dense tree transform returns — same legs, same bytes — whichever storage
-    // it was computed from. The erased sibling is compared as well, because it
-    // already owns the proved compact swap and is the reference the typed arm
-    // must not drift from.
+    // dense tree transform returns — same legs and same bytes.
     //
     // What this test cannot see: Z2 is self-dual and bosonic, so every swap
     // coefficient is exactly 1 — dropping the coefficient entirely still passes
@@ -6312,7 +6110,7 @@ fn compact_rank_one_swaps_match_the_forced_dense_and_erased_routes() {
     // where a mutation to it dies.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_bond_pair(&runtime);
+    let typed = z2_bond(&runtime);
     let dense = forced_dense(&typed);
 
     for ((name, compact), (_, oracle)) in rank_one_reorderings(&typed)
@@ -6325,30 +6123,6 @@ fn compact_rank_one_swaps_match_the_forced_dense_and_erased_routes() {
             "{name} legs"
         );
         assert_eq!(compact.data(), oracle.data(), "{name} payload");
-    }
-
-    for (name, erased_result, typed_result) in [
-        (
-            "permute",
-            erased.permute(&[1], &[0]).unwrap(),
-            typed.permute(&[1], &[0]).unwrap(),
-        ),
-        (
-            "transpose",
-            erased.transpose().unwrap(),
-            typed.transpose().unwrap(),
-        ),
-    ] {
-        assert_eq!(
-            typed_leg_shapes(&typed_result),
-            erased_leg_shapes(&erased_result),
-            "{name} legs vs erased"
-        );
-        assert_eq!(
-            typed_result.data(),
-            erased_result.data(),
-            "{name} payload vs erased"
-        );
     }
 }
 
@@ -9730,22 +9504,10 @@ fn external_z3_cat_and_absorb_hold_by_value() {
 // #580 PR 5: typed twist / flip / unit-leg insert & remove.
 // ---------------------------------------------------------------------------
 
-/// One erased/typed fZ2 operand pair: rank `2 <- 1` with a dual codomain leg,
-/// filled identically through both facades. The codomain carries a non-dual
+/// One typed fZ2 operand: rank `2 <- 1` with a dual codomain leg. The codomain carries a non-dual
 /// and a dual leg and the domain a non-dual one, so twist/flip gates can pick
 /// each (side, duality) combination off one fixture.
-fn fz2_index_pair(
-    runtime: &Runtime,
-) -> (
-    tenet::prelude::Tensor,
-    TensorMap<tenet::core::FermionParityFusionRule, f64>,
-) {
-    let w1 = tenet::prelude::Space::fz2([(0, 1), (1, 2)]).unwrap();
-    let w2 = tenet::prelude::Space::fz2([(0, 2), (1, 1)]).unwrap().dual();
-    let v = tenet::prelude::Space::fz2([(0, 1), (1, 1)]).unwrap();
-    let erased =
-        tenet::prelude::Tensor::from_block_fn(runtime, [&w1, &w2], [&v], fz2_erased_fill).unwrap();
-
+fn fz2_index(runtime: &Runtime) -> TensorMap<tenet::core::FermionParityFusionRule, f64> {
     let provider = Arc::new(tenet::core::FermionParityFusionRule);
     let leg = |pairs: &[(u8, usize)]| {
         GradedSpace::try_new(
@@ -9767,29 +9529,11 @@ fn fz2_index_pair(
     let l1 = leg(&[(0, 1), (1, 2)]);
     let l2 = leg(&[(0, 2), (1, 1)]).try_dual().unwrap();
     let lv = leg(&[(0, 1), (1, 1)]);
-    let typed: TensorMap<tenet::core::FermionParityFusionRule, f64> =
-        TensorMap::from_block_fn(runtime, [&l1, &l2], [&lv], fz2_typed_fill).unwrap();
-    (erased, typed)
+    TensorMap::from_block_fn(runtime, [&l1, &l2], [&lv], fz2_typed_fill).unwrap()
 }
 
-/// The erased flip-doctest fixture (`Tensor::flip` rustdoc: fZ2 `V <- V`,
-/// even block 2.0, odd block 3.0) built through both facades.
-fn fz2_doctest_pair(
-    runtime: &Runtime,
-) -> (
-    tenet::prelude::Tensor,
-    TensorMap<tenet::core::FermionParityFusionRule, f64>,
-) {
-    let v = tenet::prelude::Space::fz2([(0, 1), (1, 1)]).unwrap();
-    let erased = tenet::prelude::Tensor::from_block_fn(runtime, [&v], [&v], |key, _| {
-        let pair = key.as_fusion_tree_pair().expect("fusion-tree block");
-        if pair.codomain_tree().coupled().id() == 0 {
-            2.0
-        } else {
-            3.0
-        }
-    })
-    .unwrap();
+/// The typed flip-doctest fixture: fZ2 `V <- V`, even block 2.0, odd block 3.0.
+fn typed_fz2_doctest(runtime: &Runtime) -> TensorMap<tenet::core::FermionParityFusionRule, f64> {
     let provider = Arc::new(tenet::core::FermionParityFusionRule);
     let leg = GradedSpace::try_new(
         Arc::clone(&provider),
@@ -9800,16 +9544,14 @@ fn fz2_doctest_pair(
         false,
     )
     .unwrap();
-    let typed: TensorMap<tenet::core::FermionParityFusionRule, f64> =
-        TensorMap::from_block_fn(runtime, [&leg], [&leg], |sectors, _| {
-            if sectors.coupled() == &tenet::core::Z2Irrep::EVEN {
-                2.0
-            } else {
-                3.0
-            }
-        })
-        .unwrap();
-    (erased, typed)
+    TensorMap::from_block_fn(runtime, [&leg], [&leg], |sectors, _| {
+        if sectors.coupled() == &tenet::core::Z2Irrep::EVEN {
+            2.0
+        } else {
+            3.0
+        }
+    })
+    .unwrap()
 }
 
 fn typed_fz2_two_block(
@@ -9864,106 +9606,6 @@ macro_rules! assert_same_typed_block_structure {
 }
 
 #[test]
-fn typed_and_erased_twist_agree_byte_for_byte_on_fz2() {
-    // What (gate 1): the typed fermionic twist is the erased one, bytes and
-    // spaces — per leg (codomain non-dual, codomain dual, domain) and on the
-    // multi-leg call. The twist never changes the space.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased, typed) = fz2_index_pair(&runtime);
-    for legs in [
-        &[0usize][..],
-        &[1][..],
-        &[2][..],
-        &[0, 1, 2][..],
-        &[2, 2][..],
-    ] {
-        let erased_twisted = erased.twist(legs).unwrap();
-        let typed_twisted: TensorMap<tenet::core::FermionParityFusionRule, f64> =
-            typed.twist(legs).unwrap();
-        assert_eq!(typed_twisted.data(), erased_twisted.data(), "legs {legs:?}");
-        assert_same_legs(&typed_twisted.codomain(), &typed.codomain());
-        assert_same_legs(&typed_twisted.domain(), &typed.domain());
-    }
-}
-
-#[test]
-fn typed_and_erased_twist_agree_on_c64_and_u1_is_a_noop() {
-    // What (gate 1): the c64 leg of the twist parity gate, plus the bosonic
-    // short-circuit — a U(1) twist is the identity and returns the same
-    // bytes on both facades.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased_f64, typed_f64) = fz2_index_pair(&runtime);
-    let erased = erased_f64.to_c64();
-    let typed: TensorMap<tenet::core::FermionParityFusionRule, Complex64> = typed_f64.to_c64();
-    let erased_twisted = erased.twist(&[1, 2]).unwrap();
-    let typed_twisted: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
-        typed.twist(&[1, 2]).unwrap();
-    assert_eq!(typed_twisted.data(), erased_twisted.data_c64());
-
-    let (erased_u1, typed_u1) = u1_cat_pair(&runtime, &[(-1, 1), (0, 2), (1, 1)]);
-    let erased_u1_twisted = erased_u1.twist(&[0, 1, 2]).unwrap();
-    let typed_u1_twisted: TensorMap<tenet::core::U1FusionRule, f64> =
-        typed_u1.twist(&[0, 1, 2]).unwrap();
-    assert_eq!(typed_u1_twisted.data(), typed_u1.data());
-    assert_eq!(typed_u1_twisted.data(), erased_u1_twisted.data());
-}
-
-#[test]
-fn typed_and_erased_flip_agree_byte_for_byte_on_fz2() {
-    // What (gate 1): the typed flip is the erased one — per leg over both
-    // sides and both pre-flip dualities (leg 0: codomain non-dual, leg 1:
-    // codomain dual, leg 2: domain non-dual) and on a two-leg call. The
-    // flipped leg's duality flag toggles, in step on both facades.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased, typed) = fz2_index_pair(&runtime);
-    for legs in [&[0usize][..], &[1][..], &[2][..], &[1, 2][..]] {
-        let erased_flipped = erased.flip(legs).unwrap();
-        let typed_flipped: TensorMap<tenet::core::FermionParityFusionRule, f64> =
-            typed.flip(legs).unwrap();
-        assert_eq!(typed_flipped.data(), erased_flipped.data(), "legs {legs:?}");
-        let original: Vec<GradedSpace<tenet::core::FermionParityFusionRule>> =
-            typed.codomain().into_iter().chain(typed.domain()).collect();
-        let flipped: Vec<GradedSpace<tenet::core::FermionParityFusionRule>> = typed_flipped
-            .codomain()
-            .into_iter()
-            .chain(typed_flipped.domain())
-            .collect();
-        for (axis, (got, before)) in flipped.iter().zip(&original).enumerate() {
-            let expect_toggle = legs.contains(&axis);
-            assert_eq!(
-                got.is_dual(),
-                before.is_dual() ^ expect_toggle,
-                "axis {axis} legs {legs:?}"
-            );
-        }
-    }
-}
-
-#[test]
-fn typed_and_erased_flip_agree_on_c64() {
-    // What (gate 1): the c64 leg of the flip parity gate, on a domain leg
-    // (θ arm) and a dual codomain leg (χ·θ arm).
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased_f64, typed_f64) = fz2_index_pair(&runtime);
-    let erased = erased_f64.to_c64();
-    let typed: TensorMap<tenet::core::FermionParityFusionRule, Complex64> = typed_f64.to_c64();
-    for legs in [&[1usize][..], &[2][..]] {
-        let erased_flipped = erased.flip(legs).unwrap();
-        let typed_flipped: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
-            typed.flip(legs).unwrap();
-        assert_eq!(
-            typed_flipped.data(),
-            erased_flipped.data_c64(),
-            "legs {legs:?}"
-        );
-    }
-}
-
-#[test]
 fn typed_inverse_index_ops_pin_values_and_preserve_structure() {
     let _guard = cache_lock();
     let runtime = runtime();
@@ -10015,7 +9657,7 @@ fn typed_inverse_index_ops_pin_values_and_preserve_structure() {
     assert_eq!(su2.flip_inverse(&[0]).unwrap().data(), &[5.0]);
     assert_eq!(su2.flip_inverse(&[1]).unwrap().data(), &[-5.0]);
 
-    let (_, structured) = fz2_index_pair(&runtime);
+    let structured = fz2_index(&runtime);
     let twisted = structured.twist_inverse(&[0, 1, 2]).unwrap();
     assert!(std::ptr::eq(twisted.provider(), structured.provider()));
     assert_same_legs(&twisted.codomain(), &structured.codomain());
@@ -10084,13 +9726,12 @@ fn inverse_index_ops_cover_the_fermionic_simple_product() {
 }
 
 #[test]
-fn typed_flip_and_twist_pin_the_erased_doctest_fixture_by_value() {
-    // What (gate 2): value pins that do not depend on cross-facade parity —
-    // the erased flip-doctest fixture ([2.0, 3.0] -> flip(1) -> [2.0, -3.0])
-    // reproduced typed-side, and the twist involution θ² = 1.
+fn typed_flip_and_twist_pin_the_doctest_values() {
+    // What: the flip-doctest values ([2.0, 3.0] -> flip(1) -> [2.0, -3.0])
+    // and the twist involution θ² = 1, both pinned directly on the typed API.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_erased, typed) = fz2_doctest_pair(&runtime);
+    let typed = typed_fz2_doctest(&runtime);
     let flipped: TensorMap<tenet::core::FermionParityFusionRule, f64> = typed.flip(&[1]).unwrap();
     assert_eq!(flipped.data(), &[2.0, -3.0]);
     assert_eq!(flipped.domain()[0].is_dual(), !typed.domain()[0].is_dual());
@@ -10102,9 +9743,9 @@ fn typed_flip_and_twist_pin_the_erased_doctest_fixture_by_value() {
 }
 
 #[test]
-fn typed_and_erased_multi_leg_dense_twist_is_the_per_leg_product_by_value() {
-    // What (gate 2, reviewer P2-1): the multi-leg DENSE twist coefficient
-    // pinned by hand-computed value, independent of cross-facade parity — a
+fn typed_multi_leg_dense_twist_is_the_per_leg_product_by_value() {
+    // What: the multi-leg dense twist coefficient is pinned by hand-computed
+    // value — a
     // mutation that drops the per-leg product in the shared
     // `twist_block_factor` (e.g. keeping only the first leg's θ) survives
     // every parity gate, because both facades route through the one helper.
@@ -10112,7 +9753,7 @@ fn typed_and_erased_multi_leg_dense_twist_is_the_per_leg_product_by_value() {
     // both legs carry the block's coupled sector.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = fz2_doctest_pair(&runtime);
+    let typed = typed_fz2_doctest(&runtime);
     // One leg: θ bites, the odd block negates (sanity that the factor is
     // live at all on this fixture).
     let one: TensorMap<tenet::core::FermionParityFusionRule, f64> = typed.twist(&[0]).unwrap();
@@ -10121,11 +9762,9 @@ fn typed_and_erased_multi_leg_dense_twist_is_the_per_leg_product_by_value() {
     // per-leg product, not a single factor.
     let both: TensorMap<tenet::core::FermionParityFusionRule, f64> = typed.twist(&[0, 1]).unwrap();
     assert_eq!(both.data(), &[2.0, 3.0]);
-    assert_eq!(erased.twist(&[0, 1]).unwrap().data(), &[2.0, 3.0]);
     // The same leg listed twice: identity by value, for the same θ² reason.
     let twice: TensorMap<tenet::core::FermionParityFusionRule, f64> = typed.twist(&[1, 1]).unwrap();
     assert_eq!(twice.data(), &[2.0, 3.0]);
-    assert_eq!(erased.twist(&[1, 1]).unwrap().data(), &[2.0, 3.0]);
 }
 
 #[test]
@@ -10135,7 +9774,7 @@ fn typed_flip_is_a_fourth_root_of_identity_and_flip_squared_scales_odd_blocks() 
     // θ = −1; only flip⁴ = id.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_erased, typed) = fz2_doctest_pair(&runtime);
+    let typed = typed_fz2_doctest(&runtime);
     let f1: TensorMap<tenet::core::FermionParityFusionRule, f64> = typed.flip(&[1]).unwrap();
     let f2: TensorMap<tenet::core::FermionParityFusionRule, f64> = f1.flip(&[1]).unwrap();
     assert_same_legs(&f2.codomain(), &typed.codomain());
@@ -10147,100 +9786,19 @@ fn typed_flip_is_a_fourth_root_of_identity_and_flip_squared_scales_odd_blocks() 
 }
 
 #[test]
-fn typed_flip_repeated_leg_in_one_call_is_sequential_on_both_facades() {
-    // What (gate 3): the same leg listed twice in one call flips it twice
-    // *sequentially* — the second occurrence sees the duality the first one
-    // left — pinned by value ([2.0, -3.0]: θ from the first occurrence, χ = 1
-    // from the second) and equal to two single-leg calls, on both facades.
+fn typed_flip_repeated_leg_in_one_call_is_sequential() {
+    // What: the same leg listed twice in one call flips it twice sequentially;
+    // the second occurrence sees the duality the first one left.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = fz2_doctest_pair(&runtime);
-    let erased_twice = erased.flip(&[1, 1]).unwrap();
+    let typed = typed_fz2_doctest(&runtime);
     let typed_twice: TensorMap<tenet::core::FermionParityFusionRule, f64> =
         typed.flip(&[1, 1]).unwrap();
     assert_eq!(typed_twice.data(), &[2.0, -3.0]);
-    assert_eq!(typed_twice.data(), erased_twice.data());
     let typed_stepwise: TensorMap<tenet::core::FermionParityFusionRule, f64> =
         typed.flip(&[1]).unwrap().flip(&[1]).unwrap();
     assert_eq!(typed_twice.data(), typed_stepwise.data());
     assert_same_legs(&typed_twice.domain(), &typed.domain());
-}
-
-#[test]
-fn typed_and_erased_unit_ops_agree_byte_for_byte() {
-    // What (gate 1): all four insertion variants (left/right seam) × dual
-    // flag agree with the erased facade — same bytes, same rank, same
-    // inserted-leg duality — and `remove_unit` undoes each. f64 here, c64 in
-    // the sibling below.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased, typed) = fz2_index_pair(&runtime);
-    for (left, position, dual) in [
-        (true, 1usize, false),
-        (true, 1, true),
-        (false, 1, false),
-        (false, 1, true),
-        (true, 3, false),
-        (false, 0, true),
-    ] {
-        let (erased_inserted, typed_inserted): (
-            tenet::prelude::Tensor,
-            TensorMap<tenet::core::FermionParityFusionRule, f64>,
-        ) = if left {
-            (
-                erased.insert_left_unit(position, dual).unwrap(),
-                typed.insert_left_unit(position, dual).unwrap(),
-            )
-        } else {
-            (
-                erased.insert_right_unit(position, dual).unwrap(),
-                typed.insert_right_unit(position, dual).unwrap(),
-            )
-        };
-        assert_eq!(
-            typed_inserted.data(),
-            erased_inserted.data(),
-            "left={left} position={position} dual={dual}"
-        );
-        assert_eq!(typed_inserted.rank(), 4);
-        assert_eq!(typed_inserted.codomain_rank(), erased_inserted.numout());
-        let legs: Vec<GradedSpace<tenet::core::FermionParityFusionRule>> = typed_inserted
-            .codomain()
-            .into_iter()
-            .chain(typed_inserted.domain())
-            .collect();
-        assert_eq!(legs[position].is_dual(), dual);
-        assert_eq!(legs[position].degeneracies(), &[1]);
-
-        let erased_removed = erased_inserted.remove_unit(position).unwrap();
-        let typed_removed: TensorMap<tenet::core::FermionParityFusionRule, f64> =
-            typed_inserted.remove_unit(position).unwrap();
-        assert_eq!(typed_removed.data(), erased_removed.data());
-        assert_same_legs(&typed_removed.codomain(), &typed.codomain());
-        assert_same_legs(&typed_removed.domain(), &typed.domain());
-    }
-}
-
-#[test]
-fn typed_and_erased_unit_ops_agree_on_c64() {
-    // What (gate 1): the c64 leg of the unit-op parity gate, one variant per
-    // seam.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased_f64, typed_f64) = fz2_index_pair(&runtime);
-    let erased = erased_f64.to_c64();
-    let typed: TensorMap<tenet::core::FermionParityFusionRule, Complex64> = typed_f64.to_c64();
-    let erased_left = erased.insert_left_unit(2, true).unwrap();
-    let typed_left: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
-        typed.insert_left_unit(2, true).unwrap();
-    assert_eq!(typed_left.data(), erased_left.data_c64());
-    let erased_right = erased.insert_right_unit(2, false).unwrap();
-    let typed_right: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
-        typed.insert_right_unit(2, false).unwrap();
-    assert_eq!(typed_right.data(), erased_right.data_c64());
-    let typed_removed: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
-        typed_left.remove_unit(2).unwrap();
-    assert_eq!(typed_removed.data(), erased.data_c64());
 }
 
 #[test]
@@ -10253,60 +9811,55 @@ fn typed_insert_unit_round_trips_at_every_position_and_shares_the_payload() {
     // in `typed.rs`, which can see the private fields.)
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_erased, typed) = fz2_index_pair(&runtime);
+    let typed = fz2_index(&runtime);
     for position in 0..=typed.rank() {
         for left in [true, false] {
-            let inserted: TensorMap<tenet::core::FermionParityFusionRule, f64> = if left {
-                typed.insert_left_unit(position, false).unwrap()
-            } else {
-                typed.insert_right_unit(position, false).unwrap()
-            };
-            assert_eq!(
-                inserted.data().as_ptr(),
-                typed.data().as_ptr(),
-                "left={left} position={position}"
-            );
-            let removed: TensorMap<tenet::core::FermionParityFusionRule, f64> =
-                inserted.remove_unit(position).unwrap();
-            assert_eq!(removed.data().as_ptr(), typed.data().as_ptr());
-            assert_same_legs(&removed.codomain(), &typed.codomain());
-            assert_same_legs(&removed.domain(), &typed.domain());
+            for dual in [false, true] {
+                let inserted: TensorMap<tenet::core::FermionParityFusionRule, f64> = if left {
+                    typed.insert_left_unit(position, dual).unwrap()
+                } else {
+                    typed.insert_right_unit(position, dual).unwrap()
+                };
+                assert_eq!(
+                    inserted.data().as_ptr(),
+                    typed.data().as_ptr(),
+                    "left={left} position={position} dual={dual}"
+                );
+                let legs: Vec<_> = inserted
+                    .codomain()
+                    .into_iter()
+                    .chain(inserted.domain())
+                    .collect();
+                assert_eq!(legs[position].is_dual(), dual);
+                assert_eq!(legs[position].degeneracies(), &[1]);
+                let removed: TensorMap<tenet::core::FermionParityFusionRule, f64> =
+                    inserted.remove_unit(position).unwrap();
+                assert_eq!(removed.data().as_ptr(), typed.data().as_ptr());
+                assert_same_legs(&removed.codomain(), &typed.codomain());
+                assert_same_legs(&removed.domain(), &typed.domain());
+            }
         }
     }
 }
 
 #[test]
-fn typed_index_op_error_classes_match_the_erased_facade() {
-    // What (gate 4, plus twist/flip validation parity): every rejected input
-    // is the erased error class with the erased message shape — the typed
-    // messages name `TensorMap` where the erased name `Tensor`, the absorb
-    // precedent. Order parity: an out-of-range leg is reported even when the
-    // leg list would otherwise short-circuit nothing, and the empty list is
-    // an identical (buffer-sharing) clone.
+fn typed_index_op_error_classes_and_empty_shortcuts_are_stable() {
+    // What: each rejected input returns the typed error class and operation-
+    // specific message, while an empty leg list is a buffer-sharing clone.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = fz2_index_pair(&runtime);
+    let typed = fz2_index(&runtime);
 
     // Twist / flip: out-of-range leg.
-    for (typed_error, erased_error) in [
+    for (error, message) in [
         (
             typed.twist(&[5]).unwrap_err(),
-            erased.twist(&[5]).unwrap_err(),
+            "invalid argument: twist leg 5 out of range for rank 3",
         ),
         (
             typed.flip(&[5]).unwrap_err(),
-            erased.flip(&[5]).unwrap_err(),
+            "invalid argument: flip leg 5 out of range for rank 3",
         ),
-    ] {
-        let typed_message = typed_error.to_string();
-        let erased_message = erased_error.to_string();
-        assert!(
-            matches!(typed_error, tenet::typed::Error::InvalidArgument(_)),
-            "{typed_error:?}"
-        );
-        assert_eq!(typed_message, erased_message);
-    }
-    for (error, message) in [
         (
             typed.twist_inverse(&[5]).unwrap_err(),
             "invalid argument: twist_inverse leg 5 out of range for rank 3",
@@ -10341,53 +9894,44 @@ fn typed_index_op_error_classes_match_the_erased_facade() {
     );
 
     // Insert: position past the rank.
-    let typed_insert = typed.insert_left_unit(4, false).unwrap_err().to_string();
-    let erased_insert = erased.insert_left_unit(4, false).unwrap_err().to_string();
     assert_eq!(
-        typed_insert.replace("TensorMap::", "Tensor::"),
-        erased_insert
+        typed.insert_left_unit(4, false).unwrap_err().to_string(),
+        "invalid argument: TensorMap::insert_left_unit: position 4 exceeds rank 3"
     );
-    let typed_insert_right = typed.insert_right_unit(4, false).unwrap_err().to_string();
-    let erased_insert_right = erased.insert_right_unit(4, false).unwrap_err().to_string();
     assert_eq!(
-        typed_insert_right.replace("TensorMap::", "Tensor::"),
-        erased_insert_right
+        typed.insert_right_unit(4, false).unwrap_err().to_string(),
+        "invalid argument: TensorMap::insert_right_unit: position 4 exceeds rank 3"
     );
 
     // Remove: out-of-range axis, then a non-unit leg.
-    let typed_range = typed.remove_unit(3).unwrap_err().to_string();
-    let erased_range = erased.remove_unit(3).unwrap_err().to_string();
-    assert_eq!(typed_range.replace("TensorMap::", "Tensor::"), erased_range);
-    let typed_nonunit = typed.remove_unit(0).unwrap_err();
-    let erased_nonunit = erased.remove_unit(0).unwrap_err();
+    assert_eq!(
+        typed.remove_unit(3).unwrap_err().to_string(),
+        "invalid argument: TensorMap::remove_unit: axis 3 is out of range for rank 3"
+    );
+    let error = typed.remove_unit(0).unwrap_err();
     assert!(
-        matches!(typed_nonunit, tenet::typed::Error::InvalidArgument(_)),
-        "{typed_nonunit:?}"
+        matches!(error, tenet::typed::Error::InvalidArgument(_)),
+        "{error:?}"
     );
     assert_eq!(
-        typed_nonunit.to_string().replace("TensorMap::", "Tensor::"),
-        erased_nonunit.to_string()
+        error.to_string(),
+        "invalid argument: TensorMap::remove_unit: axis 0 is not a canonical unit leg"
     );
 }
 
 #[test]
-fn typed_twist_on_a_compact_spectrum_matches_the_erased_diagonal_route() {
-    // What (gate 1, compact arm): the typed `TypedData::Diagonal` twist arm
-    // is byte-identical to the erased `Data::Diagonal` `scaled_by_sector`
-    // route on an SVD spectrum whose coupled sectors include the odd one.
-    // (That the payload *stays* compact is gated with the body layout tests
-    // in `typed.rs`.)
+fn typed_twist_on_a_compact_spectrum_matches_the_dense_route() {
+    // What: the compact twist arm matches the ordinary dense tree transform
+    // on an SVD spectrum whose coupled sectors include the odd one.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = fz2_index_pair(&runtime);
-    let erased_s = erased.svd_compact().unwrap().1;
+    let typed = fz2_index(&runtime);
     let typed_s: TensorMap<tenet::core::FermionParityFusionRule, f64> =
         typed.svd_compact().unwrap().1;
-    assert_eq!(typed_s.data(), erased_s.data());
-    let erased_twisted = erased_s.twist(&[0]).unwrap();
+    let dense = forced_dense(&typed_s);
     let typed_twisted: TensorMap<tenet::core::FermionParityFusionRule, f64> =
         typed_s.twist(&[0]).unwrap();
-    assert_eq!(typed_twisted.data(), erased_twisted.data());
+    assert_eq!(typed_twisted.data(), dense.twist(&[0]).unwrap().data());
     // And the two-leg twist is the identity on the bond (θ² = 1 per sector).
     let typed_both: TensorMap<tenet::core::FermionParityFusionRule, f64> =
         typed_s.twist(&[0, 1]).unwrap();
