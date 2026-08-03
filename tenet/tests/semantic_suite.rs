@@ -137,7 +137,7 @@ macro_rules! for_each_space {
 
 /// permute ∘ permute == permute(composition), random permutation pairs on
 /// rank-4 and rank-5 tensors (splits chosen randomly, mirroring the mixed
-/// codomain/domain splits already exercised by `user_api.rs`).
+/// codomain/domain splits exercised by the typed repartition suite).
 #[test]
 fn permute_composition_law() {
     let rt = Runtime::builder().build().unwrap();

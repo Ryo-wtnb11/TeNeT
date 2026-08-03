@@ -14,8 +14,9 @@ TensorKit 並みの使い勝手。最重要軸 = Rust 準拠の保守性・拡�
       expert `tensortrace_fusion` に lowering、fZ2 supertrace 含め検証済み)
 - [x] twist / id / isomorphism / unitary / isometry(TK 0.17 oracle 検証済み、compose は mul! parity で supertrace twist なし)
 - [x] repartition / 脚の折り曲げ(codomain↔domain をまたぐ `permute(codomain_axes, domain_axes)`)
-      — 能力は実装済み、TK bend factor を oracle 検証(`tenet-core/src/tests.rs:1704/1847/1873`、
-      `tenet/tests/user_api.rs:1605`)。名前付き `repartition(N1,N2)` wrapper のみ未実装(sugar)
+      — 名前付き `repartition` を含め実装済み。TK bend factor を oracle 検証
+      (`tenet-core/src/tests.rs:1704/1847/1873`、
+      `tenet/tests/typed_facade.rs` の `repartition_moves_the_boundary_and_round_trips_at_every_split`)
 - [x] catdomain / catcodomain / absorb(TensorKit 0.17 semantics; host owned
       facade。device / mutable destination variants は未対応)
 - [ ] TK export 未実装:
