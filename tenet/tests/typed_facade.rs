@@ -2594,10 +2594,8 @@ fn repartition_is_sign_free_even_for_a_fermionic_provider() {
 // ---------------------------------------------------------------------------
 // Phase 5: decompositions (issue #567).
 //
-// The byte oracles here are exact rather than gauge-tolerant: both facades
-// call the same `*_dyn` seams, whose gauge fixing is deterministic, so a
-// difference of a single bit is a real divergence and not floating-point
-// weather.
+// Factorizations are checked through their mathematical contracts rather than
+// against the erased facade, which routes through the same `*_dyn` seams.
 // ---------------------------------------------------------------------------
 
 /// Decodes an erased spectrum's raw ids into `Z2Irrep` labels, so an erased
@@ -2625,30 +2623,6 @@ fn typed_z2_spectrum(
         .iter()
         .map(|entry| (entry.sector, entry.values.clone()))
         .collect()
-}
-
-#[test]
-fn typed_and_erased_svd_compact_agree_byte_for_byte() {
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
-
-    let (eu, es, evh) = erased.svd_compact().unwrap();
-    let (tu, ts, tvh) = typed.svd_compact().unwrap();
-
-    assert_eq!(tu.data(), eu.data());
-    assert_eq!(tvh.data(), evh.data());
-    // Both `s` factors are compact diagonal storage now (#570 closed), so they
-    // are byte-comparable through their common materialization — which the
-    // previous revision of this test could only assert a size ceiling on.
-    // `data()` deliberately reports the dense buffer on both facades: the
-    // `Σ_c k_c` storage claim underneath is what
-    // `tests/typed_diagonal_allocations.rs` measures, since neither facade
-    // publishes a compact accessor.
-    assert_eq!(ts.data(), es.data());
-    // One dense block per coupled sector, k_c² elements each: 2² + 3² = 13.
-    // Kept as the shape of the materialization, not as a storage ceiling.
-    assert_eq!(ts.data().len(), 13);
 }
 
 /// `u * s * vh` through the typed `contract`, for a `[2] <- [1]` factor chain:
@@ -2684,37 +2658,14 @@ fn svd_compact_reconstructs_the_source_through_the_typed_contract() {
 }
 
 #[test]
-fn typed_and_erased_svd_compact_agree_byte_for_byte_on_a_complex_payload() {
-    // What: the payload dtype is a type parameter here and a stored `Dtype`
-    // there, so c64 takes a different route through both facades. The
-    // imaginary part is deliberately not proportional to the real one, so a
-    // stray conjugation or a real-only path is visible.
+fn svd_compact_reconstructs_a_complex_payload() {
+    // What: c64 takes the complex factorization route. The imaginary part is
+    // deliberately not proportional to the real one, so a stray conjugation
+    // or a real-only path is visible.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_complex_oracle_pair(&runtime);
-    assert_eq!(typed.data(), erased.try_data_c64().unwrap());
-
-    let (eu, es, evh) = erased.svd_compact().unwrap();
+    let (_, typed) = z2_complex_oracle_pair(&runtime);
     let (tu, ts, tvh) = typed.svd_compact().unwrap();
-
-    assert_eq!(tu.data(), eu.try_data_c64().unwrap());
-    assert_eq!(tvh.data(), evh.try_data_c64().unwrap());
-    // Both `s` factors are compact diagonal storage (#570 closed), so `s`
-    // compares bitwise through its materialization like the f64 sibling above,
-    // not only through its spectrum.
-    assert_eq!(ts.data(), es.try_data_c64().unwrap());
-    assert_eq!(
-        typed
-            .svd_vals()
-            .unwrap()
-            .iter()
-            .map(|entry| entry.values.clone())
-            .collect::<Vec<_>>(),
-        erased_z2_spectrum(&erased.svd_vals().unwrap())
-            .iter()
-            .map(|(_, values)| values.clone())
-            .collect::<Vec<_>>()
-    );
 
     let recon = tu
         .contract(&ts, &[2], &[0], &[0, 1, 2])
@@ -2730,38 +2681,37 @@ fn typed_and_erased_svd_compact_agree_byte_for_byte_on_a_complex_payload() {
 }
 
 #[test]
-fn typed_and_erased_svd_full_agree_byte_for_byte() {
-    // `svd_full`'s `s` is dense rectangular on both sides — TensorKit's own
-    // shape — so unlike `svd_compact` all three factors compare bitwise.
+fn svd_full_reconstructs_with_unitary_outer_factors() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
+    for num_codomain in [2, 1] {
+        let (_, typed) = z2_oracle_pair_split(&runtime, num_codomain);
+        let (u, s, vh) = typed.svd_full().unwrap();
 
-    let (eu, es, evh) = erased.svd_full().unwrap();
-    let (tu, ts, tvh) = typed.svd_full().unwrap();
-
-    assert_eq!(tu.data(), eu.data());
-    assert_eq!(ts.data(), es.data());
-    assert_eq!(tvh.data(), evh.data());
+        let recon = u.compose(&s).unwrap().compose(&vh).unwrap();
+        assert_data_close_f64(recon.data(), typed.data());
+        assert!(u.is_isometric(1e-12).unwrap());
+        assert!(vh.adjoint().unwrap().is_isometric(1e-12).unwrap());
+        assert_same_legs(&u.codomain(), &typed.codomain());
+        assert_same_legs(&vh.domain(), &typed.domain());
+        assert_same_legs(&u.domain(), &s.codomain());
+        assert_same_legs(&s.domain(), &vh.codomain());
+    }
 }
 
 #[test]
-fn typed_and_erased_svd_trunc_agree_and_report_the_discarded_weight() {
+fn svd_trunc_reconstructs_and_reports_the_discarded_weight() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
+    let (_, typed) = z2_oracle_pair(&runtime);
 
     let truncation = tenet::typed::Truncation::rank(2);
-    let erased_out = erased.svd_trunc(&truncation).unwrap();
     let typed_out = typed.svd_trunc(&truncation).unwrap();
 
-    assert_eq!(typed_out.u.data(), erased_out.u.data());
-    assert_eq!(typed_out.vh.data(), erased_out.vh.data());
-    assert_eq!(typed_out.error, erased_out.error);
-    assert_eq!(
-        typed_z2_spectrum(&typed_out.singular_values),
-        erased_z2_spectrum(&erased_out.singular_values)
-    );
+    assert_same_legs(&typed_out.u.codomain(), &typed.codomain());
+    assert_same_legs(&typed_out.vh.domain(), &typed.domain());
+    assert_same_legs(&typed_out.u.domain(), &typed_out.s.codomain());
+    assert_same_legs(&typed_out.s.domain(), &typed_out.vh.codomain());
 
     // The reported error is the 2-norm of everything the truncation dropped.
     // Z2 is a group, so every quantum dimension is one and the weighting is
@@ -2780,6 +2730,16 @@ fn typed_and_erased_svd_trunc_agree_and_report_the_discarded_weight() {
     }
     assert!(discarded > 0.0, "the fixture must actually truncate");
     assert!((typed_out.error - discarded.sqrt()).abs() < 1e-12);
+
+    let recon = recompose(&typed_out.u, &typed_out.s, &typed_out.vh);
+    let reconstruction_error = recon
+        .data()
+        .iter()
+        .zip(typed.data())
+        .map(|(got, want)| (got - want) * (got - want))
+        .sum::<f64>()
+        .sqrt();
+    assert!((typed_out.error - reconstruction_error).abs() < 1e-12);
 
     // A degenerate but well-formed policy is a policy, not an error: keeping
     // nothing succeeds and discards the whole spectrum.
@@ -2877,7 +2837,7 @@ fn svd_vals_sorts_by_label_where_that_differs_from_the_id_order() {
 }
 
 #[test]
-fn typed_and_erased_qr_and_lq_agree_byte_for_byte() {
+fn qr_and_lq_reconstruct_with_the_expected_isometries_and_spaces() {
     // Both splits are exercised deliberately: `2 <- 1` is tall in every coupled
     // sector, where LQ-compact and LQ-full return the same factors and so
     // cannot tell the two seams apart; `1 <- 2` is wide, where they differ (and
@@ -2885,16 +2845,40 @@ fn typed_and_erased_qr_and_lq_agree_byte_for_byte() {
     let _guard = cache_lock();
     let runtime = runtime();
     for num_codomain in [2, 1] {
-        let (erased, typed) = z2_oracle_pair_split(&runtime, num_codomain);
+        let (_, typed) = z2_oracle_pair_split(&runtime, num_codomain);
 
-        for (erased_out, typed_out) in [
-            (erased.qr_compact().unwrap(), typed.qr_compact().unwrap()),
-            (erased.qr_full().unwrap(), typed.qr_full().unwrap()),
-            (erased.lq_compact().unwrap(), typed.lq_compact().unwrap()),
-            (erased.lq_full().unwrap(), typed.lq_full().unwrap()),
-        ] {
-            assert_eq!(typed_out.0.data(), erased_out.0.data());
-            assert_eq!(typed_out.1.data(), erased_out.1.data());
+        let qr_compact = typed.qr_compact().unwrap();
+        let qr_full = typed.qr_full().unwrap();
+        for (q, r) in [&qr_compact, &qr_full] {
+            assert_data_close_f64(q.compose(r).unwrap().data(), typed.data());
+            assert!(q.is_isometric(1e-12).unwrap());
+            assert_same_legs(&q.codomain(), &typed.codomain());
+            assert_same_legs(&r.domain(), &typed.domain());
+            assert_same_legs(&q.domain(), &r.codomain());
+        }
+
+        let lq_compact = typed.lq_compact().unwrap();
+        let lq_full = typed.lq_full().unwrap();
+        for (l, q) in [&lq_compact, &lq_full] {
+            assert_data_close_f64(l.compose(q).unwrap().data(), typed.data());
+            assert!(q.adjoint().unwrap().is_isometric(1e-12).unwrap());
+            assert_same_legs(&l.codomain(), &typed.codomain());
+            assert_same_legs(&q.domain(), &typed.domain());
+            assert_same_legs(&l.domain(), &q.codomain());
+        }
+
+        // Each orientation distinguishes one compact seam from its full
+        // sibling through the internal bond space.
+        if num_codomain == 2 {
+            assert_ne!(
+                typed_leg_shapes(&qr_compact.0),
+                typed_leg_shapes(&qr_full.0)
+            );
+        } else {
+            assert_ne!(
+                typed_leg_shapes(&lq_compact.1),
+                typed_leg_shapes(&lq_full.1)
+            );
         }
     }
 }
@@ -2918,23 +2902,46 @@ fn left_and_right_orth_are_the_tensorkit_default_kinds() {
 }
 
 #[test]
-fn typed_and_erased_null_spaces_agree_byte_for_byte() {
+fn left_and_right_null_spaces_annihilate_the_source() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
+    for num_codomain in [2, 1] {
+        let (_, typed) = z2_oracle_pair_split(&runtime, num_codomain);
+        let left = typed.left_null().unwrap();
+        let right = typed.right_null().unwrap();
 
-    // `[v, v] <- [v]` is tall per coupled sector, so the left null space is
-    // non-empty; the right one is empty, which is itself a shape the two
-    // facades must agree on.
-    assert_eq!(
-        typed.left_null().unwrap().data(),
-        erased.left_null().unwrap().data()
-    );
-    assert!(!typed.left_null().unwrap().data().is_empty());
-    assert_eq!(
-        typed.right_null().unwrap().data(),
-        erased.right_null().unwrap().data()
-    );
+        assert_same_legs(&left.codomain(), &typed.codomain());
+        assert_same_legs(&right.domain(), &typed.domain());
+        assert!(left.is_isometric(1e-12).unwrap());
+        assert!(right.adjoint().unwrap().is_isometric(1e-12).unwrap());
+        assert!(left
+            .adjoint()
+            .unwrap()
+            .compose(&typed)
+            .unwrap()
+            .data()
+            .iter()
+            .all(|value| value.abs() < 1e-12));
+        assert!(typed
+            .compose(&right.adjoint().unwrap())
+            .unwrap()
+            .data()
+            .iter()
+            .all(|value| value.abs() < 1e-12));
+
+        let left_null_dimensions = left.domain()[0].degeneracies().to_vec();
+        let right_null_dimensions = right.codomain()[0].degeneracies().to_vec();
+        // The counting fixture has one rank-deficient sector: its tall form
+        // leaves dimensions 11 and 10 on the left bond and one on the right;
+        // repartitioning to the wide form exchanges those two nullities.
+        if num_codomain == 2 {
+            assert_eq!(left_null_dimensions, [11, 10]);
+            assert_eq!(right_null_dimensions, [1]);
+        } else {
+            assert_eq!(left_null_dimensions, [1]);
+            assert_eq!(right_null_dimensions, [11, 10]);
+        }
+    }
 }
 
 #[test]
