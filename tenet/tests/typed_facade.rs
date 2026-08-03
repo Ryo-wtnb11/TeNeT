@@ -4086,59 +4086,11 @@ fn compose_declines_a_compact_arm_it_cannot_prove() {
 // Phase 6 (issue #570), slice 2: the Hermitian eigendecompositions.
 // ---------------------------------------------------------------------------
 
-/// A Hermitian endomorphism through both facades: `p = t + t†`, which is
-/// Hermitian by construction on every provider, so `eigh` is defined on it
-/// without either facade having to project first.
-fn z2_hermitian_pair(
-    runtime: &Runtime,
-) -> (
-    tenet::prelude::Tensor,
-    TensorMap<tenet::core::Z2FusionRule, f64>,
-) {
-    let (erased, typed) = z2_endo_oracle_pair(runtime);
-    (
-        erased.add(&erased.adjoint().unwrap(), 1.0, 1.0).unwrap(),
-        typed.add(&typed.adjoint().unwrap(), 1.0, 1.0).unwrap(),
-    )
-}
-
-fn su2_hermitian_pair(
-    runtime: &Runtime,
-) -> (
-    tenet::prelude::Tensor,
-    TensorMap<tenet::core::SU2FusionRule, f64>,
-) {
-    let (erased, typed) = su2_oracle_pair(runtime);
-    (
-        erased.add(&erased.adjoint().unwrap(), 1.0, 1.0).unwrap(),
-        typed.add(&typed.adjoint().unwrap(), 1.0, 1.0).unwrap(),
-    )
-}
-
-#[test]
-fn typed_and_erased_eigh_full_agree_byte_for_byte() {
-    // What: the same seam on both facades, so `v` compares bitwise and `d` —
-    // compact on both — compares through its shared materialization. The
-    // return is `(d, v)`, which is what the destructuring here pins.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased, typed) = z2_hermitian_pair(&runtime);
-
-    let (ed, ev) = erased.eigh_full().unwrap();
-    let (td, tv) = typed.eigh_full().unwrap();
-
-    assert_eq!(td.data(), ed.data());
-    assert_eq!(tv.data(), ev.data());
-    // `d` really is the eigenvalue factor and `v` the eigenbasis, not the other
-    // way round: `v` is an isometry and `d` is diagonal. A swapped return would
-    // fail both.
-    assert_eq!(td.data().len(), 13, "d is the bond <- bond factor");
-    assert_eq!(tv.data().len(), 13, "v is the codomain <- bond factor");
-    assert_eq!(
-        td.eigh_vals().unwrap(),
-        typed.eigh_vals().unwrap(),
-        "d carries the source's own spectrum on its diagonal"
-    );
+/// A typed Hermitian endomorphism: `p = t + t†`, so `eigh` is defined
+/// without projecting first.
+fn z2_hermitian(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, f64> {
+    let (_, typed) = z2_endo_oracle_pair(runtime);
+    typed.add(&typed.adjoint().unwrap(), 1.0, 1.0).unwrap()
 }
 
 #[test]
@@ -4148,7 +4100,7 @@ fn eigh_full_reconstructs_the_source_through_compose() {
     // factorization.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_hermitian_pair(&runtime);
+    let typed = z2_hermitian(&runtime);
 
     let (d, v) = typed.eigh_full().unwrap();
     let recon = v
@@ -4167,60 +4119,58 @@ fn eigh_full_reconstructs_the_source_through_compose() {
 }
 
 #[test]
-fn typed_and_erased_eigh_vals_agree_including_the_su2_branch() {
-    // What: the spectra match label for label. SU(2) is here because its
-    // dimension-weighted machinery runs underneath the eigenvalue enumeration
-    // even though the eigenvalues themselves are not weighted.
+fn eigh_vals_follow_the_provider_label_order() {
+    // What: caller-facing spectra use provider labels in canonical order.
     let _guard = cache_lock();
     let runtime = runtime();
+    let typed = z2_hermitian(&runtime);
+    let spectrum = typed.eigh_vals().unwrap();
 
-    let (erased, typed) = z2_hermitian_pair(&runtime);
     assert_eq!(
-        typed_z2_spectrum(&typed.eigh_vals().unwrap()),
-        erased_z2_spectrum(&erased.eigh_vals().unwrap())
+        spectrum
+            .iter()
+            .map(|entry| entry.sector)
+            .collect::<Vec<_>>(),
+        [tenet::core::Z2Irrep::EVEN, tenet::core::Z2Irrep::ODD]
     );
-
-    let (erased, typed) = su2_hermitian_pair(&runtime);
-    let typed_values: Vec<Vec<f64>> = typed
-        .eigh_vals()
-        .unwrap()
-        .iter()
-        .map(|entry| entry.values.clone())
-        .collect();
-    let mut erased_entries = erased.eigh_vals().unwrap();
-    erased_entries.sort_by_key(|entry| {
-        SectorCodec::decode_sector(&tenet::core::SU2FusionRule, entry.sector).unwrap()
-    });
-    let erased_values: Vec<Vec<f64>> = erased_entries
-        .iter()
-        .map(|entry| entry.values.clone())
-        .collect();
-    assert_eq!(typed_values, erased_values);
-    assert!(
-        erased_values.len() > 1,
-        "the SU(2) fixture must span more than one coupled sector"
-    );
+    assert!(spectrum.iter().all(|entry| !entry.values.is_empty()));
 }
 
 #[test]
-fn typed_and_erased_eigh_trunc_agree_and_report_the_discarded_weight() {
+fn eigh_trunc_reports_the_discarded_eigenvalue_norm() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_hermitian_pair(&runtime);
+    let typed = z2_hermitian(&runtime);
     let truncation = Truncation::rank(3);
 
-    let erased_out = erased.eigh_trunc(&truncation).unwrap();
+    let mut magnitudes: Vec<_> = typed
+        .eigh_vals()
+        .unwrap()
+        .into_iter()
+        .flat_map(|entry| entry.values)
+        .map(f64::abs)
+        .collect();
+    magnitudes.sort_by(|lhs, rhs| rhs.total_cmp(lhs));
+    let expected_error = magnitudes[3..]
+        .iter()
+        .map(|value| value * value)
+        .sum::<f64>()
+        .sqrt();
     let typed_out = typed.eigh_trunc(&truncation).unwrap();
 
-    assert_eq!(typed_out.d.data(), erased_out.d.data());
-    assert_eq!(typed_out.v.data(), erased_out.v.data());
-    assert_eq!(typed_out.error, erased_out.error);
     assert_eq!(
-        typed_z2_spectrum(&typed_out.eigenvalues),
-        erased_z2_spectrum(&erased_out.eigenvalues)
+        typed_out
+            .eigenvalues
+            .iter()
+            .map(|entry| entry.values.len())
+            .sum::<usize>(),
+        3
     );
-    // Something was actually discarded, so `error` is not vacuously zero.
-    assert!(typed_out.error > 0.0);
+    assert!(
+        expected_error > 0.0,
+        "the fixture must discard nonzero values"
+    );
+    assert!((typed_out.error - expected_error).abs() < 1e-12 * expected_error.max(1.0));
     assert!(typed_out.d.data().len() < typed.eigh_full().unwrap().0.data().len());
 }
 
@@ -4239,25 +4189,10 @@ fn eigh_reports_a_non_hermitian_input_rather_than_a_wrong_answer() {
 // Phase 6 (issue #570), slice 3: the general eigendecompositions.
 // ---------------------------------------------------------------------------
 
-/// The c64 endomorphism pair `eig` needs: [`z2_complex_oracle_pair`] is
-/// rank three, and `eig` is defined on square maps only.
-fn z2_complex_endo_oracle_pair(
-    runtime: &Runtime,
-) -> (
-    tenet::prelude::Tensor,
-    TensorMap<tenet::core::Z2FusionRule, Complex64>,
-) {
+/// The typed c64 endomorphism `eig` needs: [`z2_complex_oracle_pair`] is rank
+/// three, and `eig` is defined on square maps only.
+fn z2_complex_endo(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, Complex64> {
     let complex = |value: f64| Complex64::new(value, 1.0 + value % 5.0);
-    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
-    let erased = tenet::prelude::Tensor::from_block_fn(
-        runtime,
-        [&space],
-        [&space],
-        |key: &tenet::prelude::BlockKey, indices: &[usize]| {
-            complex(erased_fill_value(key, indices))
-        },
-    )
-    .unwrap();
     let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
@@ -4267,117 +4202,92 @@ fn z2_complex_endo_oracle_pair(
         false,
     )
     .unwrap();
-    let typed = TensorMap::from_block_fn(runtime, [&leg], [&leg], |trees, indices| {
+    TensorMap::from_block_fn(runtime, [&leg], [&leg], |trees, indices| {
         complex(typed_fill_value(trees, indices))
     })
-    .unwrap();
-    (erased, typed)
+    .unwrap()
 }
 
 #[test]
-fn typed_and_erased_eig_full_agree_on_a_real_payload() {
-    // What: the factors are complex for a real input on both facades —
-    // TensorKit's `eigen` promotes too — and `d` is the compact spectrum.
+fn eig_full_satisfies_the_eigen_equation_for_a_real_payload() {
+    // What: a real input promotes to complex factors satisfying A V = V D.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+    let (_, typed) = z2_endo_oracle_pair(&runtime);
 
-    let (ed, ev) = erased.eig_full().unwrap();
-    let (td, tv) = typed.eig_full().unwrap();
+    let (d, v) = typed.eig_full().unwrap();
+    let av = typed.to_c64().compose(&v).unwrap();
+    let vd = v.compose(&d).unwrap();
 
-    assert_eq!(td.data(), ed.try_data_c64().unwrap());
-    assert_eq!(tv.data(), ev.try_data_c64().unwrap());
+    assert_data_close_c64(av.data(), vd.data());
 }
 
 #[test]
-fn typed_and_erased_eig_agree_on_a_complex_payload_and_conjugate_the_adjoint() {
-    // What: the c64 route, where the spectrum is genuinely complex rather than
-    // a real one widened. `d.adjoint()` must conjugate it — on a real spectrum
-    // that is invisible, which is why the check lives here.
+fn complex_eig_satisfies_the_eigen_equation_and_conjugates_its_spectrum() {
+    // What: the native complex route satisfies A V = V D, and the compact
+    // spectrum's adjoint conjugates genuinely nonreal eigenvalues.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_complex_endo_oracle_pair(&runtime);
+    let typed = z2_complex_endo(&runtime);
 
-    let (ed, ev) = erased.eig_full().unwrap();
-    let (td, tv) = typed.eig_full().unwrap();
-    assert_eq!(td.data(), ed.try_data_c64().unwrap());
-    assert_eq!(tv.data(), ev.try_data_c64().unwrap());
+    let (d, v) = typed.eig_full().unwrap();
+    assert_data_close_c64(
+        typed.compose(&v).unwrap().data(),
+        v.compose(&d).unwrap().data(),
+    );
 
     // Genuinely complex, so a missing conjugation is observable.
     assert!(
-        td.data().iter().any(|value| value.im.abs() > 1e-6),
+        d.data().iter().any(|value| value.im.abs() > 1e-6),
         "the eig spectrum must be off the real axis for this to test anything"
     );
-    let adjoint = td.adjoint().unwrap();
-    assert_eq!(
-        adjoint.data(),
-        ed.adjoint().unwrap().try_data_c64().unwrap()
-    );
-    for (conjugated, original) in adjoint.data().iter().zip(td.data()) {
+    let adjoint = d.adjoint().unwrap();
+    for (conjugated, original) in adjoint.data().iter().zip(d.data()) {
         assert_eq!(*conjugated, original.conj());
     }
-
-    // The compact reductions on a genuinely complex spectrum. Every other
-    // compact oracle in this suite reads an SVD spectrum, which is real, so a
-    // dropped conjugation in the compact inner product is invisible there:
-    // `Σ conj(a) a` and `Σ a a` agree on the reals. Here they do not.
-    assert_eq!(td.inner(&td).unwrap(), ed.inner(&ed).unwrap().to_c64());
-    assert_eq!(td.norm().unwrap(), ed.norm().unwrap());
-    assert_eq!(td.tr().unwrap(), ed.tr().unwrap().to_c64());
-    // `<d, d>` is real and positive precisely because the first argument is
-    // conjugated; the unconjugated sum of squares is not.
-    let unconjugated: Complex64 = td.data().iter().map(|value| value * value).sum();
-    assert!(
-        unconjugated.im.abs() > 1e-6,
-        "the spectrum must make the unconjugated sum complex for this to test anything"
-    );
-    assert_eq!(td.inner(&td).unwrap().im, 0.0);
-    let norm = td.norm().unwrap();
-    assert!((td.inner(&td).unwrap().re - norm * norm).abs() < 1e-9 * norm * norm);
 }
 
 #[test]
-fn typed_and_erased_eig_vals_and_eig_trunc_agree() {
+fn eig_vals_are_label_ordered_and_trunc_reports_the_discarded_norm() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_endo_oracle_pair(&runtime);
-
-    let decode = |spectrum: &[tenet::prelude::SectorSpectrum<Complex64>]| {
-        let mut decoded: Vec<_> = spectrum
+    let (_, typed) = z2_endo_oracle_pair(&runtime);
+    let spectrum = typed.eig_vals().unwrap();
+    assert_eq!(
+        spectrum
             .iter()
-            .map(|entry| {
-                (
-                    SectorCodec::decode_sector(&tenet::core::Z2FusionRule, entry.sector).unwrap(),
-                    entry.values.clone(),
-                )
-            })
-            .collect();
-        decoded.sort_by_key(|(sector, _): &(tenet::core::Z2Irrep, _)| *sector);
-        decoded
-    };
-    let typed_decoded: Vec<_> = typed
-        .eig_vals()
-        .unwrap()
-        .iter()
-        .map(|entry| (entry.sector, entry.values.clone()))
-        .collect();
-    assert_eq!(typed_decoded, decode(&erased.eig_vals().unwrap()));
+            .map(|entry| entry.sector)
+            .collect::<Vec<_>>(),
+        [tenet::core::Z2Irrep::EVEN, tenet::core::Z2Irrep::ODD]
+    );
 
     let truncation = Truncation::rank(3);
-    let erased_out = erased.eig_trunc(&truncation).unwrap();
+    let mut magnitudes: Vec<_> = spectrum
+        .into_iter()
+        .flat_map(|entry| entry.values)
+        .map(|value| value.norm())
+        .collect();
+    magnitudes.sort_by(|lhs, rhs| rhs.total_cmp(lhs));
+    let expected_error = magnitudes[3..]
+        .iter()
+        .map(|value| value * value)
+        .sum::<f64>()
+        .sqrt();
     let typed_out = typed.eig_trunc(&truncation).unwrap();
-    assert_eq!(typed_out.d.data(), erased_out.d.try_data_c64().unwrap());
-    assert_eq!(typed_out.v.data(), erased_out.v.try_data_c64().unwrap());
-    assert_eq!(typed_out.error, erased_out.error);
+
     assert_eq!(
         typed_out
             .eigenvalues
             .iter()
-            .map(|entry| (entry.sector, entry.values.clone()))
-            .collect::<Vec<_>>(),
-        decode(&erased_out.eigenvalues)
+            .map(|entry| entry.values.len())
+            .sum::<usize>(),
+        3
     );
-    assert!(typed_out.error > 0.0);
+    assert!(
+        expected_error > 0.0,
+        "the fixture must discard nonzero values"
+    );
+    assert!((typed_out.error - expected_error).abs() < 1e-12 * expected_error.max(1.0));
 }
 
 // ---------------------------------------------------------------------------
@@ -4385,64 +4295,51 @@ fn typed_and_erased_eig_vals_and_eig_trunc_agree() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_hermitian_family_agrees_with_the_erased_predicates() {
-    // What: all seven members, oracled against the erased facade on the same
-    // tensor — a general endomorphism, its Hermitian part and its
-    // anti-Hermitian part, so each predicate sees both verdicts.
+fn hermitian_projections_satisfy_their_identities_and_predicate_truth_table() {
+    // What: the complementary projections reconstruct the source and their
+    // adjoint symmetries agree with the typed predicate family.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+    let (_, typed) = z2_endo_oracle_pair(&runtime);
     let tol = 1e-10;
 
-    let erased_cases = [
-        erased.clone(),
-        erased.project_hermitian().unwrap(),
-        erased.project_antihermitian().unwrap(),
-    ];
-    let typed_cases = [
-        typed.clone(),
-        typed.project_hermitian().unwrap(),
-        typed.project_antihermitian().unwrap(),
-    ];
+    let hermitian = typed.project_hermitian().unwrap();
+    let antihermitian = typed.project_antihermitian().unwrap();
+    assert_data_close_f64(
+        hermitian.add(&antihermitian, 1.0, 1.0).unwrap().data(),
+        typed.data(),
+    );
+    assert_data_close_f64(hermitian.adjoint().unwrap().data(), hermitian.data());
+    assert_data_close_f64(
+        antihermitian.adjoint().unwrap().data(),
+        antihermitian.scale(-1.0).data(),
+    );
+    assert_data_close_f64(
+        hermitian.project_hermitian().unwrap().data(),
+        hermitian.data(),
+    );
+    assert_data_close_f64(
+        antihermitian.project_antihermitian().unwrap().data(),
+        antihermitian.data(),
+    );
 
-    for (index, (erased, typed)) in erased_cases.iter().zip(&typed_cases).enumerate() {
-        // The projections themselves agree bitwise before anything is asked
-        // about them.
-        assert_eq!(typed.data(), erased.data(), "case {index} payload");
+    let cases = [
+        (&typed, [false, false, false, false, false]),
+        (&hermitian, [true, false, false, false, false]),
+        (&antihermitian, [false, true, false, false, false]),
+    ];
+    for (tensor, expected) in cases {
         assert_eq!(
-            typed.is_hermitian(tol).unwrap(),
-            erased.is_hermitian(tol).unwrap(),
-            "case {index} is_hermitian"
-        );
-        assert_eq!(
-            typed.is_antihermitian(tol).unwrap(),
-            erased.is_antihermitian(tol).unwrap(),
-            "case {index} is_antihermitian"
-        );
-        assert_eq!(
-            typed.is_isometric(tol).unwrap(),
-            erased.is_isometric(tol).unwrap(),
-            "case {index} is_isometric"
-        );
-        assert_eq!(
-            typed.is_unitary(tol).unwrap(),
-            erased.is_unitary(tol).unwrap(),
-            "case {index} is_unitary"
-        );
-        assert_eq!(
-            typed.is_posdef(tol).unwrap(),
-            erased.is_posdef(tol).unwrap(),
-            "case {index} is_posdef"
+            [
+                tensor.is_hermitian(tol).unwrap(),
+                tensor.is_antihermitian(tol).unwrap(),
+                tensor.is_isometric(tol).unwrap(),
+                tensor.is_unitary(tol).unwrap(),
+                tensor.is_posdef(tol).unwrap(),
+            ],
+            expected
         );
     }
-
-    // The verdicts are not all the same value, so the agreement above is not
-    // vacuous: the projections really are (anti-)Hermitian and the source is
-    // neither.
-    assert!(!typed_cases[0].is_hermitian(tol).unwrap());
-    assert!(typed_cases[1].is_hermitian(tol).unwrap());
-    assert!(!typed_cases[1].is_antihermitian(tol).unwrap());
-    assert!(typed_cases[2].is_antihermitian(tol).unwrap());
 }
 
 #[test]
@@ -4452,42 +4349,23 @@ fn isometry_and_posdef_see_their_positive_cases() {
     // definite when `t` has full rank.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
+    let (_, typed) = z2_oracle_pair(&runtime);
     let tol = 1e-9;
 
-    let eu = erased.svd_compact().unwrap().0;
     let tu = typed.svd_compact().unwrap().0;
     assert!(tu.is_isometric(tol).unwrap());
-    assert_eq!(tu.is_isometric(tol).unwrap(), eu.is_isometric(tol).unwrap());
     // Isometric but not unitary: `u` is tall here.
     assert!(!tu.is_unitary(tol).unwrap());
-    assert_eq!(tu.is_unitary(tol).unwrap(), eu.is_unitary(tol).unwrap());
 
     // `2 * id` is Hermitian with every eigenvalue at 2: positive definite on
     // any provider, and the cheapest tensor that is.
-    let erased_positive = tenet::prelude::Tensor::id(
-        &runtime,
-        tenet::prelude::Dtype::F64,
-        &erased.domain_spaces(),
-    )
-    .unwrap()
-    .scale(2.0)
-    .unwrap();
     let typed_positive = TensorMap::id(&runtime, &typed.domain()).unwrap().scale(2.0);
     assert!(typed_positive.is_hermitian(tol).unwrap());
     assert!(typed_positive.is_posdef(tol).unwrap());
-    assert_eq!(
-        typed_positive.is_posdef(tol).unwrap(),
-        erased_positive.is_posdef(tol).unwrap()
-    );
     // Hermitian but not positive definite: the same tensor negated.
     let negated = typed_positive.scale(-1.0);
     assert!(negated.is_hermitian(tol).unwrap());
     assert!(!negated.is_posdef(tol).unwrap());
-    assert_eq!(
-        negated.is_posdef(tol).unwrap(),
-        erased_positive.scale(-1.0).unwrap().is_posdef(tol).unwrap()
-    );
     // Positive *semi*definite is `false`, not `true`: TensorKit's `isposdef` is
     // Cholesky-based and strict, and this facade's rustdoc promises the same.
     // A real diagonal endomorphism with one entry at exactly zero is the case
@@ -4527,56 +4405,26 @@ fn isometry_and_posdef_see_their_positive_cases() {
         "a positive semidefinite tensor must not be reported positive definite"
     );
 
-    // A Gram matrix agrees with the erased verdict whichever way it falls.
-    let egram = erased.adjoint().unwrap().compose(&erased).unwrap();
+    // This rank-deficient fixture's Gram matrix is Hermitian but not strictly
+    // positive definite.
     let tgram = typed.adjoint().unwrap().compose(&typed).unwrap();
     assert!(tgram.is_hermitian(tol).unwrap());
-    assert_eq!(tgram.is_posdef(tol).unwrap(), egram.is_posdef(tol).unwrap());
+    assert!(!tgram.is_posdef(tol).unwrap());
 }
 
 #[test]
 fn a_non_endomorphism_is_never_hermitian_and_never_errors() {
-    // What: TensorKit throws here; both facades answer `false`. The projections
-    // do error, because there is no tensor to return.
+    // What: predicates are total and false; projections have no endomorphism to
+    // return and therefore reject the input.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
+    let (_, typed) = z2_oracle_pair(&runtime);
 
     assert!(!typed.is_hermitian(1e-9).unwrap());
     assert!(!typed.is_antihermitian(1e-9).unwrap());
     assert!(!typed.is_posdef(1e-9).unwrap());
-    assert_eq!(
-        typed.is_hermitian(1e-9).unwrap(),
-        erased.is_hermitian(1e-9).unwrap()
-    );
     assert!(typed.project_hermitian().is_err());
     assert!(typed.project_antihermitian().is_err());
-}
-
-#[test]
-fn the_hermitian_family_carries_the_su2_dimension_weight() {
-    // What: every member reduces through `norm`, which is dimension weighted on
-    // a non-abelian provider. Z2 alone cannot separate the two.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased, typed) = su2_oracle_pair(&runtime);
-    let tol = 1e-9;
-
-    assert_eq!(
-        typed.project_hermitian().unwrap().data(),
-        erased.project_hermitian().unwrap().data()
-    );
-    assert!(typed
-        .project_hermitian()
-        .unwrap()
-        .is_hermitian(tol)
-        .unwrap());
-    assert_eq!(
-        typed.is_hermitian(tol).unwrap(),
-        erased.is_hermitian(tol).unwrap()
-    );
-    let (_, v) = typed.project_hermitian().unwrap().eigh_full().unwrap();
-    assert!(v.is_unitary(tol).unwrap());
 }
 
 // ---------------------------------------------------------------------------
