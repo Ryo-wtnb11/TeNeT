@@ -2124,9 +2124,13 @@ where
     D: TensorScalar,
 {
     fn commit(self) -> Result<TensorMap<P, D>, Error> {
-        let data = self.source.materialized_body().materialized_dense_data();
-        let blocks = self.blocks;
         let source = self.source;
+        let materialized = source.materialized_tensor_uncached()?;
+        let data = materialized
+            .owned_body()
+            .expect("uncached materialization is owned")
+            .materialized_dense_data();
+        let blocks = self.blocks;
         let codomain = self.codomain;
         let domain = self.domain;
         let mut missing_block = false;
@@ -4918,7 +4922,11 @@ where
         if self.rank() != 2 || self.numout() != 1 || self.numin() != 1 {
             return Ok(false);
         }
-        let data = self.materialized_body().materialized_dense_data();
+        let materialized = self.materialized_tensor_uncached()?;
+        let data = materialized
+            .owned_body()
+            .expect("uncached materialization is owned")
+            .materialized_dense_data();
         let mut norm = 0.0_f64;
         let mut offdiag = 0.0_f64;
         for index in 0..self.logical_space().space().structure().block_count() {
@@ -6194,7 +6202,7 @@ where
         // Leasing rather than locking, matching the erased path: independent
         // operations on one runtime must not serialize behind each other.
         let mut lease = self.runtime.lease_context()?;
-        let body = self.materialized_body();
+        let body = self.owned_body().expect("owned tree transform input");
         let (space, data) = tree_transform_owned_multiplicity_free(
             lease.context().multiplicity_free_lane::<D>(),
             BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())?,
@@ -6826,7 +6834,10 @@ where
             )?;
             data
         } else {
-            self.materialized_body().materialized_dense_data().to_vec()
+            self.owned_body()
+                .expect("owned scaled-axis input")
+                .materialized_dense_data()
+                .to_vec()
         };
         tenet_matrixalgebra::scale_axis_by_spectrum_mapped(
             self.logical_space().space(),
@@ -6893,7 +6904,9 @@ where
 
     /// Borrowed seam view of this tensor map.
     fn bound_ref(&self) -> Result<BoundDynamicTensorRef<'_, R, D>, Error> {
-        let body = self.materialized_body();
+        let body = self.owned_body().ok_or_else(|| {
+            internal_layout_error("factorization input must be owned after adjoint dispatch")
+        })?;
         BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
             .map_err(Error::from)
     }
@@ -7916,7 +7929,10 @@ where
         // but only by convention — the buffer is free to hold anything, so the
         // off-diagonal entries are checked rather than assumed. Skipping the
         // check would silently drop them.
-        let data = self.materialized_body().materialized_dense_data();
+        let data = self
+            .owned_body()
+            .expect("owned square-root input")
+            .materialized_dense_data();
         let zero = num_complex::Complex64::new(0.0, 0.0);
         let mut out = vec![D::from_real(0.0); data.len()];
         let structure = self.logical_space().space().structure();
@@ -8175,7 +8191,10 @@ where
             (Some(diagonal), None) => {
                 return Ok(self.with_data(scatter_spectrum(
                     self.logical_space().space(),
-                    other.materialized_body().materialized_dense_data(),
+                    other
+                        .owned_body()
+                        .expect("owned add input")
+                        .materialized_dense_data(),
                     beta,
                     diagonal,
                     alpha,
@@ -8184,7 +8203,9 @@ where
             (None, Some(diagonal)) => {
                 return Ok(self.with_data(scatter_spectrum(
                     self.logical_space().space(),
-                    self.materialized_body().materialized_dense_data(),
+                    self.owned_body()
+                        .expect("owned add input")
+                        .materialized_dense_data(),
                     alpha,
                     diagonal,
                     beta,
@@ -8193,10 +8214,16 @@ where
             (None, None) => {}
         }
         Ok(self.with_data(
-            self.materialized_body()
+            self.owned_body()
+                .expect("owned add input")
                 .materialized_dense_data()
                 .iter()
-                .zip(other.materialized_body().materialized_dense_data())
+                .zip(
+                    other
+                        .owned_body()
+                        .expect("owned add input")
+                        .materialized_dense_data(),
+                )
                 .map(|(&x, &y)| x * alpha + y * beta)
                 .collect(),
         ))
@@ -8236,7 +8263,8 @@ where
                 .expect("scaling a pre-admitted adjoint must preserve its layout");
         }
         self.with_data(
-            self.materialized_body()
+            self.owned_body()
+                .expect("owned scale input")
                 .materialized_dense_data()
                 .iter()
                 .map(|&value| value * factor)
@@ -8415,8 +8443,11 @@ where
                 });
             }
         }
-        let source_data =
-            source_data.unwrap_or_else(|| self.materialized_body().materialized_dense_data());
+        let source_data = source_data.unwrap_or_else(|| {
+            self.owned_body()
+                .expect("owned trace input")
+                .materialized_dense_data()
+        });
         let data = tenet_tensors::tensortrace_fusion_dyn_owned_checked(
             &space,
             source_space,
@@ -8530,7 +8561,8 @@ where
                 .fold(0.0, f64::max));
         }
         Ok(self
-            .materialized_body()
+            .owned_body()
+            .expect("owned norm input")
             .materialized_dense_data()
             .iter()
             .map(|&value| value.widen_complex().norm())
@@ -8601,7 +8633,9 @@ where
         coupled_region_pow_sum(
             self.logical_space().space().structure(),
             self.logical_space().space().nout(),
-            self.materialized_body().materialized_dense_data(),
+            self.owned_body()
+                .expect("owned norm input")
+                .materialized_dense_data(),
             p,
             |coupled| provider.dim_scalar(coupled),
         )
@@ -8629,8 +8663,12 @@ where
             self.logical_space().provider(),
             self.logical_space().space().structure(),
             self.logical_space().space().nout(),
-            self.materialized_body().materialized_dense_data(),
-            self.materialized_body().materialized_dense_data(),
+            self.owned_body()
+                .expect("owned norm input")
+                .materialized_dense_data(),
+            self.owned_body()
+                .expect("owned norm input")
+                .materialized_dense_data(),
         )
     }
 
@@ -8698,8 +8736,13 @@ where
             self.logical_space().provider(),
             self.logical_space().space().structure(),
             self.logical_space().space().nout(),
-            self.materialized_body().materialized_dense_data(),
-            other.materialized_body().materialized_dense_data(),
+            self.owned_body()
+                .expect("owned inner input")
+                .materialized_dense_data(),
+            other
+                .owned_body()
+                .expect("owned inner input")
+                .materialized_dense_data(),
         )?))
     }
 
@@ -8764,7 +8807,9 @@ where
             self.logical_space().provider(),
             self.logical_space().space().structure(),
             self.logical_space().space().nout(),
-            self.materialized_body().materialized_dense_data(),
+            self.owned_body()
+                .expect("owned trace input")
+                .materialized_dense_data(),
         )?))
     }
 
@@ -8908,8 +8953,10 @@ where
         }
         // A rank-0 payload holds at most one element; summing matches the
         // erased facade and gives the empty payload its zero for free.
-        Ok(self
-            .materialized_body()
+        let materialized = self.materialized_tensor_uncached()?;
+        Ok(materialized
+            .owned_body()
+            .expect("uncached materialization is owned")
             .materialized_dense_data()
             .iter()
             .fold(D::from_real(0.0), |acc, &value| acc + value))
@@ -9099,8 +9146,14 @@ where
         // receiver-sized compatibility cache. Keep both copies request-local.
         let destination = self.materialized_tensor_uncached()?;
         let source = source.materialized_tensor_uncached()?;
-        let destination_data = destination.materialized_body().materialized_dense_data();
-        let source_data = source.materialized_body().materialized_dense_data();
+        let destination_data = destination
+            .owned_body()
+            .expect("uncached materialization is owned")
+            .materialized_dense_data();
+        let source_data = source
+            .owned_body()
+            .expect("uncached materialization is owned")
+            .materialized_dense_data();
         // The erased `validate_absorb_layout` internal guard, minus its
         // dtype/device arms (unrepresentable here): the dense payloads must
         // cover their structures before any block walk trusts the offsets.
@@ -9188,6 +9241,18 @@ where
             name,
             true,
         )?;
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            let parent = Self {
+                runtime: self.runtime.clone(),
+                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+            };
+            let axes = logical_adjoint_axes_to_parent(
+                view.parent.space.space().nout(),
+                view.parent.space.space().nin(),
+                legs,
+            );
+            return parent.twist_with_inverse(&axes, !inverse)?.adjoint();
+        }
         let nout = self.codomain_rank();
         if let Some(spectrum) = self.spectrum() {
             // Compact arm, mirroring the erased `scaled_by_sector` route: a
@@ -9224,7 +9289,11 @@ where
         )? {
             return Ok(self.clone());
         }
-        let mut data = self.materialized_body().materialized_dense_data().to_vec();
+        let mut data = self
+            .owned_body()
+            .expect("owned twist input")
+            .materialized_dense_data()
+            .to_vec();
         scale_blocks_impl(self.logical_space().space(), &mut data, &|key| match key {
             BlockKey::FusionTree(key) => twist_block_factor(provider, key, nout, legs, inverse),
             _ => 1.0,
@@ -9289,6 +9358,18 @@ where
         // NoBraiding preflight (PR #620 review): flip's coefficients are
         // built from the same θ/χ — see `reject_unbraided_nonunit_legs`.
         reject_unbraided_nonunit_legs(self.logical_space().provider(), hom, legs, name, false)?;
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            let parent = Self {
+                runtime: self.runtime.clone(),
+                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+            };
+            let axes = logical_adjoint_axes_to_parent(
+                view.parent.space.space().nout(),
+                view.parent.space.space().nin(),
+                legs,
+            );
+            return parent.flip_with_inverse(&axes, !inverse)?.adjoint();
+        }
         let nout = hom.codomain().len();
         // Sequential semantics for repeated legs, from the helper shared
         // with the erased facade (#580 PR 5).
@@ -9299,7 +9380,11 @@ where
             space.space().structure(),
         )?;
         let provider = self.logical_space().provider();
-        let mut data = self.materialized_body().materialized_dense_data().to_vec();
+        let mut data = self
+            .owned_body()
+            .expect("owned flip input")
+            .materialized_dense_data()
+            .to_vec();
         scale_blocks_impl(space.space(), &mut data, &|key| match key {
             BlockKey::FusionTree(key) => {
                 flip_block_factor(provider, key, nout, &occurrences, inverse)
@@ -9490,7 +9575,12 @@ where
     /// is: the diagonal fill
     /// is total on a bond space this module built from that same spectrum.
     fn shareable_dense_payload(&self) -> Arc<TypedData<D>> {
-        let body = self.materialized_body();
+        let materialized = self
+            .materialized_tensor_uncached()
+            .expect("a pre-admitted typed adjoint must materialize");
+        let body = materialized
+            .owned_body()
+            .expect("uncached materialization is owned");
         match body.data.as_ref() {
             TypedData::Dense(_) => Arc::clone(&body.data),
             TypedData::Diagonal(spectrum) => Arc::new(TypedData::Dense(
@@ -9530,23 +9620,24 @@ where
         }
         self.with_data(vec![
             D::from_real(0.0);
-            self.materialized_body().materialized_dense_data().len()
+            self.owned_body()
+                .expect("owned zero input")
+                .materialized_dense_data()
+                .len()
         ])
     }
 }
 
 // Bound-free, like the accessor impl on `GradedSpace<R>`: dtype conversion
-// needs no provider algebra or new layout admission. It is nevertheless an
-// owned-only boundary: a cold lazy adjoint first publishes its one shared
-// logical materialization.
+// needs no provider algebra or new layout admission.
 impl<R> TensorMap<R, f64> {
     /// Widens to a c64 tensor map, imaginary parts zero (TensorKit
     /// `Base.complex`).
     ///
     /// Element-wise on an owned payload: a dense payload is widened in
     /// place-order, while a compact spectrum maps spectrum-to-spectrum and
-    /// **stays compact**. A cold lazy adjoint is materialized once before the
-    /// output allocation; an already-owned input needs only its
+    /// **stays compact**. A cold lazy adjoint uses an operation-local payload
+    /// before the output allocation; an already-owned input needs only its
     /// `O(stored_len)` output. The logical space is shared, not re-derived.
     ///
     /// Infallible, unlike the erased pair [`crate::prelude::Tensor::to_c64`] /
@@ -9577,7 +9668,12 @@ impl<R> TensorMap<R, f64> {
     /// ```
     pub fn to_c64(&self) -> TensorMap<R, num_complex::Complex64> {
         let widen = |&value: &f64| num_complex::Complex64::new(value, 0.0);
-        let source = self.materialized_body();
+        let materialized = self
+            .materialized_tensor_uncached()
+            .expect("a pre-admitted typed adjoint must materialize");
+        let source = materialized
+            .owned_body()
+            .expect("uncached materialization is owned");
         let body = match source.data.as_ref() {
             TypedData::Dense(data) => {
                 TypedTensorBody::dense(source.space.clone(), data.iter().map(widen).collect())
@@ -9606,8 +9702,8 @@ impl<R> TensorMap<R, num_complex::Complex64> {
     /// real).
     ///
     /// A compact spectrum maps spectrum-to-spectrum and stays compact. A cold
-    /// lazy adjoint is materialized once before the `O(stored_len)` output;
-    /// the logical space is shared.
+    /// lazy adjoint uses an operation-local payload for the `O(stored_len)`
+    /// output; the logical space is shared.
     pub fn re(&self) -> TensorMap<R, f64> {
         self.map_parts(|value| value.re)
     }
@@ -9616,15 +9712,20 @@ impl<R> TensorMap<R, num_complex::Complex64> {
     /// spaces (TensorKit `Base.imag`).
     ///
     /// A compact spectrum maps spectrum-to-spectrum and stays compact. A cold
-    /// lazy adjoint is materialized once before the `O(stored_len)` output;
-    /// the logical space is shared.
+    /// lazy adjoint uses an operation-local payload for the `O(stored_len)`
+    /// output; the logical space is shared.
     pub fn im(&self) -> TensorMap<R, f64> {
         self.map_parts(|value| value.im)
     }
 
-    /// The shared owned-only body of [`Self::re`] / [`Self::im`].
+    /// The shared owned-input route of [`Self::re`] / [`Self::im`].
     fn map_parts(&self, part: impl Fn(num_complex::Complex64) -> f64) -> TensorMap<R, f64> {
-        let source = self.materialized_body();
+        let materialized = self
+            .materialized_tensor_uncached()
+            .expect("a pre-admitted typed adjoint must materialize");
+        let source = materialized
+            .owned_body()
+            .expect("uncached materialization is owned");
         let body = match source.data.as_ref() {
             TypedData::Dense(data) => TypedTensorBody::dense(
                 source.space.clone(),
@@ -13372,7 +13473,7 @@ mod representation_gates {
             lazy_twist.twist_inverse(&[0]).unwrap().data(),
             eager.twist_inverse(&[0]).unwrap().data()
         );
-        assert_eq!(materialized_adjoint_builds(&lazy_twist), 1);
+        assert_eq!(materialized_adjoint_builds(&lazy_twist), 0);
 
         let lazy_flip = source.adjoint().unwrap();
         let actual = lazy_flip.flip_inverse(&[1]).unwrap();
@@ -13382,7 +13483,39 @@ mod representation_gates {
             actual.logical_space().space(),
             expected.logical_space().space()
         );
-        assert_eq!(materialized_adjoint_builds(&lazy_flip), 1);
+        assert_eq!(materialized_adjoint_builds(&lazy_flip), 0);
+    }
+
+    #[test]
+    fn simple_lazy_observers_and_owned_outputs_do_not_publish() {
+        let source = u1_matrix_fixture([(0, 2)], [(0, 2)]);
+        let eager = eager_adjoint_oracle(&source);
+        let lazy = source.adjoint().unwrap();
+
+        assert_eq!(lazy.is_diagonal(0.0), eager.is_diagonal(0.0));
+        assert!(lazy.is_diagonal(-1.0).is_err());
+        assert_eq!(lazy.to_c64().data(), eager.to_c64().data());
+        assert_eq!(lazy.to_c64().re().data(), eager.to_c64().re().data());
+        assert_eq!(lazy.to_c64().im().data(), eager.to_c64().im().data());
+        assert_eq!(
+            lazy.insert_left_unit(0, false).unwrap().data(),
+            eager.insert_left_unit(0, false).unwrap().data()
+        );
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+
+        let scalar = source.trace_pairs(&[(0, 1)]).unwrap();
+        let scalar_eager = eager_adjoint_oracle(&scalar);
+        let scalar_lazy = scalar.adjoint().unwrap();
+        assert_eq!(
+            scalar_lazy.scalar().unwrap(),
+            scalar_eager.scalar().unwrap()
+        );
+        assert_eq!(materialized_adjoint_builds(&scalar_lazy), 0);
+
+        let clone = lazy.clone();
+        assert_eq!(lazy.data(), eager.data());
+        assert_eq!(clone.data(), eager.data());
+        assert_eq!(materialized_adjoint_builds(&lazy), 1);
     }
 
     #[test]
