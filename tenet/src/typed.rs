@@ -9013,9 +9013,10 @@ where
     ///
     /// # Complexity
     ///
-    /// One output allocation (the destination clone) plus `O(min-prefix)`
-    /// overwrites per shared block, walked by the same merge-join over sorted
-    /// block keys the erased facade executes (`absorb_mapped`).
+    /// One output allocation for owned dense inputs plus `O(min-prefix)`
+    /// overwrites per shared block. A lazy input currently adds one
+    /// operation-local logical payload; it is not published in the receiver's
+    /// reusable materialization cache.
     ///
     /// # Errors
     ///
@@ -9070,7 +9071,12 @@ where
                 ));
             }
         }
-        let destination_data = self.materialized_body().materialized_dense_data();
+        // Lazy inputs still need a logical dense payload until absorb gains an
+        // oriented copy plan, but an ordinary operation must not publish that
+        // receiver-sized compatibility cache. Keep both copies request-local.
+        let destination = self.materialized_tensor_uncached()?;
+        let source = source.materialized_tensor_uncached()?;
+        let destination_data = destination.materialized_body().materialized_dense_data();
         let source_data = source.materialized_body().materialized_dense_data();
         // The erased `validate_absorb_layout` internal guard, minus its
         // dtype/device arms (unrepresentable here): the dense payloads must
@@ -13354,6 +13360,22 @@ mod representation_gates {
             expected.logical_space().space()
         );
         assert_eq!(materialized_adjoint_builds(&lazy_flip), 1);
+    }
+
+    #[test]
+    fn absorb_uses_operation_local_logical_payloads_without_warming_lazy_inputs() {
+        let destination_parent = genuinely_complex(&u1_lazy_fixture());
+        let source_parent = destination_parent.scale(num_complex::Complex64::new(2.0, -1.0));
+        let eager_destination = eager_adjoint_oracle(&destination_parent);
+        let eager_source = eager_adjoint_oracle(&source_parent);
+        let expected = eager_destination.absorb(&eager_source).unwrap();
+        let lazy_destination = destination_parent.adjoint().unwrap();
+        let lazy_source = source_parent.adjoint().unwrap();
+
+        let actual = lazy_destination.absorb(&lazy_source).unwrap();
+        assert_typed_map_close(&actual, &expected, 1e-12);
+        assert_eq!(materialized_adjoint_builds(&lazy_destination), 0);
+        assert_eq!(materialized_adjoint_builds(&lazy_source), 0);
     }
 
     fn assert_parent_native_transform<R, D>(
