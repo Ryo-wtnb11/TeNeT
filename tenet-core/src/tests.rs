@@ -17245,6 +17245,8 @@ mod tests {
         let structure = space.subblock_structure();
         let cloned_before_query = structure.as_ref().clone();
         assert!(!structure.coupled_region_cache_is_initialized());
+        let cold_charge = structure.charged_retained_bytes();
+        assert!(!structure.coupled_region_cache_is_initialized());
         let regions = cloned_before_query
             .coupled_sector_regions(2)
             .unwrap()
@@ -17269,6 +17271,12 @@ mod tests {
                     .iter()
                     .all(|tree| tree.extent().unwrap() > 0)
         }));
+
+        assert_eq!(structure.charged_retained_bytes(), cold_charge);
+        for nout in 0..=structure.rank() {
+            let _ = structure.coupled_sector_regions(nout);
+        }
+        assert_eq!(structure.charged_retained_bytes(), cold_charge);
     }
 
     #[test]

@@ -40,7 +40,7 @@ use tenet::typed::TensorMap;
 
 pub use tenet::plancache::{
     Optimizer, PlanCacheConfig, PlanCacheStats, ReplanPolicy, DEFAULT_PLAN_CACHE_CAPACITY,
-    DEFAULT_REPLAN_DRIFT_FACTOR,
+    DEFAULT_REPLAN_DRIFT_FACTOR, DEFAULT_WORKSPACE_BUDGET_BYTES,
 };
 
 use crate::labels::TemporaryLabel;
@@ -89,15 +89,120 @@ struct WorkspacePoolCounters {
     idle: AtomicU64,
 }
 
+#[derive(Default)]
+struct WorkspaceBudgetState {
+    limit: usize,
+    retained: usize,
+    peak: usize,
+    admissions: u64,
+    rejections: u64,
+    evictions: u64,
+}
+
+struct WorkspaceBudget {
+    state: Mutex<WorkspaceBudgetState>,
+}
+
+// The byte budget covers dimension-dependent storage retained for reuse. Plan
+// metadata, the TypeId registry, pool mutexes, and at most two idle-workspace
+// shells per plan remain under the existing plan/idle count bounds; they are
+// deliberately not mixed into this numerical-storage budget.
+
+impl WorkspaceBudget {
+    fn new(limit: usize) -> Self {
+        Self {
+            state: Mutex::new(WorkspaceBudgetState {
+                limit,
+                ..WorkspaceBudgetState::default()
+            }),
+        }
+    }
+
+    fn reserve(&self, bytes: usize) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .expect("network workspace budget poisoned");
+        let Some(next) = state.retained.checked_add(bytes) else {
+            state.rejections = state.rejections.saturating_add(1);
+            return false;
+        };
+        if state.limit == 0 || next > state.limit {
+            state.rejections = state.rejections.saturating_add(1);
+            return false;
+        }
+        state.retained = next;
+        state.peak = state.peak.max(next);
+        state.admissions = state.admissions.saturating_add(1);
+        true
+    }
+
+    fn release(&self, bytes: usize, evicted: bool) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("network workspace budget poisoned");
+        state.retained = state
+            .retained
+            .checked_sub(bytes)
+            .expect("workspace budget release exceeds retained bytes");
+        if evicted {
+            state.evictions = state.evictions.saturating_add(1);
+        }
+    }
+
+    fn set_limit(&self, limit: usize) {
+        self.state
+            .lock()
+            .expect("network workspace budget poisoned")
+            .limit = limit;
+    }
+
+    fn reset_statistics(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("network workspace budget poisoned");
+        debug_assert_eq!(state.retained, 0);
+        state.retained = 0;
+        state.peak = 0;
+        state.admissions = 0;
+        state.rejections = 0;
+        state.evictions = 0;
+    }
+
+    fn snapshot(&self) -> (usize, usize, u64, u64, u64) {
+        let state = self
+            .state
+            .lock()
+            .expect("network workspace budget poisoned");
+        (
+            state.retained,
+            state.peak,
+            state.admissions,
+            state.rejections,
+            state.evictions,
+        )
+    }
+}
+
 struct WorkspacePools {
     pools: Mutex<LruCache<TypeId, Arc<dyn ErasedWorkspacePool>>>,
     counters: Arc<WorkspacePoolCounters>,
+    budget: Arc<WorkspaceBudget>,
+    accepting: AtomicBool,
 }
 
 struct WorkspacePool<R: FusionRule, D> {
-    available: Mutex<Vec<NetworkExecutionWorkspace<R, D>>>,
+    available: Mutex<Vec<IdleWorkspace<R, D>>>,
     counters: Arc<WorkspacePoolCounters>,
+    budget: Arc<WorkspaceBudget>,
     registered: AtomicBool,
+}
+
+struct IdleWorkspace<R: FusionRule, D> {
+    workspace: NetworkExecutionWorkspace<R, D>,
+    charge: usize,
 }
 
 const MAX_IDLE_WORKSPACES_PER_PLAN: usize = 2;
@@ -112,19 +217,40 @@ trait ErasedWorkspacePool: Any + Send + Sync {
 struct WorkspaceLease<R: FusionRule, D> {
     pool: Arc<WorkspacePool<R, D>>,
     workspace: Option<NetworkExecutionWorkspace<R, D>>,
+    recyclable: bool,
 }
 
 impl Default for WorkspacePools {
     fn default() -> Self {
-        Self {
-            pools: Mutex::new(LruCache::new(lru_capacity(MAX_IDLE_WORKSPACES_PER_PLAN))),
-            counters: Arc::new(WorkspacePoolCounters::default()),
-        }
+        Self::new(Arc::new(WorkspaceBudget::new(
+            DEFAULT_WORKSPACE_BUDGET_BYTES,
+        )))
     }
 }
 
 impl WorkspacePools {
+    fn new(budget: Arc<WorkspaceBudget>) -> Self {
+        Self {
+            pools: Mutex::new(LruCache::new(lru_capacity(MAX_IDLE_WORKSPACES_PER_PLAN))),
+            counters: Arc::new(WorkspacePoolCounters::default()),
+            budget,
+            accepting: AtomicBool::new(true),
+        }
+    }
+
+    fn unpooled() -> Self {
+        Self::new(Arc::new(WorkspaceBudget::new(0)))
+    }
+
     fn deactivate_all(&self) {
+        self.accepting.store(false, Ordering::SeqCst);
+        let mut pools = self.pools.lock().expect("network pool registry poisoned");
+        while let Some((_, pool)) = pools.pop_lru() {
+            pool.deactivate();
+        }
+    }
+
+    fn rotate_all(&self) {
         let mut pools = self.pools.lock().expect("network pool registry poisoned");
         while let Some((_, pool)) = pools.pop_lru() {
             pool.deactivate();
@@ -136,8 +262,24 @@ impl WorkspacePools {
         R: FusionRule + Send + Sync,
         D: Send + Sync + 'static,
     {
+        if !self.accepting.load(Ordering::SeqCst) {
+            return Arc::new(WorkspacePool {
+                available: Mutex::new(Vec::new()),
+                counters: Arc::clone(&self.counters),
+                budget: Arc::clone(&self.budget),
+                registered: AtomicBool::new(false),
+            });
+        }
         let key = TypeId::of::<(R, D)>();
         let mut pools = self.pools.lock().expect("network pool registry poisoned");
+        if !self.accepting.load(Ordering::SeqCst) {
+            return Arc::new(WorkspacePool {
+                available: Mutex::new(Vec::new()),
+                counters: Arc::clone(&self.counters),
+                budget: Arc::clone(&self.budget),
+                registered: AtomicBool::new(false),
+            });
+        }
         if let Some(pool) = pools.get(&key) {
             return Arc::clone(pool)
                 .as_any_arc()
@@ -147,6 +289,7 @@ impl WorkspacePools {
         let pool = Arc::new(WorkspacePool {
             available: Mutex::new(Vec::new()),
             counters: Arc::clone(&self.counters),
+            budget: Arc::clone(&self.budget),
             registered: AtomicBool::new(true),
         });
         if let Some((_, evicted)) =
@@ -174,7 +317,9 @@ where
             .lock()
             .expect("network workspace pool poisoned");
         let removed = available.len() as u64;
-        available.clear();
+        for idle in available.drain(..) {
+            self.budget.release(idle.charge, true);
+        }
         self.counters.idle.fetch_sub(removed, Ordering::SeqCst);
     }
 }
@@ -186,11 +331,14 @@ impl<R: FusionRule, D> WorkspacePool<R, D> {
                 .available
                 .lock()
                 .expect("network workspace pool poisoned");
-            let workspace = available.pop();
-            if workspace.is_some() {
+            let idle = available.pop();
+            if let Some(idle) = idle {
+                self.budget.release(idle.charge, false);
                 self.counters.idle.fetch_sub(1, Ordering::SeqCst);
+                Some(idle.workspace)
+            } else {
+                None
             }
-            workspace
         };
         let workspace = match workspace {
             Some(workspace) => {
@@ -205,6 +353,7 @@ impl<R: FusionRule, D> WorkspacePool<R, D> {
         WorkspaceLease {
             pool: Arc::clone(self),
             workspace: Some(workspace),
+            recyclable: false,
         }
     }
 }
@@ -215,11 +364,15 @@ impl<R: FusionRule, D> WorkspaceLease<R, D> {
             .as_mut()
             .expect("workspace lease always owns a workspace")
     }
+
+    fn commit_recycling(&mut self) {
+        self.recyclable = true;
+    }
 }
 
 impl<R: FusionRule, D> Drop for WorkspaceLease<R, D> {
     fn drop(&mut self) {
-        if std::thread::panicking() {
+        if std::thread::panicking() || !self.recyclable {
             self.workspace.take();
             return;
         }
@@ -243,7 +396,12 @@ impl<R: FusionRule, D> Drop for WorkspaceLease<R, D> {
                 })
                 .is_ok();
             if reserved {
-                available.push(workspace);
+                let charge = workspace.retained_idle_bytes();
+                if self.pool.budget.reserve(charge) {
+                    available.push(IdleWorkspace { workspace, charge });
+                } else {
+                    self.pool.counters.idle.fetch_sub(1, Ordering::SeqCst);
+                }
             }
         }
     }
@@ -279,6 +437,9 @@ impl CachedPlan {
                 .counters
                 .slot_grows
                 .fetch_add(1, Ordering::Relaxed);
+        }
+        if result.is_ok() {
+            lease.commit_recycling();
         }
         result
     }
@@ -318,6 +479,8 @@ struct PlanCache {
     /// non-degenerate search must not silently replace a later drift-replan's
     /// fresh search, which the truncation basis (hence energy) depends on.
     persist: bool,
+    /// One Runtime-wide owner shared by every resident typed workspace pool.
+    workspace_budget: Arc<WorkspaceBudget>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -351,6 +514,12 @@ fn lru_capacity(capacity: usize) -> NonZeroUsize {
 
 impl Default for PlanCache {
     fn default() -> Self {
+        Self::new(DEFAULT_WORKSPACE_BUDGET_BYTES)
+    }
+}
+
+impl PlanCache {
+    fn new(workspace_budget_bytes: usize) -> Self {
         Self {
             hits: 0,
             misses: 0,
@@ -360,6 +529,7 @@ impl Default for PlanCache {
             static_aliases: LruCache::new(lru_capacity(DEFAULT_PLAN_CACHE_CAPACITY)),
             disk: HashMap::new(),
             persist: false,
+            workspace_budget: Arc::new(WorkspaceBudget::new(workspace_budget_bytes)),
         }
     }
 }
@@ -416,8 +586,11 @@ const _: fn() = || {
 };
 
 /// The runtime slot's cache, claimed (created) on first use.
-fn cache_mut(slot: &mut Option<Box<dyn Any + Send>>) -> &mut PlanCache {
-    slot.get_or_insert_with(|| Box::new(PlanCache::default()))
+fn cache_mut(
+    slot: &mut Option<Box<dyn Any + Send>>,
+    workspace_budget_bytes: usize,
+) -> &mut PlanCache {
+    slot.get_or_insert_with(|| Box::new(PlanCache::new(workspace_budget_bytes)))
         .downcast_mut::<PlanCache>()
         .expect("runtime plan-cache slot claimed by another type")
 }
@@ -436,7 +609,38 @@ fn existing_cache_mut(slot: &mut Option<Box<dyn Any + Send>>) -> Option<&mut Pla
 /// Replaces the runtime's plan-cache configuration (the builder-time
 /// equivalent is `Runtime::builder().plan_cache(config)`).
 pub fn configure_plan_cache(runtime: &Runtime, config: PlanCacheConfig) {
-    runtime.set_plan_cache_config(config);
+    runtime.replace_plan_cache_config(config, |previous, next, slot| {
+        let Some(cache) = existing_cache_mut(slot) else {
+            return;
+        };
+
+        if previous.enabled && !next.enabled {
+            cache.map.clear();
+            cache.static_aliases.clear();
+        } else {
+            if next.workspace_budget_bytes < previous.workspace_budget_bytes {
+                cache
+                    .workspace_budget
+                    .set_limit(next.workspace_budget_bytes);
+                for (_, entry) in cache.map.iter() {
+                    entry.workspaces.rotate_all();
+                }
+            } else if next.workspace_budget_bytes > previous.workspace_budget_bytes {
+                cache
+                    .workspace_budget
+                    .set_limit(next.workspace_budget_bytes);
+            }
+
+            if next.capacity < previous.capacity {
+                let capacity = lru_capacity(next.capacity);
+                cache.map.resize(capacity);
+                cache.static_aliases.resize(capacity);
+            }
+        }
+        cache
+            .workspace_budget
+            .set_limit(next.workspace_budget_bytes);
+    });
 }
 
 /// The runtime's current plan-cache configuration.
@@ -447,8 +651,8 @@ pub fn plan_cache_config(runtime: &Runtime) -> PlanCacheConfig {
 /// Hit/miss/re-plan counters and the current entry count.
 #[allow(deprecated)]
 pub fn plan_cache_stats(runtime: &Runtime) -> PlanCacheStats {
-    runtime.with_extension_slot(|slot| {
-        let cache = cache_mut(slot);
+    runtime.with_plan_cache(|config, slot| {
+        let cache = cache_mut(slot, config.workspace_budget_bytes);
         let (workspaces_created, workspace_reuses, workspace_slot_grows) =
             cache
                 .map
@@ -465,6 +669,13 @@ pub fn plan_cache_stats(runtime: &Runtime) -> PlanCacheStats {
             .iter()
             .map(|(_, entry)| entry.workspaces.counters.idle.load(Ordering::Relaxed) as usize)
             .sum();
+        let (
+            retained_workspace_bytes,
+            peak_retained_workspace_bytes,
+            workspace_byte_admissions,
+            workspace_byte_rejections,
+            workspace_byte_evictions,
+        ) = cache.workspace_budget.snapshot();
         PlanCacheStats {
             hits: cache.hits,
             misses: cache.misses,
@@ -475,6 +686,11 @@ pub fn plan_cache_stats(runtime: &Runtime) -> PlanCacheStats {
             workspace_slot_grows,
             topology_materializations: cache.topology_materializations,
             idle_workspaces,
+            retained_workspace_bytes,
+            peak_retained_workspace_bytes,
+            workspace_byte_admissions,
+            workspace_byte_rejections,
+            workspace_byte_evictions,
             dynamic_aliases: 0,
         }
     })
@@ -482,14 +698,15 @@ pub fn plan_cache_stats(runtime: &Runtime) -> PlanCacheStats {
 
 /// Drops every cached plan and resets the counters (not the configuration).
 pub fn clear_plan_cache(runtime: &Runtime) {
-    runtime.with_extension_slot(|slot| {
-        let cache = cache_mut(slot);
+    runtime.with_plan_cache(|config, slot| {
+        let cache = cache_mut(slot, config.workspace_budget_bytes);
         cache.map.clear();
         cache.static_aliases.clear();
         cache.hits = 0;
         cache.misses = 0;
         cache.replans = 0;
         cache.topology_materializations = 0;
+        cache.workspace_budget.reset_statistics();
     });
 }
 
@@ -499,8 +716,8 @@ pub fn clear_plan_cache(runtime: &Runtime) {
 /// to skip the cold optimal-order search. The order is topology-only and thus
 /// dimension-independent, so one saved file serves every χ.
 pub fn save_plan_cache(runtime: &Runtime) -> String {
-    runtime.with_extension_slot(|slot| {
-        let cache = cache_mut(slot);
+    runtime.with_plan_cache(|config, slot| {
+        let cache = cache_mut(slot, config.workspace_budget_bytes);
         let mut text = String::from(PLAN_CACHE_FILE_VERSION);
         text.push('\n');
         // Sort at save rather than switching `disk` to a BTreeMap: saving is
@@ -542,8 +759,8 @@ pub fn load_plan_cache(runtime: &Runtime, text: &str) -> usize {
     if header.is_some() && header != Some(PLAN_CACHE_FILE_VERSION) {
         return 0;
     }
-    runtime.with_extension_slot(|slot| {
-        let cache = cache_mut(slot);
+    runtime.with_plan_cache(|config, slot| {
+        let cache = cache_mut(slot, config.workspace_budget_bytes);
         // The application opted into persistence: from now on record and reuse
         // orders through the disk map (even if this file was empty).
         cache.persist = true;
@@ -930,7 +1147,7 @@ where
         validate_plan(&planned)?;
         return Ok(CachedPlan {
             planned,
-            workspaces: Arc::new(WorkspacePools::default()),
+            workspaces: Arc::new(WorkspacePools::unpooled()),
         });
     }
 
@@ -971,7 +1188,7 @@ where
     if let Outcome::Hit(planned) = outcome.clone() {
         runtime.with_plan_cache(|config, slot| {
             install_static_alias(
-                cache_mut(slot),
+                cache_mut(slot, config.workspace_budget_bytes),
                 key,
                 codomain_ranks.to_vec(),
                 dims,
@@ -1013,13 +1230,17 @@ where
         }
     };
     validate_plan(&planned)?;
+    let workspace_budget = runtime.with_plan_cache(|config, slot| {
+        Arc::clone(&cache_mut(slot, config.workspace_budget_bytes).workspace_budget)
+    });
     let candidate = CachedPlan {
         planned,
-        workspaces: Arc::new(WorkspacePools::default()),
+        workspaces: Arc::new(WorkspacePools::new(workspace_budget)),
     };
     let winner = runtime.with_plan_cache(|config, slot| -> Result<CachedPlan, Error> {
-        let cache = cache_mut(slot);
+        let cache = cache_mut(slot, config.workspace_budget_bytes);
         if !config.enabled {
+            candidate.workspaces.deactivate_all();
             return Ok(candidate.clone());
         }
         let capacity = lru_capacity(config.capacity);
@@ -1075,8 +1296,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{needs_replan, ReplanPolicy, WorkspacePools};
+    use super::{needs_replan, ReplanPolicy, WorkspaceBudget, WorkspacePools};
+    use crate::network::NetworkExecutionWorkspace;
     use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Barrier};
     use tenet::core::{SU2FusionRule, U1FusionRule};
     use tenet::prelude::Complex64;
 
@@ -1113,7 +1336,9 @@ mod tests {
         }));
         assert!(result.is_err());
         assert!(pool.available.lock().unwrap().is_empty());
-        drop(pool.lease());
+        let mut lease = pool.lease();
+        lease.commit_recycling();
+        drop(lease);
         assert_eq!(
             pools
                 .counters
@@ -1127,7 +1352,8 @@ mod tests {
     fn active_lease_return_after_typed_pool_eviction_is_not_retained() {
         let pools = WorkspacePools::default();
         let first = pools.host_pool::<U1FusionRule, f64>();
-        let lease = first.lease();
+        let mut lease = first.lease();
+        lease.commit_recycling();
         drop(pools.host_pool::<U1FusionRule, Complex64>());
         drop(pools.host_pool::<SU2FusionRule, f64>());
         assert!(!first.registered.load(Ordering::SeqCst));
@@ -1140,10 +1366,134 @@ mod tests {
     fn active_lease_return_after_plan_clear_is_not_retained() {
         let pools = WorkspacePools::default();
         let pool = pools.host_pool::<U1FusionRule, f64>();
-        let lease = pool.lease();
+        let mut lease = pool.lease();
+        lease.commit_recycling();
         pools.deactivate_all();
         drop(lease);
         assert!(pool.available.lock().unwrap().is_empty());
         assert_eq!(pools.counters.idle.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn deactivated_registry_rejects_late_typed_pool_creation() {
+        let pools = WorkspacePools::default();
+        pools.deactivate_all();
+        let pool = pools.host_pool::<U1FusionRule, f64>();
+        assert!(!pool.registered.load(Ordering::SeqCst));
+        let mut lease = pool.lease();
+        lease.workspace = Some(NetworkExecutionWorkspace::with_test_slot_capacity(16));
+        lease.commit_recycling();
+        drop(lease);
+        assert!(pool.available.lock().unwrap().is_empty());
+        assert_eq!(pools.budget.snapshot(), (0, 0, 0, 0, 0));
+    }
+
+    #[test]
+    fn budget_rotation_rejects_old_return_and_accepts_new_pool() {
+        let budget = Arc::new(WorkspaceBudget::new(usize::MAX));
+        let pools = WorkspacePools::new(Arc::clone(&budget));
+        let old = pools.host_pool::<U1FusionRule, f64>();
+        let mut stale = old.lease();
+        stale.workspace = Some(NetworkExecutionWorkspace::with_test_slot_capacity(16));
+        stale.commit_recycling();
+        pools.rotate_all();
+        drop(stale);
+        assert!(old.available.lock().unwrap().is_empty());
+
+        let current = pools.host_pool::<U1FusionRule, f64>();
+        assert!(current.registered.load(Ordering::SeqCst));
+        let mut lease = current.lease();
+        lease.workspace = Some(NetworkExecutionWorkspace::with_test_slot_capacity(16));
+        lease.commit_recycling();
+        drop(lease);
+        assert_eq!(current.available.lock().unwrap().len(), 1);
+        let (retained, _, admissions, rejections, _) = budget.snapshot();
+        assert!(retained > 0);
+        assert_eq!((admissions, rejections), (1, 0));
+    }
+
+    #[test]
+    fn concurrent_whole_returns_race_for_one_final_budget_slot() {
+        let probe = NetworkExecutionWorkspace::<U1FusionRule, f64>::with_test_slot_capacity(32);
+        let charge = probe.retained_idle_bytes();
+        assert!(charge > 0);
+        let budget = Arc::new(WorkspaceBudget::new(charge));
+        let pools = WorkspacePools::new(Arc::clone(&budget));
+        let pool = pools.host_pool::<U1FusionRule, f64>();
+        let mut first = pool.lease();
+        let mut second = pool.lease();
+        first.workspace = Some(probe);
+        second.workspace = Some(NetworkExecutionWorkspace::with_test_slot_capacity(32));
+        first.commit_recycling();
+        second.commit_recycling();
+        let barrier = Arc::new(Barrier::new(2));
+        std::thread::scope(|scope| {
+            let first_barrier = Arc::clone(&barrier);
+            let second_barrier = Arc::clone(&barrier);
+            scope.spawn(move || {
+                first_barrier.wait();
+                drop(first);
+            });
+            scope.spawn(move || {
+                second_barrier.wait();
+                drop(second);
+            });
+        });
+        assert_eq!(pool.available.lock().unwrap().len(), 1);
+        let (retained, peak, admissions, rejections, _) = budget.snapshot();
+        assert_eq!((retained, peak), (charge, charge));
+        assert_eq!((admissions, rejections), (1, 1));
+    }
+
+    #[test]
+    fn typed_pools_share_one_plan_wide_byte_owner() {
+        let f64_probe = NetworkExecutionWorkspace::<U1FusionRule, f64>::with_test_slot_capacity(8);
+        let complex_probe =
+            NetworkExecutionWorkspace::<U1FusionRule, Complex64>::with_test_slot_capacity(8);
+        let f64_charge = f64_probe.retained_idle_bytes();
+        let complex_charge = complex_probe.retained_idle_bytes();
+        let budget = Arc::new(WorkspaceBudget::new(f64_charge + complex_charge - 1));
+        let pools = WorkspacePools::new(Arc::clone(&budget));
+
+        let f64_pool = pools.host_pool::<U1FusionRule, f64>();
+        let complex_pool = pools.host_pool::<U1FusionRule, Complex64>();
+        let mut f64_lease = f64_pool.lease();
+        let mut complex_lease = complex_pool.lease();
+        f64_lease.workspace = Some(f64_probe);
+        complex_lease.workspace = Some(complex_probe);
+        f64_lease.commit_recycling();
+        complex_lease.commit_recycling();
+        drop(f64_lease);
+        drop(complex_lease);
+
+        assert_eq!(f64_pool.available.lock().unwrap().len(), 1);
+        assert!(complex_pool.available.lock().unwrap().is_empty());
+        assert_eq!(budget.snapshot().0, f64_charge);
+        assert_eq!(budget.snapshot().2, 1);
+        assert_eq!(budget.snapshot().3, 1);
+    }
+
+    #[test]
+    fn lifo_small_return_keeps_one_large_bottom_workspace_charged() {
+        let budget = Arc::new(WorkspaceBudget::new(usize::MAX));
+        let pools = WorkspacePools::new(Arc::clone(&budget));
+        let pool = pools.host_pool::<U1FusionRule, f64>();
+        let mut first = pool.lease();
+        let mut second = pool.lease();
+        first.workspace = Some(NetworkExecutionWorkspace::with_test_slot_capacity(64));
+        second.workspace = Some(NetworkExecutionWorkspace::with_test_slot_capacity(64));
+        let large = first.workspace.as_ref().unwrap().retained_idle_bytes();
+        first.commit_recycling();
+        second.commit_recycling();
+        drop(first);
+        drop(second);
+
+        let mut top = pool.lease();
+        top.workspace = Some(NetworkExecutionWorkspace::with_test_slot_capacity(1));
+        let small = top.workspace.as_ref().unwrap().retained_idle_bytes();
+        top.commit_recycling();
+        drop(top);
+        assert_eq!(pool.available.lock().unwrap().len(), 2);
+        assert_eq!(budget.snapshot().0, large + small);
     }
 }

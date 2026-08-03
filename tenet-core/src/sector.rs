@@ -81,6 +81,32 @@ pub struct SectorLeg {
 }
 
 impl SectorLeg {
+    /// Conservative retained bytes for this leg's Arc-backed sector and
+    /// degeneracy metadata, excluding the inline `SectorLeg` pointer shell.
+    #[doc(hidden)]
+    pub fn charged_retained_bytes(&self) -> usize {
+        let sectors = if self.data.sectors.spilled() {
+            self.data
+                .sectors
+                .capacity()
+                .saturating_mul(std::mem::size_of::<SectorId>())
+        } else {
+            0
+        };
+        let degeneracies = if self.data.degeneracies.spilled() {
+            self.data
+                .degeneracies
+                .capacity()
+                .saturating_mul(std::mem::size_of::<usize>())
+        } else {
+            0
+        };
+        std::mem::size_of::<SectorLegData>()
+            .saturating_add(2 * std::mem::size_of::<usize>())
+            .saturating_add(sectors)
+            .saturating_add(degeneracies)
+    }
+
     /// Builds one external leg from `(sector, degeneracy)` pairs.
     ///
     /// Zero-degeneracy sectors are absent from the resulting leg. Remaining

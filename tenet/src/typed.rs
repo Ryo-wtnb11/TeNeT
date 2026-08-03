@@ -2806,6 +2806,27 @@ where
 }
 
 impl<D> RuntimeDetachedTensorMap<D> {
+    /// Dense allocation capacity and conservative dependent-layout bytes
+    /// retained by this parked destination.
+    ///
+    /// Shared layout descendants are charged per parked destination. This can
+    /// over-count, but it keeps the Runtime budget a true ceiling even when the
+    /// workspace is the last owner of an Arc-backed layout allocation.
+    #[doc(hidden)]
+    pub fn retained_dense_capacity_bytes(&self) -> usize {
+        let payload_capacity = match self.data.as_ref() {
+            TypedData::Dense(data) => data.capacity().saturating_mul(std::mem::size_of::<D>()),
+            TypedData::Diagonal(_) => {
+                debug_assert!(false, "runtime-detached destinations are always dense");
+                0
+            }
+        };
+        payload_capacity
+            .saturating_add(std::mem::size_of::<TypedData<D, Vec<D>>>())
+            .saturating_add(2 * std::mem::size_of::<usize>())
+            .saturating_add(self.layout.charged_retained_bytes())
+    }
+
     /// Whether this parked tensor belongs to `runtime`.
     #[doc(hidden)]
     pub fn matches_runtime(&self, runtime: &Runtime) -> bool {

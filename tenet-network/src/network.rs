@@ -569,6 +569,14 @@ impl<R, D> Default for NetworkExecutionWorkspace<R, D> {
 }
 
 impl<R, D> NetworkExecutionWorkspace<R, D> {
+    #[cfg(test)]
+    pub(crate) fn with_test_slot_capacity(capacity: usize) -> Self {
+        Self {
+            slots: Vec::with_capacity(capacity),
+            ..Self::default()
+        }
+    }
+
     fn clear_replay_state(&mut self) {
         self.slots.clear();
         self.producers.clear();
@@ -586,6 +594,64 @@ impl<R, D> NetworkExecutionWorkspace<R, D> {
     pub(crate) fn clear_slots(&mut self) {
         self.slots.clear();
         self.producers.clear();
+    }
+
+    /// Bytes retained solely to make this idle workspace reusable.
+    ///
+    /// This charges dense destination allocation capacities and every
+    /// workspace-owned Vec backing. Each parked destination also charges its
+    /// complete provider-neutral validated layout conservatively; the Runtime
+    /// budget therefore remains a ceiling even if that workspace is the last
+    /// owner of a shared layout descendant. Runtime/provider owners are
+    /// detached while idle; the provider-neutral rule identity is charged.
+    pub(crate) fn retained_idle_bytes(&self) -> usize {
+        let mut bytes = self
+            .slots
+            .capacity()
+            .saturating_mul(std::mem::size_of::<Option<TensorMap<R, D>>>())
+            .saturating_add(
+                self.producers
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Option<(usize, bool)>>()),
+            )
+            .saturating_add(
+                self.intermediates
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<TypedIntermediateBuffers<R, D>>()),
+            )
+            .saturating_add(
+                self.input_snapshot
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<TypedInputSnapshot>()),
+            )
+            .saturating_add(
+                self.rule_identity
+                    .as_ref()
+                    .map_or(0, RuleIdentity::charged_retained_bytes),
+            );
+        for snapshot in &self.input_snapshot {
+            bytes = bytes.saturating_add(
+                snapshot
+                    .spaces
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<SectorLeg>()),
+            );
+            bytes = snapshot.spaces.iter().fold(bytes, |bytes, leg| {
+                bytes.saturating_add(leg.charged_retained_bytes())
+            });
+        }
+        for buffers in &self.intermediates {
+            for parked in [
+                buffers.parked_contracted.as_ref(),
+                buffers.parked_oriented.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                bytes = bytes.saturating_add(parked.retained_dense_capacity_bytes());
+            }
+        }
+        bytes
     }
 
     pub(crate) fn park_runtime_owners(&mut self)
