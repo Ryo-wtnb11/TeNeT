@@ -8464,8 +8464,8 @@ where
     /// c64 entries are conjugated as well.
     ///
     /// Dense storage is a lazy parent-backed view, matching TensorKit's
-    /// `AdjointTensorMap`: metadata swaps immediately, while raw data and
-    /// owned-only consumers share one deferred materialization across clones.
+    /// `AdjointTensorMap`: metadata swaps immediately, and only [`Self::data`]
+    /// publishes a deferred whole-payload materialization across clones.
     /// Compact diagonal storage keeps its established `O(Σ_c k_c)` owned
     /// conjugation path and never enters the general lazy cell.
     ///
@@ -9196,9 +9196,9 @@ where
     /// Otherwise: one scaled copy of the dense payload, O(len), through the
     /// same per-block walk as the erased facade (`scale_blocks_impl`).
     ///
-    /// A lazy dense adjoint is materialized once before this owned-only
-    /// per-block path; compact adjoints remain compact and use the spectrum
-    /// arm above. There is no device arm (the payload is a host `Vec<D>` by
+    /// A lazy dense adjoint redirects through the parent with the inverse
+    /// categorical phase, leaving its receiver cache cold; compact adjoints
+    /// remain compact and use the spectrum arm above. There is no device arm (the payload is a host `Vec<D>` by
     /// construction). The erased route's Generic rejection is dead here: the
     /// multiplicity-free admission bound keeps a `Generic` provider out at
     /// construction.
@@ -9323,8 +9323,9 @@ where
     /// compact spectrum factor materializes first (the flipped space is no
     /// longer a bond space, so the result cannot stay compact). The same
     /// facade narrowings as [`Self::twist`] apply: a lazy dense adjoint
-    /// materializes once at this owned-only boundary, there is no device arm,
-    /// and Generic fusion is dead at the admission bound.
+    /// redirects through the parent with the inverse categorical map and
+    /// stays cold; there is no device arm, and Generic fusion is dead at the
+    /// admission bound.
     ///
     /// # Errors
     ///
@@ -13510,10 +13511,68 @@ mod representation_gates {
         );
         assert_eq!(materialized_adjoint_builds(&scalar_lazy), 0);
 
+        let complex = genuinely_complex(&source);
+        let eager_complex = eager_adjoint_oracle(&complex);
+        let lazy_complex = complex.adjoint().unwrap();
+        assert_eq!(lazy_complex.re().data(), eager_complex.re().data());
+        assert_eq!(lazy_complex.im().data(), eager_complex.im().data());
+        assert_eq!(materialized_adjoint_builds(&lazy_complex), 0);
+
         let clone = lazy.clone();
         assert_eq!(lazy.data(), eager.data());
         assert_eq!(clone.data(), eager.data());
         assert_eq!(materialized_adjoint_builds(&lazy), 1);
+    }
+
+    #[test]
+    fn lazy_otimes_orientations_and_deligne_inputs_stay_cold() {
+        let lhs = u1_lazy_fixture();
+        let rhs = lhs.scale(2.0);
+        let eager_lhs = eager_adjoint_oracle(&lhs);
+        let eager_rhs = eager_adjoint_oracle(&rhs);
+        let lazy_lhs = lhs.adjoint().unwrap();
+        let lazy_rhs = rhs.adjoint().unwrap();
+
+        for (actual, expected) in [
+            (lhs.otimes(&rhs).unwrap(), lhs.otimes(&rhs).unwrap()),
+            (
+                lhs.otimes(&lazy_rhs).unwrap(),
+                lhs.otimes(&eager_rhs).unwrap(),
+            ),
+            (
+                lazy_lhs.otimes(&rhs).unwrap(),
+                eager_lhs.otimes(&rhs).unwrap(),
+            ),
+            (
+                lazy_lhs.otimes(&lazy_rhs).unwrap(),
+                eager_lhs.otimes(&eager_rhs).unwrap(),
+            ),
+        ] {
+            assert_eq!(actual.data(), expected.data());
+            assert!(Arc::ptr_eq(
+                actual.logical_space().provider_arc(),
+                lhs.logical_space().provider_arc()
+            ));
+        }
+        assert_eq!(materialized_adjoint_builds(&lazy_lhs), 0);
+        assert_eq!(materialized_adjoint_builds(&lazy_rhs), 0);
+
+        let deligne_lhs = u1_matrix_fixture([(0, 2)], [(0, 2)]);
+        let deligne_rhs = deligne_lhs.scale(3.0);
+        let eager_deligne_lhs = eager_adjoint_oracle(&deligne_lhs);
+        let eager_deligne_rhs = eager_adjoint_oracle(&deligne_rhs);
+        let lazy_deligne_lhs = deligne_lhs.adjoint().unwrap();
+        let lazy_deligne_rhs = deligne_rhs.adjoint().unwrap();
+        let product = Arc::new(U1FusionRule.product(U1FusionRule));
+        let actual = lazy_deligne_lhs
+            .deligne_product(&lazy_deligne_rhs, Arc::clone(&product))
+            .unwrap();
+        let expected = eager_deligne_lhs
+            .deligne_product(&eager_deligne_rhs, product)
+            .unwrap();
+        assert_eq!(actual.data(), expected.data());
+        assert_eq!(materialized_adjoint_builds(&lazy_deligne_lhs), 0);
+        assert_eq!(materialized_adjoint_builds(&lazy_deligne_rhs), 0);
     }
 
     #[test]
