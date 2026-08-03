@@ -252,11 +252,18 @@ impl<T> RuntimeTreeTransformStore<T> {
     ) -> usize {
         const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
 
+        let mut dependent_structure_bytes = key.dst().charged_retained_bytes();
+        if key.src().id() != key.dst().id() {
+            dependent_structure_bytes =
+                dependent_structure_bytes.saturating_add(key.src().charged_retained_bytes());
+        }
+
         core::mem::size_of::<RuntimeTreeTransformKey>()
             .saturating_add(core::mem::size_of::<RuntimeTreeTransformStoreEntry<T>>())
             .saturating_add(key.plan().rule.charged_retained_bytes())
             .saturating_add(key.plan().operation.charged_retained_bytes())
             .saturating_add(structure.charged_payload_bytes())
+            .saturating_add(dependent_structure_bytes)
             .saturating_add(ARC_CONTROL_BYTES)
             .saturating_add(RUNTIME_TREE_TRANSFORM_LRU_NODE_ALLOWANCE)
     }
@@ -1056,6 +1063,114 @@ mod runtime_store_tests {
         )
         .unwrap();
         (key, compiled, structure)
+    }
+
+    fn pair_fixture(
+        dst_tag: usize,
+        src_tag: usize,
+    ) -> (
+        RuntimeTreeTransformKey,
+        Arc<TreeTransformStructure<f64>>,
+        BlockStructure,
+        BlockStructure,
+    ) {
+        let structure = |tag| {
+            let block = BlockSpec::with_key(BlockKey::ordinal(tag), vec![1], vec![1], 0).unwrap();
+            BlockStructure::from_blocks_with_rank(1, vec![block]).unwrap()
+        };
+        let dst = structure(dst_tag);
+        let src = structure(src_tag);
+        let compiled = Arc::new(
+            TreeTransformStructure::compile_structures(
+                &dst,
+                &src,
+                &[TreeTransformBlockSpec::single(0, 0, 1.0)],
+            )
+            .unwrap(),
+        );
+        let key = TreeTransformStructureCacheKey::from_structures(
+            RuntimeTreeTransformOperationKey {
+                rule: RuleIdentity::of_type::<TestRuleIdentity>(),
+                operation: TreeTransformOperation::permute([0], []),
+            },
+            &dst,
+            &src,
+        )
+        .unwrap();
+        (key, compiled, dst, src)
+    }
+
+    #[test]
+    fn runtime_store_charges_and_releases_dependent_structures() {
+        // What: one content owner is charged once, distinct source/destination
+        // content affects admission, and eviction/clear release both owners.
+        let (same_key, same_compiled, _, _) = pair_fixture(10, 10);
+        let (distinct_key, distinct_compiled, _, _) = pair_fixture(11, 12);
+        let same_charge =
+            RuntimeTreeTransformStore::<f64>::charged_entry_bytes(&same_key, &same_compiled);
+        let distinct_charge = RuntimeTreeTransformStore::<f64>::charged_entry_bytes(
+            &distinct_key,
+            &distinct_compiled,
+        );
+        assert_eq!(
+            distinct_charge,
+            same_charge.saturating_add(distinct_key.src().charged_retained_bytes())
+        );
+
+        let budgeted = RuntimeTreeTransformStore::with_limits(
+            2,
+            distinct_charge.saturating_sub(1),
+            usize::MAX,
+        );
+        budgeted
+            .get_or_compile(same_key, || Ok::<_, Infallible>(same_compiled))
+            .unwrap();
+        budgeted
+            .get_or_compile(distinct_key, || Ok::<_, Infallible>(distinct_compiled))
+            .unwrap();
+        assert_eq!(budgeted.info().entries(), 1);
+        assert_eq!(budgeted.info().admission_bypasses(), 1);
+
+        let store = RuntimeTreeTransformStore::with_limits(1, usize::MAX, usize::MAX);
+        let (first_key, first_compiled, first_dst, first_src) = pair_fixture(20, 21);
+        let first_dst_content = first_dst.content_key();
+        let first_src_content = first_src.content_key();
+        let first_dst_weak = Arc::downgrade(&first_dst_content);
+        let first_src_weak = Arc::downgrade(&first_src_content);
+        drop(first_dst_content);
+        drop(first_src_content);
+        drop(
+            store
+                .get_or_compile(first_key, || Ok::<_, Infallible>(first_compiled))
+                .unwrap(),
+        );
+        drop(first_dst);
+        drop(first_src);
+        assert!(first_dst_weak.upgrade().is_some());
+        assert!(first_src_weak.upgrade().is_some());
+
+        let (second_key, second_compiled, second_dst, second_src) = pair_fixture(22, 23);
+        let second_dst_content = second_dst.content_key();
+        let second_src_content = second_src.content_key();
+        let second_dst_weak = Arc::downgrade(&second_dst_content);
+        let second_src_weak = Arc::downgrade(&second_src_content);
+        drop(second_dst_content);
+        drop(second_src_content);
+        drop(
+            store
+                .get_or_compile(second_key, || Ok::<_, Infallible>(second_compiled))
+                .unwrap(),
+        );
+        drop(second_dst);
+        drop(second_src);
+        assert!(first_dst_weak.upgrade().is_none());
+        assert!(first_src_weak.upgrade().is_none());
+        assert!(second_dst_weak.upgrade().is_some());
+        assert!(second_src_weak.upgrade().is_some());
+
+        store.clear();
+        assert!(second_dst_weak.upgrade().is_none());
+        assert!(second_src_weak.upgrade().is_none());
     }
 
     #[test]
