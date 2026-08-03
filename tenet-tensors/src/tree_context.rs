@@ -6,14 +6,15 @@ use num_traits::Zero;
 use tenet_core::{
     BlockStructure, CheckedGenericRigidSymbols, GenericBraidScalar, GenericRigidSymbols,
     HostReadableStorage, HostWritableStorage, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, Placement, ScratchStorage, SimilarStorage, TensorMap,
+    MultiplicityFreeRigidSymbols, Placement, RuleIdentity, ScratchStorage, SimilarStorage,
+    TensorMap,
 };
 
 use crate::cache::OperationCachePolicy;
 use crate::contract::BoundDynamicFusionMapSpace;
 use crate::storage_scratch::StorageTreeTransformWorkspace;
 use crate::tree_transform::{
-    build_checked_generic_tree_pair_transform_group_plan,
+    build_checked_generic_tree_pair_transform_group_plan_validated,
     validate_checked_generic_tree_pair_plan_preflight, CheckedGenericPlanError, TreeTransformCache,
     TreeTransformOperation, TreeTransformRuleCacheKey,
 };
@@ -42,10 +43,48 @@ pub fn tree_transform_dyn_owned_checked_generic<P, D>(
 ) -> Result<(BoundDynamicFusionMapSpace<P>, Vec<D>), CheckedGenericPlanError<P::Error>>
 where
     P: CheckedGenericRigidSymbols,
-    P::Scalar: GenericBraidScalar + Copy + Zero + Sync,
+    P::Scalar: GenericBraidScalar + Copy + Zero + Sync + 'static,
     D: crate::DenseRecouplingScalar
         + RecouplingCoefficientAction<P::Scalar>
         + crate::ConjugateValue,
+{
+    let mut context = TreeTransformExecutionContext::<D, RuleIdentity, P::Scalar>::default();
+    tree_transform_dyn_owned_checked_generic_in_context(
+        &mut context,
+        operation,
+        src_space,
+        src_data,
+        alpha,
+    )
+}
+
+/// Runtime-context variant of [`tree_transform_dyn_owned_checked_generic`].
+///
+/// A completed structure is published only after replay and destination commit.
+#[doc(hidden)]
+#[allow(clippy::type_complexity)]
+pub fn tree_transform_dyn_owned_checked_generic_in_context<P, D, B>(
+    context: &mut TreeTransformExecutionContext<D, RuleIdentity, P::Scalar, B>,
+    operation: TreeTransformOperation,
+    src_space: &BoundDynamicFusionMapSpace<P>,
+    src_data: &[D],
+    alpha: D,
+) -> Result<(BoundDynamicFusionMapSpace<P>, Vec<D>), CheckedGenericPlanError<P::Error>>
+where
+    P: CheckedGenericRigidSymbols,
+    P::Scalar: GenericBraidScalar
+        + Copy
+        + Clone
+        + Add<Output = P::Scalar>
+        + Mul<Output = P::Scalar>
+        + Zero
+        + Send
+        + Sync
+        + 'static,
+    D: crate::DenseRecouplingScalar
+        + RecouplingCoefficientAction<P::Scalar>
+        + crate::ConjugateValue,
+    B: TreeTransformBackend<D, P::Scalar>,
 {
     let source = src_space.space();
     let provider = src_space.provider();
@@ -65,21 +104,40 @@ where
         }
         .into());
     }
-    validate_checked_generic_tree_pair_plan_preflight(provider, &operation, source.structure())?;
-    let prepared = source.prepare_transformed_generic_checked(provider, &operation, identity)?;
-    let plan = build_checked_generic_tree_pair_transform_group_plan(
+    let source_proof = validate_checked_generic_tree_pair_plan_preflight(
         provider,
-        operation,
+        &operation,
         source.structure(),
     )?;
-    let replay = plan.compile_structures(prepared.structure(), source.structure())?;
+    let prepared =
+        source.prepare_transformed_generic_checked(provider, &operation, identity.clone())?;
+    let runtime_store = context.cache.runtime_store();
+    let (cached, generation) = match &runtime_store {
+        Some(store) => store.lookup_checked_generic(
+            identity.clone(),
+            &operation,
+            prepared.structure(),
+            source.structure(),
+        )?,
+        None => (None, 0),
+    };
+    let compiled = cached.is_none();
+    let replay = match cached {
+        Some(replay) => replay,
+        None => {
+            let plan = build_checked_generic_tree_pair_transform_group_plan_validated(
+                provider,
+                operation.clone(),
+                &source_proof,
+            )?;
+            Arc::new(plan.compile_structures(prepared.structure(), source.structure())?)
+        }
+    };
     let mut dst_data = vec![D::zero(); prepared.required_len()];
     let dst_preview = Arc::new(prepared.structure().clone());
 
-    let mut backend = DenseTreeTransformOperations::default();
-    let mut workspace = Default::default();
-    backend.tree_transform_structure_into_raw(
-        &mut workspace,
+    context.backend.tree_transform_structure_into_raw(
+        &mut context.workspace,
         &replay,
         &dst_preview,
         source.structure(),
@@ -89,6 +147,27 @@ where
         D::zero(),
     )?;
     let dst_space = src_space.commit_final_homspace_generic_bound_checked(prepared)?;
+    if compiled {
+        if let Some(store) = runtime_store {
+            if let Ok(replay) = Arc::try_unwrap(replay) {
+                if let Ok(replay) = replay.with_canonical_structures(
+                    Arc::clone(dst_space.space().structure()),
+                    Arc::clone(source.structure()),
+                ) {
+                    // Retention is an optimization and cannot turn a successful
+                    // transform into an error.
+                    let _ = store.admit_checked_generic(
+                        identity,
+                        &operation,
+                        dst_space.space().structure(),
+                        source.structure(),
+                        Arc::new(replay),
+                        generation,
+                    );
+                }
+            }
+        }
+    }
     Ok((dst_space, dst_data))
 }
 

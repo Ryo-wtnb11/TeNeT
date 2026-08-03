@@ -379,7 +379,7 @@ fn checked_generic_public_transform_measurement() {
         "case={case} phase=public_repeat_provider_warm samples_ns={repeat_ns:?} median_ns={} allocations={repeat_allocations:?} requested_bytes={repeat_bytes:?} runtime_after={runtime_after_repeat:?}",
         sorted_ns[sorted_ns.len() / 2]
     );
-    assert_eq!(runtime_after_first, runtime_before);
-    assert_eq!(runtime_after_repeat, runtime_before);
+    assert!(runtime_after_first.entries() > runtime_before.entries());
+    assert!(runtime_after_repeat.hits() > runtime_after_first.hits());
     assert!(std::ptr::eq(first.provider(), provider.as_ref()));
 }

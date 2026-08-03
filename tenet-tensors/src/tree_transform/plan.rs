@@ -269,7 +269,7 @@ where
         .map_err(OperationError::from_core_preserving_context)
 }
 
-struct CheckedGenericTreePairPreflight<'structure> {
+pub(crate) struct CheckedGenericTreePairPreflight<'structure> {
     structure: &'structure BlockStructure,
 }
 
@@ -318,15 +318,15 @@ where
     })
 }
 
-pub(crate) fn validate_checked_generic_tree_pair_plan_preflight<P>(
+pub(crate) fn validate_checked_generic_tree_pair_plan_preflight<'structure, P>(
     provider: &P,
     operation: &TreeTransformOperation,
-    src_structure: &BlockStructure,
-) -> Result<(), CheckedGenericPlanError<P::Error>>
+    src_structure: &'structure BlockStructure,
+) -> Result<CheckedGenericTreePairPreflight<'structure>, CheckedGenericPlanError<P::Error>>
 where
     P: CheckedGenericFusion,
 {
-    validate_checked_generic_tree_pair_preflight(provider, operation, src_structure).map(|_| ())
+    validate_checked_generic_tree_pair_preflight(provider, operation, src_structure)
 }
 
 pub(crate) struct LocallyValidatedAllCodomainFusionTreeBlockStructure<'rule, 'structure, R> {
@@ -1847,6 +1847,22 @@ where
 {
     let source_proof =
         validate_checked_generic_tree_pair_preflight(provider, &operation, src_structure)?;
+    build_checked_generic_tree_pair_transform_group_plan_validated(
+        provider,
+        operation,
+        &source_proof,
+    )
+}
+
+pub(crate) fn build_checked_generic_tree_pair_transform_group_plan_validated<P>(
+    provider: &P,
+    operation: TreeTransformOperation,
+    source_proof: &CheckedGenericTreePairPreflight<'_>,
+) -> Result<TreeTransformGroupPlan<P::Scalar>, CheckedGenericPlanError<P::Error>>
+where
+    P: CheckedGenericRigidSymbols,
+    P::Scalar: GenericBraidScalar + Zero,
+{
     let source_axes = operation_source_axes(&operation);
     let mut specs = Vec::new();
     for group in source_proof.structure.fusion_tree_group_slice() {

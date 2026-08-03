@@ -775,6 +775,21 @@ impl<T: Copy> TreeTransformStructure<T> {
         validate_structure_identity("dst", &self.dst_structure, dst_structure)?;
         validate_structure_identity("src", &self.src_structure, src_structure)
     }
+
+    /// Rebinds an already compiled descriptor to content-equal canonical
+    /// structures without rebuilding its replay payload.
+    #[doc(hidden)]
+    pub fn with_canonical_structures(
+        mut self,
+        dst_structure: Arc<BlockStructure>,
+        src_structure: Arc<BlockStructure>,
+    ) -> Result<Self, OperationError> {
+        validate_structure_identity("dst", &self.dst_structure, &dst_structure)?;
+        validate_structure_identity("src", &self.src_structure, &src_structure)?;
+        self.dst_structure = dst_structure;
+        self.src_structure = src_structure;
+        Ok(self)
+    }
 }
 
 #[doc(hidden)]

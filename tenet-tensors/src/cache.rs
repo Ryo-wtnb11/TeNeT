@@ -138,6 +138,11 @@ impl BlockStructureCacheKey {
     pub(crate) fn charged_retained_bytes(&self) -> usize {
         self.content.charged_retained_bytes()
     }
+
+    #[inline]
+    pub(crate) fn same_content(&self, other: &Self) -> bool {
+        self.content == other.content
+    }
 }
 
 impl PartialEq for BlockStructureCacheKey {

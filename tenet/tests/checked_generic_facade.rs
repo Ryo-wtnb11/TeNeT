@@ -1220,3 +1220,49 @@ fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() 
         }
     }
 }
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn sun_checked_generic_transforms_reuse_the_runtime_completed_store() {
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    for (n, adjoint) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
+        let provider = Arc::new(SUNFusionRule::new(n).unwrap());
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(adjoint, 1)], false).unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |trees, _| {
+                trees.codomain_vertices()[0].get() as f64
+            })
+            .unwrap();
+
+        for operation in ["permute", "braid", "repartition"] {
+            runtime.clear_tree_transform_cache();
+            let apply = |tensor: &TensorMap<SUNFusionRule, f64>| match operation {
+                "permute" => tensor.permute(&[1, 0], &[2]),
+                "braid" => tensor.braid(&[1, 0], &[2], &[0, 1, 2]),
+                "repartition" => tensor.repartition(1),
+                _ => unreachable!(),
+            };
+            let first = apply(&source).unwrap();
+            let cold = runtime.tree_transform_cache_info();
+            let repeated = apply(&source).unwrap();
+            let warm = runtime.tree_transform_cache_info();
+
+            assert_eq!(cold.entries(), 1);
+            assert_eq!(cold.misses(), 1);
+            assert_eq!(warm.entries(), 1);
+            assert_eq!(warm.misses(), 1);
+            assert_eq!(warm.hits(), 1);
+            assert_eq!(repeated.data(), first.data());
+            assert!(std::ptr::eq(first.provider(), provider.as_ref()));
+            assert!(std::ptr::eq(repeated.provider(), provider.as_ref()));
+            for index in 0..first.block_count() {
+                assert_eq!(
+                    repeated.block_fusion_trees(index).unwrap(),
+                    first.block_fusion_trees(index).unwrap()
+                );
+            }
+        }
+    }
+}
