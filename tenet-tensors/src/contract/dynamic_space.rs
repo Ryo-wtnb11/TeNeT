@@ -1170,6 +1170,22 @@ impl PreparedCheckedGenericDynamicSpace {
 }
 
 impl ValidatedDynamicFusionLayout {
+    /// Conservative retained bytes for the complete provider-neutral layout.
+    /// Shared Arc descendants are charged per retained owner so a workspace
+    /// budget never relies on an external owner keeping them alive.
+    #[doc(hidden)]
+    pub fn charged_retained_bytes(&self) -> usize {
+        let identity_bytes = self
+            .0
+            .admission
+            .rule_identity()
+            .map_or(0, RuleIdentity::charged_retained_bytes);
+        std::mem::size_of::<Self>()
+            .saturating_add(self.0.homspace().charged_retained_bytes())
+            .saturating_add(self.0.structure().charged_retained_bytes())
+            .saturating_add(identity_bytes)
+    }
+
     /// Flat storage length required by this validated layout.
     ///
     /// Why not expose the raw space: executors only need allocation length;

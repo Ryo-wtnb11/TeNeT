@@ -2204,6 +2204,13 @@ fn fusion_tree_layout_data_from_groups(
 }
 
 impl FusionTreeHomSpace {
+    /// Conservative retained bytes for this HomSpace and its Arc-backed
+    /// provider-neutral leg metadata.
+    #[doc(hidden)]
+    pub fn charged_retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(self.content.charged_retained_bytes())
+    }
+
     /// Builds a fusion-tree hom space from codomain and domain product spaces.
     ///
     /// # Examples

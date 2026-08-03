@@ -55,7 +55,9 @@ pub mod prelude {
     pub use crate::plancache::CotengraSlicingConfig;
     #[cfg(feature = "cotengra-python")]
     pub use crate::plancache::{CotengraMinimize, CotengraPythonConfig, CotengraPythonMethod};
-    pub use crate::plancache::{Optimizer, PlanCacheConfig, ReplanPolicy};
+    pub use crate::plancache::{
+        Optimizer, PlanCacheConfig, ReplanPolicy, DEFAULT_WORKSPACE_BUDGET_BYTES,
+    };
     pub use crate::runtime::{
         clear_default_runtime, default_runtime, set_default_runtime, LinalgBackend, Runtime,
         RuntimeBuilder, RuntimeTreeTransformCacheInfo,

@@ -689,9 +689,22 @@ impl Runtime {
         self.lock_plan_cache().config.clone()
     }
 
-    /// Replaces the contraction-plan-cache configuration.
-    pub fn set_plan_cache_config(&self, config: PlanCacheConfig) {
-        self.lock_plan_cache().config = config;
+    /// Atomically updates the plan-cache configuration and its downstream
+    /// type-erased state under the Runtime's plan-cache lock.
+    ///
+    /// `tenet-network` uses this cold-path seam to synchronously release idle
+    /// workspace storage when disabling the cache or lowering its byte budget.
+    #[doc(hidden)]
+    pub fn replace_plan_cache_config<R>(
+        &self,
+        config: PlanCacheConfig,
+        f: impl FnOnce(&PlanCacheConfig, &PlanCacheConfig, &mut Option<Box<dyn Any + Send>>) -> R,
+    ) -> R {
+        let mut home = self.lock_plan_cache();
+        let previous = home.config.clone();
+        let result = f(&previous, &config, &mut home.slot);
+        home.config = config;
+        result
     }
 
     /// Locked access to the type-erased downstream extension slot

@@ -2256,6 +2256,21 @@ where
 }
 
 impl BlockStructure {
+    /// Conservative retained bytes for this structure's immutable layout.
+    ///
+    /// The fixed region-state allocation is included, but its lazily derived
+    /// coupled-region operation cache is not: that shared cache can be grown by
+    /// non-workspace owners and is not required to retain or reactivate an idle
+    /// destination. Excluding it also keeps this measurement allocation-free
+    /// and stable for the lifetime of the structure.
+    #[doc(hidden)]
+    pub fn charged_retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            .saturating_add(self.content.charged_retained_bytes())
+            .saturating_add(std::mem::size_of::<BlockStructureRegionState>())
+            .saturating_add(2 * std::mem::size_of::<usize>())
+    }
+
     pub fn trivial(shape: &[usize]) -> Result<Self, CoreError> {
         Self::from_parts(
             SectorStructure::dense(shape.len()),

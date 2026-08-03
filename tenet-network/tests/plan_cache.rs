@@ -35,6 +35,13 @@ fn typed_static_cache_preserves_hit_clear_and_workspace_stats() {
     assert_eq!(cold.topology_materializations, 1);
     assert_eq!(cold.workspaces_created, 1);
     assert_eq!(cold.idle_workspaces, 1);
+    assert!(cold.retained_workspace_bytes > 0);
+    assert_eq!(
+        cold.peak_retained_workspace_bytes,
+        cold.retained_workspace_bytes
+    );
+    assert_eq!(cold.workspace_byte_admissions, 1);
+    assert_eq!(cold.workspace_byte_rejections, 0);
     #[allow(deprecated)]
     {
         assert_eq!(cold.dynamic_aliases, 0);
@@ -198,7 +205,7 @@ fn concurrent_macro_calls_share_one_plan_and_bound_idle_pool() {
 }
 
 #[test]
-fn failed_execution_returns_lease_for_the_next_valid_call() {
+fn failed_execution_quarantines_lease_and_next_valid_call_rebuilds() {
     let runtime = Runtime::builder().build().unwrap();
     let other = Runtime::builder().build().unwrap();
     let local_space = space(Arc::new(U1FusionRule), 2);
@@ -209,9 +216,135 @@ fn failed_execution_returns_lease_for_the_next_valid_call() {
     assert!(tensor!([i; k] = a[i; j] * foreign[j; k]).is_err());
     drop(tensor!([i; k] = a[i; j] * b[j; k]).unwrap());
     let stats = plan_cache_stats(&runtime);
-    assert_eq!(stats.workspaces_created, 1);
-    assert_eq!(stats.workspace_reuses, 2);
+    assert_eq!(stats.workspaces_created, 2);
+    assert_eq!(stats.workspace_reuses, 1);
     assert_eq!(stats.idle_workspaces, 1);
+    assert_eq!(stats.workspace_byte_rejections, 0);
+}
+
+#[test]
+fn workspace_budget_admits_or_rejects_the_complete_idle_workspace() {
+    let runtime = Runtime::builder().build().unwrap();
+    let space = space(Arc::new(U1FusionRule), 8);
+    let (a, b) = pair(&runtime, &space, 130);
+    let (c, _) = pair(&runtime, &space, 132);
+
+    drop(tensor!([i; l] = a[i; j] * b[j; k] * c[k; l]).unwrap());
+    let charge = plan_cache_stats(&runtime).retained_workspace_bytes;
+    assert!(charge > 8 * 8 * std::mem::size_of::<f64>());
+
+    clear_plan_cache(&runtime);
+    configure_plan_cache(
+        &runtime,
+        PlanCacheConfig {
+            workspace_budget_bytes: charge - 1,
+            ..Default::default()
+        },
+    );
+    drop(tensor!([i; l] = a[i; j] * b[j; k] * c[k; l]).unwrap());
+    let rejected = plan_cache_stats(&runtime);
+    assert_eq!(rejected.retained_workspace_bytes, 0);
+    assert_eq!(rejected.peak_retained_workspace_bytes, 0);
+    assert_eq!(rejected.idle_workspaces, 0);
+    assert_eq!(rejected.workspace_byte_admissions, 0);
+    assert_eq!(rejected.workspace_byte_rejections, 1);
+
+    configure_plan_cache(
+        &runtime,
+        PlanCacheConfig {
+            workspace_budget_bytes: charge,
+            ..Default::default()
+        },
+    );
+    drop(tensor!([i; l] = a[i; j] * b[j; k] * c[k; l]).unwrap());
+    let admitted = plan_cache_stats(&runtime);
+    assert_eq!(admitted.retained_workspace_bytes, charge);
+    assert_eq!(admitted.peak_retained_workspace_bytes, charge);
+    assert_eq!(admitted.idle_workspaces, 1);
+    assert_eq!(admitted.workspace_byte_admissions, 1);
+    assert_eq!(admitted.workspace_byte_rejections, 1);
+
+    configure_plan_cache(
+        &runtime,
+        PlanCacheConfig {
+            workspace_budget_bytes: 0,
+            ..Default::default()
+        },
+    );
+    let zeroed = plan_cache_stats(&runtime);
+    assert_eq!(zeroed.retained_workspace_bytes, 0);
+    assert_eq!(zeroed.idle_workspaces, 0);
+    assert_eq!(zeroed.workspace_byte_evictions, 1);
+    drop(tensor!([i; l] = a[i; j] * b[j; k] * c[k; l]).unwrap());
+    assert_eq!(plan_cache_stats(&runtime).workspace_byte_rejections, 2);
+}
+
+#[test]
+fn configuration_flushes_and_capacity_shrink_release_synchronously() {
+    let runtime = Runtime::builder().build().unwrap();
+    configure_plan_cache(
+        &runtime,
+        PlanCacheConfig {
+            capacity: 2,
+            ..Default::default()
+        },
+    );
+    let space = space(Arc::new(U1FusionRule), 8);
+    let (a, b) = pair(&runtime, &space, 140);
+    let (c, _) = pair(&runtime, &space, 142);
+    drop(tensor!([i; l] = a[i; j] * b[j; k] * c[k; l]).unwrap());
+    drop(tensor!([l; i] = a[i; j] * b[j; k] * c[k; l]).unwrap());
+    let initial = plan_cache_stats(&runtime);
+    assert_eq!((initial.entries, initial.idle_workspaces), (2, 2));
+    let two_workspace_budget = initial.retained_workspace_bytes;
+
+    configure_plan_cache(
+        &runtime,
+        PlanCacheConfig {
+            capacity: 2,
+            workspace_budget_bytes: two_workspace_budget,
+            ..Default::default()
+        },
+    );
+    let flushed = plan_cache_stats(&runtime);
+    assert_eq!(flushed.entries, 2);
+    assert_eq!(flushed.idle_workspaces, 0);
+    assert_eq!(flushed.retained_workspace_bytes, 0);
+    assert_eq!(flushed.workspace_byte_evictions, 2);
+
+    drop(tensor!([i; l] = a[i; j] * b[j; k] * c[k; l]).unwrap());
+    drop(tensor!([l; i] = a[i; j] * b[j; k] * c[k; l]).unwrap());
+    let repopulated = plan_cache_stats(&runtime);
+    assert_eq!(repopulated.idle_workspaces, 2);
+    assert_eq!(repopulated.retained_workspace_bytes, two_workspace_budget);
+
+    configure_plan_cache(
+        &runtime,
+        PlanCacheConfig {
+            capacity: 1,
+            workspace_budget_bytes: two_workspace_budget,
+            ..Default::default()
+        },
+    );
+    let shrunk = plan_cache_stats(&runtime);
+    assert_eq!(shrunk.entries, 1);
+    assert_eq!(shrunk.idle_workspaces, 1);
+    assert!(shrunk.retained_workspace_bytes < repopulated.retained_workspace_bytes);
+    assert_eq!(shrunk.workspace_byte_evictions, 3);
+
+    configure_plan_cache(
+        &runtime,
+        PlanCacheConfig {
+            enabled: false,
+            capacity: 1,
+            workspace_budget_bytes: two_workspace_budget,
+            ..Default::default()
+        },
+    );
+    let disabled = plan_cache_stats(&runtime);
+    assert_eq!((disabled.entries, disabled.idle_workspaces), (0, 0));
+    assert_eq!(disabled.retained_workspace_bytes, 0);
+    assert_eq!(disabled.workspace_byte_evictions, 4);
 }
 
 #[test]

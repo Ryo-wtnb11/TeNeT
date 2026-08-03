@@ -264,12 +264,21 @@ impl Default for ReplanPolicy {
 
 /// Default maximum number of cached plans (per runtime).
 ///
-/// Rationale: an entry is plan metadata only (label lists, a step list and
-/// a dims snapshot — well under a kilobyte for realistic networks), so 256
-/// bounds the cache to a few hundred kilobytes while covering drivers that
-/// cycle through many distinct expressions (e.g. every bond of a large
-/// unit cell) without eviction thrash.
+/// Rationale: an entry's compiled plan is metadata only (label lists, a step
+/// list and a dims snapshot — well under a kilobyte for realistic networks),
+/// so 256 covers drivers that cycle through many distinct expressions (e.g.
+/// every bond of a large unit cell) without plan-eviction thrash. Idle
+/// numerical workspace storage is bounded separately by
+/// [`DEFAULT_WORKSPACE_BUDGET_BYTES`].
 pub const DEFAULT_PLAN_CACHE_CAPACITY: usize = 256;
+
+/// Default Runtime-wide ceiling for idle network-execution workspace storage.
+///
+/// The budget covers reusable Host dense payload capacity and workspace-owned
+/// dynamic metadata. Checked-out workspaces are request-owned and are not
+/// charged. A value of zero disables idle workspace retention; it never means
+/// unlimited.
+pub const DEFAULT_WORKSPACE_BUDGET_BYTES: usize = 128 * 1024 * 1024;
 
 /// Plan-cache behavior; set on
 /// [`RuntimeBuilder`](crate::prelude::RuntimeBuilder) or with
@@ -280,6 +289,11 @@ pub struct PlanCacheConfig {
     pub enabled: bool,
     /// Maximum cached entries before LRU eviction.
     pub capacity: usize,
+    /// Runtime-wide byte ceiling for idle network execution workspaces.
+    ///
+    /// Zero disables idle workspace pooling while preserving compiled-plan
+    /// caching.
+    pub workspace_budget_bytes: usize,
     /// When to re-plan on dimension drift.
     pub replan: ReplanPolicy,
     /// Default optimizer for network contraction (the `tensor!` path).
@@ -291,6 +305,7 @@ impl Default for PlanCacheConfig {
         Self {
             enabled: true,
             capacity: DEFAULT_PLAN_CACHE_CAPACITY,
+            workspace_budget_bytes: DEFAULT_WORKSPACE_BUDGET_BYTES,
             replan: ReplanPolicy::default(),
             optimizer: Optimizer::default(),
         }
@@ -320,6 +335,16 @@ pub struct PlanCacheStats {
     pub topology_materializations: u64,
     /// Idle execution workspaces retained by current cached plans.
     pub idle_workspaces: usize,
+    /// Current Runtime-owned idle workspace storage.
+    pub retained_workspace_bytes: usize,
+    /// Maximum admitted idle workspace storage since the last explicit clear.
+    pub peak_retained_workspace_bytes: usize,
+    /// Whole workspaces admitted to idle pooling by the byte budget.
+    pub workspace_byte_admissions: u64,
+    /// Returning workspaces rejected because the byte budget could not admit them.
+    pub workspace_byte_rejections: u64,
+    /// Already-retained workspaces released by cache/configuration eviction.
+    pub workspace_byte_evictions: u64,
     /// Compatibility field for the removed process-local `Network` alias path.
     #[doc(hidden)]
     #[deprecated(note = "dynamic Network aliases were removed; this field is always zero")]
