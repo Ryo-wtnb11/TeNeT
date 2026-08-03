@@ -11,12 +11,20 @@ Validation assertions run after the timer.
 
 The initial executable covers U1 and SU2 controls for owned and actual
 caller-owned-destination forms of `permute` and arbitrary-axis `contract`.
-Runtime tree-transform counters are reported as cold and warm deltas. The
-destination rows call the stable public `permute_overwrite_into` and
-`contract_overwrite_into` APIs; their internal preparation/comparison counters
-are not public and are therefore `NA`. Unsupported instrumentation is also
-printed as `NA`; the harness does not infer allocations, scratch, provider
-queries, dense kernel calls, or transfers from elapsed time.
+Runtime tree-transform counters are reported as cold and warm deltas. The same
+snapshots report process-global fusion-layout and complete-HomSpace cache
+deltas, with charged bytes before and after each phase. The fusion-layout cache
+does not expose a hit counter, so only its available miss, eviction, bypass,
+entry, and charged-byte fields are printed.
+
+The destination rows call the stable public `permute_overwrite_into` and
+`contract_overwrite_into` APIs. Exact-layout admission is attached to the
+Runtime tree-transform entry, but it has no public activity counter, so the
+`exact_layout_admission` column is literal `NA`. The 37-column CSV schema omits
+the old erased-only destination preparation/comparison fields. Unsupported
+instrumentation is also printed as `NA`; the harness does not infer
+allocations, scratch, provider queries, dense kernel calls, or transfers from
+elapsed time.
 
 ```sh
 OP_MATRIX_MIN_MS=20 benchmarks/operation_matrix.sh
