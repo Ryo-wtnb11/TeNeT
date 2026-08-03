@@ -10,11 +10,20 @@ use tenferro_gpu::{
 use tenferro_linalg::LinalgBackend;
 use tenferro_tensor::backend::BackendSessionHost;
 use tenferro_tensor::{
-    ContractionScalar, DotGeneralAccumulation, DotGeneralConfig, Tensor, TensorDot, TensorRead,
-    TensorView, TensorViewCanonicalization, TensorViewMut, TensorWrite,
+    ContractionScalar, DotGeneralAccumulation, DotGeneralConfig, Tensor, TensorDot,
+    TensorElementwise, TensorRead, TensorReduction, TensorStructural, TensorView,
+    TensorViewCanonicalization, TensorViewMut, TensorWrite,
 };
 
 use super::{DenseBackend, DenseError, MatrixOp};
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(test)]
+static CUDA_FULL_DOWNLOAD_BYTES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static CUDA_METADATA_DOWNLOAD_BYTES: AtomicUsize = AtomicUsize::new(0);
 
 fn cuda_error(op: &'static str, err: impl std::fmt::Display) -> DenseError {
     DenseError::Backend {
@@ -118,7 +127,12 @@ impl CudaDenseStorage {
         match host {
             Tensor::F64(tensor) => tensor
                 .host_data()
-                .map(|data| data.to_vec())
+                .map(|data| {
+                    #[cfg(test)]
+                    CUDA_FULL_DOWNLOAD_BYTES
+                        .fetch_add(data.len() * std::mem::size_of::<f64>(), Ordering::Relaxed);
+                    data.to_vec()
+                })
                 .map_err(|err| cuda_error("cuda_download", err)),
             other => Err(cuda_error(
                 "cuda_download",
@@ -383,13 +397,151 @@ fn download_values(ctx: &CudaDenseContext, tensor: &Tensor) -> Result<Vec<f64>, 
     match host {
         Tensor::F64(tensor) => tensor
             .host_data()
-            .map(|data| data.to_vec())
+            .map(|data| {
+                #[cfg(test)]
+                CUDA_METADATA_DOWNLOAD_BYTES
+                    .fetch_add(data.len() * std::mem::size_of::<f64>(), Ordering::Relaxed);
+                data.to_vec()
+            })
             .map_err(|err| cuda_error("cuda_download", err)),
         other => Err(cuda_error(
             "cuda_download",
             format!("expected f64 values, got {:?}", other.dtype()),
         )),
     }
+}
+
+fn download_scalar(
+    ctx: &CudaDenseContext,
+    tensor: &Tensor,
+    op: &'static str,
+) -> Result<f64, DenseError> {
+    let values = download_values(ctx, tensor)?;
+    if values.len() != 1 {
+        return Err(cuda_error(
+            op,
+            format!(
+                "device reduction returned {} values; expected 1",
+                values.len()
+            ),
+        ));
+    }
+    Ok(values[0])
+}
+
+fn upload_scalar(ctx: &CudaDenseContext, value: f64) -> Result<Tensor, DenseError> {
+    let host = Tensor::from_vec_col_major(vec![], vec![value])
+        .map_err(|err| cuda_error("cuda_hermitian", err))?;
+    upload_tensor(ctx.backend.runtime(), &host).map_err(|err| cuda_error("cuda_hermitian", err))
+}
+
+fn scaled_hermitian_residual_accepts(input_ss: f64, residual_scale: f64, residual_ss: f64) -> bool {
+    input_ss.is_finite()
+        && input_ss >= 0.0
+        && residual_scale.is_finite()
+        && residual_scale >= 0.0
+        && residual_ss.is_finite()
+        && residual_ss >= 0.0
+        && 0.5 * residual_scale * residual_ss.sqrt() <= 64.0 * f64::EPSILON * input_ss.sqrt()
+}
+
+/// Tests one packed f64 CUDA matrix region with the host EIGH rule
+/// `||(A - A^T)/2||_F <= 64 eps ||A||_F`.
+///
+/// The normal and transposed views are materialized and reduced on device.
+/// Only scalar norm metadata is downloaded; the receiver region is never
+/// copied to the host. Operation-local workspaces are dropped on return.
+#[doc(hidden)]
+pub fn cuda_is_hermitian_region(
+    ctx: &mut CudaDenseContext,
+    src: &CudaDenseStorage,
+    offset: usize,
+    n: usize,
+) -> Result<bool, DenseError> {
+    const OP: &str = "cuda_hermitian";
+    ensure_cuda_device(ctx.device, OP, &[("src", src.device)])?;
+    if n == 0 {
+        return Ok(true);
+    }
+
+    let normal_view = src.region_view_strided([n, n], [1, n], offset)?;
+    let normal = ctx
+        .backend
+        .to_contiguous_read(TensorRead::from_view(normal_view))
+        .map_err(|err| cuda_error(OP, err))?;
+    let input_abs = ctx
+        .backend
+        .abs(&normal)
+        .map_err(|err| cuda_error(OP, err))?;
+    let input_max = ctx
+        .backend
+        .reduce_max(&input_abs, &[0, 1])
+        .map_err(|err| cuda_error(OP, err))?;
+    let input_scale = download_scalar(ctx, &input_max, OP)?;
+    // Pinned Tenferro's CUDA reduce_max propagates NaN. Keep this check before
+    // the zero fast path so an otherwise-zero matrix containing NaN is rejected.
+    if !input_scale.is_finite() {
+        return Ok(false);
+    }
+    if input_scale == 0.0 {
+        return Ok(true);
+    }
+
+    let transpose_view = src.region_view_strided([n, n], [n, 1], offset)?;
+    let transpose = ctx
+        .backend
+        .to_contiguous_read(TensorRead::from_view(transpose_view))
+        .map_err(|err| cuda_error(OP, err))?;
+    let scale = upload_scalar(ctx, input_scale)?;
+    let normal_scaled = ctx
+        .backend
+        .div(&normal, &scale)
+        .map_err(|err| cuda_error(OP, err))?;
+    let transpose_scaled = ctx
+        .backend
+        .div(&transpose, &scale)
+        .map_err(|err| cuda_error(OP, err))?;
+    let input_ss = ctx
+        .backend
+        .reduce_sum_squares_read(TensorRead::from_tensor(&normal_scaled), &[0, 1])
+        .map_err(|err| cuda_error(OP, err))?;
+    let input_ss = download_scalar(ctx, &input_ss, OP)?;
+
+    let residual = ctx
+        .backend
+        .sub(&normal_scaled, &transpose_scaled)
+        .map_err(|err| cuda_error(OP, err))?;
+    let residual_abs = ctx
+        .backend
+        .abs(&residual)
+        .map_err(|err| cuda_error(OP, err))?;
+    let residual_max = ctx
+        .backend
+        .reduce_max(&residual_abs, &[0, 1])
+        .map_err(|err| cuda_error(OP, err))?;
+    let residual_scale = download_scalar(ctx, &residual_max, OP)?;
+    if !residual_scale.is_finite() {
+        return Ok(false);
+    }
+    if residual_scale == 0.0 {
+        return Ok(input_ss.is_finite() && input_ss >= 0.0);
+    }
+
+    let residual_scale_tensor = upload_scalar(ctx, residual_scale)?;
+    let residual_normalized = ctx
+        .backend
+        .div(&residual, &residual_scale_tensor)
+        .map_err(|err| cuda_error(OP, err))?;
+    let residual_ss = ctx
+        .backend
+        .reduce_sum_squares_read(TensorRead::from_tensor(&residual_normalized), &[0, 1])
+        .map_err(|err| cuda_error(OP, err))?;
+    let residual_ss = download_scalar(ctx, &residual_ss, OP)?;
+    Ok(scaled_hermitian_residual_accepts(
+        input_ss,
+        residual_scale,
+        residual_ss,
+    ))
 }
 
 fn expect_f64(
@@ -546,7 +698,24 @@ pub fn cuda_eigh_region(
     }
     let vectors = expect_f64("cuda_eigh", outputs.pop().expect("len checked"), ctx.device)?;
     let values = download_values(ctx, &outputs.pop().expect("len checked"))?;
+    validate_eigh_factor_shapes(values.len(), vectors.tensor.shape(), n)?;
     Ok((values, vectors))
+}
+
+fn validate_eigh_factor_shapes(
+    values_len: usize,
+    vectors_shape: &[usize],
+    n: usize,
+) -> Result<(), DenseError> {
+    if values_len != n || vectors_shape != [n, n] {
+        return Err(cuda_error(
+            "cuda_eigh",
+            format!(
+                "device EIGH returned len(values)={values_len}, vectors={vectors_shape:?}; expected len(values)={n}, vectors=[{n}, {n}]"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -608,6 +777,85 @@ mod tests {
         assert!(validate_qr_factor_shapes(&[4, 3], &[3, 3], 4, 3).is_ok());
         assert!(validate_qr_factor_shapes(&[4, 4], &[3, 3], 4, 3).is_err());
         assert!(validate_qr_factor_shapes(&[4, 3], &[4, 3], 4, 3).is_err());
+    }
+
+    #[test]
+    fn eigh_factor_shapes_must_match_the_requested_square_problem() {
+        assert!(validate_eigh_factor_shapes(3, &[3, 3], 3).is_ok());
+        assert!(validate_eigh_factor_shapes(2, &[3, 3], 3).is_err());
+        assert!(validate_eigh_factor_shapes(3, &[3, 2], 3).is_err());
+    }
+
+    #[test]
+    fn scaled_hermitian_rule_uses_the_shared_half_residual_threshold() {
+        let input_ss: f64 = 2.0;
+        let threshold = 64.0 * f64::EPSILON * input_ss.sqrt();
+        assert!(scaled_hermitian_residual_accepts(
+            input_ss,
+            2.0 * threshold * 0.99,
+            1.0,
+        ));
+        assert!(!scaled_hermitian_residual_accepts(
+            input_ss,
+            2.0 * threshold * 1.01,
+            1.0,
+        ));
+        assert!(!scaled_hermitian_residual_accepts(input_ss, f64::NAN, 1.0,));
+        assert!(!scaled_hermitian_residual_accepts(
+            input_ss,
+            1.0,
+            f64::INFINITY,
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn cuda_hermitian_region_is_scaled_and_downloads_only_scalar_metadata() {
+        let mut ctx = CudaDenseContext::new(0).unwrap();
+        let n = 4;
+        let mut data = vec![0.0; n * n];
+        for i in 0..n {
+            data[i + n * i] = 1.0;
+        }
+        data[0 + n] = 32.0 * f64::EPSILON;
+        data[1] = data[0 + n];
+        let storage = CudaDenseStorage::upload_f64(&ctx, &data).unwrap();
+
+        CUDA_FULL_DOWNLOAD_BYTES.store(0, Ordering::Relaxed);
+        CUDA_METADATA_DOWNLOAD_BYTES.store(0, Ordering::Relaxed);
+        assert!(cuda_is_hermitian_region(&mut ctx, &storage, 0, n).unwrap());
+        assert_eq!(CUDA_FULL_DOWNLOAD_BYTES.load(Ordering::Relaxed), 0);
+        assert!(CUDA_METADATA_DOWNLOAD_BYTES.load(Ordering::Relaxed) <= 4 * 8);
+
+        let near_threshold = |ctx: &CudaDenseContext, delta: f64| {
+            // For [[1, delta], [0, 1]], the shared half-residual rule changes
+            // truth value at delta = 128 eps up to negligible O(delta^2).
+            CudaDenseStorage::upload_f64(ctx, &[1.0, 0.0, delta, 1.0]).unwrap()
+        };
+        let below = near_threshold(&ctx, 120.0 * f64::EPSILON);
+        let above = near_threshold(&ctx, 136.0 * f64::EPSILON);
+        assert!(cuda_is_hermitian_region(&mut ctx, &below, 0, 2).unwrap());
+        assert!(!cuda_is_hermitian_region(&mut ctx, &above, 0, 2).unwrap());
+
+        let zero = CudaDenseStorage::upload_f64(&ctx, &vec![0.0; n * n]).unwrap();
+        assert!(cuda_is_hermitian_region(&mut ctx, &zero, 0, n).unwrap());
+
+        data[0 + n] = 256.0 * f64::EPSILON;
+        let asymmetric = CudaDenseStorage::upload_f64(&ctx, &data).unwrap();
+        assert!(!cuda_is_hermitian_region(&mut ctx, &asymmetric, 0, n).unwrap());
+
+        for scale in [f64::from_bits(0x0010_0000_0000_0000), 2.0_f64.powi(500)] {
+            let scaled: Vec<_> = data.iter().map(|value| value * scale).collect();
+            let scaled = CudaDenseStorage::upload_f64(&ctx, &scaled).unwrap();
+            assert!(!cuda_is_hermitian_region(&mut ctx, &scaled, 0, n).unwrap());
+        }
+
+        for bad in [f64::NAN, f64::INFINITY] {
+            let mut nonfinite = vec![0.0; n * n];
+            nonfinite[0] = bad;
+            let nonfinite = CudaDenseStorage::upload_f64(&ctx, &nonfinite).unwrap();
+            assert!(!cuda_is_hermitian_region(&mut ctx, &nonfinite, 0, n).unwrap());
+        }
     }
 
     #[test]
