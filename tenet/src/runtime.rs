@@ -210,6 +210,12 @@ macro_rules! define_tensor_execution_context {
                 D::ctx_of(&mut self.mf)
             }
 
+            pub(crate) fn generic_lane<D: UserScalar>(
+                &mut self,
+            ) -> &mut Ctx<D, tenet_core::RuleIdentity> {
+                D::ctx_of(&mut self.generic)
+            }
+
             #[doc(hidden)]
             pub fn release_runtime_binding(&mut self) {
                 self.runtime = None;

@@ -229,7 +229,7 @@ use tenet_dense::{cuda_gemm_region_into, CudaDenseContext, CudaDenseStorage};
 #[cfg(feature = "cuda")]
 use tenet_operations::StorageGemm;
 use tenet_tensors::{
-    tensorcontract_owned_checked_generic, tree_transform_dyn_owned_checked_generic,
+    tensorcontract_owned_checked_generic, tree_transform_dyn_owned_checked_generic_in_context,
     BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace, OutputAxisOrder,
     TensorContractSpec, TreeTransformOperation, TreeTransformOperationKind,
     ValidatedDynamicFusionLayout,
@@ -1204,7 +1204,9 @@ where
         let body = materialized
             .owned_body()
             .expect("uncached materialization is owned");
-        let (space, data) = tree_transform_dyn_owned_checked_generic(
+        let mut lease = tensor.runtime.lease_context()?;
+        let (space, data) = tree_transform_dyn_owned_checked_generic_in_context(
+            lease.context().generic_lane::<D>().tree_context_mut(),
             operation,
             &body.space,
             body.materialized_dense_data(),

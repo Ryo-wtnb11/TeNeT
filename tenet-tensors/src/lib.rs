@@ -126,7 +126,10 @@ pub use tensortrace::{
     tensortrace_fusion_structure, tensortrace_structure, TensorTraceFusionStructure,
     TensorTraceFusionStructureTerm, TensorTraceStructure, TensorTraceStructureTerm,
 };
-pub use tree_context::{tree_transform_dyn_owned_checked_generic, TreeTransformExecutionContext};
+pub use tree_context::{
+    tree_transform_dyn_owned_checked_generic, tree_transform_dyn_owned_checked_generic_in_context,
+    TreeTransformExecutionContext,
+};
 pub use tree_transform::{
     build_all_codomain_tree_transform_group_plan,
     build_checked_generic_tree_pair_transform_group_plan,

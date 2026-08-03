@@ -8879,6 +8879,100 @@ fn checked_generic_shared_provider_builds_identical_plans_concurrently() {
 }
 
 #[test]
+#[allow(clippy::arc_with_non_send_sync)]
+fn checked_generic_runtime_reuses_completed_structure_after_checked_admission() {
+    // What: the first successful checked transform publishes one completed
+    // structure, while a repeat still performs provider admission but skips
+    // the F/R coefficient build and reuses the same Runtime entry.
+    let rule = DenseGenericRule;
+    let provider = Arc::new(CheckedPlanSpy::new(&rule));
+    let raw = dense_generic_dynamic_space();
+    let source = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        raw.homspace().clone(),
+    )
+    .unwrap();
+    let data = (0..source.space().required_len().unwrap())
+        .map(|index| index as f64 + 1.0)
+        .collect::<Vec<_>>();
+    let operation = TreeTransformOperation::braid([0, 2], [1], [0, 1], [2]);
+    let store = Arc::new(RuntimeTreeTransformStore::<f64>::default());
+    let mut context = crate::TreeTransformExecutionContext::<f64, RuleIdentity>::default();
+    context
+        .cache_mut()
+        .bind_runtime_store(Arc::downgrade(&store));
+
+    provider.calls.set([0; CheckedPlanCall::COUNT]);
+    let first = crate::tree_transform_dyn_owned_checked_generic_in_context(
+        &mut context,
+        operation.clone(),
+        &source,
+        &data,
+        1.0,
+    )
+    .unwrap();
+    let cold = store.info();
+    assert_eq!(cold.entries(), 1);
+    assert_eq!(cold.misses(), 1);
+    assert!(provider.call_count(CheckedPlanCall::F) > 0);
+    assert!(provider.call_count(CheckedPlanCall::R) > 0);
+
+    provider.calls.set([0; CheckedPlanCall::COUNT]);
+    let repeated = crate::tree_transform_dyn_owned_checked_generic_in_context(
+        &mut context,
+        operation,
+        &source,
+        &data,
+        1.0,
+    )
+    .unwrap();
+    let warm = store.info();
+
+    assert_eq!(warm.entries(), 1);
+    assert_eq!(warm.misses(), 1);
+    assert_eq!(warm.hits(), 1);
+    assert_eq!(provider.call_count(CheckedPlanCall::F), 0);
+    assert_eq!(provider.call_count(CheckedPlanCall::R), 0);
+    assert_eq!(first.0.space(), repeated.0.space());
+    assert_eq!(first.1, repeated.1);
+    assert!(Arc::ptr_eq(first.0.provider_arc(), &provider));
+    assert!(Arc::ptr_eq(repeated.0.provider_arc(), &provider));
+
+    let before_identity_failure = store.info();
+    *provider.identity.borrow_mut() = Some(RuleIdentity::of_type::<ToyGenericRule>());
+    let identity_error = crate::tree_transform_dyn_owned_checked_generic_in_context(
+        &mut context,
+        TreeTransformOperation::permute([1, 0], [2]),
+        &source,
+        &data,
+        1.0,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        identity_error,
+        CheckedGenericPlanError::Core(CoreError::FusionRuleMismatch { .. })
+    ));
+    assert_eq!(store.info(), before_identity_failure);
+    *provider.identity.borrow_mut() = None;
+
+    provider.calls.set([0; CheckedPlanCall::COUNT]);
+    provider.fail.set(Some((CheckedPlanCall::F, 1)));
+    let late_error = crate::tree_transform_dyn_owned_checked_generic_in_context(
+        &mut context,
+        TreeTransformOperation::transpose([0], [2, 1]),
+        &source,
+        &data,
+        1.0,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        late_error,
+        CheckedGenericPlanError::Provider(CheckedPlanSpyError(CheckedPlanCall::F))
+    ));
+    assert_eq!(store.info().entries(), 1);
+}
+
+#[test]
 #[allow(clippy::arc_with_non_send_sync)] // The API requires Arc; this single-threaded spy uses Cells for deterministic failures.
 fn checked_generic_owned_failure_does_not_publish_destination_state() {
     use tenet_core::{

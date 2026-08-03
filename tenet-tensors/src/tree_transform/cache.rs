@@ -54,6 +54,7 @@ struct RuntimeTreeTransformOperationKey {
 }
 
 type RuntimeTreeTransformKey = TreeTransformStructureCacheKey<RuntimeTreeTransformOperationKey>;
+type RuntimeTreeTransformLookup<T> = (Option<Arc<TreeTransformStructure<T>>>, u64);
 
 #[derive(Clone)]
 struct RuntimeTreeTransformStoreEntry<T> {
@@ -115,7 +116,7 @@ const DEFAULT_RUNTIME_TREE_TRANSFORM_CACHE_ENTRIES: usize = 256;
 const DEFAULT_RUNTIME_TREE_TRANSFORM_CACHE_MAX_ENTRY_BYTES: usize = 8 * 1024 * 1024;
 const RUNTIME_TREE_TRANSFORM_LRU_NODE_ALLOWANCE: usize = 8 * core::mem::size_of::<usize>();
 
-/// One Runtime-owned store for completed multiplicity-free tree-pair structures.
+/// One Runtime-owned store for completed immutable tree-pair structures.
 #[doc(hidden)]
 pub struct RuntimeTreeTransformStore<T> {
     state: Mutex<RuntimeTreeTransformStoreState<T>>,
@@ -268,40 +269,43 @@ impl<T> RuntimeTreeTransformStore<T> {
             .saturating_add(RUNTIME_TREE_TRANSFORM_LRU_NODE_ALLOWANCE)
     }
 
-    fn get_or_compile<E>(
+    fn lookup(
+        &self,
+        key: &RuntimeTreeTransformKey,
+    ) -> (Option<Arc<TreeTransformStructure<T>>>, u64) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("runtime tree-transform store poisoned");
+        if let Some(entry) = state.entries.get(key) {
+            let structure = Arc::clone(&entry.structure);
+            state.hits = state.hits.saturating_add(1);
+            return (Some(structure), state.generation);
+        }
+        state.misses = state.misses.saturating_add(1);
+        (None, state.generation)
+    }
+
+    fn admit(
         &self,
         key: RuntimeTreeTransformKey,
-        compile: impl FnOnce() -> Result<Arc<TreeTransformStructure<T>>, E>,
-    ) -> Result<Arc<TreeTransformStructure<T>>, E> {
-        let generation = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("runtime tree-transform store poisoned");
-            if let Some(entry) = state.entries.get(&key) {
-                let structure = Arc::clone(&entry.structure);
-                state.hits = state.hits.saturating_add(1);
-                return Ok(structure);
-            }
-            state.misses = state.misses.saturating_add(1);
-            state.generation
-        };
-
-        let structure = compile()?;
+        structure: Arc<TreeTransformStructure<T>>,
+        generation: u64,
+    ) -> Arc<TreeTransformStructure<T>> {
         let charged_bytes = Self::charged_entry_bytes(&key, &structure);
         let mut state = self
             .state
             .lock()
             .expect("runtime tree-transform store poisoned");
         if let Some(entry) = state.entries.get(&key) {
-            return Ok(Arc::clone(&entry.structure));
+            return Arc::clone(&entry.structure);
         }
         if state.generation != generation {
-            return Ok(structure);
+            return structure;
         }
         if charged_bytes > state.max_entry_bytes || charged_bytes > state.byte_budget {
             state.admission_bypasses = state.admission_bypasses.saturating_add(1);
-            return Ok(structure);
+            return structure;
         }
         while state.entries.len() == state.entry_capacity
             || state.charged_payload_bytes.saturating_add(charged_bytes) > state.byte_budget
@@ -323,7 +327,89 @@ impl<T> RuntimeTreeTransformStore<T> {
                 exact_layout: None,
             },
         );
-        Ok(structure)
+        structure
+    }
+
+    fn get_or_compile<E>(
+        &self,
+        key: RuntimeTreeTransformKey,
+        compile: impl FnOnce() -> Result<Arc<TreeTransformStructure<T>>, E>,
+    ) -> Result<Arc<TreeTransformStructure<T>>, E> {
+        let (cached, generation) = self.lookup(&key);
+        if let Some(cached) = cached {
+            return Ok(cached);
+        }
+        let structure = compile()?;
+        Ok(self.admit(key, structure, generation))
+    }
+
+    pub(crate) fn lookup_checked_generic(
+        &self,
+        rule: RuleIdentity,
+        operation: &TreeTransformOperation,
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+    ) -> Result<RuntimeTreeTransformLookup<T>, OperationError> {
+        let key = TreeTransformStructureCacheKey::from_structures(
+            RuntimeTreeTransformOperationKey {
+                rule,
+                operation: operation.clone(),
+            },
+            dst_structure,
+            src_structure,
+        )?;
+        let mut state = self
+            .state
+            .lock()
+            .expect("runtime tree-transform store poisoned");
+        let matched = if state.entries.contains(&key) {
+            Some(key.clone())
+        } else {
+            // ponytail: the Runtime LRU is capped at 256 entries. Generic
+            // previews deliberately have no intern identity before commit, so
+            // a bounded semantic scan avoids a second key/index hierarchy.
+            state.entries.iter().find_map(|(candidate, _)| {
+                (candidate.plan() == key.plan()
+                    && candidate.storage_conjugate() == key.storage_conjugate()
+                    && candidate.src().same_content(key.src())
+                    && candidate.dst().same_content(key.dst()))
+                .then(|| candidate.clone())
+            })
+        };
+        if let Some(matched) = matched {
+            let structure = Arc::clone(
+                &state
+                    .entries
+                    .get(&matched)
+                    .expect("matched Runtime transform entry")
+                    .structure,
+            );
+            state.hits = state.hits.saturating_add(1);
+            return Ok((Some(structure), state.generation));
+        }
+        state.misses = state.misses.saturating_add(1);
+        Ok((None, state.generation))
+    }
+
+    pub(crate) fn admit_checked_generic(
+        &self,
+        rule: RuleIdentity,
+        operation: &TreeTransformOperation,
+        dst_structure: &BlockStructure,
+        src_structure: &BlockStructure,
+        structure: Arc<TreeTransformStructure<T>>,
+        generation: u64,
+    ) -> Result<(), OperationError> {
+        let key = TreeTransformStructureCacheKey::from_structures(
+            RuntimeTreeTransformOperationKey {
+                rule,
+                operation: operation.clone(),
+            },
+            dst_structure,
+            src_structure,
+        )?;
+        self.admit(key, structure, generation);
+        Ok(())
     }
 
     /// Returns a previously admitted exact-layout operation without rebuilding
@@ -406,8 +492,9 @@ pub(crate) const DEFAULT_TREE_TRANSFORM_CACHE_ENTRIES: usize = 256;
 ///
 /// Standalone expert contexts may retain ordinary multiplicity-free and
 /// all-codomain structures according to [`OperationCachePolicy`]. Runtime-bound
-/// ordinary tree-pair operations use their Runtime-owned store instead. Generic
-/// and prelowered callback paths compile eagerly and are not retained here.
+/// ordinary and checked Generic tree-pair operations use their Runtime-owned
+/// store instead. Prelowered callback paths compile eagerly and are not retained
+/// here.
 pub struct TreeTransformCache<T, RuleKey> {
     structures: TreeTransformStructureCache<T, TreeTransformStructureOperationKey<RuleKey>>,
     runtime_store: Option<Weak<RuntimeTreeTransformStore<T>>>,
@@ -541,6 +628,10 @@ where
 
     pub fn reset_stats(&mut self) {
         self.stats = TreeTransformCacheStats::default();
+    }
+
+    pub(crate) fn runtime_store(&self) -> Option<Arc<RuntimeTreeTransformStore<T>>> {
+        self.runtime_store.as_ref().and_then(Weak::upgrade)
     }
 
     fn structure_key(
@@ -1364,6 +1455,41 @@ mod runtime_store_tests {
         assert_eq!(admitted.entries(), 1);
         assert_eq!(admitted.misses(), 1);
         assert_eq!(admitted.hits(), 0);
+    }
+
+    #[test]
+    fn checked_generic_lookup_survives_core_interner_reset() {
+        // What: Runtime ownership, not the process-global interner lifetime,
+        // controls a completed Generic structure's semantic reuse.
+        let _guard = crate::test_support::CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let store = RuntimeTreeTransformStore::default();
+        let (key, structure, original) = fixture(31);
+        store
+            .get_or_compile(key, || Ok::<_, Infallible>(structure))
+            .unwrap();
+        let original_id = original.content_id();
+
+        tenet_core::reset_core_intern_tables();
+        let rebuilt = BlockStructure::from_blocks_with_rank(
+            1,
+            vec![BlockSpec::with_key(BlockKey::ordinal(31), vec![1], vec![1], 0).unwrap()],
+        )
+        .unwrap();
+        assert_ne!(rebuilt.content_id(), original_id);
+
+        let (cached, _) = store
+            .lookup_checked_generic(
+                RuleIdentity::of_type::<TestRuleIdentity>(),
+                &TreeTransformOperation::permute([31], []),
+                &rebuilt,
+                &rebuilt,
+            )
+            .unwrap();
+        assert!(cached.is_some());
+        assert_eq!(store.info().hits(), 1);
+        assert_eq!(store.info().misses(), 1);
     }
 }
 
