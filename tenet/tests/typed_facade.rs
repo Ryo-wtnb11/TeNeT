@@ -4586,77 +4586,60 @@ fn the_hermitian_family_carries_the_su2_dimension_weight() {
 /// An endomorphism whose every coupled-sector block is nonsingular: the fill
 /// used by [`z2_endo_oracle_pair`] is position-weighted and produces rank-one
 /// blocks, so `inv` on it would be testing the singular path instead. Adding a
-/// multiple of the identity is the cheapest fix that stays byte-identical
-/// across the two facades.
-fn z2_invertible_pair(
-    runtime: &Runtime,
-) -> (
-    tenet::prelude::Tensor,
-    TensorMap<tenet::core::Z2FusionRule, f64>,
-) {
-    let (erased, typed) = z2_endo_oracle_pair(runtime);
-    let erased_id =
-        tenet::prelude::Tensor::id(runtime, tenet::prelude::Dtype::F64, &erased.domain_spaces())
-            .unwrap();
+/// multiple of the identity is the cheapest fix.
+fn z2_invertible(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, f64> {
+    let (_, typed) = z2_endo_oracle_pair(runtime);
     let typed_id = TensorMap::id(runtime, &typed.domain()).unwrap();
-    (
-        erased.add(&erased_id, 1.0, 100.0).unwrap(),
-        typed.add(&typed_id, 1.0, 100.0).unwrap(),
-    )
+    typed.add(&typed_id, 1.0, 100.0).unwrap()
 }
 
 #[test]
-fn typed_and_erased_inv_agree_byte_for_byte() {
-    // What: the typed `inv` is the erased one — the same per-sector dense solve
-    // through the same seam — so the payloads compare bitwise, not just within
-    // a tolerance.
+fn inv_is_a_two_sided_inverse() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_invertible_pair(&runtime);
+    let typed = z2_invertible(&runtime);
 
-    let erased_inverse = erased.inv().unwrap();
     let typed_inverse = typed.inv().unwrap();
-    assert_eq!(typed_inverse.data(), erased_inverse.data());
-
-    // And it is an inverse: `t * t^-1` is the identity on the codomain.
-    let identity = typed.compose(&typed_inverse).unwrap();
     let expected = TensorMap::<_, f64>::id(&runtime, &typed.domain()).unwrap();
-    let error = identity
-        .data()
-        .iter()
-        .zip(expected.data())
-        .map(|(a, b)| (a - b).abs())
-        .fold(0.0f64, f64::max);
-    assert!(error < 1e-9, "t * inv(t) is not the identity: {error}");
+    for (name, identity) in [
+        ("t * inv(t)", typed.compose(&typed_inverse).unwrap()),
+        ("inv(t) * t", typed_inverse.compose(&typed).unwrap()),
+    ] {
+        let error = identity
+            .data()
+            .iter()
+            .zip(expected.data())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f64, f64::max);
+        assert!(error < 1e-9, "{name} is not the identity: {error}");
+    }
 }
 
 #[test]
 fn inv_of_a_compact_spectrum_is_the_elementwise_reciprocal() {
     // What: the O(rank) arm. A spectrum's inverse is `1/s_i` on the stored
-    // values, and it agrees with the erased facade's own diagonal arm.
+    // values.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+    let (_, typed) = z2_endo_oracle_pair(&runtime);
 
-    let erased_s = erased
-        .svd_trunc(&tenet::prelude::Truncation::Full)
-        .unwrap()
-        .s;
     let typed_s = typed.svd_trunc(&Truncation::Full).unwrap().s;
     // The fixture is rank deficient, so the full spectrum contains zeros that
     // `inv` must refuse; keep only the nonzero part.
-    let erased_s = erased_s
-        .svd_trunc(&tenet::prelude::Truncation::Rank(2))
-        .unwrap()
-        .s;
     let typed_s = typed_s.svd_trunc(&Truncation::Rank(2)).unwrap().s;
 
-    assert_eq!(
-        typed_s.inv().unwrap().data(),
-        erased_s.inv().unwrap().data()
-    );
+    let inverse = typed_s.inv().unwrap();
+    let source_spectrum = typed_s.diagonal_spectrum().unwrap().unwrap();
+    let inverse_spectrum = inverse.diagonal_spectrum().unwrap().unwrap();
+    assert_eq!(source_spectrum.len(), inverse_spectrum.len());
+    for (source, image) in source_spectrum.iter().zip(&inverse_spectrum) {
+        assert_eq!(source.sector, image.sector);
+        for (&value, &reciprocal) in source.values.iter().zip(&image.values) {
+            assert_eq!(reciprocal, value.recip());
+        }
+    }
     // `s * s^-1` is the identity on the bond.
-    let product = typed_s.compose(&typed_s.inv().unwrap()).unwrap();
+    let product = typed_s.compose(&inverse).unwrap();
     let expected = TensorMap::<_, f64>::id(&runtime, &typed_s.domain()).unwrap();
     let error = product
         .data()
@@ -4756,59 +4739,90 @@ fn inv_accepts_isomorphic_but_unequal_codomain_and_domain() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn typed_and_erased_pinv_agree_byte_for_byte() {
-    // What: the same SVD-and-fold seam on both facades, so the payloads compare
-    // bitwise. The fixture is deliberately rank deficient — a full-rank one
-    // would let a broken cutoff pass.
+fn pinv_satisfies_the_moore_penrose_identities() {
+    // The fixture is deliberately rank deficient: a full-rank one would let a
+    // broken cutoff pass as an ordinary inverse.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+    let (_, typed) = z2_endo_oracle_pair(&runtime);
 
-    for rcond in [0.0, 1e-12, 1e-3] {
-        assert_eq!(
-            typed.pinv(rcond).unwrap().data(),
-            erased.pinv(rcond).unwrap().data(),
-            "pinv payloads diverge at rcond {rcond}"
-        );
-    }
-
-    // Moore-Penrose: `t t^+ t = t`, the identity that a wrong fold would break.
     // `rcond` is well above the fixture's numerically-zero singular values and
     // well below its real ones, so the cutoff drops exactly the null directions
     // — inverting those instead would amplify rounding into the millions of ulp.
     let pseudo = typed.pinv(1e-6).unwrap();
-    let round_trip = typed.compose(&pseudo).unwrap().compose(&typed).unwrap();
-    let error = round_trip
-        .data()
-        .iter()
-        .zip(typed.data())
-        .map(|(a, b)| (a - b).abs())
-        .fold(0.0f64, f64::max);
-    assert!(
-        error < 1e-9 * typed.norm().unwrap(),
-        "t t^+ t != t: {error}"
+    let left_support = typed.compose(&pseudo).unwrap();
+    let right_support = pseudo.compose(&typed).unwrap();
+    let assert_close =
+        |name: &str,
+         actual: &TensorMap<tenet::core::Z2FusionRule, f64>,
+         expected: &TensorMap<tenet::core::Z2FusionRule, f64>| {
+            let error = actual
+                .data()
+                .iter()
+                .zip(expected.data())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f64, f64::max);
+            assert!(
+                error < 1e-9 * expected.norm().unwrap().max(1.0),
+                "{name}: {error}"
+            );
+        };
+    assert_close(
+        "t t^+ t != t",
+        &left_support.compose(&typed).unwrap(),
+        &typed,
+    );
+    assert_close(
+        "t^+ t t^+ != t^+",
+        &right_support.compose(&pseudo).unwrap(),
+        &pseudo,
+    );
+    assert_close(
+        "(t t^+)† != t t^+",
+        &left_support.adjoint().unwrap(),
+        &left_support,
+    );
+    assert_close(
+        "(t^+ t)† != t^+ t",
+        &right_support.adjoint().unwrap(),
+        &right_support,
     );
 }
 
 #[test]
-fn pinv_of_a_compact_spectrum_stays_compact_and_agrees_with_the_erased_arm() {
+fn pinv_of_a_compact_spectrum_is_the_elementwise_cutoff_reciprocal() {
     // What: the O(rank) arm — an elementwise cutoff and reciprocal, whose own
     // singular values are `|entry|`, so no SVD runs at all.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_endo_oracle_pair(&runtime);
-    let erased_s = erased
-        .svd_trunc(&tenet::prelude::Truncation::Full)
-        .unwrap()
-        .s;
+    let (_, typed) = z2_endo_oracle_pair(&runtime);
     let typed_s = typed.svd_trunc(&Truncation::Full).unwrap().s;
+    let source = typed_s.diagonal_spectrum().unwrap().unwrap();
+    let sigma_max = source
+        .iter()
+        .flat_map(|entry| &entry.values)
+        .map(|value| value.abs())
+        .fold(0.0, f64::max);
 
     for rcond in [0.0, 1e-12, 1e-3] {
-        assert_eq!(
-            typed_s.pinv(rcond).unwrap().data(),
-            erased_s.pinv(rcond).unwrap().data(),
-            "compact pinv payloads diverge at rcond {rcond}"
-        );
+        let image = typed_s
+            .pinv(rcond)
+            .unwrap()
+            .diagonal_spectrum()
+            .unwrap()
+            .unwrap();
+        let cutoff = rcond * sigma_max;
+        for (source, image) in source.iter().zip(&image) {
+            assert_eq!(source.sector, image.sector);
+            for (&value, &actual) in source.values.iter().zip(&image.values) {
+                let expected = if value.abs() > cutoff {
+                    value.recip()
+                } else {
+                    0.0
+                };
+                assert_eq!(actual, expected, "rcond {rcond}, value {value}");
+            }
+        }
     }
 }
 
@@ -4816,7 +4830,7 @@ fn pinv_of_a_compact_spectrum_stays_compact_and_agrees_with_the_erased_arm() {
 fn pinv_cuts_a_singular_value_sitting_exactly_on_the_cutoff() {
     // What: the boundary. The comparison is `sigma > rcond * sigma_max`, so a
     // singular value at *exactly* the cutoff is discarded, not kept — on both
-    // storages and on both facades. This is the one bit of the cutoff policy a
+    // storages. This is the one bit of the cutoff policy a
     // mutation to `>=` would otherwise slip past.
     let _guard = cache_lock();
     let runtime = runtime();
@@ -4870,7 +4884,7 @@ fn pinv_cuts_a_singular_value_sitting_exactly_on_the_cutoff() {
     assert_eq!(triple.data(), thresholded.data());
     assert_ne!(triple.data(), tensor.data());
 
-    // And on the compact arm, whose comparison is the erased facade's own.
+    // And on the compact arm.
     let spectrum = tensor.svd_trunc(&Truncation::Full).unwrap().s;
     let compact_pinv = spectrum.pinv(0.25).unwrap();
     let mut kept: Vec<f64> = compact_pinv
@@ -4983,25 +4997,8 @@ fn pinv_uses_one_global_sigma_max_across_every_sector() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn typed_and_erased_exp_agree_byte_for_byte_on_a_dense_hermitian_input() {
-    // What: the dense arm is the erased one — the same eigh-and-fold seam — so
-    // the payloads compare bitwise.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased, typed) = z2_hermitian_pair(&runtime);
-
-    assert_eq!(typed.exp().unwrap().data(), erased.exp().unwrap().data());
-
-    // And the SU(2) branch, where the recoupling weights are not all one.
-    let (erased, typed) = su2_hermitian_pair(&runtime);
-    assert_eq!(typed.exp().unwrap().data(), erased.exp().unwrap().data());
-}
-
-#[test]
 fn exp_of_the_identity_is_e_times_the_identity() {
-    // What: the value oracle that does not go through the erased facade.
-    // `exp(id) = e * id` on every provider, which pins the `V exp(D) V^H`
-    // assembly rather than just its agreement with a sibling.
+    // `exp(id) = e * id` on every provider.
     let _guard = cache_lock();
     let runtime = runtime();
     let (_, typed) = z2_endo_oracle_pair(&runtime);
@@ -5020,21 +5017,18 @@ fn exp_of_the_identity_is_e_times_the_identity() {
 }
 
 #[test]
-fn exp_accepts_a_non_hermitian_endomorphism_on_both_facades() {
+fn exp_accepts_a_non_hermitian_endomorphism_and_inverts_under_negation() {
     // What: issue #577 closed the recorded divergence — TensorKit's `exp` is a
     // general per-block Pade approximant with no hermiticity gate, and so is
-    // this one now. The refusal this test used to pin is gone; what is pinned
-    // instead is that both facades take the same general arm and publish the
-    // same bytes, and that the result is the actual exponential.
+    // this one now. `exp(A) exp(-A) = id` pins the actual exponential.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+    let (_, typed) = z2_endo_oracle_pair(&runtime);
 
     assert!(!typed.is_hermitian(1e-9).unwrap());
     let typed_exp = typed.exp().unwrap();
-    assert_eq!(typed_exp.data(), erased.exp().unwrap().data());
 
-    // exp(A) exp(-A) = id, evaluated through the facade's own composition.
+    // exp(A) exp(-A) = id, evaluated through the typed composition.
     let inverse = typed.scale(-1.0).exp().unwrap();
     let identity = TensorMap::<_, f64>::id(&runtime, &typed.domain()).unwrap();
     let residual = typed_exp
@@ -5050,37 +5044,17 @@ fn exp_accepts_a_non_hermitian_endomorphism_on_both_facades() {
 
 #[test]
 fn exp_of_a_compact_spectrum_stays_compact_and_is_elementwise() {
-    // What: the arm this phase adds. The erased facade densifies a diagonal
-    // `exp` and runs a full eigendecomposition on the block-diagonal buffer;
-    // here it is `exp(s_i)` on the `Σ_c k_c` stored values, which is
-    // TensorKit's own `exp(::DiagonalTensorMap)`. The two must still agree
-    // numerically — the point of the arm is the complexity, not the answer.
+    // What: `exp(s_i)` on the `Σ_c k_c` stored values, matching TensorKit's
+    // `exp(::DiagonalTensorMap)` law.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+    let (_, typed) = z2_endo_oracle_pair(&runtime);
     // Scaled down: the fixture's largest singular value is in the thousands and
     // `exp` of it overflows to infinity, which no comparison can separate from
     // a wrong infinity.
-    let erased_s = erased
-        .svd_trunc(&tenet::prelude::Truncation::Full)
-        .unwrap()
-        .s
-        .scale(1e-3)
-        .unwrap();
     let typed_s = typed.svd_trunc(&Truncation::Full).unwrap().s.scale(1e-3);
 
     let typed_exp = typed_s.exp().unwrap();
-    let erased_exp = erased_s.exp().unwrap();
-    let error = typed_exp
-        .data()
-        .iter()
-        .zip(erased_exp.data())
-        .map(|(a, b)| (a - b).abs())
-        .fold(0.0f64, f64::max);
-    assert!(
-        error < 1e-12,
-        "the compact exp arm disagrees with the erased densified one: {error}"
-    );
     // Every stored value is `exp` of the source's: the elementwise claim, read
     // off the materialized diagonal so it does not need a compact accessor.
     for (index, (source, image)) in typed_s.data().iter().zip(typed_exp.data()).enumerate() {
@@ -5178,65 +5152,18 @@ fn exp_of_a_complex_compact_spectrum_takes_the_complex_elementwise_branch() {
     }
 }
 
-#[test]
-fn typed_and_erased_compact_exp_agree_on_a_nonreal_spectrum() {
-    // What: issue #578 gives the erased facade the same compact `exp` arm, so
-    // the typed one — the value oracle, since it never densifies — and its
-    // erased sibling now agree value for value on a spectrum the Hermitian
-    // dense route refuses on either facade.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased, typed) = z2_complex_endo_oracle_pair(&runtime);
-
-    // Since issue #577 the dense c64 route accepts these blocks as well, and
-    // the two facades take the same general arm on them. Scaled down first:
-    // this fixture's entries run into the thousands, and `exp` of it overflows
-    // to a NaN that no equality can tell apart from a wrong NaN.
-    assert_eq!(
-        typed.scale(Complex64::new(1e-3, 0.0)).exp().unwrap().data(),
-        erased.scale(1e-3).unwrap().exp().unwrap().data_c64(),
-        "the dense c64 facades disagree on the general arm"
-    );
-
-    let erased_spectrum = erased.eig_full().unwrap().0;
-    let typed_spectrum = typed.eig_full().unwrap().0;
-    assert!(
-        typed_spectrum.data().iter().any(|v| v.im.abs() > 1e-6),
-        "the spectrum must be off the real axis for this to test anything"
-    );
-    // Byte-for-byte: both arms are `Complex64::exp` over the same C64 spectrum,
-    // which `typed_and_erased_eig_agree_on_a_complex_payload_and_conjugate_the_adjoint`
-    // already pins as identical. (The `RealC64` last-ulp gap documented on
-    // `UserScalar::sqrt_value` is a division story; `exp` has no divide.)
-    assert_eq!(
-        typed_spectrum.exp().unwrap().data(),
-        erased_spectrum.exp().unwrap().try_data_c64().unwrap()
-    );
-}
-
 // ---------------------------------------------------------------------------
 // Phase 6 (issue #576), slice 4: `sqrt`.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn typed_and_erased_sqrt_agree_byte_for_byte_on_both_storages() {
-    // What: the diagonal-bond idiom, `√S · √S = S`, on both facades and on both
-    // storages of the same spectrum — compact (the factor as returned) and
-    // dense (the same values after a round trip through an operation that
-    // materializes).
+fn sqrt_squares_to_the_source_on_both_storages() {
+    // What: the diagonal-bond idiom, `√S · √S = S`, on compact storage and on
+    // dense storage of the same spectrum.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_endo_oracle_pair(&runtime);
-    let erased_s = erased
-        .svd_trunc(&tenet::prelude::Truncation::Full)
-        .unwrap()
-        .s;
+    let (_, typed) = z2_endo_oracle_pair(&runtime);
     let typed_s = typed.svd_trunc(&Truncation::Full).unwrap().s;
-
-    assert_eq!(
-        typed_s.sqrt().unwrap().data(),
-        erased_s.sqrt().unwrap().data()
-    );
 
     // √S · √S = S.
     let root = typed_s.sqrt().unwrap();
@@ -5272,10 +5199,8 @@ fn sqrt_refuses_anything_that_is_not_a_diagonal_bond_tensor() {
     // off-diagonal entry, are both refused.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
-    // The *shape* guard, not the off-diagonal walk behind it: both refuse a
-    // rank-two tensor, so only the message separates them, and without this the
-    // guard has no killing test at all.
+    let (_, typed) = z2_oracle_pair(&runtime);
+    // The shape guard, not the off-diagonal walk behind it.
     match typed.sqrt() {
         Err(tenet::typed::Error::InvalidArgument(message)) => {
             assert!(
@@ -5286,9 +5211,7 @@ fn sqrt_refuses_anything_that_is_not_a_diagonal_bond_tensor() {
         }
         other => panic!("a non-bond tensor was accepted: {other:?}"),
     }
-    assert!(erased.sqrt().is_err(), "the erased facade disagrees");
-
-    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+    let (_, typed) = z2_endo_oracle_pair(&runtime);
     // Bond shaped (`[v] <- [v]`) but not diagonal: the off-diagonal check is
     // what refuses it, and it is the check that separates this from a general
     // endomorphism `sqrt`.
@@ -5299,7 +5222,6 @@ fn sqrt_refuses_anything_that_is_not_a_diagonal_bond_tensor() {
         }
         other => panic!("expected an off-diagonal refusal, got {other:?}"),
     }
-    assert!(erased.sqrt().is_err(), "the erased facade disagrees");
 }
 
 #[test]
@@ -5311,13 +5233,7 @@ fn sqrt_of_a_negative_f64_entry_points_at_the_complex_payload() {
     // cannot express and which disagrees with TensorKit's own diagonal path.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_endo_oracle_pair(&runtime);
-    let erased_s = erased
-        .svd_trunc(&tenet::prelude::Truncation::Full)
-        .unwrap()
-        .s
-        .scale(-1.0)
-        .unwrap();
+    let (_, typed) = z2_endo_oracle_pair(&runtime);
     let typed_s = typed.svd_trunc(&Truncation::Full).unwrap().s.scale(-1.0);
 
     for (name, result) in [
@@ -5347,13 +5263,12 @@ fn sqrt_of_a_negative_f64_entry_points_at_the_complex_payload() {
             other => panic!("the {name} arm accepted a negative entry: {other:?}"),
         }
     }
-    assert!(erased_s.sqrt().is_err(), "the erased facade disagrees");
 }
 
 #[test]
 fn sqrt_of_a_complex_payload_takes_the_principal_branch() {
     // What: with a c64 payload there is a root to return, and it is the
-    // principal one — `√(-1) = i`, not `-i`. Checked on both storages.
+    // principal one — `√(-1) = i`, not `-i`.
     let _guard = cache_lock();
     let runtime = runtime();
     let leg = GradedSpace::try_new(
@@ -5395,43 +5310,13 @@ fn sqrt_of_a_complex_payload_takes_the_principal_branch() {
 }
 
 #[test]
-fn typed_and_erased_c64_compact_inv_and_pinv_agree_to_rounding() {
-    // What: the one place the two facades' compact arms are *not* byte
-    // identical, pinned rather than left untested.
-    //
-    // A c64 tensor's singular values are real. The erased facade records that in
-    // its `DiagonalData::RealC64` variant and divides in real arithmetic; the
-    // typed facade's compact payload holds values of exactly the payload type,
-    // so it divides in complex. Complex division is not real division, and the
-    // two disagree in the last ulp on part of the spectrum.
-    //
-    // The assertion is therefore relative, not `assert_eq!`: the gap is real and
-    // accepted (a `RealC64` route in the typed storage is its own phase), but it
-    // is bounded by rounding, and a genuine algorithm divergence — a dropped
-    // cutoff, a wrong reciprocal — would blow through this bound by orders of
-    // magnitude. The f64 siblings stay byte-compared, one test up.
+fn c64_compact_inv_and_pinv_are_elementwise_reciprocals() {
+    // A c64 tensor's singular values are stored in the payload dtype, so both
+    // compact matrix functions must apply their laws directly to those values.
     let _guard = cache_lock();
     let runtime = runtime();
-    // A c64 `[v] <- [v]` map, full rank, with wide enough legs that the whole
-    // spectrum is 33 singular values: they are real while the payload dtype is
-    // not, which is exactly the `DiagonalData::RealC64` case, and the erased
-    // facade's real division agrees with the typed facade's complex division on
-    // only about three quarters of arguments — so a handful of values would be
-    // able to agree by luck and a wide spectrum cannot.
+    // A full-rank c64 `[v] <- [v]` map with a wide spectrum.
     let complex = |value: f64| Complex64::new(value, 1.0 + value % 5.0);
-    let space = tenet::prelude::Space::z2([(0, 16), (1, 17)]);
-    let mut state = 0x5eed_c64u64;
-    let mut next = || {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        complex(((state >> 33) as f64) / (u32::MAX as f64) + 0.5)
-    };
-    let erased = tenet::prelude::Tensor::from_block_fn(
-        &runtime,
-        [&space],
-        [&space],
-        |_: &tenet::prelude::BlockKey, _: &[usize]| next(),
-    )
-    .unwrap();
     let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
@@ -5447,51 +5332,39 @@ fn typed_and_erased_c64_compact_inv_and_pinv_agree_to_rounding() {
         complex(((state >> 33) as f64) / (u32::MAX as f64) + 0.5)
     };
     let typed = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| next()).unwrap();
-    assert_eq!(typed.data(), erased.data_c64(), "the fixtures differ");
-
-    let erased_s = erased
-        .svd_trunc(&tenet::prelude::Truncation::Full)
-        .unwrap()
-        .s;
     let typed_s = typed.svd_trunc(&Truncation::Full).unwrap().s;
-    assert_eq!(
-        typed_s.data(),
-        erased_s.data_c64(),
-        "the two spectra differ before either matrix function runs"
-    );
-
-    for (name, typed_out, erased_out) in [
-        ("inv", typed_s.inv().unwrap(), erased_s.inv().unwrap()),
-        (
-            "pinv",
-            typed_s.pinv(1e-12).unwrap(),
-            erased_s.pinv(1e-12).unwrap(),
-        ),
-    ] {
-        let mut differing = 0usize;
-        for (index, (mine, theirs)) in typed_out
-            .data()
+    let source = typed_s.diagonal_spectrum().unwrap().unwrap();
+    let sigma_max = source
+        .iter()
+        .flat_map(|entry| &entry.values)
+        .map(|value| value.norm())
+        .fold(0.0, f64::max);
+    let rcond = 1e-12;
+    let inverse = typed_s.inv().unwrap().diagonal_spectrum().unwrap().unwrap();
+    let pseudo = typed_s
+        .pinv(rcond)
+        .unwrap()
+        .diagonal_spectrum()
+        .unwrap()
+        .unwrap();
+    for ((source, inverse), pseudo) in source.iter().zip(&inverse).zip(&pseudo) {
+        assert_eq!(source.sector, inverse.sector);
+        assert_eq!(source.sector, pseudo.sector);
+        for ((&value, &inverse), &pseudo) in source
+            .values
             .iter()
-            .zip(erased_out.data_c64())
-            .enumerate()
+            .zip(&inverse.values)
+            .zip(&pseudo.values)
         {
-            let scale = theirs.norm().max(f64::MIN_POSITIVE);
-            assert!(
-                (mine - theirs).norm() / scale < 1e-15,
-                "c64 compact {name} entry {index}: {mine} vs {theirs} is more \
-                 than a rounding apart"
-            );
-            if mine != theirs {
-                differing += 1;
-            }
+            let reciprocal = Complex64::new(1.0, 0.0) / value;
+            assert_eq!(inverse, reciprocal);
+            let expected = if value.norm() > rcond * sigma_max {
+                reciprocal
+            } else {
+                Complex64::new(0.0, 0.0)
+            };
+            assert_eq!(pseudo, expected);
         }
-        // And the gap is really there: if this ever hits zero, the typed storage
-        // grew a real-spectrum route and the comment above went stale.
-        assert!(
-            differing > 0,
-            "c64 compact {name} is now byte identical to the erased sibling — \
-             the RealC64 divergence this test documents is gone"
-        );
     }
 }
 
