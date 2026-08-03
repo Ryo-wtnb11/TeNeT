@@ -746,8 +746,8 @@ pub trait UserScalar: FactorScalar + RecouplingCoefficientAction<f64> {
     /// storage is its own phase, and finite-precision value differences are
     /// within the coefficient-exactness principle, which requires structure,
     /// gauge determinism and verification to be exact — not the last bit of a
-    /// division. `typed_and_erased_c64_compact_inv_and_pinv_agree_to_rounding`
-    /// pins the size of the gap so it stays visible.
+    /// division. Typed integration tests pin the payload-native reciprocal and
+    /// global-cutoff laws rather than this legacy representation difference.
     fn sqrt_value(self) -> Result<Self, Error>;
 }
 
