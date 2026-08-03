@@ -1207,7 +1207,8 @@ impl BlockStructureContent {
         &self.blocks
     }
 
-    pub(crate) fn charged_retained_bytes(&self) -> usize {
+    #[doc(hidden)]
+    pub fn charged_retained_bytes(&self) -> usize {
         fn key_bytes(key: &BlockKey, seen: &mut rustc_hash::FxHashSet<usize>) -> usize {
             match key {
                 BlockKey::Dense => 0,
