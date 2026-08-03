@@ -971,30 +971,6 @@ fn simple_fusion_provider_round_trips_construction_fill_and_inspection() {
     assert_eq!(tensor.domain().len(), 2);
 }
 
-/// Fill value from the erased fusion-tree key: parities weighted by position
-/// so any reordering of legs, blocks or elements changes the buffer.
-fn erased_fill_value(key: &tenet::prelude::BlockKey, indices: &[usize]) -> f64 {
-    let pair = key.as_fusion_tree_pair().expect("fusion-tree block");
-    let parity = |id| {
-        SectorCodec::decode_sector(&tenet::core::Z2FusionRule, id)
-            .expect("built-in codec decodes its own ids")
-            .parity()
-    };
-    let mut value = f64::from(parity(pair.codomain_tree().coupled())) * 1000.0;
-    for (position, &id) in pair.codomain_tree().uncoupled().iter().enumerate() {
-        value += f64::from(parity(id)) * 100.0 * (position + 1) as f64;
-    }
-    for (position, &id) in pair.domain_tree().uncoupled().iter().enumerate() {
-        value += f64::from(parity(id)) * 10.0 * (position + 1) as f64;
-    }
-    value
-        + indices
-            .iter()
-            .enumerate()
-            .map(|(a, &i)| (a + 1) * i)
-            .sum::<usize>() as f64
-}
-
 /// The same value computed from the typed labels the facade hands the closure.
 fn typed_fill_value(
     sectors: &tenet::typed::BlockFusionTrees<tenet::core::Z2Irrep>,
@@ -1203,38 +1179,19 @@ fn permute_rejects_malformed_axes_without_panicking() {
     assert!(tensor.permute(&[0], &[2, 3]).is_err());
 }
 
-/// The erased/typed pair of the byte-oracle fixture: one built-in Z2 layout
-/// filled identically through both facades.
-fn z2_oracle_pair(
-    runtime: &Runtime,
-) -> (
-    tenet::prelude::Tensor,
-    TensorMap<tenet::core::Z2FusionRule, f64>,
-) {
-    z2_oracle_pair_split(runtime, 2)
+/// One built-in Z2 layout filled from typed fusion-tree labels.
+fn z2_tensor(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, f64> {
+    z2_tensor_split(runtime, 2)
 }
 
-/// The same oracle pair over three identical legs, split into
+/// The same tensor over three identical legs, split into
 /// `num_codomain <- rest`. `2` is tall in every coupled sector and `1` is wide,
 /// which is what separates the compact factorizations from the full ones:
 /// on a tall input LQ-compact and LQ-full coincide.
-fn z2_oracle_pair_split(
+fn z2_tensor_split(
     runtime: &Runtime,
     num_codomain: usize,
-) -> (
-    tenet::prelude::Tensor,
-    TensorMap<tenet::core::Z2FusionRule, f64>,
-) {
-    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
-    let spaces = [&space, &space, &space];
-    let (codomain, domain) = spaces.split_at(num_codomain);
-    let erased = tenet::prelude::Tensor::from_block_fn(
-        runtime,
-        codomain.iter().copied(),
-        domain.iter().copied(),
-        erased_fill_value,
-    )
-    .unwrap();
+) -> TensorMap<tenet::core::Z2FusionRule, f64> {
     let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
@@ -1246,36 +1203,20 @@ fn z2_oracle_pair_split(
     .unwrap();
     let legs = [&leg, &leg, &leg];
     let (codomain, domain) = legs.split_at(num_codomain);
-    let typed = TensorMap::from_block_fn(
+    TensorMap::from_block_fn(
         runtime,
         codomain.iter().copied(),
         domain.iter().copied(),
         typed_fill_value,
     )
-    .unwrap();
-    (erased, typed)
+    .unwrap()
 }
 
-/// The c64 sibling of [`z2_oracle_pair`]. The imaginary part is deliberately
+/// The c64 sibling of [`z2_tensor`]. The imaginary part is deliberately
 /// not proportional to the real one, so a stray conjugation or a real-only
-/// path is visible in every comparison this pair feeds.
-fn z2_complex_oracle_pair(
-    runtime: &Runtime,
-) -> (
-    tenet::prelude::Tensor,
-    TensorMap<tenet::core::Z2FusionRule, Complex64>,
-) {
+/// path is visible in every comparison this tensor feeds.
+fn z2_complex_tensor(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, Complex64> {
     let complex = |value: f64| Complex64::new(value, 1.0 + value % 5.0);
-    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
-    let erased = tenet::prelude::Tensor::from_block_fn(
-        runtime,
-        [&space, &space],
-        [&space],
-        |key: &tenet::prelude::BlockKey, indices: &[usize]| {
-            complex(erased_fill_value(key, indices))
-        },
-    )
-    .unwrap();
     let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
@@ -1285,11 +1226,10 @@ fn z2_complex_oracle_pair(
         false,
     )
     .unwrap();
-    let typed = TensorMap::from_block_fn(runtime, [&leg, &leg], [&leg], |sectors, indices| {
+    TensorMap::from_block_fn(runtime, [&leg, &leg], [&leg], |sectors, indices| {
         complex(typed_fill_value(sectors, indices))
     })
-    .unwrap();
-    (erased, typed)
+    .unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -2481,7 +2421,7 @@ fn svd_compact_reconstructs_the_source_through_the_typed_contract() {
     // `contract` — bosonic here, where the two agree.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_oracle_pair(&runtime);
+    let typed = z2_tensor(&runtime);
 
     let (u, s, vh) = typed.svd_compact().unwrap();
     let recon = recompose(&u, &s, &vh);
@@ -2502,7 +2442,7 @@ fn svd_compact_reconstructs_a_complex_payload() {
     // or a real-only path is visible.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_complex_oracle_pair(&runtime);
+    let typed = z2_complex_tensor(&runtime);
     let (tu, ts, tvh) = typed.svd_compact().unwrap();
 
     let recon = tu
@@ -2523,7 +2463,7 @@ fn svd_full_reconstructs_with_unitary_outer_factors() {
     let _guard = cache_lock();
     let runtime = runtime();
     for num_codomain in [2, 1] {
-        let (_, typed) = z2_oracle_pair_split(&runtime, num_codomain);
+        let typed = z2_tensor_split(&runtime, num_codomain);
         let (u, s, vh) = typed.svd_full().unwrap();
 
         let recon = u.compose(&s).unwrap().compose(&vh).unwrap();
@@ -2541,7 +2481,7 @@ fn svd_full_reconstructs_with_unitary_outer_factors() {
 fn svd_trunc_reconstructs_and_reports_the_discarded_weight() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_oracle_pair(&runtime);
+    let typed = z2_tensor(&runtime);
 
     let truncation = tenet::typed::Truncation::rank(2);
     let typed_out = typed.svd_trunc(&truncation).unwrap();
@@ -2701,7 +2641,7 @@ fn qr_and_lq_reconstruct_with_the_expected_isometries_and_spaces() {
     let _guard = cache_lock();
     let runtime = runtime();
     for num_codomain in [2, 1] {
-        let (_, typed) = z2_oracle_pair_split(&runtime, num_codomain);
+        let typed = z2_tensor_split(&runtime, num_codomain);
 
         let qr_compact = typed.qr_compact().unwrap();
         let qr_full = typed.qr_full().unwrap();
@@ -2744,7 +2684,7 @@ fn left_and_right_orth_are_the_tensorkit_default_kinds() {
     // TensorKit 0.17 defaults `left_orth` to `:qr` and `right_orth` to `:lq`.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_oracle_pair(&runtime);
+    let typed = z2_tensor(&runtime);
 
     let (v, c) = typed.left_orth().unwrap();
     let (q, r) = typed.qr_compact().unwrap();
@@ -2762,7 +2702,7 @@ fn left_and_right_null_spaces_annihilate_the_source() {
     let _guard = cache_lock();
     let runtime = runtime();
     for num_codomain in [2, 1] {
-        let (_, typed) = z2_oracle_pair_split(&runtime, num_codomain);
+        let typed = z2_tensor_split(&runtime, num_codomain);
         let left = typed.left_null().unwrap();
         let right = typed.right_null().unwrap();
 
@@ -2868,7 +2808,7 @@ fn add_applies_each_real_coefficient_to_the_right_operand() {
     // different values, and no second fixture.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_oracle_pair(&runtime);
+    let typed = z2_tensor(&runtime);
     let typed_other = typed.permute(&[1, 0], &[2]).unwrap();
 
     let typed_sum = typed.add(&typed_other, 2.0, -3.0).unwrap();
@@ -2893,7 +2833,7 @@ fn add_carries_complex_coefficients() {
     // genuinely complex coefficients through the same method.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_complex_oracle_pair(&runtime);
+    let typed = z2_complex_tensor(&runtime);
     let alpha = Complex64::new(0.5, -2.0);
     let beta = Complex64::new(-1.5, 0.25);
 
@@ -2917,9 +2857,9 @@ fn add_rejects_a_different_runtime_and_a_different_space() {
     let _guard = cache_lock();
     let other_runtime = runtime();
     let runtime = runtime();
-    let (_, typed) = z2_oracle_pair(&runtime);
-    let (_, elsewhere) = z2_oracle_pair(&other_runtime);
-    let (_, other_split) = z2_oracle_pair_split(&runtime, 1);
+    let typed = z2_tensor(&runtime);
+    let elsewhere = z2_tensor(&other_runtime);
+    let other_split = z2_tensor_split(&runtime, 1);
 
     assert!(matches!(
         typed.add(&elsewhere, 1.0, 1.0).unwrap_err(),
@@ -2938,13 +2878,13 @@ fn add_rejects_a_different_runtime_and_a_different_space() {
 fn scale_multiplies_every_real_and_complex_entry() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_oracle_pair(&runtime);
+    let typed = z2_tensor(&runtime);
     let scaled = typed.scale(-2.5);
     for (&actual, &source) in scaled.data().iter().zip(typed.data()) {
         assert_eq!(actual, -2.5 * source);
     }
 
-    let (_, typed_c) = z2_complex_oracle_pair(&runtime);
+    let typed_c = z2_complex_tensor(&runtime);
     let factor = Complex64::new(0.25, 3.0);
     let scaled = typed_c.scale(factor);
     for (&actual, &source) in scaled.data().iter().zip(typed_c.data()) {
@@ -2956,39 +2896,18 @@ fn scale_multiplies_every_real_and_complex_entry() {
 // Phase 5 (issue #568), slice 2: `norm`, `norm_inf`, `normalize`.
 // ---------------------------------------------------------------------------
 
-/// An SU(2) oracle pair over two legs, split into `num_codomain <- rest`: the
-/// same tensor built through both facades on the built-in `SU2FusionRule`.
+/// An SU(2) tensor over two legs, split into `num_codomain <- rest`.
 ///
 /// Why this fixture exists at all, next to the Z2 one: SU(2) is the only
 /// non-abelian rule here, so it is the only one whose coupled sectors have
 /// `dim(c) != 1`. Z2 is abelian and takes `weighted_inner`'s `Unique` fast
 /// path, where the quantum-dimension weights are all one and therefore
-/// invisible — every dimension-weighted operation needs this pair as well.
+/// invisible — every dimension-weighted operation needs this fixture as well.
 ///
-/// The fill is a plain counter, so the two buffers agree only if the two
-/// facades walk blocks and elements in the same order; the helper asserts that
-/// before handing the pair out.
-fn su2_oracle_pair_split(
+fn su2_tensor_split(
     runtime: &Runtime,
     num_codomain: usize,
-) -> (
-    tenet::prelude::Tensor,
-    TensorMap<tenet::core::SU2FusionRule, f64>,
-) {
-    let space = tenet::prelude::Space::su2([(0, 1), (1, 2)]).unwrap();
-    let spaces = [&space, &space];
-    let (codomain, domain) = spaces.split_at(num_codomain);
-    let mut next = 0.0;
-    let erased = tenet::prelude::Tensor::from_block_fn(
-        runtime,
-        codomain.iter().copied(),
-        domain.iter().copied(),
-        |_: &tenet::prelude::BlockKey, _: &[usize]| {
-            next += 1.0;
-            next
-        },
-    )
-    .unwrap();
+) -> TensorMap<tenet::core::SU2FusionRule, f64> {
     let leg = GradedSpace::try_new(
         Arc::new(tenet::core::SU2FusionRule),
         [
@@ -3001,7 +2920,7 @@ fn su2_oracle_pair_split(
     let legs = [&leg, &leg];
     let (codomain, domain) = legs.split_at(num_codomain);
     let mut next = 0.0;
-    let typed = TensorMap::from_block_fn(
+    TensorMap::from_block_fn(
         runtime,
         codomain.iter().copied(),
         domain.iter().copied(),
@@ -3010,20 +2929,13 @@ fn su2_oracle_pair_split(
             next
         },
     )
-    .unwrap();
-    assert_eq!(typed.data(), erased.data());
-    (erased, typed)
+    .unwrap()
 }
 
-/// The endomorphism split of [`su2_oracle_pair_split`]: `[v] <- [v]`, which is
+/// The endomorphism split of [`su2_tensor_split`]: `[v] <- [v]`, which is
 /// what `tr` needs and what every other SU(2) assertion here happens to use.
-fn su2_oracle_pair(
-    runtime: &Runtime,
-) -> (
-    tenet::prelude::Tensor,
-    TensorMap<tenet::core::SU2FusionRule, f64>,
-) {
-    su2_oracle_pair_split(runtime, 1)
+fn su2_tensor(runtime: &Runtime) -> TensorMap<tenet::core::SU2FusionRule, f64> {
+    su2_tensor_split(runtime, 1)
 }
 
 #[test]
@@ -3034,7 +2946,7 @@ fn normalize_divides_by_the_dimension_weighted_norm() {
     // SU(2): normalizing by a dimension-weighted norm is what a plain
     // Frobenius normalization would get wrong, and only a non-abelian fixture
     // can see it.
-    let (_, typed) = su2_oracle_pair(&runtime);
+    let typed = su2_tensor(&runtime);
     let norm = typed.norm().unwrap();
     let unit = typed.normalize().unwrap();
     for (&actual, &source) in unit.data().iter().zip(typed.data()) {
@@ -3047,18 +2959,9 @@ fn normalize_divides_by_the_dimension_weighted_norm() {
 // Phase 5 (issue #568), slice 3: `inner`, `dot`, `tr`.
 // ---------------------------------------------------------------------------
 
-/// A Z2 endomorphism oracle pair, `[v] <- [v]`: the abelian half of the `tr`
+/// A Z2 endomorphism, `[v] <- [v]`: the abelian half of the `tr`
 /// comparison, where every quantum dimension is one.
-fn z2_endo_oracle_pair(
-    runtime: &Runtime,
-) -> (
-    tenet::prelude::Tensor,
-    TensorMap<tenet::core::Z2FusionRule, f64>,
-) {
-    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
-    let erased =
-        tenet::prelude::Tensor::from_block_fn(runtime, [&space], [&space], erased_fill_value)
-            .unwrap();
+fn z2_endomorphism(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, f64> {
     let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
@@ -3068,8 +2971,7 @@ fn z2_endo_oracle_pair(
         false,
     )
     .unwrap();
-    let typed = TensorMap::from_block_fn(runtime, [&leg], [&leg], typed_fill_value).unwrap();
-    (erased, typed)
+    TensorMap::from_block_fn(runtime, [&leg], [&leg], typed_fill_value).unwrap()
 }
 
 #[test]
@@ -3081,8 +2983,8 @@ fn inner_uses_the_same_dimension_weight_as_norm() {
     let _guard = cache_lock();
     let runtime = runtime();
 
-    let (_, z2_typed) = z2_oracle_pair(&runtime);
-    let (_, su2_typed) = su2_oracle_pair(&runtime);
+    let z2_typed = z2_tensor(&runtime);
+    let su2_typed = su2_tensor(&runtime);
     let agree = |typed_value: f64, norm: f64| {
         // `<t, t>` is the squared norm, which is the identity that pins this
         // weighting to `norm`'s.
@@ -3102,7 +3004,7 @@ fn inner_conjugates_its_first_argument() {
     // A dropped conjugation makes both sides equal and this test fail.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_complex_oracle_pair(&runtime);
+    let typed = z2_complex_tensor(&runtime);
     // The extra `i` is what makes the product genuinely complex: this fixture's
     // imaginary part is a function of its real one, so the plain permuted
     // partner happens to give a real inner product and could not see a phase.
@@ -3120,7 +3022,7 @@ fn dot_is_inner() {
     // two names must not be able to come to mean different things.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_complex_oracle_pair(&runtime);
+    let typed = z2_complex_tensor(&runtime);
     let other = typed.permute(&[1, 0], &[2]).unwrap();
 
     assert_eq!(typed.dot(&other).unwrap(), typed.inner(&other).unwrap());
@@ -3131,9 +3033,9 @@ fn inner_rejects_a_different_runtime_and_a_different_space() {
     let _guard = cache_lock();
     let other_runtime = runtime();
     let runtime = runtime();
-    let (_, typed) = z2_oracle_pair(&runtime);
-    let (_, elsewhere) = z2_oracle_pair(&other_runtime);
-    let (_, other_split) = z2_oracle_pair_split(&runtime, 1);
+    let typed = z2_tensor(&runtime);
+    let elsewhere = z2_tensor(&other_runtime);
+    let other_split = z2_tensor_split(&runtime, 1);
 
     assert!(matches!(
         typed.inner(&elsewhere).unwrap_err(),
@@ -3153,7 +3055,7 @@ fn tr_uses_the_nonabelian_dimension_weight() {
     let _guard = cache_lock();
     let runtime = runtime();
 
-    let (_, typed) = su2_oracle_pair(&runtime);
+    let typed = su2_tensor(&runtime);
     let trace = typed.tr().unwrap();
     // The unweighted diagonal sum of the same blocks, for contrast: `tr` is
     // not it, which is what a dropped `dim(c)` would make it.
@@ -3179,7 +3081,7 @@ fn tr_requires_an_endomorphism() {
     // The erased facade's own message, verbatim.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_oracle_pair(&runtime);
+    let typed = z2_tensor(&runtime);
 
     assert!(matches!(
         typed.tr().unwrap_err(),
@@ -3196,7 +3098,7 @@ fn tr_requires_an_endomorphism() {
 fn adjoint_swaps_spaces_and_is_an_involution() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_oracle_pair(&runtime);
+    let typed = z2_tensor(&runtime);
 
     let adjoint = typed.adjoint().unwrap();
     assert_same_legs(&adjoint.codomain(), &typed.domain());
@@ -3215,7 +3117,7 @@ fn adjoint_conjugates_a_complex_payload() {
     // that the *values* are the conjugated ones and not the original ones.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_complex_oracle_pair(&runtime);
+    let typed = z2_complex_tensor(&runtime);
 
     let adjoint = typed.adjoint().unwrap();
     let sorted = |values: &mut Vec<Complex64>| {
@@ -3273,14 +3175,14 @@ fn trace_pairs_preserves_partial_trace_geometry() {
     let _guard = cache_lock();
     let runtime = runtime();
 
-    let (_, typed) = z2_endo_oracle_pair(&runtime);
+    let typed = z2_endomorphism(&runtime);
     let full = typed.trace_pairs(&[(0, 1)]).unwrap();
     assert_eq!(full.data().len(), 1);
     assert_eq!(full.scalar().unwrap(), typed.tr().unwrap());
 
     // `[v, v] <- [v]`: tracing axis 1 against axis 2 leaves axis 0 open, so the
     // result is `[v] <- []` and the open axis keeps its side.
-    let (_, typed) = z2_oracle_pair(&runtime);
+    let typed = z2_tensor(&runtime);
     let partial = typed.trace_pairs(&[(1, 2)]).unwrap();
     assert_eq!(partial.codomain().len(), 1);
     assert_eq!(partial.domain().len(), 0);
@@ -3293,7 +3195,7 @@ fn trace_pairs_preserves_partial_trace_geometry() {
     // `[v] <- [v, v]`, tracing (0, 1): the survivor is axis 2, a domain-side
     // leg, so the destination is `[] <- [v]` — a dropped codomain-rank filter
     // would put it in the codomain instead.
-    let (_, typed) = z2_oracle_pair_split(&runtime, 1);
+    let typed = z2_tensor_split(&runtime, 1);
     let survivor = typed.trace_pairs(&[(0, 1)]).unwrap();
     assert_eq!(survivor.codomain().len(), 0);
     assert_eq!(survivor.domain().len(), 1);
@@ -3323,7 +3225,7 @@ fn trace_pairs_preserves_partial_trace_geometry() {
 fn trace_pairs_of_nothing_is_the_source() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_oracle_pair(&runtime);
+    let typed = z2_tensor(&runtime);
 
     let traced = typed.trace_pairs(&[]).unwrap();
 
@@ -3336,7 +3238,7 @@ fn trace_pairs_rejects_malformed_pairs() {
     // Out-of-range and repeated axes both use the public invalid-pair error.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_endo_oracle_pair(&runtime);
+    let typed = z2_endomorphism(&runtime);
 
     for pairs in [vec![(0usize, 9usize)], vec![(0, 0)], vec![(0, 1), (1, 0)]] {
         assert!(matches!(
@@ -3484,7 +3386,7 @@ fn bosonic_compose_is_contract_with_the_identity_output_order() {
     // the two semantics coincide.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_endo_oracle_pair(&runtime);
+    let typed = z2_endomorphism(&runtime);
 
     let composed = typed.compose(&typed).unwrap();
 
@@ -3502,8 +3404,8 @@ fn compose_contracts_the_whole_domain_against_the_whole_codomain() {
     // either axis derivation changes the shape or the numbers here.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, tall) = z2_oracle_pair_split(&runtime, 2);
-    let (_, wide) = z2_oracle_pair_split(&runtime, 1);
+    let tall = z2_tensor_split(&runtime, 2);
+    let wide = z2_tensor_split(&runtime, 1);
 
     let composed = tall.compose(&wide).unwrap();
 
@@ -3520,8 +3422,8 @@ fn compose_contracts_the_whole_domain_against_the_whole_codomain() {
 #[test]
 fn compose_rejects_operands_from_different_runtimes() {
     let _guard = cache_lock();
-    let (_, left) = z2_endo_oracle_pair(&runtime());
-    let (_, right) = z2_endo_oracle_pair(&runtime());
+    let left = z2_endomorphism(&runtime());
+    let right = z2_endomorphism(&runtime());
 
     assert!(matches!(
         left.compose(&right).unwrap_err(),
@@ -3535,9 +3437,9 @@ fn compose_rejects_operands_whose_domain_and_codomain_do_not_meet() {
     // the expert layer rather than from a pre-check here.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, endo) = z2_endo_oracle_pair(&runtime);
-    let (_, tall) = z2_oracle_pair_split(&runtime, 2);
-    let (_, wide) = z2_oracle_pair_split(&runtime, 1);
+    let endo = z2_endomorphism(&runtime);
+    let tall = z2_tensor_split(&runtime, 2);
+    let wide = z2_tensor_split(&runtime, 1);
 
     // Rank mismatch in both directions: one domain leg against two codomain
     // legs, and two domain legs against one codomain leg.
@@ -3634,7 +3536,7 @@ fn id_composes_as_the_identity_on_both_sides() {
     // `[v, v] <- [v]`, so the two sides exercise different ranks.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_oracle_pair(&runtime);
+    let typed = z2_tensor(&runtime);
 
     let left = TensorMap::id(&runtime, &typed.codomain()).unwrap();
     let right = TensorMap::id(&runtime, &typed.domain()).unwrap();
@@ -3707,7 +3609,7 @@ fn compact_reductions_carry_the_su2_dimension_weight() {
     // do. Z2 alone cannot see this — every `dim(c)` is one there.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = su2_oracle_pair(&runtime);
+    let typed = su2_tensor(&runtime);
     let typed = typed.svd_compact().unwrap().1;
     let dense = forced_dense(&typed);
 
@@ -3767,7 +3669,7 @@ fn compose_takes_the_compact_paths_and_reconstructs_the_source() {
     // diagonal-times-diagonal arm.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_oracle_pair(&runtime);
+    let typed = z2_tensor(&runtime);
     let (tu, ts, tvh) = typed.svd_compact().unwrap();
 
     let tus = tu.compose(&ts).unwrap();
@@ -3792,7 +3694,7 @@ fn compose_declines_a_compact_arm_it_cannot_prove() {
     // multiplying two unrelated spectra elementwise.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, wide) = z2_oracle_pair_split(&runtime, 2);
+    let wide = z2_tensor_split(&runtime, 2);
     // A second endomorphism on a leg with different degeneracies, so its bond
     // space genuinely differs from `wide`'s rather than merely being a second
     // allocation of the same one.
@@ -3836,7 +3738,7 @@ fn compose_declines_a_compact_arm_it_cannot_prove() {
 /// A typed Hermitian endomorphism: `p = t + t†`, so `eigh` is defined
 /// without projecting first.
 fn z2_hermitian(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, f64> {
-    let (_, typed) = z2_endo_oracle_pair(runtime);
+    let typed = z2_endomorphism(runtime);
     typed.add(&typed.adjoint().unwrap(), 1.0, 1.0).unwrap()
 }
 
@@ -3925,7 +3827,7 @@ fn eigh_trunc_reports_the_discarded_eigenvalue_norm() {
 fn eigh_reports_a_non_hermitian_input_rather_than_a_wrong_answer() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_endo_oracle_pair(&runtime);
+    let typed = z2_endomorphism(&runtime);
 
     assert!(typed.eigh_full().is_err());
     assert!(typed.eigh_vals().is_err());
@@ -3936,7 +3838,7 @@ fn eigh_reports_a_non_hermitian_input_rather_than_a_wrong_answer() {
 // Phase 6 (issue #570), slice 3: the general eigendecompositions.
 // ---------------------------------------------------------------------------
 
-/// The typed c64 endomorphism `eig` needs: [`z2_complex_oracle_pair`] is rank
+/// The typed c64 endomorphism `eig` needs: [`z2_complex_tensor`] is rank
 /// three, and `eig` is defined on square maps only.
 fn z2_complex_endo(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, Complex64> {
     let complex = |value: f64| Complex64::new(value, 1.0 + value % 5.0);
@@ -3960,7 +3862,7 @@ fn eig_full_satisfies_the_eigen_equation_for_a_real_payload() {
     // What: a real input promotes to complex factors satisfying A V = V D.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_endo_oracle_pair(&runtime);
+    let typed = z2_endomorphism(&runtime);
 
     let (d, v) = typed.eig_full().unwrap();
     let av = typed.to_c64().compose(&v).unwrap();
@@ -3998,7 +3900,7 @@ fn complex_eig_satisfies_the_eigen_equation_and_conjugates_its_spectrum() {
 fn eig_vals_are_label_ordered_and_trunc_reports_the_discarded_norm() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_endo_oracle_pair(&runtime);
+    let typed = z2_endomorphism(&runtime);
     let spectrum = typed.eig_vals().unwrap();
     assert_eq!(
         spectrum
@@ -4047,7 +3949,7 @@ fn hermitian_projections_satisfy_their_identities_and_predicate_truth_table() {
     // adjoint symmetries agree with the typed predicate family.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_endo_oracle_pair(&runtime);
+    let typed = z2_endomorphism(&runtime);
     let tol = 1e-10;
 
     let hermitian = typed.project_hermitian().unwrap();
@@ -4096,7 +3998,7 @@ fn isometry_and_posdef_see_their_positive_cases() {
     // definite when `t` has full rank.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_oracle_pair(&runtime);
+    let typed = z2_tensor(&runtime);
     let tol = 1e-9;
 
     let tu = typed.svd_compact().unwrap().0;
@@ -4165,7 +4067,7 @@ fn a_non_endomorphism_is_never_hermitian_and_never_errors() {
     // return and therefore reject the input.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_oracle_pair(&runtime);
+    let typed = z2_tensor(&runtime);
 
     assert!(!typed.is_hermitian(1e-9).unwrap());
     assert!(!typed.is_antihermitian(1e-9).unwrap());
@@ -4179,11 +4081,11 @@ fn a_non_endomorphism_is_never_hermitian_and_never_errors() {
 // ---------------------------------------------------------------------------
 
 /// An endomorphism whose every coupled-sector block is nonsingular: the fill
-/// used by [`z2_endo_oracle_pair`] is position-weighted and produces rank-one
+/// used by [`z2_endomorphism`] is position-weighted and produces rank-one
 /// blocks, so `inv` on it would be testing the singular path instead. Adding a
 /// multiple of the identity is the cheapest fix.
 fn z2_invertible(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, f64> {
-    let (_, typed) = z2_endo_oracle_pair(runtime);
+    let typed = z2_endomorphism(runtime);
     let typed_id = TensorMap::id(runtime, &typed.domain()).unwrap();
     typed.add(&typed_id, 1.0, 100.0).unwrap()
 }
@@ -4216,7 +4118,7 @@ fn inv_of_a_compact_spectrum_is_the_elementwise_reciprocal() {
     // values.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_endo_oracle_pair(&runtime);
+    let typed = z2_endomorphism(&runtime);
 
     let typed_s = typed.svd_trunc(&Truncation::Full).unwrap().s;
     // The fixture is rank deficient, so the full spectrum contains zeros that
@@ -4254,7 +4156,7 @@ fn inv_reports_a_singular_input_as_a_typed_error() {
     // documented.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_endo_oracle_pair(&runtime);
+    let typed = z2_endomorphism(&runtime);
 
     // Compact: a spectrum scaled to exactly zero. Why not the tail of a
     // rank-deficient SVD: those singular values come back tiny but nonzero, and
@@ -4339,7 +4241,7 @@ fn pinv_satisfies_the_moore_penrose_identities() {
     // broken cutoff pass as an ordinary inverse.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_endo_oracle_pair(&runtime);
+    let typed = z2_endomorphism(&runtime);
 
     // `rcond` is well above the fixture's numerically-zero singular values and
     // well below its real ones, so the cutoff drops exactly the null directions
@@ -4390,7 +4292,7 @@ fn pinv_of_a_compact_spectrum_is_the_elementwise_cutoff_reciprocal() {
     // singular values are `|entry|`, so no SVD runs at all.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_endo_oracle_pair(&runtime);
+    let typed = z2_endomorphism(&runtime);
     let typed_s = typed.svd_trunc(&Truncation::Full).unwrap().s;
     let source = typed_s.diagonal_spectrum().unwrap().unwrap();
     let sigma_max = source
@@ -4503,7 +4405,7 @@ fn pinv_rejects_a_nonfinite_or_negative_rcond_before_any_work() {
     // the dense route would miss.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_endo_oracle_pair(&runtime);
+    let typed = z2_endomorphism(&runtime);
     let spectrum = typed.svd_trunc(&Truncation::Full).unwrap().s;
 
     for rcond in [-1.0, f64::NAN, f64::INFINITY] {
@@ -4596,7 +4498,7 @@ fn exp_of_the_identity_is_e_times_the_identity() {
     // `exp(id) = e * id` on every provider.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_endo_oracle_pair(&runtime);
+    let typed = z2_endomorphism(&runtime);
     let identity = TensorMap::<_, f64>::id(&runtime, &typed.domain()).unwrap();
 
     let expected = identity.scale(std::f64::consts::E);
@@ -4618,7 +4520,7 @@ fn exp_accepts_a_non_hermitian_endomorphism_and_inverts_under_negation() {
     // this one now. `exp(A) exp(-A) = id` pins the actual exponential.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_endo_oracle_pair(&runtime);
+    let typed = z2_endomorphism(&runtime);
 
     assert!(!typed.is_hermitian(1e-9).unwrap());
     let typed_exp = typed.exp().unwrap();
@@ -4643,7 +4545,7 @@ fn exp_of_a_compact_spectrum_stays_compact_and_is_elementwise() {
     // `exp(::DiagonalTensorMap)` law.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_endo_oracle_pair(&runtime);
+    let typed = z2_endomorphism(&runtime);
     // Scaled down: the fixture's largest singular value is in the thousands and
     // `exp` of it overflows to infinity, which no comparison can separate from
     // a wrong infinity.
@@ -4757,7 +4659,7 @@ fn sqrt_squares_to_the_source_on_both_storages() {
     // dense storage of the same spectrum.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_endo_oracle_pair(&runtime);
+    let typed = z2_endomorphism(&runtime);
     let typed_s = typed.svd_trunc(&Truncation::Full).unwrap().s;
 
     // √S · √S = S.
@@ -4794,7 +4696,7 @@ fn sqrt_refuses_anything_that_is_not_a_diagonal_bond_tensor() {
     // off-diagonal entry, are both refused.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_oracle_pair(&runtime);
+    let typed = z2_tensor(&runtime);
     // The shape guard, not the off-diagonal walk behind it.
     match typed.sqrt() {
         Err(tenet::typed::Error::InvalidArgument(message)) => {
@@ -4806,7 +4708,7 @@ fn sqrt_refuses_anything_that_is_not_a_diagonal_bond_tensor() {
         }
         other => panic!("a non-bond tensor was accepted: {other:?}"),
     }
-    let (_, typed) = z2_endo_oracle_pair(&runtime);
+    let typed = z2_endomorphism(&runtime);
     // Bond shaped (`[v] <- [v]`) but not diagonal: the off-diagonal check is
     // what refuses it, and it is the check that separates this from a general
     // endomorphism `sqrt`.
@@ -4828,7 +4730,7 @@ fn sqrt_of_a_negative_f64_entry_points_at_the_complex_payload() {
     // cannot express and which disagrees with TensorKit's own diagonal path.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_endo_oracle_pair(&runtime);
+    let typed = z2_endomorphism(&runtime);
     let typed_s = typed.svd_trunc(&Truncation::Full).unwrap().s.scale(-1.0);
 
     for (name, result) in [
@@ -5072,7 +4974,7 @@ fn complex_diagonal_contract_matches_the_typed_dense_route() {
     // route on the same spaces, including a compact `D · D` result.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_complex_oracle_pair(&runtime);
+    let typed = z2_complex_tensor(&runtime);
     let typed_s = typed.svd_compact().unwrap().1;
     let dense_s = forced_dense(&typed_s);
 
@@ -5279,7 +5181,7 @@ fn the_diagonal_contract_arm_is_its_own_dense_route_on_every_axis_pattern() {
     let _guard = cache_lock();
     let runtime = runtime();
     for split in [1, 2] {
-        let (_, t) = z2_oracle_pair_split(&runtime, split);
+        let t = z2_tensor_split(&runtime, split);
         let s = t.svd_compact().unwrap().1;
         let s_dense = forced_dense(&s);
 
@@ -5602,7 +5504,7 @@ fn compact_is_posdef_matches_the_forced_dense_route_for_a_hermitian_c64_spectrum
     // modulus. The `d` of `eigh_full` is exactly that payload.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, real) = z2_complex_oracle_pair(&runtime);
+    let real = z2_complex_tensor(&runtime);
     let square = real
         .contract(&real.adjoint().unwrap(), &[2], &[0], &[0, 1, 2, 3])
         .unwrap();
@@ -6985,15 +6887,6 @@ fn nested_three_factor_product_keeps_its_declared_factor_order() {
 // family (`isomorphism`/`unitary`/`isometry`), issue #580 PR 1.
 // ---------------------------------------------------------------------------
 
-/// U(1) leg pair (erased space, typed graded space) with identical content.
-fn u1_facade_legs() -> (
-    tenet::prelude::Space,
-    GradedSpace<tenet::core::U1FusionRule>,
-) {
-    let erased = tenet::prelude::Space::u1([(0, 2), (1, 1), (-1, 3)]);
-    (erased, u1_typed_leg())
-}
-
 fn u1_typed_leg() -> GradedSpace<tenet::core::U1FusionRule> {
     GradedSpace::try_new(
         Arc::new(tenet::core::U1FusionRule),
@@ -7005,15 +6898,6 @@ fn u1_typed_leg() -> GradedSpace<tenet::core::U1FusionRule> {
         false,
     )
     .unwrap()
-}
-
-/// fZ2 leg pair (erased space, typed graded space) with identical content.
-fn fz2_facade_legs() -> (
-    tenet::prelude::Space,
-    GradedSpace<tenet::core::FermionParityFusionRule>,
-) {
-    let erased = tenet::prelude::Space::fz2([(0, 2), (1, 3)]).unwrap();
-    (erased, fz2_typed_leg())
 }
 
 fn fz2_typed_leg() -> GradedSpace<tenet::core::FermionParityFusionRule> {
@@ -7477,7 +7361,7 @@ fn typed_polar_reconstructs_the_input_f64_u1_and_c64_fz2() {
     let _guard = cache_lock();
     let runtime = runtime();
 
-    let (_, leg) = u1_facade_legs();
+    let leg = u1_typed_leg();
     let tall: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 3).unwrap();
     let (w, p) = tall.left_polar().unwrap();
@@ -7487,7 +7371,7 @@ fn typed_polar_reconstructs_the_input_f64_u1_and_c64_fz2() {
     let (p, w) = wide.right_polar().unwrap();
     assert_data_close_f64(p.compose(&w).unwrap().data(), wide.data());
 
-    let (_, leg) = fz2_facade_legs();
+    let leg = fz2_typed_leg();
     let tall: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
         TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 7).unwrap();
     let (w, p) = tall.left_polar().unwrap();
@@ -7507,7 +7391,7 @@ fn typed_polar_factor_laws_hold() {
     let runtime = runtime();
 
     // c64 fermionic left arm: a stray conjugation or sign is visible here.
-    let (_, leg) = fz2_facade_legs();
+    let leg = fz2_typed_leg();
     let tall: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
         TensorMap::rand_with_seed(&runtime, [&leg, &leg], [&leg], 13).unwrap();
     let (w, p) = tall.left_polar().unwrap();
@@ -7520,7 +7404,7 @@ fn typed_polar_factor_laws_hold() {
     }
 
     // f64 U(1) right arm.
-    let (_, leg) = u1_facade_legs();
+    let leg = u1_typed_leg();
     let wide: TensorMap<tenet::core::U1FusionRule, f64> =
         TensorMap::rand_with_seed(&runtime, [&leg], [&leg, &leg], 17).unwrap();
     let (p, w) = wide.right_polar().unwrap();
@@ -7541,7 +7425,7 @@ fn typed_polar_factor_spaces_match_tensorkit() {
     // side so a dropped duality flag is visible.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, leg) = u1_facade_legs();
+    let leg = u1_typed_leg();
     let dual = leg.try_dual().unwrap();
 
     let tall: TensorMap<tenet::core::U1FusionRule, f64> =
@@ -7569,7 +7453,7 @@ fn typed_polar_wrong_side_rectangular_reports_the_requested_direction() {
     let _guard = cache_lock();
     let runtime = runtime();
 
-    let (_, typed_tall) = z2_oracle_pair_split(&runtime, 2);
+    let typed_tall = z2_tensor_split(&runtime, 2);
     assert!(matches!(
         typed_tall.right_polar().unwrap_err(),
         tenet::typed::Error::Operation(error)
@@ -7581,7 +7465,7 @@ fn typed_polar_wrong_side_rectangular_reports_the_requested_direction() {
             )
     ));
 
-    let (_, typed_wide) = z2_oracle_pair_split(&runtime, 1);
+    let typed_wide = z2_tensor_split(&runtime, 1);
     assert!(matches!(
         typed_wide.left_polar().unwrap_err(),
         tenet::typed::Error::Operation(error)
@@ -7634,7 +7518,7 @@ fn typed_rank_accessors_pin_the_aliases() {
     // Gate 1: ranks on a mixed 2 <- 1 fixture and the TensorKit-named aliases.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_oracle_pair(&runtime);
+    let typed = z2_tensor(&runtime);
     assert_eq!(typed.codomain_rank(), 2);
     assert_eq!(typed.domain_rank(), 1);
     assert_eq!(typed.rank(), 3);
@@ -7653,13 +7537,13 @@ fn typed_leg_dims_include_quantum_dimensions() {
     let _guard = cache_lock();
     let runtime = runtime();
 
-    let (_, typed) = z2_oracle_pair(&runtime);
+    let typed = z2_tensor(&runtime);
     assert_eq!(typed.leg_dims().unwrap(), vec![5, 5, 5]);
     for axis in 0..typed.rank() {
         assert_eq!(typed.leg_dim(axis).unwrap(), 5);
     }
 
-    let (_, su2_typed) = su2_oracle_pair(&runtime);
+    let su2_typed = su2_tensor(&runtime);
     assert_eq!(su2_typed.leg_dims().unwrap(), vec![5, 5]);
     assert_eq!(su2_typed.leg_dim(1).unwrap(), 5);
 }
@@ -7684,7 +7568,7 @@ fn typed_leg_dims_carry_an_external_provider_with_nontrivial_dimensions() {
 fn typed_leg_dim_out_of_range_is_an_invalid_argument() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_oracle_pair(&runtime);
+    let typed = z2_tensor(&runtime);
 
     let typed_error = typed.leg_dim(3).unwrap_err();
     assert!(matches!(
@@ -7699,7 +7583,7 @@ fn typed_codomain_and_domain_spaces_alias_the_primary_accessors() {
     // `codomain()`/`domain()` — same legs, content-wise.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_oracle_pair(&runtime);
+    let typed = z2_tensor(&runtime);
 
     assert_same_legs(&typed.codomain_spaces(), &typed.codomain());
     assert_same_legs(&typed.domain_spaces(), &typed.domain());
@@ -7712,7 +7596,7 @@ fn typed_scalar_reads_a_real_full_contraction() {
     // Gate 4: a rank-0 trace reads back as the payload type itself.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_endo_oracle_pair(&runtime);
+    let typed = z2_endomorphism(&runtime);
 
     let typed_value: f64 = typed.trace_pairs(&[(0, 1)]).unwrap().scalar().unwrap();
     assert_eq!(typed_value, typed.tr().unwrap());
@@ -7747,7 +7631,7 @@ fn typed_scalar_reads_a_complex_full_contraction() {
 fn typed_scalar_on_a_tensor_with_legs_is_an_invalid_argument() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_oracle_pair(&runtime);
+    let typed = z2_tensor(&runtime);
 
     let typed_error = typed.scalar().unwrap_err();
     assert!(matches!(
@@ -7763,7 +7647,7 @@ fn typed_zeros_like_keeps_the_spaces_and_zeroes_the_payload() {
     // allocation gates in `typed_diagonal_allocations.rs`.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_oracle_pair(&runtime);
+    let typed = z2_tensor(&runtime);
 
     let zeros: TensorMap<tenet::core::Z2FusionRule, f64> = typed.zeros_like();
     assert_same_legs(&zeros.codomain(), &typed.codomain());
@@ -7784,7 +7668,7 @@ fn typed_to_c64_widens_dense_and_compact_values_exactly() {
     // compact diagonal payloads.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, typed) = z2_oracle_pair(&runtime);
+    let typed = z2_tensor(&runtime);
 
     let typed_wide: TensorMap<tenet::core::Z2FusionRule, Complex64> = typed.to_c64();
     assert!(typed_wide
@@ -7810,7 +7694,7 @@ fn typed_re_im_reconstruct_the_complex_tensor_byte_exactly() {
     // zeros_like(x)`, byte-exactly.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, complex_typed) = z2_complex_oracle_pair(&runtime);
+    let complex_typed = z2_complex_tensor(&runtime);
 
     let real_part: TensorMap<tenet::core::Z2FusionRule, f64> = complex_typed.re();
     let imag_part: TensorMap<tenet::core::Z2FusionRule, f64> = complex_typed.im();
@@ -7824,7 +7708,7 @@ fn typed_re_im_reconstruct_the_complex_tensor_byte_exactly() {
         .unwrap();
     assert_eq!(rebuilt.data(), complex_typed.data());
 
-    let (_, real_typed) = z2_oracle_pair(&runtime);
+    let real_typed = z2_tensor(&runtime);
     let round_trip: TensorMap<tenet::core::Z2FusionRule, f64> = real_typed.to_c64().re();
     assert_eq!(round_trip.data(), real_typed.data());
     let vanished: TensorMap<tenet::core::Z2FusionRule, f64> = real_typed.to_c64().im();
@@ -7838,7 +7722,7 @@ fn typed_re_im_keep_a_compact_spectrum_on_its_bond_space() {
     // materialized payloads.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, complex_typed) = z2_complex_oracle_pair(&runtime);
+    let complex_typed = z2_complex_tensor(&runtime);
     let s: TensorMap<tenet::core::Z2FusionRule, Complex64> = complex_typed.svd_compact().unwrap().1;
 
     let real_part: TensorMap<tenet::core::Z2FusionRule, f64> = s.re();
