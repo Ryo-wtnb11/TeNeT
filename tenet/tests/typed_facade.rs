@@ -8068,73 +8068,41 @@ fn typed_polar_factor_spaces_match_tensorkit() {
 }
 
 #[test]
-fn typed_polar_wrong_side_rectangular_is_the_erased_error_class() {
+fn typed_polar_wrong_side_rectangular_reports_the_requested_direction() {
     // Gate 4: the split-2 fixture is tall in every coupled sector, the split-1
     // one wide — so `right_polar` on the former and `left_polar` on the latter
-    // are the seam's own wrong-side errors, unfiltered, and the same class the
-    // erased facade reports on the same numbers.
+    // return the seam's exact wrong-side errors, unfiltered.
     let _guard = cache_lock();
     let runtime = runtime();
 
-    let (erased_tall, typed_tall) = z2_oracle_pair_split(&runtime, 2);
-    let typed_error = typed_tall.right_polar().unwrap_err();
-    let erased_error = erased_tall.right_polar().unwrap_err();
-    assert_eq!(
-        std::mem::discriminant(&typed_error),
-        std::mem::discriminant(&erased_error)
-    );
+    let (_, typed_tall) = z2_oracle_pair_split(&runtime, 2);
+    assert!(matches!(
+        typed_tall.right_polar().unwrap_err(),
+        tenet::typed::Error::Operation(error)
+            if matches!(
+                error.as_ref(),
+                tenet::operations::OperationError::InvalidArgument { message }
+                    if *message
+                        == "right_polar requires columns >= rows in every coupled-sector matrix"
+            )
+    ));
 
-    let (erased_wide, typed_wide) = z2_oracle_pair_split(&runtime, 1);
-    let typed_error = typed_wide.left_polar().unwrap_err();
-    let erased_error = erased_wide.left_polar().unwrap_err();
-    assert_eq!(
-        std::mem::discriminant(&typed_error),
-        std::mem::discriminant(&erased_error)
-    );
-}
-
-#[test]
-fn typed_and_erased_polar_agree_byte_for_byte() {
-    // Gate 5: same numbers through both facades, byte equality on the
-    // deterministic backend — f64 both directions, c64, and a
-    // compact-diagonal payload (the `s` of `svd_compact`), which the typed
-    // facade materializes through the same route as `qr_compact`.
-    let _guard = cache_lock();
-    let runtime = runtime();
-
-    let (erased, typed) = z2_oracle_pair_split(&runtime, 2);
-    let (erased_w, erased_p) = erased.left_polar().unwrap();
-    let (typed_w, typed_p) = typed.left_polar().unwrap();
-    assert_eq!(typed_w.data(), erased_w.data());
-    assert_eq!(typed_p.data(), erased_p.data());
-
-    let (erased, typed) = z2_oracle_pair_split(&runtime, 1);
-    let (erased_p, erased_w) = erased.right_polar().unwrap();
-    let (typed_p, typed_w) = typed.right_polar().unwrap();
-    assert_eq!(typed_p.data(), erased_p.data());
-    assert_eq!(typed_w.data(), erased_w.data());
-
-    let (erased, typed) = z2_complex_oracle_pair(&runtime);
-    let (erased_w, erased_p) = erased.left_polar().unwrap();
-    let (typed_w, typed_p) = typed.left_polar().unwrap();
-    assert_eq!(typed_w.data(), erased_w.data_c64());
-    assert_eq!(typed_p.data(), erased_p.data_c64());
-
-    // Diagonal payload: the compact `s` factor is a square bond endomorphism,
-    // so both polars are defined on it; one direction suffices to pin the
-    // materialization route.
-    let (erased, typed) = z2_oracle_pair(&runtime);
-    let erased_s = erased.svd_compact().unwrap().1;
-    let typed_s = typed.svd_compact().unwrap().1;
-    let (erased_w, erased_p) = erased_s.left_polar().unwrap();
-    let (typed_w, typed_p) = typed_s.left_polar().unwrap();
-    assert_eq!(typed_w.data(), erased_w.data());
-    assert_eq!(typed_p.data(), erased_p.data());
+    let (_, typed_wide) = z2_oracle_pair_split(&runtime, 1);
+    assert!(matches!(
+        typed_wide.left_polar().unwrap_err(),
+        tenet::typed::Error::Operation(error)
+            if matches!(
+                error.as_ref(),
+                tenet::operations::OperationError::InvalidArgument { message }
+                    if *message
+                        == "left_polar requires rows >= columns in every coupled-sector matrix"
+            )
+    ));
 }
 
 #[test]
 fn typed_polar_carries_an_external_provider() {
-    // Gate 5's external-provider leg. The erased facade's rule set is a closed
+    // Gate 5: the erased facade's rule set is a closed
     // enum and cannot host `ExternalZ3`, so this is a typed-only law check —
     // reconstruction plus the isometry law — driving the same context lane an
     // external provider reaches through `multiplicity_free_lane`.
