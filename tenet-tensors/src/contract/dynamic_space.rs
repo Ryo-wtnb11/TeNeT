@@ -5431,6 +5431,9 @@ mod scratch_cache_tests {
 
     #[test]
     fn validation_only_contraction_never_builds_a_default_layout() {
+        // What: both the raw validator and the bound compatibility-only seam
+        // reject mismatched contracted degeneracies without constructing a
+        // result layout.
         let _guard = CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -5457,6 +5460,29 @@ mod scratch_cache_tests {
             &[0],
         )
         .is_err());
+        assert_eq!(final_result_layout_builds(), 0);
+
+        let provider = Arc::new(U1FusionRule);
+        let compatible =
+            BoundDynamicFusionMapSpace::bind_multiplicity_free(compatible, Arc::clone(&provider))
+                .unwrap();
+        let incompatible =
+            BoundDynamicFusionMapSpace::bind_multiplicity_free(incompatible, provider).unwrap();
+        let error = BoundDynamicFusionMapSpace::validate_contracted_homspace_multiplicity_free(
+            &compatible,
+            &incompatible,
+            &[1],
+            &[0],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            OperationError::Core(CoreError::LegDegeneracyMismatch {
+                expected: 4,
+                actual: 5,
+                ..
+            })
+        ));
         assert_eq!(final_result_layout_builds(), 0);
     }
 
