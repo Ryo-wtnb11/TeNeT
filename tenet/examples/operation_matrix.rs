@@ -7,25 +7,23 @@ use std::{
 
 use tenet::prelude::*;
 
+use tenet::core::{
+    complete_hom_space_structure_cache_info, fusion_tree_layout_cache_info,
+    CompleteHomSpaceStructureCacheInfo, FusionTreeLayoutCacheInfo,
+};
+
 #[derive(Clone, Copy)]
-struct RuntimeCounters {
-    entries: usize,
-    bytes: usize,
-    hits: usize,
-    misses: usize,
-    evictions: usize,
-    bypasses: usize,
+struct Counters {
+    runtime: RuntimeTreeTransformCacheInfo,
+    fusion_layout: FusionTreeLayoutCacheInfo,
+    complete_hom: CompleteHomSpaceStructureCacheInfo,
 }
 
-fn runtime_counters(runtime: &Runtime) -> RuntimeCounters {
-    let info = runtime.tree_transform_cache_info();
-    RuntimeCounters {
-        entries: info.entries(),
-        bytes: info.charged_payload_bytes(),
-        hits: info.hits(),
-        misses: info.misses(),
-        evictions: info.evictions(),
-        bypasses: info.admission_bypasses(),
+fn counters(runtime: &Runtime) -> Counters {
+    Counters {
+        runtime: runtime.tree_transform_cache_info(),
+        fusion_layout: fusion_tree_layout_cache_info(),
+        complete_hom: complete_hom_space_structure_cache_info(),
     }
 }
 
@@ -40,20 +38,55 @@ fn print_sample(
     phase: &str,
     iterations: u64,
     elapsed: Duration,
-    before: RuntimeCounters,
-    after: RuntimeCounters,
+    before: Counters,
+    after: Counters,
 ) {
+    let tree_before = before.runtime;
+    let tree_after = after.runtime;
+    let layout_before = before.fusion_layout;
+    let layout_after = after.fusion_layout;
+    let hom_before = before.complete_hom;
+    let hom_after = after.complete_hom;
     println!(
-        "{symmetry},{operation},{form},{phase},{iterations},{:.3},{},{},{},{},{},{},{},{},NA,NA,NA,NA,NA,NA,NA,NA",
-        elapsed.as_secs_f64() * 1e6 / iterations as f64,
-        after.hits - before.hits,
-        after.misses - before.misses,
-        after.evictions - before.evictions,
-        after.bypasses - before.bypasses,
-        delta(after.entries, before.entries),
-        before.bytes,
-        after.bytes,
-        delta(after.bytes, before.bytes),
+        "{symmetry},{operation},{form},{phase},{iterations},{us:.3},\
+         {tree_hits},{tree_misses},{tree_evictions},{tree_bypasses},{tree_entries_delta},\
+         {tree_bytes_before},{tree_bytes_after},{tree_bytes_delta},\
+         {layout_misses},{layout_evictions},{layout_bypasses},{layout_entries_delta},\
+         {layout_bytes_before},{layout_bytes_after},{layout_bytes_delta},\
+         {hom_hits},{hom_misses},{hom_admissions},{hom_evictions},{hom_bypasses},\
+         {hom_entries_delta},{hom_bytes_before},{hom_bytes_after},{hom_bytes_delta},\
+         NA,NA,NA,NA,NA,NA,NA",
+        us = elapsed.as_secs_f64() * 1e6 / iterations as f64,
+        tree_hits = tree_after.hits() - tree_before.hits(),
+        tree_misses = tree_after.misses() - tree_before.misses(),
+        tree_evictions = tree_after.evictions() - tree_before.evictions(),
+        tree_bypasses = tree_after.admission_bypasses() - tree_before.admission_bypasses(),
+        tree_entries_delta = delta(tree_after.entries(), tree_before.entries()),
+        tree_bytes_before = tree_before.charged_payload_bytes(),
+        tree_bytes_after = tree_after.charged_payload_bytes(),
+        tree_bytes_delta = delta(
+            tree_after.charged_payload_bytes(),
+            tree_before.charged_payload_bytes(),
+        ),
+        layout_misses = layout_after.misses() - layout_before.misses(),
+        layout_evictions = layout_after.evictions() - layout_before.evictions(),
+        layout_bypasses = layout_after.admission_bypasses() - layout_before.admission_bypasses(),
+        layout_entries_delta = delta(layout_after.entries(), layout_before.entries()),
+        layout_bytes_before = layout_before.charged_payload_bytes(),
+        layout_bytes_after = layout_after.charged_payload_bytes(),
+        layout_bytes_delta = delta(
+            layout_after.charged_payload_bytes(),
+            layout_before.charged_payload_bytes(),
+        ),
+        hom_hits = hom_after.hits() - hom_before.hits(),
+        hom_misses = hom_after.misses() - hom_before.misses(),
+        hom_admissions = hom_after.admissions() - hom_before.admissions(),
+        hom_evictions = hom_after.evictions() - hom_before.evictions(),
+        hom_bypasses = hom_after.bypasses() - hom_before.bypasses(),
+        hom_entries_delta = delta(hom_after.entries(), hom_before.entries()),
+        hom_bytes_before = hom_before.charged_bytes(),
+        hom_bytes_after = hom_after.charged_bytes(),
+        hom_bytes_delta = delta(hom_after.charged_bytes(), hom_before.charged_bytes()),
     );
 }
 
@@ -67,12 +100,12 @@ fn bench<T>(
     min_time: Duration,
     mut operation_fn: impl FnMut() -> Result<T, Error>,
 ) -> Result<T, Error> {
-    let cold_before = runtime_counters(runtime);
+    let cold_before = counters(runtime);
     let cold_start = Instant::now();
     let cold_output = operation_fn()?;
     black_box(&cold_output);
     let cold_elapsed = cold_start.elapsed();
-    let cold_after = runtime_counters(runtime);
+    let cold_after = counters(runtime);
     print_sample(
         symmetry,
         operation,
@@ -86,7 +119,7 @@ fn bench<T>(
 
     black_box(operation_fn()?);
     black_box(operation_fn()?);
-    let warm_before = runtime_counters(runtime);
+    let warm_before = counters(runtime);
     let warm_start = Instant::now();
     let mut iterations = 0;
     while iterations < 2 || warm_start.elapsed() < min_time {
@@ -94,7 +127,7 @@ fn bench<T>(
         iterations += 1;
     }
     let warm_elapsed = warm_start.elapsed();
-    let warm_after = runtime_counters(runtime);
+    let warm_after = counters(runtime);
     print_sample(
         symmetry,
         operation,
@@ -219,8 +252,8 @@ fn main() -> Result<(), Error> {
     );
     println!("# threads=RAYON_NUM_THREADS:{} OPENBLAS_NUM_THREADS:{} OMP_NUM_THREADS:{} MKL_NUM_THREADS:{}", env_or_unset("RAYON_NUM_THREADS"), env_or_unset("OPENBLAS_NUM_THREADS"), env_or_unset("OMP_NUM_THREADS"), env_or_unset("MKL_NUM_THREADS"));
     println!("# cold_scope=fresh Runtime tree-transform store; process-global interned structures may already be warm");
-    println!("# unavailable_counters=output_allocation_bytes,operation_local_scratch_bytes,provider_queries,transform_passes,gemm_calls,host_device_transfers");
-    println!("symmetry,operation,form,phase,iterations,us_per_iter,tree_hits,tree_misses,tree_evictions,tree_bypasses,tree_entries_delta,tree_charged_payload_bytes_before,tree_charged_payload_bytes_after,tree_charged_payload_bytes_delta,destination_preparations,destination_structural_comparisons,output_allocation_bytes,operation_local_scratch_bytes,provider_queries,transform_passes,gemm_calls,host_device_transfers");
+    println!("# unavailable_counters=exact_layout_admission,output_allocation_bytes,operation_local_scratch_bytes,provider_queries,transform_passes,gemm_calls,host_device_transfers");
+    println!("symmetry,operation,form,phase,iterations,us_per_iter,tree_hits,tree_misses,tree_evictions,tree_bypasses,tree_entries_delta,tree_charged_payload_bytes_before,tree_charged_payload_bytes_after,tree_charged_payload_bytes_delta,fusion_layout_misses,fusion_layout_evictions,fusion_layout_bypasses,fusion_layout_entries_delta,fusion_layout_charged_payload_bytes_before,fusion_layout_charged_payload_bytes_after,fusion_layout_charged_payload_bytes_delta,complete_hom_hits,complete_hom_misses,complete_hom_admissions,complete_hom_evictions,complete_hom_bypasses,complete_hom_entries_delta,complete_hom_charged_bytes_before,complete_hom_charged_bytes_after,complete_hom_charged_bytes_delta,exact_layout_admission,output_allocation_bytes,operation_local_scratch_bytes,provider_queries,transform_passes,gemm_calls,host_device_transfers");
 
     let min_time = Duration::from_millis(min_ms);
     run_provider!(
