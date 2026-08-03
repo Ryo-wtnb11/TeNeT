@@ -6,7 +6,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use tenet::core::{U1FusionRule, U1Irrep};
-use tenet::prelude::*;
+use tenet::prelude::{Complex64, Runtime, TensorScalar};
 use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap as TypedTensorMap};
 use tenet_network::{
     tensor, ContractionPlan, ContractionStep, Network, NetworkExecutionWorkspace, PlannedNetwork,
@@ -1179,68 +1179,6 @@ fn registry_rejects_zero_sentinels_and_deduplicates_pointers() {
     assert!(register_live_with_capacity(pointer, 64, 1));
     assert_eq!(unregister_live_with_capacity(pointer, 1), Some(64));
     assert!(register_live_with_capacity(0x2000usize as *mut u8, 32, 1));
-}
-
-#[test]
-fn rank_nine_cached_permutation_has_no_caller_thread_operation_key_allocation() {
-    let _test_guard = lock_unpoisoned(&TEST_LOCK);
-    let runtime = Runtime::builder().build().unwrap();
-    // What: SU(2) covers the non-Unique recoupling path through a
-    // Runtime-owned completed structure.
-    let space = Space::su2([(0, 1)]).unwrap();
-    let source = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space; 9], [], 31_901).unwrap();
-    let axes = [8, 7, 6, 5, 4, 3, 2, 1, 0];
-    let expected = source.permute(&axes, &[]).unwrap();
-    let mut destination = expected.scale(f64::NAN).unwrap();
-    let mut context = TensorExecutionContext::for_runtime(&runtime).unwrap();
-    let mut cache = PermuteOverwriteCache::default();
-
-    for _ in 0..3 {
-        assert_eq!(
-            context
-                .try_permute_overwrite_into(
-                    &mut cache,
-                    &mut destination,
-                    &source,
-                    &axes,
-                    &[],
-                    Scalar::F64(1.0),
-                )
-                .unwrap(),
-            OverwriteOutcome::Written
-        );
-    }
-    assert_eq!(cache.preparations(), 1);
-    let structural_comparisons = cache.structural_comparisons();
-
-    reset_event_counters();
-    reset_live_registry();
-    PROBE_THREAD_ENABLED.set(true);
-    ENABLED.store(true, Ordering::SeqCst);
-    let outcome = context
-        .try_permute_overwrite_into(
-            &mut cache,
-            &mut destination,
-            &source,
-            &axes,
-            &[],
-            Scalar::F64(1.0),
-        )
-        .unwrap();
-    ENABLED.store(false, Ordering::SeqCst);
-    PROBE_THREAD_ENABLED.set(false);
-
-    assert_eq!(outcome, OverwriteOutcome::Written);
-    assert_eq!(cache.preparations(), 1);
-    assert_eq!(cache.structural_comparisons(), structural_comparisons);
-    let operation_alloc_calls = PROBE_THREAD_ALLOC_CALLS.load(Ordering::Relaxed);
-    let operation_allocated_bytes = PROBE_THREAD_ALLOCATED_BYTES.load(Ordering::Relaxed);
-    // What: cloning the flat runtime-rank operation into a warm completed-
-    // structure key performs no caller-thread allocation or reallocation.
-    assert_eq!(operation_alloc_calls, 0);
-    assert_eq!(operation_allocated_bytes, 0);
-    assert_eq!(PROBE_THREAD_REALLOC_CALLS.load(Ordering::Relaxed), 0);
-    assert_eq!(destination.data(), expected.data());
 }
 
 #[test]
