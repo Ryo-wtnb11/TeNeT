@@ -689,6 +689,19 @@ impl Runtime {
         self.lock_plan_cache().config.clone()
     }
 
+    /// Replaces the contraction-plan-cache configuration and safely
+    /// invalidates any downstream type-erased cache state.
+    ///
+    /// Use `tenet_network::configure_plan_cache` when eligible compiled plans
+    /// should survive fine-grained configuration transitions. This base-crate
+    /// setter cannot downcast downstream state, so it conservatively drops the
+    /// complete slot under the same lock before publishing `config`.
+    pub fn set_plan_cache_config(&self, config: PlanCacheConfig) {
+        let mut home = self.lock_plan_cache();
+        home.slot = None;
+        home.config = config;
+    }
+
     /// Atomically updates the plan-cache configuration and its downstream
     /// type-erased state under the Runtime's plan-cache lock.
     ///
@@ -1199,5 +1212,24 @@ mod tests {
 
         let context = TensorExecutionContext::for_runtime(&runtime).unwrap();
         assert!(context.local_cache_policy_is(OperationCachePolicy::NoCache));
+    }
+
+    #[test]
+    fn base_plan_cache_setter_updates_config_and_invalidates_extension_state() {
+        let runtime = Runtime::builder().build().unwrap();
+        runtime.with_extension_slot(|slot| *slot = Some(Box::new(7usize)));
+
+        runtime.set_plan_cache_config(PlanCacheConfig {
+            enabled: false,
+            capacity: 7,
+            workspace_budget_bytes: 0,
+            ..PlanCacheConfig::default()
+        });
+
+        let config = runtime.plan_cache_config();
+        assert!(!config.enabled);
+        assert_eq!(config.capacity, 7);
+        assert_eq!(config.workspace_budget_bytes, 0);
+        runtime.with_extension_slot(|slot| assert!(slot.is_none()));
     }
 }
