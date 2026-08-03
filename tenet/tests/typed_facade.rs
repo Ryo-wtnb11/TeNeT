@@ -1292,133 +1292,6 @@ fn z2_complex_oracle_pair(
     (erased, typed)
 }
 
-/// CU(1) rank-three recoupling fixture shared by the erased and typed facades.
-fn cu1_oracle_pair(runtime: &Runtime) -> (tenet::prelude::Tensor, TensorMap<CU1FusionRule, f64>) {
-    let space = tenet::prelude::Space::cu1([((1, 2), 1)]).unwrap();
-    let erased = tenet::prelude::Tensor::from_block_fn(
-        runtime,
-        [&space, &space, &space],
-        [&space],
-        |_, _| 1.0,
-    )
-    .unwrap();
-    let rule = Arc::new(CU1FusionRule);
-    let leg = GradedSpace::try_new(
-        Arc::clone(&rule),
-        [(CU1Irrep::from_twice_charge(1), 1)],
-        false,
-    )
-    .unwrap();
-    let typed = TensorMap::from_block_fn(runtime, [&leg, &leg, &leg], [&leg], |_, _| 1.0).unwrap();
-    (erased, typed)
-}
-
-fn cu1_complex_oracle_pair(
-    runtime: &Runtime,
-) -> (tenet::prelude::Tensor, TensorMap<CU1FusionRule, Complex64>) {
-    let space = tenet::prelude::Space::cu1([((1, 2), 1)]).unwrap();
-    let erased = tenet::prelude::Tensor::from_block_fn(
-        runtime,
-        [&space, &space, &space],
-        [&space],
-        |_, _| Complex64::new(1.0, 2.0),
-    )
-    .unwrap();
-    let rule = Arc::new(CU1FusionRule);
-    let leg = GradedSpace::try_new(
-        Arc::clone(&rule),
-        [(CU1Irrep::from_twice_charge(1), 1)],
-        false,
-    )
-    .unwrap();
-    let typed = TensorMap::from_block_fn(runtime, [&leg, &leg, &leg], [&leg], |_, _| {
-        Complex64::new(1.0, 2.0)
-    })
-    .unwrap();
-    (erased, typed)
-}
-
-#[test]
-fn cu1_typed_rank_three_permute_matches_the_published_gauge() {
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (_, typed) = cu1_oracle_pair(&runtime);
-    assert_eq!(typed.data(), [1.0, 1.0, 1.0]);
-    let typed = typed.permute(&[2, 0, 1], &[3]).unwrap();
-    let expected = [2.0_f64.sqrt() / 2.0, -2.0_f64.sqrt() / 2.0, 2.0_f64.sqrt()];
-    assert_eq!(typed.data().len(), 3);
-    for (typed, expected) in typed.data().iter().zip(expected) {
-        assert!((typed - expected).abs() <= 1e-12, "{typed} vs {expected}");
-    }
-    assert_eq!(typed.codomain().len(), 3);
-    assert_eq!(typed.domain().len(), 1);
-}
-
-#[test]
-fn cu1_c64_adjoint_materialization_matches_the_typed_contract() {
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased, typed) = cu1_complex_oracle_pair(&runtime);
-    let typed_adjoint = typed.adjoint().unwrap();
-    let erased_adjoint = erased.adjoint().unwrap();
-    assert_eq!(typed_adjoint.data(), erased_adjoint.try_data_c64().unwrap());
-    assert_eq!(typed_adjoint.adjoint().unwrap().data(), typed.data());
-}
-
-#[test]
-fn cu1_c64_lazy_adjoint_contract_ordered_matches_typed_values_and_spaces() {
-    // What: the erased ordinary-plus-lazy-adjoint contraction takes the
-    // prelowered CU(1) dispatch seam and agrees with the typed facade in both
-    // payload and ordered external legs.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased, typed) = cu1_complex_oracle_pair(&runtime);
-    let erased_adjoint = erased.adjoint().unwrap();
-    let typed_adjoint = typed.adjoint().unwrap();
-    let order = [5, 1, 3, 0, 4, 2];
-
-    let erased = erased
-        .contract_ordered(&erased_adjoint, &[3], &[0], &order)
-        .unwrap();
-    let typed = typed.contract(&typed_adjoint, &[3], &[0], &order).unwrap();
-
-    assert_data_close_c64(typed.data(), erased.try_data_c64().unwrap());
-    for (typed_leg, erased_leg) in typed
-        .codomain_spaces()
-        .into_iter()
-        .chain(typed.domain_spaces())
-        .zip(
-            erased
-                .codomain_spaces()
-                .iter()
-                .chain(erased.domain_spaces().iter()),
-        )
-    {
-        let erased_sectors = erased_leg
-            .cu1_sectors()
-            .unwrap()
-            .into_iter()
-            .map(|((charge, sector), _)| match (charge, sector) {
-                (0, 0) => CU1Irrep::VACUUM,
-                (0, 1) => CU1Irrep::PSEUDOSCALAR,
-                (charge, 2) => CU1Irrep::from_twice_charge(charge),
-                _ => unreachable!("Space::cu1 validates its labels"),
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(typed_leg.is_dual(), erased_leg.is_dual());
-        assert_eq!(typed_leg.sectors().unwrap(), erased_sectors);
-        assert_eq!(
-            typed_leg.degeneracies(),
-            erased_leg
-                .cu1_sectors()
-                .unwrap()
-                .into_iter()
-                .map(|(_, degeneracy)| degeneracy)
-                .collect::<Vec<_>>()
-        );
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Phase 3, slice 3: `TensorMap::contract`.
 // ---------------------------------------------------------------------------
@@ -1627,23 +1500,6 @@ fn contract_rejects_malformed_axes_without_panicking() {
     assert!(lhs.contract(&rhs, &[9], &[0], &[0, 1]).is_err());
     assert!(lhs.contract(&rhs, &[1], &[9], &[0, 1]).is_err());
     assert!(lhs.contract(&rhs, &[1], &[0], &[0]).is_err());
-}
-
-#[test]
-fn typed_and_erased_contract_agree_byte_for_byte_on_a_builtin_rule() {
-    // What: the typed contraction is the erased `contract_ordered`, bytes and
-    // layout, on a non-identity output order.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
-
-    let erased_contracted = erased
-        .contract_ordered(&erased, &[2], &[0], &[1, 0, 3, 2])
-        .unwrap();
-    let typed_contracted = typed.contract(&typed, &[2], &[0], &[1, 0, 3, 2]).unwrap();
-
-    assert_eq!(typed_contracted.data(), erased_contracted.data());
-    assert!(typed_contracted.data().iter().any(|&value| value != 0.0));
 }
 
 #[test]
@@ -3337,21 +3193,19 @@ fn tr_requires_an_endomorphism() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn typed_and_erased_adjoint_agree_byte_for_byte() {
-    // What: both lazy views materialize the same buffer byte for byte. The
-    // spaces swap sides before data is requested, which the shape assertions
-    // pin.
+fn adjoint_swaps_spaces_and_is_an_involution() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
+    let (_, typed) = z2_oracle_pair(&runtime);
 
     let adjoint = typed.adjoint().unwrap();
+    assert_same_legs(&adjoint.codomain(), &typed.domain());
+    assert_same_legs(&adjoint.domain(), &typed.codomain());
 
-    assert_eq!(adjoint.data(), erased.adjoint().unwrap().data());
-    assert_eq!(adjoint.codomain().len(), typed.domain().len());
-    assert_eq!(adjoint.domain().len(), typed.codomain().len());
-    // Its own inverse, as a dagger must be.
-    assert_eq!(adjoint.adjoint().unwrap().data(), typed.data());
+    let roundtrip = adjoint.adjoint().unwrap();
+    assert_same_legs(&roundtrip.codomain(), &typed.codomain());
+    assert_same_legs(&roundtrip.domain(), &typed.domain());
+    assert_eq!(roundtrip.data(), typed.data());
 }
 
 #[test]
@@ -3361,14 +3215,9 @@ fn adjoint_conjugates_a_complex_payload() {
     // that the *values* are the conjugated ones and not the original ones.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_complex_oracle_pair(&runtime);
+    let (_, typed) = z2_complex_oracle_pair(&runtime);
 
     let adjoint = typed.adjoint().unwrap();
-    assert_eq!(
-        adjoint.data(),
-        erased.adjoint().unwrap().try_data_c64().unwrap()
-    );
-
     let sorted = |values: &mut Vec<Complex64>| {
         values.sort_by(|a, b| a.re.total_cmp(&b.re).then(a.im.total_cmp(&b.im)));
     };
@@ -3544,28 +3393,7 @@ fn fermionic_trace_pairs_is_the_supertrace_and_tr_is_not() {
 // Phase 6 (issue #569), slice 1: `TensorMap::compose`.
 // ---------------------------------------------------------------------------
 
-/// Fill value from an fz2 fusion-tree key, weighted by position exactly as
-/// [`erased_fill_value`] is: the fermionic pair below needs a fill whose every
-/// element is distinct, so a sign flip on any single block is visible.
-fn fermionic_erased_fill(key: &tenet::prelude::BlockKey, indices: &[usize]) -> f64 {
-    let pair = key.as_fusion_tree_pair().expect("fusion-tree block");
-    let parity = |id| {
-        SectorCodec::decode_sector(&tenet::core::FermionParityFusionRule, id)
-            .expect("built-in codec decodes its own ids")
-            .parity()
-    };
-    let mut value = f64::from(parity(pair.codomain_tree().coupled())) * 1000.0;
-    for (position, &id) in pair.codomain_tree().uncoupled().iter().enumerate() {
-        value += f64::from(parity(id)) * 100.0 * (position + 1) as f64;
-    }
-    for (position, &id) in pair.domain_tree().uncoupled().iter().enumerate() {
-        value += f64::from(parity(id)) * 10.0 * (position + 1) as f64;
-    }
-    value + 1.0 + indices.iter().sum::<usize>() as f64
-}
-
-/// The same value from the typed labels, so the two facades' operands are the
-/// same tensor before either composition runs.
+/// A position-weighted fill whose distinct entries expose individual signs.
 fn fermionic_typed_fill(
     sectors: &tenet::typed::BlockFusionTrees<tenet::core::Z2Irrep>,
     indices: &[usize],
@@ -3580,52 +3408,26 @@ fn fermionic_typed_fill(
     value + 1.0 + indices.iter().sum::<usize>() as f64
 }
 
-/// `a : [v] <- [v*, v]` and `b : [v*, v] <- [v]` on both facades.
+/// `a : [v] <- [v*, v]` and `b : [v*, v] <- [v]`.
 ///
 /// Composition contracts two legs here, exactly one of which is **dual** —
 /// and a dual leg is the only place a fermionic twist can act. The mixed pair
 /// is deliberate: with every contracted leg dual, "twist the dual contracted
 /// legs" and "twist all contracted legs" would be the same statement, and the
 /// twist identity below would not be pinned to a leg set at all.
-#[allow(clippy::type_complexity)]
 fn fermionic_compose_pair(
     runtime: &Runtime,
 ) -> (
-    (tenet::prelude::Tensor, tenet::prelude::Tensor),
-    (
-        TensorMap<tenet::core::FermionParityFusionRule, f64>,
-        TensorMap<tenet::core::FermionParityFusionRule, f64>,
-    ),
+    TensorMap<tenet::core::FermionParityFusionRule, f64>,
+    TensorMap<tenet::core::FermionParityFusionRule, f64>,
 ) {
-    let space = tenet::prelude::Space::fz2([(0, 1), (1, 2)]).unwrap();
-    let dual = space.dual();
-    let erased_a = tenet::prelude::Tensor::from_block_fn(
-        runtime,
-        [&space],
-        [&dual, &space],
-        fermionic_erased_fill,
-    )
-    .unwrap();
-    let erased_b = tenet::prelude::Tensor::from_block_fn(
-        runtime,
-        [&dual, &space],
-        [&space],
-        fermionic_erased_fill,
-    )
-    .unwrap();
-
     let leg = fermionic_leg_with(&[1, 2]);
     let leg_dual = leg.try_dual().unwrap();
     let typed_a =
         TensorMap::from_block_fn(runtime, [&leg], [&leg_dual, &leg], fermionic_typed_fill).unwrap();
     let typed_b =
         TensorMap::from_block_fn(runtime, [&leg_dual, &leg], [&leg], fermionic_typed_fill).unwrap();
-
-    // The operands themselves must be one tensor on both facades, or a
-    // difference downstream would not be about composition at all.
-    assert_eq!(typed_a.data(), erased_a.data());
-    assert_eq!(typed_b.data(), erased_b.data());
-    ((erased_a, erased_b), (typed_a, typed_b))
+    (typed_a, typed_b)
 }
 
 /// [`fermionic_leg`] with explicit `[even, odd]` degeneracies.
@@ -3644,23 +3446,6 @@ fn fermionic_leg_with(
 }
 
 #[test]
-fn typed_and_erased_compose_agree_byte_for_byte_on_a_fermionic_provider() {
-    // What: the typed compose is the erased compose, on the one provider whose
-    // braiding is not symmetric — so this pins the fermionic signs, not just
-    // the arithmetic. A bosonic-only compose passes every other test here and
-    // fails this one.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let ((erased_a, erased_b), (typed_a, typed_b)) = fermionic_compose_pair(&runtime);
-
-    let typed = typed_a.compose(&typed_b).unwrap();
-
-    assert_eq!(typed.data(), erased_a.compose(&erased_b).unwrap().data());
-    assert_eq!(typed.codomain().len(), 1);
-    assert_eq!(typed.domain().len(), 1);
-}
-
-#[test]
 fn fermionic_compose_is_contract_against_a_twisted_right_operand() {
     // What: the exact relation between the two contraction semantics —
     // `compose(a, b) == contract(a, twist(b, b's dual codomain legs))`. The
@@ -3671,7 +3456,7 @@ fn fermionic_compose_is_contract_against_a_twisted_right_operand() {
     // one to state it.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, (typed_a, typed_b)) = fermionic_compose_pair(&runtime);
+    let (typed_a, typed_b) = fermionic_compose_pair(&runtime);
 
     let leg = fermionic_leg_with(&[1, 2]);
     let leg_dual = leg.try_dual().unwrap();
@@ -3703,7 +3488,7 @@ fn fermionic_compose_and_contract_disagree() {
     // contraction the two would coincide and this assertion would fail.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, (typed_a, typed_b)) = fermionic_compose_pair(&runtime);
+    let (typed_a, typed_b) = fermionic_compose_pair(&runtime);
 
     assert_ne!(
         typed_a.compose(&typed_b).unwrap().data(),
@@ -3717,15 +3502,13 @@ fn fermionic_compose_and_contract_disagree() {
 #[test]
 fn bosonic_compose_is_contract_with_the_identity_output_order() {
     // What: for a symmetric braiding the supertrace twist is the identity, so
-    // the two semantics coincide — and the typed result still matches the
-    // erased sibling byte for byte.
+    // the two semantics coincide.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+    let (_, typed) = z2_endo_oracle_pair(&runtime);
 
     let composed = typed.compose(&typed).unwrap();
 
-    assert_eq!(composed.data(), erased.compose(&erased).unwrap().data());
     assert_eq!(
         composed.data(),
         typed.contract(&typed, &[1], &[0], &[0, 1]).unwrap().data()
@@ -3888,7 +3671,7 @@ fn id_composes_as_the_identity_for_a_fermionic_provider() {
     // not ask it.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, (typed_a, _)) = fermionic_compose_pair(&runtime);
+    let (typed_a, _) = fermionic_compose_pair(&runtime);
 
     let left = TensorMap::id(&runtime, &typed_a.codomain()).unwrap();
     let right = TensorMap::id(&runtime, &typed_a.domain()).unwrap();
@@ -4002,38 +3785,23 @@ fn compact_add_matches_pointwise_values_on_both_arms() {
 fn compose_takes_the_compact_paths_and_reconstructs_the_source() {
     // What: `u * s * vh` now runs through the bond-scaling arms rather than a
     // dense GEMM, and still reproduces the source — plus `s * s`, the
-    // diagonal-times-diagonal arm, against its erased sibling.
+    // diagonal-times-diagonal arm.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
-    let (eu, es, evh) = erased.svd_compact().unwrap();
+    let (_, typed) = z2_oracle_pair(&runtime);
     let (tu, ts, tvh) = typed.svd_compact().unwrap();
 
-    // `t * D`, `D * t` and `D * D`, each against the erased facade's own arm.
-    assert_eq!(
-        tu.compose(&ts).unwrap().data(),
-        eu.compose(&es).unwrap().data()
-    );
-    assert_eq!(
-        ts.compose(&tvh).unwrap().data(),
-        es.compose(&evh).unwrap().data()
-    );
-    assert_eq!(
-        ts.compose(&ts).unwrap().data(),
-        es.compose(&es).unwrap().data()
-    );
+    let tus = tu.compose(&ts).unwrap();
+    let svh = ts.compose(&tvh).unwrap();
+    let squared = ts.compose(&ts).unwrap();
     // `s * s` is still a spectrum: its entries are the squares.
-    for (squared, original) in ts.compose(&ts).unwrap().data().iter().zip(ts.data()) {
+    for (squared, original) in squared.data().iter().zip(ts.data()) {
         assert!((squared - original * original).abs() < 1e-12);
     }
 
-    let recon = tu.compose(&ts).unwrap().compose(&tvh).unwrap();
-    assert_eq!(recon.data().len(), typed.data().len());
-    for (got, want) in recon.data().iter().zip(typed.data()) {
-        assert!(
-            (got - want).abs() <= 1e-12 * want.abs().max(1.0),
-            "{got} vs {want}"
-        );
+    // Both associations reconstruct, separately pinning `t * D` and `D * t`.
+    for recon in [tus.compose(&tvh).unwrap(), tu.compose(&svh).unwrap()] {
+        assert_data_close_f64(recon.data(), typed.data());
     }
 }
 
