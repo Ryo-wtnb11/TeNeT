@@ -3003,24 +3003,27 @@ fn decompositions_carry_an_external_provider_with_its_own_labels() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn typed_and_erased_add_agree_byte_for_byte() {
-    // What: `alpha * self + beta * other` is the erased combination, coefficient
-    // for coefficient. The two coefficients are deliberately different and
+fn add_applies_each_real_coefficient_to_the_right_operand() {
+    // What: `alpha * self + beta * other`, coefficient for coefficient. The two
+    // coefficients are deliberately different and
     // neither is 1, so swapping them (or dropping one) moves the buffer.
     //
     // The second operand is a permute of the first: same space, same layout,
-    // different values, and no second fixture — `permute` is already pinned
-    // against the erased facade byte for byte.
+    // different values, and no second fixture.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
-    let erased_other = erased.permute(&[1, 0], &[2]).unwrap();
+    let (_, typed) = z2_oracle_pair(&runtime);
     let typed_other = typed.permute(&[1, 0], &[2]).unwrap();
 
-    let erased_sum = erased.add(&erased_other, 2.0, -3.0).unwrap();
     let typed_sum = typed.add(&typed_other, 2.0, -3.0).unwrap();
 
-    assert_eq!(typed_sum.data(), erased_sum.data());
+    let expected: Vec<_> = typed
+        .data()
+        .iter()
+        .zip(typed_other.data())
+        .map(|(&lhs, &rhs)| 2.0 * lhs - 3.0 * rhs)
+        .collect();
+    assert_eq!(typed_sum.data(), expected);
     // The asymmetry is real: the swapped combination is a different tensor.
     assert_ne!(
         typed.add(&typed_other, -3.0, 2.0).unwrap().data(),
@@ -3030,22 +3033,24 @@ fn typed_and_erased_add_agree_byte_for_byte() {
 
 #[test]
 fn add_carries_complex_coefficients() {
-    // What: `D` is the coefficient type too, so the c64 instantiation covers
-    // the erased facade's separate `add_c64` with no second method here.
+    // What: `D` is the coefficient type too, so the c64 instantiation carries
+    // genuinely complex coefficients through the same method.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_complex_oracle_pair(&runtime);
+    let (_, typed) = z2_complex_oracle_pair(&runtime);
     let alpha = Complex64::new(0.5, -2.0);
     let beta = Complex64::new(-1.5, 0.25);
 
-    let erased_sum = erased
-        .add_c64(&erased.permute(&[1, 0], &[2]).unwrap(), alpha, beta)
-        .unwrap();
-    let typed_sum = typed
-        .add(&typed.permute(&[1, 0], &[2]).unwrap(), alpha, beta)
-        .unwrap();
+    let other = typed.permute(&[1, 0], &[2]).unwrap();
+    let typed_sum = typed.add(&other, alpha, beta).unwrap();
+    let expected: Vec<_> = typed
+        .data()
+        .iter()
+        .zip(other.data())
+        .map(|(&lhs, &rhs)| alpha * lhs + beta * rhs)
+        .collect();
 
-    assert_eq!(typed_sum.data(), erased_sum.try_data_c64().unwrap());
+    assert_eq!(typed_sum.data(), expected);
 }
 
 #[test]
@@ -3074,19 +3079,21 @@ fn add_rejects_a_different_runtime_and_a_different_space() {
 }
 
 #[test]
-fn typed_and_erased_scale_agree_byte_for_byte() {
+fn scale_multiplies_every_real_and_complex_entry() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_oracle_pair(&runtime);
+    let (_, typed) = z2_oracle_pair(&runtime);
+    let scaled = typed.scale(-2.5);
+    for (&actual, &source) in scaled.data().iter().zip(typed.data()) {
+        assert_eq!(actual, -2.5 * source);
+    }
 
-    assert_eq!(typed.scale(-2.5).data(), erased.scale(-2.5).unwrap().data());
-
-    let (erased_c, typed_c) = z2_complex_oracle_pair(&runtime);
+    let (_, typed_c) = z2_complex_oracle_pair(&runtime);
     let factor = Complex64::new(0.25, 3.0);
-    assert_eq!(
-        typed_c.scale(factor).data(),
-        erased_c.scale_c64(factor).unwrap().try_data_c64().unwrap()
-    );
+    let scaled = typed_c.scale(factor);
+    for (&actual, &source) in scaled.data().iter().zip(typed_c.data()) {
+        assert_eq!(actual, factor * source);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3164,69 +3171,19 @@ fn su2_oracle_pair(
 }
 
 #[test]
-fn typed_and_erased_norm_agree_including_the_dimension_weighted_branch() {
-    // What: `norm` is TensorKit's quantum-dimension-weighted Frobenius norm on
-    // both facades. The SU(2) half is the one that matters: there
-    // `norm^2 != sum |x|^2`, so a weight-free implementation would pass the Z2
-    // half and fail here.
-    let _guard = cache_lock();
-    let runtime = runtime();
-
-    let (erased, typed) = z2_oracle_pair(&runtime);
-    let unweighted: f64 = typed.data().iter().map(|value| value * value).sum();
-    assert_eq!(typed.norm().unwrap(), erased.norm().unwrap());
-    // Z2 is abelian: every dim(c) is one, so the weighting is the identity and
-    // this fixture alone cannot see the weight at all.
-    assert!((typed.norm().unwrap() - unweighted.sqrt()).abs() < 1e-12);
-
-    let (erased, typed) = su2_oracle_pair(&runtime);
-    let unweighted: f64 = typed.data().iter().map(|value| value * value).sum();
-    assert_eq!(typed.norm().unwrap(), erased.norm().unwrap());
-    assert!(
-        (typed.norm().unwrap() - unweighted.sqrt()).abs() > 1.0,
-        "the SU(2) fixture must actually separate the weighted norm from the \
-         unweighted one, or it cannot kill a dropped dim(c)"
-    );
-}
-
-#[test]
-fn typed_and_erased_norm_inf_agree_and_are_not_dimension_weighted() {
-    // What: TensorKit's `norm(t, Inf)` — the largest absolute stored entry,
-    // with no quantum-dimension weighting. Checked on SU(2), where a weighted
-    // implementation would differ.
-    let _guard = cache_lock();
-    let runtime = runtime();
-
-    let (erased, typed) = su2_oracle_pair(&runtime);
-    let largest = typed
-        .data()
-        .iter()
-        .map(|value| value.abs())
-        .fold(0.0, f64::max);
-    assert_eq!(typed.norm_inf().unwrap(), erased.norm_inf().unwrap());
-    assert_eq!(typed.norm_inf().unwrap(), largest);
-    assert_ne!(typed.norm_inf().unwrap(), typed.norm().unwrap());
-
-    // c64: the modulus, not the real part.
-    let (erased, typed) = z2_complex_oracle_pair(&runtime);
-    assert_eq!(typed.norm_inf().unwrap(), erased.norm_inf().unwrap());
-    assert!(typed
-        .data()
-        .iter()
-        .all(|value| value.norm() <= typed.norm_inf().unwrap()));
-}
-
-#[test]
-fn normalize_returns_a_unit_norm_tensor_matching_the_erased_facade() {
+fn normalize_divides_by_the_dimension_weighted_norm() {
     let _guard = cache_lock();
     let runtime = runtime();
 
     // SU(2): normalizing by a dimension-weighted norm is what a plain
     // Frobenius normalization would get wrong, and only a non-abelian fixture
     // can see it.
-    let (erased, typed) = su2_oracle_pair(&runtime);
+    let (_, typed) = su2_oracle_pair(&runtime);
+    let norm = typed.norm().unwrap();
     let unit = typed.normalize().unwrap();
-    assert_eq!(unit.data(), erased.normalize().unwrap().data());
+    for (&actual, &source) in unit.data().iter().zip(typed.data()) {
+        assert!((actual - source / norm).abs() <= 1e-12 * source.abs().max(1.0));
+    }
     assert!((unit.norm().unwrap() - 1.0).abs() < 1e-12);
 }
 
@@ -3260,32 +3217,24 @@ fn z2_endo_oracle_pair(
 }
 
 #[test]
-fn typed_and_erased_inner_agree_including_the_dimension_weighted_branch() {
+fn inner_uses_the_same_dimension_weight_as_norm() {
     // What: `inner` is TensorKit's `dot(x, y)` — conjugate-linear in the first
-    // argument and quantum-dimension weighted — on both facades, and it comes
-    // back as a `D` rather than the erased `Scalar` enum. SU(2) is what
+    // argument and quantum-dimension weighted, and it comes back as a `D`.
+    // SU(2) is what
     // exercises the weighted branch; Z2 alone would take the abelian fast path.
     let _guard = cache_lock();
     let runtime = runtime();
 
-    let (z2_erased, z2_typed) = z2_oracle_pair(&runtime);
-    let (su2_erased, su2_typed) = su2_oracle_pair(&runtime);
-    // The two providers are different types, so the shared assertions live in a
-    // closure over the pair of scalars rather than in a loop over the pairs.
-    let agree = |typed_value: f64, erased_value: f64, norm: f64| {
-        assert_eq!(typed_value, erased_value);
+    let (_, z2_typed) = z2_oracle_pair(&runtime);
+    let (_, su2_typed) = su2_oracle_pair(&runtime);
+    let agree = |typed_value: f64, norm: f64| {
         // `<t, t>` is the squared norm, which is the identity that pins this
         // weighting to `norm`'s.
         assert!((typed_value - norm * norm).abs() < 1e-9 * norm * norm);
     };
-    agree(
-        z2_typed.inner(&z2_typed).unwrap(),
-        z2_erased.inner(&z2_erased).unwrap().re(),
-        z2_typed.norm().unwrap(),
-    );
+    agree(z2_typed.inner(&z2_typed).unwrap(), z2_typed.norm().unwrap());
     agree(
         su2_typed.inner(&su2_typed).unwrap(),
-        su2_erased.inner(&su2_erased).unwrap().re(),
         su2_typed.norm().unwrap(),
     );
 }
@@ -3297,20 +3246,13 @@ fn inner_conjugates_its_first_argument() {
     // A dropped conjugation makes both sides equal and this test fail.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_complex_oracle_pair(&runtime);
+    let (_, typed) = z2_complex_oracle_pair(&runtime);
     // The extra `i` is what makes the product genuinely complex: this fixture's
     // imaginary part is a function of its real one, so the plain permuted
     // partner happens to give a real inner product and could not see a phase.
     let imaginary = Complex64::new(0.0, 1.0);
     let other = typed.permute(&[1, 0], &[2]).unwrap().scale(imaginary);
-    let erased_other = erased
-        .permute(&[1, 0], &[2])
-        .unwrap()
-        .scale_c64(imaginary)
-        .unwrap();
-
     let value = typed.inner(&other).unwrap();
-    assert_eq!(value, erased.inner(&erased_other).unwrap().to_c64());
     assert_eq!(value, other.inner(&typed).unwrap().conj());
     assert_ne!(value, other.inner(&typed).unwrap());
     assert!(value.im.abs() > 1e-6, "the fixture must have a real phase");
@@ -3349,19 +3291,14 @@ fn inner_rejects_a_different_runtime_and_a_different_space() {
 }
 
 #[test]
-fn typed_and_erased_tr_agree_including_the_dimension_weighted_branch() {
-    // What: TensorKit's positive trace `Σ_c dim(c) * tr(b_c)`. The SU(2) half
-    // separates it from the unweighted diagonal sum; the Z2 half is where the
-    // two coincide.
+fn tr_uses_the_nonabelian_dimension_weight() {
+    // What: TensorKit's positive trace `Σ_c dim(c) * tr(b_c)`. SU(2) separates
+    // it from the unweighted diagonal sum.
     let _guard = cache_lock();
     let runtime = runtime();
 
-    let (erased, typed) = z2_endo_oracle_pair(&runtime);
-    assert_eq!(typed.tr().unwrap(), erased.tr().unwrap().re());
-
-    let (erased, typed) = su2_oracle_pair(&runtime);
+    let (_, typed) = su2_oracle_pair(&runtime);
     let trace = typed.tr().unwrap();
-    assert_eq!(trace, erased.tr().unwrap().re());
     // The unweighted diagonal sum of the same blocks, for contrast: `tr` is
     // not it, which is what a dropped `dim(c)` would make it.
     let unweighted: f64 = (0..typed.block_count())
@@ -3500,29 +3437,26 @@ fn fermionic_endo_pair(
 }
 
 #[test]
-fn typed_and_erased_trace_pairs_agree_byte_for_byte() {
+fn trace_pairs_preserves_partial_trace_geometry() {
     // What: the full trace to a rank-0 tensor and a partial trace that leaves a
-    // leg open, both against the erased sibling. The partial case is the one
+    // leg open. The partial case is the one
     // that exercises the output-axis derivation and the destination's
     // codomain rank; the full case is the degenerate one.
     let _guard = cache_lock();
     let runtime = runtime();
 
-    let (erased, typed) = z2_endo_oracle_pair(&runtime);
+    let (_, typed) = z2_endo_oracle_pair(&runtime);
     let full = typed.trace_pairs(&[(0, 1)]).unwrap();
-    assert_eq!(full.data(), erased.trace_pairs(&[(0, 1)]).unwrap().data());
     assert_eq!(full.data().len(), 1);
+    assert_eq!(full.scalar().unwrap(), typed.tr().unwrap());
 
     // `[v, v] <- [v]`: tracing axis 1 against axis 2 leaves axis 0 open, so the
     // result is `[v] <- []` and the open axis keeps its side.
-    let (erased, typed) = z2_oracle_pair(&runtime);
+    let (_, typed) = z2_oracle_pair(&runtime);
     let partial = typed.trace_pairs(&[(1, 2)]).unwrap();
-    assert_eq!(
-        partial.data(),
-        erased.trace_pairs(&[(1, 2)]).unwrap().data()
-    );
     assert_eq!(partial.codomain().len(), 1);
     assert_eq!(partial.domain().len(), 0);
+    assert!(partial.data().iter().any(|&value| value != 0.0));
 
     // The two cases above leave at most one survivor, and it is codomain-side,
     // so neither can see the order of `output_axes` nor the codomain-rank
@@ -3531,26 +3465,15 @@ fn typed_and_erased_trace_pairs_agree_byte_for_byte() {
     // `[v] <- [v, v]`, tracing (0, 1): the survivor is axis 2, a domain-side
     // leg, so the destination is `[] <- [v]` — a dropped codomain-rank filter
     // would put it in the codomain instead.
-    let (erased, typed) = z2_oracle_pair_split(&runtime, 1);
+    let (_, typed) = z2_oracle_pair_split(&runtime, 1);
     let survivor = typed.trace_pairs(&[(0, 1)]).unwrap();
-    assert_eq!(
-        survivor.data(),
-        erased.trace_pairs(&[(0, 1)]).unwrap().data()
-    );
     assert_eq!(survivor.codomain().len(), 0);
     assert_eq!(survivor.domain().len(), 1);
+    assert!(survivor.data().iter().any(|&value| value != 0.0));
 
     // `[v, v] <- [v, v]`, tracing (0, 3): two survivors, axes 1 and 2, one on
     // each side — so their relative order in `output_axes` is observable, and
     // reversing it changes the bytes.
-    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
-    let erased = tenet::prelude::Tensor::from_block_fn(
-        &runtime,
-        [&space, &space],
-        [&space, &space],
-        erased_fill_value,
-    )
-    .unwrap();
     let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
         [
@@ -3563,26 +3486,9 @@ fn typed_and_erased_trace_pairs_agree_byte_for_byte() {
     let typed: TensorMap<tenet::core::Z2FusionRule, f64> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], typed_fill_value).unwrap();
     let two_survivors = typed.trace_pairs(&[(0, 3)]).unwrap();
-    assert_eq!(
-        two_survivors.data(),
-        erased.trace_pairs(&[(0, 3)]).unwrap().data()
-    );
     assert_eq!(two_survivors.codomain().len(), 1);
     assert_eq!(two_survivors.domain().len(), 1);
-}
-
-#[test]
-fn trace_pairs_agrees_with_the_erased_facade_on_a_non_abelian_rule() {
-    // SU(2): the categorical trace coefficients are not all one here, so this
-    // is where a coefficient-free partial trace would diverge.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased, typed) = su2_oracle_pair(&runtime);
-
-    assert_eq!(
-        typed.trace_pairs(&[(0, 1)]).unwrap().data(),
-        erased.trace_pairs(&[(0, 1)]).unwrap().data()
-    );
+    assert!(two_survivors.data().iter().any(|&value| value != 0.0));
 }
 
 #[test]
@@ -3599,7 +3505,7 @@ fn trace_pairs_of_nothing_is_the_source() {
 
 #[test]
 fn trace_pairs_rejects_malformed_pairs() {
-    // Out of range and repeated axes, both with the erased facade's message.
+    // Out-of-range and repeated axes both use the public invalid-pair error.
     let _guard = cache_lock();
     let runtime = runtime();
     let (_, typed) = z2_endo_oracle_pair(&runtime);
@@ -3619,19 +3525,14 @@ fn fermionic_trace_pairs_is_the_supertrace_and_tr_is_not() {
     // (`Σ_c dim(c) tr(b_c)`), `trace_pairs` is the tensor-contraction trace,
     // which for a fermionic rule carries the twist — the supertrace. On this
     // fixture the odd sector contributes with opposite signs, so the two
-    // numbers differ, and both match their erased siblings.
+    // numbers differ.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = fermionic_endo_pair(&runtime);
+    let (_, typed) = fermionic_endo_pair(&runtime);
 
     let positive = typed.tr().unwrap();
     let super_trace = typed.trace_pairs(&[(0, 1)]).unwrap();
 
-    assert_eq!(positive, erased.tr().unwrap().re());
-    assert_eq!(
-        super_trace.data(),
-        erased.trace_pairs(&[(0, 1)]).unwrap().data()
-    );
     assert_ne!(
         super_trace.data(),
         [positive],
@@ -3936,9 +3837,9 @@ fn compose_rejects_operands_whose_domain_and_codomain_do_not_meet() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn typed_and_erased_id_agree_byte_for_byte() {
-    // What: the typed identity is the erased one, including on a leg list whose
-    // per-sector degeneracies differ from leg to leg — the case where the
+fn id_writes_the_nonuniform_fused_diagonal() {
+    // What: the identity on a leg list whose per-sector degeneracies differ
+    // from leg to leg — the case where the
     // diagonal offsets inside a coupled-sector block are not all the same.
     let _guard = cache_lock();
     let runtime = runtime();
@@ -3959,17 +3860,6 @@ fn typed_and_erased_id_agree_byte_for_byte() {
     let narrow = typed_leg(1, 4);
     let typed = TensorMap::<_, f64>::id(&runtime, [&wide, &narrow]).unwrap();
 
-    let erased = tenet::prelude::Tensor::id(
-        &runtime,
-        tenet::prelude::Dtype::F64,
-        [
-            &tenet::prelude::Space::z2([(0, 2), (1, 3)]),
-            &tenet::prelude::Space::z2([(0, 1), (1, 4)]),
-        ],
-    )
-    .unwrap();
-
-    assert_eq!(typed.data(), erased.data());
     // Not the zero tensor, and not the all-ones one either: a genuine diagonal.
     // 14 even + 11 odd fused states: `2*1 + 3*4` and `2*4 + 3*1`.
     assert_eq!(typed.data().iter().filter(|&&v| v == 1.0).count(), 25);
@@ -4025,65 +3915,24 @@ fn id_needs_at_least_one_leg() {
 // Phase 6 (issue #570), slice 1: compact diagonal storage and the operations
 // that consume it.
 //
-// Every oracle here is against the erased facade, which keeps diagonal storage
-// on exactly the same paths — so an assertion that only checked values would
-// pass even if this facade had densified. The storage claim itself is measured
-// in `tests/typed_diagonal_allocations.rs`; what these pin is that the compact
-// route computes the same tensor the dense one does.
+// Storage claims are measured in `tests/typed_diagonal_allocations.rs`; the
+// value gates here compare compact routes with independent dense or pointwise
+// oracles.
 // ---------------------------------------------------------------------------
 
-/// The `(erased, typed)` `s` factors of one Z2 oracle pair: two spectrum
-/// tensors on the same bond space, one per facade.
-fn z2_spectrum_pair(
-    runtime: &Runtime,
-) -> (
-    tenet::prelude::Tensor,
-    TensorMap<tenet::core::Z2FusionRule, f64>,
-) {
-    let (erased, typed) = z2_oracle_pair(runtime);
-    (
-        erased.svd_compact().unwrap().1,
-        typed.svd_compact().unwrap().1,
-    )
-}
-
 #[test]
-fn compact_scale_and_adjoint_agree_with_the_erased_facade() {
-    // What: both keep the payload compact on both facades, so `data()` is the
-    // shared materialization of the same spectrum. `adjoint` on a real spectrum
-    // is the identity — a bond space is its own adjoint — and the erased
-    // sibling says so too.
-    let _guard = cache_lock();
-    let runtime = runtime();
-    let (erased, typed) = z2_spectrum_pair(&runtime);
-
-    assert_eq!(typed.scale(-2.5).data(), erased.scale(-2.5).unwrap().data());
-    assert_eq!(
-        typed.adjoint().unwrap().data(),
-        erased.adjoint().unwrap().data()
-    );
-    // The values themselves, not just their agreement: a dropped factor would
-    // agree with a sibling that dropped it too, but not with the source.
-    for (scaled, original) in typed.scale(-2.5).data().iter().zip(typed.data()) {
-        assert_eq!(*scaled, -2.5 * original);
-    }
-}
-
-#[test]
-fn compact_reductions_agree_with_the_erased_facade() {
+fn compact_reductions_match_the_forced_dense_route() {
     // What: `norm`, `norm_inf`, `tr` and `inner` read the stored spectrum
     // instead of its materialization, and land on the same numbers.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_spectrum_pair(&runtime);
+    let typed = z2_bond(&runtime);
+    let dense = forced_dense(&typed);
 
-    assert_eq!(typed.norm().unwrap(), erased.norm().unwrap());
-    assert_eq!(typed.norm_inf().unwrap(), erased.norm_inf().unwrap());
-    assert_eq!(typed.tr().unwrap(), erased.tr().unwrap().re());
-    assert_eq!(
-        typed.inner(&typed).unwrap(),
-        erased.inner(&erased).unwrap().re()
-    );
+    assert_eq!(typed.norm().unwrap(), dense.norm().unwrap());
+    assert_eq!(typed.norm_inf().unwrap(), dense.norm_inf().unwrap());
+    assert_eq!(typed.tr().unwrap(), dense.tr().unwrap());
+    assert_eq!(typed.inner(&typed).unwrap(), dense.inner(&dense).unwrap());
     assert_eq!(typed.dot(&typed).unwrap(), typed.inner(&typed).unwrap());
     // `<s, s>` is the squared norm: the identity that pins the weighting.
     let norm = typed.norm().unwrap();
@@ -4096,63 +3945,56 @@ fn compact_reductions_carry_the_su2_dimension_weight() {
     // do. Z2 alone cannot see this — every `dim(c)` is one there.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = su2_oracle_pair(&runtime);
-    let erased = erased.svd_compact().unwrap().1;
+    let (_, typed) = su2_oracle_pair(&runtime);
     let typed = typed.svd_compact().unwrap().1;
+    let dense = forced_dense(&typed);
 
-    assert_eq!(typed.norm().unwrap(), erased.norm().unwrap());
-    assert_eq!(typed.tr().unwrap(), erased.tr().unwrap().re());
-    assert_eq!(
-        typed.inner(&typed).unwrap(),
-        erased.inner(&erased).unwrap().re()
-    );
+    assert_eq!(typed.norm().unwrap(), dense.norm().unwrap());
+    assert_eq!(typed.tr().unwrap(), dense.tr().unwrap());
+    assert_eq!(typed.inner(&typed).unwrap(), dense.inner(&dense).unwrap());
     // The unweighted sum, for contrast: a dropped `dim(c)` would make `tr` this.
     let unweighted: f64 = typed.data().iter().sum();
     assert!(
         (typed.tr().unwrap() - unweighted).abs() > 1e-6,
         "the SU(2) spectrum trace is not dimension weighted"
     );
-    // `norm_inf` is deliberately *not* weighted, on either facade.
-    assert_eq!(typed.norm_inf().unwrap(), erased.norm_inf().unwrap());
+    // `norm_inf` is deliberately *not* weighted.
+    assert_eq!(typed.norm_inf().unwrap(), dense.norm_inf().unwrap());
 }
 
 #[test]
-fn compact_add_agrees_with_the_erased_facade_on_both_arms() {
+fn compact_add_matches_pointwise_values_on_both_arms() {
     // What: diagonal + diagonal stays diagonal, and diagonal + dense goes dense
-    // — the same two arms the erased facade takes, with the same values.
+    // — and both arms obey the pointwise linear-combination law.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased, typed) = z2_spectrum_pair(&runtime);
+    let typed = z2_bond(&runtime);
 
-    assert_eq!(
-        typed.add(&typed, 0.75, -0.5).unwrap().data(),
-        erased.add(&erased, 0.75, -0.5).unwrap().data()
-    );
+    let diagonal_sum = typed.add(&typed, 0.75, -0.5).unwrap();
+    for (&actual, &source) in diagonal_sum.data().iter().zip(typed.data()) {
+        let expected = 0.25 * source;
+        assert!((actual - expected).abs() <= 1e-12 * expected.abs().max(1.0));
+    }
 
     // A dense operand on the same bond space: `id` is the cheapest one, and it
-    // is not diagonal *storage* on either facade even though its values are.
-    let erased_dense = tenet::prelude::Tensor::id(
-        &runtime,
-        tenet::prelude::Dtype::F64,
-        &erased.domain_spaces(),
-    )
-    .unwrap()
-    .scale(3.0)
-    .unwrap();
+    // is not diagonal *storage* even though its values are diagonal.
     let typed_dense = TensorMap::id(&runtime, &typed.domain()).unwrap().scale(3.0);
-    assert_eq!(typed_dense.data(), erased_dense.data());
 
     for (alpha, beta) in [(0.75, -0.5), (1.0, 1.0)] {
-        assert_eq!(
-            typed.add(&typed_dense, alpha, beta).unwrap().data(),
-            erased.add(&erased_dense, alpha, beta).unwrap().data(),
-            "diagonal + dense disagrees at ({alpha}, {beta})"
-        );
-        assert_eq!(
-            typed_dense.add(&typed, alpha, beta).unwrap().data(),
-            erased_dense.add(&erased, alpha, beta).unwrap().data(),
-            "dense + diagonal disagrees at ({alpha}, {beta})"
-        );
+        let diagonal_dense = typed.add(&typed_dense, alpha, beta).unwrap();
+        let dense_diagonal = typed_dense.add(&typed, alpha, beta).unwrap();
+        for (((&diagonal_dense, &dense_diagonal), &diagonal), &dense) in diagonal_dense
+            .data()
+            .iter()
+            .zip(dense_diagonal.data())
+            .zip(typed.data())
+            .zip(typed_dense.data())
+        {
+            let expected = alpha * diagonal + beta * dense;
+            assert!((diagonal_dense - expected).abs() <= 1e-12 * expected.abs().max(1.0));
+            let expected = alpha * dense + beta * diagonal;
+            assert!((dense_diagonal - expected).abs() <= 1e-12 * expected.abs().max(1.0));
+        }
     }
 }
 
@@ -6060,20 +5902,6 @@ where
     dense
 }
 
-/// The `bond <- bond` factor of a square Z2 tensor, on both facades.
-fn z2_bond_pair(
-    runtime: &Runtime,
-) -> (
-    tenet::prelude::Tensor,
-    TensorMap<tenet::core::Z2FusionRule, f64>,
-) {
-    let space = tenet::prelude::Space::z2([(0, 2), (1, 3)]);
-    let erased =
-        tenet::prelude::Tensor::from_block_fn(runtime, [&space], [&space], erased_fill_value)
-            .unwrap();
-    (erased.svd_compact().unwrap().1, z2_bond(runtime))
-}
-
 fn z2_bond(runtime: &Runtime) -> TensorMap<tenet::core::Z2FusionRule, f64> {
     let leg = GradedSpace::try_new(
         Arc::new(tenet::core::Z2FusionRule),
@@ -6333,44 +6161,23 @@ fn compact_is_posdef_matches_the_forced_dense_route_for_a_hermitian_c64_spectrum
 
 // ---------------------------------------------------------------------------
 // Issue #604: the compact full-pair trace arm. The typed `trace_pairs` used to
-// densify a compact spectrum factor unconditionally; after #585 gave the
-// erased facade a compact arm, that was a live cross-facade parity gap. The
-// value sweep here mirrors the erased oracle sweep in
+// densify a compact spectrum factor unconditionally. The value sweep here
+// preserves the original oracle matrix from
 // `tenet/src/tensor/compact_diagonal_tests.rs` (`full_rank_one_trace_pairs_*`)
-// — same rules, same orientations, same variants — and adds the erased compact
-// arm itself as a byte-for-byte sibling where the fixture is constructible on
-// both facades. The storage claim lives in `typed_diagonal_allocations.rs`.
+// — same rules, same orientations, same variants — against a forced-dense
+// typed route. The storage claim lives in `typed_diagonal_allocations.rs`.
 // ---------------------------------------------------------------------------
 
-/// A compact bond factor from identically filled `[v] <- [v]` endomorphisms on
-/// both facades: `svd_compact` of the same bytes yields the same spectrum, so
-/// the erased factor is the byte-for-byte sibling of the typed one. The
-/// counter fill follows the `counter_oracle_pair` precedent (every element
-/// distinct, both facades walk blocks in the same order); the norm assertion
-/// is the dtype-generic stand-in for the dense `data()` comparison the f64
-/// pairs make, so a fixture divergence fails here as a fixture error rather
-/// than implicating the trace arm.
-fn compact_bond_trace_pair<R, D>(
+/// A compact bond factor from a counter-filled `[v] <- [v]` endomorphism.
+fn compact_bond_trace<R, D>(
     runtime: &Runtime,
-    erased_space: &tenet::prelude::Space,
     typed_leg: &GradedSpace<R>,
     fill: impl Fn(f64) -> D + Copy,
-) -> (tenet::prelude::Tensor, TensorMap<R, D>)
+) -> TensorMap<R, D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: tenet::prelude::TensorScalar + std::fmt::Debug,
 {
-    let mut next: f64 = 0.0;
-    let erased: tenet::prelude::Tensor = tenet::prelude::Tensor::from_block_fn(
-        runtime,
-        [erased_space],
-        [erased_space],
-        |_: &tenet::prelude::BlockKey, _: &[usize]| {
-            next += 1.0;
-            fill(next)
-        },
-    )
-    .unwrap();
     let mut next: f64 = 0.0;
     let typed: TensorMap<R, D> =
         TensorMap::from_block_fn(runtime, [typed_leg], [typed_leg], |_, _| {
@@ -6378,20 +6185,12 @@ where
             fill(next)
         })
         .unwrap();
-    assert!(
-        (typed.norm().unwrap() - erased.norm().unwrap()).abs() <= 1e-12,
-        "the two facades disagree on the fixture itself"
-    );
-    (
-        erased.svd_compact().unwrap().1,
-        typed.svd_compact().unwrap().1,
-    )
+    typed.svd_compact().unwrap().1
 }
 
 /// The typed compact trace against the typed forced-dense engine route, both
 /// pair orders. Close, not byte-for-byte: the engine reduces block by block in
-/// its own order, so this is the value oracle — the byte pin is the erased
-/// sibling in [`assert_compact_full_trace_parity`].
+/// its own order, so this is the independent value oracle.
 fn assert_compact_trace_matches_forced_dense<R, D>(
     label: &str,
     typed: &TensorMap<R, D>,
@@ -6411,79 +6210,34 @@ fn assert_compact_trace_matches_forced_dense<R, D>(
     }
 }
 
-/// One compact variant's full trace on both facades — byte for byte against
-/// the erased compact arm (#585), which owns the oracle-pinned coefficient —
-/// plus the typed forced-dense value oracle.
-fn assert_compact_full_trace_parity<R, D>(
-    label: &str,
-    erased: &tenet::prelude::Tensor,
-    typed: &TensorMap<R, D>,
-    widen: impl Fn(D) -> Complex64 + Copy,
-) where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
-    D: tenet::prelude::TensorScalar + std::fmt::Debug,
-{
-    for pairs in [[(0usize, 1usize)], [(1usize, 0usize)]] {
-        let actual: Complex64 = widen(typed.trace_pairs(&pairs).unwrap().scalar().unwrap());
-        let sibling: Complex64 = erased
-            .trace_pairs(&pairs)
-            .unwrap()
-            .scalar()
-            .unwrap()
-            .to_c64();
-        assert_eq!(
-            actual, sibling,
-            "{label} {pairs:?}: typed vs erased compact arm"
-        );
-    }
-    assert_compact_trace_matches_forced_dense(label, typed, widen);
-}
-
-/// The erased sweep's variant set, cross-facade: the freshly factorized bond,
-/// the two compact swaps (which dual both legs and so flip the coefficient
-/// orientation), and the adjoint (owned conjugated spectrum on both facades —
-/// not the erased lazy view, which `adjoint` short-circuits for compact
-/// storage).
+/// The freshly factorized bond, both compact swaps, and the compact adjoint.
 fn sweep_compact_trace_variants<R, D>(
     label: &str,
-    erased_s: &tenet::prelude::Tensor,
     typed_s: &TensorMap<R, D>,
     widen: impl Fn(D) -> Complex64 + Copy,
 ) where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: tenet::prelude::TensorScalar + std::fmt::Debug,
 {
-    let variants: Vec<(&str, tenet::prelude::Tensor, TensorMap<R, D>)> = vec![
-        ("plain", erased_s.clone(), typed_s.clone()),
-        (
-            "transposed",
-            erased_s.transpose().unwrap(),
-            typed_s.transpose().unwrap(),
-        ),
-        (
-            "permuted",
-            erased_s.permute(&[1], &[0]).unwrap(),
-            typed_s.permute(&[1], &[0]).unwrap(),
-        ),
-        (
-            "adjoint",
-            erased_s.adjoint().unwrap(),
-            typed_s.adjoint().unwrap(),
-        ),
+    let variants: Vec<(&str, TensorMap<R, D>)> = vec![
+        ("plain", typed_s.clone()),
+        ("transposed", typed_s.transpose().unwrap()),
+        ("permuted", typed_s.permute(&[1], &[0]).unwrap()),
+        ("adjoint", typed_s.adjoint().unwrap()),
     ];
-    for (which, erased, typed) in &variants {
-        assert_compact_full_trace_parity(&format!("{label} {which}"), erased, typed, widen);
+    for (which, typed) in &variants {
+        assert_compact_trace_matches_forced_dense(&format!("{label} {which}"), typed, widen);
     }
 }
 
 #[test]
-fn compact_full_trace_matches_the_forced_dense_and_erased_routes() {
+fn compact_full_trace_matches_the_forced_dense_route() {
     // What: the full trace of a rank-(1,1) compact spectrum factor over its
-    // only pair is the same number whichever storage and whichever facade
-    // computes it — U(1), SU(2) (non-unit quantum dimensions), fZ2 (the twist
-    // makes it a supertrace) and the packed U(1) x fZ2 product route, on plain
-    // and dual bond legs, f64 and c64, both pair orders, and on legs the
-    // compact swaps bent themselves.
+    // only pair is the same number on compact and forced-dense storage — U(1),
+    // SU(2) (non-unit quantum dimensions), fZ2 (the twist makes it a
+    // supertrace) and the packed U(1) x fZ2 product route, on plain and dual
+    // bond legs, f64 and c64, both pair orders, and on legs the compact swaps
+    // bent themselves.
     let _guard = cache_lock();
     let runtime = runtime();
     let real = |value: f64| value;
@@ -6492,16 +6246,7 @@ fn compact_full_trace_matches_the_forced_dense_and_erased_routes() {
     let widen_complex = |value: Complex64| value;
 
     for is_dual in [false, true] {
-        let dual_erased = |space: tenet::prelude::Space| {
-            if is_dual {
-                space.try_dual().unwrap()
-            } else {
-                space
-            }
-        };
-
         // U(1).
-        let erased_space = dual_erased(tenet::prelude::Space::u1([(-1, 2), (0, 3), (1, 2)]));
         let mut typed_leg: GradedSpace<tenet::core::U1FusionRule> = GradedSpace::try_new(
             Arc::new(tenet::core::U1FusionRule),
             [
@@ -6515,26 +6260,13 @@ fn compact_full_trace_matches_the_forced_dense_and_erased_routes() {
         if is_dual {
             typed_leg = typed_leg.try_dual().unwrap();
         }
-        let (erased_s, typed_s) =
-            compact_bond_trace_pair(&runtime, &erased_space, &typed_leg, real);
-        sweep_compact_trace_variants(
-            &format!("u1 dual={is_dual} f64"),
-            &erased_s,
-            &typed_s,
-            widen_real,
-        );
-        let (erased_s, typed_s) =
-            compact_bond_trace_pair(&runtime, &erased_space, &typed_leg, complex);
-        sweep_compact_trace_variants(
-            &format!("u1 dual={is_dual} c64"),
-            &erased_s,
-            &typed_s,
-            widen_complex,
-        );
+        let typed_s = compact_bond_trace(&runtime, &typed_leg, real);
+        sweep_compact_trace_variants(&format!("u1 dual={is_dual} f64"), &typed_s, widen_real);
+        let typed_s = compact_bond_trace(&runtime, &typed_leg, complex);
+        sweep_compact_trace_variants(&format!("u1 dual={is_dual} c64"), &typed_s, widen_complex);
 
         // SU(2): dim(c) takes the values 1 and 2, so a coefficient-free
         // reduction cannot pass.
-        let erased_space = dual_erased(tenet::prelude::Space::su2([(0, 2), (1, 3)]).unwrap());
         let mut typed_leg: GradedSpace<tenet::core::SU2FusionRule> = GradedSpace::try_new(
             Arc::new(tenet::core::SU2FusionRule),
             [
@@ -6547,26 +6279,13 @@ fn compact_full_trace_matches_the_forced_dense_and_erased_routes() {
         if is_dual {
             typed_leg = typed_leg.try_dual().unwrap();
         }
-        let (erased_s, typed_s) =
-            compact_bond_trace_pair(&runtime, &erased_space, &typed_leg, real);
-        sweep_compact_trace_variants(
-            &format!("su2 dual={is_dual} f64"),
-            &erased_s,
-            &typed_s,
-            widen_real,
-        );
-        let (erased_s, typed_s) =
-            compact_bond_trace_pair(&runtime, &erased_space, &typed_leg, complex);
-        sweep_compact_trace_variants(
-            &format!("su2 dual={is_dual} c64"),
-            &erased_s,
-            &typed_s,
-            widen_complex,
-        );
+        let typed_s = compact_bond_trace(&runtime, &typed_leg, real);
+        sweep_compact_trace_variants(&format!("su2 dual={is_dual} f64"), &typed_s, widen_real);
+        let typed_s = compact_bond_trace(&runtime, &typed_leg, complex);
+        sweep_compact_trace_variants(&format!("su2 dual={is_dual} c64"), &typed_s, widen_complex);
 
         // fZ2: the twist is -1 on the odd sector, so this is where the
         // supertrace coefficient and its orientation live.
-        let erased_space = dual_erased(tenet::prelude::Space::fz2([(0, 2), (1, 3)]).unwrap());
         let mut typed_leg: GradedSpace<tenet::core::FermionParityFusionRule> =
             GradedSpace::try_new(
                 Arc::new(tenet::core::FermionParityFusionRule),
@@ -6580,29 +6299,14 @@ fn compact_full_trace_matches_the_forced_dense_and_erased_routes() {
         if is_dual {
             typed_leg = typed_leg.try_dual().unwrap();
         }
-        let (erased_s, typed_s) =
-            compact_bond_trace_pair(&runtime, &erased_space, &typed_leg, real);
-        sweep_compact_trace_variants(
-            &format!("fz2 dual={is_dual} f64"),
-            &erased_s,
-            &typed_s,
-            widen_real,
-        );
-        let (erased_s, typed_s) =
-            compact_bond_trace_pair(&runtime, &erased_space, &typed_leg, complex);
-        sweep_compact_trace_variants(
-            &format!("fz2 dual={is_dual} c64"),
-            &erased_s,
-            &typed_s,
-            widen_complex,
-        );
+        let typed_s = compact_bond_trace(&runtime, &typed_leg, real);
+        sweep_compact_trace_variants(&format!("fz2 dual={is_dual} f64"), &typed_s, widen_real);
+        let typed_s = compact_bond_trace(&runtime, &typed_leg, complex);
+        sweep_compact_trace_variants(&format!("fz2 dual={is_dual} c64"), &typed_s, widen_complex);
 
-        // U(1) x fZ2, on the erased facade's packed codec (see the #589
-        // section's rule aliases): the product route through
-        // `core_rule_bridge`, where both the charge and the parity factor
-        // must survive into the coefficient.
-        let erased_space =
-            dual_erased(tenet::prelude::Space::product([((0, 0), 2), ((1, 1), 3)]).unwrap());
+        // U(1) x fZ2, using the packed codec from the #589 section's rule
+        // aliases: both the charge and parity factor must survive into the
+        // coefficient.
         let product_label = |charge: i32, parity: u8| {
             tenet::core::ProductSector::new(tenet::core::U1Irrep::new(charge), parity_irrep(parity))
         };
@@ -6618,19 +6322,11 @@ fn compact_full_trace_matches_the_forced_dense_and_erased_routes() {
         if is_dual {
             typed_leg = typed_leg.try_dual().unwrap();
         }
-        let (erased_s, typed_s) =
-            compact_bond_trace_pair(&runtime, &erased_space, &typed_leg, real);
-        sweep_compact_trace_variants(
-            &format!("u1xfz2 dual={is_dual} f64"),
-            &erased_s,
-            &typed_s,
-            widen_real,
-        );
-        let (erased_s, typed_s) =
-            compact_bond_trace_pair(&runtime, &erased_space, &typed_leg, complex);
+        let typed_s = compact_bond_trace(&runtime, &typed_leg, real);
+        sweep_compact_trace_variants(&format!("u1xfz2 dual={is_dual} f64"), &typed_s, widen_real);
+        let typed_s = compact_bond_trace(&runtime, &typed_leg, complex);
         sweep_compact_trace_variants(
             &format!("u1xfz2 dual={is_dual} c64"),
-            &erased_s,
             &typed_s,
             widen_complex,
         );
@@ -6638,10 +6334,8 @@ fn compact_full_trace_matches_the_forced_dense_and_erased_routes() {
 
     // Genuinely complex stored values (a spectrum has none out of `svd`, and
     // the adjoint variant only conjugates): a compact complex rotation stays
-    // compact, and the typed forced-dense oracle covers it on the rule where
-    // the twist could interact with the phase. Typed-only — the erased `scale`
-    // takes an f64 factor, so there is no erased sibling to compare bytes with.
-    let erased_space = tenet::prelude::Space::fz2([(0, 2), (1, 3)]).unwrap();
+    // compact, and the forced-dense oracle covers it on the rule where the
+    // twist could interact with the phase.
     let typed_leg: GradedSpace<tenet::core::FermionParityFusionRule> = GradedSpace::try_new(
         Arc::new(tenet::core::FermionParityFusionRule),
         [
@@ -6651,7 +6345,7 @@ fn compact_full_trace_matches_the_forced_dense_and_erased_routes() {
         false,
     )
     .unwrap();
-    let (_, typed_s) = compact_bond_trace_pair(&runtime, &erased_space, &typed_leg, complex);
+    let typed_s = compact_bond_trace(&runtime, &typed_leg, complex);
     let rotated: TensorMap<tenet::core::FermionParityFusionRule, Complex64> =
         typed_s.scale(Complex64::new(0.8, -0.6));
     assert_compact_trace_matches_forced_dense("fz2 rotated c64", &rotated, widen_complex);
@@ -6664,16 +6358,14 @@ fn compact_full_trace_matches_the_forced_dense_and_erased_routes() {
 
 #[test]
 fn compact_full_trace_is_the_supertrace_and_the_transpose_flips_it() {
-    // What: the typed twin of the erased
-    // `full_rank_one_trace_pairs_is_the_supertrace_for_a_fermionic_rule`. On a
-    // single fermion-parity sector, `trace_pairs` and `tr` differ by exactly
-    // the twist: an odd fZ2 bond flips the sign, an even one does not, and the
-    // bosonic Z2 twin of the odd bond pins that the sign is the *twist* and
-    // not the parity label. The transpose duals both bond legs, and the traced
-    // channel is twisted only where its leg is not dual, so the same tensor
-    // traces without the fermionic sign once transposed — which is what kills
-    // a coefficient that reads the sector alone, or one with the dual and
-    // non-dual arms swapped.
+    // What: on a single fermion-parity sector, `trace_pairs` and `tr` differ by
+    // exactly the twist: an odd fZ2 bond flips the sign, an even one does not,
+    // and the bosonic Z2 twin of the odd bond pins that the sign is the *twist*
+    // and not the parity label. The transpose duals both bond legs, and the
+    // traced channel is twisted only where its leg is not dual, so the same
+    // tensor traces without the fermionic sign once transposed — which kills a
+    // coefficient that reads the sector alone, or swaps the dual and non-dual
+    // arms.
     let _guard = cache_lock();
     let runtime = runtime();
 
@@ -6743,7 +6435,7 @@ fn compact_trace_boundary_geometries_keep_their_existing_routes() {
     // `trace_pairs` tests above, which this issue must keep green.
     let _guard = cache_lock();
     let runtime = runtime();
-    let (_, s) = z2_bond_pair(&runtime);
+    let s = z2_bond(&runtime);
 
     let untouched: TensorMap<tenet::core::Z2FusionRule, f64> = s.trace_pairs(&[]).unwrap();
     assert_eq!(untouched.data(), s.data());
