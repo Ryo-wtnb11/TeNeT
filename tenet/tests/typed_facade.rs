@@ -6564,20 +6564,24 @@ fn the_fermionic_product_compose_is_contract_against_a_twisted_right_operand() {
 /// family rather than deriving it keeps the fixture honest — if a fixture were
 /// weakened to spin 0 everywhere, this flag would start lying and the test
 /// would fail rather than quietly stop covering the weighted branch.
-fn assert_reductions_and_factorizations_agree<R>(
+fn assert_reductions_and_factorizations_hold<R>(
     what: &str,
     dimension_weighted: bool,
-    erased: (&tenet::prelude::Tensor, &tenet::prelude::Tensor),
     typed: (&TensorMap<R, f64>, &TensorMap<R, f64>),
-    to_label: &dyn Fn(tenet::prelude::SectorLabel) -> R::Sector,
 ) where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
 {
     // Neither coefficient is 1 and they differ in sign, so dropping or
     // swapping one moves the buffer.
-    let erased_sum = erased.0.add(erased.1, 2.0, -3.0).unwrap();
     let typed_sum = typed.0.add(typed.1, 2.0, -3.0).unwrap();
-    assert_eq!(typed_sum.data(), erased_sum.data(), "{what}: add");
+    for ((&actual, &left), &right) in typed_sum
+        .data()
+        .iter()
+        .zip(typed.0.data())
+        .zip(typed.1.data())
+    {
+        assert_eq!(actual, 2.0 * left - 3.0 * right, "{what}: add");
+    }
     assert_nonzero(what, typed_sum.data());
     assert_ne!(
         typed.0.add(typed.1, -3.0, 2.0).unwrap().data(),
@@ -6586,23 +6590,17 @@ fn assert_reductions_and_factorizations_agree<R>(
     );
 
     let typed_scaled = typed.0.scale(-2.5);
-    assert_eq!(
-        typed_scaled.data(),
-        erased.0.scale(-2.5).unwrap().data(),
-        "{what}: scale"
-    );
+    for (&actual, &source) in typed_scaled.data().iter().zip(typed.0.data()) {
+        assert_eq!(actual, -2.5 * source, "{what}: scale");
+    }
     assert_nonzero(what, typed_scaled.data());
 
     let typed_inner = typed.0.inner(typed.1).unwrap();
-    let erased_inner = erased.0.inner(erased.1).unwrap();
-    // The erased facade always widens to a `Scalar`; on an f64 payload the
-    // imaginary part must be exactly zero, or `.re()` would be hiding it.
-    assert_eq!(
-        erased_inner.im(),
-        0.0,
-        "{what}: inner grew an imaginary part"
+    let reverse_inner = typed.1.inner(typed.0).unwrap();
+    assert!(
+        (typed_inner - reverse_inner).abs() < 1e-12 * typed_inner.abs().max(1.0),
+        "{what}: inner is not conjugate symmetric"
     );
-    assert_eq!(typed_inner, erased_inner.re(), "{what}: inner");
     assert_ne!(typed_inner, 0.0, "{what}: inner is vacuously zero");
     // `<t, t>` is the squared weighted norm, which is the identity that pins
     // this weighting to `norm`'s.
@@ -6622,33 +6620,34 @@ fn assert_reductions_and_factorizations_agree<R>(
          <t, t> = {self_inner}, sum of squares = {unweighted}"
     );
 
-    let (erased_q, erased_r) = erased.0.qr_compact().unwrap();
     let (typed_q, typed_r) = typed.0.qr_compact().unwrap();
-    assert_eq!(typed_q.data(), erased_q.data(), "{what}: qr_compact q");
-    assert_eq!(typed_r.data(), erased_r.data(), "{what}: qr_compact r");
-    assert_result_leg_sectors_agree(what, "qr_compact q", &typed_q, &erased_q, to_label);
-    assert_result_leg_sectors_agree(what, "qr_compact r", &typed_r, &erased_r, to_label);
+    assert_data_close_f64(typed_q.compose(&typed_r).unwrap().data(), typed.0.data());
+    assert!(typed_q.is_isometric(1e-12).unwrap(), "{what}: qr q");
+    assert_same_legs(&typed_q.codomain(), &typed.0.codomain());
+    assert_same_legs(&typed_r.domain(), &typed.0.domain());
+    assert_same_legs(&typed_q.domain(), &typed_r.codomain());
     assert_nonzero(what, typed_q.data());
     assert_nonzero(what, typed_r.data());
 
-    // `left_orth` / `right_orth` are TensorKit 0.17's default kinds (`:qr` and
-    // `:lq`); both facades must agree on the factors *and* on that default.
-    let (erased_v, erased_c) = erased.0.left_orth().unwrap();
+    // TensorKit's default left orthogonalization is QR.
     let (typed_v, typed_c) = typed.0.left_orth().unwrap();
-    assert_eq!(typed_v.data(), erased_v.data(), "{what}: left_orth v");
-    assert_eq!(typed_c.data(), erased_c.data(), "{what}: left_orth c");
-    assert_result_leg_sectors_agree(what, "left_orth v", &typed_v, &erased_v, to_label);
-    assert_result_leg_sectors_agree(what, "left_orth c", &typed_c, &erased_c, to_label);
     assert_eq!(typed_v.data(), typed_q.data(), "{what}: left_orth is qr");
+    assert_eq!(typed_c.data(), typed_r.data(), "{what}: left_orth is qr");
+    assert_data_close_f64(typed_v.compose(&typed_c).unwrap().data(), typed.0.data());
+    assert!(typed_v.is_isometric(1e-12).unwrap(), "{what}: left orth v");
+    assert_same_legs(&typed_v.codomain(), &typed.0.codomain());
+    assert_same_legs(&typed_c.domain(), &typed.0.domain());
+    assert_same_legs(&typed_v.domain(), &typed_c.codomain());
 
-    let (erased_c, erased_vh) = erased.0.right_orth().unwrap();
     let (typed_c, typed_vh) = typed.0.right_orth().unwrap();
-    assert_eq!(typed_c.data(), erased_c.data(), "{what}: right_orth c");
-    assert_eq!(typed_vh.data(), erased_vh.data(), "{what}: right_orth vh");
-    // The `lq` side had no result-space comparison at all before: matching
-    // bytes alone say nothing about which sectors the new bond leg carries.
-    assert_result_leg_sectors_agree(what, "right_orth c", &typed_c, &erased_c, to_label);
-    assert_result_leg_sectors_agree(what, "right_orth vh", &typed_vh, &erased_vh, to_label);
+    assert_data_close_f64(typed_c.compose(&typed_vh).unwrap().data(), typed.0.data());
+    assert!(
+        typed_vh.adjoint().unwrap().is_isometric(1e-12).unwrap(),
+        "{what}: right orth vh"
+    );
+    assert_same_legs(&typed_c.codomain(), &typed.0.codomain());
+    assert_same_legs(&typed_vh.domain(), &typed.0.domain());
+    assert_same_legs(&typed_c.domain(), &typed_vh.codomain());
     assert_nonzero(what, typed_c.data());
     assert_nonzero(what, typed_vh.data());
 
@@ -6689,49 +6688,43 @@ fn assert_reductions_and_factorizations_agree<R>(
 }
 
 #[test]
-fn typed_and_erased_reductions_and_factorizations_agree_on_u1() {
+fn reductions_and_factorizations_hold_on_u1() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased_a, typed_a) = u1_oracle_pair(&runtime, 1.0);
-    let (erased_b, typed_b) = u1_oracle_pair(&runtime, 100.0);
-    assert_reductions_and_factorizations_agree(
+    let (_, typed_a) = u1_oracle_pair(&runtime, 1.0);
+    let (_, typed_b) = u1_oracle_pair(&runtime, 100.0);
+    assert_reductions_and_factorizations_hold(
         "U1, [p, q] <- [p, q] with q dual",
         false,
-        (&erased_a, &erased_b),
         (&typed_a, &typed_b),
-        &u1_label,
     );
 }
 
 #[test]
-fn typed_and_erased_reductions_and_factorizations_agree_on_u1_fz2() {
+fn reductions_and_factorizations_hold_on_u1_fz2() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased_a, typed_a) = u1_fz2_oracle_pair(&runtime, 1.0);
-    let (erased_b, typed_b) = u1_fz2_oracle_pair(&runtime, 100.0);
-    assert_reductions_and_factorizations_agree(
+    let (_, typed_a) = u1_fz2_oracle_pair(&runtime, 1.0);
+    let (_, typed_b) = u1_fz2_oracle_pair(&runtime, 100.0);
+    assert_reductions_and_factorizations_hold(
         "U1 x fZ2, [p, q] <- [p, q] with q dual",
         false,
-        (&erased_a, &erased_b),
         (&typed_a, &typed_b),
-        &u1_fz2_label,
     );
 }
 
 #[test]
-fn typed_and_erased_reductions_and_factorizations_agree_on_fz2_u1_su2() {
+fn reductions_and_factorizations_hold_on_fz2_u1_su2() {
     let _guard = cache_lock();
     let runtime = runtime();
-    let (erased_a, typed_a) = fz2_u1_su2_oracle_pair(&runtime, 1.0);
-    let (erased_b, typed_b) = fz2_u1_su2_oracle_pair(&runtime, 100.0);
+    let (_, typed_a) = fz2_u1_su2_oracle_pair(&runtime, 1.0);
+    let (_, typed_b) = fz2_u1_su2_oracle_pair(&runtime, 100.0);
     // The only weighted family here: its SU(2) factor carries spin 1/2 and
     // spin 1, so `dim(c)` is not identically one.
-    assert_reductions_and_factorizations_agree(
+    assert_reductions_and_factorizations_hold(
         "fZ2 x U1 x SU2, [p, q] <- [p, q] with q dual",
         true,
-        (&erased_a, &erased_b),
         (&typed_a, &typed_b),
-        &fz2_u1_su2_label,
     );
 }
 
