@@ -5014,6 +5014,80 @@ const DIAGONAL_CONTRACT_CASES: &[(&str, bool, &[usize], &[usize], &[usize])] = &
 ];
 
 #[test]
+fn diagonal_contract_preserves_left_provider_authority_on_every_compact_arm() {
+    let _guard = cache_lock();
+    let runtime = runtime();
+
+    macro_rules! exercise {
+        ($name:literal, $rule:expr, $sectors:expr) => {{
+            let left_leg = GradedSpace::try_new(Arc::new($rule), $sectors, false).unwrap();
+            let right_leg = GradedSpace::try_new(Arc::new($rule), $sectors, false).unwrap();
+            let left = TensorMap::<_, f64>::id(&runtime, [&left_leg])
+                .unwrap()
+                .scale(2.0);
+            let right = TensorMap::<_, f64>::id(&runtime, [&right_leg])
+                .unwrap()
+                .scale(3.0);
+            let left_d = left.svd_compact().unwrap().1;
+            let right_d = right.svd_compact().unwrap().1;
+            assert!(!std::ptr::eq(left.provider(), right.provider()));
+
+            let left_dense = forced_dense(&left_d);
+            let right_dense = forced_dense(&right_d);
+
+            let actual = [
+                left.contract(&right_d, &[1], &[0], &[0, 1]).unwrap(),
+                right_d.contract(&left, &[1], &[0], &[0, 1]).unwrap(),
+                right_d.contract(&left_d, &[1], &[0], &[0, 1]).unwrap(),
+            ];
+            let expected = [
+                left.contract(&right_dense, &[1], &[0], &[0, 1]).unwrap(),
+                right_dense.contract(&left, &[1], &[0], &[0, 1]).unwrap(),
+                right_dense
+                    .contract(&left_dense, &[1], &[0], &[0, 1])
+                    .unwrap(),
+            ];
+            let providers = [left.provider(), right_d.provider(), right_d.provider()];
+
+            for (index, arm) in ["t*D", "D*t", "D*D"].into_iter().enumerate() {
+                let (actual, expected) = (&actual[index], &expected[index]);
+                assert_same_legs(&actual.codomain(), &expected.codomain());
+                assert_same_legs(&actual.domain(), &expected.domain());
+                assert_eq!(actual.data(), expected.data(), "{} {arm} values", $name);
+                assert!(
+                    std::ptr::eq(actual.provider(), providers[index]),
+                    "{} {arm} lost left authority",
+                    $name
+                );
+                assert_eq!(
+                    actual.diagonal_spectrum().unwrap().is_some(),
+                    index == 2,
+                    "{} {arm} storage",
+                    $name
+                );
+            }
+        }};
+    }
+
+    exercise!(
+        "Z2",
+        tenet::core::Z2FusionRule,
+        [
+            (tenet::core::Z2Irrep::EVEN, 2),
+            (tenet::core::Z2Irrep::ODD, 1),
+        ]
+    );
+    exercise!(
+        "U1",
+        tenet::core::U1FusionRule,
+        [
+            (tenet::core::U1Irrep::new(0), 2),
+            (tenet::core::U1Irrep::new(1), 1),
+        ]
+    );
+}
+
+#[test]
 fn typed_and_erased_diagonal_contract_agree_byte_for_byte() {
     // What: every axis pattern of the compact diagonal arm is the erased
     // facade's `contract_ordered` byte for byte — the erased side has taken its
@@ -5365,29 +5439,25 @@ fn the_diagonal_contract_arm_is_its_own_dense_route_on_every_axis_pattern() {
 // shared helper the compact arms end up calling.
 // ---------------------------------------------------------------------------
 
-/// A dense twin of a compact bond factor: `repartition(1)` on a `bond <- bond`
-/// space is the identity partition, so it returns the same values on the same
-/// space through the ordinary tree transform, which no compact arm fires on
-/// (its permutations are `[0]` / `[1]`, not the swap `[1]` / `[0]`). The same
-/// idiom the `contract` sweep above uses, for the same reason.
-///
-/// **This entrenches a TensorKit divergence.** TensorKit 0.17
-/// `src/tensors/diagonal.jl:217` returns the identity partition of a
-/// `DiagonalTensorMap` compact and free; we still densify it. Closing that gap
-/// would break every value oracle in this file that goes through
-/// `forced_dense` — they would compare the fast path against itself — as well
-/// as the `repartition(1)` entry of [`rank_one_reorderings`], the `contract`
-/// sweep's `s_dense`, and the probe
-/// `the_geometries_outside_the_proved_swap_keep_the_dense_route` in
-/// `tests/typed_diagonal_allocations.rs`, which asserts the densification
-/// outright. Whoever closes it has to supply a different dense twin first.
+/// A dense twin of a compact bond factor. Adding an exact dense zero keeps the
+/// values and space while forcing the mixed compact/dense arm.
 fn forced_dense<R, D>(compact: &TensorMap<R, D>) -> TensorMap<R, D>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
     D: tenet::prelude::TensorScalar + std::fmt::Debug,
 {
-    let dense = compact.repartition(1).expect("bond repartition is total");
+    let codomain = compact.codomain();
+    let domain = compact.domain();
+    let zeros = TensorMap::zeros(compact.runtime(), &codomain, &domain)
+        .expect("zero tensor on an admitted bond space is total");
+    let dense = compact
+        .add(&zeros, D::from_real(1.0), D::from_real(1.0))
+        .expect("mixed add on one bond space is total");
     assert_eq!(dense.data(), compact.data(), "the dense twin lost values");
+    assert!(
+        dense.diagonal_spectrum().unwrap().is_none(),
+        "the dense twin stayed compact"
+    );
     dense
 }
 

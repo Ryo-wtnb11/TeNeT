@@ -6744,12 +6744,35 @@ where
                 }
                 let mut source = vec![rhs_axis];
                 source.extend((0..other.rank()).filter(|&a| a != rhs_axis));
-                other
+                let Some(completed) = other
                     .scaled_axis(Some(rhs_axis), spectrum)?
                     // One open axis of `self` survives, so the destination's
                     // codomain rank is one — the contraction convention puts
                     // every open axis of the left operand there.
-                    .permuted_to_output(&source, output_axes, 1)
+                    .permuted_to_output(&source, output_axes, 1)?
+                else {
+                    return Ok(None);
+                };
+                // Scaling and permutation deliberately run on `other`; only
+                // after both succeed do we rebind their validated owned-dense
+                // result to the public contract's exact left authority.
+                let TensorMap { repr, .. } = completed;
+                let TypedTensorRepr::Owned(body) = repr else {
+                    return Ok(None);
+                };
+                if !matches!(body.data.as_ref(), TypedData::Dense(_)) {
+                    return Ok(None);
+                }
+                let space = self
+                    .logical_space()
+                    .rebind_validated(&body.space.validated_layout())?;
+                Ok(Some(Self {
+                    runtime: self.runtime.clone(),
+                    repr: owned_repr(TypedTensorBody::with_shared_payload(
+                        space,
+                        Arc::clone(&body.data),
+                    )),
+                }))
             }
             (None, None) => Ok(None),
         }
