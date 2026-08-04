@@ -37,7 +37,20 @@ OP_MATRIX_MIN_MS=20 benchmarks/operation_matrix.sh
 
 `OP_MATRIX_DEGENERACY` selects the common per-sector degeneracy (default 8).
 `OP_MATRIX_GEMM_BACKEND` is `faer` by default. A macOS BLAS control uses the
-same Apple Accelerate provider as the pinned TensorKit environment:
+same Apple Accelerate provider as the pinned TensorKit environment.
+`OP_MATRIX_OPERATION` can select one exact operation name for focused profiling.
+`OP_MATRIX_FORM` similarly selects `owned` or `destination`.
+`OP_MATRIX_PROFILE_PAUSE_MS` pauses after that row's warm phase so an external
+profiler can inspect the live process; it is outside every reported timer.
+
+```sh
+OP_MATRIX_OPERATION=contract_input_swap \
+OP_MATRIX_FORM=destination \
+OP_MATRIX_PROFILE_PAUSE_MS=30000 \
+OP_MATRIX_MIN_MS=0 benchmarks/operation_matrix.sh
+```
+
+The Apple Accelerate control is:
 
 ```sh
 OP_MATRIX_GEMM_BACKEND=blas \

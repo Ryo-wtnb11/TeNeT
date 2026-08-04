@@ -208,6 +208,13 @@ fn bench<T>(
         warm_before,
         warm_after,
     );
+    if let Ok(milliseconds) = std::env::var("OP_MATRIX_PROFILE_PAUSE_MS") {
+        std::thread::sleep(Duration::from_millis(
+            milliseconds
+                .parse()
+                .expect("OP_MATRIX_PROFILE_PAUSE_MS must be an integer"),
+        ));
+    }
     Ok(cold_output)
 }
 
@@ -227,67 +234,86 @@ fn benchmark_runtime() -> Result<Runtime, Error> {
         .build()
 }
 
+fn operation_enabled(operation: &str) -> bool {
+    std::env::var("OP_MATRIX_OPERATION").map_or(true, |selected| selected == operation)
+}
+
+fn form_enabled(form: &str) -> bool {
+    std::env::var("OP_MATRIX_FORM").map_or(true, |selected| selected == form)
+}
+
 macro_rules! run_provider {
     ($symmetry:literal, $rule:ty, $space:expr, $min_time:expr) => {{
         let space = $space;
-        for form in ["owned", "destination"] {
-            let runtime = benchmark_runtime()?;
-            let source =
-                TensorMap::<$rule, f64>::rand_with_seed(&runtime, [&space, &space], [&space], 724)?;
-            if form == "owned" {
-                let cold = bench(
+        if operation_enabled("permute") {
+            for form in ["owned", "destination"] {
+                if !form_enabled(form) {
+                    continue;
+                }
+                let runtime = benchmark_runtime()?;
+                let source = TensorMap::<$rule, f64>::rand_with_seed(
                     &runtime,
-                    $symmetry,
-                    "permute",
-                    form,
-                    "cold",
-                    "warm",
-                    $min_time,
-                    || source.permute(&[1], &[2, 0]),
+                    [&space, &space],
+                    [&space],
+                    724,
                 )?;
-                assert!(cold.norm()?.is_finite());
-            } else {
-                let expected = source.permute(&[1], &[2, 0])?;
-                let mut destination = expected.zeros_like();
-                bench(
-                    &runtime,
-                    $symmetry,
-                    "permute",
-                    form,
-                    "first_after_setup",
-                    "warm_after_setup",
-                    $min_time,
-                    || source.permute_overwrite_into(&mut destination, &[1], &[2, 0], 1.0),
-                )?;
-                assert_eq!(destination.data(), expected.data());
+                if form == "owned" {
+                    let cold = bench(
+                        &runtime,
+                        $symmetry,
+                        "permute",
+                        form,
+                        "cold",
+                        "warm",
+                        $min_time,
+                        || source.permute(&[1], &[2, 0]),
+                    )?;
+                    assert!(cold.norm()?.is_finite());
+                } else {
+                    let expected = source.permute(&[1], &[2, 0])?;
+                    let mut destination = expected.zeros_like();
+                    bench(
+                        &runtime,
+                        $symmetry,
+                        "permute",
+                        form,
+                        "first_after_setup",
+                        "warm_after_setup",
+                        $min_time,
+                        || source.permute_overwrite_into(&mut destination, &[1], &[2, 0], 1.0),
+                    )?;
+                    assert_eq!(destination.data(), expected.data());
+                }
             }
         }
 
-        let runtime = benchmark_runtime()?;
-        let lhs = TensorMap::<$rule, f64>::rand_with_seed(
-            &runtime,
-            [&space, &space],
-            [&space, &space],
-            725,
-        )?;
-        let rhs = TensorMap::<$rule, f64>::rand_with_seed(
-            &runtime,
-            [&space, &space],
-            [&space, &space],
-            726,
-        )?;
-        let composed = bench(
-            &runtime,
-            $symmetry,
-            "compose",
-            "owned",
-            "cold",
-            "warm",
-            $min_time,
-            || lhs.compose(&rhs),
-        )?;
-        let contracted = lhs.contract(&rhs, &[2, 3], &[0, 1], &[0, 1, 2, 3])?;
-        assert_eq!(composed.data(), contracted.data());
+        if operation_enabled("compose") && form_enabled("owned") {
+            let runtime = benchmark_runtime()?;
+            let lhs = TensorMap::<$rule, f64>::rand_with_seed(
+                &runtime,
+                [&space, &space],
+                [&space, &space],
+                725,
+            )?;
+            let rhs = TensorMap::<$rule, f64>::rand_with_seed(
+                &runtime,
+                [&space, &space],
+                [&space, &space],
+                726,
+            )?;
+            let composed = bench(
+                &runtime,
+                $symmetry,
+                "compose",
+                "owned",
+                "cold",
+                "warm",
+                $min_time,
+                || lhs.compose(&rhs),
+            )?;
+            let contracted = lhs.contract(&rhs, &[2, 3], &[0, 1], &[0, 1, 2, 3])?;
+            assert_eq!(composed.data(), contracted.data());
+        }
 
         for (operation, lhs_axes, rhs_axes, output_axes) in [
             (
@@ -309,7 +335,13 @@ macro_rules! run_provider {
                 &[1, 0, 2, 3][..],
             ),
         ] {
+            if !operation_enabled(operation) {
+                continue;
+            }
             for form in ["owned", "destination"] {
+                if !form_enabled(form) {
+                    continue;
+                }
                 let runtime = benchmark_runtime()?;
                 let lhs = TensorMap::<$rule, f64>::rand_with_seed(
                     &runtime,
@@ -365,6 +397,27 @@ macro_rules! run_provider {
 }
 
 fn main() -> Result<(), Error> {
+    if let Ok(operation) = std::env::var("OP_MATRIX_OPERATION") {
+        if !matches!(
+            operation.as_str(),
+            "permute"
+                | "compose"
+                | "contract_identity"
+                | "contract_input_swap"
+                | "contract_input_output_swap"
+        ) {
+            return Err(Error::InvalidArgument(format!(
+                "unknown OP_MATRIX_OPERATION `{operation}`"
+            )));
+        }
+    }
+    if let Ok(form) = std::env::var("OP_MATRIX_FORM") {
+        if !matches!(form.as_str(), "owned" | "destination") {
+            return Err(Error::InvalidArgument(format!(
+                "unknown OP_MATRIX_FORM `{form}`"
+            )));
+        }
+    }
     let min_ms = std::env::var("OP_MATRIX_MIN_MS")
         .ok()
         .map(|value| value.parse().expect("OP_MATRIX_MIN_MS must be an integer"))
