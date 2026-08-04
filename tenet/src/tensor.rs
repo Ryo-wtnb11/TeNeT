@@ -863,7 +863,6 @@ struct PreparedContractOverwrite {
     rhs_space: Arc<UserBoundSpace>,
     lhs_axes: Vec<usize>,
     rhs_axes: Vec<usize>,
-    output_axes: Vec<usize>,
     expected: Arc<UserBoundSpace>,
 }
 
@@ -3015,97 +3014,6 @@ impl UserBoundSpace {
             (Self::FZ2U1SU2(lhs), Self::FZ2U1SU2(rhs)) => {
                 contract!(lhs, rhs, FZ2U1SU2, contracted_multiplicity_free)
             }
-            _ => Err(Error::RuleMismatch),
-        }
-    }
-
-    fn contracted_with_output_order(
-        &self,
-        rhs: &Self,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_order: OutputAxisOrder<'_>,
-    ) -> Result<Self, Error> {
-        let OutputAxisOrder::Axes(output_axes) = output_order else {
-            return self.contracted(rhs, lhs_axes, rhs_axes);
-        };
-
-        let output_rank = match self
-            .raw()
-            .rank()
-            .checked_sub(lhs_axes.len())
-            .and_then(|lhs_open| {
-                rhs.raw()
-                    .rank()
-                    .checked_sub(rhs_axes.len())
-                    .and_then(|rhs_open| lhs_open.checked_add(rhs_open))
-            }) {
-            Some(rank) => rank,
-            None => {
-                self.validate_contracted_homspace(rhs, lhs_axes, rhs_axes)?;
-                return Err(Error::InvalidArgument(
-                    "contracted axis count exceeds tensor rank".to_string(),
-                ));
-            }
-        };
-        if let Err(output_error) = validate_axis_permutation(output_axes, output_rank) {
-            // Preserve historical contraction-before-pAB error precedence
-            // without building the default coupled layout. Valid pAB skips
-            // this cold check and reaches the cache lookup immediately.
-            self.validate_contracted_homspace(rhs, lhs_axes, rhs_axes)?;
-            return Err(output_error);
-        }
-        macro_rules! contract {
-            ($lhs:expr, $rhs:expr, $variant:ident) => {
-                Ok(UserBoundSpace::$variant(
-                    BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
-                        $lhs,
-                        $rhs,
-                        lhs_axes,
-                        rhs_axes,
-                        OutputAxisOrder::from_axes(output_axes),
-                    )?,
-                ))
-            };
-        }
-        match (self, rhs) {
-            (Self::U1(lhs), Self::U1(rhs)) => contract!(lhs, rhs, U1),
-            (Self::CU1(lhs), Self::CU1(rhs)) => contract!(lhs, rhs, CU1),
-            (Self::Z2(lhs), Self::Z2(rhs)) => contract!(lhs, rhs, Z2),
-            (Self::ZN(lhs), Self::ZN(rhs)) => contract!(lhs, rhs, ZN),
-            (Self::FZ2(lhs), Self::FZ2(rhs)) => contract!(lhs, rhs, FZ2),
-            (Self::SU2(lhs), Self::SU2(rhs)) => contract!(lhs, rhs, SU2),
-            (Self::U1FZ2(lhs), Self::U1FZ2(rhs)) => contract!(lhs, rhs, U1FZ2),
-            (Self::FZ2U1SU2(lhs), Self::FZ2U1SU2(rhs)) => {
-                contract!(lhs, rhs, FZ2U1SU2)
-            }
-            _ => Err(Error::RuleMismatch),
-        }
-    }
-
-    fn validate_contracted_homspace(
-        &self,
-        rhs: &Self,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-    ) -> Result<(), Error> {
-        macro_rules! validate {
-            ($lhs:expr, $rhs:expr) => {
-                BoundDynamicFusionMapSpace::validate_contracted_homspace_multiplicity_free(
-                    $lhs, $rhs, lhs_axes, rhs_axes,
-                )
-                .map_err(Into::into)
-            };
-        }
-        match (self, rhs) {
-            (Self::U1(lhs), Self::U1(rhs)) => validate!(lhs, rhs),
-            (Self::CU1(lhs), Self::CU1(rhs)) => validate!(lhs, rhs),
-            (Self::Z2(lhs), Self::Z2(rhs)) => validate!(lhs, rhs),
-            (Self::ZN(lhs), Self::ZN(rhs)) => validate!(lhs, rhs),
-            (Self::FZ2(lhs), Self::FZ2(rhs)) => validate!(lhs, rhs),
-            (Self::SU2(lhs), Self::SU2(rhs)) => validate!(lhs, rhs),
-            (Self::U1FZ2(lhs), Self::U1FZ2(rhs)) => validate!(lhs, rhs),
-            (Self::FZ2U1SU2(lhs), Self::FZ2U1SU2(rhs)) => validate!(lhs, rhs),
             _ => Err(Error::RuleMismatch),
         }
     }
@@ -9245,60 +9153,6 @@ impl TensorExecutionContext {
         rhs_axes: &[usize],
         alpha: Scalar,
     ) -> Result<OverwriteOutcome, Error> {
-        self.try_contract_overwrite_with_order(
-            cache,
-            dst,
-            lhs,
-            rhs,
-            lhs_axes,
-            rhs_axes,
-            OutputAxisOrder::identity(),
-            &[],
-            alpha,
-        )
-    }
-
-    /// Ordered counterpart used by compiled network replay. `output_axes`
-    /// has the same pAB meaning as [`Tensor::contract_ordered`].
-    #[doc(hidden)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn try_contract_ordered_overwrite_into(
-        &mut self,
-        cache: &mut ContractOverwriteCache,
-        dst: &mut Tensor,
-        lhs: &Tensor,
-        rhs: &Tensor,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_axes: &[usize],
-        alpha: Scalar,
-    ) -> Result<OverwriteOutcome, Error> {
-        self.try_contract_overwrite_with_order(
-            cache,
-            dst,
-            lhs,
-            rhs,
-            lhs_axes,
-            rhs_axes,
-            OutputAxisOrder::from_axes(output_axes),
-            output_axes,
-            alpha,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn try_contract_overwrite_with_order(
-        &mut self,
-        cache: &mut ContractOverwriteCache,
-        dst: &mut Tensor,
-        lhs: &Tensor,
-        rhs: &Tensor,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-        output_order: OutputAxisOrder<'_>,
-        cache_output_axes: &[usize],
-        alpha: Scalar,
-    ) -> Result<OverwriteOutcome, Error> {
         if !self.accepts_runtime(lhs)
             || !self.accepts_runtime(rhs)
             || !self.accepts_runtime(dst)
@@ -9338,21 +9192,18 @@ impl TensorExecutionContext {
                 &mut cache.structural_comparisons,
             ) && prepared.lhs_axes == lhs_axes
                 && prepared.rhs_axes == rhs_axes
-                && prepared.output_axes == cache_output_axes
         });
         if !cache_matches {
-            let expected = lhs.ordinary_body().space.contracted_with_output_order(
+            let expected = lhs.ordinary_body().space.contracted(
                 &rhs.ordinary_body().space,
                 lhs_axes,
                 rhs_axes,
-                output_order,
             )?;
             cache.prepared = Some(PreparedContractOverwrite {
                 lhs_space: Arc::clone(&lhs.ordinary_body().space),
                 rhs_space: Arc::clone(&rhs.ordinary_body().space),
                 lhs_axes: lhs_axes.to_vec(),
                 rhs_axes: rhs_axes.to_vec(),
-                output_axes: cache_output_axes.to_vec(),
                 expected: Arc::new(expected),
             });
             cache.preparations += 1;
@@ -9388,7 +9239,7 @@ impl TensorExecutionContext {
             rhs,
             lhs_axes,
             rhs_axes,
-            output_order,
+            OutputAxisOrder::identity(),
             alpha,
             prepared.expected.as_ref(),
         )?;
@@ -14296,14 +14147,7 @@ mod adjoint_parent_view_tests {
             let eager = parent.adjoint().unwrap().materialized_tensor().unwrap();
             let output_axes = [2, 0, 3, 1];
             let expected = eager
-                .ordinary_body()
-                .space
-                .contracted_with_output_order(
-                    rhs.ordinary_body().space.as_ref(),
-                    &[2],
-                    &[0],
-                    OutputAxisOrder::from_axes(&output_axes),
-                )
+                .contract_ordered(&rhs, &[2], &[0], &output_axes)
                 .unwrap();
 
             SELECTED_RESULT_LAYOUT_BUILDS.with(|observation| observation.set(Some(0)));
@@ -14315,7 +14159,7 @@ mod adjoint_parent_view_tests {
                     OutputAxisOrder::from_axes(&output_axes),
                 )
                 .unwrap();
-            assert_eq!(actual, expected);
+            assert_eq!(&actual, expected.ordinary_body().space.as_ref());
             assert_eq!(lazy.adjoint_body_builds(), 0);
             assert_eq!(
                 SELECTED_RESULT_LAYOUT_BUILDS.with(|observation| observation.replace(None)),
@@ -14340,7 +14184,10 @@ mod adjoint_parent_view_tests {
             let output = lazy
                 .contract_ordered(&rhs, &[2], &[0], &output_axes)
                 .unwrap();
-            assert_eq!(output.ordinary_body().space.as_ref(), &expected);
+            assert_eq!(
+                output.ordinary_body().space.as_ref(),
+                expected.ordinary_body().space.as_ref()
+            );
         }
     }
 
