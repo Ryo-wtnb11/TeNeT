@@ -253,12 +253,12 @@ pub use tenet_matrixalgebra::{Truncation, TruncationSpace};
 use tenet_matrixalgebra::{BoundDynFactor, FactorScalar};
 
 use crate::runtime::{Ctx, Ctxs};
-use crate::tensor::{absorb_mapped, cat_homspace, compile_cat_plan, CatOperandLayout, CatSide};
 #[cfg(feature = "cuda")]
 use crate::tensor::{
     assemble_left_factor, assemble_right_factor, cuda_is_hermitian_region, cuda_qr_region,
     cuda_svd_region, decide_kept, fill_diagonal_values, typed_cuda_eigh_region, upload_selector,
 };
+use crate::tensor::{cat_homspace, compile_cat_plan, CatOperandLayout, CatSide};
 pub use crate::tensor_core::CheckedGenericTensorProductError;
 use crate::tensor_core::{
     internal_layout_error, pow_by_squaring, tensorcompose_owned_multiplicity_free,
@@ -560,6 +560,189 @@ where
         total += weight_of(region.coupled()) * partial;
     }
     Ok(total.powf(p.recip()))
+}
+
+pub(crate) fn absorb_mapped<D, S>(
+    destination_structure: &BlockStructure,
+    destination: &mut [D],
+    source_structure: &BlockStructure,
+    source: &[S],
+    mut map: impl FnMut(S) -> Result<D, Error>,
+) -> Result<(), Error>
+where
+    S: Copy,
+{
+    let destination_sector = destination_structure.sector_structure();
+    let source_sector = source_structure.sector_structure();
+    let mut destination_position = 0usize;
+    let mut source_position = 0usize;
+    while destination_position < destination_sector.sorted_indices().len()
+        && source_position < source_sector.sorted_indices().len()
+    {
+        let destination_index = destination_sector.sorted_indices()[destination_position];
+        let source_index = source_sector.sorted_indices()[source_position];
+        let destination_block = destination_structure.block(destination_index)?;
+        let source_block = source_structure.block(source_index)?;
+        match destination_block.key().cmp(source_block.key()) {
+            std::cmp::Ordering::Less => destination_position += 1,
+            std::cmp::Ordering::Greater => source_position += 1,
+            std::cmp::Ordering::Equal => {
+                if !matches!(destination_block.key(), BlockKey::FusionTree(_)) {
+                    return Err(internal_layout_error(
+                        "absorb reached a non-fusion-tree block key",
+                    ));
+                }
+                // Why not construct BlockViews or a minimum-shape vector per
+                // block: the validated layouts already provide every borrowed
+                // stride, and absorb needs only this operation-local walk.
+                copy_absorb_prefix(
+                    destination,
+                    destination_block.shape(),
+                    destination_block.strides(),
+                    destination_block.offset(),
+                    source,
+                    source_block.shape(),
+                    source_block.strides(),
+                    source_block.offset(),
+                    &mut map,
+                )?;
+                destination_position += 1;
+                source_position += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_absorb_prefix<D, S>(
+    destination: &mut [D],
+    destination_shape: &[usize],
+    destination_strides: &[usize],
+    destination_offset: usize,
+    source: &[S],
+    source_shape: &[usize],
+    source_strides: &[usize],
+    source_offset: usize,
+    map: &mut impl FnMut(S) -> Result<D, Error>,
+) -> Result<(), Error>
+where
+    S: Copy,
+{
+    if destination_shape.len() != source_shape.len()
+        || destination_shape.len() != destination_strides.len()
+        || source_shape.len() != source_strides.len()
+    {
+        return Err(internal_layout_error("absorb block ranks differ"));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn walk<D, S>(
+        remaining_axes: usize,
+        destination: &mut [D],
+        destination_shape: &[usize],
+        destination_strides: &[usize],
+        destination_offset: usize,
+        source: &[S],
+        source_shape: &[usize],
+        source_strides: &[usize],
+        source_offset: usize,
+        map: &mut impl FnMut(S) -> Result<D, Error>,
+    ) -> Result<(), Error>
+    where
+        S: Copy,
+    {
+        if remaining_axes == 0 {
+            let value = source
+                .get(source_offset)
+                .copied()
+                .ok_or_else(|| internal_layout_error("absorb source offset out of bounds"))?;
+            let value = map(value)?;
+            *destination.get_mut(destination_offset).ok_or_else(|| {
+                internal_layout_error("absorb destination offset out of bounds")
+            })? = value;
+            return Ok(());
+        }
+
+        let axis = remaining_axes - 1;
+        let extent = destination_shape[axis].min(source_shape[axis]);
+        if remaining_axes == 1 {
+            if destination_strides[axis] == 1 && source_strides[axis] == 1 {
+                let destination_end = destination_offset
+                    .checked_add(extent)
+                    .ok_or_else(|| internal_layout_error("absorb destination offset overflow"))?;
+                let source_end = source_offset
+                    .checked_add(extent)
+                    .ok_or_else(|| internal_layout_error("absorb source offset overflow"))?;
+                let destination = destination
+                    .get_mut(destination_offset..destination_end)
+                    .ok_or_else(|| {
+                        internal_layout_error("absorb destination offset out of bounds")
+                    })?;
+                let source = source
+                    .get(source_offset..source_end)
+                    .ok_or_else(|| internal_layout_error("absorb source offset out of bounds"))?;
+                for (destination, &source) in destination.iter_mut().zip(source) {
+                    *destination = map(source)?;
+                }
+                return Ok(());
+            }
+            for coordinate in 0..extent {
+                let destination_index = coordinate
+                    .checked_mul(destination_strides[axis])
+                    .and_then(|offset| destination_offset.checked_add(offset))
+                    .ok_or_else(|| internal_layout_error("absorb destination offset overflow"))?;
+                let source_index = coordinate
+                    .checked_mul(source_strides[axis])
+                    .and_then(|offset| source_offset.checked_add(offset))
+                    .ok_or_else(|| internal_layout_error("absorb source offset overflow"))?;
+                let value = source
+                    .get(source_index)
+                    .copied()
+                    .ok_or_else(|| internal_layout_error("absorb source offset out of bounds"))?;
+                *destination.get_mut(destination_index).ok_or_else(|| {
+                    internal_layout_error("absorb destination offset out of bounds")
+                })? = map(value)?;
+            }
+            return Ok(());
+        }
+        for coordinate in 0..extent {
+            let destination_offset = coordinate
+                .checked_mul(destination_strides[axis])
+                .and_then(|offset| destination_offset.checked_add(offset))
+                .ok_or_else(|| internal_layout_error("absorb destination offset overflow"))?;
+            let source_offset = coordinate
+                .checked_mul(source_strides[axis])
+                .and_then(|offset| source_offset.checked_add(offset))
+                .ok_or_else(|| internal_layout_error("absorb source offset overflow"))?;
+            walk(
+                axis,
+                destination,
+                destination_shape,
+                destination_strides,
+                destination_offset,
+                source,
+                source_shape,
+                source_strides,
+                source_offset,
+                map,
+            )?;
+        }
+        Ok(())
+    }
+
+    walk(
+        destination_shape.len(),
+        destination,
+        destination_shape,
+        destination_strides,
+        destination_offset,
+        source,
+        source_shape,
+        source_strides,
+        source_offset,
+        map,
+    )
 }
 
 /// How a freshly built tensor is filled.
