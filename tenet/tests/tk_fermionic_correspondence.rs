@@ -1,11 +1,12 @@
 //! Numeric correspondence against TensorKit for fermionic (FZ2) contractions,
 //! including a diagonal `S` from an SVD used in a closed loop with dual legs
 //! (which fires the supertrace twist). The reference numbers come from running
-//! TensorKit 0.16 on identical degeneracy-1 FZ2 maps (see
-//! `scratchpad/tk_fz2_reference.jl`); every value here is a physical, basis-
-//! independent scalar, so a mismatch is a genuine convention divergence — not a
-//! layout/gauge artifact. Guards that TeNeT's fermionic contract, and the
-//! diagonal-`contract` fast path on top of it, agree with TensorKit.
+//! the pinned current TensorKit oracle on identical degeneracy-1 FZ2 maps (see
+//! section 3 of `benchmarks/tensorkit_semantic_oracle.jl`); every value here is
+//! a physical, basis-independent scalar, so a mismatch is a genuine convention
+//! divergence — not a layout/gauge artifact. Guards that TeNeT's fermionic
+//! contract, and the diagonal-`contract` fast path on top of it, agree with
+//! TensorKit.
 
 use std::sync::Arc;
 

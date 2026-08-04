@@ -178,6 +178,30 @@ end
 stream("U1", U1Space(-1 => 2, 0 => 3, 1 => 2))
 stream("SU2", SU2Space(0 => 2, 1 // 2 => 2, 1 => 1))
 
+function fz2_map(V, even, odd)
+    t = zeros(Float64, V ← V)
+    for (c, b) in blocks(t)
+        b[1, 1] = c.isodd ? odd : even
+    end
+    return t
+end
+
+println("-- fZ2 closed loops --")
+Vf = Vect[fZ2](0 => 1, 1 => 1)
+A, B, C = fz2_map(Vf, 1, 4), fz2_map(Vf, 2, 1.5), fz2_map(Vf, 0.5, 2.5)
+D, T = fz2_map(Vf, 2, 3), fz2_map(Vf, 3, 2)
+println("ordinary tr(D) = ", fmt(tr(D)))
+println("twisted tr(D) = ", fmt(tr(twist(D, 1))))
+@tensor loop_ab = A[i; j] * B[j; i]
+@tensor loop_abc = A[i; j] * B[j; k] * C[k; i]
+_, S, _ = svd_compact(T)
+@tensor loop_asb = A[i; j] * S[j; k] * B[k; i]
+@tensor loop_sab = S[i; j] * A[j; k] * B[k; i]
+println("loop A*B = ", fmt(loop_ab))
+println("loop A*B*C = ", fmt(loop_abc))
+println("loop A*S*B = ", fmt(loop_asb))
+println("loop S*A*B = ", fmt(loop_sab))
+
 # ---------------------------------------------------------------------------
 # Section 4: planar repartition fixtures
 # ---------------------------------------------------------------------------
