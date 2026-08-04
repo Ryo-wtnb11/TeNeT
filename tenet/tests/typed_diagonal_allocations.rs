@@ -635,8 +635,8 @@ fn pr3_inspections_allocate_no_payload() {
 #[test]
 fn the_full_bond_trace_reduces_the_spectrum_without_materializing() {
     // What (issue #604): `trace_pairs` over the only pair of a compact bond
-    // factor reduces the stored spectrum in O(Σ_c k_c) — the typed twin of the
-    // erased #585 gate. The warm-up runs on a throwaway twin, never on the
+    // factor reduces the stored spectrum in O(Σ_c k_c), preserving the #585
+    // regression gate. The warm-up runs on a throwaway twin, never on the
     // measured tensor: the pre-#604 route reached `dense_data()`, which fills
     // the *measured* tensor's shared cache, so a same-tensor warm-up would pay
     // for the materialization once and make the densifying route measure

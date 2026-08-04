@@ -7234,8 +7234,8 @@ fn typed_leg_dims_include_quantum_dimensions() {
 #[test]
 fn typed_leg_dims_carry_an_external_provider_with_nontrivial_dimensions() {
     // Gate 2's external-provider leg: `ExternalSu2` reports quantum dimension
-    // 2 for twice-spin 1, so the degeneracy-2 leg weighs 4 — a value the
-    // closed erased rule set cannot host, computed by hand instead.
+    // 2 for twice-spin 1, so the degeneracy-2 leg weighs 4. This pins an
+    // external provider rather than a built-in special case.
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(ExternalSu2);
@@ -7522,7 +7522,7 @@ fn u1_cat_tensor(
 #[test]
 fn typed_cat_preserves_a_dual_changed_leg_and_its_slabs() {
     // What: the typed direct sum preserves the changed leg's duality, sector
-    // union, degeneracies, and lhs-then-rhs slab order without an erased oracle.
+    // union, degeneracies, and lhs-then-rhs slab order directly.
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(tenet::core::FermionParityFusionRule);
@@ -7574,8 +7574,8 @@ fn typed_cat_preserves_a_dual_changed_leg_and_its_slabs() {
 
 #[test]
 fn typed_cat_pins_the_slab_order_by_value() {
-    // What (gate 2): the erased doctest fixtures reproduced typed-side against
-    // hand-computed payloads — adjacent column slabs for catdomain, adjacent
+    // What (gate 2): hand-computed payloads pin adjacent column slabs for
+    // catdomain and adjacent
     // row slabs for catcodomain — so the slab order is pinned by value, not
     // only by structural parity.
     let _guard = cache_lock();
@@ -7676,8 +7676,7 @@ fn typed_absorb_is_total_for_disjoint_zero_extent_and_rank_zero() {
 
 #[test]
 fn typed_cat_and_absorb_validation_and_precedence_are_stable() {
-    // What: each typed operation keeps its own validation classes and order;
-    // no erased fixture participates in this failure oracle.
+    // What: each operation keeps its own validation classes and order.
     let _guard = cache_lock();
     let runtime = runtime();
     let typed_lhs = u1_cat_tensor(&runtime, &[(0, 1), (1, 1)]);
@@ -7785,11 +7784,9 @@ fn typed_cat_and_absorb_validation_and_precedence_are_stable() {
 
 #[test]
 fn typed_cat_and_absorb_reject_a_foreign_rule_identity_first() {
-    // What (gate 4): the rule-identity check is the analogue of the erased
-    // `check_same_execution_world` and fires before any space validation —
+    // What (gate 4): the rule-identity check fires before any space validation:
     // two providers of the same Rust type but different identities cannot be
-    // concatenated or absorbed. `RuleMismatch` is the erased class for the
-    // same failure (there: U(1) versus Z2).
+    // concatenated or absorbed and report `RuleMismatch`.
     let _guard = cache_lock();
     let runtime = runtime();
     let build = |provider: &Arc<ExternalZ3>| {
