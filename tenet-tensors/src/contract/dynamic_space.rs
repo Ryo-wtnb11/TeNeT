@@ -1656,28 +1656,6 @@ where
         Self::from_derived_like(lhs, space)
     }
 
-    /// Validates contraction compatibility without building a coupled result
-    /// layout. Used to retain historical contraction-before-pAB error order.
-    pub fn validate_contracted_homspace_multiplicity_free(
-        lhs: &Self,
-        rhs: &Self,
-        lhs_axes: &[usize],
-        rhs_axes: &[usize],
-    ) -> Result<(), OperationError>
-    where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    {
-        Self::validate_shared_provider(lhs, rhs)?;
-        DynamicFusionMapSpace::validate_contracted_homspace_with_primer(
-            lhs.provider.as_ref(),
-            &lhs.space,
-            &rhs.space,
-            lhs_axes,
-            rhs_axes,
-            lhs.layout_build.legacy_dispatch(),
-        )
-    }
-
     fn validate_shared_provider(lhs: &Self, rhs: &Self) -> Result<(), OperationError> {
         if lhs.provider.rule_identity() != rhs.provider.rule_identity() {
             return Err(OperationError::from_core_preserving_context(
