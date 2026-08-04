@@ -245,7 +245,7 @@ fn form_enabled(form: &str) -> bool {
 macro_rules! run_provider {
     ($symmetry:literal, $rule:ty, $space:expr, $min_time:expr) => {{
         let space = $space;
-        for operation in ["permute", "transpose"] {
+        for operation in ["permute", "transpose", "repartition"] {
             if !operation_enabled(operation) {
                 continue;
             }
@@ -272,6 +272,7 @@ macro_rules! run_provider {
                         || match operation {
                             "permute" => source.permute(&[1], &[2, 0]),
                             "transpose" => source.transpose(),
+                            "repartition" => source.repartition(1),
                             _ => unreachable!("fixed tree-operation table"),
                         },
                     )?;
@@ -280,6 +281,7 @@ macro_rules! run_provider {
                     let expected = match operation {
                         "permute" => source.permute(&[1], &[2, 0])?,
                         "transpose" => source.transpose()?,
+                        "repartition" => source.repartition(1)?,
                         _ => unreachable!("fixed tree-operation table"),
                     };
                     let mut destination = expected.zeros_like();
@@ -296,6 +298,9 @@ macro_rules! run_provider {
                                 source.permute_overwrite_into(&mut destination, &[1], &[2, 0], 1.0)
                             }
                             "transpose" => source.transpose_overwrite_into(&mut destination, 1.0),
+                            "repartition" => {
+                                source.repartition_overwrite_into(&mut destination, 1.0)
+                            }
                             _ => unreachable!("fixed tree-operation table"),
                         },
                     )?;
@@ -419,6 +424,7 @@ fn main() -> Result<(), Error> {
             operation.as_str(),
             "permute"
                 | "transpose"
+                | "repartition"
                 | "compose"
                 | "contract_identity"
                 | "contract_input_swap"
