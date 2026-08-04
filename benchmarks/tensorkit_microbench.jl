@@ -166,6 +166,54 @@ function run_case(symmetry, V)
         @assert trace_error <= 256eps(Float64)
     end
 
+    for (suffix, left, right) in (("", A, B), ("_adjoint", adjoint(A), adjoint(B)))
+        scaled = sample(
+            () -> scale(left, 0.5),
+            symmetry,
+            "scale$suffix",
+            "owned",
+            "process_first_for_row",
+            MIN_MS,
+        )
+        scale_error = abs(norm(scaled) - 0.5norm(left))
+        @assert scale_error <= 256eps(Float64) * max(norm(left), 1)
+
+        α, β = 0.75, -0.25
+        # VectorInterface.add(y, x, α, β) computes β*y + α*x.
+        added = sample(
+            () -> add(left, right, β, α),
+            symmetry,
+            "add$suffix",
+            "owned",
+            "process_first_for_row",
+            MIN_MS,
+        )
+        expected_norm_squared =
+            α^2 * norm(left)^2 + β^2 * norm(right)^2 + 2α * β * inner(left, right)
+        add_error = abs(norm(added)^2 - expected_norm_squared)
+        @assert add_error <= 1024eps(Float64) * max(abs(expected_norm_squared), 1)
+
+        norm_value = sample(
+            () -> norm(left),
+            symmetry,
+            "norm$suffix",
+            "owned",
+            "process_first_for_row",
+            MIN_MS,
+        )
+        @assert isfinite(norm_value)
+
+        inner_value = sample(
+            () -> inner(left, right),
+            symmetry,
+            "inner$suffix",
+            "owned",
+            "process_first_for_row",
+            MIN_MS,
+        )
+        @assert isfinite(inner_value)
+    end
+
     composed = sample(
         () -> A * B,
         symmetry,
