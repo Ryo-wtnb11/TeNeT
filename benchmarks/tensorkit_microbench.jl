@@ -111,6 +111,28 @@ function run_case(symmetry, V)
         norm(actual_transposed - expected_transposed) / max(norm(expected_transposed), eps(Float64))
     @assert transpose_error <= 256eps(Float64)
 
+    expected_repartitioned = sample(
+        () -> repartition(P, 1, 2),
+        symmetry,
+        "repartition",
+        "owned",
+        "process_first_for_row",
+        MIN_MS,
+    )
+    @assert isfinite(norm(expected_repartitioned))
+    repartitioned_destination = similar(expected_repartitioned)
+    actual_repartitioned = sample(
+        () -> repartition!(repartitioned_destination, P),
+        symmetry,
+        "repartition",
+        "destination",
+        "first_after_setup",
+        MIN_MS,
+    )
+    repartition_error = norm(actual_repartitioned - expected_repartitioned) /
+                        max(norm(expected_repartitioned), eps(Float64))
+    @assert repartition_error <= 256eps(Float64)
+
     composed = sample(
         () -> A * B,
         symmetry,
