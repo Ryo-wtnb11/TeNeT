@@ -132,6 +132,8 @@ fill_value(c0, l1, l2, m1, m2, lc, i1, i2, j1, j2) = Float64(
 
 label(c::U1Irrep) = Int(c.charge)
 label(c::SU2Irrep) = Int(2 * c.j)
+label(c::I3) = 100 * Int(c.sectors[1].isodd) + 10 * Int(c.sectors[2].charge) +
+    Int(2 * c.sectors[3].j)
 
 function filled(V, c0)
     t = zeros(Float64, V ⊗ V ← V ⊗ V)
@@ -177,6 +179,7 @@ end
 
 stream("U1", U1Space(-1 => 2, 0 => 3, 1 => 2))
 stream("SU2", SU2Space(0 => 2, 1 // 2 => 2, 1 => 1))
+stream("fZ2xU1xSU2", Vect[I3]((0, 0, 0) => 2, (1, 1, 1 // 2) => 2, (0, 2, 0) => 1))
 
 function fz2_map(V, even, odd)
     t = zeros(Float64, V ← V)

@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use tenet::core::{
     product_sector, FermionParityFusionRule, Fz2SectorLayout, PackedProductCodec,
-    ProductFusionRule, ProductSectorLayout, SU2FusionRule, SU2Irrep, Su2SectorLayout, U1FusionRule,
-    U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep,
+    ProductFusionRule, ProductSector, ProductSectorLayout, SU2FusionRule, SU2Irrep,
+    Su2SectorLayout, U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep,
 };
 use tenet::prelude::{Complex64, Runtime};
 use tenet::typed::{GradedSpace, TensorMap};
@@ -23,6 +23,8 @@ type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
 type Fz2U1Su2Codec = PackedProductCodec<Fz2U1Layout, Su2SectorLayout>;
 type Fz2U1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule, Fz2U1Codec>;
 type Fz2U1Su2Rule = ProductFusionRule<Fz2U1Rule, SU2FusionRule, Fz2U1Su2Codec>;
+type Fz2U1Sector = ProductSector<Z2Irrep, U1Irrep>;
+type Fz2U1Su2Sector = ProductSector<Fz2U1Sector, SU2Irrep>;
 
 fn assert_close(lhs: &[f64], rhs: &[f64], tol: f64) {
     assert_eq!(lhs.len(), rhs.len(), "data lengths differ");
@@ -944,6 +946,85 @@ fn cross_library_invariant_stream_su2_vs_tensorkit() {
         |sector: &SU2Irrep| i64::try_from(sector.twice_spin()).unwrap(),
         &expected,
         35,
+        &svd
+    );
+}
+
+/// Cross-library invariant stream for fZ2 x U(1) x SU(2). Oracle:
+/// `julia benchmarks/tensorkit_semantic_oracle.jl` (section 3).
+/// Run with: `cargo test -p tenet --release --test semantic_suite -- --ignored product_vs`
+#[test]
+#[ignore = "cross-library stream, run explicitly (release recommended)"]
+fn cross_library_invariant_stream_product_vs_tensorkit() {
+    let expected = [
+        ("s1a", 2.041910869749216e2, -8.0),
+        ("s1b", 2.060849339471471e2, 4.9e1),
+        ("s2", 7.029845233004778e3, 1.269e4),
+        ("s3", 2.041910869749217e2, -8.000000000000014),
+        ("s4", 2.048990970819540e5, 1.251150000000001e5),
+        ("s5", 1.041952436534413e4, 4.1694e4),
+        ("s7", 2.049323716485515e5, 1.251110000000001e5),
+        ("s8", 1.392459691750001e10, 1.392459691750001e10),
+    ];
+    let svd = [
+        9.313322524156692e4,
+        8.377972168698783e4,
+        5.801978514614065e4,
+        5.425702935363993e4,
+        3.244521596397725e4,
+        2.349078948391450e4,
+        2.264344851117111e4,
+        2.189538877119227e4,
+        2.159365106169731e4,
+        1.869173451469769e4,
+        1.486434829405537e4,
+        7.22e3,
+        5.912689186545615e3,
+        5.486716759584609e3,
+        4.241123285758052e3,
+        1.977685541462147e3,
+        7.714938309221702e2,
+        7.163293805552347e2,
+        6.015165827414188e2,
+        5.900887872343542e2,
+        2.167139622628681e2,
+    ];
+    let provider = Arc::new(Fz2U1Su2Rule::new(
+        Fz2U1Rule::new(FermionParityFusionRule, U1FusionRule),
+        SU2FusionRule,
+    ));
+    invariant_stream_case!(
+        provider,
+        [
+            (
+                product_sector(
+                    product_sector(Z2Irrep::EVEN, U1Irrep::new(0)),
+                    SU2Irrep::from_twice_spin(0),
+                ),
+                2,
+            ),
+            (
+                product_sector(
+                    product_sector(Z2Irrep::ODD, U1Irrep::new(1)),
+                    SU2Irrep::from_twice_spin(1),
+                ),
+                2,
+            ),
+            (
+                product_sector(
+                    product_sector(Z2Irrep::EVEN, U1Irrep::new(2)),
+                    SU2Irrep::from_twice_spin(0),
+                ),
+                1,
+            ),
+        ],
+        |sector: &Fz2U1Su2Sector| {
+            100 * i64::from(sector.left().left().parity())
+                + 10 * i64::from(sector.left().right().charge())
+                + i64::try_from(sector.right().twice_spin()).unwrap()
+        },
+        &expected,
+        29,
         &svd
     );
 }
