@@ -1,4 +1,9 @@
-# TensorKit 0.17 user-API parity
+# TensorKit 0.17 export-name mapping (audit pending)
+
+> **Not a current capability or correctness matrix.** This historical export-name
+> ledger contains stale status rows. Issue #9 is regenerating support from current
+> source, tests, and executable oracles across provider, storage, and device
+> boundaries.
 
 One row per **user-facing** TensorKit 0.17.0 export (from `TensorKit.jl`'s
 `export` lists), mapped to TeNeT's provider-typed user layer
@@ -116,7 +121,8 @@ allow-lists remain available through direct `tenet-tensors` or
 | `rank` (numerical) | design-gated | — | Composes from `svd_vals` + a threshold at the call site. |
 | `cond` | design-gated | — | Composes from `svd_vals` (max/min ratio) at the call site. |
 | `sylvester` | design-gated | — | Sylvester-equation solver; no linear-solver surface on the facade. |
-| `\` / `/` | design-gated | — | Per-block linear solves (`linalg.jl:397-417`), the honest primitive behind environment fitting and seam solves. `pinv` + `compose` is today's worse-conditioned workaround; named methods land with #594. |
+| `\` | has-different-name | `TensorMap::solve` | Typed host left solve. Provider/storage/device coverage remains subject to the #9 operation matrix. |
+| `/` | design-gated | — | Right solve remains separate scope (#635); do not infer it from left solve. |
 | `^` (integer power) | has | `TensorMap::powi` | Power-by-squaring over `compose` / `inv` (`linalg.jl:45-47`). |
 | `DiagonalTensorMap` | has-different-name | compact `TensorMap` storage | No public diagonal type is added. `TensorMap::diagonal` publishes compact storage directly, and `diagonal_spectrum` reads it back without materializing. |
 | `diag` / `diagm` / `isdiag` | has-different-name | `diagonal` / `diagonal_spectrum` / `is_diagonal` | `diagonal` takes one labelled value vector per bond sector. `is_diagonal(0.0)` matches TensorKit exact finite-data `isdiag`; positive tolerances use `max_offdiag <= tol * max(norm_inf, 1)`. |
@@ -167,7 +173,8 @@ Sector and provider types are public parts of `GradedSpace<R>` and
 
 | TK 0.17 | Status | TeNeT | Notes |
 |---|---|---|---|
-| `block` / `blocks` | design-gated | — | Per-coupled-sector reduced-block view; Host `TensorMap::data` exposes the flat block buffer, but not a sector-indexed slice view. |
+| `block` | has | `TensorMap::block` | Borrowed reduced-block view by stored block index. |
+| `blocks` | design-gated | — | No public iterator equivalent is recorded here; provider/storage coverage remains subject to the #9 operation matrix. |
 | `blocksectors` | has-different-name | `block_count` + `block_fusion_trees` | Provider-labelled fusion trees are available per stored block. |
 | `blockdim` / `subblock` / `subblocks` | design-gated | — | Same as `block`. |
 | `scalartype` | N/A | type parameter `D` | Static rather than queried at runtime. |

@@ -1,4 +1,9 @@
-# TensorKit Compatibility TODO
+# Historical TensorKit compatibility design log
+
+> **Historical implementation notes, not a current support matrix.** Several
+> host-only and pre-CUDA statements below have since been superseded. Issue #9
+> owns the current operation/provider/storage/device audit; retain this file only
+> as design history until its durable decisions are extracted into an ADR.
 
 This file records TensorKit ecosystem behavior that TeNeT intentionally mirrors
 or leaves unsupported until the categorical semantics are fixed. These items are

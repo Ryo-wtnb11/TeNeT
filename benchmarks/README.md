@@ -1,4 +1,9 @@
-# TeNeT vs TensorKit contraction microbench
+# Historical TeNeT vs TensorKit contraction microbench
+
+> **Historical measurement, not a current performance baseline.** These results
+> use the revisions recorded below, including TensorKit 0.16.2. Do not use them
+> to describe current TeNeT performance. Issue #9 will replace this entry point
+> with a pinned, correctness-checked current comparison harness.
 
 Same workload on both sides: rank-4 tensors `A, B` in `V ⊗ V ← V ⊗ V`,
 uniform degeneracy `d` per sector, warm structure caches, single-threaded.
