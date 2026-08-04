@@ -23,11 +23,13 @@ entry, and charged-byte fields are printed.
 The destination rows call the stable public `permute_overwrite_into` and
 `contract_overwrite_into` APIs. Exact-layout admission is attached to the
 Runtime tree-transform entry, but it has no public activity counter, so the
-`exact_layout_admission` column is literal `NA`. The 37-column CSV schema omits
-the old erased-only destination preparation/comparison fields. Unsupported
-instrumentation is also printed as `NA`; the harness does not infer
-allocations, scratch, provider queries, dense kernel calls, or transfers from
-elapsed time.
+`exact_layout_admission` column is literal `NA`. The 38-column CSV schema omits
+the old erased-only destination preparation/comparison fields. Caller-thread
+Rust allocation calls and requested bytes are measured directly for each
+phase; divide warm totals by `iterations` for a per-call value. They exclude
+worker-thread and native-BLAS allocation and do not represent frees, live
+bytes, or peak memory. Scratch, provider queries, dense kernel calls, and
+transfers remain `NA` rather than being inferred from elapsed time.
 
 ```sh
 OP_MATRIX_MIN_MS=20 benchmarks/operation_matrix.sh
