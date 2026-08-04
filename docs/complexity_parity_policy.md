@@ -25,7 +25,7 @@ diagonal in *any* multiplication (including a general permuting `@tensor`
 contraction) runs as an `O(rank)` scaling, never a dense `O(rank²)` GEMM, with
 zero lines of TK code dedicated to it.
 
-Rust (and TeNeT's deliberate single-`Tensor` design) has no such automatic
+Rust (and TeNeT's provider-typed `TensorMap` design) has no such automatic
 dispatch. The same complexity must therefore be produced **explicitly**. The
 Rust-idiomatic shape is *not* "reproduce Julia's pervasive free dispatch"
 (a separate `DiagonalTensor` type → combinatorial `impl`s, or a runtime
@@ -48,14 +48,14 @@ Let `d` = per-sector bond degeneracy (the diagonal's essential size, `O(d)`),
 
 That row was a genuine order regression — densifying to `O(d²)` and GEMMing
 `O(d²·n)`, a factor `d` in both FLOPs and transient storage — and it was closed
-as an order-parity obligation rather than a performance nicety: #75 on the erased
-facade, #584 on the provider-typed one. Both scale the *other* operand's
-contracted leg by the spectrum and lay the result out with one `permute`, which
-is where all the recoupling stays. The modest *constant-factor* payoff for SU(2)
+as an order-parity obligation rather than a performance nicety. The current
+provider-typed path from #584 scales the *other* operand's contracted leg by
+the spectrum and lays the result out with one `permute`, which is where all the
+recoupling stays. The modest *constant-factor* payoff for SU(2)
 (where leg-permute cost dominates and is unavoidable, matching TK) was never the
 point: order parity is the obligation; constant-factor wins are separate.
 
-Both fast paths cover the single-axis geometries that are a composition on the
+The fast path covers the single-axis geometries that are a composition on the
 contracted leg, in either order, and *decline* to the dense route otherwise — a
 decline costs the factor `d` back, so reach for `compose` (mul!) when the shape
 allows it, which needs no guard to hit the scaling. The two routes are pinned to

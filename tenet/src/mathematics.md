@@ -271,11 +271,10 @@ under negation; dualization constructs the corresponding dual sector set.
 ## Leg Re-Arrangements
 
 The current user API exposes [`crate::prelude::TensorMap::permute`],
-[`crate::prelude::TensorMap::braid`], [`crate::prelude::TensorMap::transpose`], and
-[`crate::prelude::TensorMap::adjoint`]. TensorKit also has `flip` and `twist`
-operations on fusion-tree legs; TeNeT's public user layer does not expose them
-as separate methods yet, but the mathematics is useful for understanding
-duality changes.
+[`crate::prelude::TensorMap::braid`], [`crate::prelude::TensorMap::transpose`],
+[`crate::prelude::TensorMap::adjoint`], [`crate::prelude::TensorMap::flip`], and
+[`crate::prelude::TensorMap::twist`]. The latter two describe duality changes on
+fusion-tree legs.
 
 Let
 
