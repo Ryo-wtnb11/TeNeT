@@ -1494,17 +1494,6 @@ mod static_operand_sealed {
 /// }
 /// ```
 ///
-/// The legacy rule-erased facade is also outside this typed dispatch surface:
-///
-/// ```compile_fail
-/// use tenet::prelude::Tensor;
-/// use tenet_network::tensor;
-///
-/// fn erased(a: &Tensor, b: &Tensor) {
-///     let _ = tensor!([i; k] = a[i; j] * b[j; k]);
-/// }
-/// ```
-///
 /// Checked Generic providers remain outside this multiplicity-free dispatch
 /// surface:
 ///

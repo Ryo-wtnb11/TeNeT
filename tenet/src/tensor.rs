@@ -673,10 +673,10 @@ pub(crate) fn map_checked_unit_layout_error(error: CheckedFusionSpaceError) -> E
     }
 }
 
-/// The scalar types a [`Tensor`] can store: `f64` and [`Complex64`]. This
-/// trait is **sealed** (its supertrait is crate-private); it exists so
-/// [`Tensor::from_block_fn`] can infer the constructed dtype from the fill
-/// closure's return type.
+/// The scalar types a [`crate::prelude::TensorMap`] can store: `f64` and
+/// [`Complex64`]. This trait is **sealed** (its supertrait is crate-private);
+/// it lets [`crate::prelude::TensorMap::from_block_fn`] infer the dtype from
+/// the fill closure's return type.
 pub trait TensorScalar: UserScalar {}
 
 impl TensorScalar for f64 {}
@@ -2888,25 +2888,6 @@ fn validate_axis_permutation(axes: &[usize], rank: usize) -> Result<(), Error> {
 ///
 /// # Examples
 ///
-/// ```
-/// use tenet::prelude::*;
-///
-/// let rt = Runtime::builder().build()?;
-/// let v = Space::z2([(0, 1), (1, 1)]);
-///
-/// // Same numbers as the tutorial's expert-layer Z2 example.
-/// let a = Tensor::from_block_fn(&rt, [&v], [&v], |key, _| match key {
-///     BlockKey::FusionTree(key) if key.codomain_uncoupled()[0].id() == 0 => 2.0,
-///     _ => 3.0,
-/// })?;
-/// let b = Tensor::from_block_fn(&rt, [&v], [&v], |key, _| match key {
-///     BlockKey::FusionTree(key) if key.codomain_uncoupled()[0].id() == 0 => 5.0,
-///     _ => 7.0,
-/// })?;
-/// let c = a.compose(&b)?;
-/// assert_eq!(c.data(), &[10.0, 21.0]);
-/// # Ok::<(), tenet::prelude::Error>(())
-/// ```
 #[derive(Debug)]
 enum UserBoundSpace {
     U1(BoundDynamicFusionMapSpace<tenet_core::U1FusionRule>),
@@ -3796,20 +3777,6 @@ impl Tensor {
     /// operations in this API are methods; the name and operand order match
     /// TensorKit's free function.
     ///
-    /// ```
-    /// use tenet::prelude::*;
-    ///
-    /// let rt = Runtime::builder().build()?;
-    /// let w = Space::u1([(0, 2)]);
-    /// let v1 = Space::u1([(0, 1)]);
-    /// let v2 = Space::u1([(0, 2)]);
-    /// let a = Tensor::from_block_fn(&rt, [&w], [&v1], |_, i| (i[0] + 1) as f64)?;
-    /// let b = Tensor::from_block_fn(&rt, [&w], [&v2], |_, i| (i[0] + 2 * i[1] + 3) as f64)?;
-    /// let joined = a.catdomain(&b)?;
-    /// assert_eq!(joined.data(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-    /// assert_eq!(joined.domain_spaces()[0].degeneracy(SectorLabel::U1(0)), Some(3));
-    /// # Ok::<(), tenet::prelude::Error>(())
-    /// ```
     pub fn catdomain(&self, other: &Self) -> Result<Self, Error> {
         self.cat(other, CatSide::Domain)
     }
@@ -3824,20 +3791,6 @@ impl Tensor {
     /// operations in this API are methods; the name and operand order match
     /// TensorKit's free function.
     ///
-    /// ```
-    /// use tenet::prelude::*;
-    ///
-    /// let rt = Runtime::builder().build()?;
-    /// let w1 = Space::u1([(0, 1)]);
-    /// let w2 = Space::u1([(0, 2)]);
-    /// let v = Space::u1([(0, 2)]);
-    /// let a = Tensor::from_block_fn(&rt, [&w1], [&v], |_, i| (i[1] + 1) as f64)?;
-    /// let b = Tensor::from_block_fn(&rt, [&w2], [&v], |_, i| (i[0] + 2 * i[1] + 3) as f64)?;
-    /// let joined = a.catcodomain(&b)?;
-    /// assert_eq!(joined.data(), &[1.0, 3.0, 4.0, 2.0, 5.0, 6.0]);
-    /// assert_eq!(joined.codomain_spaces()[0].degeneracy(SectorLabel::U1(0)), Some(3));
-    /// # Ok::<(), tenet::prelude::Error>(())
-    /// ```
     pub fn catcodomain(&self, other: &Self) -> Result<Self, Error> {
         self.cat(other, CatSide::Codomain)
     }
@@ -3960,16 +3913,6 @@ impl Tensor {
     /// The identity endomorphism on `spaces <- spaces` (TensorKit `id(V)`):
     /// every coupled-sector block is the identity matrix.
     ///
-    /// ```
-    /// use tenet::prelude::*;
-    ///
-    /// let rt = Runtime::builder().build()?;
-    /// let v = Space::u1([(0, 2), (1, 1)]);
-    /// let t = Tensor::rand(&rt, Dtype::F64, [&v], [&v])?;
-    /// let id = Tensor::id(&rt, Dtype::F64, [&v])?;
-    /// assert_eq!(id.compose(&t)?.data(), t.data());
-    /// # Ok::<(), tenet::prelude::Error>(())
-    /// ```
     pub fn id<'a, S>(rt: &Runtime, dtype: Dtype, spaces: S) -> Result<Self, Error>
     where
         S: IntoIterator<Item = &'a Space>,
@@ -4192,18 +4135,6 @@ impl Tensor {
     /// finite-torus norm fuser is `isomorphism(fuse(dual(l) ⊗ l) ←
     /// dual(l) ⊗ l)`.
     ///
-    /// ```
-    /// use tenet::prelude::*;
-    ///
-    /// let rt = Runtime::builder().build()?;
-    /// let v = Space::u1([(0, 1), (1, 1)]);
-    /// let fused = v.dual().fuse(&v)?;
-    /// let f = Tensor::isomorphism(&rt, Dtype::F64, [&fused], [&v.dual(), &v])?;
-    /// // Unitary: f† ∘ f is the identity on the product space.
-    /// let roundtrip = f.adjoint()?.compose(&f)?;
-    /// assert_eq!(roundtrip.data(), Tensor::id(&rt, Dtype::F64, [&v.dual(), &v])?.data());
-    /// # Ok::<(), tenet::prelude::Error>(())
-    /// ```
     pub fn isomorphism<'a, C, D>(
         rt: &Runtime,
         dtype: Dtype,
@@ -4254,17 +4185,6 @@ impl Tensor {
     /// isometrically in the codomain (sectorwise `deg_domain <=
     /// deg_codomain`).
     ///
-    /// ```
-    /// use tenet::prelude::*;
-    ///
-    /// let rt = Runtime::builder().build()?;
-    /// let small = Space::su2([(0, 1), (1, 1)]).unwrap();
-    /// let big = Space::su2([(0, 2), (1, 3), (2, 1)]).unwrap();
-    /// let w = Tensor::isometry(&rt, Dtype::F64, [&big], [&small])?;
-    /// let id = Tensor::id(&rt, Dtype::F64, [&small])?;
-    /// assert_eq!(w.adjoint()?.compose(&w)?.data(), id.data());
-    /// # Ok::<(), tenet::prelude::Error>(())
-    /// ```
     pub fn isometry<'a, C, D>(
         rt: &Runtime,
         dtype: Dtype,
@@ -4301,16 +4221,6 @@ impl Tensor {
     /// - [`Error::Core`] when the stored block layout cannot be walked — an
     ///   engine invariant, not a caller mistake.
     ///
-    /// ```
-    /// use tenet::prelude::*;
-    ///
-    /// let rt = Runtime::builder().build()?;
-    /// let v = Space::fz2([(0, 1), (1, 1)]).unwrap();
-    /// let t = Tensor::rand(&rt, Dtype::F64, [&v], [&v])?;
-    /// let twisted = t.twist(&[0])?;
-    /// assert_eq!(twisted.twist(&[0])?.data(), t.data()); // θ² = 1
-    /// # Ok::<(), tenet::prelude::Error>(())
-    /// ```
     pub fn twist(&self, legs: &[usize]) -> Result<Self, Error> {
         #[cfg(test)]
         observe_twist_call();
@@ -4396,22 +4306,6 @@ impl Tensor {
     ///   this" message) when the toggled layout does not match the stored one
     ///   — engine invariants, not caller mistakes.
     ///
-    /// ```
-    /// use tenet::prelude::*;
-    ///
-    /// let rt = Runtime::builder().build()?;
-    /// let v = Space::fz2([(0, 1), (1, 1)]).unwrap();
-    /// let t = Tensor::from_block_fn(&rt, [&v], [&v], |key, _| match key {
-    ///     BlockKey::FusionTree(key) if key.codomain_uncoupled()[0].id() == 0 => 2.0,
-    ///     _ => 3.0,
-    /// })?;
-    /// // TensorKit 0.17: flip(t, 2) on V ← V negates the odd block (θ = −1)
-    /// // and re-orients the domain leg (see the flip oracle test).
-    /// let flipped = t.flip(&[1])?;
-    /// assert_eq!(flipped.data(), &[2.0, -3.0]);
-    /// assert!(!flipped.space(1)?.is_dual()); // was dual: space(t, 1) = dual(v)
-    /// # Ok::<(), tenet::prelude::Error>(())
-    /// ```
     pub fn flip(&self, legs: &[usize]) -> Result<Self, Error> {
         if self.is_adjoint_view() {
             return self.materialized_tensor()?.flip(legs);
@@ -5110,7 +5004,7 @@ impl Tensor {
 
     /// Quantum-dimension-weighted total dimension of every leg, in flat
     /// order (codomain legs first, then domain legs). This is the same
-    /// notion as [`crate::prelude::Space::dim`] per leg; contraction
+    /// notion as [`crate::space::Space::dim`] per leg; contraction
     /// planners use it as a size/FLOP proxy.
     pub fn leg_dims(&self) -> Result<Vec<usize>, Error> {
         let metadata = self.metadata();
@@ -5328,22 +5222,6 @@ impl Tensor {
     /// exactly; for fermionic rules (fZ2 and products containing it) they
     /// can differ by signs. Worked example — the odd sector flips sign:
     ///
-    /// ```
-    /// use tenet::prelude::*;
-    ///
-    /// let rt = Runtime::builder().build()?;
-    /// let v = Space::fz2([(0, 1), (1, 1)]).unwrap();
-    /// // a : v <- v*, b : v* <- v; the composed legs are dual (v*).
-    /// let odd = |key: &BlockKey| matches!(key, BlockKey::FusionTree(k)
-    ///     if k.codomain_uncoupled()[0].id() == 1);
-    /// let a = Tensor::from_block_fn(&rt, [&v], [&v.dual()], |k, _| if odd(k) { 2.0 } else { 5.0 })?;
-    /// let b = Tensor::from_block_fn(&rt, [&v.dual()], [&v], |k, _| if odd(k) { 3.0 } else { 7.0 })?;
-    /// let composed = a.compose(&b)?;                    // mul! semantics: no twist
-    /// let contracted = a.contract(&b, &[1], &[0])?;     // tensorcontract!: twist on v*
-    /// assert_eq!(composed.data()[0], contracted.data()[0]);  // even sector agrees
-    /// assert_eq!(composed.data()[1], -contracted.data()[1]); // odd sector: sign flip
-    /// # Ok::<(), tenet::prelude::Error>(())
-    /// ```
     ///
     /// Rule of thumb: use `compose` when you mean operator/matrix
     /// multiplication of tensor maps (TensorKit `A * B`); use
@@ -7395,15 +7273,6 @@ impl Tensor {
     /// semantics (conjugate-linear in the first argument, quantum-dimension
     /// weighted) are identical.
     ///
-    /// ```
-    /// use tenet::prelude::*;
-    ///
-    /// let rt = Runtime::builder().build()?;
-    /// let v = Space::u1([(0, 2), (1, 1)]);
-    /// let t = Tensor::rand(&rt, Dtype::F64, [&v], [&v])?;
-    /// assert_eq!(t.dot(&t)?.re(), t.inner(&t)?.re());
-    /// # Ok::<(), tenet::prelude::Error>(())
-    /// ```
     pub fn dot(&self, other: &Self) -> Result<Scalar, Error> {
         self.inner(other)
     }
@@ -7419,16 +7288,6 @@ impl Tensor {
     /// divides by zero and yields non-finite entries. Guard the caller if that
     /// input is reachable.
     ///
-    /// ```
-    /// use tenet::prelude::*;
-    ///
-    /// let rt = Runtime::builder().build()?;
-    /// let v = Space::u1([(0, 2), (1, 1)]);
-    /// let t = Tensor::rand(&rt, Dtype::F64, [&v], [&v])?;
-    /// let unit = t.normalize()?;
-    /// assert!((unit.norm()? - 1.0).abs() < 1e-12);
-    /// # Ok::<(), tenet::prelude::Error>(())
-    /// ```
     pub fn normalize(&self) -> Result<Self, Error> {
         self.scale(1.0 / self.norm()?)
     }
@@ -8879,25 +8738,6 @@ impl Tensor {
     /// A dense lazy adjoint builds one operation-local logical payload without
     /// publishing its reusable receiver cache.
     ///
-    /// ```
-    /// use tenet::prelude::*;
-    ///
-    /// let rt = Runtime::builder().build()?;
-    /// let v = Space::u1([(0, 2), (1, 2)]);
-    /// let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v], 7)?;
-    /// let s = t.svd_trunc(&Truncation::Full)?.s;
-    /// let sqrt_s = s.sqrt()?;
-    /// let composed = sqrt_s.compose(&sqrt_s)?;
-    /// let max_err = composed
-    ///     .data()
-    ///     .iter()
-    ///     .zip(s.data())
-    ///     .map(|(a, b)| (a - b).abs())
-    ///     .fold(0.0f64, f64::max);
-    /// assert!(max_err < 1e-12);
-    /// assert!(t.sqrt().is_err()); // not a diagonal bond tensor
-    /// # Ok::<(), tenet::prelude::Error>(())
-    /// ```
     pub fn sqrt(&self) -> Result<Self, Error> {
         if self.is_adjoint_view() {
             return self.materialized_tensor_uncached()?.sqrt();
@@ -9120,27 +8960,6 @@ impl TensorExecutionContext {
     /// (leaving `dst` unchanged) when `dst` cannot be reused in place — the
     /// caller matches on the outcome and falls back to an owned allocation:
     ///
-    /// ```
-    /// use tenet::prelude::*;
-    ///
-    /// let runtime = Runtime::builder().build().unwrap();
-    /// let space = Space::u1([(-1, 2), (0, 3), (1, 2)]);
-    /// let lhs = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 1).unwrap();
-    /// let rhs = Tensor::rand_with_seed(&runtime, Dtype::F64, [&space], [&space], 2).unwrap();
-    /// let owned = lhs.contract(&rhs, &[1], &[0]).unwrap();
-    /// let mut dst = owned.scale(f64::NAN).unwrap();
-    /// let mut context = TensorExecutionContext::default();
-    /// let mut cache = ContractOverwriteCache::default();
-    ///
-    /// let result = match context
-    ///     .try_contract_overwrite_into(&mut cache, &mut dst, &lhs, &rhs, &[1], &[0], Scalar::F64(1.0))
-    ///     .unwrap()
-    /// {
-    ///     OverwriteOutcome::Written => dst,
-    ///     OverwriteOutcome::Incompatible => lhs.contract(&rhs, &[1], &[0]).unwrap(),
-    /// };
-    /// assert_eq!(result.data().len(), owned.data().len());
-    /// ```
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn try_contract_overwrite_into(
@@ -11063,12 +10882,9 @@ impl Tensor {
     }
 }
 
-/// Concise, explicit tensor constructors on the runtime itself: `rt.zeros(…)`
-/// is exactly `Tensor::zeros(&rt, …)`, one per common builder. Use these when
-/// juggling several runtimes (each call names its own); use the argument-free
-/// free functions ([`zeros`], [`rand`], …) when one default runtime suffices.
+/// Legacy erased tensor constructors on the runtime itself.
 impl Runtime {
-    /// [`Tensor::zeros`] on this runtime.
+    /// Constructs a legacy erased zero tensor on this runtime.
     pub fn zeros<'a, C, D>(&self, dtype: Dtype, codomain: C, domain: D) -> Result<Tensor, Error>
     where
         C: IntoIterator<Item = &'a Space>,
@@ -11077,7 +10893,7 @@ impl Runtime {
         Tensor::zeros(self, dtype, codomain, domain)
     }
 
-    /// [`Tensor::rand`] on this runtime.
+    /// Constructs a legacy erased random tensor on this runtime.
     pub fn rand<'a, C, D>(&self, dtype: Dtype, codomain: C, domain: D) -> Result<Tensor, Error>
     where
         C: IntoIterator<Item = &'a Space>,
@@ -11086,7 +10902,7 @@ impl Runtime {
         Tensor::rand(self, dtype, codomain, domain)
     }
 
-    /// [`Tensor::rand_with_seed`] on this runtime.
+    /// Constructs a seeded legacy erased random tensor on this runtime.
     pub fn rand_with_seed<'a, C, D>(
         &self,
         dtype: Dtype,
@@ -11101,7 +10917,7 @@ impl Runtime {
         Tensor::rand_with_seed(self, dtype, codomain, domain, seed)
     }
 
-    /// [`Tensor::id`] on this runtime.
+    /// Constructs a legacy erased identity tensor on this runtime.
     pub fn id<'a, S>(&self, dtype: Dtype, spaces: S) -> Result<Tensor, Error>
     where
         S: IntoIterator<Item = &'a Space>,
