@@ -7,7 +7,8 @@ use tenet_core::{
     CheckedFusionAlgebra, CheckedFusionSpaceError, FusionRule, FusionStyleKind,
     FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
     FusionTreePairOrientation, HostReadableStorage, HostWritableStorage,
-    MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace, SectorLeg, TensorMap, TensorStorage,
+    MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace, PreparedTreePairOperation, SectorLeg,
+    TensorMap, TensorStorage,
 };
 
 use crate::contract::{BoundDynamicFusionMapSpace, DynamicFusionMapSpace};
@@ -1182,44 +1183,52 @@ where
     domain_permutation.extend_from_slice(&axis_plan.trace_rhs_axes);
 
     src.validate_source_keys()?;
+    let mut terms = Vec::new();
+    if rule.fusion_style() == FusionStyleKind::Unique {
+        let (source_codomain_rank, source_domain_rank) = match src.orientation {
+            FusionTreePairOrientation::Direct => (src.storage_nout, src.storage_nin),
+            FusionTreePairOrientation::Adjoint => (src.storage_nin, src.storage_nout),
+        };
+        let prepared = PreparedTreePairOperation::prepare_permute(
+            rule,
+            source_codomain_rank,
+            source_domain_rank,
+            &codomain_permutation,
+            &domain_permutation,
+        )
+        .map_err(OperationError::from_core_preserving_context)?;
+        for src_block_index in 0..src.structure.block_count() {
+            record_trace_transform_invocation(src_block_index);
+            let row = prepared
+                .execute_unique_rigid(rule, &src.source_key(src_block_index)?)
+                .map_err(OperationError::from_core_preserving_context)?;
+            lower_fusion_trace_source_rows(
+                rule,
+                dst_structure,
+                axis_plan,
+                dst_codomain_rank,
+                src_block_index,
+                src,
+                core::iter::once(row),
+                &mut terms,
+            )?;
+        }
+        return Ok(terms);
+    }
+
+    let groups = src.structure.fusion_tree_group_slice();
     let mut rows_by_source = (0..src.structure.block_count())
         .map(|_| None)
         .collect::<Vec<Option<Vec<(FusionTreePairKey, R::Scalar)>>>>();
-    let is_unique = rule.fusion_style() == FusionStyleKind::Unique;
-    let groups = if is_unique {
-        &[][..]
-    } else {
-        src.structure.fusion_tree_group_slice()
-    };
-    let mut group_by_source = if is_unique {
-        Vec::new()
-    } else {
-        vec![None; src.structure.block_count()]
-    };
-    if !is_unique {
-        for (group_index, group) in groups.iter().enumerate() {
-            for &src_block_index in group.block_indices() {
-                group_by_source[src_block_index] = Some(group_index);
-            }
+    let mut group_by_source = vec![None; src.structure.block_count()];
+    for (group_index, group) in groups.iter().enumerate() {
+        for &src_block_index in group.block_indices() {
+            group_by_source[src_block_index] = Some(group_index);
         }
     }
 
-    let mut terms = Vec::new();
     for src_block_index in 0..src.structure.block_count() {
-        if is_unique {
-            record_trace_transform_invocation(src_block_index);
-            let source_indices = [src_block_index];
-            let mut rows = multiplicity_free_permute_tree_pair_block_indexed(
-                rule,
-                src.structure,
-                &source_indices,
-                src.orientation,
-                &codomain_permutation,
-                &domain_permutation,
-            )
-            .map_err(OperationError::from_core_preserving_context)?;
-            rows_by_source[src_block_index] = rows.pop();
-        } else if rows_by_source[src_block_index].is_none() {
+        if rows_by_source[src_block_index].is_none() {
             let group_index =
                 group_by_source[src_block_index].ok_or(OperationError::InvalidArgument {
                     message: "trace source block was not assigned to a fusion group",
@@ -1299,19 +1308,20 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn lower_fusion_trace_source_rows<R>(
+fn lower_fusion_trace_source_rows<R, I>(
     rule: &R,
     dst_structure: &BlockStructure,
     axis_plan: &TensorTraceAxisPlan,
     dst_codomain_rank: usize,
     src_block_index: usize,
     src: OrientedTraceSource<'_>,
-    rows: Vec<(FusionTreePairKey, R::Scalar)>,
+    rows: I,
     terms: &mut Vec<TensorTraceFusionStructureTerm<R::Scalar>>,
 ) -> Result<(), OperationError>
 where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Mul<Output = R::Scalar>,
+    I: IntoIterator<Item = (FusionTreePairKey, R::Scalar)>,
 {
     for (permuted_key, permutation_coefficient) in rows {
         let (dst_codomain_tree, trace_codomain_tree) =
