@@ -29,6 +29,7 @@ categorical coefficients are separately constrained by the provider bounds.
 | Operation family | U(1), Z2 | ZN, CU(1) | fZ2 | SU(2) | multiplicity-free product | Fibonacci | checked Generic / SU(N) |
 |---|---|---|---|---|---|---|---|
 | Space and tensor construction; labelled block readback | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED |
+| Physical dense expansion and symmetric projection | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | `adjoint` | PROVED lazy view | NEEDS-PROOF | PROVED lazy view | PROVED lazy view | PROVED lazy view | UNSUPPORTED | UNSUPPORTED |
 | `permute`, `transpose`, `repartition` | PROVED | PROVED for CU(1); NEEDS-PROOF for ZN | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED |
 | `braid` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED |
@@ -72,6 +73,7 @@ and transactional nonpublication as each new row becomes reachable.
 |---|---|---|---|---|---|---|
 | Metadata, provider ownership, handle clone | PROVED | PROVED | PROVED by representation bounds | PROVED | PROVED for transfer ownership | UNSUPPORTED |
 | Stable `data() -> &[D]` | PROVED | PROVED | INTENTIONAL-DIFFERENCE: only `S: HostReadableStorage<D>` | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
+| Physical dense expansion and symmetric projection | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | Explicit Host/device transfer | N/A | N/A | NEEDS-PROOF for future storage types | PROVED | PROVED transfer-only | UNSUPPORTED |
 | Adjoint | PROVED lazy view | UNSUPPORTED | NEEDS-PROOF | PROVED lazy view | UNSUPPORTED | UNSUPPORTED |
 | General permutation/braid/recoupling | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |

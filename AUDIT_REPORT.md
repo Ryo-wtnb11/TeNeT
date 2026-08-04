@@ -1,7 +1,7 @@
 # TeNeT current-main audit report
 
-Status: **Phase A initial report; correctness and benchmark phases are not
-complete.**
+Status: **Phase A complete; Phase B independent correctness in progress;
+benchmark phases not started.**
 
 This report is the durable summary for issue #9. It separates facts established
 from current source/tests from work that still needs an independent oracle or
@@ -46,8 +46,9 @@ support/performance material already classified by the Phase A census.
 Provisional project assessment: **Promising but not yet justified.** This is not
 the requested final verdict. Current source establishes meaningful Rust
 ownership, typed errors, bounded structural reuse, and selected CUDA
-capability, but Phase B has not yet produced a neutral current TensorKit/QSpace
-correctness and performance comparison over representative applications.
+capability. Phase B now has pinned current TensorKit and executable QSpace
+correctness rows, but no neutral performance comparison over representative
+applications.
 
 ## 2. Scope and methodology
 
@@ -175,21 +176,36 @@ The first Phase B reference refresh reran
 output is numerically unchanged from the historical file; the old file differed
 only by its four-line unverified banner. A committed Julia Project/Manifest and
 SHA-256 manifest now make this TensorKit oracle reproducible. This validates
-only the operations emitted by that script, not the remaining matrix rows or
-QSpace correspondence. QSpace public master `e87ccd1` was recorded for the
-next reference slice, but no equivalent executable QSpace oracle has yet been
-established.
+only the operations emitted by that script, not the remaining matrix rows.
 
-This evidence is not yet the Phase B independent cross-library oracle. Phase B
-must add small dense/reference checks before benchmarking, cover zero/disjoint/
-empty and non-self-dual/fermionic/multiplicity cases, and compare
-gauge-invariant physical results when raw fusion-tree bases differ.
+The pinned TensorKit oracle has since added current-source rows for fZ2 closed
+loops, the fZ2 x U(1) x SU(2) invariant stream, real/complex p-norm and matrix
+exponential, disjoint/non-self-dual U(1) null-space completion for direct and
+lazy-adjoint inputs, complex SU(2) permutation/adjoint-composition/SVD, and
+quantum-dimension-weighted U(1)/SU(2) rank truncation. The adjacent Rust tests
+compare only gauge-invariant quantities or exact data where the basis is fixed.
+
+QSpace public master `e87ccd1` is now executable with MATLAB R2026a Update 4,
+Xcode 16.4 build 16F6, Apple Clang 17.0.0, and the macOS 15.5 SDK. The
+checksum-bound `benchmarks/qspace_su2_oracle.m` fixture constructs the SU(2)
+spin-half vector operator, records its reduced coefficient `-sqrt(3)/2`, and
+checks the Casimir contraction. `tenet/tests/qspace_su2_correspondence.rs`
+matches the resulting gauge-invariant closed norm squared `3/2`. This is one
+QSpace row, not broad QSpace parity.
+
+The remaining physical dense-reference requirement is currently
+`UNSUPPORTED`, not merely untested. TeNeT exposes reduced-block `data()` but no
+public physical dense expansion or symmetric projection and no provider CGC
+embedding capability. #861 owns that missing boundary. Checked Generic/SU(N)
+reductions remain `UNSUPPORTED` under #640, so the executable QSpace SU(3)
+defining-representation probe cannot yet become a TeNeT closed-reduction row.
 
 The current unsupported or overstated correctness boundaries are tracked by:
 
 - #640: checked-Generic operation and generated-family completion;
 - #662: typed fallible-provider error/nonpublication contract;
 - #592 and #633: complex-coefficient Fibonacci admission and planar oracle;
+- #861: explicit physical dense expansion and symmetric projection;
 - #3: Host/device semantic parity;
 - #635: typed right solve.
 
@@ -299,7 +315,8 @@ from #594, #635, #596, and #662.
 
 1. Keep the Phase A matrix, smoke gate, issue map, and this report synchronized
    as capabilities change.
-2. Build Phase B independent correctness oracles before new performance work.
+2. Complete the remaining Phase B correctness rows and classify unsupported
+   dense/Generic boundaries before new performance work.
 3. Revalidate and implement #640 in small operation-family leaves, pairing
    every shared boundary with multiplicity-free regression review.
 4. Extend #662 alongside each newly reachable checked operation.
@@ -315,7 +332,7 @@ is **Promising but not yet justified**:
 
 | Axis | Provisional assessment |
 |---|---|
-| correctness confidence | Moderate for core multiplicity-free Host paths; partial elsewhere |
+| correctness confidence | Moderate with pinned external evidence for selected multiplicity-free Host rows; partial elsewhere |
 | warm numerical performance | Not neutrally compared yet |
 | cold setup overhead | Structural layers identified; full neutral measurement pending |
 | memory efficiency | Explicit ownership and bounded key caches are promising; application peak memory pending |
