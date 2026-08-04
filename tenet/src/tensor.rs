@@ -8467,15 +8467,15 @@ fn validate_cuda_zero_placement(device: usize, actual: Placement) -> Result<(), 
 }
 
 #[cfg(feature = "cuda")]
-fn coupled_sector_of(region: &SectorRegion) -> SectorId {
+fn coupled_sector_of(region: &CoupledSectorRegion) -> SectorId {
     region.coupled()
 }
 
 #[cfg(feature = "cuda")]
 fn find_source<'a>(
-    regions: &'a [SectorRegion],
-    target: &SectorRegion,
-) -> Result<(usize, &'a SectorRegion), Error> {
+    regions: &'a [CoupledSectorRegion],
+    target: &CoupledSectorRegion,
+) -> Result<(usize, &'a CoupledSectorRegion), Error> {
     regions
         .iter()
         .enumerate()
@@ -8609,8 +8609,8 @@ pub(crate) fn typed_cuda_eigh_region(
 pub(crate) fn assemble_left_factor(
     cuda: &mut CudaDenseContext,
     dst: &mut CudaStorage,
-    target: &SectorRegion,
-    source: &SectorRegion,
+    target: &CoupledSectorRegion,
+    source: &CoupledSectorRegion,
     factor: &CudaDenseStorage,
     k_full: usize,
     selector: &CudaStorage,
@@ -8659,8 +8659,8 @@ pub(crate) fn assemble_left_factor(
 pub(crate) fn assemble_right_factor(
     cuda: &mut CudaDenseContext,
     dst: &mut CudaStorage,
-    target: &SectorRegion,
-    source: &SectorRegion,
+    target: &CoupledSectorRegion,
+    source: &CoupledSectorRegion,
     selector: &CudaStorage,
     kept: usize,
     k_full: usize,
