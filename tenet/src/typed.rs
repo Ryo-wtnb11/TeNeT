@@ -271,8 +271,8 @@ use crate::tensor::{
 };
 #[cfg(feature = "cuda")]
 use crate::tensor::{
-    assemble_left_factor, assemble_right_factor, cuda_qr_region, cuda_svd_region, decide_kept,
-    fill_diagonal_values, upload_selector,
+    assemble_left_factor, assemble_right_factor, cuda_is_hermitian_region, cuda_qr_region,
+    cuda_svd_region, decide_kept, fill_diagonal_values, typed_cuda_eigh_region, upload_selector,
 };
 pub use crate::tensor_core::CheckedGenericTensorProductError;
 use crate::tensor_core::{
@@ -369,6 +369,9 @@ thread_local! {
     };
     /// `(stage, one-based ordinal)` for operation-local failure injection.
     static CUDA_SVD_TRUNC_FAILURE: std::cell::Cell<Option<(&'static str, usize)>> = const {
+        std::cell::Cell::new(None)
+    };
+    static CUDA_EIGH_FAILURE: std::cell::Cell<Option<(&'static str, usize)>> = const {
         std::cell::Cell::new(None)
     };
 }
@@ -4239,6 +4242,257 @@ where
                 repr: owned_repr(TypedTensorBody::dense(plan.right_space, right_data)),
             },
             singular_values,
+            error,
+        })
+    }
+
+    /// Hermitian eigendecomposition of an owned dense CUDA endomorphism.
+    ///
+    /// Returns `(d, v)` with `self = v * d * v.adjoint()`. Both factors remain
+    /// on the source device. A lazy-adjoint receiver is rejected explicitly;
+    /// no receiver-sized payload is downloaded or materialized.
+    pub fn eigh_full(&self) -> Result<(Self, Self), Error> {
+        let out = self.eigh_trunc(&Truncation::Full)?;
+        Ok((out.d, out.v))
+    }
+
+    #[cfg(test)]
+    fn inject_cuda_eigh_failure(stage: &'static str, ordinal: usize) -> Result<(), Error> {
+        if CUDA_EIGH_FAILURE.with(|failure| failure.get()) == Some((stage, ordinal)) {
+            return Err(Error::InvalidArgument(format!(
+                "injected CUDA EIGH {stage} failure"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Truncated Hermitian eigendecomposition of an owned dense CUDA tensor.
+    ///
+    /// Hermiticity is checked sectorwise on device before the first cuSOLVER
+    /// call. Only scalar residual metadata and eigenvalues cross to the host;
+    /// eigenvectors and both returned factors remain device-resident.
+    pub fn eigh_trunc(
+        &self,
+        truncation: &Truncation,
+    ) -> Result<EighTrunc<R, f64, CudaStorage>, Error> {
+        let source = self.direct_cuda_storage("eigh_trunc")?;
+        let source_space = self.logical_space().space();
+        if source_space.homspace().codomain() != source_space.homspace().domain() {
+            return Err(
+                tenet_tensors::OperationError::UnsupportedTensorContractScope {
+                    message: "eigh requires an endomorphism (codomain == domain)",
+                }
+                .into(),
+            );
+        }
+        let required_len = source_space.required_len()?;
+        let source_regions = sector_regions(source_space.structure(), source_space.nout())?;
+        if source_regions
+            .iter()
+            .any(|region| region.rows() != region.cols())
+        {
+            return Err(internal_layout_error(
+                "CUDA EIGH source contains a non-square coupled-sector region",
+            ));
+        }
+
+        {
+            let mut state = self.runtime.lock();
+            let cuda = state.cuda.as_mut().ok_or_else(|| {
+                Error::InvalidArgument(
+                    "this runtime was built without a CUDA device; use \
+                     Runtime::builder().cuda(device)"
+                        .to_string(),
+                )
+            })?;
+            Self::validate_cuda_owned_metadata(
+                Placement::Cuda(cuda.device()),
+                source.placement(),
+                required_len,
+                source.len(),
+            )?;
+        }
+
+        // Validate the policy and every provider identity before device work.
+        decide_kept(self.logical_space().provider(), &[], Some(truncation))?;
+        // The existing compact factor plan is the canonical source -> left
+        // factor route. EIGH needs that left route only; no new plan hierarchy.
+        let source_plan = self.compile_cuda_qr_plan(source_regions)?;
+
+        // Admission is complete. Validate every block before the first EIGH so
+        // a late non-Hermitian sector cannot trigger partial numerical work.
+        {
+            let mut state = self.runtime.lock();
+            let cuda = state.cuda.as_mut().ok_or_else(|| {
+                Error::InvalidArgument(
+                    "this runtime was built without a CUDA device; use \
+                     Runtime::builder().cuda(device)"
+                        .to_string(),
+                )
+            })?;
+            for region in source_plan.source_regions.iter() {
+                if !cuda_is_hermitian_region(cuda, &source.0, region.range().start, region.rows())?
+                {
+                    return Err(
+                        tenet_tensors::OperationError::UnsupportedTensorContractScope {
+                            message: "eigh requires every coupled-sector block to be Hermitian",
+                        }
+                        .into(),
+                    );
+                }
+            }
+        }
+
+        let (raw_spectra, mut raw_vectors, orders) = {
+            let mut state = self.runtime.lock();
+            let cuda = state.cuda.as_mut().ok_or_else(|| {
+                Error::InvalidArgument(
+                    "this runtime was built without a CUDA device; use \
+                     Runtime::builder().cuda(device)"
+                        .to_string(),
+                )
+            })?;
+            let mut spectra = Vec::with_capacity(source_plan.source_regions.len());
+            let mut vectors = Vec::with_capacity(source_plan.source_regions.len());
+            let mut orders = Vec::with_capacity(source_plan.source_regions.len());
+            #[cfg(test)]
+            let mut decomposition_ordinal = 0;
+            for region in source_plan.source_regions.iter() {
+                let n = region.rows();
+                if n == 0 {
+                    spectra.push(tenet_matrixalgebra::SectorSpectrum {
+                        sector: region.coupled(),
+                        values: Vec::new(),
+                    });
+                    vectors.push(None);
+                    orders.push(Vec::new());
+                    continue;
+                }
+                let (values, vector) =
+                    typed_cuda_eigh_region(cuda, &source.0, region.range().start, n)?;
+                #[cfg(test)]
+                {
+                    decomposition_ordinal += 1;
+                    Self::inject_cuda_eigh_failure("decomposition", decomposition_ordinal)?;
+                }
+                if values.iter().any(|value| !value.is_finite()) {
+                    return Err(internal_layout_error(
+                        "CUDA EIGH returned a non-finite eigenvalue",
+                    ));
+                }
+                let mut order: Vec<_> = (0..n).collect();
+                order.sort_by(|&left, &right| {
+                    values[right]
+                        .abs()
+                        .total_cmp(&values[left].abs())
+                        .then(left.cmp(&right))
+                });
+                let sorted = order.iter().map(|&index| values[index]).collect();
+                spectra.push(tenet_matrixalgebra::SectorSpectrum {
+                    sector: region.coupled(),
+                    values: sorted,
+                });
+                vectors.push(Some(vector));
+                orders.push(order);
+            }
+            (spectra, vectors, orders)
+        };
+
+        let (kept_spectra, error) = decide_kept(
+            self.logical_space().provider(),
+            &raw_spectra,
+            Some(truncation),
+        )?;
+        let mut eigenvalues: Vec<SectorSpectrum<R::Sector>> = kept_spectra
+            .iter()
+            .map(|entry| {
+                Ok(SectorSpectrum {
+                    sector: self
+                        .logical_space()
+                        .provider()
+                        .decode_sector(entry.sector)?,
+                    values: entry.values.clone(),
+                })
+            })
+            .collect::<Result<_, Error>>()?;
+        eigenvalues.sort_by(|left, right| left.sector.cmp(&right.sector));
+
+        // Reuse the existing kept-rank space/route proof. Its right-factor
+        // fields are intentionally unused; measured need, not EIGH alone,
+        // would justify splitting another private plan type.
+        let plan = self
+            .compile_cuda_svd_trunc_plan(Arc::clone(&source_plan.source_regions), &kept_spectra)?;
+        let vector_len = plan.left_space.space().required_len()?;
+        let diagonal_len = plan.middle_space.space().required_len()?;
+        let mut diagonal_host = vec![0.0; diagonal_len];
+        fill_diagonal_values(
+            plan.middle_space.space().structure(),
+            &mut diagonal_host,
+            &kept_spectra,
+        )?;
+
+        let (diagonal_data, vector_data) = {
+            let mut state = self.runtime.lock();
+            let cuda = state.cuda.as_mut().ok_or_else(|| {
+                Error::InvalidArgument(
+                    "this runtime was built without a CUDA device; use \
+                     Runtime::builder().cuda(device)"
+                        .to_string(),
+                )
+            })?;
+            let diagonal_data = CudaStorage::upload(cuda, &diagonal_host)?;
+            let mut vector_data = CudaStorage::upload(cuda, &vec![0.0; vector_len])?;
+            #[cfg(test)]
+            let mut assembly_ordinal = 0;
+            for route in plan.routes.iter() {
+                #[cfg(test)]
+                {
+                    assembly_ordinal += 1;
+                    Self::inject_cuda_eigh_failure("assembly", assembly_ordinal)?;
+                }
+                let source_region = &plan.source_regions[route.source];
+                let raw = raw_vectors[route.source].take().ok_or_else(|| {
+                    internal_layout_error("kept CUDA EIGH route has no eigenvectors")
+                })?;
+                let order = &orders[route.source];
+                if route.kept > order.len() {
+                    return Err(internal_layout_error(
+                        "kept CUDA EIGH rank exceeds its eigenvector order",
+                    ));
+                }
+                let selector = upload_selector(
+                    cuda,
+                    route.full_rank,
+                    route.kept,
+                    order[..route.kept]
+                        .iter()
+                        .enumerate()
+                        .map(|(column, &row)| (row, column, 1.0)),
+                )?;
+                assemble_left_factor(
+                    cuda,
+                    &mut vector_data,
+                    &plan.left_regions[route.left],
+                    source_region,
+                    &raw,
+                    route.full_rank,
+                    &selector,
+                    route.kept,
+                )?;
+            }
+            (diagonal_data, vector_data)
+        };
+
+        Ok(EighTrunc {
+            d: Self {
+                runtime: self.runtime.clone(),
+                repr: owned_repr(TypedTensorBody::dense(plan.middle_space, diagonal_data)),
+            },
+            v: Self {
+                runtime: self.runtime.clone(),
+                repr: owned_repr(TypedTensorBody::dense(plan.left_space, vector_data)),
+            },
+            eigenvalues,
             error,
         })
     }
@@ -10250,6 +10504,10 @@ mod representation_gates {
             device_diagonal.svd_trunc(&Truncation::Full),
             Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
         ));
+        assert!(matches!(
+            device_diagonal.eigh_full(),
+            Err(Error::UnsupportedOnDevice(message)) if message.contains("dense CUDA storage")
+        ));
         let lazy = device_diagonal.adjoint().unwrap();
         assert!(matches!(
             lazy.qr_compact(),
@@ -10262,6 +10520,153 @@ mod representation_gates {
         assert!(matches!(
             lazy.svd_trunc(&Truncation::Full),
             Err(Error::UnsupportedOnDevice(message)) if message.contains("lazy adjoint")
+        ));
+        assert!(matches!(
+            lazy.eigh_trunc(&Truncation::Full),
+            Err(Error::UnsupportedOnDevice(message)) if message.contains("lazy adjoint")
+        ));
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    #[ignore = "requires a real CUDA device"]
+    fn typed_cuda_eigh_full_and_trunc_match_host_without_hidden_materialization() {
+        let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
+        let provider = Arc::new(U1FusionRule);
+        let leg = GradedSpace::try_new(
+            Arc::clone(&provider),
+            [(U1Irrep::new(-1), 2), (U1Irrep::new(0), 3)],
+            false,
+        )
+        .unwrap();
+        let source = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            let (row, col) = (indices[0], indices[1]);
+            if row == col {
+                row as f64 + 1.0
+            } else if row.abs_diff(col) == 1 {
+                0.125
+            } else {
+                0.0
+            }
+        })
+        .unwrap();
+        let device = source.to_cuda().unwrap();
+
+        let expected_full = source.eigh_full().unwrap();
+        let (d_device, v_device) = device.eigh_full().unwrap();
+        assert_eq!(d_device.placement(), Placement::Cuda(0));
+        assert_eq!(v_device.placement(), Placement::Cuda(0));
+        assert!(Arc::ptr_eq(
+            v_device.logical_space().provider_arc(),
+            source.logical_space().provider_arc()
+        ));
+        let d = d_device.to_host().unwrap();
+        let v = v_device.to_host().unwrap();
+        assert_typed_map_close(&d, &expected_full.0, 1.0e-10);
+        assert_typed_map_close(
+            &source.compose(&v).unwrap(),
+            &v.compose(&d).unwrap(),
+            1.0e-10,
+        );
+
+        let truncation = Truncation::rank(3);
+        let expected_trunc = source.eigh_trunc(&truncation).unwrap();
+        let actual_trunc = device.eigh_trunc(&truncation).unwrap();
+        assert_eq!(
+            actual_trunc.eigenvalues.len(),
+            expected_trunc.eigenvalues.len()
+        );
+        for (actual, expected) in actual_trunc
+            .eigenvalues
+            .iter()
+            .zip(&expected_trunc.eigenvalues)
+        {
+            assert_eq!(actual.sector, expected.sector);
+            assert_eq!(actual.values.len(), expected.values.len());
+            assert!(actual
+                .values
+                .iter()
+                .zip(&expected.values)
+                .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
+        }
+        assert!((actual_trunc.error - expected_trunc.error).abs() < 1.0e-12);
+        let d = actual_trunc.d.to_host().unwrap();
+        let v = actual_trunc.v.to_host().unwrap();
+        assert_eq!(
+            v.logical_space().space(),
+            expected_trunc.v.logical_space().space()
+        );
+        assert_typed_map_close(&d, &expected_trunc.d, 1.0e-10);
+        assert_typed_map_close(
+            &source.compose(&v).unwrap(),
+            &v.compose(&d).unwrap(),
+            1.0e-10,
+        );
+        assert_eq!(materialized_adjoint_builds(&device), 0);
+
+        let su2_provider = Arc::new(SU2FusionRule);
+        let su2_leg = GradedSpace::try_new(
+            Arc::clone(&su2_provider),
+            [
+                (SU2Irrep::from_twice_spin(0), 2),
+                (SU2Irrep::from_twice_spin(1), 2),
+            ],
+            false,
+        )
+        .unwrap();
+        let su2_source =
+            TensorMap::from_block_fn(&runtime, [&su2_leg], [&su2_leg], |_, indices| {
+                if indices[0] == indices[1] {
+                    indices[0] as f64 + 1.0
+                } else {
+                    0.25
+                }
+            })
+            .unwrap();
+        assert!(su2_source.block_count() >= 2);
+        let su2_device = su2_source.to_cuda().unwrap();
+        let (su2_d, su2_v) = su2_device.eigh_full().unwrap();
+        assert!(Arc::ptr_eq(
+            su2_v.logical_space().provider_arc(),
+            su2_source.logical_space().provider_arc()
+        ));
+        let su2_d = su2_d.to_host().unwrap();
+        let su2_v = su2_v.to_host().unwrap();
+        assert_typed_map_close(
+            &su2_source.compose(&su2_v).unwrap(),
+            &su2_v.compose(&su2_d).unwrap(),
+            1.0e-10,
+        );
+
+        let input_before_failure = device.to_host().unwrap();
+        for failure in [("decomposition", 2), ("assembly", 2)] {
+            CUDA_EIGH_FAILURE.with(|injected| injected.set(Some(failure)));
+            assert!(device.eigh_full().is_err());
+            CUDA_EIGH_FAILURE.with(|injected| injected.set(None));
+            assert_typed_map_close(
+                &device.to_host().unwrap(),
+                &input_before_failure,
+                f64::EPSILON,
+            );
+        }
+
+        let nonhermitian =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+                match (indices[0], indices[1]) {
+                    (0, 1) => 1.0,
+                    _ => 0.0,
+                }
+            })
+            .unwrap()
+            .to_cuda()
+            .unwrap();
+        assert!(matches!(
+            nonhermitian.eigh_full(),
+            Err(Error::Operation(error))
+                if matches!(
+                    error.as_ref(),
+                    tenet_tensors::OperationError::UnsupportedTensorContractScope { .. }
+                )
         ));
     }
 

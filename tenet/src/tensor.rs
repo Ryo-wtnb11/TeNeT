@@ -38,8 +38,10 @@ use tenet_core::{
 use tenet_core::{SectorLeg, TensorStorage};
 #[cfg(feature = "cuda")]
 use tenet_dense::{
-    cuda_eigh_region, cuda_gemm_region_into, cuda_qr_region as dense_cuda_qr_region,
-    cuda_svd_region as dense_cuda_svd_region, CudaDenseContext, CudaDenseStorage,
+    cuda_eigh_region, cuda_gemm_region_into,
+    cuda_is_hermitian_region as dense_cuda_is_hermitian_region,
+    cuda_qr_region as dense_cuda_qr_region, cuda_svd_region as dense_cuda_svd_region,
+    CudaDenseContext, CudaDenseStorage,
 };
 #[cfg(feature = "cuda")]
 use tenet_matrixalgebra::{select_truncation, validate_hermitian_regions, WeightedSpectrum};
@@ -10599,6 +10601,28 @@ pub(crate) fn cuda_svd_region(
     #[cfg(test)]
     crate::typed::observe_cuda_svd_decomposition(factors.1.len());
     Ok(factors)
+}
+
+#[cfg(feature = "cuda")]
+#[inline]
+pub(crate) fn cuda_is_hermitian_region(
+    cuda: &mut CudaDenseContext,
+    source: &CudaDenseStorage,
+    offset: usize,
+    n: usize,
+) -> Result<bool, Error> {
+    dense_cuda_is_hermitian_region(cuda, source, offset, n).map_err(dense_err)
+}
+
+#[cfg(feature = "cuda")]
+#[inline]
+pub(crate) fn typed_cuda_eigh_region(
+    cuda: &mut CudaDenseContext,
+    source: &CudaDenseStorage,
+    offset: usize,
+    n: usize,
+) -> Result<(Vec<f64>, CudaDenseStorage), Error> {
+    cuda_eigh_region(cuda, source, offset, n).map_err(dense_err)
 }
 
 /// Writes `factor_rows x kept` slices of `factor * selector` into the target
