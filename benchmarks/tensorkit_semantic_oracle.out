@@ -462,3 +462,11 @@ svd[2] = 21.02264361151887
 svd[3] = 8.027729719194868
 svd[4] = 3.2214290434895219
 svd[5] = 0.84564901095677913
+== section 8: weighted rank truncation ==
+-- U1 rank=5 error=155706.08009324488 --
+sector -1 kept 1
+sector 0 kept 2
+sector 1 kept 2
+-- SU2 rank=5 error=276850.04205868527 --
+sector 1 kept 1
+sector 2 kept 1
