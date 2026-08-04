@@ -3,6 +3,9 @@
 `operation_matrix.sh` launches one dependency-free Rust executable. Each row
 uses a fresh `Runtime` and constructs its fixture before timing. Owned rows run
 one cold call followed by warm-up and repeated calls in that same process.
+The wrapper records the OS, architecture, CPU name, Rust compiler, Cargo,
+TeNeT, and Tenferro authorities before the CSV. TensorKit records the Julia
+kernel/machine/CPU report alongside its pinned package and BLAS authorities.
 Here `cold` means that the fresh `Runtime` tree-transform store is empty;
 process-global interned structure may already exist.
 Destination rows require an exact output from the owned operation; they report
