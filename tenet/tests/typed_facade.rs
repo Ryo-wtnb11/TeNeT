@@ -2103,8 +2103,8 @@ fn braid_moves_legs_of_a_multi_block_external_provider_tensor() {
 
 #[test]
 fn braid_rejects_a_wrong_length_levels_list() {
-    // What: the one facade-level pre-check — `levels` must name every source
-    // axis — with the erased layer's own diagnosis, in both directions.
+    // What: the public pre-check — `levels` must name every source axis — in
+    // both directions.
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(ExternalZ3::new());
@@ -3000,8 +3000,7 @@ fn inner_conjugates_its_first_argument() {
 
 #[test]
 fn dot_is_inner() {
-    // The erased `dot` is a plain alias for `inner`; so is this one, and the
-    // two names must not be able to come to mean different things.
+    // `dot` is an alias for `inner`; the two names must not drift apart.
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = z2_complex_tensor(&runtime);
@@ -5143,12 +5142,10 @@ fn all_output_orders(n: usize) -> Vec<Vec<usize>> {
 
 #[test]
 fn the_diagonal_contract_arm_is_its_own_dense_route_on_every_axis_pattern() {
-    // What: the compact arm never differs from the route it replaces. The byte
-    // oracle above compares typed-fast against *erased-fast* (the erased side
-    // has taken its own #75 arm since then for the same geometries), so it
-    // cannot see the two fast paths sharing a mistake, and it cannot see the
-    // codomain-rank the arm derives itself (`self.rank() - 1` for `t · D`, `1`
-    // for `D · t`) diverge from the one the engine would build.
+    // What: the compact arm never differs from the dense route it replaces.
+    // This direct oracle catches a shared fast-path mistake or a divergence
+    // between the codomain rank derived by the arm (`self.rank() - 1` for
+    // `t · D`, `1` for `D · t`) and the one the engine would build.
     //
     // Here the comparison is fast against dense *inside this facade*:
     // `forced_dense` adds an exact dense zero on the same space, which preserves
@@ -5847,7 +5844,7 @@ type Fz2U1Rule = tenet::core::ProductFusionRule<
 type Fz2U1Su2Rule =
     tenet::core::ProductFusionRule<Fz2U1Rule, tenet::core::SU2FusionRule, Fz2U1Su2Codec>;
 
-/// `0` even, `1` odd, as every erased fermion-parity constructor spells it.
+/// `0` even, `1` odd, matching the public fermion-parity label contract.
 // Strict on purpose: an out-of-range parity must not fold onto a valid label.
 fn parity_irrep(parity: u8) -> tenet::core::Z2Irrep {
     match parity {
@@ -7374,8 +7371,8 @@ fn typed_to_c64_widens_dense_and_compact_values_exactly() {
 
 #[test]
 fn typed_re_im_reconstruct_the_complex_tensor_byte_exactly() {
-    // Gate 6's law checks (erased has no `re`/`im`, so parity is impossible):
-    // `re(t) + i*im(t)` rebuilds `t` byte-exactly through `to_c64` + `add`,
+    // Gate 6's law checks: `re(t) + i*im(t)` rebuilds `t` byte-exactly through
+    // `to_c64` + `add`,
     // and on a real tensor `re(to_c64(x)) == x`, `im(to_c64(x)) ==
     // zeros_like(x)`, byte-exactly.
     let _guard = cache_lock();
@@ -8152,11 +8149,10 @@ fn typed_flip_and_twist_pin_the_doctest_values() {
 
 #[test]
 fn typed_multi_leg_dense_twist_is_the_per_leg_product_by_value() {
-    // What: the multi-leg dense twist coefficient is pinned by hand-computed
-    // value — a
-    // mutation that drops the per-leg product in the shared
+    // What: the multi-leg dense twist coefficient is pinned by a hand-computed
+    // value. A mutation that drops the per-leg product in the shared
     // `twist_block_factor` (e.g. keeping only the first leg's θ) survives
-    // every parity gate, because both facades route through the one helper.
+    // ordinary cross-operation parity gates, which share the same helper.
     // Fixture: fZ2 `V <- V`, even block 2.0, odd block 3.0, θ(odd) = −1;
     // both legs carry the block's coupled sector.
     let _guard = cache_lock();

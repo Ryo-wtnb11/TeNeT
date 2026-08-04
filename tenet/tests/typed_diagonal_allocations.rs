@@ -347,9 +347,8 @@ fn the_matrix_functions_have_o_rank_diagonal_arms() {
     // assertion afterwards catches one that densifies into the shared cache,
     // which the warm-up run would otherwise have paid for silently.
     //
-    // `exp` is the one that is new in the typed facade: the erased sibling
-    // materializes a diagonal payload and eigendecomposes it, so this probe is
-    // what pins the parity fix rather than just guarding it.
+    // `exp` needs its own probe because its dense fallback materializes a
+    // diagonal payload and eigendecomposes it.
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let d = spectrum(0x5eed_0021);
     let ceiling = dense_payload_bytes();

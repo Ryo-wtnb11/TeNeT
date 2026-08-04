@@ -1,8 +1,7 @@
 //! Allocation gates for the typed `catdomain`/`catcodomain`/`absorb`
-//! (#580 PR 4), the way `cat_allocations.rs` / `absorb_allocations.rs` gate
-//! the erased siblings and `typed_diagonal_allocations.rs` gates the typed
-//! compact storage: bytes counted through a global allocator while one warmed
-//! operation runs.
+//! (#580 PR 4), alongside the compact-storage gates in
+//! `typed_diagonal_allocations.rs`: bytes counted through a global allocator
+//! while one warmed operation runs.
 //!
 //! The claims under gate: each operation performs exactly one output-sized
 //! payload allocation and no per-block allocations, and a compact diagonal
@@ -70,7 +69,7 @@ fn measured_allocations<T>(payload_bytes: usize, operation: impl FnOnce() -> T) 
 }
 
 /// Small fixed allowance for descriptor/layout bookkeeping (copy plans,
-/// derived-space metadata) — the same ceiling the erased gates use.
+/// derived-space metadata).
 const STRUCTURAL_TOLERANCE: u64 = 128 * 1024;
 
 fn u1_leg(provider: &Arc<U1FusionRule>, pairs: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
@@ -103,7 +102,7 @@ fn catcodomain_oracle<D: Copy>(lhs: &[D], lhs_rows: usize, rhs: &[D], rhs_rows: 
 fn typed_cat_uses_one_output_allocation_without_scratch() {
     // What: a warmed typed catdomain owns exactly one output-sized payload
     // and no per-block allocations — the plan executes into the single final
-    // buffer, exactly as the erased gate pins for its own route.
+    // buffer.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let codomain = u1_leg(&provider, &[(0, 127)]);

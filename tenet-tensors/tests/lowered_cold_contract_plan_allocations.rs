@@ -7,7 +7,7 @@
 //!    stays streaming — enumeration bytes track the admitted key count, not
 //!    the candidate sector product — and builds the layout exactly once
 //!    (a committed layout makes the second prepare a cache lookup).
-//! 2. The erased-contract fusion route's cold plan build: the E1 baseline.
+//! 2. The tensor-wide fusion route's cold plan build: the E1 baseline.
 //!    While both context entries existed this compared the `_lowered`
 //!    delegate against the plain twin (E1 evidence: byte-identical); with the
 //!    delegate removed, the plain entry is the production route and this
@@ -139,8 +139,8 @@ struct ContractFixture {
 }
 
 /// Rank-3 x rank-3 U(1) contraction with a non-identity output order: the
-/// erased facade's fusion route (tree-transform plan build), not the
-/// direct-core fast path.
+/// tensor-wide fusion route (tree-transform plan build), not the direct-core
+/// fast path.
 fn contract_fixture() -> ContractFixture {
     let provider = Arc::new(U1FusionRule);
     let leg = |dual| {
@@ -211,8 +211,8 @@ fn run_route() -> RouteRun {
     context.set_cache_policy(OperationCachePolicy::TaskLocal);
     let mut output = vec![0.0; fixture.dst.space().required_len().unwrap()];
     // The `_lowered` context twin (a verbatim delegate) was removed by the
-    // #586 sweep after E1 proved entry parity; the plain entry is the erased
-    // facade's production route and the one this guard pins.
+    // #586 sweep after E1 proved entry parity; the plain entry is the
+    // production route and the one this guard pins.
     let run =
         |output: &mut [f64],
          context: &mut TensorContractFusionExecutionContext<f64, RuleIdentity>| {
