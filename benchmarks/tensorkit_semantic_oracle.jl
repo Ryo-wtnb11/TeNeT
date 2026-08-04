@@ -353,3 +353,22 @@ println("svd count = ", length(complex_values))
 for (k, value) in enumerate(complex_values)
     @printf("svd[%d] = %.17g\n", k, value)
 end
+
+# ---------------------------------------------------------------------------
+# Section 8: quantum-dimension-weighted rank truncation
+# ---------------------------------------------------------------------------
+println("== section 8: weighted rank truncation ==")
+
+function truncation_fixture(name, V)
+    A = filled(V, 3)
+    B = filled(V, 5)
+    E = permute(A, ((2, 1), (4, 3))) * (A * B)
+    _, S, _, error = svd_trunc(E; trunc = truncrank(5))
+    @printf("-- %s rank=5 error=%.17g --\n", name, error)
+    for c in sort(collect(blocksectors(S)); by = label)
+        @printf("sector %d kept %d\n", label(c), length(diag(block(S, c))))
+    end
+end
+
+truncation_fixture("U1", U1Space(-1 => 2, 0 => 3, 1 => 2))
+truncation_fixture("SU2", SU2Space(0 => 2, 1 // 2 => 2, 1 => 1))

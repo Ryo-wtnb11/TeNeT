@@ -16,7 +16,7 @@ use tenet::core::{
     Su2SectorLayout, U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep,
 };
 use tenet::prelude::{Complex64, Runtime};
-use tenet::typed::{GradedSpace, TensorMap};
+use tenet::typed::{GradedSpace, TensorMap, Truncation};
 
 type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
 type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
@@ -755,6 +755,83 @@ fn oracle_fill(c0: i64, labels: [i64; 5], idx: &[usize]) -> f64 {
         + 31 * (idx[2] as i64 + 1)
         + 37 * (idx[3] as i64 + 1);
     (weighted.rem_euclid(41) - 20) as f64
+}
+
+/// TensorKit `truncrank(5)` counts quantum dimensions, not just the number of
+/// stored singular values. The SU(2) fixture therefore keeps one spin-1/2
+/// value (weight 2) and one spin-1 value (weight 3), while U(1) keeps five
+/// scalar-weight values.
+#[test]
+fn weighted_rank_truncation_matches_tensorkit() {
+    macro_rules! case {
+        ($provider:expr, $pairs:expr, $label_of:expr, $expected:expr, $error:expr) => {{
+            let runtime = Runtime::builder().build().unwrap();
+            let space = GradedSpace::try_new($provider, $pairs, false).unwrap();
+            let label_of = $label_of;
+            let build = |c0| {
+                TensorMap::from_block_fn(
+                    &runtime,
+                    [&space, &space],
+                    [&space, &space],
+                    |trees, idx| {
+                        let codomain = trees.codomain_uncoupled();
+                        let domain = trees.domain_uncoupled();
+                        oracle_fill(
+                            c0,
+                            [
+                                label_of(&codomain[0]),
+                                label_of(&codomain[1]),
+                                label_of(&domain[0]),
+                                label_of(&domain[1]),
+                                label_of(trees.coupled()),
+                            ],
+                            idx,
+                        )
+                    },
+                )
+                .unwrap()
+            };
+            let a = build(3);
+            let b = build(5);
+            let e = a
+                .permute(&[1, 0], &[3, 2])
+                .unwrap()
+                .compose(&a.compose(&b).unwrap())
+                .unwrap();
+            let truncated = e.svd_trunc(&Truncation::rank(5)).unwrap();
+            let kept: Vec<_> = truncated
+                .singular_values
+                .iter()
+                .filter(|entry| !entry.values.is_empty())
+                .map(|entry| (label_of(&entry.sector), entry.values.len()))
+                .collect();
+            assert_eq!(kept, $expected);
+            assert_scalar_close(truncated.error, $error, 1e-10);
+        }};
+    }
+
+    case!(
+        Arc::new(U1FusionRule),
+        [
+            (U1Irrep::new(-1), 2),
+            (U1Irrep::new(0), 3),
+            (U1Irrep::new(1), 2),
+        ],
+        |sector: &U1Irrep| sector.charge() as i64,
+        [(-1, 1), (0, 2), (1, 2)],
+        155706.08009324488
+    );
+    case!(
+        Arc::new(SU2FusionRule),
+        [
+            (SU2Irrep::from_twice_spin(0), 2),
+            (SU2Irrep::from_twice_spin(1), 2),
+            (SU2Irrep::from_twice_spin(2), 1),
+        ],
+        |sector: &SU2Irrep| sector.twice_spin() as i64,
+        [(1, 1), (2, 1)],
+        276850.04205868527
+    );
 }
 
 /// Runs the part-3 op sequence and compares the basis-independent
