@@ -205,9 +205,10 @@ use smallvec::SmallVec;
 use tenet_core::{
     validate_unit_layout_correspondence_checked, BlockKey, BlockRef, CanonicalUnitFusionRule,
     CheckedFusionAlgebra, CheckedGenericAdmissionMode, CheckedGenericStructureError,
-    FusionAlgebraError, FusionProductSpace, FusionTreeHomSpace, MultiplicityFreeAdmissionMode,
-    MultiplicityFreeRigidSymbols, MultiplicityIndex, PreparedTreePairOperation, ProductFusionRule,
-    ProductSector, ProductSectorCodec, SectorId, SectorLeg, TypedSectorAdmission, UnitLegInsertion,
+    FusionAlgebraError, FusionProductSpace, FusionTreeHomSpace, FusionTreePairKey,
+    MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, MultiplicityIndex,
+    PreparedTreePairOperation, ProductFusionRule, ProductSector, ProductSectorCodec, SectorId,
+    SectorLeg, TypedSectorAdmission, UnitLegInsertion,
 };
 use tenet_core::{
     CheckedGenericFusion, CheckedGenericRigidSymbols, HostReadableStorage, Placement, TensorStorage,
@@ -252,11 +253,8 @@ use tenet_matrixalgebra::{BoundDynFactor, FactorScalar};
 
 use crate::runtime::{Ctx, Ctxs};
 use crate::tensor::{
-    absorb_mapped, cat_homspace, check_flip_layout_identity, compile_cat_plan,
-    coupled_region_pow_sum, flip_block_factor, flip_toggled_homspace,
-    reject_unbraided_nonunit_legs, sector_regions, twist_block_factor, twist_factor_with_inverse,
-    twist_is_identity_over_blocks, validate_norm_p, weighted_inner, weighted_trace,
-    CatOperandLayout, CatSide,
+    absorb_mapped, cat_homspace, compile_cat_plan, coupled_region_pow_sum, sector_regions,
+    validate_norm_p, weighted_inner, weighted_trace, CatOperandLayout, CatSide,
 };
 #[cfg(feature = "cuda")]
 use crate::tensor::{
@@ -474,6 +472,224 @@ pub(crate) fn scale_blocks_impl<D: ScalarOps>(
                 }
                 indices[axis] = 0;
             }
+        }
+    }
+    Ok(())
+}
+
+fn uncoupled_sector_of_leg(key: &FusionTreePairKey, nout: usize, leg: usize) -> SectorId {
+    if leg < nout {
+        key.codomain_uncoupled()[leg]
+    } else {
+        key.domain_uncoupled()[leg - nout]
+    }
+}
+
+/// Rejects twist/flip requests whose coefficients do not exist for an
+/// unbraided provider before querying that provider.
+pub(crate) fn reject_unbraided_nonunit_legs<R>(
+    rule: &R,
+    hom: &FusionTreeHomSpace,
+    legs: &[usize],
+    operation: &str,
+    allow_unit_legs: bool,
+) -> Result<(), Error>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + ?Sized,
+{
+    if rule.braiding_style() != tenet_core::BraidingStyleKind::NoBraiding {
+        return Ok(());
+    }
+    if !allow_unit_legs {
+        if let Some(&leg) = legs.first() {
+            return Err(Error::InvalidArgument(format!(
+                "{operation} leg {leg} needs the twist and Frobenius-Schur coefficients \
+                 but the fusion rule has no braiding"
+            )));
+        }
+        return Ok(());
+    }
+    let nout = hom.codomain().len();
+    for &leg in legs {
+        let sector_leg = if leg < nout {
+            &hom.codomain().legs()[leg]
+        } else {
+            &hom.domain().legs()[leg - nout]
+        };
+        if !sector_leg
+            .sectors()
+            .iter()
+            .all(|&sector| sector == rule.vacuum())
+        {
+            return Err(Error::InvalidArgument(format!(
+                "{operation} leg {leg} carries non-unit sectors but the fusion rule has \
+                 no braiding"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// TensorKit-compatible product of ribbon-twist eigenvalues on one block.
+pub(crate) fn twist_block_factor<R>(
+    rule: &R,
+    key: &FusionTreePairKey,
+    nout: usize,
+    legs: &[usize],
+    inverse: bool,
+) -> f64
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + ?Sized,
+{
+    let factor = legs
+        .iter()
+        .map(|&leg| rule.twist_scalar(uncoupled_sector_of_leg(key, nout, leg)))
+        .product();
+    twist_factor_with_inverse(rule, factor, inverse)
+}
+
+pub(crate) fn twist_factor_with_inverse<R>(rule: &R, factor: f64, inverse: bool) -> f64
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + ?Sized,
+{
+    if inverse {
+        rule.scalar_conj(factor)
+    } else {
+        factor
+    }
+}
+
+pub(crate) fn twist_is_identity_over_blocks<R>(
+    rule: &R,
+    structure: &tenet_core::BlockStructure,
+    nout: usize,
+    legs: &[usize],
+) -> Result<bool, Error>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + ?Sized,
+{
+    if rule.braiding_style().is_bosonic() {
+        return Ok(true);
+    }
+    (0..structure.block_count()).try_fold(true, |noop, index| {
+        let block = structure.block(index)?;
+        Ok::<_, Error>(
+            noop && match block.key() {
+                BlockKey::FusionTree(key) => legs
+                    .iter()
+                    .all(|&leg| rule.twist_scalar(uncoupled_sector_of_leg(key, nout, leg)) == 1.0),
+                _ => true,
+            },
+        )
+    })
+}
+
+/// TensorKit-compatible Z-isomorphism phase for sequential flip occurrences.
+pub(crate) fn flip_block_factor<R>(
+    rule: &R,
+    key: &FusionTreePairKey,
+    nout: usize,
+    occurrences: &[(usize, bool)],
+    inverse: bool,
+) -> f64
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + ?Sized,
+{
+    occurrences
+        .iter()
+        .map(|&(leg, dual)| {
+            let sector = uncoupled_sector_of_leg(key, nout, leg);
+            let chi = rule.frobenius_schur_phase_scalar(sector);
+            let theta = rule.twist_scalar(sector);
+            if leg < nout {
+                if dual {
+                    if inverse {
+                        1.0
+                    } else {
+                        chi * theta
+                    }
+                } else if inverse {
+                    rule.scalar_conj(chi * theta)
+                } else {
+                    1.0
+                }
+            } else if dual {
+                if inverse {
+                    rule.scalar_conj(theta)
+                } else {
+                    rule.scalar_conj(chi)
+                }
+            } else if inverse {
+                chi
+            } else {
+                theta
+            }
+        })
+        .product()
+}
+
+/// Returns the duality-toggled HomSpace and each flip occurrence's pre-state.
+pub(crate) fn flip_toggled_homspace(
+    hom: &FusionTreeHomSpace,
+    legs: &[usize],
+) -> (FusionTreeHomSpace, Vec<(usize, bool)>) {
+    let nout = hom.codomain().len();
+    let rank = nout + hom.domain().len();
+    let leg_of = |leg: usize| {
+        if leg < nout {
+            &hom.codomain().legs()[leg]
+        } else {
+            &hom.domain().legs()[leg - nout]
+        }
+    };
+    let mut flip_count = vec![0usize; rank];
+    let occurrences = legs
+        .iter()
+        .map(|&leg| {
+            let dual = leg_of(leg).is_dual() ^ (flip_count[leg] % 2 == 1);
+            flip_count[leg] += 1;
+            (leg, dual)
+        })
+        .collect();
+
+    let toggled_leg = |index: usize, leg: &SectorLeg| {
+        if flip_count[index] % 2 == 1 {
+            SectorLeg::new(leg.iter(), !leg.is_dual())
+        } else {
+            leg.clone()
+        }
+    };
+    let toggled = FusionTreeHomSpace::new(
+        FusionProductSpace::new(
+            hom.codomain()
+                .legs()
+                .iter()
+                .enumerate()
+                .map(|(index, leg)| toggled_leg(index, leg)),
+        ),
+        FusionProductSpace::new(
+            hom.domain()
+                .legs()
+                .iter()
+                .enumerate()
+                .map(|(index, leg)| toggled_leg(nout + index, leg)),
+        ),
+    );
+    (toggled, occurrences)
+}
+
+pub(crate) fn check_flip_layout_identity(
+    old_structure: &tenet_core::BlockStructure,
+    new_structure: &tenet_core::BlockStructure,
+) -> Result<(), Error> {
+    if new_structure.block_count() != old_structure.block_count() {
+        return Err(internal_layout_error("flip changed the block count"));
+    }
+    for index in 0..old_structure.block_count() {
+        let old_block = old_structure.block(index)?;
+        let new_block = new_structure.block(index)?;
+        if old_block.offset() != new_block.offset() || old_block.shape() != new_block.shape() {
+            return Err(internal_layout_error("flip changed the block layout"));
         }
     }
     Ok(())
