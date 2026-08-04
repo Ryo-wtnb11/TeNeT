@@ -8,8 +8,8 @@ use tenet_tensors::OperationError;
 
 use crate::tensor::Dtype;
 
-/// Error produced by the user-layer [`crate::prelude::Tensor`] /
-/// [`crate::prelude::Space`] / [`crate::prelude::Runtime`] API.
+/// Error produced by the user-layer [`crate::prelude::TensorMap`] /
+/// [`crate::prelude::GradedSpace`] / [`crate::prelude::Runtime`] API.
 ///
 /// Expert-layer errors ([`CoreError`], [`OperationError`]) are passed through
 /// unchanged; the remaining variants report user-level misuse (mixing rules

@@ -79,10 +79,6 @@
 //! facade spells as the `[&v, &w]` leg slices passed to every constructor, not
 //! as a public container type.
 //!
-//! The erased [`crate::prelude::Space::product`] and
-//! [`crate::prelude::Space::fz2_u1_su2`] constructors cover two fixed products
-//! for compatibility. They are not the extension mechanism: the route above is.
-//!
 //! # Phase boundary
 //!
 //! This is the phase-6 surface of issue #557: construction
@@ -165,10 +161,7 @@
 //!   **`sqrt`** needs a Schur seam ([`TensorMap::sqrt`] is the diagonal-bond
 //!   idiom only), and that seam does not exist below this facade. The one that
 //!   used to stand beside it is closed — [`TensorMap::exp`] accepts any
-//!   endomorphism since issue #577, through a blockwise Padé arm. The erased
-//!   [`crate::prelude::Tensor::exp`] carried a complexity-parity gap against
-//!   this one — it densified a diagonal payload where this facade has an
-//!   O(rank) arm — until issue #578 gave it the same arm.
+//!   endomorphism since issue #577, through a blockwise Padé arm.
 //! - **Outer multiplicity factorizations** remain outside this leaf. Checked
 //!   `Generic` providers use the ordinary tree transforms, tensor product, and
 //!   direct-owned `contract` / `compose` routes through retained provider
@@ -180,14 +173,10 @@
 //!   storage. Non-host operations wait for an explicit, [`Runtime`]-dependent
 //!   transfer/device leaf. [`tenet_core::Placement`] is diagnostic metadata;
 //!   no operation dispatches on it.
-//! - The **operator overloads** (`impl Add`, `impl Mul`) are out on the
-//!   `Result` argument alone. An operator cannot return one: the erased
-//!   `Mul` precedent panics, and a panicking `*` or `+` as the only spelling
-//!   of an operation contradicts this facade's passthrough-error contract. The
-//!   cross-facade false-friend argument that used to stand beside it expired
-//!   with [`TensorMap::compose`]: `&a * &b` means composition in the erased
-//!   facade, and composition is what this facade would spell it as. Adding
-//!   them later is not a breaking change.
+//! - The **operator overloads** (`impl Add`, `impl Mul`) are out because they
+//!   cannot return `Result`; panicking operators would contradict this
+//!   facade's passthrough-error contract. Adding them later is not a breaking
+//!   change.
 //! - `conj` stays design-gated on its open correctness question for
 //!   non-self-dual sectors. [`TensorMap::adjoint`] is the TensorKit-style lazy
 //!   parent view for dense storage; compact diagonal storage keeps its direct
@@ -1541,7 +1530,7 @@ where
     ///
     /// Order is irrelevant: the leg stores its sectors in the provider's
     /// [`tenet_core::SectorId`] order. A zero-degeneracy sector is absent from
-    /// the result, matching the leg invariant of the erased facade.
+    /// the result.
     ///
     /// # Complexity
     ///
@@ -2272,10 +2261,8 @@ where
 
 /// The two block payload representations one typed tensor map can carry.
 ///
-/// The erased [`crate::tensor::Data`] needs three diagonal variants to record a
-/// spectrum's dtype and whether it must widen on materialization; here `D` is a
-/// type parameter, so the whole question collapses to one arm holding values of
-/// exactly the payload type.
+/// `D` is a type parameter, so one diagonal arm holds values of exactly the
+/// payload type.
 enum TypedData<D, S = Vec<D>> {
     /// The dense coupled-sector buffer every operation can read.
     Dense(S),
@@ -2487,10 +2474,8 @@ where
 /// both — the shape a compact spectrum can address, and the only shape whose
 /// dense form is block-diagonal.
 ///
-/// Verbatim from the erased `Tensor::is_diagonal_bond_space`, deliberately: it
-/// is the guard TensorKit's `DiagonalTensorMap` gets for free from its type, and
-/// two facades disagreeing about which destinations may stay compact would be a
-/// silent divergence rather than a visible one.
+/// This is the guard TensorKit's `DiagonalTensorMap` gets for free from its
+/// type.
 ///
 /// Applied either to the *destination* of an operation — an operand's storage
 /// says what it holds, only the destination says whether a compact result is
@@ -2587,11 +2572,9 @@ struct TypedTensorBody<R, D, S = Vec<D>> {
     /// dense *before* changing the space, exactly as the references do —
     /// TensorKit 0.17 shares `t.data` only for ordinary `TensorMap` and routes
     /// `DiagonalTensorMap` through the generic similar+block-copy branch
-    /// (`src/tensors/indexmanipulations.jl:124-136,158-195`), and the erased
-    /// facade materializes `Data::Diagonal` first and only then shares the
-    /// resulting `Arc<Data>` (`tenet/src/tensor.rs`
-    /// `materialized_dense_data_arc`). The Group 4 slice (#580 PR 5) holds
-    /// that contract in [`TensorMap::shareable_dense_payload`]: a dense
+    /// (`src/tensors/indexmanipulations.jl:124-136,158-195`). The Group 4
+    /// slice (#580 PR 5) holds that contract in
+    /// [`TensorMap::shareable_dense_payload`]: a dense
     /// payload is shared at pointer cost, a compact one is materialized into
     /// a *fresh* dense payload (one copy) — never by sharing the body-local
     /// `dense_cache`, which only lends a borrowed slice tied to this body's
@@ -2602,15 +2585,11 @@ struct TypedTensorBody<R, D, S = Vec<D>> {
     /// other side: two *bodies* can share one payload until one of them
     /// writes (the unit-leg operations build new bodies over old dense
     /// payloads; every write route publishes a new payload instead of
-    /// reaching through the `Arc`). This is also parity, not invention: the erased sibling's
-    /// `tensor.rs` `TensorBody { space: Arc<..>, data: Arc<Data> }` has had
-    /// exactly this two-`Arc` layout all along, so typed converges onto the
-    /// established in-repo shape.
+    /// reaching through the `Arc`).
     data: Arc<TypedData<D, S>>,
     /// Materialization of a [`TypedData::Diagonal`] payload into the dense
     /// coupled layout, computed at most once and shared by every clone of this
-    /// body — the erased sibling's `compact_dense` cache, without its hand-copy
-    /// on each `Tensor` value. Never populated for a dense payload.
+    /// body. Never populated for a dense payload.
     ///
     /// Deliberately *not* inside the payload `Arc`: the materialized buffer is
     /// a function of the payload **and** the space it is laid out on, so it
@@ -3077,8 +3056,7 @@ impl<R, D, S> TensorMap<R, D, S> {
 
     /// The codomain legs, in axis order (TensorKit `codomain(t)`).
     /// Documented alias of
-    /// [`Self::codomain`], carried for cross-facade name parity with the
-    /// erased [`crate::prelude::Tensor::codomain_spaces`].
+    /// [`Self::codomain`], using TensorKit's accessor name.
     #[inline]
     pub fn codomain_spaces(&self) -> Vec<GradedSpace<R>> {
         self.codomain()
@@ -3086,9 +3064,8 @@ impl<R, D, S> TensorMap<R, D, S> {
 
     /// The domain legs, in axis order (TensorKit `domain(t)`) — the
     /// spaces as written, i.e.
-    /// *not* dualized. Documented alias of [`Self::domain`], carried for
-    /// cross-facade name parity with the erased
-    /// [`crate::prelude::Tensor::domain_spaces`].
+    /// *not* dualized. Documented alias of [`Self::domain`], using
+    /// TensorKit's accessor name.
     #[inline]
     pub fn domain_spaces(&self) -> Vec<GradedSpace<R>> {
         self.domain()
@@ -3119,14 +3096,12 @@ where
     /// Quantum-dimension-weighted total dimension of every leg, in flat order
     /// (codomain legs first, then domain legs) — TensorKit's `dim(space(t,
     /// i))` per leg.
-    /// Contraction planners use it as a size/FLOP proxy, exactly as they use
-    /// the erased [`crate::prelude::Tensor::leg_dims`].
+    /// Contraction planners use it as a size/FLOP proxy.
     ///
-    /// Same rounding formula as the erased facade:
-    /// `Σ_sector round(degeneracy * dim(sector))` per leg. The erased sibling
-    /// needs dedicated branches because its rule set is a closed enum; here the provider
+    /// The rounding formula is
+    /// `Σ_sector round(degeneracy * dim(sector))` per leg. The provider
     /// abstraction carries `dim_scalar` uniformly, so there is deliberately
-    /// **no special case** — fewer branches, identical semantics.
+    /// no group-specific branch.
     ///
     /// # Complexity
     ///
@@ -3135,8 +3110,8 @@ where
     ///
     /// # Errors
     ///
-    /// None today; the `Result` keeps the erased signature's shape so the two
-    /// facades stay drop-in for each other.
+    /// None today; the `Result` leaves room for future fallible dimension
+    /// providers without changing the method shape.
     pub fn leg_dims(&self) -> Result<Vec<usize>, Error> {
         let hom = self.logical_space().space().homspace();
         let provider = self.logical_space().provider();
@@ -3154,8 +3129,7 @@ where
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidArgument`] when `axis >= rank()`, with the erased
-    /// facade's own message.
+    /// [`Error::InvalidArgument`] when `axis >= rank()`.
     pub fn leg_dim(&self, axis: usize) -> Result<usize, Error> {
         let hom = self.logical_space().space().homspace();
         let nout = hom.codomain().len();
@@ -3172,9 +3146,9 @@ where
         Ok(Self::weighted_leg_dim(self.logical_space().provider(), leg))
     }
 
-    /// The erased facade's per-leg reduction, verbatim: quantum dimensions are
-    /// generally irrational (SU(2) `sqrt` products, anyonic golden ratios), so
-    /// the per-sector weight is computed in `f64` and rounded once.
+    /// Quantum dimensions are generally irrational (SU(2) `sqrt` products,
+    /// anyonic golden ratios), so the per-sector weight is computed in `f64`
+    /// and rounded once.
     fn weighted_leg_dim(provider: &R, leg: &SectorLeg) -> usize {
         leg.sectors()
             .iter()
@@ -5454,10 +5428,9 @@ where
     D: TensorScalar,
 {
     /// The fused external sector content of one side of a structural
-    /// constructor — the typed counterpart of the erased `Space::fuse_all`
-    /// (TensorKit `fuse`, `spaces/gradedspace.jl:150-158`), on the one shared
-    /// provider-generic fold. Duality is dropped exactly as there: stored
-    /// sector content is already external.
+    /// constructor (TensorKit `fuse`, `spaces/gradedspace.jl:150-158`), using
+    /// the shared provider-generic fold. Stored sector content is already
+    /// external, so duality is dropped.
     ///
     /// The typed facade's `R` bound is `MultiplicityFreeRigidSymbols`, so a
     /// Generic-fusion provider cannot reach
@@ -5483,8 +5456,7 @@ where
 
     /// Shared body of the structural constructors: checks the fused fit,
     /// builds zeros and writes the (partial) identity into every
-    /// coupled-sector matrix — the same route as [`Self::id`], which is the
-    /// same route as the erased `Tensor::structural`.
+    /// coupled-sector matrix — the same route as [`Self::id`].
     fn structural<'a, C, M>(
         runtime: &Runtime,
         codomain: C,
@@ -5598,15 +5570,11 @@ where
     /// The identity endomorphism on `spaces <- spaces` (TensorKit `id(V)`):
     /// every coupled-sector block is the identity matrix.
     ///
-    /// TensorKit's `one`/`id` for the same object. The erased
-    /// [`crate::prelude::Tensor::id`] takes a [`crate::prelude::Dtype`] token;
-    /// here the payload dtype is `D`, so there is nothing to pass — otherwise
-    /// the argument shape is the erased one, a single leg list used for both
-    /// sides.
+    /// TensorKit's `one`/`id` for the same object. The payload dtype is `D`, so
+    /// no runtime dtype token is needed; one leg list is used for both sides.
     ///
     /// Square by construction: the codomain *is* the domain, so the
-    /// isomorphism precondition the erased structural constructors check
-    /// (`isomorphism`, `isometry`) holds trivially and is not re-checked. The
+    /// isomorphism precondition holds trivially and is not re-checked. The
     /// legs may still be heterogeneous — different sector content and
     /// different degeneracies per leg — since only the fused content matters
     /// and it is identical on both sides by definition.
@@ -6147,9 +6115,7 @@ where
     /// TensorKit `permute`: re-arranges legs with symmetric braiding.
     ///
     /// `codomain_axes` and `domain_axes` list source axis numbers (`0..rank`,
-    /// codomain axes first) for the new codomain and domain — the same
-    /// argument shape as the erased [`crate::prelude::Tensor::permute`], so
-    /// there is one vocabulary for the operation rather than two.
+    /// codomain axes first) for the new codomain and domain.
     ///
     /// # Compact storage
     ///
@@ -6370,10 +6336,8 @@ where
     /// Shared body of the three planar operations: derive the planar axis
     /// order, let the expert layer check it, and run it as a transpose.
     ///
-    /// Why the axis derivation is borrowed from the erased layer rather than
-    /// rewritten here: it *is* the definition of what "planar" means for each
-    /// request kind, and a second copy would be free to drift from the erased
-    /// sibling these operations are byte-compared against.
+    /// The shared axis derivation defines what "planar" means for each request
+    /// kind; duplicating it here would allow the definitions to drift.
     fn planar(&self, kind: PlanarRequestKind<'_>) -> Result<Self, TypedFacadeError<R>> {
         let operation = with_planar_axes(
             self.codomain_rank(),
@@ -6509,8 +6473,8 @@ where
     /// becomes its domain (`other.rank() - rhs_axes.len()` axes), regardless
     /// of which side of either operand those axes came from.
     ///
-    /// **Fermionic semantics**: like TensorKit `tensorcontract!` / `@tensor`
-    /// (and the erased [`crate::prelude::Tensor::contract`]), this **twists**
+    /// **Fermionic semantics**: like TensorKit `tensorcontract!` / `@tensor`,
+    /// this **twists**
     /// dual contracted legs with the fermionic supertrace twist — unlike
     /// composition (TensorKit `A * B` / `mul!`), which never does. Bosonic
     /// rules are unaffected; fermionic rules can differ by signs.
@@ -6553,9 +6517,6 @@ where
     /// equivalent to rebinding the product spectrum (checked in #453). A
     /// supertrace twist on a dual contracted leg of `other` would also decline,
     /// and cannot currently arise — see `try_contract_diagonal`.
-    ///
-    /// The erased [`crate::prelude::Tensor::contract`] took the same arm in #75,
-    /// and the two facades are byte-compared across it.
     ///
     /// The result is bound to `self`'s provider allocation, the same
     /// left-authority rule [`Self::zeros`] uses for its first leg: the two
@@ -6626,32 +6587,18 @@ where
     /// semantics, same compact fast paths and complexity, same errors — the
     /// delegation is total, so everything is stated there once.
     ///
-    /// It exists for cross-facade name parity. The erased facade spells the
-    /// operation as a pair — [`crate::prelude::Tensor::contract`] (implicit
-    /// identity output order) and [`crate::prelude::Tensor::contract_ordered`]
-    /// (explicit `output_axes`) — while this facade's [`Self::contract`]
-    /// always takes the order explicitly, so it *is* the ordered route and
-    /// this alias only lets the erased pair's name resolve here too.
+    /// [`Self::contract`] always takes the order explicitly, so this alias
+    /// exists only to make that intent visible at the call site.
     ///
     /// **TensorKit correspondence.** TensorKit has no `contract_ordered`
     /// entry point either: the counterpart of `output_axes` is
     /// `tensorcontract!`'s `pAB` output permutation (`TO.tensorcontract!`;
     /// the destination structure is `permute(compose(sA, sB), pAB)`, per
-    /// `tensorcontract_structure`). The
-    /// erased [`crate::prelude::Tensor::contract_ordered`] is the sibling
-    /// reference for the erased-side semantics.
+    /// `tensorcontract_structure`).
     ///
     /// # Errors
     ///
-    /// Exactly [`Self::contract`]'s. One deliberate divergence from the
-    /// erased sibling on inputs carrying *two* defects — mismatched
-    /// contracted legs *and* a bad output order: the erased
-    /// `contract_ordered` validates the contracted spaces before inspecting
-    /// the output order (its documented "why not report `pAB` first" choice),
-    /// while this facade delegates all validation to the expert layer, which
-    /// reports the output-order defect first. The precedence is pinned in
-    /// tests as it stands; re-checking the spaces here to force a match would
-    /// be a second copy of the rules, free to drift.
+    /// Exactly [`Self::contract`]'s.
     #[inline]
     pub fn contract_ordered(
         &self,
@@ -6754,8 +6701,7 @@ where
     /// index-notation contraction.
     ///
     /// The axes are not arguments, deliberately: composition is defined by the
-    /// codomain/domain split itself, and both TensorKit's `*` and the erased
-    /// [`crate::prelude::Tensor::compose`] take none.
+    /// codomain/domain split itself, and TensorKit's `*` takes none.
     ///
     /// The result is bound to `self`'s provider allocation — the same
     /// left-authority rule as [`Self::contract`] and [`Self::zeros`] — with one
@@ -6764,9 +6710,7 @@ where
     /// it under the left allocation would be a copy for nothing. The two
     /// allocations must already agree on
     /// [`tenet_core::FusionRule::rule_identity`] for the composition to be
-    /// legal at all, so the choice is immaterial to the algebra. The erased
-    /// [`crate::prelude::Tensor::compose`] takes the same exemption on the same
-    /// arm, and the two facades are byte-compared across it.
+    /// legal at all, so the choice is immaterial to the algebra.
     ///
     /// # Compact fast paths
     ///
@@ -6926,9 +6870,7 @@ where
     /// against the dense route's O(d²·n) GEMM on a materialized `Σ_c d_c²`
     /// buffer — and one [`Self::permute`] lays the result out. The permute is
     /// what carries every recoupling and bend, so this adds no mathematics of
-    /// its own; it is the same scale-plus-one-permute structure the erased
-    /// `Tensor::try_contract_diagonal_fast_path` runs, and the two are
-    /// byte-compared in `tests/typed_facade.rs`.
+    /// its own; it is a scale followed by one permutation.
     ///
     /// # Which patterns, and why only those
     ///
@@ -6946,17 +6888,15 @@ where
     /// # The twist, and why it is not folded
     ///
     /// [`Self::contract`] applies the fermionic supertrace twist to a **dual**
-    /// contracted leg of `other`, where [`Self::compose`] does not. The erased
-    /// sibling folds that `θ = ±1` into the spectrum values. Here the case
+    /// contracted leg of `other`, where [`Self::compose`] does not. Here the case
     /// cannot arise, so the arm declines instead of carrying arithmetic no test
     /// could reach: a compact payload's bond leg is built non-dual
     /// (`diagonal_bond_bound_space_like`), the arms pair it with a *codomain*
     /// leg of `other` whose external duality is exactly its raw flag, and
     /// admissibility forces that flag to equal the bond's. The guard stays
     /// because the first constructor of a compact payload on a dual bond leg —
-    /// or of an arm pairing a domain leg of `other` — should find a decline
-    /// rather than a silent sign error, and the erased fold is what to port
-    /// then.
+    /// or of an arm pairing a domain leg of `other` — should decline rather
+    /// than silently return a wrong sign.
     fn try_contract_diagonal(
         &self,
         other: &Self,
@@ -7066,8 +7006,7 @@ where
     /// `0..source.len()`.
     ///
     /// `source` is the contraction's default output order expressed as axes of
-    /// the scaled operand, so this is the fast path's counterpart of the erased
-    /// `output_source_axes_for_order`. An `output_axes` that is not a
+    /// the scaled operand. An `output_axes` that is not a
     /// permutation declines rather than errors: the dense route validates it
     /// and reports it, and one error message beats two.
     fn permuted_to_output(
@@ -7141,9 +7080,7 @@ where
     /// the payload dtype `D`. Decoding belongs to the caller-facing spectrum
     /// fields, not to storage; a stored payload never leaves this module.
     ///
-    /// Sorted by sector id first, matching the erased
-    /// `Tensor::from_diagonal_real_spectrum`: the bond leg is built from this
-    /// order, so the two facades' factors are only byte-comparable if both sort.
+    /// Sorted by sector id first because the bond leg is built from this order.
     fn diagonal_factor<V>(
         &self,
         spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<V>>,
@@ -7305,8 +7242,7 @@ where
     /// bond truncated by `truncation`; see [`SvdTrunc`].
     ///
     /// TensorKit returns the four-tuple `(U, S, Vᴴ, ϵ)`; this returns them as a
-    /// named struct, following the same rule the erased facade uses — tuples up
-    /// to three, a struct beyond.
+    /// named struct.
     ///
     /// `s` is in compact diagonal storage, exactly as [`Self::svd_compact`]'s.
     ///
@@ -7479,9 +7415,8 @@ where
     /// TensorKit 0.17 `left_orth`: the left isometry factorization
     /// `t = v * c`, `v` isometric and `c` the corestriction.
     ///
-    /// TensorKit's default `kind` is `:qr`, so this is [`Self::qr_compact`] —
-    /// the same one-line delegation the erased facade makes, deliberately, so
-    /// the two names cannot come to mean different things.
+    /// TensorKit's default `kind` is `:qr`, so this delegates directly to
+    /// [`Self::qr_compact`].
     ///
     /// # Errors
     ///
@@ -7584,9 +7519,8 @@ where
     ///
     /// Factor spaces per TensorKit 0.17: `w` lives on the input's
     /// own space `codomain <- domain`, `p` on `domain <- domain`. TensorKit
-    /// also exposes algorithm kinds for the polars; neither tenet facade does —
-    /// a deliberate narrowing, in parity with the erased
-    /// [`crate::prelude::Tensor::left_polar`]. A lazy typed adjoint executes
+    /// also exposes algorithm kinds for the polars; TeNeT deliberately does
+    /// not. A lazy typed adjoint executes
     /// the opposite polar on its exact owned parent, keeps the already-owned
     /// positive factor, and returns an owned adjoint of the isometry without
     /// publishing the receiver's materialization cache.
@@ -7692,9 +7626,8 @@ where
     /// is real too — but `d` keeps the payload dtype `D` so it composes with
     /// `v` directly.
     ///
-    /// The `(d, v)` order is MatrixAlgebraKit's `initialize_output` order and
-    /// the erased [`crate::prelude::Tensor::eigh_full`]'s, not the `v, d`
-    /// reading order of the formula. It is deliberate on both facades.
+    /// The `(d, v)` order is MatrixAlgebraKit's `initialize_output` order, not
+    /// the `v, d` reading order of the formula.
     ///
     /// # Errors
     ///
@@ -7915,13 +7848,8 @@ where
     /// that matricizes them all first, adding `O(Σ_c n_c²)`. Neither route
     /// couples sectors. A dense lazy adjoint builds one operation-local logical
     /// payload per call without publishing its reusable receiver cache. Compact
-    /// input (TensorKit's
-    /// `DiagonalTensorMap`): the **O(rank) elementwise arm**, `exp(s_i)` over
-    /// the `Σ_c k_c` stored values, staying compact. The erased
-    /// [`crate::prelude::Tensor::exp`] has the same arm since issue #578 — it
-    /// used to materialize a diagonal payload and eigendecompose the
-    /// block-diagonal buffer — so the two facades agree on complexity and on
-    /// what each storage accepts.
+    /// input (TensorKit's `DiagonalTensorMap`): the **O(rank) elementwise
+    /// arm**, `exp(s_i)` over the `Σ_c k_c` stored values, staying compact.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -8165,8 +8093,8 @@ where
     /// - a stored block has a nonzero off-diagonal entry (dense arm only — a
     ///   compact payload has none by construction);
     /// - the payload is `f64` and a diagonal entry is negative. The message
-    ///   points at the complex payload, matching the erased facade and
-    ///   TensorKit's diagonal-path `DomainError`. TensorKit's *dense* path
+    ///   points at the complex payload, matching TensorKit's diagonal-path
+    ///   `DomainError`. TensorKit's *dense* path
     ///   instead complexifies silently, which contradicts its own diagonal path
     ///   and is not mirrored here.
     ///
@@ -8318,8 +8246,7 @@ where
         Ok(total)
     }
 
-    /// The linear combination `alpha * self + beta * other`, mirroring the
-    /// erased [`crate::prelude::Tensor::add`].
+    /// The linear combination `alpha * self + beta * other`.
     ///
     /// Both operands must live on the same runtime and on the same space —
     /// identical hom space and block layout — since the combination is
@@ -8329,7 +8256,7 @@ where
     ///
     /// VectorInterface's `add(y, x, α, β)` is `y * β + x * α`: its **first**
     /// coefficient belongs to its **second** argument. Here `alpha` belongs to
-    /// `self` and `beta` to `other`, matching the erased facade. Callers
+    /// `self` and `beta` to `other`. Callers
     /// arriving from Julia should go by the argument order, not by the
     /// coefficient names.
     ///
@@ -8337,12 +8264,9 @@ where
     ///
     /// - [`Error::RuntimeMismatch`] when the operands belong to different
     ///   runtimes, as for [`Self::contract`].
-    /// - [`Error::InvalidArgument`] when they do not live on the same space,
-    ///   with the erased facade's own message. Operands whose providers report
-    ///   different rule identities land here too, rather than in
-    ///   [`Error::RuleMismatch`] as the erased `check_same_world` would report
-    ///   them: the space comparison already covers rule identity, so a
-    ///   separate check would only re-report the same disagreement.
+    /// - [`Error::InvalidArgument`] when they do not live on the same space.
+    ///   The space comparison already covers rule identity, so a separate
+    ///   check would only re-report the same disagreement.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -8506,12 +8430,8 @@ where
 
     /// `factor * self` (TensorKit `scale`).
     ///
-    /// Infallible, unlike the erased [`crate::prelude::Tensor::scale`]: that
-    /// one returns a `Result` because it must reconcile a runtime dtype and a
-    /// possible device or diagonal storage first, none of which exist here —
-    /// `D` is a type parameter and the payload is always a host buffer. The
-    /// erased `scale`/`scale_c64` split has the same origin and likewise
-    /// collapses: `factor` is simply a `D`.
+    /// Infallible because the host payload dtype is the type parameter `D`;
+    /// `factor` is simply another `D`.
     ///
     /// Compact diagonal storage is preserved: scaling a spectrum factor stays
     /// `Σ_c k_c` values rather than densifying.
@@ -8559,29 +8479,27 @@ where
     /// supertrace there. [`Self::tr`] is TensorKit's positive trace instead,
     /// and the two genuinely disagree for a fermionic provider.
     ///
-    /// The `&[(usize, usize)]` shape mirrors the erased facade; TensorKit's
-    /// native parallel-list `Index2Tuple` is what the seam takes internally.
-    /// One cross-facade vocabulary wins over matching the seam's.
+    /// TensorKit's native parallel-list `Index2Tuple` is what the seam takes
+    /// internally; the Rust API uses `&[(usize, usize)]`.
     ///
     /// # Complexity
     ///
     /// Dense storage runs the partial-trace engine over the whole payload. A
     /// compact spectrum factor traced over its only pair reduces the stored
-    /// spectrum in `O(Σ_c k_c)` without materializing (#604) — the typed twin
-    /// of the erased facade's #585 arm, with the same deliberately narrow
-    /// guard: one pair on a rank-(1,1) source, where the destination tree is
-    /// empty and the coefficient collapses to a per-sector scalar,
+    /// spectrum in `O(Σ_c k_c)` without materializing (#604), with a
+    /// deliberately narrow guard: one pair on a rank-(1,1) source, where the
+    /// destination tree is empty and the coefficient collapses to a per-sector
+    /// scalar,
     /// `dim(c) · θ(c)` on a direct traced codomain leg and `dim(c)` on a dual
     /// one. That twist is what makes this the supertrace and not [`Self::tr`];
-    /// the coefficient is pinned byte-for-byte against the erased compact arm
-    /// and numerically (the engine's summation order differs) against the
-    /// engine route by the oracle sweeps in `tests/typed_facade.rs` and
+    /// the coefficient is checked numerically against the engine route by the
+    /// oracle sweeps in `tests/typed_facade.rs` and
     /// `tenet/src/tensor/compact_diagonal_tests.rs`.
     ///
     /// # Errors
     ///
     /// [`Error::InvalidArgument`] when the pair list is malformed — an axis out
-    /// of range, or one named twice — with the erased facade's own message.
+    /// of range, or one named twice.
     /// Otherwise [`Error::Operation`] / [`Error::Core`] /
     /// [`Error::FusionAlgebra`] from the seam, which owns the rest of the
     /// validation (legs that are not mutually dual, above all).
@@ -8952,8 +8870,7 @@ where
     /// product is conjugate-linear in its first argument.
     ///
     /// `t.inner(&t)?` is `t.norm()?²` up to floating point, and for `D = f64`
-    /// the result is exactly real: the erased sibling returns
-    /// `Scalar::F64(value.re)` there, and the narrowing here is the same `.re`.
+    /// the result is exactly real.
     ///
     /// # Errors
     ///
@@ -9022,9 +8939,7 @@ where
     }
 
     /// `LinearAlgebra.dot` / TensorKit `dot(x, y)` — an alias for
-    /// [`Self::inner`], for callers who reach for that name. The erased facade
-    /// makes the same alias, deliberately, so the two names cannot come to
-    /// mean different things.
+    /// [`Self::inner`].
     ///
     /// # Errors
     ///
@@ -9039,14 +8954,13 @@ where
     /// This is TensorKit's **positive** trace, quantum-dimension weighted:
     /// `Σ_c dim(c) * tr(b_c)`. It is *not* the supertrace — a fermionic rule's
     /// twists belong to tensor contraction, and [`Self::trace_pairs`] is where
-    /// they appear. The two therefore disagree for a fermionic provider, by
-    /// design and as in the erased facade.
+    /// they appear. The two therefore disagree for a fermionic provider by
+    /// design.
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidArgument`] when the tensor is not an endomorphism, with
-    /// the erased facade's own message, and [`Error::Core`] when the block
-    /// structure cannot be walked.
+    /// [`Error::InvalidArgument`] when the tensor is not an endomorphism, and
+    /// [`Error::Core`] when the block structure cannot be walked.
     pub fn tr(&self) -> Result<D, Error> {
         let hom = self.logical_space().space().homspace();
         // Mirrors the erased pre-check verbatim, message included: the weighted
@@ -9092,8 +9006,7 @@ where
     /// norm (TensorKit `ishermitian`).
     ///
     /// A non-endomorphism is never Hermitian and comes back `false` rather than
-    /// as an error, which is where both this facade and the erased one differ
-    /// from TensorKit — it throws. A predicate that can only be called after
+    /// as an error; TensorKit throws. A predicate that can only be called after
     /// another predicate is not one.
     ///
     /// # Errors
@@ -9210,15 +9123,11 @@ where
     /// contracting every leg — TensorKit `scalar` (an empty payload reads
     /// as zero there too).
     ///
-    /// Returns `D` directly: the static-dtype counterpart of the erased
-    /// [`crate::prelude::Tensor::scalar`], whose `Scalar` enum exists only
-    /// because its dtype is a runtime property. Not a semantic difference —
-    /// the value is the same sum of the coupled payload.
+    /// Returns `D` directly: the value is the sum of the coupled payload.
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidArgument`] on a tensor with legs, with the erased
-    /// facade's own message.
+    /// [`Error::InvalidArgument`] on a tensor with legs.
     pub fn scalar(&self) -> Result<D, Error> {
         if self.rank() != 0 {
             return Err(Error::InvalidArgument(format!(
@@ -9246,13 +9155,10 @@ where
     ///
     /// Rust uses a method (`t1.catdomain(&t2)`) because binary tensor
     /// operations in this API are methods; the name and operand order match
-    /// TensorKit's free function, exactly as the erased
-    /// [`crate::prelude::Tensor::catdomain`] does.
+    /// TensorKit's free function.
     ///
-    /// Narrowings against the erased sibling, all statically enforced rather
-    /// than semantic differences: both operands share one `D`, so the erased
-    /// mixed-dtype widening arm (`execute_c64`) is unrepresentable — widen
-    /// with [`Self::to_c64`] first; there are no device placements to check.
+    /// Both operands share one `D`, so mixed-dtype widening is statically
+    /// unrepresentable — widen with [`Self::to_c64`] first.
     /// A lazy adjoint is read from parent storage through the oriented copy
     /// plan without publishing a receiver-sized materialization. A compact
     /// diagonal operand is materialized dense once on demand.
@@ -9260,18 +9166,16 @@ where
     /// # Complexity
     ///
     /// One output allocation and a single `O(len(self) + len(other))` copy
-    /// pass over the compiled per-sector slab plan — the same plan object the
-    /// erased facade executes. If an oriented geometry is conservatively
-    /// declined, correctness falls back to operation-local uncached
-    /// materialization before retrying the owned plan.
+    /// pass over the compiled per-sector slab plan. If an oriented geometry is
+    /// conservatively declined, correctness falls back to operation-local
+    /// uncached materialization before retrying the owned plan.
     ///
     /// # Errors
     ///
     /// [`Error::RuleMismatch`] on differing provider identities and
-    /// [`Error::RuntimeMismatch`] on differing runtimes, in that order (the
-    /// erased `check_same_execution_world`); then
-    /// [`Error::InvalidArgument`] — with the erased facade's own messages —
-    /// for a multi-leg domain, mismatched codomain product spaces, or changed
+    /// [`Error::RuntimeMismatch`] on differing runtimes, in that order; then
+    /// [`Error::InvalidArgument`] for a multi-leg domain, mismatched codomain
+    /// product spaces, or changed
     /// legs of opposite duality.
     pub fn catdomain(&self, other: &Self) -> Result<Self, Error> {
         self.cat(other, CatSide::Domain)
@@ -9290,10 +9194,8 @@ where
         self.cat(other, CatSide::Codomain)
     }
 
-    /// Shared route of [`Self::catdomain`] / [`Self::catcodomain`]: the same
-    /// validation core, copy-plan compiler and executor the erased facade
-    /// uses (`cat_homspace` / `compile_cat_plan` — #580 PR 4), fed with the
-    /// typed bound space's structure and executed on the dense payloads.
+    /// Shared route of [`Self::catdomain`] / [`Self::catcodomain`], using
+    /// `cat_homspace` and `compile_cat_plan` over the typed bound space.
     fn cat(&self, other: &Self, side: CatSide) -> Result<Self, Error> {
         // Rule identity before runtime: the erased
         // `check_same_execution_world` order, minus its placement arm (no
@@ -9350,11 +9252,8 @@ where
     /// the non-shared region — TK documents the same contract.
     ///
     /// The result keeps `self`'s spaces and dtype. Equal `D` is required by
-    /// the signature, so the erased facade's f64→c64 widening and its
-    /// `InexactScalarConversion` narrowing arm are statically
-    /// unrepresentable — widen with [`Self::to_c64`] first. No device
-    /// placements exist here; a compact diagonal payload (on either side) is
-    /// materialized dense first, exactly once, as the erased route does.
+    /// the signature; widen with [`Self::to_c64`] first. A compact diagonal
+    /// payload (on either side) is materialized dense first, exactly once.
     ///
     /// # Complexity
     ///
@@ -9365,13 +9264,11 @@ where
     ///
     /// # Errors
     ///
-    /// In the erased facade's order: [`Error::InvalidArgument`] on unequal
-    /// codomain/domain ranks (TK throws its `DimensionError` for the same),
-    /// [`Error::RuleMismatch`] on differing provider identities,
+    /// [`Error::InvalidArgument`] on unequal codomain/domain ranks (TK throws
+    /// its `DimensionError` for the same), [`Error::RuleMismatch`] on differing
+    /// provider identities,
     /// [`Error::RuntimeMismatch`] on differing runtimes, and
     /// [`Error::InvalidArgument`] when corresponding legs differ in duality.
-    /// The messages name `TensorMap::absorb` where the erased ones name
-    /// `Tensor::absorb` — same shape, honest receiver.
     pub fn absorb(&self, source: &Self) -> Result<Self, Error> {
         let destination_space = self.logical_space().space();
         let source_space = source.logical_space().space();
@@ -9466,26 +9363,22 @@ where
     /// is a body-sharing clone, O(1), exactly as TensorKit's `copy = false`
     /// default shares `t`. A compact
     /// spectrum factor scales spectrum-per-sector and **stays compact**,
-    /// O(Σ_c k_c) — parity with the erased `Data::Diagonal` fast path, and
-    /// with TensorKit, whose `DiagonalTensorMap` twist stays diagonal
+    /// O(Σ_c k_c), like TensorKit's `DiagonalTensorMap` twist,
     /// because `similar` preserves the diagonal storage
     /// and `twist!` only scales blocks.
-    /// Otherwise: one scaled copy of the dense payload, O(len), through the
-    /// same per-block walk as the erased facade (`scale_blocks_impl`).
+    /// Otherwise: one scaled copy of the dense payload, O(len), through
+    /// `scale_blocks_impl`.
     ///
     /// A lazy dense adjoint redirects through the parent with the inverse
     /// categorical phase, leaving its receiver cache cold; compact adjoints
-    /// remain compact and use the spectrum arm above. There is no device arm (the payload is a host `Vec<D>` by
-    /// construction). The erased route's Generic rejection is dead here: the
-    /// multiplicity-free admission bound keeps a `Generic` provider out at
-    /// construction.
+    /// remain compact and use the spectrum arm above. There is no device arm
+    /// (the payload is a host `Vec<D>` by construction). The multiplicity-free
+    /// admission bound excludes `Generic` providers.
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidArgument`] when a leg is out of range, with the
-    /// erased facade's own message — reported before the empty-list
-    /// short-circuit, matching the erased validation order. An empty `legs`
-    /// returns an identical clone.
+    /// [`Error::InvalidArgument`] when a leg is out of range, reported before
+    /// the empty-list short-circuit. An empty `legs` returns an identical clone.
     pub fn twist(&self, legs: &[usize]) -> Result<Self, Error> {
         self.twist_with_inverse(legs, false)
     }
@@ -9606,9 +9499,9 @@ where
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidArgument`] when a leg is out of range (erased message,
-    /// erased validation order — before the empty-list short-circuit; empty
-    /// `legs` returns an identical clone). Otherwise [`Error::Operation`] /
+    /// [`Error::InvalidArgument`] when a leg is out of range, before the
+    /// empty-list short-circuit; empty `legs` returns an identical clone.
+    /// Otherwise [`Error::Operation`] /
     /// [`Error::Core`] from the layout derivation of the toggled hom space.
     pub fn flip(&self, legs: &[usize]) -> Result<Self, Error> {
         self.flip_with_inverse(legs, false)
@@ -9696,10 +9589,8 @@ where
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidArgument`] when `position` exceeds the rank (erased
-    /// message shape, named for this receiver). Otherwise the layout
-    /// derivation's and unit-correspondence validator's own classes,
-    /// mapped exactly as the erased facade maps them.
+    /// [`Error::InvalidArgument`] when `position` exceeds the rank. Otherwise
+    /// the layout derivation's and unit-correspondence validator's own classes.
     pub fn insert_left_unit(&self, position: usize, dual: bool) -> Result<Self, Error>
     where
         R: CanonicalUnitFusionRule,
@@ -9726,9 +9617,9 @@ where
     }
 
     /// Shared route of [`Self::insert_left_unit`] /
-    /// [`Self::insert_right_unit`]: the tenet-core hom-space transform, the
-    /// same checked layout-correspondence validator the erased facade runs,
-    /// then a new body over the shared (or once-materialized) payload.
+    /// [`Self::insert_right_unit`]: the tenet-core hom-space transform, checked
+    /// layout correspondence, then a new body over the shared (or
+    /// once-materialized) payload.
     fn insert_unit(&self, insertion: UnitLegInsertion, operation: &str) -> Result<Self, Error>
     where
         R: CanonicalUnitFusionRule,
@@ -9780,9 +9671,8 @@ where
     /// # Errors
     ///
     /// [`Error::InvalidArgument`] when `axis` is out of range or the leg is
-    /// not a canonical unit leg (erased message shapes, named for this
-    /// receiver). Otherwise the layout derivation's and validator's own
-    /// classes, mapped exactly as the erased facade maps them.
+    /// not a canonical unit leg. Otherwise the layout derivation's and
+    /// validator's own classes.
     pub fn remove_unit(&self, axis: usize) -> Result<Self, Error>
     where
         R: CanonicalUnitFusionRule,
@@ -9916,10 +9806,8 @@ impl<R> TensorMap<R, f64> {
     /// before the output allocation; an already-owned input needs only its
     /// `O(stored_len)` output. The logical space is shared, not re-derived.
     ///
-    /// Infallible, unlike the erased pair [`crate::prelude::Tensor::to_c64`] /
-    /// `try_to_c64`: that split exists only for device residency, which the
-    /// typed facade does not have — a deliberate narrowing, not a semantic
-    /// difference.
+    /// Infallible for host storage; device transfer and conversion use their
+    /// storage-specific APIs.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -10039,10 +9927,8 @@ fn map_spectrum_dtype<A: Copy, B>(
 /// These live inside the module on purpose: the properties under test are the
 /// private layout — which `Arc` holds what — and asserting them from
 /// `tests/` would mean publishing accessors the facade does not otherwise
-/// need. Byte-level neutrality of this layout is *not* re-asserted here; it is
-/// already pinned by the typed-versus-erased oracles in `tests/typed_facade.rs`
-/// across U(1), SU(2), fZ2, Z2, an external provider and both `ProductFusionRule`
-/// orders, and the dense-cache behavior by `tests/typed_diagonal_allocations.rs`.
+/// need. Public semantic oracles live in `tests/typed_facade.rs`; dense-cache
+/// behavior lives in `tests/typed_diagonal_allocations.rs`.
 #[cfg(test)]
 mod representation_gates {
     use super::*;

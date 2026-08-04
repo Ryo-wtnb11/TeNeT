@@ -49,9 +49,7 @@ pub enum SectorLabel {
     },
 }
 
-/// The fusion rule a [`Space`] (and every [`crate::prelude::Tensor`] built
-/// from it) is tagged with. The user layer erases the concrete rule types of
-/// the expert layer behind this tag.
+/// The fusion rule a legacy erased [`Space`] is tagged with.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub(crate) enum RuleKind {
     U1,
@@ -202,17 +200,6 @@ macro_rules! with_rule {
 /// 1 => 2)` style constructors; internally it lowers to a
 /// [`tenet_core::SectorLeg`] plus per-sector degeneracies.
 ///
-/// # Examples
-///
-/// ```
-/// use tenet::prelude::Space;
-///
-/// let v = Space::u1([(-1, 2), (0, 3), (1, 2)]);
-/// assert_eq!(v.dim(), 7);
-/// let w = v.dual();
-/// assert_eq!(w.dim(), 7);
-/// assert_eq!(w.dual(), v);
-/// ```
 #[derive(Clone, Debug)]
 pub struct Space {
     pub(crate) context: Arc<UserRuleContext>,

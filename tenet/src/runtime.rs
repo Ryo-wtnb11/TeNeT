@@ -492,7 +492,7 @@ pub(crate) struct RuntimeExecutionConfig {
     pub(crate) shared_ctx: tenet_dense::SharedCpuContext,
 }
 
-/// Execution runtime for the user-layer [`crate::prelude::Tensor`] API.
+/// Execution runtime for the user-layer [`crate::prelude::TensorMap`] API.
 ///
 /// A `Runtime` is built once via [`Runtime::builder`] and then carried
 /// implicitly by every tensor created from it; operations reuse the
@@ -512,8 +512,12 @@ pub(crate) struct RuntimeExecutionConfig {
 /// use tenet::prelude::*;
 ///
 /// let rt = Runtime::builder().build()?;
-/// let v = Space::z2([(0, 1), (1, 1)]);
-/// let a = Tensor::zeros(&rt, Dtype::F64, [&v], [&v])?;
+/// let v = GradedSpace::try_new_owned(
+///     Z2FusionRule,
+///     [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
+///     false,
+/// )?;
+/// let a: TensorMap<_, f64> = TensorMap::zeros(&rt, [&v], [&v])?;
 /// assert_eq!(a.norm()?, 0.0);
 /// # Ok::<(), tenet::prelude::Error>(())
 /// ```
@@ -759,7 +763,8 @@ impl Runtime {
         self.lock().cuda.as_ref().map(|cuda| cuda.device())
     }
 
-    /// Deterministic per-runtime stream position for [`crate::prelude::Tensor::rand`].
+    /// Deterministic per-runtime stream position for
+    /// [`crate::prelude::TensorMap::rand`].
     pub(crate) fn next_rand_seed(&self) -> u64 {
         // Fixed base seed: runs are reproducible, consecutive `rand` calls
         // still produce distinct tensors.
@@ -873,7 +878,7 @@ impl std::fmt::Debug for RuntimeBuilder {
 impl RuntimeBuilder {
     /// Attaches a CUDA device (by ordinal) to the runtime. Tensors stay on
     /// the host until moved explicitly with
-    /// [`crate::prelude::Tensor::to_cuda`]; there are no implicit
+    /// [`crate::prelude::TensorMap::to_cuda`]; there are no implicit
     /// transfers. Device initialization happens in [`Self::build`].
     #[cfg(feature = "cuda")]
     pub fn cuda(mut self, device: usize) -> Self {
@@ -946,8 +951,12 @@ impl RuntimeBuilder {
     /// let rt = Runtime::builder()
     ///     .linalg_backend(LinalgBackend::Faer)
     ///     .build()?;
-    /// let v = Space::u1([(-1, 1), (0, 2), (1, 1)]);
-    /// let t = Tensor::rand_with_seed(&rt, Dtype::F64, [&v, &v], [&v, &v], 7)?;
+    /// let v = GradedSpace::try_new_owned(
+    ///     U1FusionRule,
+    ///     [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
+    ///     false,
+    /// )?;
+    /// let t: TensorMap<_, f64> = TensorMap::rand_with_seed(&rt, [&v, &v], [&v, &v], 7)?;
     /// let (_u, _s, _vh) = t.svd_compact()?;
     ///
     /// // Switch to the system BLAS/LAPACK linked via a `blas-*` cargo feature
@@ -1108,35 +1117,11 @@ thread_local! {
     static DEFAULT_RUNTIME: RefCell<Option<Runtime>> = const { RefCell::new(None) };
 }
 
-/// Sets the calling thread's default [`Runtime`], used by the argument-free
-/// tensor constructors ([`crate::prelude::zeros`], [`crate::prelude::rand`], …).
+/// Sets the calling thread's legacy default [`Runtime`].
 ///
 /// The default is **thread-local**: it is not shared with other threads, and
-/// passing a runtime explicitly (`Tensor::zeros(&rt, …)` or `rt.zeros(…)`)
-/// always works regardless of it — that is the escape hatch for using several
-/// runtimes at once (e.g. per MPI rank, or comparing backends). Call once near
-/// program start; a later call overwrites the default on this thread.
-///
-/// [`default!`](crate::default) is shorthand: `default!(rt)` == `set_default_runtime(&rt)`.
-///
-/// # Examples
-///
-/// ```
-/// use tenet::prelude::*;
-///
-/// let rt = Runtime::builder().build()?;
-/// default!(rt); // set once for this thread; equivalently set_default_runtime(&rt)
-///
-/// let v = Space::u1([(0, 1), (1, 1)]);
-/// let a = zeros(Dtype::F64, [&v], [&v])?; // no runtime argument
-/// assert_eq!(a.norm()?, 0.0);
-///
-/// // Explicit still works for a second runtime (e.g. another backend / rank):
-/// let rt2 = Runtime::builder().build()?;
-/// let b = rt2.zeros(Dtype::F64, [&v], [&v])?;
-/// # let _ = (a, b);
-/// # Ok::<(), tenet::prelude::Error>(())
-/// ```
+/// a later call overwrites the default on this thread. Typed tensors receive
+/// their runtime explicitly.
 pub fn set_default_runtime(rt: &Runtime) {
     DEFAULT_RUNTIME.with(|cell| *cell.borrow_mut() = Some(rt.clone()));
 }

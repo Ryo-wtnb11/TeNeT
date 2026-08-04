@@ -49,7 +49,6 @@ pub use runtime::{clear_default_runtime, default_runtime, set_default_runtime};
 /// everyday tensor code; expert APIs stay available through [`core`], [`dense`],
 /// and the curated [`operations`] and [`matrixalgebra`] facades.
 pub mod prelude {
-    pub use crate::default;
     pub use crate::error::Error;
     #[cfg(feature = "cotengra-python")]
     pub use crate::plancache::CotengraSlicingConfig;
@@ -59,16 +58,10 @@ pub mod prelude {
         Optimizer, PlanCacheConfig, ReplanPolicy, DEFAULT_WORKSPACE_BUDGET_BYTES,
     };
     pub use crate::runtime::{
-        clear_default_runtime, default_runtime, set_default_runtime, LinalgBackend, Runtime,
-        RuntimeBuilder, RuntimeTreeTransformCacheInfo,
+        LinalgBackend, Runtime, RuntimeBuilder, RuntimeTreeTransformCacheInfo,
     };
-    pub use crate::space::{SectorLabel, Space};
-    pub use crate::tensor::{
-        id, rand, rand_with_seed, zeros, ContractOverwriteCache, Dtype, EigTrunc, EighTrunc,
-        OverwriteOutcome, PermuteOverwriteCache, Scalar, SvdTrunc, Tensor, TensorExecutionContext,
-        TensorScalar,
-    };
-    pub use crate::typed::{GradedSpace, TensorMap};
+    pub use crate::tensor::TensorScalar;
+    pub use crate::typed::{EigTrunc, EighTrunc, GradedSpace, SvdTrunc, TensorMap};
     pub use num_complex::Complex64;
     #[allow(deprecated)]
     pub use tenet_core::FusionTreeBlockKey;

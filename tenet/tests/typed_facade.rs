@@ -2236,12 +2236,16 @@ fn repartition_rejects_a_split_beyond_the_rank() {
 /// "self-sufficient apart from the provider" claim.
 mod typed_glob_is_self_sufficient {
     use std::sync::Arc;
-    use tenet::typed::*;
+    use tenet::prelude::*;
 
     use super::{ExternalZ3, Z3Charge};
 
     #[test]
     fn a_glob_import_runs_an_end_to_end_typed_operation() {
+        let _: Option<SvdTrunc<ExternalZ3, f64>> = None;
+        let _: Option<EigTrunc<ExternalZ3, f64>> = None;
+        let _: Option<EighTrunc<ExternalZ3, f64>> = None;
+
         let _guard = super::cache_lock();
         let runtime: Runtime = Runtime::builder().build().expect("runtime builds");
         let provider = Arc::new(ExternalZ3::new());
