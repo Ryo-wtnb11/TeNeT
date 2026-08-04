@@ -338,6 +338,90 @@ macro_rules! run_provider {
             assert!(traced.norm()?.is_finite());
         }
 
+        let runtime = benchmark_runtime()?;
+        let lhs = TensorMap::<$rule, f64>::rand_with_seed(
+            &runtime,
+            [&space, &space],
+            [&space, &space],
+            728,
+        )?;
+        let rhs = TensorMap::<$rule, f64>::rand_with_seed(
+            &runtime,
+            [&space, &space],
+            [&space, &space],
+            729,
+        )?;
+        let lhs_adjoint = lhs.adjoint()?;
+        let rhs_adjoint = rhs.adjoint()?;
+        for (suffix, left, right) in [("", &lhs, &rhs), ("_adjoint", &lhs_adjoint, &rhs_adjoint)] {
+            let scale_name = format!("scale{suffix}");
+            if operation_enabled(&scale_name) && form_enabled("owned") {
+                let scaled = bench(
+                    &runtime,
+                    $symmetry,
+                    &scale_name,
+                    "owned",
+                    "cold",
+                    "warm",
+                    $min_time,
+                    || Ok(left.scale(0.5)),
+                )?;
+                let error = (scaled.norm()? - 0.5 * left.norm()?).abs();
+                assert!(error <= 256.0 * f64::EPSILON * left.norm()?.max(1.0));
+            }
+
+            let add_name = format!("add{suffix}");
+            if operation_enabled(&add_name) && form_enabled("owned") {
+                let alpha = 0.75;
+                let beta = -0.25;
+                let added = bench(
+                    &runtime,
+                    $symmetry,
+                    &add_name,
+                    "owned",
+                    "cold",
+                    "warm",
+                    $min_time,
+                    || left.add(right, alpha, beta),
+                )?;
+                let expected_norm_squared = alpha * alpha * left.norm()?.powi(2)
+                    + beta * beta * right.norm()?.powi(2)
+                    + 2.0 * alpha * beta * left.inner(right)?;
+                let error = (added.norm()?.powi(2) - expected_norm_squared).abs();
+                assert!(error <= 1024.0 * f64::EPSILON * expected_norm_squared.abs().max(1.0));
+            }
+
+            let norm_name = format!("norm{suffix}");
+            if operation_enabled(&norm_name) && form_enabled("owned") {
+                let value = bench(
+                    &runtime,
+                    $symmetry,
+                    &norm_name,
+                    "owned",
+                    "cold",
+                    "warm",
+                    $min_time,
+                    || left.norm(),
+                )?;
+                assert!(value.is_finite());
+            }
+
+            let inner_name = format!("inner{suffix}");
+            if operation_enabled(&inner_name) && form_enabled("owned") {
+                let value = bench(
+                    &runtime,
+                    $symmetry,
+                    &inner_name,
+                    "owned",
+                    "cold",
+                    "warm",
+                    $min_time,
+                    || left.inner(right),
+                )?;
+                assert!(value.is_finite());
+            }
+        }
+
         if operation_enabled("compose") && form_enabled("owned") {
             let runtime = benchmark_runtime()?;
             let lhs = TensorMap::<$rule, f64>::rand_with_seed(
@@ -456,6 +540,14 @@ fn main() -> Result<(), Error> {
                 | "repartition"
                 | "trace"
                 | "trace_adjoint"
+                | "scale"
+                | "scale_adjoint"
+                | "add"
+                | "add_adjoint"
+                | "norm"
+                | "norm_adjoint"
+                | "inner"
+                | "inner_adjoint"
                 | "compose"
                 | "contract_identity"
                 | "contract_input_swap"

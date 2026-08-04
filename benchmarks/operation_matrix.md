@@ -15,7 +15,8 @@ Validation assertions run after the timer.
 The executable covers U1 and SU2 controls for owned and actual
 caller-owned-destination forms of `permute`, planar `transpose`,
 `repartition`, owned partial trace (direct and lazy-adjoint input), and
-arbitrary-axis `contract`.
+arbitrary-axis `contract`. Owned `scale`/`add` and scalar `norm`/`inner` rows
+cover both direct tensors and pre-built lazy adjoints.
 The contraction rows distinguish canonical input order, contracted-input
 swap, and contracted-input plus output swap. An owned `compose` row checks
 that its result equals the canonical contraction before reporting it.
@@ -72,6 +73,9 @@ versions, BLAS configuration, first-call timing, warm timing, and Julia's
 per-call allocated bytes. It uses the same rank-3 fixture and axis placement
 for TeNeT's `permute`, planar `transpose`, and `repartition` rows, and the same
 rank-4 fixture and middle trace pair for the direct/lazy-adjoint trace rows.
+The same rank-4 values feed matched direct/lazy-adjoint `scale`, `add`, `norm`,
+and `inner` rows; both implementations validate the same norm identities
+outside the timer.
 It also reports TensorKit's real caller-destination trace form;
 the canonical TeNeT typed facade has no matching destination method. Its
 first-call row can include JIT compilation and may observe
@@ -79,8 +83,8 @@ process-global TensorKit caches warmed by earlier rows; it is not directly
 comparable to TeNeT's fresh-`Runtime` cold row. Only matching warm rows under
 the recorded one-thread BLAS configuration are timing controls.
 
-The remaining #9 rows (ordered contract, add/inner/norm, compact SVD/QR,
-compact diagonal, and other lazy-adjoint consumers) are
+The remaining #9 rows (ordered contract, compact SVD/QR, compact diagonal,
+and other lazy-adjoint consumers) are
 not substituted with other operations. Add each only with its real public form
 and available counters. This diagnostic harness remains outside required CI;
 semantic coverage belongs in the existing user API tests.
