@@ -1185,10 +1185,14 @@ where
     src.validate_source_keys()?;
     let mut terms = Vec::new();
     if rule.fusion_style() == FusionStyleKind::Unique {
+        let (source_codomain_rank, source_domain_rank) = match src.orientation {
+            FusionTreePairOrientation::Direct => (src.storage_nout, src.storage_nin),
+            FusionTreePairOrientation::Adjoint => (src.storage_nin, src.storage_nout),
+        };
         let prepared = PreparedTreePairOperation::prepare_permute(
             rule,
-            codomain_permutation.len(),
-            domain_permutation.len(),
+            source_codomain_rank,
+            source_domain_rank,
             &codomain_permutation,
             &domain_permutation,
         )
