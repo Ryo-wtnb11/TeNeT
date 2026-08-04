@@ -9,8 +9,11 @@ Destination rows require an exact output from the owned operation; they report
 `first_after_setup` and `warm_after_setup`, never a false cold sample.
 Validation assertions run after the timer.
 
-The initial executable covers U1 and SU2 controls for owned and actual
+The executable covers U1 and SU2 controls for owned and actual
 caller-owned-destination forms of `permute` and arbitrary-axis `contract`.
+The contraction rows distinguish canonical input order, contracted-input
+swap, and contracted-input plus output swap. An owned `compose` row checks
+that its result equals the canonical contraction before reporting it.
 Runtime tree-transform counters are reported as cold and warm deltas. The same
 snapshots report process-global fusion-layout and complete-HomSpace cache
 deltas, with charged bytes before and after each phase. The fusion-layout cache
@@ -30,7 +33,27 @@ elapsed time.
 OP_MATRIX_MIN_MS=20 benchmarks/operation_matrix.sh
 ```
 
-The remaining #724 rows (transpose/repartition, compose, ordered contract,
+`OP_MATRIX_DEGENERACY` selects the common per-sector degeneracy (default 8).
+`OP_MATRIX_GEMM_BACKEND` is `faer` by default. A macOS BLAS control uses the
+same Apple Accelerate provider as the pinned TensorKit environment:
+
+```sh
+OP_MATRIX_GEMM_BACKEND=blas \
+OP_MATRIX_CARGO_FEATURES=blas-accelerate \
+benchmarks/operation_matrix.sh
+
+julia --project=benchmarks/tensorkit_benchmark \
+    benchmarks/tensorkit_microbench.jl 8 300
+```
+
+The TensorKit script records its exact revision, Julia and AppleAccelerate
+versions, BLAS configuration, first-call timing, warm timing, and Julia's
+per-call allocated bytes. Its first-call row can include JIT compilation and
+may observe process-global TensorKit caches warmed by earlier rows; it is not
+directly comparable to TeNeT's fresh-`Runtime` cold row. Only matching warm
+rows under the recorded one-thread BLAS configuration are timing controls.
+
+The remaining #724 rows (transpose/repartition, ordered contract,
 trace, add/inner/norm, compact SVD/QR, compact diagonal, and lazy adjoint) are
 not substituted with other operations. Add each only with its real public form
 and available counters. This diagnostic harness remains outside required CI;

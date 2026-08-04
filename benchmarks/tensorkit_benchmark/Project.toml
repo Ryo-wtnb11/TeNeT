@@ -1,0 +1,9 @@
+[deps]
+AppleAccelerate = "13e28ba4-7ad8-5781-acae-3021b1ed3924"
+TensorKit = "07d1fe3e-3e46-537d-9eac-e9e13d0d4cec"
+
+[compat]
+AppleAccelerate = "0.7.0"
+
+[sources]
+TensorKit = {url = "https://github.com/QuantumKitHub/TensorKit.jl.git", rev = "f87ca7fe557abbc79561d23298028664ed5dbcd6"}
