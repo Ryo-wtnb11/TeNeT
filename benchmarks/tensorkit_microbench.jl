@@ -123,6 +123,7 @@ end
 println("# tensorkit_authority=f87ca7fe557abbc79561d23298028664ed5dbcd6")
 println("# tensorKit_version=$(pkgversion(TensorKit)) julia_version=$(VERSION)")
 println("# apple_accelerate_version=$(pkgversion(AppleAccelerate))")
+println("# host_kernel=$(Sys.KERNEL) machine=$(Sys.MACHINE) cpu_reported_by_julia=$(Sys.CPU_NAME)")
 println("# blas_threads=$(BLAS.get_num_threads()) blas_config=$(BLAS.get_config())")
 println("# cold_scope=first call for this row; Julia compilation and process-global TensorKit caches may already be warm")
 println("symmetry,operation,form,phase,iterations,us_per_iter,allocated_bytes")
