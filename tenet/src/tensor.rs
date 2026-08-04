@@ -1251,6 +1251,49 @@ impl UserBoundSpace {
         }
     }
 
+    #[cfg(feature = "cuda")]
+    fn contracted(
+        &self,
+        rhs: &Self,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+    ) -> Result<Self, Error> {
+        macro_rules! contract {
+            ($lhs:expr, $rhs:expr, $variant:ident, $method:ident) => {
+                Ok(UserBoundSpace::$variant(
+                    BoundDynamicFusionMapSpace::$method($lhs, $rhs, lhs_axes, rhs_axes)?,
+                ))
+            };
+        }
+        match (self, rhs) {
+            (Self::U1(lhs), Self::U1(rhs)) => {
+                contract!(lhs, rhs, U1, contracted_multiplicity_free)
+            }
+            (Self::CU1(lhs), Self::CU1(rhs)) => {
+                contract!(lhs, rhs, CU1, contracted_multiplicity_free)
+            }
+            (Self::Z2(lhs), Self::Z2(rhs)) => {
+                contract!(lhs, rhs, Z2, contracted_multiplicity_free)
+            }
+            (Self::ZN(lhs), Self::ZN(rhs)) => {
+                contract!(lhs, rhs, ZN, contracted_multiplicity_free)
+            }
+            (Self::FZ2(lhs), Self::FZ2(rhs)) => {
+                contract!(lhs, rhs, FZ2, contracted_multiplicity_free)
+            }
+            (Self::SU2(lhs), Self::SU2(rhs)) => {
+                contract!(lhs, rhs, SU2, contracted_multiplicity_free)
+            }
+            (Self::U1FZ2(lhs), Self::U1FZ2(rhs)) => {
+                contract!(lhs, rhs, U1FZ2, contracted_multiplicity_free)
+            }
+            (Self::FZ2U1SU2(lhs), Self::FZ2U1SU2(rhs)) => {
+                contract!(lhs, rhs, FZ2U1SU2, contracted_multiplicity_free)
+            }
+            _ => Err(Error::RuleMismatch),
+        }
+    }
+
     fn from_homspace(&self, homspace: FusionTreeHomSpace) -> Result<Self, Error> {
         macro_rules! build {
             ($space:expr, $variant:ident) => {
