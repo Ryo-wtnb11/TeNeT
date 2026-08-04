@@ -1,13 +1,12 @@
 //! Provider-typed facade: spaces and tensor maps that keep the concrete
 //! fusion-rule type `R` and speak the provider's own sector labels.
 //!
-//! The ergonomic [`crate::prelude`] facade erases the rule behind a fixed set
-//! of built-ins. This module is its typed sibling: `R` stays concrete through
-//! monomorphized construction, so any provider — including one defined
-//! downstream — can drive it, and the categorical identity of a tensor comes
-//! back as [`TypedSectorAdmission::Sector`] labels instead of opaque
-//! [`tenet_core::SectorId`] keys. The engine itself never sees a label; the
-//! codec is the single boundary where one enters or leaves.
+//! This is the canonical user facade re-exported by [`crate::prelude`]. `R`
+//! stays concrete through monomorphized construction, so any provider —
+//! including one defined downstream — can drive it, and the categorical
+//! identity of a tensor comes back as [`TypedSectorAdmission::Sector`] labels
+//! instead of opaque [`tenet_core::SectorId`] keys. The engine itself never
+//! sees a label; the codec is the single boundary where one enters or leaves.
 //!
 //! The exception is deliberate: [`TensorMap::block`] is the engine-level
 //! layout view, and the [`tenet_core::BlockRef`] it returns carries the raw
@@ -199,6 +198,7 @@
 )]
 
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::sync::{Arc, OnceLock};
 
 use tenet_core::{
@@ -249,6 +249,7 @@ pub use tenet_matrixalgebra::{Truncation, TruncationSpace};
 
 use tenet_matrixalgebra::{BoundDynFactor, FactorScalar};
 
+use crate::runtime::{Ctx, Ctxs};
 use crate::tensor::{
     absorb_mapped, apply_fill, cat_homspace, check_flip_layout_identity, compile_cat_plan,
     coupled_region_pow_sum, flip_block_factor, flip_toggled_homspace, internal_layout_error,
@@ -256,7 +257,7 @@ use crate::tensor::{
     map_checked_unit_layout_error, reject_unbraided_nonunit_legs, scale_blocks_impl,
     sector_regions, twist_block_factor, twist_factor_with_inverse, twist_is_identity_over_blocks,
     validate_norm_p, weighted_inner, weighted_trace, with_planar_axes, CatOperandLayout, CatSide,
-    Fill, PlanarRequestKind, TensorScalar,
+    Fill, PlanarRequestKind,
 };
 #[cfg(feature = "cuda")]
 use crate::tensor::{
@@ -271,6 +272,102 @@ use crate::tensor_core::{
     tree_transform_owned_multiplicity_free, OrientedContractionKind,
 };
 use crate::RuntimeIdentity;
+
+/// Scalar payloads supported by [`TensorMap`].
+///
+/// This trait is sealed; the supported scalar types are `f64` and
+/// [`num_complex::Complex64`].
+#[allow(private_bounds)]
+pub trait TensorScalar: ScalarOps {}
+
+impl TensorScalar for f64 {}
+impl TensorScalar for num_complex::Complex64 {}
+
+/// Internal scalar operations shared by typed tensor execution.
+pub(crate) trait ScalarOps:
+    FactorScalar + tenet_tensors::RecouplingCoefficientAction<f64>
+{
+    fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
+        ctxs: &mut Ctxs<Key>,
+    ) -> &mut Ctx<Self, Key>;
+    fn rand_unit(state: &mut u64) -> Self;
+    fn abs_value(self) -> f64;
+    fn exp_value(self) -> Self;
+    fn recip_value(self) -> Self;
+    fn sqrt_value(self) -> Result<Self, Error>;
+}
+
+impl ScalarOps for f64 {
+    fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
+        ctxs: &mut Ctxs<Key>,
+    ) -> &mut Ctx<Self, Key> {
+        &mut ctxs.f64
+    }
+
+    fn rand_unit(state: &mut u64) -> Self {
+        random_unit(state)
+    }
+
+    fn abs_value(self) -> f64 {
+        self.abs()
+    }
+
+    fn exp_value(self) -> Self {
+        self.exp()
+    }
+
+    fn recip_value(self) -> Self {
+        1.0 / self
+    }
+
+    fn sqrt_value(self) -> Result<Self, Error> {
+        if self < 0.0 {
+            Err(Error::InvalidArgument(format!(
+                "sqrt of a negative diagonal entry {self}; convert to c64 \
+                 with to_c64() for the complex square root"
+            )))
+        } else {
+            Ok(self.sqrt())
+        }
+    }
+}
+
+impl ScalarOps for num_complex::Complex64 {
+    fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
+        ctxs: &mut Ctxs<Key>,
+    ) -> &mut Ctx<Self, Key> {
+        &mut ctxs.c64
+    }
+
+    fn rand_unit(state: &mut u64) -> Self {
+        Self::new(random_unit(state), random_unit(state))
+    }
+
+    fn abs_value(self) -> f64 {
+        self.norm()
+    }
+
+    fn exp_value(self) -> Self {
+        self.exp()
+    }
+
+    fn recip_value(self) -> Self {
+        Self::new(1.0, 0.0) / self
+    }
+
+    fn sqrt_value(self) -> Result<Self, Error> {
+        Ok(self.sqrt())
+    }
+}
+
+fn random_unit(state: &mut u64) -> f64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut value = *state;
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^= value >> 31;
+    ((value >> 11) as f64) / ((1_u64 << 52) as f64) - 1.0
+}
 
 /// Direct-sums two sector legs by adding matching degeneracies.
 pub(crate) fn oplus_sector_legs(lhs: &SectorLeg, rhs: &SectorLeg) -> Result<SectorLeg, Error> {

@@ -60,8 +60,7 @@ pub mod prelude {
     pub use crate::runtime::{
         LinalgBackend, Runtime, RuntimeBuilder, RuntimeTreeTransformCacheInfo,
     };
-    pub use crate::tensor::TensorScalar;
-    pub use crate::typed::{EigTrunc, EighTrunc, GradedSpace, SvdTrunc, TensorMap};
+    pub use crate::typed::{EigTrunc, EighTrunc, GradedSpace, SvdTrunc, TensorMap, TensorScalar};
     pub use num_complex::Complex64;
     #[allow(deprecated)]
     pub use tenet_core::FusionTreeBlockKey;

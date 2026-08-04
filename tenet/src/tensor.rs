@@ -53,19 +53,19 @@ use tenet_matrixalgebra::{
 use tenet_tensors::cuda::{CudaStorage, CudaStorageGemm};
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, OperationError, OutputAxisOrder,
-    OwnedCatC64Source as CatC64Source, OwnedCatCopy, OwnedCatSide, RecouplingCoefficientAction,
-    TensorContractSpec, TreeTransformOperation, TreeTransformOperationKind,
-    TreeTransformRuleCacheKey,
+    OwnedCatC64Source as CatC64Source, OwnedCatCopy, OwnedCatSide, TensorContractSpec,
+    TreeTransformOperation, TreeTransformOperationKind, TreeTransformRuleCacheKey,
 };
 
 use crate::error::Error;
 pub use crate::runtime::TensorExecutionContext;
-use crate::runtime::{Ctx, Ctxs, Runtime};
+use crate::runtime::{Ctxs, Runtime};
 use crate::space::{Fz2U1Su2Rule, RuleKind, Space, U1Fz2Rule, UserRuleContext};
 use crate::tensor_core::{
     pow_by_squaring, tensorcontract_owned_multiplicity_free, tensorproduct_owned_multiplicity_free,
     tree_transform_owned_multiplicity_free,
 };
+use crate::typed::ScalarOps;
 
 mod diagonal;
 use diagonal::{
@@ -673,15 +673,6 @@ pub(crate) fn map_checked_unit_layout_error(error: CheckedFusionSpaceError) -> E
     }
 }
 
-/// The scalar types a [`crate::prelude::TensorMap`] can store: `f64` and
-/// [`Complex64`]. This trait is **sealed** (its supertrait is crate-private);
-/// it lets [`crate::prelude::TensorMap::from_block_fn`] infer the dtype from
-/// the fill closure's return type.
-pub trait TensorScalar: UserScalar {}
-
-impl TensorScalar for f64 {}
-impl TensorScalar for Complex64 {}
-
 fn map_trace_preflight_error(error: OperationError) -> Error {
     match error {
         OperationError::Core(error) => Error::Core(Box::new(error)),
@@ -690,67 +681,11 @@ fn map_trace_preflight_error(error: OperationError) -> Error {
     }
 }
 
-/// The scalar types the user layer stores: the expert-layer scalar machinery
-/// plus the glue to lift typed data into the erased [`Data`] storage and to
-/// pick the matching per-scalar execution context. Crate-private supertrait
-/// sealing [`TensorScalar`].
-pub trait UserScalar: FactorScalar + RecouplingCoefficientAction<f64> {
+/// Legacy-only glue between typed scalar operations and erased [`Data`].
+#[allow(private_bounds)]
+pub trait UserScalar: crate::typed::ScalarOps {
     fn lift(data: Vec<Self>) -> Data;
     fn data_slice(data: &Data) -> Option<&[Self]>;
-    fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
-        ctxs: &mut Ctxs<Key>,
-    ) -> &mut Ctx<Self, Key>;
-    fn rand_unit(state: &mut u64) -> Self;
-
-    /// `|self|`: the modulus for a complex payload, the absolute value for a
-    /// real one. What the diagonal `pinv` cutoff compares against, and — as
-    /// `== 0.0` — how the diagonal `inv` recognizes a singular entry.
-    fn abs_value(self) -> f64;
-
-    /// `exp(self)` in the payload dtype.
-    fn exp_value(self) -> Self;
-
-    /// `1/self` in the payload dtype.
-    fn recip_value(self) -> Self;
-
-    /// The principal square root in the payload dtype, or the erased facade's
-    /// negative-real refusal.
-    ///
-    /// # Why these four exist
-    ///
-    /// [`crate::typed::TensorMap`]'s payload type is a parameter, so its
-    /// elementwise arms have no `Data` enum to match on. The obvious
-    /// alternative — widen to [`Complex64`] with
-    /// [`FactorScalar::widen_complex`], compute, narrow back — is wrong for
-    /// exactly one of the four:
-    ///
-    /// - [`Self::recip_value`] is **forced**. Complex division is not real
-    ///   division: routing an `f64` reciprocal through `Complex64` disagrees
-    ///   with `1.0 / x` in the last ulp on roughly a quarter of arguments, and
-    ///   `inv`/`pinv` are byte-compared against their erased siblings.
-    /// - [`Self::exp_value`], [`Self::sqrt_value`] and [`Self::abs_value`] are
-    ///   not forced — measurement shows no drift through the widen route for
-    ///   any of them. They are here for dispatch cleanliness (one mechanism for
-    ///   all four arms) and, for `sqrt_value`, because the negative-`f64`
-    ///   refusal *is* the dtype branch: it has no complex counterpart to
-    ///   express, and a widen route would silently return `i·√|x|` for an `f64`
-    ///   tensor.
-    ///
-    /// # What this does not buy
-    ///
-    /// Byte-identity with the erased facade for **c64 compact storage**. The
-    /// erased [`DiagonalData`] has a `RealC64` variant — a real spectrum inside
-    /// a c64 tensor — and runs *real* arithmetic on it; the typed
-    /// `TypedData::Diagonal` has one arm holding values of exactly the payload
-    /// type and always divides in complex. So c64 compact `inv` and `pinv`
-    /// differ from the erased sibling in the last ulp on part of the spectrum.
-    /// That is accepted rather than chased: a `RealC64` equivalent in the typed
-    /// storage is its own phase, and finite-precision value differences are
-    /// within the coefficient-exactness principle, which requires structure,
-    /// gauge determinism and verification to be exact — not the last bit of a
-    /// division. Typed integration tests pin the payload-native reciprocal and
-    /// global-cutoff laws rather than this legacy representation difference.
-    fn sqrt_value(self) -> Result<Self, Error>;
 }
 
 impl UserScalar for f64 {
@@ -762,39 +697,6 @@ impl UserScalar for f64 {
         match data {
             Data::F64(data) => Some(data),
             _ => None,
-        }
-    }
-
-    fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
-        ctxs: &mut Ctxs<Key>,
-    ) -> &mut Ctx<Self, Key> {
-        &mut ctxs.f64
-    }
-
-    fn rand_unit(state: &mut u64) -> Self {
-        rand_unit(state)
-    }
-
-    fn abs_value(self) -> f64 {
-        self.abs()
-    }
-
-    fn exp_value(self) -> Self {
-        self.exp()
-    }
-
-    fn recip_value(self) -> Self {
-        1.0 / self
-    }
-
-    fn sqrt_value(self) -> Result<Self, Error> {
-        if self < 0.0 {
-            Err(Error::InvalidArgument(format!(
-                "sqrt of a negative diagonal entry {self}; convert to c64 \
-                 with to_c64() for the complex square root"
-            )))
-        } else {
-            Ok(self.sqrt())
         }
     }
 }
@@ -809,32 +711,6 @@ impl UserScalar for Complex64 {
             Data::C64(data) => Some(data),
             _ => None,
         }
-    }
-
-    fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
-        ctxs: &mut Ctxs<Key>,
-    ) -> &mut Ctx<Self, Key> {
-        &mut ctxs.c64
-    }
-
-    fn rand_unit(state: &mut u64) -> Self {
-        Complex64::new(rand_unit(state), rand_unit(state))
-    }
-
-    fn abs_value(self) -> f64 {
-        self.norm()
-    }
-
-    fn exp_value(self) -> Self {
-        self.exp()
-    }
-
-    fn recip_value(self) -> Self {
-        Complex64::new(1.0, 0.0) / self
-    }
-
-    fn sqrt_value(self) -> Result<Self, Error> {
-        Ok(self.sqrt())
     }
 }
 
@@ -1255,7 +1131,7 @@ impl CatCopyPlan {
     /// take the fast path). The former fallback loop was unreachable and
     /// test-dead, so a future declining geometry must surface loudly here
     /// instead of silently taking an untested slow path.
-    pub(crate) fn execute<D: UserScalar>(&self, lhs: &[D], rhs: &[D]) -> Result<Vec<D>, Error> {
+    pub(crate) fn execute<D: ScalarOps>(&self, lhs: &[D], rhs: &[D]) -> Result<Vec<D>, Error> {
         let side = match self.side {
             CatSide::Domain => OwnedCatSide::Domain,
             CatSide::Codomain => OwnedCatSide::Codomain,
@@ -2179,20 +2055,6 @@ pub(crate) fn cat_homspace(
     }
 }
 
-/// splitmix64: small deterministic RNG for [`Tensor::rand`]; no external
-/// dependency, values uniform in `[-1, 1)`.
-fn splitmix64(state: &mut u64) -> u64 {
-    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
-}
-
-fn rand_unit(state: &mut u64) -> f64 {
-    ((splitmix64(state) >> 11) as f64) / ((1u64 << 52) as f64) - 1.0
-}
-
 fn build_bound_space<
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
         + LoweredMultiplicityFreeAlgebra
@@ -2220,7 +2082,7 @@ fn build_bound_space_like<
 
 /// Fills a freshly-built coupled space (rule-agnostic: only touches the block
 /// structure). Shared by the multiplicity-free construction paths.
-pub(crate) fn apply_fill<S: UserScalar>(
+pub(crate) fn apply_fill<S: ScalarOps>(
     space: &DynamicFusionMapSpace,
     fill: Fill<'_, S>,
 ) -> Result<Vec<S>, Error> {
@@ -2245,7 +2107,7 @@ pub(crate) fn apply_fill<S: UserScalar>(
 /// mirroring [`tenet_core::TensorMap::from_block_fn_with_fusion_space`]
 /// (degeneracy coordinates local to the block, codomain axes first, first
 /// axis fastest).
-pub(crate) fn fill_block_elements<D: UserScalar>(
+pub(crate) fn fill_block_elements<D: ScalarOps>(
     structure: &BlockStructure,
     data: &mut [D],
     fill: &mut dyn FnMut(&BlockKey, &[usize]) -> D,
@@ -2283,7 +2145,7 @@ pub(crate) fn fill_block_elements<D: UserScalar>(
 /// phase. `pub(crate)` so the typed facade's `twist`/`flip` adapters share
 /// this exact scaling walk instead of re-deriving the block addressing
 /// (#580 PR 5).
-pub(crate) fn scale_blocks_impl<D: UserScalar>(
+pub(crate) fn scale_blocks_impl<D: ScalarOps>(
     space: &DynamicFusionMapSpace,
     data: &mut [D],
     factor_of: &dyn Fn(&BlockKey) -> f64,
@@ -2610,7 +2472,7 @@ pub(crate) fn weighted_inner<R, D>(
 ) -> Result<Complex64, Error>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: UserScalar,
+    D: ScalarOps,
 {
     // Abelian (UniqueFusion) fast path: every `dim(c) == 1`, and the coupled
     // buffer is a padding-free concatenation of the per-sector blocks, so the
@@ -2646,7 +2508,7 @@ pub(crate) fn weighted_trace<R, D>(
 ) -> Result<Complex64, Error>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    D: UserScalar,
+    D: ScalarOps,
 {
     let mut total = Complex64::new(0.0, 0.0);
     for index in 0..structure.block_count() {
@@ -3684,7 +3546,7 @@ impl Tensor {
     where
         C: IntoIterator<Item = &'a Space>,
         D: IntoIterator<Item = &'a Space>,
-        S: TensorScalar,
+        S: UserScalar,
         F: FnMut(&BlockKey, &[usize]) -> S,
     {
         Self::build(rt, codomain, domain, Fill::BlockFn(&mut fill))
@@ -9396,7 +9258,7 @@ where
         + LoweredMultiplicityFreeAlgebra
         + CheckedFusionAlgebra
         + TreeTransformRuleCacheKey<Key = Key>,
-    D: UserScalar,
+    D: ScalarOps,
     Key: Clone + Eq + Hash + Send + Sync + 'static,
 {
     D::ctx_of(contexts)
@@ -9799,7 +9661,7 @@ fn coupled_region_inner<D, W>(
     mut weight_of: W,
 ) -> Result<Complex64, Error>
 where
-    D: UserScalar,
+    D: ScalarOps,
     W: FnMut(SectorId) -> f64,
 {
     let regions = sector_regions(structure, nout)?;
@@ -9952,7 +9814,7 @@ pub(crate) fn coupled_region_pow_sum<D, W>(
     mut weight_of: W,
 ) -> Result<f64, Error>
 where
-    D: UserScalar,
+    D: ScalarOps,
     W: FnMut(SectorId) -> f64,
 {
     let regions = sector_regions(structure, nout)?;
