@@ -6,8 +6,6 @@ use tenet_core::{CoreError, FusionAlgebraError};
 use tenet_matrixalgebra::TruncationError;
 use tenet_tensors::OperationError;
 
-use crate::tensor::Dtype;
-
 /// Error produced by the user-layer [`crate::prelude::TensorMap`] /
 /// [`crate::prelude::GradedSpace`] / [`crate::prelude::Runtime`] API.
 ///
@@ -30,18 +28,6 @@ pub enum Error {
     RuleMismatch,
     /// The operands belong to different [`crate::prelude::Runtime`]s.
     RuntimeMismatch,
-    /// An operation that requires equal scalar types received f64 and c64.
-    /// Mixed-dtype operations document their conversion behavior separately.
-    DtypeMismatch,
-    /// A scalar cannot be represented exactly in the destination dtype.
-    InexactScalarConversion {
-        /// Stable public operation name, such as `Tensor::absorb`.
-        operation: &'static str,
-        /// Scalar dtype being converted.
-        from: Dtype,
-        /// Required destination dtype.
-        to: Dtype,
-    },
     /// The operands live on different placements (host vs device, or
     /// different devices); transfer explicitly with `to_cuda()` / `to_host()`
     /// first.
@@ -53,7 +39,7 @@ pub enum Error {
     /// The operation is part of the public API but is not implemented for the
     /// operand's fusion rule yet.
     UnsupportedForRule {
-        /// Stable public operation name, such as `Tensor::eigh_full`.
+        /// Stable public operation name, such as `TensorMap::eigh_full`.
         operation: &'static str,
         /// User-facing fusion-rule name, such as `U(1)`.
         rule: &'static str,
@@ -70,15 +56,6 @@ impl fmt::Display for Error {
             Self::FusionAlgebra(err) => write!(f, "fusion algebra error: {err}"),
             Self::RuleMismatch => write!(f, "operands use different fusion rules"),
             Self::RuntimeMismatch => write!(f, "operands belong to different runtimes"),
-            Self::DtypeMismatch => write!(f, "operands store different scalar types"),
-            Self::InexactScalarConversion {
-                operation,
-                from,
-                to,
-            } => write!(
-                f,
-                "{operation} cannot convert a scalar exactly from {from:?} to {to:?}"
-            ),
             Self::PlacementMismatch => write!(
                 f,
                 "operands live on different placements (transfer explicitly first)"

@@ -9,8 +9,8 @@
 # Section 3 produces the basis-independent invariant stream (norm, tr,
 # singular values) for the seeded operation sequence mirrored by
 # `cross_library_invariant_stream_*` in `tenet/tests/semantic_suite.rs`.
-# Section 4 records planar repartition fixtures consumed by the user-layer
-# regression tests in `tenet/src/tensor.rs`.
+# Section 4 records planar repartition fixtures consumed by the typed-facade
+# regression tests in `tenet/tests/typed_facade.rs`.
 #
 # Run (TensorKit v0.16.2 / TensorKitSectors v0.3.6):
 #   julia benchmarks/tensorkit_semantic_oracle.jl

@@ -50,7 +50,7 @@ fn fz2_contractions_match_tensorkit() {
     let c = fz2_map(&rt, &v, 0.5, 2.5);
     let t = fz2_map(&rt, &v, 3.0, 2.0);
 
-    // S from an SVD is a Data::Diagonal factor; singular values = |T| per sector.
+    // S from an SVD is a compact diagonal factor; singular values = |T| per sector.
     let (_, s, _) = t.svd_compact().unwrap();
     let sv = s.svd_vals().unwrap();
     for entry in &sv {

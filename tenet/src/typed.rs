@@ -228,7 +228,7 @@ use tenet_operations::StorageGemm;
 use tenet_tensors::{
     tensorcontract_owned_checked_generic, tree_transform_dyn_owned_checked_generic_in_context,
     BoundDynamicFusionMapSpace, BoundDynamicTensorRef, DynamicFusionMapSpace, OutputAxisOrder,
-    OwnedCatC64Source, OwnedCatCopy, OwnedCatSide, TensorContractSpec, TreeTransformOperation,
+    OwnedCatCopy, OwnedCatSide, TensorContractSpec, TreeTransformOperation,
     TreeTransformOperationKind, ValidatedDynamicFusionLayout,
 };
 
@@ -841,53 +841,12 @@ pub(crate) struct CatCopyPlan {
 }
 
 impl CatCopyPlan {
-    pub(crate) fn preflight(&self, source_lengths: [usize; 2]) -> Result<(), Error> {
-        let mut copied_elements = 0usize;
-        for copy in &self.copies {
-            let source_len = source_lengths
-                .get(copy.source())
-                .ok_or_else(|| internal_layout_error("concatenated copy has an invalid source"))?;
-            preflight_cat_copy(copy, *source_len, self.required_len)?;
-            copied_elements = copied_elements
-                .checked_add(copy.rows().checked_mul(copy.cols()).ok_or_else(|| {
-                    internal_layout_error("concatenated copy element count overflow")
-                })?)
-                .ok_or_else(|| {
-                    internal_layout_error("concatenated total element count overflow")
-                })?;
-        }
-        if copied_elements != self.required_len {
-            return Err(internal_layout_error(
-                "concatenated copies do not cover the destination storage",
-            ));
-        }
-        Ok(())
-    }
-
     pub(crate) fn execute<D: ScalarOps>(&self, lhs: &[D], rhs: &[D]) -> Result<Vec<D>, Error> {
         let side = match self.side {
             CatSide::Domain => OwnedCatSide::Domain,
             CatSide::Codomain => OwnedCatSide::Codomain,
         };
         tenet_tensors::try_cat_owned_raw(self.required_len, side, &self.copies, [lhs, rhs])
-            .ok_or_else(|| {
-                internal_layout_error(
-                    "cat copy plan declined by the fast-path prover; no known geometry reaches \
-                     this",
-                )
-            })
-    }
-
-    pub(crate) fn execute_c64(
-        &self,
-        lhs: OwnedCatC64Source<'_>,
-        rhs: OwnedCatC64Source<'_>,
-    ) -> Result<Vec<Complex64>, Error> {
-        let side = match self.side {
-            CatSide::Domain => OwnedCatSide::Domain,
-            CatSide::Codomain => OwnedCatSide::Codomain,
-        };
-        tenet_tensors::try_cat_owned_c64_raw(self.required_len, side, &self.copies, [lhs, rhs])
             .ok_or_else(|| {
                 internal_layout_error(
                     "cat copy plan declined by the fast-path prover; no known geometry reaches \
@@ -1075,56 +1034,6 @@ pub(crate) fn compile_cat_plan(
         copies,
         side,
     }))
-}
-
-fn preflight_cat_copy(
-    copy: &OwnedCatCopy,
-    source_len: usize,
-    destination_len: usize,
-) -> Result<(), Error> {
-    let max_offset =
-        |base: usize, rows: usize, cols: usize, row_stride: usize, column_stride: usize| {
-            if rows == 0 || cols == 0 {
-                return Ok(None);
-            }
-            let row_offset = (rows - 1)
-                .checked_mul(row_stride)
-                .ok_or_else(|| internal_layout_error("concatenated row offset overflow"))?;
-            let column_offset = (cols - 1)
-                .checked_mul(column_stride)
-                .ok_or_else(|| internal_layout_error("concatenated column offset overflow"))?;
-            base.checked_add(row_offset)
-                .and_then(|offset| offset.checked_add(column_offset))
-                .map(Some)
-                .ok_or_else(|| internal_layout_error("concatenated scalar offset overflow"))
-        };
-    if max_offset(
-        copy.source_offset(),
-        copy.rows(),
-        copy.cols(),
-        copy.source_row_stride(),
-        copy.source_column_stride(),
-    )?
-    .is_some_and(|offset| offset >= source_len)
-    {
-        return Err(internal_layout_error(
-            "concatenated source region exceeds scalar storage",
-        ));
-    }
-    if max_offset(
-        copy.destination_offset(),
-        copy.rows(),
-        copy.cols(),
-        1,
-        copy.destination_leading_dimension(),
-    )?
-    .is_some_and(|offset| offset >= destination_len)
-    {
-        return Err(internal_layout_error(
-            "concatenated destination region exceeds scalar storage",
-        ));
-    }
-    Ok(())
 }
 
 fn cat_source_blocks(
@@ -4791,6 +4700,11 @@ impl<R, D, S> TensorMap<R, D, S> {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_bound_space(&self) -> &BoundDynamicFusionMapSpace<R> {
+        self.logical_space()
+    }
+
     fn owned_body(&self) -> Option<&Arc<TypedTensorBody<R, D, S>>> {
         match &self.repr {
             TypedTensorRepr::Owned(body) => Some(body),
@@ -7335,8 +7249,7 @@ where
             fused_codomain == fused_domain
         };
         if !fits {
-            // Same message shape as the erased `Tensor::structural`, so the
-            // two facades stay diagnosable side by side.
+            // Keep the stable constructor diagnostic shape.
             return Err(Error::InvalidArgument(format!(
                 "{what}: codomain and domain are not {} (fused sector content differs)",
                 if embed {
@@ -7462,10 +7375,8 @@ where
             unreachable!("a freshly built tensor is owned")
         };
         let body = Arc::get_mut(body).expect("a freshly built body has no other owner");
-        // Same coupled-sector region walk and same diagonal addressing as the
-        // erased `Tensor::structural`, on the shared helper: the two build the
-        // same tensor, and a second copy of the offset arithmetic would be free
-        // to drift from the sibling this is byte-compared against.
+        // Use the shared coupled-sector region walk rather than duplicating
+        // offset arithmetic here.
         let regions = {
             let space = body.space.space();
             sector_regions(space.structure(), space.nout())?
@@ -8064,9 +7975,7 @@ where
         domain_axes: &[usize],
         levels: &[usize],
     ) -> Result<Self, TypedFacadeError<R>> {
-        // Mirrors the erased pre-check verbatim (`Tensor::transformed`), same
-        // message: two facades reporting one mistake two ways is a support
-        // burden with no upside.
+        // Keep the established axis/level pre-check and diagnostic.
         let rank = self.rank();
         if levels.len() != rank {
             return Err(Error::InvalidArgument(format!(
@@ -8416,9 +8325,8 @@ where
     ) -> Result<Self, TypedFacadeError<R>> {
         // The one check the expert layer cannot make: it never sees the two
         // runtimes, and mixing execution state across them is a trust-boundary
-        // violation rather than an algebra error. Mirrors the erased facade's
-        // `check_same_world`. Dtype and placement need no arm here — `D` is a
-        // type parameter and the typed facade is host-only.
+        // violation rather than an algebra error. Scalar type and placement
+        // need no arm here — `D` and `S` are type parameters.
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch.into());
         }
@@ -10341,8 +10249,7 @@ where
     /// `dim(c) · θ(c)` on a direct traced codomain leg and `dim(c)` on a dual
     /// one. That twist is what makes this the supertrace and not [`Self::tr`];
     /// the coefficient is checked numerically against the engine route by the
-    /// oracle sweeps in `tests/typed_facade.rs` and
-    /// `tenet/src/tensor/compact_diagonal_tests.rs`.
+    /// oracle sweeps in `tests/typed_facade.rs`.
     ///
     /// # Errors
     ///
@@ -10412,9 +10319,8 @@ where
                 )
             }
         };
-        // Preflight first, exactly as the erased facade does: the checked
-        // homspace selection must fail before any destination layout is
-        // derived, so a rejected trace publishes no state.
+        // Preflight first: the checked homspace selection must fail before any
+        // destination layout is derived, so a rejected trace publishes no state.
         let homspace = tenet_tensors::tensortrace_fusion_dyn_selected_homspace_checked(
             source_space,
             axes,
@@ -10423,8 +10329,7 @@ where
         let space = source_space.derive_from_final_homspace(homspace)?;
         // Compact arm (#604): the full trace of a rank-(1,1) spectrum factor
         // over its only pair is a reduction of the stored spectrum, so there
-        // is nothing to materialize — the typed twin of the erased #585 arm in
-        // `tensor.rs`, which owns the long-form rationale. In brief: this is
+        // is nothing to materialize. This is
         // the *categorical* trace, not `tr()`'s — the engine's
         // `trace_channel_factor` carries the quantum dimension of the traced
         // channel and, exactly where the traced leg is *not* dual, its
@@ -10437,24 +10342,20 @@ where
         // destination tree whose recoupling is not a per-sector scaling.
         // Today the geometric conditions are implied by the Group 4 contract
         // (`TypedData::Diagonal` lives on bond spaces only), so they are
-        // defensive parity with the erased guard, not a reachable branch. A
+        // defensive, not a reachable branch. A
         // lazy dense adjoint has no compact spectrum and therefore goes through
         // the parent-oriented trace seam; a compact adjoint remains an owned
-        // compact tensor. The coefficient is not derivable here — it is pinned
-        // against the erased arm and the engine route by the oracle sweeps in
-        // `tests/typed_facade.rs` (`compact_full_trace_*`) and, on the erased
-        // side, `tensor/compact_diagonal_tests.rs`.
+        // compact tensor. The coefficient is pinned against the engine route
+        // by the `compact_full_trace_*` oracle sweeps in
+        // `tests/typed_facade.rs`.
         if let Some(spectrum) = self.spectrum() {
             if rank == 2 && self.codomain_rank() == 1 && pairs.len() == 1 {
                 let traced_leg_is_dual: bool =
                     self.logical_space().space().homspace().codomain().legs()[0].is_dual();
                 let provider: &R = self.logical_space().provider();
                 // Accumulated in `Complex64` and narrowed once through the
-                // #568 `UserScalar` surface, mirroring both the compact `tr`
-                // above and the erased arm's `ordinary_trace_with` — same
-                // per-sector reduction order, so the two facades agree
-                // byte-for-byte. The dtype story is simpler than erased's
-                // three-way `DiagonalData` split: the typed spectrum already
+                // #568 `UserScalar` surface, with the same per-sector reduction
+                // order as compact `tr`. The typed spectrum already
                 // stores `SectorSpectrum<D>`, and the coefficient is the
                 // provider's real scalar, so the result is a plain `D`.
                 let mut total: num_complex::Complex64 = num_complex::Complex64::new(0.0, 0.0);
@@ -11782,8 +11683,8 @@ mod representation_gates {
     use super::*;
     use tenet_core::{product_sector, ProductFusionRuleExt};
     use tenet_core::{
-        CU1FusionRule, CU1Irrep, FermionParityFusionRule, SU2FusionRule, SU2Irrep, U1FusionRule,
-        U1Irrep, Z2FusionRule, Z2Irrep, ZNFusionRule,
+        BlockSpec, CU1FusionRule, CU1Irrep, FermionParityFusionRule, FusionTreeKey, SU2FusionRule,
+        SU2Irrep, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep, ZNFusionRule,
     };
     use tenet_dense::{
         DefaultDenseExecutor, DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseRead,
@@ -11913,6 +11814,116 @@ mod representation_gates {
         };
         view.materialized_body_builds
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn scalar_structure(keys: &[FusionTreePairKey]) -> BlockStructure {
+        BlockStructure::from_blocks(
+            keys.iter()
+                .cloned()
+                .enumerate()
+                .map(|(offset, key)| {
+                    let rank = key.codomain_uncoupled().len() + key.domain_uncoupled().len();
+                    BlockSpec::column_major_with_key(key.into(), vec![1; rank], offset).unwrap()
+                })
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn absorb_merge_matches_only_complete_asymmetric_interleaved_keys() {
+        let rule = SU2FusionRule;
+        let pair = |coupled, innerline| {
+            let tree = FusionTreeKey::try_from_sector_ids_for_rule(
+                &rule,
+                [1, 1, 1],
+                coupled,
+                [false; 3],
+                [innerline],
+                [1, 1],
+            )
+            .unwrap();
+            FusionTreePairKey::pair(tree.clone(), tree)
+        };
+        let inner_zero = pair(1, 0);
+        let inner_two = pair(1, 2);
+        let coupled_three = pair(3, 2);
+        let destination_keys = vec![inner_zero.clone(), inner_two.clone(), coupled_three.clone()];
+
+        for source_keys in [vec![inner_two], vec![inner_zero, coupled_three]] {
+            let mut destination_keys = destination_keys.clone();
+            destination_keys.sort();
+            let mut source_keys = source_keys;
+            source_keys.sort();
+            let destination_structure = scalar_structure(&destination_keys);
+            let source_structure = scalar_structure(&source_keys);
+            let mut destination = (0..destination_keys.len())
+                .map(|index| 100.0 + index as f64)
+                .collect::<Vec<_>>();
+            let before = destination.clone();
+            let source = (0..source_keys.len())
+                .map(|index| 10.0 + index as f64)
+                .collect::<Vec<_>>();
+            let source_values = source_keys
+                .iter()
+                .cloned()
+                .zip(source.iter().copied())
+                .collect::<HashMap<_, _>>();
+
+            absorb_mapped(
+                &destination_structure,
+                &mut destination,
+                &source_structure,
+                &source,
+                Ok,
+            )
+            .unwrap();
+
+            for index in 0..destination_structure.block_count() {
+                let block = destination_structure.block(index).unwrap();
+                let BlockKey::FusionTree(key) = block.key() else {
+                    unreachable!()
+                };
+                assert_eq!(
+                    destination[block.offset()],
+                    source_values
+                        .get(key)
+                        .copied()
+                        .unwrap_or(before[block.offset()])
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn coupled_region_inner_rejects_malformed_scalar_range() {
+        let tensor = su2_lazy_fixture();
+        let structure = owned(&tensor).space.space().structure();
+        let data = tensor.data();
+        let error = coupled_region_inner(
+            structure,
+            owned(&tensor).space.space().nout(),
+            &data[..data.len() - 1],
+            data,
+            |_| 1.0,
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::InvalidArgument(message) if
+            message.contains("internal coupled-layout invariant violated")));
+    }
+
+    #[test]
+    fn coupled_region_inner_keeps_empty_and_non_fusion_boundaries() {
+        let empty = BlockStructure::empty(3);
+        assert_eq!(
+            coupled_region_inner::<f64, _>(&empty, 1, &[], &[], |_| 7.0).unwrap(),
+            Complex64::new(0.0, 0.0)
+        );
+
+        let trivial = BlockStructure::trivial(&[2, 2]).unwrap();
+        let error = coupled_region_inner(&trivial, 1, &[1.0; 4], &[1.0; 4], |_| 1.0).unwrap_err();
+        assert!(matches!(error, Error::InvalidArgument(message) if
+            message.contains("non-packed coupled-sector layout")));
     }
 
     #[cfg(feature = "cuda")]

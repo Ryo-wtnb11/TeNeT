@@ -11,9 +11,8 @@
 //!   * a plain `compose(b)` baseline, so the adjoint overhead is visible as the
 //!     gap above it.
 //!
-//! To see the fold's effect as a before/after, run this example at this commit
-//! (fold) and again with `tensor.rs` reverted to the materialize-only commit;
-//! the `adjoint().compose` row is the one that moves.
+//! Compare the `adjoint().compose` row with the plain `compose` baseline to
+//! measure the orientation-aware fold without materializing an adjoint input.
 
 use std::time::Instant;
 

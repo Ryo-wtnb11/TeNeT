@@ -26,10 +26,9 @@
 //!
 //! **Fermionic semantics**: `tensor!` follows TensorKit `@tensor` /
 //! `tensorcontract!` — dual contracted legs are twisted with the fermionic
-//! supertrace twist. `Tensor::compose` / `&a * &b` (TensorKit `A * B` /
-//! `mul!`) never twist. Bosonic rules are identical either way; fermionic
-//! rules can differ by signs — see the worked example on
-//! `Tensor::compose`.
+//! supertrace twist. `TensorMap::compose` (TensorKit `A * B` / `mul!`) never
+//! twists. Bosonic rules are identical either way; fermionic rules can differ
+//! by signs — see the worked example on `TensorMap::compose`.
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};

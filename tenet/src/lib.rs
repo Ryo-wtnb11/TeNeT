@@ -34,7 +34,6 @@ mod error;
 pub mod plancache;
 mod runtime;
 pub(crate) mod space;
-pub(crate) mod tensor;
 mod tensor_core;
 pub mod typed;
 

@@ -1289,8 +1289,8 @@ fn contract_matches_a_hand_computed_product_with_a_reordered_output() {
 
 #[test]
 fn contract_with_the_default_output_order_keeps_the_open_axes_in_place() {
-    // What: `0..open_rank` is the identity output order (the erased facade's
-    // default `pAB`), so the same product comes back untransposed.
+    // What: `0..open_rank` is the identity output order, so the same product
+    // comes back untransposed.
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(ExternalZ3::new());
@@ -2374,8 +2374,7 @@ fn repartition_is_sign_free_even_for_a_fermionic_provider() {
 // ---------------------------------------------------------------------------
 // Phase 5: decompositions (issue #567).
 //
-// Factorizations are checked through their mathematical contracts rather than
-// against the erased facade, which routes through the same `*_dyn` seams.
+// Factorizations are checked through their mathematical contracts.
 // ---------------------------------------------------------------------------
 
 fn typed_z2_spectrum(
@@ -2849,8 +2848,7 @@ fn add_rejects_a_different_runtime_and_a_different_space() {
         typed.add(&elsewhere, 1.0, 1.0).unwrap_err(),
         tenet::prelude::Error::RuntimeMismatch
     ));
-    // The erased facade's `check_same_space` message, verbatim: one mistake
-    // must not be reported two ways across the two facades.
+    // Keep the established space-mismatch diagnostic.
     assert!(matches!(
         typed.add(&other_split, 1.0, 1.0).unwrap_err(),
         tenet::prelude::Error::InvalidArgument(message)
@@ -3062,7 +3060,7 @@ fn tr_uses_the_nonabelian_dimension_weight() {
 
 #[test]
 fn tr_requires_an_endomorphism() {
-    // The erased facade's own message, verbatim.
+    // Keep the established endomorphism diagnostic.
     let _guard = cache_lock();
     let runtime = runtime();
     let typed = z2_tensor(&runtime);
@@ -3315,10 +3313,8 @@ fn fermionic_compose_is_contract_against_a_twisted_right_operand() {
     // What: the exact relation between the two contraction semantics —
     // `compose(a, b) == contract(a, twist(b, b's dual codomain legs))`. The
     // twisted operand is built through `from_block_fn` rather than through the
-    // erased facade's `twist`: theta is -1 on an odd sector and +1 otherwise,
-    // so the twisted tensor is a one-line fill here, and building it typed
-    // keeps the identity inside this facade instead of borrowing the erased
-    // one to state it.
+    // public `twist`: theta is -1 on an odd sector and +1 otherwise, so the
+    // twisted tensor is a one-line independent oracle here.
     let _guard = cache_lock();
     let runtime = runtime();
     let (typed_a, typed_b) = fermionic_compose_pair(&runtime);
@@ -4874,7 +4870,7 @@ const DIAGONAL_CONTRACT_CASES: &[(&str, bool, &[usize], &[usize], &[usize])] = &
     ("s*t inner leg", false, &[1], &[1], &[0, 1, 2]),
     // Declined by the arm — `s`'s *codomain* axis against `t`'s domain axis is
     // admissible but is not one of the two proved geometries — and computed
-    // densely. The bytes must still be the erased facade's.
+    // densely. The expected bytes are pinned below.
     ("s*t dense fallback", false, &[0], &[2], &[0, 1, 2]),
 ];
 
@@ -5540,9 +5536,7 @@ fn compact_is_posdef_matches_the_forced_dense_route_for_a_hermitian_c64_spectrum
 // ---------------------------------------------------------------------------
 // Issue #604: the compact full-pair trace arm. The typed `trace_pairs` used to
 // densify a compact spectrum factor unconditionally. The value sweep here
-// preserves the original oracle matrix from
-// `tenet/src/tensor/compact_diagonal_tests.rs` (`full_rank_one_trace_pairs_*`)
-// — same rules, same orientations, same variants — against a forced-dense
+// covers the same rules, orientations, and variants against a forced-dense
 // typed route. The storage claim lives in `typed_diagonal_allocations.rs`.
 // ---------------------------------------------------------------------------
 
@@ -5807,8 +5801,8 @@ fn compact_full_trace_is_the_supertrace_and_the_transpose_flips_it() {
 fn compact_trace_boundary_geometries_keep_their_existing_routes() {
     // What: the compact arm's boundaries. Tracing nothing on a compact factor
     // returns the source (the pre-guard short-circuit), and a malformed pair
-    // list errors with the erased facade's message *before* the arm can run —
-    // the same validation order as on dense storage. The dense geometries
+    // list errors before the arm can run — the same validation order as on
+    // dense storage. The dense geometries
     // outside the guard (rank > 2, partial pairs) are pinned by the Phase 5
     // `trace_pairs` tests above, which this issue must keep green.
     let _guard = cache_lock();
@@ -7173,8 +7167,8 @@ fn typed_polar_wrong_side_rectangular_reports_the_requested_direction() {
 
 #[test]
 fn typed_polar_carries_an_external_provider() {
-    // Gate 5: the erased facade's rule set is a closed
-    // enum and cannot host `ExternalZ3`, so this is a typed-only law check —
+    // Gate 5: `ExternalZ3` is a downstream-style provider, so this is a
+    // provider-generic law check —
     // reconstruction plus the isometry law — driving the same context lane an
     // external provider reaches through `multiplicity_free_lane`.
     let _guard = cache_lock();
@@ -7587,7 +7581,7 @@ fn typed_cat_pins_the_slab_order_by_value() {
     // What (gate 2): the erased doctest fixtures reproduced typed-side against
     // hand-computed payloads — adjacent column slabs for catdomain, adjacent
     // row slabs for catcodomain — so the slab order is pinned by value, not
-    // only by parity with the erased facade.
+    // only by structural parity.
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(tenet::core::U1FusionRule);
@@ -7855,8 +7849,8 @@ fn typed_cat_and_absorb_reject_a_foreign_rule_identity_first() {
 #[test]
 fn external_z3_cat_and_absorb_hold_by_value() {
     // What (gate 6): typed-only law/value checks on the external Z3 provider.
-    // No erased parity is possible — the erased facade's rule set is a closed
-    // enum (PR 2 ruling) — so the expected payloads are computed by hand.
+    // The expected payloads are computed by hand rather than through another
+    // facade.
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(ExternalZ3::new());
@@ -8405,9 +8399,8 @@ fn external_z3_twist_flip_and_units_hold_by_value() {
 //
 // External NoBraiding provider: planar Z2 (the tenet-core test fixture
 // `PlanarZ2Rule`, rebuilt from the public vocabulary with a codec). The
-// erased facade cannot host it — its rule set is a closed enum of braided
-// built-ins (PR 2 ruling) — so these gates are typed-only; the erased
-// twist/flip still route through the same shared preflight structurally.
+// These gates verify that planar providers need no braiding capability;
+// twist/flip still route through the shared structural preflight.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
@@ -8869,8 +8862,7 @@ fn typed_contract_ordered_parallel_su2_replay_matches_serial() {
 #[test]
 fn contract_ordered_on_the_external_z3_provider_matches_the_hand_product() {
     // What (gate 5): a typed-only ordered-contraction value check on the
-    // external provider (closed-enum ruling: the erased facade cannot spell
-    // Z3, so there is no cross-facade oracle here). Same fixture as the
+    // external provider. Same fixture as the
     // `contract` hand-product gate: `output_axes = [1, 0]` is the transpose of
     // the 2x3 · 3x4 counting product, `[0, 1]` the product itself.
     let _guard = cache_lock();

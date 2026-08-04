@@ -331,13 +331,11 @@ pub(crate) fn is_rank_one_diagonal_swap(
         )
 }
 
-// Test-only observability at the two owned multiplicity-free seams, in the
-// erased facade's `ORDERED_CONTRACT_FUSED_ROUTE` style (`tensor.rs`): armed
-// thread-locals that count executions of the seam the current thread runs
-// through. Both facades route here — the erased host fusion path calls
-// `tensorcontract_owned_multiplicity_free` too — so a gate over these counters
-// pins "one fused contraction, no separate permute transform" without a
-// facade-side hook. Observability only: nothing behavioral reads them.
+// Test-only observability at the two owned multiplicity-free seams: armed
+// thread-locals count executions of the seam the current thread runs through.
+// A gate over these counters pins "one fused contraction, no separate permute
+// transform" without a facade-side hook. Observability only: nothing
+// behavioral reads them.
 #[cfg(test)]
 thread_local! {
     pub(crate) static CONTRACT_SEAM_CALLS: std::cell::Cell<Option<usize>> =
@@ -1736,8 +1734,7 @@ mod tests {
     fn typed_ordered_contract_is_one_fused_seam_call_and_no_permute_transform() {
         // What (#580 group 6, gate 1): a typed `contract_ordered` with a
         // non-identity output order runs the fused contraction seam exactly
-        // once and never a separate permute transform — the typed sibling of
-        // the erased `ORDERED_CONTRACT_FUSED_ROUTE` gate in `tensor.rs`.
+        // once and never a separate permute transform.
         let (_runtime, tensor) = typed_z2_facade_tensor();
 
         // Negative control: the counters can see the sequential shape at all.
