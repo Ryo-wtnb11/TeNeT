@@ -9726,6 +9726,97 @@ where
         Ok(self.wrap_bound_factor(out))
     }
 
+    /// Solves `self * x = rhs` sector by sector without forming an inverse.
+    ///
+    /// The two codomains must be exactly equal and `self` must have isomorphic
+    /// codomain and domain. The result is `domain(self) <- domain(rhs)` and
+    /// keeps `self`'s exact provider allocation. Dense blocks are written
+    /// directly into the final output; compact diagonal divisors reuse the
+    /// elementwise reciprocal and bond-scaling path.
+    pub fn solve(&self, rhs: &Self) -> Result<Self, Error> {
+        if !self.runtime.same_runtime(&rhs.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        if !self.same_rule(rhs) {
+            return Err(Error::RuleMismatch);
+        }
+        if self.logical_space().space().homspace().codomain()
+            != rhs.logical_space().space().homspace().codomain()
+        {
+            return Err(Error::InvalidArgument(
+                "solve requires equal divisor and right-hand-side codomains".to_string(),
+            ));
+        }
+        if !self.logical_space().codomain_isomorphic_to_domain()? {
+            return Err(Error::from(
+                tenet_tensors::OperationError::UnsupportedTensorContractScope {
+                    message: "solve requires an isomorphic divisor codomain and domain",
+                },
+            ));
+        }
+
+        if let Some(spectrum) = self.spectrum() {
+            if spectrum
+                .iter()
+                .flat_map(|entry| &entry.values)
+                .any(|value| value.abs_value() == 0.0)
+            {
+                return Err(Error::from(tenet_tensors::OperationError::Dense(
+                    tenet_dense::DenseError::NumericalFailure {
+                        backend: tenet_dense::DenseBackend::Tenferro,
+                        op: "solve_into",
+                        message: "singular compact diagonal divisor".to_string(),
+                    },
+                )));
+            }
+            let solved = self.inv()?.compose(rhs)?;
+            let TypedTensorRepr::Owned(body) = solved.repr else {
+                return Err(internal_layout_error(
+                    "compact solve must produce an owned result",
+                ));
+            };
+            let space = self
+                .logical_space()
+                .rebind_validated(&body.space.validated_layout())?;
+            return Ok(Self {
+                runtime: self.runtime.clone(),
+                repr: owned_repr(TypedTensorBody::with_shared_payload(
+                    space,
+                    Arc::clone(&body.data),
+                )),
+            });
+        }
+
+        let lhs_local = matches!(&self.repr, TypedTensorRepr::Adjoint(_))
+            .then(|| self.materialized_tensor_uncached())
+            .transpose()?;
+        let rhs_local = matches!(&rhs.repr, TypedTensorRepr::Adjoint(_))
+            .then(|| rhs.materialized_tensor_uncached())
+            .transpose()?;
+        let lhs = lhs_local.as_ref().unwrap_or(self);
+        let rhs = rhs_local.as_ref().unwrap_or(rhs);
+        let rhs_dense = rhs
+            .spectrum()
+            .map(|spectrum| {
+                tenet_matrixalgebra::diagonal_bond_data(
+                    rhs.logical_space().space(),
+                    spectrum,
+                    &|value| value,
+                )
+                .map_err(Error::from)
+            })
+            .transpose()?;
+        let rhs_ref = match &rhs_dense {
+            Some(data) => BoundDynamicTensorRef::try_new(rhs.logical_space(), data)?,
+            None => rhs.bound_ref()?,
+        };
+
+        let mut dense = self.runtime.lease_dense();
+        let out =
+            tenet_matrixalgebra::solve_left_direct_dyn(dense.dense(), &lhs.bound_ref()?, &rhs_ref)?;
+        Ok(self.wrap_bound_factor(out))
+    }
+
     /// TensorKit 0.17 / MatrixAlgebraKit `pinv`: the Moore-Penrose
     /// thresholded pseudo-inverse `t⁺ = V S⁺ Uᴴ`, where `t = U S Vᴴ` is the compact SVD and
     /// `S⁺` inverts every singular value above the cutoff and sends the rest to
@@ -15022,6 +15113,174 @@ mod representation_gates {
             unreachable!()
         };
         assert!(view.materialized.get().is_none());
+    }
+
+    #[test]
+    fn solve_is_transactional_provider_native_and_cache_cold() {
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let lhs_provider = Arc::new(U1FusionRule);
+        let rhs_provider = Arc::new(U1FusionRule);
+        let lhs_leg = GradedSpace::try_new(
+            Arc::clone(&lhs_provider),
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+            false,
+        )
+        .unwrap();
+        let rhs_codomain = GradedSpace::try_new(
+            Arc::clone(&rhs_provider),
+            [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
+            false,
+        )
+        .unwrap();
+        let rhs_domain = GradedSpace::try_new(
+            rhs_provider,
+            [(U1Irrep::new(0), 3), (U1Irrep::new(1), 2)],
+            false,
+        )
+        .unwrap();
+        let divisor = TensorMap::from_block_fn(&runtime, [&lhs_leg], [&lhs_leg], |_, indices| {
+            if indices[0] == indices[1] {
+                4.0 + indices[0] as f64
+            } else {
+                0.25
+            }
+        })
+        .unwrap();
+        let rhs =
+            TensorMap::from_block_fn(&runtime, [&rhs_codomain], [&rhs_domain], |_, indices| {
+                (indices[0] + 2 * indices[1] + 1) as f64
+            })
+            .unwrap();
+
+        let solution = divisor.solve(&rhs).unwrap();
+        assert_typed_map_close(&divisor.compose(&solution).unwrap(), &rhs, 1e-11);
+        assert!(Arc::ptr_eq(
+            solution.logical_space().provider_arc(),
+            &lhs_provider
+        ));
+
+        let complex_divisor = divisor.to_c64();
+        let complex_rhs = rhs.to_c64().scale(num_complex::Complex64::new(1.0, 0.25));
+        let complex_solution = complex_divisor.solve(&complex_rhs).unwrap();
+        assert_typed_map_close(
+            &complex_divisor.compose(&complex_solution).unwrap(),
+            &complex_rhs,
+            1e-11,
+        );
+        assert!(Arc::ptr_eq(
+            complex_solution.logical_space().provider_arc(),
+            &lhs_provider
+        ));
+
+        let lazy = divisor.adjoint().unwrap();
+        let expected = eager_adjoint_oracle(&divisor).solve(&rhs).unwrap();
+        assert_typed_map_close(&lazy.solve(&rhs).unwrap(), &expected, 1e-11);
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+
+        let square_rhs =
+            TensorMap::from_block_fn(&runtime, [&rhs_codomain], [&rhs_codomain], |_, indices| {
+                (2 * indices[0] + indices[1] + 1) as f64
+            })
+            .unwrap();
+        let lazy_rhs = square_rhs.adjoint().unwrap();
+        let expected = divisor.solve(&eager_adjoint_oracle(&square_rhs)).unwrap();
+        assert_typed_map_close(&divisor.solve(&lazy_rhs).unwrap(), &expected, 1e-11);
+        assert_eq!(materialized_adjoint_builds(&lazy_rhs), 0);
+
+        let bad_leg =
+            GradedSpace::try_new(Arc::clone(&lhs_provider), [(U1Irrep::new(7), 1)], false).unwrap();
+        let bad = TensorMap::from_block_fn(&runtime, [&bad_leg], [&bad_leg], |_, _| 1.0)
+            .unwrap()
+            .adjoint()
+            .unwrap();
+        assert!(matches!(lazy.solve(&bad), Err(Error::InvalidArgument(_))));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        assert_eq!(materialized_adjoint_builds(&bad), 0);
+
+        let singular_dense = divisor.scale(0.0).adjoint().unwrap();
+        assert!(matches!(
+            singular_dense.solve(&lazy_rhs),
+            Err(Error::Operation(_))
+        ));
+        assert_eq!(materialized_adjoint_builds(&singular_dense), 0);
+        assert_eq!(materialized_adjoint_builds(&lazy_rhs), 0);
+
+        let compact_rhs = TensorMap::diagonal(
+            &runtime,
+            &lhs_leg,
+            [
+                SectorSpectrum {
+                    sector: U1Irrep::new(0),
+                    values: vec![2.0, 3.0],
+                },
+                SectorSpectrum {
+                    sector: U1Irrep::new(1),
+                    values: vec![5.0],
+                },
+            ],
+        )
+        .unwrap();
+        let compact_solution = divisor.solve(&compact_rhs).unwrap();
+        assert!(owned(&compact_rhs).dense_cache.get().is_none());
+
+        let compact_divisor = TensorMap::diagonal(
+            &runtime,
+            &lhs_leg,
+            [
+                SectorSpectrum {
+                    sector: U1Irrep::new(0),
+                    values: vec![2.0, 4.0],
+                },
+                SectorSpectrum {
+                    sector: U1Irrep::new(1),
+                    values: vec![8.0],
+                },
+            ],
+        )
+        .unwrap();
+        let compact_compact = compact_divisor.solve(&compact_rhs).unwrap();
+        assert!(compact_compact.spectrum().is_some());
+        assert_eq!(compact_compact.spectrum().unwrap()[0].values, [1.0, 0.75]);
+        assert_eq!(compact_compact.spectrum().unwrap()[1].values, [0.625]);
+        assert!(owned(&compact_divisor).dense_cache.get().is_none());
+        assert!(owned(&compact_rhs).dense_cache.get().is_none());
+        assert_typed_map_close(
+            &divisor.compose(&compact_solution).unwrap(),
+            &compact_rhs,
+            1e-11,
+        );
+
+        let scaled = compact_divisor.solve(&rhs).unwrap();
+        assert_typed_map_close(&compact_divisor.compose(&scaled).unwrap(), &rhs, 1e-11);
+        assert!(Arc::ptr_eq(
+            scaled.logical_space().provider_arc(),
+            compact_divisor.logical_space().provider_arc()
+        ));
+        assert!(owned(&compact_divisor).dense_cache.get().is_none());
+
+        let singular = TensorMap::diagonal(
+            &runtime,
+            &lhs_leg,
+            [
+                SectorSpectrum {
+                    sector: U1Irrep::new(0),
+                    values: vec![2.0, 0.0],
+                },
+                SectorSpectrum {
+                    sector: U1Irrep::new(1),
+                    values: vec![8.0],
+                },
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            singular.solve(&rhs),
+            Err(Error::Operation(error))
+                if matches!(*error, tenet_tensors::OperationError::Dense(
+                    tenet_dense::DenseError::NumericalFailure { op: "solve_into", .. }
+                ))
+        ));
+        assert!(owned(&singular).dense_cache.get().is_none());
     }
 
     fn assert_pinv_redirect<R, D>(source: &TensorMap<R, D>, rcond: f64, exact_original: bool)

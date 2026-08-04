@@ -14,9 +14,9 @@ use tenet_tensors::{
 use crate::compose::compose_bound_dyn;
 use crate::factorize::{
     adjoint_bound_factor, eigh_full_dyn, inverse_by_sector_dyn, is_hermitian_endomorphism_dyn,
-    map_square_sectors_dyn, scale_axis_by_spectrum, svd_compact_factors_dyn,
-    typed_from_bound_factor, BoundDynFactor, BoundDynamicTensorRef, BoundTensorMap,
-    BoundTensorMapRef, FactorScalar, SectorSpectrum, SvdFactorsDyn,
+    map_square_sectors_dyn, scale_axis_by_spectrum, solve_left_by_sector_dyn,
+    svd_compact_factors_dyn, typed_from_bound_factor, BoundDynFactor, BoundDynamicTensorRef,
+    BoundTensorMap, BoundTensorMapRef, FactorScalar, SectorSpectrum, SvdFactorsDyn,
 };
 
 /// Matrix exponential of any endomorphism (TensorKit `exp!`, which checks only
@@ -1002,4 +1002,19 @@ where
     // truncation policy, so factor tensors and a recoupling contraction are
     // avoidable work.
     inverse_by_sector_dyn(dense, input)
+}
+
+/// Context-free dynamic-rank left solve `A \ B` used by the user layer.
+#[doc(hidden)]
+pub fn solve_left_direct_dyn<E, R, D>(
+    dense: &mut E,
+    divisor: &BoundDynamicTensorRef<'_, R, D>,
+    rhs: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    solve_left_by_sector_dyn(dense, divisor, rhs)
 }
