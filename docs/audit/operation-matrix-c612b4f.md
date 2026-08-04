@@ -100,6 +100,53 @@ non-CUDA hosts. It is not evidence that default CI executes them. The gates are
 | CUDA operations | `TensorMap<R, f64, CudaStorage>` impl at `tenet/src/typed.rs:5172` | selected device plan/kernel; unsupported scopes reject before publication |
 | network | multiplicity-free bounds in `tenet-network/src/network.rs` and `plancache.rs` | Runtime plan cache plus Host workspace, or narrow canonical CUDA replay |
 
+The family summary above is not sufficient to prove the #9 execution-path
+requirement by itself. The table below records every advertised operation row
+at the boundary where its path actually differs. Rows marked `UNSUPPORTED` in
+the capability tables have no call path and are intentionally omitted.
+
+| Advertised row | Ownership and result layout | Provider/coefficient and planning path | Numeric execution | Publication and retained state |
+|---|---|---|---|---|
+| Host construction and block readback | `GradedSpace` and `TensorMap` retain the caller's `Arc<R>`; `TypedTensorRootDispatch::build_root` admits the final `FusionTreeHomSpace` before payload allocation | multiplicity-free and checked-Generic admission query their provider through separate mode dispatch; checked errors remain typed | `zeros`, `rand`, and `from_data` fill the complete admitted layout | one owned body is published only after admission and length validation; readback decodes labels through the retained provider |
+| Host `adjoint` | swaps logical domain/codomain and stores the canonical parent in `TypedAdjointView` | no F/R/CGC query and no transform plan | no payload kernel at construction | publishes a parent-backed view; only `data()` may populate its receiver-owned `OnceLock` materialization |
+| Host `permute`, `transpose`, `repartition`, `braid` | derives the destination from the source bound space; output retains the source provider allocation | multiplicity-free uses the Runtime tree-transform context/cache; checked Generic uses `tree_transform_dyn_owned_checked_generic_in_context` and its provider-bound checked context | tree-transform pack/replay/scatter; a multiplicity-free lazy adjoint lowers the operation to its parent, while checked Generic currently accepts owned data only | owned output after planning/execution succeeds; overwrite forms preserve the caller destination identity and allocation and do not publish a replacement body |
+| Host `twist` and `flip` | layout-preserving twist, or `derive_from_final_homspace` plus exact layout-identity check for flip | obtains twist/Frobenius-Schur factors from the bound provider; no tensor-result cache | one block-scaled output copy; lazy adjoint redirects to the parent with the inverse operation | fresh owned body; receiver whole-payload cache remains cold |
+| Host unit insertion/removal | derives and validates the unit-leg HomSpace correspondence | canonical-unit provider marker and vacuum identity; no F/R/CGC plan | no dense copy for an owned dense input | new body shares the existing payload `Arc`; compact or lazy input may require one operation-local dense payload first |
+| Host `catdomain`, `catcodomain`, `absorb` | derives the result HomSpace before copying or accumulating payload | provider-bound layout correspondence; no retained prepared object | concatenation/absorption copy or accumulation; conservative lazy-adjoint arms may use `materialized_tensor_uncached()` | fresh owned output; operation-local temporaries are dropped and never enter the receiver `OnceLock` |
+| Host `otimes` | result space is built from both bound input spaces and retains the left provider allocation | mode dispatch selects multiplicity-free or checked-Generic product authority | `tensorproduct_owned_multiplicity_free` or `tensorproduct_owned_checked_generic`; both currently materialize lazy inputs operation-locally | fresh owned Host body after the complete product succeeds |
+| Host arbitrary `contract`, ordered contract, `compose` | validates runtime/provider/contracted spaces, derives final output order, then allocates the final bound output | mode dispatch selects multiplicity-free oriented lowering or checked-Generic owned lowering; tree/F/R work remains in the corresponding tensor-operation context | `tensorcontract_oriented_multiplicity_free` handles direct/lazy orientations; checked Generic calls `tensorcontract_owned_checked_generic` and rejects lazy inputs | fresh owned output after validation and execution; destination forms validate before replay and preserve destination identity |
+| Host `add` and `scale` | require the same logical layout for addition; result space is the admitted input space | no new category plan; diagonal/dense representation is selected locally | compact-spectrum fast paths where legal, otherwise one mapped dense pass | fresh compact or dense owned body; no operation-result cache |
+| Host `norm`, `inner` | validates compatible admitted layouts; scalar output has no result space | consumes existing block/layout weights; no F/R/CGC generation or retained plan | blockwise reduction over direct or oriented data | scalar return only; no published tensor or persistent workspace |
+| Host `trace_pairs`, `tr` | validates pair geometry and derives the selected traced HomSpace before execution | trace structural admission uses the bound provider and current fusion layout | `tensortrace_fusion_dyn_owned_checked` or the scalar trace path | fresh owned tensor or scalar only after validation/execution succeeds |
+| Host compact/full/truncated SVD and values | matrix-algebra factor plans derive final left, bond, and right bound spaces; truncation selects kept sector spectra before factor publication | no F/R/CGC query; dense backend leases are request-local | `svd_*_dyn`; direct adjoint-aware factor mappings avoid a receiver-sized adjoint input for compact/full/truncated/value paths | final factors are built directly as owned dense/compact bodies; no factorization-result cache |
+| Host compact/full QR and LQ | matrix-algebra derives factor spaces from the input bound HomSpace | no coefficient plan or result cache | `qr_*_dyn`; a lazy adjoint uses one uncached logical payload, while LQ maps through QR and materializes final adjoint factors where required | owned factors published together after dense success; temporary logical payloads are request-local |
+| Host orthogonal/null/polar factors | result spaces come from the matrix-algebra factorization contract, including unmatched/disjoint completion | no F/R/CGC query | dense orthogonal/null/polar kernels; polar has adjoint-parent routes, while some null output conversions use uncached materialization | owned factors only after the full operation succeeds |
+| Host EIG/EIGH and values | validates endomorphism/Hermiticity and derives eigenvector/bond spaces | no category coefficient plan | `eig_*_dyn` / `eigh_*_dyn`; lazy adjoints currently use an operation-local logical payload | owned factors or spectra; no implicit numerical-result cache |
+| Host `exp`, `inv`, `solve`, `pinv`, `sqrt`, `powi` | validates square/compatible spaces and reuses or derives the admitted output space | no F/R/CGC work; only block layout and dense backend dispatch | compact diagonal maps when legal; otherwise matrix-algebra dense kernels. `pinv` has an adjoint-parent route, while several other lazy cases materialize locally | fresh owned result; dense workspace is request-local and the receiver cache stays cold |
+| Host typed network planning/replay | `Network::plan` validates labels/spaces and compiles pairwise axes/output permutations; inputs retain their providers | Runtime plan cache owns topology/schedule entries, not provider coefficients; each contraction step delegates to the ordinary typed contraction path | `execute_with_workspace` reuses destination/intermediate buffers through overwrite forms when admitted | final owned tensor returned; idle typed workspaces may be retained under the Runtime-wide byte budget and are observable through plan-cache stats |
+| CUDA transfer and lazy adjoint | device storage owns buffer and ordinal; Runtime owns execution resources | no category coefficient work during transfer/adjoint construction | explicit upload/download; adjoint remains an orientation over device parent storage | device or Host result is explicit; no hidden `data()` download and no Host whole-payload cache |
+| CUDA arithmetic, reductions, canonical contraction/compose | operation-specific preflight derives/validates the device result layout; noncanonical scopes reject before kernel launch | multiplicity-free only; canonical direct geometry avoids a Host tree-transform plan | selected CUDA kernels/dense backend paths | fresh device output or scalar; no implicit Host transfer |
+| CUDA QR/SVD/EIGH | device factor plan derives final device factor spaces before execution | multiplicity-free `f64` only; no provider coefficient cache is added | supported compact/truncated/full subset dispatches to the CUDA dense backend | owned device factors after success; unsupported variants are absent or reject before publication |
+| CUDA network replay | reuses the compiled typed schedule only for canonical intermediate/final ordering | Runtime plan cache owns topology; ordinary CUDA contraction remains the numeric authority | `execute_cuda` chains canonical device contractions and rejects trace/noncanonical schedules before the first contraction | final device tensor; no Host workspace or transfer is introduced |
+
+Two consequences are visible in this census. First, the checked-Generic path is
+not merely missing facade methods: its existing transform/product path routes
+through owned-data helpers, and contraction explicitly accepts only direct
+owned inputs. Because checked Generic has no public lazy adjoint, those helpers
+do not create a receiver-sized copy today. Second, the Host multiplicity-free
+decomposition surface does not retain factorization results or dense
+workspaces; only network replay has an explicit bounded idle-workspace owner.
+These are current facts, not recommendations to add caches.
+
+Source anchors at the pinned revision are `tenet/src/typed.rs:2664-3221`
+(provider-mode dispatch and oriented contraction), `:4358-5050` and `:6779`
+(owned/diagonal/adjoint representation and uncached materialization),
+`:5172-6690` (CUDA), `:7427-8495` (overwrite, transforms and contraction), and
+`:8516-11728` (Host reductions, decompositions, matrix/index operations and
+dtype conversion). Network planning/replay is anchored by
+`tenet-network/src/network.rs:144-319,879-1110`; Runtime plan/workspace
+retention by `tenet-network/src/plancache.rs:611-700,1110-1275`.
+
 ## Lazy-adjoint storage and execution
 
 These are three different mechanisms and must not be combined under one
