@@ -1,6 +1,8 @@
 //! Same-process cold/warm measurements for public basic tensor operations.
 
 use std::{
+    alloc::{GlobalAlloc, Layout, System},
+    cell::Cell,
     hint::black_box,
     time::{Duration, Instant},
 };
@@ -11,6 +13,66 @@ use tenet::core::{
     complete_hom_space_structure_cache_info, fusion_tree_layout_cache_info,
     CompleteHomSpaceStructureCacheInfo, FusionTreeLayoutCacheInfo,
 };
+
+struct CountingAllocator;
+
+thread_local! {
+    static COUNTING: Cell<bool> = const { Cell::new(false) };
+    static ALLOCATION_CALLS: Cell<usize> = const { Cell::new(0) };
+    static REQUESTED_BYTES: Cell<usize> = const { Cell::new(0) };
+}
+
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc(layout) };
+        if !pointer.is_null() && COUNTING.get() {
+            ALLOCATION_CALLS.set(ALLOCATION_CALLS.get() + 1);
+            REQUESTED_BYTES.set(REQUESTED_BYTES.get() + layout.size());
+        }
+        pointer
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) };
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let pointer = unsafe { System.realloc(pointer, layout, new_size) };
+        if !pointer.is_null() && COUNTING.get() {
+            ALLOCATION_CALLS.set(ALLOCATION_CALLS.get() + 1);
+            REQUESTED_BYTES.set(REQUESTED_BYTES.get() + new_size);
+        }
+        pointer
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+#[derive(Clone, Copy)]
+struct Allocations {
+    calls: usize,
+    requested_bytes: usize,
+}
+
+fn measure_allocations<T>(
+    operation: impl FnOnce() -> Result<T, Error>,
+) -> Result<(T, Allocations), Error> {
+    ALLOCATION_CALLS.set(0);
+    REQUESTED_BYTES.set(0);
+    COUNTING.set(true);
+    let result = operation();
+    COUNTING.set(false);
+    result.map(|value| {
+        (
+            value,
+            Allocations {
+                calls: ALLOCATION_CALLS.get(),
+                requested_bytes: REQUESTED_BYTES.get(),
+            },
+        )
+    })
+}
 
 #[derive(Clone, Copy)]
 struct Counters {
@@ -38,6 +100,7 @@ fn print_sample(
     phase: &str,
     iterations: u64,
     elapsed: Duration,
+    allocations: Allocations,
     before: Counters,
     after: Counters,
 ) {
@@ -55,7 +118,7 @@ fn print_sample(
          {layout_bytes_before},{layout_bytes_after},{layout_bytes_delta},\
          {hom_hits},{hom_misses},{hom_admissions},{hom_evictions},{hom_bypasses},\
          {hom_entries_delta},{hom_bytes_before},{hom_bytes_after},{hom_bytes_delta},\
-         NA,NA,NA,NA,NA,NA,NA",
+         NA,{allocation_calls},{requested_bytes},NA,NA,NA,NA,NA",
         us = elapsed.as_secs_f64() * 1e6 / iterations as f64,
         tree_hits = tree_after.hits() - tree_before.hits(),
         tree_misses = tree_after.misses() - tree_before.misses(),
@@ -87,6 +150,8 @@ fn print_sample(
         hom_bytes_before = hom_before.charged_bytes(),
         hom_bytes_after = hom_after.charged_bytes(),
         hom_bytes_delta = delta(hom_after.charged_bytes(), hom_before.charged_bytes()),
+        allocation_calls = allocations.calls,
+        requested_bytes = allocations.requested_bytes,
     );
 }
 
@@ -102,7 +167,7 @@ fn bench<T>(
 ) -> Result<T, Error> {
     let cold_before = counters(runtime);
     let cold_start = Instant::now();
-    let cold_output = operation_fn()?;
+    let (cold_output, cold_allocations) = measure_allocations(&mut operation_fn)?;
     black_box(&cold_output);
     let cold_elapsed = cold_start.elapsed();
     let cold_after = counters(runtime);
@@ -113,6 +178,7 @@ fn bench<T>(
         first_phase,
         1,
         cold_elapsed,
+        cold_allocations,
         cold_before,
         cold_after,
     );
@@ -122,10 +188,13 @@ fn bench<T>(
     let warm_before = counters(runtime);
     let warm_start = Instant::now();
     let mut iterations = 0;
-    while iterations < 2 || warm_start.elapsed() < min_time {
-        black_box(operation_fn()?);
-        iterations += 1;
-    }
+    let (_, warm_allocations) = measure_allocations(|| {
+        while iterations < 2 || warm_start.elapsed() < min_time {
+            black_box(operation_fn()?);
+            iterations += 1;
+        }
+        Ok(())
+    })?;
     let warm_elapsed = warm_start.elapsed();
     let warm_after = counters(runtime);
     print_sample(
@@ -135,6 +204,7 @@ fn bench<T>(
         repeated_phase,
         iterations,
         warm_elapsed,
+        warm_allocations,
         warm_before,
         warm_after,
     );
@@ -330,8 +400,9 @@ fn main() -> Result<(), Error> {
     println!("# degeneracy={degeneracy}");
     println!("# threads=RAYON_NUM_THREADS:{} OPENBLAS_NUM_THREADS:{} OMP_NUM_THREADS:{} MKL_NUM_THREADS:{}", env_or_unset("RAYON_NUM_THREADS"), env_or_unset("OPENBLAS_NUM_THREADS"), env_or_unset("OMP_NUM_THREADS"), env_or_unset("MKL_NUM_THREADS"));
     println!("# cold_scope=fresh Runtime tree-transform store; process-global interned structures may already be warm");
-    println!("# unavailable_counters=exact_layout_admission,output_allocation_bytes,operation_local_scratch_bytes,provider_queries,transform_passes,gemm_calls,host_device_transfers");
-    println!("symmetry,operation,form,phase,iterations,us_per_iter,tree_hits,tree_misses,tree_evictions,tree_bypasses,tree_entries_delta,tree_charged_payload_bytes_before,tree_charged_payload_bytes_after,tree_charged_payload_bytes_delta,fusion_layout_misses,fusion_layout_evictions,fusion_layout_bypasses,fusion_layout_entries_delta,fusion_layout_charged_payload_bytes_before,fusion_layout_charged_payload_bytes_after,fusion_layout_charged_payload_bytes_delta,complete_hom_hits,complete_hom_misses,complete_hom_admissions,complete_hom_evictions,complete_hom_bypasses,complete_hom_entries_delta,complete_hom_charged_bytes_before,complete_hom_charged_bytes_after,complete_hom_charged_bytes_delta,exact_layout_admission,output_allocation_bytes,operation_local_scratch_bytes,provider_queries,transform_passes,gemm_calls,host_device_transfers");
+    println!("# allocation_scope=caller-thread Rust allocation calls and requested bytes during the measured phase; excludes worker threads, native BLAS allocation, frees, and peak/live bytes");
+    println!("# unavailable_counters=exact_layout_admission,operation_local_scratch_bytes,provider_queries,transform_passes,gemm_calls,host_device_transfers");
+    println!("symmetry,operation,form,phase,iterations,us_per_iter,tree_hits,tree_misses,tree_evictions,tree_bypasses,tree_entries_delta,tree_charged_payload_bytes_before,tree_charged_payload_bytes_after,tree_charged_payload_bytes_delta,fusion_layout_misses,fusion_layout_evictions,fusion_layout_bypasses,fusion_layout_entries_delta,fusion_layout_charged_payload_bytes_before,fusion_layout_charged_payload_bytes_after,fusion_layout_charged_payload_bytes_delta,complete_hom_hits,complete_hom_misses,complete_hom_admissions,complete_hom_evictions,complete_hom_bypasses,complete_hom_entries_delta,complete_hom_charged_bytes_before,complete_hom_charged_bytes_after,complete_hom_charged_bytes_delta,exact_layout_admission,caller_allocation_calls,caller_requested_allocation_bytes,operation_local_scratch_bytes,provider_queries,transform_passes,gemm_calls,host_device_transfers");
 
     let min_time = Duration::from_millis(min_ms);
     run_provider!(
