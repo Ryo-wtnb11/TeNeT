@@ -27,12 +27,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use num_complex::Complex64;
 use smallvec::SmallVec;
+#[cfg(test)]
+use tenet_core::FusionTreePairKey;
 use tenet_core::{
     validate_unit_layout_correspondence_checked, BlockKey, BlockStructure, BlockView, BlockViewMut,
     CheckedFusionAlgebra, CheckedFusionSpaceError, CoupledSectorRegion, FusionProductSpace,
-    FusionRule, FusionTreeHomSpace, FusionTreePairKey, FusionTreePairOrientation,
-    LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace,
-    Placement, SectorId, UnitLegInsertion,
+    FusionRule, FusionTreeHomSpace, FusionTreePairOrientation, LoweredMultiplicityFreeAlgebra,
+    MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace, Placement, SectorId,
+    UnitLegInsertion,
 };
 #[cfg(feature = "cuda")]
 use tenet_core::{SectorLeg, TensorStorage};
@@ -53,8 +55,8 @@ use tenet_matrixalgebra::{
 use tenet_tensors::cuda::{CudaStorage, CudaStorageGemm};
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, OperationError, OutputAxisOrder,
-    OwnedCatC64Source as CatC64Source, OwnedCatCopy, OwnedCatSide, TensorContractSpec,
-    TreeTransformOperation, TreeTransformRuleCacheKey,
+    OwnedCatC64Source as CatC64Source, TensorContractSpec, TreeTransformOperation,
+    TreeTransformRuleCacheKey,
 };
 
 use crate::error::Error;
@@ -66,17 +68,17 @@ use crate::tensor_core::{
     pow_by_squaring, tensorcontract_owned_multiplicity_free, tensorproduct_owned_multiplicity_free,
     tree_transform_owned_multiplicity_free,
 };
-#[cfg(test)]
-use crate::typed::coupled_region_inner;
 use crate::typed::{
-    absorb_mapped, apply_fill, cat_homspace, check_flip_layout_identity, coupled_region_pow_sum,
-    flip_block_factor, flip_toggled_homspace, logical_adjoint_axes_to_parent,
-    lower_adjoint_tree_transform_operation, map_checked_unit_layout_error,
-    reject_unbraided_nonunit_legs, scale_blocks_impl, sector_regions, twist_block_factor,
-    twist_is_identity_over_blocks, validate_axis_permutation, validate_contracted_axes,
-    validate_norm_p, weighted_inner, weighted_trace, with_planar_axes, CatSide, Fill,
-    PlanarRequestKind, ScalarOps,
+    absorb_mapped, apply_fill, cat_homspace, check_flip_layout_identity, compile_cat_plan,
+    coupled_region_pow_sum, flip_block_factor, flip_toggled_homspace,
+    logical_adjoint_axes_to_parent, lower_adjoint_tree_transform_operation,
+    map_checked_unit_layout_error, reject_unbraided_nonunit_legs, scale_blocks_impl,
+    sector_regions, twist_block_factor, twist_is_identity_over_blocks, validate_axis_permutation,
+    validate_contracted_axes, validate_norm_p, weighted_inner, weighted_trace, with_planar_axes,
+    CatCopyPlan, CatOperandLayout, CatSide, Fill, PlanarRequestKind, ScalarOps, TensorOrientation,
 };
+#[cfg(test)]
+use crate::typed::{cat_logical_block_key, coupled_region_inner, CAT_RESULT_LAYOUT_BUILDS};
 
 mod diagonal;
 use diagonal::{
@@ -91,8 +93,6 @@ thread_local! {
     static ORDERED_CONTRACT_FUSED_ROUTE: std::cell::Cell<Option<bool>> =
         const { std::cell::Cell::new(None) };
     static SELECTED_RESULT_LAYOUT_BUILDS: std::cell::Cell<Option<usize>> =
-        const { std::cell::Cell::new(None) };
-    static CAT_RESULT_LAYOUT_BUILDS: std::cell::Cell<Option<usize>> =
         const { std::cell::Cell::new(None) };
     static DIAGONAL_RESULT_LAYOUT_BUILDS: std::cell::Cell<Option<usize>> =
         const { std::cell::Cell::new(None) };
@@ -121,15 +121,6 @@ fn observe_ordered_contract_fused_route() {
 #[cfg(test)]
 fn observe_selected_result_layout_build() {
     SELECTED_RESULT_LAYOUT_BUILDS.with(|observation| {
-        if let Some(builds) = observation.get() {
-            observation.set(Some(builds + 1));
-        }
-    });
-}
-
-#[cfg(test)]
-fn observe_cat_result_layout_build() {
-    CAT_RESULT_LAYOUT_BUILDS.with(|observation| {
         if let Some(builds) = observation.get() {
             observation.set(Some(builds + 1));
         }
@@ -913,81 +904,6 @@ pub struct EigTrunc {
     pub error: f64,
 }
 
-type SectorRegion = CoupledSectorRegion;
-
-/// Structure-level description of one cat operand: everything
-/// [`compile_cat_plan`] needs to know about a source, with no
-/// `TensorMetadataView` and no [`UserBoundSpace`] — so the typed facade,
-/// which has neither, can feed the same core (#580 PR 4).
-pub(crate) struct CatOperandLayout<'a> {
-    structure: &'a Arc<BlockStructure>,
-    regions: Arc<[SectorRegion]>,
-    orientation: TensorOrientation,
-    /// Codomain rank as the operation sees it (the *logical* orientation).
-    logical_nout: usize,
-    /// Codomain rank of the stored (owned) layout; differs from
-    /// `logical_nout` only for an adjoint view.
-    storage_nout: usize,
-    rank: usize,
-}
-
-impl<'a> CatOperandLayout<'a> {
-    /// An owned (non-view) operand: logical and storage layouts coincide.
-    pub(crate) fn owned(
-        structure: &'a Arc<BlockStructure>,
-        nout: usize,
-        nin: usize,
-    ) -> Result<Self, Error> {
-        Ok(Self {
-            structure,
-            regions: sector_regions(structure, nout)?,
-            orientation: TensorOrientation::Owned,
-            logical_nout: nout,
-            storage_nout: nout,
-            rank: nout + nin,
-        })
-    }
-
-    /// An adjoint operand stored in its parent's layout. The typed facade uses
-    /// this narrow constructor without gaining access to the erased facade's
-    /// private orientation enum or metadata view.
-    pub(crate) fn adjoint(
-        structure: &'a Arc<BlockStructure>,
-        storage_nout: usize,
-        storage_nin: usize,
-    ) -> Result<Self, Error> {
-        Ok(Self {
-            structure,
-            regions: sector_regions(structure, storage_nout)?,
-            orientation: TensorOrientation::Adjoint,
-            logical_nout: storage_nin,
-            storage_nout,
-            rank: storage_nout + storage_nin,
-        })
-    }
-
-    fn from_view(view: &TensorMetadataView<'a>, regions: Arc<[SectorRegion]>) -> Self {
-        Self {
-            structure: view.body.space.structure(),
-            regions,
-            orientation: view.orientation,
-            logical_nout: view.nout(),
-            storage_nout: view.body.space.nout(),
-            rank: view.rank(),
-        }
-    }
-}
-
-/// The compiled copy plan of one concatenation: per-fusion-tree slab copies
-/// against the destination's packed coupled layout. Structure-level on
-/// purpose — both facades execute the same plan, which is the
-/// no-duplicated-kernel rule of #580 PR 4.
-pub(crate) struct CatCopyPlan {
-    required_len: usize,
-    copies: Vec<OwnedCatCopy>,
-    side: CatSide,
-}
-
 struct CatDescriptor {
     space: UserBoundSpace,
     plan: CatCopyPlan,
@@ -1059,7 +975,7 @@ impl CatDescriptor {
     fn compile(
         lhs: &TensorMetadataView<'_>,
         rhs: &TensorMetadataView<'_>,
-        source_regions: [Arc<[SectorRegion]>; 2],
+        source_regions: [Arc<[CoupledSectorRegion]>; 2],
         axis: usize,
         side: CatSide,
         homspace: FusionTreeHomSpace,
@@ -1070,8 +986,22 @@ impl CatDescriptor {
             space.structure(),
             space.nout(),
             [
-                CatOperandLayout::from_view(lhs, lhs_regions),
-                CatOperandLayout::from_view(rhs, rhs_regions),
+                CatOperandLayout::from_regions(
+                    lhs.body.space.structure(),
+                    lhs_regions,
+                    lhs.orientation,
+                    lhs.nout(),
+                    lhs.body.space.nout(),
+                    lhs.rank(),
+                ),
+                CatOperandLayout::from_regions(
+                    rhs.body.space.structure(),
+                    rhs_regions,
+                    rhs.orientation,
+                    rhs.nout(),
+                    rhs.body.space.nout(),
+                    rhs.rank(),
+                ),
             ],
             axis,
             side,
@@ -1081,264 +1011,6 @@ impl CatDescriptor {
         };
         Ok(Some(Self { space, plan }))
     }
-}
-
-impl CatCopyPlan {
-    fn preflight(&self, source_lengths: [usize; 2]) -> Result<(), Error> {
-        let required_len = self.required_len;
-        let mut copied_elements = 0usize;
-        for copy in &self.copies {
-            let source_len = source_lengths
-                .get(copy.source())
-                .ok_or_else(|| internal_layout_error("concatenated copy has an invalid source"))?;
-            preflight_cat_copy(copy, *source_len, required_len)?;
-            copied_elements = copied_elements
-                .checked_add(copy.rows().checked_mul(copy.cols()).ok_or_else(|| {
-                    internal_layout_error("concatenated copy element count overflow")
-                })?)
-                .ok_or_else(|| {
-                    internal_layout_error("concatenated total element count overflow")
-                })?;
-        }
-        if copied_elements != required_len {
-            return Err(internal_layout_error(
-                "concatenated copies do not cover the destination storage",
-            ));
-        }
-        Ok(())
-    }
-
-    /// Why there is no generic strided fallback behind the prover (#618
-    /// investigation result): `compile_cat_plan` cannot emit a plan the
-    /// fast-path prover (`validate_owned_cat`) declines — it iterates
-    /// canonical coupled-sector regions, which `coupled_sector_regions`
-    /// proves tile storage contiguously in block order, pushes per-region
-    /// copies in strict source order, and re-checks the prover's side
-    /// equations itself; the one geometry that would break the codomain
-    /// column count needs a zero-degeneracy sector, which `Space`
-    /// normalizes away before any tensor exists; and the adjoint-view
-    /// route's conjugate strided copies are proven geometry (measured to
-    /// take the fast path). The former fallback loop was unreachable and
-    /// test-dead, so a future declining geometry must surface loudly here
-    /// instead of silently taking an untested slow path.
-    pub(crate) fn execute<D: ScalarOps>(&self, lhs: &[D], rhs: &[D]) -> Result<Vec<D>, Error> {
-        let side = match self.side {
-            CatSide::Domain => OwnedCatSide::Domain,
-            CatSide::Codomain => OwnedCatSide::Codomain,
-        };
-        tenet_tensors::try_cat_owned_raw(self.required_len, side, &self.copies, [lhs, rhs])
-            .ok_or_else(|| {
-                internal_layout_error(
-                    "cat copy plan declined by the fast-path prover; no known geometry reaches \
-                     this",
-                )
-            })
-    }
-
-    /// Mixed-dtype sibling of [`Self::execute`]; the same #618 rationale
-    /// applies — a prover decline is an internal invariant violation.
-    fn execute_c64(
-        &self,
-        lhs: CatC64Source<'_>,
-        rhs: CatC64Source<'_>,
-    ) -> Result<Vec<Complex64>, Error> {
-        let side = match self.side {
-            CatSide::Domain => OwnedCatSide::Domain,
-            CatSide::Codomain => OwnedCatSide::Codomain,
-        };
-        tenet_tensors::try_cat_owned_c64_raw(self.required_len, side, &self.copies, [lhs, rhs])
-            .ok_or_else(|| {
-                internal_layout_error(
-                    "cat copy plan declined by the fast-path prover; no known geometry reaches \
-                     this",
-                )
-            })
-    }
-}
-
-/// Shared structure-level core of `catdomain`/`catcodomain` (#580 PR 4):
-/// compiles the per-fusion-tree copy plan of `[lhs, rhs]` into the packed
-/// destination layout. Both facades route through this one function — the
-/// erased Owned and adjoint-view paths via [`CatDescriptor::compile`], the
-/// typed facade directly with owned or adjoint [`CatOperandLayout`]s.
-///
-/// Returns `Ok(None)` when an adjoint-oriented layout declines (non-monotone
-/// region maps, mismatched tree orders); an all-owned pair never declines.
-pub(crate) fn compile_cat_plan(
-    destination: &Arc<BlockStructure>,
-    destination_nout: usize,
-    operands: [CatOperandLayout<'_>; 2],
-    axis: usize,
-    side: CatSide,
-) -> Result<Option<CatCopyPlan>, Error> {
-    #[cfg(test)]
-    observe_cat_result_layout_build();
-    {
-        let sources = [operands[0].structure, operands[1].structure];
-        let source_blocks = [
-            cat_source_blocks(destination, sources[0], operands[0].orientation)?,
-            cat_source_blocks(destination, sources[1], operands[1].orientation)?,
-        ];
-        let source_metadata = [&operands[0], &operands[1]];
-        for (destination_block, (&lhs_source_block, &rhs_source_block)) in
-            source_blocks[0].iter().zip(&source_blocks[1]).enumerate()
-        {
-            let dst = destination.block(destination_block)?;
-            let source_for_destination = [lhs_source_block, rhs_source_block];
-            if source_for_destination.iter().all(Option::is_none) {
-                return Err(internal_layout_error(
-                    "concatenated fusion-tree key has no source",
-                ));
-            }
-            let mut destination_axis_offset = 0usize;
-            for source in 0..2 {
-                let Some(source_block) = source_for_destination[source] else {
-                    continue;
-                };
-                let src = sources[source].block(source_block)?;
-                if src.shape().len() != dst.shape().len()
-                    || (0..dst.shape().len()).any(|logical_axis| {
-                        if logical_axis == axis {
-                            return false;
-                        }
-                        match cat_storage_axis(source_metadata[source], logical_axis) {
-                            Ok(storage_axis) => {
-                                src.shape()[storage_axis] != dst.shape()[logical_axis]
-                            }
-                            Err(_) => true,
-                        }
-                    })
-                {
-                    return Err(internal_layout_error(
-                        "concatenated source and destination subblock shapes disagree",
-                    ));
-                }
-                let storage_axis = cat_storage_axis(source_metadata[source], axis)?;
-                destination_axis_offset = destination_axis_offset
-                    .checked_add(src.shape()[storage_axis])
-                    .ok_or_else(|| internal_layout_error("concatenated axis offset overflow"))?;
-            }
-            if destination_axis_offset != dst.shape()[axis] {
-                return Err(internal_layout_error(
-                    "concatenated source slabs do not cover the destination axis",
-                ));
-            }
-        }
-    }
-    let destination_regions = sector_regions(destination, destination_nout)?;
-    let source_regions = [&operands[0].regions, &operands[1].regions];
-    let oriented = matches!(operands[0].orientation, TensorOrientation::Adjoint)
-        || matches!(operands[1].orientation, TensorOrientation::Adjoint);
-    let source_region_indices = if oriented {
-        let (Some(lhs_indices), Some(rhs_indices)) = (
-            cat_source_regions_if_monotone(&destination_regions, &source_regions[0]),
-            cat_source_regions_if_monotone(&destination_regions, &source_regions[1]),
-        ) else {
-            return Ok(None);
-        };
-        [lhs_indices, rhs_indices]
-    } else {
-        [
-            cat_source_regions(&destination_regions, &source_regions[0])?,
-            cat_source_regions(&destination_regions, &source_regions[1])?,
-        ]
-    };
-    if oriented
-        && !cat_region_tree_orders_match(
-            &destination_regions,
-            [&source_regions[0], &source_regions[1]],
-            [&source_region_indices[0], &source_region_indices[1]],
-            [operands[0].orientation, operands[1].orientation],
-            side,
-        )
-    {
-        return Ok(None);
-    }
-    let mut copies = Vec::with_capacity(source_regions[0].len() + source_regions[1].len());
-    for (destination_index, destination) in destination_regions.iter().enumerate() {
-        let mut changed_axis_offset = 0usize;
-        for source in 0..2 {
-            let Some(source_index) = source_region_indices[source][destination_index] else {
-                continue;
-            };
-            let src = &source_regions[source][source_index];
-            let (source_rows, source_cols, source_row_stride, source_column_stride) =
-                match operands[source].orientation {
-                    TensorOrientation::Owned => (src.rows(), src.cols(), 1, src.rows()),
-                    TensorOrientation::Adjoint => (src.cols(), src.rows(), src.rows(), 1),
-                };
-            let (rows, cols, destination_offset) = match side {
-                CatSide::Codomain => {
-                    if source_cols != destination.cols() {
-                        return Err(internal_layout_error(
-                            "catcodomain coupled-sector columns disagree",
-                        ));
-                    }
-                    (
-                        source_rows,
-                        source_cols,
-                        destination
-                            .range()
-                            .start
-                            .checked_add(changed_axis_offset)
-                            .ok_or_else(|| {
-                                internal_layout_error("catcodomain destination row offset overflow")
-                            })?,
-                    )
-                }
-                CatSide::Domain => {
-                    if source_rows != destination.rows() {
-                        return Err(internal_layout_error(
-                            "catdomain coupled-sector rows disagree",
-                        ));
-                    }
-                    (
-                        source_rows,
-                        source_cols,
-                        destination
-                            .rows()
-                            .checked_mul(changed_axis_offset)
-                            .and_then(|offset| destination.range().start.checked_add(offset))
-                            .ok_or_else(|| {
-                                internal_layout_error(
-                                    "catdomain destination column offset overflow",
-                                )
-                            })?,
-                    )
-                }
-            };
-            copies.push(OwnedCatCopy::new(
-                source,
-                src.range().start,
-                destination_offset,
-                [rows, cols],
-                [source_row_stride, source_column_stride],
-                destination.rows(),
-                destination.range(),
-                matches!(operands[source].orientation, TensorOrientation::Adjoint),
-            ));
-            changed_axis_offset = changed_axis_offset
-                .checked_add(match side {
-                    CatSide::Codomain => source_rows,
-                    CatSide::Domain => source_cols,
-                })
-                .ok_or_else(|| internal_layout_error("concatenated region offset overflow"))?;
-        }
-        let expected = match side {
-            CatSide::Codomain => destination.rows(),
-            CatSide::Domain => destination.cols(),
-        };
-        if changed_axis_offset != expected {
-            return Err(internal_layout_error(
-                "concatenated source regions do not cover the destination matrix",
-            ));
-        }
-    }
-    Ok(Some(CatCopyPlan {
-        required_len: destination.required_len()?,
-        copies,
-        side,
-    }))
 }
 
 fn execute_cat_data(descriptor: &CatDescriptor, lhs: &Data, rhs: &Data) -> Result<Data, Error> {
@@ -1580,230 +1252,6 @@ mod absorb_tests {
             Err(Error::InvalidArgument(message)) if message.contains("block layout")
         ));
     }
-}
-
-fn preflight_cat_copy(
-    copy: &OwnedCatCopy,
-    source_len: usize,
-    destination_len: usize,
-) -> Result<(), Error> {
-    let max_offset =
-        |base: usize, rows: usize, cols: usize, row_stride: usize, column_stride: usize| {
-            if rows == 0 || cols == 0 {
-                return Ok(None);
-            }
-            let row_offset = (rows - 1)
-                .checked_mul(row_stride)
-                .ok_or_else(|| internal_layout_error("concatenated row offset overflow"))?;
-            let column_offset = (cols - 1)
-                .checked_mul(column_stride)
-                .ok_or_else(|| internal_layout_error("concatenated column offset overflow"))?;
-            base.checked_add(row_offset)
-                .and_then(|offset| offset.checked_add(column_offset))
-                .map(Some)
-                .ok_or_else(|| internal_layout_error("concatenated scalar offset overflow"))
-        };
-    if max_offset(
-        copy.source_offset(),
-        copy.rows(),
-        copy.cols(),
-        copy.source_row_stride(),
-        copy.source_column_stride(),
-    )?
-    .is_some_and(|offset| offset >= source_len)
-    {
-        return Err(internal_layout_error(
-            "concatenated source region exceeds scalar storage",
-        ));
-    }
-    if max_offset(
-        copy.destination_offset(),
-        copy.rows(),
-        copy.cols(),
-        1,
-        copy.destination_leading_dimension(),
-    )?
-    .is_some_and(|offset| offset >= destination_len)
-    {
-        return Err(internal_layout_error(
-            "concatenated destination region exceeds scalar storage",
-        ));
-    }
-    Ok(())
-}
-
-fn cat_source_blocks(
-    destination: &BlockStructure,
-    source: &BlockStructure,
-    orientation: TensorOrientation,
-) -> Result<Vec<Option<usize>>, Error> {
-    if matches!(orientation, TensorOrientation::Adjoint) {
-        let mut source_for_destination = vec![None; destination.block_count()];
-        for source_index in 0..source.block_count() {
-            let logical_key = cat_logical_block_key(source.block(source_index)?.key())?;
-            let destination_index = destination
-                .find_block_index_by_key(&logical_key)
-                .ok_or_else(|| {
-                    internal_layout_error(
-                        "source fusion-tree key is absent from concatenated destination",
-                    )
-                })?;
-            if source_for_destination[destination_index]
-                .replace(source_index)
-                .is_some()
-            {
-                return Err(internal_layout_error(
-                    "multiple source fusion-tree keys map to one destination",
-                ));
-            }
-        }
-        return Ok(source_for_destination);
-    }
-
-    let destination_sector = destination.sector_structure();
-    let source_sector = source.sector_structure();
-    let mut source_for_destination = vec![None; destination.block_count()];
-    let mut destination_position = 0usize;
-    let mut source_position = 0usize;
-    while destination_position < destination_sector.sorted_indices().len()
-        && source_position < source_sector.sorted_indices().len()
-    {
-        let destination_index = destination_sector.sorted_indices()[destination_position];
-        let source_index = source_sector.sorted_indices()[source_position];
-        let destination_key = destination_sector.key(destination_index)?;
-        let source_key = source_sector.key(source_index)?;
-        match destination_key.cmp(source_key) {
-            std::cmp::Ordering::Less => destination_position += 1,
-            std::cmp::Ordering::Greater => {
-                return Err(internal_layout_error(
-                    "source fusion-tree key is absent from concatenated destination",
-                ));
-            }
-            std::cmp::Ordering::Equal => {
-                source_for_destination[destination_index] = Some(source_index);
-                destination_position += 1;
-                source_position += 1;
-            }
-        }
-    }
-    if source_position != source_sector.sorted_indices().len() {
-        return Err(internal_layout_error(
-            "source fusion-tree key is absent from concatenated destination",
-        ));
-    }
-    Ok(source_for_destination)
-}
-
-fn cat_logical_block_key(key: &BlockKey) -> Result<BlockKey, Error> {
-    match key {
-        BlockKey::FusionTree(key) => Ok(BlockKey::from(FusionTreePairKey::pair(
-            key.domain_tree().clone(),
-            key.codomain_tree().clone(),
-        ))),
-        _ => Err(internal_layout_error(
-            "unsupported block key in adjoint concatenation",
-        )),
-    }
-}
-
-fn cat_storage_axis(source: &CatOperandLayout<'_>, logical_axis: usize) -> Result<usize, Error> {
-    if logical_axis >= source.rank {
-        return Err(internal_layout_error(
-            "concatenated logical axis exceeds source rank",
-        ));
-    }
-    match source.orientation {
-        TensorOrientation::Owned => Ok(logical_axis),
-        TensorOrientation::Adjoint => {
-            if logical_axis < source.logical_nout {
-                source
-                    .storage_nout
-                    .checked_add(logical_axis)
-                    .ok_or_else(|| internal_layout_error("concatenated storage axis overflow"))
-            } else {
-                Ok(logical_axis - source.logical_nout)
-            }
-        }
-    }
-}
-
-fn cat_source_regions(
-    destination: &[SectorRegion],
-    source: &[SectorRegion],
-) -> Result<Vec<Option<usize>>, Error> {
-    cat_source_regions_if_monotone(destination, source).ok_or_else(|| {
-        internal_layout_error("source coupled sectors do not map monotonically to destination")
-    })
-}
-
-fn cat_source_regions_if_monotone(
-    destination: &[SectorRegion],
-    source: &[SectorRegion],
-) -> Option<Vec<Option<usize>>> {
-    if destination
-        .windows(2)
-        .any(|pair| pair[0].coupled() >= pair[1].coupled())
-        || source
-            .windows(2)
-            .any(|pair| pair[0].coupled() >= pair[1].coupled())
-    {
-        return None;
-    }
-    let mut source_for_destination = vec![None; destination.len()];
-    let mut destination_position = 0usize;
-    let mut source_position = 0usize;
-    while destination_position < destination.len() && source_position < source.len() {
-        match destination[destination_position]
-            .coupled()
-            .cmp(&source[source_position].coupled())
-        {
-            std::cmp::Ordering::Less => destination_position += 1,
-            std::cmp::Ordering::Greater => return None,
-            std::cmp::Ordering::Equal => {
-                source_for_destination[destination_position] = Some(source_position);
-                destination_position += 1;
-                source_position += 1;
-            }
-        }
-    }
-    if source_position != source.len() {
-        return None;
-    }
-    Some(source_for_destination)
-}
-
-fn cat_region_tree_orders_match(
-    destination: &[SectorRegion],
-    sources: [&[SectorRegion]; 2],
-    source_indices: [&[Option<usize>]; 2],
-    orientations: [TensorOrientation; 2],
-    side: CatSide,
-) -> bool {
-    destination
-        .iter()
-        .enumerate()
-        .all(|(destination_index, destination)| {
-            (0..2).all(|source| {
-                let Some(source_index) = source_indices[source][destination_index] else {
-                    return true;
-                };
-                let source_region = &sources[source][source_index];
-                match (side, orientations[source]) {
-                    (CatSide::Domain, TensorOrientation::Owned) => {
-                        source_region.row_trees() == destination.row_trees()
-                    }
-                    (CatSide::Domain, TensorOrientation::Adjoint) => {
-                        source_region.col_trees() == destination.row_trees()
-                    }
-                    (CatSide::Codomain, TensorOrientation::Owned) => {
-                        source_region.col_trees() == destination.col_trees()
-                    }
-                    (CatSide::Codomain, TensorOrientation::Adjoint) => {
-                        source_region.row_trees() == destination.col_trees()
-                    }
-                }
-            })
-        })
 }
 
 fn build_bound_space<
@@ -2252,12 +1700,6 @@ struct AdjointView {
 enum TensorRepr {
     Owned(TensorBody),
     Adjoint(Arc<AdjointView>),
-}
-
-#[derive(Clone, Copy)]
-enum TensorOrientation {
-    Owned,
-    Adjoint,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -9949,34 +9391,6 @@ mod unit_layout_tensor_tests {
         ));
         assert_eq!(lazy.adjoint_body_builds(), 0);
     }
-
-    #[test]
-    fn declined_plan_is_an_internal_layout_error() {
-        let plan = CatCopyPlan {
-            required_len: 10,
-            copies: vec![
-                // Region 4..10 listed before region 0..4: the prover rejects
-                // the reversed tiling (`region_start != covered_end`).
-                OwnedCatCopy::new(0, 2, 4, [2, 1], [1, 2], 2, 4..10, false),
-                OwnedCatCopy::new(1, 2, 6, [2, 2], [2, 1], 2, 4..10, false),
-                OwnedCatCopy::new(0, 0, 0, [2, 1], [1, 2], 2, 0..4, false),
-                OwnedCatCopy::new(1, 0, 2, [2, 1], [1, 2], 2, 0..4, false),
-            ],
-            side: CatSide::Domain,
-        };
-        let lhs: [f64; 4] = [1.0, 2.0, 3.0, 4.0];
-        let rhs: [f64; 6] = [5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
-        let error = plan.execute(&lhs, &rhs).unwrap_err();
-        match error {
-            Error::InvalidArgument(message) => {
-                assert!(
-                    message.contains("declined by the fast-path prover"),
-                    "unexpected internal error message: {message}"
-                );
-            }
-            other => panic!("expected the internal layout error class, got {other:?}"),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -15366,11 +14780,11 @@ mod cat_tests {
         assert_eq!(
             canonical_regions
                 .iter()
-                .map(SectorRegion::coupled)
+                .map(CoupledSectorRegion::coupled)
                 .collect::<Vec<_>>(),
             reordered_regions
                 .iter()
-                .map(SectorRegion::coupled)
+                .map(CoupledSectorRegion::coupled)
                 .collect::<Vec<_>>()
         );
         assert!(
