@@ -17,7 +17,7 @@ use tenet_tensors::{
 
 use crate::error::Error;
 use crate::plancache::{Optimizer, PlanCacheConfig};
-use crate::tensor::UserScalar;
+use crate::typed::ScalarOps;
 pub type Ctx<D, Key> = TensorContractFusionExecutionContext<D, Key>;
 /// The pair of per-scalar execution contexts for one cache-key namespace.
 /// Tensor operations dispatch on the stored dtype once per call and pick one
@@ -204,13 +204,13 @@ macro_rules! define_tensor_execution_context {
             ///
             /// Only this lane is exposed to the typed facade; Generic-fusion
             /// execution remains behind its provider-specific boundary.
-            pub(crate) fn multiplicity_free_lane<D: UserScalar>(
+            pub(crate) fn multiplicity_free_lane<D: ScalarOps>(
                 &mut self,
             ) -> &mut Ctx<D, tenet_core::RuleIdentity> {
                 D::ctx_of(&mut self.mf)
             }
 
-            pub(crate) fn generic_lane<D: UserScalar>(
+            pub(crate) fn generic_lane<D: ScalarOps>(
                 &mut self,
             ) -> &mut Ctx<D, tenet_core::RuleIdentity> {
                 D::ctx_of(&mut self.generic)

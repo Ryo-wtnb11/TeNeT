@@ -16,7 +16,8 @@ use tenet_tensors::{
 };
 
 use crate::runtime::Ctx;
-use crate::tensor::{internal_layout_error, UserScalar};
+use crate::tensor::internal_layout_error;
+use crate::typed::ScalarOps;
 
 /// Error from fallible checked-Generic tensor-product execution.
 ///
@@ -366,7 +367,7 @@ pub(crate) fn tree_transform_owned_multiplicity_free<R, D>(
 ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), tenet_tensors::OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-    D: UserScalar,
+    D: ScalarOps,
 {
     #[cfg(test)]
     observe_tree_transform_seam_call();
@@ -411,7 +412,7 @@ pub(crate) fn tensorcontract_owned_multiplicity_free<R, D>(
 ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), tenet_tensors::OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-    D: UserScalar,
+    D: ScalarOps,
 {
     #[cfg(test)]
     observe_contract_seam_call();
@@ -460,7 +461,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>
         + CheckedFusionAlgebra
         + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-    D: UserScalar,
+    D: ScalarOps,
 {
     if lhs_authority.provider().rule_identity() != rhs_authority.provider().rule_identity() {
         return Err(tenet_tensors::OperationError::from_core_preserving_context(
@@ -602,7 +603,7 @@ where
         + CheckedFusionAlgebra
         + CanonicalUnitFusionRule
         + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-    D: UserScalar,
+    D: ScalarOps,
 {
     let rule = lhs.space().provider();
     if rule.rule_identity() != rhs.space().provider().rule_identity() {
@@ -845,7 +846,7 @@ pub(crate) fn tensorproduct_owned_checked_generic<R, D>(
 ) -> CheckedGenericTensorProductResult<R, D>
 where
     R: CheckedGenericRigidSymbols<Scalar = f64>,
-    D: UserScalar,
+    D: ScalarOps,
 {
     let rule = lhs_space.provider();
     let lhs_identity = rule.rule_identity();
@@ -1035,7 +1036,7 @@ fn tensor_product_checked_error(error: CheckedFusionSpaceError) -> tenet_tensors
 }
 
 #[allow(clippy::too_many_arguments)]
-fn scatter_tensor_product_block<D: UserScalar>(
+fn scatter_tensor_product_block<D: ScalarOps>(
     lhs_data: &[D],
     lhs: tenet_core::BlockRef<'_>,
     lhs_nout: usize,
@@ -1147,7 +1148,7 @@ pub(crate) fn tensorcompose_owned_multiplicity_free<R, D>(
 ) -> Result<(BoundDynamicFusionMapSpace<R>, Vec<D>), tenet_tensors::OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + TreeTransformRuleCacheKey<Key = RuleIdentity>,
-    D: UserScalar,
+    D: ScalarOps,
 {
     let destination = BoundDynamicFusionMapSpace::contracted_multiplicity_free_ordered(
         lhs.space(),
