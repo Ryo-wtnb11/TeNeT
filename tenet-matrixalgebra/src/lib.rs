@@ -40,6 +40,7 @@ pub use factorize::{
 };
 pub use matrix_functions::{
     exp, exp_dyn, inv, inv_direct_dyn, inv_dyn, pinv, pinv_adjoint_parent_dyn, pinv_dyn,
+    solve_left_direct_dyn,
 };
 pub use truncation::{
     select_truncation, Truncation, TruncationDecision, TruncationError, TruncationSpace,
