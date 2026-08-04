@@ -166,14 +166,8 @@ macro_rules! rule_lanes {
 
 macro_rules! define_tensor_execution_context {
     ($( $field:ident: $key:ty ),+ $(,)?) => {
-        /// Caller-owned host execution state for dynamic destination operations.
-        /// [`Self::default`] is independent of a [`Runtime`]; use
-        /// [`Self::for_runtime`] when execution must inherit and remain bound to a
-        /// runtime's backend configuration.
-        #[derive(Default)]
-        pub struct TensorExecutionContext {
-            pub(crate) runtime: Option<Runtime>,
-            pub(crate) runtime_identity: Option<RuntimeIdentity>,
+        /// Runtime-owned host tensor execution state.
+        pub(crate) struct TensorExecutionContext {
             $(pub(crate) $field: Ctxs<$key>,)+
         }
 
@@ -182,8 +176,6 @@ macro_rules! define_tensor_execution_context {
             // Runtime, so the back-reference would form an Arc cycle.
             pub(crate) fn for_config(config: &RuntimeExecutionConfig) -> Result<Self, Error> {
                 let mut context = Self {
-                    runtime: None,
-                    runtime_identity: None,
                     $($field: Ctxs::with_config(
                         &config.shared_ctx,
                         config.gemm_kind,
@@ -214,25 +206,6 @@ macro_rules! define_tensor_execution_context {
                 &mut self,
             ) -> &mut Ctx<D, tenet_core::RuleIdentity> {
                 D::ctx_of(&mut self.generic)
-            }
-
-            #[doc(hidden)]
-            pub fn release_runtime_binding(&mut self) {
-                self.runtime = None;
-            }
-
-            #[doc(hidden)]
-            pub fn bind_runtime(&mut self, runtime: &Runtime) -> Result<(), Error> {
-                if self
-                    .runtime_identity
-                    .as_ref()
-                    .is_some_and(|identity| !identity.matches(runtime))
-                {
-                    return Err(Error::RuntimeMismatch);
-                }
-                self.runtime_identity = Some(runtime.identity());
-                self.runtime = Some(runtime.clone());
-                Ok(())
             }
 
             #[cfg(test)]
@@ -580,6 +553,7 @@ impl Runtime {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn execution_config(&self) -> &RuntimeExecutionConfig {
         &self.inner.execution_config
     }
@@ -1201,7 +1175,7 @@ mod tests {
         assert!(state.local_cache_policy_is(OperationCachePolicy::NoCache));
         drop(state);
 
-        let context = TensorExecutionContext::for_runtime(&runtime).unwrap();
+        let context = TensorExecutionContext::for_config(runtime.execution_config()).unwrap();
         assert!(context.local_cache_policy_is(OperationCachePolicy::NoCache));
     }
 
