@@ -273,8 +273,8 @@ under negation; dualization constructs the corresponding dual sector set.
 The current user API exposes [`crate::prelude::TensorMap::permute`],
 [`crate::prelude::TensorMap::braid`], [`crate::prelude::TensorMap::transpose`],
 [`crate::prelude::TensorMap::adjoint`], [`crate::prelude::TensorMap::flip`], and
-[`crate::prelude::TensorMap::twist`]. The latter two describe duality changes on
-fusion-tree legs.
+[`crate::prelude::TensorMap::twist`]. The latter two act on fusion-tree legs:
+`flip` changes leg duality, while `twist` applies ribbon-twist phases.
 
 Let
 
