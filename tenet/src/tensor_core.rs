@@ -150,10 +150,10 @@ pub(crate) fn pow_by_squaring<T: Clone, E>(
 /// `DiagonalTensorMap` re-labels the stored diagonal instead of materializing
 /// it.
 ///
-/// The geometry this accepts is exactly the one already proved for the erased
-/// facade: rank `(1, 1)`, codomain permutation `[1]`, domain permutation `[0]`,
-/// and a `Permute` or `Transpose` operation — see [`is_rank_one_diagonal_swap`],
-/// which both facades ask before calling this. Under it every source block
+/// The geometry this accepts is rank `(1, 1)`, codomain permutation `[1]`,
+/// domain permutation `[0]`, and a `Permute` or `Transpose` operation — see
+/// [`is_rank_one_diagonal_swap`], which the typed facade asks before calling
+/// this. Under it every source block
 /// lowers to a **single** destination term, so the whole transform is one real
 /// coefficient per sector applied to that sector's stored values. The
 /// single-term property is asserted here rather than assumed: zero or several
@@ -171,8 +171,8 @@ pub(crate) fn pow_by_squaring<T: Clone, E>(
 /// all share this one body. The bound is the crate's own
 /// [`RecouplingCoefficientAction`] rather than a bare `Mul<f64>`: it is the
 /// seam every other recoupling coefficient in the engine acts through, and it
-/// is already a supertrait of the typed facade's payload scalar, so neither
-/// facade has to widen a public bound to reach this helper.
+/// is already a supertrait of the typed facade's payload scalar, so the facade
+/// does not widen a public bound to reach this helper.
 pub(crate) fn transform_rank_one_diagonal_spectrum<R, V>(
     rule: &R,
     source: &DynamicFusionMapSpace,

@@ -62,7 +62,7 @@ FermionParityFusionRule.product(U1FusionRule).product(SU2FusionRule)
 ```
 
 is `(fZ2 ⊠ U(1)) ⊠ SU(2)` — any ordered product of admitted components,
-recursively nested, without a new `RuleKind`, dispatch arm or group-specific
+recursively nested, without a central provider enum, dispatch arm or group-specific
 constructor. Factor order and association are structure of the Rust type and of
 the `ProductSector` label, never an automatic equivalence: `U(1) ⊠ fZ2` and
 `fZ2 ⊠ U(1)` are both legal and are different types.

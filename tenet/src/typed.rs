@@ -7205,7 +7205,7 @@ where
         legs: &[&GradedSpace<R>],
     ) -> Result<Vec<(tenet_core::SectorId, usize)>, Error> {
         let (first, rest) = legs.split_first().ok_or_else(|| {
-            // Same class as the erased `Space::fuse_all` on an empty side.
+            // Keep the empty-side failure local to the typed fusion fold.
             Error::InvalidArgument("fuse_all needs at least one space".into())
         })?;
         let mut fused: Vec<(tenet_core::SectorId, usize)> = first.leg().iter().collect();

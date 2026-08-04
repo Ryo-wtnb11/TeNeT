@@ -5853,7 +5853,7 @@ fn parity_irrep(parity: u8) -> tenet::core::Z2Irrep {
     match parity {
         0 => tenet::core::Z2Irrep::EVEN,
         1 => tenet::core::Z2Irrep::ODD,
-        other => panic!("not a fermion parity: {other} (SectorLabel parity is exactly 0 or 1)"),
+        other => panic!("not a fermion parity: {other} (parity is exactly 0 or 1)"),
     }
 }
 
@@ -6428,9 +6428,8 @@ fn reductions_and_factorizations_hold_on_fz2_u1_su2() {
 // Everything below is written the way a downstream user would have to write
 // it: `ProductFusionRuleExt::product` for the provider, `product_sector` for
 // the label, `tenet::typed` for the space and the tensor. No
-// `tenet::prelude::Space` product constructor appears, so the tests fail —
-// they do not silently reroute — if the fixed erased constructors were the
-// only working path.
+// fixed product-space constructor appears, so the tests fail — they do not
+// silently reroute — if a group-specific constructor is the only working path.
 // ---------------------------------------------------------------------------
 
 /// `fZ2 ⊠ U(1)` built from the generic rule product, then run through a typed
