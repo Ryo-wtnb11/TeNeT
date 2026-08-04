@@ -6186,7 +6186,7 @@ fn the_fermionic_product_compose_is_contract_against_a_twisted_right_operand() {
     // weaker `contract != compose` would pin only that *a* twist exists, not
     // which legs it acts on nor with which sign; this form pins all three, and
     // it is stated inside the product family so the suite does not lean on the
-    // plain-fZ2 test above for it. A cross-facade byte oracle cannot do this
+    // plain-fZ2 test above for it. A byte-parity oracle cannot do this
     // job at all: a twist deleted from a shared kernel moves both buffers
     // together. The bosonic family is the control — theta is one there, so the
     // twisted operand is the operand and the two contractions agree.
@@ -7262,7 +7262,7 @@ fn typed_leg_dim_out_of_range_is_an_invalid_argument() {
 
 #[test]
 fn typed_codomain_and_domain_spaces_alias_the_primary_accessors() {
-    // Gate 3: the cross-facade names are documented aliases of
+    // Gate 3: the compatibility names are documented aliases of
     // `codomain()`/`domain()` — same legs, content-wise.
     let _guard = cache_lock();
     let runtime = runtime();
