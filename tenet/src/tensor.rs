@@ -67,9 +67,9 @@ use crate::tensor_core::{
     tree_transform_owned_multiplicity_free,
 };
 use crate::typed::{
-    logical_adjoint_axes_to_parent, lower_adjoint_tree_transform_operation,
-    validate_axis_permutation, validate_contracted_axes, with_planar_axes, PlanarRequestKind,
-    ScalarOps,
+    apply_fill, logical_adjoint_axes_to_parent, lower_adjoint_tree_transform_operation,
+    map_checked_unit_layout_error, scale_blocks_impl, validate_axis_permutation,
+    validate_contracted_axes, with_planar_axes, Fill, PlanarRequestKind, ScalarOps,
 };
 
 mod diagonal;
@@ -668,16 +668,6 @@ fn device_unsupported(what: &str) -> Error {
     ))
 }
 
-/// `pub(crate)` so the typed facade's unit-leg adapters map the checked
-/// validator's failures to exactly the erased error classes (#580 PR 5).
-pub(crate) fn map_checked_unit_layout_error(error: CheckedFusionSpaceError) -> Error {
-    match error {
-        CheckedFusionSpaceError::Core(error) => Error::Core(error),
-        CheckedFusionSpaceError::FusionAlgebra(error) => Error::FusionAlgebra(error),
-        other => Error::InvalidArgument(format!("unit layout correspondence failed: {other}")),
-    }
-}
-
 fn map_trace_preflight_error(error: OperationError) -> Error {
     match error {
         OperationError::Core(error) => Error::Core(Box::new(error)),
@@ -915,13 +905,6 @@ pub struct EigTrunc {
     pub eigenvalues: Vec<SectorSpectrum<Complex64>>,
     /// Quantum-dimension-weighted 2-norm of the discarded `|eigenvalues|`.
     pub error: f64,
-}
-
-/// How a freshly built tensor is filled.
-pub(crate) enum Fill<'f, D> {
-    Zeros,
-    Rand(u64),
-    BlockFn(&'f mut dyn FnMut(&BlockKey, &[usize]) -> D),
 }
 
 #[derive(Clone, Copy)]
@@ -2083,109 +2066,6 @@ fn build_bound_space_like<
     authority
         .derive_from_final_homspace(hom)
         .map_err(Into::into)
-}
-
-/// Fills a freshly-built coupled space (rule-agnostic: only touches the block
-/// structure). Shared by the multiplicity-free construction paths.
-pub(crate) fn apply_fill<S: ScalarOps>(
-    space: &DynamicFusionMapSpace,
-    fill: Fill<'_, S>,
-) -> Result<Vec<S>, Error> {
-    let len = space.required_len()?;
-    let mut data = vec![S::from_real(0.0); len];
-    match fill {
-        Fill::Zeros => {}
-        Fill::Rand(seed) => {
-            let mut state = seed;
-            for value in &mut data {
-                *value = S::rand_unit(&mut state);
-            }
-        }
-        Fill::BlockFn(fill) => {
-            fill_block_elements(space.structure(), &mut data, fill)?;
-        }
-    }
-    Ok(data)
-}
-
-/// Fills every symmetry-allowed block element via `fill(key, indices)`,
-/// mirroring [`tenet_core::TensorMap::from_block_fn_with_fusion_space`]
-/// (degeneracy coordinates local to the block, codomain axes first, first
-/// axis fastest).
-pub(crate) fn fill_block_elements<D: ScalarOps>(
-    structure: &BlockStructure,
-    data: &mut [D],
-    fill: &mut dyn FnMut(&BlockKey, &[usize]) -> D,
-) -> Result<(), Error> {
-    for index in 0..structure.block_count() {
-        let block = structure.block(index)?;
-        let shape = block.shape();
-        let strides = block.strides();
-        let offset = block.offset();
-        let count: usize = shape.iter().product();
-        let mut indices = vec![0usize; shape.len()];
-        for _ in 0..count {
-            let position = offset
-                + indices
-                    .iter()
-                    .zip(strides)
-                    .map(|(&i, &s)| i * s)
-                    .sum::<usize>();
-            data[position] = fill(block.key(), &indices);
-            for axis in 0..shape.len() {
-                indices[axis] += 1;
-                if indices[axis] < shape[axis] {
-                    break;
-                }
-                indices[axis] = 0;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Scales every fusion-tree block of `data` in place by the real factor
-/// `factor_of(key)` (skipping factor-1 blocks). Backs [`Tensor::twist`] and
-/// [`Tensor::flip`], whose effect on the storage is exactly a per-block
-/// phase. `pub(crate)` so the typed facade's `twist`/`flip` adapters share
-/// this exact scaling walk instead of re-deriving the block addressing
-/// (#580 PR 5).
-pub(crate) fn scale_blocks_impl<D: ScalarOps>(
-    space: &DynamicFusionMapSpace,
-    data: &mut [D],
-    factor_of: &dyn Fn(&BlockKey) -> f64,
-) -> Result<(), Error> {
-    let structure = space.structure();
-    for index in 0..structure.block_count() {
-        let block = structure.block(index)?;
-        let factor = factor_of(block.key());
-        if factor == 1.0 {
-            continue;
-        }
-        let factor = D::from_real(factor);
-        let shape = block.shape();
-        let strides = block.strides();
-        let offset = block.offset();
-        let count: usize = shape.iter().product();
-        let mut indices = vec![0usize; shape.len()];
-        for _ in 0..count {
-            let position = offset
-                + indices
-                    .iter()
-                    .zip(strides)
-                    .map(|(&i, &s)| i * s)
-                    .sum::<usize>();
-            data[position] = data[position] * factor;
-            for axis in 0..shape.len() {
-                indices[axis] += 1;
-                if indices[axis] < shape[axis] {
-                    break;
-                }
-                indices[axis] = 0;
-            }
-        }
-    }
-    Ok(())
 }
 
 /// The uncoupled sector a flat external leg (codomain first) carries on one
