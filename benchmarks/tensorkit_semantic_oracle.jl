@@ -322,3 +322,34 @@ for (name, tensor) in (("direct", A0), ("adjoint", A0'))
     @printf("left stored = %d norm = %.17g\n", length(left.data), norm(left))
     @printf("right stored = %d norm = %.17g\n", length(right.data), norm(right))
 end
+
+# ---------------------------------------------------------------------------
+# Section 7: complex SU(2) structural operations
+# ---------------------------------------------------------------------------
+println("== section 7: complex SU2 structural operations ==")
+
+Vc = SU2Space(0 => 1, 1 // 2 => 1)
+Ac = zeros(ComplexF64, Vc ⊗ Vc ← Vc ⊗ Vc)
+for (f1, f2) in fusiontrees(Ac)
+    block = Ac[f1, f2]
+    l1, l2 = label.(f1.uncoupled)
+    m1, m2 = label.(f2.uncoupled)
+    lc = label(f1.coupled)
+    for j2 in axes(block, 4), j1 in axes(block, 3),
+            i2 in axes(block, 2), i1 in axes(block, 1)
+        re = fill_value(11, l1, l2, m1, m2, lc, i1, i2, j1, j2)
+        im = fill_value(17, l1, l2, m1, m2, lc, i1, i2, j1, j2) / 3
+        block[i1, i2, j1, j2] = complex(re, im)
+    end
+end
+Pc = permute(Ac, ((2, 1), (4, 3)))
+Gc = Ac' * Ac
+@printf("source norm = %.17g tr = %.17g %.17g\n", norm(Ac), real(tr(Ac)), imag(tr(Ac)))
+@printf("permute norm = %.17g tr = %.17g %.17g\n", norm(Pc), real(tr(Pc)), imag(tr(Pc)))
+@printf("adjoint-compose norm = %.17g tr = %.17g %.17g\n", norm(Gc), real(tr(Gc)), imag(tr(Gc)))
+_, Sc, _ = svd_compact(Pc)
+complex_values = sort(vcat([diag(b) for (_, b) in blocks(Sc)]...); rev = true)
+println("svd count = ", length(complex_values))
+for (k, value) in enumerate(complex_values)
+    @printf("svd[%d] = %.17g\n", k, value)
+end
