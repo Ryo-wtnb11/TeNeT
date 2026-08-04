@@ -102,7 +102,13 @@ example/benchmark artifacts:
 | Historical | 9 | Revision/migration evidence; not current user guidance |
 | Misleading | 6 | Demonstrably stale current-facing API, authority, support, or performance claim |
 
-The six misleading artifacts now carry historical/audit-pending treatment.
+Phase B has since promoted the TensorKit semantic script and output to Valid:
+they reproduce under Julia 1.11.6 and pinned TensorKit main `f87ca7f`. Current
+counts, including the new Project, Manifest, and SHA-256 record, are 22 Valid,
+16 Salvageable, 9 Historical, and 5 Misleading.
+
+The remaining five misleading artifacts carry historical/audit-pending
+treatment.
 The root README remains Salvageable rather than Valid and will be rebuilt only
 after the operation matrix and Phase B evidence stabilize.
 
@@ -162,6 +168,17 @@ executes arbitrary contraction, permutation round trip, double adjoint, trace,
 rank-truncated SVD reconstruction, and repeated explicit network-plan replay.
 All three smoke tests pass in required Ubuntu CI. No trivial-provider example
 is fabricated: that public path remains `UNSUPPORTED`.
+
+The first Phase B reference refresh reran
+`benchmarks/tensorkit_semantic_oracle.jl` against TensorKit main `f87ca7f`
+(Project 0.17.1). The symbol/coherence, invariant-stream, and planar-repartition
+output is numerically unchanged from the historical file; the old file differed
+only by its four-line unverified banner. A committed Julia Project/Manifest and
+SHA-256 manifest now make this TensorKit oracle reproducible. This validates
+only the operations emitted by that script, not the remaining matrix rows or
+QSpace correspondence. QSpace public master `e87ccd1` was recorded for the
+next reference slice, but no equivalent executable QSpace oracle has yet been
+established.
 
 This evidence is not yet the Phase B independent cross-library oracle. Phase B
 must add small dense/reference checks before benchmarking, cover zero/disjoint/

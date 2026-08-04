@@ -12,11 +12,11 @@
 # Section 4 records planar repartition fixtures consumed by the typed-facade
 # regression tests in `tenet/tests/typed_facade.rs`.
 #
-# Run (TensorKit v0.16.2 / TensorKitSectors v0.3.6):
-#   julia benchmarks/tensorkit_semantic_oracle.jl
+# Run (Julia 1.11.6, pinned TensorKit main `f87ca7f`):
+#   julia --project=benchmarks/tensorkit_oracle \
+#     benchmarks/tensorkit_semantic_oracle.jl
 #
-# The committed reference output lives next to this script as
-# `tensorkit_semantic_oracle.out`.
+# The committed reference output and SHA-256 manifest live next to this script.
 
 using TensorKit
 using TensorKit: pentagon_equation, hexagon_equation
