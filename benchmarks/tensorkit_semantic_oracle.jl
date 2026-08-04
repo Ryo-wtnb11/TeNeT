@@ -11,6 +11,8 @@
 # `cross_library_invariant_stream_*` in `tenet/tests/semantic_suite.rs`.
 # Section 4 records planar repartition fixtures consumed by the typed-facade
 # regression tests in `tenet/tests/typed_facade.rs`.
+# Section 6 records the disjoint U(1) zero-map null-space completion consumed
+# by `tenet/tests/tk_disjoint_null.rs`.
 #
 # Run (Julia 1.11.6, pinned TensorKit main `f87ca7f`):
 #   julia --project=benchmarks/tensorkit_oracle \
@@ -301,4 +303,22 @@ for (name, V, W) in norm_spaces, T in (Float64, ComplexF64)
         @printf(" %.17g", value)
     end
     println()
+end
+
+# ---------------------------------------------------------------------------
+# Section 6: disjoint zero-map null-space completion
+# ---------------------------------------------------------------------------
+println("== section 6: disjoint U1 null spaces ==")
+
+Vout = U1Space(0 => 2)
+Vin = U1Space(1 => 3)
+A0 = zeros(Float64, Vout ← Vin)
+for (name, tensor) in (("direct", A0), ("adjoint", A0'))
+    left = left_null(tensor)
+    right = right_null(tensor)
+    println("-- $name --")
+    stored = tensor isa TensorMap ? length(tensor.data) : length(parent(tensor).data)
+    @printf("source stored = %d\n", stored)
+    @printf("left stored = %d norm = %.17g\n", length(left.data), norm(left))
+    @printf("right stored = %d norm = %.17g\n", length(right.data), norm(right))
 end
