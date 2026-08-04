@@ -13,7 +13,8 @@ Destination rows require an exact output from the owned operation; they report
 Validation assertions run after the timer.
 
 The executable covers U1 and SU2 controls for owned and actual
-caller-owned-destination forms of `permute` and arbitrary-axis `contract`.
+caller-owned-destination forms of `permute`, planar `transpose`, and
+arbitrary-axis `contract`.
 The contraction rows distinguish canonical input order, contracted-input
 swap, and contracted-input plus output swap. An owned `compose` row checks
 that its result equals the canonical contraction before reporting it.
@@ -23,8 +24,8 @@ deltas, with charged bytes before and after each phase. The fusion-layout cache
 does not expose a hit counter, so only its available miss, eviction, bypass,
 entry, and charged-byte fields are printed.
 
-The destination rows call the stable public `permute_overwrite_into` and
-`contract_overwrite_into` APIs. Exact-layout admission is attached to the
+The destination rows call the stable public `permute_overwrite_into`,
+`transpose_overwrite_into`, and `contract_overwrite_into` APIs. Exact-layout admission is attached to the
 Runtime tree-transform entry, but it has no public activity counter, so the
 `exact_layout_admission` column is literal `NA`. The 38-column CSV schema omits
 the old erased-only destination preparation/comparison fields. Caller-thread
@@ -67,7 +68,7 @@ julia --project=benchmarks/tensorkit_benchmark \
 The TensorKit script records its exact revision, Julia and AppleAccelerate
 versions, BLAS configuration, first-call timing, warm timing, and Julia's
 per-call allocated bytes. It uses the same rank-3 space and axis placement for
-the TeNeT `permute` owned/destination rows. Its first-call row can include JIT compilation and
+the TeNeT `permute` and planar `transpose` owned/destination rows. Its first-call row can include JIT compilation and
 may observe process-global TensorKit caches warmed by earlier rows; it is not
 directly comparable to TeNeT's fresh-`Runtime` cold row. Only matching warm
 rows under the recorded one-thread BLAS configuration are timing controls.

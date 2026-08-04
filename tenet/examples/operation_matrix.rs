@@ -245,7 +245,10 @@ fn form_enabled(form: &str) -> bool {
 macro_rules! run_provider {
     ($symmetry:literal, $rule:ty, $space:expr, $min_time:expr) => {{
         let space = $space;
-        if operation_enabled("permute") {
+        for operation in ["permute", "transpose"] {
+            if !operation_enabled(operation) {
+                continue;
+            }
             for form in ["owned", "destination"] {
                 if !form_enabled(form) {
                     continue;
@@ -261,26 +264,40 @@ macro_rules! run_provider {
                     let cold = bench(
                         &runtime,
                         $symmetry,
-                        "permute",
+                        operation,
                         form,
                         "cold",
                         "warm",
                         $min_time,
-                        || source.permute(&[1], &[2, 0]),
+                        || match operation {
+                            "permute" => source.permute(&[1], &[2, 0]),
+                            "transpose" => source.transpose(),
+                            _ => unreachable!("fixed tree-operation table"),
+                        },
                     )?;
                     assert!(cold.norm()?.is_finite());
                 } else {
-                    let expected = source.permute(&[1], &[2, 0])?;
+                    let expected = match operation {
+                        "permute" => source.permute(&[1], &[2, 0])?,
+                        "transpose" => source.transpose()?,
+                        _ => unreachable!("fixed tree-operation table"),
+                    };
                     let mut destination = expected.zeros_like();
                     bench(
                         &runtime,
                         $symmetry,
-                        "permute",
+                        operation,
                         form,
                         "first_after_setup",
                         "warm_after_setup",
                         $min_time,
-                        || source.permute_overwrite_into(&mut destination, &[1], &[2, 0], 1.0),
+                        || match operation {
+                            "permute" => {
+                                source.permute_overwrite_into(&mut destination, &[1], &[2, 0], 1.0)
+                            }
+                            "transpose" => source.transpose_overwrite_into(&mut destination, 1.0),
+                            _ => unreachable!("fixed tree-operation table"),
+                        },
                     )?;
                     assert_eq!(destination.data(), expected.data());
                 }
@@ -401,6 +418,7 @@ fn main() -> Result<(), Error> {
         if !matches!(
             operation.as_str(),
             "permute"
+                | "transpose"
                 | "compose"
                 | "contract_identity"
                 | "contract_input_swap"
