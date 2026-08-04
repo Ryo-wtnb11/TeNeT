@@ -252,11 +252,11 @@ use tenet_matrixalgebra::{BoundDynFactor, FactorScalar};
 
 use crate::runtime::{Ctx, Ctxs};
 use crate::tensor::{
-    absorb_mapped, apply_fill, cat_homspace, check_flip_layout_identity, compile_cat_plan,
+    absorb_mapped, cat_homspace, check_flip_layout_identity, compile_cat_plan,
     coupled_region_pow_sum, flip_block_factor, flip_toggled_homspace,
-    map_checked_unit_layout_error, reject_unbraided_nonunit_legs, scale_blocks_impl,
-    sector_regions, twist_block_factor, twist_factor_with_inverse, twist_is_identity_over_blocks,
-    validate_norm_p, weighted_inner, weighted_trace, CatOperandLayout, CatSide, Fill,
+    reject_unbraided_nonunit_legs, sector_regions, twist_block_factor, twist_factor_with_inverse,
+    twist_is_identity_over_blocks, validate_norm_p, weighted_inner, weighted_trace,
+    CatOperandLayout, CatSide,
 };
 #[cfg(feature = "cuda")]
 use crate::tensor::{
@@ -366,6 +366,117 @@ fn random_unit(state: &mut u64) -> f64 {
     value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     value ^= value >> 31;
     ((value >> 11) as f64) / ((1_u64 << 52) as f64) - 1.0
+}
+
+/// How a freshly built tensor is filled.
+pub(crate) enum Fill<'f, D> {
+    Zeros,
+    Rand(u64),
+    BlockFn(&'f mut dyn FnMut(&BlockKey, &[usize]) -> D),
+}
+
+/// Keeps checked unit-leg validation failures in the public error classes used
+/// by the typed facade.
+pub(crate) fn map_checked_unit_layout_error(error: tenet_core::CheckedFusionSpaceError) -> Error {
+    match error {
+        tenet_core::CheckedFusionSpaceError::Core(error) => Error::Core(error),
+        tenet_core::CheckedFusionSpaceError::FusionAlgebra(error) => Error::FusionAlgebra(error),
+        other => Error::InvalidArgument(format!("unit layout correspondence failed: {other}")),
+    }
+}
+
+/// Fills a freshly-built coupled space without inspecting its provider.
+pub(crate) fn apply_fill<S: ScalarOps>(
+    space: &DynamicFusionMapSpace,
+    fill: Fill<'_, S>,
+) -> Result<Vec<S>, Error> {
+    let len = space.required_len()?;
+    let mut data = vec![S::from_real(0.0); len];
+    match fill {
+        Fill::Zeros => {}
+        Fill::Rand(seed) => {
+            let mut state = seed;
+            for value in &mut data {
+                *value = S::rand_unit(&mut state);
+            }
+        }
+        Fill::BlockFn(fill) => {
+            fill_block_elements(space.structure(), &mut data, fill)?;
+        }
+    }
+    Ok(data)
+}
+
+/// Fills every symmetry-allowed block in coupled-layout storage order.
+fn fill_block_elements<D: ScalarOps>(
+    structure: &tenet_core::BlockStructure,
+    data: &mut [D],
+    fill: &mut dyn FnMut(&BlockKey, &[usize]) -> D,
+) -> Result<(), Error> {
+    for index in 0..structure.block_count() {
+        let block = structure.block(index)?;
+        let shape = block.shape();
+        let strides = block.strides();
+        let offset = block.offset();
+        let count: usize = shape.iter().product();
+        let mut indices = vec![0usize; shape.len()];
+        for _ in 0..count {
+            let position = offset
+                + indices
+                    .iter()
+                    .zip(strides)
+                    .map(|(&i, &s)| i * s)
+                    .sum::<usize>();
+            data[position] = fill(block.key(), &indices);
+            for axis in 0..shape.len() {
+                indices[axis] += 1;
+                if indices[axis] < shape[axis] {
+                    break;
+                }
+                indices[axis] = 0;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Scales every fusion-tree block by its real categorical factor.
+pub(crate) fn scale_blocks_impl<D: ScalarOps>(
+    space: &DynamicFusionMapSpace,
+    data: &mut [D],
+    factor_of: &dyn Fn(&BlockKey) -> f64,
+) -> Result<(), Error> {
+    let structure = space.structure();
+    for index in 0..structure.block_count() {
+        let block = structure.block(index)?;
+        let factor = factor_of(block.key());
+        if factor == 1.0 {
+            continue;
+        }
+        let factor = D::from_real(factor);
+        let shape = block.shape();
+        let strides = block.strides();
+        let offset = block.offset();
+        let count: usize = shape.iter().product();
+        let mut indices = vec![0usize; shape.len()];
+        for _ in 0..count {
+            let position = offset
+                + indices
+                    .iter()
+                    .zip(strides)
+                    .map(|(&i, &s)| i * s)
+                    .sum::<usize>();
+            data[position] = data[position] * factor;
+            for axis in 0..shape.len() {
+                indices[axis] += 1;
+                if indices[axis] < shape[axis] {
+                    break;
+                }
+                indices[axis] = 0;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) enum PlanarRequestKind<'a> {
