@@ -29,8 +29,8 @@ use tenet_core::{RuleIdentity, SectorId};
 /// prefix-only decision layer instead of needing the non-prefix filter layer
 /// `truncfilter` would.
 ///
-/// Build one from a space via `Space::truncspace` / `GradedSpace::truncspace`
-/// rather than by hand: the sector keys are the engine's opaque
+/// Build one from a space via `GradedSpace::truncspace` rather than by hand:
+/// the sector keys are the engine's opaque
 /// [`SectorId`]s, so the space that produced them is the only honest source,
 /// and the [`RuleIdentity`] recorded alongside is what lets the factorization
 /// reject a profile built against a different fusion rule.

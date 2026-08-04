@@ -21,7 +21,7 @@ Fix a multiplicity-free rigid fusion rule with simple sectors
 `a, b, c, ...`, tensor unit `1`, dual sector `a*`, fusion coefficients
 `N_ab^c`, and quantum dimensions `d_a`.
 
-A TeNeT `Space` is one external tensor leg. Mathematically it is a finite
+A TeNeT `GradedSpace` is one external tensor leg. Mathematically it is a finite
 graded vector space
 
 <div class="math" style="margin: 1.25rem 0; padding: 0.2rem 0; overflow-x: auto;">
@@ -181,7 +181,7 @@ domain axes are dual objects. For a flat zero-based axis number `i`,
 </math>
 </div>
 
-The stored `Space` on a domain side is still written as `D_i`; the dual
+The stored `GradedSpace` on a domain side is still written as `D_i`; the dual
 orientation appears when the tensor is interpreted as an element of
 `C tensor D*` or when a contraction is planned.
 
@@ -242,7 +242,7 @@ then
 
 So "`one leg is on the domain side`" is not the general mathematical rule.
 It is only what happens for the common codomain-vs-domain composition case.
-Same-side contraction is valid when the actual `Space` on exactly one of the
+Same-side contraction is valid when the actual `GradedSpace` on exactly one of the
 two same-side legs is dualized:
 
 <div class="math" style="margin: 1.25rem 0; padding: 0.2rem 0; overflow-x: auto;">
@@ -265,7 +265,7 @@ two same-side legs is dualized:
 </div>
 
 For U(1), this says a charge `q` object pairs with a charge `-q` object after
-orientation is accounted for. A `Space` need not contain a charge set closed
+orientation is accounted for. A `GradedSpace` need not contain a charge set closed
 under negation; dualization constructs the corresponding dual sector set.
 
 ## Leg Re-Arrangements

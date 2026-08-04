@@ -161,7 +161,7 @@ let v = GradedSpace::try_new_owned(
     false,
 )?;
 
-// Codomain-vs-domain legs of the same Space contract directly...
+// Codomain-vs-domain legs of the same GradedSpace contract directly...
 let a = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&v])?;
 let _ = a.compose(&a)?;
 

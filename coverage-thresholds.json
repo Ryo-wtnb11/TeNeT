@@ -80,7 +80,6 @@
     "tenet-tensors/src/tree_transform/plan.rs": 72,
     "tenet/src/error.rs": 31,
     "tenet/src/plancache.rs": 95,
-    "tenet/src/runtime.rs": 44,
-    "tenet/src/space.rs": 83
+    "tenet/src/runtime.rs": 44
   }
 }

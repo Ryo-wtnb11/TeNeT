@@ -255,7 +255,7 @@ fn cu1_sectors() -> Vec<SectorId> {
     .into()
 }
 
-/// `U1 ⊠ fZ2`, sector encoding as `Space::product` (U1 left, fZ2 right).
+/// `U1 ⊠ fZ2`, with U1 as the left factor and fZ2 as the right factor.
 type U1Fz2Codec = PackedProductCodec<U1SectorLayout, Fz2SectorLayout>;
 type U1Fz2Rule = ProductFusionRule<U1FusionRule, FermionParityFusionRule, U1Fz2Codec>;
 
@@ -272,7 +272,7 @@ fn u1_fz2_sectors(window: i32) -> Vec<SectorId> {
     sectors
 }
 
-/// `fZ2 ⊠ U1 ⊠ SU2`, left-associated as in `Space::fz2_u1_su2`.
+/// `fZ2 ⊠ U1 ⊠ SU2`, left-associated as `(fZ2 ⊠ U1) ⊠ SU2`.
 type Fz2U1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
 type Fz2U1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
 type Fz2U1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule, Fz2U1Codec>;
