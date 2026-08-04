@@ -62,8 +62,9 @@ Provider-mode dispatch exists for transactional root construction, tree
 transforms, `otimes`, `contract` and `compose`
 (`tenet/src/typed.rs:2824-3087`). Reductions, factorizations, matrix functions,
 unit/cat operations and network execution are in impl blocks requiring the
-multiplicity-free `Scalar = f64` contract. This is the concrete residual scope
-of #640 and #662, not a documentation-only gap.
+multiplicity-free `Scalar = f64` contract. Missing operation implementation is
+the concrete residual scope of #640. #662 owns typed provider-error propagation
+and transactional nonpublication as each new row becomes reachable.
 
 ## Storage and device matrix
 
@@ -163,9 +164,10 @@ copy for tree transforms, contraction/composition, SVD compact/full/truncated/
 values and pseudo-inverse. QR, some LQ/null output conversion, EIG/EIGH,
 general `exp`, solve, `sqrt`, `absorb`, dtype conversion and conservative cat
 fallbacks still contain operation-local full-payload calls
-(`tenet/src/typed.rs`, all `materialized_tensor_uncached()` call sites). This is
-the concrete audit list for #783; a cold receiver cache does not imply zero
-peak copy cost.
+(`tenet/src/typed.rs`, all `materialized_tensor_uncached()` call sites). The
+completed #783 review records this distinction. A future production leaf needs
+a per-operation semantic proof and measured gap; a cold receiver cache alone
+does not imply zero peak copy cost.
 
 ## Executable evidence
 
@@ -193,7 +195,9 @@ peak copy cost.
    categorical coefficient scalar and payload scalar compose.
 2. **Checked Generic is deliberately partial, not an alternate complete tensor
    hierarchy.** Complete reductions/decompositions under #640 and network
-   execution under #662 before describing SU(N) as generally supported.
+   execution under #640 before describing SU(N) as generally supported. #662
+   applies the shared typed error/nonpublication contract to every reachable
+   checked operation.
 3. **Storage genericity is representation-only today.** Metadata and host
    readback bounds are generic, but ordinary result allocation and execution
    remain Host `Vec<D>` or the explicit narrow CUDA impl. This matches #729's
