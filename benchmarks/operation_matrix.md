@@ -63,7 +63,8 @@ julia --project=benchmarks/tensorkit_benchmark \
 
 The TensorKit script records its exact revision, Julia and AppleAccelerate
 versions, BLAS configuration, first-call timing, warm timing, and Julia's
-per-call allocated bytes. Its first-call row can include JIT compilation and
+per-call allocated bytes. It uses the same rank-3 space and axis placement for
+the TeNeT `permute` owned/destination rows. Its first-call row can include JIT compilation and
 may observe process-global TensorKit caches warmed by earlier rows; it is not
 directly comparable to TeNeT's fresh-`Runtime` cold row. Only matching warm
 rows under the recorded one-thread BLAS configuration are timing controls.
