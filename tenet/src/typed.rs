@@ -201,20 +201,21 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::{Arc, OnceLock};
 
+use num_complex::Complex64;
 use smallvec::SmallVec;
+#[cfg(feature = "cuda")]
+use tenet_core::CoupledTreeExtent;
 use tenet_core::{
-    validate_unit_layout_correspondence_checked, BlockKey, BlockRef, CanonicalUnitFusionRule,
-    CheckedFusionAlgebra, CheckedGenericAdmissionMode, CheckedGenericStructureError,
-    FusionAlgebraError, FusionProductSpace, FusionTreeHomSpace, FusionTreePairKey,
-    MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, MultiplicityIndex,
-    PreparedTreePairOperation, ProductFusionRule, ProductSector, ProductSectorCodec, SectorId,
-    SectorLeg, TypedSectorAdmission, UnitLegInsertion,
+    validate_unit_layout_correspondence_checked, BlockKey, BlockRef, BlockStructure,
+    CanonicalUnitFusionRule, CheckedFusionAlgebra, CheckedGenericAdmissionMode,
+    CheckedGenericStructureError, CoupledSectorRegion, FusionAlgebraError, FusionProductSpace,
+    FusionTreeHomSpace, FusionTreePairKey, MultiplicityFreeAdmissionMode,
+    MultiplicityFreeRigidSymbols, MultiplicityIndex, PreparedTreePairOperation, ProductFusionRule,
+    ProductSector, ProductSectorCodec, SectorId, SectorLeg, TypedSectorAdmission, UnitLegInsertion,
 };
 use tenet_core::{
     CheckedGenericFusion, CheckedGenericRigidSymbols, HostReadableStorage, Placement, TensorStorage,
 };
-#[cfg(feature = "cuda")]
-use tenet_core::{CoupledSectorRegion, CoupledTreeExtent};
 #[cfg(feature = "cuda")]
 use tenet_dense::{cuda_gemm_region_into, CudaDenseContext, CudaDenseStorage};
 #[cfg(feature = "cuda")]
@@ -252,10 +253,7 @@ pub use tenet_matrixalgebra::{Truncation, TruncationSpace};
 use tenet_matrixalgebra::{BoundDynFactor, FactorScalar};
 
 use crate::runtime::{Ctx, Ctxs};
-use crate::tensor::{
-    absorb_mapped, cat_homspace, compile_cat_plan, coupled_region_pow_sum, sector_regions,
-    validate_norm_p, weighted_inner, weighted_trace, CatOperandLayout, CatSide,
-};
+use crate::tensor::{absorb_mapped, cat_homspace, compile_cat_plan, CatOperandLayout, CatSide};
 #[cfg(feature = "cuda")]
 use crate::tensor::{
     assemble_left_factor, assemble_right_factor, cuda_is_hermitian_region, cuda_qr_region,
@@ -364,6 +362,204 @@ fn random_unit(state: &mut u64) -> f64 {
     value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     value ^= value >> 31;
     ((value >> 11) as f64) / ((1_u64 << 52) as f64) - 1.0
+}
+
+/// Enumerates the coupled-sector matrix regions of a coupled-layout block
+/// structure and verifies that every fusion-tree block addresses exactly the
+/// packed column-major sector matrix. The structural constructors and the
+/// device paths rely on these offsets, so any other layout is an explicit
+/// error, never silent misaddressing.
+pub(crate) fn sector_regions(
+    structure: &BlockStructure,
+    nout: usize,
+) -> Result<Arc<[CoupledSectorRegion]>, Error> {
+    structure
+        .coupled_sector_regions(nout)?
+        .ok_or_else(|| internal_layout_error("non-packed coupled-sector layout"))
+}
+
+pub(crate) fn coupled_region_inner<D, W>(
+    structure: &BlockStructure,
+    nout: usize,
+    a: &[D],
+    b: &[D],
+    mut weight_of: W,
+) -> Result<Complex64, Error>
+where
+    D: ScalarOps,
+    W: FnMut(SectorId) -> f64,
+{
+    let regions = sector_regions(structure, nout)?;
+    let required_len = structure.required_len()?;
+    if a.len() != required_len || b.len() != required_len {
+        return Err(internal_layout_error(
+            "coupled-sector regions do not cover the scalar buffers",
+        ));
+    }
+
+    let mut total = Complex64::new(0.0, 0.0);
+    for region in regions.iter() {
+        let range = region.range();
+        let lhs = a.get(range.clone()).ok_or_else(|| {
+            internal_layout_error("coupled-sector region exceeds the left scalar buffer")
+        })?;
+        let rhs = b.get(range).ok_or_else(|| {
+            internal_layout_error("coupled-sector region exceeds the right scalar buffer")
+        })?;
+        let mut partial = D::from_real(0.0);
+        for (&ai, &bi) in lhs.iter().zip(rhs) {
+            partial = partial + FactorScalar::adjoint(ai) * bi;
+        }
+        total += partial.widen_complex() * weight_of(region.coupled());
+    }
+    Ok(total)
+}
+
+/// Quantum-dimension-weighted Frobenius inner product over the stored
+/// blocks: `sum_c dim(c) * <a_c, b_c>` with the first argument conjugated,
+/// matching TensorKit's `dot` (which conjugates its first argument). Real
+/// tensors produce an exactly-real result.
+pub(crate) fn weighted_inner<R, D>(
+    rule: &R,
+    structure: &BlockStructure,
+    nout: usize,
+    a: &[D],
+    b: &[D],
+) -> Result<Complex64, Error>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: ScalarOps,
+{
+    // Abelian (UniqueFusion) fast path: every `dim(c) == 1`, and the coupled
+    // buffer is a padding-free concatenation of the per-sector blocks, so the
+    // weighted per-block sum collapses to one whole-buffer conjugated dot —
+    // no `dim(c)` weights and no per-element odometer. Mirrors TensorKit's
+    // `inner(tx.data, ty.data)` / `norm(t.data)` UniqueFusion specialization
+    // (vectorinterface.jl:124, linalg.jl:277). Non-abelian keeps the weighted
+    // block loop below, where `dim(c) != 1`.
+    if rule.fusion_style() == tenet_core::FusionStyleKind::Unique {
+        let mut total = D::from_real(0.0);
+        for (&ai, &bi) in a.iter().zip(b) {
+            total = total + FactorScalar::adjoint(ai) * bi;
+        }
+        return Ok(total.widen_complex());
+    }
+    coupled_region_inner(structure, nout, a, b, |coupled| rule.dim_scalar(coupled))
+}
+
+/// Quantum-dimension-weighted block trace of an endomorphism:
+/// `sum_c dim(c) * tr(b_c)`, matching TensorKit's `tr` (`linalg.jl`, the
+/// native `sum_c dim(c) * tr(block)`). Only fusion-tree blocks whose codomain
+/// and domain trees coincide sit on the coupled-block diagonal; every other
+/// block is off-diagonal in `b_c` and contributes nothing. Within a diagonal
+/// block the trace pairs codomain degeneracy axis `i` with domain axis
+/// `nout + i` (equal degeneracies, since the spaces match). Real tensors give
+/// an exactly-real result. Fermionic twists belong to `trace_pairs` / tensor
+/// contractions and are not part of this matrix trace.
+pub(crate) fn weighted_trace<R, D>(
+    rule: &R,
+    structure: &BlockStructure,
+    nout: usize,
+    data: &[D],
+) -> Result<Complex64, Error>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: ScalarOps,
+{
+    let mut total = Complex64::new(0.0, 0.0);
+    for index in 0..structure.block_count() {
+        let block = structure.block(index)?;
+        let key = match block.key() {
+            BlockKey::FusionTree(key) => key,
+            _ => {
+                return Err(Error::InvalidArgument(
+                    "tr() requires fusion-tree blocks".to_string(),
+                ))
+            }
+        };
+        // Off the coupled-block diagonal (codomain tree != domain tree): not on
+        // the matrix diagonal of b_c, so it drops out of tr(b_c).
+        if key.codomain_tree() != key.domain_tree() {
+            continue;
+        }
+        let coupled = key.codomain_tree().coupled();
+        let weight = rule.dim_scalar(coupled);
+        let shape = block.shape();
+        let strides = block.strides();
+        let offset = block.offset();
+        // Walk only the codomain degeneracy multi-index and index both halves
+        // diagonally (axis i and axis nout+i share the index) — the degeneracy
+        // trace of this coupled sub-block.
+        let count: usize = shape[..nout].iter().product();
+        let mut partial = D::from_real(0.0);
+        for linear in 0..count {
+            let mut remainder = linear;
+            let mut position = offset;
+            for axis in 0..nout {
+                let coordinate = remainder % shape[axis];
+                remainder /= shape[axis];
+                position += coordinate * (strides[axis] + strides[nout + axis]);
+            }
+            partial = partial + data[position];
+        }
+        total += partial.widen_complex() * weight;
+    }
+    Ok(total)
+}
+
+/// TensorKit `_norm`'s domain check on `p` (`linalg.jl:271-274`): only finite
+/// positive `p` and `+Inf` name a norm; TensorKit throws `ArgumentError` for
+/// anything else, which here is [`Error::InvalidArgument`].
+///
+/// `p <= 0.0` is false for NaN, so NaN needs its own test — without it a NaN
+/// `p` would sail through and return NaN instead of being rejected.
+pub(crate) fn validate_norm_p(p: f64) -> Result<(), Error> {
+    if p.is_nan() || p <= 0.0 {
+        return Err(Error::InvalidArgument(format!(
+            "norm_p requires a finite p > 0 or p = inf, got {p}"
+        )));
+    }
+    Ok(())
+}
+
+/// TensorKit `_norm(blocks(t), p, 0)` for finite `p > 0` (`linalg.jl:262-270`):
+/// `(Σ_c dim(c) · Σ_{x ∈ block_c} |x|^p)^(1/p)` over the coupled-sector regions
+/// of one dense payload.
+///
+/// Why no `UniqueFusion` whole-buffer fast path like [`weighted_inner`]'s: that
+/// one exists to reach a single BLAS-shaped dot, and an entrywise `|x|^p`
+/// reduction has no such kernel to reach. The region walk is a partition of the
+/// same buffer, so the element count is identical either way.
+pub(crate) fn coupled_region_pow_sum<D, W>(
+    structure: &BlockStructure,
+    nout: usize,
+    data: &[D],
+    p: f64,
+    mut weight_of: W,
+) -> Result<f64, Error>
+where
+    D: ScalarOps,
+    W: FnMut(SectorId) -> f64,
+{
+    let regions = sector_regions(structure, nout)?;
+    if data.len() != structure.required_len()? {
+        return Err(internal_layout_error(
+            "coupled-sector regions do not cover the scalar buffer",
+        ));
+    }
+
+    let mut total = 0.0;
+    for region in regions.iter() {
+        let block = data.get(region.range()).ok_or_else(|| {
+            internal_layout_error("coupled-sector region exceeds the scalar buffer")
+        })?;
+        let partial: f64 = block
+            .iter()
+            .map(|&value| value.widen_complex().norm().powf(p))
+            .sum();
+        total += weight_of(region.coupled()) * partial;
+    }
+    Ok(total.powf(p.recip()))
 }
 
 /// How a freshly built tensor is filled.
