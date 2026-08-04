@@ -69,13 +69,13 @@ use crate::tensor_core::{
 #[cfg(test)]
 use crate::typed::coupled_region_inner;
 use crate::typed::{
-    absorb_mapped, apply_fill, check_flip_layout_identity, coupled_region_pow_sum,
+    absorb_mapped, apply_fill, cat_homspace, check_flip_layout_identity, coupled_region_pow_sum,
     flip_block_factor, flip_toggled_homspace, logical_adjoint_axes_to_parent,
     lower_adjoint_tree_transform_operation, map_checked_unit_layout_error,
     reject_unbraided_nonunit_legs, scale_blocks_impl, sector_regions, twist_block_factor,
     twist_is_identity_over_blocks, validate_axis_permutation, validate_contracted_axes,
-    validate_norm_p, weighted_inner, weighted_trace, with_planar_axes, Fill, PlanarRequestKind,
-    ScalarOps,
+    validate_norm_p, weighted_inner, weighted_trace, with_planar_axes, CatSide, Fill,
+    PlanarRequestKind, ScalarOps,
 };
 
 mod diagonal;
@@ -911,12 +911,6 @@ pub struct EigTrunc {
     pub eigenvalues: Vec<SectorSpectrum<Complex64>>,
     /// Quantum-dimension-weighted 2-norm of the discarded `|eigenvalues|`.
     pub error: f64,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum CatSide {
-    Domain,
-    Codomain,
 }
 
 type SectorRegion = CoupledSectorRegion;
@@ -1810,62 +1804,6 @@ fn cat_region_tree_orders_match(
                 }
             })
         })
-}
-
-/// Shared validation-and-output-homspace core of `catdomain`/`catcodomain`
-/// (#580 PR 4): checks the rank-1 changed side and the identical unchanged
-/// product space, then direct-sums the changed legs through
-/// [`crate::typed::oplus_sector_legs`] — the same `SectorLeg`-level sum the
-/// erased [`Space::oplus`] routes through, so both facades produce the merged
-/// leg byte-identically in sector order. Rule identity is checked by the
-/// callers before this runs (erased `check_same_execution_world`, typed rule
-/// identity comparison), which is what made the erased route's per-`Space`
-/// rule re-check a no-op.
-pub(crate) fn cat_homspace(
-    lhs_codomain: &FusionProductSpace,
-    lhs_domain: &FusionProductSpace,
-    rhs_codomain: &FusionProductSpace,
-    rhs_domain: &FusionProductSpace,
-    side: CatSide,
-) -> Result<(usize, FusionTreeHomSpace), Error> {
-    match side {
-        CatSide::Domain => {
-            if lhs_domain.len() != 1 || rhs_domain.len() != 1 {
-                return Err(Error::InvalidArgument(
-                    "catdomain requires exactly one domain leg on each tensor".to_string(),
-                ));
-            }
-            if lhs_codomain != rhs_codomain {
-                return Err(Error::InvalidArgument(
-                    "catdomain requires identical codomain product spaces".to_string(),
-                ));
-            }
-            let leg =
-                crate::typed::oplus_sector_legs(&lhs_domain.legs()[0], &rhs_domain.legs()[0])?;
-            Ok((
-                lhs_codomain.len(),
-                FusionTreeHomSpace::new(lhs_codomain.clone(), FusionProductSpace::new([leg])),
-            ))
-        }
-        CatSide::Codomain => {
-            if lhs_codomain.len() != 1 || rhs_codomain.len() != 1 {
-                return Err(Error::InvalidArgument(
-                    "catcodomain requires exactly one codomain leg on each tensor".to_string(),
-                ));
-            }
-            if lhs_domain != rhs_domain {
-                return Err(Error::InvalidArgument(
-                    "catcodomain requires identical domain product spaces".to_string(),
-                ));
-            }
-            let leg =
-                crate::typed::oplus_sector_legs(&lhs_codomain.legs()[0], &rhs_codomain.legs()[0])?;
-            Ok((
-                0,
-                FusionTreeHomSpace::new(FusionProductSpace::new([leg]), lhs_domain.clone()),
-            ))
-        }
-    }
 }
 
 fn build_bound_space<

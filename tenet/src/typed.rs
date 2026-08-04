@@ -258,7 +258,7 @@ use crate::tensor::{
     assemble_left_factor, assemble_right_factor, cuda_is_hermitian_region, cuda_qr_region,
     cuda_svd_region, decide_kept, fill_diagonal_values, typed_cuda_eigh_region, upload_selector,
 };
-use crate::tensor::{cat_homspace, compile_cat_plan, CatOperandLayout, CatSide};
+use crate::tensor::{compile_cat_plan, CatOperandLayout};
 pub use crate::tensor_core::CheckedGenericTensorProductError;
 use crate::tensor_core::{
     internal_layout_error, pow_by_squaring, tensorcompose_owned_multiplicity_free,
@@ -743,6 +743,61 @@ where
         source_offset,
         map,
     )
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum CatSide {
+    Domain,
+    Codomain,
+}
+
+/// Shared validation-and-output-homspace core of `catdomain`/`catcodomain`:
+/// checks the rank-1 changed side and the identical unchanged product space,
+/// then direct-sums the changed legs through [`oplus_sector_legs`]. Rule
+/// identity is checked by callers before this runs.
+pub(crate) fn cat_homspace(
+    lhs_codomain: &FusionProductSpace,
+    lhs_domain: &FusionProductSpace,
+    rhs_codomain: &FusionProductSpace,
+    rhs_domain: &FusionProductSpace,
+    side: CatSide,
+) -> Result<(usize, FusionTreeHomSpace), Error> {
+    match side {
+        CatSide::Domain => {
+            if lhs_domain.len() != 1 || rhs_domain.len() != 1 {
+                return Err(Error::InvalidArgument(
+                    "catdomain requires exactly one domain leg on each tensor".to_string(),
+                ));
+            }
+            if lhs_codomain != rhs_codomain {
+                return Err(Error::InvalidArgument(
+                    "catdomain requires identical codomain product spaces".to_string(),
+                ));
+            }
+            let leg = oplus_sector_legs(&lhs_domain.legs()[0], &rhs_domain.legs()[0])?;
+            Ok((
+                lhs_codomain.len(),
+                FusionTreeHomSpace::new(lhs_codomain.clone(), FusionProductSpace::new([leg])),
+            ))
+        }
+        CatSide::Codomain => {
+            if lhs_codomain.len() != 1 || rhs_codomain.len() != 1 {
+                return Err(Error::InvalidArgument(
+                    "catcodomain requires exactly one codomain leg on each tensor".to_string(),
+                ));
+            }
+            if lhs_domain != rhs_domain {
+                return Err(Error::InvalidArgument(
+                    "catcodomain requires identical domain product spaces".to_string(),
+                ));
+            }
+            let leg = oplus_sector_legs(&lhs_codomain.legs()[0], &rhs_codomain.legs()[0])?;
+            Ok((
+                0,
+                FusionTreeHomSpace::new(FusionProductSpace::new([leg]), lhs_domain.clone()),
+            ))
+        }
+    }
 }
 
 /// How a freshly built tensor is filled.
