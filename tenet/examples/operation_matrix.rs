@@ -141,11 +141,27 @@ fn bench<T>(
     Ok(cold_output)
 }
 
+fn benchmark_runtime() -> Result<Runtime, Error> {
+    let backend = match std::env::var("OP_MATRIX_GEMM_BACKEND").as_deref() {
+        Ok("blas") => LinalgBackend::Blas,
+        Ok("faer") | Err(_) => LinalgBackend::Faer,
+        Ok(other) => {
+            return Err(Error::InvalidArgument(format!(
+                "OP_MATRIX_GEMM_BACKEND must be `faer` or `blas`, got `{other}`"
+            )))
+        }
+    };
+    Runtime::builder()
+        .dense_threads(1)
+        .gemm_backend(backend)
+        .build()
+}
+
 macro_rules! run_provider {
     ($symmetry:literal, $rule:ty, $space:expr, $min_time:expr) => {{
         let space = $space;
         for form in ["owned", "destination"] {
-            let runtime = Runtime::builder().build()?;
+            let runtime = benchmark_runtime()?;
             let source =
                 TensorMap::<$rule, f64>::rand_with_seed(&runtime, [&space, &space], [&space], 724)?;
             if form == "owned" {
@@ -177,55 +193,102 @@ macro_rules! run_provider {
             }
         }
 
-        for form in ["owned", "destination"] {
-            let runtime = Runtime::builder().build()?;
-            let lhs = TensorMap::<$rule, f64>::rand_with_seed(
-                &runtime,
-                [&space, &space],
-                [&space, &space],
-                725,
-            )?;
-            let rhs = TensorMap::<$rule, f64>::rand_with_seed(
-                &runtime,
-                [&space, &space],
-                [&space, &space],
-                726,
-            )?;
-            if form == "owned" {
-                let cold = bench(
+        let runtime = benchmark_runtime()?;
+        let lhs = TensorMap::<$rule, f64>::rand_with_seed(
+            &runtime,
+            [&space, &space],
+            [&space, &space],
+            725,
+        )?;
+        let rhs = TensorMap::<$rule, f64>::rand_with_seed(
+            &runtime,
+            [&space, &space],
+            [&space, &space],
+            726,
+        )?;
+        let composed = bench(
+            &runtime,
+            $symmetry,
+            "compose",
+            "owned",
+            "cold",
+            "warm",
+            $min_time,
+            || lhs.compose(&rhs),
+        )?;
+        let contracted = lhs.contract(&rhs, &[2, 3], &[0, 1], &[0, 1, 2, 3])?;
+        assert_eq!(composed.data(), contracted.data());
+
+        for (operation, lhs_axes, rhs_axes, output_axes) in [
+            (
+                "contract_identity",
+                &[2, 3][..],
+                &[0, 1][..],
+                &[0, 1, 2, 3][..],
+            ),
+            (
+                "contract_input_swap",
+                &[3, 2][..],
+                &[0, 1][..],
+                &[0, 1, 2, 3][..],
+            ),
+            (
+                "contract_input_output_swap",
+                &[3, 2][..],
+                &[0, 1][..],
+                &[1, 0, 2, 3][..],
+            ),
+        ] {
+            for form in ["owned", "destination"] {
+                let runtime = benchmark_runtime()?;
+                let lhs = TensorMap::<$rule, f64>::rand_with_seed(
                     &runtime,
-                    $symmetry,
-                    "contract",
-                    form,
-                    "cold",
-                    "warm",
-                    $min_time,
-                    || lhs.contract(&rhs, &[3, 2], &[0, 1], &[0, 1, 2, 3]),
+                    [&space, &space],
+                    [&space, &space],
+                    725,
                 )?;
-                assert!(cold.norm()?.is_finite());
-            } else {
-                let expected = lhs.contract(&rhs, &[3, 2], &[0, 1], &[0, 1, 2, 3])?;
-                let mut destination = expected.zeros_like();
-                bench(
+                let rhs = TensorMap::<$rule, f64>::rand_with_seed(
                     &runtime,
-                    $symmetry,
-                    "contract",
-                    form,
-                    "first_after_setup",
-                    "warm_after_setup",
-                    $min_time,
-                    || {
-                        lhs.contract_overwrite_into(
-                            &rhs,
-                            &mut destination,
-                            &[3, 2],
-                            &[0, 1],
-                            &[0, 1, 2, 3],
-                            1.0,
-                        )
-                    },
+                    [&space, &space],
+                    [&space, &space],
+                    726,
                 )?;
-                assert_eq!(destination.data(), expected.data());
+                if form == "owned" {
+                    let cold = bench(
+                        &runtime,
+                        $symmetry,
+                        operation,
+                        form,
+                        "cold",
+                        "warm",
+                        $min_time,
+                        || lhs.contract(&rhs, lhs_axes, rhs_axes, output_axes),
+                    )?;
+                    assert!(cold.norm()?.is_finite());
+                } else {
+                    let expected = lhs.contract(&rhs, lhs_axes, rhs_axes, output_axes)?;
+                    let mut destination = expected.zeros_like();
+                    bench(
+                        &runtime,
+                        $symmetry,
+                        operation,
+                        form,
+                        "first_after_setup",
+                        "warm_after_setup",
+                        $min_time,
+                        || {
+                            lhs.contract_overwrite_into(
+                                &rhs,
+                                &mut destination,
+                                lhs_axes,
+                                rhs_axes,
+                                output_axes,
+                                1.0,
+                            )
+                        },
+                    )?;
+                    assert_eq!(destination.data(), expected.data());
+                }
             }
         }
     }};
@@ -236,6 +299,14 @@ fn main() -> Result<(), Error> {
         .ok()
         .map(|value| value.parse().expect("OP_MATRIX_MIN_MS must be an integer"))
         .unwrap_or(20);
+    let degeneracy = std::env::var("OP_MATRIX_DEGENERACY")
+        .ok()
+        .map(|value| {
+            value
+                .parse()
+                .expect("OP_MATRIX_DEGENERACY must be an integer")
+        })
+        .unwrap_or(8);
     println!(
         "# tenet_authority={}",
         std::env::var("TENET_AUTHORITY").unwrap_or_else(|_| "unknown".into())
@@ -245,11 +316,18 @@ fn main() -> Result<(), Error> {
         std::env::var("TENFERRO_AUTHORITY").unwrap_or_else(|_| "unknown".into())
     );
     println!(
-        "# features=cpu-faer:{} cpu-blas:{} cuda:{} backend=faer(default RuntimeBuilder)",
+        "# features=cpu-faer:{} blas-provider:{} cuda:{} gemm_backend={}",
         cfg!(feature = "cpu-faer"),
-        cfg!(feature = "cpu-blas"),
-        cfg!(feature = "cuda")
+        cfg!(any(
+            feature = "cpu-blas",
+            feature = "blas-accelerate",
+            feature = "blas-openblas",
+            feature = "blas-mkl"
+        )),
+        cfg!(feature = "cuda"),
+        std::env::var("OP_MATRIX_GEMM_BACKEND").unwrap_or_else(|_| "faer".into())
     );
+    println!("# degeneracy={degeneracy}");
     println!("# threads=RAYON_NUM_THREADS:{} OPENBLAS_NUM_THREADS:{} OMP_NUM_THREADS:{} MKL_NUM_THREADS:{}", env_or_unset("RAYON_NUM_THREADS"), env_or_unset("OPENBLAS_NUM_THREADS"), env_or_unset("OMP_NUM_THREADS"), env_or_unset("MKL_NUM_THREADS"));
     println!("# cold_scope=fresh Runtime tree-transform store; process-global interned structures may already be warm");
     println!("# unavailable_counters=exact_layout_admission,output_allocation_bytes,operation_local_scratch_bytes,provider_queries,transform_passes,gemm_calls,host_device_transfers");
@@ -262,9 +340,9 @@ fn main() -> Result<(), Error> {
         GradedSpace::try_new_owned(
             U1FusionRule,
             [
-                (U1Irrep::new(-1), 2),
-                (U1Irrep::new(0), 2),
-                (U1Irrep::new(1), 2),
+                (U1Irrep::new(-1), degeneracy),
+                (U1Irrep::new(0), degeneracy),
+                (U1Irrep::new(1), degeneracy),
             ],
             false,
         )?,
@@ -276,9 +354,9 @@ fn main() -> Result<(), Error> {
         GradedSpace::try_new_owned(
             SU2FusionRule,
             [
-                (SU2Irrep::from_twice_spin(0), 2),
-                (SU2Irrep::from_twice_spin(1), 2),
-                (SU2Irrep::from_twice_spin(2), 2),
+                (SU2Irrep::from_twice_spin(0), degeneracy),
+                (SU2Irrep::from_twice_spin(1), degeneracy),
+                (SU2Irrep::from_twice_spin(2), degeneracy),
             ],
             false,
         )?,

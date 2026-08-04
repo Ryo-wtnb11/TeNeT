@@ -7,8 +7,11 @@ OPENBLAS_NUM_THREADS=1
 OMP_NUM_THREADS=1
 MKL_NUM_THREADS=1
 : "${CARGO_TARGET_DIR:=target/operation-matrix}"
-export RAYON_NUM_THREADS OPENBLAS_NUM_THREADS OMP_NUM_THREADS MKL_NUM_THREADS CARGO_TARGET_DIR
+: "${OP_MATRIX_GEMM_BACKEND:=faer}"
+: "${OP_MATRIX_CARGO_FEATURES:=cpu-faer}"
+export RAYON_NUM_THREADS OPENBLAS_NUM_THREADS OMP_NUM_THREADS MKL_NUM_THREADS CARGO_TARGET_DIR OP_MATRIX_GEMM_BACKEND
 export TENET_AUTHORITY="$(git describe --always --dirty)"
 export TENFERRO_AUTHORITY="$(git -C ../tenferro-rs describe --always --dirty 2>/dev/null || printf unavailable)"
 
-cargo run --release -p tenet --example operation_matrix --quiet
+cargo run --release -p tenet --example operation_matrix --quiet \
+    --no-default-features --features "$OP_MATRIX_CARGO_FEATURES"
