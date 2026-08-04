@@ -309,6 +309,35 @@ macro_rules! run_provider {
             }
         }
 
+        for operation in ["trace", "trace_adjoint"] {
+            if !operation_enabled(operation) || !form_enabled("owned") {
+                continue;
+            }
+            let runtime = benchmark_runtime()?;
+            let source = TensorMap::<$rule, f64>::rand_with_seed(
+                &runtime,
+                [&space, &space],
+                [&space, &space],
+                727,
+            )?;
+            let logical_source = match operation {
+                "trace" => source,
+                "trace_adjoint" => source.adjoint()?,
+                _ => unreachable!("fixed trace-operation table"),
+            };
+            let traced = bench(
+                &runtime,
+                $symmetry,
+                operation,
+                "owned",
+                "cold",
+                "warm",
+                $min_time,
+                || logical_source.trace_pairs(&[(1, 2)]),
+            )?;
+            assert!(traced.norm()?.is_finite());
+        }
+
         if operation_enabled("compose") && form_enabled("owned") {
             let runtime = benchmark_runtime()?;
             let lhs = TensorMap::<$rule, f64>::rand_with_seed(
@@ -425,6 +454,8 @@ fn main() -> Result<(), Error> {
             "permute"
                 | "transpose"
                 | "repartition"
+                | "trace"
+                | "trace_adjoint"
                 | "compose"
                 | "contract_identity"
                 | "contract_input_swap"

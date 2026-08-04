@@ -61,6 +61,16 @@ function contract_input_output_swap!(C, A, B)
     return C
 end
 
+function trace_middle(A)
+    @tensor C[a; d] := A[a c; c d]
+    return C
+end
+
+function trace_middle!(C, A)
+    @tensor C[a; d] = A[a c; c d]
+    return C
+end
+
 function run_case(symmetry, V)
     A = randn(Float64, V ⊗ V ← V ⊗ V)
     B = randn(Float64, V ⊗ V ← V ⊗ V)
@@ -132,6 +142,29 @@ function run_case(symmetry, V)
     repartition_error = norm(actual_repartitioned - expected_repartitioned) /
                         max(norm(expected_repartitioned), eps(Float64))
     @assert repartition_error <= 256eps(Float64)
+
+    for (operation, logical_source) in (("trace", A), ("trace_adjoint", adjoint(A)))
+        expected_trace = sample(
+            () -> trace_middle(logical_source),
+            symmetry,
+            operation,
+            "owned",
+            "process_first_for_row",
+            MIN_MS,
+        )
+        @assert isfinite(norm(expected_trace))
+        trace_destination = similar(expected_trace)
+        actual_trace = sample(
+            () -> trace_middle!(trace_destination, logical_source),
+            symmetry,
+            operation,
+            "destination",
+            "first_after_setup",
+            MIN_MS,
+        )
+        trace_error = norm(actual_trace - expected_trace) / max(norm(expected_trace), eps(Float64))
+        @assert trace_error <= 256eps(Float64)
+    end
 
     composed = sample(
         () -> A * B,

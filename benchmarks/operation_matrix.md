@@ -14,7 +14,8 @@ Validation assertions run after the timer.
 
 The executable covers U1 and SU2 controls for owned and actual
 caller-owned-destination forms of `permute`, planar `transpose`,
-`repartition`, and arbitrary-axis `contract`.
+`repartition`, owned partial trace (direct and lazy-adjoint input), and
+arbitrary-axis `contract`.
 The contraction rows distinguish canonical input order, contracted-input
 swap, and contracted-input plus output swap. An owned `compose` row checks
 that its result equals the canonical contraction before reporting it.
@@ -68,15 +69,18 @@ julia --project=benchmarks/tensorkit_benchmark \
 
 The TensorKit script records its exact revision, Julia and AppleAccelerate
 versions, BLAS configuration, first-call timing, warm timing, and Julia's
-per-call allocated bytes. It uses the same rank-3 space and axis placement for
-the TeNeT `permute`, planar `transpose`, and `repartition` owned/destination
-rows. Its first-call row can include JIT compilation and may observe
+per-call allocated bytes. It uses the same rank-3 fixture and axis placement
+for TeNeT's `permute`, planar `transpose`, and `repartition` rows, and the same
+rank-4 fixture and middle trace pair for the direct/lazy-adjoint trace rows.
+It also reports TensorKit's real caller-destination trace form;
+the canonical TeNeT typed facade has no matching destination method. Its
+first-call row can include JIT compilation and may observe
 process-global TensorKit caches warmed by earlier rows; it is not directly
 comparable to TeNeT's fresh-`Runtime` cold row. Only matching warm rows under
 the recorded one-thread BLAS configuration are timing controls.
 
-The remaining #724 rows (ordered contract,
-trace, add/inner/norm, compact SVD/QR, compact diagonal, and lazy adjoint) are
+The remaining #9 rows (ordered contract, add/inner/norm, compact SVD/QR,
+compact diagonal, and other lazy-adjoint consumers) are
 not substituted with other operations. Add each only with its real public form
 and available counters. This diagnostic harness remains outside required CI;
 semantic coverage belongs in the existing user API tests.
