@@ -20,9 +20,9 @@
 //!
 //! # Oracle provenance
 //!
-//! The constants below are TensorKit output on Julia 1.11.6 from
-//! `~/.julia/packages/TensorKit/6Camk` (0.16.2), for the same fill this file
-//! uses:
+//! The constants below are emitted by section 5 of the pinned current oracle,
+//! `benchmarks/tensorkit_semantic_oracle.jl`: TensorKit `f87ca7f` (project
+//! version 0.17.1) on Julia 1.11.6, using the same fill as this file:
 //!
 //! ```julia
 //! V = U1Space(0 => 3, 1 => 2)
@@ -34,11 +34,6 @@
 //! b .*= scale
 //! norm(t), norm(exp(t))
 //! ```
-//!
-//! The pinned 0.17.0 tree (`~/.julia/packages/TensorKit/jCjQQ`) was not the
-//! resolved version. That does not weaken the oracle: `exp!` is
-//! character-identical in the two trees and contains no arithmetic of its own,
-//! so these are Julia stdlib v1.11 numbers in either.
 //!
 //! # Fixture certification
 //!
@@ -128,7 +123,7 @@ fn general_exp_matches_the_tensorkit_oracle() {
     // (scale, norm(t), norm(exp(t))) from the Julia session quoted above.
     for (scale, input_norm, exponential_norm) in [
         (1.0, 2.2220486043288972, 3.1532168621506798),
-        (4.0, 8.8881944173155887, 15.692503963067274),
+        (4.0, 8.8881944173155887, 15.692503963067267),
     ] {
         let typed = typed_real(&runtime, scale);
         assert_close(
@@ -154,7 +149,7 @@ fn general_exp_matches_the_tensorkit_oracle() {
     );
 
     let typed_exp = typed.exp().unwrap();
-    assert_close(typed_exp.norm().unwrap(), 3.1806015158373824, "c64 exp");
+    assert_close(typed_exp.norm().unwrap(), 3.1806015158373815, "c64 exp");
 }
 
 /// `A = [0 1e16; 1e-16 0]`, whose exponential is closed form:
