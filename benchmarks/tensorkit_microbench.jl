@@ -1,4 +1,4 @@
-# Current TensorKit control for TeNeT's typed contraction operation matrix.
+# Current TensorKit control for TeNeT's typed operation matrix.
 # Usage:
 #   julia --project=benchmarks/tensorkit_benchmark \
 #       benchmarks/tensorkit_microbench.jl [degeneracy] [min_ms]
@@ -64,6 +64,30 @@ end
 function run_case(symmetry, V)
     A = randn(Float64, V ⊗ V ← V ⊗ V)
     B = randn(Float64, V ⊗ V ← V ⊗ V)
+    P = randn(Float64, V ⊗ V ← V)
+
+    permutation = ((2,), (3, 1))
+    expected_permuted = sample(
+        () -> permute(P, permutation),
+        symmetry,
+        "permute",
+        "owned",
+        "process_first_for_row",
+        MIN_MS,
+    )
+    @assert isfinite(norm(expected_permuted))
+    permuted_destination = similar(expected_permuted)
+    actual_permuted = sample(
+        () -> permute!(permuted_destination, P, permutation),
+        symmetry,
+        "permute",
+        "destination",
+        "first_after_setup",
+        MIN_MS,
+    )
+    permutation_error =
+        norm(actual_permuted - expected_permuted) / max(norm(expected_permuted), eps(Float64))
+    @assert permutation_error <= 256eps(Float64)
 
     composed = sample(
         () -> A * B,
