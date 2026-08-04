@@ -228,10 +228,11 @@ fn benchmark_runtime() -> Result<Runtime, Error> {
             )))
         }
     };
-    Runtime::builder()
-        .dense_threads(1)
-        .gemm_backend(backend)
-        .build()
+    let mut builder = Runtime::builder().dense_threads(1).gemm_backend(backend);
+    if std::env::var("OP_MATRIX_CACHE").as_deref() == Ok("disabled") {
+        builder = builder.tree_transform_cache_byte_budget(0);
+    }
+    builder.build()
 }
 
 fn operation_enabled(operation: &str) -> bool {
@@ -600,6 +601,10 @@ fn main() -> Result<(), Error> {
     println!("# degeneracy={degeneracy}");
     println!("# threads=RAYON_NUM_THREADS:{} OPENBLAS_NUM_THREADS:{} OMP_NUM_THREADS:{} MKL_NUM_THREADS:{}", env_or_unset("RAYON_NUM_THREADS"), env_or_unset("OPENBLAS_NUM_THREADS"), env_or_unset("OMP_NUM_THREADS"), env_or_unset("MKL_NUM_THREADS"));
     println!("# cold_scope=fresh Runtime tree-transform store; process-global interned structures may already be warm");
+    println!(
+        "# cache_mode={}",
+        std::env::var("OP_MATRIX_CACHE").unwrap_or_else(|_| "enabled".into())
+    );
     println!("# allocation_scope=caller-thread Rust allocation calls and requested bytes during the measured phase; excludes worker threads, native BLAS allocation, frees, and peak/live bytes");
     println!("# unavailable_counters=exact_layout_admission,operation_local_scratch_bytes,provider_queries,transform_passes,gemm_calls,host_device_transfers");
     println!("symmetry,operation,form,phase,iterations,us_per_iter,tree_hits,tree_misses,tree_evictions,tree_bypasses,tree_entries_delta,tree_charged_payload_bytes_before,tree_charged_payload_bytes_after,tree_charged_payload_bytes_delta,fusion_layout_misses,fusion_layout_evictions,fusion_layout_bypasses,fusion_layout_entries_delta,fusion_layout_charged_payload_bytes_before,fusion_layout_charged_payload_bytes_after,fusion_layout_charged_payload_bytes_delta,complete_hom_hits,complete_hom_misses,complete_hom_admissions,complete_hom_evictions,complete_hom_bypasses,complete_hom_entries_delta,complete_hom_charged_bytes_before,complete_hom_charged_bytes_after,complete_hom_charged_bytes_delta,exact_layout_admission,caller_allocation_calls,caller_requested_allocation_bytes,operation_local_scratch_bytes,provider_queries,transform_passes,gemm_calls,host_device_transfers");

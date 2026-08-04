@@ -49,6 +49,9 @@ same Apple Accelerate provider as the pinned TensorKit environment.
 `OP_MATRIX_FORM` similarly selects `owned` or `destination`.
 `OP_MATRIX_PROFILE_PAUSE_MS` pauses after that row's warm phase so an external
 profiler can inspect the live process; it is outside every reported timer.
+`OP_MATRIX_CACHE=disabled` constructs each Runtime with a zero tree-transform
+byte budget, disabling completed tree-transform admission for a cache-disabled
+control. The default is `enabled`.
 
 ```sh
 OP_MATRIX_OPERATION=contract_input_swap \
