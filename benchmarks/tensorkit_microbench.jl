@@ -89,6 +89,28 @@ function run_case(symmetry, V)
         norm(actual_permuted - expected_permuted) / max(norm(expected_permuted), eps(Float64))
     @assert permutation_error <= 256eps(Float64)
 
+    expected_transposed = sample(
+        () -> transpose(P),
+        symmetry,
+        "transpose",
+        "owned",
+        "process_first_for_row",
+        MIN_MS,
+    )
+    @assert isfinite(norm(expected_transposed))
+    transposed_destination = similar(expected_transposed)
+    actual_transposed = sample(
+        () -> transpose!(transposed_destination, P),
+        symmetry,
+        "transpose",
+        "destination",
+        "first_after_setup",
+        MIN_MS,
+    )
+    transpose_error =
+        norm(actual_transposed - expected_transposed) / max(norm(expected_transposed), eps(Float64))
+    @assert transpose_error <= 256eps(Float64)
+
     composed = sample(
         () -> A * B,
         symmetry,
