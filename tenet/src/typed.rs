@@ -8195,8 +8195,8 @@ where
             };
             return parent.tree_transform_multiplicity_free(lowered)?.adjoint();
         }
-        // Leasing rather than locking, matching the erased path: independent
-        // operations on one runtime must not serialize behind each other.
+        // Leasing rather than locking: independent operations on one runtime
+        // must not serialize behind each other.
         let mut lease = self.runtime.lease_context()?;
         let body = self.owned_body().expect("owned tree transform input");
         let (space, data) = tree_transform_owned_multiplicity_free(
@@ -8864,8 +8864,7 @@ where
                 })
             })
             .collect::<Result<_, Error>>()?;
-        // Label order, not the engine's id order: see the type's own rustdoc
-        // for why this facade sorts and the erased one does not.
+        // Public label order, not the engine's opaque sector-id order.
         decoded.sort_by(|left, right| left.sector.cmp(&right.sector));
         Ok(decoded)
     }
@@ -8930,8 +8929,8 @@ where
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
     pub fn svd_compact(&self) -> Result<(Self, Self, Self), Error> {
-        // Dense lease only, matching the erased sibling: a factorization runs
-        // entirely on the dense-executor boundary, so leasing the (scarcer)
+        // Dense lease only: a factorization runs entirely on the dense-executor
+        // boundary, so leasing the (scarcer)
         // recoupling context here would serialize unrelated work for nothing.
         let mut dense = self.runtime.lease_dense();
         // Why the `_factors_` seam rather than `svd_compact_dyn`: the latter
@@ -9315,7 +9314,7 @@ where
         }
         // Dense lease before the context lease — the polar seam recouples
         // internally, so unlike QR/LQ/null it takes the context lane; the
-        // lease order matches every existing site on both facades.
+        // lease order matches every existing site that takes both lanes.
         let mut dense = self.runtime.lease_dense();
         let mut lease = self.runtime.lease_context()?;
         let (w, p) = tenet_matrixalgebra::left_polar_dyn(
@@ -9701,7 +9700,7 @@ where
             // Why `== 0` and not a tolerance: the dense arm has none either
             // (the solve either fails or it does not), and a compact arm that
             // refused near-zero entries would let storage change the answer.
-            // Same comparison as the erased facade's `try_recip`.
+            // Match the dense arm: exact zero is singular.
             return Ok(self.with_spectrum(map_spectrum(spectrum, |value| {
                 if value.abs_value() == 0.0 {
                     Err(Error::InvalidArgument(
@@ -9788,7 +9787,7 @@ where
                     .iter()
                     .flat_map(|entry| entry.values.iter())
                     .fold(0.0f64, |largest, &value| largest.max(value.abs_value()));
-            // Strict `>`, matching the dense fold and the erased facade: a
+            // Strict `>`, matching the dense fold: a
             // value exactly on the cutoff is cut. Changing it to `>=` is what
             // `pinv_cuts_a_singular_value_sitting_exactly_on_the_cutoff` kills.
             return Ok(self.with_spectrum(map_spectrum(spectrum, |value| {
@@ -9868,9 +9867,8 @@ where
     /// builds one operation-local logical payload without publishing its
     /// reusable receiver cache.
     pub fn sqrt(&self) -> Result<Self, Error> {
-        // Same guard as the erased facade's, and the same one
-        // [`is_diagonal_bond_space`] applies to compact *destinations*: here it
-        // is asked of the receiver, which is what makes it reachable.
+        // Use the same [`is_diagonal_bond_space`] predicate as compact
+        // destinations; here it is asked of the receiver.
         if !is_diagonal_bond_space(self.logical_space().space()) {
             return Err(Error::InvalidArgument(
                 "sqrt requires a diagonal bond tensor `[v] <- [v]` (equal single \
@@ -10046,16 +10044,13 @@ where
     /// ```
     pub fn add(&self, other: &Self, alpha: D, beta: D) -> Result<Self, Error> {
         // Runtime first, exactly as `contract` does: crossing runtimes is a
-        // trust-boundary violation rather than an algebra error, and the
-        // erased facade's `check_same_space` checks it first too.
+        // trust-boundary violation rather than an algebra error.
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }
         // `DynamicFusionMapSpace: PartialEq` covers the hom space, the
         // codomain/domain split and the block structure, which is exactly what
-        // makes the zipped element-wise combination below meaningful. Message
-        // verbatim from the erased `check_same_space`: one mistake reported two
-        // ways across the two facades is a support burden with no upside.
+        // makes the zipped element-wise combination below meaningful.
         if self.logical_space().space() != other.logical_space().space() {
             return Err(Error::InvalidArgument(
                 "tensors live on different spaces or block layouts".to_string(),
@@ -10371,8 +10366,7 @@ where
                     }
                     total += partial.widen_complex() * coefficient;
                 }
-                // The erased arm's internal check, on the shared derived
-                // space: a fully traced rank-(1,1) destination is one scalar.
+                // A fully traced rank-(1,1) destination is one scalar.
                 if space.space().required_len()? != 1 {
                     return Err(internal_layout_error(
                         "a fully traced rank-one destination is not a single scalar",
@@ -10423,8 +10417,7 @@ where
             // dagger of a diagonal is the conjugated diagonal — so this is
             // O(Σ_c k_c) with no dense buffer and no bend. For a real payload
             // `FactorScalar::adjoint` is the identity, which is why there is no
-            // separate real arm: the erased facade's `RealF64`/`RealC64`/`C64`
-            // split exists only because its dtype is a runtime property.
+            // separate real arm: the payload dtype is already a static property.
             return Ok(self.with_spectrum(
                 spectrum
                     .iter()
@@ -10454,9 +10447,8 @@ where
     /// [`Error::Core`] when the block structure cannot be walked, which is an
     /// engine-internal invariant rather than a caller mistake.
     pub fn norm(&self) -> Result<f64, Error> {
-        // Same weighted reduction the erased `norm` runs, on the same helper:
-        // a second copy would be free to drift from the sibling this is
-        // byte-compared against.
+        // Keep the weighted reduction on the shared helper; a second copy
+        // could drift from the block semantics it centralizes.
         if let Some(spectrum) = self.spectrum() {
             let provider = self.logical_space().provider();
             return Ok(Self::compact_inner(spectrum, spectrum, provider)?.re.sqrt());
@@ -10483,9 +10475,8 @@ where
     /// None today; the `Result` keeps the shape of [`Self::norm`], which the
     /// two are usually reached through together.
     pub fn norm_inf(&self) -> Result<f64, Error> {
-        // Why `widen_complex().norm()` rather than an f64/c64 match: the erased
-        // facade needs the match because its dtype is a runtime property. Here
-        // the widening is exact and `Complex64::new(x, 0.0).norm()` is exactly
+        // Why `widen_complex().norm()` rather than an f64/c64 match: the
+        // widening is exact and `Complex64::new(x, 0.0).norm()` is exactly
         // `|x|`, so one expression covers both instantiations.
         if let Some(spectrum) = self.spectrum() {
             return Ok(spectrum
@@ -10671,8 +10662,7 @@ where
             return Ok(value);
         }
         // `D::from_complex64` is `.re` for the real scalar and the identity for
-        // the complex one, so this is bit-identical to the erased facade's
-        // `Scalar::F64(v.re)` / `Scalar::C64(v)` dispatch, without the enum.
+        // the complex one, so one static conversion covers both scalar types.
         Ok(D::from_complex64(weighted_inner(
             self.logical_space().provider(),
             self.logical_space().space().structure(),
@@ -10712,9 +10702,8 @@ where
     /// [`Error::Core`] when the block structure cannot be walked.
     pub fn tr(&self) -> Result<D, Error> {
         let hom = self.logical_space().space().homspace();
-        // Mirrors the erased pre-check verbatim, message included: the weighted
-        // trace below indexes codomain axis `i` together with domain axis
-        // `nout + i` and would be meaningless without it.
+        // The weighted trace below indexes codomain axis `i` together with
+        // domain axis `nout + i` and would be meaningless without this check.
         if hom.codomain().legs() != hom.domain().legs() {
             return Err(Error::InvalidArgument(
                 "tr() requires an endomorphism (domain == codomain)".to_string(),
@@ -10884,8 +10873,8 @@ where
                 self.rank()
             )));
         }
-        // A rank-0 payload holds at most one element; summing matches the
-        // erased facade and gives the empty payload its zero for free.
+        // A rank-0 payload holds at most one element; summing gives the empty
+        // payload its zero for free.
         let materialized = self.materialized_tensor_uncached()?;
         Ok(materialized
             .owned_body()
@@ -10946,11 +10935,9 @@ where
     /// Shared route of [`Self::catdomain`] / [`Self::catcodomain`], using
     /// `cat_homspace` and `compile_cat_plan` over the typed bound space.
     fn cat(&self, other: &Self, side: CatSide) -> Result<Self, Error> {
-        // Rule identity before runtime: the erased
-        // `check_same_execution_world` order, minus its placement arm (no
-        // devices here). Same rationale as `authority()`: separately
-        // allocated providers of one rule interoperate; different identities
-        // are rejected before any layout work.
+        // Rule identity before runtime, for the same reason as `authority()`:
+        // separately allocated providers of one rule interoperate; different
+        // identities are rejected before any layout work.
         if self.logical_space().provider().rule_identity()
             != other.logical_space().provider().rule_identity()
         {
@@ -10968,9 +10955,8 @@ where
             rhs.domain(),
             side,
         )?;
-        // The same derivation route the erased `from_homspace` takes
-        // (`build_bound_space_like` is `derive_from_final_homspace` on the
-        // authority space); no new space-construction logic.
+        // Derive from the authority space; do not duplicate space-construction
+        // logic here.
         let space = self.logical_space().derive_from_final_homspace(homspace)?;
         let (lhs_layout, lhs_data) = self.cat_operand()?;
         let (rhs_layout, rhs_data) = other.cat_operand()?;
@@ -11075,9 +11061,8 @@ where
             .owned_body()
             .expect("uncached materialization is owned")
             .materialized_dense_data();
-        // The erased `validate_absorb_layout` internal guard, minus its
-        // dtype/device arms (unrepresentable here): the dense payloads must
-        // cover their structures before any block walk trusts the offsets.
+        // Dense payloads must cover their structures before any block walk
+        // trusts the offsets.
         if destination_space.structure().required_len()? != destination_data.len()
             || source_space.structure().required_len()? != source_data.len()
         {
@@ -11172,8 +11157,8 @@ where
         }
         let nout = self.codomain_rank();
         if let Some(spectrum) = self.spectrum() {
-            // Compact arm, mirroring the erased `scaled_by_sector` route: a
-            // bond space's two legs both carry the block's coupled sector, so
+            // Compact arm: a bond space's two legs both carry the block's
+            // coupled sector, so
             // the per-block factor collapses to θ(sector)^|legs|. The space
             // is unchanged, so the payload may stay compact.
             let sector_factor = |sector: tenet_core::SectorId| -> f64 {
@@ -11289,8 +11274,8 @@ where
             return parent.flip_with_inverse(&axes, !inverse)?.adjoint();
         }
         let nout = hom.codomain().len();
-        // Sequential semantics for repeated legs, from the helper shared
-        // with the erased facade (#580 PR 5).
+        // Sequential semantics for repeated legs, centralized in the shared
+        // helper from #580 PR 5.
         let (new_hom, occurrences) = flip_toggled_homspace(hom, legs);
         let space = self.logical_space().derive_from_final_homspace(new_hom)?;
         check_flip_layout_identity(
@@ -11447,7 +11432,7 @@ where
         }
         // The insertion that this removal undoes, for the correspondence
         // validator: a codomain leg is the right seam's insertion, a domain
-        // leg the left seam's — same reconstruction as the erased facade.
+        // leg the left seam's.
         let insertion = if axis < nout {
             UnitLegInsertion::Right {
                 position: axis,
@@ -11603,9 +11588,8 @@ impl<R> TensorMap<R, f64> {
     }
 }
 
-// Typed-first: the erased facade has no `re`/`im` counterpart, so there is no
-// route to extract and cross-facade parity is impossible — the gates are law
-// checks (`re(t) + i·im(t)` rebuilds `t`) instead. TensorKit's real-input
+// The `re`/`im` gates are law checks (`re(t) + i·im(t)` rebuilds `t`).
+// TensorKit's real-input
 // branches (`real(t) = t`, `imag(t) = zerovector(t)` for a real scalartype)
 // are statically unrepresentable here: these methods exist on the `Complex64`
 // impl only, and `to_c64().re()` covers the round trip.

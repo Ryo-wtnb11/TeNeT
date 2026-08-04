@@ -347,9 +347,8 @@ fn the_matrix_functions_have_o_rank_diagonal_arms() {
     // assertion afterwards catches one that densifies into the shared cache,
     // which the warm-up run would otherwise have paid for silently.
     //
-    // `exp` is the one that is new in the typed facade: the erased sibling
-    // materializes a diagonal payload and eigendecomposes it, so this probe is
-    // what pins the parity fix rather than just guarding it.
+    // `exp` needs its own probe because its dense fallback materializes a
+    // diagonal payload and eigendecomposes it.
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let d = spectrum(0x5eed_0021);
     let ceiling = dense_payload_bytes();
@@ -636,8 +635,8 @@ fn pr3_inspections_allocate_no_payload() {
 #[test]
 fn the_full_bond_trace_reduces_the_spectrum_without_materializing() {
     // What (issue #604): `trace_pairs` over the only pair of a compact bond
-    // factor reduces the stored spectrum in O(Σ_c k_c) — the typed twin of the
-    // erased #585 gate. The warm-up runs on a throwaway twin, never on the
+    // factor reduces the stored spectrum in O(Σ_c k_c), preserving the #585
+    // regression gate. The warm-up runs on a throwaway twin, never on the
     // measured tensor: the pre-#604 route reached `dense_data()`, which fills
     // the *measured* tensor's shared cache, so a same-tensor warm-up would pay
     // for the materialization once and make the densifying route measure

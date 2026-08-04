@@ -2688,9 +2688,8 @@ fn bosonic_tensorcompose_with_an_adjoint_operand_matches_the_materialized_adjoin
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     // What: bosonic composition with a *conjugated* operand — the one arm of
-    // the composition seam no other caller in this workspace reaches (the
-    // erased facade enters the seam only when the rule is fermionic, and the
-    // typed facade always passes direct operands). It is also the arm whose
+    // the composition seam no public caller in this workspace reaches because
+    // the typed facade passes direct operands. It is also the arm whose
     // inner call the non-lowered seam changed, so this is where the claim
     // "the two entry points compute the same thing" is actually pinned.
     //
