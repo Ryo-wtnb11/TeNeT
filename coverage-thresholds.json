@@ -81,7 +81,6 @@
     "tenet/src/error.rs": 31,
     "tenet/src/plancache.rs": 95,
     "tenet/src/runtime.rs": 44,
-    "tenet/src/space.rs": 83,
-    "tenet/src/tensor.rs": 84
+    "tenet/src/space.rs": 83
   }
 }

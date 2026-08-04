@@ -2854,7 +2854,8 @@ pub struct EighFull<R, D, const NOUT: usize, const NIN: usize> {
 /// Dynamic-rank [`EighFull`]. Carries only the eigenvector map and the O(rank)
 /// spectrum; the dense diagonal `D` is built on demand by the typed [`eigh_full`]
 /// wrapper (which returns a `TensorMap`), so callers that keep `D` diagonal
-/// (the user layer, via `Data::Diagonal`) never pay the O(rank²) materialization.
+/// (the user layer, via compact diagonal storage) never pay the O(rank²)
+/// materialization.
 #[derive(Clone, Debug)]
 pub struct EighFullDyn<R, D> {
     v: BoundDynFactor<R, D>,

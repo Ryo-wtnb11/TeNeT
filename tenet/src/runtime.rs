@@ -1131,6 +1131,8 @@ macro_rules! default {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::typed::{GradedSpace, TensorMap};
+    use tenet_core::{SU2FusionRule, SU2Irrep};
 
     // What: the context pool must hold pointer-sized entries. Pooling the
     // complete two-lane execution state by value made Vec pop/push memmoves
@@ -1177,6 +1179,111 @@ mod tests {
 
         let context = TensorExecutionContext::for_config(runtime.execution_config()).unwrap();
         assert!(context.local_cache_policy_is(OperationCachePolicy::NoCache));
+    }
+
+    #[test]
+    fn runtime_and_leased_contexts_share_one_cpu_context() {
+        let runtime = Runtime::builder().build().expect("runtime");
+        let shared = runtime.execution_config().shared_ctx.clone();
+        {
+            let mut state = runtime.lock();
+            assert!(state.shares_cpu_context(&shared));
+        }
+
+        let mut lease = runtime.lease_context().expect("lease");
+        assert!(lease.context().shares_cpu_context(&shared));
+        let mut network_context =
+            TensorExecutionContext::for_config(runtime.execution_config()).expect("context");
+        assert!(network_context.shares_cpu_context(&shared));
+    }
+
+    #[test]
+    fn runtime_builder_recoupling_threads_reach_every_runtime_and_context_lane() {
+        fn assert_runtime_and_context(runtime: &Runtime, expected: usize) {
+            {
+                let mut state = runtime.lock();
+                assert!(state.recoupling_threads_are(expected));
+            }
+
+            let mut context =
+                TensorExecutionContext::for_config(runtime.execution_config()).expect("context");
+            assert!(context.recoupling_threads_are(expected));
+        }
+
+        let configured = Runtime::builder()
+            .recoupling_threads(3)
+            .build()
+            .expect("configured runtime");
+        assert_runtime_and_context(&configured, 3);
+
+        let default = Runtime::builder().build().expect("default runtime");
+        assert_runtime_and_context(&default, 1);
+    }
+
+    #[test]
+    fn runtime_transform_stores_are_isolated_and_expired_weak_handles_run_eagerly() {
+        let runtime_a = Runtime::builder().build().unwrap();
+        let runtime_b = Runtime::builder().build().unwrap();
+        let provider = Arc::new(SU2FusionRule);
+        let space = GradedSpace::try_new(
+            provider,
+            [
+                (SU2Irrep::from_twice_spin(0), 2),
+                (SU2Irrep::from_twice_spin(1), 2),
+                (SU2Irrep::from_twice_spin(2), 1),
+            ],
+            false,
+        )
+        .unwrap();
+        let source_a: TensorMap<SU2FusionRule, f64> =
+            TensorMap::rand_with_seed(&runtime_a, [&space, &space], [&space], 475_002).unwrap();
+        let source_b: TensorMap<SU2FusionRule, f64> =
+            TensorMap::rand_with_seed(&runtime_b, [&space, &space], [&space], 475_002).unwrap();
+        let expected_a = source_a.permute(&[1], &[2, 0]).unwrap();
+        let expected_b = source_b.permute(&[1], &[2, 0]).unwrap();
+        assert_eq!(runtime_a.tree_transform_cache_info().entries(), 1);
+        assert_eq!(runtime_b.tree_transform_cache_info().entries(), 1);
+
+        runtime_a.clear_tree_transform_cache();
+        assert_eq!(runtime_a.tree_transform_cache_info().entries(), 0);
+        assert_eq!(runtime_a.tree_transform_cache_info().misses(), 0);
+        assert_eq!(runtime_b.tree_transform_cache_info().entries(), 1);
+        assert_eq!(runtime_b.tree_transform_cache_info().misses(), 1);
+
+        let mut context = TensorExecutionContext::for_config(runtime_b.execution_config()).unwrap();
+        let store = runtime_b.execution_config().tree_transform_store.clone();
+        let source_space = source_b.test_bound_space();
+        let destination_space = expected_b.test_bound_space();
+        let rule = Arc::clone(source_space.provider_arc());
+        let source_structure = Arc::clone(source_space.space().structure());
+        let destination_structure = Arc::clone(destination_space.space().structure());
+        let source_data = source_b.data().to_vec();
+        let expected_data = expected_b.data().to_vec();
+        let operation = TreeTransformOperation::permute([1], [2, 0]);
+        drop(source_a);
+        drop(source_b);
+        drop(expected_a);
+        drop(expected_b);
+        drop(runtime_a);
+        drop(runtime_b);
+        assert!(store.upgrade().is_none());
+
+        let mut actual = vec![f64::NAN; expected_data.len()];
+        context
+            .mf
+            .f64
+            .tree_context_mut()
+            .tree_transform_dyn_overwrite_into_ref(
+                rule.as_ref(),
+                &operation,
+                &destination_structure,
+                &source_structure,
+                &mut actual,
+                &source_data,
+                1.0,
+            )
+            .unwrap();
+        assert_eq!(actual, expected_data);
     }
 
     #[test]

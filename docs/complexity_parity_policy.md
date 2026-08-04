@@ -29,7 +29,7 @@ Rust (and TeNeT's deliberate single-`Tensor` design) has no such automatic
 dispatch. The same complexity must therefore be produced **explicitly**. The
 Rust-idiomatic shape is *not* "reproduce Julia's pervasive free dispatch"
 (a separate `DiagonalTensor` type → combinatorial `impl`s, or a runtime
-`match Data::Diagonal` scattered through every op). It is **a small number of
+`match TypedData::Diagonal` scattered through every op). It is **a small number of
 explicit fast paths placed at the layer where they pay**, plus a correct
 fallback everywhere else — where "correct" still means *order-correct*.
 
