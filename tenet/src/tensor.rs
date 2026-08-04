@@ -32,7 +32,7 @@ use tenet_core::{
     CheckedFusionAlgebra, CheckedFusionSpaceError, CoupledSectorRegion, FusionProductSpace,
     FusionRule, FusionTreeHomSpace, FusionTreePairKey, FusionTreePairOrientation,
     LoweredMultiplicityFreeAlgebra, MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace,
-    Placement, PreparedTreePairOperation, SectorId, UnitLegInsertion,
+    Placement, SectorId, UnitLegInsertion,
 };
 #[cfg(feature = "cuda")]
 use tenet_core::{SectorLeg, TensorStorage};
@@ -54,18 +54,23 @@ use tenet_tensors::cuda::{CudaStorage, CudaStorageGemm};
 use tenet_tensors::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, OperationError, OutputAxisOrder,
     OwnedCatC64Source as CatC64Source, OwnedCatCopy, OwnedCatSide, TensorContractSpec,
-    TreeTransformOperation, TreeTransformOperationKind, TreeTransformRuleCacheKey,
+    TreeTransformOperation, TreeTransformRuleCacheKey,
 };
 
 use crate::error::Error;
 pub use crate::runtime::TensorExecutionContext;
 use crate::runtime::{Ctxs, Runtime};
 use crate::space::{Fz2U1Su2Rule, RuleKind, Space, U1Fz2Rule, UserRuleContext};
+pub(crate) use crate::tensor_core::internal_layout_error;
 use crate::tensor_core::{
     pow_by_squaring, tensorcontract_owned_multiplicity_free, tensorproduct_owned_multiplicity_free,
     tree_transform_owned_multiplicity_free,
 };
-use crate::typed::ScalarOps;
+use crate::typed::{
+    logical_adjoint_axes_to_parent, lower_adjoint_tree_transform_operation,
+    validate_axis_permutation, validate_contracted_axes, with_planar_axes, PlanarRequestKind,
+    ScalarOps,
+};
 
 mod diagonal;
 use diagonal::{
@@ -2558,174 +2563,9 @@ enum TransformKind<'a> {
     Transpose,
 }
 
-pub(crate) enum PlanarRequestKind<'a> {
-    FullTranspose,
-    Explicit {
-        codomain_axes: &'a [usize],
-        domain_axes: &'a [usize],
-    },
-    Repartition {
-        num_codomain: usize,
-    },
-}
-
 enum PlanarOverwriteRequest<'a> {
     Planar(PlanarRequestKind<'a>),
     RepartitionFromDestination,
-}
-
-pub(crate) fn with_planar_axes<T>(
-    source_codomain_rank: usize,
-    source_rank: usize,
-    kind: PlanarRequestKind<'_>,
-    apply: impl FnOnce(&[usize], &[usize]) -> Result<T, Error>,
-) -> Result<T, Error> {
-    let source_domain_rank = source_rank - source_codomain_rank;
-    let checked_apply = |codomain_axes: &[usize], domain_axes: &[usize]| {
-        PreparedTreePairOperation::validate_transpose_syntax(
-            source_codomain_rank,
-            source_domain_rank,
-            codomain_axes,
-            domain_axes,
-        )?;
-        apply(codomain_axes, domain_axes)
-    };
-    match kind {
-        PlanarRequestKind::FullTranspose => {
-            let axes = (source_codomain_rank..source_rank)
-                .rev()
-                .chain((0..source_codomain_rank).rev())
-                .collect::<Vec<_>>();
-            let (codomain_axes, domain_axes) = axes.split_at(source_domain_rank);
-            checked_apply(codomain_axes, domain_axes)
-        }
-        PlanarRequestKind::Explicit {
-            codomain_axes,
-            domain_axes,
-        } => checked_apply(codomain_axes, domain_axes),
-        PlanarRequestKind::Repartition { num_codomain } => {
-            if num_codomain > source_rank {
-                return Err(Error::InvalidArgument(format!(
-                    "repartition: num_codomain {num_codomain} exceeds rank {source_rank}",
-                )));
-            }
-            let mut axes = (0..source_codomain_rank)
-                .chain((source_codomain_rank..source_rank).rev())
-                .collect::<Vec<_>>();
-            axes[num_codomain..].reverse();
-            let (codomain_axes, domain_axes) = axes.split_at(num_codomain);
-            checked_apply(codomain_axes, domain_axes)
-        }
-    }
-}
-
-fn logical_adjoint_axis_to_parent(
-    parent_codomain_rank: usize,
-    parent_domain_rank: usize,
-    axis: usize,
-) -> usize {
-    debug_assert!(axis < parent_codomain_rank + parent_domain_rank);
-    if axis < parent_domain_rank {
-        parent_codomain_rank + axis
-    } else {
-        axis - parent_domain_rank
-    }
-}
-
-pub(crate) fn logical_adjoint_axes_to_parent(
-    parent_codomain_rank: usize,
-    parent_domain_rank: usize,
-    axes: &[usize],
-) -> Vec<usize> {
-    axes.iter()
-        .map(|&axis| logical_adjoint_axis_to_parent(parent_codomain_rank, parent_domain_rank, axis))
-        .collect()
-}
-
-pub(crate) fn lower_adjoint_tree_transform_operation(
-    parent_codomain_rank: usize,
-    parent_domain_rank: usize,
-    operation: &TreeTransformOperation,
-) -> Result<TreeTransformOperation, Error> {
-    let rank = parent_codomain_rank
-        .checked_add(parent_domain_rank)
-        .ok_or_else(|| Error::InvalidArgument("tensor rank overflow".to_string()))?;
-    let logical_axes = operation
-        .codomain_permutation()
-        .iter()
-        .chain(operation.domain_permutation())
-        .copied()
-        .collect::<Vec<_>>();
-    validate_axis_permutation(&logical_axes, rank)?;
-
-    let codomain_axes = operation
-        .domain_permutation()
-        .iter()
-        .copied()
-        .map(|axis| logical_adjoint_axis_to_parent(parent_codomain_rank, parent_domain_rank, axis))
-        .collect::<Vec<_>>();
-    let domain_axes = operation
-        .codomain_permutation()
-        .iter()
-        .copied()
-        .map(|axis| logical_adjoint_axis_to_parent(parent_codomain_rank, parent_domain_rank, axis))
-        .collect::<Vec<_>>();
-    Ok(match operation.kind() {
-        TreeTransformOperationKind::Permute => {
-            TreeTransformOperation::permute(codomain_axes, domain_axes)
-        }
-        TreeTransformOperationKind::Transpose => {
-            TreeTransformOperation::transpose(codomain_axes, domain_axes)
-        }
-        TreeTransformOperationKind::Braid => {
-            let level_count = operation
-                .codomain_levels()
-                .len()
-                .checked_add(operation.domain_levels().len())
-                .ok_or_else(|| Error::InvalidArgument("braid level count overflow".to_string()))?;
-            if level_count != rank {
-                return Err(Error::InvalidArgument(format!(
-                    "braid levels must list one level per source axis \
-                     (expected {rank}, got {level_count})",
-                )));
-            }
-            // Why not reflect the level values: the outer adjoint conjugates
-            // coefficients; TensorKit only reindexes levels into parent order.
-            TreeTransformOperation::braid(
-                codomain_axes,
-                domain_axes,
-                operation.domain_levels().iter().copied(),
-                operation.codomain_levels().iter().copied(),
-            )
-        }
-    })
-}
-
-fn validate_contracted_axes(contracted: &[usize], rank: usize) -> Result<(), Error> {
-    let mut seen = SmallVec::<[bool; 16]>::new();
-    seen.resize(rank, false);
-    for &axis in contracted {
-        if axis >= rank || seen[axis] {
-            return Err(Error::InvalidArgument(format!(
-                "invalid contracted axis list {contracted:?} for rank {rank}"
-            )));
-        }
-        seen[axis] = true;
-    }
-    Ok(())
-}
-
-fn validate_axis_permutation(axes: &[usize], rank: usize) -> Result<(), Error> {
-    if axes.len() == rank && validate_contracted_axes(axes, rank).is_ok() {
-        return Ok(());
-    }
-    Err(
-        OperationError::Core(tenet_core::CoreError::InvalidPermutation {
-            permutation: axes.to_vec(),
-            rank,
-        })
-        .into(),
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -9632,12 +9472,6 @@ fn sqrt_diagonal_impl<D: UserScalar + PartialEq>(
 }
 
 type SectorRegion = CoupledSectorRegion;
-
-pub(crate) fn internal_layout_error(what: &str) -> Error {
-    Error::InvalidArgument(format!(
-        "internal coupled-layout invariant violated ({what}); please report this"
-    ))
-}
 
 /// Enumerates the coupled-sector matrix regions of a coupled-layout block
 /// structure and verifies that every fusion-tree block addresses exactly the
