@@ -250,3 +250,55 @@ repartition_fixture("fZ2 2|2 -> 1|3", sequential_tensor(fz2_spaces...), 1)
 repartition_fixture("fZ2xU1xSU2 2|2 -> 1|3", sequential_tensor(i3_spaces...), 1)
 repartition_fixture("fZ2xU1xSU2 2|2 -> 0|4", sequential_tensor(i3_spaces...), 0)
 repartition_fixture("fZ2xU1xSU2 2|2 -> 4|0", sequential_tensor(i3_spaces...), 4)
+
+# ---------------------------------------------------------------------------
+# Section 5: scalar reductions and blockwise matrix exponential
+# ---------------------------------------------------------------------------
+println("== section 5: scalar reductions and exp ==")
+
+function exp_fixture(::Type{T}, scale) where {T}
+    V = U1Space(0 => 3, 1 => 2)
+    t = zeros(T, V ← V)
+    for (c, b) in blocks(t), j in axes(b, 2), i in axes(b, 1)
+        re = 0.5 + 0.25 * (i - 1) - 0.75 * (j - 1) + 0.125 * Int(c.charge)
+        value = T <: Complex ?
+            complex(re, 0.125 * (i - 1) + 0.375 * (j - 1) - 0.25) : re
+        b[i, j] = scale * value
+    end
+    return norm(t), norm(exp(t))
+end
+
+println("-- exp --")
+for (T, scale) in ((Float64, 1.0), (Float64, 4.0), (ComplexF64, 1.0))
+    input_norm, output_norm = exp_fixture(T, scale)
+    @printf("%s %.1f %.17g %.17g\n", T, scale, input_norm, output_norm)
+end
+
+norm_real_fill(i, j) = 1.0 + 0.5 * (i - 1) - 0.25 * (j - 1)
+norm_complex_fill(i, j) =
+    norm_real_fill(i, j) + im * (0.5 + 0.125 * (i - 1) + 0.375 * (j - 1))
+
+function norm_p_fixture(::Type{T}, V, W) where {T}
+    t = zeros(T, V ← W)
+    for (_, b) in blocks(t), j in axes(b, 2), i in axes(b, 1)
+        b[i, j] = T <: Complex ? norm_complex_fill(i, j) : norm_real_fill(i, j)
+    end
+    return [norm(t, p) for p in (1.0, 2.0, 3.0, Inf)]
+end
+
+println("-- norm_p --")
+norm_spaces = (
+    ("U1", U1Space(-1 => 2, 0 => 3, 1 => 4), U1Space(-1 => 5, 0 => 1, 1 => 2)),
+    (
+        "SU2", SU2Space(0 => 2, 1 // 2 => 3, 1 => 4),
+        SU2Space(0 => 5, 1 // 2 => 1, 1 => 2),
+    ),
+)
+for (name, V, W) in norm_spaces, T in (Float64, ComplexF64)
+    values = norm_p_fixture(T, V, W)
+    @printf("%s %s", name, T)
+    for value in values
+        @printf(" %.17g", value)
+    end
+    println()
+end

@@ -17,9 +17,10 @@
 //!
 //! # Oracle provenance
 //!
-//! The constants are TensorKit 0.17.0 output (`~/.julia/packages/TensorKit/jCjQQ`,
-//! Julia 1.11.6), from a tensor built block-by-block with exactly the fill this
-//! file uses:
+//! The constants are emitted by section 5 of the pinned current oracle,
+//! `benchmarks/tensorkit_semantic_oracle.jl`: TensorKit `f87ca7f` (project
+//! version 0.17.1) on Julia 1.11.6, from a tensor built block-by-block with
+//! exactly the fill this file uses:
 //!
 //! ```julia
 //! realfill(i, j) = 1.0 + 0.5 * (i - 1) - 0.25 * (j - 1)
@@ -76,18 +77,18 @@ fn assert_close(actual: f64, expected: f64, what: &str) {
 }
 
 // TensorKit 0.17.0 oracle values, indexed as [p = 1, 2, 3, Inf].
-const U1_F64: [f64; 4] = [25.0, 6.2048368229954285, 4.080404211522764, 2.5];
+const U1_F64: [f64; 4] = [25.0, 6.2048368229954285, 4.0804042115227643, 2.5];
 const U1_C64: [f64; 4] = [
-    36.08814448804253,
-    8.145167278822456,
+    36.088144488042531,
+    8.1451672788224556,
     5.0601391475683535,
     2.6487025125521364,
 ];
-const SU2_F64: [f64; 4] = [55.5, 9.656603957913982, 5.588779616741119, 2.5];
+const SU2_F64: [f64; 4] = [55.5, 9.6566039579139815, 5.5887796167411192, 2.5];
 const SU2_C64: [f64; 4] = [
-    70.83774683619109,
+    70.837746836191087,
     11.637090486887175,
-    6.51405041399105,
+    6.5140504139910496,
     2.6487025125521364,
 ];
 
