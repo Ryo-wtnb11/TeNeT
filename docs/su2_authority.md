@@ -1,7 +1,13 @@
-# SU(2) Authority
+# Historical SU(2) authority migration record
 
-`tenet-sectors` delegates base/default-feature SU(2) representation algebra,
-F/R/Frobenius--Schur coefficients, and coefficient caches to `racah` revision
+> **Historical revision-specific evidence.** The benchmark and compatibility
+> sweep below describe the recorded migration pair, not current-main behavior.
+> The current dependency authority is the `racah` revision in
+> `tenet-sectors/Cargo.toml` (currently `86a540f30b8e343dd69af08e9192c50d3004aa28`).
+
+At the recorded migration revision, `tenet-sectors` delegated base/default-feature
+SU(2) representation algebra, F/R/Frobenius--Schur coefficients, and coefficient
+caches to `racah` revision
 `489f367e7d0dce85842f15b253be0b74c4c47340`. The compatibility baseline is
 TeNeT commit `6a3bbe365982928c8e8ce014f19e13ac15a14002`.
 

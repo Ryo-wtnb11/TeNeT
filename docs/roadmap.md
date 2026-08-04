@@ -1,4 +1,8 @@
-# TeNeT ロードマップ(2026-07-04 棚卸し)
+# Historical TeNeT roadmap snapshot (2026-07-04)
+
+> **Historical status only.** This checklist predates the current typed API and
+> CUDA work. Its completion marks and performance claims are not current support
+> evidence. Issue #9 and its operation matrix are the current audit authority.
 
 完成像: fZ2⊠U(1)⊠SU(2) の TN 計算、縮約パス最適化、CPU/GPU 両対応、
 TensorKit 並みの使い勝手。最重要軸 = Rust 準拠の保守性・拡張性 × 動的 rank でも速い。
