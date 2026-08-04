@@ -217,7 +217,12 @@ use tenet_core::{
     CheckedGenericFusion, CheckedGenericRigidSymbols, HostReadableStorage, Placement, TensorStorage,
 };
 #[cfg(feature = "cuda")]
-use tenet_dense::{cuda_gemm_region_into, CudaDenseContext, CudaDenseStorage};
+use tenet_dense::{
+    cuda_eigh_region, cuda_gemm_region_into,
+    cuda_is_hermitian_region as dense_cuda_is_hermitian_region,
+    cuda_qr_region as dense_cuda_qr_region, cuda_svd_region as dense_cuda_svd_region,
+    CudaDenseContext, CudaDenseStorage,
+};
 #[cfg(feature = "cuda")]
 use tenet_operations::StorageGemm;
 use tenet_tensors::{
@@ -250,14 +255,11 @@ pub use crate::runtime::Runtime;
 /// self-sufficient without it.
 pub use tenet_matrixalgebra::{Truncation, TruncationSpace};
 
+#[cfg(feature = "cuda")]
+use tenet_matrixalgebra::{select_truncation, WeightedSpectrum};
 use tenet_matrixalgebra::{BoundDynFactor, FactorScalar};
 
 use crate::runtime::{Ctx, Ctxs};
-#[cfg(feature = "cuda")]
-use crate::tensor::{
-    assemble_left_factor, assemble_right_factor, cuda_is_hermitian_region, cuda_qr_region,
-    cuda_svd_region, decide_kept, fill_diagonal_values, typed_cuda_eigh_region, upload_selector,
-};
 pub use crate::tensor_core::CheckedGenericTensorProductError;
 use crate::tensor_core::{
     internal_layout_error, pow_by_squaring, tensorcompose_owned_multiplicity_free,
@@ -2135,6 +2137,256 @@ fn observe_cuda_qr_output_upload() {
     update_cuda_qr_observation(|(qr, diagonal, selectors, outputs, gemms, live, peak)| {
         (qr, diagonal, selectors, outputs + 1, gemms, live, peak)
     });
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) fn dense_err(err: tenet_dense::DenseError) -> Error {
+    Error::from(tenet_tensors::OperationError::Dense(err))
+}
+
+/// Shared host-side truncation decision (exactly the host cores' flow:
+/// `select_truncation` over quantum-dimension-weighted magnitudes, kept
+/// prefixes, empty sectors dropped, discarded weighted 2-norm as `error`;
+/// a no-op decision keeps the full factorization with `error == 0`).
+#[cfg(feature = "cuda")]
+pub(crate) fn decide_kept<R: MultiplicityFreeRigidSymbols<Scalar = f64>>(
+    rule: &R,
+    spectra: &[tenet_matrixalgebra::SectorSpectrum<f64>],
+    truncation: Option<&Truncation>,
+) -> Result<(Vec<tenet_matrixalgebra::SectorSpectrum<f64>>, f64), Error> {
+    let Some(truncation) = truncation else {
+        return Ok((spectra.to_vec(), 0.0));
+    };
+    let magnitudes: Vec<Vec<f64>> = spectra
+        .iter()
+        .map(|entry| entry.values.iter().map(|value| value.abs()).collect())
+        .collect();
+    let weighted: Vec<WeightedSpectrum<'_>> = spectra
+        .iter()
+        .zip(&magnitudes)
+        .map(|(entry, values)| WeightedSpectrum {
+            sector: entry.sector,
+            weight: rule.dim_scalar(entry.sector),
+            values,
+        })
+        .collect();
+    let decision = select_truncation(&weighted, truncation, &rule.rule_identity())
+        .map_err(|err| Error::InvalidArgument(err.to_string()))?;
+    if spectra
+        .iter()
+        .zip(&decision.kept)
+        .all(|(entry, &count)| entry.values.len() == count)
+    {
+        return Ok((spectra.to_vec(), 0.0));
+    }
+    let mut kept = spectra.to_vec();
+    for (entry, &count) in kept.iter_mut().zip(&decision.kept) {
+        entry.values.truncate(count);
+    }
+    kept.retain(|entry| !entry.values.is_empty());
+    Ok((kept, decision.error))
+}
+
+/// Uploads a small host-built selector matrix (`rows x cols`, column-major,
+/// zero except `entries`) used by the assembly GEMMs.
+#[cfg(feature = "cuda")]
+pub(crate) fn upload_selector(
+    cuda: &mut CudaDenseContext,
+    rows: usize,
+    cols: usize,
+    entries: impl Iterator<Item = (usize, usize, f64)>,
+) -> Result<CudaStorage, Error> {
+    let mut data = vec![0.0; rows * cols];
+    for (row, col, value) in entries {
+        data[row + rows * col] = value;
+    }
+    let selector = CudaStorage::upload(cuda, &data).map_err(Error::from)?;
+    #[cfg(test)]
+    {
+        observe_cuda_qr_selector_upload();
+        observe_cuda_svd_trunc_allocation("selector", data.len());
+    }
+    Ok(selector)
+}
+
+#[cfg(feature = "cuda")]
+#[inline]
+pub(crate) fn cuda_qr_region(
+    cuda: &mut CudaDenseContext,
+    source: &CudaDenseStorage,
+    offset: usize,
+    rows: usize,
+    cols: usize,
+) -> Result<(CudaDenseStorage, CudaDenseStorage, Vec<f64>), Error> {
+    let factors = dense_cuda_qr_region(cuda, source, offset, rows, cols).map_err(dense_err)?;
+    #[cfg(test)]
+    observe_cuda_qr_decomposition(factors.2.len());
+    Ok(factors)
+}
+
+#[cfg(feature = "cuda")]
+#[inline]
+pub(crate) fn cuda_svd_region(
+    cuda: &mut CudaDenseContext,
+    source: &CudaDenseStorage,
+    offset: usize,
+    rows: usize,
+    cols: usize,
+) -> Result<(CudaDenseStorage, Vec<f64>, CudaDenseStorage), Error> {
+    let factors = dense_cuda_svd_region(cuda, source, offset, rows, cols).map_err(dense_err)?;
+    #[cfg(test)]
+    observe_cuda_svd_decomposition(factors.1.len());
+    Ok(factors)
+}
+
+#[cfg(feature = "cuda")]
+#[inline]
+pub(crate) fn cuda_is_hermitian_region(
+    cuda: &mut CudaDenseContext,
+    source: &CudaDenseStorage,
+    offset: usize,
+    n: usize,
+) -> Result<bool, Error> {
+    dense_cuda_is_hermitian_region(cuda, source, offset, n).map_err(dense_err)
+}
+
+#[cfg(feature = "cuda")]
+#[inline]
+pub(crate) fn typed_cuda_eigh_region(
+    cuda: &mut CudaDenseContext,
+    source: &CudaDenseStorage,
+    offset: usize,
+    n: usize,
+) -> Result<(Vec<f64>, CudaDenseStorage), Error> {
+    cuda_eigh_region(cuda, source, offset, n).map_err(dense_err)
+}
+
+/// Writes `factor_rows x kept` slices of `factor * selector` into the target
+/// sector region of a left factor (`codomain <- bond`), one GEMM per
+/// codomain tree so correctness never relies on tree enumeration order
+/// matching between the source and factor spaces.
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assemble_left_factor(
+    cuda: &mut CudaDenseContext,
+    dst: &mut CudaStorage,
+    target: &CoupledSectorRegion,
+    source: &CoupledSectorRegion,
+    factor: &CudaDenseStorage,
+    k_full: usize,
+    selector: &CudaStorage,
+    kept: usize,
+) -> Result<(), Error> {
+    for target_tree in target.row_trees() {
+        let sub_rows = target_tree.extent()?;
+        if sub_rows == 0 {
+            continue;
+        }
+        let src_row = source
+            .row_trees()
+            .iter()
+            .find(|source_tree| source_tree.tree() == target_tree.tree())
+            .map(|source_tree| source_tree.offset())
+            .ok_or_else(|| internal_layout_error("codomain tree missing in the source sector"))?;
+        cuda_gemm_region_into(
+            cuda,
+            &mut dst.0,
+            target.range().start + target_tree.offset(),
+            target.rows(),
+            factor,
+            src_row,
+            source.rows(),
+            &selector.0,
+            0,
+            k_full,
+            sub_rows,
+            k_full,
+            kept,
+            1.0,
+            0.0,
+        )
+        .map_err(dense_err)?;
+        #[cfg(test)]
+        observe_cuda_qr_assembly_gemm();
+    }
+    Ok(())
+}
+
+/// Writes `kept x factor_cols` slices of `selector * factor` into the target
+/// sector region of a right factor (`bond <- domain`), one GEMM per domain
+/// tree.
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assemble_right_factor(
+    cuda: &mut CudaDenseContext,
+    dst: &mut CudaStorage,
+    target: &CoupledSectorRegion,
+    source: &CoupledSectorRegion,
+    selector: &CudaStorage,
+    kept: usize,
+    k_full: usize,
+    factor: &CudaDenseStorage,
+) -> Result<(), Error> {
+    for target_tree in target.col_trees() {
+        let sub_cols = target_tree.extent()?;
+        if sub_cols == 0 {
+            continue;
+        }
+        let src_col = source
+            .col_trees()
+            .iter()
+            .find(|source_tree| source_tree.tree() == target_tree.tree())
+            .map(|source_tree| source_tree.offset())
+            .ok_or_else(|| internal_layout_error("domain tree missing in the source sector"))?;
+        cuda_gemm_region_into(
+            cuda,
+            &mut dst.0,
+            target.range().start + target.rows() * target_tree.offset(),
+            target.rows(),
+            &selector.0,
+            0,
+            kept,
+            factor,
+            k_full * src_col,
+            k_full,
+            kept,
+            k_full,
+            sub_cols,
+            1.0,
+            0.0,
+        )
+        .map_err(dense_err)?;
+        #[cfg(test)]
+        observe_cuda_qr_assembly_gemm();
+    }
+    Ok(())
+}
+
+/// Fills the diagonal of a coupled-layout `W <- W` buffer from per-sector
+/// spectra, mirroring the host `diagonal_bond_tensor_dyn`.
+#[cfg(feature = "cuda")]
+pub(crate) fn fill_diagonal_values(
+    structure: &BlockStructure,
+    data: &mut [f64],
+    spectra: &[tenet_matrixalgebra::SectorSpectrum<f64>],
+) -> Result<(), Error> {
+    for index in 0..structure.block_count() {
+        let block = structure.block(index)?;
+        let BlockKey::FusionTree(tree) = block.key() else {
+            continue;
+        };
+        let sector = tree.codomain_tree().coupled();
+        let Some(entry) = spectra.iter().find(|entry| entry.sector == sector) else {
+            continue;
+        };
+        let strides = block.strides();
+        let offset = block.offset();
+        let count = block.shape()[0].min(block.shape()[1]);
+        for position in 0..count {
+            data[offset + position * (strides[0] + strides[1])] = entry.values[position];
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "cuda")]
