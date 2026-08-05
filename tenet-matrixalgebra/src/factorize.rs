@@ -456,10 +456,7 @@ where
     }
 }
 
-impl<R, D> BoundDynFactor<R, D>
-where
-    R: FusionRule,
-{
+impl<R, D> BoundDynFactor<R, D> {
     pub(crate) fn from_bound(
         space: BoundDynamicFusionMapSpace<R>,
         data: Vec<D>,
@@ -1727,8 +1724,9 @@ pub(crate) struct CompactFactorPlan {
     routes: Arc<[CompactFactorRoute]>,
 }
 
+#[doc(hidden)]
 #[derive(Debug)]
-pub(crate) enum CheckedGenericFactorPlanError<E> {
+pub enum CheckedGenericFactorPlanError<E> {
     Provider(E),
     Operation(OperationError),
 }
@@ -6945,6 +6943,111 @@ where
     ))
 }
 
+fn build_left_right_bound_pair_generic_checked<R, D>(
+    provider: &Arc<R>,
+    homspace: &FusionTreeHomSpace,
+    matricizations: &[SectorMatricization<D>],
+    pairs: &[FactorPair<D>],
+) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let ranks = pairs
+        .iter()
+        .map(|pair| SectorRank {
+            sector: pair.sector,
+            kept: pair.kept,
+        })
+        .collect::<Vec<_>>();
+    let matrix_by_sector = matricization_map(matricizations);
+    let new_leg = SectorLeg::new(ranks.iter().map(|rank| (rank.sector, rank.kept)), false);
+    let left_hom = FusionTreeHomSpace::new(
+        homspace.codomain().clone(),
+        FusionProductSpace::new([new_leg.clone()]),
+    );
+    let left_keys = left_hom
+        .fusion_tree_keys_generic_checked(provider.as_ref())
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    for key in left_keys.iter() {
+        let sector = coupled_of_generic(key.codomain_tree());
+        row_placement(
+            matricization_of(&matrix_by_sector, sector)
+                .map_err(CheckedGenericFactorPlanError::from)?,
+            key.codomain_tree(),
+        )
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    }
+    let left = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(provider),
+        left_hom,
+    )
+    .map_err(CheckedGenericFactorPlanError::from)?;
+    let right_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([new_leg]),
+        homspace.domain().clone(),
+    );
+    let right_keys = right_hom
+        .fusion_tree_keys_generic_checked(provider.as_ref())
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    for key in right_keys.iter() {
+        let sector = coupled_of_generic(key.domain_tree());
+        col_placement(
+            matricization_of(&matrix_by_sector, sector)
+                .map_err(CheckedGenericFactorPlanError::from)?,
+            key.domain_tree(),
+        )
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    }
+    let right = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(provider),
+        right_hom,
+    )
+    .map_err(CheckedGenericFactorPlanError::from)?;
+    let mut left_data = vec![
+        D::zero();
+        left.space().required_len().map_err(|e| {
+            CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(
+                e,
+            ))
+        })?
+    ];
+    let mut right_data = vec![
+        D::zero();
+        right.space().required_len().map_err(|e| {
+            CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(
+                e,
+            ))
+        })?
+    ];
+    for (matrix, pair) in matricizations.iter().zip(pairs) {
+        scatter_left_sector_blocks_generic(
+            left.space(),
+            &mut left_data,
+            matrix,
+            &pair.left,
+            pair.left_rows,
+        )
+        .map_err(CheckedGenericFactorPlanError::from)?;
+        scatter_right_sector_blocks_generic(
+            right.space(),
+            &mut right_data,
+            matrix,
+            &pair.right,
+            pair.right_leading,
+        )
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    }
+    let left_nout = left.space().nout();
+    let right_nin = right.space().nin();
+    Ok((
+        BoundDynFactor::from_bound(left, left_data, left_nout, 1)
+            .map_err(CheckedGenericFactorPlanError::from)?,
+        BoundDynFactor::from_bound(right, right_data, 1, right_nin)
+            .map_err(CheckedGenericFactorPlanError::from)?,
+    ))
+}
+
 /// Generic sibling of [`scatter_left_sector_blocks`].
 fn scatter_left_sector_blocks_generic<D>(
     left_space: &DynamicFusionMapSpace,
@@ -7592,6 +7695,65 @@ where
         });
     }
     build_left_right_bound_pair_generic(provider, space.homspace(), &matrices, &pairs)
+}
+
+/// Checked-Generic compact QR. Provider-bound output spaces are admitted
+/// through the checked staging boundary; dense QR itself performs no provider
+/// queries and therefore needs no Tenferro-specific capability.
+#[doc(hidden)]
+pub fn qr_compact_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let provider = input.space().provider_arc();
+    let space = input.space().space();
+    let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    let mut pairs = Vec::with_capacity(matrices.len());
+    for matrix in &matrices {
+        let rank = matrix.rows.min(matrix.cols);
+        let mut q = vec![D::zero(); matrix.rows * rank];
+        let mut r = vec![D::zero(); rank * matrix.cols];
+        qr_into_workspace(
+            dense,
+            &matrix.data,
+            matrix.rows,
+            matrix.cols,
+            matrix.rows,
+            &mut q,
+            matrix.rows,
+            rank,
+            matrix.rows,
+            &mut r,
+            rank,
+            matrix.cols,
+            rank,
+        )
+        .map_err(CheckedGenericFactorPlanError::from)?;
+        positive_diagonal_gauge_strided(
+            &mut q,
+            matrix.rows,
+            matrix.rows,
+            &mut r,
+            rank,
+            rank,
+            matrix.cols,
+        );
+        pairs.push(FactorPair {
+            sector: matrix.sector,
+            kept: rank,
+            left: q,
+            left_rows: matrix.rows,
+            right: r,
+            right_leading: rank,
+        });
+    }
+    build_left_right_bound_pair_generic_checked(provider, space.homspace(), &matrices, &pairs)
 }
 
 /// Provider-bound compact LQ for a generic rule.

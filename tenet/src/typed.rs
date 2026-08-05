@@ -257,7 +257,7 @@ pub use tenet_matrixalgebra::{Truncation, TruncationSpace};
 
 #[cfg(feature = "cuda")]
 use tenet_matrixalgebra::{select_truncation, WeightedSpectrum};
-use tenet_matrixalgebra::{BoundDynFactor, FactorScalar};
+use tenet_matrixalgebra::{BoundDynFactor, CheckedGenericFactorPlanError, FactorScalar};
 
 use crate::runtime::{Ctx, Ctxs};
 pub use crate::tensor_core::CheckedGenericTensorProductError;
@@ -322,6 +322,49 @@ where
     /// TensorKit adjoint dispatched by provider mode.
     pub fn adjoint(&self) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorAdjointDispatch<R, D>>::adjoint(self)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
+    /// Checked-Generic compact QR for owned host tensors.
+    ///
+    /// The first Generic decomposition leaf deliberately rejects lazy-adjoint
+    /// inputs; no operation-local whole-payload fallback is introduced here.
+    fn qr_compact_checked_generic(
+        &self,
+    ) -> Result<(Self, Self), GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        let TypedTensorRepr::Owned(body) = &self.repr else {
+            return Err(GenericTensorError::Facade(Error::InvalidArgument(
+                "checked Generic qr_compact does not accept lazy adjoints".to_string(),
+            )));
+        };
+        let mut dense = self.runtime.lease_dense();
+        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+            .map_err(|error| GenericTensorError::Facade(error.into()))?;
+        let (q, r) = tenet_matrixalgebra::qr_compact_dyn_checked_generic(dense.dense(), &input)?;
+        Ok((
+            wrap_factor_on(&self.runtime, q),
+            wrap_factor_on(&self.runtime, r),
+        ))
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorQrDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// TensorKit compact QR dispatched by provider mode.
+    pub fn qr_compact(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
+        <R::Mode as TypedTensorQrDispatch<R, D>>::qr_compact(self)
     }
 }
 
@@ -2713,6 +2756,19 @@ impl<E> From<CheckedGenericPlanError<E>> for GenericTensorError<E> {
     }
 }
 
+impl<E> From<CheckedGenericFactorPlanError<E>> for GenericTensorError<E> {
+    fn from(error: CheckedGenericFactorPlanError<E>) -> Self {
+        match error {
+            CheckedGenericFactorPlanError::Provider(error) => {
+                Self::Plan(CheckedGenericPlanError::Provider(error))
+            }
+            CheckedGenericFactorPlanError::Operation(error) => {
+                Self::Plan(CheckedGenericPlanError::Operation(error))
+            }
+        }
+    }
+}
+
 impl<E> From<CheckedGenericTensorProductError<E>> for GenericTensorError<E> {
     fn from(error: CheckedGenericTensorProductError<E>) -> Self {
         Self::TensorProduct(error)
@@ -2863,6 +2919,17 @@ where
     fn adjoint(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Self::FacadeError>;
 }
 
+#[doc(hidden)]
+pub trait TypedTensorQrDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn qr_compact(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
+}
+
 impl<R> TypedSpaceModeDispatch<R> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
@@ -2974,6 +3041,19 @@ where
     }
 }
 
+impl<R, D> TypedTensorQrDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn qr_compact(tensor: &TensorMap<R, D>) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Error> {
+        tensor.qr_compact_multiplicity_free()
+    }
+}
+
 impl<R, D> TypedTensorAdjointDispatch<R, D> for CheckedGenericAdmissionMode
 where
     R: TypedSectorAdmission<
@@ -3006,6 +3086,24 @@ where
                 repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
             },
         })
+    }
+}
+
+impl<R, D> TypedTensorQrDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
+    fn qr_compact(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<
+        (TensorMap<R, D>, TensorMap<R, D>),
+        GenericTensorError<<R as CheckedGenericFusion>::Error>,
+    > {
+        tensor.qr_compact_checked_generic()
     }
 }
 
@@ -4428,10 +4526,7 @@ where
 
 /// [`TensorMap::wrap_bound_factor`]'s body, free for the same reason as
 /// [`diagonal_factor_on`].
-fn wrap_factor_on<R, E>(runtime: &Runtime, factor: BoundDynFactor<R, E>) -> TensorMap<R, E>
-where
-    R: tenet_core::FusionRule,
-{
+fn wrap_factor_on<R, E>(runtime: &Runtime, factor: BoundDynFactor<R, E>) -> TensorMap<R, E> {
     let (space, data) = factor.into_parts();
     TensorMap {
         runtime: runtime.clone(),
@@ -9395,7 +9490,7 @@ where
     /// (MatrixAlgebraKit's `DiagonalAlgorithm`); that fast path is not adopted
     /// here — the issue #613 Group 4 contract requires every compact fast path
     /// to be re-proven individually, the same deferral the polars record.
-    pub fn qr_compact(&self) -> Result<(Self, Self), Error> {
+    fn qr_compact_multiplicity_free(&self) -> Result<(Self, Self), Error> {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             return self.materialized_tensor_uncached()?.qr_compact();
         }
