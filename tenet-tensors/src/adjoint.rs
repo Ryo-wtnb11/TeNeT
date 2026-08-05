@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use tenet_core::{
-    BlockKey, BlockStructure, CoreError, FusionRule, FusionTensorMapSpace, FusionTreeHomSpace,
-    FusionTreePairKey, MultiplicityFreeRigidSymbols, TensorMap, TensorMapSpace,
+    BlockKey, BlockStructure, CheckedGenericFusion, CoreError, FusionRule, FusionTensorMapSpace,
+    FusionTreeHomSpace, FusionTreePairKey, MultiplicityFreeRigidSymbols, TensorMap, TensorMapSpace,
 };
 
 use crate::contract::{
@@ -21,7 +21,7 @@ use crate::contract::{
     reset_scratch_publication_observations, scratch_publication_observations, MetadataOutput,
     MetadataRequest,
 };
-use crate::{ConjugateValue, OperationError};
+use crate::{CheckedGenericPlanError, ConjugateValue, OperationError};
 
 /// Dynamic-rank adjoint space (dagger of the homspace): codomain and domain
 /// swapped, per-block shapes transposed. Pure metadata — touches no data — so a
@@ -407,6 +407,41 @@ where
 {
     let output = adjoint_space_dyn_generic(space.provider(), space.space())?;
     BoundDynamicFusionMapSpace::from_derived(Arc::clone(space.provider_arc()), output)
+}
+
+/// Checked Generic lazy-adjoint metadata. Structural admission and all
+/// provider queries complete before the derived layout is published.
+pub fn adjoint_bound_space_dyn_generic_checked<R>(
+    space: &BoundDynamicFusionMapSpace<R>,
+) -> Result<BoundDynamicFusionMapSpace<R>, CheckedGenericPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+{
+    let homspace = space.space().homspace();
+    let adjoint_hom =
+        FusionTreeHomSpace::new(homspace.domain().clone(), homspace.codomain().clone());
+    let structure = Arc::clone(space.space().structure());
+    let keys = adjoint_hom
+        .fusion_tree_keys_generic_checked(space.provider())
+        .map_err(CheckedGenericPlanError::from)?;
+    for key in keys {
+        let source_key = BlockKey::FusionTree(FusionTreePairKey::pair(
+            key.domain_tree().clone(),
+            key.codomain_tree().clone(),
+        ));
+        if structure.find_block_index_by_key(&source_key).is_none() {
+            return Err(CheckedGenericPlanError::Operation(
+                OperationError::MissingBlockKey {
+                    key: Box::new(source_key),
+                },
+            ));
+        }
+    }
+    BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(space.provider_arc()),
+        adjoint_hom,
+    )
+    .map_err(CheckedGenericPlanError::from)
 }
 
 /// Generic-fusion (SU(N)) sibling of [`adjoint_space_dyn`]. The adjoint is a

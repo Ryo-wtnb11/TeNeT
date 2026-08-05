@@ -73,6 +73,7 @@ pub use oriented_elementwise::{
     oriented_fusion_add_into, oriented_fusion_inner, validate_oriented_fusion_layout,
 };
 // Stage B3a: Generic-fusion (outer-multiplicity) facade siblings.
+pub use adjoint::adjoint_bound_space_dyn_generic_checked;
 pub use facade::{
     braid_into_generic, permute_into_generic, transpose_into_generic, tree_transform_into_generic,
     tree_transform_into_with_generic, tree_transform_structure_generic,
