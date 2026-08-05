@@ -436,6 +436,34 @@ where
     Ok(total)
 }
 
+fn checked_generic_weight_map_for<R, D>(
+    tensor: &TensorMap<R, D>,
+) -> Result<HashMap<SectorId, f64>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion
+        + CheckedGenericRigidSymbols<Scalar = f64>,
+    D: TensorScalar,
+{
+    let regions = sector_regions(
+        tensor.logical_space().space().structure(),
+        tensor.logical_space().space().nout(),
+    )?;
+    let mut weights = HashMap::with_capacity(regions.len());
+    for region in regions.iter() {
+        let sector = region.coupled();
+        if weights.contains_key(&sector) {
+            continue;
+        }
+        let weight =
+            <R::Mode as TypedSpaceModeDispatch<R>>::dim(tensor.logical_space().provider(), sector)?;
+        weights.insert(sector, weight);
+    }
+    Ok(weights)
+}
+
 /// Quantum-dimension-weighted Frobenius inner product over the stored
 /// blocks: `sum_c dim(c) * <a_c, b_c>` with the first argument conjugated,
 /// matching TensorKit's `dot` (which conjugates its first argument). Real
@@ -2909,6 +2937,120 @@ where
     }
     fn tr(tensor: &TensorMap<R, D>) -> Result<D, Error> {
         tensor.tr_multiplicity_free()
+    }
+}
+
+impl<R, D> TypedTensorReductionDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion
+        + CheckedGenericRigidSymbols<Scalar = f64>,
+    D: TensorScalar,
+{
+    fn inner(
+        tensor: &TensorMap<R, D>,
+        other: &TensorMap<R, D>,
+    ) -> Result<D, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        if !tensor.runtime.same_runtime(&other.runtime) {
+            return Err(Error::RuntimeMismatch.into());
+        }
+        if tensor.logical_space().space() != other.logical_space().space() {
+            return Err(Error::InvalidArgument(
+                "tensors live on different spaces or block layouts".to_string(),
+            )
+            .into());
+        }
+        if matches!(&tensor.repr, TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Diagonal(_)))
+            || matches!(&other.repr, TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Diagonal(_)))
+            || matches!(&tensor.repr, TypedTensorRepr::Adjoint(_))
+            || matches!(&other.repr, TypedTensorRepr::Adjoint(_))
+        {
+            return Err(Error::InvalidArgument(
+                "checked Generic reductions require owned dense payloads".to_string(),
+            )
+            .into());
+        }
+        let weights = checked_generic_weight_map_for(tensor)?;
+        let value = coupled_region_inner(
+            tensor.logical_space().space().structure(),
+            tensor.logical_space().space().nout(),
+            tensor
+                .owned_body()
+                .expect("owned inner input")
+                .materialized_dense_data(),
+            other
+                .owned_body()
+                .expect("owned inner input")
+                .materialized_dense_data(),
+            |sector| *weights.get(&sector).unwrap_or(&0.0),
+        )?;
+        Ok(D::from_complex64(value))
+    }
+
+    fn norm(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<f64, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        Ok(Self::inner(tensor, tensor)?.widen_complex().re.sqrt())
+    }
+
+    fn tr(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<D, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        let hom = tensor.logical_space().space().homspace();
+        if hom.codomain().legs() != hom.domain().legs() {
+            return Err(Error::InvalidArgument(
+                "tr() requires an endomorphism (domain == codomain)".to_string(),
+            )
+            .into());
+        }
+        if matches!(&tensor.repr, TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Diagonal(_)))
+            || matches!(&tensor.repr, TypedTensorRepr::Adjoint(_))
+        {
+            return Err(Error::InvalidArgument(
+                "checked Generic reductions require owned dense payloads".to_string(),
+            )
+            .into());
+        }
+        let weights = checked_generic_weight_map_for(tensor)?;
+        let structure = tensor.logical_space().space().structure();
+        let nout = tensor.logical_space().space().nout();
+        let data = tensor
+            .owned_body()
+            .expect("owned trace input")
+            .materialized_dense_data();
+        let mut total = num_complex::Complex64::new(0.0, 0.0);
+        for index in 0..structure.block_count() {
+            let block = structure.block(index).map_err(Error::from)?;
+            let BlockKey::FusionTree(key) = block.key() else {
+                return Err(
+                    Error::InvalidArgument("tr() requires fusion-tree blocks".to_string()).into(),
+                );
+            };
+            if key.codomain_tree() != key.domain_tree() {
+                continue;
+            }
+            let shape = block.shape();
+            let strides = block.strides();
+            let mut partial = D::from_real(0.0);
+            for linear in 0..shape[..nout].iter().product() {
+                let mut remainder = linear;
+                let mut position = block.offset();
+                for axis in 0..nout {
+                    let coordinate = remainder % shape[axis];
+                    remainder /= shape[axis];
+                    position += coordinate * (strides[axis] + strides[nout + axis]);
+                }
+                partial = partial + data[position];
+            }
+            total += partial.widen_complex()
+                * weights
+                    .get(&key.codomain_tree().coupled())
+                    .copied()
+                    .unwrap_or(0.0);
+        }
+        Ok(D::from_complex64(total))
     }
 }
 
