@@ -1804,6 +1804,23 @@ impl<'a> OrientedFusionTreeHomSpace<'a> {
             .transpose()
     }
 
+    /// Checked Generic sibling of [`Self::try_external_axis_leg`] that keeps
+    /// provider failures typed and does not require the infallible
+    /// [`FusionRule`] contract.
+    #[doc(hidden)]
+    pub fn try_external_axis_leg_generic<R>(
+        self,
+        rule: &R,
+        axis: usize,
+    ) -> Result<Option<SectorLeg>, CheckedGenericStructureError<R::Error>>
+    where
+        R: CheckedGenericFusion,
+    {
+        self.external_axis_leg_view(axis)
+            .map(|view| view.try_materialize_generic(rule))
+            .transpose()
+    }
+
     #[doc(hidden)]
     pub fn external_axis_is_dual(self, axis: usize) -> Option<bool> {
         self.external_axis_leg_view(axis).map(OrientedLegView::is_dual)

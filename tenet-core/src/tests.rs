@@ -13669,6 +13669,27 @@ mod tests {
         assert_eq!(tail.is_dual(), &[false, false, false]);
     }
 
+    #[test]
+    fn checked_generic_external_axis_leg_keeps_provider_boundary() {
+        let rule = UnitaryToyOmRule;
+        let a = SectorId::new(UnitaryToyOmRule::A);
+        let homspace = FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(a, 1)], false)]),
+            FusionProductSpace::new([]),
+        );
+        let oriented = OrientedFusionTreeHomSpace::new(
+            &homspace,
+            FusionTreePairOrientation::Direct,
+        );
+        let leg = oriented
+            .try_external_axis_leg_generic(&rule, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(leg.sectors(), &[a]);
+        assert_eq!(leg.degeneracies(), &[1]);
+        assert!(!leg.is_dual());
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ArtinSpyError { F, R }
     impl std::fmt::Display for ArtinSpyError { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{self:?}") } }
