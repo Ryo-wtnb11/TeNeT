@@ -810,6 +810,31 @@ fn sun_checked_generic_full_qr_preserves_provider_and_reconstructs() {
         .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-10));
 }
 
+#[cfg(feature = "racah-generated")]
+#[test]
+fn sun_checked_generic_svd_vals_matches_compact_spectrum() {
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 1)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, _| {
+            trees.coupled().iter().sum::<i64>() as f64 + 1.0
+        })
+        .unwrap();
+    let spectra = source.svd_vals().unwrap();
+    assert!(!spectra.is_empty());
+    assert!(spectra.iter().all(|spectrum| spectrum
+        .values
+        .iter()
+        .all(|value| value.is_finite() && *value >= 0.0)));
+
+    let complex = source.to_c64();
+    let complex_spectra = complex.svd_vals().unwrap();
+    assert_eq!(complex_spectra, spectra);
+}
+
 #[test]
 fn checked_generic_lazy_adjoint_preserves_provider_and_reductions() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();

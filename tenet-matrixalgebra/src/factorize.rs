@@ -8012,6 +8012,43 @@ where
     build_left_right_bound_pair_generic_checked(&provider, space.homspace(), &matrices, &pairs)
 }
 
+/// Checked-Generic singular values only. No factor-space publication occurs.
+#[doc(hidden)]
+pub fn svd_vals_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<Vec<SectorSpectrum>, CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let space = input.space().space();
+    let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    let mut singular_values = Vec::with_capacity(matrices.len());
+    for matrix in &matrices {
+        let input_shape = [matrix.rows, matrix.cols];
+        let input_strides = [1usize, matrix.rows];
+        let input_view =
+            DenseView::new(&matrix.data, &input_shape, &input_strides, 0).map_err(|error| {
+                CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
+            })?;
+        let values = dense.svd_vals(D::dense_read(input_view)).map_err(|error| {
+            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
+        })?;
+        let mut values = D::real_spectrum(&values).map_err(|error| {
+            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
+        })?;
+        values.truncate(matrix.rows.min(matrix.cols));
+        singular_values.push(SectorSpectrum {
+            sector: matrix.sector,
+            values,
+        });
+    }
+    Ok(singular_values)
+}
+
 /// Provider-bound compact LQ for a generic rule.
 pub fn lq_compact_dyn_generic<E, R, D>(
     dense: &mut E,
