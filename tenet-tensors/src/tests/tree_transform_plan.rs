@@ -8379,6 +8379,58 @@ fn build_generic_tree_pair_plan_matches_core_rows_and_guards_style() {
 }
 
 #[test]
+fn checked_generic_positive_trace_terms_filter_diagonal_blocks_and_preserve_provider_error() {
+    let rule = DenseGenericRule;
+    let provider = Arc::new(CheckedPlanSpy::new(&rule));
+    let sector = SectorId::new(1);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(sector, 1)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(sector, 1)], false)]),
+    );
+    let source = crate::BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        homspace,
+    )
+    .unwrap();
+    let terms = crate::tensortrace::generic_positive_trace_terms_checked(&source).unwrap();
+    assert!(!terms.is_empty());
+    assert!(terms.len() <= source.space().structure().block_count());
+    for term in &terms {
+        let BlockKey::FusionTree(key) = source
+            .space()
+            .structure()
+            .block(term.src_block())
+            .unwrap()
+            .key()
+        else {
+            panic!("positive trace emitted a non-fusion block")
+        };
+        assert_eq!(key.codomain_tree(), key.domain_tree());
+        assert_eq!(term.coefficient(), 1.0);
+    }
+    let diagonal_count = (0..source.space().structure().block_count())
+        .filter(|&index| {
+            let BlockKey::FusionTree(key) = source.space().structure().block(index).unwrap().key()
+            else {
+                return false;
+            };
+            key.codomain_tree() == key.domain_tree()
+        })
+        .count();
+    assert_eq!(terms.len(), diagonal_count);
+
+    let next_sqrt = provider.call_count(CheckedPlanCall::SqrtDim) + 1;
+    provider
+        .fail
+        .set(Some((CheckedPlanCall::SqrtDim, next_sqrt)));
+    let error = crate::tensortrace::generic_positive_trace_terms_checked(&source).unwrap_err();
+    assert!(matches!(
+        error,
+        crate::CheckedGenericPlanError::Provider(CheckedPlanSpyError(CheckedPlanCall::SqrtDim))
+    ));
+}
+
+#[test]
 fn generic_multiplicity_monomial_rows_compile_and_execute_as_direct_singles() {
     use crate::tree_transform::{reset_tree_pair_lowering_calls, tree_pair_lowering_calls};
 
