@@ -12816,6 +12816,32 @@ where
     Ok((output_frame.materialize(validated.local), coefficient))
 }
 
+struct UniqueRigidTreePairState {
+    frame: MultiplicityFreeTreePairFrame,
+    local: MultiplicityFreeTreePairLocal,
+}
+
+fn unique_rigid_bendright_state<R>(
+    rule: &R,
+    state: UniqueRigidTreePairState,
+) -> Result<(UniqueRigidTreePairState, R::Scalar), CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Mul<Output = R::Scalar>,
+{
+    let prepared = prepare_multiplicity_free_bendright(rule, &state.frame)?;
+    let validated = prepared.validate_local(rule, &state.local.codomain, &state.local.domain)?;
+    let output_frame = prepared.output_frame(rule)?;
+    let coefficient = prepared.coefficient(rule, &validated);
+    Ok((
+        UniqueRigidTreePairState {
+            frame: output_frame,
+            local: validated.local,
+        },
+        coefficient,
+    ))
+}
+
 fn unique_rigid_bendleft_tree_pair<R>(
     rule: &R,
     tree_pair: &FusionTreePairKey,
@@ -12830,6 +12856,27 @@ where
     let output_frame = prepared.output_frame(rule)?;
     let (output_local, coefficient) = prepared.finish_local(rule, validated);
     Ok((output_frame.materialize(output_local), coefficient))
+}
+
+fn unique_rigid_bendleft_state<R>(
+    rule: &R,
+    state: UniqueRigidTreePairState,
+) -> Result<(UniqueRigidTreePairState, R::Scalar), CoreError>
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + Mul<Output = R::Scalar>,
+{
+    let prepared = prepare_multiplicity_free_bendleft(rule, &state.frame)?;
+    let validated = prepared.validate_local(rule, &state.local.codomain, &state.local.domain)?;
+    let output_frame = prepared.output_frame(rule)?;
+    let (local, coefficient) = prepared.finish_local(rule, validated);
+    Ok((
+        UniqueRigidTreePairState {
+            frame: output_frame,
+            local,
+        },
+        coefficient,
+    ))
 }
 
 fn unique_rigid_foldright_tree_pair<R>(
@@ -12984,22 +13031,23 @@ where
         });
     }
 
-    let mut current = tree_pair.clone();
-    let mut current_codomain_rank = current.codomain_tree().uncoupled().len();
+    let (frame, local) = project_multiplicity_free_tree_pair(rule, tree_pair)?;
+    let mut current = UniqueRigidTreePairState { frame, local };
+    let mut current_codomain_rank = current.frame.codomain.uncoupled.len();
     let mut coefficient = rule.scalar_one();
     while current_codomain_rank < target_codomain_rank {
-        let (next, step_coefficient) = unique_rigid_bendleft_tree_pair(rule, &current)?;
+        let (next, step_coefficient) = unique_rigid_bendleft_state(rule, current)?;
         coefficient = coefficient * step_coefficient;
         current = next;
         current_codomain_rank += 1;
     }
     while current_codomain_rank > target_codomain_rank {
-        let (next, step_coefficient) = unique_rigid_bendright_tree_pair(rule, &current)?;
+        let (next, step_coefficient) = unique_rigid_bendright_state(rule, current)?;
         coefficient = coefficient * step_coefficient;
         current = next;
         current_codomain_rank -= 1;
     }
-    Ok((current, coefficient))
+    Ok((current.frame.materialize(current.local), coefficient))
 }
 
 fn unique_rigid_multi_fmove_tree<R>(
