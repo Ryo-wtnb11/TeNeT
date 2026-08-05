@@ -1,4 +1,5 @@
 use num_complex::{Complex32, Complex64};
+use std::sync::Arc;
 
 use crate::{DenseBackend, DenseDType, DenseError};
 
@@ -14,7 +15,8 @@ pub struct DenseTensor {
 #[derive(Clone, Debug)]
 enum DenseTensorInner {
     #[cfg(feature = "tenferro")]
-    Tenferro(tenferro_tensor::Tensor),
+    #[allow(dead_code)]
+    Tenferro(Arc<tenferro_tensor::Tensor>),
     #[cfg(not(feature = "tenferro"))]
     #[allow(dead_code)]
     Empty(std::convert::Infallible),
@@ -89,10 +91,11 @@ impl DenseTensor {
     }
 
     #[cfg(feature = "tenferro")]
+    #[cfg(not(feature = "provider-inject"))]
     pub(crate) fn from_tenferro(tensor: tenferro_tensor::Tensor) -> Self {
         Self {
             backend: DenseBackend::Tenferro,
-            inner: DenseTensorInner::Tenferro(tensor),
+            inner: DenseTensorInner::Tenferro(Arc::new(tensor)),
         }
     }
 }
