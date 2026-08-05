@@ -30,7 +30,7 @@ categorical coefficients are separately constrained by the provider bounds.
 |---|---|---|---|---|---|---|---|
 | Space and tensor construction; labelled block readback | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED |
 | Physical dense expansion and symmetric projection | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
-| `adjoint` | PROVED lazy view | NEEDS-PROOF | PROVED lazy view | PROVED lazy view | PROVED lazy view | UNSUPPORTED | UNSUPPORTED |
+| `adjoint` | PROVED lazy view | NEEDS-PROOF | PROVED lazy view | PROVED lazy view | PROVED lazy view | UNSUPPORTED | PROVED for SU(3)/SU(4) real-provider fixtures |
 | `permute`, `transpose`, `repartition` | PROVED | PROVED for CU(1); NEEDS-PROOF for ZN | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED |
 | `braid` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED |
 | `twist` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED |
@@ -38,7 +38,7 @@ categorical coefficients are separately constrained by the provider bounds.
 | `catdomain`, `catcodomain`, `absorb` | PROVED | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | UNSUPPORTED |
 | `otimes` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED |
 | arbitrary `contract`, ordered output, `compose` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED |
-| `add`, `scale`, `norm`, `inner`, `trace_pairs`, `tr` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED |
+| `add`, `scale`, `norm`, `inner`, `trace_pairs`, `tr` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | `norm`/`inner`/`tr` PROVED for SU(3)/SU(4) real-provider fixtures; `add`/`scale`/`trace_pairs` remain UNSUPPORTED |
 | compact QR and compact SVD | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED |
 | full/truncated SVD, values, LQ, orthogonal/null/polar factors | PROVED on U1/Z2 fixtures | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | UNSUPPORTED |
 | EIG/EIGH, `exp`, `inv`, `solve`, `pinv`, `sqrt`, `powi` | PROVED on Z2 fixtures | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | UNSUPPORTED |
@@ -75,11 +75,11 @@ and transactional nonpublication as each new row becomes reachable.
 | Stable `data() -> &[D]` | PROVED | PROVED | INTENTIONAL-DIFFERENCE: only `S: HostReadableStorage<D>` | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | Physical dense expansion and symmetric projection | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | Explicit Host/device transfer | N/A | N/A | NEEDS-PROOF for future storage types | PROVED | PROVED transfer-only | UNSUPPORTED |
-| Adjoint | PROVED lazy view | UNSUPPORTED | NEEDS-PROOF | PROVED lazy view | UNSUPPORTED | UNSUPPORTED |
+| Adjoint | PROVED lazy view | PROVED lazy view for SU(3)/SU(4) real-provider fixtures | NEEDS-PROOF | PROVED lazy view | UNSUPPORTED | UNSUPPORTED |
 | General permutation/braid/recoupling | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | Canonical direct contract/compose | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | UNSUPPORTED |
 | Noncanonical transform-dependent contraction | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED with typed preflight error | UNSUPPORTED | UNSUPPORTED |
-| Arithmetic and reductions | PROVED | UNSUPPORTED | UNSUPPORTED | PROVED | UNSUPPORTED | UNSUPPORTED |
+| Arithmetic and reductions | PROVED | `norm`/`inner`/`tr` PROVED for SU(3)/SU(4) real-provider fixtures; add/scale remain UNSUPPORTED | UNSUPPORTED | PROVED | UNSUPPORTED | UNSUPPORTED |
 | QR | PROVED compact/full | UNSUPPORTED | UNSUPPORTED | PROVED compact only | UNSUPPORTED | UNSUPPORTED |
 | SVD | PROVED compact/full/truncated/values | UNSUPPORTED | UNSUPPORTED | PROVED compact and truncated | UNSUPPORTED | UNSUPPORTED |
 | EIGH | PROVED full/truncated/values | UNSUPPORTED | UNSUPPORTED | PROVED full and truncated | UNSUPPORTED | UNSUPPORTED |
@@ -135,8 +135,9 @@ the capability tables have no call path and are intentionally omitted.
 Two consequences are visible in this census. First, the checked-Generic path is
 not merely missing facade methods: its existing transform/product path routes
 through owned-data helpers, and contraction explicitly accepts only direct
-owned inputs. Because checked Generic has no public lazy adjoint, those helpers
-do not create a receiver-sized copy today. Second, the Host multiplicity-free
+owned inputs. The checked-Generic adjoint and direct reductions now have public
+mode-dispatched paths, while operation coverage is still anchored to the
+SU(3)/SU(4) real-provider fixtures listed above. Second, the Host multiplicity-free
 decomposition surface does not retain factorization results or dense
 workspaces; only network replay has an explicit bounded idle-workspace owner.
 These are current facts, not recommendations to add caches.
@@ -157,7 +158,7 @@ These are three different mechanisms and must not be combined under one
 
 | Mechanism | Current owner and trigger | Current scope |
 |---|---|---|
-| parent-backed lazy view | `TypedAdjointView` created by multiplicity-free Host/CUDA `adjoint()` | metadata and canonical parent storage only; checked Generic has no public `adjoint()` |
+| parent-backed lazy view | `TypedAdjointView` created by multiplicity-free Host/CUDA or checked-Generic Host `adjoint()` | metadata and canonical parent storage only; checked-Generic coverage is currently pinned by SU(3)/SU(4) real-provider fixtures |
 | receiver-retained whole logical payload | the lazy view's `OnceLock`, populated only by Host-readable `data()` | compatibility storage for a stable `&[D]`, not an execution cache |
 | operation-local full logical payload | `materialized_tensor_uncached()` | used only where no orientation-aware seam/algebraic redirect exists; never published to the receiver |
 
