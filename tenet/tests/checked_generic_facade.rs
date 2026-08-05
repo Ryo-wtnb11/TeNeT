@@ -661,6 +661,28 @@ fn checked_generic_reductions_cover_real_complex_dense_payloads() {
 }
 
 #[test]
+fn checked_generic_lazy_adjoint_preserves_provider_and_reductions() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            (indices.iter().sum::<usize>() + 1) as f64
+        })
+        .unwrap();
+
+    let adjoint = source.adjoint().unwrap();
+    assert!(std::ptr::eq(adjoint.provider(), provider.as_ref()));
+    assert!((adjoint.norm().unwrap() - source.norm().unwrap()).abs() < 1.0e-12);
+    assert!((adjoint.tr().unwrap() - source.tr().unwrap()).abs() < 1.0e-12);
+
+    let complex = source.to_c64();
+    let complex_adjoint = complex.adjoint().unwrap();
+    assert!(std::ptr::eq(complex_adjoint.provider(), provider.as_ref()));
+    assert!((complex_adjoint.tr().unwrap() - complex.tr().unwrap().conj()).norm() < 1.0e-12);
+}
+
+#[test]
 fn checked_generic_reduction_dimension_failure_is_typed_and_nonpublishing() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));

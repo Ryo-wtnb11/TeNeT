@@ -313,6 +313,18 @@ where
     }
 }
 
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorAdjointDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// TensorKit adjoint dispatched by provider mode.
+    pub fn adjoint(&self) -> Result<Self, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorAdjointDispatch<R, D>>::adjoint(self)
+    }
+}
+
 impl ScalarOps for f64 {
     fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
         ctxs: &mut Ctxs<Key>,
@@ -2842,6 +2854,15 @@ where
     fn tr(tensor: &TensorMap<R, D>) -> Result<D, Self::FacadeError>;
 }
 
+#[doc(hidden)]
+pub trait TypedTensorAdjointDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn adjoint(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Self::FacadeError>;
+}
+
 impl<R> TypedSpaceModeDispatch<R> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
@@ -2937,6 +2958,54 @@ where
     }
     fn tr(tensor: &TensorMap<R, D>) -> Result<D, Error> {
         tensor.tr_multiplicity_free()
+    }
+}
+
+impl<R, D> TypedTensorAdjointDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn adjoint(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
+        tensor.adjoint_multiplicity_free()
+    }
+}
+
+impl<R, D> TypedTensorAdjointDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
+    fn adjoint(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        Ok(match &tensor.repr {
+            TypedTensorRepr::Owned(parent) => {
+                let logical_space =
+                    tenet_tensors::adjoint_bound_space_dyn_generic_checked(&parent.space)
+                        .map_err(GenericTensorError::Plan)?;
+                TensorMap {
+                    runtime: tensor.runtime.clone(),
+                    repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView {
+                        parent: Arc::clone(parent),
+                        logical_space,
+                        materialized: OnceLock::new(),
+                        #[cfg(test)]
+                        materialized_body_builds: std::sync::atomic::AtomicUsize::new(0),
+                    })),
+                }
+            }
+            TypedTensorRepr::Adjoint(view) => TensorMap {
+                runtime: tensor.runtime.clone(),
+                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+            },
+        })
     }
 }
 
@@ -10745,7 +10814,7 @@ where
     ///
     /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`]
     /// straight from the seam, which owns the bend the dagger performs.
-    pub fn adjoint(&self) -> Result<Self, Error> {
+    fn adjoint_multiplicity_free(&self) -> Result<Self, Error> {
         if let Some(spectrum) = self.spectrum() {
             // A bond space is its own adjoint (`codomain == domain`), and the
             // dagger of a diagonal is the conjugated diagonal — so this is
