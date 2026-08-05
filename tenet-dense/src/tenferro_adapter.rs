@@ -10,8 +10,11 @@ use crate::{
 use std::sync::Arc;
 
 use tenferro_cpu::{CpuBackend, CpuBackendKind, CpuContext};
+#[cfg(not(feature = "provider-inject"))]
 use tenferro_linalg::{TensorLinalgExt, TensorReadLinalgExt};
-use tenferro_tensor::backend::{BackendSessionHost, GroupedGemmConfig, GroupedGemmJob};
+#[cfg(not(feature = "provider-inject"))]
+use tenferro_tensor::backend::BackendSessionHost;
+use tenferro_tensor::backend::{GroupedGemmConfig, GroupedGemmJob};
 use tenferro_tensor::{
     BackendCachedDot, BackendRuntimeCache, DotGeneralConfig, TensorDot, TensorRead, TensorView,
     TensorViewMut, TensorWrite, TypedTensorView, TypedTensorViewMut,
@@ -482,55 +485,87 @@ impl Default for DefaultDenseExecutor {
 
 impl DenseExecutor for DefaultDenseExecutor {
     fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        let input = tenferro_view(input)?;
-        TensorRead::from_view(input)
-            .svd_read(&mut self.backend)
-            .map(|(u, s, vt)| {
-                vec![u, s, vt]
-                    .into_iter()
-                    .map(DenseTensor::from_tenferro)
-                    .collect()
-            })
-            .map_err(|err| tenferro_error("svd_read", err))
+        #[cfg(feature = "provider-inject")]
+        {
+            let _ = input;
+            return Err(linalg_unavailable("svd"));
+        }
+        #[cfg(not(feature = "provider-inject"))]
+        {
+            let input = tenferro_view(input)?;
+            TensorRead::from_view(input)
+                .svd_read(&mut self.backend)
+                .map(|(u, s, vt)| {
+                    vec![u, s, vt]
+                        .into_iter()
+                        .map(DenseTensor::from_tenferro)
+                        .collect()
+                })
+                .map_err(|err| tenferro_error("svd_read", err))
+        }
     }
 
     fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        let input = tenferro_view(input)?;
-        TensorRead::from_view(input)
-            .qr_read(&mut self.backend)
-            .map(|(q, r)| {
-                vec![q, r]
-                    .into_iter()
-                    .map(DenseTensor::from_tenferro)
-                    .collect()
-            })
-            .map_err(|err| tenferro_error("qr_read", err))
+        #[cfg(feature = "provider-inject")]
+        {
+            let _ = input;
+            return Err(linalg_unavailable("qr"));
+        }
+        #[cfg(not(feature = "provider-inject"))]
+        {
+            let input = tenferro_view(input)?;
+            TensorRead::from_view(input)
+                .qr_read(&mut self.backend)
+                .map(|(q, r)| {
+                    vec![q, r]
+                        .into_iter()
+                        .map(DenseTensor::from_tenferro)
+                        .collect()
+                })
+                .map_err(|err| tenferro_error("qr_read", err))
+        }
     }
 
     fn eig(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        let input = tenferro_view(input)?;
-        TensorRead::from_view(input)
-            .eig_read(&mut self.backend)
-            .map(|(values, vectors)| {
-                vec![values, vectors]
-                    .into_iter()
-                    .map(DenseTensor::from_tenferro)
-                    .collect()
-            })
-            .map_err(|err| tenferro_error("eig_read", err))
+        #[cfg(feature = "provider-inject")]
+        {
+            let _ = input;
+            return Err(linalg_unavailable("eig"));
+        }
+        #[cfg(not(feature = "provider-inject"))]
+        {
+            let input = tenferro_view(input)?;
+            TensorRead::from_view(input)
+                .eig_read(&mut self.backend)
+                .map(|(values, vectors)| {
+                    vec![values, vectors]
+                        .into_iter()
+                        .map(DenseTensor::from_tenferro)
+                        .collect()
+                })
+                .map_err(|err| tenferro_error("eig_read", err))
+        }
     }
 
     fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        let input = tenferro_view(input)?;
-        TensorRead::from_view(input)
-            .eigh_read(&mut self.backend)
-            .map(|(values, vectors)| {
-                vec![values, vectors]
-                    .into_iter()
-                    .map(DenseTensor::from_tenferro)
-                    .collect()
-            })
-            .map_err(|err| tenferro_error("eigh_read", err))
+        #[cfg(feature = "provider-inject")]
+        {
+            let _ = input;
+            return Err(linalg_unavailable("eigh"));
+        }
+        #[cfg(not(feature = "provider-inject"))]
+        {
+            let input = tenferro_view(input)?;
+            TensorRead::from_view(input)
+                .eigh_read(&mut self.backend)
+                .map(|(values, vectors)| {
+                    vec![values, vectors]
+                        .into_iter()
+                        .map(DenseTensor::from_tenferro)
+                        .collect()
+                })
+                .map_err(|err| tenferro_error("eigh_read", err))
+        }
     }
 
     fn solve_into(
@@ -539,30 +574,38 @@ impl DenseExecutor for DefaultDenseExecutor {
         b: DenseRead<'_>,
         x: DenseWrite<'_>,
     ) -> Result<(), DenseError> {
-        if x.dtype() != b.dtype() {
-            return Err(DenseError::DTypeMismatch {
-                op: "solve_into",
-                expected: b.dtype(),
-                actual: x.dtype(),
-            });
+        #[cfg(feature = "provider-inject")]
+        {
+            let _ = (a, b, x);
+            return Err(linalg_unavailable("solve_into"));
         }
-        if x.shape() != b.shape() {
-            return Err(DenseError::ShapeMismatch {
-                op: "solve_into",
-                expected: b.shape().to_vec(),
-                actual: x.shape().to_vec(),
-            });
+        #[cfg(not(feature = "provider-inject"))]
+        {
+            if x.dtype() != b.dtype() {
+                return Err(DenseError::DTypeMismatch {
+                    op: "solve_into",
+                    expected: b.dtype(),
+                    actual: x.dtype(),
+                });
+            }
+            if x.shape() != b.shape() {
+                return Err(DenseError::ShapeMismatch {
+                    op: "solve_into",
+                    expected: b.shape().to_vec(),
+                    actual: x.shape().to_vec(),
+                });
+            }
+            let a = tenferro_view(a)?;
+            let b = tenferro_view(b)?;
+            let x = tenferro_view_mut(x)?;
+            TensorRead::from_view(a)
+                .solve_read_into(
+                    TensorRead::from_view(b),
+                    TensorWrite::from_view(x),
+                    &mut self.backend,
+                )
+                .map_err(tenferro_solve_error)
         }
-        let a = tenferro_view(a)?;
-        let b = tenferro_view(b)?;
-        let x = tenferro_view_mut(x)?;
-        TensorRead::from_view(a)
-            .solve_read_into(
-                TensorRead::from_view(b),
-                TensorWrite::from_view(x),
-                &mut self.backend,
-            )
-            .map_err(tenferro_solve_error)
     }
 
     // The current tenferro public extension API exposes values-only results
@@ -571,39 +614,63 @@ impl DenseExecutor for DefaultDenseExecutor {
     // factors. The borrowed view is materialized once because the owned
     // extension methods require a contiguous Tensor.
     fn svd_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
-        let input = tenferro_view(input)?;
-        let owned = self
-            .backend
-            .with_backend_session(|exec| exec.to_contiguous_read(TensorRead::from_view(input)))
-            .map_err(|err| tenferro_error("svd_values", err))?;
-        let (_, values, _) = owned
-            .svd(&mut self.backend)
-            .map_err(|err| tenferro_error("svd_values", err))?;
-        Ok(DenseTensor::from_tenferro(values))
+        #[cfg(feature = "provider-inject")]
+        {
+            let _ = input;
+            return Err(linalg_unavailable("svd_vals"));
+        }
+        #[cfg(not(feature = "provider-inject"))]
+        {
+            let input = tenferro_view(input)?;
+            let owned = self
+                .backend
+                .with_backend_session(|exec| exec.to_contiguous_read(TensorRead::from_view(input)))
+                .map_err(|err| tenferro_error("svd_values", err))?;
+            let (_, values, _) = owned
+                .svd(&mut self.backend)
+                .map_err(|err| tenferro_error("svd_values", err))?;
+            Ok(DenseTensor::from_tenferro(values))
+        }
     }
 
     fn eigh_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
-        let input = tenferro_view(input)?;
-        let owned = self
-            .backend
-            .with_backend_session(|exec| exec.to_contiguous_read(TensorRead::from_view(input)))
-            .map_err(|err| tenferro_error("eigh_values", err))?;
-        let (values, _) = owned
-            .eigh(&mut self.backend)
-            .map_err(|err| tenferro_error("eigh_values", err))?;
-        Ok(DenseTensor::from_tenferro(values))
+        #[cfg(feature = "provider-inject")]
+        {
+            let _ = input;
+            return Err(linalg_unavailable("eigh_vals"));
+        }
+        #[cfg(not(feature = "provider-inject"))]
+        {
+            let input = tenferro_view(input)?;
+            let owned = self
+                .backend
+                .with_backend_session(|exec| exec.to_contiguous_read(TensorRead::from_view(input)))
+                .map_err(|err| tenferro_error("eigh_values", err))?;
+            let (values, _) = owned
+                .eigh(&mut self.backend)
+                .map_err(|err| tenferro_error("eigh_values", err))?;
+            Ok(DenseTensor::from_tenferro(values))
+        }
     }
 
     fn eig_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
-        let input = tenferro_view(input)?;
-        let owned = self
-            .backend
-            .with_backend_session(|exec| exec.to_contiguous_read(TensorRead::from_view(input)))
-            .map_err(|err| tenferro_error("eig_values", err))?;
-        owned
-            .eigvals(&mut self.backend)
-            .map(DenseTensor::from_tenferro)
-            .map_err(|err| tenferro_error("eig_values", err))
+        #[cfg(feature = "provider-inject")]
+        {
+            let _ = input;
+            return Err(linalg_unavailable("eig_vals"));
+        }
+        #[cfg(not(feature = "provider-inject"))]
+        {
+            let input = tenferro_view(input)?;
+            let owned = self
+                .backend
+                .with_backend_session(|exec| exec.to_contiguous_read(TensorRead::from_view(input)))
+                .map_err(|err| tenferro_error("eig_values", err))?;
+            owned
+                .eigvals(&mut self.backend)
+                .map(DenseTensor::from_tenferro)
+                .map_err(|err| tenferro_error("eig_values", err))
+        }
     }
 
     fn dot_general_into(
@@ -910,6 +977,7 @@ pub(crate) fn tenferro_error(op: &'static str, err: tenferro_tensor::Error) -> D
     }
 }
 
+#[cfg(not(feature = "provider-inject"))]
 fn tenferro_solve_error(err: tenferro_tensor::Error) -> DenseError {
     if err.kind() == tenferro_tensor::ErrorKind::NumericalFailure {
         DenseError::NumericalFailure {
@@ -919,5 +987,13 @@ fn tenferro_solve_error(err: tenferro_tensor::Error) -> DenseError {
         }
     } else {
         tenferro_error("solve_into", err)
+    }
+}
+
+#[cfg(feature = "provider-inject")]
+fn linalg_unavailable(op: &'static str) -> DenseError {
+    DenseError::Unsupported {
+        op,
+        message: "provider-inject requires a registered BLAS/LAPACK provider".to_string(),
     }
 }
