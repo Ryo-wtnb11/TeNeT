@@ -293,6 +293,26 @@ pub(crate) trait ScalarOps:
     fn sqrt_value(self) -> Result<Self, Error>;
 }
 
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorReductionDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// TensorKit positive trace/norm reductions dispatched by provider mode.
+    pub fn norm(&self) -> Result<f64, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorReductionDispatch<R, D>>::norm(self)
+    }
+    /// Quantum-dimension-weighted Frobenius inner product.
+    pub fn inner(&self, other: &Self) -> Result<D, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorReductionDispatch<R, D>>::inner(self, other)
+    }
+    /// TensorKit positive matrix trace.
+    pub fn tr(&self) -> Result<D, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorReductionDispatch<R, D>>::tr(self)
+    }
+}
+
 impl ScalarOps for f64 {
     fn ctx_of<Key: Clone + Eq + Hash + Send + Sync + 'static>(
         ctxs: &mut Ctxs<Key>,
@@ -2783,6 +2803,17 @@ where
     ) -> Result<f64, <Self as TypedTensorModeDispatch<R>>::FacadeError>;
 }
 
+#[doc(hidden)]
+pub trait TypedTensorReductionDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn inner(tensor: &TensorMap<R, D>, other: &TensorMap<R, D>) -> Result<D, Self::FacadeError>;
+    fn norm(tensor: &TensorMap<R, D>) -> Result<f64, Self::FacadeError>;
+    fn tr(tensor: &TensorMap<R, D>) -> Result<D, Self::FacadeError>;
+}
+
 impl<R> TypedSpaceModeDispatch<R> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
@@ -2859,6 +2890,25 @@ where
             .try_sqrt_dim_scalar(sector)
             .map(|sqrt_dim| sqrt_dim * sqrt_dim)
             .map_err(<Self as TypedTensorModeDispatch<R>>::map_provider_error)
+    }
+}
+
+impl<R, D> TypedTensorReductionDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn inner(tensor: &TensorMap<R, D>, other: &TensorMap<R, D>) -> Result<D, Error> {
+        tensor.inner_multiplicity_free(other)
+    }
+    fn norm(tensor: &TensorMap<R, D>) -> Result<f64, Error> {
+        tensor.norm_multiplicity_free()
+    }
+    fn tr(tensor: &TensorMap<R, D>) -> Result<D, Error> {
+        tensor.tr_multiplicity_free()
     }
 }
 
@@ -10568,7 +10618,7 @@ where
     ///
     /// [`Error::Core`] when the block structure cannot be walked, which is an
     /// engine-internal invariant rather than a caller mistake.
-    pub fn norm(&self) -> Result<f64, Error> {
+    fn norm_multiplicity_free(&self) -> Result<f64, Error> {
         // Keep the weighted reduction on the shared helper; a second copy
         // could drift from the block semantics it centralizes.
         if let Some(spectrum) = self.spectrum() {
@@ -10739,7 +10789,7 @@ where
     /// Exactly [`Self::add`]'s — the operands must share a runtime and a space
     /// — plus [`Error::Core`] from the block-structure walk, as for
     /// [`Self::norm`].
-    pub fn inner(&self, other: &Self) -> Result<D, Error> {
+    fn inner_multiplicity_free(&self, other: &Self) -> Result<D, Error> {
         if !self.runtime.same_runtime(&other.runtime) {
             return Err(Error::RuntimeMismatch);
         }
@@ -10822,7 +10872,7 @@ where
     ///
     /// [`Error::InvalidArgument`] when the tensor is not an endomorphism, and
     /// [`Error::Core`] when the block structure cannot be walked.
-    pub fn tr(&self) -> Result<D, Error> {
+    fn tr_multiplicity_free(&self) -> Result<D, Error> {
         let hom = self.logical_space().space().homspace();
         // The weighted trace below indexes codomain axis `i` together with
         // domain axis `nout + i` and would be meaningless without this check.
