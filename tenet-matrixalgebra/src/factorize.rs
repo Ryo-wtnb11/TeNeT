@@ -7956,6 +7956,62 @@ where
     build_left_right_bound_pair_generic_checked(&provider, space.homspace(), &matrices, &pairs)
 }
 
+/// Checked-Generic full QR via sectorwise augmented `[A | I]` QR.
+#[doc(hidden)]
+pub fn qr_full_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let provider = input.space().provider_arc();
+    let space = input.space().space();
+    let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    let mut pairs = Vec::with_capacity(matrices.len());
+    for matrix in &matrices {
+        let rows = matrix.rows;
+        let cols = matrix.cols;
+        let mut augmented = vec![D::zero(); rows * (cols + rows)];
+        augmented[..rows * cols].copy_from_slice(&matrix.data);
+        for row in 0..rows {
+            augmented[rows * cols + row * rows + row] = D::one();
+        }
+        let mut q = vec![D::zero(); rows * rows];
+        let mut work_r = vec![D::zero(); rows * (cols + rows)];
+        qr_into_workspace(
+            dense,
+            &augmented,
+            rows,
+            cols + rows,
+            rows,
+            &mut q,
+            rows,
+            rows,
+            rows,
+            &mut work_r,
+            rows,
+            cols + rows,
+            rows,
+        )
+        .map_err(CheckedGenericFactorPlanError::from)?;
+        let mut r = work_r[..rows * cols].to_vec();
+        positive_diagonal_gauge(&mut q, rows, &mut r, rows, cols);
+        pairs.push(FactorPair {
+            sector: matrix.sector,
+            kept: rows,
+            left: q,
+            left_rows: rows,
+            right: r,
+            right_leading: rows,
+        });
+    }
+    build_left_right_bound_pair_generic_checked(&provider, space.homspace(), &matrices, &pairs)
+}
+
 /// Provider-bound compact LQ for a generic rule.
 pub fn lq_compact_dyn_generic<E, R, D>(
     dense: &mut E,

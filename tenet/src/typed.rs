@@ -321,6 +321,34 @@ where
         > + CheckedGenericFusion,
     D: TensorScalar,
 {
+    /// Checked-Generic full QR for owned host tensors.
+    fn qr_full_checked_generic(
+        &self,
+    ) -> Result<(Self, Self), GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        let TypedTensorRepr::Owned(body) = &self.repr else {
+            return Err(GenericTensorError::Facade(Error::InvalidArgument(
+                "checked Generic qr_full does not accept lazy adjoints".to_string(),
+            )));
+        };
+        let mut dense = self.runtime.lease_dense();
+        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+            .map_err(|error| GenericTensorError::Facade(error.into()))?;
+        let (q, r) = tenet_matrixalgebra::qr_full_dyn_checked_generic(dense.dense(), &input)?;
+        Ok((
+            wrap_factor_on(&self.runtime, q),
+            wrap_factor_on(&self.runtime, r),
+        ))
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
     /// Checked-Generic compact LQ for owned host tensors.
     fn lq_compact_checked_generic(
         &self,
@@ -447,6 +475,18 @@ where
     /// TensorKit compact LQ dispatched by provider mode.
     pub fn lq_compact(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorLqDispatch<R, D>>::lq_compact(self)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorFullQrDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// TensorKit full QR dispatched by provider mode.
+    pub fn qr_full(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
+        <R::Mode as TypedTensorFullQrDispatch<R, D>>::qr_full(self)
     }
 }
 
@@ -3034,6 +3074,17 @@ where
     ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
 }
 
+#[doc(hidden)]
+pub trait TypedTensorFullQrDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn qr_full(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
+}
+
 impl<R> TypedSpaceModeDispatch<R> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
@@ -3186,6 +3237,19 @@ where
     }
 }
 
+impl<R, D> TypedTensorFullQrDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn qr_full(tensor: &TensorMap<R, D>) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Error> {
+        tensor.qr_full_multiplicity_free()
+    }
+}
+
 impl<R, D> TypedTensorAdjointDispatch<R, D> for CheckedGenericAdmissionMode
 where
     R: TypedSectorAdmission<
@@ -3272,6 +3336,24 @@ where
         GenericTensorError<<R as CheckedGenericFusion>::Error>,
     > {
         tensor.lq_compact_checked_generic()
+    }
+}
+
+impl<R, D> TypedTensorFullQrDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
+    fn qr_full(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<
+        (TensorMap<R, D>, TensorMap<R, D>),
+        GenericTensorError<<R as CheckedGenericFusion>::Error>,
+    > {
+        tensor.qr_full_checked_generic()
     }
 }
 
@@ -9680,7 +9762,7 @@ where
     /// whole-logical-payload allocation for a lazy adjoint. A compact-diagonal
     /// payload is materialized dense first (TensorKit's `DiagonalAlgorithm`
     /// covers `qr_full!` too — same non-adoption, same #613 Group 4 deferral).
-    pub fn qr_full(&self) -> Result<(Self, Self), Error> {
+    fn qr_full_multiplicity_free(&self) -> Result<(Self, Self), Error> {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             return self.materialized_tensor_uncached()?.qr_full();
         }
