@@ -4,8 +4,8 @@ use std::sync::Arc;
 use num_traits::{One, Zero};
 use tenet_core::{
     multiplicity_free_permute_tree_pair_block_indexed, split_fusion_tree, BlockKey, BlockStructure,
-    CheckedFusionAlgebra, CheckedFusionSpaceError, CheckedGenericRigidSymbols, FusionRule,
-    FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
+    CheckedFusionAlgebra, CheckedFusionSpaceError, FusionRule, FusionStyleKind,
+    FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
     FusionTreePairOrientation, HostReadableStorage, HostWritableStorage,
     MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace, PreparedTreePairOperation, SectorLeg,
     TensorMap, TensorStorage,
@@ -16,7 +16,6 @@ use crate::lowering::{
     lower_tensortrace_source_adjoint_axes, lower_tensortrace_source_adjoint_axes_dyn,
 };
 use crate::strided::offset_to_isize;
-use crate::CheckedGenericPlanError;
 use crate::{tensortrace_raw_strided_kernel, tensortrace_raw_strided_kernel_add_with_coefficient};
 use tenet_operations::structure_identity::validate_structure_identity;
 use tenet_operations::transform_structure::validate_destination_layouts_injective;
@@ -36,70 +35,6 @@ pub struct TensorTraceStructure {
     descriptor: TensorTraceDescriptor,
     dst_structure: Arc<BlockStructure>,
     src_structure: Arc<BlockStructure>,
-}
-
-/// One diagonal block contributing to TensorKit's ordinary positive trace.
-///
-/// This is deliberately only geometry and the quantum-dimension coefficient;
-/// payload traversal remains with the caller.  In particular, no categorical
-/// twist is present here: `tr` is the positive trace, not `tensortrace!`'s
-/// categorical/supertrace.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct GenericPositiveTraceTerm {
-    src_block: usize,
-    coefficient: f64,
-}
-
-impl GenericPositiveTraceTerm {
-    #[inline]
-    pub fn src_block(&self) -> usize {
-        self.src_block
-    }
-
-    #[inline]
-    pub fn coefficient(&self) -> f64 {
-        self.coefficient
-    }
-}
-
-/// Fallible Generic preflight and term lowering for the ordinary positive
-/// trace.  Provider failures are returned through the existing
-/// [`CheckedGenericPlanError`] carrier before any destination/layout state is
-/// published.  Off-diagonal fusion-tree blocks are omitted because they have
-/// zero matrix trace.
-pub fn generic_positive_trace_terms_checked<R>(
-    source: &BoundDynamicFusionMapSpace<R>,
-) -> Result<Vec<GenericPositiveTraceTerm>, CheckedGenericPlanError<R::Error>>
-where
-    R: CheckedGenericRigidSymbols<Scalar = f64>,
-{
-    let structure = source.space().structure();
-    let mut terms = Vec::new();
-    terms.reserve(structure.block_count());
-    for index in 0..structure.block_count() {
-        let block = structure
-            .block(index)
-            .map_err(CheckedGenericPlanError::Core)?;
-        let BlockKey::FusionTree(key) = block.key() else {
-            return Err(CheckedGenericPlanError::Operation(
-                OperationError::InvalidArgument {
-                    message: "positive trace requires fusion-tree blocks",
-                },
-            ));
-        };
-        if key.codomain_tree() != key.domain_tree() {
-            continue;
-        }
-        let sqrt_dim = source
-            .provider()
-            .try_sqrt_dim_scalar(key.codomain_tree().coupled())
-            .map_err(CheckedGenericPlanError::Provider)?;
-        terms.push(GenericPositiveTraceTerm {
-            src_block: index,
-            coefficient: sqrt_dim * sqrt_dim,
-        });
-    }
-    Ok(terms)
 }
 
 pub fn tensortrace_structure<
