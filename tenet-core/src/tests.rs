@@ -13651,6 +13651,24 @@ mod tests {
         fn try_r_symbol_generic(&self, a: SectorId,b: SectorId,c: SectorId) -> Result<GenericRMatrix<f64>, Self::Error> { Ok(self.r_symbol_generic(a,b,c)) }
     }
 
+    #[test]
+    fn checked_generic_tree_split_is_structural_and_provider_typed() {
+        let rule = UnitaryToyOmRule;
+        let a = SectorId::new(UnitaryToyOmRule::A);
+        let c = SectorId::new(UnitaryToyOmRule::C);
+        let tree = FusionTreeKey::new([a, a, a], a, [false, false, false], [c], [
+            MultiplicityIndex::ONE,
+            MultiplicityIndex::ONE,
+        ]);
+
+        let (front, tail) = split_fusion_tree_generic_checked(&rule, &tree, 1).unwrap();
+        assert_eq!(front.uncoupled(), &[a]);
+        assert_eq!(front.coupled(), a);
+        assert_eq!(tail.uncoupled(), &[a, a, a]);
+        assert_eq!(tail.coupled(), a);
+        assert_eq!(tail.is_dual(), &[false, false, false]);
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ArtinSpyError { F, R }
     impl std::fmt::Display for ArtinSpyError { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{self:?}") } }
