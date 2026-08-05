@@ -1291,26 +1291,28 @@ fn sun_checked_generic_adjoint_and_reductions_preserve_provider_and_errors() {
     use tenet::typed::SUNFusionRule;
 
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
-    let adjoint = vec![1, 1];
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(adjoint, 1)], false).unwrap();
-    let source: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, _| {
-            trees.coupled().iter().sum::<i64>() as f64 + 1.0
-        })
-        .unwrap();
+    for (n, adjoint) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
+        let provider = Arc::new(SUNFusionRule::new(n).unwrap());
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(adjoint, 1)], false).unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, _| {
+                trees.coupled().iter().sum::<i64>() as f64 + 1.0
+            })
+            .unwrap();
 
-    let dagger = source.adjoint().unwrap();
-    assert!(std::ptr::eq(dagger.provider(), provider.as_ref()));
-    assert!((dagger.norm().unwrap() - source.norm().unwrap()).abs() < 1.0e-12);
-    assert!((dagger.inner(&dagger).unwrap() - source.inner(&source).unwrap()).abs() < 1.0e-12);
-    assert!((dagger.tr().unwrap() - source.tr().unwrap()).abs() < 1.0e-12);
+        let dagger = source.adjoint().unwrap();
+        assert!(std::ptr::eq(dagger.provider(), provider.as_ref()));
+        assert!((dagger.norm().unwrap() - source.norm().unwrap()).abs() < 1.0e-12);
+        assert!((dagger.inner(&dagger).unwrap() - source.inner(&source).unwrap()).abs() < 1.0e-12);
+        assert!((dagger.tr().unwrap() - source.tr().unwrap()).abs() < 1.0e-12);
 
-    let complex = source.to_c64();
-    let complex_dagger = complex.adjoint().unwrap();
-    assert!(std::ptr::eq(complex_dagger.provider(), provider.as_ref()));
-    assert!((complex_dagger.tr().unwrap() - complex.tr().unwrap().conj()).norm() < 1.0e-12);
+        let complex = source.to_c64();
+        let complex_dagger = complex.adjoint().unwrap();
+        assert!(std::ptr::eq(complex_dagger.provider(), provider.as_ref()));
+        assert!((complex_dagger.tr().unwrap() - complex.tr().unwrap().conj()).norm() < 1.0e-12);
+    }
 
+    let provider = SUNFusionRule::new(3).unwrap();
     let three = provider.encode_dynkin(&[1, 0]).unwrap();
     let eight = provider.encode_dynkin(&[1, 1]).unwrap();
     assert!(matches!(
