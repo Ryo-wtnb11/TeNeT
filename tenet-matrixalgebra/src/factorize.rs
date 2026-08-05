@@ -7048,6 +7048,33 @@ where
     ))
 }
 
+fn diagonal_bond_svd_factor_generic_checked<R, D, V>(
+    provider: Arc<R>,
+    spectrum: &[SectorSpectrum<V>],
+    to_scalar: &dyn Fn(V) -> D,
+) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+    V: Copy,
+{
+    let new_leg = SectorLeg::new(
+        spectrum
+            .iter()
+            .map(|entry| (entry.sector, entry.values.len())),
+        false,
+    );
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([new_leg.clone()]),
+        FusionProductSpace::new([new_leg]),
+    );
+    let space = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(provider, homspace)
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    let data = diagonal_bond_data(space.space(), spectrum, to_scalar)
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    BoundDynFactor::from_bound(space, data, 1, 1).map_err(CheckedGenericFactorPlanError::from)
+}
+
 /// Generic sibling of [`scatter_left_sector_blocks`].
 fn scatter_left_sector_blocks_generic<D>(
     left_space: &DynamicFusionMapSpace,
@@ -7754,6 +7781,120 @@ where
         });
     }
     build_left_right_bound_pair_generic_checked(provider, space.homspace(), &matrices, &pairs)
+}
+
+/// Checked-Generic compact SVD. Dense SVD is unchanged; all provider-bound
+/// output spaces are admitted through the checked staging boundary.
+#[doc(hidden)]
+pub fn svd_compact_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<
+    (
+        BoundDynFactor<R, D>,
+        BoundDynFactor<R, D>,
+        BoundDynFactor<R, D>,
+    ),
+    CheckedGenericFactorPlanError<R::Error>,
+>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let provider = input.space().provider_arc();
+    let space = input.space().space();
+    let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    let ranks = matrices
+        .iter()
+        .map(|matrix| SectorRank {
+            sector: matrix.sector,
+            kept: matrix.rows.min(matrix.cols),
+        })
+        .collect::<Vec<_>>();
+    let max_rows = matrices.iter().map(|matrix| matrix.rows).max().unwrap_or(0);
+    let max_cols = matrices.iter().map(|matrix| matrix.cols).max().unwrap_or(0);
+    let max_rank = ranks.iter().map(|rank| rank.kept).max().unwrap_or(0);
+    let mut u_workspace = vec![D::zero(); max_rows * max_rank];
+    let mut s_workspace = vec![D::Real::zero(); max_rank];
+    let mut vt_workspace = vec![D::zero(); max_rank * max_cols];
+    let mut pairs = Vec::with_capacity(matrices.len());
+    let mut singular_values = Vec::with_capacity(matrices.len());
+    for matrix in &matrices {
+        let rank = matrix.rows.min(matrix.cols);
+        let input_shape = [matrix.rows, matrix.cols];
+        let input_strides = [1usize, matrix.rows];
+        let input_view =
+            DenseView::new(&matrix.data, &input_shape, &input_strides, 0).map_err(|error| {
+                CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
+            })?;
+        let u_shape = [matrix.rows, rank];
+        let u_strides = [1usize, max_rows];
+        let s_shape = [rank];
+        let s_strides = [1usize];
+        let vt_shape = [rank, matrix.cols];
+        let vt_strides = [1usize, max_rank];
+        let u_view =
+            DenseViewMut::new(&mut u_workspace, &u_shape, &u_strides, 0).map_err(|error| {
+                CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
+            })?;
+        let s_view =
+            DenseViewMut::new(&mut s_workspace, &s_shape, &s_strides, 0).map_err(|error| {
+                CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
+            })?;
+        let vt_view =
+            DenseViewMut::new(&mut vt_workspace, &vt_shape, &vt_strides, 0).map_err(|error| {
+                CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
+            })?;
+        dense
+            .svd_into(
+                D::dense_read(input_view),
+                D::dense_write(u_view),
+                D::Real::dense_write(s_view),
+                D::dense_write(vt_view),
+            )
+            .map_err(|error| {
+                CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
+            })?;
+        svd_compact_gauge(
+            &mut u_workspace,
+            matrix.rows,
+            max_rows,
+            &mut vt_workspace,
+            rank,
+            matrix.cols,
+            max_rank,
+        );
+        singular_values.push(SectorSpectrum {
+            sector: matrix.sector,
+            values: s_workspace[..rank]
+                .iter()
+                .copied()
+                .map(Into::into)
+                .collect(),
+        });
+        pairs.push(FactorPair {
+            sector: matrix.sector,
+            kept: rank,
+            left: u_workspace.clone(),
+            left_rows: max_rows,
+            right: vt_workspace.clone(),
+            right_leading: max_rank,
+        });
+    }
+    let (u, vh) = build_left_right_bound_pair_generic_checked(
+        &provider,
+        space.homspace(),
+        &matrices,
+        &pairs,
+    )?;
+    let s = diagonal_bond_svd_factor_generic_checked(
+        Arc::clone(&provider),
+        &singular_values,
+        &D::from_real,
+    )?;
+    Ok((u, s, vh))
 }
 
 /// Provider-bound compact LQ for a generic rule.

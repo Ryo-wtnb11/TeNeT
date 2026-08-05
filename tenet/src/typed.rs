@@ -315,6 +315,36 @@ where
 
 impl<R, D> TensorMap<R, D>
 where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
+    /// Checked-Generic compact SVD for owned host tensors.
+    fn svd_compact_checked_generic(
+        &self,
+    ) -> Result<(Self, Self, Self), GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        let TypedTensorRepr::Owned(body) = &self.repr else {
+            return Err(GenericTensorError::Facade(Error::InvalidArgument(
+                "checked Generic svd_compact does not accept lazy adjoints".to_string(),
+            )));
+        };
+        let mut dense = self.runtime.lease_dense();
+        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+            .map_err(|error| GenericTensorError::Facade(error.into()))?;
+        let (u, s, vh) =
+            tenet_matrixalgebra::svd_compact_dyn_checked_generic(dense.dense(), &input)?;
+        Ok((
+            wrap_factor_on(&self.runtime, u),
+            wrap_factor_on(&self.runtime, s),
+            wrap_factor_on(&self.runtime, vh),
+        ))
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
     R: TypedSectorAdmission,
     R::Mode: TypedTensorAdjointDispatch<R, D>,
     D: TensorScalar,
@@ -365,6 +395,18 @@ where
     /// TensorKit compact QR dispatched by provider mode.
     pub fn qr_compact(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorQrDispatch<R, D>>::qr_compact(self)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorSvdDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// TensorKit compact SVD dispatched by provider mode.
+    pub fn svd_compact(&self) -> Result<(Self, Self, Self), TypedFacadeError<R>> {
+        <R::Mode as TypedTensorSvdDispatch<R, D>>::svd_compact(self)
     }
 }
 
@@ -2930,6 +2972,17 @@ where
     ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
 }
 
+#[doc(hidden)]
+pub trait TypedTensorSvdDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn svd_compact(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<(TensorMap<R, D>, TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
+}
+
 impl<R> TypedSpaceModeDispatch<R> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
@@ -3054,6 +3107,21 @@ where
     }
 }
 
+impl<R, D> TypedTensorSvdDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn svd_compact(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<(TensorMap<R, D>, TensorMap<R, D>, TensorMap<R, D>), Error> {
+        tensor.svd_compact_multiplicity_free()
+    }
+}
+
 impl<R, D> TypedTensorAdjointDispatch<R, D> for CheckedGenericAdmissionMode
 where
     R: TypedSectorAdmission<
@@ -3104,6 +3172,24 @@ where
         GenericTensorError<<R as CheckedGenericFusion>::Error>,
     > {
         tensor.qr_compact_checked_generic()
+    }
+}
+
+impl<R, D> TypedTensorSvdDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
+    fn svd_compact(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<
+        (TensorMap<R, D>, TensorMap<R, D>, TensorMap<R, D>),
+        GenericTensorError<<R as CheckedGenericFusion>::Error>,
+    > {
+        tensor.svd_compact_checked_generic()
     }
 }
 
@@ -9335,7 +9421,7 @@ where
     /// assert!(max_err < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn svd_compact(&self) -> Result<(Self, Self, Self), Error> {
+    fn svd_compact_multiplicity_free(&self) -> Result<(Self, Self, Self), Error> {
         // Dense lease only: a factorization runs entirely on the dense-executor
         // boundary, so leasing the (scarcer)
         // recoupling context here would serialize unrelated work for nothing.
