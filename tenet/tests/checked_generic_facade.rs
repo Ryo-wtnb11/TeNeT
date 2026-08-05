@@ -245,6 +245,9 @@ impl CheckedGenericRigidSymbols for CheckedOnlyToy {
     fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
         self.record_query();
         self.coefficient_queries.fetch_add(1, Ordering::Relaxed);
+        if self.fail_algebra.load(Ordering::Relaxed) {
+            return Err(ToyError::Algebra);
+        }
         Ok(if sector.id() == 3 {
             if self.fractional_dim {
                 2.5_f64
@@ -634,6 +637,44 @@ fn checked_only_multiplicity_two_transforms_keep_the_source_authority() {
             ToyError::Algebra
         ))
     ));
+}
+
+#[test]
+fn checked_generic_reductions_cover_real_complex_dense_payloads() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            (indices.iter().sum::<usize>() + 1) as f64
+        })
+        .unwrap();
+    let inner = source.inner(&source).unwrap();
+    assert!(inner.is_finite());
+    assert!((source.norm().unwrap() * source.norm().unwrap() - inner).abs() < 1e-12);
+    assert!(source.tr().unwrap().is_finite());
+    let complex = source.to_c64();
+    assert!(complex.inner(&complex).unwrap().re.is_finite());
+    assert!(complex.norm().unwrap().is_finite());
+    assert!(complex.tr().unwrap().re.is_finite());
+    assert!(provider.coefficient_queries.load(Ordering::Relaxed) > 0);
+}
+
+#[test]
+fn checked_generic_reduction_dimension_failure_is_typed_and_nonpublishing() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
+    let before = source.data().to_vec();
+    provider.fail_algebra.store(true, Ordering::Relaxed);
+    let error = source.norm().unwrap_err();
+    assert!(matches!(
+        error,
+        GenericTensorError::Structure(CheckedGenericStructureError::Provider(ToyError::Algebra))
+    ));
+    assert_eq!(source.data(), before.as_slice());
 }
 
 #[test]
