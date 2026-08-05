@@ -2964,15 +2964,29 @@ where
         }
         if matches!(&tensor.repr, TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Diagonal(_)))
             || matches!(&other.repr, TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Diagonal(_)))
-            || matches!(&tensor.repr, TypedTensorRepr::Adjoint(_))
-            || matches!(&other.repr, TypedTensorRepr::Adjoint(_))
         {
             return Err(Error::InvalidArgument(
-                "checked Generic reductions require owned dense payloads".to_string(),
+                "checked Generic reductions require dense payloads".to_string(),
             )
             .into());
         }
         let weights = checked_generic_weight_map_for(tensor)?;
+        if matches!(&tensor.repr, TypedTensorRepr::Adjoint(_))
+            || matches!(&other.repr, TypedTensorRepr::Adjoint(_))
+        {
+            let (lhs_operand, lhs_data) = tensor.fusion_operand_and_data();
+            let (rhs_operand, rhs_data) = other.fusion_operand_and_data();
+            let value = tenet_tensors::oriented_fusion_inner(
+                tensor.logical_space().space().structure(),
+                lhs_operand,
+                lhs_data,
+                rhs_operand,
+                rhs_data,
+                |sector| D::from_real(*weights.get(&sector).unwrap_or(&0.0)),
+            )
+            .map_err(|error| GenericTensorError::Facade(error.into()))?;
+            return Ok(value);
+        }
         let value = coupled_region_inner(
             tensor.logical_space().space().structure(),
             tensor.logical_space().space().nout(),
@@ -3006,12 +3020,18 @@ where
             .into());
         }
         if matches!(&tensor.repr, TypedTensorRepr::Owned(body) if matches!(body.data.as_ref(), TypedData::Diagonal(_)))
-            || matches!(&tensor.repr, TypedTensorRepr::Adjoint(_))
         {
             return Err(Error::InvalidArgument(
-                "checked Generic reductions require owned dense payloads".to_string(),
+                "checked Generic reductions require dense payloads".to_string(),
             )
             .into());
+        }
+        if let TypedTensorRepr::Adjoint(view) = &tensor.repr {
+            let parent = TensorMap {
+                runtime: tensor.runtime.clone(),
+                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+            };
+            return Ok(FactorScalar::adjoint(Self::tr(&parent)?));
         }
         let weights = checked_generic_weight_map_for(tensor)?;
         let structure = tensor.logical_space().space().structure();
