@@ -2218,6 +2218,138 @@ where
     Ok((front_tree, tail_tree))
 }
 
+/// Split a Generic fusion tree without requiring the infallible `FusionRule`
+/// contract.
+///
+/// This is structural only: no F/R or braid data is queried.  The input and
+/// both output trees are checked through the provider-owned Generic admission
+/// path before publication.
+pub fn split_fusion_tree_generic_checked<C>(
+    rule: &C,
+    tree: &FusionTreeKey,
+    front_rank: usize,
+) -> Result<(FusionTreeKey, FusionTreeKey), CheckedGenericStructureError<C::Error>>
+where
+    C: CheckedGenericFusion,
+{
+    validate_generic_fusion_tree_pair_checked(rule, &FusionTreePairKey::pair(
+        tree.clone(),
+        tree.clone(),
+    ))?;
+    let rank = tree.uncoupled().len();
+    if front_rank > rank {
+        return Err(CoreError::DimensionMismatch {
+            expected: rank,
+            actual: front_rank,
+        }
+        .into());
+    }
+
+    let (front_tree, tail_tree) = if front_rank == rank {
+        let coupled = tree.coupled();
+        (
+            tree.clone(),
+            FusionTreeKey::new([coupled], coupled, [false], Vec::<SectorId>::new(), Vec::<MultiplicityIndex>::new()),
+        )
+    } else if front_rank == 1 {
+        let first = tree.uncoupled()[0];
+        let front_tree = FusionTreeKey::new(
+            [first],
+            first,
+            [tree.is_dual()[0]],
+            Vec::<SectorId>::new(),
+            Vec::<MultiplicityIndex>::new(),
+        );
+        let mut tail_is_dual = tree.is_dual().to_vec();
+        tail_is_dual[0] = false;
+        let tail_tree = FusionTreeKey::new(
+            tree.uncoupled().to_vec(),
+            tree.coupled(),
+            tail_is_dual,
+            tree.innerlines().to_vec(),
+            tree.vertices().to_vec(),
+        );
+        (front_tree, tail_tree)
+    } else if front_rank == 0 {
+        if rank == 0 {
+            return Err(CoreError::MalformedFusionTree {
+                message: "split at zero requires a non-empty source fusion tree",
+            }
+            .into());
+        }
+        let unit = rule.vacuum();
+        let front_tree = FusionTreeKey::new(
+            Vec::<SectorId>::new(),
+            unit,
+            Vec::<bool>::new(),
+            Vec::<SectorId>::new(),
+            Vec::<MultiplicityIndex>::new(),
+        );
+        let mut tail_uncoupled = Vec::with_capacity(rank + 1);
+        tail_uncoupled.push(unit);
+        tail_uncoupled.extend_from_slice(tree.uncoupled());
+        let mut tail_is_dual = Vec::with_capacity(rank + 1);
+        tail_is_dual.push(false);
+        tail_is_dual.extend_from_slice(tree.is_dual());
+        let mut tail_innerlines = Vec::with_capacity(rank.saturating_sub(1));
+        if rank >= 2 {
+            tail_innerlines.push(tree.uncoupled()[0]);
+            tail_innerlines.extend_from_slice(tree.innerlines());
+        }
+        let mut tail_vertices = Vec::with_capacity(rank);
+        tail_vertices.push(MultiplicityIndex::ONE);
+        tail_vertices.extend_from_slice(tree.vertices());
+        (
+            front_tree,
+            FusionTreeKey::new(
+                tail_uncoupled,
+                tree.coupled(),
+                tail_is_dual,
+                tail_innerlines,
+                tail_vertices,
+            ),
+        )
+    } else {
+        let intermediate = *tree
+            .innerlines()
+            .get(front_rank - 2)
+            .ok_or(CoreError::MalformedFusionTree {
+                message: "split requires the intermediate innerline",
+            })?;
+        let front_tree = FusionTreeKey::new(
+            tree.uncoupled()[..front_rank].to_vec(),
+            intermediate,
+            tree.is_dual()[..front_rank].to_vec(),
+            tree.innerlines()[..front_rank.saturating_sub(2)].to_vec(),
+            tree.vertices()[..front_rank - 1].to_vec(),
+        );
+        let mut tail_uncoupled = Vec::with_capacity(rank - front_rank + 1);
+        tail_uncoupled.push(intermediate);
+        tail_uncoupled.extend_from_slice(&tree.uncoupled()[front_rank..]);
+        let mut tail_is_dual = Vec::with_capacity(rank - front_rank + 1);
+        tail_is_dual.push(false);
+        tail_is_dual.extend_from_slice(&tree.is_dual()[front_rank..]);
+        (
+            front_tree,
+            FusionTreeKey::new(
+                tail_uncoupled,
+                tree.coupled(),
+                tail_is_dual,
+                tree.innerlines()[front_rank - 1..].to_vec(),
+                tree.vertices()[front_rank - 1..].to_vec(),
+            ),
+        )
+    };
+
+    for output in [&front_tree, &tail_tree] {
+        validate_generic_fusion_tree_pair_checked(
+            rule,
+            &FusionTreePairKey::pair(output.clone(), output.clone()),
+        )?;
+    }
+    Ok((front_tree, tail_tree))
+}
+
 /// Merge two standard fusion trees without exchanging their external legs.
 ///
 /// This is TensorKit's `merge(f₁, f₂, c, 1)` for a multiplicity-free rule:
