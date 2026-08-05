@@ -774,6 +774,42 @@ fn sun_checked_generic_compact_lq_preserves_provider_and_reconstructs() {
         .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-10));
 }
 
+#[cfg(feature = "racah-generated")]
+#[test]
+fn sun_checked_generic_full_qr_preserves_provider_and_reconstructs() {
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 1)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, _| {
+            trees.coupled().iter().sum::<i64>() as f64 + 1.0
+        })
+        .unwrap();
+
+    let (q, r) = source.qr_full().unwrap();
+    assert!(std::ptr::eq(q.provider(), provider.as_ref()));
+    assert!(std::ptr::eq(r.provider(), provider.as_ref()));
+    let rebuilt = q.compose(&r).unwrap();
+    assert!(rebuilt
+        .data()
+        .iter()
+        .zip(source.data())
+        .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
+
+    let complex = source.to_c64();
+    let (complex_q, complex_r) = complex.qr_full().unwrap();
+    assert!(std::ptr::eq(complex_q.provider(), provider.as_ref()));
+    assert!(std::ptr::eq(complex_r.provider(), provider.as_ref()));
+    let complex_rebuilt = complex_q.compose(&complex_r).unwrap();
+    assert!(complex_rebuilt
+        .data()
+        .iter()
+        .zip(complex.data())
+        .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-10));
+}
+
 #[test]
 fn checked_generic_lazy_adjoint_preserves_provider_and_reductions() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -861,6 +897,25 @@ fn checked_generic_compact_lq_failure_is_typed_and_nonpublishing() {
     let before = source.data().to_vec();
     provider.fail_algebra.store(true, Ordering::Relaxed);
     let error = source.lq_compact().unwrap_err();
+    assert!(matches!(
+        error,
+        GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Provider(
+            ToyError::Algebra
+        ))
+    ));
+    assert_eq!(source.data(), before.as_slice());
+}
+
+#[test]
+fn checked_generic_full_qr_failure_is_typed_and_nonpublishing() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, _| 2.0).unwrap();
+    let before = source.data().to_vec();
+    provider.fail_algebra.store(true, Ordering::Relaxed);
+    let error = source.qr_full().unwrap_err();
     assert!(matches!(
         error,
         GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Provider(
