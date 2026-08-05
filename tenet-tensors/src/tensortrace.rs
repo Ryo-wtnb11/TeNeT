@@ -45,19 +45,19 @@ pub struct TensorTraceStructure {
 /// twist is present here: `tr` is the positive trace, not `tensortrace!`'s
 /// categorical/supertrace.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct GenericPositiveTraceTerm {
+pub(crate) struct GenericPositiveTraceTerm {
     src_block: usize,
     coefficient: f64,
 }
 
 impl GenericPositiveTraceTerm {
     #[inline]
-    pub fn src_block(&self) -> usize {
+    pub(crate) fn src_block(&self) -> usize {
         self.src_block
     }
 
     #[inline]
-    pub fn coefficient(&self) -> f64 {
+    pub(crate) fn coefficient(&self) -> f64 {
         self.coefficient
     }
 }
@@ -67,12 +67,14 @@ impl GenericPositiveTraceTerm {
 /// [`CheckedGenericPlanError`] carrier before any destination/layout state is
 /// published.  Off-diagonal fusion-tree blocks are omitted because they have
 /// zero matrix trace.
-pub fn generic_positive_trace_terms_checked<R>(
+pub(crate) fn generic_positive_trace_terms_checked<R>(
     source: &BoundDynamicFusionMapSpace<R>,
 ) -> Result<Vec<GenericPositiveTraceTerm>, CheckedGenericPlanError<R::Error>>
 where
     R: CheckedGenericRigidSymbols<Scalar = f64>,
 {
+    // The bound space is admitted and complete already; this leaf deliberately
+    // does not rebuild or publish another layout proof.
     let structure = source.space().structure();
     let mut terms = Vec::new();
     terms.reserve(structure.block_count());
