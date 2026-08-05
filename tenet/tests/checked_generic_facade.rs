@@ -1286,6 +1286,41 @@ fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() 
 
 #[cfg(feature = "racah-generated")]
 #[test]
+fn sun_checked_generic_adjoint_and_reductions_preserve_provider_and_errors() {
+    use tenet::core::SUNFusionRuleError;
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let adjoint = vec![1, 1];
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(adjoint, 1)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, _| {
+            trees.coupled().iter().sum::<i64>() as f64 + 1.0
+        })
+        .unwrap();
+
+    let dagger = source.adjoint().unwrap();
+    assert!(std::ptr::eq(dagger.provider(), provider.as_ref()));
+    assert!((dagger.norm().unwrap() - source.norm().unwrap()).abs() < 1.0e-12);
+    assert!((dagger.inner(&dagger).unwrap() - source.inner(&source).unwrap()).abs() < 1.0e-12);
+    assert!((dagger.tr().unwrap() - source.tr().unwrap()).abs() < 1.0e-12);
+
+    let complex = source.to_c64();
+    let complex_dagger = complex.adjoint().unwrap();
+    assert!(std::ptr::eq(complex_dagger.provider(), provider.as_ref()));
+    assert!((complex_dagger.tr().unwrap() - complex.tr().unwrap().conj()).norm() < 1.0e-12);
+
+    let three = provider.encode_dynkin(&[1, 0]).unwrap();
+    let eight = provider.encode_dynkin(&[1, 1]).unwrap();
+    assert!(matches!(
+        provider.try_r_symbol_generic(three, three, eight),
+        Err(SUNFusionRuleError::Racah(_))
+    ));
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
 fn sun_checked_generic_transforms_reuse_the_runtime_completed_store() {
     use tenet::typed::SUNFusionRule;
 
