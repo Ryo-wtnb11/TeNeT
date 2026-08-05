@@ -7897,6 +7897,65 @@ where
     Ok((u, s, vh))
 }
 
+/// Checked-Generic compact LQ, implemented through the existing host
+/// adjoint-plus-QR boundary; no borrowed conjugated-dot capability is needed.
+#[doc(hidden)]
+pub fn lq_compact_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let provider = input.space().provider_arc();
+    let space = input.space().space();
+    let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    let mut pairs = Vec::with_capacity(matrices.len());
+    for matrix in &matrices {
+        let rank = matrix.rows.min(matrix.cols);
+        let adjoint = adjoint_col_major(&matrix.data, matrix.rows, matrix.cols);
+        let mut q_prime = vec![D::zero(); matrix.cols * rank];
+        let mut r_prime = vec![D::zero(); rank * matrix.rows];
+        qr_into_workspace(
+            dense,
+            &adjoint,
+            matrix.cols,
+            matrix.rows,
+            matrix.cols,
+            &mut q_prime,
+            matrix.cols,
+            rank,
+            matrix.cols,
+            &mut r_prime,
+            rank,
+            matrix.rows,
+            rank,
+        )
+        .map_err(CheckedGenericFactorPlanError::from)?;
+        positive_diagonal_gauge_strided(
+            &mut q_prime,
+            matrix.cols,
+            matrix.cols,
+            &mut r_prime,
+            rank,
+            rank,
+            matrix.rows,
+        );
+        pairs.push(FactorPair {
+            sector: matrix.sector,
+            kept: rank,
+            left: adjoint_col_major(&r_prime, rank, matrix.rows),
+            left_rows: matrix.rows,
+            right: adjoint_col_major(&q_prime, matrix.cols, rank),
+            right_leading: rank,
+        });
+    }
+    build_left_right_bound_pair_generic_checked(&provider, space.homspace(), &matrices, &pairs)
+}
+
 /// Provider-bound compact LQ for a generic rule.
 pub fn lq_compact_dyn_generic<E, R, D>(
     dense: &mut E,
