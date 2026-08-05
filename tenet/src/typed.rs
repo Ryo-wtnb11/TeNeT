@@ -5057,13 +5057,20 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 /// this leaf:
 ///
 /// ```compile_fail
-/// use tenet::core::U1FusionRule;
+/// use tenet::core::{
+///     CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericRigidSymbols,
+///     TypedSectorAdmission,
+/// };
 /// use tenet::typed::{CudaStorage, TensorMap};
 ///
-/// fn no_checked_generic_cuda_operations(
-///     lhs: &TensorMap<U1FusionRule, f64, CudaStorage>,
-///     rhs: &TensorMap<U1FusionRule, f64, CudaStorage>,
-/// ) {
+/// fn no_checked_generic_cuda_operations<R>(
+///     lhs: &TensorMap<R, f64, CudaStorage>,
+///     rhs: &TensorMap<R, f64, CudaStorage>,
+/// ) where
+///     R: TypedSectorAdmission<Mode = CheckedGenericAdmissionMode>
+///         + CheckedGenericFusion
+///         + CheckedGenericRigidSymbols<Scalar = f64>,
+/// {
 ///     let _ = lhs.norm();
 ///     let _ = lhs.inner(rhs);
 ///     let _ = lhs.dot(rhs);
@@ -5108,10 +5115,18 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 /// tensors independently of the reduction/arithmetic surface above:
 ///
 /// ```compile_fail
-/// use tenet::core::U1FusionRule;
+/// use tenet::core::{
+///     CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericRigidSymbols,
+///     TypedSectorAdmission,
+/// };
 /// use tenet::typed::{CudaStorage, TensorMap};
 ///
-/// fn no_checked_generic_cuda_qr(tensor: &TensorMap<U1FusionRule, f64, CudaStorage>) {
+/// fn no_checked_generic_cuda_qr<R>(tensor: &TensorMap<R, f64, CudaStorage>)
+/// where
+///     R: TypedSectorAdmission<Mode = CheckedGenericAdmissionMode>
+///         + CheckedGenericFusion
+///         + CheckedGenericRigidSymbols<Scalar = f64>,
+/// {
 ///     let _ = tensor.qr_compact();
 /// }
 /// ```
@@ -5129,10 +5144,18 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 /// Compact SVD has the same deliberately narrow typed CUDA surface:
 ///
 /// ```compile_fail
-/// use tenet::core::U1FusionRule;
+/// use tenet::core::{
+///     CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericRigidSymbols,
+///     TypedSectorAdmission,
+/// };
 /// use tenet::typed::{CudaStorage, TensorMap};
 ///
-/// fn no_checked_generic_cuda_svd(tensor: &TensorMap<U1FusionRule, f64, CudaStorage>) {
+/// fn no_checked_generic_cuda_svd<R>(tensor: &TensorMap<R, f64, CudaStorage>)
+/// where
+///     R: TypedSectorAdmission<Mode = CheckedGenericAdmissionMode>
+///         + CheckedGenericFusion
+///         + CheckedGenericRigidSymbols<Scalar = f64>,
+/// {
 ///     let _ = tensor.svd_compact();
 /// }
 /// ```
@@ -5150,10 +5173,18 @@ impl<R> TensorMap<R, f64, CudaStorage> {
 /// Truncated SVD is absent at the same checked-Generic/complex boundaries:
 ///
 /// ```compile_fail
-/// use tenet::core::U1FusionRule;
+/// use tenet::core::{
+///     CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericRigidSymbols,
+///     TypedSectorAdmission,
+/// };
 /// use tenet::typed::{CudaStorage, TensorMap, Truncation};
 ///
-/// fn no_checked_generic_cuda_svd_trunc(tensor: &TensorMap<U1FusionRule, f64, CudaStorage>) {
+/// fn no_checked_generic_cuda_svd_trunc<R>(tensor: &TensorMap<R, f64, CudaStorage>)
+/// where
+///     R: TypedSectorAdmission<Mode = CheckedGenericAdmissionMode>
+///         + CheckedGenericFusion
+///         + CheckedGenericRigidSymbols<Scalar = f64>,
+/// {
 ///     let _ = tensor.svd_trunc(&Truncation::Full);
 /// }
 /// ```
