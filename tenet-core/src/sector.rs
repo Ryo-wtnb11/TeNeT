@@ -268,6 +268,32 @@ impl SectorLeg {
         })
     }
 
+    /// Checked Generic sibling of [`Self::try_dual`] that preserves the
+    /// provider's concrete error without requiring `CheckedFusionAlgebra`.
+    #[doc(hidden)]
+    pub fn try_dual_generic<R>(
+        &self,
+        rule: &R,
+    ) -> Result<Self, CheckedGenericStructureError<R::Error>>
+    where
+        R: CheckedGenericFusion,
+    {
+        let sectors = self
+            .iter()
+            .map(|(sector, degeneracy)| {
+                rule.try_dual(sector)
+                    .map(|dual| (dual, degeneracy))
+                    .map_err(CheckedGenericStructureError::Provider)
+            })
+            .collect::<Result<SmallVec<[(SectorId, usize); 8]>, _>>()?;
+        Self::try_new(sectors, !self.is_dual).map_err(|_| {
+            CoreError::MalformedFusionTree {
+                message: "checked Generic dual is not injective on one tensor leg",
+            }
+            .into()
+        })
+    }
+
     #[inline]
     pub const fn is_dual(&self) -> bool {
         self.is_dual

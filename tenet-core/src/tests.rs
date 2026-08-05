@@ -13688,6 +13688,9 @@ mod tests {
         assert_eq!(leg.sectors(), &[a]);
         assert_eq!(leg.degeneracies(), &[1]);
         assert!(!leg.is_dual());
+        let dual = leg.try_dual_generic(&rule).unwrap();
+        assert_eq!(dual.sectors(), &[a]);
+        assert!(dual.is_dual());
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
