@@ -3,12 +3,8 @@
 //! tenet workspace that touches tenferro GPU types; upper layers see opaque
 //! storage handles and `DenseError`.
 
-use tenferro_gpu::{
-    download_tensor, upload_tensor, with_cuda_exec_session, CudaBackend, CudaDeviceId,
-    CudaExecSession,
-};
-use tenferro_linalg::LinalgBackend;
-use tenferro_tensor::backend::BackendSessionHost;
+use tenferro_gpu::{download_tensor, upload_tensor, CudaBackend};
+use tenferro_linalg::TensorReadLinalgExt;
 use tenferro_tensor::{
     ContractionScalar, DotGeneralAccumulation, DotGeneralConfig, Tensor, TensorDot,
     TensorElementwise, TensorRead, TensorReduction, TensorStructural, TensorView,
@@ -31,20 +27,6 @@ fn cuda_error(op: &'static str, err: impl std::fmt::Display) -> DenseError {
         op,
         message: err.to_string(),
     }
-}
-
-fn with_cuda_linalg<R: Send>(
-    backend: &mut CudaBackend,
-    f: impl for<'a> FnOnce(&'a mut CudaExecSession<'a>) -> tenferro_tensor::Result<R> + Send,
-) -> tenferro_tensor::Result<R> {
-    backend.with_backend_session(|session| {
-        with_cuda_exec_session(session, f).unwrap_or_else(|| {
-            Err(tenferro_tensor::Error::backend_failure(
-                "cuda_linalg_session",
-                "CudaBackend did not expose a CUDA execution session",
-            ))
-        })
-    })
 }
 
 fn cuda_operand_view(op: MatrixOp, rows: usize, cols: usize) -> ([usize; 2], bool) {
@@ -86,10 +68,7 @@ pub struct CudaDenseContext {
 
 impl CudaDenseContext {
     pub fn new(device: usize) -> Result<Self, DenseError> {
-        let device_id = u32::try_from(device)
-            .map_err(|_| cuda_error("cuda_context", "CUDA device ordinal does not fit u32"))?;
-        let backend = CudaBackend::new(CudaDeviceId::from_ordinal(device_id))
-            .map_err(|err| cuda_error("cuda_context", err))?;
+        let backend = CudaBackend::new(device).map_err(|err| cuda_error("cuda_context", err))?;
         Ok(Self { backend, device })
     }
 
@@ -571,16 +550,12 @@ pub fn cuda_svd_region(
 ) -> Result<(CudaDenseStorage, Vec<f64>, CudaDenseStorage), DenseError> {
     ensure_cuda_device(ctx.device, "cuda_svd", &[("src", src.device)])?;
     let view = src.region_view(rows, cols, rows, offset)?;
-    let mut outputs = with_cuda_linalg(&mut ctx.backend, |backend| {
-        backend.svd_read(TensorRead::from_view(view))
-    })
-    .map_err(|err| cuda_error("cuda_svd", err))?;
-    if outputs.len() != 3 {
-        return Err(cuda_error("cuda_svd", "device SVD must return (U, S, Vt)"));
-    }
-    let vt = expect_f64("cuda_svd", outputs.pop().expect("len checked"), ctx.device)?;
-    let s = download_values(ctx, &outputs.pop().expect("len checked"))?;
-    let u = expect_f64("cuda_svd", outputs.pop().expect("len checked"), ctx.device)?;
+    let (u, s, vt) = TensorRead::from_view(view)
+        .svd_read(&mut ctx.backend)
+        .map_err(|err| cuda_error("cuda_svd", err))?;
+    let vt = expect_f64("cuda_svd", vt, ctx.device)?;
+    let s = download_values(ctx, &s)?;
+    let u = expect_f64("cuda_svd", u, ctx.device)?;
     validate_svd_factor_shapes(u.tensor.shape(), s.len(), vt.tensor.shape(), rows, cols)?;
     Ok((u, s, vt))
 }
@@ -618,15 +593,11 @@ pub fn cuda_qr_region(
 ) -> Result<(CudaDenseStorage, CudaDenseStorage, Vec<f64>), DenseError> {
     ensure_cuda_device(ctx.device, "cuda_qr", &[("src", src.device)])?;
     let view = src.region_view(rows, cols, rows, offset)?;
-    let mut outputs = with_cuda_linalg(&mut ctx.backend, |backend| {
-        backend.qr_read(TensorRead::from_view(view))
-    })
-    .map_err(|err| cuda_error("cuda_qr", err))?;
-    if outputs.len() != 2 {
-        return Err(cuda_error("cuda_qr", "device QR must return (Q, R)"));
-    }
-    let r = expect_f64("cuda_qr", outputs.pop().expect("len checked"), ctx.device)?;
-    let q = expect_f64("cuda_qr", outputs.pop().expect("len checked"), ctx.device)?;
+    let (q, r) = TensorRead::from_view(view)
+        .qr_read(&mut ctx.backend)
+        .map_err(|err| cuda_error("cuda_qr", err))?;
+    let r = expect_f64("cuda_qr", r, ctx.device)?;
+    let q = expect_f64("cuda_qr", q, ctx.device)?;
     let k = rows.min(cols);
     validate_qr_factor_shapes(q.tensor.shape(), r.tensor.shape(), rows, cols)?;
     // R's diagonal as a strided [k] view (stride k + 1), compacted on
@@ -686,18 +657,11 @@ pub fn cuda_eigh_region(
 ) -> Result<(Vec<f64>, CudaDenseStorage), DenseError> {
     ensure_cuda_device(ctx.device, "cuda_eigh", &[("src", src.device)])?;
     let view = src.region_view(n, n, n, offset)?;
-    let mut outputs = with_cuda_linalg(&mut ctx.backend, |backend| {
-        backend.eigh_read(TensorRead::from_view(view))
-    })
-    .map_err(|err| cuda_error("cuda_eigh", err))?;
-    if outputs.len() != 2 {
-        return Err(cuda_error(
-            "cuda_eigh",
-            "device eigh must return (values, vectors)",
-        ));
-    }
-    let vectors = expect_f64("cuda_eigh", outputs.pop().expect("len checked"), ctx.device)?;
-    let values = download_values(ctx, &outputs.pop().expect("len checked"))?;
+    let (values, vectors) = TensorRead::from_view(view)
+        .eigh_read(&mut ctx.backend)
+        .map_err(|err| cuda_error("cuda_eigh", err))?;
+    let vectors = expect_f64("cuda_eigh", vectors, ctx.device)?;
+    let values = download_values(ctx, &values)?;
     validate_eigh_factor_shapes(values.len(), vectors.tensor.shape(), n)?;
     Ok((values, vectors))
 }

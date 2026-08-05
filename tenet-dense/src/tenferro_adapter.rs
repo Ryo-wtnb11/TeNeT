@@ -9,14 +9,12 @@ use crate::{
 
 use std::sync::Arc;
 
-use tenferro_cpu::{with_cpu_exec_session, CpuBackend, CpuBackendKind, CpuContext, CpuExecSession};
-use tenferro_linalg::LinalgBackend;
-use tenferro_tensor::backend::{
-    BackendSessionHost, GroupedGemmConfig, GroupedGemmJob, TensorStructural,
-};
+use tenferro_cpu::{CpuBackend, CpuBackendKind, CpuContext};
+use tenferro_linalg::{TensorLinalgExt, TensorReadLinalgExt};
+use tenferro_tensor::backend::{BackendSessionHost, GroupedGemmConfig, GroupedGemmJob};
 use tenferro_tensor::{
-    BackendCachedDot, BackendRuntimeCache, DotGeneralConfig, Tensor, TensorDot, TensorRead,
-    TensorView, TensorViewMut, TensorWrite, TypedTensorView, TypedTensorViewMut,
+    BackendCachedDot, BackendRuntimeCache, DotGeneralConfig, TensorDot, TensorRead, TensorView,
+    TensorViewMut, TensorWrite, TypedTensorView, TypedTensorViewMut,
 };
 
 /// Minimum plan-time run length routed to the strided-batch seam; shorter runs
@@ -34,20 +32,6 @@ use tenferro_tensor::{
 /// plan-time cost-model constant (peer of the contraction-order cost model),
 /// not a runtime kernel knob.
 const STRIDED_RUN_MIN: usize = 4;
-
-fn with_cpu_linalg<R: Send>(
-    backend: &mut CpuBackend,
-    f: impl for<'a> FnOnce(&'a mut CpuExecSession<'a>) -> tenferro_tensor::Result<R> + Send,
-) -> tenferro_tensor::Result<R> {
-    backend.with_backend_session(|session| {
-        with_cpu_exec_session(session, f).unwrap_or_else(|| {
-            Err(tenferro_tensor::Error::backend_failure(
-                "cpu_linalg_session",
-                "CpuBackend did not expose a CPU execution session",
-            ))
-        })
-    })
-}
 
 /// One CPU execution context — parallelism hint plus the rayon pool behind
 /// multi-threaded CPU work — meant to be shared by EVERY executor a runtime
@@ -499,38 +483,54 @@ impl Default for DefaultDenseExecutor {
 impl DenseExecutor for DefaultDenseExecutor {
     fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         let input = tenferro_view(input)?;
-        with_cpu_linalg(&mut self.backend, |backend| {
-            backend.svd_read(TensorRead::from_view(input))
-        })
-        .map(wrap_outputs)
-        .map_err(|err| tenferro_error("svd_read", err))
+        TensorRead::from_view(input)
+            .svd_read(&mut self.backend)
+            .map(|(u, s, vt)| {
+                vec![u, s, vt]
+                    .into_iter()
+                    .map(DenseTensor::from_tenferro)
+                    .collect()
+            })
+            .map_err(|err| tenferro_error("svd_read", err))
     }
 
     fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         let input = tenferro_view(input)?;
-        with_cpu_linalg(&mut self.backend, |backend| {
-            backend.qr_read(TensorRead::from_view(input))
-        })
-        .map(wrap_outputs)
-        .map_err(|err| tenferro_error("qr_read", err))
+        TensorRead::from_view(input)
+            .qr_read(&mut self.backend)
+            .map(|(q, r)| {
+                vec![q, r]
+                    .into_iter()
+                    .map(DenseTensor::from_tenferro)
+                    .collect()
+            })
+            .map_err(|err| tenferro_error("qr_read", err))
     }
 
     fn eig(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         let input = tenferro_view(input)?;
-        with_cpu_linalg(&mut self.backend, |backend| {
-            backend.eig_read(TensorRead::from_view(input))
-        })
-        .map(wrap_outputs)
-        .map_err(|err| tenferro_error("eig_read", err))
+        TensorRead::from_view(input)
+            .eig_read(&mut self.backend)
+            .map(|(values, vectors)| {
+                vec![values, vectors]
+                    .into_iter()
+                    .map(DenseTensor::from_tenferro)
+                    .collect()
+            })
+            .map_err(|err| tenferro_error("eig_read", err))
     }
 
     fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         let input = tenferro_view(input)?;
-        with_cpu_linalg(&mut self.backend, |backend| {
-            backend.eigh_read(TensorRead::from_view(input))
-        })
-        .map(wrap_outputs)
-        .map_err(|err| tenferro_error("eigh_read", err))
+        TensorRead::from_view(input)
+            .eigh_read(&mut self.backend)
+            .map(|(values, vectors)| {
+                vec![values, vectors]
+                    .into_iter()
+                    .map(DenseTensor::from_tenferro)
+                    .collect()
+            })
+            .map_err(|err| tenferro_error("eigh_read", err))
     }
 
     fn solve_into(
@@ -556,49 +556,54 @@ impl DenseExecutor for DefaultDenseExecutor {
         let a = tenferro_view(a)?;
         let b = tenferro_view(b)?;
         let x = tenferro_view_mut(x)?;
-        with_cpu_linalg(&mut self.backend, |backend| {
-            backend.solve_read_into(
-                TensorRead::from_view(a),
+        TensorRead::from_view(a)
+            .solve_read_into(
                 TensorRead::from_view(b),
                 TensorWrite::from_view(x),
+                &mut self.backend,
             )
-        })
-        .map_err(tenferro_solve_error)
+            .map_err(tenferro_solve_error)
     }
 
-    // Values-only overrides route to tenferro's no-vector LAPACK entries
-    // (`job='N'`), skipping the U/Vt (or eigenvector) computation the default
-    // fallback would do. The backend entries take an owned `&Tensor`, so the
-    // borrowed view is materialized to a contiguous tensor first — one cheap
-    // copy of the input matrix versus the discarded O(n^2) vector work.
+    // The current tenferro public extension API exposes values-only results
+    // through the ordinary decomposition extensions, so these adapters keep
+    // the dense API working by computing the decomposition and discarding the
+    // factors. The borrowed view is materialized once because the owned
+    // extension methods require a contiguous Tensor.
     fn svd_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
         let input = tenferro_view(input)?;
-        with_cpu_linalg(&mut self.backend, |backend| {
-            let owned = backend.to_contiguous_read(TensorRead::from_view(input))?;
-            backend.svd_values(&owned)
-        })
-        .map(DenseTensor::from_tenferro)
-        .map_err(|err| tenferro_error("svd_values", err))
+        let owned = self
+            .backend
+            .with_backend_session(|exec| exec.to_contiguous_read(TensorRead::from_view(input)))
+            .map_err(|err| tenferro_error("svd_values", err))?;
+        let (_, values, _) = owned
+            .svd(&mut self.backend)
+            .map_err(|err| tenferro_error("svd_values", err))?;
+        Ok(DenseTensor::from_tenferro(values))
     }
 
     fn eigh_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
         let input = tenferro_view(input)?;
-        with_cpu_linalg(&mut self.backend, |backend| {
-            let owned = backend.to_contiguous_read(TensorRead::from_view(input))?;
-            backend.eigh_values(&owned)
-        })
-        .map(DenseTensor::from_tenferro)
-        .map_err(|err| tenferro_error("eigh_values", err))
+        let owned = self
+            .backend
+            .with_backend_session(|exec| exec.to_contiguous_read(TensorRead::from_view(input)))
+            .map_err(|err| tenferro_error("eigh_values", err))?;
+        let (values, _) = owned
+            .eigh(&mut self.backend)
+            .map_err(|err| tenferro_error("eigh_values", err))?;
+        Ok(DenseTensor::from_tenferro(values))
     }
 
     fn eig_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
         let input = tenferro_view(input)?;
-        with_cpu_linalg(&mut self.backend, |backend| {
-            let owned = backend.to_contiguous_read(TensorRead::from_view(input))?;
-            backend.eig_values(&owned)
-        })
-        .map(DenseTensor::from_tenferro)
-        .map_err(|err| tenferro_error("eig_values", err))
+        let owned = self
+            .backend
+            .with_backend_session(|exec| exec.to_contiguous_read(TensorRead::from_view(input)))
+            .map_err(|err| tenferro_error("eig_values", err))?;
+        owned
+            .eigvals(&mut self.backend)
+            .map(DenseTensor::from_tenferro)
+            .map_err(|err| tenferro_error("eig_values", err))
     }
 
     fn dot_general_into(
@@ -827,13 +832,6 @@ fn tenferro_scalar(value: DenseScalar) -> tenferro_tensor::ContractionScalar {
         DenseScalar::C32(value) => tenferro_tensor::ContractionScalar::C32(value),
         DenseScalar::C64(value) => tenferro_tensor::ContractionScalar::C64(value),
     }
-}
-
-fn wrap_outputs(outputs: Vec<Tensor>) -> Vec<DenseTensor> {
-    outputs
-        .into_iter()
-        .map(DenseTensor::from_tenferro)
-        .collect()
 }
 
 fn tenferro_view(input: DenseRead<'_>) -> Result<TensorView<'_>, DenseError> {
