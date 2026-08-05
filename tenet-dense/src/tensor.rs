@@ -15,6 +15,7 @@ pub struct DenseTensor {
 #[derive(Clone, Debug)]
 enum DenseTensorInner {
     #[cfg(feature = "tenferro")]
+    #[allow(dead_code)]
     Tenferro(Arc<tenferro_tensor::Tensor>),
     #[cfg(not(feature = "tenferro"))]
     #[allow(dead_code)]
