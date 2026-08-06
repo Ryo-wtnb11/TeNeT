@@ -214,7 +214,8 @@ use tenet_core::{
     ProductSector, ProductSectorCodec, SectorId, SectorLeg, TypedSectorAdmission, UnitLegInsertion,
 };
 use tenet_core::{
-    CheckedGenericFusion, CheckedGenericRigidSymbols, HostReadableStorage, Placement, TensorStorage,
+    CheckedGenericFusion, CheckedGenericPivotal, CheckedGenericRigidSymbols, HostReadableStorage,
+    Placement, TensorStorage,
 };
 #[cfg(feature = "cuda")]
 use tenet_dense::{
@@ -3419,6 +3420,19 @@ where
     ) -> Result<TensorMap<R, D>, Self::FacadeError>;
 }
 
+/// Partial categorical trace execution selected by provider-owned mode.
+#[doc(hidden)]
+pub trait TypedTensorTraceDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn trace_pairs(
+        tensor: &TensorMap<R, D>,
+        pairs: &[(usize, usize)],
+    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
+}
+
 mod typed_admission_private {
     use super::{CheckedGenericAdmissionMode, MultiplicityFreeAdmissionMode};
 
@@ -4491,6 +4505,139 @@ where
             &rhs_axes,
             &(0..lhs.codomain_rank() + rhs.domain_rank()).collect::<Vec<_>>(),
         )
+    }
+}
+
+impl<R, D> TypedTensorTraceDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn trace_pairs(
+        tensor: &TensorMap<R, D>,
+        pairs: &[(usize, usize)],
+    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        tensor.trace_pairs_multiplicity_free(pairs)
+    }
+}
+
+impl<R, D> TypedTensorTraceDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericPivotal<Scalar = f64>
+        + SectorCodec,
+    D: TensorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+{
+    fn trace_pairs(
+        tensor: &TensorMap<R, D>,
+        pairs: &[(usize, usize)],
+    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        trace_pairs_checked_generic(tensor, pairs)
+    }
+}
+
+fn trace_pairs_checked_generic<R, D>(
+    tensor: &TensorMap<R, D>,
+    pairs: &[(usize, usize)],
+) -> Result<TensorMap<R, D>, TypedFacadeError<R>>
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericPivotal<Scalar = f64>
+        + SectorCodec,
+    D: TensorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
+{
+    let rank = tensor.rank();
+    let mut seen = vec![false; rank];
+    for &(lhs, rhs) in pairs {
+        for axis in [lhs, rhs] {
+            if axis >= rank || seen[axis] {
+                return Err(Error::InvalidArgument(format!(
+                    "invalid trace pair list {pairs:?} for rank {rank} (axes must be in range and distinct)"
+                ))
+                .into());
+            }
+            seen[axis] = true;
+        }
+    }
+    if pairs.is_empty() {
+        return Ok(tensor.clone());
+    }
+    let output_axes: Vec<usize> = (0..rank).filter(|&axis| !seen[axis]).collect();
+    let destination_codomain_rank = output_axes
+        .iter()
+        .filter(|&&axis| axis < tensor.codomain_rank())
+        .count();
+    let trace_lhs: Vec<usize> = pairs.iter().map(|&(lhs, _)| lhs).collect();
+    let trace_rhs: Vec<usize> = pairs.iter().map(|&(_, rhs)| rhs).collect();
+    let mapped_output_axes;
+    let mapped_trace_lhs;
+    let mapped_trace_rhs;
+    let (source_space, source_data, axes) = match &tensor.repr {
+        TypedTensorRepr::Owned(body) => (
+            &body.space,
+            body.materialized_dense_data(),
+            tenet_tensors::TensorTraceAxisSpec::new(&output_axes, &trace_lhs, &trace_rhs),
+        ),
+        TypedTensorRepr::Adjoint(view) => {
+            let parent = view.parent.space.space();
+            mapped_output_axes =
+                logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &output_axes);
+            mapped_trace_lhs =
+                logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &trace_lhs);
+            mapped_trace_rhs =
+                logical_adjoint_axes_to_parent(parent.nout(), parent.nin(), &trace_rhs);
+            (
+                &view.parent.space,
+                view.parent.materialized_dense_data(),
+                tenet_tensors::TensorTraceAxisSpec::new_with_conjugation(
+                    &mapped_output_axes,
+                    &mapped_trace_lhs,
+                    &mapped_trace_rhs,
+                    true,
+                ),
+            )
+        }
+    };
+    let homspace = tenet_tensors::tensortrace_fusion_dyn_selected_homspace_generic_checked(
+        source_space,
+        axes,
+        destination_codomain_rank,
+    )?;
+    let prepared = source_space
+        .prepare_final_homspace_generic_with_checked(source_space.provider(), homspace)
+        .map_err(CheckedGenericPlanError::from)?;
+    let space = source_space
+        .commit_final_homspace_generic_bound_checked(prepared)
+        .map_err(CheckedGenericPlanError::Operation)?;
+    let data = tenet_tensors::tensortrace_fusion_dyn_owned_generic_checked(
+        &space,
+        source_space,
+        source_data,
+        axes,
+        D::from_real(1.0),
+    )?;
+    Ok(TensorMap {
+        runtime: tensor.runtime.clone(),
+        repr: owned_repr(TypedTensorBody::dense(space, data)),
+    })
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorTraceDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// Partial categorical trace over mutually dual axis pairs.
+    pub fn trace_pairs(&self, pairs: &[(usize, usize)]) -> Result<Self, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorTraceDispatch<R, D>>::trace_pairs(self, pairs)
     }
 }
 
@@ -11776,7 +11923,7 @@ where
     /// Otherwise [`Error::Operation`] / [`Error::Core`] /
     /// [`Error::FusionAlgebra`] from the seam, which owns the rest of the
     /// validation (legs that are not mutually dual, above all).
-    pub fn trace_pairs(&self, pairs: &[(usize, usize)]) -> Result<Self, Error> {
+    fn trace_pairs_multiplicity_free(&self, pairs: &[(usize, usize)]) -> Result<Self, Error> {
         // Why this validation is kept rather than left to the seam, unlike
         // everywhere else in this facade: `seen` is not a check, it is the
         // derivation of `output_axes` below — the seam cannot supply it, and a
