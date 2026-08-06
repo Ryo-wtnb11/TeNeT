@@ -406,7 +406,7 @@ where
     StructurallyValidatedFusionTreeSubset::try_new(larger_homspace, larger_structure)?
         .validate_for_rule(rule)?;
     validate_unit_layout_correspondence_after_preflight(
-        rule,
+        rule.vacuum(),
         smaller,
         larger,
         insertion,
@@ -424,7 +424,7 @@ pub fn validate_unit_layout_correspondence_checked<R>(
     insertion: UnitLegInsertion,
 ) -> Result<(), CheckedFusionSpaceError>
 where
-    R: CanonicalUnitFusionRule + CheckedFusionAlgebra,
+    R: CheckedFusionAlgebra,
 {
     let (is_codomain, local_position) = unit_insertion_side(smaller.0, insertion)
         .ok_or(CoreError::UnitLayoutCorrespondence)?;
@@ -437,7 +437,40 @@ where
         .validate_for_rule_checked(rule)?;
     larger_validated.validate_for_rule_checked(rule)?;
     validate_unit_layout_correspondence_after_preflight(
-        rule,
+        FusionRule::vacuum(rule),
+        smaller,
+        larger,
+        insertion,
+        is_codomain,
+        local_position,
+    )
+    .map_err(Into::into)
+}
+
+/// Checked Generic unit-layout correspondence after root admission.
+///
+/// The source and destination roots have already undergone Generic provider
+/// validation; this seam checks only the exact structural/layout relation and
+/// never falls back to the infallible provider API.
+#[doc(hidden)]
+pub fn validate_unit_layout_correspondence_generic_checked<R>(
+    rule: &R,
+    smaller: (&FusionTreeHomSpace, &BlockStructure),
+    larger: (&FusionTreeHomSpace, &BlockStructure),
+    insertion: UnitLegInsertion,
+) -> Result<(), CheckedGenericStructureError<R::Error>>
+where
+    R: CheckedGenericFusion,
+{
+    let (is_codomain, local_position) = unit_insertion_side(smaller.0, insertion)
+        .ok_or(CoreError::UnitLayoutCorrespondence)?;
+    if larger.0.rank() != smaller.0.rank() + 1 || larger.1.rank() != smaller.1.rank() + 1 {
+        return Err(CoreError::UnitLayoutCorrespondence.into());
+    }
+    StructurallyValidatedFusionTreeSubset::try_new(smaller.0, smaller.1)?;
+    StructurallyValidatedFusionTreeSubset::try_new(larger.0, larger.1)?;
+    validate_unit_layout_correspondence_after_preflight(
+        rule.vacuum(),
         smaller,
         larger,
         insertion,
@@ -463,16 +496,14 @@ fn unit_insertion_side(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn validate_unit_layout_correspondence_after_preflight<R>(
-    rule: &R,
+fn validate_unit_layout_correspondence_after_preflight(
+    unit: SectorId,
     smaller: (&FusionTreeHomSpace, &BlockStructure),
     larger: (&FusionTreeHomSpace, &BlockStructure),
     insertion: UnitLegInsertion,
     is_codomain: bool,
     local_position: usize,
 ) -> Result<(), CoreError>
-where
-    R: CanonicalUnitFusionRule,
 {
     let (smaller_homspace, smaller_structure) = smaller;
     let (larger_homspace, larger_structure) = larger;
@@ -493,7 +524,7 @@ where
     };
     if larger_side.len() != smaller_side.len() + 1
         || larger_side.legs().get(local_position)
-            != Some(&SectorLeg::new([(rule.vacuum(), 1)], insertion.dual()))
+            != Some(&SectorLeg::new([(unit, 1)], insertion.dual()))
         || !slice_matches_without(larger_side.legs(), smaller_side.legs(), local_position)
         || smaller_other != larger_other
         || smaller_structure.block_count() != larger_structure.block_count()
@@ -524,7 +555,7 @@ where
             (small_key.codomain_tree(), large_key.codomain_tree())
         };
         if small_other != large_other
-            || !unit_tree_matches(rule, small_tree, large_tree, local_position, insertion.dual())
+            || !unit_tree_matches(unit, small_tree, large_tree, local_position, insertion.dual())
         {
             return Err(CoreError::UnitLayoutCorrespondence);
         }
@@ -545,20 +576,17 @@ fn slice_matches_without<T: Eq>(larger: &[T], smaller: &[T], index: usize) -> bo
         && larger[index + 1..] == smaller[index..]
 }
 
-fn unit_tree_matches<R>(
-    rule: &R,
+fn unit_tree_matches(
+    unit: SectorId,
     small: &FusionTreeKey,
     large: &FusionTreeKey,
     position: usize,
     dual: bool,
-) -> bool
-where
-    R: CanonicalUnitFusionRule,
-{
+) -> bool {
     let rank = small.uncoupled().len();
     if position > rank
         || large.coupled() != small.coupled()
-        || large.uncoupled().get(position) != Some(&rule.vacuum())
+        || large.uncoupled().get(position) != Some(&unit)
         || large.is_dual().get(position) != Some(&dual)
         || !slice_matches_without(large.uncoupled(), small.uncoupled(), position)
         || !slice_matches_without(large.is_dual(), small.is_dual(), position)
@@ -2413,6 +2441,93 @@ impl FusionTreeHomSpace {
             &self.domain().legs()[axis - self.codomain().len()]
         };
         if leg.sectors() != [rule.vacuum()] || leg.degeneracy(rule.vacuum()) != Some(1) {
+            return Err(CoreError::UnitLayoutCorrespondence);
+        }
+        if axis < self.codomain().len() {
+            Ok(Self::new(
+                remove_product_space_leg(self.codomain(), axis),
+                self.domain().clone(),
+            ))
+        } else {
+            Ok(Self::new(
+                self.codomain().clone(),
+                remove_product_space_leg(self.domain(), axis - self.codomain().len()),
+            ))
+        }
+    }
+
+    /// Checked Generic counterpart of [`Self::insert_left_unit`].
+    #[doc(hidden)]
+    pub fn insert_left_unit_checked<R>(
+        &self,
+        rule: &R,
+        position: usize,
+        dual: bool,
+    ) -> Result<Self, CoreError>
+    where
+        R: CheckedCanonicalUnitFusionRule,
+    {
+        if position > self.rank() {
+            return Err(CoreError::UnitLayoutCorrespondence);
+        }
+        let unit = SectorLeg::new([(rule.vacuum(), 1)], dual);
+        if position < self.codomain().len() {
+            Ok(Self::new(
+                insert_product_space_leg(self.codomain(), position, unit),
+                self.domain().clone(),
+            ))
+        } else {
+            Ok(Self::new(
+                self.codomain().clone(),
+                insert_product_space_leg(self.domain(), position - self.codomain().len(), unit),
+            ))
+        }
+    }
+
+    /// Checked Generic counterpart of [`Self::insert_right_unit`].
+    #[doc(hidden)]
+    pub fn insert_right_unit_checked<R>(
+        &self,
+        rule: &R,
+        position: usize,
+        dual: bool,
+    ) -> Result<Self, CoreError>
+    where
+        R: CheckedCanonicalUnitFusionRule,
+    {
+        if position > self.rank() {
+            return Err(CoreError::UnitLayoutCorrespondence);
+        }
+        let unit = SectorLeg::new([(rule.vacuum(), 1)], dual);
+        if position <= self.codomain().len() {
+            Ok(Self::new(
+                insert_product_space_leg(self.codomain(), position, unit),
+                self.domain().clone(),
+            ))
+        } else {
+            Ok(Self::new(
+                self.codomain().clone(),
+                insert_product_space_leg(self.domain(), position - self.codomain().len(), unit),
+            ))
+        }
+    }
+
+    /// Checked Generic counterpart of [`Self::remove_unit`].
+    #[doc(hidden)]
+    pub fn remove_unit_checked<R>(&self, rule: &R, axis: usize) -> Result<Self, CoreError>
+    where
+        R: CheckedCanonicalUnitFusionRule,
+    {
+        if axis >= self.rank() {
+            return Err(CoreError::UnitLayoutCorrespondence);
+        }
+        let vacuum = rule.vacuum();
+        let leg = if axis < self.codomain().len() {
+            &self.codomain().legs()[axis]
+        } else {
+            &self.domain().legs()[axis - self.codomain().len()]
+        };
+        if leg.sectors() != [vacuum] || leg.degeneracy(vacuum) != Some(1) {
             return Err(CoreError::UnitLayoutCorrespondence);
         }
         if axis < self.codomain().len() {

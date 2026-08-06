@@ -21,17 +21,18 @@ use smallvec::SmallVec;
 pub use tenet_sectors::CheckedGenericAdmissionMode;
 pub use tenet_sectors::{
     product_fusion_rule, product_fusion_rule_with_codec, product_sector, BraidingStyleKind,
-    CU1FusionRule, CU1Irrep, CanonicalUnitFusionRule, CheckedFusionAlgebra, CheckedGenericFusion,
-    CheckedGenericPivotal, CheckedGenericRigidSymbols, CoupledSectorFold, FermionParityFusionRule,
-    FibonacciFusionRule, FusionAlgebraError, FusionRule, FusionStyleKind, Fz2SectorLayout,
-    GenericBraidScalar, GenericFArray, GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols,
-    InfallibleGeneric, MultiplicityFreeAdmissionMode, MultiplicityFreeFusionRule,
-    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, PackedProductCodec,
-    PackedSectorLayout, ProductFusionRule, ProductFusionRuleExt, ProductSector, ProductSectorCodec,
-    ProductSectorCodecError, ProductSectorComponent, ProductSectorLayout, RuleIdentity,
-    SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorVec, Su2SectorLayout, SymbolShapeError,
-    TensorKitProductCodec, TypedSectorAdmission, U1FusionRule, U1Irrep, U1SectorLayout,
-    Z2FusionRule, Z2Irrep, ZNFusionRule, ZNIrrep, CU1_MAX_TWICE_CHARGE, SU2_MAX_DOUBLED_SPIN,
+    CU1FusionRule, CU1Irrep, CanonicalUnitFusionRule, CheckedCanonicalUnitFusionRule,
+    CheckedFusionAlgebra, CheckedGenericFusion, CheckedGenericPivotal, CheckedGenericRigidSymbols,
+    CoupledSectorFold, FermionParityFusionRule, FibonacciFusionRule, FusionAlgebraError,
+    FusionRule, FusionStyleKind, Fz2SectorLayout, GenericBraidScalar, GenericFArray,
+    GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols, InfallibleGeneric,
+    MultiplicityFreeAdmissionMode, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, PackedProductCodec, PackedSectorLayout, ProductFusionRule,
+    ProductFusionRuleExt, ProductSector, ProductSectorCodec, ProductSectorCodecError,
+    ProductSectorComponent, ProductSectorLayout, RuleIdentity, SU2FusionRule, SU2Irrep,
+    SectorCodec, SectorId, SectorVec, Su2SectorLayout, SymbolShapeError, TensorKitProductCodec,
+    TypedSectorAdmission, U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep,
+    ZNFusionRule, ZNIrrep, CU1_MAX_TWICE_CHARGE, SU2_MAX_DOUBLED_SPIN,
 };
 #[cfg(feature = "racah-generated")]
 pub use tenet_sectors::{SUNFusionRule, SUNFusionRuleError};
