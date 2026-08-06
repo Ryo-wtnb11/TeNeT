@@ -6504,6 +6504,113 @@ impl<R, D> TensorMap<R, D> {
     }
 }
 
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    /// TensorKit `absorb(tdst, tsrc)` (which copies and delegates to
+    /// `absorb!`): copies the common per-axis prefix of every shared
+    /// fusion-tree block of `source` into a deep copy of `self` (TK takes
+    /// the `min` of the two block shapes per axis). Blocks whose key the source
+    /// does not carry are untouched, so the caller owns the initialization of
+    /// the non-shared region — TK documents the same contract.
+    ///
+    /// The result keeps `self`'s spaces and dtype. Equal `D` is required by
+    /// the signature; widen with [`Self::to_c64`] first. A compact diagonal
+    /// payload (on either side) is materialized dense first, exactly once.
+    ///
+    /// # Complexity
+    ///
+    /// One output allocation for owned dense inputs plus `O(min-prefix)`
+    /// overwrites per shared block. A lazy input currently adds one
+    /// operation-local logical payload; it is not published in the receiver's
+    /// reusable materialization cache.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] on unequal codomain/domain ranks (TK throws
+    /// its `DimensionError` for the same), [`Error::RuleMismatch`] when the
+    /// already-admitted layouts carry differing rule-identity stamps,
+    /// [`Error::RuntimeMismatch`] on differing runtimes, and
+    /// [`Error::InvalidArgument`] when corresponding legs differ in duality.
+    pub fn absorb(&self, source: &Self) -> Result<Self, Error> {
+        let destination_space = self.logical_space().space();
+        let source_space = source.logical_space().space();
+        if destination_space.nout() != source_space.nout()
+            || destination_space.nin() != source_space.nin()
+        {
+            return Err(Error::InvalidArgument(format!(
+                "TensorMap::absorb requires equal codomain/domain ranks, got {}|{} and {}|{}",
+                destination_space.nout(),
+                destination_space.nin(),
+                source_space.nout(),
+                source_space.nin()
+            )));
+        }
+        if destination_space.admission().rule_identity() != source_space.admission().rule_identity()
+        {
+            return Err(Error::RuleMismatch);
+        }
+        if !self.runtime.same_runtime(&source.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        for (destination_leg, source_leg) in destination_space
+            .homspace()
+            .codomain()
+            .legs()
+            .iter()
+            .chain(destination_space.homspace().domain().legs())
+            .zip(
+                source_space
+                    .homspace()
+                    .codomain()
+                    .legs()
+                    .iter()
+                    .chain(source_space.homspace().domain().legs()),
+            )
+        {
+            if destination_leg.is_dual() != source_leg.is_dual() {
+                return Err(Error::InvalidArgument(
+                    "TensorMap::absorb requires corresponding legs to have equal duality"
+                        .to_string(),
+                ));
+            }
+        }
+        // Lazy inputs need an operation-local dense payload, never a warmed
+        // reusable receiver cache.
+        let destination = self.materialized_tensor_uncached()?;
+        let source = source.materialized_tensor_uncached()?;
+        let destination_data = destination
+            .owned_body()
+            .expect("uncached materialization is owned")
+            .materialized_dense_data();
+        let source_data = source
+            .owned_body()
+            .expect("uncached materialization is owned")
+            .materialized_dense_data();
+        if destination_space.structure().required_len()? != destination_data.len()
+            || source_space.structure().required_len()? != source_data.len()
+        {
+            return Err(internal_layout_error(
+                "absorb block layout does not cover scalar storage",
+            ));
+        }
+        let mut output = destination_data.to_vec();
+        absorb_mapped(
+            destination_space.structure(),
+            &mut output,
+            source_space.structure(),
+            source_data,
+            Ok,
+        )?;
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(self.logical_space().clone(), output)),
+        })
+    }
+}
+
 impl<R, D, S> TensorMap<R, D, S>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -8455,7 +8562,6 @@ where
             )),
         }
     }
-
     /// Builds an operation-local logical tensor without publishing the
     /// receiver's reusable materialization cache, but still constructs a full
     /// receiver-sized logical payload. Prefer an oriented kernel or algebraic
@@ -12723,111 +12829,6 @@ where
         Ok(Self {
             runtime: self.runtime.clone(),
             repr: owned_repr(TypedTensorBody::dense(space, data)),
-        })
-    }
-
-    /// TensorKit `absorb(tdst, tsrc)` (which copies and delegates to
-    /// `absorb!`): copies the common per-axis prefix of every shared
-    /// fusion-tree block of `source` into a deep copy of `self` (TK takes
-    /// the `min` of the two block shapes per axis). Blocks whose key the source
-    /// does not carry are untouched, so the caller owns the initialization of
-    /// the non-shared region — TK documents the same contract.
-    ///
-    /// The result keeps `self`'s spaces and dtype. Equal `D` is required by
-    /// the signature; widen with [`Self::to_c64`] first. A compact diagonal
-    /// payload (on either side) is materialized dense first, exactly once.
-    ///
-    /// # Complexity
-    ///
-    /// One output allocation for owned dense inputs plus `O(min-prefix)`
-    /// overwrites per shared block. A lazy input currently adds one
-    /// operation-local logical payload; it is not published in the receiver's
-    /// reusable materialization cache.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::InvalidArgument`] on unequal codomain/domain ranks (TK throws
-    /// its `DimensionError` for the same), [`Error::RuleMismatch`] on differing
-    /// provider identities,
-    /// [`Error::RuntimeMismatch`] on differing runtimes, and
-    /// [`Error::InvalidArgument`] when corresponding legs differ in duality.
-    pub fn absorb(&self, source: &Self) -> Result<Self, Error> {
-        let destination_space = self.logical_space().space();
-        let source_space = source.logical_space().space();
-        if destination_space.nout() != source_space.nout()
-            || destination_space.nin() != source_space.nin()
-        {
-            return Err(Error::InvalidArgument(format!(
-                "TensorMap::absorb requires equal codomain/domain ranks, got {}|{} and {}|{}",
-                destination_space.nout(),
-                destination_space.nin(),
-                source_space.nout(),
-                source_space.nin()
-            )));
-        }
-        if self.logical_space().provider().rule_identity()
-            != source.logical_space().provider().rule_identity()
-        {
-            return Err(Error::RuleMismatch);
-        }
-        if !self.runtime.same_runtime(&source.runtime) {
-            return Err(Error::RuntimeMismatch);
-        }
-        for (destination_leg, source_leg) in destination_space
-            .homspace()
-            .codomain()
-            .legs()
-            .iter()
-            .chain(destination_space.homspace().domain().legs())
-            .zip(
-                source_space
-                    .homspace()
-                    .codomain()
-                    .legs()
-                    .iter()
-                    .chain(source_space.homspace().domain().legs()),
-            )
-        {
-            if destination_leg.is_dual() != source_leg.is_dual() {
-                return Err(Error::InvalidArgument(
-                    "TensorMap::absorb requires corresponding legs to have equal duality"
-                        .to_string(),
-                ));
-            }
-        }
-        // Lazy inputs still need a logical dense payload until absorb gains an
-        // oriented copy plan, but an ordinary operation must not publish that
-        // receiver-sized compatibility cache. Keep both copies request-local.
-        let destination = self.materialized_tensor_uncached()?;
-        let source = source.materialized_tensor_uncached()?;
-        let destination_data = destination
-            .owned_body()
-            .expect("uncached materialization is owned")
-            .materialized_dense_data();
-        let source_data = source
-            .owned_body()
-            .expect("uncached materialization is owned")
-            .materialized_dense_data();
-        // Dense payloads must cover their structures before any block walk
-        // trusts the offsets.
-        if destination_space.structure().required_len()? != destination_data.len()
-            || source_space.structure().required_len()? != source_data.len()
-        {
-            return Err(internal_layout_error(
-                "absorb block layout does not cover scalar storage",
-            ));
-        }
-        let mut output = destination_data.to_vec();
-        absorb_mapped(
-            destination_space.structure(),
-            &mut output,
-            source_space.structure(),
-            source_data,
-            Ok,
-        )?;
-        Ok(Self {
-            runtime: self.runtime.clone(),
-            repr: owned_repr(TypedTensorBody::dense(self.logical_space().clone(), output)),
         })
     }
 
