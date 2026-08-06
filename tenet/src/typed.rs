@@ -293,6 +293,147 @@ pub(crate) trait ScalarOps:
     fn sqrt_value(self) -> Result<Self, Error>;
 }
 
+fn host_add_impl<R, D>(
+    tensor: &TensorMap<R, D>,
+    other: &TensorMap<R, D>,
+    alpha: D,
+    beta: D,
+) -> Result<TensorMap<R, D>, Error>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    if !tensor.runtime.same_runtime(&other.runtime) {
+        return Err(Error::RuntimeMismatch);
+    }
+    if tensor.logical_space().space() != other.logical_space().space() {
+        return Err(Error::InvalidArgument(
+            "tensors live on different spaces or block layouts".to_string(),
+        ));
+    }
+    if matches!(&tensor.repr, TypedTensorRepr::Adjoint(_))
+        || matches!(&other.repr, TypedTensorRepr::Adjoint(_))
+    {
+        let (lhs, lhs_data) = tensor.fusion_operand_and_data();
+        let (rhs, rhs_data) = other.fusion_operand_and_data();
+        let mut data = vec![D::from_real(0.0); tensor.logical_space().space().required_len()?];
+        tenet_tensors::oriented_fusion_add_into(
+            tensor.logical_space().space().structure(),
+            &mut data,
+            lhs,
+            lhs_data,
+            rhs,
+            rhs_data,
+            alpha,
+            beta,
+        )?;
+        return Ok(tensor.with_data(data));
+    }
+    match (tensor.spectrum(), other.spectrum()) {
+        (Some(lhs), Some(rhs)) => {
+            if lhs.len() != rhs.len() {
+                return Err(spectra_disagree());
+            }
+            let sum = lhs
+                .iter()
+                .zip(rhs)
+                .map(|(left, right)| {
+                    if left.sector != right.sector || left.values.len() != right.values.len() {
+                        return Err(spectra_disagree());
+                    }
+                    Ok(tenet_matrixalgebra::SectorSpectrum {
+                        sector: left.sector,
+                        values: left
+                            .values
+                            .iter()
+                            .zip(&right.values)
+                            .map(|(&x, &y)| x * alpha + y * beta)
+                            .collect(),
+                    })
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            return Ok(tensor.with_spectrum(sum));
+        }
+        (Some(diagonal), None) => {
+            return Ok(tensor.with_data(scatter_spectrum(
+                tensor.logical_space().space(),
+                other
+                    .owned_body()
+                    .expect("owned add input")
+                    .materialized_dense_data(),
+                beta,
+                diagonal,
+                alpha,
+            )?))
+        }
+        (None, Some(diagonal)) => {
+            return Ok(tensor.with_data(scatter_spectrum(
+                tensor.logical_space().space(),
+                tensor
+                    .owned_body()
+                    .expect("owned add input")
+                    .materialized_dense_data(),
+                alpha,
+                diagonal,
+                beta,
+            )?))
+        }
+        (None, None) => {}
+    }
+    Ok(tensor.with_data(
+        tensor
+            .owned_body()
+            .expect("owned add input")
+            .materialized_dense_data()
+            .iter()
+            .zip(
+                other
+                    .owned_body()
+                    .expect("owned add input")
+                    .materialized_dense_data(),
+            )
+            .map(|(&x, &y)| x * alpha + y * beta)
+            .collect(),
+    ))
+}
+
+fn host_scale_impl<R, D>(tensor: &TensorMap<R, D>, factor: D) -> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorAdjointDispatch<R, D>,
+    D: TensorScalar,
+{
+    if let Some(spectrum) = tensor.spectrum() {
+        return tensor.with_spectrum(
+            spectrum
+                .iter()
+                .map(|entry| tenet_matrixalgebra::SectorSpectrum {
+                    sector: entry.sector,
+                    values: entry.values.iter().map(|&value| value * factor).collect(),
+                })
+                .collect(),
+        );
+    }
+    if let TypedTensorRepr::Adjoint(view) = &tensor.repr {
+        let parent = TensorMap {
+            runtime: tensor.runtime.clone(),
+            repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+        };
+        return host_scale_impl(&parent, FactorScalar::adjoint(factor))
+            .adjoint()
+            .expect("scaling a pre-admitted adjoint must preserve its layout");
+    }
+    tensor.with_data(
+        tensor
+            .owned_body()
+            .expect("owned scale input")
+            .materialized_dense_data()
+            .iter()
+            .map(|&value| value * factor)
+            .collect(),
+    )
+}
+
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
@@ -310,6 +451,25 @@ where
     /// TensorKit positive matrix trace.
     pub fn tr(&self) -> Result<D, TypedFacadeError<R>> {
         <R::Mode as TypedTensorReductionDispatch<R, D>>::tr(self)
+    }
+}
+
+#[allow(private_bounds)]
+#[allow(private_bounds)]
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorAddScaleDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// Host-side linear combination `alpha * self + beta * other`.
+    pub fn add(&self, other: &Self, alpha: D, beta: D) -> Result<Self, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorAddScaleDispatch<R, D>>::add(self, other, alpha, beta)
+    }
+
+    /// Host-side scalar multiplication.
+    pub fn scale(&self, factor: D) -> Self {
+        <R::Mode as TypedTensorAddScaleDispatch<R, D>>::scale(self, factor)
     }
 }
 
@@ -3268,6 +3428,22 @@ where
 }
 
 #[doc(hidden)]
+trait TypedTensorAddScaleDispatch<R, D>:
+    TypedTensorModeDispatch<R> + TypedTensorAdjointDispatch<R, D>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn add(
+        tensor: &TensorMap<R, D>,
+        other: &TensorMap<R, D>,
+        alpha: D,
+        beta: D,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
+    fn scale(tensor: &TensorMap<R, D>, factor: D) -> TensorMap<R, D>;
+}
+
+#[doc(hidden)]
 pub trait TypedTensorAdjointDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
@@ -3464,6 +3640,50 @@ where
     }
     fn tr(tensor: &TensorMap<R, D>) -> Result<D, Error> {
         tensor.tr_multiplicity_free()
+    }
+}
+
+impl<R, D> TypedTensorAddScaleDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn add(
+        tensor: &TensorMap<R, D>,
+        other: &TensorMap<R, D>,
+        alpha: D,
+        beta: D,
+    ) -> Result<TensorMap<R, D>, Error> {
+        tensor.add_multiplicity_free(other, alpha, beta)
+    }
+
+    fn scale(tensor: &TensorMap<R, D>, factor: D) -> TensorMap<R, D> {
+        tensor.scale_multiplicity_free(factor)
+    }
+}
+
+impl<R, D> TypedTensorAddScaleDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
+    fn add(
+        tensor: &TensorMap<R, D>,
+        other: &TensorMap<R, D>,
+        alpha: D,
+        beta: D,
+    ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        host_add_impl(tensor, other, alpha, beta).map_err(GenericTensorError::from)
+    }
+
+    fn scale(tensor: &TensorMap<R, D>, factor: D) -> TensorMap<R, D> {
+        host_scale_impl(tensor, factor)
     }
 }
 
@@ -5916,6 +6136,43 @@ impl<R, D, S> TensorMap<R, D, S> {
     #[inline]
     pub fn block_count(&self) -> usize {
         self.logical_space().space().structure().block_count()
+    }
+}
+
+impl<R, D> TensorMap<R, D> {
+    fn with_data(&self, data: Vec<D>) -> Self {
+        Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(self.logical_space().clone(), data)),
+        }
+    }
+
+    fn with_spectrum(&self, spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<D>>) -> Self {
+        Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::diagonal(
+                self.logical_space().clone(),
+                spectrum,
+            )),
+        }
+    }
+
+    fn with_spectrum_on(
+        &self,
+        space: BoundDynamicFusionMapSpace<R>,
+        spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<D>>,
+    ) -> Self {
+        Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::diagonal(space, spectrum)),
+        }
+    }
+
+    fn spectrum(&self) -> Option<&[tenet_matrixalgebra::SectorSpectrum<D>]> {
+        match self.owned_body()?.data.as_ref() {
+            TypedData::Diagonal(spectrum) => Some(spectrum),
+            TypedData::Dense(_) => None,
+        }
     }
 }
 
@@ -11113,58 +11370,6 @@ where
         Ok(self.with_data(out))
     }
 
-    /// Builds a sibling on this tensor's own space and runtime from a fresh
-    /// buffer. Every element-wise scalar operation below produces exactly
-    /// that: the space is unchanged and only the payload is new, so the shared
-    /// [`BoundDynamicFusionMapSpace`] is cloned rather than re-derived — it
-    /// carries a checked admission proof this kind of operation cannot
-    /// invalidate.
-    fn with_data(&self, data: Vec<D>) -> Self {
-        Self {
-            runtime: self.runtime.clone(),
-            repr: owned_repr(TypedTensorBody::dense(self.logical_space().clone(), data)),
-        }
-    }
-
-    /// A sibling on this tensor's own space carrying a new compact spectrum.
-    /// Every operation that reaches this keeps the bond space it was called on,
-    /// so the checked admission proof carries over exactly as for
-    /// [`Self::with_data`].
-    fn with_spectrum(&self, spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<D>>) -> Self {
-        Self {
-            runtime: self.runtime.clone(),
-            repr: owned_repr(TypedTensorBody::diagonal(
-                self.logical_space().clone(),
-                spectrum,
-            )),
-        }
-    }
-
-    /// A sibling on a **different** space carrying a new compact spectrum —
-    /// [`Self::with_spectrum`] for the one operation that moves the bond space
-    /// rather than keeping it. The space must be one the expert layer derived
-    /// from this tensor's own, so the checked admission proof carries over the
-    /// same way.
-    fn with_spectrum_on(
-        &self,
-        space: BoundDynamicFusionMapSpace<R>,
-        spectrum: Vec<tenet_matrixalgebra::SectorSpectrum<D>>,
-    ) -> Self {
-        Self {
-            runtime: self.runtime.clone(),
-            repr: owned_repr(TypedTensorBody::diagonal(space, spectrum)),
-        }
-    }
-
-    /// The compact payload, when this tensor has one.
-    fn spectrum(&self) -> Option<&[tenet_matrixalgebra::SectorSpectrum<D>]> {
-        let body = self.owned_body()?;
-        match body.data.as_ref() {
-            TypedData::Diagonal(spectrum) => Some(spectrum),
-            TypedData::Dense(_) => None,
-        }
-    }
-
     /// Whether two operands' providers are the same rule. The compact paths
     /// below skip the expert layer, which is where a mismatch would otherwise
     /// be caught, so they have to ask themselves.
@@ -11241,7 +11446,7 @@ where
     /// assert!((doubled.norm()? - 2.0 * t.norm()?).abs() < 1e-12);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn add(&self, other: &Self, alpha: D, beta: D) -> Result<Self, Error> {
+    fn add_multiplicity_free(&self, other: &Self, alpha: D, beta: D) -> Result<Self, Error> {
         // Runtime first, exactly as `contract` does: crossing runtimes is a
         // trust-boundary violation rather than an algebra error.
         if !self.runtime.same_runtime(&other.runtime) {
@@ -11385,7 +11590,7 @@ where
     ///
     /// Compact diagonal storage is preserved: scaling a spectrum factor stays
     /// `Σ_c k_c` values rather than densifying.
-    pub fn scale(&self, factor: D) -> Self {
+    fn scale_multiplicity_free(&self, factor: D) -> Self {
         if let Some(spectrum) = self.spectrum() {
             return self.with_spectrum(
                 spectrum
@@ -11785,7 +11990,7 @@ where
     ///
     /// Exactly [`Self::norm`]'s.
     pub fn normalize(&self) -> Result<Self, Error> {
-        Ok(self.scale(D::from_real(1.0 / self.norm()?)))
+        Ok(self.scale_multiplicity_free(D::from_real(1.0 / self.norm()?)))
     }
 
     /// The dimension-weighted inner product of this tensor with itself, the
@@ -11953,7 +12158,8 @@ where
         if !self.is_endomorphism() {
             return Ok(false);
         }
-        let difference = self.add(&self.adjoint()?, D::from_real(1.0), D::from_real(-1.0))?;
+        let difference =
+            self.add_multiplicity_free(&self.adjoint()?, D::from_real(1.0), D::from_real(-1.0))?;
         Ok(difference.norm()? <= tol * self.norm()?.max(1.0))
     }
 
@@ -11968,7 +12174,8 @@ where
         if !self.is_endomorphism() {
             return Ok(false);
         }
-        let sum = self.add(&self.adjoint()?, D::from_real(1.0), D::from_real(1.0))?;
+        let sum =
+            self.add_multiplicity_free(&self.adjoint()?, D::from_real(1.0), D::from_real(1.0))?;
         Ok(sum.norm()? <= tol * self.norm()?.max(1.0))
     }
 
@@ -11982,7 +12189,8 @@ where
     pub fn is_isometric(&self, tol: f64) -> Result<bool, Error> {
         let gram = self.adjoint()?.compose(self)?;
         let identity = Self::id(&self.runtime, &self.domain())?;
-        let difference = gram.add(&identity, D::from_real(1.0), D::from_real(-1.0))?;
+        let difference =
+            gram.add_multiplicity_free(&identity, D::from_real(1.0), D::from_real(-1.0))?;
         Ok(difference.norm()? <= tol * gram.norm()?.max(1.0))
     }
 
@@ -12035,7 +12243,7 @@ where
     /// not an endomorphism, since then it and its adjoint live on different
     /// spaces. Unlike [`Self::is_hermitian`] there is no `false` to return here.
     pub fn project_hermitian(&self) -> Result<Self, Error> {
-        self.add(&self.adjoint()?, D::from_real(0.5), D::from_real(0.5))
+        self.add_multiplicity_free(&self.adjoint()?, D::from_real(0.5), D::from_real(0.5))
     }
 
     /// The anti-Hermitian part `(t - t†)/2` (TensorKit
@@ -12045,7 +12253,7 @@ where
     ///
     /// Exactly [`Self::project_hermitian`]'s.
     pub fn project_antihermitian(&self) -> Result<Self, Error> {
-        self.add(&self.adjoint()?, D::from_real(0.5), D::from_real(-0.5))
+        self.add_multiplicity_free(&self.adjoint()?, D::from_real(0.5), D::from_real(-0.5))
     }
 
     /// Whether codomain and domain are the same product space — the
