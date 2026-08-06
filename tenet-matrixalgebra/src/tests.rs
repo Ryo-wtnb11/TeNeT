@@ -1327,6 +1327,48 @@ struct LateGenericSpy {
     calls: Cell<usize>,
 }
 
+struct CountingDense {
+    inner: tenet_dense::DefaultDenseExecutor,
+    svd_calls: usize,
+    qr_calls: usize,
+}
+
+impl Default for CountingDense {
+    fn default() -> Self {
+        Self {
+            inner: tenet_dense::DefaultDenseExecutor::new(),
+            svd_calls: 0,
+            qr_calls: 0,
+        }
+    }
+}
+
+impl DenseExecutor for CountingDense {
+    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.svd_calls += 1;
+        self.inner.svd(input)
+    }
+
+    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.qr_calls += 1;
+        self.inner.qr(input)
+    }
+
+    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.eigh(input)
+    }
+
+    fn dot_general_into(
+        &mut self,
+        output: DenseWrite<'_>,
+        lhs: DenseRead<'_>,
+        rhs: DenseRead<'_>,
+        config: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        self.inner.dot_general_into(output, lhs, rhs, config)
+    }
+}
+
 impl FusionRule for LateGenericSpy {
     fn rule_identity(&self) -> RuleIdentity {
         self.rule.rule_identity()
@@ -1565,6 +1607,78 @@ fn checked_generic_full_svd_completes_unmatched_columns_and_disjoint_space() {
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let full = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
     assert!(full.singular_values().is_empty());
+}
+
+fn assert_checked_full_svd_builder_failure(fail_at: usize) {
+    let (source, data) = generic_factorization_input();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at,
+        calls: Cell::new(0),
+    });
+    let checked = BoundDynamicFusionMapSpace::bind_generic(
+        source.space().clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let before = input.data().to_vec();
+    let mut dense = CountingDense::default();
+    let result = svd_full_dyn_checked_generic(&mut dense, &input);
+
+    assert!(matches!(
+        result,
+        Err(crate::CheckedGenericFactorPlanError::Provider(LateGenericError(call)))
+            if call == fail_at
+    ));
+    assert_eq!(input.data(), before);
+    assert!(Arc::ptr_eq(input.space().provider_arc(), &provider));
+    assert_eq!(dense.svd_calls, 2);
+    assert_eq!(dense.qr_calls, 2);
+}
+
+#[test]
+fn checked_generic_full_svd_u_builder_failure_preserves_provider_context() {
+    // What: the first post-dense checked-provider call belongs to U-space construction.
+    assert_checked_full_svd_builder_failure(5);
+}
+
+#[test]
+fn checked_generic_full_svd_vh_builder_failure_preserves_provider_context() {
+    // What: Vh-space construction propagates its exact provider error without publishing U.
+    assert_checked_full_svd_builder_failure(9);
+}
+
+#[test]
+fn checked_generic_full_svd_s_builder_failure_preserves_provider_context() {
+    // What: S-space construction propagates its exact provider error after U/Vh staging.
+    assert_checked_full_svd_builder_failure(13);
+}
+
+#[test]
+fn checked_generic_full_svd_local_shape_error_precedes_provider_query() {
+    // What: checked tensor admission reports the local storage mismatch before
+    // any provider-backed factorization work can run.
+    let (source, data) = generic_factorization_input();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: 1,
+        calls: Cell::new(0),
+    });
+    let checked = BoundDynamicFusionMapSpace::bind_generic(
+        source.space().clone(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let error = match BoundDynamicTensorRef::try_new(&checked, &data[..data.len() - 1]) {
+        Ok(_) => panic!("short storage must be rejected"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        OperationError::Core(CoreError::DimensionMismatch { .. })
+    ));
+    assert_eq!(provider.calls.get(), 0);
 }
 
 #[test]
