@@ -1321,13 +1321,37 @@ impl fmt::Display for LateGenericError {
 
 impl std::error::Error for LateGenericError {}
 
-struct LateGenericSpy<'a> {
-    rule: &'a FactorGenericRule,
+struct LateGenericSpy {
+    rule: FactorGenericRule,
     fail_at: usize,
     calls: Cell<usize>,
 }
 
-impl LateGenericSpy<'_> {
+impl FusionRule for LateGenericSpy {
+    fn rule_identity(&self) -> RuleIdentity {
+        self.rule.rule_identity()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        self.rule.fusion_style()
+    }
+    fn braiding_style(&self) -> BraidingStyleKind {
+        self.rule.braiding_style()
+    }
+    fn vacuum(&self) -> SectorId {
+        self.rule.vacuum()
+    }
+    fn dual(&self, sector: SectorId) -> SectorId {
+        self.rule.dual(sector)
+    }
+    fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
+        self.rule.fusion_channels(left, right)
+    }
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        self.rule.nsymbol(left, right, coupled)
+    }
+}
+
+impl LateGenericSpy {
     fn call<T>(&self, value: impl FnOnce() -> T) -> Result<T, LateGenericError> {
         let call = self.calls.get() + 1;
         self.calls.set(call);
@@ -1339,7 +1363,7 @@ impl LateGenericSpy<'_> {
     }
 }
 
-impl CheckedGenericFusion for LateGenericSpy<'_> {
+impl CheckedGenericFusion for LateGenericSpy {
     type Error = LateGenericError;
 
     fn rule_identity(&self) -> RuleIdentity {
@@ -1392,7 +1416,7 @@ impl CheckedGenericFusion for LateGenericSpy<'_> {
 fn checked_generic_factor_plan_late_failure_precedes_commit() {
     let (space, _data) = generic_factorization_input();
     let complete = LateGenericSpy {
-        rule: space.provider(),
+        rule: FactorGenericRule,
         fail_at: usize::MAX,
         calls: Cell::new(0),
     };
@@ -1406,7 +1430,7 @@ fn checked_generic_factor_plan_late_failure_precedes_commit() {
     assert_eq!(complete.calls.get(), final_call);
 
     let failing = LateGenericSpy {
-        rule: space.provider(),
+        rule: FactorGenericRule,
         fail_at: final_call,
         calls: Cell::new(0),
     };
@@ -1423,6 +1447,124 @@ fn checked_generic_factor_plan_late_failure_precedes_commit() {
             if call == final_call
     ));
     assert_eq!(crate::factorize::generic_factor_plan_finish_calls(), 0);
+}
+
+#[test]
+fn checked_generic_full_svd_preserves_provider_and_completes_unmatched_rows() {
+    let rule = FactorGenericRule;
+    let x = SectorId::new(1);
+    let vacuum = SectorId::new(0);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(x, 1), (vacuum, 1)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(x, 1)], false)]),
+    );
+    let source =
+        BoundDynamicFusionMapSpace::from_final_homspace_generic(Arc::new(rule), homspace).unwrap();
+    let data = vec![1.0; source.space().required_len().unwrap()];
+    let checked_provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked = BoundDynamicFusionMapSpace::bind_generic(
+        source.space().clone(),
+        Arc::clone(&checked_provider),
+    )
+    .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let full = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
+    assert!(Arc::ptr_eq(
+        full.u().space().provider_arc(),
+        &checked_provider
+    ));
+    assert!(Arc::ptr_eq(
+        full.s().space().provider_arc(),
+        &checked_provider
+    ));
+    assert!(Arc::ptr_eq(
+        full.vh().space().provider_arc(),
+        &checked_provider
+    ));
+    let structure = full.u().space().space().structure();
+    assert!((0..structure.block_count()).any(|index| {
+        matches!(
+            structure.block(index).unwrap().key(),
+            BlockKey::FusionTree(key) if key.codomain_tree().coupled() == vacuum
+        )
+    }));
+}
+
+#[test]
+fn checked_generic_full_svd_failure_publishes_no_factors() {
+    let (source, data) = generic_factorization_input();
+    let failing = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: 2,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), failing).unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let result = svd_full_dyn_checked_generic(&mut dense, &input);
+    assert!(matches!(
+        result,
+        Err(crate::CheckedGenericFactorPlanError::Provider(_))
+    ));
+}
+
+#[test]
+fn checked_generic_full_svd_completes_unmatched_columns_and_disjoint_space() {
+    let rule = FactorGenericRule;
+    let x = SectorId::new(1);
+    let vacuum = SectorId::new(0);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(x, 1)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(x, 1), (vacuum, 1)], false)]),
+    );
+    let source =
+        BoundDynamicFusionMapSpace::from_final_homspace_generic(Arc::new(rule), homspace).unwrap();
+    let data = vec![1.0; source.space().required_len().unwrap()];
+    let checked = BoundDynamicFusionMapSpace::bind_generic(
+        source.space().clone(),
+        Arc::new(LateGenericSpy {
+            rule: FactorGenericRule,
+            fail_at: usize::MAX,
+            calls: Cell::new(0),
+        }),
+    )
+    .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let full = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
+    let structure = full.vh().space().space().structure();
+    assert!((0..structure.block_count()).any(|index| {
+        matches!(
+            structure.block(index).unwrap().key(),
+            BlockKey::FusionTree(key) if key.domain_tree().coupled() == vacuum
+        )
+    }));
+
+    let disjoint = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(vacuum, 1)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(x, 1)], false)]),
+    );
+    let source =
+        BoundDynamicFusionMapSpace::from_final_homspace_generic(Arc::new(rule), disjoint).unwrap();
+    let checked = BoundDynamicFusionMapSpace::bind_generic(
+        source.space().clone(),
+        Arc::new(LateGenericSpy {
+            rule: FactorGenericRule,
+            fail_at: usize::MAX,
+            calls: Cell::new(0),
+        }),
+    )
+    .unwrap();
+    let data = vec![1.0; source.space().required_len().unwrap()];
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let full = svd_full_dyn_checked_generic(&mut dense, &input).unwrap();
+    assert!(full.singular_values().is_empty());
 }
 
 #[test]
