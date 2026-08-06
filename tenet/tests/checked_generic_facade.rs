@@ -700,6 +700,31 @@ fn checked_generic_host_add_scale_cover_real_and_complex_payloads() {
 
 #[cfg(feature = "racah-generated")]
 #[test]
+fn sun_checked_generic_unit_insert_remove_preserves_authority_and_payload() {
+    use tenet::prelude::GenericUnitTensorMapExt;
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    for n in [3, 4] {
+        let provider = Arc::new(SUNFusionRule::new(n).unwrap());
+        let label = if n == 3 { vec![1, 1] } else { vec![1, 0, 1] };
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(label, 1)], false).unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
+
+        assert!(source.remove_unit(0).is_err());
+        let inserted = source.insert_left_unit(0, false).unwrap();
+        assert!(std::ptr::eq(inserted.provider(), provider.as_ref()));
+        assert_eq!(inserted.data().as_ptr(), source.data().as_ptr());
+        let removed = inserted.remove_unit(0).unwrap();
+        assert!(std::ptr::eq(removed.provider(), provider.as_ref()));
+        assert_eq!(removed.data().as_ptr(), source.data().as_ptr());
+        assert_eq!(removed.data(), source.data());
+    }
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
 fn sun_checked_generic_compact_qr_preserves_provider_and_reconstructs() {
     use tenet::typed::SUNFusionRule;
 

@@ -4,9 +4,10 @@ use std::sync::Arc;
 use num_traits::ToPrimitive;
 
 use crate::{
-    BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericPivotal,
-    CheckedGenericRigidSymbols, FusionStyleKind, GenericFArray, GenericRMatrix, RuleIdentity,
-    SectorId, SectorVec, SymbolShapeError, TypedSectorAdmission,
+    BraidingStyleKind, CheckedCanonicalUnitFusionRule, CheckedGenericAdmissionMode,
+    CheckedGenericFusion, CheckedGenericPivotal, CheckedGenericRigidSymbols, FusionStyleKind,
+    GenericFArray, GenericRMatrix, RuleIdentity, SectorId, SectorVec, SymbolShapeError,
+    TypedSectorAdmission,
 };
 
 const CODEC_VERSION: &[u8] = b"tenet:sun:dynkin:graded-total-then-lex:v1";
@@ -331,6 +332,9 @@ impl CheckedGenericFusion for SUNFusionRule {
         Ok(product.get(&self.irrep(coupled)?).copied().unwrap_or(0) as usize)
     }
 }
+
+/// SU(N) uses the canonical trivial representation as its tensor unit.
+impl CheckedCanonicalUnitFusionRule for SUNFusionRule {}
 
 impl TypedSectorAdmission for SUNFusionRule {
     type Sector = Vec<i64>;

@@ -206,12 +206,14 @@ use smallvec::SmallVec;
 #[cfg(feature = "cuda")]
 use tenet_core::CoupledTreeExtent;
 use tenet_core::{
-    validate_unit_layout_correspondence_checked, BlockKey, BlockRef, BlockStructure,
-    CanonicalUnitFusionRule, CheckedFusionAlgebra, CheckedGenericAdmissionMode,
-    CheckedGenericStructureError, CoupledSectorRegion, FusionAlgebraError, FusionProductSpace,
-    FusionTreeHomSpace, FusionTreePairKey, MultiplicityFreeAdmissionMode,
-    MultiplicityFreeRigidSymbols, MultiplicityIndex, PreparedTreePairOperation, ProductFusionRule,
-    ProductSector, ProductSectorCodec, SectorId, SectorLeg, TypedSectorAdmission, UnitLegInsertion,
+    validate_unit_layout_correspondence_checked,
+    validate_unit_layout_correspondence_generic_checked, BlockKey, BlockRef, BlockStructure,
+    CanonicalUnitFusionRule, CheckedCanonicalUnitFusionRule, CheckedFusionAlgebra,
+    CheckedGenericAdmissionMode, CheckedGenericStructureError, CoupledSectorRegion,
+    FusionAlgebraError, FusionProductSpace, FusionTreeHomSpace, FusionTreePairKey,
+    MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, MultiplicityIndex,
+    PreparedTreePairOperation, ProductFusionRule, ProductSector, ProductSectorCodec, SectorId,
+    SectorLeg, TypedSectorAdmission, UnitLegInsertion,
 };
 use tenet_core::{
     CheckedGenericFusion, CheckedGenericPivotal, CheckedGenericRigidSymbols, HostReadableStorage,
@@ -13045,6 +13047,47 @@ where
         })
     }
 
+    /// A zero tensor on the same spaces and dtype as `self` (TensorKit
+    /// `zerovector`). Dense and compact payloads are freshly initialized to
+    /// exact positive zero, independently of non-finite source values. A lazy
+    /// adjoint zeros its canonical parent and stays a cold lazy adjoint.
+    pub fn zeros_like(&self) -> Self {
+        if let TypedTensorRepr::Adjoint(view) = &self.repr {
+            let parent = Self {
+                runtime: self.runtime.clone(),
+                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+            };
+            return parent
+                .zeros_like()
+                .adjoint()
+                .expect("zeroing a pre-admitted adjoint must preserve its layout");
+        }
+        if let Some(spectrum) = self.spectrum() {
+            return self.with_spectrum(
+                spectrum
+                    .iter()
+                    .map(|entry| tenet_matrixalgebra::SectorSpectrum {
+                        sector: entry.sector,
+                        values: vec![D::from_real(0.0); entry.values.len()],
+                    })
+                    .collect(),
+            );
+        }
+        self.with_data(vec![
+            D::from_real(0.0);
+            self.owned_body()
+                .expect("owned zero input")
+                .materialized_dense_data()
+                .len()
+        ])
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+{
     /// TensorKit `insertleftunit(t, i; dual)`: inserts the canonical unit
     /// leg — the vacuum with degeneracy one, or its dual — at zero-based
     /// external slot `position`, following TensorKit's left seam convention
@@ -13236,40 +13279,184 @@ where
             )),
         }
     }
+}
+/// Checked Generic canonical-unit operations.
+pub trait GenericUnitTensorMapExt {
+    /// Error returned by checked Generic unit operations.
+    type Error;
 
-    /// A zero tensor on the same spaces and dtype as `self` (TensorKit
-    /// `zerovector`). Dense and compact payloads are freshly initialized to
-    /// exact positive zero, independently of non-finite source values. A lazy
-    /// adjoint zeros its canonical parent and stays a cold lazy adjoint.
-    pub fn zeros_like(&self) -> Self {
-        if let TypedTensorRepr::Adjoint(view) = &self.repr {
-            let parent = Self {
-                runtime: self.runtime.clone(),
-                repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
-            };
-            return parent
-                .zeros_like()
-                .adjoint()
-                .expect("zeroing a pre-admitted adjoint must preserve its layout");
+    /// Insert the canonical unit at a zero-based external position.
+    fn insert_left_unit(&self, position: usize, dual: bool) -> Result<Self, Self::Error>
+    where
+        Self: Sized;
+    /// Insert the canonical unit on the codomain-side seam.
+    fn insert_right_unit(&self, position: usize, dual: bool) -> Result<Self, Self::Error>
+    where
+        Self: Sized;
+    /// Remove a canonical unit leg at a flat external axis.
+    fn remove_unit(&self, axis: usize) -> Result<Self, Self::Error>
+    where
+        Self: Sized;
+}
+
+impl<R, D> GenericUnitTensorMapExt for TensorMap<R, D>
+where
+    R: CheckedCanonicalUnitFusionRule,
+    D: TensorScalar,
+{
+    type Error = GenericTensorError<R::Error>;
+
+    fn insert_left_unit(&self, position: usize, dual: bool) -> Result<Self, Self::Error> {
+        generic_insert_unit(
+            self,
+            UnitLegInsertion::Left { position, dual },
+            "TensorMap::insert_left_unit",
+        )
+    }
+
+    fn insert_right_unit(&self, position: usize, dual: bool) -> Result<Self, Self::Error> {
+        generic_insert_unit(
+            self,
+            UnitLegInsertion::Right { position, dual },
+            "TensorMap::insert_right_unit",
+        )
+    }
+
+    fn remove_unit(&self, axis: usize) -> Result<Self, Self::Error> {
+        generic_remove_unit(self, axis)
+    }
+}
+
+fn generic_insert_unit<R, D>(
+    tensor: &TensorMap<R, D>,
+    insertion: UnitLegInsertion,
+    operation: &str,
+) -> Result<TensorMap<R, D>, GenericTensorError<R::Error>>
+where
+    R: CheckedCanonicalUnitFusionRule,
+    D: TensorScalar,
+{
+    let (UnitLegInsertion::Left { position, .. } | UnitLegInsertion::Right { position, .. }) =
+        insertion;
+    if position > tensor.rank() {
+        return Err(GenericTensorError::Facade(Error::InvalidArgument(format!(
+            "{operation}: position {position} exceeds rank {}",
+            tensor.rank()
+        ))));
+    }
+    let provider = tensor.logical_space().provider();
+    let source_hom = tensor.logical_space().space().homspace();
+    let homspace = match insertion {
+        UnitLegInsertion::Left { position, dual } => source_hom
+            .insert_left_unit_checked(provider, position, dual)
+            .map_err(|error| GenericTensorError::Facade(error.into()))?,
+        UnitLegInsertion::Right { position, dual } => source_hom
+            .insert_right_unit_checked(provider, position, dual)
+            .map_err(|error| GenericTensorError::Facade(error.into()))?,
+    };
+    let destination = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(tensor.logical_space().provider_arc()),
+        homspace,
+    )
+    .map_err(GenericTensorError::Structure)?;
+    validate_unit_layout_correspondence_generic_checked(
+        provider,
+        (source_hom, tensor.logical_space().space().structure()),
+        (
+            destination.space().homspace(),
+            destination.space().structure(),
+        ),
+        insertion,
+    )
+    .map_err(GenericTensorError::Structure)?;
+    let data = generic_shareable_dense_payload(tensor);
+    Ok(TensorMap {
+        runtime: tensor.runtime.clone(),
+        repr: owned_repr(TypedTensorBody::with_shared_payload(destination, data)),
+    })
+}
+
+fn generic_remove_unit<R, D>(
+    tensor: &TensorMap<R, D>,
+    axis: usize,
+) -> Result<TensorMap<R, D>, GenericTensorError<R::Error>>
+where
+    R: CheckedCanonicalUnitFusionRule,
+    D: TensorScalar,
+{
+    if axis >= tensor.rank() {
+        return Err(GenericTensorError::Facade(Error::InvalidArgument(format!(
+            "TensorMap::remove_unit: axis {axis} is out of range for rank {}",
+            tensor.rank()
+        ))));
+    }
+    let provider = tensor.logical_space().provider();
+    let source_hom = tensor.logical_space().space().homspace();
+    let nout = source_hom.codomain().len();
+    let leg = if axis < nout {
+        &source_hom.codomain().legs()[axis]
+    } else {
+        &source_hom.domain().legs()[axis - nout]
+    };
+    let vacuum = CheckedGenericFusion::vacuum(provider);
+    if leg.sectors() != [vacuum] || leg.degeneracy(vacuum) != Some(1) {
+        return Err(GenericTensorError::Facade(Error::InvalidArgument(format!(
+            "TensorMap::remove_unit: axis {axis} is not a canonical unit leg"
+        ))));
+    }
+    let insertion = if axis < nout {
+        UnitLegInsertion::Right {
+            position: axis,
+            dual: leg.is_dual(),
         }
-        if let Some(spectrum) = self.spectrum() {
-            return self.with_spectrum(
-                spectrum
-                    .iter()
-                    .map(|entry| tenet_matrixalgebra::SectorSpectrum {
-                        sector: entry.sector,
-                        values: vec![D::from_real(0.0); entry.values.len()],
-                    })
-                    .collect(),
-            );
+    } else {
+        UnitLegInsertion::Left {
+            position: axis,
+            dual: leg.is_dual(),
         }
-        self.with_data(vec![
-            D::from_real(0.0);
-            self.owned_body()
-                .expect("owned zero input")
-                .materialized_dense_data()
-                .len()
-        ])
+    };
+    let homspace = source_hom
+        .remove_unit_checked(provider, axis)
+        .map_err(|error| GenericTensorError::Facade(error.into()))?;
+    let destination = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(tensor.logical_space().provider_arc()),
+        homspace,
+    )
+    .map_err(GenericTensorError::Structure)?;
+    validate_unit_layout_correspondence_generic_checked(
+        provider,
+        (
+            destination.space().homspace(),
+            destination.space().structure(),
+        ),
+        (source_hom, tensor.logical_space().space().structure()),
+        insertion,
+    )
+    .map_err(GenericTensorError::Structure)?;
+    let data = generic_shareable_dense_payload(tensor);
+    Ok(TensorMap {
+        runtime: tensor.runtime.clone(),
+        repr: owned_repr(TypedTensorBody::with_shared_payload(destination, data)),
+    })
+}
+
+fn generic_shareable_dense_payload<R, D>(tensor: &TensorMap<R, D>) -> Arc<TypedData<D>>
+where
+    R: CheckedCanonicalUnitFusionRule,
+    D: TensorScalar,
+{
+    let materialized = tensor
+        .materialized_tensor_uncached()
+        .expect("a pre-admitted typed adjoint must materialize");
+    let body = materialized
+        .owned_body()
+        .expect("uncached materialization is owned");
+    match body.data.as_ref() {
+        TypedData::Dense(_) => Arc::clone(&body.data),
+        TypedData::Diagonal(spectrum) => Arc::new(TypedData::Dense(
+            tenet_matrixalgebra::diagonal_bond_data(body.space.space(), spectrum, &|value| value)
+                .expect("diagonal fill is total on the stored bond space"),
+        )),
     }
 }
 

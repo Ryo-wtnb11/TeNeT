@@ -124,6 +124,12 @@ pub trait FusionRule: 'static {
 /// the same law without depending on TeNeT's execution crates.
 pub trait CanonicalUnitFusionRule: FusionRule {}
 
+/// Marks a checked Generic provider with the same canonical vacuum laws.
+///
+/// This is the fallible-provider counterpart of [`CanonicalUnitFusionRule`];
+/// it intentionally does not require the legacy infallible [`FusionRule`].
+pub trait CheckedCanonicalUnitFusionRule: CheckedGenericFusion {}
+
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FusionAlgebraError {
