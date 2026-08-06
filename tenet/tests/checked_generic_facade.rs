@@ -853,6 +853,33 @@ fn checked_generic_eigh_vals_preserves_spectrum_and_dtype() {
 }
 
 #[test]
+fn checked_generic_eig_vals_preserves_spectrum_and_dtype() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            if indices[0] == indices[1] {
+                (indices[0] + 2) as f64
+            } else {
+                0.0
+            }
+        })
+        .unwrap();
+
+    let spectra = source.eig_vals().unwrap();
+    assert_eq!(spectra.len(), 1);
+    assert_eq!(spectra[0].sector, Label::X);
+    assert_eq!(
+        spectra[0].values,
+        vec![Complex64::new(3.0, 0.0), Complex64::new(2.0, 0.0)]
+    );
+
+    let complex = source.to_c64();
+    assert_eq!(complex.eig_vals().unwrap(), spectra);
+}
+
+#[test]
 fn checked_generic_lazy_adjoint_preserves_provider_and_reductions() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
