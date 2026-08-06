@@ -124,8 +124,9 @@ pub use tenet_operations::{OutputAxisOrder, TensorContractSpec, TensorTraceAxisS
 pub use tensortrace::{
     tensortrace_fusion_dyn_into, tensortrace_fusion_dyn_into_checked, tensortrace_fusion_dyn_owned,
     tensortrace_fusion_dyn_owned_checked, tensortrace_fusion_dyn_selected_homspace_checked,
-    tensortrace_fusion_structure, tensortrace_structure, TensorTraceFusionStructure,
-    TensorTraceFusionStructureTerm, TensorTraceStructure, TensorTraceStructureTerm,
+    tensortrace_fusion_dyn_selected_homspace_generic_checked, tensortrace_fusion_structure,
+    tensortrace_structure, TensorTraceFusionStructure, TensorTraceFusionStructureTerm,
+    TensorTraceStructure, TensorTraceStructureTerm,
 };
 pub use tree_context::{
     tree_transform_dyn_owned_checked_generic, tree_transform_dyn_owned_checked_generic_in_context,
