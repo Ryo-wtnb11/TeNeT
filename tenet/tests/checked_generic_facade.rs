@@ -662,6 +662,42 @@ fn checked_generic_reductions_cover_real_complex_dense_payloads() {
     assert!(provider.coefficient_queries.load(Ordering::Relaxed) > 0);
 }
 
+#[test]
+fn checked_generic_host_add_scale_cover_real_and_complex_payloads() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            (indices.iter().sum::<usize>() + 1) as f64
+        })
+        .unwrap();
+    let added = source.add(&source, 2.0, -1.0).unwrap();
+    assert_eq!(added.data(), source.data());
+    let scaled = source.scale(3.0);
+    assert!(scaled
+        .data()
+        .iter()
+        .zip(source.data())
+        .all(|(a, b)| (*a - 3.0 * *b).abs() < 1e-12));
+
+    let complex = source.to_c64();
+    let added = complex
+        .add(
+            &complex,
+            Complex64::new(2.0, 0.0),
+            Complex64::new(-1.0, 0.0),
+        )
+        .unwrap();
+    assert_eq!(added.data(), complex.data());
+    let scaled = complex.scale(Complex64::new(0.5, -1.0));
+    assert!(scaled
+        .data()
+        .iter()
+        .zip(complex.data())
+        .all(|(a, b)| (*a - *b * Complex64::new(0.5, -1.0)).norm() < 1e-12));
+}
+
 #[cfg(feature = "racah-generated")]
 #[test]
 fn sun_checked_generic_compact_qr_preserves_provider_and_reconstructs() {
