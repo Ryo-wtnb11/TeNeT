@@ -1616,11 +1616,9 @@ fn assert_checked_full_svd_builder_failure(fail_at: usize) {
         fail_at,
         calls: Cell::new(0),
     });
-    let checked = BoundDynamicFusionMapSpace::bind_generic(
-        source.space().clone(),
-        Arc::clone(&provider),
-    )
-    .unwrap();
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
     let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
     let before = input.data().to_vec();
     let mut dense = CountingDense::default();
@@ -1665,11 +1663,9 @@ fn checked_generic_full_svd_local_shape_error_precedes_provider_query() {
         fail_at: 1,
         calls: Cell::new(0),
     });
-    let checked = BoundDynamicFusionMapSpace::bind_generic(
-        source.space().clone(),
-        Arc::clone(&provider),
-    )
-    .unwrap();
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
     let error = match BoundDynamicTensorRef::try_new(&checked, &data[..data.len() - 1]) {
         Ok(_) => panic!("short storage must be rejected"),
         Err(error) => error,
