@@ -669,6 +669,15 @@ pub trait CheckedGenericRigidSymbols: CheckedGenericFusion {
     ) -> Result<GenericRMatrix<Self::Scalar>, Self::Error>;
 }
 
+/// Checked provider-owned pivotal/twist data for categorical traces.
+///
+/// This is deliberately separate from [`CheckedGenericRigidSymbols`]: a
+/// Frobenius--Schur phase and a ribbon twist are distinct categorical data,
+/// and existing Generic providers must not silently acquire a default twist.
+pub trait CheckedGenericPivotal: CheckedGenericRigidSymbols {
+    fn try_twist_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error>;
+}
+
 /// Checked structural view of an existing infallible Generic provider.
 ///
 /// A wrapper, rather than a blanket implementation on `R`, leaves a future
