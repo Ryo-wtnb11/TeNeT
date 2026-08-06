@@ -321,6 +321,46 @@ where
         > + CheckedGenericFusion,
     D: TensorScalar,
 {
+    /// Checked-Generic Hermitian eigenvalues for owned host tensors.
+    fn eigh_vals_checked_generic(
+        &self,
+    ) -> Result<
+        Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>,
+        GenericTensorError<<R as CheckedGenericFusion>::Error>,
+    > {
+        let TypedTensorRepr::Owned(body) = &self.repr else {
+            return Err(GenericTensorError::Facade(Error::InvalidArgument(
+                "checked Generic eigh_vals does not accept lazy adjoints".to_string(),
+            )));
+        };
+        let mut dense = self.runtime.lease_dense();
+        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+            .map_err(|error| GenericTensorError::Facade(error.into()))?;
+        let raw = tenet_matrixalgebra::eigh_vals_dyn_checked_generic(dense.dense(), &input)?;
+        let provider = self.logical_space().provider();
+        let mut decoded = raw
+            .into_iter()
+            .map(|entry| {
+                Ok(SectorSpectrum {
+                    sector: provider.try_decode_label(entry.sector)?,
+                    values: entry.values,
+                })
+            })
+            .collect::<Result<Vec<_>, <R as TypedSectorAdmission>::Error>>()
+            .map_err(|error| GenericTensorError::Plan(CheckedGenericPlanError::Provider(error)))?;
+        decoded.sort_by(|left, right| left.sector.cmp(&right.sector));
+        Ok(decoded)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
     /// Checked-Generic full QR for owned host tensors.
     fn qr_full_checked_generic(
         &self,
@@ -542,6 +582,21 @@ where
     ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, TypedFacadeError<R>>
     {
         <R::Mode as TypedTensorSvdValsDispatch<R, D>>::svd_vals(self)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorEighValsDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// TensorKit Hermitian eigenvalue spectra dispatched by provider mode.
+    pub fn eigh_vals(
+        &self,
+    ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, TypedFacadeError<R>>
+    {
+        <R::Mode as TypedTensorEighValsDispatch<R, D>>::eigh_vals(self)
     }
 }
 
@@ -3151,6 +3206,17 @@ where
     ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, Self::FacadeError>;
 }
 
+#[doc(hidden)]
+pub trait TypedTensorEighValsDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn eigh_vals(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, Self::FacadeError>;
+}
+
 impl<R> TypedSpaceModeDispatch<R> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
@@ -3334,6 +3400,24 @@ where
     }
 }
 
+impl<R, D> TypedTensorEighValsDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = FusionAlgebraError,
+            Mode = MultiplicityFreeAdmissionMode,
+            Sector = <R as SectorCodec>::Sector,
+        > + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn eigh_vals(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, Error> {
+        tensor.eigh_vals_multiplicity_free()
+    }
+}
+
 impl<R, D> TypedTensorAdjointDispatch<R, D> for CheckedGenericAdmissionMode
 where
     R: TypedSectorAdmission<
@@ -3456,6 +3540,24 @@ where
         GenericTensorError<<R as CheckedGenericFusion>::Error>,
     > {
         tensor.svd_vals_checked_generic()
+    }
+}
+
+impl<R, D> TypedTensorEighValsDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
+    fn eigh_vals(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<
+        Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>,
+        GenericTensorError<<R as CheckedGenericFusion>::Error>,
+    > {
+        tensor.eigh_vals_checked_generic()
     }
 }
 
@@ -10198,9 +10300,11 @@ where
     ///
     /// [`Self::eigh_full`]'s, plus [`Error::FusionAlgebra`] when the provider
     /// cannot decode a coupled sector its own algebra produced.
-    pub fn eigh_vals(&self) -> Result<Vec<SectorSpectrum<R::Sector>>, Error> {
+    fn eigh_vals_multiplicity_free(&self) -> Result<Vec<SectorSpectrum<R::Sector>>, Error> {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
-            return self.materialized_tensor_uncached()?.eigh_vals();
+            return self
+                .materialized_tensor_uncached()?
+                .eigh_vals_multiplicity_free();
         }
         let mut dense = self.runtime.lease_dense();
         let raw = tenet_matrixalgebra::eigh_vals_dyn(dense.dense(), &self.bound_ref()?)?;
