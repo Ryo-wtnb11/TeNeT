@@ -3621,6 +3621,70 @@ where
     BoundDynFactor::from_bound(space, data, 1, 1)
 }
 
+#[doc(hidden)]
+pub fn rectangular_diagonal_bond_tensor_generic_checked<R, D>(
+    provider: Arc<R>,
+    spectra: &[SectorSpectrum],
+    row_dimensions: &BTreeMap<SectorId, usize>,
+    col_dimensions: &BTreeMap<SectorId, usize>,
+    to_scalar: &dyn Fn(f64) -> D,
+) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let row_leg = SectorLeg::new(
+        row_dimensions
+            .iter()
+            .map(|(&sector, &dimension)| (sector, dimension)),
+        false,
+    );
+    let col_leg = SectorLeg::new(
+        col_dimensions
+            .iter()
+            .map(|(&sector, &dimension)| (sector, dimension)),
+        false,
+    );
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([row_leg]),
+        FusionProductSpace::new([col_leg]),
+    );
+    let space = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(provider, homspace)
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    let len = space.space().required_len().map_err(|error| {
+        CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(
+            error,
+        ))
+    })?;
+    let mut data = vec![D::zero(); len];
+    let spectrum_by_sector: HashMap<SectorId, &SectorSpectrum> =
+        spectra.iter().map(|entry| (entry.sector, entry)).collect();
+    let structure = Arc::clone(space.space().structure());
+    for index in 0..structure.block_count() {
+        let block = structure.block(index).map_err(|error| {
+            CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(
+                error,
+            ))
+        })?;
+        let BlockKey::FusionTree(tree) = block.key() else {
+            continue;
+        };
+        let Some(entry) = spectrum_by_sector.get(&tree.codomain_tree().coupled()) else {
+            continue;
+        };
+        let strides = block.strides();
+        let offset = block.offset();
+        let count = block.shape()[0].min(block.shape()[1]);
+        for position in 0..count {
+            let Some(&value) = entry.values.get(position) else {
+                break;
+            };
+            data[offset + position * (strides[0] + strides[1])] = to_scalar(value);
+        }
+    }
+    BoundDynFactor::from_bound(space, data, 1, 1).map_err(CheckedGenericFactorPlanError::from)
+}
+
 /// Positive-diagonal gauge (MatrixAlgebraKit `positive = true`, the default
 /// of the Householder QR/LQ algorithms since MAK 0.6.8 / TensorKit 0.17):
 /// absorbs the unitary phase `D = diag(phase(R_jj))` into `Q`, i.e.
