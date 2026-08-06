@@ -8616,6 +8616,63 @@ where
     })
 }
 
+/// Checked-Generic full LQ via the full QR of each sector's adjoint matrix.
+#[doc(hidden)]
+pub fn lq_full_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let provider = input.space().provider_arc();
+    let space = input.space().space();
+    let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    let mut pairs = Vec::with_capacity(matrices.len());
+    for matrix in &matrices {
+        let rows = matrix.rows;
+        let cols = matrix.cols;
+        let transposed = adjoint_col_major(&matrix.data, rows, cols);
+        let mut augmented = vec![D::zero(); cols * (rows + cols)];
+        augmented[..cols * rows].copy_from_slice(&transposed);
+        for row in 0..cols {
+            augmented[cols * rows + row * cols + row] = D::one();
+        }
+        let mut q_prime = vec![D::zero(); cols * cols];
+        let mut work_r = vec![D::zero(); cols * (rows + cols)];
+        qr_into_workspace(
+            dense,
+            &augmented,
+            cols,
+            rows + cols,
+            cols,
+            &mut q_prime,
+            cols,
+            cols,
+            cols,
+            &mut work_r,
+            cols,
+            rows + cols,
+            cols,
+        )
+        .map_err(CheckedGenericFactorPlanError::from)?;
+        let mut r_prime = work_r[..cols * rows].to_vec();
+        positive_diagonal_gauge(&mut q_prime, cols, &mut r_prime, cols, rows);
+        pairs.push(FactorPair {
+            sector: matrix.sector,
+            kept: cols,
+            left: adjoint_col_major(&r_prime, cols, rows),
+            left_rows: rows,
+            right: adjoint_col_major(&q_prime, cols, cols),
+            right_leading: cols,
+        });
+    }
+    build_left_right_bound_pair_generic_checked(&provider, space.homspace(), &matrices, &pairs)
+}
+
 /// Checked-Generic singular values only. No factor-space publication occurs.
 #[doc(hidden)]
 pub fn svd_vals_dyn_checked_generic<E, R, D>(
