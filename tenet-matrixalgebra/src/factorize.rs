@@ -6729,6 +6729,45 @@ fn coupled_of_generic(tree: &FusionTreeKey) -> SectorId {
     tree.coupled()
 }
 
+/// Fallible coupled-sector reduced dimensions for checked Generic providers.
+/// This is a structural dynamic program: it never expands dense tensor data or
+/// publishes a factor-space cache.
+#[doc(hidden)]
+pub fn coupled_sector_block_dimensions_generic_checked<R>(
+    product: &FusionProductSpace,
+    rule: &R,
+) -> Result<BTreeMap<SectorId, usize>, CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+{
+    let mut dimensions = BTreeMap::from([(rule.vacuum(), 1usize)]);
+    for leg in product.legs() {
+        let mut next = BTreeMap::<SectorId, usize>::new();
+        for (&left, &left_dimension) in &dimensions {
+            for (right, right_degeneracy) in leg.iter() {
+                let channels = rule
+                    .try_fusion_channels(left, right)
+                    .map_err(CheckedGenericFactorPlanError::Provider)?;
+                for coupled in channels {
+                    let contribution = left_dimension.checked_mul(right_degeneracy).ok_or(
+                        CheckedGenericFactorPlanError::Operation(
+                            OperationError::ElementCountOverflow,
+                        ),
+                    )?;
+                    let entry = next.entry(coupled).or_default();
+                    *entry = entry.checked_add(contribution).ok_or(
+                        CheckedGenericFactorPlanError::Operation(
+                            OperationError::ElementCountOverflow,
+                        ),
+                    )?;
+                }
+            }
+        }
+        dimensions = next;
+    }
+    Ok(dimensions)
+}
+
 /// Generic sibling of [`sector_matricizations`]: identical two-pass stacking
 /// (vertex-labelled trees are distinct keys, so OM trees get distinct rows /
 /// columns of the coupled block, exactly TensorKit's `block(t, c)` layout).
