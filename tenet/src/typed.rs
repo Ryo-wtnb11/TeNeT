@@ -8582,6 +8582,133 @@ where
     }
 }
 
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorRootDispatch<R>,
+    D: TensorScalar,
+{
+    /// TensorKit `catdomain(t1, t2)`:
+    /// concatenate two `N₁ <- 1` tensor maps along their sole domain leg. The
+    /// codomain product spaces must match exactly; the two domain legs must
+    /// share duality and are combined by direct sum `V = V1 ⊕ V2`; reduced
+    /// data is copied into adjacent column slabs per coupled sector, `self`
+    /// first.
+    ///
+    /// Rust uses a method (`t1.catdomain(&t2)`) because binary tensor
+    /// operations in this API are methods; the name and operand order match
+    /// TensorKit's free function.
+    ///
+    /// Both operands share one `D`, so mixed-dtype widening is statically
+    /// unrepresentable — widen with [`Self::to_c64`] first.
+    /// A lazy adjoint is read from parent storage through the oriented copy
+    /// plan without publishing a receiver-sized materialization. A compact
+    /// diagonal operand is materialized dense once on demand.
+    ///
+    /// # Complexity
+    ///
+    /// One output admission and allocation plus a single
+    /// `O(len(self) + len(other))` copy pass over the compiled per-sector slab
+    /// plan. If an oriented geometry is conservatively declined, correctness
+    /// falls back to operation-local uncached materialization and retries the
+    /// plan against the already-admitted output.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::RuleMismatch`] on differing admitted rule identities and
+    /// [`Error::RuntimeMismatch`] on differing runtimes, in that order; then
+    /// [`Error::InvalidArgument`] for a multi-leg domain, mismatched codomain
+    /// product spaces, or changed legs of opposite duality. Checked-Generic
+    /// output-admission failures retain their typed provider error.
+    pub fn catdomain(&self, other: &Self) -> Result<Self, TypedFacadeError<R>> {
+        self.cat(other, CatSide::Domain)
+    }
+
+    /// TensorKit `catcodomain(t1, t2)`:
+    /// concatenate two `1 <- N₂` tensor maps along their sole codomain leg.
+    /// The domain product spaces must match exactly; the two codomain legs
+    /// must share duality and are combined by direct sum; reduced data is
+    /// copied into adjacent row slabs per coupled sector, `self` first.
+    ///
+    /// Method-vs-free-function note, narrowings, complexity and error
+    /// classes: exactly as [`Self::catdomain`], with the codomain and domain
+    /// roles swapped.
+    pub fn catcodomain(&self, other: &Self) -> Result<Self, TypedFacadeError<R>> {
+        self.cat(other, CatSide::Codomain)
+    }
+
+    /// Shared route of [`Self::catdomain`] / [`Self::catcodomain`].
+    fn cat(&self, other: &Self, side: CatSide) -> Result<Self, TypedFacadeError<R>> {
+        let lhs_space = self.logical_space().space();
+        let rhs_space = other.logical_space().space();
+        if lhs_space.admission().rule_identity() != rhs_space.admission().rule_identity() {
+            return Err(TypedFacadeError::<R>::from(Error::RuleMismatch));
+        }
+        if !self.runtime.same_runtime(&other.runtime) {
+            return Err(TypedFacadeError::<R>::from(Error::RuntimeMismatch));
+        }
+        let lhs = lhs_space.homspace();
+        let rhs = rhs_space.homspace();
+        let (axis, homspace) = cat_homspace(
+            lhs.codomain(),
+            lhs.domain(),
+            rhs.codomain(),
+            rhs.domain(),
+            side,
+        )
+        .map_err(TypedFacadeError::<R>::from)?;
+        let space = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
+            Arc::clone(self.logical_space().provider_arc()),
+            homspace,
+        )?;
+        let (lhs_layout, lhs_data) = self.cat_operand().map_err(TypedFacadeError::<R>::from)?;
+        let (rhs_layout, rhs_data) = other.cat_operand().map_err(TypedFacadeError::<R>::from)?;
+        let data = if let Some(plan) = compile_cat_plan(
+            space.space().structure(),
+            space.space().nout(),
+            [lhs_layout, rhs_layout],
+            axis,
+            side,
+        )
+        .map_err(TypedFacadeError::<R>::from)?
+        {
+            plan.execute(lhs_data, rhs_data)
+                .map_err(TypedFacadeError::<R>::from)?
+        } else {
+            // Why not recurse through `cat`: output admission has succeeded,
+            // so retry only the local copy plan and never query the provider
+            // or admit the same HomSpace a second time.
+            let lhs = self
+                .materialized_tensor_uncached()
+                .map_err(TypedFacadeError::<R>::from)?;
+            let rhs = other
+                .materialized_tensor_uncached()
+                .map_err(TypedFacadeError::<R>::from)?;
+            let (lhs_layout, lhs_data) = lhs.cat_operand().map_err(TypedFacadeError::<R>::from)?;
+            let (rhs_layout, rhs_data) = rhs.cat_operand().map_err(TypedFacadeError::<R>::from)?;
+            let plan = compile_cat_plan(
+                space.space().structure(),
+                space.space().nout(),
+                [lhs_layout, rhs_layout],
+                axis,
+                side,
+            )
+            .map_err(TypedFacadeError::<R>::from)?
+            .ok_or_else(|| {
+                TypedFacadeError::<R>::from(internal_layout_error(
+                    "owned cat operands did not produce a copy plan",
+                ))
+            })?;
+            plan.execute(lhs_data, rhs_data)
+                .map_err(TypedFacadeError::<R>::from)?
+        };
+        Ok(Self {
+            runtime: self.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(space, data)),
+        })
+    }
+}
+
 impl<R, D, S> TensorMap<R, D, S>
 where
     D: TensorScalar,
@@ -12735,101 +12862,6 @@ where
             .materialized_dense_data()
             .iter()
             .fold(D::from_real(0.0), |acc, &value| acc + value))
-    }
-
-    /// TensorKit `catdomain(t1, t2)`:
-    /// concatenate two `N₁ <- 1` tensor maps along their sole domain leg. The
-    /// codomain product spaces must match exactly; the two domain legs must
-    /// share duality and are combined by direct sum `V = V1 ⊕ V2`; reduced
-    /// data is copied into adjacent column slabs per coupled sector, `self`
-    /// first.
-    ///
-    /// Rust uses a method (`t1.catdomain(&t2)`) because binary tensor
-    /// operations in this API are methods; the name and operand order match
-    /// TensorKit's free function.
-    ///
-    /// Both operands share one `D`, so mixed-dtype widening is statically
-    /// unrepresentable — widen with [`Self::to_c64`] first.
-    /// A lazy adjoint is read from parent storage through the oriented copy
-    /// plan without publishing a receiver-sized materialization. A compact
-    /// diagonal operand is materialized dense once on demand.
-    ///
-    /// # Complexity
-    ///
-    /// One output allocation and a single `O(len(self) + len(other))` copy
-    /// pass over the compiled per-sector slab plan. If an oriented geometry is
-    /// conservatively declined, correctness falls back to operation-local
-    /// uncached materialization before retrying the owned plan.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::RuleMismatch`] on differing provider identities and
-    /// [`Error::RuntimeMismatch`] on differing runtimes, in that order; then
-    /// [`Error::InvalidArgument`] for a multi-leg domain, mismatched codomain
-    /// product spaces, or changed
-    /// legs of opposite duality.
-    pub fn catdomain(&self, other: &Self) -> Result<Self, Error> {
-        self.cat(other, CatSide::Domain)
-    }
-
-    /// TensorKit `catcodomain(t1, t2)`:
-    /// concatenate two `1 <- N₂` tensor maps along their sole codomain leg.
-    /// The domain product spaces must match exactly; the two codomain legs
-    /// must share duality and are combined by direct sum; reduced data is
-    /// copied into adjacent row slabs per coupled sector, `self` first.
-    ///
-    /// Method-vs-free-function note, narrowings, complexity and error
-    /// classes: exactly as [`Self::catdomain`], with the codomain and domain
-    /// roles swapped.
-    pub fn catcodomain(&self, other: &Self) -> Result<Self, Error> {
-        self.cat(other, CatSide::Codomain)
-    }
-
-    /// Shared route of [`Self::catdomain`] / [`Self::catcodomain`], using
-    /// `cat_homspace` and `compile_cat_plan` over the typed bound space.
-    fn cat(&self, other: &Self, side: CatSide) -> Result<Self, Error> {
-        // Rule identity before runtime, for the same reason as `authority()`:
-        // separately allocated providers of one rule interoperate; different
-        // identities are rejected before any layout work.
-        if self.logical_space().provider().rule_identity()
-            != other.logical_space().provider().rule_identity()
-        {
-            return Err(Error::RuleMismatch);
-        }
-        if !self.runtime.same_runtime(&other.runtime) {
-            return Err(Error::RuntimeMismatch);
-        }
-        let lhs = self.logical_space().space().homspace();
-        let rhs = other.logical_space().space().homspace();
-        let (axis, homspace) = cat_homspace(
-            lhs.codomain(),
-            lhs.domain(),
-            rhs.codomain(),
-            rhs.domain(),
-            side,
-        )?;
-        // Derive from the authority space; do not duplicate space-construction
-        // logic here.
-        let space = self.logical_space().derive_from_final_homspace(homspace)?;
-        let (lhs_layout, lhs_data) = self.cat_operand()?;
-        let (rhs_layout, rhs_data) = other.cat_operand()?;
-        let Some(plan) = compile_cat_plan(
-            space.space().structure(),
-            space.space().nout(),
-            [lhs_layout, rhs_layout],
-            axis,
-            side,
-        )?
-        else {
-            let lhs = self.materialized_tensor_uncached()?;
-            let rhs = other.materialized_tensor_uncached()?;
-            return lhs.cat(&rhs, side);
-        };
-        let data = plan.execute(lhs_data, rhs_data)?;
-        Ok(Self {
-            runtime: self.runtime.clone(),
-            repr: owned_repr(TypedTensorBody::dense(space, data)),
-        })
     }
 
     /// TensorKit `twist(t, inds)` (and its in-place `twist!`): multiplies
