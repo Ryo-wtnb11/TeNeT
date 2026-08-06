@@ -154,6 +154,32 @@ impl CheckedOnlyToy {
     }
 }
 
+fn reset_provider_queries(provider: &CheckedOnlyToy) {
+    for counter in [
+        &provider.algebra_queries,
+        &provider.coefficient_queries,
+        &provider.f_queries,
+        &provider.r_queries,
+        &provider.identity_queries,
+        &provider.style_queries,
+    ] {
+        counter.store(0, Ordering::Relaxed);
+    }
+}
+
+fn assert_no_provider_queries(provider: &CheckedOnlyToy) {
+    for counter in [
+        &provider.algebra_queries,
+        &provider.coefficient_queries,
+        &provider.f_queries,
+        &provider.r_queries,
+        &provider.identity_queries,
+        &provider.style_queries,
+    ] {
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+}
+
 impl CheckedGenericFusion for CheckedOnlyToy {
     type Error = ToyError;
 
@@ -696,6 +722,110 @@ fn checked_generic_host_add_scale_cover_real_and_complex_payloads() {
         .iter()
         .zip(complex.data())
         .all(|(a, b)| (*a - *b * Complex64::new(0.5, -1.0)).norm() < 1e-12));
+}
+
+#[test]
+fn checked_generic_add_rejects_runtime_before_layout_without_queries() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let foreign_runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let wide = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let left: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&narrow], [&narrow], |_, _| 1.0).unwrap();
+    let right: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&foreign_runtime, [&wide], [&wide], |_, _| 2.0).unwrap();
+    reset_provider_queries(&provider);
+    let before = left.data().to_vec();
+    let error = left.add(&right, 1.0, 1.0).unwrap_err();
+    assert!(matches!(
+        error,
+        GenericTensorError::Facade(tenet::prelude::Error::RuntimeMismatch)
+    ));
+    assert_eq!(left.data(), before.as_slice());
+    assert_no_provider_queries(&provider);
+}
+
+#[test]
+fn checked_generic_add_rejects_layout_mismatch_without_queries() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let wide = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let left: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&narrow], [&narrow], |_, _| 1.0).unwrap();
+    let right: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&wide], [&wide], |_, _| 2.0).unwrap();
+    reset_provider_queries(&provider);
+    let before = left.data().to_vec();
+    let error = left.add(&right, 1.0, 1.0).unwrap_err();
+    assert!(matches!(
+        error,
+        GenericTensorError::Facade(tenet::prelude::Error::InvalidArgument(_))
+    ));
+    assert_eq!(left.data(), before.as_slice());
+    assert_no_provider_queries(&provider);
+}
+
+#[test]
+fn checked_generic_add_assign_rejects_runtime_before_layout_and_preserves_receiver() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let foreign_runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let wide = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let mut left: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&narrow], [&narrow], |_, _| 1.0).unwrap();
+    let right: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&foreign_runtime, [&wide], [&wide], |_, _| 2.0).unwrap();
+    let before_data = left.data().to_vec();
+    let before_trees = (0..left.block_count())
+        .map(|index| left.block_fusion_trees(index).unwrap())
+        .collect::<Vec<_>>();
+    reset_provider_queries(&provider);
+    let error = left.add_assign(&right, 1.0, 1.0).unwrap_err();
+    assert!(matches!(
+        error,
+        GenericTensorError::Facade(tenet::prelude::Error::RuntimeMismatch)
+    ));
+    assert_eq!(left.data(), before_data.as_slice());
+    assert_eq!(
+        (0..left.block_count())
+            .map(|index| left.block_fusion_trees(index).unwrap())
+            .collect::<Vec<_>>(),
+        before_trees
+    );
+    assert_no_provider_queries(&provider);
+}
+
+#[test]
+fn checked_generic_add_assign_rejects_layout_mismatch_and_preserves_receiver() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let wide = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let mut left: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&narrow], [&narrow], |_, _| 1.0).unwrap();
+    let right: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&wide], [&wide], |_, _| 2.0).unwrap();
+    let before_data = left.data().to_vec();
+    let before_trees = (0..left.block_count())
+        .map(|index| left.block_fusion_trees(index).unwrap())
+        .collect::<Vec<_>>();
+    reset_provider_queries(&provider);
+    let error = left.add_assign(&right, 1.0, 1.0).unwrap_err();
+    assert!(matches!(
+        error,
+        GenericTensorError::Facade(tenet::prelude::Error::InvalidArgument(_))
+    ));
+    assert_eq!(left.data(), before_data.as_slice());
+    assert_eq!(
+        (0..left.block_count())
+            .map(|index| left.block_fusion_trees(index).unwrap())
+            .collect::<Vec<_>>(),
+        before_trees
+    );
+    assert_no_provider_queries(&provider);
 }
 
 #[cfg(feature = "racah-generated")]
