@@ -1,5 +1,117 @@
 use super::*;
+use std::sync::Arc;
 use tenet_core::Trivial;
+
+#[derive(Clone, Copy, Debug)]
+struct CheckedTraceToy;
+
+impl tenet_core::CheckedGenericFusion for CheckedTraceToy {
+    type Error = std::convert::Infallible;
+    fn rule_identity(&self) -> tenet_core::RuleIdentity {
+        tenet_core::RuleIdentity::of_type::<Self>()
+    }
+    fn fusion_style(&self) -> FusionStyleKind {
+        FusionStyleKind::Generic
+    }
+    fn braiding_style(&self) -> tenet_core::BraidingStyleKind {
+        tenet_core::BraidingStyleKind::Bosonic
+    }
+    fn vacuum(&self) -> SectorId {
+        SectorId::new(0)
+    }
+    fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+        Ok(sector)
+    }
+    fn try_fusion_channels(
+        &self,
+        _left: SectorId,
+        _right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        Ok(vec![SectorId::new(0)].into())
+    }
+    fn try_fusion_channels_in_table(
+        &self,
+        left: SectorId,
+        right: SectorId,
+    ) -> Result<SectorVec, Self::Error> {
+        self.try_fusion_channels(left, right)
+    }
+    fn try_nsymbol(
+        &self,
+        _left: SectorId,
+        _right: SectorId,
+        _coupled: SectorId,
+    ) -> Result<usize, Self::Error> {
+        Ok(1)
+    }
+}
+
+impl tenet_core::CheckedGenericRigidSymbols for CheckedTraceToy {
+    type Scalar = f64;
+    fn try_sqrt_dim_scalar(&self, _sector: SectorId) -> Result<f64, Self::Error> {
+        Ok(1.0)
+    }
+    fn try_inv_sqrt_dim_scalar(&self, _sector: SectorId) -> Result<f64, Self::Error> {
+        Ok(1.0)
+    }
+    fn try_frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Result<f64, Self::Error> {
+        Ok(1.0)
+    }
+    fn try_f_symbol_generic(
+        &self,
+        _a: SectorId,
+        _b: SectorId,
+        _c: SectorId,
+        _d: SectorId,
+        _e: SectorId,
+        _f: SectorId,
+    ) -> Result<GenericFArray<f64>, Self::Error> {
+        Ok(GenericFArray::new(vec![1.0], (1, 1, 1, 1)))
+    }
+    fn try_r_symbol_generic(
+        &self,
+        _a: SectorId,
+        _b: SectorId,
+        _c: SectorId,
+    ) -> Result<GenericRMatrix<f64>, Self::Error> {
+        Ok(GenericRMatrix::new(vec![1.0], 1, 1))
+    }
+}
+
+impl tenet_core::CheckedGenericPivotal for CheckedTraceToy {
+    fn try_twist_scalar(&self, _sector: SectorId) -> Result<f64, Self::Error> {
+        Ok(1.0)
+    }
+}
+
+#[test]
+fn checked_generic_trace_owned_path_reuses_strided_executor() {
+    let leg = || SectorLeg::new([(SectorId::new(0), 1)], false);
+    let source_hom = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg()]),
+        FusionProductSpace::new([leg()]),
+    );
+    let destination_hom =
+        FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
+    let provider = Arc::new(CheckedTraceToy);
+    let src = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        source_hom,
+    )
+    .unwrap();
+    let dst =
+        BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(provider, destination_hom)
+            .unwrap();
+    let output = crate::tensortrace::tensortrace_fusion_dyn_owned_generic_checked(
+        &dst,
+        &src,
+        &[2.0],
+        TensorTraceAxisSpec::new(&[], &[0], &[1]),
+        1.0,
+    )
+    .unwrap();
+    assert_eq!(output, vec![2.0]);
+}
 
 fn lowered_u1_dynamic_space(
     homspace: FusionTreeHomSpace,
