@@ -1599,12 +1599,15 @@ where
             message: "trace channel requires at least one uncoupled sector",
         })
     })?;
-    let mut factor = rule
+    let sqrt_coupled = rule
         .try_sqrt_dim_scalar(trace_tree.coupled())
-        .map_err(CheckedGenericPlanError::Provider)?
-        * rule
-            .try_inv_sqrt_dim_scalar(first)
-            .map_err(CheckedGenericPlanError::Provider)?;
+        .map_err(CheckedGenericPlanError::Provider)?;
+    let inv_sqrt_first = rule
+        .try_inv_sqrt_dim_scalar(first)
+        .map_err(CheckedGenericPlanError::Provider)?;
+    // The categorical trace factor is dim(coupled)/dim(first), expressed
+    // through the Generic provider's square-root dimension interface.
+    let mut factor = sqrt_coupled.clone() * sqrt_coupled * inv_sqrt_first.clone() * inv_sqrt_first;
     for (&sector, &is_dual) in trace_tree
         .uncoupled()
         .iter()
