@@ -4,7 +4,7 @@ use std::sync::Arc;
 use num_traits::ToPrimitive;
 
 use crate::{
-    BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericFusion,
+    BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericPivotal,
     CheckedGenericRigidSymbols, FusionStyleKind, GenericFArray, GenericRMatrix, RuleIdentity,
     SectorId, SectorVec, SymbolShapeError, TypedSectorAdmission,
 };
@@ -442,6 +442,13 @@ impl CheckedGenericRigidSymbols for SUNFusionRule {
     }
 }
 
+impl CheckedGenericPivotal for SUNFusionRule {
+    fn try_twist_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
+        self.irrep(sector)?;
+        Ok(1.0)
+    }
+}
+
 enum Capped {
     Exact(usize),
     Exceeded,
@@ -710,6 +717,7 @@ mod tests {
             assert!((sqrt * sqrt - dimension).abs() < 1e-12);
             assert!((sqrt * rule.try_inv_sqrt_dim_scalar(sector).unwrap() - 1.0).abs() < 1e-12);
             assert_ne!(rule.try_frobenius_schur_phase_scalar(sector).unwrap(), 0.0);
+            assert_eq!(rule.try_twist_scalar(sector).unwrap(), 1.0);
         }
 
         let f = rule
