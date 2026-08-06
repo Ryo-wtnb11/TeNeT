@@ -1781,6 +1781,22 @@ impl<'a> OrientedFusionTreeHomSpace<'a> {
         descriptor.try_materialize(rule).map_err(Into::into)
     }
 
+    /// Checked Generic sibling of [`Self::select`] that preserves provider
+    /// failures without requiring the legacy `CheckedFusionAlgebra` contract.
+    #[doc(hidden)]
+    pub fn try_select_generic_checked<R>(
+        self,
+        rule: &R,
+        codomain_axes: &[usize],
+        domain_axes: &[usize],
+    ) -> Result<FusionTreeHomSpace, CheckedGenericStructureError<R::Error>>
+    where
+        R: CheckedGenericFusion,
+    {
+        let descriptor = self.select_descriptor(codomain_axes, domain_axes)?;
+        descriptor.try_materialize_generic(rule)
+    }
+
     #[doc(hidden)]
     pub fn external_axis_leg<R>(self, rule: &R, axis: usize) -> Option<SectorLeg>
     where
