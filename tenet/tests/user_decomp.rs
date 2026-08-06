@@ -67,3 +67,43 @@ fn truncated_svd_restores_dropped_sector_in_non_dual_closed_space() {
     let error = tensor.add(&recomposed, 1.0, -1.0).unwrap().norm().unwrap();
     assert!((error - truncated.error).abs() < 1.0e-12);
 }
+
+#[test]
+fn solve_right_reuses_left_solve_for_real_complex_and_nonselfdual_u1() {
+    let runtime = Runtime::builder().build().unwrap();
+    let space = GradedSpace::try_new(
+        Arc::new(U1FusionRule),
+        [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
+        false,
+    )
+    .unwrap();
+    let lhs = TensorMap::<_, f64>::from_block_fn(&runtime, [&space], [&space], |trees, _| {
+        if *trees.coupled() == U1Irrep::new(0) {
+            6.0
+        } else {
+            10.0
+        }
+    })
+    .unwrap();
+    let rhs = TensorMap::<_, f64>::from_block_fn(&runtime, [&space], [&space], |trees, _| {
+        if *trees.coupled() == U1Irrep::new(0) {
+            2.0
+        } else {
+            5.0
+        }
+    })
+    .unwrap();
+    let solved = lhs.solve_right(&rhs).unwrap();
+    assert_eq!(solved.compose(&rhs).unwrap().data(), lhs.data());
+
+    let lhs_c = lhs.to_c64();
+    let rhs_c = rhs.to_c64();
+    let solved_c = lhs_c.solve_right(&rhs_c).unwrap();
+    assert!(solved_c
+        .compose(&rhs_c)
+        .unwrap()
+        .data()
+        .iter()
+        .zip(lhs_c.data())
+        .all(|(a, b)| (*a - *b).norm() < 1.0e-12));
+}
