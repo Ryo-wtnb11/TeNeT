@@ -2554,6 +2554,27 @@ where
     authority.derive_from_final_homspace(hom)
 }
 
+#[doc(hidden)]
+pub fn build_bound_factor_space_generic_checked<R>(
+    authority: Arc<R>,
+    homspace: &FusionTreeHomSpace,
+    dimensions: impl IntoIterator<Item = (SectorId, usize)>,
+    side: bool,
+) -> Result<BoundDynamicFusionMapSpace<R>, CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+{
+    let new_leg = SectorLeg::new(dimensions, false);
+    let bond = FusionProductSpace::new([new_leg]);
+    let hom = if side {
+        FusionTreeHomSpace::new(homspace.codomain().clone(), bond)
+    } else {
+        FusionTreeHomSpace::new(bond, homspace.domain().clone())
+    };
+    BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(authority, hom)
+        .map_err(CheckedGenericFactorPlanError::from)
+}
+
 /// Builds the `(codomain <- W, W <- domain)` factor pair shared by SVD and
 /// the orthogonal factorizations, in the coupled-sector matrix layout.
 fn build_left_right_bound_pair<R, D>(
