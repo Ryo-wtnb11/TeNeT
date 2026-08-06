@@ -7173,6 +7173,135 @@ where
     ))
 }
 
+/// Checked generic factor materialization with identity completion for sectors
+/// absent from the source matricization (the full-factor contract).
+fn build_bound_factor_generic_checked<R, D>(
+    provider: &Arc<R>,
+    homspace: &FusionTreeHomSpace,
+    matricizations: &[SectorMatricization<D>],
+    pairs: &[FactorPair<D>],
+    dimensions: &BTreeMap<SectorId, usize>,
+    side: FactorSide,
+) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let space = build_bound_factor_space_generic_checked(
+        Arc::clone(provider),
+        homspace,
+        dimensions.iter().map(|(&sector, &dim)| (sector, dim)),
+        matches!(side, FactorSide::Left),
+    )?;
+    let len = space.space().required_len().map_err(|e| {
+        CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(e))
+    })?;
+    let mut data = vec![D::zero(); len];
+    let matrices = matricizations
+        .iter()
+        .map(|matrix| (matrix.sector, matrix))
+        .collect::<HashMap<_, _>>();
+    let pairs = pairs
+        .iter()
+        .map(|pair| (pair.sector, pair))
+        .collect::<HashMap<_, _>>();
+    let mut missing_offsets = HashMap::<SectorId, usize>::new();
+    let structure = Arc::clone(space.space().structure());
+    for index in 0..structure.block_count() {
+        let block = structure.block(index).map_err(|e| {
+            CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(
+                e,
+            ))
+        })?;
+        let BlockKey::FusionTree(key) = block.key() else {
+            continue;
+        };
+        let (sector, axis) = match side {
+            FactorSide::Left => (
+                coupled_of_generic(key.codomain_tree()),
+                block.shape().len() - 1,
+            ),
+            FactorSide::Right => (coupled_of_generic(key.domain_tree()), 0),
+        };
+        if let Some(matrix) = matrices.get(&sector) {
+            let pair = pairs
+                .get(&sector)
+                .ok_or(CheckedGenericFactorPlanError::Operation(
+                    OperationError::UnsupportedTensorContractScope {
+                        message: "factor rank absent for a populated source sector",
+                    },
+                ))?;
+            let offset = match side {
+                FactorSide::Left => row_placement(matrix, key.codomain_tree())?.0,
+                FactorSide::Right => col_placement(matrix, key.domain_tree())?.0,
+            };
+            let (factor, factor_rows) = match side {
+                FactorSide::Left => (&pair.left, pair.left_rows),
+                FactorSide::Right => (&pair.right, pair.right_leading),
+            };
+            scatter_matrix_block(
+                &mut data,
+                block.shape(),
+                block.strides(),
+                block.offset(),
+                axis,
+                factor,
+                factor_rows,
+                offset,
+            );
+            continue;
+        }
+        let dimension =
+            *dimensions
+                .get(&sector)
+                .ok_or(CheckedGenericFactorPlanError::Operation(
+                    OperationError::UnsupportedTensorContractScope {
+                        message: "factor sector absent from the source tensor",
+                    },
+                ))?;
+        let side_offset = missing_offsets.entry(sector).or_default();
+        let extent = block
+            .shape()
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != axis)
+            .try_fold(1usize, |acc, (_, &value)| acc.checked_mul(value))
+            .ok_or(CheckedGenericFactorPlanError::Operation(
+                OperationError::ElementCountOverflow,
+            ))?;
+        let end =
+            side_offset
+                .checked_add(extent)
+                .ok_or(CheckedGenericFactorPlanError::Operation(
+                    OperationError::ElementCountOverflow,
+                ))?;
+        if end > dimension {
+            return Err(CheckedGenericFactorPlanError::Operation(
+                OperationError::ElementCountMismatch {
+                    expected: dimension,
+                    actual: end,
+                },
+            ));
+        }
+        scatter_identity_matrix_block(
+            &mut data,
+            block.shape(),
+            block.strides(),
+            block.offset(),
+            axis,
+            dimension,
+            *side_offset,
+            extent,
+        )?;
+        *side_offset = end;
+    }
+    let (nout, nin) = match side {
+        FactorSide::Left => (space.space().nout(), 1),
+        FactorSide::Right => (1, space.space().nin()),
+    };
+    BoundDynFactor::from_bound(space, data, nout, nin).map_err(CheckedGenericFactorPlanError::from)
+}
+
 #[doc(hidden)]
 pub fn diagonal_bond_svd_factor_generic_checked<R, D, V>(
     provider: Arc<R>,
@@ -8315,6 +8444,149 @@ where
         });
     }
     build_left_right_bound_pair_generic_checked(&provider, space.homspace(), &matrices, &pairs)
+}
+
+/// Checked-Generic full SVD. Dense work is performed before any output-space
+/// publication; checked factor builders then admit square outer factors and
+/// the rectangular diagonal, including unmatched structural sectors.
+#[doc(hidden)]
+pub fn svd_full_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<SvdFullDyn<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let provider = input.space().provider_arc();
+    let space = input.space().space();
+    let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    let row_dimensions = coupled_sector_block_dimensions_generic_checked(
+        space.homspace().codomain(),
+        provider.as_ref(),
+    )?;
+    let col_dimensions = coupled_sector_block_dimensions_generic_checked(
+        space.homspace().domain(),
+        provider.as_ref(),
+    )?;
+    let max_rows = matrices.iter().map(|m| m.rows).max().unwrap_or(0);
+    let max_cols = matrices.iter().map(|m| m.cols).max().unwrap_or(0);
+    let max_rank = matrices
+        .iter()
+        .map(|m| m.rows.min(m.cols))
+        .max()
+        .unwrap_or(0);
+    let mut u_workspace = vec![D::zero(); max_rows * max_rank];
+    let mut s_workspace = vec![D::Real::zero(); max_rank];
+    let mut vt_workspace = vec![D::zero(); max_rank * max_cols];
+    let mut pairs = Vec::with_capacity(matrices.len());
+    let mut singular_values = Vec::with_capacity(matrices.len());
+    for matrix in &matrices {
+        let rank = matrix.rows.min(matrix.cols);
+        let shape = [matrix.rows, matrix.cols];
+        let strides = [1usize, matrix.rows];
+        let u_shape = [matrix.rows, rank];
+        let u_strides = [1usize, max_rows];
+        let s_shape = [rank];
+        let s_strides = [1usize];
+        let vt_shape = [rank, matrix.cols];
+        let vt_strides = [1usize, max_rank];
+        let input_view = DenseView::new(&matrix.data, &shape, &strides, 0)
+            .map_err(|e| CheckedGenericFactorPlanError::Operation(OperationError::Dense(e)))?;
+        let u_view = DenseViewMut::new(&mut u_workspace, &u_shape, &u_strides, 0)
+            .map_err(|e| CheckedGenericFactorPlanError::Operation(OperationError::Dense(e)))?;
+        let s_view = DenseViewMut::new(&mut s_workspace, &s_shape, &s_strides, 0)
+            .map_err(|e| CheckedGenericFactorPlanError::Operation(OperationError::Dense(e)))?;
+        let vt_view = DenseViewMut::new(&mut vt_workspace, &vt_shape, &vt_strides, 0)
+            .map_err(|e| CheckedGenericFactorPlanError::Operation(OperationError::Dense(e)))?;
+        dense
+            .svd_into(
+                D::dense_read(input_view),
+                D::dense_write(u_view),
+                D::Real::dense_write(s_view),
+                D::dense_write(vt_view),
+            )
+            .map_err(|e| CheckedGenericFactorPlanError::Operation(OperationError::Dense(e)))?;
+        let mut u_thin = vec![D::zero(); matrix.rows * rank];
+        let mut vt_thin = vec![D::zero(); rank * matrix.cols];
+        copy_col_major_strided(
+            &u_workspace,
+            matrix.rows,
+            rank,
+            max_rows,
+            &mut u_thin,
+            matrix.rows,
+        );
+        copy_col_major_strided(
+            &vt_workspace,
+            rank,
+            matrix.cols,
+            max_rank,
+            &mut vt_thin,
+            rank,
+        );
+        let mut left = orthonormal_completion(dense, &u_thin, matrix.rows, rank)
+            .map_err(CheckedGenericFactorPlanError::from)?;
+        let v_thin = adjoint_col_major(&vt_thin, rank, matrix.cols);
+        let v_full = orthonormal_completion(dense, &v_thin, matrix.cols, rank)
+            .map_err(CheckedGenericFactorPlanError::from)?;
+        let mut right = adjoint_col_major(&v_full, matrix.cols, matrix.cols);
+        svd_full_gauge(
+            &mut left,
+            matrix.rows,
+            matrix.rows,
+            &mut right,
+            matrix.cols,
+            matrix.cols,
+        );
+        singular_values.push(SectorSpectrum {
+            sector: matrix.sector,
+            values: s_workspace[..rank]
+                .iter()
+                .copied()
+                .map(Into::into)
+                .collect(),
+        });
+        pairs.push(FactorPair {
+            sector: matrix.sector,
+            kept: matrix.rows,
+            left,
+            left_rows: matrix.rows,
+            right,
+            right_leading: matrix.cols,
+        });
+    }
+    let u = build_bound_factor_generic_checked(
+        &provider,
+        space.homspace(),
+        &matrices,
+        &pairs,
+        &row_dimensions,
+        FactorSide::Left,
+    )?;
+    let vh = build_bound_factor_generic_checked(
+        &provider,
+        space.homspace(),
+        &matrices,
+        &pairs,
+        &col_dimensions,
+        FactorSide::Right,
+    )?;
+    let s = rectangular_diagonal_bond_tensor_generic_checked(
+        Arc::clone(&provider),
+        &singular_values,
+        &row_dimensions,
+        &col_dimensions,
+        &D::from_real,
+    )?;
+    Ok(SvdFullDyn {
+        u,
+        s,
+        vh,
+        singular_values,
+    })
 }
 
 /// Checked-Generic singular values only. No factor-space publication occurs.
