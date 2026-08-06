@@ -72,7 +72,8 @@ The main artifacts are:
 
 - `docs/audit/public-api-8999ec3.jsonl`: rustdoc-JSON-derived public API;
 - `docs/audit/artifact-classification-8999ec3.md`: stale-artifact census;
-- `docs/audit/operation-matrix-c612b4f.md`: capability and call-path matrix;
+- `docs/audit/operation-matrix-c612b4f.md`: capability and call-path matrix at
+  current main `d612869`;
 - issue #9 comment `5176167235`: ordered task registry.
 
 ## 3. Current API snapshot
@@ -134,14 +135,15 @@ correctness and should not be hidden by a successful developer checkout.
 ## 6. Feature matrix
 
 The canonical matrix is
-`docs/audit/operation-matrix-c612b4f.md`. Its important boundaries are:
+`docs/audit/operation-matrix-c612b4f.md` (current main `d612869`). Its
+important boundaries are:
 
 | Family | Current level |
 |---|---|
 | U(1), Z2 Host | Broad typed operation surface; strongest current proof coverage |
 | fZ2, SU(2), multiplicity-free products Host | Broad surface; selected advanced rows still need provider-specific proof |
 | ZN, CU(1) Host | Construction and selected transforms proved; many operation rows remain `NEEDS-PROOF` |
-| checked Generic / SU(N) Host | Construction/readback, transforms, otimes, contract/compose; broad reductions/decompositions/network unsupported |
+| checked Generic / SU(N) Host | Construction/readback, transforms, otimes, contract/compose, reductions, arithmetic, spectra, and current SVD/QR/LQ leaves; unit/cat, factor-returning EIG/EIGH, null/polar, matrix functions, and network remain unsupported |
 | Fibonacci | Expert category data exists; canonical typed tensors unsupported |
 | trivial/no symmetry | No canonical public provider identified |
 | CUDA f64 multiplicity-free | Selected explicit operations and canonical network execution |

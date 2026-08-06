@@ -1,7 +1,7 @@
-# Current operation matrix at `c612b4f`
+# Current operation matrix at `d612869`
 
 This is the Phase A capability census required by #9. The authority is TeNeT
-`c612b4ff5c0b9285fa6ef8617b5c5472cba3287e`; current source and executable
+`d6128696c01b85d8dffbaf805dc1a34fa7686a48`; current source and executable
 tests are authoritative. Export presence, trait plausibility, historical
 documentation and old benchmark output are not support evidence.
 
@@ -38,10 +38,10 @@ categorical coefficients are separately constrained by the provider bounds.
 | `catdomain`, `catcodomain`, `absorb` | PROVED | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | UNSUPPORTED |
 | `otimes` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED |
 | arbitrary `contract`, ordered output, `compose` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED |
-| `add`, `scale`, `norm`, `inner`, `trace_pairs`, `tr` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | `norm`/`inner`/`tr` PROVED for SU(3)/SU(4) real-provider fixtures; `add`/`scale`/`trace_pairs` remain UNSUPPORTED |
-| compact QR and compact SVD | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED |
-| full/truncated SVD, values, LQ, orthogonal/null/polar factors | PROVED on U1/Z2 fixtures | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | UNSUPPORTED |
-| EIG/EIGH, `exp`, `inv`, `solve`, `pinv`, `sqrt`, `powi` | PROVED on Z2 fixtures | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | UNSUPPORTED |
+| `add`, `scale`, `norm`, `inner`, `trace_pairs`, `tr` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | checked-Generic dispatch and current real/complex fixtures cover `add`/`scale`/`norm`/`inner`/`trace_pairs`/`tr`; provider-wide coverage remains open |
+| compact QR and compact SVD | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED on checked-Generic real/complex and SU(3)/SU(4) reconstruction fixtures |
+| full/truncated SVD, values, LQ, orthogonal/null/polar factors | PROVED on U1/Z2 fixtures | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | full/truncated SVD, values, compact/full QR/LQ proved on current checked-Generic fixtures; orthogonal/null/polar remain UNSUPPORTED |
+| EIG/EIGH, `exp`, `inv`, `solve`, `pinv`, `sqrt`, `powi` | PROVED on Z2 fixtures | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | `eig_vals`/`eigh_vals` proved on checked-Generic fixtures; factor-returning spectra and matrix functions remain UNSUPPORTED |
 | typed network planning and execution | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED |
 | serialization | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 
@@ -59,13 +59,13 @@ proved typed providers without this qualification.
 
 ### Why checked Generic stops after core tensor operations
 
-Provider-mode dispatch exists for transactional root construction, tree
-transforms, `otimes`, `contract` and `compose`
-(`tenet/src/typed.rs:2824-3087`). Reductions, factorizations, matrix functions,
-unit/cat operations and network execution are in impl blocks requiring the
-multiplicity-free `Scalar = f64` contract. Missing operation implementation is
-the concrete residual scope of #640. #662 owns typed provider-error propagation
-and transactional nonpublication as each new row becomes reachable.
+Provider-mode dispatch now covers transactional root construction, tree
+transforms, `otimes`, `contract`, `compose`, reductions, trace, arithmetic, and
+the current checked-Generic decomposition/spectrum leaves. The remaining
+operation gaps are the concrete residual scope of #640: unit/cat operations,
+factor-returning EIG/EIGH variants, orthogonal/null/polar factors, matrix
+functions, and typed network execution. #662 owns typed provider-error
+propagation and transactional nonpublication as each new row becomes reachable.
 
 ## Storage and device matrix
 
@@ -79,11 +79,11 @@ and transactional nonpublication as each new row becomes reachable.
 | General permutation/braid/recoupling | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | Canonical direct contract/compose | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | UNSUPPORTED |
 | Noncanonical transform-dependent contraction | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED with typed preflight error | UNSUPPORTED | UNSUPPORTED |
-| Arithmetic and reductions | PROVED | `norm`/`inner`/`tr` PROVED for SU(3)/SU(4) real-provider fixtures; add/scale remain UNSUPPORTED | UNSUPPORTED | PROVED | UNSUPPORTED | UNSUPPORTED |
+| Arithmetic and reductions | PROVED | checked-Generic `add`/`scale`/`norm`/`inner`/`trace_pairs`/`tr` are proved on current fixtures; provider-wide matrix remains open | UNSUPPORTED | PROVED | UNSUPPORTED | UNSUPPORTED |
 | QR | PROVED compact/full | UNSUPPORTED | UNSUPPORTED | PROVED compact only | UNSUPPORTED | UNSUPPORTED |
-| SVD | PROVED compact/full/truncated/values | UNSUPPORTED | UNSUPPORTED | PROVED compact and truncated | UNSUPPORTED | UNSUPPORTED |
-| EIGH | PROVED full/truncated/values | UNSUPPORTED | UNSUPPORTED | PROVED full and truncated | UNSUPPORTED | UNSUPPORTED |
-| EIG, LQ, null/polar, solve and matrix functions | PROVED on selected Host fixtures | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
+| SVD | PROVED compact/full/truncated/values | checked-Generic compact/full/truncated/values proved on current Host fixtures | UNSUPPORTED | PROVED compact and truncated | UNSUPPORTED | UNSUPPORTED |
+| EIGH | PROVED full/truncated/values | `eigh_vals` proved; factor-returning EIGH remains unsupported | UNSUPPORTED | PROVED full and truncated | UNSUPPORTED | UNSUPPORTED |
+| EIG, LQ, null/polar, solve and matrix functions | PROVED on selected Host fixtures | `eig_vals` and compact/full LQ proved; null/polar/solve/matrix functions remain unsupported | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | Network planning/execution | PROVED | UNSUPPORTED | planning is storage-generic; Host execution is not | PROVED for canonical chains; trace/noncanonical scopes reject | UNSUPPORTED | UNSUPPORTED |
 
 CUDA `PROVED` means the real-device tests exist and are explicitly ignored on
