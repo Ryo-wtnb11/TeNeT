@@ -7187,6 +7187,37 @@ where
     R: CheckedGenericFusion,
     D: FactorScalar,
 {
+    let bond = SectorLeg::new(
+        dimensions.iter().map(|(&sector, &dim)| (sector, dim)),
+        false,
+    );
+    let output_hom = match side {
+        FactorSide::Left => {
+            FusionTreeHomSpace::new(homspace.codomain().clone(), FusionProductSpace::new([bond]))
+        }
+        FactorSide::Right => {
+            FusionTreeHomSpace::new(FusionProductSpace::new([bond]), homspace.domain().clone())
+        }
+    };
+    let matrices = matricizations
+        .iter()
+        .map(|matrix| (matrix.sector, matrix))
+        .collect::<HashMap<_, _>>();
+    let keys = output_hom
+        .fusion_tree_keys_generic_checked(provider.as_ref())
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    for key in &keys {
+        let sector = match side {
+            FactorSide::Left => coupled_of_generic(key.codomain_tree()),
+            FactorSide::Right => coupled_of_generic(key.domain_tree()),
+        };
+        if let Some(matrix) = matrices.get(&sector) {
+            match side {
+                FactorSide::Left => row_placement(matrix, key.codomain_tree())?,
+                FactorSide::Right => col_placement(matrix, key.domain_tree())?,
+            };
+        }
+    }
     let space = build_bound_factor_space_generic_checked(
         Arc::clone(provider),
         homspace,
@@ -7197,10 +7228,6 @@ where
         CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(e))
     })?;
     let mut data = vec![D::zero(); len];
-    let matrices = matricizations
-        .iter()
-        .map(|matrix| (matrix.sector, matrix))
-        .collect::<HashMap<_, _>>();
     let pairs = pairs
         .iter()
         .map(|pair| (pair.sector, pair))
