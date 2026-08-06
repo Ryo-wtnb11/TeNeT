@@ -8,10 +8,11 @@ use std::cell::Cell;
 use num_complex::Complex64;
 use num_traits::{Float, Zero};
 use tenet_core::{
-    BlockKey, BlockStructure, CheckedGenericFusion, CheckedGenericStructureError, CoreError,
-    CoupledSectorRegion, CoupledTreeExtent, FusionProductSpace, FusionRule, FusionTensorMapSpace,
-    FusionTreeHomSpace, FusionTreeKey, GenericRigidSymbols, InfallibleGeneric,
-    MultiplicityFreeRigidSymbols, SectorId, SectorLeg, TensorMap, TensorMapSpace,
+    BlockKey, BlockStructure, CheckedGenericFusion, CheckedGenericRigidSymbols,
+    CheckedGenericStructureError, CoreError, CoupledSectorRegion, CoupledTreeExtent,
+    FusionProductSpace, FusionRule, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey,
+    GenericRigidSymbols, InfallibleGeneric, MultiplicityFreeRigidSymbols, SectorId, SectorLeg,
+    TensorMap, TensorMapSpace,
 };
 use tenet_dense::{DenseError, DenseExecutor, DenseTensor, DenseView, DenseViewMut};
 
@@ -7441,6 +7442,34 @@ where
     select_truncation(&weighted, truncation, &rule.rule_identity()).map_err(OperationError::from)
 }
 
+fn decide_bond_truncation_generic_checked<R, V>(
+    rule: &R,
+    spectra: &[SectorSpectrum<V>],
+    truncation: &Truncation,
+) -> Result<crate::truncation::TruncationDecision, CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericRigidSymbols<Scalar = f64>,
+    V: SpectrumMagnitude,
+{
+    let magnitudes: Vec<Vec<f64>> = spectra
+        .iter()
+        .map(|entry| entry.values.iter().map(|value| value.magnitude()).collect())
+        .collect();
+    let mut weighted = Vec::with_capacity(spectra.len());
+    for (entry, values) in spectra.iter().zip(&magnitudes) {
+        let sqrt_dim = rule
+            .try_sqrt_dim_scalar(entry.sector)
+            .map_err(CheckedGenericFactorPlanError::Provider)?;
+        weighted.push(WeightedSpectrum {
+            sector: entry.sector,
+            weight: sqrt_dim * sqrt_dim,
+            values,
+        });
+    }
+    select_truncation(&weighted, truncation, &rule.rule_identity())
+        .map_err(|error| CheckedGenericFactorPlanError::Operation(error.into()))
+}
+
 #[cfg(test)]
 mod generic_truncation_weight_tests {
     use super::generic_truncation_weight;
@@ -7564,6 +7593,102 @@ where
     BoundDynFactor::from_bound(space, data, expected_nout, expected_nin)
 }
 
+fn sliced_bond_tensor_generic_checked<R, D>(
+    provider: Arc<R>,
+    source_space: &DynamicFusionMapSpace,
+    source_data: &[D],
+    axis: usize,
+    kept_of: &dyn Fn(SectorId) -> usize,
+    expected_nout: usize,
+    expected_nin: usize,
+) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let nout = source_space.nout();
+    let source_structure = Arc::clone(source_space.structure());
+    let homspace = source_space.homspace();
+    let leg = if axis < nout {
+        &homspace.codomain().legs()[axis]
+    } else {
+        &homspace.domain().legs()[axis - nout]
+    };
+    let bond_leg = SectorLeg::new(
+        leg.sectors()
+            .iter()
+            .copied()
+            .filter(|&sector| kept_of(sector) > 0)
+            .map(|sector| (sector, kept_of(sector))),
+        false,
+    );
+    let new_hom = if axis < nout {
+        let mut legs = homspace.codomain().legs().to_vec();
+        legs[axis] = bond_leg;
+        FusionTreeHomSpace::new(FusionProductSpace::new(legs), homspace.domain().clone())
+    } else {
+        let mut legs = homspace.domain().legs().to_vec();
+        legs[axis - nout] = bond_leg;
+        FusionTreeHomSpace::new(homspace.codomain().clone(), FusionProductSpace::new(legs))
+    };
+    let keys = new_hom
+        .fusion_tree_keys_generic_checked(provider.as_ref())
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    for key in &keys {
+        let old = source_structure
+            .find_block_index_by_key(&BlockKey::FusionTree(key.clone()))
+            .ok_or(CheckedGenericFactorPlanError::Operation(
+                OperationError::UnsupportedTensorContractScope {
+                    message: "truncated factor tree must exist in the full factor",
+                },
+            ))?;
+        source_structure.block(old).map_err(|error| {
+            CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(
+                error,
+            ))
+        })?;
+    }
+    let space = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(provider, new_hom)
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    let len = space.space().required_len().map_err(|error| {
+        CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(
+            error,
+        ))
+    })?;
+    let mut data = vec![D::zero(); len];
+    let sliced_structure = Arc::clone(space.space().structure());
+    for index in 0..sliced_structure.block_count() {
+        let new_block = sliced_structure.block(index).map_err(|error| {
+            CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(
+                error,
+            ))
+        })?;
+        let old_index = source_structure
+            .find_block_index_by_key(new_block.key())
+            .ok_or(CheckedGenericFactorPlanError::Operation(
+                OperationError::UnsupportedTensorContractScope {
+                    message: "truncated factor tree must exist in the full factor",
+                },
+            ))?;
+        let old_block = source_structure.block(old_index).map_err(|error| {
+            CheckedGenericFactorPlanError::Operation(OperationError::from_core_preserving_context(
+                error,
+            ))
+        })?;
+        copy_matching_block_prefix(
+            source_data,
+            old_block.strides(),
+            old_block.offset(),
+            &mut data,
+            new_block.strides(),
+            new_block.offset(),
+            new_block.shape(),
+        );
+    }
+    BoundDynFactor::from_bound(space, data, expected_nout, expected_nin)
+        .map_err(CheckedGenericFactorPlanError::from)
+}
+
 fn truncate_svd_factors_only_dyn_generic<R, D>(
     u: BoundDynFactor<R, D>,
     vh: BoundDynFactor<R, D>,
@@ -7658,6 +7783,61 @@ where
 {
     let (u, vh, singular_values) = svd_compact_factors_dyn_generic(dense, input)?;
     truncate_svd_factors_only_dyn_generic(u, vh, singular_values, truncation)
+}
+
+#[doc(hidden)]
+pub fn svd_trunc_factors_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    truncation: &Truncation,
+) -> Result<SvdTruncFactorsDyn<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let singular_values = svd_vals_dyn_checked_generic(dense, input)?;
+    let (u, _s, vh) = svd_compact_dyn_checked_generic(dense, input)?;
+    let mut singular_values = singular_values;
+    let rule = u.space().provider();
+    let decision = decide_bond_truncation_generic_checked(rule, &singular_values, truncation)?;
+    if singular_values
+        .iter()
+        .zip(&decision.kept)
+        .all(|(entry, &count)| entry.values.len() == count)
+    {
+        return Ok((u, vh, singular_values, decision.error));
+    }
+    for (entry, &count) in singular_values.iter_mut().zip(&decision.kept) {
+        entry.values.truncate(count);
+    }
+    singular_values.retain(|entry| !entry.values.is_empty());
+    let kept: HashMap<SectorId, usize> = singular_values
+        .iter()
+        .map(|entry| (entry.sector, entry.values.len()))
+        .collect();
+    let kept_of = |sector: SectorId| kept.get(&sector).copied().unwrap_or(0);
+    let bond_axis = u.space().space().nout();
+    let provider = Arc::clone(u.space().provider_arc());
+    let u_factor = sliced_bond_tensor_generic_checked(
+        Arc::clone(&provider),
+        u.space().space(),
+        u.data(),
+        bond_axis,
+        &kept_of,
+        u.space().space().nout(),
+        1,
+    )?;
+    let vh_factor = sliced_bond_tensor_generic_checked(
+        provider,
+        vh.space().space(),
+        vh.data(),
+        0,
+        &kept_of,
+        1,
+        vh.space().space().nin(),
+    )?;
+    Ok((u_factor, vh_factor, singular_values, decision.error))
 }
 
 /// Provider-bound compact QR for a generic rule.
