@@ -1108,6 +1108,59 @@ fn checked_generic_full_qr_failure_is_typed_and_nonpublishing() {
 }
 
 #[test]
+fn checked_generic_full_lq_reconstructs_and_preserves_provider() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, _| 2.0).unwrap();
+    let (l, q) = source.lq_full().unwrap();
+    assert!(std::ptr::eq(l.provider(), provider.as_ref()));
+    assert!(std::ptr::eq(q.provider(), provider.as_ref()));
+    let rebuilt = l.compose(&q).unwrap();
+    assert_eq!(rebuilt.data().len(), source.data().len());
+    assert!(rebuilt
+        .data()
+        .iter()
+        .zip(source.data())
+        .all(|(actual, expected)| (actual - expected).abs() < 1e-12));
+}
+
+#[test]
+fn checked_generic_full_lq_supports_complex_scalars() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let source: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, _| {
+            Complex64::new(2.0, 1.0)
+        })
+        .unwrap();
+    let (l, q) = source.lq_full().unwrap();
+    let rebuilt = l.compose(&q).unwrap();
+    assert!((rebuilt.norm().unwrap() - source.norm().unwrap()).abs() < 1e-12);
+}
+
+#[test]
+fn checked_generic_full_lq_failure_is_typed_and_nonpublishing() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, _| 2.0).unwrap();
+    let before = source.data().to_vec();
+    provider.fail_algebra.store(true, Ordering::Relaxed);
+    let error = source.lq_full().unwrap_err();
+    assert!(matches!(
+        error,
+        GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Provider(
+            ToyError::Algebra
+        ))
+    ));
+    assert_eq!(source.data(), before.as_slice());
+}
+
+#[test]
 fn checked_only_contract_and_compose_keep_left_authority() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let left_provider = Arc::new(CheckedOnlyToy::new(0));

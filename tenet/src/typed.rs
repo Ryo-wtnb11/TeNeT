@@ -849,6 +849,18 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
+    R::Mode: TypedTensorFullLqDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// TensorKit full LQ dispatched by provider mode.
+    pub fn lq_full(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
+        <R::Mode as TypedTensorFullLqDispatch<R, D>>::lq_full(self)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
     R::Mode: TypedTensorSvdValsDispatch<R, D>,
     D: TensorScalar,
 {
@@ -3523,6 +3535,17 @@ where
 }
 
 #[doc(hidden)]
+pub trait TypedTensorFullLqDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn lq_full(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
+}
+
+#[doc(hidden)]
 pub trait TypedTensorSvdValsDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
@@ -3786,6 +3809,19 @@ where
     }
 }
 
+impl<R, D> TypedTensorFullLqDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn lq_full(tensor: &TensorMap<R, D>) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Error> {
+        tensor.lq_full_multiplicity_free()
+    }
+}
+
 impl<R, D> TypedTensorSvdValsDispatch<R, D> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<
@@ -3971,6 +4007,36 @@ where
         GenericTensorError<<R as CheckedGenericFusion>::Error>,
     > {
         tensor.qr_full_checked_generic()
+    }
+}
+
+impl<R, D> TypedTensorFullLqDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
+    fn lq_full(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<
+        (TensorMap<R, D>, TensorMap<R, D>),
+        GenericTensorError<<R as CheckedGenericFusion>::Error>,
+    > {
+        let TypedTensorRepr::Owned(body) = &tensor.repr else {
+            return Err(GenericTensorError::Facade(Error::InvalidArgument(
+                "checked Generic lq_full does not accept lazy adjoints".to_string(),
+            )));
+        };
+        let mut dense = tensor.runtime.lease_dense();
+        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+            .map_err(|error| GenericTensorError::Facade(error.into()))?;
+        let (l, q) = tenet_matrixalgebra::lq_full_dyn_checked_generic(dense.dense(), &input)?;
+        Ok((
+            wrap_factor_on(&tensor.runtime, l),
+            wrap_factor_on(&tensor.runtime, q),
+        ))
     }
 }
 
@@ -10554,7 +10620,7 @@ where
     /// As [`Self::lq_compact`]: sectorwise cubic, including the lazy-adjoint
     /// parent-QR route and two detached owned output payloads. A compact-diagonal
     /// payload is materialized dense first.
-    pub fn lq_full(&self) -> Result<(Self, Self), Error> {
+    fn lq_full_multiplicity_free(&self) -> Result<(Self, Self), Error> {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             let (q, r) = self.adjoint()?.qr_full()?;
             return Ok((
