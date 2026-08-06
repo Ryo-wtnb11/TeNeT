@@ -708,6 +708,25 @@ where
         > + CheckedGenericFusion,
     D: TensorScalar,
 {
+    fn svd_full_checked_generic(
+        &self,
+    ) -> Result<(Self, Self, Self), GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        let TypedTensorRepr::Owned(body) = &self.repr else {
+            return Err(GenericTensorError::Facade(Error::InvalidArgument(
+                "checked Generic svd_full does not accept lazy adjoints".to_string(),
+            )));
+        };
+        let mut dense = self.runtime.lease_dense();
+        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+            .map_err(|error| GenericTensorError::Facade(error.into()))?;
+        let out = tenet_matrixalgebra::svd_full_dyn_checked_generic(dense.dense(), &input)?;
+        Ok((
+            wrap_factor_on(&self.runtime, out.u),
+            wrap_factor_on(&self.runtime, out.s),
+            wrap_factor_on(&self.runtime, out.vh),
+        ))
+    }
+
     /// Checked-Generic compact SVD for owned host tensors.
     fn svd_compact_checked_generic(
         &self,
@@ -794,6 +813,11 @@ where
     /// TensorKit compact SVD dispatched by provider mode.
     pub fn svd_compact(&self) -> Result<(Self, Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorSvdDispatch<R, D>>::svd_compact(self)
+    }
+
+    /// TensorKit full SVD with square outer factors.
+    pub fn svd_full(&self) -> Result<(Self, Self, Self), TypedFacadeError<R>> {
+        <R::Mode as TypedTensorSvdDispatch<R, D>>::svd_full(self)
     }
 }
 
@@ -3470,6 +3494,9 @@ where
     fn svd_compact(
         tensor: &TensorMap<R, D>,
     ) -> Result<(TensorMap<R, D>, TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
+    fn svd_full(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<(TensorMap<R, D>, TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
 }
 
 #[doc(hidden)]
@@ -3724,6 +3751,12 @@ where
     ) -> Result<(TensorMap<R, D>, TensorMap<R, D>, TensorMap<R, D>), Error> {
         tensor.svd_compact_multiplicity_free()
     }
+
+    fn svd_full(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<(TensorMap<R, D>, TensorMap<R, D>, TensorMap<R, D>), Error> {
+        tensor.svd_full_multiplicity_free()
+    }
 }
 
 impl<R, D> TypedTensorLqDispatch<R, D> for MultiplicityFreeAdmissionMode
@@ -3892,6 +3925,15 @@ where
         GenericTensorError<<R as CheckedGenericFusion>::Error>,
     > {
         tensor.svd_compact_checked_generic()
+    }
+
+    fn svd_full(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<
+        (TensorMap<R, D>, TensorMap<R, D>, TensorMap<R, D>),
+        GenericTensorError<<R as CheckedGenericFusion>::Error>,
+    > {
+        tensor.svd_full_checked_generic()
     }
 }
 
@@ -10325,7 +10367,7 @@ where
     /// # Errors
     ///
     /// As [`Self::svd_compact`]: the seam's own errors, unfiltered.
-    pub fn svd_full(&self) -> Result<(Self, Self, Self), Error> {
+    fn svd_full_multiplicity_free(&self) -> Result<(Self, Self, Self), Error> {
         let mut dense = self.runtime.lease_dense();
         let out = match &self.repr {
             TypedTensorRepr::Adjoint(view) => tenet_matrixalgebra::svd_full_adjoint_dyn(
