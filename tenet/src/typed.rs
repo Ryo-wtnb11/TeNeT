@@ -470,6 +470,78 @@ where
     pub fn scale(&self, factor: D) -> Self {
         <R::Mode as TypedTensorAddScaleDispatch<R, D>>::scale(self, factor)
     }
+
+    /// Scales this host tensor in place when its dense payload is uniquely
+    /// owned. Shared or compact representations use the existing allocating
+    /// path and replace the receiver, preserving copy-on-write semantics.
+    pub fn scale_assign(&mut self, factor: D) {
+        let Some(body) = (match &mut self.repr {
+            TypedTensorRepr::Owned(body) => Arc::get_mut(body),
+            TypedTensorRepr::Adjoint(_) => None,
+        }) else {
+            *self = self.scale(factor);
+            return;
+        };
+        let Some(TypedData::Dense(data)) = Arc::get_mut(&mut body.data) else {
+            *self = self.scale(factor);
+            return;
+        };
+        for value in data.iter_mut() {
+            *value = *value * factor;
+        }
+    }
+
+    /// Replaces this host tensor with `alpha * self + beta * other`.
+    ///
+    /// A uniquely owned dense receiver is updated without allocating a new
+    /// payload. All other representations use [`Self::add`], so compact
+    /// spectra remain compact and shared bodies remain copy-on-write.
+    pub fn add_assign(
+        &mut self,
+        other: &Self,
+        alpha: D,
+        beta: D,
+    ) -> Result<(), TypedFacadeError<R>> {
+        if !self.runtime.same_runtime(&other.runtime) {
+            return Err(TypedFacadeError::<R>::from(Error::RuntimeMismatch));
+        }
+        if self.logical_space().space() != other.logical_space().space() {
+            return Err(TypedFacadeError::<R>::from(Error::InvalidArgument(
+                "tensors live on different spaces or block layouts".to_string(),
+            )));
+        }
+        let source = match &other.repr {
+            TypedTensorRepr::Owned(body) => match body.data.as_ref() {
+                TypedData::Dense(data) => Some(data.as_slice()),
+                TypedData::Diagonal(_) => None,
+            },
+            TypedTensorRepr::Adjoint(_) => None,
+        };
+        let Some(source) = source else {
+            *self = self.add(other, alpha, beta)?;
+            return Ok(());
+        };
+        let Some(body) = (match &mut self.repr {
+            TypedTensorRepr::Owned(body) => Arc::get_mut(body),
+            TypedTensorRepr::Adjoint(_) => None,
+        }) else {
+            *self = self.add(other, alpha, beta)?;
+            return Ok(());
+        };
+        let Some(TypedData::Dense(data)) = Arc::get_mut(&mut body.data) else {
+            *self = self.add(other, alpha, beta)?;
+            return Ok(());
+        };
+        if data.len() != source.len() {
+            return Err(TypedFacadeError::<R>::from(Error::InvalidArgument(
+                "tensors have different dense payload lengths".to_string(),
+            )));
+        }
+        for (dst, src) in data.iter_mut().zip(source) {
+            *dst = *dst * alpha + *src * beta;
+        }
+        Ok(())
+    }
 }
 
 impl<R, D> TensorMap<R, D>
