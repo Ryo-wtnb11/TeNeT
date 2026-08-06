@@ -720,10 +720,11 @@ where
         let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
             .map_err(|error| GenericTensorError::Facade(error.into()))?;
         let out = tenet_matrixalgebra::svd_full_dyn_checked_generic(dense.dense(), &input)?;
+        let (u, s, vh, _) = out.into_parts();
         Ok((
-            wrap_factor_on(&self.runtime, out.u),
-            wrap_factor_on(&self.runtime, out.s),
-            wrap_factor_on(&self.runtime, out.vh),
+            wrap_factor_on(&self.runtime, u),
+            wrap_factor_on(&self.runtime, s),
+            wrap_factor_on(&self.runtime, vh),
         ))
     }
 
