@@ -8049,6 +8049,56 @@ where
     Ok(singular_values)
 }
 
+/// Checked-Generic Hermitian eigenvalues only. No eigenvector or factor-space
+/// publication occurs.
+#[doc(hidden)]
+pub fn eigh_vals_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<Vec<SectorSpectrum>, CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let space = input.space().space();
+    if space.homspace().codomain() != space.homspace().domain() {
+        return Err(CheckedGenericFactorPlanError::Operation(
+            OperationError::UnsupportedTensorContractScope {
+                message: "eigh requires an endomorphism (codomain == domain)",
+            },
+        ));
+    }
+    let matricizations =
+        sector_matricizations_generic(space.structure(), input.data(), space.nout())
+            .map_err(CheckedGenericFactorPlanError::from)?;
+    validate_hermitian_matricizations(&matricizations)
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    let mut eigenvalues = Vec::with_capacity(matricizations.len());
+    for matrix in &matricizations {
+        let n = matrix.rows;
+        let shape = [matrix.rows, matrix.cols];
+        let strides = [1usize, matrix.rows];
+        let view = DenseView::new(&matrix.data, &shape, &strides, 0).map_err(|error| {
+            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
+        })?;
+        let values_tensor = dense.eigh_vals(D::dense_read(view)).map_err(|error| {
+            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
+        })?;
+        let mut values = D::real_spectrum(&values_tensor).map_err(|error| {
+            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
+        })?;
+        values.truncate(n);
+        validate_real_eigenvalues(&values).map_err(CheckedGenericFactorPlanError::from)?;
+        values.sort_by(|a, b| b.abs().total_cmp(&a.abs()));
+        eigenvalues.push(SectorSpectrum {
+            sector: matrix.sector,
+            values,
+        });
+    }
+    Ok(eigenvalues)
+}
+
 /// Provider-bound compact LQ for a generic rule.
 pub fn lq_compact_dyn_generic<E, R, D>(
     dense: &mut E,

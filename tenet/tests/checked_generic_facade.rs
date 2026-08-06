@@ -836,6 +836,23 @@ fn sun_checked_generic_svd_vals_matches_compact_spectrum() {
 }
 
 #[test]
+fn checked_generic_eigh_vals_preserves_spectrum_and_dtype() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 2.5).unwrap();
+
+    let spectra = source.eigh_vals().unwrap();
+    assert_eq!(spectra.len(), 1);
+    assert_eq!(spectra[0].sector, Label::X);
+    assert_eq!(spectra[0].values, vec![2.5]);
+
+    let complex = source.to_c64();
+    assert_eq!(complex.eigh_vals().unwrap(), spectra);
+}
+
+#[test]
 fn checked_generic_lazy_adjoint_preserves_provider_and_reductions() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
