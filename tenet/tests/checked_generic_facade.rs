@@ -778,6 +778,51 @@ fn sun_checked_generic_compact_svd_preserves_provider_and_reconstructs() {
 
 #[cfg(feature = "racah-generated")]
 #[test]
+fn sun_checked_generic_full_svd_preserves_provider_reconstructs_and_rejects_lazy() {
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 1)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, _| {
+            trees.coupled().iter().sum::<i64>() as f64 + 1.0
+        })
+        .unwrap();
+
+    let (u, s, vh) = source.svd_full().unwrap();
+    assert!(std::ptr::eq(u.provider(), provider.as_ref()));
+    assert!(std::ptr::eq(s.provider(), provider.as_ref()));
+    assert!(std::ptr::eq(vh.provider(), provider.as_ref()));
+    let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+    assert!(rebuilt
+        .data()
+        .iter()
+        .zip(source.data())
+        .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
+
+    let complex = source.to_c64();
+    let (complex_u, complex_s, complex_vh) = complex.svd_full().unwrap();
+    let complex_rebuilt = complex_u
+        .compose(&complex_s)
+        .unwrap()
+        .compose(&complex_vh)
+        .unwrap();
+    assert!(complex_rebuilt
+        .data()
+        .iter()
+        .zip(complex.data())
+        .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-10));
+
+    let lazy = source.adjoint().unwrap();
+    assert!(matches!(
+        lazy.svd_full(),
+        Err(GenericTensorError::Facade(_))
+    ));
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
 fn sun_checked_generic_compact_lq_preserves_provider_and_reconstructs() {
     use tenet::typed::SUNFusionRule;
 
