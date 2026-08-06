@@ -4,8 +4,8 @@ use std::sync::Arc;
 use num_traits::{One, Zero};
 use tenet_core::{
     multiplicity_free_permute_tree_pair_block_indexed, split_fusion_tree, BlockKey, BlockStructure,
-    CheckedFusionAlgebra, CheckedFusionSpaceError, FusionRule, FusionStyleKind,
-    FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
+    CheckedFusionAlgebra, CheckedFusionSpaceError, CheckedGenericFusion, FusionRule,
+    FusionStyleKind, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
     FusionTreePairOrientation, HostReadableStorage, HostWritableStorage,
     MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace, PreparedTreePairOperation, SectorLeg,
     TensorMap, TensorStorage,
@@ -16,6 +16,7 @@ use crate::lowering::{
     lower_tensortrace_source_adjoint_axes, lower_tensortrace_source_adjoint_axes_dyn,
 };
 use crate::strided::offset_to_isize;
+use crate::tree_transform::CheckedGenericPlanError;
 use crate::{tensortrace_raw_strided_kernel, tensortrace_raw_strided_kernel_add_with_coefficient};
 use tenet_operations::structure_identity::validate_structure_identity;
 use tenet_operations::transform_structure::validate_destination_layouts_injective;
@@ -1159,6 +1160,94 @@ impl TensorTraceAxisPlan {
 struct CheckedTraceGeometry {
     selected_homspace: FusionTreeHomSpace,
     trace_pairs_match: bool,
+}
+
+/// Select the traced output HomSpace through the checked Generic descriptor
+/// path. This is the structural half of Generic trace compilation; no payload
+/// or destination layout is allocated here.
+#[doc(hidden)]
+pub fn tensortrace_fusion_dyn_selected_homspace_generic_checked<R>(
+    src: &BoundDynamicFusionMapSpace<R>,
+    axes: TensorTraceAxisSpec<'_>,
+    dst_nout: usize,
+) -> Result<FusionTreeHomSpace, CheckedGenericPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+{
+    let orientation = if axes.source_conjugate() {
+        FusionTreePairOrientation::Adjoint
+    } else {
+        FusionTreePairOrientation::Direct
+    };
+    let lowered_axes =
+        lower_tensortrace_source_adjoint_axes_dyn(src.space().nout(), src.space().nin(), axes)
+            .map_err(CheckedGenericPlanError::Operation)?;
+    let lowered_spec = lowered_axes.as_spec();
+    let axis_plan = TensorTraceAxisPlan::compile(
+        src.space().rank(),
+        lowered_spec.output_axes().len(),
+        lowered_spec,
+    )
+    .map_err(CheckedGenericPlanError::Operation)?;
+    if dst_nout > axis_plan.output_axes.len() {
+        return Err(CheckedGenericPlanError::Operation(
+            OperationError::RankMismatch {
+                expected: axis_plan.output_axes.len(),
+                actual: dst_nout,
+            },
+        ));
+    }
+    let oriented = OrientedFusionTreeHomSpace::new(src.space().homspace(), orientation);
+    let selected = oriented
+        .try_select_generic_checked(
+            src.provider(),
+            &axis_plan.output_axes[..dst_nout],
+            &axis_plan.output_axes[dst_nout..],
+        )
+        .map_err(CheckedGenericPlanError::from)?;
+    for (&lhs_axis, &rhs_axis) in axis_plan
+        .trace_lhs_axes
+        .iter()
+        .zip(axis_plan.trace_rhs_axes.iter())
+    {
+        let lhs = oriented
+            .try_external_axis_leg_generic(src.provider(), lhs_axis)
+            .map_err(CheckedGenericPlanError::from)?
+            .ok_or_else(|| {
+                CheckedGenericPlanError::Operation(OperationError::InvalidArgument {
+                    message: "trace lhs axis has no external leg",
+                })
+            })?;
+        let rhs = oriented
+            .try_external_axis_leg_generic(src.provider(), rhs_axis)
+            .map_err(CheckedGenericPlanError::from)?
+            .ok_or_else(|| {
+                CheckedGenericPlanError::Operation(OperationError::InvalidArgument {
+                    message: "trace rhs axis has no external leg",
+                })
+            })?;
+        let rhs_dual = src
+            .provider()
+            .try_dual(*rhs.sectors().first().ok_or_else(|| {
+                CheckedGenericPlanError::Operation(OperationError::InvalidArgument {
+                    message: "trace rhs leg has no sector",
+                })
+            })?)
+            .map_err(CheckedGenericPlanError::Provider)?;
+        if *lhs.sectors().first().ok_or_else(|| {
+            CheckedGenericPlanError::Operation(OperationError::InvalidArgument {
+                message: "trace lhs leg has no sector",
+            })
+        })? != rhs_dual
+        {
+            return Err(CheckedGenericPlanError::Operation(
+                OperationError::UnsupportedTensorContractScope {
+                    message: "trace pairs must contain dual sectors",
+                },
+            ));
+        }
+    }
+    Ok(selected)
 }
 
 fn build_fusion_trace_terms<R>(
