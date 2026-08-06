@@ -11223,6 +11223,18 @@ where
         Ok(self.wrap_bound_factor(out))
     }
 
+    /// Solves the right equation `x * rhs = self` without forming an inverse.
+    /// This reuses the established left-solve authority via
+    /// `(rhs.adjoint() \ self.adjoint()).adjoint()`.
+    pub fn solve_right(&self, rhs: &Self) -> Result<Self, Error> {
+        if !self.runtime.same_runtime(&rhs.runtime) {
+            return Err(Error::RuntimeMismatch);
+        }
+        let rhs_adjoint = rhs.adjoint()?;
+        let self_adjoint = self.adjoint()?;
+        rhs_adjoint.solve(&self_adjoint)?.adjoint()
+    }
+
     /// TensorKit 0.17 / MatrixAlgebraKit `pinv`: the Moore-Penrose
     /// thresholded pseudo-inverse `t⁺ = V S⁺ Uᴴ`, where `t = U S Vᴴ` is the compact SVD and
     /// `S⁺` inverts every singular value above the cutoff and sends the rest to
