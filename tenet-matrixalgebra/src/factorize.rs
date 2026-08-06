@@ -7049,7 +7049,8 @@ where
     ))
 }
 
-fn diagonal_bond_svd_factor_generic_checked<R, D, V>(
+#[doc(hidden)]
+pub fn diagonal_bond_svd_factor_generic_checked<R, D, V>(
     provider: Arc<R>,
     spectrum: &[SectorSpectrum<V>],
     to_scalar: &dyn Fn(V) -> D,

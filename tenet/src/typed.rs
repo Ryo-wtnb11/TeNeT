@@ -318,6 +318,59 @@ where
     R: TypedSectorAdmission<
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericRigidSymbols<Scalar = f64>,
+    D: TensorScalar,
+{
+    fn svd_trunc_checked_generic(
+        &self,
+        truncation: &Truncation,
+    ) -> Result<CheckedGenericSvdTrunc<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
+    {
+        let TypedTensorRepr::Owned(body) = &self.repr else {
+            return Err(GenericTensorError::Facade(Error::InvalidArgument(
+                "checked Generic svd_trunc does not accept lazy adjoints".to_string(),
+            )));
+        };
+        let mut dense = self.runtime.lease_dense();
+        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+            .map_err(|error| GenericTensorError::Facade(error.into()))?;
+        let (u, vh, singular_values, error) =
+            tenet_matrixalgebra::svd_trunc_factors_dyn_checked_generic(
+                dense.dense(),
+                &input,
+                truncation,
+            )?;
+        let s = tenet_matrixalgebra::diagonal_bond_svd_factor_generic_checked(
+            Arc::clone(input.space().provider_arc()),
+            &singular_values,
+            &D::from_real,
+        )?;
+        let provider = self.logical_space().provider();
+        let decoded = singular_values
+            .into_iter()
+            .map(|entry| {
+                Ok(SectorSpectrum {
+                    sector: provider.try_decode_label(entry.sector)?,
+                    values: entry.values,
+                })
+            })
+            .collect::<Result<Vec<_>, <R as TypedSectorAdmission>::Error>>()
+            .map_err(|error| GenericTensorError::Plan(CheckedGenericPlanError::Provider(error)))?;
+        Ok(CheckedGenericSvdTrunc {
+            u: wrap_factor_on(&self.runtime, u),
+            s: wrap_factor_on(&self.runtime, s),
+            vh: wrap_factor_on(&self.runtime, vh),
+            singular_values: decoded,
+            error,
+        })
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
         > + CheckedGenericFusion,
     D: TensorScalar,
 {
@@ -622,6 +675,21 @@ where
     ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, TypedFacadeError<R>>
     {
         <R::Mode as TypedTensorSvdValsDispatch<R, D>>::svd_vals(self)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorSvdTruncDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// TensorKit truncated SVD dispatched by provider mode.
+    pub fn svd_trunc(
+        &self,
+        truncation: &Truncation,
+    ) -> Result<<R::Mode as TypedTensorSvdTruncDispatch<R, D>>::Output, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorSvdTruncDispatch<R, D>>::svd_trunc(self, truncation)
     }
 }
 
@@ -3264,6 +3332,19 @@ where
 }
 
 #[doc(hidden)]
+pub trait TypedTensorSvdTruncDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    type Output;
+    fn svd_trunc(
+        tensor: &TensorMap<R, D>,
+        truncation: &Truncation,
+    ) -> Result<Self::Output, Self::FacadeError>;
+}
+
+#[doc(hidden)]
 pub trait TypedTensorEighValsDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
@@ -3471,6 +3552,20 @@ where
     }
 }
 
+impl<R, D> TypedTensorSvdTruncDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    type Output = SvdTrunc<R, D>;
+    fn svd_trunc(tensor: &TensorMap<R, D>, truncation: &Truncation) -> Result<Self::Output, Error> {
+        tensor.svd_trunc_multiplicity_free(truncation)
+    }
+}
+
 impl<R, D> TypedTensorEighValsDispatch<R, D> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<
@@ -3633,6 +3728,23 @@ where
         GenericTensorError<<R as CheckedGenericFusion>::Error>,
     > {
         tensor.svd_vals_checked_generic()
+    }
+}
+
+impl<R, D> TypedTensorSvdTruncDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericRigidSymbols<Scalar = f64>,
+    D: TensorScalar,
+{
+    type Output = CheckedGenericSvdTrunc<R, D>;
+    fn svd_trunc(
+        tensor: &TensorMap<R, D>,
+        truncation: &Truncation,
+    ) -> Result<Self::Output, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        tensor.svd_trunc_checked_generic(truncation)
     }
 }
 
@@ -4920,6 +5032,21 @@ pub struct SvdTrunc<R: SectorCodec, D, S = Vec<D>> {
     /// Kept singular values per coupled sector, sorted by provider label.
     pub singular_values: Vec<SectorSpectrum<R::Sector>>,
     /// Quantum-dimension-weighted 2-norm of everything discarded.
+    pub error: f64,
+}
+
+/// Checked-Generic truncated SVD result. Labels use the provider's typed
+/// admission surface rather than the legacy `SectorCodec` constraint.
+pub struct CheckedGenericSvdTrunc<R: TypedSectorAdmission, D: TensorScalar> {
+    /// Left factor.
+    pub u: TensorMap<R, D>,
+    /// Compact diagonal singular-value factor.
+    pub s: TensorMap<R, D>,
+    /// Right factor.
+    pub vh: TensorMap<R, D>,
+    /// Kept singular values per sector.
+    pub singular_values: Vec<SectorSpectrum<R::Sector, f64>>,
+    /// Weighted discarded norm.
     pub error: f64,
 }
 
@@ -9978,7 +10105,10 @@ where
     /// [`Error::Operation`] / [`Error::Core`] / [`Error::FusionAlgebra`] from
     /// the seam, including a malformed `truncation` — the truncation policy is
     /// validated where it is applied, not here.
-    pub fn svd_trunc(&self, truncation: &Truncation) -> Result<SvdTrunc<R, D>, Error> {
+    fn svd_trunc_multiplicity_free(
+        &self,
+        truncation: &Truncation,
+    ) -> Result<SvdTrunc<R, D>, Error> {
         let mut dense = self.runtime.lease_dense();
         // The `_factors_` seam, for the reason `svd_compact` gives.
         let (u, vh, singular_values, error) = match &self.repr {

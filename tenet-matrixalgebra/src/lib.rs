@@ -23,9 +23,10 @@ pub mod truncation;
 
 pub use factorize::{
     diagonal_bond_bound_space, diagonal_bond_bound_space_generic, diagonal_bond_bound_space_like,
-    diagonal_bond_data, eig_full, eig_full_dyn, eig_trunc, eig_trunc_dyn, eig_vals, eig_vals_dyn,
-    eig_vals_dyn_checked_generic, eigh_full, eigh_full_dyn, eigh_trunc, eigh_trunc_dyn, eigh_vals,
-    eigh_vals_dyn, eigh_vals_dyn_checked_generic, left_null, left_null_dyn, left_orth, left_polar,
+    diagonal_bond_data, diagonal_bond_svd_factor_generic_checked, eig_full, eig_full_dyn,
+    eig_trunc, eig_trunc_dyn, eig_vals, eig_vals_dyn, eig_vals_dyn_checked_generic, eigh_full,
+    eigh_full_dyn, eigh_trunc, eigh_trunc_dyn, eigh_vals, eigh_vals_dyn,
+    eigh_vals_dyn_checked_generic, left_null, left_null_dyn, left_orth, left_polar,
     left_polar_adjoint_parent_dyn, left_polar_dyn, lq_compact, lq_compact_dyn,
     lq_compact_dyn_checked_generic, lq_compact_dyn_generic, lq_full, lq_full_dyn, qr_compact,
     qr_compact_dyn, qr_compact_dyn_checked_generic, qr_compact_dyn_generic, qr_full, qr_full_dyn,

@@ -8,7 +8,9 @@ use tenet::core::{
     GenericRMatrix, RuleIdentity, SectorId, SectorVec, TypedSectorAdmission,
 };
 use tenet::prelude::{Complex64, Runtime};
-use tenet::typed::{CheckedGenericTensorProductError, GenericTensorError, GradedSpace, TensorMap};
+use tenet::typed::{
+    CheckedGenericTensorProductError, GenericTensorError, GradedSpace, TensorMap, Truncation,
+};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 enum Label {
@@ -877,6 +879,36 @@ fn checked_generic_eig_vals_preserves_spectrum_and_dtype() {
 
     let complex = source.to_c64();
     assert_eq!(complex.eig_vals().unwrap(), spectra);
+}
+
+#[test]
+fn checked_generic_svd_trunc_reconstructs_and_preserves_provider() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            if indices[0] == indices[1] {
+                (indices[0] + 2) as f64
+            } else {
+                0.0
+            }
+        })
+        .unwrap();
+    let result = source.svd_trunc(&Truncation::rank(1)).unwrap();
+    assert!(std::ptr::eq(result.u.provider(), provider.as_ref()));
+    assert!(std::ptr::eq(result.s.provider(), provider.as_ref()));
+    assert!(std::ptr::eq(result.vh.provider(), provider.as_ref()));
+    let rebuilt = result
+        .u
+        .compose(&result.s)
+        .unwrap()
+        .compose(&result.vh)
+        .unwrap();
+    assert!(rebuilt.data().iter().all(|value| value.is_finite()));
+    assert!(result.singular_values.iter().all(|spectrum| {
+        spectrum.values.len() <= 2 && spectrum.values.iter().all(|value| value.is_finite())
+    }));
 }
 
 #[test]
