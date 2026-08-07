@@ -117,18 +117,16 @@ impl FusionRule for SU2FusionRule {
         true
     }
 
+    fn dual(&self, sector: SectorId) -> SectorId {
+        self.dual_or_panic(sector)
+    }
+
     fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
-        let left_irrep = SU2Irrep::from_sector_id(left);
-        let right_irrep = SU2Irrep::from_sector_id(right);
-        assert!(
-            left_irrep.twice_spin() + right_irrep.twice_spin() <= SU2_MAX_DOUBLED_SPIN,
-            "SU(2) fusion closure exceeds the supported maximum doubled spin 254"
-        );
-        racah_irrep(left_irrep)
-            .fusion(racah_irrep(right_irrep))
-            .expect("TeNeT SU(2) label range cannot overflow racah labels")
-            .map(|irrep| SU2Irrep::from_twice_spin(irrep.dj() as usize).into())
-            .collect()
+        self.fusion_channels_or_panic(left, right)
+    }
+
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        self.nsymbol_or_panic(left, right, coupled)
     }
 }
 
