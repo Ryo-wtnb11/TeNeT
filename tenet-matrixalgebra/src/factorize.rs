@@ -14,7 +14,9 @@ use tenet_core::{
     GenericRigidSymbols, InfallibleGeneric, MultiplicityFreeRigidSymbols, SectorId, SectorLeg,
     TensorMap, TensorMapSpace,
 };
-use tenet_dense::{DenseError, DenseExecutor, DenseTensor, DenseView, DenseViewMut};
+use tenet_dense::{
+    DenseDotConfig, DenseError, DenseExecutor, DenseTensor, DenseView, DenseViewMut,
+};
 
 pub use tenet_tensors::BoundDynamicTensorRef;
 use tenet_tensors::{
@@ -6237,6 +6239,198 @@ where
         source_space.nin(),
         source_space.nout(),
     )
+}
+
+/// Coefficient-free pseudo-inverse into an already admitted swapped space.
+///
+/// All layout checks happen before staging or dense work.  The local staging
+/// keeps an SVD or GEMM failure from publishing a partial output.
+pub(crate) fn pinv_by_sector_dyn_into<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    output_space: BoundDynamicFusionMapSpace<R>,
+    rcond: f64,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let source_space = input.space().space();
+    if input.space().provider().rule_identity() != output_space.provider().rule_identity() {
+        return Err(OperationError::from_core_preserving_context(
+            CoreError::FusionRuleMismatch {
+                expected: input.space().provider().rule_identity(),
+                actual: output_space.provider().rule_identity(),
+            },
+        ));
+    }
+    let source_regions =
+        canonical_generic_sector_regions(source_space.structure(), source_space.nout())?.ok_or(
+            OperationError::UnsupportedTensorContractScope {
+                message: "pinv requires canonical coupled-sector input storage",
+            },
+        )?;
+    let output_regions = canonical_generic_sector_regions(
+        output_space.space().structure(),
+        output_space.space().nout(),
+    )?
+    .ok_or(OperationError::UnsupportedTensorContractScope {
+        message: "pinv requires canonical coupled-sector output storage",
+    })?;
+    let routes = compile_pinv_region_routes(
+        &source_regions,
+        &output_regions,
+        input.data().len(),
+        output_space.space().required_len()?,
+    )?;
+
+    struct Stage<D> {
+        route: InverseSectorRoute,
+        rows: usize,
+        cols: usize,
+        rank: usize,
+        u: Vec<D>,
+        singular_values: Vec<f64>,
+        vt: Vec<D>,
+    }
+
+    let mut output_data = vec![D::zero(); output_space.space().required_len()?];
+    let mut staged = Vec::with_capacity(routes.len());
+    for route in routes {
+        let source = &source_regions[route.source];
+        let rows = source.rows();
+        let cols = source.cols();
+        let rank = rows.min(cols);
+        let mut u = vec![D::zero(); rows * rank];
+        let mut singular_values = vec![D::Real::zero(); rank];
+        let mut vt = vec![D::zero(); rank * cols];
+        if rank != 0 {
+            let input_shape = [rows, cols];
+            let input_strides = [1, rows];
+            let u_shape = [rows, rank];
+            let u_strides = [1, rows];
+            let s_shape = [rank];
+            let s_strides = [1];
+            let vt_shape = [rank, cols];
+            let vt_strides = [1, rank];
+            let source_view = DenseView::new(
+                &input.data()[source.range()],
+                &input_shape,
+                &input_strides,
+                0,
+            )
+            .map_err(OperationError::Dense)?;
+            let u_view = DenseViewMut::new(&mut u, &u_shape, &u_strides, 0)
+                .map_err(OperationError::Dense)?;
+            let s_view = DenseViewMut::new(&mut singular_values, &s_shape, &s_strides, 0)
+                .map_err(OperationError::Dense)?;
+            let vt_view = DenseViewMut::new(&mut vt, &vt_shape, &vt_strides, 0)
+                .map_err(OperationError::Dense)?;
+            dense
+                .svd_into(
+                    D::dense_read(source_view),
+                    D::dense_write(u_view),
+                    D::Real::dense_write(s_view),
+                    D::dense_write(vt_view),
+                )
+                .map_err(OperationError::Dense)?;
+        }
+        staged.push(Stage {
+            route,
+            rows,
+            cols,
+            rank,
+            u,
+            singular_values: singular_values.into_iter().map(Into::into).collect(),
+            vt,
+        });
+    }
+    let cutoff = rcond
+        * staged
+            .iter()
+            .flat_map(|stage| stage.singular_values.iter().copied())
+            .fold(0.0_f64, f64::max);
+    for stage in staged {
+        if stage.rank == 0 {
+            continue;
+        }
+        let mut vt = stage.vt;
+        for (row, &sigma) in stage.singular_values.iter().enumerate() {
+            let reciprocal = D::from_real(if sigma > cutoff { 1.0 / sigma } else { 0.0 });
+            for column in 0..stage.cols {
+                vt[row + stage.rank * column] = vt[row + stage.rank * column] * reciprocal;
+            }
+        }
+        let output = &mut output_data[output_regions[stage.route.output].range()];
+        let output_shape = [stage.cols, stage.rows];
+        let output_strides = [1, stage.cols];
+        let v_shape = [stage.cols, stage.rank];
+        let v_strides = [stage.rank, 1];
+        let uh_shape = [stage.rank, stage.rows];
+        let uh_strides = [1, stage.rows];
+        let output_view = DenseViewMut::new(output, &output_shape, &output_strides, 0)
+            .map_err(OperationError::Dense)?;
+        let v_view = DenseView::new(&vt, &v_shape, &v_strides, 0).map_err(OperationError::Dense)?;
+        let uh_view =
+            DenseView::new(&stage.u, &uh_shape, &uh_strides, 0).map_err(OperationError::Dense)?;
+        dense
+            .dot_general_into(
+                D::dense_write(output_view),
+                D::dense_read(v_view),
+                D::dense_read(uh_view),
+                &DenseDotConfig::matmul().with_conjugation(true, true),
+            )
+            .map_err(OperationError::Dense)?;
+    }
+    BoundDynFactor::from_bound(
+        output_space,
+        output_data,
+        source_space.nin(),
+        source_space.nout(),
+    )
+}
+
+fn compile_pinv_region_routes(
+    source: &[CoupledSectorRegion],
+    output: &[CoupledSectorRegion],
+    source_len: usize,
+    output_len: usize,
+) -> Result<Vec<InverseSectorRoute>, OperationError> {
+    let output_by_sector = sector_region_index_map(output)?;
+    let mut used = vec![false; output.len()];
+    let mut routes = Vec::with_capacity(source.len());
+    for (source_index, source_region) in source.iter().enumerate() {
+        let output_index = output_by_sector
+            .get(&source_region.coupled())
+            .copied()
+            .ok_or(OperationError::UnsupportedTensorContractScope {
+                message: "pinv output is missing a source coupled sector",
+            })?;
+        let output_region = &output[output_index];
+        if output_region.rows() != source_region.cols()
+            || output_region.cols() != source_region.rows()
+            || source_region.col_trees() != output_region.row_trees()
+            || source_region.row_trees() != output_region.col_trees()
+        {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "pinv output does not transpose the source coupled-sector layout",
+            });
+        }
+        validate_region_range(source_region, source_len)?;
+        validate_region_range(output_region, output_len)?;
+        used[output_index] = true;
+        routes.push(InverseSectorRoute {
+            source: source_index,
+            output: output_index,
+        });
+    }
+    if used.iter().any(|used| !used) {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "pinv output contains a coupled sector absent from the source",
+        });
+    }
+    Ok(routes)
 }
 
 pub(crate) fn solve_left_by_sector_dyn<E, R, D>(

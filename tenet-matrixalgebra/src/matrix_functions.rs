@@ -4,7 +4,7 @@
 
 use std::hash::Hash;
 
-use tenet_core::MultiplicityFreeRigidSymbols;
+use tenet_core::{CheckedGenericFusion, MultiplicityFreeRigidSymbols};
 use tenet_dense::{DenseExecutor, DenseView, DenseViewMut};
 use tenet_tensors::{
     OperationError, TensorContractBackend, TensorContractFusionExecutionContext,
@@ -15,7 +15,8 @@ use crate::compose::compose_bound_dyn;
 use crate::factorize::{
     adjoint_bound_factor, eigh_full_dyn, inverse_by_sector_dyn, inverse_by_sector_dyn_into,
     is_hermitian_endomorphism_dyn, map_square_sectors_dyn, map_square_sectors_dyn_into,
-    scale_axis_by_spectrum, solve_left_by_sector_dyn, solve_left_by_sector_dyn_into,
+    pinv_by_sector_dyn_into, scale_axis_by_spectrum, solve_left_by_sector_dyn,
+    solve_left_by_sector_dyn_into,
     svd_compact_factors_dyn, typed_from_bound_factor, BoundDynFactor, BoundDynamicTensorRef,
     BoundTensorMap, BoundTensorMapRef, FactorScalar, SectorSpectrum, SvdFactorsDyn,
 };
@@ -1040,6 +1041,23 @@ where
     D: FactorScalar,
 {
     inverse_by_sector_dyn_into(dense, input, output_space)
+}
+
+/// Context-free checked-provider pseudo-inverse into a caller-admitted swapped output space.
+#[doc(hidden)]
+pub fn pinv_direct_into_dyn<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    output_space: tenet_tensors::BoundDynamicFusionMapSpace<R>,
+    rcond: f64,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    validate_pinv_rcond(rcond)?;
+    pinv_by_sector_dyn_into(dense, input, output_space, rcond)
 }
 
 /// Context-free dynamic-rank left solve `A \ B` used by the user layer.
