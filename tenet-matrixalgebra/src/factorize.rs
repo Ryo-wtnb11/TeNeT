@@ -6276,7 +6276,21 @@ where
     let output_space = divisor
         .space()
         .derive_from_final_homspace(output_homspace)?;
-    let mut output_data = vec![D::zero(); output_space.space().required_len()?];
+    solve_left_by_sector_dyn_into(dense, divisor, rhs, output_space)
+}
+
+pub(crate) fn solve_left_by_sector_dyn_into<E, R, D>(
+    dense: &mut E,
+    divisor: &BoundDynamicTensorRef<'_, R, D>,
+    rhs: &BoundDynamicTensorRef<'_, R, D>,
+    output_space: BoundDynamicFusionMapSpace<R>,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let divisor_space = divisor.space().space();
+    let rhs_space = rhs.space().space();
 
     let divisor_regions = checked_sector_regions(divisor_space.structure(), divisor_space.nout())?
         .ok_or(OperationError::UnsupportedTensorContractScope {
@@ -6302,14 +6316,17 @@ where
     .ok_or(OperationError::UnsupportedTensorContractScope {
         message: "solve derived output requires canonical coupled-sector storage",
     })?;
+    let output_len = output_space.space().required_len()?;
     let routes = compile_solve_left_region_routes(
         &divisor_regions,
         &rhs_regions,
         &output_regions,
         divisor.data().len(),
         rhs.data().len(),
-        output_data.len(),
+        output_len,
     )?;
+
+    let mut output_data = vec![D::zero(); output_len];
 
     for route in routes {
         let divisor_region = &divisor_regions[route.divisor];
