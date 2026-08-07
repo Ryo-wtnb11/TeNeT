@@ -52,16 +52,32 @@ impl FusionRule for FibonacciFusionRule {
         SectorId::new(0)
     }
 
-    // `dual(s) = s` (anyons.jl:80: `dual(s::FibonacciAnyon) = s`) is exactly
-    // the `FusionRule::dual` default (identity) — no override needed.
+    fn dual(&self, sector: SectorId) -> SectorId {
+        self.dual_or_panic(sector)
+    }
+
     fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
-        match (Self::is_tau(left), Self::is_tau(right)) {
-            (false, _) => smallvec![right],
-            (true, false) => smallvec![left],
-            // τ⊗τ = 𝟙 ⊕ τ, vacuum-first to match TensorKitSectors'
-            // `FibonacciAnyonProdIterator` iteration order (anyons.jl:96-109).
-            (true, true) => smallvec![SectorId::new(0), SectorId::new(1)],
-        }
+        self.fusion_channels_or_panic(left, right)
+    }
+
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        self.nsymbol_or_panic(left, right, coupled)
+    }
+}
+
+/// `𝟙 ⊗ τ = τ`, `τ ⊗ 𝟙 = τ`, `τ ⊗ τ = 𝟙 ⊕ τ` (vacuum-first to match
+/// TensorKitSectors' `FibonacciAnyonProdIterator` iteration order,
+/// anyons.jl:96-109). Shared by [`FusionRule::fusion_channels`] and
+/// [`CheckedFusionAlgebra::try_fusion_channels`] so the two entry points
+/// state this once.
+fn fibonacci_channels(left: SectorId, right: SectorId) -> SectorVec {
+    match (
+        FibonacciFusionRule::is_tau(left),
+        FibonacciFusionRule::is_tau(right),
+    ) {
+        (false, _) => smallvec![right],
+        (true, false) => smallvec![left],
+        (true, true) => smallvec![SectorId::new(0), SectorId::new(1)],
     }
 }
 
@@ -84,7 +100,7 @@ impl CheckedFusionAlgebra for FibonacciFusionRule {
     ) -> Result<SectorVec, FusionAlgebraError> {
         checked_fibonacci_sector(left)?;
         checked_fibonacci_sector(right)?;
-        Ok(self.fusion_channels(left, right))
+        Ok(fibonacci_channels(left, right))
     }
 
     fn try_nsymbol(
@@ -96,7 +112,9 @@ impl CheckedFusionAlgebra for FibonacciFusionRule {
         checked_fibonacci_sector(left)?;
         checked_fibonacci_sector(right)?;
         checked_fibonacci_sector(coupled)?;
-        Ok(self.nsymbol(left, right, coupled))
+        Ok(usize::from(
+            fibonacci_channels(left, right).contains(&coupled),
+        ))
     }
 }
 

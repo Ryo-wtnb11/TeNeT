@@ -99,26 +99,16 @@ impl FusionRule for ZNFusionRule {
         self.irrep(0).into()
     }
     fn dual(&self, sector: SectorId) -> SectorId {
-        let sector = self
-            .checked(sector)
-            .expect("Z_N dual received an invalid sector");
-        self.irrep(-(sector.charge as i64)).into()
+        self.dual_or_panic(sector)
     }
     fn supports_unitary_braid_dagger(&self) -> bool {
         true
     }
     fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
-        let left = self
-            .checked(left)
-            .expect("Z_N fusion received an invalid sector");
-        let right = self
-            .checked(right)
-            .expect("Z_N fusion received an invalid sector");
-        core::iter::once(
-            self.irrep((left.charge as u64 + right.charge as u64) as i64)
-                .into(),
-        )
-        .collect()
+        self.fusion_channels_or_panic(left, right)
+    }
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        self.nsymbol_or_panic(left, right, coupled)
     }
 }
 
@@ -275,10 +265,16 @@ impl FusionRule for Z2FusionRule {
         true
     }
 
+    fn dual(&self, sector: SectorId) -> SectorId {
+        self.dual_or_panic(sector)
+    }
+
     fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
-        let left = Z2Irrep::from_sector_id(left).expect("Z2 fusion received an invalid sector");
-        let right = Z2Irrep::from_sector_id(right).expect("Z2 fusion received an invalid sector");
-        core::iter::once(Z2Irrep::new(left.parity() ^ right.parity()).into()).collect()
+        self.fusion_channels_or_panic(left, right)
+    }
+
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        self.nsymbol_or_panic(left, right, coupled)
     }
 }
 
@@ -420,8 +416,16 @@ impl FusionRule for FermionParityFusionRule {
         true
     }
 
+    fn dual(&self, sector: SectorId) -> SectorId {
+        self.dual_or_panic(sector)
+    }
+
     fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
-        Z2FusionRule.fusion_channels(left, right)
+        self.fusion_channels_or_panic(left, right)
+    }
+
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        self.nsymbol_or_panic(left, right, coupled)
     }
 }
 
@@ -618,22 +622,15 @@ impl FusionRule for U1FusionRule {
     }
 
     fn dual(&self, sector: SectorId) -> SectorId {
-        let sector = U1Irrep::from_sector_id(sector).expect("U(1) dual received an invalid sector");
-        sector
-            .checked_dual()
-            .expect("U(1) dual charge overflow")
-            .into()
+        self.dual_or_panic(sector)
     }
 
     fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
-        let left = U1Irrep::from_sector_id(left).expect("U(1) fusion received an invalid sector");
-        let right = U1Irrep::from_sector_id(right).expect("U(1) fusion received an invalid sector");
-        core::iter::once(
-            left.checked_fuse(right)
-                .expect("U(1) fusion charge overflow")
-                .into(),
-        )
-        .collect()
+        self.fusion_channels_or_panic(left, right)
+    }
+
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        self.nsymbol_or_panic(left, right, coupled)
     }
 }
 

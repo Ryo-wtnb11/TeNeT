@@ -177,25 +177,22 @@ impl FusionRule for CategoryDataFibonacci {
     // asserts. The closed-form provider reports the same `false`.
 
     fn dual(&self, sector: SectorId) -> SectorId {
-        SectorId::new(self.table.dual(sector.id()))
+        self.dual_or_panic(sector)
     }
 
     fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
-        self.table
-            .channels(left.id(), right.id())
-            .map(SectorId::new)
-            .collect::<SmallVec<_>>()
+        self.fusion_channels_or_panic(left, right)
     }
 
     fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
-        self.table.nsymbol(left.id(), right.id(), coupled.id()) as usize
+        self.nsymbol_or_panic(left, right, coupled)
     }
 }
 
 impl CheckedFusionAlgebra for CategoryDataFibonacci {
     fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
         Self::index(sector)?;
-        Ok(self.dual(sector))
+        Ok(SectorId::new(self.table.dual(sector.id())))
     }
 
     fn try_fusion_channels(
@@ -205,7 +202,11 @@ impl CheckedFusionAlgebra for CategoryDataFibonacci {
     ) -> Result<SectorVec, FusionAlgebraError> {
         Self::index(left)?;
         Self::index(right)?;
-        Ok(self.fusion_channels(left, right))
+        Ok(self
+            .table
+            .channels(left.id(), right.id())
+            .map(SectorId::new)
+            .collect::<SmallVec<_>>())
     }
 
     fn try_nsymbol(
@@ -217,7 +218,7 @@ impl CheckedFusionAlgebra for CategoryDataFibonacci {
         Self::index(left)?;
         Self::index(right)?;
         Self::index(coupled)?;
-        Ok(self.nsymbol(left, right, coupled))
+        Ok(self.table.nsymbol(left.id(), right.id(), coupled.id()) as usize)
     }
 }
 
