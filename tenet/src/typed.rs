@@ -440,6 +440,25 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
+    R::Mode: TypedTensorSolveDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// TensorKit `A \\ B`: solves `A * X = B` per coupled sector without
+    /// forming an inverse. `A` and `B` must have exactly equal codomains, `A`'s
+    /// codomain and domain must be isomorphic, and the result is
+    /// `domain(A) <- domain(B)`.
+    ///
+    /// Checked Generic accepts dense inputs and admits the output with `A`'s
+    /// exact provider allocation before any output allocation or dense solve.
+    /// `solve_right` remains multiplicity-free only.
+    pub fn solve(&self, rhs: &Self) -> Result<Self, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorSolveDispatch<R, D>>::solve(self, rhs)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
     R::Mode: TypedTensorReductionDispatch<R, D>,
     D: TensorScalar,
 {
@@ -3852,6 +3871,18 @@ where
 }
 
 #[doc(hidden)]
+pub trait TypedTensorSolveDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn solve(
+        tensor: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
+}
+
+#[doc(hidden)]
 pub trait TypedTensorExpDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
@@ -4144,6 +4175,19 @@ where
     }
 }
 
+impl<R, D> TypedTensorSolveDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn solve(tensor: &TensorMap<R, D>, rhs: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
+        tensor.solve_multiplicity_free(rhs)
+    }
+}
+
 impl<R, D> TypedTensorExpDispatch<R, D> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
@@ -4401,6 +4445,82 @@ where
         let factor = tenet_matrixalgebra::inv_direct_into_dyn(
             dense.dense(),
             &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+                .map_err(Error::from)?,
+            output,
+        )
+        .map_err(Error::from)?;
+        Ok(wrap_factor_on(&tensor.runtime, factor))
+    }
+}
+
+impl<R, D> TypedTensorSolveDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
+    fn solve(
+        tensor: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+    ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        if !tensor.runtime.same_runtime(&rhs.runtime) {
+            return Err(Error::RuntimeMismatch.into());
+        }
+        if tensor.logical_space().provider().rule_identity()
+            != rhs.logical_space().provider().rule_identity()
+        {
+            return Err(Error::RuleMismatch.into());
+        }
+        if tensor.logical_space().space().homspace().codomain()
+            != rhs.logical_space().space().homspace().codomain()
+        {
+            return Err(Error::InvalidArgument(
+                "solve requires equal divisor and right-hand-side codomains".to_string(),
+            )
+            .into());
+        }
+
+        let lhs_space = tensor.logical_space();
+        let codomain = tenet_matrixalgebra::coupled_sector_block_dimensions_generic_checked(
+            lhs_space.space().homspace().codomain(),
+            lhs_space.provider(),
+        )?;
+        let domain = tenet_matrixalgebra::coupled_sector_block_dimensions_generic_checked(
+            lhs_space.space().homspace().domain(),
+            lhs_space.provider(),
+        )?;
+        if codomain != domain {
+            return Err(Error::from(
+                tenet_tensors::OperationError::UnsupportedTensorContractScope {
+                    message: "solve requires an isomorphic divisor codomain and domain",
+                },
+            )
+            .into());
+        }
+
+        let output = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
+            Arc::clone(lhs_space.provider_arc()),
+            FusionTreeHomSpace::new(
+                lhs_space.space().homspace().domain().clone(),
+                rhs.logical_space().space().homspace().domain().clone(),
+            ),
+        )?;
+        let lhs = tensor
+            .materialized_tensor_uncached()
+            .map_err(GenericTensorError::from)?;
+        let rhs = rhs
+            .materialized_tensor_uncached()
+            .map_err(GenericTensorError::from)?;
+        let lhs_body = lhs.owned_body().expect("uncached solve lhs is owned");
+        let rhs_body = rhs.owned_body().expect("uncached solve rhs is owned");
+        let mut dense = tensor.runtime.lease_dense();
+        let factor = tenet_matrixalgebra::solve_left_direct_into_dyn(
+            dense.dense(),
+            &BoundDynamicTensorRef::try_new(&lhs_body.space, lhs_body.materialized_dense_data())
+                .map_err(Error::from)?,
+            &BoundDynamicTensorRef::try_new(&rhs_body.space, rhs_body.materialized_dense_data())
                 .map_err(Error::from)?,
             output,
         )
@@ -12551,7 +12671,7 @@ where
     /// keeps `self`'s exact provider allocation. Dense blocks are written
     /// directly into the final output; compact diagonal divisors reuse the
     /// elementwise reciprocal and bond-scaling path.
-    pub fn solve(&self, rhs: &Self) -> Result<Self, Error> {
+    fn solve_multiplicity_free(&self, rhs: &Self) -> Result<Self, Error> {
         if !self.runtime.same_runtime(&rhs.runtime) {
             return Err(Error::RuntimeMismatch);
         }

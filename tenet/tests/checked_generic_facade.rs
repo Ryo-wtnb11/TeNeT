@@ -1485,6 +1485,71 @@ fn sun_checked_generic_inv_preserves_provider_outer_multiplicity_and_inverse_law
 }
 
 #[cfg(feature = "racah-generated")]
+fn assert_sun_checked_generic_left_solve(n: usize, label: Vec<i64>) {
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(n).unwrap());
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(label, 2)], false).unwrap();
+    let divisor: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
+            let row = indices[0] + 2 * indices[1];
+            let col = indices[2] + 2 * indices[3];
+            if trees.codomain_vertices() != trees.domain_vertices() {
+                0.0
+            } else if row == col {
+                5.0
+            } else {
+                0.25
+            }
+        })
+        .unwrap();
+    assert!((0..divisor.block_count()).any(|index| {
+        divisor
+            .block_fusion_trees(index)
+            .unwrap()
+            .codomain_vertices()
+            .iter()
+            .chain(divisor.block_fusion_trees(index).unwrap().domain_vertices())
+            .any(|vertex| vertex.get() > 1)
+    }));
+    let rhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |_, indices| {
+            (indices.iter().sum::<usize>() + 1) as f64
+        })
+        .unwrap();
+
+    let solution = divisor.solve(&rhs).unwrap();
+    assert!(std::ptr::eq(solution.provider(), provider.as_ref()));
+    assert!(divisor
+        .compose(&solution)
+        .unwrap()
+        .data()
+        .iter()
+        .zip(rhs.data())
+        .all(|(actual, expected)| (*actual - *expected).abs() < 2e-10));
+
+    let complex_divisor = divisor.to_c64();
+    let complex_rhs = rhs.to_c64().scale(Complex64::new(1.0, 0.25));
+    let complex_solution = complex_divisor.solve(&complex_rhs).unwrap();
+    assert!(complex_divisor
+        .compose(&complex_solution)
+        .unwrap()
+        .data()
+        .iter()
+        .zip(complex_rhs.data())
+        .all(|(actual, expected)| (*actual - *expected).norm() < 2e-10));
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn sun_checked_generic_left_solve_preserves_outer_multiplicity() {
+    for (n, label) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
+        assert_sun_checked_generic_left_solve(n, label);
+    }
+}
+
+#[cfg(feature = "racah-generated")]
 #[test]
 fn sun_checked_generic_inv_preflight_counts_outer_multiplicity() {
     use tenet::typed::SUNFusionRule;
@@ -2158,6 +2223,87 @@ fn checked_generic_inv_singular_early_and_late_sectors_preserve_source() {
         ));
         assert_eq!(source.data(), before.as_slice());
     }
+}
+
+#[test]
+fn checked_generic_left_solve_accepts_distinct_provider_arcs_and_rectangular_rhs() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let lhs_provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let rhs_provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let lhs_codomain =
+        GradedSpace::try_new(Arc::clone(&lhs_provider), [(Label::X, 2)], false).unwrap();
+    let lhs_domain_x =
+        GradedSpace::try_new(Arc::clone(&lhs_provider), [(Label::X, 2)], false).unwrap();
+    let lhs_domain_unit =
+        GradedSpace::try_new(Arc::clone(&lhs_provider), [(Label::Vacuum, 1)], false).unwrap();
+    let rhs_codomain =
+        GradedSpace::try_new(Arc::clone(&rhs_provider), [(Label::X, 2)], false).unwrap();
+    let rhs_domain = GradedSpace::try_new(rhs_provider, [(Label::X, 3)], false).unwrap();
+    let divisor: TensorMap<_, f64> = TensorMap::from_block_fn(
+        &runtime,
+        [&lhs_codomain],
+        [&lhs_domain_x, &lhs_domain_unit],
+        |_, indices| {
+            if indices[0] == indices[1] {
+                2.0 + indices[0] as f64
+            } else {
+                0.0
+            }
+        },
+    )
+    .unwrap();
+    let rhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&rhs_codomain], [&rhs_domain], |_, indices| {
+            (indices[0] + 2 * indices[1] + 1) as f64
+        })
+        .unwrap();
+
+    let solution = divisor.solve(&rhs).unwrap();
+    assert!(std::ptr::eq(solution.provider(), lhs_provider.as_ref()));
+    assert_eq!(solution.codomain(), divisor.domain());
+    assert_eq!(solution.domain(), rhs.domain());
+    assert!(divisor
+        .compose(&solution)
+        .unwrap()
+        .data()
+        .iter()
+        .zip(rhs.data())
+        .all(|(actual, expected)| (*actual - *expected).abs() < 1e-11));
+
+    let complex_divisor = divisor.to_c64();
+    let complex_rhs = rhs.to_c64().scale(Complex64::new(1.0, 0.25));
+    let complex_solution = complex_divisor.solve(&complex_rhs).unwrap();
+    assert!(std::ptr::eq(
+        complex_solution.provider(),
+        lhs_provider.as_ref()
+    ));
+    assert!(complex_divisor
+        .compose(&complex_solution)
+        .unwrap()
+        .data()
+        .iter()
+        .zip(complex_rhs.data())
+        .all(|(actual, expected)| (*actual - *expected).norm() < 1e-11));
+}
+
+#[test]
+fn checked_generic_left_solve_preflight_failures_are_nonpublishing() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let x = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let lhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&x], [&narrow], |_, _| 1.0).unwrap();
+    let rhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&x], [&x], |_, _| 1.0).unwrap();
+    let before = lhs.data().to_vec();
+    assert!(matches!(
+        lhs.solve(&rhs),
+        Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
+            _
+        )))
+    ));
+    assert_eq!(lhs.data(), before.as_slice());
 }
 
 #[test]
