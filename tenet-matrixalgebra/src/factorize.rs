@@ -6506,20 +6506,21 @@ where
     .ok_or(OperationError::UnsupportedTensorContractScope {
         message: "matrix function output requires canonical coupled-sector storage",
     })?;
-    let mut output_data = vec![D::zero(); output_space.space().required_len()?];
-    match source_regions {
+    let output_len = output_space.space().required_len()?;
+    let output_data = match source_regions {
         Some(source) => {
             let routes = compile_inverse_region_routes(
                 &source,
                 &output_regions,
                 input.data().len(),
-                output_data.len(),
+                output_len,
             )?;
             let max_order = routes
                 .iter()
                 .map(|route| source[route.source].rows())
                 .max()
                 .unwrap_or(0);
+            let mut output_data = vec![D::zero(); output_len];
             let mut state = init(max_order)?;
             for route in routes {
                 let region = &source[route.source];
@@ -6536,20 +6537,19 @@ where
                     output.rows(),
                 )?;
             }
+            output_data
         }
         None => {
             let source_matrices =
                 sector_matricizations(source_space.structure(), input.data(), source_space.nout())?;
-            let routes = compile_inverse_matrix_routes(
-                &source_matrices,
-                &output_regions,
-                output_data.len(),
-            )?;
+            let routes =
+                compile_inverse_matrix_routes(&source_matrices, &output_regions, output_len)?;
             let max_order = routes
                 .iter()
                 .map(|route| source_matrices[route.source].rows)
                 .max()
                 .unwrap_or(0);
+            let mut output_data = vec![D::zero(); output_len];
             let mut state = init(max_order)?;
             let mut image = vec![
                 D::zero();
@@ -6573,8 +6573,9 @@ where
                     &route.cols,
                 );
             }
+            output_data
         }
-    }
+    };
 
     BoundDynFactor::from_bound(
         output_space,

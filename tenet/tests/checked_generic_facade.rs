@@ -1722,44 +1722,38 @@ fn assert_sun_checked_generic_exp_outer_multiplicity(n: usize, adjoint: Vec<i64>
             .zip(real_identity.data())
             .all(|(a, b)| (*a - *b).abs() < 2e-10));
     }
-    for complex in [true] {
-        let input = if complex {
-            source.to_c64().scale(Complex64::new(1.0, 0.2))
-        } else {
-            source.to_c64()
-        };
-        let output = input.exp().unwrap();
-        assert!(std::ptr::eq(output.provider(), provider.as_ref()));
-        assert!(output.runtime().shares_state_with(source.runtime()));
-        assert_eq!(output.codomain(), input.codomain());
-        assert_eq!(output.domain(), input.domain());
-        assert_eq!(output.block_count(), input.block_count());
-        for index in 0..input.block_count() {
-            assert_eq!(
-                output.block_fusion_trees(index).unwrap(),
-                input.block_fusion_trees(index).unwrap()
-            );
-            assert_eq!(output.block(index).unwrap(), input.block(index).unwrap());
-        }
-        let inverse = input.scale(Complex64::new(-1.0, 0.0)).exp().unwrap();
-        let identity: TensorMap<_, Complex64> =
-            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, _| {
-                Complex64::new(
-                    f64::from(trees.codomain_vertices() == trees.domain_vertices()),
-                    0.0,
-                )
-            })
-            .unwrap();
-        for product in [
-            output.compose(&inverse).unwrap(),
-            inverse.compose(&output).unwrap(),
-        ] {
-            assert!(product
-                .data()
-                .iter()
-                .zip(identity.data())
-                .all(|(a, b)| (*a - *b).norm() < 2e-10));
-        }
+    let input = source.to_c64().scale(Complex64::new(1.0, 0.2));
+    let output = input.exp().unwrap();
+    assert!(std::ptr::eq(output.provider(), provider.as_ref()));
+    assert!(output.runtime().shares_state_with(source.runtime()));
+    assert_eq!(output.codomain(), input.codomain());
+    assert_eq!(output.domain(), input.domain());
+    assert_eq!(output.block_count(), input.block_count());
+    for index in 0..input.block_count() {
+        assert_eq!(
+            output.block_fusion_trees(index).unwrap(),
+            input.block_fusion_trees(index).unwrap()
+        );
+        assert_eq!(output.block(index).unwrap(), input.block(index).unwrap());
+    }
+    let inverse = input.scale(Complex64::new(-1.0, 0.0)).exp().unwrap();
+    let identity: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, _| {
+            Complex64::new(
+                f64::from(trees.codomain_vertices() == trees.domain_vertices()),
+                0.0,
+            )
+        })
+        .unwrap();
+    for product in [
+        output.compose(&inverse).unwrap(),
+        inverse.compose(&output).unwrap(),
+    ] {
+        assert!(product
+            .data()
+            .iter()
+            .zip(identity.data())
+            .all(|(a, b)| (*a - *b).norm() < 2e-10));
     }
 }
 

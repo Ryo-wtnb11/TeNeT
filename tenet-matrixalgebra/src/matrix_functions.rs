@@ -219,7 +219,6 @@ where
 pub fn exp_pade13_direct_into_dyn<E, R, D>(
     dense: &mut E,
     input: &BoundDynamicTensorRef<'_, R, D>,
-    output_space: tenet_tensors::BoundDynamicFusionMapSpace<R>,
 ) -> Result<BoundDynFactor<R, D>, OperationError>
 where
     E: DenseExecutor + ?Sized,
@@ -227,7 +226,7 @@ where
 {
     map_square_sectors_dyn_into(
         input,
-        output_space,
+        input.space().clone(),
         Pade13Workspace::<D>::new,
         |workspace, source, order, output, output_leading| {
             exp_pade13_sector(dense, workspace, source, order, output, output_leading)

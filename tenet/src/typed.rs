@@ -4421,7 +4421,6 @@ where
             dense.dense(),
             &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
                 .map_err(Error::from)?,
-            tensor.logical_space().clone(),
         )
         .map_err(Error::from)?;
         Ok(wrap_factor_on(&tensor.runtime, factor))
