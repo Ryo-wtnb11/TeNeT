@@ -848,7 +848,6 @@ mod tests {
         n_calls: std::sync::atomic::AtomicUsize,
         f_calls: std::sync::atomic::AtomicUsize,
         r_calls: std::sync::atomic::AtomicUsize,
-        bend_calls: std::sync::atomic::AtomicUsize,
     }
 
     impl FusionRule for SplitOnlyCountingRule {
@@ -3593,9 +3592,14 @@ mod tests {
     }
 
     #[test]
-    fn malformed_sources_do_not_evaluate_symbols_or_bends() {
-        // What: categorical rejection occurs before F, R, or pivotal bend
-        // providers can observe a malformed source.
+    fn malformed_sources_do_not_evaluate_symbols() {
+        // What: categorical rejection occurs before an F or R provider can
+        // observe a malformed source.
+        //
+        // Bends are not counted here: the coefficient comes from
+        // b_symbol_scalar / sqrt_dim_scalar on MultiplicityFreeRigidSymbols,
+        // which have no separate counter, so a bend-specific assertion would
+        // only be able to observe zero and would prove nothing.
         let rule = SplitOnlyCountingRule::default();
         let invalid = FusionTreeKey::new(
             [SectorId::new(1); 2], SectorId::new(1),
@@ -3620,11 +3624,6 @@ mod tests {
         );
         assert_eq!(
             rule.r_calls.load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
-        assert_eq!(
-            rule.bend_calls
-                .load(std::sync::atomic::Ordering::Relaxed),
             0
         );
     }

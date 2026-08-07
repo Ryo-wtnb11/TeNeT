@@ -10,7 +10,8 @@ use crate::{
 
 // Why not tenet-sectors: this trait and its errors define FusionTree lowering,
 // which is core-owned. The pivotal half that also lived here was deleted with
-// its only route (#976), so nothing left here speaks about tree keys.
+// its only route (issue #976, deleted by PR #981), so nothing left here
+// speaks about tree keys.
 pub(crate) mod lowered_multiplicity_free_sealed {
     pub trait Sealed {}
 }
