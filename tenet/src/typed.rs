@@ -15884,11 +15884,20 @@ mod representation_gates {
 
         let nonbond: TensorMap<_, f64> =
             TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, _| 1.0).unwrap();
-        let lazy_nonbond = nonbond.adjoint().unwrap();
-        assert!(matches!(
-            lazy_nonbond.sqrt(),
-            Err(Error::InvalidArgument(_))
-        ));
+        let malformed_nonbond = TensorMap {
+            runtime: runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(
+                nonbond.logical_space().clone(),
+                Vec::<f64>::new(),
+            )),
+        };
+        let lazy_nonbond = malformed_nonbond.adjoint().unwrap();
+        match lazy_nonbond.sqrt() {
+            Err(Error::InvalidArgument(message)) => {
+                assert!(message.contains("diagonal bond tensor"));
+            }
+            other => panic!("unexpected nonbond sqrt result: {other:?}"),
+        }
         assert_eq!(materialized_adjoint_builds(&lazy_nonbond), 0);
     }
 
