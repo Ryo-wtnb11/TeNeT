@@ -22,7 +22,15 @@ use crate::{BraidingStyleKind, FusionStyleKind, RuleIdentity, SectorId, SectorVe
 /// independent — losing classification precision means no candidate may be
 /// reported clean, and a sector cannot be both clean and tainted. As separate
 /// public fields those invariants had to be re-established by every producer
-/// and re-checked by every consumer. Here they are unrepresentable.
+/// and re-checked by every consumer.
+///
+/// The variants make the first one unrepresentable: an [`Self::Unknown`] fold
+/// has no clean list to contradict. The second is normalized rather than
+/// forbidden, because enum fields are public too — a hand-written
+/// [`Self::Partial`] can still name a sector on both sides.
+/// [`CoupledSectorFoldBuilder::seal`] resolves it the conservative way, and a
+/// provider that hands the engine an inconsistent fold directly loses a
+/// candidate it could have kept rather than gaining one it should not have.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CoupledSectorFold {
     /// Every candidate is clean; nothing escaped the table.
@@ -1575,4 +1583,69 @@ where
         sector.id() >> Left::BITS
     };
     Ok((SectorId::new(sector.id() & left_mask), SectorId::new(right)))
+}
+
+#[cfg(test)]
+mod coupled_sector_fold_tests {
+    use super::*;
+
+    fn sector(id: usize) -> SectorId {
+        SectorId::new(id)
+    }
+
+    #[test]
+    fn sealing_promotes_an_all_clean_accumulation_to_complete() {
+        // What: the two conventions are stated once, at seal, so an
+        // accumulation with nothing escaping is indistinguishable from a
+        // provider that reported `Complete` directly.
+        let mut builder = CoupledSectorFoldBuilder::default();
+        builder.absorb(CoupledSectorFold::complete(vec![sector(2), sector(1)]));
+        builder.absorb(CoupledSectorFold::complete(vec![sector(1)]));
+
+        let sealed = builder.seal();
+        assert!(sealed.is_fully_clean());
+        assert_eq!(sealed.clean(), &[sector(1), sector(2)]);
+        assert!(sealed.tainted().is_empty());
+    }
+
+    #[test]
+    fn tainted_anywhere_beats_clean_somewhere() {
+        // What: a sector reported clean by one leg tuple and tainted by
+        // another must not survive as clean — the taint is a statement about
+        // trees that exist, the cleanliness only about the tuple that was
+        // examined.
+        let mut builder = CoupledSectorFoldBuilder::default();
+        builder.absorb(CoupledSectorFold::complete(vec![sector(1), sector(3)]));
+        builder.absorb(CoupledSectorFold::Partial {
+            clean: vec![sector(3)],
+            tainted: vec![sector(1)],
+            out_of_table: vec!["27".to_owned()],
+        });
+
+        let sealed = builder.seal();
+        assert!(!sealed.is_fully_clean());
+        assert!(!sealed.is_unknown());
+        assert_eq!(sealed.clean(), &[sector(3)]);
+        assert_eq!(sealed.tainted(), &[sector(1)]);
+        assert_eq!(sealed.out_of_table(), &["27".to_owned()]);
+    }
+
+    #[test]
+    fn an_unknown_split_anywhere_demotes_every_candidate() {
+        // What: once the fold leaves the frontier shell the clean/tainted
+        // split is not knowable, so no candidate may be reported clean —
+        // including ones an earlier tuple certified.
+        let mut builder = CoupledSectorFoldBuilder::default();
+        builder.absorb(CoupledSectorFold::complete(vec![sector(1), sector(2)]));
+        builder.absorb(CoupledSectorFold::Unknown {
+            tainted: vec![sector(4)],
+            out_of_table: Vec::new(),
+        });
+
+        let sealed = builder.seal();
+        assert!(sealed.is_unknown());
+        assert!(!sealed.is_fully_clean());
+        assert!(sealed.clean().is_empty());
+        assert_eq!(sealed.tainted(), &[sector(1), sector(2), sector(4)]);
+    }
 }
