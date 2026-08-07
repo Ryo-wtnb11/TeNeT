@@ -7260,7 +7260,11 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Z2 fusion received an invalid sector")]
+    // Message updated for #971: the component's FusionRule::fusion_channels
+    // panic is now derived from CheckedFusionAlgebra::try_fusion_channels
+    // rather than restated separately; the invalid sector it names is
+    // unchanged.
+    #[should_panic(expected = "invalid fusion sector SectorId(2)")]
     fn product_fusion_rule_panics_on_component_invalid_sector_like_existing_rules() {
         type FpU1Rule = ProductFusionRule<FermionParityFusionRule, U1FusionRule>;
         let rule = FpU1Rule::default();
