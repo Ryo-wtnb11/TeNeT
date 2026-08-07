@@ -2226,6 +2226,81 @@ fn checked_generic_inv_accepts_unequal_isomorphic_spaces_and_rejects_nonisomorph
 }
 
 #[test]
+fn checked_generic_pinv_rectangular_moore_penrose_and_validation_precedence() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let codomain = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let domain = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 3)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&codomain], [&domain], |_, index| {
+            [[1.0, 0.0, 1.0], [0.0, 2.0, 1.0]][index[0]][index[1]]
+        })
+        .unwrap();
+    let before = source.data().to_vec();
+    reset_provider_queries(&provider);
+    for rcond in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(matches!(
+            source.pinv(rcond),
+            Err(GenericTensorError::Facade(
+                tenet::typed::Error::InvalidArgument(_)
+            ))
+        ));
+        assert_no_provider_queries(&provider);
+    }
+    assert_eq!(source.data(), before.as_slice());
+
+    let pseudo = source.pinv(1e-12).unwrap();
+    assert_eq!(pseudo.codomain(), source.domain());
+    assert_eq!(pseudo.domain(), source.codomain());
+    assert!(std::ptr::eq(pseudo.provider(), provider.as_ref()));
+    for (actual, expected) in source
+        .compose(&pseudo)
+        .unwrap()
+        .compose(&source)
+        .unwrap()
+        .data()
+        .iter()
+        .zip(source.data())
+    {
+        assert!((actual - expected).abs() < 1e-10);
+    }
+    for (actual, expected) in pseudo
+        .compose(&source)
+        .unwrap()
+        .compose(&pseudo)
+        .unwrap()
+        .data()
+        .iter()
+        .zip(pseudo.data())
+    {
+        assert!((actual - expected).abs() < 1e-10);
+    }
+
+    let complex = source.to_c64();
+    let complex_pseudo = complex.pinv(1e-12).unwrap();
+    for (actual, expected) in complex
+        .compose(&complex_pseudo)
+        .unwrap()
+        .compose(&complex)
+        .unwrap()
+        .data()
+        .iter()
+        .zip(complex.data())
+    {
+        assert!((*actual - *expected).norm() < 1e-10);
+    }
+    let lazy = source.adjoint().unwrap();
+    let lazy_pseudo = lazy.pinv(1e-12).unwrap();
+    for (actual, expected) in lazy_pseudo
+        .data()
+        .iter()
+        .zip(pseudo.adjoint().unwrap().data())
+    {
+        assert!((actual - expected).abs() < 1e-10);
+    }
+}
+
+#[test]
 fn checked_generic_inv_singular_early_and_late_sectors_preserve_source() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));

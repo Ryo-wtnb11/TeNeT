@@ -72,7 +72,7 @@ allow-lists remain available through direct `tenet-tensors` or
 | `axpy!` / `axpby!` | has-different-name | `TensorMap::add` | Same `α`/`β` combination, out of place. |
 | `mul!` | has-different-name | `TensorMap::compose` / `contract` | Categorical composition (`A * B`). |
 | `lmul!` / `rmul!` | has-different-name | `TensorMap::scale` | Scalar (and diagonal, via `compose`) scaling. |
-| `pinv` | has | `TensorMap::pinv` | Pseudo-inverse with `rcond` cutoff. |
+| `pinv` | has | `TensorMap::pinv` | Dense maps use one global strict `rcond * sigma_max` cutoff; TensorKit's block-local tolerance intentionally differs. |
 | `adjoint!` | has-different-name | `TensorMap::adjoint` | Lazy, out of place. |
 | `*!` / `*!!` bang forms | N/A | — | Immutable facade. |
 
