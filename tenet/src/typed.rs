@@ -4468,8 +4468,8 @@ where
         if !tensor.runtime.same_runtime(&rhs.runtime) {
             return Err(Error::RuntimeMismatch.into());
         }
-        if tensor.logical_space().provider().rule_identity()
-            != rhs.logical_space().provider().rule_identity()
+        if tensor.logical_space().space().admission().rule_identity()
+            != rhs.logical_space().space().admission().rule_identity()
         {
             return Err(Error::RuleMismatch.into());
         }

@@ -6291,6 +6291,62 @@ where
 {
     let divisor_space = divisor.space().space();
     let rhs_space = rhs.space().space();
+    let Some(divisor_identity) = divisor_space.admission().rule_identity() else {
+        return Err(OperationError::from_core_preserving_context(
+            CoreError::MissingFusionRuleIdentity,
+        ));
+    };
+    let Some(rhs_identity) = rhs_space.admission().rule_identity() else {
+        return Err(OperationError::from_core_preserving_context(
+            CoreError::MissingFusionRuleIdentity,
+        ));
+    };
+    let Some(output_identity) = output_space.space().admission().rule_identity() else {
+        return Err(OperationError::from_core_preserving_context(
+            CoreError::MissingFusionRuleIdentity,
+        ));
+    };
+    if divisor_identity != rhs_identity {
+        return Err(OperationError::from_core_preserving_context(
+            CoreError::FusionRuleMismatch {
+                expected: divisor_identity.clone(),
+                actual: rhs_identity.clone(),
+            },
+        ));
+    }
+    if divisor_identity != output_identity {
+        return Err(OperationError::from_core_preserving_context(
+            CoreError::FusionRuleMismatch {
+                expected: divisor_identity.clone(),
+                actual: output_identity.clone(),
+            },
+        ));
+    }
+    if !Arc::ptr_eq(divisor.space().provider_arc(), output_space.provider_arc()) {
+        return Err(OperationError::StructureMismatch {
+            tensor: "solve output provider authority",
+        });
+    }
+    if divisor_space.homspace().codomain() != rhs_space.homspace().codomain() {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "solve requires equal divisor and right-hand-side codomains",
+        });
+    }
+    let expected_homspace = FusionTreeHomSpace::new(
+        divisor_space.homspace().domain().clone(),
+        rhs_space.homspace().domain().clone(),
+    );
+    let expected_nout = expected_homspace.codomain().len();
+    let expected_nin = expected_homspace.domain().len();
+    if output_space.space().nout() != expected_nout
+        || output_space.space().nin() != expected_nin
+        || output_space.space().rank() != expected_nout + expected_nin
+        || output_space.space().homspace() != &expected_homspace
+    {
+        return Err(OperationError::StructureMismatch {
+            tensor: "solve output space",
+        });
+    }
 
     let divisor_regions = checked_sector_regions(divisor_space.structure(), divisor_space.nout())?
         .ok_or(OperationError::UnsupportedTensorContractScope {
