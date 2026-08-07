@@ -731,26 +731,6 @@ mod tests {
         }
     }
 
-    impl MultiplicityFreePivotalSymbols for IdentitySymbolPanicRule {
-        fn bendright_scalar(
-            &self,
-            _left_coupled: SectorId,
-            _bent_sector: SectorId,
-            _coupled: SectorId,
-            _bent_leg_is_dual: bool,
-        ) -> Self::Scalar {
-            panic!("identity braid evaluated a bend symbol")
-        }
-
-        fn foldright_scalar(
-            &self,
-            _source: &FusionTreePairKey,
-            _destination: &FusionTreePairKey,
-        ) -> Self::Scalar {
-            panic!("identity braid evaluated a fold symbol")
-        }
-    }
-
     impl MultiplicityFreeRigidSymbols for IdentitySymbolPanicRule {
         fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
             1.0
@@ -834,26 +814,6 @@ mod tests {
             _coupled: SectorId,
         ) -> Self::Scalar {
             panic!("misreported Generic provider evaluated an R symbol")
-        }
-    }
-
-    impl MultiplicityFreePivotalSymbols for MisreportedGenericMultiplicityFreeRule {
-        fn bendright_scalar(
-            &self,
-            _left_coupled: SectorId,
-            _bent_sector: SectorId,
-            _coupled: SectorId,
-            _bent_leg_is_dual: bool,
-        ) -> Self::Scalar {
-            panic!("misreported Generic provider evaluated a bend symbol")
-        }
-
-        fn foldright_scalar(
-            &self,
-            _source: &FusionTreePairKey,
-            _destination: &FusionTreePairKey,
-        ) -> Self::Scalar {
-            panic!("misreported Generic provider evaluated a fold symbol")
         }
     }
 
@@ -984,28 +944,6 @@ mod tests {
         }
     }
 
-    impl MultiplicityFreePivotalSymbols for SplitOnlyCountingRule {
-        fn bendright_scalar(
-            &self,
-            _left_coupled: SectorId,
-            _bent_sector: SectorId,
-            _coupled: SectorId,
-            _bent_leg_is_dual: bool,
-        ) -> Self::Scalar {
-            self.bend_calls
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            1.0
-        }
-
-        fn foldright_scalar(
-            &self,
-            _source: &FusionTreePairKey,
-            _destination: &FusionTreePairKey,
-        ) -> Self::Scalar {
-            1.0
-        }
-    }
-
     fn legacy_split_only_tree_pair_route<R>(
         rule: &R,
         source: &FusionTreePairKey,
@@ -1114,26 +1052,6 @@ mod tests {
                 (3, 1) => 23.0,
                 _ => 1.0,
             }
-        }
-    }
-
-    impl MultiplicityFreePivotalSymbols for AsymmetricAnyonicRule {
-        fn bendright_scalar(
-            &self,
-            _left_coupled: SectorId,
-            _bent_sector: SectorId,
-            _coupled: SectorId,
-            _bent_leg_is_dual: bool,
-        ) -> Self::Scalar {
-            1.0
-        }
-
-        fn foldright_scalar(
-            &self,
-            _source: &FusionTreePairKey,
-            _destination: &FusionTreePairKey,
-        ) -> Self::Scalar {
-            1.0
         }
     }
 

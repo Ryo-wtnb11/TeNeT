@@ -34,10 +34,9 @@ use tenet_core::{
     FusionTensorMapSpace, FusionTreeGroupKey, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
     GenericFArray, GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols, HostReadableStorage,
     HostWritableStorage, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
-    MultiplicityFreePivotalSymbols, MultiplicityFreeRigidSymbols, MultiplicityIndex, Placement,
-    ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorStructure, SectorVec,
-    SimilarStorage, TensorMap, TensorMapSpace, TensorStorage, Trivial, U1FusionRule, U1Irrep,
-    Z2FusionRule,
+    MultiplicityFreeRigidSymbols, MultiplicityIndex, Placement, ProductFusionRule, SU2FusionRule,
+    SU2Irrep, SectorId, SectorLeg, SectorStructure, SectorVec, SimilarStorage, TensorMap,
+    TensorMapSpace, TensorStorage, Trivial, U1FusionRule, U1Irrep, Z2FusionRule,
 };
 use tenet_dense::{DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseWrite, MatrixOp};
 
@@ -573,26 +572,6 @@ impl MultiplicityFreeFusionSymbols for UniqueAnyonicRule {
     }
 }
 
-impl MultiplicityFreePivotalSymbols for UniqueAnyonicRule {
-    fn bendright_scalar(
-        &self,
-        _left_coupled: SectorId,
-        _bent_sector: SectorId,
-        _coupled: SectorId,
-        _bent_leg_is_dual: bool,
-    ) -> Self::Scalar {
-        1.0
-    }
-
-    fn foldright_scalar(
-        &self,
-        _source: &FusionTreePairKey,
-        _destination: &FusionTreePairKey,
-    ) -> Self::Scalar {
-        1.0
-    }
-}
-
 impl MultiplicityFreeRigidSymbols for UniqueAnyonicRule {
     fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
         1.0
@@ -773,26 +752,6 @@ impl MultiplicityFreeFusionSymbols for UnitaryPhaseAnyonicRule {
         } else {
             Complex64::new(1.0, 0.0)
         }
-    }
-}
-
-impl MultiplicityFreePivotalSymbols for UnitaryPhaseAnyonicRule {
-    fn bendright_scalar(
-        &self,
-        _left_coupled: SectorId,
-        _bent_sector: SectorId,
-        _coupled: SectorId,
-        _bent_leg_is_dual: bool,
-    ) -> Self::Scalar {
-        Complex64::new(1.0, 0.0)
-    }
-
-    fn foldright_scalar(
-        &self,
-        _source: &FusionTreePairKey,
-        _destination: &FusionTreePairKey,
-    ) -> Self::Scalar {
-        Complex64::new(1.0, 0.0)
     }
 }
 

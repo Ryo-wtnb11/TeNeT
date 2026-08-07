@@ -1,12 +1,10 @@
 use tenet_core::{
-    CU1FusionRule, CU1Irrep, FermionParityFusionRule, FibonacciFusionRule,
-    LoweredMultiplicityFreeAlgebra, MultiplicityFreePivotalSymbols, SU2FusionRule, U1FusionRule,
-    U1Irrep, Z2FusionRule, Z2Irrep, ZNFusionRule, CU1_MAX_TWICE_CHARGE,
+    CU1FusionRule, CU1Irrep, FermionParityFusionRule, LoweredMultiplicityFreeAlgebra,
+    SU2FusionRule, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep, ZNFusionRule,
+    CU1_MAX_TWICE_CHARGE,
 };
 
 fn assert_lowered<T: LoweredMultiplicityFreeAlgebra>() {}
-
-fn assert_pivotal<T: MultiplicityFreePivotalSymbols>() {}
 
 fn assert_lowered_roundtrip<R>(
     rule: &R,
@@ -43,9 +41,6 @@ fn built_in_providers_implement_core_rule_bridge_traits() {
     assert_lowered::<U1FusionRule>();
     assert_lowered::<SU2FusionRule>();
     assert_lowered::<CU1FusionRule>();
-    assert_pivotal::<Z2FusionRule>();
-    assert_pivotal::<FermionParityFusionRule>();
-    assert_pivotal::<FibonacciFusionRule>();
 }
 
 #[test]
