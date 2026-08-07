@@ -3604,6 +3604,20 @@ where
     ) -> Result<TensorMap<R, D>, Self::FacadeError>;
 }
 
+/// Z-isomorphism execution selected by the admitted provider mode.
+#[doc(hidden)]
+pub trait TypedTensorFlipDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn flip(
+        tensor: &TensorMap<R, D>,
+        legs: &[usize],
+        inverse: bool,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
+}
+
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
@@ -3635,6 +3649,53 @@ where
     /// Applies the inverse TensorKit ribbon twist on the selected legs.
     pub fn twist_inverse(&self, legs: &[usize]) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorTwistDispatch<R, D>>::twist(self, legs, true)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorFlipDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// TensorKit `flip(t, I)`:
+    /// return a tensor isomorphic to `self` where the duality flag of each
+    /// leg in `legs` (flat indices, codomain first; a leg listed twice is
+    /// flipped twice, sequentially) is toggled,
+    /// `space(t', i) = flip(space(t, i))`. The stored sectors and the block
+    /// layout are unchanged; each fusion-tree block picks up the
+    /// Z-isomorphism phase of TensorKit's fusion-tree `flip`
+    /// per flipped leg with uncoupled sector `a` and pre-flip duality `d`
+    /// (χ = Frobenius–Schur phase, θ = ribbon twist; both real for every
+    /// rule in scope): codomain leg → `d ? χ·θ : 1`; domain leg →
+    /// `d ? χ : θ`.
+    ///
+    /// Like TensorKit's, this `flip` is *not* an involution: flipping the
+    /// same leg twice returns to the original spaces but can scale odd
+    /// blocks (e.g. by θ = −1 on fermionic legs); only `flip⁴ = id` in
+    /// general.
+    ///
+    /// One scaled copy of the dense payload into a fresh body, O(len); a
+    /// compact spectrum factor materializes first (the flipped space is no
+    /// longer a bond space, so the result cannot stay compact). The same
+    /// facade narrowings as [`Self::twist`] apply: a lazy dense adjoint
+    /// redirects through the parent with the inverse categorical map and
+    /// stays cold; there is no device arm, and checked Generic follows its
+    /// provider-mode dispatch.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] when a leg is out of range, before the
+    /// empty-list short-circuit; empty `legs` returns an identical clone.
+    /// Otherwise [`Error::Operation`] /
+    /// [`Error::Core`] from the layout derivation of the toggled hom space.
+    pub fn flip(&self, legs: &[usize]) -> Result<Self, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorFlipDispatch<R, D>>::flip(self, legs, false)
+    }
+
+    /// Applies the inverse TensorKit Z-isomorphism on the selected legs.
+    pub fn flip_inverse(&self, legs: &[usize]) -> Result<Self, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorFlipDispatch<R, D>>::flip(self, legs, true)
     }
 }
 
@@ -4650,6 +4711,218 @@ where
     ) -> Result<TensorMap<R, D>, Self::FacadeError> {
         twist_checked_generic(tensor, legs, inverse)
     }
+}
+
+impl<R, D> TypedTensorFlipDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn flip(
+        tensor: &TensorMap<R, D>,
+        legs: &[usize],
+        inverse: bool,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        tensor.flip_multiplicity_free_with_inverse(legs, inverse)
+    }
+}
+
+impl<R, D> TypedTensorFlipDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericPivotal<Scalar = f64>,
+    D: TensorScalar,
+{
+    fn flip(
+        tensor: &TensorMap<R, D>,
+        legs: &[usize],
+        inverse: bool,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        flip_checked_generic(tensor, legs, inverse)
+    }
+}
+
+fn flip_checked_generic<R, D>(
+    tensor: &TensorMap<R, D>,
+    legs: &[usize],
+    inverse: bool,
+) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericPivotal<Scalar = f64>,
+    D: TensorScalar,
+{
+    let rank = tensor.rank();
+    let name = if inverse { "flip_inverse" } else { "flip" };
+    if let Some(&leg) = legs.iter().find(|&&leg| leg >= rank) {
+        return Err(GenericTensorError::Facade(Error::InvalidArgument(format!(
+            "{name} leg {leg} out of range for rank {rank}"
+        ))));
+    }
+    if legs.is_empty() {
+        return Ok(tensor.clone());
+    }
+
+    let provider = tensor.logical_space().provider();
+    if CheckedGenericFusion::braiding_style(provider) == tenet_core::BraidingStyleKind::NoBraiding {
+        let leg = legs[0];
+        return Err(GenericTensorError::Facade(Error::InvalidArgument(format!(
+            "{name} leg {leg} needs the twist and Frobenius-Schur coefficients but the fusion rule has no braiding"
+        ))));
+    }
+    if let TypedTensorRepr::Adjoint(view) = &tensor.repr {
+        let logical_space = checked_generic_flip_destination(tensor, legs)?.0;
+        let parent = TensorMap {
+            runtime: tensor.runtime.clone(),
+            repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+        };
+        let axes = logical_adjoint_axes_to_parent(
+            view.parent.space.space().nout(),
+            view.parent.space.space().nin(),
+            legs,
+        );
+        let flipped_parent = flip_checked_generic_owned(&parent, &axes, !inverse)?;
+        let TypedTensorRepr::Owned(parent) = &flipped_parent.repr else {
+            unreachable!("checked-Generic parent flip stays owned")
+        };
+        return Ok(TensorMap {
+            runtime: tensor.runtime.clone(),
+            repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView {
+                parent: Arc::clone(parent),
+                logical_space,
+                materialized: OnceLock::new(),
+                #[cfg(test)]
+                materialized_body_builds: std::sync::atomic::AtomicUsize::new(0),
+            })),
+        });
+    }
+    flip_checked_generic_owned(tensor, legs, inverse)
+}
+
+fn flip_checked_generic_owned<R, D>(
+    tensor: &TensorMap<R, D>,
+    legs: &[usize],
+    inverse: bool,
+) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericPivotal<Scalar = f64>,
+    D: TensorScalar,
+{
+    let nout = tensor.codomain_rank();
+    let (space, occurrences) = checked_generic_flip_destination(tensor, legs)?;
+
+    // Why stage first: any pivotal failure leaves the input and destination
+    // unpublished, while replay over this table cannot query the provider.
+    let provider = tensor.logical_space().provider();
+    let mut staged = HashMap::<SectorId, (f64, f64)>::new();
+    for block_index in 0..space.space().structure().block_count() {
+        let block = space
+            .space()
+            .structure()
+            .block(block_index)
+            .map_err(Error::from)
+            .map_err(GenericTensorError::Facade)?;
+        let BlockKey::FusionTree(key) = block.key() else {
+            continue;
+        };
+        for &(leg, _) in &occurrences {
+            let sector = uncoupled_sector_of_leg(key, nout, leg);
+            if let std::collections::hash_map::Entry::Vacant(entry) = staged.entry(sector) {
+                let chi = provider
+                    .try_frobenius_schur_phase_scalar(sector)
+                    .map_err(|error| {
+                        GenericTensorError::Plan(CheckedGenericPlanError::Provider(error))
+                    })?;
+                let theta = provider.try_twist_scalar(sector).map_err(|error| {
+                    GenericTensorError::Plan(CheckedGenericPlanError::Provider(error))
+                })?;
+                entry.insert((chi, theta));
+            }
+        }
+    }
+    let block_factor = |key: &FusionTreePairKey| {
+        occurrences
+            .iter()
+            .map(|&(leg, dual)| {
+                let (chi, theta) = staged[&uncoupled_sector_of_leg(key, nout, leg)];
+                if leg < nout {
+                    if dual {
+                        if inverse {
+                            1.0
+                        } else {
+                            chi * theta
+                        }
+                    } else if inverse {
+                        chi * theta
+                    } else {
+                        1.0
+                    }
+                } else if dual {
+                    if inverse {
+                        theta
+                    } else {
+                        chi
+                    }
+                } else if inverse {
+                    chi
+                } else {
+                    theta
+                }
+            })
+            .product::<f64>()
+    };
+    let mut data = tensor
+        .owned_body()
+        .expect("owned checked-Generic flip input")
+        .materialized_dense_data()
+        .to_vec();
+    scale_blocks_impl(space.space(), &mut data, &|key| match key {
+        BlockKey::FusionTree(key) => block_factor(key),
+        _ => 1.0,
+    })
+    .map_err(GenericTensorError::Facade)?;
+    Ok(TensorMap {
+        runtime: tensor.runtime.clone(),
+        repr: owned_repr(TypedTensorBody::dense(space, data)),
+    })
+}
+
+fn checked_generic_flip_destination<R, D>(
+    tensor: &TensorMap<R, D>,
+    legs: &[usize],
+) -> Result<
+    (BoundDynamicFusionMapSpace<R>, Vec<(usize, bool)>),
+    GenericTensorError<<R as CheckedGenericFusion>::Error>,
+>
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericPivotal<Scalar = f64>,
+    D: TensorScalar,
+{
+    let (homspace, occurrences) =
+        flip_toggled_homspace(tensor.logical_space().space().homspace(), legs);
+    let space = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
+        Arc::clone(tensor.logical_space().provider_arc()),
+        homspace,
+    )?;
+    check_flip_layout_identity(
+        tensor.logical_space().space().structure(),
+        space.space().structure(),
+    )
+    .map_err(GenericTensorError::Facade)?;
+    Ok((space, occurrences))
 }
 
 fn twist_checked_generic<R, D>(
@@ -13187,47 +13460,11 @@ where
         })
     }
 
-    /// TensorKit `flip(t, I)`:
-    /// return a tensor isomorphic to `self` where the duality flag of each
-    /// leg in `legs` (flat indices, codomain first; a leg listed twice is
-    /// flipped twice, sequentially) is toggled,
-    /// `space(t', i) = flip(space(t, i))`. The stored sectors and the block
-    /// layout are unchanged; each fusion-tree block picks up the
-    /// Z-isomorphism phase of TensorKit's fusion-tree `flip`
-    /// per flipped leg with uncoupled sector `a` and pre-flip duality `d`
-    /// (χ = Frobenius–Schur phase, θ = ribbon twist; both real for every
-    /// rule in scope): codomain leg → `d ? χ·θ : 1`; domain leg →
-    /// `d ? χ : θ`.
-    ///
-    /// Like TensorKit's, this `flip` is *not* an involution: flipping the
-    /// same leg twice returns to the original spaces but can scale odd
-    /// blocks (e.g. by θ = −1 on fermionic legs); only `flip⁴ = id` in
-    /// general.
-    ///
-    /// One scaled copy of the dense payload into a fresh body, O(len); a
-    /// compact spectrum factor materializes first (the flipped space is no
-    /// longer a bond space, so the result cannot stay compact). The same
-    /// facade narrowings as [`Self::twist`] apply: a lazy dense adjoint
-    /// redirects through the parent with the inverse categorical map and
-    /// stays cold; there is no device arm, and Generic fusion is dead at the
-    /// admission bound.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::InvalidArgument`] when a leg is out of range, before the
-    /// empty-list short-circuit; empty `legs` returns an identical clone.
-    /// Otherwise [`Error::Operation`] /
-    /// [`Error::Core`] from the layout derivation of the toggled hom space.
-    pub fn flip(&self, legs: &[usize]) -> Result<Self, Error> {
-        self.flip_with_inverse(legs, false)
-    }
-
-    /// Applies the inverse TensorKit Z-isomorphism on the selected legs.
-    pub fn flip_inverse(&self, legs: &[usize]) -> Result<Self, Error> {
-        self.flip_with_inverse(legs, true)
-    }
-
-    fn flip_with_inverse(&self, legs: &[usize], inverse: bool) -> Result<Self, Error> {
+    fn flip_multiplicity_free_with_inverse(
+        &self,
+        legs: &[usize],
+        inverse: bool,
+    ) -> Result<Self, Error> {
         let rank = self.rank();
         let name = if inverse { "flip_inverse" } else { "flip" };
         if let Some(&leg) = legs.iter().find(|&&leg| leg >= rank) {
@@ -13252,7 +13489,9 @@ where
                 view.parent.space.space().nin(),
                 legs,
             );
-            return parent.flip_with_inverse(&axes, !inverse)?.adjoint();
+            return parent
+                .flip_multiplicity_free_with_inverse(&axes, !inverse)?
+                .adjoint();
         }
         let nout = hom.codomain().len();
         // Sequential semantics for repeated legs, centralized in the shared
