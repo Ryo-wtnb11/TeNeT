@@ -731,26 +731,6 @@ mod tests {
         }
     }
 
-    impl MultiplicityFreePivotalSymbols for IdentitySymbolPanicRule {
-        fn bendright_scalar(
-            &self,
-            _left_coupled: SectorId,
-            _bent_sector: SectorId,
-            _coupled: SectorId,
-            _bent_leg_is_dual: bool,
-        ) -> Self::Scalar {
-            panic!("identity braid evaluated a bend symbol")
-        }
-
-        fn foldright_scalar(
-            &self,
-            _source: &FusionTreePairKey,
-            _destination: &FusionTreePairKey,
-        ) -> Self::Scalar {
-            panic!("identity braid evaluated a fold symbol")
-        }
-    }
-
     impl MultiplicityFreeRigidSymbols for IdentitySymbolPanicRule {
         fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
             1.0
@@ -837,26 +817,6 @@ mod tests {
         }
     }
 
-    impl MultiplicityFreePivotalSymbols for MisreportedGenericMultiplicityFreeRule {
-        fn bendright_scalar(
-            &self,
-            _left_coupled: SectorId,
-            _bent_sector: SectorId,
-            _coupled: SectorId,
-            _bent_leg_is_dual: bool,
-        ) -> Self::Scalar {
-            panic!("misreported Generic provider evaluated a bend symbol")
-        }
-
-        fn foldright_scalar(
-            &self,
-            _source: &FusionTreePairKey,
-            _destination: &FusionTreePairKey,
-        ) -> Self::Scalar {
-            panic!("misreported Generic provider evaluated a fold symbol")
-        }
-    }
-
     impl MultiplicityFreeRigidSymbols for MisreportedGenericMultiplicityFreeRule {
         fn dim_scalar(&self, _sector: SectorId) -> Self::Scalar {
             1.0
@@ -888,7 +848,6 @@ mod tests {
         n_calls: std::sync::atomic::AtomicUsize,
         f_calls: std::sync::atomic::AtomicUsize,
         r_calls: std::sync::atomic::AtomicUsize,
-        bend_calls: std::sync::atomic::AtomicUsize,
     }
 
     impl FusionRule for SplitOnlyCountingRule {
@@ -980,28 +939,6 @@ mod tests {
         }
 
         fn frobenius_schur_phase_scalar(&self, _sector: SectorId) -> Self::Scalar {
-            1.0
-        }
-    }
-
-    impl MultiplicityFreePivotalSymbols for SplitOnlyCountingRule {
-        fn bendright_scalar(
-            &self,
-            _left_coupled: SectorId,
-            _bent_sector: SectorId,
-            _coupled: SectorId,
-            _bent_leg_is_dual: bool,
-        ) -> Self::Scalar {
-            self.bend_calls
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            1.0
-        }
-
-        fn foldright_scalar(
-            &self,
-            _source: &FusionTreePairKey,
-            _destination: &FusionTreePairKey,
-        ) -> Self::Scalar {
             1.0
         }
     }
@@ -1114,26 +1051,6 @@ mod tests {
                 (3, 1) => 23.0,
                 _ => 1.0,
             }
-        }
-    }
-
-    impl MultiplicityFreePivotalSymbols for AsymmetricAnyonicRule {
-        fn bendright_scalar(
-            &self,
-            _left_coupled: SectorId,
-            _bent_sector: SectorId,
-            _coupled: SectorId,
-            _bent_leg_is_dual: bool,
-        ) -> Self::Scalar {
-            1.0
-        }
-
-        fn foldright_scalar(
-            &self,
-            _source: &FusionTreePairKey,
-            _destination: &FusionTreePairKey,
-        ) -> Self::Scalar {
-            1.0
         }
     }
 
@@ -3675,9 +3592,14 @@ mod tests {
     }
 
     #[test]
-    fn malformed_sources_do_not_evaluate_symbols_or_bends() {
-        // What: categorical rejection occurs before F, R, or pivotal bend
-        // providers can observe a malformed source.
+    fn malformed_sources_do_not_evaluate_symbols() {
+        // What: categorical rejection occurs before an F or R provider can
+        // observe a malformed source.
+        //
+        // Bends are not counted here: the coefficient comes from
+        // b_symbol_scalar / sqrt_dim_scalar on MultiplicityFreeRigidSymbols,
+        // which have no separate counter, so a bend-specific assertion would
+        // only be able to observe zero and would prove nothing.
         let rule = SplitOnlyCountingRule::default();
         let invalid = FusionTreeKey::new(
             [SectorId::new(1); 2], SectorId::new(1),
@@ -3702,11 +3624,6 @@ mod tests {
         );
         assert_eq!(
             rule.r_calls.load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
-        assert_eq!(
-            rule.bend_calls
-                .load(std::sync::atomic::Ordering::Relaxed),
             0
         );
     }

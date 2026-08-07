@@ -2,15 +2,16 @@ use core::fmt;
 use std::hash::Hash;
 
 use crate::{
-    CU1FusionRule, CU1Irrep, CheckedFusionAlgebra, FermionParityFusionRule, FibonacciFusionRule,
-    FusionAlgebraError, FusionTreePairKey, MultiplicityFreeFusionRule,
-    MultiplicityFreeFusionSymbols, PackedProductCodec, PackedSectorLayout, ProductFusionRule,
+    CU1FusionRule, CU1Irrep, CheckedFusionAlgebra, FermionParityFusionRule, FusionAlgebraError,
+    MultiplicityFreeFusionRule, PackedProductCodec, PackedSectorLayout, ProductFusionRule,
     ProductSector, ProductSectorCodec, ProductSectorCodecError, SU2FusionRule, SU2Irrep,
     SectorCodec, SectorId, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep, ZNFusionRule, ZNIrrep,
 };
 
-// Why not tenet-sectors: these traits and errors define FusionTree lowering
-// and pivotal operations over core-owned tree keys.
+// Why not tenet-sectors: this trait and its errors define FusionTree lowering,
+// which is core-owned. The pivotal half that also lived here was deleted with
+// its only route (issue #976, deleted by PR #981), so nothing left here
+// speaks about tree keys.
 pub(crate) mod lowered_multiplicity_free_sealed {
     pub trait Sealed {}
 }
@@ -152,52 +153,6 @@ pub trait LoweredMultiplicityFreeAlgebra:
         right: Self::Sector,
         coupled: Self::Sector,
     ) -> Result<usize, LoweredFusionTreeBuildError>;
-}
-
-pub trait MultiplicityFreePivotalSymbols: MultiplicityFreeFusionSymbols {
-    fn bendright_scalar(
-        &self,
-        left_coupled: SectorId,
-        bent_sector: SectorId,
-        coupled: SectorId,
-        bent_leg_is_dual: bool,
-    ) -> Self::Scalar;
-
-    fn foldright_scalar(
-        &self,
-        source: &FusionTreePairKey,
-        destination: &FusionTreePairKey,
-    ) -> Self::Scalar;
-}
-
-impl MultiplicityFreePivotalSymbols for FibonacciFusionRule {
-    // Dead code for this provider: every `unique_*` caller of
-    // `bendright_scalar`/`foldright_scalar` gates on
-    // `fusion_style() == FusionStyleKind::Unique` and errors out first
-    // (verified by reading every call site), and `FibonacciFusionRule` is
-    // `Simple`. The Simple-fusion bend path
-    // (`multiplicity_free_bendright_tree_pair`) instead derives its
-    // coefficient from `b_symbol_scalar`/`sqrt_dim_scalar`, which Fibonacci
-    // gets for free from `MultiplicityFreeRigidSymbols` below. Implemented
-    // here only for interface parity with the sibling providers
-    // (Z2/Fermion/AsymmetricAnyonic), which all also return the scalar unit.
-    fn bendright_scalar(
-        &self,
-        _left_coupled: SectorId,
-        _bent_sector: SectorId,
-        _coupled: SectorId,
-        _bent_leg_is_dual: bool,
-    ) -> Self::Scalar {
-        self.scalar_one()
-    }
-
-    fn foldright_scalar(
-        &self,
-        _source: &FusionTreePairKey,
-        _destination: &FusionTreePairKey,
-    ) -> Self::Scalar {
-        self.scalar_one()
-    }
 }
 
 impl lowered_multiplicity_free_sealed::Sealed for SU2FusionRule {}
@@ -392,26 +347,6 @@ impl LoweredMultiplicityFreeAlgebra for Z2FusionRule {
     }
 }
 
-impl MultiplicityFreePivotalSymbols for Z2FusionRule {
-    fn bendright_scalar(
-        &self,
-        _left_coupled: SectorId,
-        _bent_sector: SectorId,
-        _coupled: SectorId,
-        _bent_leg_is_dual: bool,
-    ) -> Self::Scalar {
-        1.0
-    }
-
-    fn foldright_scalar(
-        &self,
-        _source: &FusionTreePairKey,
-        _destination: &FusionTreePairKey,
-    ) -> Self::Scalar {
-        1.0
-    }
-}
-
 impl lowered_multiplicity_free_sealed::Sealed for FermionParityFusionRule {}
 
 impl LoweredMultiplicityFreeAlgebra for FermionParityFusionRule {
@@ -461,26 +396,6 @@ impl LoweredMultiplicityFreeAlgebra for FermionParityFusionRule {
         coupled: Self::Sector,
     ) -> Result<usize, LoweredFusionTreeBuildError> {
         Z2FusionRule.try_lowered_nsymbol(left, right, coupled)
-    }
-}
-
-impl MultiplicityFreePivotalSymbols for FermionParityFusionRule {
-    fn bendright_scalar(
-        &self,
-        _left_coupled: SectorId,
-        _bent_sector: SectorId,
-        _coupled: SectorId,
-        _bent_leg_is_dual: bool,
-    ) -> Self::Scalar {
-        1.0
-    }
-
-    fn foldright_scalar(
-        &self,
-        _source: &FusionTreePairKey,
-        _destination: &FusionTreePairKey,
-    ) -> Self::Scalar {
-        1.0
     }
 }
 
