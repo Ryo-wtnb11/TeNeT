@@ -2400,13 +2400,10 @@ where
         .iter()
         .map(|&leg| rule.twist_scalar(uncoupled_sector_of_leg(key, nout, leg)))
         .product();
-    twist_factor_with_inverse(rule, factor, inverse)
+    twist_factor_with_inverse(factor, inverse)
 }
 
-pub(crate) fn twist_factor_with_inverse<R>(_rule: &R, factor: f64, inverse: bool) -> f64
-where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + ?Sized,
-{
+pub(crate) fn twist_factor_with_inverse(factor: f64, inverse: bool) -> f64 {
     if inverse {
         (factor).conj()
     } else {
@@ -13906,7 +13903,7 @@ where
             // is unchanged, so the payload may stay compact.
             let sector_factor = |sector: tenet_core::SectorId| -> f64 {
                 let factor = legs.iter().map(|_| provider.twist_scalar(sector)).product();
-                twist_factor_with_inverse(provider, factor, inverse)
+                twist_factor_with_inverse(factor, inverse)
             };
             if spectrum
                 .iter()

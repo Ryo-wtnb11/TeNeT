@@ -454,7 +454,7 @@ pub trait MultiplicityFreeFusionSymbols: MultiplicityFreeFusionRule {
     // the unit and conjugation every provider needs (issue #972: those two
     // operations never depend on the provider, so they are not provider
     // methods).
-    type Scalar: CategoricalScalar + Clone + Send + Sync;
+    type Scalar: CategoricalScalar + Send + Sync;
 
     /// Whether every allowed associator coefficient in this provider's
     /// current gauge is exactly the scalar unit.
@@ -923,7 +923,7 @@ where
 /// 0 or 1, this trait returns a dense rank-4 array / matrix because
 /// `nsymbol` can exceed 1.
 pub trait GenericFusionSymbols: FusionRule {
-    type Scalar: CategoricalScalar + Clone + Send + Sync;
+    type Scalar: CategoricalScalar + Send + Sync;
 
     fn f_symbol_generic(
         &self,
