@@ -459,6 +459,62 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
+    R::Mode: TypedTensorPinvDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// TensorKit 0.17 / MatrixAlgebraKit `pinv`: the Moore-Penrose
+    /// thresholded pseudo-inverse `t⁺ = V S⁺ Uᴴ`, where `t = U S Vᴴ` is the compact SVD and
+    /// `S⁺` inverts every singular value above the cutoff and sends the rest to
+    /// zero. This is the exact Moore-Penrose inverse of the hard-thresholded
+    /// effective-rank tensor `t_r`. It is the Moore-Penrose inverse of `t`
+    /// itself only when no genuinely nonzero singular value is discarded, and
+    /// then satisfies `t t⁺ t = t`. It reduces to [`Self::inv`] when `t` is
+    /// nonsingular and `rcond` keeps every singular value.
+    ///
+    /// # Tolerance, and the divergence from TensorKit
+    ///
+    /// The cutoff is `rcond * σ_max` with **one global `σ_max` taken across all
+    /// coupled sectors**, and the comparison is strict: a singular value
+    /// sitting exactly on the cutoff is discarded. TensorKit instead takes
+    /// per-block `atol`/`rtol` keywords, so its relative tolerance is measured
+    /// against each block's own largest singular value. That is a deliberate
+    /// divergence, not a gap: a per-block relative tolerance cannot cut
+    /// anything in a one-dimensional sector however small that sector's
+    /// contribution to the tensor is. TensorKit's `DiagonalTensorMap` branch
+    /// is deliberately **not** mirrored either: there `rtol` is ignored
+    /// whenever `atol` is nonzero, the default is no cutoff at all, and its
+    /// comparison (`abs(x) < tol` discards) *keeps* a value sitting exactly on
+    /// the cutoff — the opposite of the strict `>` above.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] when `rcond` is not finite or is negative,
+    ///   checked before any provider work or dense allocation.
+    /// - [`Error::Operation`] / [`Error::Core`] from dense SVD or recomposition.
+    ///
+    /// There is no singular-input failure: sending the offending directions to
+    /// zero is what a pseudo-inverse is for.
+    ///
+    /// # Complexity and storage
+    ///
+    /// Dense input uses one compact SVD per nonempty coupled sector,
+    /// `O(Σ_c n_c³)`, then folds `S⁺` into a column scaling and recomposes with
+    /// one local GEMM. Compact input uses an **O(rank) elementwise
+    /// cutoff-and-reciprocal arm** over the stored diagonal values and stays
+    /// compact.
+    ///
+    /// Checked Generic supports dense maps only: it admits the swapped output
+    /// with the source's exact provider `Arc` and validates its identity,
+    /// HomSpace, rank, and layout before any SVD/GEMM. Compact checked-Generic
+    /// construction remains unsupported.
+    pub fn pinv(&self, rcond: f64) -> Result<Self, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorPinvDispatch<R, D>>::pinv(self, rcond)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
     R::Mode: TypedTensorReductionDispatch<R, D>,
     D: TensorScalar,
 {
@@ -3883,6 +3939,15 @@ where
 }
 
 #[doc(hidden)]
+pub trait TypedTensorPinvDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn pinv(tensor: &TensorMap<R, D>, rcond: f64) -> Result<TensorMap<R, D>, Self::FacadeError>;
+}
+
+#[doc(hidden)]
 pub trait TypedTensorExpDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
@@ -4185,6 +4250,19 @@ where
 {
     fn solve(tensor: &TensorMap<R, D>, rhs: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
         tensor.solve_multiplicity_free(rhs)
+    }
+}
+
+impl<R, D> TypedTensorPinvDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn pinv(tensor: &TensorMap<R, D>, rcond: f64) -> Result<TensorMap<R, D>, Error> {
+        tensor.pinv_multiplicity_free(rcond)
     }
 }
 
@@ -4523,6 +4601,56 @@ where
             &BoundDynamicTensorRef::try_new(&rhs_body.space, rhs_body.materialized_dense_data())
                 .map_err(Error::from)?,
             output,
+        )
+        .map_err(Error::from)?;
+        Ok(wrap_factor_on(&tensor.runtime, factor))
+    }
+}
+
+impl<R, D> TypedTensorPinvDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
+    fn pinv(
+        tensor: &TensorMap<R, D>,
+        rcond: f64,
+    ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        if !rcond.is_finite() || rcond < 0.0 {
+            return Err(Error::InvalidArgument(
+                "pinv rcond must be finite and non-negative".to_string(),
+            )
+            .into());
+        }
+        if matches!(&tensor.repr, TypedTensorRepr::Adjoint(_)) {
+            return tensor
+                .adjoint()?
+                .pinv(rcond)?
+                .adjoint()?
+                .materialized_tensor_uncached()
+                .map_err(GenericTensorError::from);
+        }
+        let source = tensor.logical_space();
+        let output = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
+            Arc::clone(source.provider_arc()),
+            FusionTreeHomSpace::new(
+                source.space().homspace().domain().clone(),
+                source.space().homspace().codomain().clone(),
+            ),
+        )?;
+        let body = tensor
+            .owned_body()
+            .expect("checked Generic pinv input is owned after lazy dispatch");
+        let mut dense = tensor.runtime.lease_dense();
+        let factor = tenet_matrixalgebra::pinv_direct_into_dyn(
+            dense.dense(),
+            &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+                .map_err(Error::from)?,
+            output,
+            rcond,
         )
         .map_err(Error::from)?;
         Ok(wrap_factor_on(&tensor.runtime, factor))
@@ -12767,53 +12895,8 @@ where
         rhs_adjoint.solve(&self_adjoint)?.adjoint()
     }
 
-    /// TensorKit 0.17 / MatrixAlgebraKit `pinv`: the Moore-Penrose
-    /// thresholded pseudo-inverse `t⁺ = V S⁺ Uᴴ`, where `t = U S Vᴴ` is the compact SVD and
-    /// `S⁺` inverts every singular value above the cutoff and sends the rest to
-    /// zero. This is the exact Moore-Penrose inverse of the hard-thresholded
-    /// effective-rank tensor `t_r`. It is the Moore-Penrose inverse of `t`
-    /// itself only when no genuinely nonzero singular value is discarded, and
-    /// then satisfies `t t⁺ t = t`. It reduces to [`Self::inv`] when `t` is
-    /// nonsingular and `rcond` keeps every singular value.
-    ///
-    /// # Tolerance, and the divergence from TensorKit
-    ///
-    /// The cutoff is `rcond * σ_max` with **one global `σ_max` taken across all
-    /// coupled sectors**, and the comparison is strict: a singular value
-    /// sitting exactly on the cutoff is discarded. TensorKit instead takes
-    /// per-block `atol`/`rtol` keywords, so its relative tolerance is measured
-    /// against each block's own largest singular value. That is a deliberate
-    /// divergence, not a gap: a per-block relative tolerance cannot cut
-    /// anything in a one-dimensional sector however small that sector's
-    /// contribution to the tensor is, and TensorKit's own source carries a TODO
-    /// saying the tolerance should be relative to the total norm — which is
-    /// what this facade already does. TensorKit's `DiagonalTensorMap` branch is
-    /// deliberately **not** mirrored either: there `rtol` is ignored whenever
-    /// `atol` is nonzero, the default is no cutoff at all, and its comparison
-    /// (`abs(x) < tol` discards) *keeps* a value sitting exactly on the cutoff
-    /// — the opposite of the strict `>` above. On that last point TensorKit
-    /// contradicts itself: its general `pinv` goes through Julia's, which keeps
-    /// only `sigma > tol`, and that is the boundary this facade matches on both
-    /// storages.
-    ///
-    /// # Errors
-    ///
-    /// - [`Error::InvalidArgument`] when `rcond` is not finite or is negative.
-    ///   Checked before any work on both storages.
-    /// - [`Error::Operation`] / [`Error::Core`] from the SVD, on the dense arm.
-    ///
-    /// There is no singular-input failure: sending the offending directions to
-    /// zero is what a pseudo-inverse is for.
-    ///
-    /// # Complexity
-    ///
-    /// Dense input: one compact SVD, `O(Σ_c n_c³)`, plus a bond scaling and one
-    /// composition; `S⁺` is folded into a column scaling rather than
-    /// materialized. Compact input (TensorKit's `DiagonalTensorMap`): the
-    /// **O(rank) elementwise cutoff-and-reciprocal arm** over the `Σ_c k_c`
-    /// stored values — the singular values of a diagonal are its `|entry|`s, so
-    /// no SVD is needed — and the result stays compact.
-    pub fn pinv(&self, rcond: f64) -> Result<Self, Error> {
+    /// Multiplicity-free implementation of [`Self::pinv`].
+    fn pinv_multiplicity_free(&self, rcond: f64) -> Result<Self, Error> {
         // Ahead of the storage split, so both arms answer alike: the seam
         // repeats this check for its own callers, but the compact arm never
         // reaches the seam.
