@@ -878,6 +878,19 @@ where
     pub fn qr_compact(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorQrDispatch<R, D>>::qr_compact(self)
     }
+
+    /// TensorKit 0.17 `left_orth`: the left isometry factorization
+    /// `t = v * c`, `v` isometric and `c` the corestriction.
+    ///
+    /// TensorKit's default `kind` is `:qr`, so this delegates directly to
+    /// [`Self::qr_compact`].
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::qr_compact`]'s.
+    pub fn left_orth(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
+        self.qr_compact()
+    }
 }
 
 impl<R, D> TensorMap<R, D>
@@ -906,6 +919,19 @@ where
     /// TensorKit compact LQ dispatched by provider mode.
     pub fn lq_compact(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorLqDispatch<R, D>>::lq_compact(self)
+    }
+
+    /// TensorKit 0.17 `right_orth`: the right isometry factorization
+    /// `t = c * vh`, `vh` carrying orthonormal rows.
+    ///
+    /// TensorKit's default `kind` is `:lq`, so this is [`Self::lq_compact`];
+    /// see [`Self::left_orth`] for why it is a delegation.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::lq_compact`]'s.
+    pub fn right_orth(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
+        self.lq_compact()
     }
 }
 
@@ -11315,32 +11341,6 @@ where
         Ok((self.wrap_bound_factor(l), self.wrap_bound_factor(q)))
     }
 
-    /// TensorKit 0.17 `left_orth`: the left isometry factorization
-    /// `t = v * c`, `v` isometric and `c` the corestriction.
-    ///
-    /// TensorKit's default `kind` is `:qr`, so this delegates directly to
-    /// [`Self::qr_compact`].
-    ///
-    /// # Errors
-    ///
-    /// Exactly [`Self::qr_compact`]'s.
-    pub fn left_orth(&self) -> Result<(Self, Self), Error> {
-        self.qr_compact()
-    }
-
-    /// TensorKit 0.17 `right_orth`: the right isometry factorization
-    /// `t = c * vh`, `vh` carrying orthonormal rows.
-    ///
-    /// TensorKit's default `kind` is `:lq`, so this is [`Self::lq_compact`];
-    /// see [`Self::left_orth`] for why it is a delegation.
-    ///
-    /// # Errors
-    ///
-    /// Exactly [`Self::lq_compact`]'s.
-    pub fn right_orth(&self) -> Result<(Self, Self), Error> {
-        self.lq_compact()
-    }
-
     /// TensorKit 0.17 / MatrixAlgebraKit `left_null`: `n : codomain <- W` with
     /// `n^H * t = 0`.
     ///
@@ -15785,6 +15785,52 @@ mod representation_gates {
             unreachable!()
         };
         assert!(view.materialized.get().is_none());
+    }
+
+    #[cfg(feature = "racah-generated")]
+    #[test]
+    fn checked_generic_orth_aliases_reject_lazy_adjoint_without_materializing() {
+        use tenet_core::SUNFusionRule;
+
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 1)], false).unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |trees, _| {
+                trees.codomain_vertices()[0].get() as f64
+            })
+            .unwrap();
+
+        let lazy = source.adjoint().unwrap();
+        {
+            let lower = lazy.qr_compact();
+            let alias = lazy.left_orth();
+            let lower_message = match lower {
+                Err(GenericTensorError::Facade(Error::InvalidArgument(message))) => message,
+                other => panic!("unexpected compact QR result: {other:?}"),
+            };
+            let alias_message = match alias {
+                Err(GenericTensorError::Facade(Error::InvalidArgument(message))) => message,
+                other => panic!("unexpected left_orth result: {other:?}"),
+            };
+            assert_eq!(lower_message, alias_message);
+            assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        }
+        let lazy = source.adjoint().unwrap();
+        {
+            let lower = lazy.lq_compact();
+            let alias = lazy.right_orth();
+            let lower_message = match lower {
+                Err(GenericTensorError::Facade(Error::InvalidArgument(message))) => message,
+                other => panic!("unexpected compact LQ result: {other:?}"),
+            };
+            let alias_message = match alias {
+                Err(GenericTensorError::Facade(Error::InvalidArgument(message))) => message,
+                other => panic!("unexpected right_orth result: {other:?}"),
+            };
+            assert_eq!(lower_message, alias_message);
+            assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        }
     }
 
     #[test]
