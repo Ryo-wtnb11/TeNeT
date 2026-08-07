@@ -2307,6 +2307,35 @@ fn checked_generic_left_solve_preflight_failures_are_nonpublishing() {
 }
 
 #[test]
+fn checked_generic_left_solve_singular_sectors_are_nonpublishing() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let bond = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(Label::Vacuum, 1), (Label::X, 1)],
+        false,
+    )
+    .unwrap();
+    let rhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&bond], [&bond], |_, _| 1.0).unwrap();
+    for target in [Label::Vacuum, Label::X] {
+        let divisor: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&bond], [&bond], |trees, _| {
+                f64::from(trees.coupled() != &target)
+            })
+            .unwrap();
+        let before = divisor.data().to_vec();
+        assert!(matches!(
+            divisor.solve(&rhs),
+            Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
+                _
+            )))
+        ));
+        assert_eq!(divisor.data(), before.as_slice());
+    }
+}
+
+#[test]
 fn checked_generic_compact_qr_failure_is_typed_and_nonpublishing() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
