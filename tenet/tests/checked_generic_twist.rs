@@ -856,6 +856,7 @@ where
     assert!(std::ptr::eq(flipped.provider(), provider.as_ref()));
     assert!(flipped.codomain()[0].is_dual());
     assert!(flipped.codomain()[2].is_dual());
+    assert_eq!(flipped.data(), source.data());
     let mut saw_vertex_two = false;
     for index in 0..source.block_count() {
         let before = source.block(index).unwrap();

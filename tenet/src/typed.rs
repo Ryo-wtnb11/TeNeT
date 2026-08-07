@@ -2465,10 +2465,35 @@ pub(crate) fn check_flip_layout_identity(
     if new_structure.block_count() != old_structure.block_count() {
         return Err(internal_layout_error("flip changed the block count"));
     }
+    if new_structure.required_len()? != old_structure.required_len()? {
+        return Err(internal_layout_error(
+            "flip changed the required payload length",
+        ));
+    }
     for index in 0..old_structure.block_count() {
         let old_block = old_structure.block(index)?;
         let new_block = new_structure.block(index)?;
-        if old_block.offset() != new_block.offset() || old_block.shape() != new_block.shape() {
+        let same_key = match (
+            old_block.key().as_fusion_tree_pair(),
+            new_block.key().as_fusion_tree_pair(),
+        ) {
+            (Some(old), Some(new)) => {
+                old.codomain_uncoupled() == new.codomain_uncoupled()
+                    && old.domain_uncoupled() == new.domain_uncoupled()
+                    && old.coupled() == new.coupled()
+                    && old.codomain_innerlines() == new.codomain_innerlines()
+                    && old.domain_innerlines() == new.domain_innerlines()
+                    && old.codomain_vertices() == new.codomain_vertices()
+                    && old.domain_vertices() == new.domain_vertices()
+            }
+            (None, None) => old_block.key() == new_block.key(),
+            _ => false,
+        };
+        if !same_key
+            || old_block.shape() != new_block.shape()
+            || old_block.strides() != new_block.strides()
+            || old_block.offset() != new_block.offset()
+        {
             return Err(internal_layout_error("flip changed the block layout"));
         }
     }
