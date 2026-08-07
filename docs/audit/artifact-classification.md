@@ -1,7 +1,9 @@
-# Current artifact classification at `8999ec3`
+# Artifact classification
+
+Audited at: `8999ec3678b7f894a3547b1a930802a1adfe90a0`
 
 This inventory is the Phase A artifact census required by #9. The production
-source authority is `8999ec3678b7f894a3547b1a930802a1adfe90a0`; the audit base
+source authority is that commit; the audit base
 is `b73fd39f3eb271d9d287f5927df41d99bd017a63`, which adds only the public-API
 snapshot. It treats current source, manifests, executable tests and that
 snapshot as authority.
@@ -53,7 +55,7 @@ the source, dependency graph, and result.
 | `benchmarks/tensorkit_semantic_oracle.sha256` | Valid | Binds the generator, output, Project, and Manifest bytes verified during regeneration. |
 | `benchmarks/tensorkit_tsvd_crosscheck.jl` | Salvageable | Useful singular-value oracle, but no pinned current TensorKit environment/result accompanies it. Rebuild under the Phase B competitor manifest. |
 | `docs/api_migration_587.md` | Historical | Pre-release migration ledger for the removed broad expert facade. Useful only as migration history/ADR. |
-| `docs/audit/public-api-8999ec3.jsonl` | Valid | Reproducible rustdoc-JSON-derived inventory pinned to TeNeT/Tenferro/Racah/rustc; syntactic support is explicitly separated from operation proof. |
+| `docs/audit/public-api.jsonl` | Valid | Reproducible rustdoc-JSON-derived inventory pinned to TeNeT/Tenferro/Racah/rustc; syntactic support is explicitly separated from operation proof. |
 | `docs/backend_policy.md` | Salvageable | The trait/runtime boundary is useful, but fixed scaling numbers and current-state claims were not remeasured; “abstract every plausible seam from day one” is broader than current code and the #9 evidence-first rule. Rewrite as present contract plus measured exceptions. |
 | `docs/complexity_parity_policy.md` | Salvageable | The asymptotic-parity rule is useful, but the current compliance rows and TensorKit comparison have not been reprofiled in this audit. Preserve policy; revalidate status claims. |
 | `docs/cotengra_backend.md` | Salvageable | Current feature types compile, but latency figures and external Python behavior were not rerun; the Rust snippet is not standalone. Reverify in pinned uv environment. |

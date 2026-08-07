@@ -1,7 +1,9 @@
-# Current operation matrix at `d612869`
+# Operation matrix
 
-This is the Phase A capability census required by #9. The authority is TeNeT
-`d6128696c01b85d8dffbaf805dc1a34fa7686a48`; current source and executable
+Audited at: `d6128696c01b85d8dffbaf805dc1a34fa7686a48`
+
+This is the Phase A capability census required by #9. The authority is that
+commit; current source and executable
 tests are authoritative. Export presence, trait plausibility, historical
 documentation and old benchmark output are not support evidence.
 
