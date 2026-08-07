@@ -5691,7 +5691,61 @@ where
     R::Mode: TypedTensorExpDispatch<R, D>,
     D: TensorScalar,
 {
-    /// TensorKit / MatrixAlgebraKit matrix exponential of an endomorphism.
+    /// The matrix exponential `exp(t) = Σ_k t^k / k!`, evaluated per coupled
+    /// sector — TensorKit's `exp`, which copies and calls `exp!`: check
+    /// `domain == codomain`, then exponentiate every block.
+    ///
+    /// # Domain
+    ///
+    /// Any endomorphism, of any dtype. Multiplicity-free tensors retain the
+    /// original two dense routes:
+    ///
+    /// - **Hermitian blocks** take the spectral function `V exp(D) Vᴴ` of the
+    ///   Hermitian eigendecomposition.
+    /// - **Everything else** takes blockwise scaling-and-squaring Padé [13/13]
+    ///   (Higham 2005). Non-normal, defective and complex non-Hermitian blocks
+    ///   are all in domain; nothing is symmetrized.
+    ///
+    /// The multiplicity-free **compact** arm is TensorKit's
+    /// `exp(::DiagonalTensorMap)`: unconditionally elementwise, with no
+    /// hermiticity gate. Checked-Generic tensors currently use only the dense
+    /// Padé route; checked compact construction is unsupported.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Operation`] when the input is not an endomorphism
+    ///   (`codomain != domain`), when a general block holds a nonfinite entry,
+    ///   when a general block's column 1-norm overflows to infinity although
+    ///   every entry is finite, or when the backend fails. Nothing is published
+    ///   unless every coupled sector succeeded.
+    /// - [`Error::Core`] / [`Error::FusionAlgebra`] from the multiplicity-free
+    ///   Hermitian composition route.
+    ///
+    /// # Complexity
+    ///
+    /// Dense input is `O(Σ_c n_c³)`: multiplicity-free Hermitian blocks use one
+    /// eigendecomposition plus a composition; all general blocks, including
+    /// checked-Generic, use six GEMMs, one solve and the necessary Padé
+    /// squarings per sector with `O(max_c n_c²)` workspace. Coupled sectors are
+    /// never mixed. A dense lazy adjoint builds one operation-local logical
+    /// payload per call without publishing its receiver cache. Compact
+    /// multiplicity-free input remains `O(rank)` elementwise.
+    ///
+    /// TensorKit's diagonal implementation is the reference for the compact
+    /// branch; this method never panics for a supported tensor contract.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    /// let runtime = Runtime::builder().build()?;
+    /// let rule = Arc::new(U1FusionRule);
+    /// let v = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)], false)?;
+    /// let zero: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&v], [&v])?;
+    /// let id: TensorMap<_, f64> = TensorMap::id(&runtime, [&v])?;
+    /// assert!(zero.exp()?.data().iter().zip(id.data()).all(|(a, b)| (a - b).abs() < 1e-15));
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
     pub fn exp(&self) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorExpDispatch<R, D>>::exp(self)
     }
