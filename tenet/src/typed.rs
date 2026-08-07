@@ -3689,6 +3689,8 @@ where
     /// empty-list short-circuit; empty `legs` returns an identical clone.
     /// Otherwise [`Error::Operation`] /
     /// [`Error::Core`] from the layout derivation of the toggled hom space.
+    /// Checked-Generic admission and pivotal failures retain their typed
+    /// [`GenericTensorError`] variants.
     pub fn flip(&self, legs: &[usize]) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorFlipDispatch<R, D>>::flip(self, legs, false)
     }

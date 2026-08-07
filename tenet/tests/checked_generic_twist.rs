@@ -144,6 +144,7 @@ impl CheckedGenericFusion for CheckedPivotalToy {
             Arc::<[u8]>::from(vec![
                 self.identity_tag,
                 self.braiding as u8,
+                u8::from(self.x_fs.is_sign_negative()),
                 u8::from(self.x_twist.is_sign_negative()),
             ]),
         )
