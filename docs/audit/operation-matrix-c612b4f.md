@@ -66,9 +66,9 @@ proved typed providers without this qualification.
 
 Provider-mode dispatch now covers transactional root construction, tree
 transforms, `otimes`, `contract`, `compose`, reductions, trace, arithmetic, and
-the current checked-Generic unit, cat, twist, decomposition, and spectrum leaves.
+the current checked-Generic unit, cat, twist, decomposition, spectrum, and integer `powi` leaves.
 The remaining operation gaps are factor-returning EIG/EIGH variants,
-null/polar factors, matrix functions, and typed network execution.
+null/polar factors, matrix functions other than `exp` and integer `powi`, and typed network execution.
 #662 closed through merged #946 after proving typed provider-error propagation
 and transactional nonpublication for the reachable checked-Generic operations.
 
@@ -90,7 +90,7 @@ and transactional nonpublication for the reachable checked-Generic operations.
 | EIGH | PROVED full/truncated/values | `eigh_vals` proved; factor-returning EIGH remains unsupported | UNSUPPORTED | PROVED full and truncated | UNSUPPORTED | UNSUPPORTED |
 | LQ | PROVED on selected Host fixtures | checked-Generic compact/full LQ proved on current Host fixtures | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | orthogonal factors | PROVED on selected Host fixtures | checked-Generic `left_orth`/`right_orth` proved through compact QR/LQ parity fixtures | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
-| EIG, null/polar, solve and matrix functions | PROVED on selected Host fixtures | dense `inv`, dense Padé `exp`, and `eig_vals` proved; null/polar/solve and remaining matrix functions remain unsupported; compact checked-Generic construction remains unsupported | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
+| EIG, null/polar, solve and matrix functions | PROVED on selected Host fixtures | dense `inv`, dense Padé `exp`, integer `powi`, and `eig_vals` proved; null/polar/solve and remaining matrix functions remain unsupported; compact checked-Generic construction remains unsupported | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | Network planning/execution | PROVED | UNSUPPORTED | planning is storage-generic; Host execution is not | PROVED for canonical chains; trace/noncanonical scopes reject | UNSUPPORTED | UNSUPPORTED |
 
 CUDA `PROVED` means the real-device tests exist and are explicitly ignored on
