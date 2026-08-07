@@ -232,7 +232,13 @@ impl From<ProductSectorCodecError> for FusionAlgebraError {
 
 /// Checked companion for finite or encoded fusion algebras.
 ///
-/// The infallible [`FusionRule`] methods remain the validated expert hot path.
+/// This is the sole authority for a provider's representable-domain
+/// precondition. [`Self::dual_or_panic`], [`Self::fusion_channels_or_panic`],
+/// and [`Self::nsymbol_or_panic`] apply that precondition exactly once, so a
+/// provider's [`FusionRule::dual`] / [`FusionRule::fusion_channels`] /
+/// [`FusionRule::nsymbol`] implementation forwards to them instead of
+/// restating the check next to an `expect` (issue #971: the two entry points
+/// must not carry two independent copies of the same algebra).
 pub trait CheckedFusionAlgebra: FusionRule {
     /// Return the exact dual when both the input and output are representable
     /// by this provider; otherwise return the exact representation failure.
@@ -262,6 +268,31 @@ pub trait CheckedFusionAlgebra: FusionRule {
         right: SectorId,
         coupled: SectorId,
     ) -> Result<usize, FusionAlgebraError>;
+
+    /// [`FusionRule::dual`]'s single panic site: succeeds exactly where
+    /// [`Self::try_dual_sector`] returns `Ok`, and panics with a message
+    /// derived from its `Err` otherwise.
+    fn dual_or_panic(&self, sector: SectorId) -> SectorId {
+        self.try_dual_sector(sector)
+            .unwrap_or_else(|error| panic!("FusionRule::dual precondition violated: {error}"))
+    }
+
+    /// [`FusionRule::fusion_channels`]'s single panic site: succeeds exactly
+    /// where [`Self::try_fusion_channels`] returns `Ok`, and panics with a
+    /// message derived from its `Err` otherwise.
+    fn fusion_channels_or_panic(&self, left: SectorId, right: SectorId) -> SectorVec {
+        self.try_fusion_channels(left, right).unwrap_or_else(|error| {
+            panic!("FusionRule::fusion_channels precondition violated: {error}")
+        })
+    }
+
+    /// [`FusionRule::nsymbol`]'s single panic site: succeeds exactly where
+    /// [`Self::try_nsymbol`] returns `Ok`, and panics with a message derived
+    /// from its `Err` otherwise.
+    fn nsymbol_or_panic(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        self.try_nsymbol(left, right, coupled)
+            .unwrap_or_else(|error| panic!("FusionRule::nsymbol precondition violated: {error}"))
+    }
 }
 
 /// Translation between a provider's semantic sector labels and the opaque
