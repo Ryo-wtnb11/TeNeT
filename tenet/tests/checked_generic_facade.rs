@@ -2317,6 +2317,22 @@ fn checked_generic_left_solve_preflight_failures_are_nonpublishing() {
     ));
     assert_no_provider_queries(&provider);
 
+    let foreign_provider = Arc::new(CheckedOnlyToy::new_product_probe(1));
+    let foreign_x =
+        GradedSpace::try_new(Arc::clone(&foreign_provider), [(Label::X, 2)], false).unwrap();
+    let foreign_rhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&foreign_x], [&foreign_x], |_, _| 1.0).unwrap();
+    reset_provider_queries(&provider);
+    reset_provider_queries(&foreign_provider);
+    assert!(matches!(
+        lhs.solve(&foreign_rhs),
+        Err(GenericTensorError::Facade(
+            tenet::typed::Error::RuleMismatch
+        ))
+    ));
+    assert_no_provider_queries(&provider);
+    assert_no_provider_queries(&foreign_provider);
+
     let wrong_codomain =
         GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 1)], false).unwrap();
     let codomain_rhs: TensorMap<_, f64> =
@@ -2357,6 +2373,43 @@ fn checked_generic_left_solve_singular_sectors_are_nonpublishing() {
             )))
         ));
         assert_eq!(divisor.data(), before.as_slice());
+    }
+}
+
+#[test]
+fn checked_generic_left_solve_covers_all_lazy_input_pairs() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let divisor: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            if indices[0] == indices[1] {
+                2.0 + indices[0] as f64
+            } else {
+                0.0
+            }
+        })
+        .unwrap();
+    let rhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+            if indices[0] == indices[1] {
+                2.0 + indices[0] as f64
+            } else {
+                1.0
+            }
+        })
+        .unwrap();
+    let expected = divisor.solve(&rhs).unwrap();
+    for (lazy_lhs, lazy_rhs) in [(false, false), (true, false), (false, true), (true, true)] {
+        let lhs = lazy_lhs
+            .then(|| divisor.adjoint().unwrap())
+            .unwrap_or_else(|| divisor.clone());
+        let right = lazy_rhs
+            .then(|| rhs.adjoint().unwrap())
+            .unwrap_or_else(|| rhs.clone());
+        let solution = lhs.solve(&right).unwrap();
+        assert!(std::ptr::eq(solution.provider(), provider.as_ref()));
+        assert_eq!(solution.data(), expected.data());
     }
 }
 
