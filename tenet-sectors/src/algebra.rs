@@ -61,6 +61,13 @@ pub trait FusionRule: 'static {
         false
     }
 
+    /// The default is the identity, which is correct only for a provider whose
+    /// every sector is self-dual.
+    ///
+    /// A provider that also implements [`CheckedFusionAlgebra`] must override
+    /// this with a forward to [`CheckedFusionAlgebra::dual_or_panic`]. Keeping
+    /// the default there is the #971 defect: the checked entry point rejects an
+    /// out-of-domain sector while this one silently accepts it.
     fn dual(&self, sector: SectorId) -> SectorId {
         sector
     }
@@ -71,6 +78,13 @@ pub trait FusionRule: 'static {
     /// cold-path allocations.
     fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec;
 
+    /// The default answers from [`Self::fusion_channels`], which never inspects
+    /// `coupled`'s domain: an unrepresentable `coupled` reads as "not a
+    /// channel" rather than as an error.
+    ///
+    /// A provider that also implements [`CheckedFusionAlgebra`] must override
+    /// this with a forward to [`CheckedFusionAlgebra::nsymbol_or_panic`], so
+    /// that the two entry points agree on which sectors exist (#971).
     fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
         usize::from(self.fusion_channels(left, right).contains(&coupled))
     }
