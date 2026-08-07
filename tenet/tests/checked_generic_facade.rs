@@ -21,6 +21,25 @@ enum Label {
     Invalid,
 }
 
+#[test]
+fn checked_generic_powi_zero_reuses_the_admitted_space_without_provider_work() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| f64::from(ij == [0, 1]))
+            .unwrap();
+    reset_provider_queries(&provider);
+    let identity = source.powi(0).unwrap();
+    assert_no_provider_queries(&provider);
+    assert!(std::ptr::eq(identity.provider(), provider.as_ref()));
+    assert!(identity.runtime().shares_state_with(source.runtime()));
+    assert_eq!(identity.codomain(), source.codomain());
+    assert_eq!(identity.domain(), source.domain());
+    assert_eq!(identity.block_count(), source.block_count());
+    assert_eq!(identity.data(), &[1.0, 0.0, 0.0, 1.0]);
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ToyError {
     InvalidSector,
