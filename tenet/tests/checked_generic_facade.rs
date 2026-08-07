@@ -156,10 +156,12 @@ fn checked_generic_powi_rejects_nonendomorphisms_before_provider_work() {
         .collect::<Vec<_>>();
     for exponent in [0, 1, -1] {
         reset_provider_queries(&provider);
-        assert!(matches!(
-            source.powi(exponent),
-            Err(GenericTensorError::Facade(_))
-        ));
+        match source.powi(exponent) {
+            Err(GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(message))) => {
+                assert!(message.contains("endomorphism"));
+            }
+            other => panic!("unexpected powi({exponent}) result: {other:?}"),
+        }
         assert_no_provider_queries(&provider);
         assert_eq!(
             source

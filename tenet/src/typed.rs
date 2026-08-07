@@ -5858,11 +5858,11 @@ where
     /// compositions. Zero returns the multiplicative identity (staying compact
     /// for compact input); negative powers invert once.
     ///
-    /// For checked-Generic tensors, the exact endomorphism check and all
-    /// required output admission happen before provider queries or publication;
-    /// zero uses the already admitted full block layout, while positive powers
-    /// compose and negative powers perform one typed inverse. Checked-Generic
-    /// compact construction remains unsupported.
+    /// For checked-Generic tensors, the exact endomorphism check precedes
+    /// provider work. Zero uses the already admitted full block layout without
+    /// a provider query or new admission; other exponents inherit the checked
+    /// compose/inverse ordering and errors. Checked-Generic compact
+    /// construction remains unsupported.
     ///
     /// # Errors
     ///
