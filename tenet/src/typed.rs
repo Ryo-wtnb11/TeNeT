@@ -5706,7 +5706,13 @@ where
     let TypedTensorRepr::Owned(body) = &mut tensor.repr else {
         unreachable!()
     };
-    let body = Arc::get_mut(body).expect("fresh identity body");
+    write_dense_identity_blocks(Arc::get_mut(body).expect("fresh identity body"))
+}
+
+fn write_dense_identity_blocks<R, D>(body: &mut TypedTensorBody<R, D>) -> Result<(), Error>
+where
+    D: TensorScalar,
+{
     let regions = {
         let space = body.space.space();
         sector_regions(space.structure(), space.nout())?
@@ -10330,26 +10336,9 @@ where
         let TypedTensorRepr::Owned(body) = &mut tensor.repr else {
             unreachable!("a freshly built tensor is owned")
         };
-        let body = Arc::get_mut(body).expect("a freshly built body has no other owner");
-        // Use the shared coupled-sector region walk rather than duplicating
-        // offset arithmetic here.
-        let regions = {
-            let space = body.space.space();
-            sector_regions(space.structure(), space.nout())?
-        };
-        // The payload `Arc` is unique for the same reason the body one is: this
-        // tensor was built two statements ago and never handed out.
-        let payload =
-            Arc::get_mut(&mut body.data).expect("a freshly built payload has no other owner");
-        let TypedData::Dense(data) = payload else {
-            unreachable!("`build` always produces a dense payload");
-        };
-        for region in regions.iter() {
-            for i in 0..region.rows().min(region.cols()) {
-                data[region.range().start + i * (region.rows() + 1)] = D::from_real(1.0);
-            }
-        }
-        Ok(())
+        write_dense_identity_blocks(
+            Arc::get_mut(body).expect("a freshly built body has no other owner"),
+        )
     }
 }
 
