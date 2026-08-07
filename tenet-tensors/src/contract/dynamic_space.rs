@@ -5252,12 +5252,6 @@ mod scratch_cache_tests {
     impl tenet_core::MultiplicityFreeFusionRule for CountingRule {}
     impl MultiplicityFreeFusionSymbols for CountingRule {
         type Scalar = f64;
-        fn scalar_one(&self) -> f64 {
-            1.0
-        }
-        fn scalar_conj(&self, value: f64) -> f64 {
-            value
-        }
         fn f_symbol_scalar(
             &self,
             _: SectorId,
@@ -6215,12 +6209,6 @@ mod checked_admission_tests {
 
     impl MultiplicityFreeFusionSymbols for ExternalUniqueRule {
         type Scalar = f64;
-        fn scalar_one(&self) -> f64 {
-            1.0
-        }
-        fn scalar_conj(&self, value: f64) -> f64 {
-            value
-        }
         fn f_symbol_scalar(
             &self,
             _: SectorId,
@@ -6327,12 +6315,6 @@ mod checked_admission_tests {
 
     impl MultiplicityFreeFusionSymbols for ExternalSimpleRule {
         type Scalar = f64;
-        fn scalar_one(&self) -> f64 {
-            SU2FusionRule.scalar_one()
-        }
-        fn scalar_conj(&self, value: f64) -> f64 {
-            SU2FusionRule.scalar_conj(value)
-        }
         fn f_symbol_scalar(
             &self,
             l: SectorId,

@@ -257,14 +257,6 @@ impl CanonicalUnitFusionRule for CategoryDataFibonacci {}
 impl MultiplicityFreeFusionSymbols for CategoryDataFibonacci {
     type Scalar = Complex64;
 
-    fn scalar_one(&self) -> Self::Scalar {
-        Complex64::new(1.0, 0.0)
-    }
-
-    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-        value.conj()
-    }
-
     // Left at the `false` default: Fibonacci's associator is genuinely
     // non-trivial, so the gauge-general Artin path is the correct one.
 

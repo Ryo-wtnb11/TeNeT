@@ -166,12 +166,6 @@ impl MultiplicityFreeFusionSymbols for ZNFusionRule {
     fn has_trivial_associator_gauge(&self) -> bool {
         true
     }
-    fn scalar_one(&self) -> Self::Scalar {
-        1.0
-    }
-    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-        value
-    }
     fn f_symbol_scalar(
         &self,
         _: SectorId,
@@ -336,14 +330,6 @@ impl MultiplicityFreeFusionSymbols for Z2FusionRule {
         true
     }
 
-    fn scalar_one(&self) -> Self::Scalar {
-        1.0
-    }
-
-    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-        value
-    }
-
     fn f_symbol_scalar(
         &self,
         _left: SectorId,
@@ -473,14 +459,6 @@ impl MultiplicityFreeFusionSymbols for FermionParityFusionRule {
 
     fn has_trivial_associator_gauge(&self) -> bool {
         true
-    }
-
-    fn scalar_one(&self) -> Self::Scalar {
-        1.0
-    }
-
-    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-        value
     }
 
     fn f_symbol_scalar(
@@ -683,14 +661,6 @@ impl MultiplicityFreeFusionSymbols for U1FusionRule {
 
     fn has_trivial_associator_gauge(&self) -> bool {
         true
-    }
-
-    fn scalar_one(&self) -> Self::Scalar {
-        1.0
-    }
-
-    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-        value
     }
 
     fn f_symbol_scalar(

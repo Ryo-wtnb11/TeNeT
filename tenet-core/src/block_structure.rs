@@ -1956,7 +1956,7 @@ where
                     source.codomain_tree().uncoupled().len(),
                     source.domain_tree().uncoupled().len(),
                 )?;
-                rows.push(vec![(source.clone(), self.rule.scalar_one())]);
+                rows.push(vec![(source.clone(), R::Scalar::one())]);
             }
             return Ok(rows);
         }
@@ -2015,7 +2015,7 @@ where
                     source.codomain_tree().uncoupled().len(),
                     source.domain_tree().uncoupled().len(),
                 )?;
-                rows.push(vec![(source.clone(), self.rule.scalar_one())]);
+                rows.push(vec![(source.clone(), R::Scalar::one())]);
             }
             return Ok(rows);
         }
@@ -2169,7 +2169,7 @@ where
 impl<'rule, 'structure, R> LocallyValidatedFusionTreeBlockStructure<'rule, 'structure, R>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     pub fn generic_permute_tree_pair_for_block_index(
         &self,

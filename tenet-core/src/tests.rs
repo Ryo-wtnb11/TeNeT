@@ -571,14 +571,6 @@ mod tests {
     impl MultiplicityFreeFusionSymbols for PlanarZ2Rule {
         type Scalar = f64;
 
-        fn scalar_one(&self) -> Self::Scalar {
-            1.0
-        }
-
-        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-            value
-        }
-
         fn f_symbol_scalar(
             &self,
             _left: SectorId,
@@ -657,14 +649,6 @@ mod tests {
     impl MultiplicityFreeFusionSymbols for IdentitySymbolPanicRule {
         type Scalar = f64;
 
-        fn scalar_one(&self) -> Self::Scalar {
-            1.0
-        }
-
-        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-            value
-        }
-
         fn f_symbol_scalar(
             &self,
             _left: SectorId,
@@ -742,14 +726,6 @@ mod tests {
 
     impl MultiplicityFreeFusionSymbols for MisreportedGenericMultiplicityFreeRule {
         type Scalar = f64;
-
-        fn scalar_one(&self) -> Self::Scalar {
-            1.0
-        }
-
-        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-            value
-        }
 
         fn f_symbol_scalar(
             &self,
@@ -838,14 +814,6 @@ mod tests {
 
     impl MultiplicityFreeFusionSymbols for SplitOnlyCountingRule {
         type Scalar = f64;
-
-        fn scalar_one(&self) -> Self::Scalar {
-            1.0
-        }
-
-        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-            value
-        }
 
         fn f_symbol_scalar(
             &self,
@@ -972,14 +940,6 @@ mod tests {
     impl MultiplicityFreeFusionSymbols for AsymmetricAnyonicRule {
         type Scalar = f64;
 
-        fn scalar_one(&self) -> Self::Scalar {
-            1.0
-        }
-
-        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-            value
-        }
-
         fn f_symbol_scalar(
             &self,
             _left: SectorId,
@@ -1066,14 +1026,6 @@ mod tests {
     impl MultiplicityFreeFusionSymbols for UncertifiedCustomSymbolsRule {
         type Scalar = f64;
 
-        fn scalar_one(&self) -> Self::Scalar {
-            1.0
-        }
-
-        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-            value
-        }
-
         fn f_symbol_scalar(
             &self,
             _left: SectorId,
@@ -1125,14 +1077,6 @@ mod tests {
 
     impl MultiplicityFreeFusionSymbols for ComplexAsymmetricUniqueRule {
         type Scalar = Complex64;
-
-        fn scalar_one(&self) -> Self::Scalar {
-            Complex64::new(1.0, 0.0)
-        }
-
-        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-            value.conj()
-        }
 
         fn f_symbol_scalar(
             &self,
@@ -1254,7 +1198,7 @@ mod tests {
     fn multiplicity_free_symbols_are_a_separate_scalar_api() {
         let z2 = Z2FusionRule;
 
-        assert_eq!(z2.scalar_one(), 1.0);
+        assert_eq!(<Z2FusionRule as MultiplicityFreeFusionSymbols>::Scalar::one(), 1.0);
         assert_eq!(
             z2.f_symbol_scalar(
                 SectorId::new(1),
@@ -3796,7 +3740,7 @@ mod tests {
     // makes no pentagon claim) — it exists purely to prove that
     // `multiplicity_free_braid_tree` / `FusionTermAccumulator` compile and
     // run correctly when `Scalar: num_complex::Complex64` (Add/Mul/Clone from
-    // `num_complex`, plus a genuinely complex `scalar_conj` = `.conj()`).
+    // `num_complex`, plus a genuinely complex `CategoricalScalar::conj`).
     #[derive(Clone, Copy, Debug)]
     struct ComplexScalarProbeRule;
 
@@ -3833,14 +3777,6 @@ mod tests {
 
     impl MultiplicityFreeFusionSymbols for ComplexScalarProbeRule {
         type Scalar = num_complex::Complex64;
-
-        fn scalar_one(&self) -> Self::Scalar {
-            num_complex::Complex64::new(1.0, 0.0)
-        }
-
-        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-            value.conj()
-        }
 
         // Trivial associator (1 on every allowed channel, since
         // `fusion_channels` already zeroes out disallowed ones via the
@@ -3901,8 +3837,8 @@ mod tests {
 
             // Reflected levels select the inverse-artin branch: the
             // coefficient must come back as the complex conjugate, proving
-            // `scalar_conj` (not just `Clone`/`Mul`) is wired through for a
-            // non-real `Scalar`.
+            // `CategoricalScalar::conj` (not just `Clone`/`Mul`) is wired through
+            // for a non-real `Scalar`.
             let backward = multiplicity_free_braid_tree(&rule, &tree, &[1, 0], &[1, 0]).unwrap();
             assert_eq!(backward.len(), 1);
             assert!((backward[0].1 - expected.conj()).norm() < 1.0e-12);
@@ -3913,7 +3849,7 @@ mod tests {
     fn complex_scalar_braid_tree_expands_multichannel_loop_stage0_spike() {
         // Rank-3 tree with an index>0 swap: exercises the `fusion_channels(a,
         // d)` loop branch of `multiplicity_free_artin_braid_at_with_inverse`
-        // (f_symbol_scalar * r_symbol_scalar * scalar_conj composition) —
+        // (f_symbol_scalar * r_symbol_scalar * conj composition) —
         // this is the part of the engine Fibonacci's Simple-fusion braid
         // actually needs (the rank-2 spike above only reaches the
         // single-r-symbol `index == 0` branch).
@@ -4012,14 +3948,6 @@ mod tests {
 
     impl MultiplicityFreeFusionSymbols for FibonacciFAdmissibilityProbe {
         type Scalar = Complex64;
-
-        fn scalar_one(&self) -> Self::Scalar {
-            FibonacciFusionRule.scalar_one()
-        }
-
-        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-            FibonacciFusionRule.scalar_conj(value)
-        }
 
         fn f_symbol_scalar(
             &self,
@@ -4445,14 +4373,6 @@ mod tests {
 
     impl MultiplicityFreeFusionSymbols for UniqueFAdmissibilityProbe {
         type Scalar = f64;
-
-        fn scalar_one(&self) -> Self::Scalar {
-            Z2FusionRule.scalar_one()
-        }
-
-        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-            Z2FusionRule.scalar_conj(value)
-        }
 
         fn f_symbol_scalar(
             &self,
@@ -6006,7 +5926,7 @@ mod tests {
         let owned = PreparedTreeBraid::new(&permutation, &levels, source.uncoupled().len()).unwrap();
 
         let mut expected_tree = source.clone();
-        let mut expected_coefficient = rule.scalar_one();
+        let mut expected_coefficient = <AsymmetricAnyonicRule as MultiplicityFreeFusionSymbols>::Scalar::one();
         for step in &owned.artin_steps {
             let (next, coefficient) = immutable_unique_artin_braid_at_with_inverse_oracle(
                 &rule,
@@ -6083,7 +6003,7 @@ mod tests {
         let source_snapshots = sources.clone();
         for source in &sources {
             let mut expected_tree = source.codomain_tree().clone();
-            let mut expected_coefficient = rule.scalar_one();
+            let mut expected_coefficient = <AsymmetricAnyonicRule as MultiplicityFreeFusionSymbols>::Scalar::one();
             for step in &owned.artin_steps {
                 let (next, coefficient) = immutable_unique_artin_braid_at_with_inverse_oracle(
                     &rule,
@@ -16136,8 +16056,8 @@ mod tests {
 
     // ===================== Residual (b): complex conj path =====================
     //
-    // The B2a complex path (`GenericBraidScalar for Complex64`, the fold's
-    // `coeff₂.braid_conj()`, and `a_symbol_generic`'s inner `conj`) was only
+    // The B2a complex path (`CategoricalScalar for Complex64`, the fold's
+    // `coeff₂.conj()`, and `a_symbol_generic`'s inner `conj`) was only
     // verified by source-matching. This closes it numerically: a synthetic
     // Complex64 Generic rule whose A-move / B-move are a genuinely complex 2×2
     // UNITARY U (non-Hermitian, non-real). Self-dual sector 1, N(1,1,1)=2,
@@ -17919,7 +17839,6 @@ mod tests {
             "reset must not reuse content ids, got before={id_before} after={id_after}"
         );
     }
-
 
     #[test]
     fn checked_u1_reports_nonclosure_and_preserves_valid_boundaries() {

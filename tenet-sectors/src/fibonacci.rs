@@ -125,14 +125,6 @@ impl CanonicalUnitFusionRule for FibonacciFusionRule {}
 impl MultiplicityFreeFusionSymbols for FibonacciFusionRule {
     type Scalar = Complex64;
 
-    fn scalar_one(&self) -> Self::Scalar {
-        Complex64::new(1.0, 0.0)
-    }
-
-    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-        value.conj()
-    }
-
     // Verbatim port of `Fsymbol` (anyons.jl:115-137): four `Nsymbol` gates,
     // then the single non-trivial 2x2 block `F^{τττ}_τ` (entries ±1/φ,
     // ±1/√φ); every other allowed configuration is 1.

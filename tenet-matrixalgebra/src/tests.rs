@@ -152,12 +152,6 @@ impl MultiplicityFreeFusionRule for IdentityQdimRule {}
 
 impl MultiplicityFreeFusionSymbols for IdentityQdimRule {
     type Scalar = f64;
-    fn scalar_one(&self) -> f64 {
-        1.0
-    }
-    fn scalar_conj(&self, value: f64) -> f64 {
-        value
-    }
     fn f_symbol_scalar(
         &self,
         _: SectorId,

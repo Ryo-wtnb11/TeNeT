@@ -223,12 +223,6 @@ impl CanonicalUnitFusionRule for CU1FusionRule {}
 
 impl MultiplicityFreeFusionSymbols for CU1FusionRule {
     type Scalar = f64;
-    fn scalar_one(&self) -> f64 {
-        1.0
-    }
-    fn scalar_conj(&self, value: f64) -> f64 {
-        value
-    }
 
     // TensorKitSectors 0.3.4 `cu1irrep.jl:123-196`, including its gauge.
     fn f_symbol_scalar(

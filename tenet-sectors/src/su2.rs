@@ -218,14 +218,6 @@ impl CanonicalUnitFusionRule for SU2FusionRule {}
 impl MultiplicityFreeFusionSymbols for SU2FusionRule {
     type Scalar = f64;
 
-    fn scalar_one(&self) -> Self::Scalar {
-        1.0
-    }
-
-    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-        value
-    }
-
     fn f_symbol_scalar(
         &self,
         left: SectorId,

@@ -1692,14 +1692,6 @@ impl MultiplicityFreeFusionRule for AdmissionCountingSu2Rule {}
 impl MultiplicityFreeFusionSymbols for AdmissionCountingSu2Rule {
     type Scalar = f64;
 
-    fn scalar_one(&self) -> Self::Scalar {
-        SU2FusionRule.scalar_one()
-    }
-
-    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-        SU2FusionRule.scalar_conj(value)
-    }
-
     fn f_symbol_scalar(
         &self,
         left: SectorId,
@@ -5756,14 +5748,6 @@ impl MultiplicityFreeFusionRule for TensorKitZ4Element2Rule {}
 impl MultiplicityFreeFusionSymbols for TensorKitZ4Element2Rule {
     type Scalar = Complex64;
 
-    fn scalar_one(&self) -> Self::Scalar {
-        Complex64::new(1.0, 0.0)
-    }
-
-    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-        value.conj()
-    }
-
     fn f_symbol_scalar(
         &self,
         left: SectorId,
@@ -7841,7 +7825,7 @@ impl<R: FusionRule> CheckedGenericFusion for CheckedPlanSpy<'_, R> {
 impl<R> CheckedGenericRigidSymbols for CheckedPlanSpy<'_, R>
 where
     R: GenericRigidSymbols,
-    R::Scalar: tenet_core::GenericBraidScalar + Send + Sync,
+    R::Scalar: tenet_core::CategoricalScalar + Send + Sync,
 {
     type Scalar = R::Scalar;
 

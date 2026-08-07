@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, Weak};
 use num_traits::Zero;
 use rustc_hash::FxHashMap;
 use tenet_core::{
-    BlockStructure, FusionTreePairKey, FusionTreePairOrientation, GenericBraidScalar,
+    BlockStructure, CategoricalScalar, FusionTreePairKey, FusionTreePairOrientation,
     GenericRigidSymbols, HomSpaceId, LocallyValidatedFusionTreeBlockStructure,
     MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, RuleIdentity, TensorMap,
     TensorStorage, WeakHomSpaceId,
@@ -987,7 +987,7 @@ where
     ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
     where
         R: GenericRigidSymbols<Scalar = T>,
-        R::Scalar: GenericBraidScalar,
+        R::Scalar: CategoricalScalar,
         T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
         RuleKey: 'static + Send + Sync,
         DDst: TensorStorage<TDst>,
@@ -1013,7 +1013,7 @@ where
     ) -> Result<Arc<TreeTransformStructure<T>>, OperationError>
     where
         R: GenericRigidSymbols<Scalar = T>,
-        R::Scalar: GenericBraidScalar,
+        R::Scalar: CategoricalScalar,
         T: 'static + Copy + Clone + Add<Output = T> + Mul<Output = T> + Zero + Send + Sync,
         RuleKey: 'static + Send + Sync,
     {

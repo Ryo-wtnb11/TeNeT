@@ -11,12 +11,12 @@ use tenet_core::{
     multiplicity_free_braid_tree_pair_block_ordered_indexed,
     multiplicity_free_transpose_tree_pair_block_ordered_indexed,
     validate_generic_fusion_tree_pair_checked, BlockKey, BlockKeyKind, BlockStructure,
-    CheckedGenericFusion, CheckedGenericRigidSymbols, CheckedGenericStructureError,
-    CheckedGenericSymbolError, CoreError, FusionRule, FusionStyleKind, FusionTreeBlockGroup,
-    FusionTreeKey, FusionTreePairKey, FusionTreePairOrientation, GenericBraidScalar,
-    GenericRigidSymbols, LocallyValidatedFusionTreeBlockStructure, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, OrderedBlockLinearMap, OrderedBlockLinearStorage,
-    PreparedTreePairOperation,
+    CategoricalScalar, CheckedGenericFusion, CheckedGenericRigidSymbols,
+    CheckedGenericStructureError, CheckedGenericSymbolError, CoreError, FusionRule,
+    FusionStyleKind, FusionTreeBlockGroup, FusionTreeKey, FusionTreePairKey,
+    FusionTreePairOrientation, GenericRigidSymbols, LocallyValidatedFusionTreeBlockStructure,
+    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, OrderedBlockLinearMap,
+    OrderedBlockLinearStorage, PreparedTreePairOperation,
 };
 
 use crate::{OperationError, TreeTransformStructure};
@@ -1843,7 +1843,7 @@ pub fn build_checked_generic_tree_pair_transform_group_plan<P>(
 ) -> Result<TreeTransformGroupPlan<P::Scalar>, CheckedGenericPlanError<P::Error>>
 where
     P: CheckedGenericRigidSymbols,
-    P::Scalar: GenericBraidScalar + Zero,
+    P::Scalar: CategoricalScalar + Zero,
 {
     let source_proof =
         validate_checked_generic_tree_pair_preflight(provider, &operation, src_structure)?;
@@ -1861,7 +1861,7 @@ pub(crate) fn build_checked_generic_tree_pair_transform_group_plan_validated<P>(
 ) -> Result<TreeTransformGroupPlan<P::Scalar>, CheckedGenericPlanError<P::Error>>
 where
     P: CheckedGenericRigidSymbols,
-    P::Scalar: GenericBraidScalar + Zero,
+    P::Scalar: CategoricalScalar + Zero,
 {
     let source_axes = operation_source_axes(&operation);
     let mut specs = Vec::new();
@@ -1934,7 +1934,7 @@ pub fn build_generic_tree_pair_transform_group_plan<R>(
 ) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar + Zero,
+    R::Scalar: CategoricalScalar + Zero,
 {
     let source_proof = validate_generic_tree_pair_preflight(rule, &operation, src_structure)?;
     build_generic_tree_pair_transform_group_plan_validated(&source_proof, operation)
@@ -1946,7 +1946,7 @@ pub(crate) fn build_generic_tree_pair_transform_group_plan_validated<R>(
 ) -> Result<TreeTransformGroupPlan<R::Scalar>, OperationError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar + Zero,
+    R::Scalar: CategoricalScalar + Zero,
 {
     let src_structure = source_proof.structure();
     let source_axes = operation_source_axes(&operation);
