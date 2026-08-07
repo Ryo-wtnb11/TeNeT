@@ -55,6 +55,8 @@ struct CheckedOnlyToy {
     committed: AtomicBool,
     commit_count: AtomicUsize,
     postcommit_queries: AtomicUsize,
+    commit_after_queries: AtomicUsize,
+    queries_since_reset: AtomicUsize,
 }
 
 impl CheckedOnlyToy {
@@ -78,6 +80,8 @@ impl CheckedOnlyToy {
             committed: AtomicBool::new(false),
             commit_count: AtomicUsize::new(0),
             postcommit_queries: AtomicUsize::new(0),
+            commit_after_queries: AtomicUsize::new(0),
+            queries_since_reset: AtomicUsize::new(0),
         }
     }
 
@@ -145,10 +149,25 @@ impl CheckedOnlyToy {
         self.committed.store(false, Ordering::Relaxed);
         self.commit_count.store(0, Ordering::Relaxed);
         self.postcommit_queries.store(0, Ordering::Relaxed);
+        self.commit_after_queries.store(0, Ordering::Relaxed);
+        self.queries_since_reset.store(0, Ordering::Relaxed);
+    }
+
+    fn arm_commit_spy_after_queries(&self, query_count: usize) {
+        self.reset_commit_spy();
+        assert!(query_count > 0);
+        self.commit_after_queries
+            .store(query_count, Ordering::Relaxed);
     }
 
     fn record_query(&self) {
-        if self.committed.load(Ordering::Relaxed) {
+        let query = self.queries_since_reset.fetch_add(1, Ordering::Relaxed) + 1;
+        let commit_after = self.commit_after_queries.load(Ordering::Relaxed);
+        if commit_after != 0 && query == commit_after {
+            if !self.committed.swap(true, Ordering::Relaxed) {
+                self.commit_count.fetch_add(1, Ordering::Relaxed);
+            }
+        } else if self.committed.load(Ordering::Relaxed) {
             self.postcommit_queries.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -185,9 +204,10 @@ impl CheckedGenericFusion for CheckedOnlyToy {
 
     fn rule_identity(&self) -> RuleIdentity {
         self.identity_queries.fetch_add(1, Ordering::Relaxed);
-        if self.committed.load(Ordering::Relaxed) {
-            self.postcommit_queries.fetch_add(1, Ordering::Relaxed);
-        } else if self.f_queries.load(Ordering::Relaxed) > 0 {
+        self.record_query();
+        if self.commit_after_queries.load(Ordering::Relaxed) == 0
+            && self.f_queries.load(Ordering::Relaxed) > 0
+        {
             self.commit_identity_seen.store(true, Ordering::Relaxed);
         }
         RuleIdentity::from_canonical_bytes::<Self>(
@@ -202,12 +222,12 @@ impl CheckedGenericFusion for CheckedOnlyToy {
 
     fn fusion_style(&self) -> FusionStyleKind {
         self.style_queries.fetch_add(1, Ordering::Relaxed);
-        if self.commit_identity_seen.load(Ordering::Relaxed)
+        self.record_query();
+        if self.commit_after_queries.load(Ordering::Relaxed) == 0
+            && self.commit_identity_seen.load(Ordering::Relaxed)
             && !self.committed.swap(true, Ordering::Relaxed)
         {
             self.commit_count.fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.record_query();
         }
         if self.invalid_style.load(Ordering::Relaxed) {
             FusionStyleKind::Unique
@@ -1745,6 +1765,355 @@ fn failed_checked_admission_does_not_advance_the_runtime_stream() {
     let after_failure = TensorMap::<_, f64>::rand(&runtime_a, [&leg, &leg], [&leg]).unwrap();
     let control = TensorMap::<_, f64>::rand(&runtime_b, [&leg, &leg], [&leg]).unwrap();
     assert_eq!(after_failure.data(), control.data());
+}
+
+#[test]
+fn checked_generic_cat_admits_once_and_queries_only_left_before_commit() {
+    // What: successful catdomain admission uses the left provider Arc once;
+    // admitted identity stamps keep the equal-identity right provider cold,
+    // and copy planning performs no provider query after commit.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let left_provider = Arc::new(CheckedOnlyToy::new(0));
+    let right_provider = Arc::new(CheckedOnlyToy::new(0));
+    let left_common =
+        GradedSpace::try_new(Arc::clone(&left_provider), [(Label::X, 1)], false).unwrap();
+    let right_common =
+        GradedSpace::try_new(Arc::clone(&right_provider), [(Label::X, 1)], false).unwrap();
+    let left_changed =
+        GradedSpace::try_new(Arc::clone(&left_provider), [(Label::X, 1)], false).unwrap();
+    let right_changed =
+        GradedSpace::try_new(Arc::clone(&right_provider), [(Label::X, 2)], false).unwrap();
+    let lhs: TensorMap<_, f64> = TensorMap::from_block_fn(
+        &runtime,
+        [&left_common, &left_common],
+        [&left_changed],
+        |trees, indices| {
+            10.0 + trees.codomain_vertices()[0].get() as f64 + indices.iter().sum::<usize>() as f64
+        },
+    )
+    .unwrap();
+    let rhs: TensorMap<_, f64> = TensorMap::from_block_fn(
+        &runtime,
+        [&right_common, &right_common],
+        [&right_changed],
+        |trees, indices| {
+            20.0 + trees.codomain_vertices()[0].get() as f64 + indices.iter().sum::<usize>() as f64
+        },
+    )
+    .unwrap();
+    let combined = left_changed.oplus(&right_changed).unwrap();
+    for provider in [&left_provider, &right_provider] {
+        for counter in [
+            &provider.identity_queries,
+            &provider.style_queries,
+            &provider.algebra_queries,
+            &provider.coefficient_queries,
+            &provider.f_queries,
+            &provider.r_queries,
+        ] {
+            counter.store(0, Ordering::Relaxed);
+        }
+        provider.reset_commit_spy();
+    }
+    let _: TensorMap<_, f64> =
+        TensorMap::zeros(&runtime, [&left_common, &left_common], [&combined]).unwrap();
+    let mut admission_queries = [
+        left_provider.identity_queries.load(Ordering::Relaxed),
+        left_provider.style_queries.load(Ordering::Relaxed),
+        left_provider.algebra_queries.load(Ordering::Relaxed),
+        left_provider.coefficient_queries.load(Ordering::Relaxed),
+        left_provider.f_queries.load(Ordering::Relaxed),
+        left_provider.r_queries.load(Ordering::Relaxed),
+    ];
+    let admission_query_count = left_provider.queries_since_reset.load(Ordering::Relaxed) - 3;
+    // `zeros` first checks the three supplied leg authorities; cat starts from
+    // already-admitted stamps, so remove exactly those three identity reads.
+    admission_queries[0] -= 3;
+    for counter in [
+        &left_provider.identity_queries,
+        &left_provider.style_queries,
+        &left_provider.algebra_queries,
+        &left_provider.coefficient_queries,
+        &left_provider.f_queries,
+        &left_provider.r_queries,
+    ] {
+        counter.store(0, Ordering::Relaxed);
+    }
+    left_provider.arm_commit_spy_after_queries(admission_query_count);
+
+    let output = lhs.catdomain(&rhs).unwrap();
+
+    assert!(std::ptr::eq(output.provider(), left_provider.as_ref()));
+    assert!(!std::ptr::eq(output.provider(), right_provider.as_ref()));
+    assert_eq!(left_provider.commit_count.load(Ordering::Relaxed), 1);
+    assert_eq!(left_provider.postcommit_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        [
+            left_provider.identity_queries.load(Ordering::Relaxed),
+            left_provider.style_queries.load(Ordering::Relaxed),
+            left_provider.algebra_queries.load(Ordering::Relaxed),
+            left_provider.coefficient_queries.load(Ordering::Relaxed),
+            left_provider.f_queries.load(Ordering::Relaxed),
+            left_provider.r_queries.load(Ordering::Relaxed),
+        ],
+        admission_queries
+    );
+    for counter in [
+        &right_provider.identity_queries,
+        &right_provider.style_queries,
+        &right_provider.algebra_queries,
+        &right_provider.coefficient_queries,
+        &right_provider.f_queries,
+        &right_provider.r_queries,
+        &right_provider.postcommit_queries,
+    ] {
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[test]
+fn checked_generic_cat_precedence_and_admission_failure_are_typed_nonpublishing() {
+    // What: admission stamps, runtime, cat arguments, then output admission
+    // reject in order; every failure leaves both admitted input payloads alone.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let equal = Arc::new(CheckedOnlyToy::new(0));
+    let wrong = Arc::new(CheckedOnlyToy::new(1));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let equal_leg = GradedSpace::try_new(Arc::clone(&equal), [(Label::X, 1)], false).unwrap();
+    let wrong_leg = GradedSpace::try_new(Arc::clone(&wrong), [(Label::X, 1)], false).unwrap();
+    let lhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, indices| {
+            1.0 + indices.iter().sum::<usize>() as f64
+        })
+        .unwrap();
+    let valid_rhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&equal_leg, &equal_leg], [&equal_leg], |_, _| 2.0)
+            .unwrap();
+    let wrong_identity: TensorMap<_, f64> = TensorMap::zeros(
+        &other_runtime,
+        [&wrong_leg, &wrong_leg],
+        [&wrong_leg, &wrong_leg],
+    )
+    .unwrap();
+    let wrong_runtime: TensorMap<_, f64> = TensorMap::zeros(
+        &other_runtime,
+        [&equal_leg, &equal_leg],
+        [&equal_leg, &equal_leg],
+    )
+    .unwrap();
+    let bad_arguments: TensorMap<_, f64> =
+        TensorMap::zeros(&runtime, [&equal_leg, &equal_leg], [&equal_leg, &equal_leg]).unwrap();
+    let lhs_before = lhs.data().to_vec();
+    let rhs_before = valid_rhs.data().to_vec();
+    provider.fail_algebra.store(true, Ordering::Relaxed);
+    for counter in [
+        &provider.identity_queries,
+        &provider.style_queries,
+        &provider.algebra_queries,
+        &provider.coefficient_queries,
+        &provider.f_queries,
+        &provider.r_queries,
+    ] {
+        counter.store(0, Ordering::Relaxed);
+    }
+    provider.reset_commit_spy();
+
+    assert!(matches!(
+        lhs.catdomain(&wrong_identity),
+        Err(GenericTensorError::Facade(
+            tenet::prelude::Error::RuleMismatch
+        ))
+    ));
+    assert!(matches!(
+        lhs.catdomain(&wrong_runtime),
+        Err(GenericTensorError::Facade(
+            tenet::prelude::Error::RuntimeMismatch
+        ))
+    ));
+    assert!(matches!(
+        lhs.catdomain(&bad_arguments),
+        Err(GenericTensorError::Facade(
+            tenet::prelude::Error::InvalidArgument(_)
+        ))
+    ));
+    assert_eq!(provider.identity_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(provider.algebra_queries.load(Ordering::Relaxed), 0);
+
+    assert!(matches!(
+        lhs.catdomain(&valid_rhs),
+        Err(GenericTensorError::Structure(
+            CheckedGenericStructureError::Provider(ToyError::Algebra)
+        ))
+    ));
+    assert_eq!(provider.commit_count.load(Ordering::Relaxed), 0);
+    assert_eq!(lhs.data(), lhs_before);
+    assert_eq!(valid_rhs.data(), rhs_before);
+}
+
+#[cfg(feature = "racah-generated")]
+fn sun_cat_marker(trees: &tenet::typed::BlockFusionTrees<Vec<i64>>) -> usize {
+    trees
+        .codomain_vertices()
+        .iter()
+        .enumerate()
+        .map(|(index, vertex)| (index + 1) * 100 * vertex.get())
+        .chain(
+            trees
+                .domain_vertices()
+                .iter()
+                .enumerate()
+                .map(|(index, vertex)| (index + 1) * 1_000 * vertex.get()),
+        )
+        .sum()
+}
+
+#[cfg(feature = "racah-generated")]
+fn assert_sun_cat_values<D>(
+    output: &TensorMap<tenet::typed::SUNFusionRule, D>,
+    lhs: &TensorMap<tenet::typed::SUNFusionRule, D>,
+    rhs: &TensorMap<tenet::typed::SUNFusionRule, D>,
+    changed_axis: usize,
+    lhs_extent: usize,
+    value: impl Fn(usize) -> D,
+) where
+    D: Copy + fmt::Debug + PartialEq + tenet::typed::TensorScalar,
+{
+    let mut saw_mu_two = false;
+    for output_index in 0..output.block_count() {
+        let trees = output.block_fusion_trees(output_index).unwrap();
+        saw_mu_two |= trees
+            .codomain_vertices()
+            .iter()
+            .chain(trees.domain_vertices())
+            .any(|vertex| vertex.get() == 2);
+        assert!((0..lhs.block_count()).any(|index| lhs.block_fusion_trees(index).unwrap() == trees));
+        assert!((0..rhs.block_count()).any(|index| rhs.block_fusion_trees(index).unwrap() == trees));
+        let block = output.block(output_index).unwrap();
+        let elements = block.shape().iter().product::<usize>();
+        for linear in 0..elements {
+            let mut remainder = linear;
+            let mut indices = Vec::with_capacity(block.shape().len());
+            let mut position = block.offset();
+            for (&extent, &stride) in block.shape().iter().zip(block.strides()) {
+                let index = remainder % extent;
+                remainder /= extent;
+                indices.push(index);
+                position += index * stride;
+            }
+            let (base, local_changed) = if indices[changed_axis] < lhs_extent {
+                (10_000, indices[changed_axis])
+            } else {
+                (20_000, indices[changed_axis] - lhs_extent)
+            };
+            indices[changed_axis] = local_changed;
+            let index_marker = indices
+                .iter()
+                .enumerate()
+                .map(|(axis, index)| (axis + 1) * index)
+                .sum::<usize>();
+            assert_eq!(
+                output.data()[position],
+                value(base + sun_cat_marker(&trees) + index_marker)
+            );
+        }
+    }
+    assert!(saw_mu_two, "SU(N) cat fixture must carry a μ=2 full key");
+}
+
+#[cfg(feature = "racah-generated")]
+fn assert_sun_cat_case<D>(n: usize, label: Vec<i64>, value: impl Fn(usize) -> D + Copy)
+where
+    D: Copy + fmt::Debug + PartialEq + tenet::typed::TensorScalar,
+{
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let left_provider = Arc::new(SUNFusionRule::new(n).unwrap());
+    let right_provider = Arc::new(SUNFusionRule::new(n).unwrap());
+    let left_common =
+        GradedSpace::try_new(Arc::clone(&left_provider), [(label.clone(), 1)], false).unwrap();
+    let right_common =
+        GradedSpace::try_new(Arc::clone(&right_provider), [(label.clone(), 1)], false).unwrap();
+    let left_changed =
+        GradedSpace::try_new(Arc::clone(&left_provider), [(label.clone(), 1)], false).unwrap();
+    let right_changed =
+        GradedSpace::try_new(Arc::clone(&right_provider), [(label.clone(), 2)], false).unwrap();
+    let fill = |base, trees: &tenet::typed::BlockFusionTrees<Vec<i64>>, indices: &[usize]| {
+        value(
+            base + sun_cat_marker(trees)
+                + indices
+                    .iter()
+                    .enumerate()
+                    .map(|(axis, index)| (axis + 1) * index)
+                    .sum::<usize>(),
+        )
+    };
+
+    let domain_lhs: TensorMap<_, D> = TensorMap::from_block_fn(
+        &runtime,
+        [&left_common, &left_common],
+        [&left_changed],
+        |trees, indices| fill(10_000, trees, indices),
+    )
+    .unwrap();
+    let domain_rhs: TensorMap<_, D> = TensorMap::from_block_fn(
+        &runtime,
+        [&right_common, &right_common],
+        [&right_changed],
+        |trees, indices| fill(20_000, trees, indices),
+    )
+    .unwrap();
+    let domain = domain_lhs.catdomain(&domain_rhs).unwrap();
+    assert!(std::ptr::eq(domain.provider(), left_provider.as_ref()));
+    assert!(!std::ptr::eq(domain.provider(), right_provider.as_ref()));
+    assert_eq!(domain.domain()[0].degeneracy(&label).unwrap(), 3);
+    assert_sun_cat_values(&domain, &domain_lhs, &domain_rhs, 2, 1, value);
+    let lazy_domain = domain_lhs
+        .adjoint()
+        .unwrap()
+        .catcodomain(&domain_rhs.adjoint().unwrap())
+        .unwrap();
+    assert_eq!(lazy_domain.data(), domain.adjoint().unwrap().data());
+
+    let codomain_lhs: TensorMap<_, D> = TensorMap::from_block_fn(
+        &runtime,
+        [&left_changed],
+        [&left_common, &left_common],
+        |trees, indices| fill(10_000, trees, indices),
+    )
+    .unwrap();
+    let codomain_rhs: TensorMap<_, D> = TensorMap::from_block_fn(
+        &runtime,
+        [&right_changed],
+        [&right_common, &right_common],
+        |trees, indices| fill(20_000, trees, indices),
+    )
+    .unwrap();
+    let codomain = codomain_lhs.catcodomain(&codomain_rhs).unwrap();
+    assert!(std::ptr::eq(codomain.provider(), left_provider.as_ref()));
+    assert_eq!(codomain.codomain()[0].degeneracy(&label).unwrap(), 3);
+    assert_sun_cat_values(&codomain, &codomain_lhs, &codomain_rhs, 0, 1, value);
+    let lazy_codomain = codomain_lhs
+        .adjoint()
+        .unwrap()
+        .catdomain(&codomain_rhs.adjoint().unwrap())
+        .unwrap();
+    assert_eq!(lazy_codomain.data(), codomain.adjoint().unwrap().data());
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn sun_checked_generic_cat_covers_both_directions_dtypes_and_mu_two_keys() {
+    // What: exact TensorKit direct-sum slab values, μ=2 full-key matching,
+    // distinct equal-identity Arcs, left authority, and lazy-adjoint parity.
+    for (n, label) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
+        assert_sun_cat_case(n, label.clone(), |value| value as f64);
+        assert_sun_cat_case(n, label, |value| {
+            Complex64::new(value as f64, -(value as f64))
+        });
+    }
 }
 
 #[cfg(feature = "racah-generated")]

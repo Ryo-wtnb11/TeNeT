@@ -34,8 +34,9 @@ categorical coefficients are separately constrained by the provider bounds.
 | `permute`, `transpose`, `repartition` | PROVED | PROVED for CU(1); NEEDS-PROOF for ZN | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED |
 | `braid` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED |
 | `twist` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED |
-| `flip`, unit insertion/removal | PROVED | NEEDS-PROOF | PROVED | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | UNSUPPORTED |
-| `catdomain`, `catcodomain` | PROVED | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | UNSUPPORTED |
+| `flip` | PROVED | NEEDS-PROOF | PROVED | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | UNSUPPORTED |
+| unit insertion/removal | PROVED | NEEDS-PROOF | PROVED | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | PROVED |
+| `catdomain`, `catcodomain` | PROVED | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | PROVED in both directions for four SU(3)/SU(4) × f64/c64 cases with μ=2 full-key matching, exact direct-sum slabs, distinct equal-identity Arcs, and lazy-adjoint parity; compact checked-Generic construction remains unsupported |
 | `absorb` | PROVED | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | PROVED for four SU(3)/SU(4) × f64/c64 cases with μ=2 vertex keys, asymmetric min-prefix copy, and lazy-adjoint parity; provider-wide coverage remains open |
 | `otimes` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED |
 | arbitrary `contract`, ordered output, `compose` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED |
@@ -62,11 +63,11 @@ proved typed providers without this qualification.
 
 Provider-mode dispatch now covers transactional root construction, tree
 transforms, `otimes`, `contract`, `compose`, reductions, trace, arithmetic, and
-the current checked-Generic decomposition/spectrum leaves. The remaining
-operation gaps are the concrete residual scope of #640: unit/cat operations,
-factor-returning EIG/EIGH variants, orthogonal/null/polar factors, matrix
-functions, and typed network execution. #662 owns typed provider-error
-propagation and transactional nonpublication as each new row becomes reachable.
+the current checked-Generic unit, cat, decomposition, and spectrum leaves. The
+remaining operation gaps are `twist`, `flip`, factor-returning EIG/EIGH variants,
+orthogonal/null/polar factors, matrix functions, and typed network execution.
+#662 closed through merged #946 after proving typed provider-error propagation
+and transactional nonpublication for the reachable checked-Generic operations.
 
 ## Storage and device matrix
 
@@ -116,7 +117,7 @@ the capability tables have no call path and are intentionally omitted.
 | Host `permute`, `transpose`, `repartition`, `braid` | derives the destination from the source bound space; output retains the source provider allocation | multiplicity-free uses the Runtime tree-transform context/cache; checked Generic uses `tree_transform_dyn_owned_checked_generic_in_context` and its provider-bound checked context | tree-transform pack/replay/scatter; a multiplicity-free lazy adjoint lowers the operation to its parent, while checked Generic currently accepts owned data only | owned output after planning/execution succeeds; overwrite forms preserve the caller destination identity and allocation and do not publish a replacement body |
 | Host `twist` and `flip` | layout-preserving twist, or `derive_from_final_homspace` plus exact layout-identity check for flip | obtains twist/Frobenius-Schur factors from the bound provider; no tensor-result cache | one block-scaled output copy; lazy adjoint redirects to the parent with the inverse operation | fresh owned body; receiver whole-payload cache remains cold |
 | Host unit insertion/removal | derives and validates the unit-leg HomSpace correspondence | canonical-unit provider marker and vacuum identity; no F/R/CGC plan | no dense copy for an owned dense input | new body shares the existing payload `Arc`; compact or lazy input may require one operation-local dense payload first |
-| Host `catdomain`, `catcodomain` | derives the result HomSpace before copying or accumulating payload | provider-bound layout correspondence; no retained prepared object | concatenation or accumulation; conservative lazy-adjoint arms may use `materialized_tensor_uncached()` | fresh owned output; operation-local temporaries are dropped and never enter the receiver `OnceLock` |
+| Host `catdomain`, `catcodomain` | derives the result HomSpace, then admits it with the left operand's exact provider `Arc` | mode root dispatch performs the one output admission; admitted input stamps reject identity mismatch, and no provider query follows successful output admission | compiled direct-sum slab copy; a conservatively declined lazy orientation retries locally after uncached materialization against the same admitted output | fresh owned output only after admission, planning and copy all succeed; operation-local temporaries are dropped and never enter the receiver `OnceLock` |
 | Host `absorb` | preserves the destination admitted space and layout | compares the admitted layout rule-identity stamps; no provider or coefficient query and no retained prepared object | per-block min-prefix copy; lazy inputs may use `materialized_tensor_uncached()` | fresh owned output on the destination admitted space; operation-local temporaries are dropped and never enter the receiver `OnceLock` |
 | Host `otimes` | result space is built from both bound input spaces and retains the left provider allocation | mode dispatch selects multiplicity-free or checked-Generic product authority | `tensorproduct_owned_multiplicity_free` or `tensorproduct_owned_checked_generic`; both currently materialize lazy inputs operation-locally | fresh owned Host body after the complete product succeeds |
 | Host arbitrary `contract`, ordered contract, `compose` | validates runtime/provider/contracted spaces, derives final output order, then allocates the final bound output | mode dispatch selects multiplicity-free oriented lowering or checked-Generic owned lowering; tree/F/R work remains in the corresponding tensor-operation context | `tensorcontract_oriented_multiplicity_free` handles direct/lazy orientations; checked Generic calls `tensorcontract_owned_checked_generic` and rejects lazy inputs | fresh owned output after validation and execution; destination forms validate before replay and preserve destination identity |
@@ -199,10 +200,11 @@ does not imply zero peak copy cost.
    correction through #9; a future implementation leaf must first decide how
    categorical coefficient scalar and payload scalar compose.
 2. **Checked Generic is deliberately partial, not an alternate complete tensor
-   hierarchy.** Complete reductions/decompositions under #640 and network
-   execution under #640 before describing SU(N) as generally supported. #662
-   applies the shared typed error/nonpublication contract to every reachable
-   checked operation.
+   hierarchy.** Close the residual twist/flip, factor-returning EIG/EIGH,
+   orthogonal/null/polar, matrix-function, and network-execution gaps before
+   describing SU(N) as generally supported. Merged #946 closed #662 with the
+   shared typed error/nonpublication contract proved for the reachable checked
+   operations.
 3. **Storage genericity is representation-only today.** Metadata and host
    readback bounds are generic, but ordinary result allocation and execution
    remain Host `Vec<D>` or the explicit narrow CUDA impl. This matches #729's
