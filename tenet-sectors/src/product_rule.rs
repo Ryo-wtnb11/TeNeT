@@ -1,12 +1,40 @@
 use core::marker::PhantomData;
+use core::ops::Mul;
 use std::sync::OnceLock;
 
 use crate::{
     BraidingStyleKind, CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionAlgebraError,
-    FusionRule, FusionStyleKind, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
-    MultiplicityFreeRigidSymbols, ProductSector, ProductSectorCodec, RuleIdentity, SectorCodec,
-    SectorId, SectorVec, TensorKitProductCodec,
+    FusionRule, FusionStyleKind, GenericBraidScalar, MultiplicityFreeFusionRule,
+    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, ProductSector, ProductSectorCodec,
+    PromoteCoefficientScalar, RuleIdentity, SectorCodec, SectorId, SectorVec,
+    TensorKitProductCodec,
 };
+
+/// The coefficient scalar of `Left ⊠ Right`, promoted from its components'.
+type ProductScalar<LeftRule, RightRule> =
+    <<LeftRule as MultiplicityFreeFusionSymbols>::Scalar as PromoteCoefficientScalar<
+        <RightRule as MultiplicityFreeFusionSymbols>::Scalar,
+    >>::Output;
+
+fn promote_left<LeftRule, RightRule>(value: LeftRule::Scalar) -> ProductScalar<LeftRule, RightRule>
+where
+    LeftRule: MultiplicityFreeFusionSymbols,
+    RightRule: MultiplicityFreeFusionSymbols,
+    LeftRule::Scalar: PromoteCoefficientScalar<RightRule::Scalar>,
+{
+    <LeftRule::Scalar as PromoteCoefficientScalar<RightRule::Scalar>>::promote_left(value)
+}
+
+fn promote_right<LeftRule, RightRule>(
+    value: RightRule::Scalar,
+) -> ProductScalar<LeftRule, RightRule>
+where
+    LeftRule: MultiplicityFreeFusionSymbols,
+    RightRule: MultiplicityFreeFusionSymbols,
+    LeftRule::Scalar: PromoteCoefficientScalar<RightRule::Scalar>,
+{
+    <LeftRule::Scalar as PromoteCoefficientScalar<RightRule::Scalar>>::promote_right(value)
+}
 
 /// The Deligne product `Left ⊠ Right` of two providers: one fusion rule over
 /// [`ProductSector<L, R>`](ProductSector) labels whose fusion, dual, F/R and
@@ -385,25 +413,29 @@ where
     }
 }
 
+/// The product's coefficient scalar is the promotion of its components', not a
+/// fixed type: a component with complex F/R data (an anyon model) composes with
+/// a real-coefficient group provider. See [`PromoteCoefficientScalar`].
 impl<LeftRule, RightRule, Codec> MultiplicityFreeFusionSymbols
     for ProductFusionRule<LeftRule, RightRule, Codec>
 where
-    LeftRule: MultiplicityFreeFusionSymbols<Scalar = f64>,
-    RightRule: MultiplicityFreeFusionSymbols<Scalar = f64>,
+    LeftRule: MultiplicityFreeFusionSymbols,
+    RightRule: MultiplicityFreeFusionSymbols,
+    LeftRule::Scalar: PromoteCoefficientScalar<RightRule::Scalar>,
     Codec: ProductSectorCodec + 'static,
 {
-    type Scalar = f64;
+    type Scalar = ProductScalar<LeftRule, RightRule>;
 
     fn has_trivial_associator_gauge(&self) -> bool {
         self.left.has_trivial_associator_gauge() && self.right.has_trivial_associator_gauge()
     }
 
     fn scalar_one(&self) -> Self::Scalar {
-        1.0
+        Self::Scalar::braid_one()
     }
 
     fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-        value
+        value.braid_conj()
     }
 
     fn f_symbol_scalar(
@@ -421,94 +453,113 @@ where
         let (coupled_l, coupled_r) = self.decode_sector_or_panic(coupled);
         let (left_coupled_l, left_coupled_r) = self.decode_sector_or_panic(left_coupled);
         let (right_coupled_l, right_coupled_r) = self.decode_sector_or_panic(right_coupled);
-        self.left.f_symbol_scalar(
+        promote_left::<LeftRule, RightRule>(self.left.f_symbol_scalar(
             left_l,
             middle_l,
             right_l,
             coupled_l,
             left_coupled_l,
             right_coupled_l,
-        ) * self.right.f_symbol_scalar(
+        )) * promote_right::<LeftRule, RightRule>(self.right.f_symbol_scalar(
             left_r,
             middle_r,
             right_r,
             coupled_r,
             left_coupled_r,
             right_coupled_r,
-        )
+        ))
     }
 
     fn r_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar {
         let (left_l, left_r) = self.decode_sector_or_panic(left);
         let (right_l, right_r) = self.decode_sector_or_panic(right);
         let (coupled_l, coupled_r) = self.decode_sector_or_panic(coupled);
-        self.left.r_symbol_scalar(left_l, right_l, coupled_l)
-            * self.right.r_symbol_scalar(left_r, right_r, coupled_r)
+        promote_left::<LeftRule, RightRule>(self.left.r_symbol_scalar(left_l, right_l, coupled_l))
+            * promote_right::<LeftRule, RightRule>(
+                self.right.r_symbol_scalar(left_r, right_r, coupled_r),
+            )
     }
 }
 
 impl<LeftRule, RightRule, Codec> MultiplicityFreeRigidSymbols
     for ProductFusionRule<LeftRule, RightRule, Codec>
 where
-    LeftRule: MultiplicityFreeRigidSymbols<Scalar = f64>,
-    RightRule: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    LeftRule: MultiplicityFreeRigidSymbols,
+    RightRule: MultiplicityFreeRigidSymbols,
+    LeftRule::Scalar: PromoteCoefficientScalar<RightRule::Scalar>,
+    // The A/B overrides below delegate to each component's own default body,
+    // which is stated over that component's scalar.
+    LeftRule::Scalar: Mul<Output = LeftRule::Scalar>,
+    RightRule::Scalar: Mul<Output = RightRule::Scalar>,
     // Sync via the trait's supertrait; the codec is a PhantomData marker.
     Codec: ProductSectorCodec + Sync + 'static,
 {
     fn dim_scalar(&self, sector: SectorId) -> Self::Scalar {
         let (left, right) = self.decode_sector_or_panic(sector);
-        self.left.dim_scalar(left) * self.right.dim_scalar(right)
+        promote_left::<LeftRule, RightRule>(self.left.dim_scalar(left))
+            * promote_right::<LeftRule, RightRule>(self.right.dim_scalar(right))
     }
 
     fn inv_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
         let (left, right) = self.decode_sector_or_panic(sector);
-        self.left.inv_dim_scalar(left) * self.right.inv_dim_scalar(right)
+        promote_left::<LeftRule, RightRule>(self.left.inv_dim_scalar(left))
+            * promote_right::<LeftRule, RightRule>(self.right.inv_dim_scalar(right))
     }
 
     fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
         let (left, right) = self.decode_sector_or_panic(sector);
-        self.left.sqrt_dim_scalar(left) * self.right.sqrt_dim_scalar(right)
+        promote_left::<LeftRule, RightRule>(self.left.sqrt_dim_scalar(left))
+            * promote_right::<LeftRule, RightRule>(self.right.sqrt_dim_scalar(right))
     }
 
     fn inv_sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar {
         let (left, right) = self.decode_sector_or_panic(sector);
-        self.left.inv_sqrt_dim_scalar(left) * self.right.inv_sqrt_dim_scalar(right)
+        promote_left::<LeftRule, RightRule>(self.left.inv_sqrt_dim_scalar(left))
+            * promote_right::<LeftRule, RightRule>(self.right.inv_sqrt_dim_scalar(right))
     }
 
     fn twist_scalar(&self, sector: SectorId) -> Self::Scalar {
         let (left, right) = self.decode_sector_or_panic(sector);
-        self.left.twist_scalar(left) * self.right.twist_scalar(right)
+        promote_left::<LeftRule, RightRule>(self.left.twist_scalar(left))
+            * promote_right::<LeftRule, RightRule>(self.right.twist_scalar(right))
     }
 
     fn frobenius_schur_phase_scalar(&self, sector: SectorId) -> Self::Scalar {
         let (left, right) = self.decode_sector_or_panic(sector);
-        self.left.frobenius_schur_phase_scalar(left)
-            * self.right.frobenius_schur_phase_scalar(right)
+        promote_left::<LeftRule, RightRule>(self.left.frobenius_schur_phase_scalar(left))
+            * promote_right::<LeftRule, RightRule>(self.right.frobenius_schur_phase_scalar(right))
     }
 
     fn a_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar {
         let (left_l, left_r) = self.decode_sector_or_panic(left);
         let (right_l, right_r) = self.decode_sector_or_panic(right);
         let (coupled_l, coupled_r) = self.decode_sector_or_panic(coupled);
-        self.left.a_symbol_scalar(left_l, right_l, coupled_l)
-            * self.right.a_symbol_scalar(left_r, right_r, coupled_r)
+        promote_left::<LeftRule, RightRule>(self.left.a_symbol_scalar(left_l, right_l, coupled_l))
+            * promote_right::<LeftRule, RightRule>(
+                self.right.a_symbol_scalar(left_r, right_r, coupled_r),
+            )
     }
 
     fn b_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar {
         let (left_l, left_r) = self.decode_sector_or_panic(left);
         let (right_l, right_r) = self.decode_sector_or_panic(right);
         let (coupled_l, coupled_r) = self.decode_sector_or_panic(coupled);
-        self.left.b_symbol_scalar(left_l, right_l, coupled_l)
-            * self.right.b_symbol_scalar(left_r, right_r, coupled_r)
+        promote_left::<LeftRule, RightRule>(self.left.b_symbol_scalar(left_l, right_l, coupled_l))
+            * promote_right::<LeftRule, RightRule>(
+                self.right.b_symbol_scalar(left_r, right_r, coupled_r),
+            )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use num_complex::Complex64;
+
     use crate::{
-        CanonicalUnitFusionRule, FermionParityFusionRule, MultiplicityFreeFusionSymbols,
-        U1FusionRule, U1Irrep, Z2Irrep,
+        BraidingStyleKind, CanonicalUnitFusionRule, FermionParityFusionRule, FibonacciFusionRule,
+        FusionStyleKind, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, SectorId,
+        U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
     };
 
     #[test]
@@ -566,5 +617,130 @@ mod tests {
             rule.rule_identity(),
             product_fusion_rule(U1FusionRule, FermionParityFusionRule).rule_identity()
         );
+    }
+
+    // Oracle for the two tests below: TensorKitSectors 0.3.6 through
+    // TensorKit 0.17, queried for `FibonacciAnyon ⊠ Z2Irrep` with
+    // `t1 = FibonacciAnyon(:τ) ⊠ Z2Irrep(1)`. Recorded verbatim:
+    //
+    //   FusionStyle           = SimpleFusion()
+    //   BraidingStyle         = Anyonic()
+    //   sectorscalartype      = ComplexF64
+    //   t1 ⊗ t1               = [(:I, 0), (:τ, 0)]
+    //   dim(t1)               = 1.618033988749895
+    //   twist(t1)             = -0.8090169943749473 - 0.5877852522924734im
+    //   frobeniusschur(t1)    = 1.0
+    //   R(t1,t1,(:I,0))       = -0.8090169943749476 + 0.587785252292473im
+    //   R(t1,t1,(:τ,0))       = -0.30901699437494734 - 0.9510565162951536im
+    //   F(t1,t1,t1,t1,e,f)    = 0.6180339887498948   (e,f) = ((:I,0),(:I,0))
+    //                           0.7861513777574233   (e,f) = ((:I,0),(:τ,0))
+    //                           0.7861513777574233   (e,f) = ((:τ,0),(:I,0))
+    //                          -0.6180339887498948   (e,f) = ((:τ,0),(:τ,0))
+    const TK_TOLERANCE: f64 = 1e-12;
+
+    fn assert_close(actual: Complex64, expected: Complex64) {
+        assert!(
+            (actual - expected).norm() <= TK_TOLERANCE,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn product_promotes_a_complex_component_scalar() {
+        // What: a multiplicity-free product whose components disagree on the
+        // coefficient scalar is representable, and its topological data is the
+        // componentwise product promoted to the wider scalar.
+        let rule = product_fusion_rule(FibonacciFusionRule, Z2FusionRule);
+        let tau = SectorId::new(1);
+        let vacuum_fib = SectorId::new(0);
+        let t1 = rule.encode_sector(tau, Z2Irrep::ODD.into());
+        let i0 = rule.encode_sector(vacuum_fib, Z2Irrep::EVEN.into());
+        let tau0 = rule.encode_sector(tau, Z2Irrep::EVEN.into());
+
+        assert_eq!(rule.fusion_style(), FusionStyleKind::Simple);
+        assert_eq!(rule.braiding_style(), BraidingStyleKind::Anyonic);
+        assert_eq!(rule.vacuum(), i0);
+
+        let mut channels = rule.fusion_channels(t1, t1).to_vec();
+        channels.sort_unstable();
+        assert_eq!(channels, vec![i0, tau0]);
+
+        assert_close(
+            rule.dim_scalar(t1),
+            Complex64::new(1.618_033_988_749_895, 0.0),
+        );
+        assert_close(
+            rule.twist_scalar(t1),
+            Complex64::new(-0.809_016_994_374_947_3, -0.587_785_252_292_473_4),
+        );
+        assert_close(
+            rule.frobenius_schur_phase_scalar(t1),
+            Complex64::new(1.0, 0.0),
+        );
+        assert_close(
+            rule.r_symbol_scalar(t1, t1, i0),
+            Complex64::new(-0.809_016_994_374_947_6, 0.587_785_252_292_473),
+        );
+        assert_close(
+            rule.r_symbol_scalar(t1, t1, tau0),
+            Complex64::new(-0.309_016_994_374_947_34, -0.951_056_516_295_153_6),
+        );
+        for (left_coupled, right_coupled, expected) in [
+            (i0, i0, 0.618_033_988_749_894_8),
+            (i0, tau0, 0.786_151_377_757_423_3),
+            (tau0, i0, 0.786_151_377_757_423_3),
+            (tau0, tau0, -0.618_033_988_749_894_8),
+        ] {
+            assert_close(
+                rule.f_symbol_scalar(t1, t1, t1, t1, left_coupled, right_coupled),
+                Complex64::new(expected, 0.0),
+            );
+        }
+
+        // The promoted unit and conjugation are the wider scalar's, not the
+        // left component's.
+        assert_eq!(rule.scalar_one(), Complex64::new(1.0, 0.0));
+        assert_close(
+            rule.scalar_conj(rule.r_symbol_scalar(t1, t1, i0)),
+            Complex64::new(-0.809_016_994_374_947_6, -0.587_785_252_292_473),
+        );
+    }
+
+    #[test]
+    fn product_promotion_is_component_order_independent() {
+        // What: promotion does not depend on which side carries the wider
+        // scalar; TensorKitSectors promotes rather than taking the left type.
+        let forward = product_fusion_rule(FibonacciFusionRule, Z2FusionRule);
+        let reversed = product_fusion_rule(Z2FusionRule, FibonacciFusionRule);
+        let tau = SectorId::new(1);
+        let vacuum_fib = SectorId::new(0);
+
+        let forward_t1 = forward.encode_sector(tau, Z2Irrep::ODD.into());
+        let forward_i0 = forward.encode_sector(vacuum_fib, Z2Irrep::EVEN.into());
+        let reversed_t1 = reversed.encode_sector(Z2Irrep::ODD.into(), tau);
+        let reversed_i0 = reversed.encode_sector(Z2Irrep::EVEN.into(), vacuum_fib);
+
+        assert_close(
+            reversed.r_symbol_scalar(reversed_t1, reversed_t1, reversed_i0),
+            forward.r_symbol_scalar(forward_t1, forward_t1, forward_i0),
+        );
+        assert_close(
+            reversed.dim_scalar(reversed_t1),
+            forward.dim_scalar(forward_t1),
+        );
+    }
+
+    #[test]
+    fn product_of_real_components_keeps_the_real_scalar() {
+        // What: promotion must not widen a product whose components are both
+        // real; the existing providers keep f64 coefficients and values.
+        let rule = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
+        let odd_zero = rule.encode_sector(Z2Irrep::ODD.into(), U1Irrep::new(0).into());
+        let vacuum = rule.vacuum();
+        let one: f64 = rule.scalar_one();
+
+        assert_eq!(one, 1.0);
+        assert_eq!(rule.r_symbol_scalar(odd_zero, odd_zero, vacuum), -1.0);
+        assert_eq!(rule.dim_scalar(odd_zero), 1.0);
     }
 }

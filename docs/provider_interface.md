@@ -192,8 +192,12 @@ path.
 ## Products
 
 `ProductFusionRule<Left, Right, Codec>` is itself a provider, so products nest.
-Use `PackedProductCodec` (fixed-width, association-independent) unless you need
-the legacy Cantor pairing for id compatibility. Component order and association
+The product's coefficient scalar is the promotion of its components'
+(`PromoteCoefficientScalar`), following TensorKitSectors'
+`fusionscalartype(ProductSector)`: components need not agree, and a complex
+component widens the product. Use `PackedProductCodec` (fixed-width,
+association-independent) unless you need the legacy Cantor pairing for id
+compatibility. Component order and association
 are part of the Rust type and of the `ProductSector` label; `U(1) ⊠ fZ2` and
 `fZ2 ⊠ U(1)` are different providers, never automatically equivalent.
 
@@ -206,9 +210,6 @@ Honest list, at the commit that introduced this document:
   that decodes a sector once at the miss boundary instead of round-tripping
   `SectorId` per channel. You cannot implement it. Your provider takes the same
   semantic path and pays a constant factor there.
-- **Product coefficient scalar.** `ProductFusionRule` requires
-  `Scalar = f64` on both components, so a product with a complex-coefficient
-  component does not type-check.
 - **Complex coefficients through the typed facade.** A provider with
   `Scalar = Complex64` is expert-layer only until the typed coefficient lane is
   parameterized.

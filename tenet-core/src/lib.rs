@@ -29,10 +29,10 @@ pub use tenet_sectors::{
     MultiplicityFreeAdmissionMode, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
     MultiplicityFreeRigidSymbols, PackedProductCodec, PackedSectorLayout, ProductFusionRule,
     ProductFusionRuleExt, ProductSector, ProductSectorCodec, ProductSectorCodecError,
-    ProductSectorComponent, ProductSectorLayout, RuleIdentity, SU2FusionRule, SU2Irrep,
-    SectorCodec, SectorId, SectorVec, Su2SectorLayout, SymbolShapeError, TensorKitProductCodec,
-    TypedSectorAdmission, U1FusionRule, U1Irrep, U1SectorLayout, Z2FusionRule, Z2Irrep,
-    ZNFusionRule, ZNIrrep, CU1_MAX_TWICE_CHARGE, SU2_MAX_DOUBLED_SPIN,
+    ProductSectorComponent, ProductSectorLayout, PromoteCoefficientScalar, RuleIdentity,
+    SU2FusionRule, SU2Irrep, SectorCodec, SectorId, SectorVec, Su2SectorLayout, SymbolShapeError,
+    TensorKitProductCodec, TypedSectorAdmission, U1FusionRule, U1Irrep, U1SectorLayout,
+    Z2FusionRule, Z2Irrep, ZNFusionRule, ZNIrrep, CU1_MAX_TWICE_CHARGE, SU2_MAX_DOUBLED_SPIN,
 };
 #[cfg(feature = "racah-generated")]
 pub use tenet_sectors::{SUNFusionRule, SUNFusionRuleError};

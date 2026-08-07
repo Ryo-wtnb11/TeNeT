@@ -858,6 +858,78 @@ pub trait GenericBraidScalar: Clone + Add<Output = Self> + Mul<Output = Self> {
     fn braid_is_zero(&self) -> bool;
 }
 
+/// The coefficient scalar a product category carries, given its components'.
+///
+/// TensorKitSectors derives it by promotion rather than by requiring the
+/// components to agree: `fusionscalartype(ProductSector{T}) =
+/// typeof(prod(zero ∘ fusionscalartype, _sectors(T)))` (0.3.6,
+/// `src/product.jl:218-219`, and `:230-231` for `sectorscalartype`), because
+/// the product's symbols are the componentwise products of the components'
+/// (`:95-100`, `:126-131`). Julia gets that from `promote_type`; Rust has no
+/// such operation, so the promotion is spelled out here.
+///
+/// Why a closed set of implementations rather than a numeric-tower
+/// abstraction: the admitted coefficient scalars are `f64` and [`Complex64`],
+/// the promotion between them is total, and a fifth case would be a new
+/// categorical decision rather than a new arithmetic one.
+pub trait PromoteCoefficientScalar<Rhs> {
+    /// The promoted scalar. `GenericBraidScalar` supplies the unit,
+    /// conjugation and product the promoted symbols are combined with.
+    type Output: GenericBraidScalar + Clone + Send + Sync;
+
+    fn promote_left(value: Self) -> Self::Output;
+
+    fn promote_right(value: Rhs) -> Self::Output;
+}
+
+impl PromoteCoefficientScalar<f64> for f64 {
+    type Output = f64;
+
+    fn promote_left(value: Self) -> Self::Output {
+        value
+    }
+
+    fn promote_right(value: f64) -> Self::Output {
+        value
+    }
+}
+
+impl PromoteCoefficientScalar<Complex64> for f64 {
+    type Output = Complex64;
+
+    fn promote_left(value: Self) -> Self::Output {
+        Complex64::new(value, 0.0)
+    }
+
+    fn promote_right(value: Complex64) -> Self::Output {
+        value
+    }
+}
+
+impl PromoteCoefficientScalar<f64> for Complex64 {
+    type Output = Complex64;
+
+    fn promote_left(value: Self) -> Self::Output {
+        value
+    }
+
+    fn promote_right(value: f64) -> Self::Output {
+        Complex64::new(value, 0.0)
+    }
+}
+
+impl PromoteCoefficientScalar<Complex64> for Complex64 {
+    type Output = Complex64;
+
+    fn promote_left(value: Self) -> Self::Output {
+        value
+    }
+
+    fn promote_right(value: Complex64) -> Self::Output {
+        value
+    }
+}
+
 impl GenericBraidScalar for f64 {
     fn braid_zero() -> Self {
         0.0

@@ -503,9 +503,10 @@ consequences worth knowing before you pick an order:
   `fZ2 ⊠ U(1)` are both legal and are different providers; a tensor built with
   one does not compose with a tensor built with the other. Fix the order once,
   at the top of your model.
-- **Every component must currently use `f64` coefficients.** All the built-in
-  group providers do. A component with complex F/R data, such as
-  `FibonacciFusionRule`, does not type-check inside a product yet.
+- **The coefficient scalar is promoted, not fixed.** A product of two
+  real-coefficient providers stays real; a component with complex F/R data,
+  such as `FibonacciFusionRule`, widens the product to `Complex64`. Tensors
+  over such a product need a complex payload.
 
 To use a symmetry that is not built in, implement the provider traits in your
 own crate — nothing in the engine enumerates symmetries, so an external
@@ -901,6 +902,3 @@ Honest list, as of this writing:
 - **Memory-bounded slicing is planned but not executable yet**: the
   slicing planner IR is ported, the sliced executor over symmetric legs
   is future work (sector-granular slicing).
-- **Products require `f64` coefficients on every component**, so a product
-  containing a complex-coefficient provider such as `FibonacciFusionRule` does
-  not type-check. See `docs/provider_interface.md`.
