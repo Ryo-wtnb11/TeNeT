@@ -888,6 +888,15 @@ fn sun_checked_generic_compact_qr_preserves_provider_and_reconstructs() {
         .unwrap();
 
     let (q, r) = source.qr_compact().unwrap();
+    let (orth_q, orth_r) = source.left_orth().unwrap();
+    assert_eq!(orth_q.data(), q.data());
+    assert_eq!(orth_r.data(), r.data());
+    assert!(std::ptr::eq(orth_q.provider(), q.provider()));
+    assert!(std::ptr::eq(orth_r.provider(), r.provider()));
+    assert_eq!(orth_q.codomain(), q.codomain());
+    assert_eq!(orth_q.domain(), q.domain());
+    assert_eq!(orth_r.codomain(), r.codomain());
+    assert_eq!(orth_r.domain(), r.domain());
     assert!(std::ptr::eq(q.provider(), provider.as_ref()));
     assert!(std::ptr::eq(r.provider(), provider.as_ref()));
     let rebuilt = q.compose(&r).unwrap();
@@ -899,6 +908,21 @@ fn sun_checked_generic_compact_qr_preserves_provider_and_reconstructs() {
 
     let complex = source.to_c64();
     let (complex_q, complex_r) = complex.qr_compact().unwrap();
+    let (complex_orth_q, complex_orth_r) = complex.left_orth().unwrap();
+    assert_eq!(complex_orth_q.data(), complex_q.data());
+    assert_eq!(complex_orth_r.data(), complex_r.data());
+    assert!(std::ptr::eq(
+        complex_orth_q.provider(),
+        complex_q.provider()
+    ));
+    assert!(std::ptr::eq(
+        complex_orth_r.provider(),
+        complex_r.provider()
+    ));
+    assert_eq!(complex_orth_q.codomain(), complex_q.codomain());
+    assert_eq!(complex_orth_q.domain(), complex_q.domain());
+    assert_eq!(complex_orth_r.codomain(), complex_r.codomain());
+    assert_eq!(complex_orth_r.domain(), complex_r.domain());
     assert!(std::ptr::eq(complex_q.provider(), provider.as_ref()));
     assert!(std::ptr::eq(complex_r.provider(), provider.as_ref()));
     let complex_rebuilt = complex_q.compose(&complex_r).unwrap();
@@ -1011,6 +1035,15 @@ fn sun_checked_generic_compact_lq_preserves_provider_and_reconstructs() {
         .unwrap();
 
     let (l, q) = source.lq_compact().unwrap();
+    let (orth_l, orth_q) = source.right_orth().unwrap();
+    assert_eq!(orth_l.data(), l.data());
+    assert_eq!(orth_q.data(), q.data());
+    assert!(std::ptr::eq(orth_l.provider(), l.provider()));
+    assert!(std::ptr::eq(orth_q.provider(), q.provider()));
+    assert_eq!(orth_l.codomain(), l.codomain());
+    assert_eq!(orth_l.domain(), l.domain());
+    assert_eq!(orth_q.codomain(), q.codomain());
+    assert_eq!(orth_q.domain(), q.domain());
     assert!(std::ptr::eq(l.provider(), provider.as_ref()));
     assert!(std::ptr::eq(q.provider(), provider.as_ref()));
     let rebuilt = l.compose(&q).unwrap();
@@ -1022,6 +1055,21 @@ fn sun_checked_generic_compact_lq_preserves_provider_and_reconstructs() {
 
     let complex = source.to_c64();
     let (complex_l, complex_q) = complex.lq_compact().unwrap();
+    let (complex_orth_l, complex_orth_q) = complex.right_orth().unwrap();
+    assert_eq!(complex_orth_l.data(), complex_l.data());
+    assert_eq!(complex_orth_q.data(), complex_q.data());
+    assert!(std::ptr::eq(
+        complex_orth_l.provider(),
+        complex_l.provider()
+    ));
+    assert!(std::ptr::eq(
+        complex_orth_q.provider(),
+        complex_q.provider()
+    ));
+    assert_eq!(complex_orth_l.codomain(), complex_l.codomain());
+    assert_eq!(complex_orth_l.domain(), complex_l.domain());
+    assert_eq!(complex_orth_q.codomain(), complex_q.codomain());
+    assert_eq!(complex_orth_q.domain(), complex_q.domain());
     assert!(std::ptr::eq(complex_l.provider(), provider.as_ref()));
     assert!(std::ptr::eq(complex_q.provider(), provider.as_ref()));
     let complex_rebuilt = complex_l.compose(&complex_q).unwrap();
@@ -1223,6 +1271,13 @@ fn checked_generic_compact_qr_failure_is_typed_and_nonpublishing() {
         ))
     ));
     assert_eq!(source.data(), before.as_slice());
+    assert!(matches!(
+        source.left_orth(),
+        Err(GenericTensorError::Plan(
+            tenet::typed::CheckedGenericPlanError::Provider(ToyError::Algebra)
+        ))
+    ));
+    assert_eq!(source.data(), before.as_slice());
 }
 
 #[test]
@@ -1258,6 +1313,13 @@ fn checked_generic_compact_lq_failure_is_typed_and_nonpublishing() {
         error,
         GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Provider(
             ToyError::Algebra
+        ))
+    ));
+    assert_eq!(source.data(), before.as_slice());
+    assert!(matches!(
+        source.right_orth(),
+        Err(GenericTensorError::Plan(
+            tenet::typed::CheckedGenericPlanError::Provider(ToyError::Algebra)
         ))
     ));
     assert_eq!(source.data(), before.as_slice());

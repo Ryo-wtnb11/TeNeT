@@ -878,6 +878,19 @@ where
     pub fn qr_compact(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorQrDispatch<R, D>>::qr_compact(self)
     }
+
+    /// TensorKit 0.17 `left_orth`: the left isometry factorization
+    /// `t = v * c`, `v` isometric and `c` the corestriction.
+    ///
+    /// TensorKit's default `kind` is `:qr`, so this delegates directly to
+    /// [`Self::qr_compact`].
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::qr_compact`]'s.
+    pub fn left_orth(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
+        self.qr_compact()
+    }
 }
 
 impl<R, D> TensorMap<R, D>
@@ -906,6 +919,19 @@ where
     /// TensorKit compact LQ dispatched by provider mode.
     pub fn lq_compact(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
         <R::Mode as TypedTensorLqDispatch<R, D>>::lq_compact(self)
+    }
+
+    /// TensorKit 0.17 `right_orth`: the right isometry factorization
+    /// `t = c * vh`, `vh` carrying orthonormal rows.
+    ///
+    /// TensorKit's default `kind` is `:lq`, so this is [`Self::lq_compact`];
+    /// see [`Self::left_orth`] for why it is a delegation.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`Self::lq_compact`]'s.
+    pub fn right_orth(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
+        self.lq_compact()
     }
 }
 
@@ -11313,32 +11339,6 @@ where
         let mut dense = self.runtime.lease_dense();
         let (l, q) = tenet_matrixalgebra::lq_full_dyn(dense.dense(), &self.bound_ref()?)?;
         Ok((self.wrap_bound_factor(l), self.wrap_bound_factor(q)))
-    }
-
-    /// TensorKit 0.17 `left_orth`: the left isometry factorization
-    /// `t = v * c`, `v` isometric and `c` the corestriction.
-    ///
-    /// TensorKit's default `kind` is `:qr`, so this delegates directly to
-    /// [`Self::qr_compact`].
-    ///
-    /// # Errors
-    ///
-    /// Exactly [`Self::qr_compact`]'s.
-    pub fn left_orth(&self) -> Result<(Self, Self), Error> {
-        self.qr_compact()
-    }
-
-    /// TensorKit 0.17 `right_orth`: the right isometry factorization
-    /// `t = c * vh`, `vh` carrying orthonormal rows.
-    ///
-    /// TensorKit's default `kind` is `:lq`, so this is [`Self::lq_compact`];
-    /// see [`Self::left_orth`] for why it is a delegation.
-    ///
-    /// # Errors
-    ///
-    /// Exactly [`Self::lq_compact`]'s.
-    pub fn right_orth(&self) -> Result<(Self, Self), Error> {
-        self.lq_compact()
     }
 
     /// TensorKit 0.17 / MatrixAlgebraKit `left_null`: `n : codomain <- W` with
