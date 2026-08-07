@@ -2435,7 +2435,7 @@ fn checked_generic_pinv_uses_a_strict_global_cutoff() {
 }
 
 #[cfg(feature = "racah-generated")]
-fn assert_sun_checked_generic_pinv<D>(n: usize, label: Vec<i64>)
+fn assert_sun_checked_generic_pinv<D>(n: usize, label: Vec<i64>, close: impl Fn(D, D) -> f64)
 where
     D: tenet::typed::TensorScalar + fmt::Debug + PartialEq,
 {
@@ -2448,13 +2448,15 @@ where
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, index| {
             let row = index[0] + 2 * index[1];
             let column = index[2] + 2 * index[3];
-            D::from_real(
-                if trees.codomain_vertices() == trees.domain_vertices() && row == column {
+            D::from_real(if trees.codomain_vertices() == trees.domain_vertices() {
+                if row == column {
                     2.0
                 } else {
                     0.0
-                },
-            )
+                }
+            } else {
+                0.125
+            })
         })
         .unwrap();
     assert!((0..source.block_count()).any(|index| {
@@ -2470,24 +2472,49 @@ where
     assert!(std::ptr::eq(pseudo.provider(), provider.as_ref()));
     assert_eq!(pseudo.codomain(), source.domain());
     assert_eq!(pseudo.domain(), source.codomain());
-    let expected = source.scale(D::from_real(0.5));
-    for product in [
-        source.compose(&pseudo).unwrap(),
-        pseudo.compose(&source).unwrap(),
-    ] {
-        assert_eq!(product.data(), expected.data());
+    for (actual, expected) in source
+        .compose(&pseudo)
+        .unwrap()
+        .compose(&source)
+        .unwrap()
+        .data()
+        .iter()
+        .zip(source.data())
+    {
+        assert!(close(*actual, *expected) < 1e-9);
+    }
+    for (actual, expected) in pseudo
+        .compose(&source)
+        .unwrap()
+        .compose(&pseudo)
+        .unwrap()
+        .data()
+        .iter()
+        .zip(pseudo.data())
+    {
+        assert!(close(*actual, *expected) < 1e-9);
     }
     let lazy = source.adjoint().unwrap();
     let lazy_pseudo = lazy.pinv(1e-12).unwrap();
-    assert_eq!(lazy_pseudo.data(), pseudo.adjoint().unwrap().data());
+    for (actual, expected) in lazy_pseudo
+        .data()
+        .iter()
+        .zip(pseudo.adjoint().unwrap().data())
+    {
+        assert!(close(*actual, *expected) < 1e-9);
+    }
 }
 
 #[cfg(feature = "racah-generated")]
 #[test]
-fn sun_checked_generic_pinv_preserves_full_keys_for_both_dtypes() {
+fn sun_checked_generic_pinv_cross_mu_full_keys_for_both_dtypes() {
     for (n, label) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
-        assert_sun_checked_generic_pinv::<f64>(n, label.clone());
-        assert_sun_checked_generic_pinv::<Complex64>(n, label);
+        assert_sun_checked_generic_pinv::<f64>(n, label.clone(), |actual, expected| {
+            (actual - expected).abs()
+        });
+        assert_sun_checked_generic_pinv::<Complex64>(n, label, |actual, expected| {
+            (actual - expected).norm()
+        });
     }
 }
 

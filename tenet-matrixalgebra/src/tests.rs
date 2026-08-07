@@ -6859,6 +6859,52 @@ fn solve_left_direct_into_rejects_foreign_authority_and_wrong_output_before_exec
 }
 
 #[test]
+fn pinv_direct_into_rejects_foreign_authority_and_wrong_output_before_execution() {
+    // What: the checked-Generic pinv seam treats its admitted destination as
+    // a sealed input, before it allocates staging or invokes SVD/GEMM.
+    let (base, data) = generic_factorization_input();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let source =
+        BoundDynamicFusionMapSpace::bind_generic(base.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&source, &data).unwrap();
+    let expected = FusionTreeHomSpace::new(
+        source.space().homspace().domain().clone(),
+        source.space().homspace().codomain().clone(),
+    );
+
+    let foreign = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::new(LateGenericSpy {
+            rule: FactorGenericRule,
+            fail_at: usize::MAX,
+            calls: Cell::new(0),
+        }),
+        expected.clone(),
+    )
+    .unwrap();
+    let error = pinv_direct_into_dyn(&mut RejectExecutorCalls, &input, foreign, 0.0).unwrap_err();
+    assert!(matches!(error, OperationError::StructureMismatch { .. }));
+
+    let wrong = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        provider,
+        FusionTreeHomSpace::new(
+            source.space().homspace().domain().clone(),
+            FusionProductSpace::new([
+                SectorLeg::new([(SectorId::new(1), 1)], false),
+                SectorLeg::new([(SectorId::new(1), 1)], false),
+            ]),
+        ),
+    )
+    .unwrap();
+    let error = pinv_direct_into_dyn(&mut RejectExecutorCalls, &input, wrong, 0.0).unwrap_err();
+    assert!(matches!(error, OperationError::StructureMismatch { .. }));
+}
+
+#[test]
 fn solve_left_direct_into_rejects_late_tree_route_before_execution() {
     // What: an admitted output with the right identity and HomSpace still
     // cannot reinterpret a different coupled-tree basis.
