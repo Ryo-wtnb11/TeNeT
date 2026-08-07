@@ -77,11 +77,10 @@ constructor. Factor order and association are structure of the Rust type and of
 the `ProductSector` label, never an automatic equivalence: `U(1) ⊠ fZ2` and
 `fZ2 ⊠ U(1)` are both legal and are different types.
 
-The combinator currently admits one coefficient scalar: both components must
-have `Scalar = f64`. Every built-in group provider satisfies that, but a
-multiplicity-free provider with complex topological data does not, so a product
-with `FibonacciFusionRule` as a component cannot be named yet. That is a
-restriction of the combinator, not of the component providers.
+The product's coefficient scalar is promoted from its components', as in
+TensorKitSectors, so a component with complex topological data composes with a
+real-coefficient group provider: `Fibonacci ⊠ Z2` carries `Complex64`
+coefficients while `fZ2 ⊠ U(1)` stays real.
 
 The ordinary user API is `GradedSpace<R>` / `TensorMap<R, D, S>`. It keeps `R`
 concrete, returns the provider's own labels (`SectorCodec::Sector`), and keeps
@@ -330,9 +329,6 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
 - External planners use dense effective dimensions. Symmetric block execution,
   fusion-tree bookkeeping, fermionic signs, and storage layout remain TeNeT
   execution responsibilities.
-- `ProductFusionRule` requires `Scalar = f64` on both components, so products
-  involving a complex-coefficient provider such as `FibonacciFusionRule` do not
-  type-check. See [`docs/provider_interface.md`](docs/provider_interface.md).
 - The fast cold layout enumeration is behind a sealed trait implemented for the
   built-in providers only. External providers are semantically equal and pay a
   constant factor on that path.
