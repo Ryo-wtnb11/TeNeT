@@ -982,8 +982,9 @@ where
     ///
     /// # Complexity
     ///
-    /// Compact input (TensorKit's `DiagonalTensorMap`, what the factorizations
-    /// hand back): the **O(rank) elementwise arm** over the `Σ_c k_c` stored
+    /// Compact input (the existing multiplicity-free/TensorKit
+    /// `DiagonalTensorMap` path, what those factorizations hand back): the
+    /// **O(rank) elementwise arm** over the `Σ_c k_c` stored
     /// values, staying compact — so `s.sqrt()` and the two `compose`s around it
     /// are all bond scalings. Dense input: `O(Σ_c n_c²)`, one walk over the
     /// block-diagonal buffer, which is what the off-diagonal check costs; the
@@ -15863,12 +15864,22 @@ mod representation_gates {
         let expected = source.sqrt().unwrap();
         let lazy = source.adjoint().unwrap();
         let actual = lazy.sqrt().unwrap();
+        assert!(matches!(&actual.repr, TypedTensorRepr::Owned(_)));
         assert_eq!(actual.data(), expected.data());
         assert!(std::ptr::eq(actual.provider(), expected.provider()));
         assert_eq!(actual.codomain(), expected.codomain());
         assert_eq!(actual.domain(), expected.domain());
         assert!(actual.runtime().shares_state_with(expected.runtime()));
         assert_eq!(materialized_adjoint_builds(&lazy), 0);
+
+        let nonbond: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, _| 1.0).unwrap();
+        let lazy_nonbond = nonbond.adjoint().unwrap();
+        assert!(matches!(
+            lazy_nonbond.sqrt(),
+            Err(Error::InvalidArgument(_))
+        ));
+        assert_eq!(materialized_adjoint_builds(&lazy_nonbond), 0);
     }
 
     #[test]
