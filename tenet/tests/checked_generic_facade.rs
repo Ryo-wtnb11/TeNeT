@@ -7,6 +7,10 @@ use tenet::core::{
     CheckedGenericRigidSymbols, CheckedGenericStructureError, FusionStyleKind, GenericFArray,
     GenericRMatrix, RuleIdentity, SectorId, SectorVec, TypedSectorAdmission,
 };
+use tenet::dense::{
+    DefaultDenseExecutor, DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseRead,
+    DenseTensor, DenseWrite,
+};
 use tenet::prelude::{Complex64, Runtime};
 use tenet::typed::{
     CheckedGenericTensorProductError, GenericTensorError, GradedSpace, TensorMap, Truncation,
@@ -2297,6 +2301,193 @@ fn checked_generic_pinv_rectangular_moore_penrose_and_validation_precedence() {
         .zip(pseudo.adjoint().unwrap().data())
     {
         assert!((actual - expected).abs() < 1e-10);
+    }
+}
+
+struct PinvFaultExecutor {
+    inner: DefaultDenseExecutor,
+    svd_calls: Arc<AtomicUsize>,
+    gemm_calls: Arc<AtomicUsize>,
+    fail_svd: Option<usize>,
+    fail_gemm: Option<usize>,
+}
+
+impl DenseExecutor for PinvFaultExecutor {
+    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.svd(input)
+    }
+
+    fn svd_into(
+        &mut self,
+        input: DenseRead<'_>,
+        u: DenseWrite<'_>,
+        s: DenseWrite<'_>,
+        vt: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        let call = self.svd_calls.fetch_add(1, Ordering::Relaxed) + 1;
+        if self.fail_svd == Some(call) {
+            return Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "svd_into",
+                message: "injected pinv SVD failure".to_string(),
+            });
+        }
+        self.inner.svd_into(input, u, s, vt)
+    }
+
+    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.qr(input)
+    }
+
+    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.eigh(input)
+    }
+
+    fn dot_general_into(
+        &mut self,
+        output: DenseWrite<'_>,
+        lhs: DenseRead<'_>,
+        rhs: DenseRead<'_>,
+        config: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        let call = self.gemm_calls.fetch_add(1, Ordering::Relaxed) + 1;
+        if self.fail_gemm == Some(call) {
+            return Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "dot_general_into",
+                message: "injected pinv GEMM failure".to_string(),
+            });
+        }
+        self.inner.dot_general_into(output, lhs, rhs, config)
+    }
+}
+
+#[test]
+fn checked_generic_pinv_stages_svd_and_gemm_failures_without_publication() {
+    for (fail_svd, fail_gemm, expected_svd, expected_gemm) in [
+        (Some(1), None, 1, 0),
+        (Some(2), None, 2, 0),
+        (None, Some(2), 2, 2),
+    ] {
+        let svd_calls = Arc::new(AtomicUsize::new(0));
+        let gemm_calls = Arc::new(AtomicUsize::new(0));
+        let runtime = Runtime::builder()
+            .dense_threads(1)
+            .with_dense_executor(Box::new(PinvFaultExecutor {
+                inner: DefaultDenseExecutor::new(),
+                svd_calls: Arc::clone(&svd_calls),
+                gemm_calls: Arc::clone(&gemm_calls),
+                fail_svd,
+                fail_gemm,
+            }))
+            .build()
+            .unwrap();
+        let provider = Arc::new(CheckedOnlyToy::new(0));
+        let bond = GradedSpace::try_new(
+            Arc::clone(&provider),
+            [(Label::Vacuum, 1), (Label::X, 1)],
+            false,
+        )
+        .unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&bond], [&bond], |trees, _| {
+                if trees.coupled() == &Label::Vacuum {
+                    2.0
+                } else {
+                    3.0
+                }
+            })
+            .unwrap();
+        let before = source.data().to_vec();
+        assert!(matches!(
+            source.pinv(0.0),
+            Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
+                _
+            )))
+        ));
+        assert_eq!(svd_calls.load(Ordering::Relaxed), expected_svd);
+        assert_eq!(gemm_calls.load(Ordering::Relaxed), expected_gemm);
+        assert_eq!(source.data(), before.as_slice());
+    }
+}
+
+#[test]
+fn checked_generic_pinv_uses_a_strict_global_cutoff() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let bond = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(Label::Vacuum, 1), (Label::X, 1)],
+        false,
+    )
+    .unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&bond], [&bond], |trees, _| {
+            if trees.coupled() == &Label::Vacuum {
+                4.0
+            } else {
+                2.0
+            }
+        })
+        .unwrap();
+    let pseudo = source.pinv(0.5).unwrap();
+    assert_eq!(pseudo.data(), &[0.25, 0.0]);
+}
+
+#[cfg(feature = "racah-generated")]
+fn assert_sun_checked_generic_pinv<D>(n: usize, label: Vec<i64>)
+where
+    D: tenet::typed::TensorScalar + fmt::Debug + PartialEq,
+{
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(n).unwrap());
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(label, 2)], false).unwrap();
+    let source: TensorMap<_, D> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, index| {
+            let row = index[0] + 2 * index[1];
+            let column = index[2] + 2 * index[3];
+            D::from_real(
+                if trees.codomain_vertices() == trees.domain_vertices() && row == column {
+                    2.0
+                } else {
+                    0.0
+                },
+            )
+        })
+        .unwrap();
+    assert!((0..source.block_count()).any(|index| {
+        source
+            .block_fusion_trees(index)
+            .unwrap()
+            .codomain_vertices()
+            .iter()
+            .chain(source.block_fusion_trees(index).unwrap().domain_vertices())
+            .any(|vertex| vertex.get() > 1)
+    }));
+    let pseudo = source.pinv(1e-12).unwrap();
+    assert!(std::ptr::eq(pseudo.provider(), provider.as_ref()));
+    assert_eq!(pseudo.codomain(), source.domain());
+    assert_eq!(pseudo.domain(), source.codomain());
+    let expected = source.scale(D::from_real(0.5));
+    for product in [
+        source.compose(&pseudo).unwrap(),
+        pseudo.compose(&source).unwrap(),
+    ] {
+        assert_eq!(product.data(), expected.data());
+    }
+    let lazy = source.adjoint().unwrap();
+    let lazy_pseudo = lazy.pinv(1e-12).unwrap();
+    assert_eq!(lazy_pseudo.data(), pseudo.adjoint().unwrap().data());
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn sun_checked_generic_pinv_preserves_full_keys_for_both_dtypes() {
+    for (n, label) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
+        assert_sun_checked_generic_pinv::<f64>(n, label.clone());
+        assert_sun_checked_generic_pinv::<Complex64>(n, label);
     }
 }
 
