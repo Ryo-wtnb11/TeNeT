@@ -5,25 +5,22 @@
 //! permissive (a silent wrong answer on an out-of-domain id) and never less
 //! (an unnecessary panic on a representable one).
 //!
-//! `ProductFusionRule` and `tenet-category-data`'s Fibonacci provider are
-//! covered by their own crates (product_rule.rs docs; issue #971 lands them
-//! in a separate commit each).
+//! Two providers are deliberately absent. `ProductFusionRule` keeps two
+//! independent bodies on purpose: its `FusionRule` impl accepts components
+//! that are not `CheckedFusionAlgebra`, so it cannot forward without
+//! restricting which providers compose — its infallible `nsymbol` validates
+//! indirectly, through whichever components do forward. `tenet-category-data`'s
+//! Fibonacci provider is converted but not swept here, because this test lives
+//! in `tenet-sectors` and that crate is not a dependency; a reintroduced
+//! recursion there would overflow the stack in that crate's own tests.
 
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::Once;
 
 use tenet_sectors::{
     CU1FusionRule, CU1Irrep, CheckedFusionAlgebra, FermionParityFusionRule, FibonacciFusionRule,
     FusionRule, SU2FusionRule, SectorId, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
     ZNFusionRule, CU1_MAX_TWICE_CHARGE,
 };
-
-/// Installs a no-op panic hook once so the many expected panics below don't
-/// spam stderr; this file's only job is deliberately panicking code.
-fn quiet_panics() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| panic::set_hook(Box::new(|_| {})));
-}
 
 fn assert_dual_forwards<R: FusionRule + CheckedFusionAlgebra>(rule: &R, ids: &[SectorId]) {
     for &id in ids {
@@ -104,7 +101,6 @@ fn all_triples(ids: &[SectorId]) -> Vec<(SectorId, SectorId, SectorId)> {
 
 #[test]
 fn zn_infallible_entry_points_match_checked_domain() {
-    quiet_panics();
     let rule = ZNFusionRule::new(5).unwrap();
     let valid: Vec<SectorId> = (0..5i64).map(|c| rule.irrep(c).into()).collect();
     let invalid = [
@@ -121,7 +117,6 @@ fn zn_infallible_entry_points_match_checked_domain() {
 
 #[test]
 fn z2_infallible_entry_points_match_checked_domain() {
-    quiet_panics();
     let rule = Z2FusionRule;
     let ids = [
         Z2Irrep::EVEN.sector_id(),
@@ -138,7 +133,6 @@ fn z2_infallible_entry_points_match_checked_domain() {
 
 #[test]
 fn fermion_parity_infallible_entry_points_match_checked_domain() {
-    quiet_panics();
     let rule = FermionParityFusionRule;
     let ids = [
         Z2Irrep::EVEN.sector_id(),
@@ -154,7 +148,6 @@ fn fermion_parity_infallible_entry_points_match_checked_domain() {
 
 #[test]
 fn u1_infallible_entry_points_match_checked_domain() {
-    quiet_panics();
     let rule = U1FusionRule;
     // Representable domain, including the two charges whose *generated*
     // dual/fusion output overflows i32 (checked errs on an otherwise-valid
@@ -178,7 +171,6 @@ fn u1_infallible_entry_points_match_checked_domain() {
 
 #[test]
 fn su2_infallible_entry_points_match_checked_domain() {
-    quiet_panics();
     let rule = SU2FusionRule;
     // A sample of the representable doubled-spin domain, including the pair
     // (128, 127) whose fusion *closure* escapes the 254 catalog bound even
@@ -203,7 +195,6 @@ fn su2_infallible_entry_points_match_checked_domain() {
 
 #[test]
 fn cu1_infallible_entry_points_match_checked_domain() {
-    quiet_panics();
     let rule = CU1FusionRule;
     let big = CU1Irrep::from_twice_charge(CU1_MAX_TWICE_CHARGE);
     let valid: Vec<SectorId> = [
@@ -232,7 +223,6 @@ fn cu1_infallible_entry_points_match_checked_domain() {
 
 #[test]
 fn fibonacci_infallible_entry_points_match_checked_domain() {
-    quiet_panics();
     let rule = FibonacciFusionRule;
     let ids = [
         SectorId::new(0),
