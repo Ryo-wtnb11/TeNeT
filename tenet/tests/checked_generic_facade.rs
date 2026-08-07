@@ -1082,6 +1082,79 @@ fn sun_checked_generic_compact_lq_preserves_provider_and_reconstructs() {
 
 #[cfg(feature = "racah-generated")]
 #[test]
+fn sun_checked_generic_orth_aliases_reconstruct_multiplicity_fixture() {
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    macro_rules! assert_aliases {
+        ($source:expr, $close:expr) => {{
+            let source = $source;
+            let close = $close;
+            let (q, r) = source.qr_compact().unwrap();
+            let (orth_q, orth_r) = source.left_orth().unwrap();
+            for (actual, expected) in orth_q
+                .compose(&orth_r)
+                .unwrap()
+                .data()
+                .iter()
+                .zip(source.data())
+            {
+                assert!(close(*actual, *expected) < 1.0e-10);
+            }
+            for (actual, expected) in q.compose(&r).unwrap().data().iter().zip(source.data()) {
+                assert!(close(*actual, *expected) < 1.0e-10);
+            }
+            for (alias, lower) in [(&orth_q, &q), (&orth_r, &r)] {
+                assert!(std::ptr::eq(alias.provider(), lower.provider()));
+                assert_eq!(alias.codomain(), lower.codomain());
+                assert_eq!(alias.domain(), lower.domain());
+                assert!(alias.runtime().shares_state_with(lower.runtime()));
+            }
+
+            let (l, q) = source.lq_compact().unwrap();
+            let (orth_l, orth_q) = source.right_orth().unwrap();
+            for (actual, expected) in orth_l
+                .compose(&orth_q)
+                .unwrap()
+                .data()
+                .iter()
+                .zip(source.data())
+            {
+                assert!(close(*actual, *expected) < 1.0e-10);
+            }
+            for (actual, expected) in l.compose(&q).unwrap().data().iter().zip(source.data()) {
+                assert!(close(*actual, *expected) < 1.0e-10);
+            }
+            for (alias, lower) in [(&orth_l, &l), (&orth_q, &q)] {
+                assert!(std::ptr::eq(alias.provider(), lower.provider()));
+                assert_eq!(alias.codomain(), lower.codomain());
+                assert_eq!(alias.domain(), lower.domain());
+                assert!(alias.runtime().shares_state_with(lower.runtime()));
+            }
+        }};
+    }
+
+    for n in [3, 4] {
+        let provider = Arc::new(SUNFusionRule::new(n).unwrap());
+        let label = if n == 3 { vec![1, 1] } else { vec![1, 0, 1] };
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(label, 1)], false).unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |trees, _| {
+                trees.codomain_vertices()[0].get() as f64
+            })
+            .unwrap();
+        assert_eq!(source.block_count(), 2);
+        assert_aliases!(&source, |actual: f64, expected: f64| {
+            (actual - expected).abs()
+        });
+        assert_aliases!(source.to_c64(), |actual: Complex64, expected: Complex64| {
+            (actual - expected).norm()
+        });
+    }
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
 fn sun_checked_generic_full_qr_preserves_provider_and_reconstructs() {
     use tenet::typed::SUNFusionRule;
 

@@ -15787,6 +15787,52 @@ mod representation_gates {
         assert!(view.materialized.get().is_none());
     }
 
+    #[cfg(feature = "racah-generated")]
+    #[test]
+    fn checked_generic_orth_aliases_reject_lazy_adjoint_without_materializing() {
+        use tenet_core::SUNFusionRule;
+
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 1)], false).unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |trees, _| {
+                trees.codomain_vertices()[0].get() as f64
+            })
+            .unwrap();
+
+        let lazy = source.adjoint().unwrap();
+        {
+            let lower = lazy.qr_compact();
+            let alias = lazy.left_orth();
+            let lower_message = match lower {
+                Err(GenericTensorError::Facade(Error::InvalidArgument(message))) => message,
+                other => panic!("unexpected compact QR result: {other:?}"),
+            };
+            let alias_message = match alias {
+                Err(GenericTensorError::Facade(Error::InvalidArgument(message))) => message,
+                other => panic!("unexpected left_orth result: {other:?}"),
+            };
+            assert_eq!(lower_message, alias_message);
+            assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        }
+        let lazy = source.adjoint().unwrap();
+        {
+            let lower = lazy.lq_compact();
+            let alias = lazy.right_orth();
+            let lower_message = match lower {
+                Err(GenericTensorError::Facade(Error::InvalidArgument(message))) => message,
+                other => panic!("unexpected compact LQ result: {other:?}"),
+            };
+            let alias_message = match alias {
+                Err(GenericTensorError::Facade(Error::InvalidArgument(message))) => message,
+                other => panic!("unexpected right_orth result: {other:?}"),
+            };
+            assert_eq!(lower_message, alias_message);
+            assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        }
+    }
+
     #[test]
     fn cloned_adjoint_materializes_once_across_threads() {
         let source = u1_lazy_fixture().to_c64();
