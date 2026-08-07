@@ -459,6 +459,21 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
+    R::Mode: TypedTensorPinvDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// Moore-Penrose pseudo-inverse with the global strict `rcond` cutoff.
+    ///
+    /// TensorKit applies its tolerance per block; TeNeT instead uses one
+    /// strict `rcond * sigma_max` across all coupled sectors.
+    pub fn pinv(&self, rcond: f64) -> Result<Self, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorPinvDispatch<R, D>>::pinv(self, rcond)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
     R::Mode: TypedTensorReductionDispatch<R, D>,
     D: TensorScalar,
 {
@@ -3883,6 +3898,15 @@ where
 }
 
 #[doc(hidden)]
+pub trait TypedTensorPinvDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn pinv(tensor: &TensorMap<R, D>, rcond: f64) -> Result<TensorMap<R, D>, Self::FacadeError>;
+}
+
+#[doc(hidden)]
 pub trait TypedTensorExpDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
@@ -4185,6 +4209,19 @@ where
 {
     fn solve(tensor: &TensorMap<R, D>, rhs: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
         tensor.solve_multiplicity_free(rhs)
+    }
+}
+
+impl<R, D> TypedTensorPinvDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn pinv(tensor: &TensorMap<R, D>, rcond: f64) -> Result<TensorMap<R, D>, Error> {
+        tensor.pinv_multiplicity_free(rcond)
     }
 }
 
@@ -4523,6 +4560,56 @@ where
             &BoundDynamicTensorRef::try_new(&rhs_body.space, rhs_body.materialized_dense_data())
                 .map_err(Error::from)?,
             output,
+        )
+        .map_err(Error::from)?;
+        Ok(wrap_factor_on(&tensor.runtime, factor))
+    }
+}
+
+impl<R, D> TypedTensorPinvDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
+    fn pinv(
+        tensor: &TensorMap<R, D>,
+        rcond: f64,
+    ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        if !rcond.is_finite() || rcond < 0.0 {
+            return Err(Error::InvalidArgument(
+                "pinv rcond must be finite and non-negative".to_string(),
+            )
+            .into());
+        }
+        if matches!(&tensor.repr, TypedTensorRepr::Adjoint(_)) {
+            return tensor
+                .adjoint()?
+                .pinv(rcond)?
+                .adjoint()?
+                .materialized_tensor_uncached()
+                .map_err(GenericTensorError::from);
+        }
+        let source = tensor.logical_space();
+        let output = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
+            Arc::clone(source.provider_arc()),
+            FusionTreeHomSpace::new(
+                source.space().homspace().domain().clone(),
+                source.space().homspace().codomain().clone(),
+            ),
+        )?;
+        let body = tensor
+            .owned_body()
+            .expect("checked Generic pinv input is owned after lazy dispatch");
+        let mut dense = tensor.runtime.lease_dense();
+        let factor = tenet_matrixalgebra::pinv_direct_into_dyn(
+            dense.dense(),
+            &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+                .map_err(Error::from)?,
+            output,
+            rcond,
         )
         .map_err(Error::from)?;
         Ok(wrap_factor_on(&tensor.runtime, factor))
@@ -12813,7 +12900,7 @@ where
     /// **O(rank) elementwise cutoff-and-reciprocal arm** over the `Σ_c k_c`
     /// stored values — the singular values of a diagonal are its `|entry|`s, so
     /// no SVD is needed — and the result stays compact.
-    pub fn pinv(&self, rcond: f64) -> Result<Self, Error> {
+    fn pinv_multiplicity_free(&self, rcond: f64) -> Result<Self, Error> {
         // Ahead of the storage split, so both arms answer alike: the seam
         // repeats this check for its own callers, but the compact arm never
         // reaches the seam.
