@@ -1582,6 +1582,62 @@ fn checked_generic_exp_uses_general_pade_for_nonhermitian_dense_blocks() {
 }
 
 #[test]
+fn checked_generic_exp_rejects_nonendomorphism_before_provider_work() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let wide = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&wide], [&narrow], |_, _| 1.0).unwrap();
+    let before = source.data().to_vec();
+    reset_provider_queries(&provider);
+    assert!(matches!(
+        source.exp(),
+        Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
+            _
+        )))
+    ));
+    assert_no_provider_queries(&provider);
+    assert_eq!(source.data(), before.as_slice());
+}
+
+#[test]
+fn checked_generic_exp_rejects_early_and_late_nonfinite_sectors_without_publication() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(Label::Vacuum, 1), (Label::X, 1)],
+        false,
+    )
+    .unwrap();
+    for target in [Label::Vacuum, Label::X] {
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |trees, _| {
+                if trees.coupled() == &target {
+                    f64::NAN
+                } else {
+                    0.0
+                }
+            })
+            .unwrap();
+        let before = source.data().to_vec();
+        assert!(matches!(
+            source.exp(),
+            Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
+                _
+            )))
+        ));
+        assert_eq!(source.data().len(), before.len());
+        assert!(source
+            .data()
+            .iter()
+            .zip(&before)
+            .all(|(a, b)| a.to_bits() == b.to_bits()));
+    }
+}
+
+#[test]
 fn checked_generic_reduction_dimension_failure_is_typed_and_nonpublishing() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));

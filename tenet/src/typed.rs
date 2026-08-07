@@ -16372,6 +16372,29 @@ mod representation_gates {
 
     #[cfg(feature = "racah-generated")]
     #[test]
+    fn checked_generic_exp_lazy_is_owned_and_stays_cold() {
+        use tenet_core::SUNFusionRule;
+
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 1)], false).unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| f64::from(ij == [0, 1]))
+                .unwrap();
+        let lazy = source.adjoint().unwrap();
+        let actual = lazy.exp().unwrap();
+        let expected = source.exp().unwrap().adjoint().unwrap();
+        assert!(matches!(actual.repr, TypedTensorRepr::Owned(_)));
+        assert_eq!(actual.data(), expected.data());
+        assert!(std::ptr::eq(actual.provider(), provider.as_ref()));
+        assert!(actual.runtime().shares_state_with(source.runtime()));
+        assert_eq!(actual.codomain(), lazy.codomain());
+        assert_eq!(actual.domain(), lazy.domain());
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+    }
+
+    #[cfg(feature = "racah-generated")]
+    #[test]
     fn checked_generic_lazy_flip_stays_cold_and_keeps_logical_duality() {
         use tenet_core::SUNFusionRule;
 
