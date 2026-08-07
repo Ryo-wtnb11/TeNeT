@@ -3459,6 +3459,55 @@ where
     ) -> Result<TensorMap<R, D>, Self::FacadeError>;
 }
 
+/// Ribbon-twist execution selected by the admitted provider mode.
+#[doc(hidden)]
+pub trait TypedTensorTwistDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn twist(
+        tensor: &TensorMap<R, D>,
+        legs: &[usize],
+        inverse: bool,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorTwistDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// TensorKit `twist(t, inds)` (and its in-place `twist!`): multiplies each
+    /// fusion-tree block by the product over `legs` (flat leg indices,
+    /// codomain first) of that leg's ribbon-twist eigenvalue.
+    ///
+    /// A bosonic provider, a NoBraiding provider restricted to unit legs, or
+    /// selected sectors whose staged twists are all one returns a body-sharing
+    /// clone, matching TensorKit's `copy = false` behavior. Otherwise the
+    /// operation publishes one fresh scaled payload on the exact admitted
+    /// space and provider allocation. A lazy adjoint redirects through its
+    /// parent with the inverse operation. Multiplicity-free compact spectra
+    /// remain compact; checked-Generic compact spectra use the same staged
+    /// provider values and representation-preserving scaling.
+    ///
+    /// # Errors
+    ///
+    /// An out-of-range leg is rejected before the empty-list short circuit.
+    /// Non-unit NoBraiding legs are invalid. Checked-Generic pivotal failures
+    /// retain their typed provider error, and no result is published until all
+    /// selected twist values have been staged successfully.
+    pub fn twist(&self, legs: &[usize]) -> Result<Self, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorTwistDispatch<R, D>>::twist(self, legs, false)
+    }
+
+    /// Applies the inverse TensorKit ribbon twist on the selected legs.
+    pub fn twist_inverse(&self, legs: &[usize]) -> Result<Self, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorTwistDispatch<R, D>>::twist(self, legs, true)
+    }
+}
+
 /// Tensor-product execution selected by a provider-owned mode.
 #[doc(hidden)]
 pub trait TypedTensorProductDispatch<R, D>: TypedTensorModeDispatch<R>
@@ -4437,6 +4486,201 @@ where
             repr: owned_repr(TypedTensorBody::dense(space, data)),
         })
     }
+}
+
+impl<R, D> TypedTensorTwistDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn twist(
+        tensor: &TensorMap<R, D>,
+        legs: &[usize],
+        inverse: bool,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        tensor.twist_with_inverse(legs, inverse)
+    }
+}
+
+impl<R, D> TypedTensorTwistDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericPivotal<Scalar = f64>,
+    D: TensorScalar,
+{
+    fn twist(
+        tensor: &TensorMap<R, D>,
+        legs: &[usize],
+        inverse: bool,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError> {
+        twist_checked_generic(tensor, legs, inverse)
+    }
+}
+
+fn twist_checked_generic<R, D>(
+    tensor: &TensorMap<R, D>,
+    legs: &[usize],
+    inverse: bool,
+) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericPivotal<Scalar = f64>,
+    D: TensorScalar,
+{
+    let rank = tensor.rank();
+    let name = if inverse { "twist_inverse" } else { "twist" };
+    if let Some(&leg) = legs.iter().find(|&&leg| leg >= rank) {
+        return Err(GenericTensorError::Facade(Error::InvalidArgument(format!(
+            "{name} leg {leg} out of range for rank {rank}"
+        ))));
+    }
+    if legs.is_empty() {
+        return Ok(tensor.clone());
+    }
+
+    let provider = tensor.logical_space().provider();
+    let homspace = tensor.logical_space().space().homspace();
+    let braiding = CheckedGenericFusion::braiding_style(provider);
+    if braiding == tenet_core::BraidingStyleKind::NoBraiding {
+        let vacuum = CheckedGenericFusion::vacuum(provider);
+        let nout = homspace.codomain().len();
+        for &leg in legs {
+            let sectors = if leg < nout {
+                homspace.codomain().legs()[leg].sectors()
+            } else {
+                homspace.domain().legs()[leg - nout].sectors()
+            };
+            if sectors.iter().any(|&sector| sector != vacuum) {
+                return Err(GenericTensorError::Facade(Error::InvalidArgument(format!(
+                    "{name} leg {leg} carries non-unit sectors but the fusion rule has no braiding"
+                ))));
+            }
+        }
+        return Ok(tensor.clone());
+    }
+    if braiding.is_bosonic() {
+        return Ok(tensor.clone());
+    }
+    if let TypedTensorRepr::Adjoint(view) = &tensor.repr {
+        let parent = TensorMap {
+            runtime: tensor.runtime.clone(),
+            repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
+        };
+        let axes = logical_adjoint_axes_to_parent(
+            view.parent.space.space().nout(),
+            view.parent.space.space().nin(),
+            legs,
+        );
+        let twisted_parent = twist_checked_generic_owned(&parent, &axes, !inverse)?;
+        let TypedTensorRepr::Owned(parent) = &twisted_parent.repr else {
+            unreachable!("checked-Generic parent twist stays owned")
+        };
+        // Why not call `adjoint()`: the original view already owns the exact
+        // admitted logical space, and re-deriving it would query the provider
+        // after all fallible twist values had been staged.
+        return Ok(TensorMap {
+            runtime: tensor.runtime.clone(),
+            repr: TypedTensorRepr::Adjoint(Arc::new(TypedAdjointView {
+                parent: Arc::clone(parent),
+                logical_space: view.logical_space.clone(),
+                materialized: OnceLock::new(),
+                #[cfg(test)]
+                materialized_body_builds: std::sync::atomic::AtomicUsize::new(0),
+            })),
+        });
+    }
+
+    twist_checked_generic_owned(tensor, legs, inverse)
+}
+
+fn twist_checked_generic_owned<R, D>(
+    tensor: &TensorMap<R, D>,
+    legs: &[usize],
+    inverse: bool,
+) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericPivotal<Scalar = f64>,
+    D: TensorScalar,
+{
+    // Why stage first: a late provider failure must leave no scaled payload to
+    // publish, and replay over the staged table must never call the provider.
+    let provider = tensor.logical_space().provider();
+    let nout = tensor.codomain_rank();
+    let structure = tensor.logical_space().space().structure();
+    let mut staged = HashMap::<SectorId, f64>::new();
+    for block_index in 0..structure.block_count() {
+        let block = structure
+            .block(block_index)
+            .map_err(Error::from)
+            .map_err(GenericTensorError::Facade)?;
+        let BlockKey::FusionTree(key) = block.key() else {
+            continue;
+        };
+        for &leg in legs {
+            let sector = uncoupled_sector_of_leg(key, nout, leg);
+            if let std::collections::hash_map::Entry::Vacant(entry) = staged.entry(sector) {
+                let value = provider.try_twist_scalar(sector).map_err(|error| {
+                    GenericTensorError::Structure(CheckedGenericStructureError::Provider(error))
+                })?;
+                entry.insert(value);
+            }
+        }
+    }
+    if staged.values().all(|&value| value == 1.0) {
+        return Ok(tensor.clone());
+    }
+
+    // Checked pivotal coefficients are exactly real here, so conjugation for
+    // the inverse operation leaves every staged value unchanged.
+    let _ = inverse;
+    let block_factor = |key: &FusionTreePairKey| {
+        legs.iter()
+            .map(|&leg| staged[&uncoupled_sector_of_leg(key, nout, leg)])
+            .product::<f64>()
+    };
+    if let Some(spectrum) = tensor.spectrum() {
+        let scaled = spectrum
+            .iter()
+            .map(|entry| {
+                let factor =
+                    D::from_real(legs.iter().map(|_| staged[&entry.sector]).product::<f64>());
+                tenet_matrixalgebra::SectorSpectrum {
+                    sector: entry.sector,
+                    values: entry.values.iter().map(|&value| value * factor).collect(),
+                }
+            })
+            .collect();
+        return Ok(tensor.with_spectrum(scaled));
+    }
+
+    let mut data = tensor
+        .owned_body()
+        .expect("owned checked-Generic twist input")
+        .materialized_dense_data()
+        .to_vec();
+    scale_blocks_impl(
+        tensor.logical_space().space(),
+        &mut data,
+        &|key| match key {
+            BlockKey::FusionTree(key) => block_factor(key),
+            _ => 1.0,
+        },
+    )
+    .map_err(GenericTensorError::Facade)?;
+    Ok(TensorMap {
+        runtime: tensor.runtime.clone(),
+        repr: owned_repr(TypedTensorBody::dense(tensor.logical_space().clone(), data)),
+    })
 }
 
 impl<R, D> TypedTensorProductDispatch<R, D> for MultiplicityFreeAdmissionMode
@@ -12862,44 +13106,6 @@ where
             .materialized_dense_data()
             .iter()
             .fold(D::from_real(0.0), |acc, &value| acc + value))
-    }
-
-    /// TensorKit `twist(t, inds)` (and its in-place `twist!`): multiplies
-    /// each fusion-tree block by the product over
-    /// `legs` (flat leg indices, codomain first) of the ribbon-twist
-    /// eigenvalue θ of that leg's uncoupled sector. θ = −1 for odd fermionic
-    /// sectors and +1 for every bosonic sector, so this is a no-op on purely
-    /// bosonic legs and an involution (θ² = 1) on fermionic ones.
-    ///
-    /// When the twist is the identity on every stored block — TensorKit
-    /// `has_shared_twist`: a bosonic
-    /// provider, or no requested leg touching a twisted sector — the result
-    /// is a body-sharing clone, O(1), exactly as TensorKit's `copy = false`
-    /// default shares `t`. A compact
-    /// spectrum factor scales spectrum-per-sector and **stays compact**,
-    /// O(Σ_c k_c), like TensorKit's `DiagonalTensorMap` twist,
-    /// because `similar` preserves the diagonal storage
-    /// and `twist!` only scales blocks.
-    /// Otherwise: one scaled copy of the dense payload, O(len), through
-    /// `scale_blocks_impl`.
-    ///
-    /// A lazy dense adjoint redirects through the parent with the inverse
-    /// categorical phase, leaving its receiver cache cold; compact adjoints
-    /// remain compact and use the spectrum arm above. There is no device arm
-    /// (the payload is a host `Vec<D>` by construction). The multiplicity-free
-    /// admission bound excludes `Generic` providers.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::InvalidArgument`] when a leg is out of range, reported before
-    /// the empty-list short-circuit. An empty `legs` returns an identical clone.
-    pub fn twist(&self, legs: &[usize]) -> Result<Self, Error> {
-        self.twist_with_inverse(legs, false)
-    }
-
-    /// Applies the inverse TensorKit ribbon twist on the selected legs.
-    pub fn twist_inverse(&self, legs: &[usize]) -> Result<Self, Error> {
-        self.twist_with_inverse(legs, true)
     }
 
     fn twist_with_inverse(&self, legs: &[usize], inverse: bool) -> Result<Self, Error> {
