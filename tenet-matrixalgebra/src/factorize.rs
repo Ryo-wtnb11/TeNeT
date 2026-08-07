@@ -6257,13 +6257,43 @@ where
     D: FactorScalar,
 {
     let source_space = input.space().space();
-    if input.space().provider().rule_identity() != output_space.provider().rule_identity() {
+    let Some(source_identity) = source_space.admission().rule_identity() else {
+        return Err(OperationError::from_core_preserving_context(
+            CoreError::MissingFusionRuleIdentity,
+        ));
+    };
+    let Some(output_identity) = output_space.space().admission().rule_identity() else {
+        return Err(OperationError::from_core_preserving_context(
+            CoreError::MissingFusionRuleIdentity,
+        ));
+    };
+    if source_identity != output_identity {
         return Err(OperationError::from_core_preserving_context(
             CoreError::FusionRuleMismatch {
-                expected: input.space().provider().rule_identity(),
-                actual: output_space.provider().rule_identity(),
+                expected: source_identity.clone(),
+                actual: output_identity.clone(),
             },
         ));
+    }
+    if !Arc::ptr_eq(input.space().provider_arc(), output_space.provider_arc()) {
+        return Err(OperationError::StructureMismatch {
+            tensor: "pinv output provider authority",
+        });
+    }
+    let expected_homspace = FusionTreeHomSpace::new(
+        source_space.homspace().domain().clone(),
+        source_space.homspace().codomain().clone(),
+    );
+    let expected_nout = expected_homspace.codomain().len();
+    let expected_nin = expected_homspace.domain().len();
+    if output_space.space().nout() != expected_nout
+        || output_space.space().nin() != expected_nin
+        || output_space.space().rank() != expected_nout + expected_nin
+        || output_space.space().homspace() != &expected_homspace
+    {
+        return Err(OperationError::StructureMismatch {
+            tensor: "pinv output space",
+        });
     }
     let source_regions =
         canonical_generic_sector_regions(source_space.structure(), source_space.nout())?.ok_or(
@@ -6368,7 +6398,7 @@ where
         let v_shape = [stage.cols, stage.rank];
         let v_strides = [stage.rank, 1];
         let uh_shape = [stage.rank, stage.rows];
-        let uh_strides = [1, stage.rows];
+        let uh_strides = [stage.rows, 1];
         let output_view = DenseViewMut::new(output, &output_shape, &output_strides, 0)
             .map_err(OperationError::Dense)?;
         let v_view = DenseView::new(&vt, &v_shape, &v_strides, 0).map_err(OperationError::Dense)?;
