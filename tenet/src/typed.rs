@@ -938,6 +938,110 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    /// TensorKit 0.17 `sqrt(::DiagonalTensorMap)`: the elementwise principal
+    /// square root of a diagonal bond tensor, `√s_i` on each diagonal entry, so
+    /// that `√t · √t = t`. This is the idiom that splits singular values in
+    /// Vidal-gauge and gate-application updates.
+    ///
+    /// # Domain
+    ///
+    /// The receiver must be a **diagonal bond tensor** `[v] <- [v]`: one
+    /// codomain leg equal to the one domain leg, and every stored block
+    /// diagonal, with off-diagonal entries exactly zero. That is the shape the
+    /// factorizations produce ([`Self::svd_compact`]'s and [`Self::svd_trunc`]'s
+    /// `s`, [`Self::eigh_full`]'s `d`), and it is the receiver type TensorKit's
+    /// own diagonal `sqrt` demands.
+    ///
+    /// General endomorphism `sqrt` is deliberately out of scope. TensorKit does
+    /// have one (`sqrt(::AbstractTensorMap)`, Schur-based, always returning a
+    /// complex tensor), but no Schur seam exists below this facade, and its
+    /// value-independent complexification is not expressible in a typed
+    /// signature. A wider `sqrt` is a separate phase, not an omission here.
+    ///
+    /// Checked Generic currently exposes this operation for dense diagonal
+    /// tensors only. Checked Generic compact construction and compact
+    /// preservation remain unsupported; the compact arm below remains for the
+    /// existing multiplicity-free path.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] in every failure case:
+    ///
+    /// - the receiver is not shaped `[v] <- [v]`;
+    /// - a stored block has a nonzero off-diagonal entry (dense arm only — a
+    ///   compact payload has none by construction);
+    /// - the payload is `f64` and a diagonal entry is negative. The message
+    ///   points at the complex payload, matching TensorKit's diagonal-path
+    ///   `DomainError`. TensorKit's *dense* path instead complexifies silently,
+    ///   which contradicts its own diagonal path and is not mirrored here.
+    ///
+    /// A [`num_complex::Complex64`] payload never fails on a value: it takes the
+    /// principal branch (`√(-1) = +i`).
+    ///
+    /// # Complexity
+    ///
+    /// Compact input (TensorKit's `DiagonalTensorMap`, what the factorizations
+    /// hand back): the **O(rank) elementwise arm** over the `Σ_c k_c` stored
+    /// values, staying compact — so `s.sqrt()` and the two `compose`s around it
+    /// are all bond scalings. Dense input: `O(Σ_c n_c²)`, one walk over the
+    /// block-diagonal buffer, which is what the off-diagonal check costs; the
+    /// root itself is still only `Σ_c n_c` square roots. A dense lazy adjoint
+    /// builds one operation-local logical payload without publishing its
+    /// reusable receiver cache.
+    pub fn sqrt(&self) -> Result<Self, Error> {
+        // Use the same [`is_diagonal_bond_space`] predicate as compact
+        // destinations; here it is asked of the receiver.
+        if !is_diagonal_bond_space(self.logical_space().space()) {
+            return Err(Error::InvalidArgument(
+                "sqrt requires a diagonal bond tensor `[v] <- [v]` (equal single \
+                 codomain and domain legs), like the `s` factor of svd_trunc"
+                    .to_string(),
+            ));
+        }
+        if let Some(spectrum) = self.spectrum() {
+            return Ok(self.with_spectrum(map_spectrum(spectrum, D::sqrt_value)?));
+        }
+        if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
+            return self.materialized_tensor_uncached()?.sqrt();
+        }
+        // Dense payload on a bond space: block-diagonal by the space's shape,
+        // but only by convention — the buffer is free to hold anything, so the
+        // off-diagonal entries are checked rather than assumed. Skipping the
+        // check would silently drop them.
+        let data = self
+            .owned_body()
+            .expect("owned square-root input")
+            .materialized_dense_data();
+        let zero = num_complex::Complex64::new(0.0, 0.0);
+        let mut out = vec![D::from_real(0.0); data.len()];
+        let structure = self.logical_space().space().structure();
+        for index in 0..structure.block_count() {
+            let block = structure.block(index)?;
+            let (shape, strides, offset) = (block.shape(), block.strides(), block.offset());
+            for row in 0..shape[0] {
+                for col in 0..shape[1] {
+                    let position = offset + row * strides[0] + col * strides[1];
+                    if row == col {
+                        out[position] = data[position].sqrt_value()?;
+                    } else if data[position].widen_complex() != zero {
+                        return Err(Error::InvalidArgument(format!(
+                            "sqrt requires a diagonal bond tensor, but block {:?} has a \
+                             nonzero off-diagonal entry at ({row}, {col})",
+                            block.key()
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(self.with_data(out))
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
     R::Mode: TypedTensorFullQrDispatch<R, D>,
     D: TensorScalar,
 {
@@ -12077,100 +12181,6 @@ where
         Ok(self.wrap_bound_factor(out))
     }
 
-    /// TensorKit 0.17 `sqrt(::DiagonalTensorMap)`: the elementwise principal
-    /// square root of a diagonal bond tensor, `√s_i` on each diagonal entry, so
-    /// that `√t · √t = t`. This is the idiom that splits singular values in
-    /// Vidal-gauge and gate-application updates.
-    ///
-    /// # Domain
-    ///
-    /// The receiver must be a **diagonal bond tensor** `[v] <- [v]`: one
-    /// codomain leg equal to the one domain leg, and every stored block
-    /// diagonal, with off-diagonal entries exactly zero. That is the shape the
-    /// factorizations produce ([`Self::svd_compact`]'s and [`Self::svd_trunc`]'s
-    /// `s`, [`Self::eigh_full`]'s `d`), and it is the receiver type TensorKit's
-    /// own diagonal `sqrt` demands.
-    ///
-    /// General endomorphism `sqrt` is deliberately out of scope. TensorKit does
-    /// have one (`sqrt(::AbstractTensorMap)`, Schur-based, always returning a
-    /// complex tensor), but no Schur seam exists below this facade, and its
-    /// value-independent complexification is not expressible in a typed
-    /// signature. A wider `sqrt` is a separate phase, not an omission here.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::InvalidArgument`] in every failure case:
-    ///
-    /// - the receiver is not shaped `[v] <- [v]`;
-    /// - a stored block has a nonzero off-diagonal entry (dense arm only — a
-    ///   compact payload has none by construction);
-    /// - the payload is `f64` and a diagonal entry is negative. The message
-    ///   points at the complex payload, matching TensorKit's diagonal-path
-    ///   `DomainError`. TensorKit's *dense* path
-    ///   instead complexifies silently, which contradicts its own diagonal path
-    ///   and is not mirrored here.
-    ///
-    /// A [`num_complex::Complex64`] payload never fails on a value: it takes the
-    /// principal branch (`√(-1) = +i`).
-    ///
-    /// # Complexity
-    ///
-    /// Compact input (TensorKit's `DiagonalTensorMap`, what the factorizations
-    /// hand back): the **O(rank) elementwise arm** over the `Σ_c k_c` stored
-    /// values, staying compact — so `s.sqrt()` and the two `compose`s around it
-    /// are all bond scalings. Dense input: `O(Σ_c n_c²)`, one walk over the
-    /// block-diagonal buffer, which is what the off-diagonal check costs; the
-    /// root itself is still only `Σ_c n_c` square roots. A dense lazy adjoint
-    /// builds one operation-local logical payload without publishing its
-    /// reusable receiver cache.
-    pub fn sqrt(&self) -> Result<Self, Error> {
-        // Use the same [`is_diagonal_bond_space`] predicate as compact
-        // destinations; here it is asked of the receiver.
-        if !is_diagonal_bond_space(self.logical_space().space()) {
-            return Err(Error::InvalidArgument(
-                "sqrt requires a diagonal bond tensor `[v] <- [v]` (equal single \
-                 codomain and domain legs), like the `s` factor of svd_trunc"
-                    .to_string(),
-            ));
-        }
-        if let Some(spectrum) = self.spectrum() {
-            return Ok(self.with_spectrum(map_spectrum(spectrum, D::sqrt_value)?));
-        }
-        if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
-            return self.materialized_tensor_uncached()?.sqrt();
-        }
-        // Dense payload on a bond space: block-diagonal by the space's shape,
-        // but only by convention — the buffer is free to hold anything, so the
-        // off-diagonal entries are checked rather than assumed. Skipping the
-        // check would silently drop them.
-        let data = self
-            .owned_body()
-            .expect("owned square-root input")
-            .materialized_dense_data();
-        let zero = num_complex::Complex64::new(0.0, 0.0);
-        let mut out = vec![D::from_real(0.0); data.len()];
-        let structure = self.logical_space().space().structure();
-        for index in 0..structure.block_count() {
-            let block = structure.block(index)?;
-            let (shape, strides, offset) = (block.shape(), block.strides(), block.offset());
-            for row in 0..shape[0] {
-                for col in 0..shape[1] {
-                    let position = offset + row * strides[0] + col * strides[1];
-                    if row == col {
-                        out[position] = data[position].sqrt_value()?;
-                    } else if data[position].widen_complex() != zero {
-                        return Err(Error::InvalidArgument(format!(
-                            "sqrt requires a diagonal bond tensor, but block {:?} has a \
-                             nonzero off-diagonal entry at ({row}, {col})",
-                            block.key()
-                        )));
-                    }
-                }
-            }
-        }
-        Ok(self.with_data(out))
-    }
-
     /// Whether two operands' providers are the same rule. The compact paths
     /// below skip the expert layer, which is where a mismatch would otherwise
     /// be caught, so they have to ask themselves.
@@ -15831,6 +15841,34 @@ mod representation_gates {
             assert_eq!(lower_message, alias_message);
             assert_eq!(materialized_adjoint_builds(&lazy), 0);
         }
+    }
+
+    #[cfg(feature = "racah-generated")]
+    #[test]
+    fn checked_generic_dense_sqrt_lazy_matches_owned_and_stays_cold() {
+        use tenet_core::SUNFusionRule;
+
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 1)], false).unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+                if indices[0] == indices[1] {
+                    4.0
+                } else {
+                    0.0
+                }
+            })
+            .unwrap();
+        let expected = source.sqrt().unwrap();
+        let lazy = source.adjoint().unwrap();
+        let actual = lazy.sqrt().unwrap();
+        assert_eq!(actual.data(), expected.data());
+        assert!(std::ptr::eq(actual.provider(), expected.provider()));
+        assert_eq!(actual.codomain(), expected.codomain());
+        assert_eq!(actual.domain(), expected.domain());
+        assert!(actual.runtime().shares_state_with(expected.runtime()));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
     }
 
     #[test]

@@ -953,6 +953,179 @@ fn sun_checked_generic_compact_svd_preserves_provider_and_reconstructs() {
 
 #[cfg(feature = "racah-generated")]
 #[test]
+fn sun_checked_generic_dense_sqrt_preserves_svd_bond_and_principal_branch() {
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    for n in [3, 4] {
+        let provider = Arc::new(SUNFusionRule::new(n).unwrap());
+        let label = if n == 3 { vec![1, 1] } else { vec![1, 0, 1] };
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(label, 1)], false).unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |trees, _| {
+                trees.codomain_vertices()[0].get() as f64 + 1.0
+            })
+            .unwrap();
+        let (u, s, vh) = source.svd_compact().unwrap();
+        let root = s.sqrt().unwrap();
+        assert!(std::ptr::eq(root.provider(), s.provider()));
+        assert_eq!(root.codomain(), s.codomain());
+        assert_eq!(root.domain(), s.domain());
+        assert!(root.runtime().shares_state_with(s.runtime()));
+        assert!(root
+            .compose(&root)
+            .unwrap()
+            .data()
+            .iter()
+            .zip(s.data())
+            .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
+        let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+        assert!(rebuilt
+            .data()
+            .iter()
+            .zip(source.data())
+            .all(|(actual, expected)| (actual - expected).abs() < 1.0e-10));
+
+        let complex = source.to_c64();
+        let (u, s, vh) = complex.svd_compact().unwrap();
+        let root = s.sqrt().unwrap();
+        assert!(std::ptr::eq(root.provider(), s.provider()));
+        assert_eq!(root.codomain(), s.codomain());
+        assert_eq!(root.domain(), s.domain());
+        assert!(root.runtime().shares_state_with(s.runtime()));
+        assert!(root
+            .compose(&root)
+            .unwrap()
+            .data()
+            .iter()
+            .zip(s.data())
+            .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-10));
+        let negative: TensorMap<_, Complex64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+                if indices[0] == indices[1] {
+                    Complex64::new(-1.0, 0.0)
+                } else {
+                    Complex64::new(0.0, 0.0)
+                }
+            })
+            .unwrap();
+        let principal = negative.sqrt().unwrap();
+        assert!(principal
+            .data()
+            .iter()
+            .any(|value| *value == Complex64::new(0.0, 1.0)));
+        assert!(principal.data().iter().all(|value| {
+            *value == Complex64::new(0.0, 0.0) || *value == Complex64::new(0.0, 1.0)
+        }));
+        assert!(principal
+            .compose(&principal)
+            .unwrap()
+            .data()
+            .iter()
+            .zip(negative.data())
+            .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-10));
+        let rebuilt = u.compose(&s).unwrap().compose(&vh).unwrap();
+        assert!(rebuilt
+            .data()
+            .iter()
+            .zip(complex.data())
+            .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-10));
+    }
+}
+
+#[test]
+fn checked_generic_sqrt_rejects_shape_before_queries_and_preserves_source() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |_, _| 2.0).unwrap();
+    let before = source.data().to_vec();
+    reset_provider_queries(&provider);
+    match source.sqrt() {
+        Err(tenet::typed::Error::InvalidArgument(message)) => {
+            assert!(message.contains("diagonal bond tensor"));
+        }
+        other => panic!("expected shape rejection, got {other:?}"),
+    }
+    assert_eq!(source.data(), before.as_slice());
+    assert_no_provider_queries(&provider);
+
+    let dense = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, indices| {
+        if indices[0] == indices[1] {
+            4.0
+        } else {
+            0.0
+        }
+    })
+    .unwrap();
+    let before = dense.data().to_vec();
+    reset_provider_queries(&provider);
+    let root = dense.sqrt().unwrap();
+    assert_no_provider_queries(&provider);
+    assert!(root
+        .compose(&root)
+        .unwrap()
+        .data()
+        .iter()
+        .zip(&before)
+        .all(|(actual, expected)| (actual - expected).abs() < 1.0e-12));
+    assert_eq!(dense.data(), before.as_slice());
+
+    macro_rules! assert_failure {
+        ($fill:expr, $needle:literal) => {{
+            let tensor = TensorMap::from_block_fn(&runtime, [&leg], [&leg], $fill).unwrap();
+            let before = tensor.data().to_vec();
+            reset_provider_queries(&provider);
+            match tensor.sqrt() {
+                Err(tenet::typed::Error::InvalidArgument(message)) => {
+                    assert!(
+                        message.contains($needle),
+                        "unexpected sqrt error: {message}"
+                    );
+                }
+                other => panic!("expected sqrt rejection, got {other:?}"),
+            }
+            assert_eq!(tensor.data(), before.as_slice());
+            assert_no_provider_queries(&provider);
+        }};
+    }
+    assert_failure!(
+        |_, indices: &[usize]| {
+            if indices[0] == indices[1] {
+                -1.0
+            } else {
+                0.0
+            }
+        },
+        "negative"
+    );
+    let bond_leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let tensor = TensorMap::from_block_fn(&runtime, [&bond_leg], [&bond_leg], |_, indices| {
+        if indices[0] == indices[1] {
+            4.0
+        } else {
+            1.0
+        }
+    })
+    .unwrap();
+    let before = tensor.data().to_vec();
+    reset_provider_queries(&provider);
+    match tensor.sqrt() {
+        Err(tenet::typed::Error::InvalidArgument(message)) => {
+            assert!(
+                message.contains("off-diagonal"),
+                "unexpected sqrt error: {message}"
+            );
+        }
+        other => panic!("expected off-diagonal rejection, got {other:?}"),
+    }
+    assert_eq!(tensor.data(), before.as_slice());
+    assert_no_provider_queries(&provider);
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
 fn sun_checked_generic_full_svd_preserves_provider_reconstructs_and_rejects_lazy() {
     use tenet::typed::SUNFusionRule;
 
