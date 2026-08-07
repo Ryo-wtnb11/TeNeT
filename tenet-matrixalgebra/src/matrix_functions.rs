@@ -13,10 +13,11 @@ use tenet_tensors::{
 
 use crate::compose::compose_bound_dyn;
 use crate::factorize::{
-    adjoint_bound_factor, eigh_full_dyn, inverse_by_sector_dyn, is_hermitian_endomorphism_dyn,
-    map_square_sectors_dyn, scale_axis_by_spectrum, solve_left_by_sector_dyn,
-    svd_compact_factors_dyn, typed_from_bound_factor, BoundDynFactor, BoundDynamicTensorRef,
-    BoundTensorMap, BoundTensorMapRef, FactorScalar, SectorSpectrum, SvdFactorsDyn,
+    adjoint_bound_factor, eigh_full_dyn, inverse_by_sector_dyn, inverse_by_sector_dyn_into,
+    is_hermitian_endomorphism_dyn, map_square_sectors_dyn, scale_axis_by_spectrum,
+    solve_left_by_sector_dyn, svd_compact_factors_dyn, typed_from_bound_factor, BoundDynFactor,
+    BoundDynamicTensorRef, BoundTensorMap, BoundTensorMapRef, FactorScalar, SectorSpectrum,
+    SvdFactorsDyn,
 };
 
 /// Matrix exponential of any endomorphism (TensorKit `exp!`, which checks only
@@ -1002,6 +1003,24 @@ where
     // truncation policy, so factor tensors and a recoupling contraction are
     // avoidable work.
     inverse_by_sector_dyn(dense, input)
+}
+
+/// Context-free inverse execution into a caller-admitted swapped output space.
+///
+/// This is the checked-provider seam: categorical admission belongs above this
+/// layer, while the sector routing and dense LU solve stay shared with the
+/// multiplicity-free facade.
+#[doc(hidden)]
+pub fn inv_direct_into_dyn<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    output_space: tenet_tensors::BoundDynamicFusionMapSpace<R>,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    inverse_by_sector_dyn_into(dense, input, output_space)
 }
 
 /// Context-free dynamic-rank left solve `A \ B` used by the user layer.

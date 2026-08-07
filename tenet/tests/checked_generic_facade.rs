@@ -1163,6 +1163,134 @@ fn sun_checked_generic_full_svd_preserves_provider_reconstructs_and_rejects_lazy
 }
 
 #[cfg(feature = "racah-generated")]
+fn assert_sun_checked_generic_inv<D>(n: usize, label: Vec<i64>)
+where
+    D: tenet::typed::TensorScalar + fmt::Debug + PartialEq,
+{
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(n).unwrap());
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(label, 2)], false).unwrap();
+    let source: TensorMap<_, D> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
+            let row = indices[0] + 2 * indices[1];
+            let col = indices[2] + 2 * indices[3];
+            D::from_real(
+                if trees.codomain_vertices() == trees.domain_vertices() && row == col {
+                    2.0
+                } else {
+                    0.0
+                },
+            )
+        })
+        .unwrap();
+    assert!((0..source.block_count()).any(|index| {
+        source
+            .block_fusion_trees(index)
+            .unwrap()
+            .codomain_vertices()
+            .iter()
+            .chain(source.block_fusion_trees(index).unwrap().domain_vertices())
+            .any(|vertex| vertex.get() > 1)
+    }));
+    let inverse = source.inv().unwrap();
+    assert!(std::ptr::eq(inverse.provider(), provider.as_ref()));
+    assert!(source.runtime().shares_state_with(inverse.runtime()));
+    assert_eq!(inverse.codomain(), source.domain());
+    assert_eq!(inverse.domain(), source.codomain());
+    let expected = source.scale(D::from_real(0.5));
+    for identity in [
+        source.compose(&inverse).unwrap(),
+        inverse.compose(&source).unwrap(),
+    ] {
+        assert_eq!(identity.data(), expected.data());
+    }
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn sun_checked_generic_inv_preserves_provider_outer_multiplicity_and_inverse_laws() {
+    for (n, label) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
+        assert_sun_checked_generic_inv::<f64>(n, label.clone());
+        assert_sun_checked_generic_inv::<Complex64>(n, label);
+    }
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn sun_checked_generic_inv_preflight_counts_outer_multiplicity() {
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let adjoint = vec![1, 1];
+    let codomain_leg =
+        GradedSpace::try_new(Arc::clone(&provider), [(adjoint.clone(), 1)], false).unwrap();
+    let isomorphic_domain = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [
+            (vec![0, 0], 1),
+            (adjoint.clone(), 2),
+            (vec![3, 0], 1),
+            (vec![0, 3], 1),
+            (vec![2, 2], 1),
+        ],
+        false,
+    )
+    .unwrap();
+    let accepted: TensorMap<_, f64> = TensorMap::from_block_fn(
+        &runtime,
+        [&codomain_leg, &codomain_leg],
+        [&isomorphic_domain],
+        |trees, indices| {
+            if trees.coupled() == &adjoint {
+                let row = trees.codomain_vertices()[0].get() - 1;
+                if row == indices[2] {
+                    2.0
+                } else {
+                    0.0
+                }
+            } else {
+                2.0
+            }
+        },
+    )
+    .unwrap();
+    let inverse = accepted.inv().unwrap();
+    assert_eq!(inverse.codomain(), accepted.domain());
+    assert_eq!(inverse.domain(), accepted.codomain());
+
+    let nonisomorphic_domain = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [
+            (vec![0, 0], 1),
+            (adjoint, 1),
+            (vec![3, 0], 1),
+            (vec![0, 3], 1),
+            (vec![2, 2], 1),
+        ],
+        false,
+    )
+    .unwrap();
+    let rejected: TensorMap<_, f64> = TensorMap::from_block_fn(
+        &runtime,
+        [&codomain_leg, &codomain_leg],
+        [&nonisomorphic_domain],
+        |_, _| 1.0,
+    )
+    .unwrap();
+    let before = rejected.data().to_vec();
+    assert!(matches!(
+        rejected.inv(),
+        Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
+            _
+        )))
+    ));
+    assert_eq!(rejected.data(), before.as_slice());
+}
+
+#[cfg(feature = "racah-generated")]
 #[test]
 fn sun_checked_generic_compact_lq_preserves_provider_and_reconstructs() {
     use tenet::typed::SUNFusionRule;
@@ -1439,6 +1567,118 @@ fn checked_generic_reduction_dimension_failure_is_typed_and_nonpublishing() {
         GenericTensorError::Structure(CheckedGenericStructureError::Provider(ToyError::Algebra))
     ));
     assert_eq!(source.data(), before.as_slice());
+}
+
+#[test]
+fn checked_generic_inv_isomorphism_preflight_failure_is_typed_and_nonpublishing() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
+    let before = source.data().to_vec();
+    provider.fail_algebra.store(true, Ordering::Relaxed);
+    assert!(matches!(
+        source.inv(),
+        Err(GenericTensorError::Plan(
+            tenet::typed::CheckedGenericPlanError::Provider(ToyError::Algebra)
+        ))
+    ));
+    assert_eq!(source.data(), before.as_slice());
+}
+
+#[test]
+fn checked_generic_inv_destination_admission_failure_is_typed_and_nonpublishing() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
+    let before = source.data().to_vec();
+    provider.invalid_style.store(true, Ordering::Relaxed);
+    assert!(matches!(
+        source.inv(),
+        Err(GenericTensorError::Structure(_))
+    ));
+    assert_eq!(source.data(), before.as_slice());
+}
+
+#[test]
+fn checked_generic_inv_accepts_unequal_isomorphic_spaces_and_rejects_nonisomorphic() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let x = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let unit = GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 1)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&x], [&x, &unit], |_, indices| {
+            if indices[0] == indices[1] {
+                2.0
+            } else {
+                0.0
+            }
+        })
+        .unwrap();
+    let inverse = source.inv().unwrap();
+    assert_eq!((inverse.codomain_rank(), inverse.domain_rank()), (2, 1));
+    assert_eq!(inverse.codomain(), source.domain());
+    assert_eq!(inverse.domain(), source.codomain());
+    assert!(std::ptr::eq(inverse.provider(), provider.as_ref()));
+    assert!(source.runtime().shares_state_with(inverse.runtime()));
+    assert_eq!(
+        source.compose(&inverse).unwrap().data(),
+        source.scale(0.5).data()
+    );
+    assert_eq!(
+        inverse.compose(&source).unwrap().data(),
+        source.scale(0.5).data()
+    );
+
+    let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let nonisomorphic: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&narrow], [&x], |_, _| 1.0).unwrap();
+    let before = nonisomorphic.data().to_vec();
+    assert!(matches!(
+        nonisomorphic.inv(),
+        Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
+            _
+        )))
+    ));
+    assert_eq!(nonisomorphic.data(), before.as_slice());
+}
+
+#[test]
+fn checked_generic_inv_singular_early_and_late_sectors_preserve_source() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let bond = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(Label::Vacuum, 1), (Label::X, 1)],
+        false,
+    )
+    .unwrap();
+    for target in [Label::Vacuum, Label::X] {
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&bond], [&bond], |trees, _| {
+                if trees.coupled() == &target {
+                    0.0
+                } else {
+                    1.0
+                }
+            })
+            .unwrap();
+        let labels = (0..source.block_count())
+            .map(|index| source.block_fusion_trees(index).unwrap().coupled().clone())
+            .collect::<Vec<_>>();
+        assert_eq!(labels, [Label::Vacuum, Label::X]);
+        let before = source.data().to_vec();
+        assert!(matches!(
+            source.inv(),
+            Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
+                _
+            )))
+        ));
+        assert_eq!(source.data(), before.as_slice());
+    }
 }
 
 #[test]

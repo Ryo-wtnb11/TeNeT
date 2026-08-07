@@ -1637,20 +1637,22 @@ fn assert_checked_full_svd_builder_failure(fail_at: usize) {
 
 #[test]
 fn checked_generic_full_svd_u_builder_failure_preserves_provider_context() {
-    // What: the first post-dense checked-provider call belongs to U-space construction.
-    assert_checked_full_svd_builder_failure(5);
+    // What: after the two multiplicity-aware dimension DPs (ten checked calls),
+    // the first post-dense checked-provider call belongs to U-space construction.
+    assert_checked_full_svd_builder_failure(15);
 }
 
 #[test]
 fn checked_generic_full_svd_vh_builder_failure_preserves_provider_context() {
     // What: Vh-space construction propagates its exact provider error without publishing U.
-    assert_checked_full_svd_builder_failure(9);
+    assert_checked_full_svd_builder_failure(19);
 }
 
 #[test]
 fn checked_generic_full_svd_s_builder_failure_preserves_provider_context() {
-    // What: S-space construction propagates its exact provider error after U/Vh staging.
-    assert_checked_full_svd_builder_failure(13);
+    // What: S-space construction propagates its exact provider error after U/Vh staging;
+    // its final checked admission call follows the ten-call dimension preflight at 22.
+    assert_checked_full_svd_builder_failure(22);
 }
 
 #[test]

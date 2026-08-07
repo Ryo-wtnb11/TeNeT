@@ -45,8 +45,8 @@ pub use factorize::{
     SvdFull, SvdFullDyn, SvdTrunc, SvdTruncDyn, SvdTruncFactorsDyn,
 };
 pub use matrix_functions::{
-    exp, exp_dyn, inv, inv_direct_dyn, inv_dyn, pinv, pinv_adjoint_parent_dyn, pinv_dyn,
-    solve_left_direct_dyn,
+    exp, exp_dyn, inv, inv_direct_dyn, inv_direct_into_dyn, inv_dyn, pinv, pinv_adjoint_parent_dyn,
+    pinv_dyn, solve_left_direct_dyn,
 };
 pub use truncation::{
     select_truncation, Truncation, TruncationDecision, TruncationError, TruncationSpace,
