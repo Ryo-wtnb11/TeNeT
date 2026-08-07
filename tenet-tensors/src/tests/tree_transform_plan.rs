@@ -7824,7 +7824,7 @@ impl<R: FusionRule> CheckedGenericFusion for CheckedPlanSpy<'_, R> {
         left: SectorId,
         right: SectorId,
     ) -> Result<SectorVec, Self::Error> {
-        Ok(self.rule.fusion_channels_in_table(left, right))
+        Ok(self.rule.fusion_channels(left, right))
     }
 
     fn try_nsymbol(
@@ -8103,7 +8103,7 @@ impl CheckedGenericFusion for SynchronizedCheckedGeneric {
         right: SectorId,
     ) -> Result<SectorVec, Self::Error> {
         self.hit();
-        Ok(self.rule.fusion_channels_in_table(left, right))
+        Ok(self.rule.fusion_channels(left, right))
     }
     fn try_nsymbol(
         &self,

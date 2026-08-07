@@ -156,7 +156,7 @@ where
     fn vacuum(&self) -> SectorId { self.0.vacuum() }
     fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> { Ok(self.0.dual(sector)) }
     fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> { Ok(self.0.nsymbol(a, b, c)) }
-    fn try_fusion_channels_in_table(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.0.fusion_channels_in_table(a, b)) }
+    fn try_fusion_channels_in_table(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.0.fusion_channels(a, b)) }
     fn try_f_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, Self::Error> { Ok(self.0.f_symbol_generic(a,b,c,d,e,f)) }
     fn try_validated_f_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, CheckedGenericSymbolError<Self::Error>> { Ok(self.0.f_symbol_generic(a,b,c,d,e,f)) }
     fn try_r_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> { Ok(self.0.r_symbol_generic(a,b,c)) }
@@ -190,7 +190,7 @@ where
     fn vacuum(&self) -> SectorId { self.0.vacuum() }
     fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> { Ok(self.0.dual(sector)) }
     fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> { Ok(self.0.nsymbol(a, b, c)) }
-    fn try_fusion_channels_in_table(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.0.fusion_channels_in_table(a, b)) }
+    fn try_fusion_channels_in_table(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.0.fusion_channels(a, b)) }
     fn try_f_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, Self::Error> { Ok(self.0.f_symbol_generic(a,b,c,d,e,f)) }
     fn try_validated_f_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, CheckedGenericSymbolError<Self::Error>> { Ok(self.0.f_symbol_generic(a,b,c,d,e,f)) }
     fn try_r_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> { Ok(self.0.r_symbol_generic(a,b,c)) }
@@ -1169,8 +1169,7 @@ where
 {
     let mut grouped = Vec::<CoupledFusionTrees>::new();
     let mut index: FxHashMap<SectorId, usize> = FxHashMap::default();
-    let mut aggregate = CoupledSectorFold::default();
-    let mut clean_set: Vec<SectorId> = Vec::new();
+    let mut aggregate = CoupledSectorFoldBuilder::default();
     let mut uncoupled = Vec::with_capacity(space.len());
     let mut is_dual = Vec::with_capacity(space.len());
     let mut effective = Vec::with_capacity(space.len());
@@ -1190,7 +1189,7 @@ where
             let fold = rule
                 .try_coupled_sector_fold(&effective)
                 .map_err(CheckedGenericStructureError::Provider)?;
-            for &coupled in &fold.clean {
+            for &coupled in fold.clean() {
                 let trees = collect_generic_fusion_trees_for_coupled_frozen_checked(
                     rule,
                     &frozen_uncoupled,
@@ -1206,30 +1205,14 @@ where
                     }
                 }
             }
-            clean_set.extend(fold.clean);
-            aggregate.tainted.extend(fold.tainted);
-            aggregate.out_of_table.extend(fold.out_of_table);
-            aggregate.poisoned |= fold.poisoned;
+            aggregate.absorb(fold);
             Ok::<(), CheckedGenericStructureError<R::Error>>(())
         })?;
-    aggregate.tainted.sort_unstable();
-    aggregate.tainted.dedup();
-    aggregate.out_of_table.sort();
-    aggregate.out_of_table.dedup();
-    clean_set.sort_unstable();
-    clean_set.dedup();
-    // Tainted-anywhere wins over clean-somewhere.
-    clean_set.retain(|s| !aggregate.tainted.contains(s));
-    aggregate.clean = clean_set;
-    if aggregate.poisoned {
-        // Same conservative contract as the per-tuple fold.
-        let mut demoted = std::mem::take(&mut aggregate.clean);
-        aggregate.tainted.append(&mut demoted);
-        aggregate.tainted.sort_unstable();
-        aggregate.tainted.dedup();
-    }
+    // Tainted-anywhere beats clean-somewhere, and an unknown split anywhere
+    // demotes every candidate; both live in the builder's seal.
+    let aggregate = aggregate.seal();
     // Drop tree groups of sectors that lost their clean status across tuples.
-    grouped.retain(|group| aggregate.clean.contains(&group.coupled));
+    grouped.retain(|group| aggregate.clean().contains(&group.coupled));
     grouped.sort_by_key(|group| group.coupled);
     Ok((grouped, aggregate))
 }
@@ -1272,19 +1255,19 @@ fn merge_generic_tree_groups(
 /// `Err` (names the escaping sectors — never silently dropped).
 fn fusion_fold_error_message(side: &str, fold: &CoupledSectorFold) -> String {
     let mut parts = Vec::new();
-    if !fold.out_of_table.is_empty() {
+    if !fold.out_of_table().is_empty() {
         parts.push(format!(
             "out-of-table coupled candidates on the {side} side: {}",
-            fold.out_of_table.join(", ")
+            fold.out_of_table().join(", ")
         ));
     }
-    if !fold.tainted.is_empty() {
+    if !fold.tainted().is_empty() {
         parts.push(format!(
             "sectors requiring out-of-table intermediates on the {side} side: {:?}",
-            fold.tainted
+            fold.tainted()
         ));
     }
-    if fold.poisoned {
+    if fold.is_unknown() {
         parts.push(format!(
             "the {side}-side fold left the one-hop frontier shell (conservative)"
         ));

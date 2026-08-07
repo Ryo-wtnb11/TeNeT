@@ -3,9 +3,8 @@ use std::{cell::Cell, error::Error, fmt};
 use tenet_core::{
     block_structure_intern_cache_info, complete_hom_space_structure_cache_info,
     fusion_tree_layout_cache_info, BraidingStyleKind, CheckedGenericFusion,
-    CheckedGenericStructureError, CoreError, CoupledSectorFold, FusionProductSpace, FusionRule,
-    FusionStyleKind, FusionTreeHomSpace, InfallibleGeneric, RuleIdentity, SectorId, SectorLeg,
-    SectorVec,
+    CheckedGenericStructureError, CoreError, CoupledSectorFold, FusionProductSpace,
+    FusionStyleKind, FusionTreeHomSpace, RuleIdentity, SectorId, SectorLeg, SectorVec,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,10 +107,7 @@ impl CheckedGenericFusion for Toy {
     }
     fn try_coupled_sector_fold(&self, _: &[SectorId]) -> Result<CoupledSectorFold, ToyError> {
         self.hit(Failure::Fold)?;
-        Ok(CoupledSectorFold {
-            clean: vec![SectorId::new(1)],
-            ..Default::default()
-        })
+        Ok(CoupledSectorFold::complete(vec![SectorId::new(1)]))
     }
     fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, ToyError> {
         self.hit(Failure::Multiplicity)?;
@@ -181,9 +177,12 @@ impl CheckedGenericFusion for TaintedFoldToy {
         self.0.try_fusion_channels_in_table(a, b)
     }
     fn try_coupled_sector_fold(&self, _: &[SectorId]) -> Result<CoupledSectorFold, ToyError> {
-        Ok(CoupledSectorFold {
+        // Was `{ tainted: [1], ..Default::default() }`: tainted-but-classified,
+        // not an unknown split.
+        Ok(CoupledSectorFold::Partial {
+            clean: Vec::new(),
             tainted: vec![SectorId::new(1)],
-            ..Default::default()
+            out_of_table: Vec::new(),
         })
     }
     fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, ToyError> {
@@ -345,42 +344,4 @@ fn checked_generic_structure_preserves_order_and_never_publishes_on_provider_fai
             Some(key)
         );
     }
-}
-
-struct ChannelSpy;
-impl FusionRule for ChannelSpy {
-    fn rule_identity(&self) -> RuleIdentity {
-        RuleIdentity::of_type::<Self>()
-    }
-    fn fusion_style(&self) -> FusionStyleKind {
-        FusionStyleKind::Generic
-    }
-    fn braiding_style(&self) -> BraidingStyleKind {
-        BraidingStyleKind::Bosonic
-    }
-    fn vacuum(&self) -> SectorId {
-        SectorId::new(0)
-    }
-    fn fusion_channels(&self, _: SectorId, _: SectorId) -> SectorVec {
-        SectorVec::from_iter([SectorId::new(9)])
-    }
-    fn fusion_channels_in_table(&self, _: SectorId, _: SectorId) -> SectorVec {
-        SectorVec::from_iter([SectorId::new(4)])
-    }
-}
-#[test]
-fn infallible_generic_distinguishes_full_and_in_table_channels() {
-    let checked = InfallibleGeneric::new(&ChannelSpy);
-    assert_eq!(
-        checked
-            .try_fusion_channels(SectorId::new(1), SectorId::new(2))
-            .unwrap(),
-        SectorVec::from_iter([SectorId::new(9)])
-    );
-    assert_eq!(
-        checked
-            .try_fusion_channels_in_table(SectorId::new(1), SectorId::new(2))
-            .unwrap(),
-        SectorVec::from_iter([SectorId::new(4)])
-    );
 }

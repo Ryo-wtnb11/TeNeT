@@ -8,31 +8,152 @@ use num_complex::Complex64;
 use crate::{BraidingStyleKind, FusionStyleKind, RuleIdentity, SectorId, SectorVec};
 
 /// Classification of a leg tuple's coupled-sector candidates for a possibly
-/// catalog-bounded rule. For unbounded rules every candidate is `clean`; for
-/// a bounded provider:
-/// * `clean`: every fusion tree ending in this sector stays inside the table —
-///   enumeration is exactly the provider's complete tree set;
-/// * `tainted`: some complete tree for this sector passes through an
-///   out-of-table inner line — the table cannot enumerate (or recouple) the
-///   complete set, so constructing this sector must be an error, NEVER a
-///   silently truncated block;
-/// * `out_of_table`: display labels of coupled-sector candidates that escaped
-///   the table entirely (they cannot even be named by a dense `SectorId`);
-/// * `poisoned`: the fold left the one-hop frontier shell, so the split into
-///   clean/tainted is unknown — every sector must be treated as tainted
-///   (`clean` is emptied by the producer when this fires).
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct CoupledSectorFold {
-    pub clean: Vec<SectorId>,
-    pub tainted: Vec<SectorId>,
-    pub out_of_table: Vec<String>,
-    pub poisoned: bool,
+/// catalog-bounded rule.
+///
+/// A candidate is *clean* when every complete fusion tree ending in it stays
+/// inside the provider's table, so enumeration is exactly the provider's
+/// complete tree set. It is *tainted* when some complete tree passes through an
+/// out-of-table inner line: constructing that sector must be an error, NEVER a
+/// silently truncated block. `out_of_table` carries display labels for
+/// candidates that escaped the table entirely and cannot even be named by a
+/// dense [`SectorId`].
+///
+/// Why an enum rather than four fields: the conventions between them are not
+/// independent — losing classification precision means no candidate may be
+/// reported clean, and a sector cannot be both clean and tainted. As separate
+/// public fields those invariants had to be re-established by every producer
+/// and re-checked by every consumer.
+///
+/// The variants make the first one unrepresentable: an [`Self::Unknown`] fold
+/// has no clean list to contradict. The second is normalized rather than
+/// forbidden, because enum fields are public too — a hand-written
+/// [`Self::Partial`] can still name a sector on both sides.
+/// [`CoupledSectorFoldBuilder::seal`] resolves it the conservative way, and a
+/// provider that hands the engine an inconsistent fold directly loses a
+/// candidate it could have kept rather than gaining one it should not have.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CoupledSectorFold {
+    /// Every candidate is clean; nothing escaped the table.
+    Complete { clean: Vec<SectorId> },
+    /// Some candidates escaped. `clean` is the remainder that stays provably
+    /// complete.
+    Partial {
+        clean: Vec<SectorId>,
+        tainted: Vec<SectorId>,
+        out_of_table: Vec<String>,
+    },
+    /// The fold left the one-hop frontier shell, so the clean/tainted split is
+    /// unknown and every candidate is treated as tainted.
+    Unknown {
+        tainted: Vec<SectorId>,
+        out_of_table: Vec<String>,
+    },
 }
 
 impl CoupledSectorFold {
+    /// The fold of an unbounded provider: every candidate is clean.
+    pub fn complete(clean: Vec<SectorId>) -> Self {
+        Self::Complete { clean }
+    }
+
     /// Whether the fold proved the candidate set complete and in-table.
     pub fn is_fully_clean(&self) -> bool {
-        self.tainted.is_empty() && self.out_of_table.is_empty() && !self.poisoned
+        matches!(self, Self::Complete { .. })
+    }
+
+    /// Candidates whose complete tree set is enumerable. Empty when the
+    /// classification itself is unknown.
+    pub fn clean(&self) -> &[SectorId] {
+        match self {
+            Self::Complete { clean } | Self::Partial { clean, .. } => clean,
+            Self::Unknown { .. } => &[],
+        }
+    }
+
+    /// Candidates that must not be constructed.
+    pub fn tainted(&self) -> &[SectorId] {
+        match self {
+            Self::Complete { .. } => &[],
+            Self::Partial { tainted, .. } | Self::Unknown { tainted, .. } => tainted,
+        }
+    }
+
+    /// Display labels of candidates that escaped the table entirely.
+    pub fn out_of_table(&self) -> &[String] {
+        match self {
+            Self::Complete { .. } => &[],
+            Self::Partial { out_of_table, .. } | Self::Unknown { out_of_table, .. } => out_of_table,
+        }
+    }
+
+    /// Whether the clean/tainted split could not be determined.
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown { .. })
+    }
+}
+
+/// Accumulates per-tuple folds into one classification for a whole space.
+///
+/// Sealing applies the two cross-tuple conventions once, where they can be
+/// stated instead of repeated: tainted-anywhere beats clean-somewhere, and an
+/// unknown split anywhere demotes every candidate.
+#[derive(Clone, Debug, Default)]
+pub struct CoupledSectorFoldBuilder {
+    clean: Vec<SectorId>,
+    tainted: Vec<SectorId>,
+    out_of_table: Vec<String>,
+    unknown: bool,
+}
+
+impl CoupledSectorFoldBuilder {
+    pub fn absorb(&mut self, fold: CoupledSectorFold) {
+        match fold {
+            CoupledSectorFold::Complete { clean } => self.clean.extend(clean),
+            CoupledSectorFold::Partial {
+                clean,
+                tainted,
+                out_of_table,
+            } => {
+                self.clean.extend(clean);
+                self.tainted.extend(tainted);
+                self.out_of_table.extend(out_of_table);
+            }
+            CoupledSectorFold::Unknown {
+                tainted,
+                out_of_table,
+            } => {
+                self.unknown = true;
+                self.tainted.extend(tainted);
+                self.out_of_table.extend(out_of_table);
+            }
+        }
+    }
+
+    pub fn seal(mut self) -> CoupledSectorFold {
+        self.tainted.sort_unstable();
+        self.tainted.dedup();
+        self.out_of_table.sort();
+        self.out_of_table.dedup();
+        self.clean.sort_unstable();
+        self.clean.dedup();
+        self.clean.retain(|sector| !self.tainted.contains(sector));
+        if self.unknown {
+            self.tainted.append(&mut self.clean);
+            self.tainted.sort_unstable();
+            self.tainted.dedup();
+            return CoupledSectorFold::Unknown {
+                tainted: self.tainted,
+                out_of_table: self.out_of_table,
+            };
+        }
+        if self.tainted.is_empty() && self.out_of_table.is_empty() {
+            return CoupledSectorFold::Complete { clean: self.clean };
+        }
+        CoupledSectorFold::Partial {
+            clean: self.clean,
+            tainted: self.tainted,
+            out_of_table: self.out_of_table,
+        }
     }
 }
 
@@ -87,45 +208,6 @@ pub trait FusionRule: 'static {
     /// that the two entry points agree on which sectors exist (#971).
     fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
         usize::from(self.fusion_channels(left, right).contains(&coupled))
-    }
-
-    /// The representable channels of `left ⊗ right` — identical to
-    /// [`Self::fusion_channels`] for unbounded rules (the default). A
-    /// catalog-bounded rule overrides this to return the
-    /// in-table channels of an ESCAPING pair instead of panicking.
-    ///
-    /// Safety contract: callers may only rely on this being the complete
-    /// channel list where out-of-table branches provably contribute nothing —
-    /// i.e. on trees of sectors the [`Self::coupled_sector_fold`] classified
-    /// `clean` (a clean sector by definition has no tree through an
-    /// out-of-table line, so skipping frontier channels drops only
-    /// provably-dead branches).
-    fn fusion_channels_in_table(&self, left: SectorId, right: SectorId) -> SectorVec {
-        self.fusion_channels(left, right)
-    }
-
-    /// Folds `effective[0] ⊗ effective[1] ⊗ …` and classifies every coupled
-    /// candidate (see [`CoupledSectorFold`]). Default: the plain unbounded
-    /// fold — everything clean, nothing escapes. Bounded rules override.
-    fn coupled_sector_fold(&self, effective: &[SectorId]) -> CoupledSectorFold {
-        let mut acc: Vec<SectorId> = match effective.first() {
-            None => vec![self.vacuum()],
-            Some(&first) => vec![first],
-        };
-        for &last in effective.iter().skip(1) {
-            acc = acc
-                .iter()
-                .flat_map(|&front| self.fusion_channels(front, last))
-                .collect();
-            acc.sort_unstable();
-            acc.dedup();
-        }
-        acc.sort_unstable();
-        acc.dedup();
-        CoupledSectorFold {
-            clean: acc,
-            ..CoupledSectorFold::default()
-        }
     }
 }
 
@@ -615,10 +697,7 @@ pub trait CheckedGenericFusion {
         }
         acc.sort_unstable();
         acc.dedup();
-        Ok(CoupledSectorFold {
-            clean: acc,
-            ..CoupledSectorFold::default()
-        })
+        Ok(CoupledSectorFold::complete(acc))
     }
     fn try_nsymbol(
         &self,
@@ -774,19 +853,15 @@ impl<R: FusionRule> CheckedGenericFusion for InfallibleGeneric<'_, R> {
         Ok(self.0.fusion_channels(left, right))
     }
 
+    /// An infallible provider is unbounded by definition of [`FusionRule`], so
+    /// its representable channels are its complete channels and the inherited
+    /// default fold classifies every candidate clean.
     fn try_fusion_channels_in_table(
         &self,
         left: SectorId,
         right: SectorId,
     ) -> Result<SectorVec, Self::Error> {
-        Ok(self.0.fusion_channels_in_table(left, right))
-    }
-
-    fn try_coupled_sector_fold(
-        &self,
-        effective: &[SectorId],
-    ) -> Result<CoupledSectorFold, Self::Error> {
-        Ok(self.0.coupled_sector_fold(effective))
+        Ok(self.0.fusion_channels(left, right))
     }
 
     fn try_nsymbol(
@@ -1508,4 +1583,69 @@ where
         sector.id() >> Left::BITS
     };
     Ok((SectorId::new(sector.id() & left_mask), SectorId::new(right)))
+}
+
+#[cfg(test)]
+mod coupled_sector_fold_tests {
+    use super::*;
+
+    fn sector(id: usize) -> SectorId {
+        SectorId::new(id)
+    }
+
+    #[test]
+    fn sealing_promotes_an_all_clean_accumulation_to_complete() {
+        // What: the two conventions are stated once, at seal, so an
+        // accumulation with nothing escaping is indistinguishable from a
+        // provider that reported `Complete` directly.
+        let mut builder = CoupledSectorFoldBuilder::default();
+        builder.absorb(CoupledSectorFold::complete(vec![sector(2), sector(1)]));
+        builder.absorb(CoupledSectorFold::complete(vec![sector(1)]));
+
+        let sealed = builder.seal();
+        assert!(sealed.is_fully_clean());
+        assert_eq!(sealed.clean(), &[sector(1), sector(2)]);
+        assert!(sealed.tainted().is_empty());
+    }
+
+    #[test]
+    fn tainted_anywhere_beats_clean_somewhere() {
+        // What: a sector reported clean by one leg tuple and tainted by
+        // another must not survive as clean — the taint is a statement about
+        // trees that exist, the cleanliness only about the tuple that was
+        // examined.
+        let mut builder = CoupledSectorFoldBuilder::default();
+        builder.absorb(CoupledSectorFold::complete(vec![sector(1), sector(3)]));
+        builder.absorb(CoupledSectorFold::Partial {
+            clean: vec![sector(3)],
+            tainted: vec![sector(1)],
+            out_of_table: vec!["27".to_owned()],
+        });
+
+        let sealed = builder.seal();
+        assert!(!sealed.is_fully_clean());
+        assert!(!sealed.is_unknown());
+        assert_eq!(sealed.clean(), &[sector(3)]);
+        assert_eq!(sealed.tainted(), &[sector(1)]);
+        assert_eq!(sealed.out_of_table(), &["27".to_owned()]);
+    }
+
+    #[test]
+    fn an_unknown_split_anywhere_demotes_every_candidate() {
+        // What: once the fold leaves the frontier shell the clean/tainted
+        // split is not knowable, so no candidate may be reported clean —
+        // including ones an earlier tuple certified.
+        let mut builder = CoupledSectorFoldBuilder::default();
+        builder.absorb(CoupledSectorFold::complete(vec![sector(1), sector(2)]));
+        builder.absorb(CoupledSectorFold::Unknown {
+            tainted: vec![sector(4)],
+            out_of_table: Vec::new(),
+        });
+
+        let sealed = builder.seal();
+        assert!(sealed.is_unknown());
+        assert!(!sealed.is_fully_clean());
+        assert!(sealed.clean().is_empty());
+        assert_eq!(sealed.tainted(), &[sector(1), sector(2), sector(4)]);
+    }
 }

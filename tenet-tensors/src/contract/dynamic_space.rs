@@ -2927,19 +2927,6 @@ mod bound_invariant_tests {
             [SectorId::new(0)].into_iter().collect()
         }
 
-        fn fusion_channels_in_table(&self, _: SectorId, _: SectorId) -> SectorVec {
-            self.calls.set(self.calls.get() + 1);
-            [SectorId::new(0)].into_iter().collect()
-        }
-
-        fn coupled_sector_fold(&self, _: &[SectorId]) -> CoupledSectorFold {
-            self.calls.set(self.calls.get() + 1);
-            CoupledSectorFold {
-                clean: vec![SectorId::new(0)],
-                ..Default::default()
-            }
-        }
-
         fn nsymbol(&self, _: SectorId, _: SectorId, _: SectorId) -> usize {
             self.calls.set(self.calls.get() + 1);
             2
@@ -2996,10 +2983,7 @@ mod bound_invariant_tests {
         ) -> Result<CoupledSectorFold, Self::Error> {
             let _ = effective;
             self.hit()?;
-            Ok(CoupledSectorFold {
-                clean: vec![SectorId::new(0)],
-                ..Default::default()
-            })
+            Ok(CoupledSectorFold::complete(vec![SectorId::new(0)]))
         }
 
         fn try_nsymbol(

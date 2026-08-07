@@ -76,19 +76,15 @@ impl FusionProductSpace {
                     // Why not dualize `right` from `SectorLeg::is_dual`: stored
                     // sector IDs are already outward labels; the flag controls
                     // pivotal and braiding data, not ProductSpace block dimensions.
-                    let mut fold = rule.coupled_sector_fold(&[left, right]);
-                    if !fold.is_fully_clean() {
-                        return Err(CoreError::FusionOutsideTable {
-                            message: format!(
-                                "coupled-sector dimension fold is incomplete: \
-                                 tainted={:?}, out_of_table={:?}, poisoned={}",
-                                fold.tainted, fold.out_of_table, fold.poisoned
-                            ),
-                        });
-                    }
-                    fold.clean.sort_unstable();
-                    fold.clean.dedup();
-                    for coupled in fold.clean {
+                    // Why no catalog-completeness guard: an infallible
+                    // `FusionRule` is unbounded by construction, so every
+                    // channel it names is representable. A provider with a
+                    // finite table implements `CheckedGenericFusion` and
+                    // reaches the checked preflight instead.
+                    let mut channels = rule.fusion_channels(left, right);
+                    channels.sort_unstable();
+                    channels.dedup();
+                    for coupled in channels {
                         let contribution = left_dimension
                             .checked_mul(right_degeneracy)
                             .and_then(|value| {
@@ -725,7 +721,7 @@ fn generic_keys_for_coupled_from_groups(
     outside_table_error: impl Fn(&str, &CoupledSectorFold, SectorId) -> CoreError,
 ) -> Result<Vec<FusionTreePairKey>, CoreError> {
     for (side, fold) in [("codomain", codomain_fold), ("domain", domain_fold)] {
-        if fold.poisoned || fold.tainted.contains(&coupled) {
+        if fold.is_unknown() || fold.tainted().contains(&coupled) {
             return Err(outside_table_error(side, fold, coupled));
         }
     }
