@@ -1561,8 +1561,14 @@ fn checked_generic_exp_uses_general_pade_for_nonhermitian_dense_blocks() {
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| f64::from(ij == [0, 1]))
             .unwrap();
     let expected = [1.0, 0.0, 1.0, 1.0];
+    reset_provider_queries(&provider);
     let direct = source.exp().unwrap();
+    assert_no_provider_queries(&provider);
     assert!(std::ptr::eq(direct.provider(), provider.as_ref()));
+    assert!(direct.runtime().shares_state_with(source.runtime()));
+    assert_eq!(direct.codomain(), source.codomain());
+    assert_eq!(direct.domain(), source.domain());
+    assert_eq!(direct.block_count(), source.block_count());
     assert!(direct
         .data()
         .iter()
@@ -1570,15 +1576,30 @@ fn checked_generic_exp_uses_general_pade_for_nonhermitian_dense_blocks() {
         .all(|(a, b)| (*a - b).abs() < 1e-12));
     let lazy = source.adjoint().unwrap();
     let lazy_exp = lazy.exp().unwrap();
+    assert!(std::ptr::eq(lazy_exp.provider(), provider.as_ref()));
+    assert!(lazy_exp.runtime().shares_state_with(source.runtime()));
+    assert_eq!(lazy_exp.codomain(), lazy.codomain());
+    assert_eq!(lazy_exp.domain(), lazy.domain());
+    assert_eq!(lazy_exp.block_count(), lazy.block_count());
     assert_eq!(lazy_exp.data(), direct.adjoint().unwrap().data());
-    let complex = source.to_c64();
-    assert!(complex
-        .exp()
-        .unwrap()
+    let complex = source.to_c64().scale(Complex64::new(1.0, 0.25));
+    reset_provider_queries(&provider);
+    let complex_exp = complex.exp().unwrap();
+    assert_no_provider_queries(&provider);
+    assert!(std::ptr::eq(complex_exp.provider(), provider.as_ref()));
+    assert!(complex_exp.runtime().shares_state_with(source.runtime()));
+    assert_eq!(complex_exp.codomain(), complex.codomain());
+    assert_eq!(complex_exp.domain(), complex.domain());
+    assert!(complex_exp
         .data()
         .iter()
-        .zip(expected)
-        .all(|(a, b)| (*a - Complex64::new(b, 0.0)).norm() < 1e-12));
+        .zip([
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(1.0, 0.25),
+            Complex64::new(1.0, 0.0)
+        ])
+        .all(|(a, b)| (*a - b).norm() < 1e-12));
 }
 
 #[test]
@@ -1635,6 +1656,118 @@ fn checked_generic_exp_rejects_early_and_late_nonfinite_sectors_without_publicat
             .zip(&before)
             .all(|(a, b)| a.to_bits() == b.to_bits()));
     }
+}
+
+#[cfg(feature = "racah-generated")]
+fn assert_sun_checked_generic_exp_outer_multiplicity(n: usize, adjoint: Vec<i64>) {
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(n).unwrap());
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(adjoint.clone(), 1)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, ij| {
+            let left = trees.codomain_vertices()[0].get();
+            let right = trees.domain_vertices()[0].get();
+            if ij.iter().all(|&index| index == 0) {
+                if left == right {
+                    left as f64 / 5.0
+                } else if left == 1 && right == 2 {
+                    0.3
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            }
+        })
+        .unwrap();
+    assert!(
+        (0..source.block_count()).any(|index| source
+            .block_fusion_trees(index)
+            .unwrap()
+            .codomain_vertices()[0]
+            .get()
+            > 1),
+        "[adj, adj] -> adj must retain its outer-multiplicity key"
+    );
+    let real_output = source.exp().unwrap();
+    assert!(std::ptr::eq(real_output.provider(), provider.as_ref()));
+    assert!(real_output.runtime().shares_state_with(source.runtime()));
+    assert_eq!(real_output.codomain(), source.codomain());
+    assert_eq!(real_output.domain(), source.domain());
+    for index in 0..source.block_count() {
+        assert_eq!(
+            real_output.block_fusion_trees(index).unwrap(),
+            source.block_fusion_trees(index).unwrap()
+        );
+        assert_eq!(
+            real_output.block(index).unwrap(),
+            source.block(index).unwrap()
+        );
+    }
+    let real_inverse = source.scale(-1.0).exp().unwrap();
+    let real_identity: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, _| {
+            f64::from(trees.codomain_vertices() == trees.domain_vertices())
+        })
+        .unwrap();
+    for product in [
+        real_output.compose(&real_inverse).unwrap(),
+        real_inverse.compose(&real_output).unwrap(),
+    ] {
+        assert!(product
+            .data()
+            .iter()
+            .zip(real_identity.data())
+            .all(|(a, b)| (*a - *b).abs() < 2e-10));
+    }
+    for complex in [true] {
+        let input = if complex {
+            source.to_c64().scale(Complex64::new(1.0, 0.2))
+        } else {
+            source.to_c64()
+        };
+        let output = input.exp().unwrap();
+        assert!(std::ptr::eq(output.provider(), provider.as_ref()));
+        assert!(output.runtime().shares_state_with(source.runtime()));
+        assert_eq!(output.codomain(), input.codomain());
+        assert_eq!(output.domain(), input.domain());
+        assert_eq!(output.block_count(), input.block_count());
+        for index in 0..input.block_count() {
+            assert_eq!(
+                output.block_fusion_trees(index).unwrap(),
+                input.block_fusion_trees(index).unwrap()
+            );
+            assert_eq!(output.block(index).unwrap(), input.block(index).unwrap());
+        }
+        let inverse = input.scale(Complex64::new(-1.0, 0.0)).exp().unwrap();
+        let identity: TensorMap<_, Complex64> =
+            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, _| {
+                Complex64::new(
+                    f64::from(trees.codomain_vertices() == trees.domain_vertices()),
+                    0.0,
+                )
+            })
+            .unwrap();
+        for product in [
+            output.compose(&inverse).unwrap(),
+            inverse.compose(&output).unwrap(),
+        ] {
+            assert!(product
+                .data()
+                .iter()
+                .zip(identity.data())
+                .all(|(a, b)| (*a - *b).norm() < 2e-10));
+        }
+    }
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_generic_exp_sun_outer_multiplicity_preserves_layout() {
+    assert_sun_checked_generic_exp_outer_multiplicity(3, vec![1, 1]);
+    assert_sun_checked_generic_exp_outer_multiplicity(4, vec![1, 0, 1]);
 }
 
 #[test]

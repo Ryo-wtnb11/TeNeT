@@ -14,8 +14,8 @@ use tenet_tensors::{
 };
 
 use crate::factorize::{
-    dyn_space_of, truncate_svd, typed_from_bound_factor, typed_from_dyn,
-    validate_inverse_region_routes_for_test, BoundTensorMap,
+    dyn_space_of, map_square_sectors_dyn_into, truncate_svd, typed_from_bound_factor,
+    typed_from_dyn, validate_inverse_region_routes_for_test, BoundTensorMap,
 };
 use crate::*;
 use num_complex::{Complex32, Complex64};
@@ -1304,6 +1304,28 @@ fn provider_neutral_generic_factorizations_keep_the_strided_fallback() {
     let padded_lq = lq_compact_dyn_generic(&mut dense, &padded).unwrap();
     assert_generic_factor_close(&padded_lq.0, &canonical_lq.0);
     assert_generic_factor_close(&padded_lq.1, &canonical_lq.1);
+}
+
+#[test]
+fn square_matrix_function_rejects_noncanonical_admitted_output_before_kernel() {
+    let (canonical_space, canonical_data) = generic_factorization_input();
+    let (padded_space, _) = padded_generic_factorization_input(&canonical_space, &canonical_data);
+    let input = BoundDynamicTensorRef::try_new(&canonical_space, &canonical_data).unwrap();
+    let called = Cell::new(false);
+    let result = map_square_sectors_dyn_into(
+        &input,
+        padded_space,
+        |_| -> Result<(), OperationError> {
+            called.set(true);
+            unreachable!("layout rejection precedes kernel initialization")
+        },
+        |_, _, _, _, _| unreachable!("layout rejection precedes dense work"),
+    );
+    assert!(matches!(
+        result,
+        Err(OperationError::UnsupportedTensorContractScope { .. })
+    ));
+    assert!(!called.get());
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
