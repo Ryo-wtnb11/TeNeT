@@ -2493,8 +2493,8 @@ fn assert_sun_checked_generic_pinv<D>(
             let column = index[2] + 2 * index[3];
             if trees.codomain_vertices() == trees.domain_vertices() && row == column {
                 D::from_real(2.0)
-            } else if trees.codomain_vertices()[0].get() == 1
-                && trees.domain_vertices()[0].get() == 2
+            } else if trees.codomain_vertices()[0].get() == 2
+                && trees.domain_vertices()[0].get() == 1
                 && row == column
             {
                 off_diagonal
@@ -2516,10 +2516,36 @@ fn assert_sun_checked_generic_pinv<D>(
     assert!(std::ptr::eq(pseudo.provider(), provider.as_ref()));
     assert_eq!(pseudo.codomain(), source.domain());
     assert_eq!(pseudo.domain(), source.codomain());
+    let expected: TensorMap<_, D> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, index| {
+            let row = index[0] + 2 * index[1];
+            let column = index[2] + 2 * index[3];
+            if trees.codomain_vertices() == trees.domain_vertices() && row == column {
+                D::from_real(0.5)
+            } else if trees.codomain_vertices()[0].get() == 2
+                && trees.domain_vertices()[0].get() == 1
+                && row == column
+            {
+                D::from_real(-0.25) * off_diagonal
+            } else {
+                D::from_real(0.0)
+            }
+        })
+        .unwrap();
+    for index in 0..pseudo.block_count() {
+        let actual = pseudo.block(index).unwrap();
+        let expected_block = expected.block(index).unwrap();
+        assert_eq!(actual.key(), expected_block.key());
+        assert_eq!(actual.shape(), expected_block.shape());
+        assert_eq!(actual.strides(), expected_block.strides());
+    }
+    for (actual, expected) in pseudo.data().iter().zip(expected.data()) {
+        assert!(close(*actual, *expected) < 1e-9);
+    }
     assert!((0..source.block_count()).any(|index| {
         let trees = source.block_fusion_trees(index).unwrap();
-        trees.codomain_vertices()[0].get() == 1
-            && trees.domain_vertices()[0].get() == 2
+        trees.codomain_vertices()[0].get() == 2
+            && trees.domain_vertices()[0].get() == 1
             && source.block(index).unwrap().shape() == [2, 2, 2, 2]
             && source.data()[source.block(index).unwrap().offset()] == off_diagonal
     }));
