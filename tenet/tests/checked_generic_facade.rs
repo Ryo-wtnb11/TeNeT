@@ -1553,6 +1553,35 @@ fn checked_generic_lazy_adjoint_preserves_provider_and_reductions() {
 }
 
 #[test]
+fn checked_generic_exp_uses_general_pade_for_nonhermitian_dense_blocks() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| f64::from(ij == [0, 1]))
+            .unwrap();
+    let expected = [1.0, 0.0, 1.0, 1.0];
+    let direct = source.exp().unwrap();
+    assert!(std::ptr::eq(direct.provider(), provider.as_ref()));
+    assert!(direct
+        .data()
+        .iter()
+        .zip(expected)
+        .all(|(a, b)| (*a - b).abs() < 1e-12));
+    let lazy = source.adjoint().unwrap();
+    let lazy_exp = lazy.exp().unwrap();
+    assert_eq!(lazy_exp.data(), direct.adjoint().unwrap().data());
+    let complex = source.to_c64();
+    assert!(complex
+        .exp()
+        .unwrap()
+        .data()
+        .iter()
+        .zip(expected)
+        .all(|(a, b)| (*a - Complex64::new(b, 0.0)).norm() < 1e-12));
+}
+
+#[test]
 fn checked_generic_reduction_dimension_failure_is_typed_and_nonpublishing() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
