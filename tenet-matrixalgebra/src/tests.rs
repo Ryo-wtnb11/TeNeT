@@ -6769,6 +6769,54 @@ fn solve_left_preserves_dense_singularity_and_capability_errors() {
     ));
 }
 
+#[test]
+fn solve_left_direct_into_rejects_foreign_authority_and_wrong_output_before_execution() {
+    // What: caller-admitted output metadata is an input contract, not a hint.
+    let divisor = u1_block_endomorphism(&[(0, 1, vec![2.0_f64])]);
+    let rhs = u1_block_map(&[(0, 1, 1, vec![1.0_f64])]);
+    let provider = Arc::new(U1FusionRule);
+    let divisor = bound_tensor(Arc::clone(&provider), &divisor);
+    let rhs = bound_tensor(Arc::new(U1FusionRule), &rhs);
+    let expected = FusionTreeHomSpace::new(
+        divisor.space().space().homspace().domain().clone(),
+        rhs.space().space().homspace().domain().clone(),
+    );
+
+    let foreign = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+        Arc::new(U1FusionRule),
+        expected.clone(),
+    )
+    .unwrap();
+    let error = solve_left_direct_into_dyn(
+        &mut RejectExecutorCalls,
+        &divisor.as_ref().dynamic(),
+        &rhs.as_ref().dynamic(),
+        foreign,
+    )
+    .unwrap_err();
+    assert!(matches!(error, OperationError::StructureMismatch { .. }));
+
+    let wrong = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+        provider,
+        FusionTreeHomSpace::new(
+            divisor.space().space().homspace().domain().clone(),
+            FusionProductSpace::new([
+                SectorLeg::new([(U1Irrep::new(0).sector_id(), 1)], false),
+                SectorLeg::new([(U1Irrep::new(0).sector_id(), 1)], false),
+            ]),
+        ),
+    )
+    .unwrap();
+    let error = solve_left_direct_into_dyn(
+        &mut RejectExecutorCalls,
+        &divisor.as_ref().dynamic(),
+        &rhs.as_ref().dynamic(),
+        wrong,
+    )
+    .unwrap_err();
+    assert!(matches!(error, OperationError::StructureMismatch { .. }));
+}
+
 fn u1_cross_space_map<D: FactorScalar>(
     codomain: &[(i32, usize)],
     domain: &[(i32, usize)],

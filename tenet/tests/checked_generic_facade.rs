@@ -2304,6 +2304,31 @@ fn checked_generic_left_solve_preflight_failures_are_nonpublishing() {
         )))
     ));
     assert_eq!(lhs.data(), before.as_slice());
+
+    let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let runtime_rhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&other_runtime, [&x], [&x], |_, _| 1.0).unwrap();
+    reset_provider_queries(&provider);
+    assert!(matches!(
+        lhs.solve(&runtime_rhs),
+        Err(GenericTensorError::Facade(
+            tenet::typed::Error::RuntimeMismatch
+        ))
+    ));
+    assert_no_provider_queries(&provider);
+
+    let wrong_codomain =
+        GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 1)], false).unwrap();
+    let codomain_rhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&wrong_codomain], [&x], |_, _| 1.0).unwrap();
+    reset_provider_queries(&provider);
+    assert!(matches!(
+        lhs.solve(&codomain_rhs),
+        Err(GenericTensorError::Facade(
+            tenet::typed::Error::InvalidArgument(_)
+        ))
+    ));
+    assert_no_provider_queries(&provider);
 }
 
 #[test]
