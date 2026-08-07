@@ -33,7 +33,7 @@ categorical coefficients are separately constrained by the provider bounds.
 | `adjoint` | PROVED lazy view | NEEDS-PROOF | PROVED lazy view | PROVED lazy view | PROVED lazy view | UNSUPPORTED | PROVED for SU(3)/SU(4) real-provider fixtures |
 | `permute`, `transpose`, `repartition` | PROVED | PROVED for CU(1); NEEDS-PROOF for ZN | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED |
 | `braid` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED |
-| `twist` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED for synthetic checked-pivotal f64/c64 ±1 scaling, μ=2 full keys, direct/lazy parity, precedence, staged failures, NoBraiding/Bosonic/identity sharing, plus SU(3)/SU(4) × f64/c64 identity sharing and exact layout; checked-Generic compact storage remains unproved by integration tests |
+| `twist` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED for synthetic checked-pivotal f64/c64 ±1 scaling, μ=2 full keys, direct/lazy parity, precedence, staged failures, NoBraiding/Bosonic/identity sharing, plus SU(3)/SU(4) × f64/c64 identity sharing and exact layout; checked-Generic compact construction remains unsupported |
 | `flip` | PROVED | NEEDS-PROOF | PROVED | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | UNSUPPORTED |
 | unit insertion/removal | PROVED | NEEDS-PROOF | PROVED | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | PROVED |
 | `catdomain`, `catcodomain` | PROVED | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | PROVED in both directions for four SU(3)/SU(4) × f64/c64 cases with μ=2 full-key matching, exact direct-sum slabs, distinct equal-identity Arcs, and lazy-adjoint parity; compact checked-Generic construction remains unsupported |

@@ -3489,8 +3489,7 @@ where
     /// operation publishes one fresh scaled payload on the exact admitted
     /// space and provider allocation. A lazy adjoint redirects through its
     /// parent with the inverse operation. Multiplicity-free compact spectra
-    /// remain compact; checked-Generic compact spectra use the same staged
-    /// provider values and representation-preserving scaling.
+    /// retain their existing representation-preserving path.
     ///
     /// # Errors
     ///
@@ -4630,7 +4629,7 @@ where
             let sector = uncoupled_sector_of_leg(key, nout, leg);
             if let std::collections::hash_map::Entry::Vacant(entry) = staged.entry(sector) {
                 let value = provider.try_twist_scalar(sector).map_err(|error| {
-                    GenericTensorError::Structure(CheckedGenericStructureError::Provider(error))
+                    GenericTensorError::Plan(CheckedGenericPlanError::Provider(error))
                 })?;
                 entry.insert(value);
             }
@@ -4648,21 +4647,6 @@ where
             .map(|&leg| staged[&uncoupled_sector_of_leg(key, nout, leg)])
             .product::<f64>()
     };
-    if let Some(spectrum) = tensor.spectrum() {
-        let scaled = spectrum
-            .iter()
-            .map(|entry| {
-                let factor =
-                    D::from_real(legs.iter().map(|_| staged[&entry.sector]).product::<f64>());
-                tenet_matrixalgebra::SectorSpectrum {
-                    sector: entry.sector,
-                    values: entry.values.iter().map(|&value| value * factor).collect(),
-                }
-            })
-            .collect();
-        return Ok(tensor.with_spectrum(scaled));
-    }
-
     let mut data = tensor
         .owned_body()
         .expect("owned checked-Generic twist input")

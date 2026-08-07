@@ -4,11 +4,13 @@ use std::sync::{Arc, Mutex};
 
 use tenet::core::{
     BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericPivotal,
-    CheckedGenericRigidSymbols, CheckedGenericStructureError, FusionStyleKind, GenericFArray,
-    GenericRMatrix, RuleIdentity, SectorId, SectorVec, TypedSectorAdmission,
+    CheckedGenericRigidSymbols, FusionStyleKind, GenericFArray, GenericRMatrix, RuleIdentity,
+    SectorId, SectorVec, TypedSectorAdmission,
 };
 use tenet::prelude::{Complex64, Error, Runtime};
-use tenet::typed::{GenericTensorError, GradedSpace, TensorMap, TensorScalar};
+use tenet::typed::{
+    CheckedGenericPlanError, GenericTensorError, GradedSpace, TensorMap, TensorScalar,
+};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 enum Label {
@@ -458,13 +460,15 @@ where
     assert_values(&repeated, value, |_| 1.0);
 
     let lazy = source.adjoint().unwrap();
+    // What: logical adjoint axis 1 maps to parent codomain axis 0; logical
+    // axis 0 would instead map to the uniformly-X parent domain axis 2.
     provider.reset_ledger(2);
-    let lazy_twisted = lazy.twist(&[0, 1, 2]).unwrap();
+    let lazy_twisted = lazy.twist(&[1]).unwrap();
     assert_eq!(provider.style_queries.load(Ordering::Relaxed), 1);
     assert_eq!(provider.twist_queries.load(Ordering::Relaxed), 2);
     assert_eq!(provider.post_stage_queries.load(Ordering::Relaxed), 0);
     provider.finish_observation();
-    let direct = source.twist(&[0, 1, 2]).unwrap().adjoint().unwrap();
+    let direct = source.twist_inverse(&[0]).unwrap().adjoint().unwrap();
     assert_eq!(lazy_twisted.data(), direct.data());
     assert!(std::ptr::eq(lazy_twisted.provider(), provider.as_ref()));
     assert_eq!(source.data(), before);
@@ -509,9 +513,9 @@ fn checked_generic_twist_precedence_and_late_failure_are_typed_and_nonpublishing
     provider.fail_twist_on.store(2, Ordering::Relaxed);
     assert!(matches!(
         source.twist(&[0]),
-        Err(GenericTensorError::Structure(
-            CheckedGenericStructureError::Provider(PivotalError::Twist)
-        ))
+        Err(GenericTensorError::Plan(CheckedGenericPlanError::Provider(
+            PivotalError::Twist
+        )))
     ));
     assert_eq!(provider.style_queries.load(Ordering::Relaxed), 1);
     assert_eq!(provider.twist_queries.load(Ordering::Relaxed), 2);
