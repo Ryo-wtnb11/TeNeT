@@ -3852,6 +3852,15 @@ where
 }
 
 #[doc(hidden)]
+pub trait TypedTensorExpDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn exp(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Self::FacadeError>;
+}
+
+#[doc(hidden)]
 pub trait TypedTensorQrDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
@@ -4126,6 +4135,19 @@ where
     }
 }
 
+impl<R, D> TypedTensorExpDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn exp(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
+        tensor.exp_multiplicity_free()
+    }
+}
+
 impl<R, D> TypedTensorQrDispatch<R, D> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
@@ -4359,6 +4381,46 @@ where
             &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
                 .map_err(Error::from)?,
             output,
+        )
+        .map_err(Error::from)?;
+        Ok(wrap_factor_on(&tensor.runtime, factor))
+    }
+}
+
+impl<R, D> TypedTensorExpDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
+    fn exp(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        if tensor.logical_space().space().homspace().codomain()
+            != tensor.logical_space().space().homspace().domain()
+        {
+            return Err(Error::from(
+                tenet_tensors::OperationError::UnsupportedTensorContractScope {
+                    message: "exp requires an endomorphism (codomain == domain)",
+                },
+            )
+            .into());
+        }
+        let local = matches!(&tensor.repr, TypedTensorRepr::Adjoint(_))
+            .then(|| tensor.materialized_tensor_uncached())
+            .transpose()
+            .map_err(GenericTensorError::from)?;
+        let body = local
+            .as_ref()
+            .and_then(TensorMap::owned_body)
+            .unwrap_or_else(|| tensor.owned_body().expect("owned representation"));
+        let mut dense = tensor.runtime.lease_dense();
+        let factor = tenet_matrixalgebra::exp_pade13_direct_into_dyn(
+            dense.dense(),
+            &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+                .map_err(Error::from)?,
         )
         .map_err(Error::from)?;
         Ok(wrap_factor_on(&tensor.runtime, factor))
@@ -5619,6 +5681,72 @@ where
     /// remains unsupported.
     pub fn inv(&self) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorInvDispatch<R, D>>::inv(self)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorExpDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// The matrix exponential `exp(t) = Σ_k t^k / k!`, evaluated per coupled
+    /// sector — TensorKit's `exp`, which copies and calls `exp!`: check
+    /// `domain == codomain`, then exponentiate every block.
+    ///
+    /// # Domain
+    ///
+    /// Any endomorphism, of any dtype. Multiplicity-free tensors retain the
+    /// original two dense routes:
+    ///
+    /// - **Hermitian blocks** take the spectral function `V exp(D) Vᴴ` of the
+    ///   Hermitian eigendecomposition.
+    /// - **Everything else** takes blockwise scaling-and-squaring Padé [13/13]
+    ///   (Higham 2005). Non-normal, defective and complex non-Hermitian blocks
+    ///   are all in domain; nothing is symmetrized.
+    ///
+    /// The multiplicity-free **compact** arm is TensorKit's
+    /// `exp(::DiagonalTensorMap)`: unconditionally elementwise, with no
+    /// hermiticity gate. Checked-Generic tensors currently use only the dense
+    /// Padé route; checked compact construction is unsupported.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Operation`] when the input is not an endomorphism
+    ///   (`codomain != domain`), when a general block holds a nonfinite entry,
+    ///   when a general block's column 1-norm overflows to infinity although
+    ///   every entry is finite, or when the backend fails. Nothing is published
+    ///   unless every coupled sector succeeded.
+    /// - [`Error::Core`] / [`Error::FusionAlgebra`] from the multiplicity-free
+    ///   Hermitian composition route.
+    ///
+    /// # Complexity
+    ///
+    /// Dense input is `O(Σ_c n_c³)`: multiplicity-free Hermitian blocks use one
+    /// eigendecomposition plus a composition; all general blocks, including
+    /// checked-Generic, use six GEMMs, one solve and the necessary Padé
+    /// squarings per sector with `O(max_c n_c²)` workspace. Coupled sectors are
+    /// never mixed. A dense lazy adjoint builds one operation-local logical
+    /// payload per call without publishing its receiver cache. Compact
+    /// multiplicity-free input remains `O(rank)` elementwise.
+    ///
+    /// TensorKit's diagonal implementation is the reference for the compact
+    /// branch; this method never panics for a supported tensor contract.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use tenet::core::{U1FusionRule, U1Irrep};
+    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
+    /// let runtime = Runtime::builder().build()?;
+    /// let rule = Arc::new(U1FusionRule);
+    /// let v = GradedSpace::try_new(Arc::clone(&rule), [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)], false)?;
+    /// let zero: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&v], [&v])?;
+    /// let id: TensorMap<_, f64> = TensorMap::id(&runtime, [&v])?;
+    /// assert!(zero.exp()?.data().iter().zip(id.data()).all(|(a, b)| (a - b).abs() < 1e-15));
+    /// # Ok::<(), tenet::typed::Error>(())
+    /// ```
+    pub fn exp(&self) -> Result<Self, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorExpDispatch<R, D>>::exp(self)
     }
 }
 
@@ -12248,85 +12376,8 @@ where
         self.decode_spectrum(raw)
     }
 
-    /// The matrix exponential `exp(t) = Σ_k t^k / k!`, evaluated per coupled
-    /// sector — TensorKit's `exp`, which copies and calls
-    /// `exp!`: check `domain == codomain`, then
-    /// exponentiate every block.
-    ///
-    /// # Domain
-    ///
-    /// Any endomorphism, of any dtype. Since issue #577 there are two dense
-    /// routes and the input picks one:
-    ///
-    /// - **Hermitian blocks** take the spectral function `V exp(D) Vᴴ` of the
-    ///   Hermitian eigendecomposition. Exact, and the cheaper of the two.
-    /// - **Everything else** takes blockwise scaling-and-squaring Padé [13/13]
-    ///   (Higham 2005) — the algorithm behind the `LinearAlgebra.exp!` that
-    ///   TensorKit's own `exp!` calls. Non-normal, defective and complex
-    ///   non-Hermitian blocks are all in domain; nothing is symmetrized.
-    ///
-    /// The **compact** arm is TensorKit's `exp(::DiagonalTensorMap)`:
-    /// unconditionally elementwise, with no hermiticity gate. Storage therefore
-    /// decides how `exp` is computed, no longer whether it is defined.
-    ///
-    /// # Errors
-    ///
-    /// - [`Error::Operation`] when the input is not an endomorphism
-    ///   (`codomain != domain`), when a general block holds a nonfinite entry,
-    ///   when a general block's column 1-norm overflows to infinity although
-    ///   every entry of it is finite, or when the backend fails — including an
-    ///   executor that supplies no
-    ///   dense solve, which the Padé route needs and which surfaces as
-    ///   `DenseError::Unsupported`. Nothing is published unless every coupled
-    ///   sector succeeded.
-    /// - [`Error::Core`] / [`Error::FusionAlgebra`] from the composition that
-    ///   reassembles `V exp(D) Vᴴ` on the Hermitian route.
-    ///
-    /// # Complexity
-    ///
-    /// Dense input: `O(Σ_c n_c³)` on both routes — one Hermitian
-    /// eigendecomposition per coupled sector plus one composition, with
-    /// `exp(D)` folded into a column scaling of `V` rather than materialized;
-    /// or six GEMMs, one solve and `s = max(0, ceil(log2(||A_c||_1 / theta_13)))`
-    /// squarings per sector — over the balanced block, so a badly scaled one
-    /// pays for its true magnitude and not its scaling — with an
-    /// `O(max_c n_c²)` Padé workspace reused across sectors. That workspace is
-    /// the whole of the scratch on the canonical layout; a payload whose
-    /// coupled sectors are not laid out in contiguous regions takes a fallback
-    /// that matricizes them all first, adding `O(Σ_c n_c²)`. Neither route
-    /// couples sectors. A dense lazy adjoint builds one operation-local logical
-    /// payload per call without publishing its reusable receiver cache. Compact
-    /// input (TensorKit's `DiagonalTensorMap`): the **O(rank) elementwise
-    /// arm**, `exp(s_i)` over the `Σ_c k_c` stored values, staying compact.
-    ///
-    /// ```
-    /// use std::sync::Arc;
-    ///
-    /// use tenet::core::{U1FusionRule, U1Irrep};
-    /// use tenet::typed::{GradedSpace, Runtime, TensorMap};
-    ///
-    /// let runtime = Runtime::builder().build()?;
-    /// let rule = Arc::new(U1FusionRule);
-    /// let v = GradedSpace::try_new(
-    ///     Arc::clone(&rule),
-    ///     [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
-    ///     false,
-    /// )?;
-    ///
-    /// // exp of the zero endomorphism is the identity.
-    /// let zero: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&v], [&v])?;
-    /// let id: TensorMap<_, f64> = TensorMap::id(&runtime, [&v])?;
-    /// let max_err = zero
-    ///     .exp()?
-    ///     .data()
-    ///     .iter()
-    ///     .zip(id.data())
-    ///     .map(|(a, b)| (a - b).abs())
-    ///     .fold(0.0f64, f64::max);
-    /// assert!(max_err < 1e-15);
-    /// # Ok::<(), tenet::typed::Error>(())
-    /// ```
-    pub fn exp(&self) -> Result<Self, Error> {
+    /// Multiplicity-free implementation of the public mode-dispatched exponential.
+    fn exp_multiplicity_free(&self) -> Result<Self, Error> {
         if let Some(spectrum) = self.spectrum() {
             // Why the spectrum is exponentiated unconditionally while the dense
             // arm asks about hermiticity: the dense question picks an algorithm
@@ -16293,6 +16344,29 @@ mod representation_gates {
             other => panic!("unexpected nonbond sqrt result: {other:?}"),
         }
         assert_eq!(materialized_adjoint_builds(&lazy_nonbond), 0);
+    }
+
+    #[cfg(feature = "racah-generated")]
+    #[test]
+    fn checked_generic_exp_lazy_is_owned_and_stays_cold() {
+        use tenet_core::SUNFusionRule;
+
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 1)], false).unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| f64::from(ij == [0, 1]))
+                .unwrap();
+        let lazy = source.adjoint().unwrap();
+        let actual = lazy.exp().unwrap();
+        let expected = source.exp().unwrap().adjoint().unwrap();
+        assert!(matches!(actual.repr, TypedTensorRepr::Owned(_)));
+        assert_eq!(actual.data(), expected.data());
+        assert!(std::ptr::eq(actual.provider(), provider.as_ref()));
+        assert!(actual.runtime().shares_state_with(source.runtime()));
+        assert_eq!(actual.codomain(), lazy.codomain());
+        assert_eq!(actual.domain(), lazy.domain());
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
     }
 
     #[cfg(feature = "racah-generated")]

@@ -6460,7 +6460,7 @@ where
 pub(crate) fn map_square_sectors_dyn<R, D, S, I, F>(
     input: &BoundDynamicTensorRef<'_, R, D>,
     init: I,
-    mut apply: F,
+    apply: F,
 ) -> Result<BoundDynFactor<R, D>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -6477,30 +6477,50 @@ where
     let output_space = input
         .space()
         .derive_from_final_homspace(source_space.homspace().clone())?;
-    let mut output_data = vec![D::zero(); output_space.space().required_len()?];
+    map_square_sectors_dyn_into(input, output_space, init, apply)
+}
+
+pub(crate) fn map_square_sectors_dyn_into<R, D, S, I, F>(
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    output_space: BoundDynamicFusionMapSpace<R>,
+    init: I,
+    mut apply: F,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    D: FactorScalar,
+    I: FnOnce(usize) -> Result<S, OperationError>,
+    F: FnMut(&mut S, &[D], usize, &mut [D], usize) -> Result<(), OperationError>,
+{
+    let source_space = input.space().space();
+    if source_space.homspace() != output_space.space().homspace() {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "matrix function output must preserve the input homspace",
+        });
+    }
 
     let source_regions = checked_sector_regions(source_space.structure(), source_space.nout())?;
-    // The output layout is derived here, from a homspace this function just
-    // built, so it is canonical by construction whatever the input layout was —
-    // the packed input route below reaches the very same output regions.
     let output_regions = checked_sector_regions(
         output_space.space().structure(),
         output_space.space().nout(),
     )?
-    .expect("a freshly derived matrix-function layout is canonical");
-    match source_regions {
+    .ok_or(OperationError::UnsupportedTensorContractScope {
+        message: "matrix function output requires canonical coupled-sector storage",
+    })?;
+    let output_len = output_space.space().required_len()?;
+    let output_data = match source_regions {
         Some(source) => {
             let routes = compile_inverse_region_routes(
                 &source,
                 &output_regions,
                 input.data().len(),
-                output_data.len(),
+                output_len,
             )?;
             let max_order = routes
                 .iter()
                 .map(|route| source[route.source].rows())
                 .max()
                 .unwrap_or(0);
+            let mut output_data = vec![D::zero(); output_len];
             let mut state = init(max_order)?;
             for route in routes {
                 let region = &source[route.source];
@@ -6517,20 +6537,19 @@ where
                     output.rows(),
                 )?;
             }
+            output_data
         }
         None => {
             let source_matrices =
                 sector_matricizations(source_space.structure(), input.data(), source_space.nout())?;
-            let routes = compile_inverse_matrix_routes(
-                &source_matrices,
-                &output_regions,
-                output_data.len(),
-            )?;
+            let routes =
+                compile_inverse_matrix_routes(&source_matrices, &output_regions, output_len)?;
             let max_order = routes
                 .iter()
                 .map(|route| source_matrices[route.source].rows)
                 .max()
                 .unwrap_or(0);
+            let mut output_data = vec![D::zero(); output_len];
             let mut state = init(max_order)?;
             let mut image = vec![
                 D::zero();
@@ -6554,8 +6573,9 @@ where
                     &route.cols,
                 );
             }
+            output_data
         }
-    }
+    };
 
     BoundDynFactor::from_bound(
         output_space,

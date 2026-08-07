@@ -14,10 +14,10 @@ use tenet_tensors::{
 use crate::compose::compose_bound_dyn;
 use crate::factorize::{
     adjoint_bound_factor, eigh_full_dyn, inverse_by_sector_dyn, inverse_by_sector_dyn_into,
-    is_hermitian_endomorphism_dyn, map_square_sectors_dyn, scale_axis_by_spectrum,
-    solve_left_by_sector_dyn, svd_compact_factors_dyn, typed_from_bound_factor, BoundDynFactor,
-    BoundDynamicTensorRef, BoundTensorMap, BoundTensorMapRef, FactorScalar, SectorSpectrum,
-    SvdFactorsDyn,
+    is_hermitian_endomorphism_dyn, map_square_sectors_dyn, map_square_sectors_dyn_into,
+    scale_axis_by_spectrum, solve_left_by_sector_dyn, svd_compact_factors_dyn,
+    typed_from_bound_factor, BoundDynFactor, BoundDynamicTensorRef, BoundTensorMap,
+    BoundTensorMapRef, FactorScalar, SectorSpectrum, SvdFactorsDyn,
 };
 
 /// Matrix exponential of any endomorphism (TensorKit `exp!`, which checks only
@@ -208,6 +208,25 @@ where
 {
     map_square_sectors_dyn(
         input,
+        Pade13Workspace::<D>::new,
+        |workspace, source, order, output, output_leading| {
+            exp_pade13_sector(dense, workspace, source, order, output, output_leading)
+        },
+    )
+}
+
+#[doc(hidden)]
+pub fn exp_pade13_direct_into_dyn<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    map_square_sectors_dyn_into(
+        input,
+        input.space().clone(),
         Pade13Workspace::<D>::new,
         |workspace, source, order, output, output_leading| {
             exp_pade13_sector(dense, workspace, source, order, output, output_leading)

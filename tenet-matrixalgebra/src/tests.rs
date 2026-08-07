@@ -14,8 +14,8 @@ use tenet_tensors::{
 };
 
 use crate::factorize::{
-    dyn_space_of, truncate_svd, typed_from_bound_factor, typed_from_dyn,
-    validate_inverse_region_routes_for_test, BoundTensorMap,
+    dyn_space_of, map_square_sectors_dyn_into, truncate_svd, typed_from_bound_factor,
+    typed_from_dyn, validate_inverse_region_routes_for_test, BoundTensorMap,
 };
 use crate::*;
 use num_complex::{Complex32, Complex64};
@@ -1304,6 +1304,55 @@ fn provider_neutral_generic_factorizations_keep_the_strided_fallback() {
     let padded_lq = lq_compact_dyn_generic(&mut dense, &padded).unwrap();
     assert_generic_factor_close(&padded_lq.0, &canonical_lq.0);
     assert_generic_factor_close(&padded_lq.1, &canonical_lq.1);
+}
+
+#[test]
+fn square_matrix_function_rejects_noncanonical_admitted_output_before_kernel() {
+    let (canonical_space, canonical_data) = generic_factorization_input();
+    let (padded_space, _) = padded_generic_factorization_input(&canonical_space, &canonical_data);
+    let input = BoundDynamicTensorRef::try_new(&canonical_space, &canonical_data).unwrap();
+    let called = Cell::new(false);
+    let result = map_square_sectors_dyn_into(
+        &input,
+        padded_space,
+        |_| -> Result<(), OperationError> {
+            called.set(true);
+            unreachable!("layout rejection precedes kernel initialization")
+        },
+        |_, _, _, _, _| unreachable!("layout rejection precedes dense work"),
+    );
+    assert!(matches!(
+        result,
+        Err(OperationError::UnsupportedTensorContractScope { .. })
+    ));
+    assert!(!called.get());
+}
+
+#[test]
+fn generic_exp_direct_reuses_the_exact_input_provider_and_layout() {
+    let provider = Arc::new(FactorGenericRule);
+    let x = SectorId::new(1);
+    let leg = SectorLeg::new([(x, 1)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone(), leg.clone()]),
+        FusionProductSpace::new([leg.clone(), leg]),
+    );
+    let space =
+        BoundDynamicFusionMapSpace::from_final_homspace_generic(provider, homspace).unwrap();
+    let data = vec![0.0; space.space().required_len().unwrap()];
+    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+    let output = exp_pade13_direct_into_dyn(&mut dense, &input).unwrap();
+
+    assert!(Arc::ptr_eq(
+        output.space().provider_arc(),
+        space.provider_arc()
+    ));
+    assert_eq!(
+        output.space().space().structure(),
+        space.space().structure()
+    );
+    assert_eq!(output.space().space().homspace(), space.space().homspace());
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
