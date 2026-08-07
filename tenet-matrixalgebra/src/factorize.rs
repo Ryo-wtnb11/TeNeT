@@ -6492,18 +6492,21 @@ where
     F: FnMut(&mut S, &[D], usize, &mut [D], usize) -> Result<(), OperationError>,
 {
     let source_space = input.space().space();
-    debug_assert_eq!(source_space.homspace(), output_space.space().homspace());
-    let mut output_data = vec![D::zero(); output_space.space().required_len()?];
+    if source_space.homspace() != output_space.space().homspace() {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "matrix function output must preserve the input homspace",
+        });
+    }
 
     let source_regions = checked_sector_regions(source_space.structure(), source_space.nout())?;
-    // The output layout is derived here, from a homspace this function just
-    // built, so it is canonical by construction whatever the input layout was —
-    // the packed input route below reaches the very same output regions.
     let output_regions = checked_sector_regions(
         output_space.space().structure(),
         output_space.space().nout(),
     )?
-    .expect("a freshly derived matrix-function layout is canonical");
+    .ok_or(OperationError::UnsupportedTensorContractScope {
+        message: "matrix function output requires canonical coupled-sector storage",
+    })?;
+    let mut output_data = vec![D::zero(); output_space.space().required_len()?];
     match source_regions {
         Some(source) => {
             let routes = compile_inverse_region_routes(
