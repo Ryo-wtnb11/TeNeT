@@ -3621,11 +3621,12 @@ mod tests {
             ),
             Err(CoreError::InvalidPermutation { .. })
         ));
-        // Not covered here: the deleted execute_unique_pivotal route's own
-        // rejection of a Simple provider (`unique_braid_tree`). That entry
-        // point no longer exists, and multiplicity_free_braid_tree accepts
-        // Simple providers by design, so there is no surviving contract to
-        // assert in its place.
+        // Not asserted here: `unique_braid_tree`'s own rejection of a Simple
+        // provider. That entry point is gone and
+        // `multiplicity_free_braid_tree` accepts Simple providers by design.
+        // The Unique-only style guard itself still exists on the surviving
+        // route and is asserted elsewhere — `execute_unique_rigid` at
+        // `fusion_tree.rs`, exercised with a Simple rule below in this file.
         assert!(matches!(
             multiplicity_free_permute_tree(
                 &FibonacciFusionRule,
