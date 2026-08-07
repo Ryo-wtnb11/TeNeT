@@ -2983,10 +2983,7 @@ mod bound_invariant_tests {
         ) -> Result<CoupledSectorFold, Self::Error> {
             let _ = effective;
             self.hit()?;
-            Ok(CoupledSectorFold {
-                clean: vec![SectorId::new(0)],
-                ..Default::default()
-            })
+            Ok(CoupledSectorFold::complete(vec![SectorId::new(0)]))
         }
 
         fn try_nsymbol(

@@ -721,7 +721,7 @@ fn generic_keys_for_coupled_from_groups(
     outside_table_error: impl Fn(&str, &CoupledSectorFold, SectorId) -> CoreError,
 ) -> Result<Vec<FusionTreePairKey>, CoreError> {
     for (side, fold) in [("codomain", codomain_fold), ("domain", domain_fold)] {
-        if fold.poisoned || fold.tainted.contains(&coupled) {
+        if fold.is_unknown() || fold.tainted().contains(&coupled) {
             return Err(outside_table_error(side, fold, coupled));
         }
     }

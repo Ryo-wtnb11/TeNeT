@@ -107,10 +107,7 @@ impl CheckedGenericFusion for Toy {
     }
     fn try_coupled_sector_fold(&self, _: &[SectorId]) -> Result<CoupledSectorFold, ToyError> {
         self.hit(Failure::Fold)?;
-        Ok(CoupledSectorFold {
-            clean: vec![SectorId::new(1)],
-            ..Default::default()
-        })
+        Ok(CoupledSectorFold::complete(vec![SectorId::new(1)]))
     }
     fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, ToyError> {
         self.hit(Failure::Multiplicity)?;
@@ -180,9 +177,12 @@ impl CheckedGenericFusion for TaintedFoldToy {
         self.0.try_fusion_channels_in_table(a, b)
     }
     fn try_coupled_sector_fold(&self, _: &[SectorId]) -> Result<CoupledSectorFold, ToyError> {
-        Ok(CoupledSectorFold {
+        // Was `{ tainted: [1], ..Default::default() }`: tainted-but-classified,
+        // not an unknown split.
+        Ok(CoupledSectorFold::Partial {
+            clean: Vec::new(),
             tainted: vec![SectorId::new(1)],
-            ..Default::default()
+            out_of_table: Vec::new(),
         })
     }
     fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, ToyError> {
