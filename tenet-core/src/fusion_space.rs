@@ -76,19 +76,15 @@ impl FusionProductSpace {
                     // Why not dualize `right` from `SectorLeg::is_dual`: stored
                     // sector IDs are already outward labels; the flag controls
                     // pivotal and braiding data, not ProductSpace block dimensions.
-                    let mut fold = rule.coupled_sector_fold(&[left, right]);
-                    if !fold.is_fully_clean() {
-                        return Err(CoreError::FusionOutsideTable {
-                            message: format!(
-                                "coupled-sector dimension fold is incomplete: \
-                                 tainted={:?}, out_of_table={:?}, poisoned={}",
-                                fold.tainted, fold.out_of_table, fold.poisoned
-                            ),
-                        });
-                    }
-                    fold.clean.sort_unstable();
-                    fold.clean.dedup();
-                    for coupled in fold.clean {
+                    // Why no catalog-completeness guard: an infallible
+                    // `FusionRule` is unbounded by construction, so every
+                    // channel it names is representable. A provider with a
+                    // finite table implements `CheckedGenericFusion` and
+                    // reaches the checked preflight instead.
+                    let mut channels = rule.fusion_channels(left, right);
+                    channels.sort_unstable();
+                    channels.dedup();
+                    for coupled in channels {
                         let contribution = left_dimension
                             .checked_mul(right_degeneracy)
                             .and_then(|value| {

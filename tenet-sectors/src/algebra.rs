@@ -88,45 +88,6 @@ pub trait FusionRule: 'static {
     fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
         usize::from(self.fusion_channels(left, right).contains(&coupled))
     }
-
-    /// The representable channels of `left ⊗ right` — identical to
-    /// [`Self::fusion_channels`] for unbounded rules (the default). A
-    /// catalog-bounded rule overrides this to return the
-    /// in-table channels of an ESCAPING pair instead of panicking.
-    ///
-    /// Safety contract: callers may only rely on this being the complete
-    /// channel list where out-of-table branches provably contribute nothing —
-    /// i.e. on trees of sectors the [`Self::coupled_sector_fold`] classified
-    /// `clean` (a clean sector by definition has no tree through an
-    /// out-of-table line, so skipping frontier channels drops only
-    /// provably-dead branches).
-    fn fusion_channels_in_table(&self, left: SectorId, right: SectorId) -> SectorVec {
-        self.fusion_channels(left, right)
-    }
-
-    /// Folds `effective[0] ⊗ effective[1] ⊗ …` and classifies every coupled
-    /// candidate (see [`CoupledSectorFold`]). Default: the plain unbounded
-    /// fold — everything clean, nothing escapes. Bounded rules override.
-    fn coupled_sector_fold(&self, effective: &[SectorId]) -> CoupledSectorFold {
-        let mut acc: Vec<SectorId> = match effective.first() {
-            None => vec![self.vacuum()],
-            Some(&first) => vec![first],
-        };
-        for &last in effective.iter().skip(1) {
-            acc = acc
-                .iter()
-                .flat_map(|&front| self.fusion_channels(front, last))
-                .collect();
-            acc.sort_unstable();
-            acc.dedup();
-        }
-        acc.sort_unstable();
-        acc.dedup();
-        CoupledSectorFold {
-            clean: acc,
-            ..CoupledSectorFold::default()
-        }
-    }
 }
 
 /// Marks a fusion rule whose vacuum obeys TeNeT's canonical unit conventions.
@@ -774,19 +735,15 @@ impl<R: FusionRule> CheckedGenericFusion for InfallibleGeneric<'_, R> {
         Ok(self.0.fusion_channels(left, right))
     }
 
+    /// An infallible provider is unbounded by definition of [`FusionRule`], so
+    /// its representable channels are its complete channels and the inherited
+    /// default fold classifies every candidate clean.
     fn try_fusion_channels_in_table(
         &self,
         left: SectorId,
         right: SectorId,
     ) -> Result<SectorVec, Self::Error> {
-        Ok(self.0.fusion_channels_in_table(left, right))
-    }
-
-    fn try_coupled_sector_fold(
-        &self,
-        effective: &[SectorId],
-    ) -> Result<CoupledSectorFold, Self::Error> {
-        Ok(self.0.coupled_sector_fold(effective))
+        Ok(self.0.fusion_channels(left, right))
     }
 
     fn try_nsymbol(

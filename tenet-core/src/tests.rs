@@ -402,50 +402,6 @@ mod tests {
     }
 
     #[derive(Clone, Copy, Debug)]
-    struct IncompleteDimensionFoldRule;
-
-    impl FusionRule for IncompleteDimensionFoldRule {
-        fn rule_identity(&self) -> RuleIdentity {
-            RuleIdentity::of_type::<Self>()
-        }
-
-        fn fusion_style(&self) -> FusionStyleKind {
-            FusionStyleKind::Generic
-        }
-
-        fn braiding_style(&self) -> BraidingStyleKind {
-            BraidingStyleKind::Bosonic
-        }
-
-        fn vacuum(&self) -> SectorId {
-            SectorId::new(0)
-        }
-
-        fn fusion_channels(&self, _left: SectorId, _right: SectorId) -> SectorVec {
-            SectorVec::new()
-        }
-
-        fn coupled_sector_fold(&self, _effective: &[SectorId]) -> CoupledSectorFold {
-            CoupledSectorFold {
-                tainted: vec![SectorId::new(1)],
-                ..CoupledSectorFold::default()
-            }
-        }
-    }
-
-    #[test]
-    fn coupled_sector_dimensions_reject_incomplete_bounded_folds() {
-        // What: an incomplete bounded fusion result is a typed error, never a
-        // silently truncated sector-dimension map.
-        let product =
-            FusionProductSpace::new([SectorLeg::new([(SectorId::new(1), 1)], false)]);
-        assert!(matches!(
-            product.coupled_sector_block_dimensions(&IncompleteDimensionFoldRule),
-            Err(CoreError::FusionOutsideTable { .. })
-        ));
-    }
-
-    #[derive(Clone, Copy, Debug)]
     struct BranchingMultiplicityFreeRule;
 
     impl FusionRule for BranchingMultiplicityFreeRule {
@@ -13638,7 +13594,7 @@ mod tests {
         fn vacuum(&self) -> SectorId { FusionRule::vacuum(self) }
         fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> { Ok(sector) }
         fn try_fusion_channels(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.fusion_channels(a,b)) }
-        fn try_fusion_channels_in_table(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.fusion_channels_in_table(a,b)) }
+        fn try_fusion_channels_in_table(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.fusion_channels(a,b)) }
         fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> { Ok(self.nsymbol(a,b,c)) }
     }
 
@@ -13720,7 +13676,7 @@ mod tests {
         fn vacuum(&self) -> SectorId { FusionRule::vacuum(&self.inner) }
         fn try_dual(&self, s: SectorId) -> Result<SectorId, Self::Error> { Ok(s) }
         fn try_fusion_channels(&self,a:SectorId,b:SectorId)->Result<SectorVec,Self::Error>{Ok(self.inner.fusion_channels(a,b))}
-        fn try_fusion_channels_in_table(&self,a:SectorId,b:SectorId)->Result<SectorVec,Self::Error>{Ok(self.inner.fusion_channels_in_table(a,b))}
+        fn try_fusion_channels_in_table(&self,a:SectorId,b:SectorId)->Result<SectorVec,Self::Error>{Ok(self.inner.fusion_channels(a,b))}
         fn try_nsymbol(&self,a:SectorId,b:SectorId,c:SectorId)->Result<usize,Self::Error>{Ok(self.inner.nsymbol(a,b,c))}
     }
     impl CheckedGenericRigidSymbols for ArtinSpy {
@@ -14609,7 +14565,7 @@ mod tests {
             left: SectorId,
             right: SectorId,
         ) -> Result<SectorVec, Self::Error> {
-            Ok(FusionRule::fusion_channels_in_table(self, left, right))
+            Ok(FusionRule::fusion_channels(self, left, right))
         }
 
         fn try_nsymbol(

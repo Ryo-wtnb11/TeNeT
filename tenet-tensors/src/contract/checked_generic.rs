@@ -610,8 +610,8 @@ mod tests {
     use crate::tests::GenericMultiplicityRule;
     use tenet_core::{
         BraidingStyleKind, CheckedGenericFusion, CoupledSectorFold, FusionProductSpace, FusionRule,
-        FusionStyleKind, GenericFArray, GenericRMatrix, RuleIdentity, SectorId, SectorLeg,
-        SectorVec,
+        FusionStyleKind, GenericFArray, GenericRMatrix, InfallibleGeneric, RuleIdentity, SectorId,
+        SectorLeg, SectorVec,
     };
 
     use super::*;
@@ -740,17 +740,21 @@ mod tests {
             right: SectorId,
         ) -> Result<SectorVec, Self::Error> {
             self.hit(Query::Channel)?;
-            Ok(FusionRule::fusion_channels_in_table(
-                &self.rule, left, right,
-            ))
+            Ok(FusionRule::fusion_channels(&self.rule, left, right))
         }
 
+        // Counts one query for the fold itself, as the engine's failure
+        // budgets are stated per provider call rather than per inner channel
+        // lookup. The classification is the trait default over this rule.
         fn try_coupled_sector_fold(
             &self,
             effective: &[SectorId],
         ) -> Result<CoupledSectorFold, Self::Error> {
             self.hit(Query::Channel)?;
-            Ok(FusionRule::coupled_sector_fold(&self.rule, effective))
+            match InfallibleGeneric::new(&self.rule).try_coupled_sector_fold(effective) {
+                Ok(fold) => Ok(fold),
+                Err(never) => match never {},
+            }
         }
 
         fn try_nsymbol(

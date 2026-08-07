@@ -156,7 +156,7 @@ where
     fn vacuum(&self) -> SectorId { self.0.vacuum() }
     fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> { Ok(self.0.dual(sector)) }
     fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> { Ok(self.0.nsymbol(a, b, c)) }
-    fn try_fusion_channels_in_table(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.0.fusion_channels_in_table(a, b)) }
+    fn try_fusion_channels_in_table(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.0.fusion_channels(a, b)) }
     fn try_f_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, Self::Error> { Ok(self.0.f_symbol_generic(a,b,c,d,e,f)) }
     fn try_validated_f_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, CheckedGenericSymbolError<Self::Error>> { Ok(self.0.f_symbol_generic(a,b,c,d,e,f)) }
     fn try_r_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> { Ok(self.0.r_symbol_generic(a,b,c)) }
@@ -190,7 +190,7 @@ where
     fn vacuum(&self) -> SectorId { self.0.vacuum() }
     fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> { Ok(self.0.dual(sector)) }
     fn try_nsymbol(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<usize, Self::Error> { Ok(self.0.nsymbol(a, b, c)) }
-    fn try_fusion_channels_in_table(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.0.fusion_channels_in_table(a, b)) }
+    fn try_fusion_channels_in_table(&self, a: SectorId, b: SectorId) -> Result<SectorVec, Self::Error> { Ok(self.0.fusion_channels(a, b)) }
     fn try_f_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, Self::Error> { Ok(self.0.f_symbol_generic(a,b,c,d,e,f)) }
     fn try_validated_f_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId, d: SectorId, e: SectorId, f: SectorId) -> Result<GenericFArray<Self::Scalar>, CheckedGenericSymbolError<Self::Error>> { Ok(self.0.f_symbol_generic(a,b,c,d,e,f)) }
     fn try_r_symbol_generic(&self, a: SectorId, b: SectorId, c: SectorId) -> Result<GenericRMatrix<Self::Scalar>, Self::Error> { Ok(self.0.r_symbol_generic(a,b,c)) }
