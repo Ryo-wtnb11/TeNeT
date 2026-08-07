@@ -42,7 +42,9 @@ categorical coefficients are separately constrained by the provider bounds.
 | arbitrary `contract`, ordered output, `compose` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED |
 | `add`, `scale`, `norm`, `inner`, `trace_pairs`, `tr` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | checked-Generic dispatch and current real/complex fixtures cover `add`/`scale`/`norm`/`inner`/`trace_pairs`/`tr`; provider-wide coverage remains open |
 | compact QR and compact SVD | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED on checked-Generic real/complex and SU(3)/SU(4) reconstruction fixtures |
-| full/truncated SVD, values, LQ, orthogonal/null/polar factors | PROVED on U1/Z2 fixtures | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | full/truncated SVD, values, compact/full QR/LQ proved on current checked-Generic fixtures; orthogonal/null/polar remain UNSUPPORTED |
+| full/truncated SVD, values, LQ | PROVED on U1/Z2 fixtures | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | full/truncated SVD, values, compact/full QR/LQ proved on current checked-Generic fixtures |
+| orthogonal factors (`left_orth`, `right_orth`) | PROVED on U1/Z2 fixtures | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | proved through checked-Generic compact QR/LQ parity fixtures |
+| null/polar factors | PROVED on U1/Z2 fixtures | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | UNSUPPORTED |
 | EIG/EIGH, `exp`, `inv`, `solve`, `pinv`, `sqrt`, `powi` | PROVED on Z2 fixtures | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | `eig_vals`/`eigh_vals` proved on checked-Generic fixtures; factor-returning spectra and matrix functions remain UNSUPPORTED |
 | typed network planning and execution | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED |
 | serialization | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
@@ -65,7 +67,7 @@ Provider-mode dispatch now covers transactional root construction, tree
 transforms, `otimes`, `contract`, `compose`, reductions, trace, arithmetic, and
 the current checked-Generic unit, cat, twist, decomposition, and spectrum leaves.
 The remaining operation gaps are `flip`, factor-returning EIG/EIGH variants,
-orthogonal/null/polar factors, matrix functions, and typed network execution.
+null/polar factors, matrix functions, and typed network execution.
 #662 closed through merged #946 after proving typed provider-error propagation
 and transactional nonpublication for the reachable checked-Generic operations.
 
@@ -82,10 +84,12 @@ and transactional nonpublication for the reachable checked-Generic operations.
 | Canonical direct contract/compose | PROVED | PROVED | UNSUPPORTED | PROVED | UNSUPPORTED | UNSUPPORTED |
 | Noncanonical transform-dependent contraction | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED with typed preflight error | UNSUPPORTED | UNSUPPORTED |
 | Arithmetic and reductions | PROVED | checked-Generic `add`/`scale`/`norm`/`inner`/`trace_pairs`/`tr` are proved on current fixtures; provider-wide matrix remains open | UNSUPPORTED | PROVED | UNSUPPORTED | UNSUPPORTED |
-| QR | PROVED compact/full | UNSUPPORTED | UNSUPPORTED | PROVED compact only | UNSUPPORTED | UNSUPPORTED |
+| QR | PROVED compact/full | checked-Generic compact/full proved on current Host fixtures | UNSUPPORTED | PROVED compact only | UNSUPPORTED | UNSUPPORTED |
 | SVD | PROVED compact/full/truncated/values | checked-Generic compact/full/truncated/values proved on current Host fixtures | UNSUPPORTED | PROVED compact and truncated | UNSUPPORTED | UNSUPPORTED |
 | EIGH | PROVED full/truncated/values | `eigh_vals` proved; factor-returning EIGH remains unsupported | UNSUPPORTED | PROVED full and truncated | UNSUPPORTED | UNSUPPORTED |
-| EIG, LQ, null/polar, solve and matrix functions | PROVED on selected Host fixtures | `eig_vals` and compact/full LQ proved; null/polar/solve/matrix functions remain unsupported | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
+| LQ | PROVED on selected Host fixtures | checked-Generic compact/full LQ proved on current Host fixtures | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
+| orthogonal factors | PROVED on selected Host fixtures | checked-Generic `left_orth`/`right_orth` proved through compact QR/LQ parity fixtures | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
+| EIG, null/polar, solve and matrix functions | PROVED on selected Host fixtures | `eig_vals` proved; null/polar/solve/matrix functions remain unsupported | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED | UNSUPPORTED |
 | Network planning/execution | PROVED | UNSUPPORTED | planning is storage-generic; Host execution is not | PROVED for canonical chains; trace/noncanonical scopes reject | UNSUPPORTED | UNSUPPORTED |
 
 CUDA `PROVED` means the real-device tests exist and are explicitly ignored on
@@ -127,7 +131,8 @@ the capability tables have no call path and are intentionally omitted.
 | Host `trace_pairs`, `tr` | validates pair geometry and derives the selected traced HomSpace before execution | trace structural admission uses the bound provider and current fusion layout | `tensortrace_fusion_dyn_owned_checked` or the scalar trace path | fresh owned tensor or scalar only after validation/execution succeeds |
 | Host compact/full/truncated SVD and values | matrix-algebra factor plans derive final left, bond, and right bound spaces; truncation selects kept sector spectra before factor publication | no F/R/CGC query; dense backend leases are request-local | `svd_*_dyn`; direct adjoint-aware factor mappings avoid a receiver-sized adjoint input for compact/full/truncated/value paths | final factors are built directly as owned dense/compact bodies; no factorization-result cache |
 | Host compact/full QR and LQ | matrix-algebra derives factor spaces from the input bound HomSpace | no coefficient plan or result cache | `qr_*_dyn`; a lazy adjoint uses one uncached logical payload, while LQ maps through QR and materializes final adjoint factors where required | owned factors published together after dense success; temporary logical payloads are request-local |
-| Host orthogonal/null/polar factors | result spaces come from the matrix-algebra factorization contract, including unmatched/disjoint completion | no F/R/CGC query | dense orthogonal/null/polar kernels; polar has adjoint-parent routes, while some null output conversions use uncached materialization | owned factors only after the full operation succeeds |
+| Host orthogonal aliases | `left_orth`/`right_orth` inherit the preceding compact QR/LQ result spaces and authority unchanged | inherits compact QR/LQ; no additional F/R/CGC query | exactly the compact QR/LQ kernels through the mode-neutral aliases | same owned factors and publication boundary as compact QR/LQ |
+| Host null/polar factors | result spaces come from their separate matrix-algebra contracts, including unmatched/disjoint completion | no F/R/CGC query | separate dense null/polar kernels; polar has adjoint-parent routes, while some null output conversions use uncached materialization | owned factors only after the full operation succeeds |
 | Host EIG/EIGH and values | validates endomorphism/Hermiticity and derives eigenvector/bond spaces | no category coefficient plan | `eig_*_dyn` / `eigh_*_dyn`; lazy adjoints currently use an operation-local logical payload | owned factors or spectra; no implicit numerical-result cache |
 | Host `exp`, `inv`, `solve`, `pinv`, `sqrt`, `powi` | validates square/compatible spaces and reuses or derives the admitted output space | no F/R/CGC work; only block layout and dense backend dispatch | compact diagonal maps when legal; otherwise matrix-algebra dense kernels. `pinv` has an adjoint-parent route, while several other lazy cases materialize locally | fresh owned result; dense workspace is request-local and the receiver cache stays cold |
 | Host typed network planning/replay | `Network::plan` validates labels/spaces and compiles pairwise axes/output permutations; inputs retain their providers | Runtime plan cache owns topology/schedule entries, not provider coefficients; each contraction step delegates to the ordinary typed contraction path | `execute_with_workspace` reuses destination/intermediate buffers through overwrite forms when admitted | final owned tensor returned; idle typed workspaces may be retained under the Runtime-wide byte budget and are observable through plan-cache stats |
@@ -205,7 +210,7 @@ does not imply zero peak copy cost.
    categorical coefficient scalar and payload scalar compose.
 2. **Checked Generic is deliberately partial, not an alternate complete tensor
    hierarchy.** Close the residual flip, factor-returning EIG/EIGH,
-   orthogonal/null/polar, matrix-function, and network-execution gaps before
+   null/polar, matrix-function, and network-execution gaps before
    describing SU(N) as generally supported. Merged #946 closed #662 with the
    shared typed error/nonpublication contract proved for the reachable checked
    operations.
