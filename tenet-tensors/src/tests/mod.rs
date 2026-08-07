@@ -28,11 +28,11 @@ use num_traits::{One, Zero};
 use std::fmt::Debug;
 use std::ops::{Add, Mul};
 use tenet_core::{
-    multiplicity_free_repartition_tree_pair, unique_permute_tree_pair, BlockKey, BlockSpec,
-    BlockStructure, BlockView, BlockViewMut, BraidingStyleKind, CoreError, DegeneracyStructure,
-    FermionParityFusionRule, FusionProductSpace, FusionRule, FusionStyleKind, FusionTensorMapSpace,
-    FusionTreeGroupKey, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey, GenericFArray,
-    GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols, HostReadableStorage,
+    multiplicity_free_permute_tree_pair, multiplicity_free_repartition_tree_pair, BlockKey,
+    BlockSpec, BlockStructure, BlockView, BlockViewMut, BraidingStyleKind, CoreError,
+    DegeneracyStructure, FermionParityFusionRule, FusionProductSpace, FusionRule, FusionStyleKind,
+    FusionTensorMapSpace, FusionTreeGroupKey, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
+    GenericFArray, GenericFusionSymbols, GenericRMatrix, GenericRigidSymbols, HostReadableStorage,
     HostWritableStorage, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
     MultiplicityFreePivotalSymbols, MultiplicityFreeRigidSymbols, MultiplicityIndex, Placement,
     ProductFusionRule, SU2FusionRule, SU2Irrep, SectorId, SectorLeg, SectorStructure, SectorVec,
@@ -40,6 +40,32 @@ use tenet_core::{
     Z2FusionRule,
 };
 use tenet_dense::{DenseDotConfig, DenseError, DenseExecutor, DenseRead, DenseWrite, MatrixOp};
+
+/// The single destination of a permutation that is structurally one-to-one.
+///
+/// Fixtures want the destination tree a permutation lands on, not a proof of
+/// which lowering produced it, so they go through the ordinary
+/// multiplicity-free entry point and assert the result is a single term.
+fn single_permuted_tree_pair<R>(
+    rule: &R,
+    tree_pair: &FusionTreePairKey,
+    codomain_permutation: &[usize],
+    domain_permutation: &[usize],
+) -> (FusionTreePairKey, R::Scalar)
+where
+    R: MultiplicityFreeRigidSymbols,
+    R::Scalar: Clone + std::ops::Add<Output = R::Scalar> + std::ops::Mul<Output = R::Scalar>,
+{
+    let mut terms = multiplicity_free_permute_tree_pair(
+        rule,
+        tree_pair,
+        codomain_permutation,
+        domain_permutation,
+    )
+    .expect("permutation lowering");
+    assert_eq!(terms.len(), 1, "fixture permutation is not one-to-one");
+    terms.pop().expect("single term")
+}
 
 #[derive(Clone, Debug, PartialEq)]
 struct TestHostStorage<T>(Vec<T>);

@@ -3789,7 +3789,7 @@ fn unique_tree_pair_reuses_completed_transformers_with_complete_storage_keys() {
     assert_eq!(rule.fusion_style(), FusionStyleKind::Unique);
     let src_tree = expect_tree_key(&src_key);
     let operation = TreeTransformOperation::permute([0, 2], [1]);
-    let (dst_tree, _) = unique_permute_tree_pair(&rule, &src_tree, &[0, 2], &[1]).unwrap();
+    let (dst_tree, _) = single_permuted_tree_pair(&rule, &src_tree, &[0, 2], &[1]);
     let src_structure = packed_fixture_structure(3, [(src_key, vec![1, 1, 1])]).unwrap();
     let dst_structure =
         packed_fixture_structure(3, [(BlockKey::from(dst_tree), vec![1, 1, 1])]).unwrap();
@@ -4021,7 +4021,7 @@ fn tree_pair_transform_public_helper_executes_split_changing_permute() {
     let src_tree = expect_tree_key(&src_key);
     let operation = TreeTransformOperation::permute([0, 2], [1]);
     let (dst_tree, coefficient) =
-        unique_permute_tree_pair(&Z2FusionRule, &src_tree, &[0, 2], &[1]).unwrap();
+        single_permuted_tree_pair(&Z2FusionRule, &src_tree, &[0, 2], &[1]);
     let dst_key = BlockKey::from(dst_tree);
     let src_structure = packed_fixture_structure(3, [(src_key, vec![1, 1, 1])]).unwrap();
     let dst_structure = packed_fixture_structure(3, [(dst_key.clone(), vec![1, 1, 1])]).unwrap();
@@ -4057,7 +4057,7 @@ fn tree_pair_transform_public_helper_compiles_against_actual_destination_structu
     );
     let src_tree = expect_tree_key(&src_key);
     let operation = TreeTransformOperation::permute([0, 2], [1]);
-    let (dst_tree, _) = unique_permute_tree_pair(&Z2FusionRule, &src_tree, &[0, 2], &[1]).unwrap();
+    let (dst_tree, _) = single_permuted_tree_pair(&Z2FusionRule, &src_tree, &[0, 2], &[1]);
     let expected_missing = BlockKey::from(dst_tree);
     let src_structure = packed_fixture_structure(3, [(src_key.clone(), vec![1, 1, 1])]).unwrap();
     let wrong_dst_structure = packed_fixture_structure(3, [(src_key, vec![1, 1, 1])]).unwrap();
