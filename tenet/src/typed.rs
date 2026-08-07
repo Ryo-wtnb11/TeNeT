@@ -16140,6 +16140,35 @@ mod representation_gates {
         assert_eq!(materialized_adjoint_builds(&lazy_nonbond), 0);
     }
 
+    #[cfg(feature = "racah-generated")]
+    #[test]
+    fn checked_generic_lazy_flip_stays_cold_and_keeps_logical_duality() {
+        use tenet_core::SUNFusionRule;
+
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![2, 2], 1)], false).unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |trees, _| {
+                trees.codomain_vertices()[0].get() as f64
+            })
+            .unwrap();
+        let lazy = source.adjoint().unwrap();
+
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let flipped = lazy.flip(&[1]).unwrap();
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        assert_eq!(materialized_adjoint_builds(&flipped), 0);
+        assert_eq!(flipped.domain()[0].is_dual(), !lazy.domain()[0].is_dual());
+
+        let expected = source.flip_inverse(&[0]).unwrap().adjoint().unwrap();
+        assert_eq!(flipped.data(), expected.data());
+        assert_eq!(flipped.codomain(), expected.codomain());
+        assert_eq!(flipped.domain(), expected.domain());
+        assert!(std::ptr::eq(flipped.provider(), provider.as_ref()));
+        assert!(flipped.runtime().shares_state_with(expected.runtime()));
+    }
+
     #[test]
     fn cloned_adjoint_materializes_once_across_threads() {
         let source = u1_lazy_fixture().to_c64();

@@ -614,6 +614,8 @@ where
     let provider = Arc::new(CheckedPivotalToy::new(6, BraidingStyleKind::Anyonic, -1.0));
     let source = fixture(&runtime, &provider, value);
     let before = source.data().to_vec();
+    let source_codomain = source.codomain();
+    let source_domain = source.domain();
 
     provider.reset_ledger(2);
     let codomain = source.flip_inverse(&[0]).unwrap();
@@ -666,9 +668,17 @@ where
         lazy_flipped.domain()[0].is_dual(),
         !lazy.domain()[0].is_dual()
     );
+    provider.reset_ledger(2);
     let direct = source.flip_inverse(&[0]).unwrap().adjoint().unwrap();
+    provider.finish_observation();
     assert_eq!(lazy_flipped.data(), direct.data());
+    assert_eq!(lazy_flipped.codomain(), direct.codomain());
+    assert_eq!(lazy_flipped.domain(), direct.domain());
+    assert!(std::ptr::eq(lazy_flipped.provider(), provider.as_ref()));
+    assert!(lazy_flipped.runtime().shares_state_with(direct.runtime()));
     assert_eq!(source.data(), before);
+    assert_eq!(source.codomain(), source_codomain);
+    assert_eq!(source.domain(), source_domain);
 }
 
 #[test]
@@ -761,6 +771,10 @@ fn checked_generic_flip_uses_staged_nontrivial_fs_and_twist_factors() {
     let domain = source.flip(&[1]).unwrap();
     assert_eq!(codomain.data(), &[-3.0]);
     assert_eq!(domain.data(), &[-3.0]);
+    let roundtrip = codomain.flip_inverse(&[0]).unwrap();
+    assert_eq!(roundtrip.data(), source.data());
+    assert_eq!(roundtrip.codomain(), source.codomain());
+    assert_eq!(roundtrip.domain(), source.domain());
 }
 
 #[cfg(feature = "racah-generated")]
@@ -841,13 +855,22 @@ where
     assert!(std::ptr::eq(flipped.provider(), provider.as_ref()));
     assert!(flipped.codomain()[0].is_dual());
     assert!(flipped.codomain()[2].is_dual());
+    let mut saw_vertex_two = false;
     for index in 0..source.block_count() {
         let before = source.block(index).unwrap();
         let after = flipped.block(index).unwrap();
+        let before_trees = source.block_fusion_trees(index).unwrap();
+        let after_trees = flipped.block_fusion_trees(index).unwrap();
+        saw_vertex_two |= before_trees
+            .codomain_vertices()
+            .iter()
+            .any(|vertex| vertex.get() > 1);
+        assert_eq!(after_trees, before_trees);
         assert_eq!(after.shape(), before.shape());
         assert_eq!(after.strides(), before.strides());
         assert_eq!(after.offset(), before.offset());
     }
+    assert!(saw_vertex_two);
     let roundtrip = flipped.flip_inverse(&[0, 2]).unwrap();
     assert_eq!(roundtrip.data(), source.data());
     assert_eq!(roundtrip.codomain(), source.codomain());
