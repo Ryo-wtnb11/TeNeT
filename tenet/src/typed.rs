@@ -440,6 +440,25 @@ where
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
+    R::Mode: TypedTensorSolveDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// TensorKit `A \\ B`: solves `A * X = B` per coupled sector without
+    /// forming an inverse. `A` and `B` must have exactly equal codomains, `A`'s
+    /// codomain and domain must be isomorphic, and the result is
+    /// `domain(A) <- domain(B)`.
+    ///
+    /// Checked Generic accepts dense inputs and admits the output with `A`'s
+    /// exact provider allocation before any output allocation or dense solve.
+    /// `solve_right` remains multiplicity-free only.
+    pub fn solve(&self, rhs: &Self) -> Result<Self, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorSolveDispatch<R, D>>::solve(self, rhs)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
     R::Mode: TypedTensorReductionDispatch<R, D>,
     D: TensorScalar,
 {
@@ -3852,6 +3871,18 @@ where
 }
 
 #[doc(hidden)]
+pub trait TypedTensorSolveDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn solve(
+        tensor: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
+}
+
+#[doc(hidden)]
 pub trait TypedTensorExpDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
@@ -4144,6 +4175,19 @@ where
     }
 }
 
+impl<R, D> TypedTensorSolveDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn solve(tensor: &TensorMap<R, D>, rhs: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
+        tensor.solve_multiplicity_free(rhs)
+    }
+}
+
 impl<R, D> TypedTensorExpDispatch<R, D> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
@@ -4401,6 +4445,82 @@ where
         let factor = tenet_matrixalgebra::inv_direct_into_dyn(
             dense.dense(),
             &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+                .map_err(Error::from)?,
+            output,
+        )
+        .map_err(Error::from)?;
+        Ok(wrap_factor_on(&tensor.runtime, factor))
+    }
+}
+
+impl<R, D> TypedTensorSolveDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
+    fn solve(
+        tensor: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+    ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        if !tensor.runtime.same_runtime(&rhs.runtime) {
+            return Err(Error::RuntimeMismatch.into());
+        }
+        if tensor.logical_space().space().admission().rule_identity()
+            != rhs.logical_space().space().admission().rule_identity()
+        {
+            return Err(Error::RuleMismatch.into());
+        }
+        if tensor.logical_space().space().homspace().codomain()
+            != rhs.logical_space().space().homspace().codomain()
+        {
+            return Err(Error::InvalidArgument(
+                "solve requires equal divisor and right-hand-side codomains".to_string(),
+            )
+            .into());
+        }
+
+        let lhs_space = tensor.logical_space();
+        let codomain = tenet_matrixalgebra::coupled_sector_block_dimensions_generic_checked(
+            lhs_space.space().homspace().codomain(),
+            lhs_space.provider(),
+        )?;
+        let domain = tenet_matrixalgebra::coupled_sector_block_dimensions_generic_checked(
+            lhs_space.space().homspace().domain(),
+            lhs_space.provider(),
+        )?;
+        if codomain != domain {
+            return Err(Error::from(
+                tenet_tensors::OperationError::UnsupportedTensorContractScope {
+                    message: "solve requires an isomorphic divisor codomain and domain",
+                },
+            )
+            .into());
+        }
+
+        let output = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
+            Arc::clone(lhs_space.provider_arc()),
+            FusionTreeHomSpace::new(
+                lhs_space.space().homspace().domain().clone(),
+                rhs.logical_space().space().homspace().domain().clone(),
+            ),
+        )?;
+        let lhs = tensor
+            .materialized_tensor_uncached()
+            .map_err(GenericTensorError::from)?;
+        let rhs = rhs
+            .materialized_tensor_uncached()
+            .map_err(GenericTensorError::from)?;
+        let lhs_body = lhs.owned_body().expect("uncached solve lhs is owned");
+        let rhs_body = rhs.owned_body().expect("uncached solve rhs is owned");
+        let mut dense = tensor.runtime.lease_dense();
+        let factor = tenet_matrixalgebra::solve_left_direct_into_dyn(
+            dense.dense(),
+            &BoundDynamicTensorRef::try_new(&lhs_body.space, lhs_body.materialized_dense_data())
+                .map_err(Error::from)?,
+            &BoundDynamicTensorRef::try_new(&rhs_body.space, rhs_body.materialized_dense_data())
                 .map_err(Error::from)?,
             output,
         )
@@ -12551,7 +12671,7 @@ where
     /// keeps `self`'s exact provider allocation. Dense blocks are written
     /// directly into the final output; compact diagonal divisors reuse the
     /// elementwise reciprocal and bond-scaling path.
-    pub fn solve(&self, rhs: &Self) -> Result<Self, Error> {
+    fn solve_multiplicity_free(&self, rhs: &Self) -> Result<Self, Error> {
         if !self.runtime.same_runtime(&rhs.runtime) {
             return Err(Error::RuntimeMismatch);
         }
@@ -14394,6 +14514,56 @@ mod representation_gates {
     struct FailSecondQr {
         inner: DefaultDenseExecutor,
         calls: usize,
+    }
+
+    #[cfg(feature = "racah-generated")]
+    struct CountingSolve {
+        inner: DefaultDenseExecutor,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        failure: Option<&'static str>,
+    }
+
+    #[cfg(feature = "racah-generated")]
+    impl DenseExecutor for CountingSolve {
+        fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            panic!("test only exercises solve")
+        }
+
+        fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            panic!("test only exercises solve")
+        }
+
+        fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            panic!("test only exercises solve")
+        }
+
+        fn solve_into(
+            &mut self,
+            a: DenseRead<'_>,
+            b: DenseRead<'_>,
+            x: DenseWrite<'_>,
+        ) -> Result<(), DenseError> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Some(message) = self.failure {
+                return Err(DenseError::Backend {
+                    backend: DenseBackend::Tenferro,
+                    op: "solve_into",
+                    message: message.to_string(),
+                });
+            }
+            self.inner.solve_into(a, b, x)
+        }
+
+        fn dot_general_into(
+            &mut self,
+            _: DenseWrite<'_>,
+            _: DenseRead<'_>,
+            _: DenseRead<'_>,
+            _: &DenseDotConfig,
+        ) -> Result<(), DenseError> {
+            panic!("test only exercises solve")
+        }
     }
 
     impl DenseExecutor for FailSecondSvd {
@@ -18093,6 +18263,128 @@ mod representation_gates {
                 ))
         ));
         assert!(owned(&singular).dense_cache.get().is_none());
+    }
+
+    #[cfg(feature = "racah-generated")]
+    fn assert_checked_generic_left_solve_acceptance<D>()
+    where
+        D: TensorScalar + core::fmt::Debug,
+    {
+        use tenet_core::SUNFusionRule;
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let runtime = Runtime::builder()
+            .with_dense_executor(Box::new(CountingSolve {
+                inner: DefaultDenseExecutor::default(),
+                calls: Arc::clone(&calls),
+                failure: None,
+            }))
+            .build()
+            .unwrap();
+        let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 2)], false).unwrap();
+        let divisor: TensorMap<_, D> =
+            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, ij| {
+                let row = ij[0] + 2 * ij[1];
+                let col = ij[2] + 2 * ij[3];
+                D::from_real(if row == col {
+                    7.0 + trees.codomain_vertices()[0].get() as f64
+                } else {
+                    0.125 * (1 + trees.domain_vertices()[0].get()) as f64
+                })
+            })
+            .unwrap();
+        let rhs: TensorMap<_, D> =
+            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, ij| {
+                D::from_real(
+                    (1 + ij.iter().sum::<usize>() + 3 * trees.domain_vertices()[0].get()) as f64,
+                )
+            })
+            .unwrap();
+        assert!((0..divisor.block_count())
+            .any(|i| { divisor.block_fusion_trees(i).unwrap().codomain_vertices()[0].get() == 2 }));
+
+        for (lazy_lhs, lazy_rhs) in [(false, false), (true, false), (false, true), (true, true)] {
+            let lhs = lazy_lhs
+                .then(|| divisor.adjoint().unwrap())
+                .unwrap_or_else(|| divisor.clone());
+            let right = lazy_rhs
+                .then(|| rhs.adjoint().unwrap())
+                .unwrap_or_else(|| rhs.clone());
+            let lhs_before = divisor.data().to_vec();
+            let rhs_before = rhs.data().to_vec();
+            calls.store(0, std::sync::atomic::Ordering::Relaxed);
+            let solution = lhs.solve(&right).unwrap();
+            assert!(matches!(solution.repr, TypedTensorRepr::Owned(_)));
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::Relaxed),
+                5,
+                "the SU(3) μ=2 fixture has five nonempty coupled-sector solve routes"
+            );
+            let lhs_oracle = lhs.materialized_tensor_uncached().unwrap();
+            let rhs_oracle = right.materialized_tensor_uncached().unwrap();
+            let reconstructed = lhs_oracle.compose(&solution).unwrap();
+            assert!(reconstructed.data().iter().zip(rhs_oracle.data()).all(
+                |(&actual, &expected)| {
+                    (actual.widen_complex() - expected.widen_complex()).norm() < 2e-10
+                }
+            ));
+            for i in 0..solution.block_count() {
+                assert_eq!(
+                    reconstructed.block_fusion_trees(i).unwrap(),
+                    rhs_oracle.block_fusion_trees(i).unwrap(),
+                );
+            }
+            assert_eq!(divisor.data(), lhs_before.as_slice());
+            assert_eq!(rhs.data(), rhs_before.as_slice());
+            for input in [&lhs, &right] {
+                assert_eq!(materialized_adjoint_builds(input), 0);
+                if let TypedTensorRepr::Adjoint(view) = &input.repr {
+                    assert!(view.materialized.get().is_none());
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "racah-generated")]
+    #[test]
+    fn checked_generic_left_solve_is_owned_uncached_and_one_call_per_route() {
+        assert_checked_generic_left_solve_acceptance::<f64>();
+        assert_checked_generic_left_solve_acceptance::<num_complex::Complex64>();
+    }
+
+    #[cfg(feature = "racah-generated")]
+    #[test]
+    fn checked_generic_left_solve_preserves_injected_backend_provenance() {
+        use tenet_core::SUNFusionRule;
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let runtime = Runtime::builder()
+            .with_dense_executor(Box::new(CountingSolve {
+                inner: DefaultDenseExecutor::default(),
+                calls: Arc::clone(&calls),
+                failure: Some("injected checked solve failure"),
+            }))
+            .build()
+            .unwrap();
+        let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 1)], false).unwrap();
+        let lhs: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| f64::from(ij[0] == ij[1]))
+                .unwrap();
+        let rhs = lhs.scale(2.0);
+        let before_lhs = lhs.data().to_vec();
+        let before_rhs = rhs.data().to_vec();
+        assert!(matches!(
+            lhs.solve(&rhs),
+            Err(GenericTensorError::Facade(Error::Operation(error)))
+                if matches!(*error, tenet_tensors::OperationError::Dense(
+                    DenseError::Backend { op: "solve_into", ref message, .. }
+                ) if message == "injected checked solve failure")
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(lhs.data(), before_lhs.as_slice());
+        assert_eq!(rhs.data(), before_rhs.as_slice());
     }
 
     fn assert_pinv_redirect<R, D>(source: &TensorMap<R, D>, rcond: f64, exact_original: bool)

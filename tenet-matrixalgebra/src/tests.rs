@@ -5965,6 +5965,47 @@ where
     .unwrap()
 }
 
+fn reversed_coupled_tree_basis_copy<R, D, const NOUT: usize, const NIN: usize>(
+    rule: &R,
+    source: &TensorMap<D, NOUT, NIN>,
+) -> TensorMap<D, NOUT, NIN>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let blocks = (0..source.structure().block_count())
+        .rev()
+        .map(|index| {
+            let block = source.structure().block(index).unwrap();
+            let BlockKey::FusionTree(key) = block.key() else {
+                unreachable!("source has fusion-tree blocks")
+            };
+            (key.clone(), block.shape().to_vec())
+        })
+        .collect();
+    let structure =
+        BlockStructure::coupled_sector_matrix_with_keys(rule, NOUT, NOUT + NIN, blocks).unwrap();
+    let source_space = source.fusion_space().unwrap();
+    let space = FusionTensorMapSpace::new_unbound(
+        source_space.dense_space().clone(),
+        source_space.homspace().clone(),
+        structure,
+    )
+    .unwrap()
+    .try_bind_rule(rule)
+    .unwrap();
+    TensorMap::from_block_fn_with_fusion_space(space, D::zero(), |key, indices| {
+        let block = source.block_by_key(key).unwrap();
+        block.data()[block.offset()
+            + indices
+                .iter()
+                .zip(block.strides())
+                .map(|(&index, &stride)| index * stride)
+                .sum::<usize>()]
+    })
+    .unwrap()
+}
+
 fn assert_value_region_paths_match<R, D>(
     rule: Arc<R>,
     general: &TensorMap<D, 2, 2>,
@@ -6767,6 +6808,90 @@ fn solve_left_preserves_dense_singularity_and_capability_errors() {
             ..
         })
     ));
+}
+
+#[test]
+fn solve_left_direct_into_rejects_foreign_authority_and_wrong_output_before_execution() {
+    // What: caller-admitted output metadata is an input contract, not a hint.
+    let divisor = u1_block_endomorphism(&[(0, 1, vec![2.0_f64])]);
+    let rhs = u1_block_map(&[(0, 1, 1, vec![1.0_f64])]);
+    let provider = Arc::new(U1FusionRule);
+    let divisor = bound_tensor(Arc::clone(&provider), &divisor);
+    let rhs = bound_tensor(Arc::new(U1FusionRule), &rhs);
+    let expected = FusionTreeHomSpace::new(
+        divisor.space().space().homspace().domain().clone(),
+        rhs.space().space().homspace().domain().clone(),
+    );
+
+    let foreign = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+        Arc::new(U1FusionRule),
+        expected.clone(),
+    )
+    .unwrap();
+    let error = solve_left_direct_into_dyn(
+        &mut RejectExecutorCalls,
+        &divisor.as_ref().dynamic(),
+        &rhs.as_ref().dynamic(),
+        foreign,
+    )
+    .unwrap_err();
+    assert!(matches!(error, OperationError::StructureMismatch { .. }));
+
+    let wrong = BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free(
+        provider,
+        FusionTreeHomSpace::new(
+            divisor.space().space().homspace().domain().clone(),
+            FusionProductSpace::new([
+                SectorLeg::new([(U1Irrep::new(0).sector_id(), 1)], false),
+                SectorLeg::new([(U1Irrep::new(0).sector_id(), 1)], false),
+            ]),
+        ),
+    )
+    .unwrap();
+    let error = solve_left_direct_into_dyn(
+        &mut RejectExecutorCalls,
+        &divisor.as_ref().dynamic(),
+        &rhs.as_ref().dynamic(),
+        wrong,
+    )
+    .unwrap_err();
+    assert!(matches!(error, OperationError::StructureMismatch { .. }));
+}
+
+#[test]
+fn solve_left_direct_into_rejects_late_tree_route_before_execution() {
+    // What: an admitted output with the right identity and HomSpace still
+    // cannot reinterpret a different coupled-tree basis.
+    let source = hermitian_test_tensor(&Z2FusionRule, &[SectorId::new(0), SectorId::new(1)]);
+    let output = reversed_coupled_tree_basis_copy(&Z2FusionRule, &source);
+    let provider = Arc::new(Z2FusionRule);
+    let divisor = bound_tensor(Arc::clone(&provider), &source);
+    let rhs = bound_tensor(Arc::clone(&provider), &source);
+    let output_space = BoundDynamicFusionMapSpace::bind_multiplicity_free(
+        dyn_space_of(&output).unwrap(),
+        Arc::clone(&provider),
+    )
+    .unwrap();
+    let mut dense = SolveCallSpy::default();
+
+    let error = solve_left_direct_into_dyn(
+        &mut dense,
+        &divisor.as_ref().dynamic(),
+        &rhs.as_ref().dynamic(),
+        output_space,
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            OperationError::UnsupportedTensorContractScope {
+                message: "solve coupled-sector tree bases are incompatible"
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(dense.solve_calls, 0);
 }
 
 fn u1_cross_space_map<D: FactorScalar>(
