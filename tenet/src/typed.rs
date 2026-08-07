@@ -5848,9 +5848,21 @@ where
     R::Mode: TypedTensorPowiDispatch<R, D>,
     D: TensorScalar,
 {
-    /// Integer tensor-map power (TensorKit `t ^ p`) using `O(log |p|)` compositions.
-    /// Checked-Generic tensors require an exact endomorphism before any provider work;
-    /// zero uses the existing admitted layout, positive powers compose, and negatives invert once.
+    /// Integer tensor-map power (TensorKit `t ^ p`), using `O(log |p|)`
+    /// compositions. Zero returns the multiplicative identity (staying compact
+    /// for compact input); negative powers invert once.
+    ///
+    /// For checked-Generic tensors, the exact endomorphism check and all
+    /// required output admission happen before provider queries or publication;
+    /// zero uses the already admitted full block layout, while positive powers
+    /// compose and negative powers perform one typed inverse. Checked-Generic
+    /// compact construction remains unsupported.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidArgument`] unless this is an endomorphism.
+    /// Negative powers additionally return the inverse operation's typed error
+    /// when a block is singular or output admission fails.
     pub fn powi(&self, exponent: i32) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorPowiDispatch<R, D>>::powi(self, exponent)
     }
