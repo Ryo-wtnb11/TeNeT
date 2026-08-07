@@ -5587,28 +5587,36 @@ where
     /// and returns a map `domain <- codomain`. This facade's seam agrees: a
     /// rank-one codomain and a rank-two domain with the same coupled-sector
     /// dimensions are accepted, and the result carries the two spaces swapped.
+    /// The pin is `inv_accepts_isomorphic_but_unequal_codomain_and_domain`.
     ///
     /// # Errors
     ///
     /// - [`Error::Operation`] when the two sides are not isomorphic, and when a
     ///   coupled-sector block is singular — the dense solve is where that
     ///   surfaces, so it comes back as an execution error rather than an
-    ///   argument one. Checked Generic preserves provider admission failures as
-    ///   typed structural/plan errors before allocation or dense execution.
+    ///   argument one. Never a panic.
     /// - [`Error::InvalidArgument`] from the compact arm below, whose zero
     ///   entry is visible before any solve runs and is therefore reported as
-    ///   the caller mistake it is. Checked-Generic compact construction is
-    ///   unsupported.
+    ///   the caller mistake it is. The two storages of one singular tensor
+    ///   consequently report different variants; both are pinned by
+    ///   `inv_reports_a_singular_input_as_a_typed_error`.
     ///
     /// # Complexity
     ///
     /// Dense input: `O(Σ_c n_c³)`, one LU solve per coupled sector. Compact
     /// input (a spectrum factor, TensorKit's `DiagonalTensorMap`): the
     /// **O(rank) elementwise-reciprocal arm**, `1/s_i` over the `Σ_c k_c`
-    /// stored values, and the result stays compact. A host lazy adjoint solves
-    /// its owned parent and returns a detached owned adjoint of that inverse;
-    /// it does not allocate or publish a separate receiver-materialization
-    /// payload.
+    /// stored values, and the result stays compact — matching TensorKit's
+    /// `inv(::DiagonalTensorMap)`, which is `inv.(d.data)`. Nothing dense is
+    /// built on either side of that arm. A host lazy adjoint solves its owned
+    /// parent and returns a detached owned adjoint of that inverse; it does not
+    /// allocate or publish a separate receiver-materialization payload.
+    ///
+    /// Checked Generic accepts dense inputs only: it performs the same
+    /// isomorphism preflight, admits the swapped output with the source provider
+    /// `Arc` before output allocation or dense work, and preserves provider
+    /// admission failures as typed errors. Compact checked-Generic construction
+    /// remains unsupported.
     pub fn inv(&self) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorInvDispatch<R, D>>::inv(self)
     }
