@@ -16352,6 +16352,34 @@ mod representation_gates {
 
     #[cfg(feature = "racah-generated")]
     #[test]
+    fn checked_generic_powi_lazy_is_owned_matches_direct_and_keeps_receiver_cold() {
+        use tenet_core::SUNFusionRule;
+
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 2)], false).unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| {
+                [[2.0, 1.0], [3.0, 4.0]][ij[0]][ij[1]]
+            })
+            .unwrap();
+        let lazy = source.adjoint().unwrap();
+
+        for exponent in [0, 2, -1] {
+            let actual = lazy.powi(exponent).unwrap();
+            let expected = source.powi(exponent).unwrap().adjoint().unwrap();
+            assert!(matches!(actual.repr, TypedTensorRepr::Owned(_)));
+            assert_eq!(actual.data(), expected.data());
+            assert_eq!(materialized_adjoint_builds(&lazy), 0);
+            let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+                unreachable!()
+            };
+            assert!(view.materialized.get().is_none());
+        }
+    }
+
+    #[cfg(feature = "racah-generated")]
+    #[test]
     fn checked_generic_orth_aliases_reject_lazy_adjoint_without_materializing() {
         use tenet_core::SUNFusionRule;
 
