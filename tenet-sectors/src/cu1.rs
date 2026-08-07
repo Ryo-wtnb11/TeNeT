@@ -165,12 +165,16 @@ impl FusionRule for CU1FusionRule {
         true
     }
 
+    fn dual(&self, sector: SectorId) -> SectorId {
+        self.dual_or_panic(sector)
+    }
+
     fn fusion_channels(&self, left: SectorId, right: SectorId) -> SectorVec {
-        channels(
-            CU1Irrep::try_from_sector_id(left).expect("CU(1) fusion received an invalid sector"),
-            CU1Irrep::try_from_sector_id(right).expect("CU(1) fusion received an invalid sector"),
-        )
-        .expect("CU(1) fusion output is not representable")
+        self.fusion_channels_or_panic(left, right)
+    }
+
+    fn nsymbol(&self, left: SectorId, right: SectorId, coupled: SectorId) -> usize {
+        self.nsymbol_or_panic(left, right, coupled)
     }
 }
 
