@@ -21,6 +21,7 @@ enum Label {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum PivotalError {
     InvalidSector,
+    FrobeniusSchur,
     Twist,
 }
 
@@ -35,32 +36,42 @@ impl std::error::Error for PivotalError {}
 struct CheckedPivotalToy {
     identity_tag: u8,
     braiding: BraidingStyleKind,
+    x_fs: f64,
     x_twist: f64,
     style_queries: AtomicUsize,
     vacuum_queries: AtomicUsize,
+    fs_queries: AtomicUsize,
     twist_queries: AtomicUsize,
     other_queries: AtomicUsize,
     post_stage_queries: AtomicUsize,
     stage_after_twists: AtomicUsize,
     staged: AtomicBool,
     fail_twist_on: AtomicUsize,
+    fail_fs_on: AtomicUsize,
     twist_sectors: Mutex<Vec<SectorId>>,
 }
 
 impl CheckedPivotalToy {
     fn new(identity_tag: u8, braiding: BraidingStyleKind, x_twist: f64) -> Self {
+        Self::with_fs(identity_tag, braiding, 1.0, x_twist)
+    }
+
+    fn with_fs(identity_tag: u8, braiding: BraidingStyleKind, x_fs: f64, x_twist: f64) -> Self {
         Self {
             identity_tag,
             braiding,
+            x_fs,
             x_twist,
             style_queries: AtomicUsize::new(0),
             vacuum_queries: AtomicUsize::new(0),
+            fs_queries: AtomicUsize::new(0),
             twist_queries: AtomicUsize::new(0),
             other_queries: AtomicUsize::new(0),
             post_stage_queries: AtomicUsize::new(0),
             stage_after_twists: AtomicUsize::new(0),
             staged: AtomicBool::new(false),
             fail_twist_on: AtomicUsize::new(0),
+            fail_fs_on: AtomicUsize::new(0),
             twist_sectors: Mutex::new(Vec::new()),
         }
     }
@@ -76,6 +87,7 @@ impl CheckedPivotalToy {
     fn reset_ledger(&self, stage_after_twists: usize) {
         self.style_queries.store(0, Ordering::Relaxed);
         self.vacuum_queries.store(0, Ordering::Relaxed);
+        self.fs_queries.store(0, Ordering::Relaxed);
         self.twist_queries.store(0, Ordering::Relaxed);
         self.other_queries.store(0, Ordering::Relaxed);
         self.post_stage_queries.store(0, Ordering::Relaxed);
@@ -83,6 +95,7 @@ impl CheckedPivotalToy {
             .store(stage_after_twists, Ordering::Relaxed);
         self.staged.store(false, Ordering::Relaxed);
         self.fail_twist_on.store(0, Ordering::Relaxed);
+        self.fail_fs_on.store(0, Ordering::Relaxed);
         self.twist_sectors.lock().unwrap().clear();
     }
 
@@ -202,9 +215,19 @@ impl CheckedGenericRigidSymbols for CheckedPivotalToy {
         Ok(1.0)
     }
 
-    fn try_frobenius_schur_phase_scalar(&self, _: SectorId) -> Result<f64, Self::Error> {
-        self.record_other_query();
-        Ok(1.0)
+    fn try_frobenius_schur_phase_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
+        self.record_query();
+        let query = self.fs_queries.fetch_add(1, Ordering::Relaxed) + 1;
+        if self.fail_fs_on.load(Ordering::Relaxed) == query {
+            return Err(PivotalError::FrobeniusSchur);
+        }
+        if sector == Self::unit() {
+            Ok(1.0)
+        } else if sector == Self::x() {
+            Ok(self.x_fs)
+        } else {
+            Err(PivotalError::InvalidSector)
+        }
     }
 
     fn try_f_symbol_generic(
@@ -583,6 +606,163 @@ fn checked_generic_twist_handles_nobraiding_bosonic_and_staged_identity_sharing(
     assert!(std::ptr::eq(identity_twist.provider(), identity.as_ref()));
 }
 
+fn assert_flip_nontrivial_case<D>(value: impl Fn(usize) -> D + Copy)
+where
+    D: TensorScalar + fmt::Debug + PartialEq,
+{
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedPivotalToy::new(6, BraidingStyleKind::Anyonic, -1.0));
+    let source = fixture(&runtime, &provider, value);
+    let before = source.data().to_vec();
+
+    provider.reset_ledger(2);
+    let codomain = source.flip_inverse(&[0]).unwrap();
+    assert_eq!(provider.fs_queries.load(Ordering::Relaxed), 2);
+    assert_eq!(provider.twist_queries.load(Ordering::Relaxed), 2);
+    assert_eq!(provider.post_stage_queries.load(Ordering::Relaxed), 0);
+    provider.finish_observation();
+    assert!(std::ptr::eq(codomain.provider(), provider.as_ref()));
+    assert_eq!(
+        codomain.codomain()[0].is_dual(),
+        !source.codomain()[0].is_dual()
+    );
+    assert_values(&codomain, value, |trees| {
+        if trees.codomain_uncoupled()[0] == Label::X {
+            -1.0
+        } else {
+            1.0
+        }
+    });
+
+    provider.reset_ledger(2);
+    let domain = source.flip(&[2]).unwrap();
+    assert_eq!(provider.post_stage_queries.load(Ordering::Relaxed), 0);
+    provider.finish_observation();
+    assert_eq!(domain.domain()[0].is_dual(), !source.domain()[0].is_dual());
+    assert_values(&domain, value, |_| -1.0);
+
+    provider.reset_ledger(2);
+    let repeated = source.flip(&[0, 0]).unwrap();
+    assert_eq!(provider.post_stage_queries.load(Ordering::Relaxed), 0);
+    provider.finish_observation();
+    assert_eq!(
+        repeated.codomain()[0].is_dual(),
+        source.codomain()[0].is_dual()
+    );
+    assert_values(&repeated, value, |trees| {
+        if trees.codomain_uncoupled()[0] == Label::X {
+            -1.0
+        } else {
+            1.0
+        }
+    });
+
+    let lazy = source.adjoint().unwrap();
+    provider.reset_ledger(2);
+    let lazy_flipped = lazy.flip(&[1]).unwrap();
+    assert_eq!(provider.post_stage_queries.load(Ordering::Relaxed), 0);
+    provider.finish_observation();
+    assert_eq!(
+        lazy_flipped.domain()[0].is_dual(),
+        !lazy.domain()[0].is_dual()
+    );
+    let direct = source.flip_inverse(&[0]).unwrap().adjoint().unwrap();
+    assert_eq!(lazy_flipped.data(), direct.data());
+    assert_eq!(source.data(), before);
+}
+
+#[test]
+fn checked_generic_flip_scales_full_keys_and_lazy_duality_for_real_and_complex_payloads() {
+    // What: checked Generic replay uses staged χ/θ factors on complete μ=2
+    // keys, including repeated legs, and a lazy result owns toggled metadata.
+    assert_flip_nontrivial_case(|marker| marker as f64);
+    assert_flip_nontrivial_case(|marker| Complex64::new(marker as f64, -(marker as f64) / 10.0));
+}
+
+#[test]
+fn checked_generic_flip_rejects_nobraiding_before_pivotal_queries() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedPivotalToy::new(
+        7,
+        BraidingStyleKind::NoBraiding,
+        -1.0,
+    ));
+    let source = fixture(&runtime, &provider, |marker| marker as f64);
+
+    provider.reset_ledger(0);
+    assert!(matches!(
+        source.flip(&[0]),
+        Err(GenericTensorError::Facade(Error::InvalidArgument(_)))
+    ));
+    assert_eq!(provider.style_queries.load(Ordering::Relaxed), 1);
+    assert_eq!(provider.vacuum_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(provider.fs_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(provider.twist_queries.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn checked_generic_flip_precedence_and_staged_failures_are_nonpublishing() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedPivotalToy::new(8, BraidingStyleKind::Anyonic, -1.0));
+    let source = fixture(&runtime, &provider, |marker| marker as f64);
+    let before = source.data().to_vec();
+
+    provider.reset_ledger(0);
+    assert!(matches!(
+        source.flip(&[source.rank()]),
+        Err(GenericTensorError::Facade(Error::InvalidArgument(_)))
+    ));
+    assert_eq!(provider.style_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(provider.fs_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(provider.twist_queries.load(Ordering::Relaxed), 0);
+
+    provider.reset_ledger(0);
+    let empty = source.flip(&[]).unwrap();
+    assert_eq!(empty.data().as_ptr(), source.data().as_ptr());
+    assert_eq!(provider.style_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(provider.fs_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(provider.twist_queries.load(Ordering::Relaxed), 0);
+
+    provider.reset_ledger(0);
+    provider.fail_fs_on.store(2, Ordering::Relaxed);
+    assert!(matches!(
+        source.flip(&[0]),
+        Err(GenericTensorError::Plan(CheckedGenericPlanError::Provider(
+            PivotalError::FrobeniusSchur
+        )))
+    ));
+    assert_eq!(source.data(), before);
+
+    provider.reset_ledger(0);
+    provider.fail_twist_on.store(2, Ordering::Relaxed);
+    assert!(matches!(
+        source.flip(&[0]),
+        Err(GenericTensorError::Plan(CheckedGenericPlanError::Provider(
+            PivotalError::Twist
+        )))
+    ));
+    assert_eq!(source.data(), before);
+}
+
+#[test]
+fn checked_generic_flip_uses_staged_nontrivial_fs_and_twist_factors() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedPivotalToy::with_fs(
+        9,
+        BraidingStyleKind::Anyonic,
+        -1.0,
+        1.0,
+    ));
+    let x_dual = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], true).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&x_dual], [&x_dual], |_, _| 3.0).unwrap();
+
+    let codomain = source.flip(&[0]).unwrap();
+    let domain = source.flip(&[1]).unwrap();
+    assert_eq!(codomain.data(), &[-3.0]);
+    assert_eq!(domain.data(), &[-3.0]);
+}
+
 #[cfg(feature = "racah-generated")]
 fn assert_sun_identity_case<D>(n: usize, label: Vec<i64>, value: impl Fn(usize) -> D)
 where
@@ -632,6 +812,56 @@ fn sun_checked_generic_twist_identity_shares_exact_provider_and_layout() {
     });
     assert_sun_identity_case(4, vec![2, 0, 2], |value| value as f64);
     assert_sun_identity_case(4, vec![2, 0, 2], |value| {
+        Complex64::new(value as f64, -(value as f64))
+    });
+}
+
+#[cfg(feature = "racah-generated")]
+fn assert_sun_flip_case<D>(n: usize, label: Vec<i64>, value: impl Fn(usize) -> D)
+where
+    D: TensorScalar + fmt::Debug + PartialEq,
+{
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(n).unwrap());
+    let legs = [2, 1, 2].map(|degeneracy| {
+        GradedSpace::try_new(Arc::clone(&provider), [(label.clone(), degeneracy)], false).unwrap()
+    });
+    let source: TensorMap<_, D> = TensorMap::from_block_fn(
+        &runtime,
+        [&legs[0], &legs[1], &legs[2]],
+        [],
+        |trees, indices| {
+            value(100 * trees.codomain_vertices()[0].get() + indices.iter().sum::<usize>())
+        },
+    )
+    .unwrap();
+    let flipped = source.flip(&[0, 2]).unwrap();
+    assert!(std::ptr::eq(flipped.provider(), provider.as_ref()));
+    assert!(flipped.codomain()[0].is_dual());
+    assert!(flipped.codomain()[2].is_dual());
+    for index in 0..source.block_count() {
+        let before = source.block(index).unwrap();
+        let after = flipped.block(index).unwrap();
+        assert_eq!(after.shape(), before.shape());
+        assert_eq!(after.strides(), before.strides());
+        assert_eq!(after.offset(), before.offset());
+    }
+    let roundtrip = flipped.flip_inverse(&[0, 2]).unwrap();
+    assert_eq!(roundtrip.data(), source.data());
+    assert_eq!(roundtrip.codomain(), source.codomain());
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn sun_checked_generic_flip_preserves_full_key_layout_and_inverse_roundtrip() {
+    assert_sun_flip_case(3, vec![2, 2], |value| value as f64);
+    assert_sun_flip_case(3, vec![2, 2], |value| {
+        Complex64::new(value as f64, -(value as f64))
+    });
+    assert_sun_flip_case(4, vec![2, 0, 2], |value| value as f64);
+    assert_sun_flip_case(4, vec![2, 0, 2], |value| {
         Complex64::new(value as f64, -(value as f64))
     });
 }
