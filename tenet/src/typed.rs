@@ -3843,6 +3843,15 @@ where
 }
 
 #[doc(hidden)]
+pub trait TypedTensorInvDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn inv(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Self::FacadeError>;
+}
+
+#[doc(hidden)]
 pub trait TypedTensorQrDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
@@ -4104,6 +4113,19 @@ where
     }
 }
 
+impl<R, D> TypedTensorInvDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn inv(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
+        tensor.inv_multiplicity_free()
+    }
+}
+
 impl<R, D> TypedTensorQrDispatch<R, D> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
@@ -4281,6 +4303,65 @@ where
                 repr: TypedTensorRepr::Owned(Arc::clone(&view.parent)),
             },
         })
+    }
+}
+
+impl<R, D> TypedTensorInvDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
+    fn inv(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        if matches!(&tensor.repr, TypedTensorRepr::Adjoint(_)) {
+            return tensor
+                .adjoint()?
+                .inv()?
+                .adjoint()?
+                .materialized_tensor_uncached()
+                .map_err(GenericTensorError::from);
+        }
+        let source = tensor.logical_space();
+        let codomain = tenet_matrixalgebra::coupled_sector_block_dimensions_generic_checked(
+            source.space().homspace().codomain(),
+            source.provider(),
+        )?;
+        let domain = tenet_matrixalgebra::coupled_sector_block_dimensions_generic_checked(
+            source.space().homspace().domain(),
+            source.provider(),
+        )?;
+        if codomain != domain {
+            return Err(Error::from(
+                tenet_tensors::OperationError::UnsupportedTensorContractScope {
+                    message: "inv requires isomorphic codomain and domain",
+                },
+            )
+            .into());
+        }
+        let homspace = FusionTreeHomSpace::new(
+            source.space().homspace().domain().clone(),
+            source.space().homspace().codomain().clone(),
+        );
+        let output = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
+            Arc::clone(source.provider_arc()),
+            homspace,
+        )?;
+        let body = tensor
+            .owned_body()
+            .expect("checked Generic inverse input is owned after lazy dispatch");
+        let mut dense = tensor.runtime.lease_dense();
+        let factor = tenet_matrixalgebra::inv_direct_into_dyn(
+            dense.dense(),
+            &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+                .map_err(Error::from)?,
+            output,
+        )
+        .map_err(Error::from)?;
+        Ok(wrap_factor_on(&tensor.runtime, factor))
     }
 }
 
@@ -5487,6 +5568,51 @@ where
 
 type TypedFacadeError<R> =
     <<R as TypedSectorAdmission>::Mode as TypedTensorModeDispatch<R>>::FacadeError;
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorInvDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// TensorKit 0.17 / MatrixAlgebraKit `inv`: the true inverse `t^-1` of a
+    /// nonsingular map, defined by `t * t^-1 = id` on the codomain and
+    /// `t^-1 * t = id` on the domain. Computed per coupled sector as the exact
+    /// dense solve `t_c X_c = 1`, not as a spectral function — there is no
+    /// truncation policy to apply and no factor tensor to build.
+    ///
+    /// # Domain
+    ///
+    /// TensorKit asks for `codomain ≅ domain` — **isomorphic, not equal** —
+    /// and returns a map `domain <- codomain`. This facade's seam agrees: a
+    /// rank-one codomain and a rank-two domain with the same coupled-sector
+    /// dimensions are accepted, and the result carries the two spaces swapped.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Operation`] when the two sides are not isomorphic, and when a
+    ///   coupled-sector block is singular — the dense solve is where that
+    ///   surfaces, so it comes back as an execution error rather than an
+    ///   argument one. Checked Generic preserves provider admission failures as
+    ///   typed structural/plan errors before allocation or dense execution.
+    /// - [`Error::InvalidArgument`] from the compact arm below, whose zero
+    ///   entry is visible before any solve runs and is therefore reported as
+    ///   the caller mistake it is. Checked-Generic compact construction is
+    ///   unsupported.
+    ///
+    /// # Complexity
+    ///
+    /// Dense input: `O(Σ_c n_c³)`, one LU solve per coupled sector. Compact
+    /// input (a spectrum factor, TensorKit's `DiagonalTensorMap`): the
+    /// **O(rank) elementwise-reciprocal arm**, `1/s_i` over the `Σ_c k_c`
+    /// stored values, and the result stays compact. A host lazy adjoint solves
+    /// its owned parent and returns a detached owned adjoint of that inverse;
+    /// it does not allocate or publish a separate receiver-materialization
+    /// payload.
+    pub fn inv(&self) -> Result<Self, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorInvDispatch<R, D>>::inv(self)
+    }
+}
 
 /// One tensor leg: a provider plus the sector-to-degeneracy map of that axis
 /// (TensorKit's `GradedSpace`).
@@ -12218,43 +12344,8 @@ where
         Ok(self.wrap_bound_factor(out))
     }
 
-    /// TensorKit 0.17 / MatrixAlgebraKit `inv`: the true inverse `t^-1` of a
-    /// nonsingular map, defined by `t * t^-1 = id` on the codomain and
-    /// `t^-1 * t = id` on the domain. Computed per coupled sector as the exact
-    /// dense solve `t_c X_c = 1`, not as a spectral function — there is no
-    /// truncation policy to apply and no factor tensor to build.
-    ///
-    /// # Domain
-    ///
-    /// TensorKit asks for `codomain ≅ domain` — **isomorphic, not equal** —
-    /// and returns a map `domain <- codomain`. This facade's seam agrees: a
-    /// rank-one codomain and a rank-two domain with the same coupled-sector
-    /// dimensions are accepted, and the result carries the two spaces swapped.
-    /// The pin is `inv_accepts_isomorphic_but_unequal_codomain_and_domain`.
-    ///
-    /// # Errors
-    ///
-    /// - [`Error::Operation`] when the two sides are not isomorphic, and when a
-    ///   coupled-sector block is singular — the dense solve is where that
-    ///   surfaces, so it comes back as an execution error rather than an
-    ///   argument one. Never a panic.
-    /// - [`Error::InvalidArgument`] from the compact arm below, whose zero
-    ///   entry is visible before any solve runs and is therefore reported as
-    ///   the caller mistake it is. The two storages of one singular tensor
-    ///   consequently report different variants; both are pinned by
-    ///   `inv_reports_a_singular_input_as_a_typed_error`.
-    ///
-    /// # Complexity
-    ///
-    /// Dense input: `O(Σ_c n_c³)`, one LU solve per coupled sector. Compact
-    /// input (a spectrum factor, TensorKit's `DiagonalTensorMap`): the
-    /// **O(rank) elementwise-reciprocal arm**, `1/s_i` over the `Σ_c k_c`
-    /// stored values, and the result stays compact — matching TensorKit's
-    /// `inv(::DiagonalTensorMap)`, which is `inv.(d.data)`. Nothing dense is
-    /// built on either side of that arm. A host lazy adjoint solves its owned
-    /// parent and returns a detached owned adjoint of that inverse; it does not
-    /// allocate or publish a separate receiver-materialization payload.
-    pub fn inv(&self) -> Result<Self, Error> {
+    /// Multiplicity-free implementation of the public mode-dispatched inverse.
+    fn inv_multiplicity_free(&self) -> Result<Self, Error> {
         if let Some(spectrum) = self.spectrum() {
             // Why `== 0` and not a tolerance: the dense arm has none either
             // (the solve either fails or it does not), and a compact arm that
@@ -16062,6 +16153,35 @@ mod representation_gates {
             unreachable!()
         };
         assert!(view.materialized.get().is_none());
+    }
+
+    #[cfg(feature = "racah-generated")]
+    #[test]
+    fn checked_generic_inv_lazy_is_detached_and_keeps_receiver_cold() {
+        use tenet_core::SUNFusionRule;
+
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 1)], false).unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
+        let lazy = source.adjoint().unwrap();
+        let inverse = lazy.inv().unwrap();
+
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
+        assert!(matches!(inverse.repr, TypedTensorRepr::Owned(_)));
+        assert!(!std::ptr::eq(
+            inverse.data().as_ptr(),
+            source.data().as_ptr()
+        ));
+        assert!(inverse
+            .data()
+            .iter()
+            .all(|value| (*value - 0.5).abs() < 1.0e-12));
     }
 
     #[cfg(feature = "racah-generated")]

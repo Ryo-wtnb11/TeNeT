@@ -6130,6 +6130,23 @@ where
         source_space.homspace().codomain().clone(),
     );
     let output_space = input.space().derive_from_final_homspace(inverse_homspace)?;
+    inverse_by_sector_dyn_into(dense, input, output_space)
+}
+
+/// Coefficient-free inverse execution into an already admitted swapped output.
+///
+/// The caller owns categorical admission; this body only routes the existing
+/// coupled-sector layout and performs the dense solves.
+pub(crate) fn inverse_by_sector_dyn_into<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    output_space: BoundDynamicFusionMapSpace<R>,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let source_space = input.space().space();
     let mut output_data = vec![D::zero(); output_space.space().required_len()?];
 
     let source_regions = checked_sector_regions(source_space.structure(), source_space.nout())?;
