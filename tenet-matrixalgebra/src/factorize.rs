@@ -6851,11 +6851,15 @@ where
                     .try_fusion_channels(left, right)
                     .map_err(CheckedGenericFactorPlanError::Provider)?;
                 for coupled in channels {
-                    let contribution = left_dimension.checked_mul(right_degeneracy).ok_or(
-                        CheckedGenericFactorPlanError::Operation(
+                    let multiplicity = rule
+                        .try_nsymbol(left, right, coupled)
+                        .map_err(CheckedGenericFactorPlanError::Provider)?;
+                    let contribution = left_dimension
+                        .checked_mul(right_degeneracy)
+                        .and_then(|value| value.checked_mul(multiplicity))
+                        .ok_or(CheckedGenericFactorPlanError::Operation(
                             OperationError::ElementCountOverflow,
-                        ),
-                    )?;
+                        ))?;
                     let entry = next.entry(coupled).or_default();
                     *entry = entry.checked_add(contribution).ok_or(
                         CheckedGenericFactorPlanError::Operation(

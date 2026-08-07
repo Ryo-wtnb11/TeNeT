@@ -1219,6 +1219,79 @@ fn sun_checked_generic_inv_preserves_provider_outer_multiplicity_and_inverse_law
 
 #[cfg(feature = "racah-generated")]
 #[test]
+fn sun_checked_generic_inv_preflight_counts_outer_multiplicity() {
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+    let adjoint = vec![1, 1];
+    let codomain_leg =
+        GradedSpace::try_new(Arc::clone(&provider), [(adjoint.clone(), 1)], false).unwrap();
+    let isomorphic_domain = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [
+            (vec![0, 0], 1),
+            (adjoint.clone(), 2),
+            (vec![3, 0], 1),
+            (vec![0, 3], 1),
+            (vec![2, 2], 1),
+        ],
+        false,
+    )
+    .unwrap();
+    let accepted: TensorMap<_, f64> = TensorMap::from_block_fn(
+        &runtime,
+        [&codomain_leg, &codomain_leg],
+        [&isomorphic_domain],
+        |trees, indices| {
+            if trees.coupled() == &adjoint {
+                let row = trees.codomain_vertices()[0].get() - 1;
+                if row == indices[2] {
+                    2.0
+                } else {
+                    0.0
+                }
+            } else {
+                2.0
+            }
+        },
+    )
+    .unwrap();
+    let inverse = accepted.inv().unwrap();
+    assert_eq!(inverse.codomain(), accepted.domain());
+    assert_eq!(inverse.domain(), accepted.codomain());
+
+    let nonisomorphic_domain = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [
+            (vec![0, 0], 1),
+            (adjoint, 1),
+            (vec![3, 0], 1),
+            (vec![0, 3], 1),
+            (vec![2, 2], 1),
+        ],
+        false,
+    )
+    .unwrap();
+    let rejected: TensorMap<_, f64> = TensorMap::from_block_fn(
+        &runtime,
+        [&codomain_leg, &codomain_leg],
+        [&nonisomorphic_domain],
+        |_, _| 1.0,
+    )
+    .unwrap();
+    let before = rejected.data().to_vec();
+    assert!(matches!(
+        rejected.inv(),
+        Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
+            _
+        )))
+    ));
+    assert_eq!(rejected.data(), before.as_slice());
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
 fn sun_checked_generic_compact_lq_preserves_provider_and_reconstructs() {
     use tenet::typed::SUNFusionRule;
 
