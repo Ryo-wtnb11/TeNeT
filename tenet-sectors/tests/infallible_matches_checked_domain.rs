@@ -49,7 +49,8 @@ fn assert_fusion_channels_forwards<R: FusionRule + CheckedFusionAlgebra>(
 ) {
     for &(left, right) in pairs {
         let checked = rule.try_fusion_channels(left, right);
-        let infallible = panic::catch_unwind(AssertUnwindSafe(|| rule.fusion_channels(left, right)));
+        let infallible =
+            panic::catch_unwind(AssertUnwindSafe(|| rule.fusion_channels(left, right)));
         match checked {
             Ok(expected) => assert_eq!(
                 infallible.expect("fusion_channels must not panic on representable inputs"),
@@ -106,7 +107,11 @@ fn zn_infallible_entry_points_match_checked_domain() {
     quiet_panics();
     let rule = ZNFusionRule::new(5).unwrap();
     let valid: Vec<SectorId> = (0..5i64).map(|c| rule.irrep(c).into()).collect();
-    let invalid = [SectorId::new(5), SectorId::new(6), SectorId::new(usize::MAX)];
+    let invalid = [
+        SectorId::new(5),
+        SectorId::new(6),
+        SectorId::new(usize::MAX),
+    ];
     let ids: Vec<SectorId> = valid.iter().copied().chain(invalid).collect();
 
     assert_dual_forwards(&rule, &ids);
@@ -160,7 +165,10 @@ fn u1_infallible_entry_points_match_checked_domain() {
         .collect();
     // Only representable when usize is wider than u32 (true for every CI
     // target); the zigzag codec's domain is exactly 0..=u32::MAX.
-    let invalid = [SectorId::new(u32::MAX as usize + 1), SectorId::new(usize::MAX)];
+    let invalid = [
+        SectorId::new(u32::MAX as usize + 1),
+        SectorId::new(usize::MAX),
+    ];
     let ids: Vec<SectorId> = valid.iter().copied().chain(invalid).collect();
 
     assert_dual_forwards(&rule, &ids);
@@ -179,7 +187,11 @@ fn su2_infallible_entry_points_match_checked_domain() {
         .into_iter()
         .map(SectorId::new)
         .collect();
-    let invalid = [SectorId::new(255), SectorId::new(256), SectorId::new(usize::MAX)];
+    let invalid = [
+        SectorId::new(255),
+        SectorId::new(256),
+        SectorId::new(usize::MAX),
+    ];
     let ids: Vec<SectorId> = valid.iter().copied().chain(invalid).collect();
 
     assert_dual_forwards(&rule, &ids);

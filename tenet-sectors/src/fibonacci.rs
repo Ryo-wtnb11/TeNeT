@@ -112,7 +112,9 @@ impl CheckedFusionAlgebra for FibonacciFusionRule {
         checked_fibonacci_sector(left)?;
         checked_fibonacci_sector(right)?;
         checked_fibonacci_sector(coupled)?;
-        Ok(usize::from(fibonacci_channels(left, right).contains(&coupled)))
+        Ok(usize::from(
+            fibonacci_channels(left, right).contains(&coupled),
+        ))
     }
 }
 

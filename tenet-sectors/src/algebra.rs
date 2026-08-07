@@ -281,9 +281,10 @@ pub trait CheckedFusionAlgebra: FusionRule {
     /// where [`Self::try_fusion_channels`] returns `Ok`, and panics with a
     /// message derived from its `Err` otherwise.
     fn fusion_channels_or_panic(&self, left: SectorId, right: SectorId) -> SectorVec {
-        self.try_fusion_channels(left, right).unwrap_or_else(|error| {
-            panic!("FusionRule::fusion_channels precondition violated: {error}")
-        })
+        self.try_fusion_channels(left, right)
+            .unwrap_or_else(|error| {
+                panic!("FusionRule::fusion_channels precondition violated: {error}")
+            })
     }
 
     /// [`FusionRule::nsymbol`]'s single panic site: succeeds exactly where
