@@ -4491,7 +4491,9 @@ where
         } else {
             tensor.clone()
         };
-        pow_by_squaring(power, exponent.unsigned_abs(), TensorMap::compose)
+        pow_by_squaring(power, exponent.unsigned_abs(), |left, right| {
+            left.compose(right)
+        })
     }
 }
 
