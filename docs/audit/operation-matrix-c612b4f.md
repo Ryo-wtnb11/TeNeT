@@ -33,7 +33,7 @@ categorical coefficients are separately constrained by the provider bounds.
 | `adjoint` | PROVED lazy view | NEEDS-PROOF | PROVED lazy view | PROVED lazy view | PROVED lazy view | UNSUPPORTED | PROVED for SU(3)/SU(4) real-provider fixtures |
 | `permute`, `transpose`, `repartition` | PROVED | PROVED for CU(1); NEEDS-PROOF for ZN | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED |
 | `braid` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED |
-| `twist` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | UNSUPPORTED |
+| `twist` | PROVED | NEEDS-PROOF | PROVED | PROVED | PROVED | UNSUPPORTED | PROVED for synthetic checked-pivotal f64/c64 ±1 scaling, μ=2 full keys, direct/lazy parity, precedence, staged failures, NoBraiding/Bosonic/identity sharing, plus SU(3)/SU(4) × f64/c64 identity sharing and exact layout; checked-Generic compact storage remains unproved by integration tests |
 | `flip` | PROVED | NEEDS-PROOF | PROVED | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | UNSUPPORTED |
 | unit insertion/removal | PROVED | NEEDS-PROOF | PROVED | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | PROVED |
 | `catdomain`, `catcodomain` | PROVED | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | NEEDS-PROOF | UNSUPPORTED | PROVED in both directions for four SU(3)/SU(4) × f64/c64 cases with μ=2 full-key matching, exact direct-sum slabs, distinct equal-identity Arcs, and lazy-adjoint parity; compact checked-Generic construction remains unsupported |
@@ -63,8 +63,8 @@ proved typed providers without this qualification.
 
 Provider-mode dispatch now covers transactional root construction, tree
 transforms, `otimes`, `contract`, `compose`, reductions, trace, arithmetic, and
-the current checked-Generic unit, cat, decomposition, and spectrum leaves. The
-remaining operation gaps are `twist`, `flip`, factor-returning EIG/EIGH variants,
+the current checked-Generic unit, cat, twist, decomposition, and spectrum leaves.
+The remaining operation gaps are `flip`, factor-returning EIG/EIGH variants,
 orthogonal/null/polar factors, matrix functions, and typed network execution.
 #662 closed through merged #946 after proving typed provider-error propagation
 and transactional nonpublication for the reachable checked-Generic operations.
@@ -115,7 +115,8 @@ the capability tables have no call path and are intentionally omitted.
 | Host construction and block readback | `GradedSpace` and `TensorMap` retain the caller's `Arc<R>`; `TypedTensorRootDispatch::build_root` admits the final `FusionTreeHomSpace` before payload allocation | multiplicity-free and checked-Generic admission query their provider through separate mode dispatch; checked errors remain typed | `zeros`, `rand`, and `from_data` fill the complete admitted layout | one owned body is published only after admission and length validation; readback decodes labels through the retained provider |
 | Host `adjoint` | swaps logical domain/codomain and stores the canonical parent in `TypedAdjointView` | no F/R/CGC query and no transform plan | no payload kernel at construction | publishes a parent-backed view; only `data()` may populate its receiver-owned `OnceLock` materialization |
 | Host `permute`, `transpose`, `repartition`, `braid` | derives the destination from the source bound space; output retains the source provider allocation | multiplicity-free uses the Runtime tree-transform context/cache; checked Generic uses `tree_transform_dyn_owned_checked_generic_in_context` and its provider-bound checked context | tree-transform pack/replay/scatter; a multiplicity-free lazy adjoint lowers the operation to its parent, while checked Generic currently accepts owned data only | owned output after planning/execution succeeds; overwrite forms preserve the caller destination identity and allocation and do not publish a replacement body |
-| Host `twist` and `flip` | layout-preserving twist, or `derive_from_final_homspace` plus exact layout-identity check for flip | obtains twist/Frobenius-Schur factors from the bound provider; no tensor-result cache | one block-scaled output copy; lazy adjoint redirects to the parent with the inverse operation | fresh owned body; receiver whole-payload cache remains cold |
+| Host `twist` | preserves the exact admitted space and provider allocation | mode dispatch keeps the multiplicity-free path unchanged; checked Generic validates index/empty/braiding in order and stages every fallible selected-sector twist before replay, with no provider query after staging | identity cases share the body; otherwise one fresh dense or compact scaled payload; a lazy adjoint redirects to its parent and reuses the already-admitted logical view | publishes only after staging and local scaling succeed; no root admission, prepared object, or result cache |
+| Host `flip` | `derive_from_final_homspace` plus exact layout-identity check | obtains twist/Frobenius-Schur factors from the bound multiplicity-free provider; no tensor-result cache | one block-scaled output copy; lazy adjoint redirects to the parent with the inverse operation | fresh owned body; unit tests prove the receiver whole-payload cache remains cold |
 | Host unit insertion/removal | derives and validates the unit-leg HomSpace correspondence | canonical-unit provider marker and vacuum identity; no F/R/CGC plan | no dense copy for an owned dense input | new body shares the existing payload `Arc`; compact or lazy input may require one operation-local dense payload first |
 | Host `catdomain`, `catcodomain` | derives the result HomSpace, then admits it with the left operand's exact provider `Arc` | mode root dispatch performs the one output admission; admitted input stamps reject identity mismatch, and no provider query follows successful output admission | compiled direct-sum slab copy; a conservatively declined lazy orientation retries locally after uncached materialization against the same admitted output | fresh owned output only after admission, planning and copy all succeed; operation-local temporaries are dropped and never enter the receiver `OnceLock` |
 | Host `absorb` | preserves the destination admitted space and layout | compares the admitted layout rule-identity stamps; no provider or coefficient query and no retained prepared object | per-block min-prefix copy; lazy inputs may use `materialized_tensor_uncached()` | fresh owned output on the destination admitted space; operation-local temporaries are dropped and never enter the receiver `OnceLock` |
@@ -166,7 +167,7 @@ These are three different mechanisms and must not be combined under one
 | operation-local full logical payload | `materialized_tensor_uncached()` | used only where no orientation-aware seam/algebraic redirect exists; never published to the receiver |
 
 Current orientation-aware or algebraic routes avoid a receiver-sized input
-copy for tree transforms, contraction/composition, SVD compact/full/truncated/
+copy for tree transforms, twist, contraction/composition, SVD compact/full/truncated/
 values and pseudo-inverse. QR, some LQ/null output conversion, EIG/EIGH,
 general `exp`, solve, `sqrt`, `absorb`, dtype conversion and conservative cat
 fallbacks still contain operation-local full-payload calls
@@ -180,6 +181,9 @@ does not imply zero peak copy cost.
 - Generic construction, multiplicity-two transforms, `otimes`, contraction,
   composition, typed failures and SUN round trips:
   `tenet/tests/checked_generic_facade.rs`.
+- Checked-pivotal twist staging, ±1 full-key scaling, direct/lazy parity,
+  NoBraiding/Bosonic behavior, typed failures, and SU(3)/SU(4) identity sharing:
+  `tenet/tests/checked_generic_twist.rs`.
 - U(1), SU(2), fZ2 and triple-product contraction laws plus U(1)/SU(2)
   TensorKit invariant streams: `tenet/tests/semantic_suite.rs`.
 - Broad Host facade behavior, including CU(1) recoupling and Z2
@@ -200,7 +204,7 @@ does not imply zero peak copy cost.
    correction through #9; a future implementation leaf must first decide how
    categorical coefficient scalar and payload scalar compose.
 2. **Checked Generic is deliberately partial, not an alternate complete tensor
-   hierarchy.** Close the residual twist/flip, factor-returning EIG/EIGH,
+   hierarchy.** Close the residual flip, factor-returning EIG/EIGH,
    orthogonal/null/polar, matrix-function, and network-execution gaps before
    describing SU(N) as generally supported. Merged #946 closed #662 with the
    shared typed error/nonpublication contract proved for the reachable checked
