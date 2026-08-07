@@ -21,6 +21,273 @@ enum Label {
     Invalid,
 }
 
+#[test]
+fn checked_generic_powi_zero_reuses_the_admitted_space_without_provider_work() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| f64::from(ij == [0, 1]))
+            .unwrap();
+    reset_provider_queries(&provider);
+    let identity = source.powi(0).unwrap();
+    assert_no_provider_queries(&provider);
+    assert!(std::ptr::eq(identity.provider(), provider.as_ref()));
+    assert!(identity.runtime().shares_state_with(source.runtime()));
+    assert_eq!(identity.codomain(), source.codomain());
+    assert_eq!(identity.domain(), source.domain());
+    assert_eq!(identity.block_count(), source.block_count());
+    assert_eq!(identity.data(), &[1.0, 0.0, 0.0, 1.0]);
+    for index in 0..source.block_count() {
+        assert_eq!(identity.block(index).unwrap(), source.block(index).unwrap());
+        assert_eq!(
+            identity.block_fusion_trees(index).unwrap(),
+            source.block_fusion_trees(index).unwrap()
+        );
+    }
+}
+
+#[test]
+fn checked_generic_powi_matches_explicit_real_and_complex_oracles() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let real: TensorMap<_, f64> = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| {
+        [[2.0, 1.0], [3.0, 4.0]][ij[0]][ij[1]]
+    })
+    .unwrap();
+    let complex = real.to_c64().scale(Complex64::new(1.0, 1.0));
+    let real_oracles: &[(i32, &[f64])] = &[
+        (0, &[1.0, 0.0, 0.0, 1.0]),
+        (1, &[2.0, 3.0, 1.0, 4.0]),
+        (2, &[7.0, 18.0, 6.0, 19.0]),
+        (3, &[32.0, 93.0, 31.0, 94.0]),
+        (-1, &[0.8, -0.6, -0.2, 0.4]),
+        (-2, &[0.76, -0.72, -0.24, 0.28]),
+    ];
+    let complex_oracles: &[(i32, &[Complex64])] = &[
+        (
+            0,
+            &[
+                Complex64::new(1.0, 0.0),
+                Complex64::new(0.0, 0.0),
+                Complex64::new(0.0, 0.0),
+                Complex64::new(1.0, 0.0),
+            ],
+        ),
+        (
+            1,
+            &[
+                Complex64::new(2.0, 2.0),
+                Complex64::new(3.0, 3.0),
+                Complex64::new(1.0, 1.0),
+                Complex64::new(4.0, 4.0),
+            ],
+        ),
+        (
+            2,
+            &[
+                Complex64::new(0.0, 14.0),
+                Complex64::new(0.0, 36.0),
+                Complex64::new(0.0, 12.0),
+                Complex64::new(0.0, 38.0),
+            ],
+        ),
+        (
+            3,
+            &[
+                Complex64::new(-64.0, 64.0),
+                Complex64::new(-186.0, 186.0),
+                Complex64::new(-62.0, 62.0),
+                Complex64::new(-188.0, 188.0),
+            ],
+        ),
+        (
+            -1,
+            &[
+                Complex64::new(0.4, -0.4),
+                Complex64::new(-0.3, 0.3),
+                Complex64::new(-0.1, 0.1),
+                Complex64::new(0.2, -0.2),
+            ],
+        ),
+        (
+            -2,
+            &[
+                Complex64::new(0.0, -0.38),
+                Complex64::new(0.0, 0.36),
+                Complex64::new(0.0, 0.12),
+                Complex64::new(0.0, -0.14),
+            ],
+        ),
+    ];
+    for &(exponent, expected) in real_oracles {
+        assert!(real
+            .powi(exponent)
+            .unwrap()
+            .data()
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| (actual - expected).abs() < 1e-12));
+    }
+    for &(exponent, expected) in complex_oracles {
+        assert!(complex
+            .powi(exponent)
+            .unwrap()
+            .data()
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| (*actual - *expected).norm() < 1e-12));
+    }
+}
+
+#[test]
+fn checked_generic_powi_rejects_nonendomorphisms_before_provider_work() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let wide = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 1)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&wide], [&narrow], |_, _| 1.0).unwrap();
+    let before = source
+        .data()
+        .iter()
+        .map(|value| value.to_bits())
+        .collect::<Vec<_>>();
+    for exponent in [0, 1, -1] {
+        reset_provider_queries(&provider);
+        match source.powi(exponent) {
+            Err(GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(message))) => {
+                assert!(message.contains("endomorphism"));
+            }
+            other => panic!("unexpected powi({exponent}) result: {other:?}"),
+        }
+        assert_no_provider_queries(&provider);
+        assert_eq!(
+            source
+                .data()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            before
+        );
+    }
+}
+
+#[test]
+fn checked_generic_powi_singular_negative_powers_do_not_publish() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| f64::from(ij == [0, 0]))
+            .unwrap();
+    assert_eq!(source.powi(2).unwrap().data(), &[1.0, 0.0, 0.0, 0.0]);
+    let before = source
+        .data()
+        .iter()
+        .map(|value| value.to_bits())
+        .collect::<Vec<_>>();
+    for exponent in [-1, -2] {
+        assert!(matches!(
+            source.powi(exponent),
+            Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
+                _
+            )))
+        ));
+        assert_eq!(
+            source
+                .data()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            before
+        );
+    }
+}
+
+#[test]
+fn checked_generic_powi_i32_min_on_identity_is_exact() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let identity: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| f64::from(ij[0] == ij[1]))
+            .unwrap();
+    assert_eq!(identity.powi(i32::MIN).unwrap().data(), identity.data());
+}
+
+#[cfg(feature = "racah-generated")]
+fn assert_sun_checked_generic_powi_outer_multiplicity<D>(n: usize, adjoint: Vec<i64>)
+where
+    D: tenet::typed::TensorScalar + fmt::Debug + PartialEq,
+{
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(n).unwrap());
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(adjoint.clone(), 2)], false).unwrap();
+    let source: TensorMap<_, D> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, ij| {
+            let row = ij[0] + 2 * ij[1];
+            let col = ij[2] + 2 * ij[3];
+            D::from_real(
+                if trees.codomain_vertices() == trees.domain_vertices() && row == col {
+                    2.0
+                } else if trees.codomain_vertices()[0].get() == 1
+                    && trees.domain_vertices()[0].get() == 2
+                    && row == col
+                {
+                    1.0
+                } else {
+                    0.0
+                },
+            )
+        })
+        .unwrap();
+    assert!((0..source.block_count()).any(|index| {
+        let trees = source.block_fusion_trees(index).unwrap();
+        trees.codomain_vertices()[0].get() == 2 || trees.domain_vertices()[0].get() == 2
+    }));
+    assert!((0..source.block_count()).any(|index| {
+        let trees = source.block_fusion_trees(index).unwrap();
+        trees.codomain_vertices()[0].get() == 1
+            && trees.domain_vertices()[0].get() == 2
+            && source.data()[source.block(index).unwrap().offset()] == D::from_real(1.0)
+    }));
+
+    let identity = source.powi(0).unwrap();
+    assert!(std::ptr::eq(identity.provider(), provider.as_ref()));
+    assert!(identity.runtime().shares_state_with(source.runtime()));
+    assert_eq!(identity.codomain(), source.codomain());
+    assert_eq!(identity.domain(), source.domain());
+    for index in 0..source.block_count() {
+        assert_eq!(identity.block(index).unwrap(), source.block(index).unwrap());
+        assert_eq!(
+            identity.block_fusion_trees(index).unwrap(),
+            source.block_fusion_trees(index).unwrap()
+        );
+    }
+    let squared = source.powi(2).unwrap();
+    assert_eq!(squared.data(), source.compose(&source).unwrap().data());
+    let inverse = source.powi(-1).unwrap();
+    for product in [
+        source.compose(&inverse).unwrap(),
+        inverse.compose(&source).unwrap(),
+    ] {
+        assert_eq!(product.data(), identity.data());
+    }
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn checked_generic_powi_sun_outer_multiplicity_preserves_full_layout_and_power_laws() {
+    for (n, adjoint) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
+        assert_sun_checked_generic_powi_outer_multiplicity::<f64>(n, adjoint.clone());
+        assert_sun_checked_generic_powi_outer_multiplicity::<Complex64>(n, adjoint);
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ToyError {
     InvalidSector,

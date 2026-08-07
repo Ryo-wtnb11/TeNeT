@@ -3861,6 +3861,15 @@ where
 }
 
 #[doc(hidden)]
+pub trait TypedTensorPowiDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn powi(tensor: &TensorMap<R, D>, exponent: i32) -> Result<TensorMap<R, D>, Self::FacadeError>;
+}
+
+#[doc(hidden)]
 pub trait TypedTensorQrDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
@@ -4148,6 +4157,19 @@ where
     }
 }
 
+impl<R, D> TypedTensorPowiDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn powi(tensor: &TensorMap<R, D>, exponent: i32) -> Result<TensorMap<R, D>, Error> {
+        tensor.powi_multiplicity_free(exponent)
+    }
+}
+
 impl<R, D> TypedTensorQrDispatch<R, D> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
@@ -4424,6 +4446,54 @@ where
         )
         .map_err(Error::from)?;
         Ok(wrap_factor_on(&tensor.runtime, factor))
+    }
+}
+
+impl<R, D> TypedTensorPowiDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericRigidSymbols<Scalar = f64>,
+    D: TensorScalar,
+{
+    fn powi(
+        tensor: &TensorMap<R, D>,
+        exponent: i32,
+    ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        let hom = tensor.logical_space().space().homspace();
+        if hom.codomain() != hom.domain() {
+            return Err(Error::InvalidArgument(
+                "powi() requires an endomorphism (domain == codomain)".into(),
+            )
+            .into());
+        }
+        if matches!(&tensor.repr, TypedTensorRepr::Adjoint(_)) {
+            return tensor
+                .adjoint()?
+                .powi(exponent)?
+                .adjoint()?
+                .materialized_tensor_uncached()
+                .map_err(GenericTensorError::from);
+        }
+        if exponent == 0 {
+            let space = tensor.logical_space().clone();
+            let len = space.space().required_len().map_err(Error::from)?;
+            let mut output = TensorMap {
+                runtime: tensor.runtime.clone(),
+                repr: owned_repr(TypedTensorBody::dense(space, vec![D::zero(); len])),
+            };
+            write_identity_blocks_generic(&mut output).map_err(GenericTensorError::from)?;
+            return Ok(output);
+        }
+        let power = if exponent < 0 {
+            tensor.inv()?
+        } else {
+            tensor.clone()
+        };
+        pow_by_squaring(power, exponent.unsigned_abs(), |left, right| {
+            left.compose(right)
+        })
     }
 }
 
@@ -5631,6 +5701,36 @@ where
 type TypedFacadeError<R> =
     <<R as TypedSectorAdmission>::Mode as TypedTensorModeDispatch<R>>::FacadeError;
 
+fn write_identity_blocks_generic<R, D>(tensor: &mut TensorMap<R, D>) -> Result<(), Error>
+where
+    D: TensorScalar,
+{
+    let TypedTensorRepr::Owned(body) = &mut tensor.repr else {
+        unreachable!()
+    };
+    write_dense_identity_blocks(Arc::get_mut(body).expect("fresh identity body"))
+}
+
+fn write_dense_identity_blocks<R, D>(body: &mut TypedTensorBody<R, D>) -> Result<(), Error>
+where
+    D: TensorScalar,
+{
+    let regions = {
+        let space = body.space.space();
+        sector_regions(space.structure(), space.nout())?
+    };
+    let payload = Arc::get_mut(&mut body.data).expect("fresh identity payload");
+    let TypedData::Dense(data) = payload else {
+        unreachable!()
+    };
+    for region in regions.iter() {
+        for i in 0..region.rows().min(region.cols()) {
+            data[region.range().start + i * (region.rows() + 1)] = D::from_real(1.0);
+        }
+    }
+    Ok(())
+}
+
 impl<R, D> TensorMap<R, D>
 where
     R: TypedSectorAdmission,
@@ -5747,6 +5847,32 @@ where
     /// ```
     pub fn exp(&self) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorExpDispatch<R, D>>::exp(self)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorPowiDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// Integer tensor-map power (TensorKit `t ^ p`), using `O(log |p|)`
+    /// compositions. Zero returns the multiplicative identity (staying compact
+    /// for compact input); negative powers invert once.
+    ///
+    /// For checked-Generic tensors, the exact endomorphism check precedes
+    /// provider work. Zero uses the already admitted full block layout without
+    /// a provider query or new admission; other exponents inherit the checked
+    /// compose/inverse ordering and errors. Checked-Generic compact
+    /// construction remains unsupported.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidArgument`] unless this is an endomorphism.
+    /// Negative powers additionally return the inverse operation's typed error
+    /// when a block is singular or output admission fails.
+    pub fn powi(&self, exponent: i32) -> Result<Self, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorPowiDispatch<R, D>>::powi(self, exponent)
     }
 }
 
@@ -10212,26 +10338,9 @@ where
         let TypedTensorRepr::Owned(body) = &mut tensor.repr else {
             unreachable!("a freshly built tensor is owned")
         };
-        let body = Arc::get_mut(body).expect("a freshly built body has no other owner");
-        // Use the shared coupled-sector region walk rather than duplicating
-        // offset arithmetic here.
-        let regions = {
-            let space = body.space.space();
-            sector_regions(space.structure(), space.nout())?
-        };
-        // The payload `Arc` is unique for the same reason the body one is: this
-        // tensor was built two statements ago and never handed out.
-        let payload =
-            Arc::get_mut(&mut body.data).expect("a freshly built payload has no other owner");
-        let TypedData::Dense(data) = payload else {
-            unreachable!("`build` always produces a dense payload");
-        };
-        for region in regions.iter() {
-            for i in 0..region.rows().min(region.cols()) {
-                data[region.range().start + i * (region.rows() + 1)] = D::from_real(1.0);
-            }
-        }
-        Ok(())
+        write_dense_identity_blocks(
+            Arc::get_mut(body).expect("a freshly built body has no other owner"),
+        )
     }
 }
 
@@ -11351,7 +11460,7 @@ where
     /// for compact input); negative powers invert once.
     ///
     /// Returns [`Error::InvalidArgument`] unless this is an endomorphism.
-    pub fn powi(&self, exponent: i32) -> Result<Self, Error> {
+    fn powi_multiplicity_free(&self, exponent: i32) -> Result<Self, Error> {
         if !self.is_endomorphism() {
             return Err(Error::InvalidArgument(
                 "powi() requires an endomorphism (domain == codomain)".to_string(),
@@ -16241,6 +16350,34 @@ mod representation_gates {
             .data()
             .iter()
             .all(|value| (*value - 0.5).abs() < 1.0e-12));
+    }
+
+    #[cfg(feature = "racah-generated")]
+    #[test]
+    fn checked_generic_powi_lazy_is_owned_matches_direct_and_keeps_receiver_cold() {
+        use tenet_core::SUNFusionRule;
+
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 2)], false).unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| {
+                [[2.0, 1.0], [3.0, 4.0]][ij[0]][ij[1]]
+            })
+            .unwrap();
+        let lazy = source.adjoint().unwrap();
+
+        for exponent in [0, 2, -1] {
+            let actual = lazy.powi(exponent).unwrap();
+            let expected = source.powi(exponent).unwrap().adjoint().unwrap();
+            assert!(matches!(actual.repr, TypedTensorRepr::Owned(_)));
+            assert_eq!(actual.data(), expected.data());
+            assert_eq!(materialized_adjoint_builds(&lazy), 0);
+            let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+                unreachable!()
+            };
+            assert!(view.materialized.get().is_none());
+        }
     }
 
     #[cfg(feature = "racah-generated")]
