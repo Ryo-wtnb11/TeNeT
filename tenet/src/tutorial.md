@@ -462,6 +462,57 @@ assert_eq!(s.dim()?, 3.0);
 # Ok::<(), Error>(())
 ```
 
+### Combining symmetries
+
+A symmetry is a value, so combining two is a method call rather than a new type
+in the library. `left.product(right)` builds a provider for `left ⊠ right`; its
+labels are [`prelude::ProductSector`], built with [`prelude::product_sector`],
+and everything else — spaces, tensors, contraction, decompositions — is
+unchanged.
+
+```rust
+use tenet::prelude::*;
+
+let rt = Runtime::builder().build()?;
+
+// fZ2 ⊠ U(1): fermion parity together with particle number.
+let rule = FermionParityFusionRule.product(U1FusionRule);
+let v = GradedSpace::try_new_owned(
+    rule,
+    [
+        (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 1),
+        (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2),
+    ],
+    false,
+)?;
+
+let t = TensorMap::<_, f64>::zeros(&rt, [&v], [&v])?;
+assert_eq!(t.block_count(), 2);
+
+// Labels come back as the pair, with each component in its own type.
+let sectors = v.sectors()?;
+assert_eq!(sectors[0].left(), &Z2Irrep::EVEN);
+assert_eq!(sectors[0].right(), &U1Irrep::new(0));
+# Ok::<(), Error>(())
+```
+
+Products nest, so `a.product(b).product(c)` is a three-component provider. Two
+consequences worth knowing before you pick an order:
+
+- **Order and association are part of the type.** `U(1) ⊠ fZ2` and
+  `fZ2 ⊠ U(1)` are both legal and are different providers; a tensor built with
+  one does not compose with a tensor built with the other. Fix the order once,
+  at the top of your model.
+- **Every component must currently use `f64` coefficients.** All the built-in
+  group providers do. A component with complex F/R data, such as
+  `FibonacciFusionRule`, does not type-check inside a product yet.
+
+To use a symmetry that is not built in, implement the provider traits in your
+own crate — nothing in the engine enumerates symmetries, so an external
+provider reaches the same `GradedSpace` / `TensorMap` API. The obligations, the
+laws the engine assumes without checking, and the current restrictions are in
+`docs/provider_interface.md`.
+
 For the complete TensorKit-name lookup — every user-facing 0.17 export, its
 TeNeT name, and the rationale for anything spelled or gated differently — see
 `docs/tk_api_parity.md`.
@@ -850,3 +901,6 @@ Honest list, as of this writing:
 - **Memory-bounded slicing is planned but not executable yet**: the
   slicing planner IR is ported, the sliced executor over symmetric legs
   is future work (sector-granular slicing).
+- **Products require `f64` coefficients on every component**, so a product
+  containing a complex-coefficient provider such as `FibonacciFusionRule` does
+  not type-check. See `docs/provider_interface.md`.

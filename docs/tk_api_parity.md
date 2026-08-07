@@ -1,9 +1,16 @@
 # TensorKit 0.17 export-name mapping (audit pending)
 
-> **Not a current capability or correctness matrix.** This historical export-name
-> ledger contains stale status rows. Issue #9 is regenerating support from current
-> source, tests, and executable oracles across provider, storage, and device
-> boundaries.
+> **This is a name-and-semantics lookup, not a capability or correctness
+> matrix.** A row says what the operation is called and whether it computes what
+> TensorKit computes. It does not say which providers, dtypes, storage forms, or
+> devices are proved to reach it — `docs/audit/operation-matrix.md` and issue #9
+> own that, from current source, tests, and executable oracles. Individual
+> status rows here may still be stale.
+>
+> `has` is a strong claim: same name, same result. Where the two libraries
+> genuinely differ, the row must say `has-different-semantics` and name the
+> difference, so that a ported call site fails in review rather than in
+> production.
 
 One row per **user-facing** TensorKit 0.17.0 export (from `TensorKit.jl`'s
 `export` lists), mapped to TeNeT's provider-typed user layer
@@ -24,8 +31,9 @@ Reference source: `TensorKit v0.17.0` at
 
 | Status | Meaning |
 |---|---|
-| **has** | Present under the same (or effectively same) name. |
+| **has** | Present under the same (or effectively same) name, computing the same thing. A TensorKit user can reach for it without reading the Notes column. |
 | **has-different-name** | Present; TeNeT spells it differently. The mapping column *is* the alias — no thin wrapper is added when the different name is clearer and the concept is already discoverable. |
+| **has-different-semantics** | Present under a matching name, but the result is not the one TensorKit's default would produce: a different algorithm, tolerance, rank policy, or distribution. The Notes column states the difference; read it before porting code. |
 | **added** | Added in this parity sweep under the TK name (or a Rust-idiomatic `snake_case` of it). |
 | **design-gated** | Not present; needs kernel/storage/solver work beyond a facade wrapper, or would reintroduce a known hazard. Rationale given. |
 | **N/A** | No TeNeT analog by design (the type system already carries it, or TeNeT does not model that category-theoretic surface). |
@@ -51,7 +59,7 @@ allow-lists remain available through direct `tenet-tensors` or
 | `isomorphism` | has | `TensorMap::isomorphism` | |
 | `unitary` | has | `TensorMap::unitary` | |
 | `isometry` | has | `TensorMap::isometry` | |
-| `rand` | has | `TensorMap::rand` / `rand_with_seed` | Entries uniform in `[-1, 1)` (TK `rand` is `[0, 1)`); use an explicit seed for reproducibility. |
+| `rand` | has-different-semantics | `TensorMap::rand` / `rand_with_seed` | Entries uniform in `[-1, 1)` (TK `rand` is `[0, 1)`); use an explicit seed for reproducibility. |
 | `randn` | design-gated | — | Needs a Gaussian `Fill` variant in the core layer; `rand` covers the common "random tensor" need. |
 | `randisometry` | design-gated | — | Composes as `TensorMap::rand(...).left_orth()?.0` at the call site; no dedicated constructor yet. |
 | (block fill) | has | `TensorMap::from_block_fn` | No TK export; per-block closure fill, dtype from the closure. |
@@ -72,7 +80,7 @@ allow-lists remain available through direct `tenet-tensors` or
 | `axpy!` / `axpby!` | has-different-name | `TensorMap::add` | Same `α`/`β` combination, out of place. |
 | `mul!` | has-different-name | `TensorMap::compose` / `contract` | Categorical composition (`A * B`). |
 | `lmul!` / `rmul!` | has-different-name | `TensorMap::scale` | Scalar (and diagonal, via `compose`) scaling. |
-| `pinv` | has | `TensorMap::pinv` | Dense maps use one global strict `rcond * sigma_max` cutoff; TensorKit's block-local tolerance intentionally differs. |
+| `pinv` | has-different-semantics | `TensorMap::pinv` | Dense maps use one global strict `rcond * sigma_max` cutoff; TensorKit's block-local tolerance intentionally differs. |
 | `adjoint!` | has-different-name | `TensorMap::adjoint` | Lazy, out of place. |
 | `*!` / `*!!` bang forms | N/A | — | Immutable facade. |
 
@@ -100,7 +108,7 @@ allow-lists remain available through direct `tenet-tensors` or
 | `svd_trunc` | has | `TensorMap::svd_trunc` → `SvdTrunc` | Truncation via `Truncation` (below). |
 | `svd_vals` | has | `TensorMap::svd_vals` | |
 | `left_orth` / `right_orth` | has | `TensorMap::left_orth` / `right_orth` | |
-| `left_null` / `right_null` | has | `TensorMap::left_null` / `right_null` | |
+| `left_null` / `right_null` | has-different-semantics | `TensorMap::left_null` / `right_null` | TeNeT counts numerical nullity per coupled sector from that sector's compact SVD (`sigma > eps * max(rows, cols) * sigma_max`). TensorKit/MatrixAlgebraKit's default with no truncation argument is QR-based and counts only the structural nullity `rows - min(rows, cols)` (`interface/orthnull.jl`, the `alg::Nothing` mode); TeNeT's behavior corresponds to their SVD mode with a tolerance. A numerically rank-deficient block therefore yields null directions here and none there. |
 | `qr_null` / `lq_null` | has-different-name | `TensorMap::left_null` / `right_null` | Same null-space factor. |
 | `left_polar` / `right_polar` | has | `TensorMap::left_polar` / `right_polar` | |
 | `qr_full` / `qr_compact` | has | `TensorMap::qr_full` / `qr_compact` | |
@@ -108,7 +116,7 @@ allow-lists remain available through direct `tenet-tensors` or
 | `eigh_full` / `eigh_trunc` / `eigh_vals` | has | `TensorMap::eigh_full` / `eigh_trunc` / `eigh_vals` | |
 | `eig_full` / `eig_trunc` / `eig_vals` | has | `TensorMap::eig_full` / `eig_trunc` / `eig_vals` | Outputs always c64. |
 | `eigen` | has-different-name | `TensorMap::eig_full` | |
-| `exp` | has | `TensorMap::exp` | Any endomorphism, as in TK (`exp!`, `linalg.jl:420-428`, which checks only `domain == codomain`). Dense input dispatches on the blocks: Hermitian blocks keep the spectral route `v exp(d) v^H`, everything else takes blockwise scaling-and-squaring Padé [13/13] (Higham 2005) at `O(Σ_c n_c³)` with an `O(max_c n_c²)` workspace reused across sectors. Values agree with TK to approximant error, not bitwise: TK selects lower Padé degrees for small norms. Compact diagonal storage applies `exp` elementwise and stays compact. |
+| `exp` | has-different-semantics | `TensorMap::exp` | Any endomorphism, as in TK (`exp!`, `linalg.jl:420-428`, which checks only `domain == codomain`). Dense input dispatches on the blocks: Hermitian blocks keep the spectral route `v exp(d) v^H`, everything else takes blockwise scaling-and-squaring Padé [13/13] (Higham 2005) at `O(Σ_c n_c³)` with an `O(max_c n_c²)` workspace reused across sectors. Values agree with TK to approximant error, not bitwise: TK selects lower Padé degrees for small norms. Compact diagonal storage applies `exp` elementwise and stays compact. |
 | (matrix `sqrt` / `inv`) | has | `TensorMap::sqrt` / `TensorMap::inv` | LinearAlgebra surface; not a distinct TK export. |
 | `ishermitian` | added | `TensorMap::is_hermitian` | Non-endomorphism → `false`, not an error. |
 | `isantihermitian` | added | `TensorMap::is_antihermitian` | |

@@ -1,4 +1,6 @@
-# Phase B edge-case matrix at `e9c5d35`
+# Phase B edge-case matrix
+
+Audited at: `e9c5d35c45b022f93999bf8be63c27cd08fda1a3`
 
 This is a compact evidence index for issue #9. It records existing executable
 tests; it does not upgrade an operation to `PROVED` for providers, dtypes, or
