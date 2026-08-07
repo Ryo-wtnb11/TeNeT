@@ -3852,6 +3852,15 @@ where
 }
 
 #[doc(hidden)]
+pub trait TypedTensorExpDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn exp(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Self::FacadeError>;
+}
+
+#[doc(hidden)]
 pub trait TypedTensorQrDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
@@ -4126,6 +4135,19 @@ where
     }
 }
 
+impl<R, D> TypedTensorExpDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn exp(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
+        tensor.exp_multiplicity_free()
+    }
+}
+
 impl<R, D> TypedTensorQrDispatch<R, D> for MultiplicityFreeAdmissionMode
 where
     R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
@@ -4359,6 +4381,47 @@ where
             &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
                 .map_err(Error::from)?,
             output,
+        )
+        .map_err(Error::from)?;
+        Ok(wrap_factor_on(&tensor.runtime, factor))
+    }
+}
+
+impl<R, D> TypedTensorExpDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
+    fn exp(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        if tensor.logical_space().space().homspace().codomain()
+            != tensor.logical_space().space().homspace().domain()
+        {
+            return Err(Error::from(
+                tenet_tensors::OperationError::UnsupportedTensorContractScope {
+                    message: "exp requires an endomorphism (codomain == domain)",
+                },
+            )
+            .into());
+        }
+        let local = matches!(&tensor.repr, TypedTensorRepr::Adjoint(_))
+            .then(|| tensor.materialized_tensor_uncached())
+            .transpose()
+            .map_err(GenericTensorError::from)?;
+        let body = local
+            .as_ref()
+            .and_then(TensorMap::owned_body)
+            .unwrap_or_else(|| tensor.owned_body().expect("owned representation"));
+        let mut dense = tensor.runtime.lease_dense();
+        let factor = tenet_matrixalgebra::exp_pade13_direct_into_dyn(
+            dense.dense(),
+            &BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+                .map_err(Error::from)?,
+            tensor.logical_space().clone(),
         )
         .map_err(Error::from)?;
         Ok(wrap_factor_on(&tensor.runtime, factor))
@@ -5619,6 +5682,18 @@ where
     /// remains unsupported.
     pub fn inv(&self) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorInvDispatch<R, D>>::inv(self)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorExpDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// TensorKit / MatrixAlgebraKit matrix exponential of an endomorphism.
+    pub fn exp(&self) -> Result<Self, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorExpDispatch<R, D>>::exp(self)
     }
 }
 
@@ -12326,7 +12401,7 @@ where
     /// assert!(max_err < 1e-15);
     /// # Ok::<(), tenet::typed::Error>(())
     /// ```
-    pub fn exp(&self) -> Result<Self, Error> {
+    fn exp_multiplicity_free(&self) -> Result<Self, Error> {
         if let Some(spectrum) = self.spectrum() {
             // Why the spectrum is exponentiated unconditionally while the dense
             // arm asks about hermiticity: the dense question picks an algorithm

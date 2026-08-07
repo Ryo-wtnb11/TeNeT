@@ -6460,7 +6460,7 @@ where
 pub(crate) fn map_square_sectors_dyn<R, D, S, I, F>(
     input: &BoundDynamicTensorRef<'_, R, D>,
     init: I,
-    mut apply: F,
+    apply: F,
 ) -> Result<BoundDynFactor<R, D>, OperationError>
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
@@ -6477,6 +6477,22 @@ where
     let output_space = input
         .space()
         .derive_from_final_homspace(source_space.homspace().clone())?;
+    map_square_sectors_dyn_into(input, output_space, init, apply)
+}
+
+pub(crate) fn map_square_sectors_dyn_into<R, D, S, I, F>(
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    output_space: BoundDynamicFusionMapSpace<R>,
+    init: I,
+    mut apply: F,
+) -> Result<BoundDynFactor<R, D>, OperationError>
+where
+    D: FactorScalar,
+    I: FnOnce(usize) -> Result<S, OperationError>,
+    F: FnMut(&mut S, &[D], usize, &mut [D], usize) -> Result<(), OperationError>,
+{
+    let source_space = input.space().space();
+    debug_assert_eq!(source_space.homspace(), output_space.space().homspace());
     let mut output_data = vec![D::zero(); output_space.space().required_len()?];
 
     let source_regions = checked_sector_regions(source_space.structure(), source_space.nout())?;
