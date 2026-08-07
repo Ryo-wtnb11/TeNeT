@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use tenet_core::{
-    multiplicity_free_permute_tree_pair, BlockKey, BraidingStyleKind, CoreError, FusionRule,
-    FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
+    multiplicity_free_permute_tree_pair, BlockKey, BraidingStyleKind, CategoricalScalar, CoreError,
+    FusionRule, FusionTensorMapSpace, FusionTreeHomSpace, FusionTreeKey, FusionTreePairKey,
     FusionTreePairOrientation, MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace, SectorId,
     TensorMap, TensorStorage,
 };
@@ -678,7 +678,7 @@ where
     R: MultiplicityFreeRigidSymbols<Scalar = f64>,
 {
     if rule.braiding_style() != BraidingStyleKind::Fermionic {
-        return Ok(rule.scalar_one());
+        return Ok(R::Scalar::one());
     }
     if rhs_contracting_axes.len() != rhs_core_codomain.uncoupled().len() {
         return Err(OperationError::StructureRankMismatch {
@@ -686,7 +686,7 @@ where
             actual: rhs_core_codomain.uncoupled().len(),
         });
     }
-    let mut factor = rule.scalar_one();
+    let mut factor = R::Scalar::one();
     for (position, &axis) in rhs_contracting_axes.iter().enumerate() {
         if rhs
             .external_axis_is_dual(axis)

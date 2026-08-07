@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use num_traits::Zero;
 use tenet_core::{
-    BlockStructure, CheckedGenericRigidSymbols, GenericBraidScalar, GenericRigidSymbols,
+    BlockStructure, CategoricalScalar, CheckedGenericRigidSymbols, GenericRigidSymbols,
     HostReadableStorage, HostWritableStorage, MultiplicityFreeFusionSymbols,
     MultiplicityFreeRigidSymbols, Placement, RuleIdentity, ScratchStorage, SimilarStorage,
     TensorMap,
@@ -43,7 +43,7 @@ pub fn tree_transform_dyn_owned_checked_generic<P, D>(
 ) -> Result<(BoundDynamicFusionMapSpace<P>, Vec<D>), CheckedGenericPlanError<P::Error>>
 where
     P: CheckedGenericRigidSymbols,
-    P::Scalar: GenericBraidScalar + Copy + Zero + Sync + 'static,
+    P::Scalar: CategoricalScalar + Copy + Zero + Sync + 'static,
     D: crate::DenseRecouplingScalar
         + RecouplingCoefficientAction<P::Scalar>
         + crate::ConjugateValue,
@@ -72,7 +72,7 @@ pub fn tree_transform_dyn_owned_checked_generic_in_context<P, D, B>(
 ) -> Result<(BoundDynamicFusionMapSpace<P>, Vec<D>), CheckedGenericPlanError<P::Error>>
 where
     P: CheckedGenericRigidSymbols,
-    P::Scalar: GenericBraidScalar
+    P::Scalar: CategoricalScalar
         + Copy
         + Clone
         + Add<Output = P::Scalar>
@@ -816,7 +816,7 @@ where
     ) -> Result<(), OperationError>
     where
         R: GenericRigidSymbols<Scalar = C>,
-        C: GenericBraidScalar,
+        C: CategoricalScalar,
     {
         let Self {
             backend,
@@ -856,7 +856,7 @@ where
     ) -> Result<(), OperationError>
     where
         R: GenericRigidSymbols<Scalar = C>,
-        C: GenericBraidScalar,
+        C: CategoricalScalar,
     {
         self.compile_and_replay_overwrite(
             |cache| {

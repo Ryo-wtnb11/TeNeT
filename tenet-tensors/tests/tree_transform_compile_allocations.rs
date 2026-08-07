@@ -148,14 +148,6 @@ impl MultiplicityFreeFusionRule for AdmissionCountingSu2Rule {}
 impl MultiplicityFreeFusionSymbols for AdmissionCountingSu2Rule {
     type Scalar = f64;
 
-    fn scalar_one(&self) -> Self::Scalar {
-        SU2FusionRule.scalar_one()
-    }
-
-    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-        SU2FusionRule.scalar_conj(value)
-    }
-
     fn f_symbol_scalar(
         &self,
         left: SectorId,

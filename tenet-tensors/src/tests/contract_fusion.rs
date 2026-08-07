@@ -37,14 +37,6 @@ impl MultiplicityFreeFusionRule for AdversarialNonuniformTwistRule {}
 impl MultiplicityFreeFusionSymbols for AdversarialNonuniformTwistRule {
     type Scalar = f64;
 
-    fn scalar_one(&self) -> Self::Scalar {
-        1.0
-    }
-
-    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-        value
-    }
-
     fn f_symbol_scalar(
         &self,
         _left: SectorId,

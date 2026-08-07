@@ -99,7 +99,7 @@ fn map_infallible_generic_symbol_error(
 }
 
 trait GenericFRAccess {
-    type Scalar: GenericBraidScalar;
+    type Scalar: CategoricalScalar;
     type Error;
     fn fusion_style(&self) -> FusionStyleKind;
     fn braiding_style(&self) -> BraidingStyleKind;
@@ -147,7 +147,7 @@ struct InfallibleGenericFR<'a, R>(&'a R);
 impl<R> GenericFRAccess for InfallibleGenericFR<'_, R>
 where
     R: GenericFusionSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     type Scalar = R::Scalar;
     type Error = std::convert::Infallible;
@@ -181,7 +181,7 @@ struct InfallibleGenericRigid<'a, R>(&'a R);
 impl<R> GenericFRAccess for InfallibleGenericRigid<'_, R>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     type Scalar = R::Scalar;
     type Error = std::convert::Infallible;
@@ -199,7 +199,7 @@ where
 impl<R> GenericRigidAccess for InfallibleGenericRigid<'_, R>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error> {
         Ok(self.0.sqrt_dim_scalar(sector))
@@ -467,7 +467,7 @@ where
         for lambda in 0..cols {
             data.push(
                 factor.clone()
-                    * (fs.clone() * f.get(0, 0, kappa, lambda).clone()).braid_conj(),
+                    * (fs.clone() * f.get(0, 0, kappa, lambda).clone()).conj(),
             );
         }
     }
@@ -2369,10 +2369,10 @@ where
     // branches have unit coefficient. Handling them structurally also avoids
     // manufacturing and then deleting a synthetic vacuum leaf.
     if lhs.uncoupled().is_empty() {
-        return Ok(vec![(rhs.clone(), rule.scalar_one())]);
+        return Ok(vec![(rhs.clone(), R::Scalar::one())]);
     }
     if rhs.uncoupled().is_empty() {
-        return Ok(vec![(lhs.clone(), rule.scalar_one())]);
+        return Ok(vec![(lhs.clone(), R::Scalar::one())]);
     }
 
     multiplicity_free_multi_fmove_inv_tree(rule, lhs.coupled(), coupled, rhs, false)?
@@ -2417,10 +2417,10 @@ where
         }));
     }
     if lhs.uncoupled().is_empty() {
-        return Ok(vec![(rhs.clone(), C::Scalar::braid_one())]);
+        return Ok(vec![(rhs.clone(), C::Scalar::one())]);
     }
     if rhs.uncoupled().is_empty() {
-        return Ok(vec![(lhs.clone(), C::Scalar::braid_one())]);
+        return Ok(vec![(lhs.clone(), C::Scalar::one())]);
     }
     let terms = generic_multi_fmove_inv_tree_checked(
         rule,
@@ -2438,7 +2438,7 @@ where
                 .ok_or(CheckedGenericSymbolError::Core(CoreError::MalformedFusionTree {
                     message: "tensor-product root vertex coefficient is absent",
                 }))?;
-            if coefficient.braid_is_zero() {
+            if coefficient.is_zero() {
                 return Ok(None);
             }
             join_fusion_tree_front_generic_checked(rule, lhs, &tail)
@@ -2458,7 +2458,7 @@ pub fn merge_fusion_trees_generic<R>(
 ) -> Result<GenericTreeTerms<R::Scalar>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar + Send + Sync,
+    R::Scalar: CategoricalScalar + Send + Sync,
 {
     let mut checked = InfallibleGeneric::new(rule);
     match merge_fusion_trees_generic_checked(&mut checked, lhs, rhs, coupled, root_vertex) {
@@ -3637,7 +3637,7 @@ impl<'operation> PreparedTreePairOperation<'operation> {
         let tree_pair = validated.key;
         match &self.plan {
             PreparedTreePairPlan::Identity => {
-                Ok(vec![(tree_pair.clone(), rule.scalar_one())])
+                Ok(vec![(tree_pair.clone(), R::Scalar::one())])
             }
             PreparedTreePairPlan::Repartition => {
                 multiplicity_free_repartition_tree_pair_validated(
@@ -3790,7 +3790,7 @@ impl<'operation> PreparedTreePairOperation<'operation> {
         let rule = validated.rule;
         match &self.plan {
             PreparedTreePairPlan::Identity => {
-                Ok((validated.key.clone(), rule.scalar_one()))
+                Ok((validated.key.clone(), R::Scalar::one()))
             }
             PreparedTreePairPlan::Repartition => {
                 unique_rigid_repartition_tree_pair_validated(
@@ -3910,7 +3910,7 @@ where
     let prepared = PreparedTreeBraid::new(permutation, &levels, rank)?;
     validate_fusion_tree_for_rule(rule, tree)?;
     if permutation.iter().copied().eq(0..rank) {
-        return Ok((tree.clone(), rule.scalar_one()));
+        return Ok((tree.clone(), R::Scalar::one()));
     }
     execute_unique_tree_braid(rule, tree, &prepared.permutation, &prepared.artin_steps)
 }
@@ -3969,7 +3969,7 @@ where
     let tree = validated.key;
     let rank = tree.uncoupled().len();
     if prepared.permutation.iter().copied().eq(0..rank) {
-        return Ok(vec![(tree.clone(), rule.scalar_one())]);
+        return Ok(vec![(tree.clone(), R::Scalar::one())]);
     }
     execute_multiplicity_free_tree_braid(
         rule,
@@ -4013,7 +4013,7 @@ where
         return Ok(vec![(destination, coefficient)]);
     }
 
-    let mut current = vec![(tree.clone(), rule.scalar_one())];
+    let mut current = vec![(tree.clone(), R::Scalar::one())];
     for step in steps {
         let mut next_terms = FusionTermAccumulator::new();
         for (tree, coefficient) in current {
@@ -4102,7 +4102,7 @@ where
 {
     let rule = tree_pair.rule;
     let tree_pair = tree_pair.key;
-    let mut current = vec![(tree_pair.clone(), rule.scalar_one())];
+    let mut current = vec![(tree_pair.clone(), R::Scalar::one())];
     let mut current_codomain_rank = tree_pair.codomain_tree().uncoupled().len();
     while current_codomain_rank < target_codomain_rank {
         current = compose_tree_pair_terms(rule, current, |rule, key| {
@@ -4615,7 +4615,7 @@ fn compose_generic_block_terms<R, F, I>(
 ) -> Result<(Vec<FusionTreePairKey>, DenseColumns<R::Scalar>), CoreError>
 where
     R: GenericFusionSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
     F: FnMut(&R, &FusionTreePairKey) -> Result<I, CoreError>,
     I: IntoIterator<Item = (FusionTreePairKey, R::Scalar)>,
 {
@@ -4663,7 +4663,7 @@ fn seed_generic_tree_pair_block<R>(
 ) -> Result<(Vec<FusionTreePairKey>, DenseColumns<R::Scalar>), CoreError>
 where
     R: GenericFusionSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     if rule.fusion_style() != FusionStyleKind::Generic {
         return Err(CoreError::UnsupportedFusionStyle {
@@ -4679,7 +4679,7 @@ where
     let mut columns = DenseColumns::with_capacity(src_keys.len(), src_keys.len());
     for source in 0..src_keys.len() {
         let row = columns.push_empty_row();
-        columns.row_mut(row)[source] = Some(R::Scalar::braid_one());
+        columns.row_mut(row)[source] = Some(R::Scalar::one());
     }
     Ok((basis, columns))
 }
@@ -4761,7 +4761,7 @@ fn generic_repartition_tree_pair_block_terms<R>(
 ) -> Result<(Vec<FusionTreePairKey>, DenseColumns<R::Scalar>), CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     let Some(first) = basis.first() else {
         return Ok((basis, columns));
@@ -4800,7 +4800,7 @@ pub fn generic_braid_tree_pair_block_ordered<R>(
 ) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     if src_keys.is_empty() {
         return Ok(order_generic_tree_pair_block(
@@ -4892,7 +4892,7 @@ pub fn generic_permute_tree_pair_block_ordered<R>(
 ) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     if !rule.braiding_style().is_symmetric() {
         return Err(CoreError::UnsupportedBraidingStyle {
@@ -4929,7 +4929,7 @@ pub fn generic_transpose_tree_pair_block_ordered<R>(
 ) -> Result<OrderedBlockLinearMap<FusionTreePairKey, R::Scalar>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     if src_keys.is_empty() {
         return Ok(order_generic_tree_pair_block(
@@ -5299,14 +5299,14 @@ where
                     },
                 )?;
                 let mut coefficient = normalization.clone()
-                    * rule.scalar_conj(domain_coefficient.clone())
+                    * (domain_coefficient.clone()).conj()
                     * a_symbol.clone()
                     * codomain_coefficient.clone();
                 if prepared.first_is_dual {
                     coefficient = coefficient * prepared.frobenius_schur_phase.clone();
                 }
                 if conjugate_step {
-                    coefficient = rule.scalar_conj(coefficient);
+                    coefficient = (coefficient).conj();
                 }
                 if let Some(columns) = columns {
                     let source_column = columns.row(source_row);
@@ -6005,7 +6005,7 @@ where
         let mut columns = DenseColumns::with_capacity(source_len, source_len);
         for source in 0..source_len {
             let row = columns.push_empty_row();
-            columns.row_mut(row)[source] = Some(rule.scalar_one());
+            columns.row_mut(row)[source] = Some(R::Scalar::one());
         }
         return Ok(CompactMultiplicityFreeTreePairBlock {
             basis,
@@ -6029,7 +6029,7 @@ where
             })?,
     );
     let mut rows = Vec::with_capacity(group.source_len);
-    rows.push((first_local, rule.scalar_one()));
+    rows.push((first_local, R::Scalar::one()));
     for index in 1..group.source_len {
         let (source_frame, source_local) =
             MultiplicityFreeTreePairFrame::split(
@@ -6043,7 +6043,7 @@ where
                 message: TREE_PAIR_BLOCK_GROUP_ERROR,
             });
         }
-        rows.push((source_local, rule.scalar_one()));
+        rows.push((source_local, R::Scalar::one()));
     }
 
     while current_codomain_rank > target_codomain_rank {
@@ -6228,7 +6228,7 @@ where
     if prepared.permutation.iter().copied().eq(0..group.rank) {
         return Ok(src_keys
             .iter()
-            .map(|key| vec![(key.clone(), rule.scalar_one())])
+            .map(|key| vec![(key.clone(), R::Scalar::one())])
             .collect());
     }
 
@@ -6523,7 +6523,7 @@ where
                     .pair_at(index)
                     .expect("validated projection covers every source")
                     .materialize();
-                vec![(key, group.rule.scalar_one())]
+                vec![(key, R::Scalar::one())]
             })
             .collect());
     }
@@ -6861,7 +6861,7 @@ where
                     .pair_at(index)
                     .expect("validated projection covers every source")
                     .materialize();
-                vec![(key, group.rule.scalar_one())]
+                vec![(key, R::Scalar::one())]
             })
             .collect());
     }
@@ -7011,7 +7011,7 @@ where
             !is_dual_a,
         )? {
             let mut coefficient =
-                coeff0.clone() * rule.scalar_conj(coeff2) * a_symbol.clone() * coeff1.clone();
+                coeff0.clone() * (coeff2).conj() * a_symbol.clone() * coeff1.clone();
             if is_dual_a {
                 coefficient = coefficient * kappa.clone();
             }
@@ -7046,7 +7046,7 @@ where
                         folded.domain_tree().clone(),
                         folded.codomain_tree().clone(),
                     ),
-                    rule.scalar_conj(coefficient),
+                    (coefficient).conj(),
                 )
             })
             .collect(),
@@ -7131,7 +7131,7 @@ where
         PreparedTreePairPlan::Identity => {
             return Ok(src_keys
                 .iter()
-                .map(|key| vec![(key.clone(), rule.scalar_one())])
+                .map(|key| vec![(key.clone(), R::Scalar::one())])
                 .collect());
         }
         PreparedTreePairPlan::Repartition => None,
@@ -7148,7 +7148,7 @@ where
     let mut columns = DenseColumns::with_capacity(num_src, num_src);
     for source in 0..num_src {
         let row = columns.push_empty_row();
-        columns.row_mut(row)[source] = Some(rule.scalar_one());
+        columns.row_mut(row)[source] = Some(R::Scalar::one());
     }
 
     let target_codomain_rank = prepared.target_codomain_rank;
@@ -7479,7 +7479,7 @@ where
         && rule.has_trivial_associator_gauge()
         && is_unique_direct_braid_source(rule, tree)
     {
-        let mut coefficient = rule.scalar_one();
+        let mut coefficient = R::Scalar::one();
         for right_position in 0..rank {
             for left_position in 0..right_position {
                 let left_axis = permutation[left_position];
@@ -7539,7 +7539,7 @@ where
         && rule.has_trivial_associator_gauge()
         && is_unique_direct_braid_source(rule, tree)
     {
-        let mut coefficient = rule.scalar_one();
+        let mut coefficient = R::Scalar::one();
         for right_position in 0..rank {
             for left_position in 0..right_position {
                 let left_axis = braid.permutation_at(left_position);
@@ -7581,7 +7581,7 @@ where
     // Why not freeze a key after every step: this state is private to one
     // execution, while only the final categorical identity can escape.
     let mut current = tree.clone();
-    let mut coefficient = rule.scalar_one();
+    let mut coefficient = R::Scalar::one();
     for step in steps {
         let step_coefficient =
             apply_unique_artin_braid_at_with_inverse(rule, &mut current, step.index, step.inverse)?;
@@ -7726,7 +7726,7 @@ where
         }
 
         let braided = FusionTreeKey::new(uncoupled, tree.coupled(), is_dual, innerlines, vertices);
-        return Ok((braided, rule.scalar_one()));
+        return Ok((braided, R::Scalar::one()));
     }
 
     if !rule.braiding_style().has_braiding() {
@@ -7751,7 +7751,7 @@ where
 
         let braided = FusionTreeKey::new(uncoupled, tree.coupled(), is_dual, innerlines, vertices);
         let coefficient = if inverse {
-            rule.scalar_conj(rule.r_symbol_scalar(right, left, coupled))
+            (rule.r_symbol_scalar(right, left, coupled)).conj()
         } else {
             rule.r_symbol_scalar(left, right, coupled)
         };
@@ -7774,11 +7774,11 @@ where
     let coefficient = if inverse {
         let left = rule.r_symbol_scalar(d, c, e);
         let right = rule.r_symbol_scalar(d, a, c_prime);
-        rule.scalar_conj(left * f_symbol) * right
+        (left * f_symbol).conj() * right
     } else {
         let left = rule.r_symbol_scalar(c, d, e);
         let right = rule.r_symbol_scalar(a, d, c_prime);
-        left * rule.scalar_conj(f_symbol * right)
+        left * (f_symbol * right).conj()
     };
     Ok((braided, coefficient))
 }
@@ -7830,7 +7830,7 @@ where
 
         Arc::make_mut(&mut tree.uncoupled).swap(index, index + 1);
         Arc::make_mut(&mut tree.is_dual).swap(index, index + 1);
-        return Ok(rule.scalar_one());
+        return Ok(R::Scalar::one());
     }
 
     if !rule.braiding_style().has_braiding() {
@@ -7854,7 +7854,7 @@ where
         };
 
         let coefficient = if inverse {
-            rule.scalar_conj(rule.r_symbol_scalar(right, left, coupled))
+            (rule.r_symbol_scalar(right, left, coupled)).conj()
         } else {
             rule.r_symbol_scalar(left, right, coupled)
         };
@@ -7878,11 +7878,11 @@ where
     let coefficient = if inverse {
         let left = rule.r_symbol_scalar(d, c, e);
         let right = rule.r_symbol_scalar(d, a, c_prime);
-        rule.scalar_conj(left * f_symbol) * right
+        (left * f_symbol).conj() * right
     } else {
         let left = rule.r_symbol_scalar(c, d, e);
         let right = rule.r_symbol_scalar(a, d, c_prime);
-        left * rule.scalar_conj(f_symbol * right)
+        left * (f_symbol * right).conj()
     };
     Arc::make_mut(&mut tree.uncoupled).swap(index, index + 1);
     Arc::make_mut(&mut tree.is_dual).swap(index, index + 1);
@@ -8486,7 +8486,7 @@ impl PreparedMultiplicityFreeArtin {
                     coupled: tree.coupled(),
                     innerlines: innerlines.into_iter().collect(),
                 },
-                rule.scalar_one(),
+                R::Scalar::one(),
             ));
             return Ok(terms);
         }
@@ -8503,7 +8503,7 @@ impl PreparedMultiplicityFreeArtin {
                 tree.coupled()
             };
             let coefficient = if self.inverse {
-                rule.scalar_conj(rule.r_symbol_scalar(right, left, coupled))
+                (rule.r_symbol_scalar(right, left, coupled)).conj()
             } else {
                 rule.r_symbol_scalar(left, right, coupled)
             };
@@ -8542,11 +8542,11 @@ impl PreparedMultiplicityFreeArtin {
             let coefficient = if self.inverse {
                 let left = rule.r_symbol_scalar(d, c, e);
                 let right = rule.r_symbol_scalar(d, a, c_prime);
-                rule.scalar_conj(left * f_symbol) * right
+                (left * f_symbol).conj() * right
             } else {
                 let left = rule.r_symbol_scalar(c, d, e);
                 let right = rule.r_symbol_scalar(a, d, c_prime);
-                left * rule.scalar_conj(f_symbol * right)
+                left * (f_symbol * right).conj()
             };
             terms.push((braided, coefficient));
         }
@@ -8626,7 +8626,7 @@ fn generic_artin_braid_at_with_inverse<R>(
 ) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>
 where
     R: GenericFusionSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     let mut checked = InfallibleGenericFR(rule);
     match generic_artin_braid_at_with_inverse_checked(&mut checked, tree, index, inverse) {
@@ -8712,7 +8712,7 @@ where
                 innerlines,
                 vertices,
             ),
-            C::Scalar::braid_one(),
+            C::Scalar::one(),
         )]);
     }
 
@@ -8759,11 +8759,11 @@ where
         for nu0 in 0..n_nu {
             // R = Rmat[μ, ν]  (:141). For the adjoint, Rmat[μ,ν] = conj(base[ν,μ]).
             let r = if inverse {
-                rmat.get(nu0, mu0).braid_conj()
+                rmat.get(nu0, mu0).conj()
             } else {
                 rmat.get(mu0, nu0).clone()
             };
-            if r.braid_is_zero() {
+            if r.is_zero() {
                 continue; // iszero(R) && continue  (:142)
             }
             // vertices′ = setindex(vertices, ν, 1)  (:143)
@@ -8845,7 +8845,7 @@ where
         for sigma0 in 0..n_sigma {
             for lambda0 in 0..n_lambda {
                 // coeff = zero(oneT)  (:179)
-                let mut coeff = C::Scalar::braid_zero();
+                let mut coeff = C::Scalar::zero();
                 for rho0 in 0..n_rho {
                     for kappa0 in 0..n_kappa {
                         // coeff += Rmat1[ν,ρ] * conj(Fmat[κ,λ,μ,ρ]) * conj(Rmat2[σ,κ])
@@ -8853,20 +8853,20 @@ where
                         //   Rmat1[ν,ρ]      : base[ν,ρ]      | conj(base[ρ,ν])   (inv)
                         //   conj(Rmat2[σ,κ]): conj(base[σ,κ])| base[κ,σ]         (inv, double-conj cancels)
                         let r1 = if inverse {
-                            rmat1.get(rho0, nu0).braid_conj()
+                            rmat1.get(rho0, nu0).conj()
                         } else {
                             rmat1.get(nu0, rho0).clone()
                         };
-                        let f_conj = fmat.get(kappa0, lambda0, mu0, rho0).braid_conj();
+                        let f_conj = fmat.get(kappa0, lambda0, mu0, rho0).conj();
                         let r2_conj = if inverse {
                             rmat2.get(kappa0, sigma0).clone()
                         } else {
-                            rmat2.get(sigma0, kappa0).braid_conj()
+                            rmat2.get(sigma0, kappa0).conj()
                         };
                         coeff = coeff + r1 * f_conj * r2_conj;
                     }
                 }
-                if coeff.braid_is_zero() {
+                if coeff.is_zero() {
                     continue; // iszero(coeff) && continue  (:184)
                 }
                 // vertices′ = setindex(setindex(vertices, σ, i-1), λ, i)  (:185-186)
@@ -8948,7 +8948,7 @@ pub fn generic_braid_tree<R>(
 ) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>
 where
     R: GenericFusionSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     if !rule.fusion_style().has_multiplicity() {
         return Err(CoreError::UnsupportedFusionStyle {
@@ -8976,7 +8976,7 @@ fn generic_braid_tree_validated<R>(
 ) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>
 where
     R: GenericFusionSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     let rule = tree.rule;
     generic_braid_tree_unchecked(rule, tree.key, permutation, levels, swaps)
@@ -8991,7 +8991,7 @@ fn generic_braid_tree_unchecked<R>(
 ) -> Result<Vec<(FusionTreeKey, R::Scalar)>, CoreError>
 where
     R: GenericFusionSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     let mut checked = InfallibleGenericFR(rule);
     match generic_braid_tree_result(&mut checked, tree, permutation, levels, swaps) {
@@ -9016,9 +9016,9 @@ where
 {
     let rank = tree.uncoupled().len();
     if permutation.iter().copied().eq(0..rank) {
-        return Ok(vec![(tree.clone(), C::Scalar::braid_one())]);
+        return Ok(vec![(tree.clone(), C::Scalar::one())]);
     }
-    let mut current = vec![(tree.clone(), C::Scalar::braid_one())];
+    let mut current = vec![(tree.clone(), C::Scalar::one())];
     let mut current_levels = levels.to_vec();
     for &swap in swaps {
         let inverse = current_levels[swap] > current_levels[swap + 1];
@@ -9164,9 +9164,9 @@ impl PreparedMultiplicityFreeBendRight {
             * rule.b_symbol_scalar(local.left_coupled, self.bent_sector, local.coupled);
         if local.bent_is_dual {
             coefficient = coefficient
-                * rule.scalar_conj(
-                    rule.frobenius_schur_phase_scalar(rule.dual(self.bent_sector)),
-                );
+                * rule
+                    .frobenius_schur_phase_scalar(rule.dual(self.bent_sector))
+                    .conj();
         }
         coefficient
     }
@@ -9258,7 +9258,7 @@ impl PreparedMultiplicityFreeBendLeft {
         R: MultiplicityFreeRigidSymbols,
         R::Scalar: Clone + Mul<Output = R::Scalar>,
     {
-        let coefficient = rule.scalar_conj(self.right.coefficient(rule, &validated));
+        let coefficient = (self.right.coefficient(rule, &validated)).conj();
         (Self::finish_local_structure(validated), coefficient)
     }
 
@@ -9349,7 +9349,7 @@ fn generic_bendright_tree_pair<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     let mut checked = InfallibleGenericRigid(rule);
     match generic_bendright_tree_pair_result(&mut checked, tree_pair) {
@@ -9488,7 +9488,7 @@ where
             * rule
                 .try_frobenius_schur_phase_scalar(dual_bent_sector)
                 .map_err(CheckedGenericSymbolError::Provider)?
-                .braid_conj();
+                .conj();
     }
 
     // Bmat = Bsymbol(a, b, c)  (TK :98); μ = N₁>1 ? vertices[end] : 1  (TK :99).
@@ -9511,7 +9511,7 @@ where
     for nu0 in 0..cols {
         // coeff = coeff₀ · Bmat[μ, ν]  (TK :105); iszero → skip  (TK :106).
         let coeff = coeff0.clone() * bmat.get(mu0, nu0).clone();
-        if coeff.braid_is_zero() {
+        if coeff.is_zero() {
             continue;
         }
         // vertices₂ = N₂>0 ? (f₂.vertices..., ν) : ()  (TK :107). ν is the
@@ -9560,7 +9560,7 @@ fn generic_bendleft_tree_pair<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     let mut checked = InfallibleGenericRigid(rule);
     match generic_bendleft_tree_pair_result(&mut checked, tree_pair) {
@@ -9602,7 +9602,7 @@ where
         .map(|(bent, coefficient)| {
             (
                 FusionTreePairKey::pair(bent.domain_tree().clone(), bent.codomain_tree().clone()),
-                coefficient.braid_conj(),
+                coefficient.conj(),
             )
         })
         .collect())
@@ -9616,7 +9616,7 @@ fn compose_generic_tree_pair_terms<R, F, I>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
     F: FnMut(&R, &FusionTreePairKey) -> Result<I, CoreError>,
     I: IntoIterator<Item = (FusionTreePairKey, R::Scalar)>,
 {
@@ -9628,7 +9628,7 @@ fn compose_generic_tree_pair_terms_result<S, E, F, I>(
     mut transform: F,
 ) -> Result<Vec<(FusionTreePairKey, S)>, E>
 where
-    S: GenericBraidScalar,
+    S: CategoricalScalar,
     F: FnMut(&FusionTreePairKey) -> Result<I, E>,
     I: IntoIterator<Item = (FusionTreePairKey, S)>,
 {
@@ -9657,7 +9657,7 @@ pub fn generic_repartition_tree_pair<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     let total_rank =
         tree_pair.codomain_tree().uncoupled().len() + tree_pair.domain_tree().uncoupled().len();
@@ -9683,7 +9683,7 @@ fn generic_repartition_tree_pair_validated<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     let rule = tree_pair.rule;
     let mut checked = InfallibleGenericRigid(rule);
@@ -9704,7 +9704,7 @@ fn generic_repartition_tree_pair_unchecked<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     let mut checked = InfallibleGenericRigid(rule);
     match generic_repartition_tree_pair_result(&mut checked, tree_pair, target_codomain_rank) {
@@ -9751,7 +9751,7 @@ fn generic_repartition_tree_pair_result<C>(
 where
     C: GenericRigidAccess,
 {
-    let mut current = vec![(tree_pair.clone(), C::Scalar::braid_one())];
+    let mut current = vec![(tree_pair.clone(), C::Scalar::one())];
     let mut current_codomain_rank = tree_pair.codomain_tree().uncoupled().len();
     // N = numout - target > 0 ⇒ bendright; < 0 ⇒ bendleft (TK :492).
     while current_codomain_rank < target_codomain_rank {
@@ -10047,13 +10047,13 @@ where
                 long.coupled(),
             )
             .map_err(CheckedGenericSymbolError::Provider)?;
-        let mut values = vec![C::Scalar::braid_zero(); n];
+        let mut values = vec![C::Scalar::zero(); n];
         let slot = values.get_mut(mu_index(long, 0)?).ok_or(
             CheckedGenericSymbolError::Core(CoreError::MalformedFusionTree {
                 message: "multi_associator: vertex label exceeds Nsymbol",
             }),
         )?;
-        *slot = C::Scalar::braid_one();
+        *slot = C::Scalar::one();
         return Ok(Some(values));
     }
     let first = long.uncoupled()[0];
@@ -10061,7 +10061,7 @@ where
     // transformed by one F-slice per interior leg. After each step it is indexed
     // by the current step's `λ` axis (F axis 4, `N(a, e′, d)`), which becomes
     // the next step's `μ` axis (F axis 1, `N(a, b, e)`) — the associator chain.
-    let mut coeff = vec![C::Scalar::braid_one()];
+    let mut coeff = vec![C::Scalar::one()];
     for tensor_kit_k in 2..rank {
         let right_sector = long.uncoupled()[tensor_kit_k]; // c
         // vertex_info(long, k+1) = (e, d); ν = its vertex label.
@@ -10089,7 +10089,7 @@ where
             short_right,
         )?;
         let n_lambda = f.shape().3;
-        let mut next = vec![C::Scalar::braid_zero(); n_lambda];
+        let mut next = vec![C::Scalar::zero(); n_lambda];
         if tensor_kit_k == 2 {
             // `transpose(view(F, μ:μ, ν, κ, :)) * coeff` (TK `:159-160`): the μ
             // axis is fixed to `long.vertices[0]`, seed has length 1.
@@ -10101,7 +10101,7 @@ where
             // `transpose(view(F, :, ν, κ, :)) * coeff` (TK `:162`): sum over the
             // μ axis (= incoming vector index) into the λ axis.
             for (lambda, slot) in next.iter_mut().enumerate() {
-                let mut acc = C::Scalar::braid_zero();
+                let mut acc = C::Scalar::zero();
                 for (mu, coeff_mu) in coeff.iter().enumerate() {
                     acc = acc + f.get(mu, nu0, kappa0, lambda).clone() * coeff_mu.clone();
                 }
@@ -10170,7 +10170,7 @@ where
     let mut terms = Vec::with_capacity(candidates.len());
     for candidate in candidates {
         if let Some(values) = generic_multi_associator_result(rule, &candidate, tree)? {
-            terms.push((candidate, values.into_iter().map(|value| value.braid_conj()).collect()));
+            terms.push((candidate, values.into_iter().map(|value| value.conj()).collect()));
         }
     }
     Ok(terms)
@@ -10225,14 +10225,14 @@ where
                 Vec::<SectorId>::new(),
                 Vec::<MultiplicityIndex>::new(),
             ),
-            vec![C::Scalar::braid_one()],
+            vec![C::Scalar::one()],
         )]);
     }
     if rank == 2 {
         let n = rule
             .try_nsymbol(tree.uncoupled()[0], tree.uncoupled()[1], tree.coupled())
             .map_err(CheckedGenericSymbolError::Provider)?;
-        let mut coefficients = vec![C::Scalar::braid_zero(); n];
+        let mut coefficients = vec![C::Scalar::zero(); n];
         let slot = coefficients
             .get_mut(mu_index(tree, 0)?)
             .ok_or(CheckedGenericSymbolError::Core(
@@ -10240,7 +10240,7 @@ where
                     message: "multi_Fmove: vertex label exceeds Nsymbol",
                 },
             ))?;
-        *slot = C::Scalar::braid_one();
+        *slot = C::Scalar::one();
         return Ok(vec![(
             FusionTreeKey::new(
                 [tree.uncoupled()[1]],
@@ -10291,7 +10291,7 @@ fn generic_multi_fmove_tree<R>(
 ) -> Result<GenericFmoveTerms<R::Scalar>, CoreError>
 where
     R: GenericFusionSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     let access = InfallibleGenericFR(rule);
     generic_multi_fmove_tree_with(
@@ -10328,7 +10328,7 @@ fn generic_multi_fmove_inv_tree<R>(
 ) -> Result<GenericFmoveTerms<R::Scalar>, CoreError>
 where
     R: GenericFusionSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     let access = InfallibleGenericFR(rule);
     generic_multi_fmove_inv_tree_with(
@@ -10362,7 +10362,7 @@ pub fn generic_foldright_tree_pair<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     let codomain = tree_pair.codomain_tree();
     let codomain_rank = codomain.uncoupled().len();
@@ -10386,7 +10386,7 @@ fn generic_foldright_tree_pair_validated<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     let rule = tree_pair.rule;
     generic_foldright_tree_pair_unchecked(rule, tree_pair.key)
@@ -10398,7 +10398,7 @@ fn generic_foldright_tree_pair_unchecked<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     let access = InfallibleGenericRigid(rule);
     generic_foldright_tree_pair_with(
@@ -10424,7 +10424,7 @@ pub fn generic_foldleft_tree_pair<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     if tree_pair.domain_tree().uncoupled().is_empty() {
         return Err(CoreError::MalformedFusionTree {
@@ -10446,7 +10446,7 @@ fn generic_foldleft_tree_pair_validated<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     let rule = tree_pair.rule;
     generic_foldleft_tree_pair_unchecked(rule, tree_pair.key)
@@ -10458,7 +10458,7 @@ fn generic_foldleft_tree_pair_unchecked<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     generic_foldleft_tree_pair_with(tree_pair, |key| {
         generic_foldright_tree_pair_unchecked(rule, key)
@@ -10477,7 +10477,7 @@ pub fn generic_cycle_clockwise_tree_pair<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     if !rule.fusion_style().has_multiplicity() {
         return Err(CoreError::UnsupportedFusionStyle {
@@ -10494,7 +10494,7 @@ fn generic_cycle_clockwise_tree_pair_validated<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     let rule = tree_pair.rule;
     generic_cycle_clockwise_tree_pair_unchecked(rule, tree_pair.key)
@@ -10506,7 +10506,7 @@ fn generic_cycle_clockwise_tree_pair_unchecked<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     generic_cycle_clockwise_tree_pair_with(
         tree_pair,
@@ -10527,7 +10527,7 @@ pub fn generic_cycle_anticlockwise_tree_pair<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     if !rule.fusion_style().has_multiplicity() {
         return Err(CoreError::UnsupportedFusionStyle {
@@ -10544,7 +10544,7 @@ fn generic_cycle_anticlockwise_tree_pair_validated<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     let rule = tree_pair.rule;
     generic_cycle_anticlockwise_tree_pair_unchecked(rule, tree_pair.key)
@@ -10556,7 +10556,7 @@ fn generic_cycle_anticlockwise_tree_pair_unchecked<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     generic_cycle_anticlockwise_tree_pair_with(
         tree_pair,
@@ -10649,14 +10649,14 @@ where
                 }
                 .into());
             }
-            let mut inner = C::Scalar::braid_zero();
+            let mut inner = C::Scalar::zero();
             for (j, coeff2_j) in coeff2.iter().enumerate() {
-                let mut column = C::Scalar::braid_zero();
+                let mut column = C::Scalar::zero();
                 for (i, coeff1_i) in coeff1.iter().enumerate() {
                     column =
                         column + a_matrix.get(i, j).clone() * coeff1_i.clone();
                 }
-                inner = inner + coeff2_j.braid_conj() * column;
+                inner = inner + coeff2_j.conj() * column;
             }
             let mut coefficient = coeff0.clone() * inner;
             if is_dual_a {
@@ -10688,7 +10688,7 @@ fn generic_foldleft_tree_pair_with<S, E, F>(
     mut foldright: F,
 ) -> Result<GenericTreePairTerms<S>, E>
 where
-    S: GenericBraidScalar,
+    S: CategoricalScalar,
     F: FnMut(&FusionTreePairKey) -> Result<GenericTreePairTerms<S>, E>,
 {
     let swapped = FusionTreePairKey::pair(
@@ -10703,7 +10703,7 @@ where
                     folded.domain_tree().clone(),
                     folded.codomain_tree().clone(),
                 ),
-                coefficient.braid_conj(),
+                coefficient.conj(),
             )
         })
         .collect())
@@ -10729,7 +10729,7 @@ fn generic_cycle_clockwise_tree_pair_with<S, E, B, F>(
     mut foldright: F,
 ) -> Result<GenericTreePairTerms<S>, E>
 where
-    S: GenericBraidScalar,
+    S: CategoricalScalar,
     B: FnMut(&FusionTreePairKey) -> Result<GenericTreePairTerms<S>, E>,
     F: FnMut(&FusionTreePairKey) -> Result<GenericTreePairTerms<S>, E>,
 {
@@ -10762,7 +10762,7 @@ fn generic_cycle_anticlockwise_tree_pair_with<S, E, B, F>(
     mut foldleft: F,
 ) -> Result<GenericTreePairTerms<S>, E>
 where
-    S: GenericBraidScalar,
+    S: CategoricalScalar,
     B: FnMut(&FusionTreePairKey) -> Result<GenericTreePairTerms<S>, E>,
     F: FnMut(&FusionTreePairKey) -> Result<GenericTreePairTerms<S>, E>,
 {
@@ -10779,7 +10779,7 @@ where
 /// braid there, bend back — the TensorKit `braid`/`fsbraid` decomposition.
 /// Structural twin of [`multiplicity_free_braid_tree_pair`] (:829): the only
 /// difference is the primitive family (`generic_repartition_tree_pair` /
-/// `generic_braid_tree`) and the `braid_one` seed;
+/// `generic_braid_tree`) and the `one` seed;
 /// no new recoupling formula is introduced.
 /// `tree_pair` follows [`FusionTreePairKey::validate_for_rule`]'s
 /// provider-domain precondition.
@@ -10793,7 +10793,7 @@ pub fn generic_braid_tree_pair<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     let codomain_rank = tree_pair.codomain_tree().uncoupled().len();
     let domain_rank = tree_pair.domain_tree().uncoupled().len();
@@ -10834,7 +10834,7 @@ pub(crate) fn generic_braid_tree_pair_proven<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     if tree_pair.rule.fusion_style() != FusionStyleKind::Generic {
         return Err(CoreError::UnsupportedFusionStyle {
@@ -10893,7 +10893,7 @@ fn generic_braid_tree_pair_validated<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     let mut checked = InfallibleGenericRigid(tree_pair.rule);
     match generic_braid_tree_pair_result(
@@ -10927,7 +10927,7 @@ where
     C: GenericRigidAccess,
 {
     if identity {
-        return Ok(vec![(tree_pair.clone(), C::Scalar::braid_one())]);
+        return Ok(vec![(tree_pair.clone(), C::Scalar::one())]);
     }
     let all_rank = permutation.len();
     let mut current = generic_repartition_tree_pair_result(rule, tree_pair, all_rank)?;
@@ -11033,7 +11033,7 @@ pub fn generic_permute_tree_pair<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     if !rule.braiding_style().is_symmetric() {
         return Err(CoreError::UnsupportedBraidingStyle {
@@ -11089,7 +11089,7 @@ pub(crate) fn generic_permute_tree_pair_proven<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     if !tree_pair.rule.braiding_style().is_symmetric() {
         return Err(CoreError::UnsupportedBraidingStyle {
@@ -11147,7 +11147,7 @@ pub fn generic_transpose_tree_pair<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     let codomain_rank = tree_pair.codomain_tree().uncoupled().len();
     let domain_rank = tree_pair.domain_tree().uncoupled().len();
@@ -11180,7 +11180,7 @@ pub(crate) fn generic_transpose_tree_pair_proven<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     if tree_pair.rule.fusion_style() != FusionStyleKind::Generic {
         return Err(CoreError::UnsupportedFusionStyle {
@@ -11219,7 +11219,7 @@ fn generic_transpose_tree_pair_validated<R>(
 ) -> Result<Vec<(FusionTreePairKey, R::Scalar)>, CoreError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar,
+    R::Scalar: CategoricalScalar,
 {
     let rule = tree_pair.rule;
     generic_transpose_tree_pair_with(
@@ -11292,13 +11292,13 @@ fn generic_transpose_tree_pair_with<S, E, P, A, C>(
     mut clockwise: C,
 ) -> Result<Vec<(FusionTreePairKey, S)>, E>
 where
-    S: GenericBraidScalar,
+    S: CategoricalScalar,
     P: FnMut(&FusionTreePairKey, usize) -> Result<Vec<(FusionTreePairKey, S)>, E>,
     A: FnMut(&FusionTreePairKey) -> Result<Vec<(FusionTreePairKey, S)>, E>,
     C: FnMut(&FusionTreePairKey) -> Result<Vec<(FusionTreePairKey, S)>, E>,
 {
     let Some(mut position) = position else {
-        return Ok(vec![(tree_pair.clone(), S::braid_one())]);
+        return Ok(vec![(tree_pair.clone(), S::one())]);
     };
     let mut current = repartition(tree_pair, target_codomain_rank)?;
     if total_rank == 0 || position == 0 {
@@ -11405,7 +11405,7 @@ where
             !is_dual_a,
         )? {
             let mut coefficient =
-                coeff0.clone() * rule.scalar_conj(coeff2) * a_symbol.clone() * coeff1.clone();
+                coeff0.clone() * (coeff2).conj() * a_symbol.clone() * coeff1.clone();
             if is_dual_a {
                 coefficient = coefficient * kappa.clone();
             }
@@ -11438,7 +11438,7 @@ where
                     folded.domain_tree().clone(),
                     folded.codomain_tree().clone(),
                 ),
-                rule.scalar_conj(coefficient),
+                (coefficient).conj(),
             )
         })
         .collect())
@@ -11686,7 +11686,7 @@ where
                 coupled: rule.vacuum(),
                 innerlines: SectorVec::new(),
             },
-            rule.scalar_one(),
+            R::Scalar::one(),
         )]);
     }
     if rank == 2 {
@@ -11695,7 +11695,7 @@ where
                 coupled: frame.uncoupled[1],
                 innerlines: SectorVec::new(),
             },
-            rule.scalar_one(),
+            R::Scalar::one(),
         )]);
     }
 
@@ -11799,7 +11799,7 @@ where
         .into_iter()
         .zip(coefficients)
         .filter_map(|(candidate, coefficient)| {
-            coefficient.map(|coefficient| (candidate, rule.scalar_conj(coefficient)))
+            coefficient.map(|coefficient| (candidate, (coefficient).conj()))
         })
         .collect())
 }
@@ -11909,7 +11909,7 @@ where
         return Ok(None);
     }
 
-    let mut coefficient = rule.scalar_one();
+    let mut coefficient = R::Scalar::one();
     let first = long.uncoupled()[0];
     for tensor_kit_k in 2..rank {
         let right = long.uncoupled()[tensor_kit_k];
@@ -11959,7 +11959,7 @@ where
                 Vec::<SectorId>::new(),
                 Vec::<MultiplicityIndex>::new(),
             ),
-            rule.scalar_one(),
+            R::Scalar::one(),
         )]);
     }
     if rank == 2 {
@@ -11971,7 +11971,7 @@ where
                 Vec::<SectorId>::new(),
                 Vec::<MultiplicityIndex>::new(),
             ),
-            rule.scalar_one(),
+            R::Scalar::one(),
         )]);
     }
 
@@ -12034,7 +12034,7 @@ where
         if let Some(coefficient) =
             multiplicity_free_multi_associator_scalar_legacy_oracle(rule, &candidate, tree)?
         {
-            terms.push((candidate, rule.scalar_conj(coefficient)));
+            terms.push((candidate, (coefficient).conj()));
         }
     }
     Ok(terms)
@@ -12161,7 +12161,7 @@ where
     Ok(coefficients
         .into_iter()
         .map(|coefficient| match coefficient {
-            Coefficient::Pending => Some(rule.scalar_one()),
+            Coefficient::Pending => Some(R::Scalar::one()),
             Coefficient::Active(value) => Some(value),
             Coefficient::Rejected => None,
         })
@@ -12290,7 +12290,7 @@ where
         return Ok(None);
     }
 
-    let mut coefficient = rule.scalar_one();
+    let mut coefficient = R::Scalar::one();
     let first = long_uncoupled[0];
     for tensor_kit_k in 2..rank {
         let right_sector = long_uncoupled[tensor_kit_k];
@@ -12574,7 +12574,7 @@ where
         !is_dual_a,
     )?;
     let mut coefficient =
-        coeff0 * rule.scalar_conj(coeff2) * a_symbol * coeff1;
+        coeff0 * (coeff2).conj() * a_symbol * coeff1;
     if is_dual_a {
         coefficient = coefficient * kappa;
     }
@@ -12599,7 +12599,7 @@ where
     let (folded, coefficient) = unique_rigid_foldright_tree_pair(rule, &swapped)?;
     Ok((
         FusionTreePairKey::pair(folded.domain_tree().clone(), folded.codomain_tree().clone()),
-        rule.scalar_conj(coefficient),
+        (coefficient).conj(),
     ))
 }
 
@@ -12691,7 +12691,7 @@ where
     let (frame, local) = project_multiplicity_free_tree_pair(rule, tree_pair)?;
     let mut current = UniqueRigidTreePairState { frame, local };
     let mut current_codomain_rank = current.frame.codomain.uncoupled.len();
-    let mut coefficient = rule.scalar_one();
+    let mut coefficient = R::Scalar::one();
     while current_codomain_rank < target_codomain_rank {
         let (next, step_coefficient) = unique_rigid_bendleft_state(rule, current)?;
         coefficient = coefficient * step_coefficient;
@@ -12740,7 +12740,7 @@ where
         .ok_or(CoreError::MalformedFusionTree {
             message: "unique inverse multi_Fmove destination does not match the source tail",
         })?;
-    Ok((destination, rule.scalar_conj(coefficient)))
+    Ok((destination, (coefficient).conj()))
 }
 
 fn unique_multi_fmove_tree<R>(rule: &R, tree: &FusionTreeKey) -> Result<FusionTreeKey, CoreError>

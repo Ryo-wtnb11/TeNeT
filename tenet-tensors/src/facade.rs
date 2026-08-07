@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use num_traits::{One, Zero};
 use tenet_core::{
-    BlockView, BlockViewMut, CoreError, GenericBraidScalar, GenericRigidSymbols,
+    BlockView, BlockViewMut, CategoricalScalar, CoreError, GenericRigidSymbols,
     HostReadableStorage, HostWritableStorage, LocallyValidatedFusionTreeBlockStructure,
     MultiplicityFreeRigidSymbols, TensorMap, TensorStorage,
 };
@@ -1598,7 +1598,7 @@ pub fn tree_transform_structure_generic<
 ) -> Result<TreeTransformStructure<R::Scalar>, OperationError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar + Copy + Zero,
+    R::Scalar: CategoricalScalar + Copy + Zero,
     DDst: TensorStorage<TDst>,
     DSrc: TensorStorage<TSrc>,
 {
@@ -1641,7 +1641,7 @@ pub fn tree_transform_into_with_generic<
 where
     B: TreeTransformBackend<D, R::Scalar>,
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar + Copy + Zero,
+    R::Scalar: CategoricalScalar + Copy + Zero,
     D: TreeTransformScalar,
     DDst: HostWritableStorage<D>,
     DSrc: HostReadableStorage<D>,
@@ -1677,7 +1677,7 @@ pub fn tree_transform_into_generic<
 ) -> Result<(), OperationError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar + Copy + Zero,
+    R::Scalar: CategoricalScalar + Copy + Zero,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
     DDst: HostWritableStorage<D>,
     DSrc: HostReadableStorage<D>,
@@ -1721,7 +1721,7 @@ pub fn permute_into_generic<
 ) -> Result<(), OperationError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar + Copy + Zero,
+    R::Scalar: CategoricalScalar + Copy + Zero,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
     DDst: HostWritableStorage<D>,
     DSrc: HostReadableStorage<D>,
@@ -1763,7 +1763,7 @@ pub fn braid_into_generic<
 ) -> Result<(), OperationError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar + Copy + Zero,
+    R::Scalar: CategoricalScalar + Copy + Zero,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
     DDst: HostWritableStorage<D>,
     DSrc: HostReadableStorage<D>,
@@ -1808,7 +1808,7 @@ pub fn transpose_into_generic<
 ) -> Result<(), OperationError>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar + Copy + Zero,
+    R::Scalar: CategoricalScalar + Copy + Zero,
     D: DenseRecouplingScalar + RecouplingCoefficientAction<R::Scalar>,
     DDst: HostWritableStorage<D>,
     DSrc: HostReadableStorage<D>,

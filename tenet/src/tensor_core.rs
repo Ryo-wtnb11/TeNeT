@@ -2,10 +2,10 @@ use std::collections::HashMap;
 
 use tenet_core::{
     merge_fusion_trees_generic_checked, merge_fusion_trees_multiplicity_free, BlockKey,
-    CanonicalUnitFusionRule, CheckedFusionAlgebra, CheckedFusionSpaceError, CheckedGenericFusion,
-    CheckedGenericRigidSymbols, CheckedGenericStructureError, CheckedGenericSymbolError, CoreError,
-    FusionProductSpace, FusionStyleKind, FusionTreeHomSpace, FusionTreePairKey,
-    FusionTreePairOrientation, GenericBraidScalar, MultiplicityFreeRigidSymbols, MultiplicityIndex,
+    CanonicalUnitFusionRule, CategoricalScalar, CheckedFusionAlgebra, CheckedFusionSpaceError,
+    CheckedGenericFusion, CheckedGenericRigidSymbols, CheckedGenericStructureError,
+    CheckedGenericSymbolError, CoreError, FusionProductSpace, FusionStyleKind, FusionTreeHomSpace,
+    FusionTreePairKey, FusionTreePairOrientation, MultiplicityFreeRigidSymbols, MultiplicityIndex,
     OrientedFusionTreeHomSpace, PreparedTreePairOperation, RuleIdentity,
 };
 use tenet_matrixalgebra::SectorSpectrum;
@@ -708,8 +708,7 @@ where
                             lhs: lhs_index,
                             rhs: rhs_index,
                             destination: destination_index,
-                            coefficient: *codomain_coefficient
-                                * rule.scalar_conj(*domain_coefficient),
+                            coefficient: *codomain_coefficient * (*domain_coefficient).conj(),
                         });
                     }
                 }
@@ -984,8 +983,7 @@ where
                                 lhs: lhs_index,
                                 rhs: rhs_index,
                                 destination,
-                                coefficient: *codomain_coefficient
-                                    * domain_coefficient.braid_conj(),
+                                coefficient: *codomain_coefficient * domain_coefficient.conj(),
                             });
                         }
                     }
@@ -1533,14 +1531,6 @@ mod tests {
 
     impl MultiplicityFreeFusionSymbols for ExternalZ2 {
         type Scalar = f64;
-
-        fn scalar_one(&self) -> Self::Scalar {
-            Z2FusionRule.scalar_one()
-        }
-
-        fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-            Z2FusionRule.scalar_conj(value)
-        }
 
         fn has_trivial_associator_gauge(&self) -> bool {
             Z2FusionRule.has_trivial_associator_gauge()

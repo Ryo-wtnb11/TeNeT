@@ -458,14 +458,6 @@ impl MultiplicityFreeFusionRule for UniqueZ2Rule {}
 impl MultiplicityFreeFusionSymbols for UniqueZ2Rule {
     type Scalar = f64;
 
-    fn scalar_one(&self) -> Self::Scalar {
-        1.0
-    }
-
-    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-        value
-    }
-
     fn f_symbol_scalar(
         &self,
         _left: SectorId,
@@ -542,14 +534,6 @@ impl MultiplicityFreeFusionRule for UniqueAnyonicRule {}
 
 impl MultiplicityFreeFusionSymbols for UniqueAnyonicRule {
     type Scalar = f64;
-
-    fn scalar_one(&self) -> Self::Scalar {
-        1.0
-    }
-
-    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-        value
-    }
 
     fn f_symbol_scalar(
         &self,
@@ -633,14 +617,6 @@ impl MultiplicityFreeFusionRule for AsymmetricAnyonicPointedRule {}
 
 impl MultiplicityFreeFusionSymbols for AsymmetricAnyonicPointedRule {
     type Scalar = f64;
-
-    fn scalar_one(&self) -> Self::Scalar {
-        1.0
-    }
-
-    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-        value
-    }
 
     fn f_symbol_scalar(
         &self,
@@ -726,14 +702,6 @@ impl MultiplicityFreeFusionRule for UnitaryPhaseAnyonicRule {}
 impl MultiplicityFreeFusionSymbols for UnitaryPhaseAnyonicRule {
     type Scalar = Complex64;
 
-    fn scalar_one(&self) -> Self::Scalar {
-        Complex64::new(1.0, 0.0)
-    }
-
-    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-        value.conj()
-    }
-
     fn f_symbol_scalar(
         &self,
         _left: SectorId,
@@ -809,14 +777,6 @@ impl MultiplicityFreeFusionRule for UniquePlanarRule {}
 
 impl MultiplicityFreeFusionSymbols for UniquePlanarRule {
     type Scalar = f64;
-
-    fn scalar_one(&self) -> Self::Scalar {
-        1.0
-    }
-
-    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-        value
-    }
 
     fn f_symbol_scalar(
         &self,

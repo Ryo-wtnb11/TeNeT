@@ -4,9 +4,9 @@ use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 use tenet_core::{
-    BlockKey, FusionRule, FusionTreeHomSpace, FusionTreeKey, FusionTreePairOrientation,
-    HostReadableStorage, HostWritableStorage, MultiplicityFreeRigidSymbols,
-    OrientedFusionTreeHomSpace, SectorId,
+    BlockKey, CategoricalScalar, FusionRule, FusionTreeHomSpace, FusionTreeKey,
+    FusionTreePairOrientation, HostReadableStorage, HostWritableStorage,
+    MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace, SectorId,
 };
 
 use crate::strided::{
@@ -1899,7 +1899,7 @@ where
 /// (vertex-labelled outer-multiplicity blocks) are grouped/paired
 /// correctly by the group-agnostic block structure. The per-subblock
 /// coefficient is `1.0` (SU(N) is bosonic → no supertrace twist, exactly what
-/// the mult-free `rule.scalar_one()` returns for a bosonic rule).
+/// the mult-free `R::Scalar::one()` returns for a bosonic rule).
 ///
 /// A contraction whose source or output is NOT in core form (open contracted
 /// legs needing a source tree-pair transform) is an explicit B3c-2 error: the
@@ -2466,7 +2466,7 @@ impl FusionBlockMatrixGroupBuilder {
 
     fn finish<R>(
         self,
-        rule: &R,
+        _rule: &R,
         space: &DynamicFusionMapSpace,
     ) -> Result<FusionBlockMatrixGroup, OperationError>
     where
@@ -2512,7 +2512,7 @@ impl FusionBlockMatrixGroupBuilder {
             // Coefficient-free by contract (TensorKit mul! parity): fermionic
             // supertrace twists are applied during rhs materialization on the
             // dynamic route, never inside the GEMM plan.
-            let coefficient = rule.scalar_one();
+            let coefficient = R::Scalar::one();
             subblocks.push(FusionSubblockMatrixLayout {
                 block: FusionStridedBlockLayout {
                     shape: block.shape().to_vec(),
@@ -2543,7 +2543,7 @@ impl FusionBlockMatrixGroupBuilder {
 
     fn finish_operand<R>(
         self,
-        rule: &R,
+        _rule: &R,
         source: &FusionOperandLayout<'_>,
         op: MatrixOp,
     ) -> Result<FusionBlockMatrixGroup, OperationError>
@@ -2610,7 +2610,7 @@ impl FusionBlockMatrixGroupBuilder {
                 },
                 matrix_offset: offset_to_isize(matrix_offset)?,
                 matrix_strides,
-                coefficient: rule.scalar_one(),
+                coefficient: R::Scalar::one(),
             });
         }
         let matrix_elements = self
@@ -2633,7 +2633,7 @@ impl FusionBlockMatrixGroupBuilder {
     /// Generic-fusion (Stage B3c-1) sibling of [`Self::finish`]: byte-for-byte
     /// the same block/matrix layout, with the coefficient fixed to `1.0`.
     /// SU(N) is bosonic, so there is no supertrace twist — exactly the value
-    /// `rule.scalar_one()` returns on the mult-free path. Takes no rule (the
+    /// `R::Scalar::one()` returns on the mult-free path. Takes no rule (the
     /// layout math is symmetry-agnostic once blocks are grouped by coupled
     /// sector).
     fn finish_generic(
@@ -2679,7 +2679,7 @@ impl FusionBlockMatrixGroupBuilder {
                 .ok_or(OperationError::ElementCountOverflow)?;
             let matrix_offset = offset_to_isize(matrix_offset)?;
             // SU(N) bosonic: no supertrace twist → coefficient 1.0 (TensorKit
-            // mul! parity, matching the mult-free `rule.scalar_one()`). This
+            // mul! parity, matching the mult-free `R::Scalar::one()`). This
             // assumes a bosonic rule; `compile_fusion_block_contract_plan_generic`
             // guards the entry against non-bosonic rules so that assumption is
             // never silently violated here.

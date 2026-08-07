@@ -121,12 +121,6 @@ impl MultiplicityFreeFusionRule for ExternalZ3 {}
 
 impl MultiplicityFreeFusionSymbols for ExternalZ3 {
     type Scalar = f64;
-    fn scalar_one(&self) -> f64 {
-        1.0
-    }
-    fn scalar_conj(&self, value: f64) -> f64 {
-        value
-    }
     fn f_symbol_scalar(
         &self,
         _: SectorId,
@@ -276,12 +270,6 @@ impl MultiplicityFreeFusionRule for ExternalSu2 {}
 
 impl MultiplicityFreeFusionSymbols for ExternalSu2 {
     type Scalar = f64;
-    fn scalar_one(&self) -> f64 {
-        SU2FusionRule.scalar_one()
-    }
-    fn scalar_conj(&self, value: f64) -> f64 {
-        SU2FusionRule.scalar_conj(value)
-    }
     fn f_symbol_scalar(
         &self,
         l: SectorId,
@@ -1509,12 +1497,6 @@ impl tenet::core::CanonicalUnitFusionRule for PlanarTrivial {}
 
 impl MultiplicityFreeFusionSymbols for PlanarTrivial {
     type Scalar = f64;
-    fn scalar_one(&self) -> f64 {
-        1.0
-    }
-    fn scalar_conj(&self, value: f64) -> f64 {
-        value
-    }
     fn f_symbol_scalar(
         &self,
         _: SectorId,
@@ -8424,12 +8406,6 @@ impl tenet::core::CanonicalUnitFusionRule for PlanarZ2 {}
 
 impl MultiplicityFreeFusionSymbols for PlanarZ2 {
     type Scalar = f64;
-    fn scalar_one(&self) -> f64 {
-        1.0
-    }
-    fn scalar_conj(&self, value: f64) -> f64 {
-        value
-    }
     fn f_symbol_scalar(
         &self,
         _: SectorId,

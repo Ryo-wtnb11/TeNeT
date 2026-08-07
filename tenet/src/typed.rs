@@ -208,12 +208,12 @@ use tenet_core::CoupledTreeExtent;
 use tenet_core::{
     validate_unit_layout_correspondence_checked,
     validate_unit_layout_correspondence_generic_checked, BlockKey, BlockRef, BlockStructure,
-    CanonicalUnitFusionRule, CheckedCanonicalUnitFusionRule, CheckedFusionAlgebra,
-    CheckedGenericAdmissionMode, CheckedGenericStructureError, CoupledSectorRegion,
-    FusionAlgebraError, FusionProductSpace, FusionTreeHomSpace, FusionTreePairKey,
-    MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols, MultiplicityIndex,
-    PreparedTreePairOperation, ProductFusionRule, ProductSector, ProductSectorCodec, SectorId,
-    SectorLeg, TypedSectorAdmission, UnitLegInsertion,
+    CanonicalUnitFusionRule, CategoricalScalar, CheckedCanonicalUnitFusionRule,
+    CheckedFusionAlgebra, CheckedGenericAdmissionMode, CheckedGenericStructureError,
+    CoupledSectorRegion, FusionAlgebraError, FusionProductSpace, FusionTreeHomSpace,
+    FusionTreePairKey, MultiplicityFreeAdmissionMode, MultiplicityFreeRigidSymbols,
+    MultiplicityIndex, PreparedTreePairOperation, ProductFusionRule, ProductSector,
+    ProductSectorCodec, SectorId, SectorLeg, TypedSectorAdmission, UnitLegInsertion,
 };
 use tenet_core::{
     CheckedGenericFusion, CheckedGenericPivotal, CheckedGenericRigidSymbols, HostReadableStorage,
@@ -2403,12 +2403,12 @@ where
     twist_factor_with_inverse(rule, factor, inverse)
 }
 
-pub(crate) fn twist_factor_with_inverse<R>(rule: &R, factor: f64, inverse: bool) -> f64
+pub(crate) fn twist_factor_with_inverse<R>(_rule: &R, factor: f64, inverse: bool) -> f64
 where
     R: MultiplicityFreeRigidSymbols<Scalar = f64> + ?Sized,
 {
     if inverse {
-        rule.scalar_conj(factor)
+        (factor).conj()
     } else {
         factor
     }
@@ -2464,15 +2464,15 @@ where
                         chi * theta
                     }
                 } else if inverse {
-                    rule.scalar_conj(chi * theta)
+                    (chi * theta).conj()
                 } else {
                     1.0
                 }
             } else if dual {
                 if inverse {
-                    rule.scalar_conj(theta)
+                    (theta).conj()
                 } else {
-                    rule.scalar_conj(chi)
+                    (chi).conj()
                 }
             } else if inverse {
                 chi

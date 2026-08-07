@@ -4,10 +4,9 @@ use std::sync::OnceLock;
 
 use crate::{
     BraidingStyleKind, CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionAlgebraError,
-    FusionRule, FusionStyleKind, GenericBraidScalar, MultiplicityFreeFusionRule,
-    MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, ProductSector, ProductSectorCodec,
-    PromoteCoefficientScalar, RuleIdentity, SectorCodec, SectorId, SectorVec,
-    TensorKitProductCodec,
+    FusionRule, FusionStyleKind, MultiplicityFreeFusionRule, MultiplicityFreeFusionSymbols,
+    MultiplicityFreeRigidSymbols, ProductSector, ProductSectorCodec, PromoteCoefficientScalar,
+    RuleIdentity, SectorCodec, SectorId, SectorVec, TensorKitProductCodec,
 };
 
 /// The coefficient scalar of `Left ⊠ Right`, promoted from its components'.
@@ -430,14 +429,6 @@ where
         self.left.has_trivial_associator_gauge() && self.right.has_trivial_associator_gauge()
     }
 
-    fn scalar_one(&self) -> Self::Scalar {
-        Self::Scalar::braid_one()
-    }
-
-    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar {
-        value.braid_conj()
-    }
-
     fn f_symbol_scalar(
         &self,
         left: SectorId,
@@ -557,9 +548,9 @@ mod tests {
     use num_complex::Complex64;
 
     use crate::{
-        BraidingStyleKind, CanonicalUnitFusionRule, FermionParityFusionRule, FibonacciFusionRule,
-        FusionStyleKind, MultiplicityFreeFusionSymbols, MultiplicityFreeRigidSymbols, SectorId,
-        U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
+        BraidingStyleKind, CanonicalUnitFusionRule, CategoricalScalar, FermionParityFusionRule,
+        FibonacciFusionRule, FusionStyleKind, MultiplicityFreeFusionSymbols,
+        MultiplicityFreeRigidSymbols, SectorId, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
     };
 
     #[test]
@@ -699,9 +690,9 @@ mod tests {
 
         // The promoted unit and conjugation are the wider scalar's, not the
         // left component's.
-        assert_eq!(rule.scalar_one(), Complex64::new(1.0, 0.0));
+        assert_eq!(Complex64::one(), Complex64::new(1.0, 0.0));
         assert_close(
-            rule.scalar_conj(rule.r_symbol_scalar(t1, t1, i0)),
+            (rule.r_symbol_scalar(t1, t1, i0)).conj(),
             Complex64::new(-0.809_016_994_374_947_6, -0.587_785_252_292_473),
         );
     }
@@ -737,7 +728,7 @@ mod tests {
         let rule = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
         let odd_zero = rule.encode_sector(Z2Irrep::ODD.into(), U1Irrep::new(0).into());
         let vacuum = rule.vacuum();
-        let one: f64 = rule.scalar_one();
+        let one: f64 = CategoricalScalar::one();
 
         assert_eq!(one, 1.0);
         assert_eq!(rule.r_symbol_scalar(odd_zero, odd_zero, vacuum), -1.0);

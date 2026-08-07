@@ -55,12 +55,6 @@ impl MultiplicityFreeFusionRule for SymbolOnlyRule {}
 
 impl MultiplicityFreeFusionSymbols for SymbolOnlyRule {
     type Scalar = f64;
-    fn scalar_one(&self) -> f64 {
-        1.0
-    }
-    fn scalar_conj(&self, value: f64) -> f64 {
-        value
-    }
     fn f_symbol_scalar(
         &self,
         _: SectorId,

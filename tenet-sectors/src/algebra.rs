@@ -450,12 +450,11 @@ pub trait MultiplicityFreeFusionRule: FusionRule {}
 pub trait MultiplicityFreeFusionSymbols: MultiplicityFreeFusionRule {
     // Send + Sync because cached recoupling coefficients are shared across
     // tree-transform replay workers (TensorKit sectorscalartype parity: the
-    // concrete scalar is a plain number type).
-    type Scalar: Clone + Send + Sync;
-
-    fn scalar_one(&self) -> Self::Scalar;
-
-    fn scalar_conj(&self, value: Self::Scalar) -> Self::Scalar;
+    // concrete scalar is a plain number type). `CategoricalScalar` supplies
+    // the unit and conjugation every provider needs (issue #972: those two
+    // operations never depend on the provider, so they are not provider
+    // methods).
+    type Scalar: CategoricalScalar + Clone + Send + Sync;
 
     /// Whether every allowed associator coefficient in this provider's
     /// current gauge is exactly the scalar unit.
@@ -507,7 +506,7 @@ pub trait MultiplicityFreeRigidSymbols: MultiplicityFreeFusionSymbols + Sync {
             * self.inv_sqrt_dim_scalar(coupled);
         let symbol = self.frobenius_schur_phase_scalar(left)
             * self.f_symbol_scalar(self.dual(left), left, right, right, self.vacuum(), coupled);
-        factor * self.scalar_conj(symbol)
+        factor * symbol.conj()
     }
 
     fn b_symbol_scalar(&self, left: SectorId, right: SectorId, coupled: SectorId) -> Self::Scalar
@@ -775,7 +774,7 @@ where
 /// contract: F/R and rigidity answers for one identity are stable across
 /// query order and concurrency even when internal warm state changes.
 pub trait CheckedGenericRigidSymbols: CheckedGenericFusion {
-    type Scalar: GenericBraidScalar + Send + Sync;
+    type Scalar: CategoricalScalar + Send + Sync;
 
     fn try_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error>;
     fn try_inv_sqrt_dim_scalar(&self, sector: SectorId) -> Result<Self::Scalar, Self::Error>;
@@ -877,7 +876,7 @@ impl<R: FusionRule> CheckedGenericFusion for InfallibleGeneric<'_, R> {
 impl<R> CheckedGenericRigidSymbols for InfallibleGeneric<'_, R>
 where
     R: GenericRigidSymbols,
-    R::Scalar: GenericBraidScalar + Send + Sync,
+    R::Scalar: CategoricalScalar + Send + Sync,
 {
     type Scalar = R::Scalar;
 
@@ -924,7 +923,7 @@ where
 /// 0 or 1, this trait returns a dense rank-4 array / matrix because
 /// `nsymbol` can exceed 1.
 pub trait GenericFusionSymbols: FusionRule {
-    type Scalar: Clone + Send + Sync;
+    type Scalar: CategoricalScalar + Clone + Send + Sync;
 
     fn f_symbol_generic(
         &self,
@@ -944,39 +943,43 @@ pub trait GenericFusionSymbols: FusionRule {
     ) -> GenericRMatrix<Self::Scalar>;
 }
 
-/// Scalar arithmetic the Generic-fusion (outer-multiplicity) Artin braid needs
-/// when summing the `R · F̄ · R̄` inner-index contraction
-/// (`braiding_manipulations.jl:181-182`:
-/// `coeff += Rmat1[ν,ρ] * conj(Fmat[κ,λ,μ,ρ]) * conj(Rmat2[σ,κ])`).
+/// The capability every structural-coefficient scalar carries: a unit, a
+/// conjugation, and — for the Generic-fusion accumulation and pruning paths —
+/// an additive identity and an exact-zero test.
 ///
-/// [`GenericFusionSymbols`] deliberately fixes only `type Scalar: Clone + Send +
-/// Sync` — Stage A never *computed* with the scalar, it only stored toy F/R
-/// blocks — so the braid layer needs `conj` / `+` / `*` / `zero` / `one` /
-/// `iszero` as an extra capability. Expressing that as a bound on `R::Scalar`
-/// here (a NEW trait, implemented for the concrete scalar types) keeps the
-/// Stage A `GenericFusionSymbols` trait byte-for-byte untouched (pure
-/// addition), while mirroring the `scalar_one` / `scalar_conj` that the
-/// multiplicity-free [`MultiplicityFreeFusionSymbols`] carries on the rule.
+/// [`MultiplicityFreeFusionSymbols::Scalar`] and [`GenericFusionSymbols::Scalar`]
+/// both bound on this one trait (issue #972). It used to be two shapes: a
+/// provider method pair (`scalar_one`/`scalar_conj`, unable to depend on the
+/// provider because every implementation just returns the scalar unit and
+/// conjugate) and a separate free trait carrying `zero`/`is_zero` for the
+/// Generic Artin braid's `coeff += Rmat1[ν,ρ] * conj(Fmat[κ,λ,μ,ρ]) *
+/// conj(Rmat2[σ,κ])` accumulation and its `iszero(...) && continue` prune
+/// (`braiding_manipulations.jl:179-184`). `zero`/`is_zero` stay on this one
+/// trait rather than splitting into a base/extension pair: the multiplicity-
+/// free path simply does not name them, and a trait member with a real
+/// consumer does not need every bound site to use it.
+///
 /// `Add`/`Mul` are supertraits so the braid can use the `+`/`*` operators
 /// exactly as TensorKit writes them.
-pub trait GenericBraidScalar: Clone + Add<Output = Self> + Mul<Output = Self> {
+pub trait CategoricalScalar: Clone + Add<Output = Self> + Mul<Output = Self> {
     /// Additive identity — the `coeff = zero(oneT)` accumulator seed at
     /// `braiding_manipulations.jl:179`.
-    fn braid_zero() -> Self;
+    fn zero() -> Self;
 
     /// Multiplicative identity — the `oneT` unit-braid / seed coefficient
-    /// (`braiding_manipulations.jl:96`, `:117`).
-    fn braid_one() -> Self;
+    /// (`braiding_manipulations.jl:96`, `:117`), and TensorKit
+    /// `sectorscalartype`'s unit for the multiplicity-free F/R symbols.
+    fn one() -> Self;
 
     /// Complex conjugation — TensorKit's `conj(...)` and the matrix adjoint
     /// `'` (`braiding_manipulations.jl:139`, `:172-173`, `:181-182`). Real for
     /// real scalars.
-    fn braid_conj(&self) -> Self;
+    fn conj(&self) -> Self;
 
     /// Whether this coefficient is exactly zero — the `iszero(R) && continue`
     /// / `iszero(coeff) && continue` prune (`braiding_manipulations.jl:142`,
     /// `:184`). Exact compare mirrors Julia's `iszero`.
-    fn braid_is_zero(&self) -> bool;
+    fn is_zero(&self) -> bool;
 }
 
 /// The coefficient scalar a product category carries, given its components'.
@@ -994,9 +997,9 @@ pub trait GenericBraidScalar: Clone + Add<Output = Self> + Mul<Output = Self> {
 /// the promotion between them is total, and a fifth case would be a new
 /// categorical decision rather than a new arithmetic one.
 pub trait PromoteCoefficientScalar<Rhs> {
-    /// The promoted scalar. `GenericBraidScalar` supplies the unit,
+    /// The promoted scalar. `CategoricalScalar` supplies the unit,
     /// conjugation and product the promoted symbols are combined with.
-    type Output: GenericBraidScalar + Clone + Send + Sync;
+    type Output: CategoricalScalar + Clone + Send + Sync;
 
     fn promote_left(value: Self) -> Self::Output;
 
@@ -1051,38 +1054,38 @@ impl PromoteCoefficientScalar<Complex64> for Complex64 {
     }
 }
 
-impl GenericBraidScalar for f64 {
-    fn braid_zero() -> Self {
+impl CategoricalScalar for f64 {
+    fn zero() -> Self {
         0.0
     }
 
-    fn braid_one() -> Self {
+    fn one() -> Self {
         1.0
     }
 
-    fn braid_conj(&self) -> Self {
+    fn conj(&self) -> Self {
         *self
     }
 
-    fn braid_is_zero(&self) -> bool {
+    fn is_zero(&self) -> bool {
         *self == 0.0
     }
 }
 
-impl GenericBraidScalar for Complex64 {
-    fn braid_zero() -> Self {
+impl CategoricalScalar for Complex64 {
+    fn zero() -> Self {
         Complex64::new(0.0, 0.0)
     }
 
-    fn braid_one() -> Self {
+    fn one() -> Self {
         Complex64::new(1.0, 0.0)
     }
 
-    fn braid_conj(&self) -> Self {
+    fn conj(&self) -> Self {
         Complex64::conj(self)
     }
 
-    fn braid_is_zero(&self) -> bool {
+    fn is_zero(&self) -> bool {
         self.re == 0.0 && self.im == 0.0
     }
 }
@@ -1097,7 +1100,7 @@ impl GenericBraidScalar for Complex64 {
 ///
 /// Bend/repartition only ever multiply, conjugate and zero-test these
 /// coefficients, so the associated scalar carries only the
-/// [`GenericBraidScalar`] capability (the same bound the Generic Artin braid
+/// [`CategoricalScalar`] capability (the same bound the Generic Artin braid
 /// uses) — no separate `scalar_one`/`scalar_conj` on the rule.
 ///
 /// `frobenius_schur_phase_scalar` stays a bare `Scalar` (not a matrix): the
@@ -1111,7 +1114,7 @@ impl GenericBraidScalar for Complex64 {
 /// cycle, Stage B2b) will consume, and is kept honest by a TK oracle test.
 pub trait GenericRigidSymbols: GenericFusionSymbols
 where
-    Self::Scalar: GenericBraidScalar,
+    Self::Scalar: CategoricalScalar,
 {
     /// `√dim(sector)` — TensorKitSectors `sqrtdim` (`sectors.jl:440`).
     fn sqrt_dim_scalar(&self, sector: SectorId) -> Self::Scalar;
@@ -1139,7 +1142,7 @@ where
         c: SectorId,
     ) -> GenericRMatrix<Self::Scalar>
     where
-        Self::Scalar: GenericBraidScalar,
+        Self::Scalar: CategoricalScalar,
     {
         let rows = self.nsymbol(a, b, c);
         let cols = self.nsymbol(c, self.dual(b), a);
@@ -1172,7 +1175,7 @@ where
         c: SectorId,
     ) -> GenericRMatrix<Self::Scalar>
     where
-        Self::Scalar: GenericBraidScalar,
+        Self::Scalar: CategoricalScalar,
     {
         let rows = self.nsymbol(a, b, c);
         let cols = self.nsymbol(self.dual(a), c, b);
@@ -1186,7 +1189,7 @@ where
             for lambda in 0..cols {
                 // conj(κ_a · F[0,0,κ,λ]), then scale by the (real) dim factor.
                 let symbol = fs.clone() * f.get(0, 0, kappa, lambda).clone();
-                data.push(factor.clone() * symbol.braid_conj());
+                data.push(factor.clone() * symbol.conj());
             }
         }
         GenericRMatrix::new(data, rows, cols)
