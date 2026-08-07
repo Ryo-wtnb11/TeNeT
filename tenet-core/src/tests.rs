@@ -1403,7 +1403,10 @@ mod tests {
     fn unique_artin_braid_first_allows_unit_crossing_without_braiding() {
         let tree = FusionTreeKey::try_from_sector_ids([0, 1], 1, [false, true], [], [1]).unwrap();
 
-        let (braided, coefficient) = unique_artin_braid_first(&PlanarZ2Rule, &tree).unwrap();
+        let terms =
+            multiplicity_free_braid_tree(&PlanarZ2Rule, &tree, &[1, 0], &[0, 1]).unwrap();
+        assert_eq!(terms.len(), 1);
+        let (braided, coefficient) = terms.into_iter().next().unwrap();
 
         assert_eq!(coefficient, 1.0);
         assert_eq!(braided.uncoupled(), &[SectorId::new(1), SectorId::new(0)]);
@@ -1417,7 +1420,8 @@ mod tests {
     fn unique_artin_braid_first_rejects_nonunit_crossing_without_braiding() {
         let tree = FusionTreeKey::try_from_sector_ids([1, 1], 0, [false, false], [], [1]).unwrap();
 
-        let err = unique_artin_braid_first(&PlanarZ2Rule, &tree).unwrap_err();
+        let err =
+            multiplicity_free_braid_tree(&PlanarZ2Rule, &tree, &[1, 0], &[0, 1]).unwrap_err();
 
         assert_eq!(
             err,
@@ -1475,8 +1479,11 @@ mod tests {
     fn unique_artin_braid_first_uses_r_symbol_for_first_crossing() {
         let tree = FusionTreeKey::try_from_sector_ids([1, 1], 0, [false, true], [], [1]).unwrap();
 
-        let (braided, coefficient) =
-            unique_artin_braid_first(&FermionParityFusionRule, &tree).unwrap();
+        let terms =
+            multiplicity_free_braid_tree(&FermionParityFusionRule, &tree, &[1, 0], &[0, 1])
+                .unwrap();
+        assert_eq!(terms.len(), 1);
+        let (braided, coefficient) = terms.into_iter().next().unwrap();
 
         assert_eq!(coefficient, -1.0);
         assert_eq!(braided.uncoupled(), &[SectorId::new(1), SectorId::new(1)]);
@@ -1491,8 +1498,15 @@ mod tests {
         let tree =
             FusionTreeKey::try_from_sector_ids([1, 1, 1], 1, [false, false, false], [0], [1, 1]).unwrap();
 
-        let (braided, coefficient) =
-            unique_artin_braid_first(&FermionParityFusionRule, &tree).unwrap();
+        let terms = multiplicity_free_braid_tree(
+            &FermionParityFusionRule,
+            &tree,
+            &[1, 0, 2],
+            &[0, 1, 2],
+        )
+        .unwrap();
+        assert_eq!(terms.len(), 1);
+        let (braided, coefficient) = terms.into_iter().next().unwrap();
 
         assert_eq!(coefficient, -1.0);
         assert_eq!(
@@ -1508,7 +1522,10 @@ mod tests {
         let tree =
             FusionTreeKey::try_from_sector_ids([1, 0, 1], 0, [false, false, true], [1], [1, 1]).unwrap();
 
-        let (braided, coefficient) = unique_artin_braid_at(&PlanarZ2Rule, &tree, 1).unwrap();
+        let terms =
+            multiplicity_free_braid_tree(&PlanarZ2Rule, &tree, &[0, 2, 1], &[0, 1, 2]).unwrap();
+        assert_eq!(terms.len(), 1);
+        let (braided, coefficient) = terms.into_iter().next().unwrap();
 
         assert_eq!(coefficient, 1.0);
         assert_eq!(
@@ -1525,8 +1542,15 @@ mod tests {
         let tree =
             FusionTreeKey::try_from_sector_ids([1, 1, 1], 1, [false, true, false], [0], [1, 1]).unwrap();
 
-        let (braided, coefficient) =
-            unique_artin_braid_at(&FermionParityFusionRule, &tree, 1).unwrap();
+        let terms = multiplicity_free_braid_tree(
+            &FermionParityFusionRule,
+            &tree,
+            &[0, 2, 1],
+            &[0, 1, 2],
+        )
+        .unwrap();
+        assert_eq!(terms.len(), 1);
+        let (braided, coefficient) = terms.into_iter().next().unwrap();
 
         assert_eq!(coefficient, -1.0);
         assert_eq!(
@@ -1542,7 +1566,17 @@ mod tests {
     fn unique_artin_braid_at_rejects_out_of_range_index() {
         let tree = FusionTreeKey::try_from_sector_ids([1, 1], 0, [false, false], [], [1]).unwrap();
 
-        let err = unique_artin_braid_at(&FermionParityFusionRule, &tree, 1).unwrap_err();
+        // What: index 1 is out of range for a rank-2 tree; a swap starting at
+        // that index has no adjacent partner, so a permutation cannot express
+        // it either. Repoint at the live single-step primitive that the
+        // surviving multiplicity-free braid decomposes each Artin swap into.
+        let err = apply_unique_artin_braid_at_with_inverse(
+            &FermionParityFusionRule,
+            &mut tree.clone(),
+            1,
+            false,
+        )
+        .unwrap_err();
 
         assert_eq!(err, CoreError::InvalidBraidIndex { index: 1, rank: 2 });
     }
@@ -1564,8 +1598,15 @@ mod tests {
         let tree =
             FusionTreeKey::try_from_sector_ids([1, 1, 1], 1, [false, false, false], [0], [1, 1]).unwrap();
 
-        let (braided, coefficient) =
-            unique_braid_tree(&FermionParityFusionRule, &tree, &[2, 0, 1], &[0, 1, 2]).unwrap();
+        let terms = multiplicity_free_braid_tree(
+            &FermionParityFusionRule,
+            &tree,
+            &[2, 0, 1],
+            &[0, 1, 2],
+        )
+        .unwrap();
+        assert_eq!(terms.len(), 1);
+        let (braided, coefficient) = terms.into_iter().next().unwrap();
 
         assert_eq!(coefficient, 1.0);
         assert_eq!(
@@ -1582,10 +1623,16 @@ mod tests {
     fn unique_braid_tree_uses_inverse_artin_branch_from_levels() {
         let tree = FusionTreeKey::try_from_sector_ids([1, 2], 3, [false, false], [], [1]).unwrap();
 
-        let (braided_forward, forward) =
-            unique_braid_tree(&AsymmetricAnyonicRule, &tree, &[1, 0], &[0, 1]).unwrap();
-        let (braided_inverse, inverse) =
-            unique_braid_tree(&AsymmetricAnyonicRule, &tree, &[1, 0], &[1, 0]).unwrap();
+        let forward_terms =
+            multiplicity_free_braid_tree(&AsymmetricAnyonicRule, &tree, &[1, 0], &[0, 1])
+                .unwrap();
+        assert_eq!(forward_terms.len(), 1);
+        let (braided_forward, forward) = forward_terms.into_iter().next().unwrap();
+        let inverse_terms =
+            multiplicity_free_braid_tree(&AsymmetricAnyonicRule, &tree, &[1, 0], &[1, 0])
+                .unwrap();
+        assert_eq!(inverse_terms.len(), 1);
+        let (braided_inverse, inverse) = inverse_terms.into_iter().next().unwrap();
 
         assert_eq!(forward, 5.0);
         assert_eq!(inverse, 7.0);
@@ -1608,10 +1655,20 @@ mod tests {
             .map(|&level| min_level + max_level - level)
             .collect::<Vec<_>>();
 
-        let (forward_tree, forward_coeff) =
-            unique_braid_tree(&AsymmetricAnyonicRule, &tree, &[1, 0], &levels).unwrap();
-        let (inverse_tree, inverse_coeff) =
-            unique_braid_tree(&AsymmetricAnyonicRule, &tree, &[1, 0], &reflected_levels).unwrap();
+        let forward_terms =
+            multiplicity_free_braid_tree(&AsymmetricAnyonicRule, &tree, &[1, 0], &levels)
+                .unwrap();
+        assert_eq!(forward_terms.len(), 1);
+        let (forward_tree, forward_coeff) = forward_terms.into_iter().next().unwrap();
+        let inverse_terms = multiplicity_free_braid_tree(
+            &AsymmetricAnyonicRule,
+            &tree,
+            &[1, 0],
+            &reflected_levels,
+        )
+        .unwrap();
+        assert_eq!(inverse_terms.len(), 1);
+        let (inverse_tree, inverse_coeff) = inverse_terms.into_iter().next().unwrap();
 
         assert_eq!(reflected_levels, vec![8, 3]);
         assert_eq!(forward_tree, inverse_tree);
@@ -1632,23 +1689,24 @@ mod tests {
         let levels = [0, 1, 2, 3];
         let mut permutation = [0usize, 1, 2, 3];
         loop {
-            let direct =
-                unique_braid_tree(&FermionParityFusionRule, &tree, &permutation, &levels)
+            let direct_terms =
+                multiplicity_free_braid_tree(&FermionParityFusionRule, &tree, &permutation, &levels)
                     .unwrap();
+            assert_eq!(direct_terms.len(), 1);
+            let direct = direct_terms.into_iter().next().unwrap();
 
             let mut replay_tree = tree.clone();
             let mut replay_coefficient = 1.0;
             let mut replay_levels = levels;
             for swap in permutation_to_adjacent_swaps(&permutation, 4).unwrap() {
                 let inverse = replay_levels[swap] > replay_levels[swap + 1];
-                let (next, coefficient) = unique_artin_braid_at_with_inverse(
+                let coefficient = apply_unique_artin_braid_at_with_inverse(
                     &FermionParityFusionRule,
-                    &replay_tree,
+                    &mut replay_tree,
                     swap,
                     inverse,
                 )
                 .unwrap();
-                replay_tree = next;
                 replay_coefficient *= coefficient;
                 replay_levels.swap(swap, swap + 1);
             }
@@ -3563,19 +3621,12 @@ mod tests {
             ),
             Err(CoreError::InvalidPermutation { .. })
         ));
-        assert_eq!(
-            unique_braid_tree(
-                &FibonacciFusionRule,
-                &invalid,
-                &[0, 1, 2],
-                &[0, 1, 2],
-            )
-            .unwrap_err(),
-            CoreError::UnsupportedFusionStyle {
-                expected: FusionStyleKind::Unique,
-                actual: FusionStyleKind::Simple,
-            }
-        );
+        // Not asserted here: `unique_braid_tree`'s own rejection of a Simple
+        // provider. That entry point is gone and
+        // `multiplicity_free_braid_tree` accepts Simple providers by design.
+        // The Unique-only style guard itself still exists on the surviving
+        // route and is asserted elsewhere — `execute_unique_rigid` at
+        // `fusion_tree.rs`, exercised with a Simple rule below in this file.
         assert!(matches!(
             multiplicity_free_permute_tree(
                 &FibonacciFusionRule,
@@ -3634,7 +3685,7 @@ mod tests {
             [],
             [MultiplicityIndex::ONE],
         );
-        assert!(unique_braid_tree(&rule, &invalid, &[0, 1], &[0, 1]).is_err());
+        assert!(multiplicity_free_braid_tree(&rule, &invalid, &[0, 1], &[0, 1]).is_err());
         let pair = FusionTreePairKey::pair(
             invalid,
             FusionTreeKey::new(
@@ -3644,7 +3695,7 @@ mod tests {
                 [],
             ),
         );
-        assert!(unique_repartition_tree_pair(&rule, &pair, 1).is_err());
+        assert!(multiplicity_free_repartition_tree_pair(&rule, &pair, 1).is_err());
         assert_eq!(
             rule.f_calls.load(std::sync::atomic::Ordering::Relaxed),
             0
@@ -3782,11 +3833,15 @@ mod tests {
         let tree =
             FusionTreeKey::try_from_sector_ids([1, 1, 1], 1, [false, false, false], [0], [1, 1]).unwrap();
 
-        let (destination, coefficient) =
-            unique_braid_tree(&rule, &tree, &[0, 2, 1], &[0, 1, 2]).unwrap();
-        let expected = unique_artin_braid_at_with_inverse(&rule, &tree, 1, false).unwrap();
+        let terms = multiplicity_free_braid_tree(&rule, &tree, &[0, 2, 1], &[0, 1, 2]).unwrap();
+        assert_eq!(terms.len(), 1);
+        let (destination, coefficient) = terms.into_iter().next().unwrap();
 
-        assert_eq!((destination, coefficient), expected);
+        let mut expected_tree = tree.clone();
+        let expected_coefficient =
+            apply_unique_artin_braid_at_with_inverse(&rule, &mut expected_tree, 1, false).unwrap();
+
+        assert_eq!((destination, coefficient), (expected_tree, expected_coefficient));
         assert_eq!(coefficient, 30.0);
     }
 
@@ -3797,8 +3852,12 @@ mod tests {
         let rule = ComplexAsymmetricUniqueRule;
         let tree = FusionTreeKey::try_from_sector_ids([1, 2], 3, [false, true], [], [1]).unwrap();
 
-        let forward = unique_braid_tree(&rule, &tree, &[1, 0], &[0, 1]).unwrap();
-        let inverse = unique_braid_tree(&rule, &tree, &[1, 0], &[1, 0]).unwrap();
+        let forward_terms = multiplicity_free_braid_tree(&rule, &tree, &[1, 0], &[0, 1]).unwrap();
+        assert_eq!(forward_terms.len(), 1);
+        let forward = forward_terms.into_iter().next().unwrap();
+        let inverse_terms = multiplicity_free_braid_tree(&rule, &tree, &[1, 0], &[1, 0]).unwrap();
+        assert_eq!(inverse_terms.len(), 1);
+        let inverse = inverse_terms.into_iter().next().unwrap();
         let expected_forward =
             Complex64::from_polar(1.0, std::f64::consts::FRAC_PI_3);
         let expected_inverse =
@@ -3820,7 +3879,9 @@ mod tests {
     fn unique_braid_tree_rejects_invalid_permutation_and_level_count() {
         let tree = FusionTreeKey::try_from_sector_ids([1, 2], 3, [false, false], [], [1]).unwrap();
 
-        let err = unique_braid_tree(&AsymmetricAnyonicRule, &tree, &[1, 1], &[0, 1]).unwrap_err();
+        let err =
+            multiplicity_free_braid_tree(&AsymmetricAnyonicRule, &tree, &[1, 1], &[0, 1])
+                .unwrap_err();
         assert_eq!(
             err,
             CoreError::InvalidPermutation {
@@ -3829,7 +3890,8 @@ mod tests {
             }
         );
 
-        let err = unique_braid_tree(&AsymmetricAnyonicRule, &tree, &[1, 0], &[0]).unwrap_err();
+        let err =
+            multiplicity_free_braid_tree(&AsymmetricAnyonicRule, &tree, &[1, 0], &[0]).unwrap_err();
         assert_eq!(
             err,
             CoreError::DimensionMismatch {
@@ -4799,17 +4861,11 @@ mod tests {
             [],
         ).unwrap();
 
-        let unique = unique_braid_tree_pair(
-            &IdentitySymbolPanicRule,
-            &source,
-            &[0],
-            &[1],
-            &[19],
-            &[3],
-        )
-        .unwrap();
-        assert_eq!(unique, (source.clone(), 1.0));
-
+        // Not covered here: the deleted execute_unique_pivotal route's own
+        // identity-braid shortcut (`unique_braid_tree_pair`). Its no-op
+        // symbol-free contract is already covered below by
+        // multiplicity_free_braid_tree_pair and its block variant, which are
+        // the live entry points for this behavior.
         let multiplicity_free = multiplicity_free_braid_tree_pair(
             &IdentitySymbolPanicRule,
             &source,
@@ -5645,7 +5701,7 @@ mod tests {
             [],
         ).unwrap();
 
-        assert!(unique_braid_tree_pair(
+        assert!(multiplicity_free_braid_tree_pair(
             &IdentitySymbolPanicRule,
             &source,
             &[0],
@@ -5663,7 +5719,7 @@ mod tests {
             &[],
         )
         .is_err());
-        assert!(unique_braid_tree_pair(
+        assert!(multiplicity_free_braid_tree_pair(
             &IdentitySymbolPanicRule,
             &source,
             &[0],
@@ -5676,18 +5732,20 @@ mod tests {
 
     #[test]
     fn unique_identity_tree_operations_reject_simple_fusion_rules() {
-        // What: identity axes do not let a Simple rule enter APIs whose
+        // What: identity axes do not let a Simple rule enter an API whose
         // contract requires Unique fusion.
+        //
+        // Not covered here: the deleted execute_unique_pivotal route's own
+        // identity-axis rejection of Simple providers. That contract no
+        // longer exists — the surviving multiplicity_free_braid_tree accepts
+        // Simple providers by design, so there is nothing left to assert for
+        // the braid side of this test.
         let tree = FusionTreeKey::try_from_sector_ids([1], 1, [false], [], []).unwrap();
         let expected = CoreError::UnsupportedFusionStyle {
             expected: FusionStyleKind::Unique,
             actual: FusionStyleKind::Simple,
         };
 
-        assert_eq!(
-            unique_braid_tree(&SU2FusionRule, &tree, &[0], &[7]).unwrap_err(),
-            expected
-        );
         assert_eq!(
             unique_permute_tree(&SU2FusionRule, &tree, &[0]).unwrap_err(),
             expected
@@ -5710,9 +5768,9 @@ mod tests {
         ).unwrap();
 
         assert_eq!(
-            unique_transpose_tree_pair(&IdentitySymbolPanicRule, &source, &[0, 1], &[2])
+            multiplicity_free_transpose_tree_pair(&IdentitySymbolPanicRule, &source, &[0, 1], &[2])
                 .unwrap(),
-            (source, 1.0)
+            vec![(source, 1.0)]
         );
     }
 
@@ -5735,7 +5793,7 @@ mod tests {
 
         let fz2_source = pair(z2_odd());
         assert_eq!(
-            unique_braid_tree_pair(
+            multiplicity_free_braid_tree_pair(
                 &FermionParityFusionRule,
                 &fz2_source,
                 &[0],
@@ -5744,7 +5802,7 @@ mod tests {
                 &[2],
             )
             .unwrap(),
-            (fz2_source, 1.0)
+            vec![(fz2_source, 1.0)]
         );
 
         let su2_source = pair(su2(1));
@@ -5794,7 +5852,7 @@ mod tests {
             Vec::<usize>::new(),
         ).unwrap();
         assert_eq!(
-            unique_braid_tree_pair(
+            multiplicity_free_braid_tree_pair(
                 &Z2FusionRule,
                 &scalar_source,
                 &[],
@@ -5803,7 +5861,7 @@ mod tests {
                 &[],
             )
             .unwrap(),
-            (scalar_source, 1.0)
+            vec![(scalar_source, 1.0)]
         );
     }
 
@@ -5820,8 +5878,9 @@ mod tests {
             [1],
         ).unwrap();
 
-        let (all_out, coefficient) =
-            unique_repartition_tree_pair(&Z2FusionRule, &source, 3).unwrap();
+        let terms = multiplicity_free_repartition_tree_pair(&Z2FusionRule, &source, 3).unwrap();
+        assert_eq!(terms.len(), 1);
+        let (all_out, coefficient) = terms.into_iter().next().unwrap();
 
         assert_eq!(coefficient, 1.0);
         assert_eq!(
@@ -5851,7 +5910,7 @@ mod tests {
             ),
         );
 
-        let (braided, coefficient) = unique_braid_tree_pair(
+        let terms = multiplicity_free_braid_tree_pair(
             &FermionParityFusionRule,
             &source,
             &[1, 0],
@@ -5860,6 +5919,8 @@ mod tests {
             &[],
         )
         .unwrap();
+        assert_eq!(terms.len(), 1);
+        let (braided, coefficient) = terms.into_iter().next().unwrap();
 
         assert_eq!(coefficient, -1.0);
         assert_eq!(
@@ -5887,8 +5948,10 @@ mod tests {
             [1],
         ).unwrap();
 
-        let (permuted, coefficient) =
-            unique_permute_tree_pair(&Z2FusionRule, &source, &[0], &[2, 1]).unwrap();
+        let terms =
+            multiplicity_free_permute_tree_pair(&Z2FusionRule, &source, &[0], &[2, 1]).unwrap();
+        assert_eq!(terms.len(), 1);
+        let (permuted, coefficient) = terms.into_iter().next().unwrap();
 
         assert_eq!(coefficient, 1.0);
         assert_eq!(permuted.codomain_uncoupled(), &[SectorId::new(1)]);
@@ -5913,8 +5976,11 @@ mod tests {
             [],
         ).unwrap();
 
-        let (permuted, coefficient) =
-            unique_permute_tree_pair(&FermionParityFusionRule, &source, &[1], &[0]).unwrap();
+        let terms =
+            multiplicity_free_permute_tree_pair(&FermionParityFusionRule, &source, &[1], &[0])
+                .unwrap();
+        assert_eq!(terms.len(), 1);
+        let (permuted, coefficient) = terms.into_iter().next().unwrap();
 
         assert_eq!(coefficient, -1.0);
         assert_eq!(permuted.codomain_uncoupled(), &[SectorId::new(1)]);
@@ -6506,10 +6572,15 @@ mod tests {
             [],
         ).unwrap();
 
-        let (transposed, coefficient) =
-            unique_transpose_tree_pair(&Z2FusionRule, &source, &[1], &[0]).unwrap();
-        let (roundtrip, inverse_coefficient) =
-            unique_transpose_tree_pair(&Z2FusionRule, &transposed, &[1], &[0]).unwrap();
+        let forward_terms =
+            multiplicity_free_transpose_tree_pair(&Z2FusionRule, &source, &[1], &[0]).unwrap();
+        assert_eq!(forward_terms.len(), 1);
+        let (transposed, coefficient) = forward_terms.into_iter().next().unwrap();
+        let roundtrip_terms =
+            multiplicity_free_transpose_tree_pair(&Z2FusionRule, &transposed, &[1], &[0])
+                .unwrap();
+        assert_eq!(roundtrip_terms.len(), 1);
+        let (roundtrip, inverse_coefficient) = roundtrip_terms.into_iter().next().unwrap();
 
         assert_eq!(coefficient, 1.0);
         assert_eq!(inverse_coefficient, 1.0);
@@ -6539,8 +6610,11 @@ mod tests {
             [1],
         ).unwrap();
 
-        let (transposed, coefficient) =
-            unique_transpose_tree_pair(&Z2FusionRule, &source, &[1, 3], &[0, 2]).unwrap();
+        let terms =
+            multiplicity_free_transpose_tree_pair(&Z2FusionRule, &source, &[1, 3], &[0, 2])
+                .unwrap();
+        assert_eq!(terms.len(), 1);
+        let (transposed, coefficient) = terms.into_iter().next().unwrap();
 
         assert_eq!(coefficient, 1.0);
         assert_eq!(transposed, expected);
@@ -6569,8 +6643,11 @@ mod tests {
             [1],
         ).unwrap();
 
-        let (transposed, coefficient) =
-            unique_transpose_tree_pair(&Z2FusionRule, &source, &[2, 0], &[3, 1]).unwrap();
+        let terms =
+            multiplicity_free_transpose_tree_pair(&Z2FusionRule, &source, &[2, 0], &[3, 1])
+                .unwrap();
+        assert_eq!(terms.len(), 1);
+        let (transposed, coefficient) = terms.into_iter().next().unwrap();
 
         assert_eq!(coefficient, 1.0);
         assert_eq!(transposed, expected);
@@ -6589,7 +6666,9 @@ mod tests {
             [],
         ).unwrap();
 
-        let err = unique_transpose_tree_pair(&Z2FusionRule, &source, &[0, 2], &[1]).unwrap_err();
+        let err =
+            multiplicity_free_transpose_tree_pair(&Z2FusionRule, &source, &[0, 2], &[1])
+                .unwrap_err();
 
         assert_eq!(
             err,
