@@ -51,8 +51,18 @@ QSpace-style compiled block engine, whose kernels are selectable at
 `CheckedFusionAlgebra`, `SectorCodec`, `MultiplicityFreeRigidSymbols`,
 `GenericRigidSymbols`, `RuleIdentity` — and the built-in symmetries (U(1), Z2,
 fZ2, SU(2), Fibonacci, and their products) are ordinary implementations of
-those traits, with no privileged
-status in the engine. The crate has zero workspace dependencies.
+those traits. There is no provider enum and no symmetry-named dispatch arm in
+any operation. The crate has zero workspace dependencies.
+[`docs/provider_interface.md`](docs/provider_interface.md) is the contract for
+writing one.
+
+Two qualifications, because "no privileged status" would be too strong today.
+The built-ins additionally implement a sealed layout-enumeration trait
+(`LoweredMultiplicityFreeAlgebra`) that lets the cold enumeration work on
+decoded labels instead of round-tripping `SectorId` per channel; an external
+provider takes the same semantic path with a constant-factor penalty and cannot
+opt in. And `tenet-core` names the built-in providers to implement it. Both are
+recorded as debt, not as design.
 
 Products are a provider combinator, not a list of blessed symmetries. A
 product of providers is itself a provider, so
@@ -61,11 +71,17 @@ product of providers is itself a provider, so
 FermionParityFusionRule.product(U1FusionRule).product(SU2FusionRule)
 ```
 
-is `(fZ2 ⊠ U(1)) ⊠ SU(2)` — any ordered product of admitted components,
-recursively nested, without a central provider enum, dispatch arm or group-specific
+is `(fZ2 ⊠ U(1)) ⊠ SU(2)` — an ordered product of components, recursively
+nested, without a central provider enum, dispatch arm or group-specific
 constructor. Factor order and association are structure of the Rust type and of
 the `ProductSector` label, never an automatic equivalence: `U(1) ⊠ fZ2` and
 `fZ2 ⊠ U(1)` are both legal and are different types.
+
+The combinator currently admits one coefficient scalar: both components must
+have `Scalar = f64`. Every built-in group provider satisfies that, but a
+multiplicity-free provider with complex topological data does not, so a product
+with `FibonacciFusionRule` as a component cannot be named yet. That is a
+restriction of the combinator, not of the component providers.
 
 The ordinary user API is `GradedSpace<R>` / `TensorMap<R, D, S>`. It keeps `R`
 concrete, returns the provider's own labels (`SectorCodec::Sector`), and keeps
@@ -121,8 +137,9 @@ inside the macro, `;` separates codomain and domain legs, `[]` is a scalar
 output, and `conj(x)[...]` marks an adjoint operand.
 
 The provider is an ordinary value, so a fusion rule defined outside this
-workspace substitutes for `U1FusionRule` without touching the engine.
-`try_new_owned` creates one shared provider authority internally; write `Arc`
+workspace substitutes for `U1FusionRule` without touching the engine — same
+operations, same semantics, and the constant-factor enumeration difference noted
+above. `try_new_owned` creates one shared provider authority internally; write `Arc`
 only when you already have an authority allocation that multiple spaces must
 share explicitly.
 
@@ -313,6 +330,12 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
 - External planners use dense effective dimensions. Symmetric block execution,
   fusion-tree bookkeeping, fermionic signs, and storage layout remain TeNeT
   execution responsibilities.
+- `ProductFusionRule` requires `Scalar = f64` on both components, so products
+  involving a complex-coefficient provider such as `FibonacciFusionRule` do not
+  type-check. See [`docs/provider_interface.md`](docs/provider_interface.md).
+- The fast cold layout enumeration is behind a sealed trait implemented for the
+  built-in providers only. External providers are semantically equal and pay a
+  constant factor on that path.
 - `SectorId`, raw block order, and seeded random storage are internal
   representations rather than cross-version formats. See
   [`docs/sector_id_compatibility.md`](docs/sector_id_compatibility.md) for the
@@ -324,6 +347,9 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
   compiling examples.
 - [`tenet/src/mathematics.md`](tenet/src/mathematics.md): tensor-map
   convention, duality, and categorical semantics.
+- [`docs/provider_interface.md`](docs/provider_interface.md): what a symmetry
+  provider must implement, which trait owns which data, and the current
+  restrictions on external providers.
 - [`docs/tk_api_parity.md`](docs/tk_api_parity.md): TensorKit 0.17 user-API
   parity table — every user-facing export, its TeNeT name, and the rationale
   for anything spelled or gated differently. The lookup surface for a
