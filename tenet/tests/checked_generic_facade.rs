@@ -2231,6 +2231,46 @@ fn checked_generic_inv_accepts_unequal_isomorphic_spaces_and_rejects_nonisomorph
 
 #[test]
 fn checked_generic_pinv_rectangular_moore_penrose_and_validation_precedence() {
+    macro_rules! assert_moore_penrose {
+        ($input:expr, $pseudo:expr, $distance:expr) => {{
+            let input = $input;
+            let pseudo = $pseudo;
+            let distance = $distance;
+            let aa_plus = input.compose(pseudo).unwrap();
+            let a_plus_a = pseudo.compose(input).unwrap();
+            for (actual, expected) in aa_plus
+                .compose(input)
+                .unwrap()
+                .data()
+                .iter()
+                .zip(input.data())
+            {
+                assert!(distance(*actual, *expected) < 1e-10);
+            }
+            for (actual, expected) in a_plus_a
+                .compose(pseudo)
+                .unwrap()
+                .data()
+                .iter()
+                .zip(pseudo.data())
+            {
+                assert!(distance(*actual, *expected) < 1e-10);
+            }
+            for (actual, expected) in aa_plus.adjoint().unwrap().data().iter().zip(aa_plus.data()) {
+                assert!(distance(*actual, *expected) < 1e-10);
+            }
+            for (actual, expected) in a_plus_a
+                .adjoint()
+                .unwrap()
+                .data()
+                .iter()
+                .zip(a_plus_a.data())
+            {
+                assert!(distance(*actual, *expected) < 1e-10);
+            }
+        }};
+    }
+
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
     let codomain = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
@@ -2257,42 +2297,35 @@ fn checked_generic_pinv_rectangular_moore_penrose_and_validation_precedence() {
     assert_eq!(pseudo.codomain(), source.domain());
     assert_eq!(pseudo.domain(), source.codomain());
     assert!(std::ptr::eq(pseudo.provider(), provider.as_ref()));
-    for (actual, expected) in source
-        .compose(&pseudo)
-        .unwrap()
-        .compose(&source)
-        .unwrap()
-        .data()
-        .iter()
-        .zip(source.data())
-    {
-        assert!((actual - expected).abs() < 1e-10);
-    }
-    for (actual, expected) in pseudo
-        .compose(&source)
-        .unwrap()
-        .compose(&pseudo)
-        .unwrap()
-        .data()
-        .iter()
-        .zip(pseudo.data())
-    {
-        assert!((actual - expected).abs() < 1e-10);
-    }
+    assert_moore_penrose!(&source, &pseudo, |actual: f64, expected: f64| (actual
+        - expected)
+        .abs());
 
-    let complex = source.to_c64();
+    let complex = source.to_c64().scale(Complex64::new(1.0, 0.25));
     let complex_pseudo = complex.pinv(1e-12).unwrap();
-    for (actual, expected) in complex
-        .compose(&complex_pseudo)
-        .unwrap()
-        .compose(&complex)
-        .unwrap()
-        .data()
-        .iter()
-        .zip(complex.data())
-    {
-        assert!((*actual - *expected).norm() < 1e-10);
-    }
+    assert_moore_penrose!(
+        &complex,
+        &complex_pseudo,
+        |actual: Complex64, expected: Complex64| (actual - expected).norm()
+    );
+
+    let tall: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&domain], [&codomain], |_, index| {
+            [[1.0, 0.0], [0.0, 2.0], [1.0, 1.0]][index[0]][index[1]]
+        })
+        .unwrap();
+    let tall_pseudo = tall.pinv(1e-12).unwrap();
+    assert_moore_penrose!(&tall, &tall_pseudo, |actual: f64, expected: f64| (actual
+        - expected)
+        .abs());
+    let complex_tall = tall.to_c64().scale(Complex64::new(1.0, 0.25));
+    let complex_tall_pseudo = complex_tall.pinv(1e-12).unwrap();
+    assert_moore_penrose!(
+        &complex_tall,
+        &complex_tall_pseudo,
+        |actual: Complex64, expected: Complex64| { (actual - expected).norm() }
+    );
+
     let lazy = source.adjoint().unwrap();
     let lazy_pseudo = lazy.pinv(1e-12).unwrap();
     for (actual, expected) in lazy_pseudo
@@ -2365,6 +2398,7 @@ impl DenseExecutor for PinvFaultExecutor {
 #[test]
 fn checked_generic_pinv_stages_svd_and_gemm_failures_without_publication() {
     for (fail_svd, fail_gemm, expected_svd, expected_gemm) in [
+        (None, None, 2, 2),
         (Some(1), None, 1, 0),
         (Some(2), None, 2, 0),
         (None, Some(2), 2, 2),
@@ -2399,12 +2433,17 @@ fn checked_generic_pinv_stages_svd_and_gemm_failures_without_publication() {
             })
             .unwrap();
         let before = source.data().to_vec();
-        assert!(matches!(
-            source.pinv(0.0),
-            Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
-                _
-            )))
-        ));
+        let result = source.pinv(0.0);
+        if fail_svd.is_some() || fail_gemm.is_some() {
+            assert!(matches!(
+                result,
+                Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
+                    _
+                )))
+            ));
+        } else {
+            assert!(result.is_ok());
+        }
         assert_eq!(svd_calls.load(Ordering::Relaxed), expected_svd);
         assert_eq!(gemm_calls.load(Ordering::Relaxed), expected_gemm);
         assert_eq!(source.data(), before.as_slice());
@@ -2435,8 +2474,12 @@ fn checked_generic_pinv_uses_a_strict_global_cutoff() {
 }
 
 #[cfg(feature = "racah-generated")]
-fn assert_sun_checked_generic_pinv<D>(n: usize, label: Vec<i64>, close: impl Fn(D, D) -> f64)
-where
+fn assert_sun_checked_generic_pinv<D>(
+    n: usize,
+    label: Vec<i64>,
+    off_diagonal: D,
+    close: impl Fn(D, D) -> f64,
+) where
     D: tenet::typed::TensorScalar + fmt::Debug + PartialEq,
 {
     use tenet::typed::SUNFusionRule;
@@ -2448,15 +2491,16 @@ where
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, index| {
             let row = index[0] + 2 * index[1];
             let column = index[2] + 2 * index[3];
-            D::from_real(if trees.codomain_vertices() == trees.domain_vertices() {
-                if row == column {
-                    2.0
-                } else {
-                    0.0
-                }
+            if trees.codomain_vertices() == trees.domain_vertices() && row == column {
+                D::from_real(2.0)
+            } else if trees.codomain_vertices()[0].get() == 1
+                && trees.domain_vertices()[0].get() == 2
+                && row == column
+            {
+                off_diagonal
             } else {
-                0.125
-            })
+                D::from_real(0.0)
+            }
         })
         .unwrap();
     assert!((0..source.block_count()).any(|index| {
@@ -2472,9 +2516,16 @@ where
     assert!(std::ptr::eq(pseudo.provider(), provider.as_ref()));
     assert_eq!(pseudo.codomain(), source.domain());
     assert_eq!(pseudo.domain(), source.codomain());
-    for (actual, expected) in source
-        .compose(&pseudo)
-        .unwrap()
+    assert!((0..source.block_count()).any(|index| {
+        let trees = source.block_fusion_trees(index).unwrap();
+        trees.codomain_vertices()[0].get() == 1
+            && trees.domain_vertices()[0].get() == 2
+            && source.block(index).unwrap().shape() == [2, 2, 2, 2]
+            && source.data()[source.block(index).unwrap().offset()] == off_diagonal
+    }));
+    let aa_plus = source.compose(&pseudo).unwrap();
+    let a_plus_a = pseudo.compose(&source).unwrap();
+    for (actual, expected) in aa_plus
         .compose(&source)
         .unwrap()
         .data()
@@ -2483,14 +2534,24 @@ where
     {
         assert!(close(*actual, *expected) < 1e-9);
     }
-    for (actual, expected) in pseudo
-        .compose(&source)
-        .unwrap()
+    for (actual, expected) in a_plus_a
         .compose(&pseudo)
         .unwrap()
         .data()
         .iter()
         .zip(pseudo.data())
+    {
+        assert!(close(*actual, *expected) < 1e-9);
+    }
+    for (actual, expected) in aa_plus.adjoint().unwrap().data().iter().zip(aa_plus.data()) {
+        assert!(close(*actual, *expected) < 1e-9);
+    }
+    for (actual, expected) in a_plus_a
+        .adjoint()
+        .unwrap()
+        .data()
+        .iter()
+        .zip(a_plus_a.data())
     {
         assert!(close(*actual, *expected) < 1e-9);
     }
@@ -2509,12 +2570,15 @@ where
 #[test]
 fn sun_checked_generic_pinv_cross_mu_full_keys_for_both_dtypes() {
     for (n, label) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
-        assert_sun_checked_generic_pinv::<f64>(n, label.clone(), |actual, expected| {
+        assert_sun_checked_generic_pinv::<f64>(n, label.clone(), 1.0, |actual, expected| {
             (actual - expected).abs()
         });
-        assert_sun_checked_generic_pinv::<Complex64>(n, label, |actual, expected| {
-            (actual - expected).norm()
-        });
+        assert_sun_checked_generic_pinv::<Complex64>(
+            n,
+            label,
+            Complex64::new(1.0, 0.5),
+            |actual, expected| (actual - expected).norm(),
+        );
     }
 }
 
