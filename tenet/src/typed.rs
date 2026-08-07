@@ -15862,6 +15862,16 @@ mod representation_gates {
             })
             .unwrap();
         let expected = source.sqrt().unwrap();
+        let (_, s, _) = source.svd_compact().unwrap();
+        let TypedTensorRepr::Owned(s_body) = &s.repr else {
+            unreachable!()
+        };
+        assert!(matches!(s_body.data.as_ref(), TypedData::Dense(_)));
+        let s_root = s.sqrt().unwrap();
+        let TypedTensorRepr::Owned(root_body) = &s_root.repr else {
+            unreachable!()
+        };
+        assert!(matches!(root_body.data.as_ref(), TypedData::Dense(_)));
         let lazy = source.adjoint().unwrap();
         let actual = lazy.sqrt().unwrap();
         assert!(matches!(&actual.repr, TypedTensorRepr::Owned(_)));

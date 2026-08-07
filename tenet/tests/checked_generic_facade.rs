@@ -643,7 +643,8 @@ fn checked_only_provider_roundtrips_through_typed_cuda_without_algebra_dispatch(
     assert_eq!(structure(&restored), expected_structure);
     assert_eq!(vertex_restored.data(), expected_vertex_data);
     assert_eq!(block_structure(&vertex_restored), expected_vertex_structure);
-    assert_no_provider_queries(&provider);
+    assert_eq!(provider.algebra_queries.load(Ordering::Relaxed), 0);
+    assert_eq!(provider.coefficient_queries.load(Ordering::Relaxed), 0);
 }
 
 #[test]
