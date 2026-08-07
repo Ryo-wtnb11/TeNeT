@@ -14516,6 +14516,56 @@ mod representation_gates {
         calls: usize,
     }
 
+    #[cfg(feature = "racah-generated")]
+    struct CountingSolve {
+        inner: DefaultDenseExecutor,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        failure: Option<&'static str>,
+    }
+
+    #[cfg(feature = "racah-generated")]
+    impl DenseExecutor for CountingSolve {
+        fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            panic!("test only exercises solve")
+        }
+
+        fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            panic!("test only exercises solve")
+        }
+
+        fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+            panic!("test only exercises solve")
+        }
+
+        fn solve_into(
+            &mut self,
+            a: DenseRead<'_>,
+            b: DenseRead<'_>,
+            x: DenseWrite<'_>,
+        ) -> Result<(), DenseError> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Some(message) = self.failure {
+                return Err(DenseError::Backend {
+                    backend: DenseBackend::Tenferro,
+                    op: "solve_into",
+                    message: message.to_string(),
+                });
+            }
+            self.inner.solve_into(a, b, x)
+        }
+
+        fn dot_general_into(
+            &mut self,
+            _: DenseWrite<'_>,
+            _: DenseRead<'_>,
+            _: DenseRead<'_>,
+            _: &DenseDotConfig,
+        ) -> Result<(), DenseError> {
+            panic!("test only exercises solve")
+        }
+    }
+
     impl DenseExecutor for FailSecondSvd {
         fn svd(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
             panic!("full SVD must use the destination API")
@@ -18213,6 +18263,128 @@ mod representation_gates {
                 ))
         ));
         assert!(owned(&singular).dense_cache.get().is_none());
+    }
+
+    #[cfg(feature = "racah-generated")]
+    fn assert_checked_generic_left_solve_acceptance<D>()
+    where
+        D: TensorScalar + core::fmt::Debug,
+    {
+        use tenet_core::SUNFusionRule;
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let runtime = Runtime::builder()
+            .with_dense_executor(Box::new(CountingSolve {
+                inner: DefaultDenseExecutor::default(),
+                calls: Arc::clone(&calls),
+                failure: None,
+            }))
+            .build()
+            .unwrap();
+        let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 2)], false).unwrap();
+        let divisor: TensorMap<_, D> =
+            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, ij| {
+                let row = ij[0] + 2 * ij[1];
+                let col = ij[2] + 2 * ij[3];
+                D::from_real(if row == col {
+                    7.0 + trees.codomain_vertices()[0].get() as f64
+                } else {
+                    0.125 * (1 + trees.domain_vertices()[0].get()) as f64
+                })
+            })
+            .unwrap();
+        let rhs: TensorMap<_, D> =
+            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, ij| {
+                D::from_real(
+                    (1 + ij.iter().sum::<usize>() + 3 * trees.domain_vertices()[0].get()) as f64,
+                )
+            })
+            .unwrap();
+        assert!((0..divisor.block_count())
+            .any(|i| { divisor.block_fusion_trees(i).unwrap().codomain_vertices()[0].get() == 2 }));
+
+        for (lazy_lhs, lazy_rhs) in [(false, false), (true, false), (false, true), (true, true)] {
+            let lhs = lazy_lhs
+                .then(|| divisor.adjoint().unwrap())
+                .unwrap_or_else(|| divisor.clone());
+            let right = lazy_rhs
+                .then(|| rhs.adjoint().unwrap())
+                .unwrap_or_else(|| rhs.clone());
+            let lhs_before = divisor.data().to_vec();
+            let rhs_before = rhs.data().to_vec();
+            calls.store(0, std::sync::atomic::Ordering::Relaxed);
+            let solution = lhs.solve(&right).unwrap();
+            assert!(matches!(solution.repr, TypedTensorRepr::Owned(_)));
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::Relaxed),
+                5,
+                "the SU(3) μ=2 fixture has five nonempty coupled-sector solve routes"
+            );
+            let lhs_oracle = lhs.materialized_tensor_uncached().unwrap();
+            let rhs_oracle = right.materialized_tensor_uncached().unwrap();
+            let reconstructed = lhs_oracle.compose(&solution).unwrap();
+            assert!(reconstructed.data().iter().zip(rhs_oracle.data()).all(
+                |(&actual, &expected)| {
+                    (actual.widen_complex() - expected.widen_complex()).norm() < 2e-10
+                }
+            ));
+            for i in 0..solution.block_count() {
+                assert_eq!(
+                    reconstructed.block_fusion_trees(i).unwrap(),
+                    rhs_oracle.block_fusion_trees(i).unwrap(),
+                );
+            }
+            assert_eq!(divisor.data(), lhs_before.as_slice());
+            assert_eq!(rhs.data(), rhs_before.as_slice());
+            for input in [&lhs, &right] {
+                assert_eq!(materialized_adjoint_builds(input), 0);
+                if let TypedTensorRepr::Adjoint(view) = &input.repr {
+                    assert!(view.materialized.get().is_none());
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "racah-generated")]
+    #[test]
+    fn checked_generic_left_solve_is_owned_uncached_and_one_call_per_route() {
+        assert_checked_generic_left_solve_acceptance::<f64>();
+        assert_checked_generic_left_solve_acceptance::<num_complex::Complex64>();
+    }
+
+    #[cfg(feature = "racah-generated")]
+    #[test]
+    fn checked_generic_left_solve_preserves_injected_backend_provenance() {
+        use tenet_core::SUNFusionRule;
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let runtime = Runtime::builder()
+            .with_dense_executor(Box::new(CountingSolve {
+                inner: DefaultDenseExecutor::default(),
+                calls: Arc::clone(&calls),
+                failure: Some("injected checked solve failure"),
+            }))
+            .build()
+            .unwrap();
+        let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 1)], false).unwrap();
+        let lhs: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| f64::from(ij[0] == ij[1]))
+                .unwrap();
+        let rhs = lhs.scale(2.0);
+        let before_lhs = lhs.data().to_vec();
+        let before_rhs = rhs.data().to_vec();
+        assert!(matches!(
+            lhs.solve(&rhs),
+            Err(GenericTensorError::Facade(Error::Operation(error)))
+                if matches!(*error, tenet_tensors::OperationError::Dense(
+                    DenseError::Backend { op: "solve_into", ref message, .. }
+                ) if message == "injected checked solve failure")
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(lhs.data(), before_lhs.as_slice());
+        assert_eq!(rhs.data(), before_rhs.as_slice());
     }
 
     fn assert_pinv_redirect<R, D>(source: &TensorMap<R, D>, rcond: f64, exact_original: bool)

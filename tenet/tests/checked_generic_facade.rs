@@ -1495,12 +1495,13 @@ fn assert_sun_checked_generic_left_solve(n: usize, label: Vec<i64>) {
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
             let row = indices[0] + 2 * indices[1];
             let col = indices[2] + 2 * indices[3];
-            if trees.codomain_vertices() != trees.domain_vertices() {
-                0.0
-            } else if row == col {
-                5.0
+            if row == col {
+                7.0 + trees.codomain_vertices()[0].get() as f64
+                    + 0.25 * trees.domain_vertices()[0].get() as f64
             } else {
-                0.25
+                0.05 * (1
+                    + trees.codomain_vertices()[0].get()
+                    + 2 * trees.domain_vertices()[0].get()) as f64
             }
         })
         .unwrap();
@@ -1514,27 +1515,61 @@ fn assert_sun_checked_generic_left_solve(n: usize, label: Vec<i64>) {
             .any(|vertex| vertex.get() > 1)
     }));
     let rhs: TensorMap<_, f64> =
-        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |_, indices| {
-            (indices.iter().sum::<usize>() + 1) as f64
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
+            (indices.iter().sum::<usize>()
+                + 1
+                + 3 * trees.codomain_vertices()[0].get()
+                + 5 * trees.domain_vertices()[0].get()) as f64
+        })
+        .unwrap();
+    let route_swapped_rhs: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
+            (indices.iter().sum::<usize>()
+                + 1
+                + 3 * trees.domain_vertices()[0].get()
+                + 5 * trees.codomain_vertices()[0].get()) as f64
         })
         .unwrap();
 
     let solution = divisor.solve(&rhs).unwrap();
     assert!(std::ptr::eq(solution.provider(), provider.as_ref()));
-    assert!(divisor
-        .compose(&solution)
-        .unwrap()
+    let reconstructed = divisor.compose(&solution).unwrap();
+    for index in 0..rhs.block_count() {
+        assert_eq!(
+            reconstructed.block_fusion_trees(index).unwrap(),
+            rhs.block_fusion_trees(index).unwrap()
+        );
+        assert_eq!(
+            reconstructed.block(index).unwrap().shape(),
+            rhs.block(index).unwrap().shape()
+        );
+    }
+    assert!(reconstructed
         .data()
         .iter()
         .zip(rhs.data())
         .all(|(actual, expected)| (*actual - *expected).abs() < 2e-10));
+    assert!(reconstructed
+        .data()
+        .iter()
+        .zip(route_swapped_rhs.data())
+        .any(|(actual, swapped)| (*actual - *swapped).abs() > 1e-7));
 
     let complex_divisor = divisor.to_c64();
     let complex_rhs = rhs.to_c64().scale(Complex64::new(1.0, 0.25));
     let complex_solution = complex_divisor.solve(&complex_rhs).unwrap();
-    assert!(complex_divisor
-        .compose(&complex_solution)
-        .unwrap()
+    let complex_reconstructed = complex_divisor.compose(&complex_solution).unwrap();
+    for index in 0..complex_rhs.block_count() {
+        assert_eq!(
+            complex_reconstructed.block_fusion_trees(index).unwrap(),
+            complex_rhs.block_fusion_trees(index).unwrap()
+        );
+        assert_eq!(
+            complex_reconstructed.block(index).unwrap().shape(),
+            complex_rhs.block(index).unwrap().shape()
+        );
+    }
+    assert!(complex_reconstructed
         .data()
         .iter()
         .zip(complex_rhs.data())
@@ -2407,9 +2442,11 @@ fn checked_generic_left_solve_covers_all_lazy_input_pairs() {
         let right = lazy_rhs
             .then(|| rhs.adjoint().unwrap())
             .unwrap_or_else(|| rhs.clone());
+        reset_provider_queries(&provider);
         let solution = lhs.solve(&right).unwrap();
         assert!(std::ptr::eq(solution.provider(), provider.as_ref()));
         assert_eq!(solution.data(), expected.data());
+        assert_eq!(provider.queries_since_reset.load(Ordering::Relaxed), 8);
     }
 }
 
