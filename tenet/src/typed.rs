@@ -450,9 +450,19 @@ where
     ///
     /// Checked Generic accepts dense inputs and admits the output with `A`'s
     /// exact provider allocation before any output allocation or dense solve.
-    /// `solve_right` remains multiplicity-free only.
     pub fn solve(&self, rhs: &Self) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorSolveDispatch<R, D>>::solve(self, rhs)
+    }
+
+    /// TensorKit `A / B`: solves `X * B = A` per coupled sector without
+    /// forming an inverse. `A` and `B` must have exactly equal domains, `B`'s
+    /// codomain and domain must be isomorphic, and the result is
+    /// `codomain(A) <- codomain(B)`.
+    ///
+    /// The result keeps `A`'s exact provider allocation, including for
+    /// checked-Generic operands backed by distinct compatible providers.
+    pub fn solve_right(&self, rhs: &Self) -> Result<Self, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorSolveDispatch<R, D>>::solve_right(self, rhs)
     }
 }
 
@@ -3933,6 +3943,10 @@ where
         tensor: &TensorMap<R, D>,
         rhs: &TensorMap<R, D>,
     ) -> Result<TensorMap<R, D>, Self::FacadeError>;
+    fn solve_right(
+        tensor: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+    ) -> Result<TensorMap<R, D>, Self::FacadeError>;
 }
 
 #[doc(hidden)]
@@ -4247,6 +4261,13 @@ where
 {
     fn solve(tensor: &TensorMap<R, D>, rhs: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
         tensor.solve_multiplicity_free(rhs)
+    }
+
+    fn solve_right(
+        tensor: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+    ) -> Result<TensorMap<R, D>, Error> {
+        tensor.solve_right_multiplicity_free(rhs)
     }
 }
 
@@ -4582,26 +4603,125 @@ where
                 rhs.logical_space().space().homspace().domain().clone(),
             ),
         )?;
-        let lhs = tensor
-            .materialized_tensor_uncached()
-            .map_err(GenericTensorError::from)?;
-        let rhs = rhs
-            .materialized_tensor_uncached()
-            .map_err(GenericTensorError::from)?;
-        let lhs_body = lhs.owned_body().expect("uncached solve lhs is owned");
-        let rhs_body = rhs.owned_body().expect("uncached solve rhs is owned");
-        let mut dense = tensor.runtime.lease_dense();
-        let factor = tenet_matrixalgebra::solve_left_direct_into_dyn(
-            dense.dense(),
-            &BoundDynamicTensorRef::try_new(&lhs_body.space, lhs_body.materialized_dense_data())
-                .map_err(Error::from)?,
-            &BoundDynamicTensorRef::try_new(&rhs_body.space, rhs_body.materialized_dense_data())
-                .map_err(Error::from)?,
-            output,
-        )
-        .map_err(Error::from)?;
+        let factor =
+            checked_generic_solve_into(tensor, rhs, tensor.logical_space().clone(), output)?;
         Ok(wrap_factor_on(&tensor.runtime, factor))
     }
+
+    fn solve_right(
+        tensor: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+    ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        if !tensor.runtime.same_runtime(&rhs.runtime) {
+            return Err(Error::RuntimeMismatch.into());
+        }
+        if tensor.logical_space().space().admission().rule_identity()
+            != rhs.logical_space().space().admission().rule_identity()
+        {
+            return Err(Error::RuleMismatch.into());
+        }
+        if tensor.logical_space().space().homspace().domain()
+            != rhs.logical_space().space().homspace().domain()
+        {
+            return Err(Error::InvalidArgument(
+                "solve_right requires equal receiver and divisor domains".to_string(),
+            )
+            .into());
+        }
+
+        let rhs_space = rhs.logical_space();
+        let codomain = tenet_matrixalgebra::coupled_sector_block_dimensions_generic_checked(
+            rhs_space.space().homspace().codomain(),
+            rhs_space.provider(),
+        )?;
+        let domain = tenet_matrixalgebra::coupled_sector_block_dimensions_generic_checked(
+            rhs_space.space().homspace().domain(),
+            rhs_space.provider(),
+        )?;
+        if codomain != domain {
+            return Err(Error::from(
+                tenet_tensors::OperationError::UnsupportedTensorContractScope {
+                    message: "solve_right requires an isomorphic divisor codomain and domain",
+                },
+            )
+            .into());
+        }
+
+        let rhs_adjoint = rhs.adjoint()?;
+        let receiver_adjoint = tensor.adjoint()?;
+        let receiver_space = tensor.logical_space();
+        let divisor_authority = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
+            Arc::clone(receiver_space.provider_arc()),
+            rhs_adjoint.logical_space().space().homspace().clone(),
+        )?;
+        if divisor_authority.space() != rhs_adjoint.logical_space().space() {
+            return Err(
+                Error::from(tenet_tensors::OperationError::StructureMismatch {
+                    tensor: "solve_right divisor authority",
+                })
+                .into(),
+            );
+        }
+        let oriented_output = <R::Mode as TypedTensorRootDispatch<R>>::build_root(
+            Arc::clone(receiver_space.provider_arc()),
+            FusionTreeHomSpace::new(
+                rhs_space.space().homspace().codomain().clone(),
+                receiver_space.space().homspace().codomain().clone(),
+            ),
+        )?;
+        let output = tenet_tensors::adjoint_bound_space_dyn_generic_checked(&oriented_output)
+            .map_err(GenericTensorError::Plan)?;
+        let factor = checked_generic_solve_into(
+            &rhs_adjoint,
+            &receiver_adjoint,
+            divisor_authority,
+            oriented_output,
+        )?;
+        let data = tenet_tensors::materialize_adjoint_data_dyn(
+            factor.space().space(),
+            output.space(),
+            factor.data(),
+        )
+        .map_err(Error::from)?;
+        Ok(TensorMap {
+            runtime: tensor.runtime.clone(),
+            repr: owned_repr(TypedTensorBody::dense(output, data)),
+        })
+    }
+}
+
+fn checked_generic_solve_into<R, D>(
+    tensor: &TensorMap<R, D>,
+    rhs: &TensorMap<R, D>,
+    divisor_authority: BoundDynamicFusionMapSpace<R>,
+    output: BoundDynamicFusionMapSpace<R>,
+) -> Result<BoundDynFactor<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
+    let lhs = tensor
+        .materialized_tensor_uncached()
+        .map_err(GenericTensorError::from)?;
+    let rhs = rhs
+        .materialized_tensor_uncached()
+        .map_err(GenericTensorError::from)?;
+    let lhs_body = lhs.owned_body().expect("uncached solve lhs is owned");
+    let rhs_body = rhs.owned_body().expect("uncached solve rhs is owned");
+    let mut dense = tensor.runtime.lease_dense();
+    tenet_matrixalgebra::solve_left_direct_into_dyn(
+        dense.dense(),
+        &BoundDynamicTensorRef::try_new(&divisor_authority, lhs_body.materialized_dense_data())
+            .map_err(Error::from)?,
+        &BoundDynamicTensorRef::try_new(&rhs_body.space, rhs_body.materialized_dense_data())
+            .map_err(Error::from)?,
+        output,
+    )
+    .map_err(Error::from)
+    .map_err(GenericTensorError::from)
 }
 
 impl<R, D> TypedTensorPinvDispatch<R, D> for CheckedGenericAdmissionMode
@@ -12880,10 +13000,8 @@ where
         Ok(self.wrap_bound_factor(out))
     }
 
-    /// Solves the right equation `x * rhs = self` without forming an inverse.
-    /// This reuses the established left-solve authority via
-    /// `(rhs.adjoint() \ self.adjoint()).adjoint()`.
-    pub fn solve_right(&self, rhs: &Self) -> Result<Self, Error> {
+    /// Multiplicity-free implementation of the public mode-dispatched right solve.
+    fn solve_right_multiplicity_free(&self, rhs: &Self) -> Result<Self, Error> {
         if !self.runtime.same_runtime(&rhs.runtime) {
             return Err(Error::RuntimeMismatch);
         }
@@ -18346,7 +18464,7 @@ mod representation_gates {
     }
 
     #[cfg(feature = "racah-generated")]
-    fn assert_checked_generic_left_solve_acceptance<D>()
+    fn assert_checked_generic_solve_acceptance<D>()
     where
         D: TensorScalar + core::fmt::Debug,
     {
@@ -18401,6 +18519,18 @@ mod representation_gates {
                 5,
                 "the SU(3) μ=2 fixture has five nonempty coupled-sector solve routes"
             );
+            calls.store(0, std::sync::atomic::Ordering::Relaxed);
+            let right_solution = right.solve_right(&lhs).unwrap();
+            assert!(matches!(right_solution.repr, TypedTensorRepr::Owned(_)));
+            assert!(Arc::ptr_eq(
+                right_solution.logical_space().provider_arc(),
+                right.logical_space().provider_arc()
+            ));
+            assert_eq!(
+                calls.load(std::sync::atomic::Ordering::Relaxed),
+                5,
+                "right solve reuses the five admitted left-solve routes"
+            );
             let lhs_oracle = lhs.materialized_tensor_uncached().unwrap();
             let rhs_oracle = right.materialized_tensor_uncached().unwrap();
             let reconstructed = lhs_oracle.compose(&solution).unwrap();
@@ -18415,6 +18545,15 @@ mod representation_gates {
                     rhs_oracle.block_fusion_trees(i).unwrap(),
                 );
             }
+            assert!(right_solution
+                .compose(&lhs_oracle)
+                .unwrap()
+                .data()
+                .iter()
+                .zip(rhs_oracle.data())
+                .all(|(&actual, &expected)| {
+                    (actual.widen_complex() - expected.widen_complex()).norm() < 2e-10
+                }));
             assert_eq!(divisor.data(), lhs_before.as_slice());
             assert_eq!(rhs.data(), rhs_before.as_slice());
             for input in [&lhs, &right] {
@@ -18428,9 +18567,11 @@ mod representation_gates {
 
     #[cfg(feature = "racah-generated")]
     #[test]
-    fn checked_generic_left_solve_is_owned_uncached_and_one_call_per_route() {
-        assert_checked_generic_left_solve_acceptance::<f64>();
-        assert_checked_generic_left_solve_acceptance::<num_complex::Complex64>();
+    fn checked_generic_solves_are_owned_uncached_and_one_call_per_route() {
+        // What: both solve directions keep all four lazy input pairs cold on
+        // nondegenerate real and complex cross-multiplicity matrices.
+        assert_checked_generic_solve_acceptance::<f64>();
+        assert_checked_generic_solve_acceptance::<num_complex::Complex64>();
     }
 
     #[cfg(feature = "racah-generated")]

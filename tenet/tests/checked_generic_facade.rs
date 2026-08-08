@@ -2608,6 +2608,198 @@ fn sun_checked_generic_pinv_cross_mu_full_keys_for_both_dtypes() {
     }
 }
 
+#[cfg(feature = "racah-generated")]
+fn assert_sun_checked_generic_solve_right<D>(
+    n: usize,
+    label: Vec<i64>,
+    off_diagonal: D,
+    close: impl Fn(D, D) -> f64,
+) where
+    D: tenet::typed::TensorScalar + fmt::Debug + PartialEq,
+{
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let receiver_provider = Arc::new(SUNFusionRule::new(n).unwrap());
+    let divisor_provider = Arc::new(SUNFusionRule::new(n).unwrap());
+    let cross_sector = label.clone();
+    let receiver_leg =
+        GradedSpace::try_new(Arc::clone(&receiver_provider), [(label.clone(), 2)], false).unwrap();
+    let divisor_leg =
+        GradedSpace::try_new(Arc::clone(&divisor_provider), [(label, 2)], false).unwrap();
+    let receiver_off_diagonal = D::from_real(0.75);
+    let receiver: TensorMap<_, D> = TensorMap::from_block_fn(
+        &runtime,
+        [&receiver_leg, &receiver_leg],
+        [&receiver_leg, &receiver_leg],
+        |trees, index| {
+            let row = index[0] + 2 * index[1];
+            let column = index[2] + 2 * index[3];
+            if trees.codomain_vertices() == trees.domain_vertices() && row == column {
+                D::from_real(3.0)
+            } else if trees.codomain_vertices()[0].get() == 1
+                && trees.domain_vertices()[0].get() == 2
+                && row == column
+            {
+                receiver_off_diagonal
+            } else {
+                D::from_real(0.0)
+            }
+        },
+    )
+    .unwrap();
+    let divisor: TensorMap<_, D> = TensorMap::from_block_fn(
+        &runtime,
+        [&divisor_leg, &divisor_leg],
+        [&divisor_leg, &divisor_leg],
+        |trees, index| {
+            let row = index[0] + 2 * index[1];
+            let column = index[2] + 2 * index[3];
+            if trees.codomain_vertices() == trees.domain_vertices() && row == column {
+                D::from_real(2.0)
+            } else if trees.codomain_vertices()[0].get() == 2
+                && trees.domain_vertices()[0].get() == 1
+                && row == column
+            {
+                off_diagonal
+            } else {
+                D::from_real(0.0)
+            }
+        },
+    )
+    .unwrap();
+    let ab = receiver.compose(&divisor).unwrap();
+    let ba = divisor.compose(&receiver).unwrap();
+    assert!(ab
+        .data()
+        .iter()
+        .zip(ba.data())
+        .any(|(&left, &right)| close(left, right) > 1e-9));
+
+    let solution = receiver.solve_right(&divisor).unwrap();
+    assert!(std::ptr::eq(
+        solution.provider(),
+        receiver_provider.as_ref()
+    ));
+    assert!(!std::ptr::eq(
+        solution.provider(),
+        divisor_provider.as_ref()
+    ));
+    assert_eq!(solution.codomain(), receiver.codomain());
+    assert_eq!(solution.domain(), divisor.codomain());
+    // What: for `M=|1><2|`, `N=|2><1|`, and `MN=P1`,
+    // `(3I+mM)(2I+nN)^-1 = 3/2 I - 3n/4 N + m/2 M - mn/4 P1`.
+    let expected: TensorMap<_, D> = TensorMap::from_block_fn(
+        &runtime,
+        [&receiver_leg, &receiver_leg],
+        [&receiver_leg, &receiver_leg],
+        |trees, index| {
+            let row = index[0] + 2 * index[1];
+            let column = index[2] + 2 * index[3];
+            if trees.codomain_vertices() == trees.domain_vertices() && row == column {
+                let correction = if trees.coupled() == &cross_sector
+                    && trees.codomain_vertices()[0].get() == 1
+                {
+                    D::from_real(-0.25) * receiver_off_diagonal * off_diagonal
+                } else {
+                    D::from_real(0.0)
+                };
+                D::from_real(1.5) + correction
+            } else if trees.codomain_vertices()[0].get() == 2
+                && trees.domain_vertices()[0].get() == 1
+                && row == column
+            {
+                D::from_real(-0.75) * off_diagonal
+            } else if trees.codomain_vertices()[0].get() == 1
+                && trees.domain_vertices()[0].get() == 2
+                && row == column
+            {
+                D::from_real(0.5) * receiver_off_diagonal
+            } else {
+                D::from_real(0.0)
+            }
+        },
+    )
+    .unwrap();
+    for index in 0..solution.block_count() {
+        let actual = solution.block(index).unwrap();
+        let expected_block = expected.block(index).unwrap();
+        assert_eq!(actual.key(), expected_block.key());
+        assert_eq!(actual.shape(), expected_block.shape());
+        assert_eq!(actual.strides(), expected_block.strides());
+    }
+    for (index, (&actual, &expected)) in solution.data().iter().zip(expected.data()).enumerate() {
+        assert!(
+            close(actual, expected) < 1e-9,
+            "payload {index}: actual={actual:?}, expected={expected:?}"
+        );
+    }
+    assert!(solution
+        .compose(&divisor)
+        .unwrap()
+        .data()
+        .iter()
+        .zip(receiver.data())
+        .all(|(&actual, &expected)| close(actual, expected) < 1e-9));
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn sun_checked_generic_solve_right_cross_mu_for_both_dtypes_and_receiver_arcs() {
+    // What: noncommuting cross-multiplicity matrices distinguish `A / B`
+    // from left solve and exercise both payload types and receiver Arc authority.
+    for (n, label) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
+        assert_sun_checked_generic_solve_right::<f64>(n, label.clone(), 1.0, |actual, expected| {
+            (actual - expected).abs()
+        });
+        assert_sun_checked_generic_solve_right::<Complex64>(
+            n,
+            label,
+            Complex64::new(1.0, 0.5),
+            |actual, expected| (actual - expected).norm(),
+        );
+    }
+}
+
+struct SolveCallSpy {
+    inner: DefaultDenseExecutor,
+    calls: Arc<AtomicUsize>,
+}
+
+impl DenseExecutor for SolveCallSpy {
+    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.svd(input)
+    }
+
+    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.qr(input)
+    }
+
+    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.eigh(input)
+    }
+
+    fn solve_into(
+        &mut self,
+        a: DenseRead<'_>,
+        b: DenseRead<'_>,
+        x: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.inner.solve_into(a, b, x)
+    }
+
+    fn dot_general_into(
+        &mut self,
+        output: DenseWrite<'_>,
+        lhs: DenseRead<'_>,
+        rhs: DenseRead<'_>,
+        config: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        self.inner.dot_general_into(output, lhs, rhs, config)
+    }
+}
+
 #[test]
 fn checked_generic_inv_singular_early_and_late_sectors_preserve_source() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
@@ -2831,6 +3023,163 @@ fn checked_generic_left_solve_covers_all_lazy_input_pairs() {
         assert_eq!(solution.data(), expected.data());
         assert_eq!(provider.queries_since_reset.load(Ordering::Relaxed), 8);
     }
+}
+
+#[test]
+fn checked_generic_solve_right_preflight_precedence_and_provider_failure_are_nonpublishing() {
+    // What: error precedence and provider failures are pre-kernel, while a
+    // rank-2 <- rank-1 result keeps the unequal receiver/divisor codomains.
+    let solve_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .with_dense_executor(Box::new(SolveCallSpy {
+            inner: DefaultDenseExecutor::default(),
+            calls: Arc::clone(&solve_calls),
+        }))
+        .build()
+        .unwrap();
+    let receiver_provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let divisor_provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let receiver_leg =
+        GradedSpace::try_new(Arc::clone(&receiver_provider), [(Label::X, 2)], false).unwrap();
+    let divisor_leg =
+        GradedSpace::try_new(Arc::clone(&divisor_provider), [(Label::X, 2)], false).unwrap();
+    let receiver: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&receiver_leg], [&receiver_leg], |_, ij| {
+            f64::from(ij[0] == ij[1])
+        })
+        .unwrap();
+    let divisor: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&divisor_leg], [&divisor_leg], |_, ij| {
+            if ij[0] == ij[1] {
+                2.0
+            } else {
+                0.25
+            }
+        })
+        .unwrap();
+    let receiver_before = receiver.data().to_vec();
+    let divisor_before = divisor.data().to_vec();
+
+    let other_runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let runtime_divisor: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&other_runtime, [&divisor_leg], [&divisor_leg], |_, ij| {
+            f64::from(ij[0] == ij[1])
+        })
+        .unwrap();
+    reset_provider_queries(&receiver_provider);
+    reset_provider_queries(&divisor_provider);
+    assert!(matches!(
+        receiver.solve_right(&runtime_divisor),
+        Err(GenericTensorError::Facade(
+            tenet::typed::Error::RuntimeMismatch
+        ))
+    ));
+    assert_no_provider_queries(&receiver_provider);
+    assert_no_provider_queries(&divisor_provider);
+
+    let foreign_provider = Arc::new(CheckedOnlyToy::new_product_probe(1));
+    let foreign_leg =
+        GradedSpace::try_new(Arc::clone(&foreign_provider), [(Label::X, 2)], false).unwrap();
+    let foreign_divisor: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&foreign_leg], [&foreign_leg], |_, ij| {
+            f64::from(ij[0] == ij[1])
+        })
+        .unwrap();
+    reset_provider_queries(&receiver_provider);
+    reset_provider_queries(&foreign_provider);
+    assert!(matches!(
+        receiver.solve_right(&foreign_divisor),
+        Err(GenericTensorError::Facade(
+            tenet::typed::Error::RuleMismatch
+        ))
+    ));
+    assert_no_provider_queries(&receiver_provider);
+    assert_no_provider_queries(&foreign_provider);
+
+    let wrong_domain =
+        GradedSpace::try_new(Arc::clone(&divisor_provider), [(Label::Vacuum, 1)], false).unwrap();
+    let domain_divisor: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&divisor_leg], [&wrong_domain], |_, _| 1.0).unwrap();
+    divisor_provider.fail_algebra.store(true, Ordering::Relaxed);
+    assert!(matches!(
+        receiver.solve_right(&domain_divisor),
+        Err(GenericTensorError::Facade(
+            tenet::typed::Error::InvalidArgument(_)
+        ))
+    ));
+    divisor_provider
+        .fail_algebra
+        .store(false, Ordering::Relaxed);
+
+    let narrow =
+        GradedSpace::try_new(Arc::clone(&divisor_provider), [(Label::X, 1)], false).unwrap();
+    let rectangular_divisor: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&narrow], [&divisor_leg], |_, _| 1.0).unwrap();
+    assert!(matches!(
+        receiver.solve_right(&rectangular_divisor),
+        Err(GenericTensorError::Facade(tenet::typed::Error::Operation(
+            _
+        )))
+    ));
+
+    divisor_provider.fail_algebra.store(true, Ordering::Relaxed);
+    assert!(matches!(
+        receiver.solve_right(&divisor),
+        Err(GenericTensorError::Plan(
+            tenet::typed::CheckedGenericPlanError::Provider(ToyError::Algebra)
+        ))
+    ));
+    assert_eq!(solve_calls.load(Ordering::Relaxed), 0);
+    divisor_provider
+        .fail_algebra
+        .store(false, Ordering::Relaxed);
+
+    let wide_receiver: TensorMap<_, f64> = TensorMap::from_block_fn(
+        &runtime,
+        [&receiver_leg, &receiver_leg],
+        [&receiver_leg],
+        |_, _| 1.0,
+    )
+    .unwrap();
+    let wide_before = wide_receiver.data().to_vec();
+    receiver_provider
+        .fail_algebra
+        .store(true, Ordering::Relaxed);
+    assert!(matches!(
+        wide_receiver.solve_right(&divisor),
+        Err(GenericTensorError::Plan(
+            tenet::typed::CheckedGenericPlanError::Provider(ToyError::Algebra)
+        ))
+    ));
+    assert_eq!(solve_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(wide_receiver.data(), wide_before.as_slice());
+    assert_eq!(receiver.data(), receiver_before.as_slice());
+    assert_eq!(divisor.data(), divisor_before.as_slice());
+    receiver_provider
+        .fail_algebra
+        .store(false, Ordering::Relaxed);
+
+    let geometry_solution = wide_receiver.solve_right(&divisor).unwrap();
+    assert!(std::ptr::eq(
+        geometry_solution.provider(),
+        receiver_provider.as_ref()
+    ));
+    assert_ne!(wide_receiver.codomain(), divisor.codomain());
+    assert_eq!(geometry_solution.codomain(), wide_receiver.codomain());
+    assert_eq!(geometry_solution.domain(), divisor.codomain());
+    assert_eq!(geometry_solution.codomain_rank(), 2);
+    assert_eq!(geometry_solution.domain_rank(), 1);
+    for index in 0..geometry_solution.block_count() {
+        assert_eq!(geometry_solution.block(index).unwrap().shape(), [2, 2, 2]);
+    }
+    assert!(geometry_solution
+        .compose(&divisor)
+        .unwrap()
+        .data()
+        .iter()
+        .zip(wide_receiver.data())
+        .all(|(actual, expected)| (*actual - *expected).abs() < 1e-11));
 }
 
 #[test]
