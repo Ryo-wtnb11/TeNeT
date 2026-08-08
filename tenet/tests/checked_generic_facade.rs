@@ -541,6 +541,153 @@ fn sun_checked_generic_eigh_cross_mu_projectors_for_both_dtypes() {
     }
 }
 
+#[cfg(feature = "racah-generated")]
+trait SunEigInput:
+    tenet::typed::TensorScalar + tenet_matrixalgebra::FactorScalar<Eig = Complex64> + fmt::Debug
+{
+    fn to_complex(
+        source: &TensorMap<tenet::typed::SUNFusionRule, Self>,
+    ) -> TensorMap<tenet::typed::SUNFusionRule, Complex64>;
+}
+
+#[cfg(feature = "racah-generated")]
+impl SunEigInput for f64 {
+    fn to_complex(
+        source: &TensorMap<tenet::typed::SUNFusionRule, Self>,
+    ) -> TensorMap<tenet::typed::SUNFusionRule, Complex64> {
+        source.to_c64()
+    }
+}
+
+#[cfg(feature = "racah-generated")]
+impl SunEigInput for Complex64 {
+    fn to_complex(
+        source: &TensorMap<tenet::typed::SUNFusionRule, Self>,
+    ) -> TensorMap<tenet::typed::SUNFusionRule, Complex64> {
+        source.clone()
+    }
+}
+
+#[cfg(feature = "racah-generated")]
+fn assert_sun_checked_generic_eig<D>(n: usize, label: Vec<i64>)
+where
+    D: SunEigInput,
+{
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(n).unwrap());
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(label.clone(), 2)], false).unwrap();
+    let source: TensorMap<_, D> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, index| {
+            let row = index[0] + 2 * index[1];
+            let column = index[2] + 2 * index[3];
+            if row != column {
+                return D::from_real(0.0);
+            }
+            if trees.coupled() == &label {
+                let mu_row = trees.codomain_vertices()[0].get();
+                let mu_column = trees.domain_vertices()[0].get();
+                let shift = 10.0 * row as f64;
+                D::from_real(match (mu_row, mu_column) {
+                    (1, 1) | (2, 2) => 1.0 + shift,
+                    (1, 2) => -3.0,
+                    (2, 1) => 1.0,
+                    _ => 0.0,
+                })
+            } else if trees.codomain_vertices() == trees.domain_vertices() {
+                D::from_real(50.0 + 10.0 * row as f64)
+            } else {
+                D::from_real(0.0)
+            }
+        })
+        .unwrap();
+    let (d, v) = source.eig_full().unwrap();
+    assert!(std::ptr::eq(d.provider(), provider.as_ref()));
+    assert!(std::ptr::eq(v.provider(), provider.as_ref()));
+    let dense_len = d.data().len();
+    assert!(!format!("{d:?}").contains(&format!("elements: {dense_len}")));
+    let complex_source = D::to_complex(&source);
+    let av = complex_source.compose(&v).unwrap();
+    let vd = v.compose(&d).unwrap();
+    assert!(av
+        .data()
+        .iter()
+        .zip(vd.data())
+        .all(|(actual, expected)| (*actual - *expected).norm() < 1.0e-8));
+    let rebuilt = v.compose(&d).unwrap().compose(&v.inv().unwrap()).unwrap();
+    assert_same_checked_generic_layout_and_close(&rebuilt, &complex_source, |actual, expected| {
+        (actual - expected).norm()
+    });
+
+    let lambda_plus = Complex64::new(1.0, 3.0_f64.sqrt());
+    let identity: TensorMap<_, Complex64> = TensorMap::from_block_fn(
+        &runtime,
+        d.codomain().iter(),
+        d.domain().iter(),
+        |_, index| Complex64::new(f64::from(index[0] == index[1]), 0.0),
+    )
+    .unwrap();
+    let mut selector = identity.clone();
+    let mut found_target = false;
+    for index in 0..d.block_count() {
+        let block = d.block(index).unwrap();
+        for diagonal in 0..block.shape()[0] {
+            let value = d.data()
+                [block.offset() + diagonal * block.strides()[0] + diagonal * block.strides()[1]];
+            if (value - lambda_plus).norm() < 1.0e-8 {
+                assert!(!found_target);
+                found_target = true;
+            } else {
+                selector = selector
+                    .compose(
+                        &d.add(&identity, Complex64::new(1.0, 0.0), -value)
+                            .unwrap()
+                            .scale(Complex64::new(1.0, 0.0) / (lambda_plus - value)),
+                    )
+                    .unwrap();
+            }
+        }
+    }
+    assert!(found_target);
+    let projector = v
+        .compose(&selector)
+        .unwrap()
+        .compose(&v.inv().unwrap())
+        .unwrap();
+    let root = 3.0_f64.sqrt();
+    let expected: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, index| {
+            let row = index[0] + 2 * index[1];
+            let column = index[2] + 2 * index[3];
+            if trees.coupled() != &label || row != 0 || column != 0 {
+                return Complex64::new(0.0, 0.0);
+            }
+            match (
+                trees.codomain_vertices()[0].get(),
+                trees.domain_vertices()[0].get(),
+            ) {
+                (1, 1) | (2, 2) => Complex64::new(0.5, 0.0),
+                (1, 2) => Complex64::new(0.0, root / 2.0),
+                (2, 1) => Complex64::new(0.0, -1.0 / (2.0 * root)),
+                _ => Complex64::new(0.0, 0.0),
+            }
+        })
+        .unwrap();
+    assert_same_checked_generic_layout_and_close(&projector, &expected, |actual, expected| {
+        (actual - expected).norm()
+    });
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn sun_checked_generic_eig_nonnormal_cross_mu_projectors_for_both_dtypes() {
+    for (n, label) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
+        assert_sun_checked_generic_eig::<f64>(n, label.clone());
+        assert_sun_checked_generic_eig::<Complex64>(n, label);
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ToyError {
     InvalidSector,
@@ -2235,6 +2382,63 @@ struct EighFaultExecutor {
     fail_at: Option<usize>,
 }
 
+#[derive(Clone, Copy)]
+enum EigFault {
+    Eig,
+    Svd,
+}
+
+struct EigFaultExecutor {
+    inner: DefaultDenseExecutor,
+    fault: EigFault,
+}
+
+impl DenseExecutor for EigFaultExecutor {
+    fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.svd(input)
+    }
+
+    fn svd_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
+        if matches!(self.fault, EigFault::Svd) {
+            return Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "svd_vals",
+                message: "injected checked Generic EIG rank-check failure".to_string(),
+            });
+        }
+        self.inner.svd_vals(input)
+    }
+
+    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.qr(input)
+    }
+
+    fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.eigh(input)
+    }
+
+    fn eig(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        if matches!(self.fault, EigFault::Eig) {
+            return Err(DenseError::Backend {
+                backend: DenseBackend::Tenferro,
+                op: "eig",
+                message: "injected checked Generic EIG failure".to_string(),
+            });
+        }
+        self.inner.eig(input)
+    }
+
+    fn dot_general_into(
+        &mut self,
+        output: DenseWrite<'_>,
+        lhs: DenseRead<'_>,
+        rhs: DenseRead<'_>,
+        config: &DenseDotConfig,
+    ) -> Result<(), DenseError> {
+        self.inner.dot_general_into(output, lhs, rhs, config)
+    }
+}
+
 impl DenseExecutor for EighFaultExecutor {
     fn svd(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         self.inner.svd(input)
@@ -2352,6 +2556,31 @@ fn checked_generic_eigh_dense_failure_preserves_the_source() {
 }
 
 #[test]
+fn checked_generic_eig_dense_and_rank_check_failures_preserve_the_source() {
+    for fault in [EigFault::Eig, EigFault::Svd] {
+        let runtime = Runtime::builder()
+            .dense_threads(1)
+            .with_dense_executor(Box::new(EigFaultExecutor {
+                inner: DefaultDenseExecutor::new(),
+                fault,
+            }))
+            .build()
+            .unwrap();
+        let provider = Arc::new(CheckedOnlyToy::new(0));
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
+                [[1.0, -3.0], [1.0, 1.0]][index[0]][index[1]]
+            })
+            .unwrap();
+        let before = source.data().to_vec();
+        assert!(source.eig_full().is_err());
+        assert_eq!(source.data(), before);
+        assert!(std::ptr::eq(source.provider(), provider.as_ref()));
+    }
+}
+
+#[test]
 fn checked_generic_eigh_qdim_and_decode_failures_publish_no_pair() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(CheckedOnlyToy::new(0));
@@ -2376,6 +2605,41 @@ fn checked_generic_eigh_qdim_and_decode_failures_publish_no_pair() {
     provider.fail_dim.store(true, Ordering::Relaxed);
     assert!(matches!(
         source.eigh_trunc(&Truncation::rank(1)),
+        Err(GenericTensorError::Plan(
+            tenet::typed::CheckedGenericPlanError::Provider(ToyError::Algebra)
+        ))
+    ));
+    provider.fail_dim.store(false, Ordering::Relaxed);
+
+    assert_eq!(source.data(), before);
+    assert!(std::ptr::eq(source.provider(), provider.as_ref()));
+}
+
+#[test]
+fn checked_generic_eig_qdim_and_decode_failures_publish_no_pair() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
+            [[1.0, -3.0], [1.0, 1.0]][index[0]][index[1]]
+        })
+        .unwrap();
+    let before = source.data().to_vec();
+
+    provider.fail_decode.store(true, Ordering::Relaxed);
+    assert!(source.eig_full().is_ok());
+    assert!(matches!(
+        source.eig_trunc(&Truncation::Full),
+        Err(GenericTensorError::Plan(
+            tenet::typed::CheckedGenericPlanError::Provider(ToyError::Decode)
+        ))
+    ));
+    provider.fail_decode.store(false, Ordering::Relaxed);
+
+    provider.fail_dim.store(true, Ordering::Relaxed);
+    assert!(matches!(
+        source.eig_trunc(&Truncation::rank(1)),
         Err(GenericTensorError::Plan(
             tenet::typed::CheckedGenericPlanError::Provider(ToyError::Algebra)
         ))
@@ -2459,6 +2723,192 @@ fn checked_generic_eig_vals_preserves_spectrum_and_dtype() {
 
     let complex = source.to_c64();
     assert_eq!(complex.eig_vals().unwrap(), spectra);
+}
+
+fn assert_checked_generic_eig_reconstruction(
+    source: &TensorMap<CheckedOnlyToy, Complex64>,
+    d: &TensorMap<CheckedOnlyToy, Complex64>,
+    v: &TensorMap<CheckedOnlyToy, Complex64>,
+) {
+    assert!(std::ptr::eq(d.provider(), source.provider()));
+    assert!(std::ptr::eq(v.provider(), source.provider()));
+    assert!(d.runtime().shares_state_with(source.runtime()));
+    assert!(v.runtime().shares_state_with(source.runtime()));
+    assert_eq!(v.codomain(), source.codomain());
+    assert_eq!(v.domain(), d.codomain());
+    let av = source.compose(v).unwrap();
+    let vd = v.compose(d).unwrap();
+    let scale = source
+        .data()
+        .iter()
+        .map(|value| value.norm())
+        .fold(1.0_f64, f64::max);
+    assert!(av
+        .data()
+        .iter()
+        .zip(vd.data())
+        .all(|(actual, expected)| (*actual - *expected).norm() <= 1.0e-11 * scale));
+    let rebuilt = v.compose(d).unwrap().compose(&v.inv().unwrap()).unwrap();
+    assert_same_checked_generic_layout_and_close(&rebuilt, source, |actual, expected| {
+        (actual - expected).norm()
+    });
+}
+
+#[test]
+fn checked_generic_eig_full_is_complex_and_reconstructs_nonnormal_inputs() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let real: TensorMap<_, f64> = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
+        [[1.0, -3.0], [1.0, 1.0]][index[0]][index[1]]
+    })
+    .unwrap();
+    let (real_d, real_v) = real.eig_full().unwrap();
+    assert!(real_d.data().iter().any(|value| value.im.abs() > 1.0));
+    for column in 0..2 {
+        let pivot = (0..2)
+            .max_by(|&left, &right| {
+                real_v.data()[left + column * 2]
+                    .norm()
+                    .total_cmp(&real_v.data()[right + column * 2].norm())
+            })
+            .unwrap();
+        let pivot = real_v.data()[pivot + column * 2];
+        assert!(pivot.im.abs() < 1.0e-12);
+        assert!(pivot.re >= 0.0);
+    }
+    assert_checked_generic_eig_reconstruction(&real.to_c64(), &real_d, &real_v);
+
+    let complex = real.to_c64().scale(Complex64::new(1.0, 0.25));
+    let (complex_d, complex_v) = complex.eig_full().unwrap();
+    assert!(complex_d.data().iter().any(|value| value.im.abs() > 1.0));
+    assert_checked_generic_eig_reconstruction(&complex, &complex_d, &complex_v);
+}
+
+#[test]
+fn checked_generic_eig_ties_are_stable_and_degenerate_projectors_are_invariant() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 3)], false).unwrap();
+    let tied: TensorMap<_, f64> = TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
+        [-2.0, 2.0, 1.0][index[0]] * f64::from(index[0] == index[1])
+    })
+    .unwrap();
+    let (d, _) = tied.eig_full().unwrap();
+    assert_eq!(
+        [d.data()[0], d.data()[4], d.data()[8]],
+        [
+            Complex64::new(-2.0, 0.0),
+            Complex64::new(2.0, 0.0),
+            Complex64::new(1.0, 0.0)
+        ]
+    );
+
+    let degenerate: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
+            [2.0, 2.0, -1.0][index[0]] * f64::from(index[0] == index[1])
+        })
+        .unwrap();
+    let (d, v) = degenerate.eig_full().unwrap();
+    let selector: TensorMap<_, Complex64> = TensorMap::from_block_fn(
+        &runtime,
+        d.codomain().iter(),
+        d.domain().iter(),
+        |_, index| {
+            Complex64::new(
+                f64::from(
+                    index[0] == index[1]
+                        && (d.data()[index[0] * 4] - Complex64::new(2.0, 0.0)).norm() < 1.0e-12,
+                ),
+                0.0,
+            )
+        },
+    )
+    .unwrap();
+    let projector = v
+        .compose(&selector)
+        .unwrap()
+        .compose(&v.inv().unwrap())
+        .unwrap();
+    assert_eq!(
+        projector.data(),
+        &[
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(1.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+            Complex64::new(0.0, 0.0),
+        ]
+    );
+}
+
+#[test]
+fn checked_generic_eig_trunc_reports_discarded_spectrum_norm_only() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 3)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
+            [-3.0, 2.0, 1.0][index[0]] * f64::from(index[0] == index[1])
+        })
+        .unwrap();
+    let truncated = source.eig_trunc(&Truncation::rank(5)).unwrap();
+    assert!(std::ptr::eq(truncated.d.provider(), provider.as_ref()));
+    assert!(std::ptr::eq(truncated.v.provider(), provider.as_ref()));
+    assert_eq!(truncated.eigenvalues[0].sector, Label::X);
+    assert_eq!(
+        truncated.eigenvalues[0].values,
+        vec![Complex64::new(-3.0, 0.0), Complex64::new(2.0, 0.0)]
+    );
+    assert!((truncated.error - (1.0 + 2.0_f64.sqrt()).sqrt()).abs() < 1.0e-12);
+}
+
+#[test]
+fn checked_generic_eig_rejects_jordan_and_nonfinite_inputs() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let jordan: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
+            [[1.0, 1.0], [0.0, 1.0]][index[0]][index[1]]
+        })
+        .unwrap();
+    let error = jordan.eig_full().unwrap_err();
+    assert!(format!("{error:?}")
+        .contains("eig requires a numerically diagonalizable coupled-sector matrix"));
+
+    let nonfinite: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
+            if index == [0, 0] {
+                f64::NAN
+            } else {
+                0.0
+            }
+        })
+        .unwrap();
+    let error = nonfinite.eig_full().unwrap_err();
+    assert!(format!("{error:?}").contains("eig input components must be finite"));
+}
+
+#[test]
+fn checked_generic_eig_lazy_calls_leave_the_source_view_lazy() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, index| {
+            [[1.0, -3.0], [1.0, 1.0]][index[0]][index[1]]
+        })
+        .unwrap();
+    let lazy = source.adjoint().unwrap();
+    assert!(lazy.network_reuse_class(false) == tenet::typed::NetworkReuseClass::LazyAdjoint);
+    assert!(lazy.eig_full().is_ok());
+    assert!(lazy.eig_trunc(&Truncation::rank(1)).is_ok());
+    assert!(lazy.network_reuse_class(false) == tenet::typed::NetworkReuseClass::LazyAdjoint);
 }
 
 #[test]

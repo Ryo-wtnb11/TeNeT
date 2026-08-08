@@ -9741,6 +9741,253 @@ where
     })
 }
 
+fn eig_not_numerically_diagonalizable() -> OperationError {
+    OperationError::InvalidArgument {
+        message: "eig requires a numerically diagonalizable coupled-sector matrix",
+    }
+}
+
+pub(crate) fn validate_eigenvector_singular_values(
+    singular_values: &[f64],
+    n: usize,
+    epsilon: f64,
+) -> Result<(), OperationError> {
+    if singular_values.len() != n || singular_values.iter().any(|value| !value.is_finite()) {
+        return Err(eig_not_numerically_diagonalizable());
+    }
+    let sigma_max = singular_values.first().copied().unwrap_or(0.0);
+    let tolerance = n as f64 * epsilon * sigma_max;
+    if singular_values.iter().all(|&sigma| sigma > tolerance) {
+        Ok(())
+    } else {
+        Err(eig_not_numerically_diagonalizable())
+    }
+}
+
+/// Checked-Generic full general eigendecomposition. All input components and
+/// dense results are validated before the exact source provider is asked to
+/// admit either output factor.
+#[doc(hidden)]
+pub fn eig_full_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<EigFullDyn<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let provider = input.space().provider_arc();
+    let space = input.space().space();
+    if space.homspace().codomain() != space.homspace().domain() {
+        return Err(CheckedGenericFactorPlanError::Operation(
+            OperationError::UnsupportedTensorContractScope {
+                message: "eig requires an endomorphism (codomain == domain)",
+            },
+        ));
+    }
+    let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    validate_endomorphism_tree_stacking(&matrices).map_err(CheckedGenericFactorPlanError::from)?;
+    if matrices
+        .iter()
+        .flat_map(|matrix| &matrix.data)
+        .any(|&value| {
+            let value = value.widen_complex();
+            !value.re.is_finite() || !value.im.is_finite()
+        })
+    {
+        return Err(CheckedGenericFactorPlanError::Operation(
+            OperationError::InvalidArgument {
+                message: "eig input components must be finite",
+            },
+        ));
+    }
+
+    let mut pairs: Vec<FactorPair<D::Eig>> = Vec::with_capacity(matrices.len());
+    let mut eigenvalues = Vec::with_capacity(matrices.len());
+    for matrix in &matrices {
+        let n = matrix.rows;
+        let shape = [n, n];
+        let strides = [1usize, n];
+        let view = DenseView::new(&matrix.data, &shape, &strides, 0).map_err(|error| {
+            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
+        })?;
+        let outputs = dense.eig(D::dense_read(view)).map_err(|error| {
+            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
+        })?;
+        if outputs.len() != 2 {
+            return Err(CheckedGenericFactorPlanError::Operation(
+                OperationError::UnsupportedTensorContractScope {
+                    message: "dense eig must return exactly (values, vectors)",
+                },
+            ));
+        }
+        validate_dense_shape(outputs[0].shape(), &[n])
+            .map_err(CheckedGenericFactorPlanError::from)?;
+        validate_dense_shape(outputs[1].shape(), &[n, n])
+            .map_err(CheckedGenericFactorPlanError::from)?;
+        let values = <D::Eig as FactorScalar>::dense_slice(&outputs[0]).map_err(|error| {
+            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
+        })?;
+        let vectors = <D::Eig as FactorScalar>::dense_slice(&outputs[1]).map_err(|error| {
+            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
+        })?;
+        let complex_values = values
+            .iter()
+            .map(|&value| value.widen_complex())
+            .collect::<Vec<_>>();
+        validate_complex_eigenvalues(&complex_values)
+            .map_err(CheckedGenericFactorPlanError::from)?;
+        if vectors.iter().any(|&value| {
+            let value = value.widen_complex();
+            !value.re.is_finite() || !value.im.is_finite()
+        }) {
+            return Err(CheckedGenericFactorPlanError::Operation(
+                eig_not_numerically_diagonalizable(),
+            ));
+        }
+
+        let vector_view = DenseView::new(vectors, &shape, &strides, 0).map_err(|error| {
+            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
+        })?;
+        let singular_values = dense
+            .svd_vals(<D::Eig as DenseBlockScalar>::dense_read(vector_view))
+            .map_err(|error| {
+                CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
+            })?;
+        validate_dense_shape(singular_values.shape(), &[n])
+            .map_err(CheckedGenericFactorPlanError::from)?;
+        let singular_values =
+            <D::Eig as FactorScalar>::real_spectrum(&singular_values).map_err(|error| {
+                CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
+            })?;
+        validate_eigenvector_singular_values(
+            &singular_values,
+            n,
+            <D::Eig as FactorScalar>::epsilon(),
+        )
+        .map_err(CheckedGenericFactorPlanError::from)?;
+
+        let mut order = (0..n).collect::<Vec<_>>();
+        order.sort_by(|&a, &b| {
+            complex_values[b]
+                .norm()
+                .total_cmp(&complex_values[a].norm())
+                .then(a.cmp(&b))
+        });
+        let sorted_values = order.iter().map(|&index| complex_values[index]).collect();
+        let mut sorted_vectors = vec![D::Eig::zero(); n * n];
+        for (position, &index) in order.iter().enumerate() {
+            sorted_vectors[position * n..(position + 1) * n]
+                .copy_from_slice(&vectors[index * n..(index + 1) * n]);
+        }
+        eigenvector_gauge(&mut sorted_vectors, n, n, n);
+        eigenvalues.push(SectorSpectrum {
+            sector: matrix.sector,
+            values: sorted_values,
+        });
+        pairs.push(FactorPair {
+            sector: matrix.sector,
+            kept: n,
+            left: sorted_vectors,
+            left_rows: n,
+            right: Vec::new(),
+            right_leading: 0,
+        });
+    }
+
+    let complex_matrices = matrices
+        .iter()
+        .map(|matrix| SectorMatricization {
+            sector: matrix.sector,
+            rows: matrix.rows,
+            cols: matrix.cols,
+            row_trees: matrix.row_trees.clone(),
+            col_trees: matrix.col_trees.clone(),
+            data: Vec::<D::Eig>::new(),
+        })
+        .collect::<Vec<_>>();
+    let dimensions = matrices
+        .iter()
+        .map(|matrix| (matrix.sector, matrix.rows))
+        .collect::<BTreeMap<_, _>>();
+    let v = build_bound_factor_generic_checked(
+        provider,
+        space.homspace(),
+        &complex_matrices,
+        &pairs,
+        &dimensions,
+        FactorSide::Left,
+    )?;
+    Ok(EigFullDyn { v, eigenvalues })
+}
+
+/// Checked-Generic general eigendecomposition with shared global truncation.
+#[doc(hidden)]
+pub fn eig_trunc_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    truncation: &Truncation,
+) -> Result<EigTruncDyn<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let full = eig_full_dyn_checked_generic(dense, input)?;
+    if matches!(truncation, Truncation::Full) {
+        return Ok(EigTruncDyn {
+            v: full.v,
+            eigenvalues: full.eigenvalues,
+            error: 0.0,
+        });
+    }
+    let decision = decide_bond_truncation_generic_checked(
+        full.v.space().provider(),
+        &full.eigenvalues,
+        truncation,
+    )?;
+    if full
+        .eigenvalues
+        .iter()
+        .zip(&decision.kept)
+        .all(|(entry, &count)| entry.values.len() == count)
+    {
+        return Ok(EigTruncDyn {
+            v: full.v,
+            eigenvalues: full.eigenvalues,
+            error: 0.0,
+        });
+    }
+    let mut eigenvalues = full.eigenvalues;
+    for (entry, &count) in eigenvalues.iter_mut().zip(&decision.kept) {
+        entry.values.truncate(count);
+    }
+    eigenvalues.retain(|entry| !entry.values.is_empty());
+    let kept = eigenvalues
+        .iter()
+        .map(|entry| (entry.sector, entry.values.len()))
+        .collect::<HashMap<_, _>>();
+    let kept_of = |sector| kept.get(&sector).copied().unwrap_or(0);
+    let bond_axis = full.v.space().space().nout();
+    let provider = Arc::clone(full.v.space().provider_arc());
+    let v = sliced_bond_tensor_generic_checked(
+        provider,
+        full.v.space().space(),
+        full.v.data(),
+        bond_axis,
+        &kept_of,
+        bond_axis,
+        1,
+    )?;
+    Ok(EigTruncDyn {
+        v,
+        eigenvalues,
+        error: decision.error,
+    })
+}
+
 /// Checked-Generic Hermitian eigenvalues only. No eigenvector or factor-space
 /// publication occurs.
 #[doc(hidden)]
