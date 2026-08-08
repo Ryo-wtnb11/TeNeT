@@ -986,13 +986,8 @@ where
         #[cfg(feature = "opt-path")]
         Optimizer::DynamicProgramming => {
             use crate::pathopt::{OptEinsumPathOptimizer, PathStrategy};
-            match network.plan(
-                tensors,
-                &OptEinsumPathOptimizer::new(PathStrategy::DynamicProgramming),
-            ) {
-                Ok(plan) => Ok(plan),
-                Err(_) => network.plan(tensors, &GreedyDenseOptimizer),
-            }
+            let dynamic = OptEinsumPathOptimizer::new(PathStrategy::DynamicProgramming);
+            network.plan_with_optimizer_fallbacks(tensors, &dynamic, &[&GreedyDenseOptimizer])
         }
         // Legacy `default_dense_plan` fallback chain: auto-hq -> auto -> dp
         // -> greedy. Upstream `opt-einsum-path` errors on some all-dim-1
@@ -1000,19 +995,14 @@ where
         #[cfg(feature = "opt-path")]
         Optimizer::AutoHq => {
             use crate::pathopt::{OptEinsumPathOptimizer, PathStrategy};
-            let mut last_error = None;
-            for strategy in [
-                PathStrategy::AutoHq,
-                PathStrategy::Auto,
-                PathStrategy::DynamicProgramming,
-            ] {
-                match network.plan(tensors, &OptEinsumPathOptimizer::new(strategy)) {
-                    Ok(plan) => return Ok(plan),
-                    Err(err) => last_error = Some(err),
-                }
-            }
-            let _ = last_error;
-            network.plan(tensors, &GreedyDenseOptimizer)
+            let auto_hq = OptEinsumPathOptimizer::new(PathStrategy::AutoHq);
+            let auto = OptEinsumPathOptimizer::new(PathStrategy::Auto);
+            let dynamic = OptEinsumPathOptimizer::new(PathStrategy::DynamicProgramming);
+            network.plan_with_optimizer_fallbacks(
+                tensors,
+                &auto_hq,
+                &[&auto, &dynamic, &GreedyDenseOptimizer],
+            )
         }
         #[cfg(feature = "cotengra-python")]
         Optimizer::CotengraPython(config) => network.plan(

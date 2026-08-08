@@ -7,11 +7,13 @@ use std::sync::Arc;
 
 use tenet::core::{
     BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericFusion,
-    CheckedGenericRigidSymbols, FusionStyleKind, GenericFArray, GenericRMatrix, RuleIdentity,
-    SectorId, SectorVec, TypedSectorAdmission,
+    CheckedGenericRigidSymbols, CheckedGenericStructureError, FusionStyleKind, GenericFArray,
+    GenericRMatrix, RuleIdentity, SectorId, SectorVec, TypedSectorAdmission,
 };
 use tenet::prelude::{Complex64, Error, Runtime, TensorScalar};
 use tenet::typed::{BlockFusionTrees, GenericTensorError, GradedSpace, SUNFusionRule, TensorMap};
+#[cfg(feature = "opt-path")]
+use tenet_network::Optimizer;
 use tenet_network::{
     configure_plan_cache, plan_cache_stats, tensor, GreedyDenseOptimizer, LabelOrderDenseOptimizer,
     Network, NetworkExecutionWorkspace, PlanCacheConfig, PlannedNetwork, TemporaryLabel, TensorId,
@@ -286,6 +288,7 @@ struct InjectedGeneric {
     inner: SUNFusionRule,
     fail_encode: AtomicBool,
     fail_dual: AtomicBool,
+    dual_calls: AtomicUsize,
     fail_symbol_at: AtomicUsize,
     symbol_calls: AtomicUsize,
 }
@@ -296,6 +299,7 @@ impl InjectedGeneric {
             inner: SUNFusionRule::new(3).unwrap(),
             fail_encode: AtomicBool::new(false),
             fail_dual: AtomicBool::new(false),
+            dual_calls: AtomicUsize::new(0),
             fail_symbol_at: AtomicUsize::new(0),
             symbol_calls: AtomicUsize::new(0),
         }
@@ -341,6 +345,7 @@ impl CheckedGenericFusion for InjectedGeneric {
     }
 
     fn try_dual(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
+        self.dual_calls.fetch_add(1, Ordering::SeqCst);
         if self.fail_dual.load(Ordering::SeqCst) {
             Err(InjectedError::Dual)
         } else {
@@ -377,6 +382,80 @@ impl CheckedGenericFusion for InjectedGeneric {
         self.symbol()?;
         CheckedGenericFusion::try_nsymbol(&self.inner, left, right, coupled)
             .map_err(|_| InjectedError::Provider)
+    }
+}
+
+#[cfg(feature = "opt-path")]
+#[derive(Clone, Copy)]
+enum PlanningFailure {
+    Dual,
+    Dimension,
+}
+
+#[cfg(feature = "opt-path")]
+fn assert_optimizer_does_not_retry_provider_failure(
+    optimizer: Optimizer,
+    failure: PlanningFailure,
+) {
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .plan_cache(PlanCacheConfig {
+            optimizer,
+            ..PlanCacheConfig::default()
+        })
+        .build()
+        .unwrap();
+    let provider = Arc::new(InjectedGeneric::new());
+    let tensors = injected_chain(&runtime, &provider);
+    provider.dual_calls.store(0, Ordering::SeqCst);
+    match failure {
+        PlanningFailure::Dual => provider.fail_dual.store(true, Ordering::SeqCst),
+        PlanningFailure::Dimension => provider.arm_symbol(1),
+    }
+    let first = &tensors[0];
+    let second = &tensors[1];
+    let third = &tensors[2];
+    let fourth = &tensors[3];
+    let error = tensor!(
+        [a, b; f] = first[a, b; c]
+            * second[c; d]
+            * third[d; e]
+            * fourth[e; f]
+    )
+    .unwrap_err();
+    match failure {
+        PlanningFailure::Dual => {
+            assert!(matches!(
+                error,
+                GenericTensorError::Structure(CheckedGenericStructureError::Provider(
+                    InjectedError::Dual
+                ))
+            ));
+            assert_eq!(provider.dual_calls.load(Ordering::SeqCst), 1);
+        }
+        PlanningFailure::Dimension => {
+            assert!(matches!(
+                error,
+                GenericTensorError::Structure(CheckedGenericStructureError::Provider(
+                    InjectedError::Symbol
+                ))
+            ));
+            assert_eq!(provider.symbol_calls.load(Ordering::SeqCst), 1);
+        }
+    }
+    let stats = plan_cache_stats(&runtime);
+    assert_eq!(stats.entries, 0);
+    assert_eq!(stats.topology_materializations, 0);
+    assert_eq!(stats.workspaces_created, 0);
+}
+
+#[cfg(feature = "opt-path")]
+#[test]
+fn checked_generic_optimizer_fallback_never_retries_provider_failures() {
+    for optimizer in [Optimizer::DynamicProgramming, Optimizer::AutoHq] {
+        for failure in [PlanningFailure::Dual, PlanningFailure::Dimension] {
+            assert_optimizer_does_not_retry_provider_failure(optimizer.clone(), failure);
+        }
     }
 }
 

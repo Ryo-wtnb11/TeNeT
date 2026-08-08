@@ -227,6 +227,36 @@ impl Network {
         self.finish_typed_plan(tensors, ir, plan)
     }
 
+    #[cfg(feature = "opt-path")]
+    pub(crate) fn plan_with_optimizer_fallbacks<R, D, S>(
+        &self,
+        tensors: &[&TensorMap<R, D, S>],
+        optimizer: &dyn DenseContractionOptimizer,
+        fallbacks: &[&dyn DenseContractionOptimizer],
+    ) -> Result<PlannedNetwork, HostNetworkError<R>>
+    where
+        R: TypedSectorAdmission,
+        R::Mode: HostNetworkModeDispatch<R, D>,
+        D: TensorScalar,
+        S: TensorStorage<D>,
+    {
+        let (ir, infos) = self.lower_typed(tensors)?;
+        let plan = if ir.tensors().len() == 1 {
+            ContractionPlan::new(1, self.output.clone(), Vec::new()).map_err(invalid)?
+        } else {
+            let cost = DenseCostModel::from_network(&ir, &infos).map_err(invalid)?;
+            let mut result = ContractionPlan::from_dense_optimizer(&ir, optimizer, &cost);
+            for optimizer in fallbacks {
+                if result.is_ok() {
+                    break;
+                }
+                result = ContractionPlan::from_dense_optimizer(&ir, *optimizer, &cost);
+            }
+            result.map_err(invalid)?
+        };
+        self.finish_typed_plan(tensors, ir, plan)
+    }
+
     /// Wraps an already searched structural order for typed execution.
     pub fn plan_with<R, D, S>(
         &self,
