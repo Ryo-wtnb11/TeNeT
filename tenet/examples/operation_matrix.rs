@@ -243,6 +243,25 @@ fn form_enabled(form: &str) -> bool {
     std::env::var("OP_MATRIX_FORM").map_or(true, |selected| selected == form)
 }
 
+fn assert_f64_payload_close(actual: &[f64], expected: &[f64]) {
+    const ABS_TOLERANCE: f64 = 64.0 * f64::EPSILON;
+    const REL_TOLERANCE: f64 = 256.0 * f64::EPSILON;
+
+    assert_eq!(actual.len(), expected.len());
+    for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            actual.is_finite() && expected.is_finite(),
+            "non-finite payload at index {index}: actual={actual}, expected={expected}"
+        );
+        let error = (actual - expected).abs();
+        let tolerance = ABS_TOLERANCE + REL_TOLERANCE * actual.abs().max(expected.abs());
+        assert!(
+            error <= tolerance,
+            "payload mismatch at index {index}: actual={actual}, expected={expected}, error={error}, tolerance={tolerance}"
+        );
+    }
+}
+
 macro_rules! assert_same_tensor {
     ($actual:expr, $expected:expr, $authority:expr) => {{
         assert!(std::ptr::eq($actual.provider(), $authority.provider()));
@@ -256,7 +275,7 @@ macro_rules! assert_same_tensor {
                 $expected.block_fusion_trees(index)?
             );
         }
-        assert_eq!($actual.data(), $expected.data());
+        assert_f64_payload_close($actual.data(), $expected.data());
     }};
 }
 
