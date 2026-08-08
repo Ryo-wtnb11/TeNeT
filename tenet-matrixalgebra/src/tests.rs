@@ -15,7 +15,8 @@ use tenet_tensors::{
 
 use crate::factorize::{
     dyn_space_of, map_square_sectors_dyn_into, truncate_svd, typed_from_bound_factor,
-    typed_from_dyn, validate_inverse_region_routes_for_test, BoundTensorMap,
+    typed_from_dyn, validate_eigenvector_singular_values, validate_inverse_region_routes_for_test,
+    BoundTensorMap,
 };
 use crate::*;
 use num_complex::{Complex32, Complex64};
@@ -1373,7 +1374,9 @@ struct LateGenericSpy {
 struct CountingDense {
     inner: tenet_dense::DefaultDenseExecutor,
     svd_calls: usize,
+    svd_vals_calls: usize,
     qr_calls: usize,
+    eig_calls: usize,
     eigh_calls: usize,
 }
 
@@ -1382,7 +1385,9 @@ impl Default for CountingDense {
         Self {
             inner: tenet_dense::DefaultDenseExecutor::new(),
             svd_calls: 0,
+            svd_vals_calls: 0,
             qr_calls: 0,
+            eig_calls: 0,
             eigh_calls: 0,
         }
     }
@@ -1394,6 +1399,11 @@ impl DenseExecutor for CountingDense {
         self.inner.svd(input)
     }
 
+    fn svd_vals(&mut self, input: DenseRead<'_>) -> Result<DenseTensor, DenseError> {
+        self.svd_vals_calls += 1;
+        self.inner.svd_vals(input)
+    }
+
     fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         self.qr_calls += 1;
         self.inner.qr(input)
@@ -1401,6 +1411,11 @@ impl DenseExecutor for CountingDense {
 
     fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         self.inner.eigh(input)
+    }
+
+    fn eig(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.eig_calls += 1;
+        self.inner.eig(input)
     }
 
     fn eigh_into(
@@ -1692,6 +1707,46 @@ fn checked_generic_eigh_stages_dense_work_before_checked_factor_admission() {
         .iter()
         .flat_map(|entry| &entry.values)
         .all(|value| *value == 0.0));
+}
+
+#[test]
+fn checked_generic_eig_uses_the_existing_numerical_rank_boundary() {
+    let epsilon = f64::EPSILON;
+    assert!(validate_eigenvector_singular_values(&[1.0, 2.0 * epsilon], 2, epsilon).is_err());
+    assert!(validate_eigenvector_singular_values(&[1.0, 2.0 * epsilon * 1.01], 2, epsilon).is_ok());
+    assert!(validate_eigenvector_singular_values(&[1.0, f64::NAN], 2, epsilon).is_err());
+}
+
+#[test]
+fn checked_generic_eig_stages_dense_work_before_checked_factor_admission() {
+    let x = SectorId::new(1);
+    let leg = SectorLeg::new([(x, 1)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone(), leg.clone()]),
+        FusionProductSpace::new([leg.clone(), leg]),
+    );
+    let source = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(FactorGenericRule),
+        homspace,
+    )
+    .unwrap();
+    let data = vec![0.0; source.space().required_len().unwrap()];
+    let failing = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: 1,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), failing).unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = CountingDense::default();
+    assert!(matches!(
+        eig_full_dyn_checked_generic(&mut dense, &input),
+        Err(CheckedGenericFactorPlanError::Provider(LateGenericError(1)))
+    ));
+    assert_eq!(dense.eig_calls, 2);
+    assert_eq!(dense.svd_vals_calls, 2);
+    assert_eq!(input.data(), data);
 }
 
 #[test]
