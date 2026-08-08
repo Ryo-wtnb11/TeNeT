@@ -20,6 +20,17 @@ cover both direct tensors and pre-built lazy adjoints.
 The contraction rows distinguish canonical input order, contracted-input
 swap, and contracted-input plus output swap. An owned `compose` row checks
 that its result equals the canonical contraction before reporting it.
+With the default `racah-generated` feature it also runs exact checked-Generic
+SU3 `[1,1]` and SU4 `[1,0,1]` fixtures for public owned transforms, reductions,
+compose, and contract. Transform/compose/contract checks are public-call
+self-consistency checks comparing provider authority, spaces, block layout,
+full fusion-tree keys, and payload; scale/add also check elementary payload
+laws, while norm/inner check scalar identities. On this base those fixtures
+print an explicit trace exclusion because this exact `SUNFusionRule` lacks the
+`SectorCodec` bound required by checked trace dispatch, and a destination
+exclusion because it lacks the required multiplicity-free dispatch bounds.
+The checked-Generic API exists; these operations are neither emulated nor
+replaced for the exact SUN fixtures.
 Runtime tree-transform counters are reported as cold and warm deltas. The same
 snapshots report process-global fusion-layout and complete-HomSpace cache
 deltas, with charged bytes before and after each phase. The fusion-layout cache
@@ -52,6 +63,10 @@ profiler can inspect the live process; it is outside every reported timer.
 `OP_MATRIX_CACHE=disabled` constructs each Runtime with a zero tree-transform
 byte budget, disabling completed tree-transform admission for a cache-disabled
 control. The default is `enabled`.
+The executable emits raw per-process samples. `operation_matrix.sh` launches
+three fresh processes, preserves every raw row as a `# raw_sample` record, and
+then appends the complete median-time row for each CSV key; its warm value is
+the mean within that selected child batch, not a cross-child mean.
 
 ```sh
 OP_MATRIX_OPERATION=contract_input_swap \

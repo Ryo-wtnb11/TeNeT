@@ -55,9 +55,9 @@ struct Allocations {
     requested_bytes: usize,
 }
 
-fn measure_allocations<T>(
-    operation: impl FnOnce() -> Result<T, Error>,
-) -> Result<(T, Allocations), Error> {
+fn measure_allocations<T, E>(
+    operation: impl FnOnce() -> Result<T, E>,
+) -> Result<(T, Allocations), E> {
     ALLOCATION_CALLS.set(0);
     REQUESTED_BYTES.set(0);
     COUNTING.set(true);
@@ -155,7 +155,7 @@ fn print_sample(
     );
 }
 
-fn bench<T>(
+fn bench<T, E>(
     runtime: &Runtime,
     symmetry: &str,
     operation: &str,
@@ -163,8 +163,8 @@ fn bench<T>(
     first_phase: &str,
     repeated_phase: &str,
     min_time: Duration,
-    mut operation_fn: impl FnMut() -> Result<T, Error>,
-) -> Result<T, Error> {
+    mut operation_fn: impl FnMut() -> Result<T, E>,
+) -> Result<T, E> {
     let cold_before = counters(runtime);
     let cold_start = Instant::now();
     let (cold_output, cold_allocations) = measure_allocations(&mut operation_fn)?;
@@ -243,6 +243,42 @@ fn form_enabled(form: &str) -> bool {
     std::env::var("OP_MATRIX_FORM").map_or(true, |selected| selected == form)
 }
 
+fn assert_f64_payload_close(actual: &[f64], expected: &[f64]) {
+    const ABS_TOLERANCE: f64 = 64.0 * f64::EPSILON;
+    const REL_TOLERANCE: f64 = 256.0 * f64::EPSILON;
+
+    assert_eq!(actual.len(), expected.len());
+    for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            actual.is_finite() && expected.is_finite(),
+            "non-finite payload at index {index}: actual={actual}, expected={expected}"
+        );
+        let error = (actual - expected).abs();
+        let tolerance = ABS_TOLERANCE + REL_TOLERANCE * actual.abs().max(expected.abs());
+        assert!(
+            error <= tolerance,
+            "payload mismatch at index {index}: actual={actual}, expected={expected}, error={error}, tolerance={tolerance}"
+        );
+    }
+}
+
+macro_rules! assert_same_tensor {
+    ($actual:expr, $expected:expr, $authority:expr) => {{
+        assert!(std::ptr::eq($actual.provider(), $authority.provider()));
+        assert_eq!($actual.codomain(), $expected.codomain());
+        assert_eq!($actual.domain(), $expected.domain());
+        assert_eq!($actual.block_count(), $expected.block_count());
+        for index in 0..$actual.block_count() {
+            assert_eq!($actual.block(index)?, $expected.block(index)?);
+            assert_eq!(
+                $actual.block_fusion_trees(index)?,
+                $expected.block_fusion_trees(index)?
+            );
+        }
+        assert_f64_payload_close($actual.data(), $expected.data());
+    }};
+}
+
 macro_rules! run_provider {
     ($symmetry:literal, $rule:ty, $space:expr, $min_time:expr) => {{
         let space = $space;
@@ -278,6 +314,13 @@ macro_rules! run_provider {
                         },
                     )?;
                     assert!(cold.norm()?.is_finite());
+                    let expected = match operation {
+                        "permute" => source.permute(&[1], &[2, 0])?,
+                        "transpose" => source.transpose()?,
+                        "repartition" => source.repartition(1)?,
+                        _ => unreachable!("fixed tree-operation table"),
+                    };
+                    assert_same_tensor!(cold, expected, source);
                 } else {
                     let expected = match operation {
                         "permute" => source.permute(&[1], &[2, 0])?,
@@ -305,7 +348,7 @@ macro_rules! run_provider {
                             _ => unreachable!("fixed tree-operation table"),
                         },
                     )?;
-                    assert_eq!(destination.data(), expected.data());
+                    assert_same_tensor!(destination, expected, source);
                 }
             }
         }
@@ -337,6 +380,8 @@ macro_rules! run_provider {
                 || logical_source.trace_pairs(&[(1, 2)]),
             )?;
             assert!(traced.norm()?.is_finite());
+            let expected = logical_source.trace_pairs(&[(1, 2)])?;
+            assert_same_tensor!(traced, expected, logical_source);
         }
 
         let runtime = benchmark_runtime()?;
@@ -365,7 +410,7 @@ macro_rules! run_provider {
                     "cold",
                     "warm",
                     $min_time,
-                    || Ok(left.scale(0.5)),
+                    || Ok::<_, Error>(left.scale(0.5)),
                 )?;
                 let error = (scaled.norm()? - 0.5 * left.norm()?).abs();
                 assert!(error <= 256.0 * f64::EPSILON * left.norm()?.max(1.0));
@@ -448,7 +493,7 @@ macro_rules! run_provider {
                 || lhs.compose(&rhs),
             )?;
             let contracted = lhs.contract(&rhs, &[2, 3], &[0, 1], &[0, 1, 2, 3])?;
-            assert_eq!(composed.data(), contracted.data());
+            assert_same_tensor!(composed, contracted, lhs);
         }
 
         for (operation, lhs_axes, rhs_axes, output_axes) in [
@@ -503,6 +548,8 @@ macro_rules! run_provider {
                         || lhs.contract(&rhs, lhs_axes, rhs_axes, output_axes),
                     )?;
                     assert!(cold.norm()?.is_finite());
+                    let expected = lhs.contract(&rhs, lhs_axes, rhs_axes, output_axes)?;
+                    assert_same_tensor!(cold, expected, lhs);
                 } else {
                     let expected = lhs.contract(&rhs, lhs_axes, rhs_axes, output_axes)?;
                     let mut destination = expected.zeros_like();
@@ -525,14 +572,208 @@ macro_rules! run_provider {
                             )
                         },
                     )?;
-                    assert_eq!(destination.data(), expected.data());
+                    assert_same_tensor!(destination, expected, lhs);
                 }
             }
         }
     }};
 }
 
-fn main() -> Result<(), Error> {
+#[cfg(feature = "racah-generated")]
+fn run_checked_sun(
+    symmetry: &str,
+    provider: std::sync::Arc<tenet::typed::SUNFusionRule>,
+    label: Vec<i64>,
+    degeneracy: usize,
+    min_time: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tenet::typed::SUNFusionRule;
+
+    let space = GradedSpace::try_new(provider, [(label, degeneracy)], false)?;
+    if form_enabled("destination") {
+        println!("# {symmetry}: destination rows excluded: the public destination methods retain multiplicity-free dispatch bounds, so the exact SUN fixtures cannot call them");
+    }
+    for operation in ["permute", "transpose", "repartition"] {
+        if !operation_enabled(operation) || !form_enabled("owned") {
+            continue;
+        }
+        let runtime = benchmark_runtime()?;
+        let source = TensorMap::<SUNFusionRule, f64>::rand_with_seed(
+            &runtime,
+            [&space, &space],
+            [&space],
+            724,
+        )?;
+        let cold = bench(
+            &runtime,
+            symmetry,
+            operation,
+            "owned",
+            "cold",
+            "warm",
+            min_time,
+            || match operation {
+                "permute" => source.permute(&[1], &[2, 0]),
+                "transpose" => source.transpose(),
+                "repartition" => source.repartition(1),
+                _ => unreachable!("fixed tree-operation table"),
+            },
+        )?;
+        let expected = match operation {
+            "permute" => source.permute(&[1], &[2, 0])?,
+            "transpose" => source.transpose()?,
+            "repartition" => source.repartition(1)?,
+            _ => unreachable!("fixed tree-operation table"),
+        };
+        assert_same_tensor!(cold, expected, source);
+    }
+
+    if operation_enabled("trace") || operation_enabled("trace_adjoint") {
+        println!("# {symmetry}: trace rows excluded: checked-Generic trace dispatch exists, but SUNFusionRule lacks the required SectorCodec");
+    }
+
+    let runtime = benchmark_runtime()?;
+    let lhs = TensorMap::<SUNFusionRule, f64>::rand_with_seed(
+        &runtime,
+        [&space, &space],
+        [&space, &space],
+        725,
+    )?;
+    let rhs = TensorMap::<SUNFusionRule, f64>::rand_with_seed(
+        &runtime,
+        [&space, &space],
+        [&space, &space],
+        726,
+    )?;
+    for (operation, action) in [
+        ("scale", 0),
+        ("add", 1),
+        ("norm", 2),
+        ("inner", 3),
+        ("compose", 4),
+        ("contract_identity", 5),
+        ("contract_input_swap", 6),
+        ("contract_input_output_swap", 7),
+    ] {
+        if !operation_enabled(operation) || !form_enabled("owned") {
+            continue;
+        }
+        match action {
+            0 => {
+                let scaled = bench(
+                    &runtime,
+                    symmetry,
+                    operation,
+                    "owned",
+                    "cold",
+                    "warm",
+                    min_time,
+                    || {
+                        Ok::<_, tenet::typed::GenericTensorError<tenet::typed::SUNFusionRuleError>>(
+                            lhs.scale(0.5),
+                        )
+                    },
+                )?;
+                for (&actual, &input) in scaled.data().iter().zip(lhs.data()) {
+                    assert_eq!(actual, 0.5 * input);
+                }
+                assert_same_tensor!(scaled, lhs.scale(0.5), lhs);
+            }
+            1 => {
+                let added = bench(
+                    &runtime,
+                    symmetry,
+                    operation,
+                    "owned",
+                    "cold",
+                    "warm",
+                    min_time,
+                    || lhs.add(&rhs, 0.75, -0.25),
+                )?;
+                for ((&actual, &left), &right) in
+                    added.data().iter().zip(lhs.data()).zip(rhs.data())
+                {
+                    assert_eq!(actual, 0.75 * left - 0.25 * right);
+                }
+                assert_same_tensor!(added, lhs.add(&rhs, 0.75, -0.25)?, lhs);
+            }
+            2 => {
+                let norm = bench(
+                    &runtime,
+                    symmetry,
+                    operation,
+                    "owned",
+                    "cold",
+                    "warm",
+                    min_time,
+                    || lhs.norm(),
+                )?;
+                let inner_self = lhs.inner(&lhs)?;
+                assert!(
+                    (norm * norm - inner_self).abs()
+                        <= 256.0 * f64::EPSILON * inner_self.abs().max(1.0)
+                );
+            }
+            3 => {
+                let inner = bench(
+                    &runtime,
+                    symmetry,
+                    operation,
+                    "owned",
+                    "cold",
+                    "warm",
+                    min_time,
+                    || lhs.inner(&rhs),
+                )?;
+                let reverse = rhs.inner(&lhs)?;
+                assert!((inner - reverse).abs() <= 256.0 * f64::EPSILON * inner.abs().max(1.0));
+            }
+            4 => {
+                let composed = bench(
+                    &runtime,
+                    symmetry,
+                    operation,
+                    "owned",
+                    "cold",
+                    "warm",
+                    min_time,
+                    || lhs.compose(&rhs),
+                )?;
+                assert_same_tensor!(
+                    composed,
+                    lhs.contract(&rhs, &[2, 3], &[0, 1], &[0, 1, 2, 3])?,
+                    lhs
+                );
+            }
+            _ => {
+                let (lhs_axes, output_axes) = match action {
+                    5 => (&[2, 3][..], &[0, 1, 2, 3][..]),
+                    6 => (&[3, 2][..], &[0, 1, 2, 3][..]),
+                    7 => (&[3, 2][..], &[1, 0, 2, 3][..]),
+                    _ => unreachable!(),
+                };
+                let output = bench(
+                    &runtime,
+                    symmetry,
+                    operation,
+                    "owned",
+                    "cold",
+                    "warm",
+                    min_time,
+                    || lhs.contract(&rhs, lhs_axes, &[0, 1], output_axes),
+                )?;
+                assert_same_tensor!(
+                    output,
+                    lhs.contract(&rhs, lhs_axes, &[0, 1], output_axes)?,
+                    lhs
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(operation) = std::env::var("OP_MATRIX_OPERATION") {
         if !matches!(
             operation.as_str(),
@@ -554,16 +795,16 @@ fn main() -> Result<(), Error> {
                 | "contract_input_swap"
                 | "contract_input_output_swap"
         ) {
-            return Err(Error::InvalidArgument(format!(
+            return Err(Box::new(Error::InvalidArgument(format!(
                 "unknown OP_MATRIX_OPERATION `{operation}`"
-            )));
+            ))));
         }
     }
     if let Ok(form) = std::env::var("OP_MATRIX_FORM") {
         if !matches!(form.as_str(), "owned" | "destination") {
-            return Err(Error::InvalidArgument(format!(
+            return Err(Box::new(Error::InvalidArgument(format!(
                 "unknown OP_MATRIX_FORM `{form}`"
-            )));
+            ))));
         }
     }
     let min_ms = std::env::var("OP_MATRIX_MIN_MS")
@@ -638,6 +879,26 @@ fn main() -> Result<(), Error> {
         )?,
         min_time
     );
+    #[cfg(feature = "racah-generated")]
+    {
+        use std::sync::Arc;
+        use tenet::typed::SUNFusionRule;
+
+        run_checked_sun(
+            "SU3[1;1]",
+            Arc::new(SUNFusionRule::new(3)?),
+            vec![1, 1],
+            degeneracy,
+            min_time,
+        )?;
+        run_checked_sun(
+            "SU4[1;0;1]",
+            Arc::new(SUNFusionRule::new(4)?),
+            vec![1, 0, 1],
+            degeneracy,
+            min_time,
+        )?;
+    }
     Ok(())
 }
 
