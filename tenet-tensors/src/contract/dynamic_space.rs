@@ -4950,17 +4950,15 @@ mod checked_metadata_tests {
     }
 
     #[test]
-    fn admission_reports_exact_u1_min_dual_failure_without_publication() {
-        // What: a leg whose dual is unrepresentable is rejected when the space
-        // is admitted, with its exact cause and without publishing anything.
-        // Admitting it would only defer the same failure to whichever boundary
-        // crossing ran first.
+    fn admission_rejects_the_excluded_u1_id_without_publication() {
+        // What: a raw ID excluded by the label constructor is rejected before
+        // the space publishes anything.
         let _guard = CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::reset_global_operation_caches();
         tenet_core::reset_core_intern_tables();
-        let min = U1Irrep::new(i32::MIN).sector_id();
+        let min = SectorId::new(u32::MAX as usize);
         let homspace = FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([(min, 1)], false)]),
             FusionProductSpace::new([]),
@@ -4976,8 +4974,8 @@ mod checked_metadata_tests {
 
         assert_eq!(
             error,
-            OperationError::FusionAlgebra(Box::new(FusionAlgebraError::U1DualOverflow {
-                charge: i32::MIN,
+            OperationError::FusionAlgebra(Box::new(FusionAlgebraError::InvalidSector {
+                sector: min,
             }))
         );
         assert_eq!(scratch_publication_observations(), (0, 0, 0));
@@ -4985,9 +4983,9 @@ mod checked_metadata_tests {
 
     #[cfg(target_pointer_width = "64")]
     #[test]
-    fn admission_reports_exact_product_odd_min_failure_without_publication() {
-        // What: orienting an open fZ2-odd/U1-MIN RHS leg into the result domain
-        // returns the nested U1 dual failure before any result layout publication.
+    fn admission_rejects_a_product_containing_the_excluded_u1_id_without_publication() {
+        // What: a packed product containing the excluded U1 ID is rejected
+        // before any result layout publication.
         let _guard = CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -5002,19 +5000,14 @@ mod checked_metadata_tests {
             [Vec::<usize>::new()],
         )
         .unwrap();
-        let odd_min =
-            Fz2U1Codec::encode(Z2Irrep::ODD.sector_id(), U1Irrep::new(i32::MIN).sector_id());
+        let excluded_u1 = SectorId::new(u32::MAX as usize);
+        let odd_min = Fz2U1Codec::encode(Z2Irrep::ODD.sector_id(), excluded_u1);
         let rhs_homspace = FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([(odd_min, 1)], false)]),
             FusionProductSpace::new([]),
         );
         reset_scratch_publication_observations();
 
-        // The unrepresentable dual is rejected when the space is admitted, not
-        // when a later operation first needs it: a leg whose dual does not
-        // exist cannot carry adjoint, repartition, bend or transpose, so
-        // admitting it would only move the same failure to whichever operation
-        // ran first.
         let _ = &lhs;
         let error = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
             Arc::clone(&provider),
@@ -5025,8 +5018,8 @@ mod checked_metadata_tests {
 
         assert_eq!(
             error,
-            OperationError::FusionAlgebra(Box::new(FusionAlgebraError::U1DualOverflow {
-                charge: i32::MIN,
+            OperationError::FusionAlgebra(Box::new(FusionAlgebraError::InvalidSector {
+                sector: excluded_u1,
             }))
         );
         assert_eq!(scratch_publication_observations(), (0, 0, 0));

@@ -262,14 +262,16 @@ fn portable_contracts_are_implementable_without_tenet_core() {
 fn u1_irrep_checked_arithmetic_preserves_normal_and_overflow_results() {
     // What: portable U(1) component arithmetic has the exact checked algebra
     // results used by both public provider calls and core's lowered hot path.
-    assert_eq!(U1Irrep::new(7).checked_dual(), Ok(U1Irrep::new(-7)));
     assert_eq!(
         U1Irrep::new(7).checked_fuse(U1Irrep::new(-3)),
         Ok(U1Irrep::new(4))
     );
     assert_eq!(
-        U1Irrep::new(i32::MIN).checked_dual(),
-        Err(FusionAlgebraError::U1DualOverflow { charge: i32::MIN })
+        U1Irrep::new(i32::MIN + 1).checked_fuse(U1Irrep::new(-1)),
+        Err(FusionAlgebraError::U1FusionOverflow {
+            left: i32::MIN + 1,
+            right: -1,
+        })
     );
     assert_eq!(
         U1Irrep::new(i32::MAX).checked_fuse(U1Irrep::new(1)),

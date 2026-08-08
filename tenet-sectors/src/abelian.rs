@@ -518,8 +518,25 @@ pub struct U1Irrep {
 }
 
 impl U1Irrep {
+    /// Returns the U(1) label when its dual is representable by this encoding.
+    pub const fn try_new(charge: i32) -> Option<Self> {
+        if charge == i32::MIN {
+            None
+        } else {
+            Some(Self { charge })
+        }
+    }
+
+    /// Creates a U(1) label.
+    ///
+    /// # Panics
+    ///
+    /// Panics for `i32::MIN`, whose dual charge cannot be represented by `i32`.
     pub const fn new(charge: i32) -> Self {
-        Self { charge }
+        match Self::try_new(charge) {
+            Some(irrep) => irrep,
+            None => panic!("U(1) charge i32::MIN has no representable dual label"),
+        }
     }
 
     #[inline]
@@ -535,25 +552,17 @@ impl U1Irrep {
         u32::try_from(sector.id())
             .ok()
             .map(u1_charge_from_zigzag_u32)
-            .map(Self::new)
-    }
-
-    pub fn checked_dual(self) -> Result<Self, FusionAlgebraError> {
-        self.charge
-            .checked_neg()
-            .map(Self::new)
-            .ok_or(FusionAlgebraError::U1DualOverflow {
-                charge: self.charge,
-            })
+            .and_then(Self::try_new)
     }
 
     pub fn checked_fuse(self, other: Self) -> Result<Self, FusionAlgebraError> {
-        self.charge.checked_add(other.charge).map(Self::new).ok_or(
-            FusionAlgebraError::U1FusionOverflow {
+        self.charge
+            .checked_add(other.charge)
+            .and_then(Self::try_new)
+            .ok_or(FusionAlgebraError::U1FusionOverflow {
                 left: self.charge,
                 right: other.charge,
-            },
-        )
+            })
     }
 }
 
@@ -614,7 +623,8 @@ impl FusionRule for U1FusionRule {
 
 impl CheckedFusionAlgebra for U1FusionRule {
     fn try_dual_sector(&self, sector: SectorId) -> Result<SectorId, FusionAlgebraError> {
-        Ok(checked_u1_irrep(sector)?.checked_dual()?.into())
+        let irrep = checked_u1_irrep(sector)?;
+        Ok(U1Irrep::new(-irrep.charge()).into())
     }
 
     fn try_fusion_channels(
@@ -644,7 +654,14 @@ impl SectorCodec for U1FusionRule {
     type Sector = U1Irrep;
 
     fn encode_sector(&self, value: &Self::Sector) -> Result<SectorId, FusionAlgebraError> {
-        Ok(value.sector_id())
+        if Self::Sector::try_new(value.charge()).is_some() {
+            Ok(value.sector_id())
+        } else {
+            Err(FusionAlgebraError::UnrepresentableSectorLabel {
+                rule: self.rule_identity(),
+                label: value.charge().to_string(),
+            })
+        }
     }
 
     fn decode_sector(&self, id: SectorId) -> Result<Self::Sector, FusionAlgebraError> {
@@ -736,8 +753,8 @@ mod tests {
         U1Irrep, Z2FusionRule, Z2Irrep, ZNFusionRule,
     };
     use crate::{
-        CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionRule, MultiplicityFreeFusionSymbols,
-        SectorCodec, SectorId,
+        CanonicalUnitFusionRule, CheckedFusionAlgebra, FusionAlgebraError, FusionRule,
+        MultiplicityFreeFusionSymbols, SectorCodec, SectorId,
     };
 
     fn assert_canonical_unit<R>(rule: &R, sector: SectorId)
@@ -790,9 +807,8 @@ mod tests {
     }
 
     #[test]
-    fn u1_zigzag_roundtrips_native_and_simulated_32_bit_extremes() {
-        // What: every i32 charge has its historical u32 zigzag ID without
-        // target-width arithmetic.
+    fn u1_zigzag_encoding_is_unchanged_at_32_bit_extremes() {
+        // What: rejecting one label does not change the packed zigzag layout.
         for (charge, encoded) in [
             (i32::MIN, u32::MAX),
             (-1, 1),
@@ -802,10 +818,72 @@ mod tests {
         ] {
             assert_eq!(u1_charge_to_zigzag_u32(charge), encoded);
             assert_eq!(u1_charge_from_zigzag_u32(encoded), charge);
-            let sector = U1Irrep::new(charge).sector_id();
-            assert_eq!(sector.id(), encoded as usize);
-            assert_eq!(U1Irrep::from_sector_id(sector), Some(U1Irrep::new(charge)));
+            if let Some(irrep) = U1Irrep::try_new(charge) {
+                let sector = irrep.sector_id();
+                assert_eq!(sector.id(), encoded as usize);
+                assert_eq!(U1Irrep::from_sector_id(sector), Some(irrep));
+            }
         }
+    }
+
+    #[test]
+    fn u1_label_boundary_rejects_only_i32_min() {
+        // What: i32::MIN has no label, while both adjacent representable
+        // extremes encode, decode, and dualize normally.
+        let invalid = SectorId::new(u32::MAX as usize);
+        assert_eq!(U1Irrep::try_new(i32::MIN), None);
+        assert_eq!(U1Irrep::from_sector_id(invalid), None);
+        assert_eq!(
+            U1FusionRule.decode_sector(invalid),
+            Err(FusionAlgebraError::InvalidSector { sector: invalid })
+        );
+
+        for charge in [i32::MIN + 1, i32::MAX] {
+            let irrep = U1Irrep::new(charge);
+            assert_eq!(U1FusionRule.encode_sector(&irrep), Ok(irrep.sector_id()));
+            assert_eq!(U1Irrep::from_sector_id(irrep.sector_id()), Some(irrep));
+            assert_eq!(
+                U1FusionRule
+                    .try_dual_sector(irrep.sector_id())
+                    .and_then(|dual| U1FusionRule.try_dual_sector(dual)),
+                Ok(irrep.sector_id())
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "U(1) charge i32::MIN has no representable dual label")]
+    fn u1_new_rejects_i32_min() {
+        let _ = U1Irrep::new(i32::MIN);
+    }
+
+    #[test]
+    fn u1_codec_defensively_rejects_an_invalid_label() {
+        // What: the codec keeps its own trust-boundary check even though safe
+        // public constructors cannot create this value.
+        let invalid = U1Irrep { charge: i32::MIN };
+        assert_eq!(
+            U1FusionRule.encode_sector(&invalid),
+            Err(FusionAlgebraError::UnrepresentableSectorLabel {
+                rule: U1FusionRule.rule_identity(),
+                label: i32::MIN.to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn u1_fusion_rejects_the_unlabelled_boundary_without_panicking() {
+        // What: valid inputs whose mathematical sum is i32::MIN retain the
+        // checked fusion failure contract.
+        let left = U1Irrep::new(i32::MIN + 1);
+        let right = U1Irrep::new(-1);
+        assert_eq!(
+            left.checked_fuse(right),
+            Err(FusionAlgebraError::U1FusionOverflow {
+                left: i32::MIN + 1,
+                right: -1,
+            })
+        );
     }
 
     #[test]

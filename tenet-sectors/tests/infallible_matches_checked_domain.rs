@@ -149,16 +149,16 @@ fn fermion_parity_infallible_entry_points_match_checked_domain() {
 #[test]
 fn u1_infallible_entry_points_match_checked_domain() {
     let rule = U1FusionRule;
-    // Representable domain, including the two charges whose *generated*
-    // dual/fusion output overflows i32 (checked errs on an otherwise-valid
-    // input, not merely an invalid id).
-    let valid: Vec<SectorId> = [-17, -1, 0, 1, 17, i32::MAX, i32::MIN]
+    // Representable domain, including charges whose generated fusion output
+    // falls outside that domain.
+    let valid: Vec<SectorId> = [-17, -1, 0, 1, 17, i32::MAX, i32::MIN + 1]
         .into_iter()
         .map(|c| U1Irrep::new(c).sector_id())
         .collect();
-    // Only representable when usize is wider than u32 (true for every CI
-    // target); the zigzag codec's domain is exactly 0..=u32::MAX.
+    // The first ID is the excluded U1 charge; the other two exceed the zigzag
+    // storage range on the 64-bit CI targets.
     let invalid = [
+        SectorId::new(u32::MAX as usize),
         SectorId::new(u32::MAX as usize + 1),
         SectorId::new(usize::MAX),
     ];

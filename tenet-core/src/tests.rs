@@ -272,6 +272,10 @@ mod tests {
         U1Irrep::new(charge).sector_id()
     }
 
+    fn excluded_u1_id() -> SectorId {
+        SectorId::new(u32::MAX as usize)
+    }
+
     fn z2_even() -> SectorId {
         Z2Irrep::EVEN.sector_id()
     }
@@ -1734,7 +1738,7 @@ mod tests {
     #[test]
     fn checked_rank_one_validates_ids_by_unit_fusion() {
         // What: rank-one raw imports reject every unrepresentable built-in ID,
-        // while U1 MIN remains valid without computing its overflowing dual.
+        // including the zigzag ID reserved for the excluded U1 charge.
         let invalid = SectorId::new(2);
         assert_invalid_rank_one_checked(
             &Z2FusionRule,
@@ -1785,9 +1789,12 @@ mod tests {
             );
         }
 
-        FusionTreeKey::new([u1(i32::MIN)], u1(i32::MIN), [false], [], [])
-            .validate_for_rule_checked(&U1FusionRule)
-            .unwrap();
+        let invalid_u1 = excluded_u1_id();
+        assert_invalid_rank_one_checked(
+            &U1FusionRule,
+            invalid_u1,
+            FusionAlgebraError::InvalidSector { sector: invalid_u1 },
+        );
     }
 
     #[test]
@@ -6766,14 +6773,14 @@ mod tests {
         type RightAssociated = PackedProductCodec<Fz2SectorLayout, U1Su2Layout>;
 
         for (parity, charge, twice_spin) in [
-            (z2_even(), i32::MIN, 0),
-            (z2_odd(), -1, 1),
-            (z2_even(), 0, 2),
-            (z2_odd(), i32::MAX, 254),
+            (z2_even(), excluded_u1_id(), 0),
+            (z2_odd(), u1(-1), 1),
+            (z2_even(), u1(0), 2),
+            (z2_odd(), u1(i32::MAX), 254),
         ] {
-            let left = FpU1Codec::encode(parity, u1(charge));
+            let left = FpU1Codec::encode(parity, charge);
             let left_associated = LeftAssociated::encode(left, su2(twice_spin));
-            let right = U1Su2Codec::encode(u1(charge), su2(twice_spin));
+            let right = U1Su2Codec::encode(charge, su2(twice_spin));
             let right_associated = RightAssociated::encode(parity, right);
             assert_eq!(left_associated, right_associated);
         }
@@ -6782,22 +6789,28 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn packed_product_codec_covers_the_builtin_leaf_domains() {
-        // What: the codec represents the complete i32 U1 label domain
-        // together with every currently supported SU2 label; algebraic
-        // overflow behavior is tracked separately in issue #274.
+        // What: the packed codec preserves the full 32-bit U1 component range,
+        // including the raw ID reserved by the semantic label constructor,
+        // together with every currently supported SU2 label.
         type FpU1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
         type FpU1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
         type TripleCodec = PackedProductCodec<FpU1Layout, Su2SectorLayout>;
 
-        for charge in [i32::MIN, -1, 0, 1, i32::MAX] {
+        for charge in [
+            excluded_u1_id(),
+            u1(-1),
+            u1(0),
+            u1(1),
+            u1(i32::MAX),
+        ] {
             for twice_spin in [0, 1, 127, 254] {
-                let inner = FpU1Codec::encode(z2_odd(), u1(charge));
+                let inner = FpU1Codec::encode(z2_odd(), charge);
                 let encoded = TripleCodec::encode(inner, su2(twice_spin));
                 let (decoded_inner, decoded_spin) = TripleCodec::decode(encoded).unwrap();
                 let (decoded_parity, decoded_charge) =
                     FpU1Codec::decode(decoded_inner).unwrap();
                 assert_eq!(decoded_parity, z2_odd());
-                assert_eq!(decoded_charge, u1(charge));
+                assert_eq!(decoded_charge, charge);
                 assert_eq!(decoded_spin, su2(twice_spin));
             }
         }
@@ -10362,20 +10375,22 @@ mod tests {
             }
         );
 
-        let u1_dual_overflow = FusionTreeHomSpace::new(
+        let invalid_u1_label = FusionTreeHomSpace::new(
             FusionProductSpace::new([
                 SectorLeg::new([(u1(0), 1)], false),
                 SectorLeg::new([(u1(0), 1)], false),
-                SectorLeg::new([(u1(i32::MIN), 1)], false),
+                SectorLeg::new([(excluded_u1_id(), 1)], false),
             ]),
             FusionProductSpace::new(Vec::<SectorLeg>::new()),
         );
-        let error = u1_dual_overflow
+        let error = invalid_u1_label
             .try_fusion_tree_layout_data_uncached_checked(&U1FusionRule)
             .unwrap_err();
         assert_eq!(
             error,
-            FusionAlgebraError::U1DualOverflow { charge: i32::MIN }
+            FusionAlgebraError::InvalidSector {
+                sector: excluded_u1_id()
+            }
         );
 
         let su2_overflow = FusionTreeHomSpace::new(
@@ -17778,15 +17793,17 @@ mod tests {
     }
 
     #[test]
-    fn checked_u1_reports_nonclosure_and_preserves_valid_boundaries() {
-        // What: finite-i32 nonclosure is typed, while boundary sums that
+    fn checked_u1_rejects_the_unlabelled_id_and_preserves_valid_boundaries() {
+        // What: the excluded zigzag ID is typed, while boundary sums that
         // remain representable are identical to the expert infallible path.
         let rule = U1FusionRule;
         assert_eq!(
-            rule.try_dual_sector(u1(i32::MIN)),
-            Err(FusionAlgebraError::U1DualOverflow { charge: i32::MIN })
+            rule.try_dual_sector(excluded_u1_id()),
+            Err(FusionAlgebraError::InvalidSector {
+                sector: excluded_u1_id()
+            })
         );
-        for (left, right) in [(i32::MAX, 1), (i32::MIN, -1)] {
+        for (left, right) in [(i32::MAX, 1), (i32::MIN + 1, -1)] {
             assert_eq!(
                 rule.try_fusion_channels(u1(left), u1(right)),
                 Err(FusionAlgebraError::U1FusionOverflow { left, right })
@@ -17794,8 +17811,8 @@ mod tests {
         }
         for (left, right, expected) in [
             (i32::MAX, 0, i32::MAX),
-            (i32::MIN, 0, i32::MIN),
-            (i32::MAX, i32::MIN, -1),
+            (i32::MIN + 1, 0, i32::MIN + 1),
+            (i32::MAX, i32::MIN + 1, 0),
         ] {
             let checked = rule.try_fusion_channels(u1(left), u1(right)).unwrap();
             assert_eq!(checked.as_slice(), &[u1(expected)]);
@@ -18001,10 +18018,14 @@ mod tests {
         type TripleRule = ProductFusionRule<Fz2U1Rule, SU2FusionRule, TripleCodec>;
 
         let pair = Fz2U1Rule::new(FermionParityFusionRule, U1FusionRule);
-        let pair_min = pair.try_encode_sector(z2_odd(), u1(i32::MIN)).unwrap();
+        let pair_min = pair
+            .try_encode_sector(z2_odd(), excluded_u1_id())
+            .unwrap();
         assert_eq!(
             pair.try_dual_sector(pair_min),
-            Err(FusionAlgebraError::U1DualOverflow { charge: i32::MIN })
+            Err(FusionAlgebraError::InvalidSector {
+                sector: excluded_u1_id()
+            })
         );
         let pair_max = pair.try_encode_sector(z2_even(), u1(i32::MAX)).unwrap();
         let pair_one = pair.try_encode_sector(z2_odd(), u1(1)).unwrap();
@@ -18020,7 +18041,9 @@ mod tests {
         let triple_min = triple.try_encode_sector(pair_min, su2(1)).unwrap();
         assert_eq!(
             triple.try_dual_sector(triple_min),
-            Err(FusionAlgebraError::U1DualOverflow { charge: i32::MIN })
+            Err(FusionAlgebraError::InvalidSector {
+                sector: excluded_u1_id()
+            })
         );
         let invalid = SectorId::new(1usize << TripleLayout::BITS);
         assert!(matches!(
@@ -18057,29 +18080,31 @@ mod tests {
     }
 
     #[test]
-    fn u1_trivial_a_b_symbols_accept_min_charge_valid_triples() {
-        // What: trivial U1 rigidity symbols remain exactly one for valid
-        // MIN-containing triples without requiring an unrepresentable dual.
+    fn u1_trivial_a_b_symbols_accept_lowest_charge_valid_triples() {
+        // What: trivial U1 rigidity symbols remain exactly one at the lowest
+        // representable charge.
         let rule = U1FusionRule;
         assert_eq!(
-            rule.a_symbol_scalar(u1(i32::MIN), u1(0), u1(i32::MIN)),
+            rule.a_symbol_scalar(u1(i32::MIN + 1), u1(0), u1(i32::MIN + 1)),
             1.0
         );
         assert_eq!(
-            rule.b_symbol_scalar(u1(0), u1(i32::MIN), u1(i32::MIN)),
+            rule.b_symbol_scalar(u1(0), u1(i32::MIN + 1), u1(i32::MIN + 1)),
             1.0
         );
     }
 
     #[test]
-    fn checked_sector_leg_dual_is_transactional_and_preserves_exact_causes() {
-        // What: a checked dual either returns the complete dual leg or the exact
-        // algebra failure without changing the source leg.
-        let source = SectorLeg::new([(u1(i32::MIN), 2), (u1(1), 3)], false);
+    fn checked_sector_leg_dual_rejects_a_malformed_id_transactionally() {
+        // What: a checked dual rejects an excluded raw ID without changing the
+        // source leg.
+        let source = SectorLeg::new([(excluded_u1_id(), 2), (u1(1), 3)], false);
         let before = source.clone();
         assert_eq!(
             source.try_dual(&U1FusionRule),
-            Err(FusionAlgebraError::U1DualOverflow { charge: i32::MIN })
+            Err(FusionAlgebraError::InvalidSector {
+                sector: excluded_u1_id()
+            })
         );
         assert_eq!(source, before);
 
@@ -18087,21 +18112,23 @@ mod tests {
         {
             type Rule = ProductFusionRule<U1FusionRule, Z2FusionRule, TensorKitProductCodec>;
             let rule = Rule::new(U1FusionRule, Z2FusionRule);
-            let min = TensorKitProductCodec::encode(u1(i32::MIN), z2_odd());
+            let min = TensorKitProductCodec::encode(excluded_u1_id(), z2_odd());
             let product = SectorLeg::new([(min, 1)], false);
             assert_eq!(
                 product.try_dual(&rule),
-                Err(FusionAlgebraError::U1DualOverflow { charge: i32::MIN })
+                Err(FusionAlgebraError::InvalidSector {
+                    sector: excluded_u1_id()
+                })
             );
         }
     }
 
     #[test]
-    fn checked_select_and_permute_report_orientation_failure_without_extra_duals() {
-        // What: moving a legal MIN codomain leg across the HomSpace boundary
-        // reports its algebra error, while same-side selection and identity
-        // permutation perform no dual operation.
-        let min_leg = SectorLeg::new([(u1(i32::MIN), 2)], false);
+    fn checked_select_and_permute_reject_a_malformed_id_when_orientation_needs_it() {
+        // What: moving an excluded raw U1 ID across the HomSpace boundary
+        // reports it, while same-side selection and identity permutation do not
+        // inspect sectors they do not dualize.
+        let min_leg = SectorLeg::new([(excluded_u1_id(), 2)], false);
         let hom = FusionTreeHomSpace::new(
             FusionProductSpace::new([min_leg]),
             FusionProductSpace::new([]),
@@ -18118,7 +18145,9 @@ mod tests {
         assert_eq!(
             hom.try_select_checked(&rule, &[], &[0]),
             Err(CheckedFusionSpaceError::FusionAlgebra(Box::new(
-                FusionAlgebraError::U1DualOverflow { charge: i32::MIN }
+                FusionAlgebraError::InvalidSector {
+                    sector: excluded_u1_id()
+                }
             )))
         );
         assert_eq!(rule.dual_calls(), 1);
@@ -18127,7 +18156,7 @@ mod tests {
         {
             type Rule = ProductFusionRule<U1FusionRule, Z2FusionRule, TensorKitProductCodec>;
             let product_rule = Rule::new(U1FusionRule, Z2FusionRule);
-            let product_min = TensorKitProductCodec::encode(u1(i32::MIN), z2_odd());
+            let product_min = TensorKitProductCodec::encode(excluded_u1_id(), z2_odd());
             let product_hom = FusionTreeHomSpace::new(
                 FusionProductSpace::new([SectorLeg::new([(product_min, 1)], false)]),
                 FusionProductSpace::new([]),
@@ -18135,17 +18164,19 @@ mod tests {
             assert_eq!(
                 product_hom.try_permute_checked(&product_rule, &[], &[0]),
                 Err(CheckedFusionSpaceError::FusionAlgebra(Box::new(
-                    FusionAlgebraError::U1DualOverflow { charge: i32::MIN }
+                    FusionAlgebraError::InvalidSector {
+                        sector: excluded_u1_id()
+                    }
                 )))
             );
         }
     }
 
     #[test]
-    fn checked_orientation_validates_axes_before_dual_arithmetic() {
+    fn checked_orientation_validates_axes_before_sector_ids() {
         // What: malformed axis requests retain Core validation precedence even
-        // when the first legal orientation mapping would overflow.
-        let min_leg = SectorLeg::new([(u1(i32::MIN), 1)], false);
+        // when the first legal orientation mapping would inspect an invalid ID.
+        let min_leg = SectorLeg::new([(excluded_u1_id(), 1)], false);
         let hom = FusionTreeHomSpace::new(
             FusionProductSpace::new([min_leg]),
             FusionProductSpace::new([]),
@@ -18199,9 +18230,9 @@ mod tests {
     #[test]
     fn checked_tensorcontract_separates_pair_validation_and_output_orientation_failures() {
         // What: structural pair mismatches retain Core precedence without
-        // touching checked dual arithmetic, while a valid open leg moved to the
-        // output domain reports the exact algebra failure.
-        let min_leg = || SectorLeg::new([(u1(i32::MIN), 1)], false);
+        // inspecting sectors, while an excluded raw ID moved to the output
+        // domain reports the exact algebra failure.
+        let min_leg = || SectorLeg::new([(excluded_u1_id(), 1)], false);
         let scalar = || {
             FusionTreeHomSpace::new(
                 FusionProductSpace::new([]),
@@ -18234,7 +18265,7 @@ mod tests {
         let rhs_count_mismatch = FusionTreeHomSpace::new(
             FusionProductSpace::new([]),
             FusionProductSpace::new([SectorLeg::new(
-                [(u1(i32::MIN), 1), (u1(0), 1)],
+                [(excluded_u1_id(), 1), (u1(0), 1)],
                 false,
             )]),
         );
@@ -18268,7 +18299,9 @@ mod tests {
                 0,
             ),
             Err(CheckedFusionSpaceError::FusionAlgebra(Box::new(
-                FusionAlgebraError::U1DualOverflow { charge: i32::MIN }
+                FusionAlgebraError::InvalidSector {
+                    sector: excluded_u1_id()
+                }
             )))
         );
         assert_eq!(rule.dual_calls(), 1);
@@ -18331,8 +18364,9 @@ mod tests {
         });
         assert!(std::error::Error::source(&core)
             .is_some_and(|source| source.downcast_ref::<CoreError>().is_some()));
-        let algebra = CheckedFusionSpaceError::from(FusionAlgebraError::U1DualOverflow {
-            charge: i32::MIN,
+        let algebra = CheckedFusionSpaceError::from(FusionAlgebraError::U1FusionOverflow {
+            left: i32::MAX,
+            right: 1,
         });
         assert!(std::error::Error::source(&algebra)
             .is_some_and(|source| source.downcast_ref::<FusionAlgebraError>().is_some()));

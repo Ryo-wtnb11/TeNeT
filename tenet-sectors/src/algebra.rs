@@ -244,9 +244,6 @@ pub enum FusionAlgebraError {
         /// The rejected label in the rule's display form.
         label: String,
     },
-    U1DualOverflow {
-        charge: i32,
-    },
     U1FusionOverflow {
         left: i32,
         right: i32,
@@ -280,12 +277,6 @@ impl fmt::Display for FusionAlgebraError {
                 formatter,
                 "sector label {label} is not representable by its fusion rule"
             ),
-            Self::U1DualOverflow { charge } => {
-                write!(
-                    formatter,
-                    "U(1) dual charge -({charge}) is not representable"
-                )
-            }
             Self::U1FusionOverflow { left, right } => write!(
                 formatter,
                 "U(1) fusion charge {left} + {right} is not representable"
