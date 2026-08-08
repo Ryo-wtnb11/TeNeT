@@ -2337,6 +2337,248 @@ fn checked_generic_pinv_rectangular_moore_penrose_and_validation_precedence() {
     }
 }
 
+fn assert_same_checked_generic_layout_and_close<R, D>(
+    actual: &TensorMap<R, D>,
+    expected: &TensorMap<R, D>,
+    close: impl Fn(D, D) -> f64,
+) where
+    R: TypedSectorAdmission,
+    D: tenet::typed::TensorScalar + fmt::Debug,
+{
+    assert_eq!(actual.block_count(), expected.block_count());
+    for index in 0..actual.block_count() {
+        let actual_block = actual.block(index).unwrap();
+        let expected_block = expected.block(index).unwrap();
+        assert_eq!(actual_block.key(), expected_block.key());
+        assert_eq!(actual_block.shape(), expected_block.shape());
+        assert_eq!(actual_block.strides(), expected_block.strides());
+    }
+    assert_eq!(actual.data().len(), expected.data().len());
+    for (&actual, &expected) in actual.data().iter().zip(expected.data()) {
+        assert!(
+            close(actual, expected) < 1e-10,
+            "{actual:?} != {expected:?}"
+        );
+    }
+}
+
+fn multiply_2x2<D: tenet::typed::TensorScalar>(
+    left: [[D; 2]; 2],
+    right: [[D; 2]; 2],
+) -> [[D; 2]; 2] {
+    std::array::from_fn(|row| {
+        std::array::from_fn(|col| left[row][0] * right[0][col] + left[row][1] * right[1][col])
+    })
+}
+
+#[test]
+fn checked_generic_polar_matches_independent_real_and_complex_qh_oracles() {
+    // What: both factor orders retain the source authority and match Q/H,
+    // including conjugate-transpose arithmetic for a genuinely complex Q.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+
+    let h = [[2.0, 0.5], [0.5, 3.0]];
+    let q = [[0.0, -1.0], [1.0, 0.0]];
+    let left_data = multiply_2x2(q, h);
+    let right_data = multiply_2x2(h, q);
+    let q_tensor: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| q[ij[0]][ij[1]]).unwrap();
+    let h_tensor: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| h[ij[0]][ij[1]]).unwrap();
+    let left: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| left_data[ij[0]][ij[1]])
+            .unwrap();
+    let right: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| right_data[ij[0]][ij[1]])
+            .unwrap();
+    let (actual_q, actual_h) = left.left_polar().unwrap();
+    assert!(std::ptr::eq(actual_q.provider(), provider.as_ref()));
+    assert!(std::ptr::eq(actual_h.provider(), provider.as_ref()));
+    assert!(actual_q.runtime().shares_state_with(left.runtime()));
+    assert_same_checked_generic_layout_and_close(&actual_q, &q_tensor, |a, b| (a - b).abs());
+    assert_same_checked_generic_layout_and_close(&actual_h, &h_tensor, |a, b| (a - b).abs());
+    let (actual_h, actual_q) = right.right_polar().unwrap();
+    assert_same_checked_generic_layout_and_close(&actual_q, &q_tensor, |a, b| (a - b).abs());
+    assert_same_checked_generic_layout_and_close(&actual_h, &h_tensor, |a, b| (a - b).abs());
+
+    let s = std::f64::consts::FRAC_1_SQRT_2;
+    let cq = [
+        [Complex64::new(s, 0.0), Complex64::new(0.0, s)],
+        [Complex64::new(0.0, s), Complex64::new(s, 0.0)],
+    ];
+    let ch = [
+        [Complex64::new(2.0, 0.0), Complex64::new(0.25, 0.5)],
+        [Complex64::new(0.25, -0.5), Complex64::new(3.0, 0.0)],
+    ];
+    let complex_q: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| cq[ij[0]][ij[1]]).unwrap();
+    let complex_h: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| ch[ij[0]][ij[1]]).unwrap();
+    for (source, left) in [(multiply_2x2(cq, ch), true), (multiply_2x2(ch, cq), false)] {
+        let source: TensorMap<_, Complex64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| source[ij[0]][ij[1]])
+                .unwrap();
+        let (actual_q, actual_h) = if left {
+            source.left_polar().unwrap()
+        } else {
+            let (p, w) = source.right_polar().unwrap();
+            (w, p)
+        };
+        assert_same_checked_generic_layout_and_close(&actual_q, &complex_q, |a, b| (a - b).norm());
+        assert_same_checked_generic_layout_and_close(&actual_h, &complex_h, |a, b| (a - b).norm());
+    }
+}
+
+#[test]
+fn checked_generic_polar_direction_covers_rectangular_side_only_and_empty_inputs() {
+    // What: complete dimensions, not populated blocks, select the requested
+    // tall/wide contract before any dense factorization.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let tall = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 3)], false).unwrap();
+    let wide = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&tall], [&wide], |_, ij| {
+            [[1.0, 0.0], [0.0, 2.0], [1.0, 1.0]][ij[0]][ij[1]]
+        })
+        .unwrap();
+    assert!(source.left_polar().is_ok());
+    assert!(matches!(
+        source.right_polar(),
+        Err(GenericTensorError::Plan(
+            tenet::typed::CheckedGenericPlanError::Operation(_)
+        ))
+    ));
+    let codomain_only = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(Label::Vacuum, 1), (Label::X, 1)],
+        false,
+    )
+    .unwrap();
+    let domain_only =
+        GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 1)], false).unwrap();
+    let side_only: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&codomain_only], [&domain_only], |_, _| 0.0).unwrap();
+    assert!(side_only.left_polar().is_ok());
+    assert!(side_only.right_polar().is_err());
+    let empty = GradedSpace::try_new(Arc::clone(&provider), [], false).unwrap();
+    let empty_map: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&empty], [&empty]).unwrap();
+    assert!(empty_map.left_polar().unwrap().0.data().is_empty());
+    assert!(empty_map.right_polar().unwrap().0.data().is_empty());
+}
+
+#[test]
+fn checked_generic_polar_lazy_redirects_to_the_opposite_parent_operation() {
+    // What: lazy adjoints reuse the parent's owned P, return owned W-adjoints,
+    // and report the operation requested on the receiver.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let source: TensorMap<_, Complex64> =
+        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| {
+            [
+                [Complex64::new(2.0, 0.0), Complex64::new(0.5, 0.75)],
+                [Complex64::new(-0.25, 0.5), Complex64::new(3.0, -0.25)],
+            ][ij[0]][ij[1]]
+        })
+        .unwrap();
+    let lazy = source.adjoint().unwrap();
+    let (parent_p, parent_w) = source.right_polar().unwrap();
+    let (actual_w, actual_p) = lazy.left_polar().unwrap();
+    assert_same_checked_generic_layout_and_close(
+        &actual_w,
+        &parent_w.adjoint().unwrap(),
+        |a, b| (a - b).norm(),
+    );
+    assert_same_checked_generic_layout_and_close(&actual_p, &parent_p, |a, b| (a - b).norm());
+    let (parent_w, parent_p) = source.left_polar().unwrap();
+    let (actual_p, actual_w) = lazy.right_polar().unwrap();
+    assert_same_checked_generic_layout_and_close(&actual_p, &parent_p, |a, b| (a - b).norm());
+    assert_same_checked_generic_layout_and_close(
+        &actual_w,
+        &parent_w.adjoint().unwrap(),
+        |a, b| (a - b).norm(),
+    );
+    assert!(std::ptr::eq(actual_w.provider(), provider.as_ref()));
+    assert!(actual_w.runtime().shares_state_with(source.runtime()));
+
+    let tall = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 3)], false).unwrap();
+    let narrow = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let tall_source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&tall], [&narrow], |_, _| 1.0).unwrap();
+    let error = tall_source.adjoint().unwrap().left_polar().unwrap_err();
+    assert!(matches!(
+        error,
+        GenericTensorError::Plan(tenet::typed::CheckedGenericPlanError::Operation(error))
+            if matches!(
+                error,
+                tenet::operations::OperationError::InvalidArgument { message }
+                    if message == "left_polar requires rows >= columns in every coupled-sector matrix"
+            )
+    ));
+}
+
+#[test]
+fn checked_generic_polar_completes_rank_deficient_and_zero_sectors() {
+    // What: compact-full SVD completion returns a full isometry/coisometry;
+    // P remains Hermitian PSD for rank-deficient and zero matrices.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    for zero in [false, true] {
+        let source: TensorMap<_, Complex64> =
+            TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, ij| {
+                if zero {
+                    Complex64::new(0.0, 0.0)
+                } else {
+                    let row = [Complex64::new(1.0, 1.0), Complex64::new(2.0, -0.5)];
+                    let col = [Complex64::new(0.5, -1.0), Complex64::new(-1.5, 2.0)];
+                    row[ij[0]] * col[ij[1]].conj()
+                }
+            })
+            .unwrap();
+        for left in [true, false] {
+            let (w, p) = if left {
+                source.left_polar().unwrap()
+            } else {
+                let (p, w) = source.right_polar().unwrap();
+                (w, p)
+            };
+            let rebuilt = if left {
+                w.compose(&p).unwrap()
+            } else {
+                p.compose(&w).unwrap()
+            };
+            for (&actual, &expected) in rebuilt.data().iter().zip(source.data()) {
+                assert!((actual - expected).norm() < 1e-9);
+            }
+            for col in 0..2 {
+                for row in 0..2 {
+                    let gram = (0..2).fold(Complex64::new(0.0, 0.0), |sum, inner| {
+                        if left {
+                            sum + w.data()[inner + 2 * row].conj() * w.data()[inner + 2 * col]
+                        } else {
+                            sum + w.data()[row + 2 * inner] * w.data()[col + 2 * inner].conj()
+                        }
+                    });
+                    assert!((gram - Complex64::new(f64::from(row == col), 0.0)).norm() < 1e-10);
+                    assert!(
+                        (p.data()[row + 2 * col] - p.data()[col + 2 * row].conj()).norm() < 1e-10
+                    );
+                }
+            }
+            assert!(p
+                .eigh_vals()
+                .unwrap()
+                .iter()
+                .flat_map(|entry| &entry.values)
+                .all(|&value| value >= -1e-10));
+        }
+    }
+}
+
 struct PinvFaultExecutor {
     inner: DefaultDenseExecutor,
     svd_calls: Arc<AtomicUsize>,
@@ -2393,6 +2635,100 @@ impl DenseExecutor for PinvFaultExecutor {
         }
         self.inner.dot_general_into(output, lhs, rhs, config)
     }
+}
+
+#[test]
+fn checked_generic_polar_stages_svd_and_both_gemms_without_publication() {
+    // What: every SVD completes before W/P GEMMs, and either GEMM failure
+    // returns no factor while preserving the source and provider authority.
+    for (fail_svd, fail_gemm, expected_svd, expected_gemm) in [
+        (None, None, 2, 4),
+        (Some(1), None, 1, 0),
+        (Some(2), None, 2, 0),
+        (None, Some(1), 2, 1),
+        (None, Some(2), 2, 2),
+        (None, Some(4), 2, 4),
+    ] {
+        let svd_calls = Arc::new(AtomicUsize::new(0));
+        let gemm_calls = Arc::new(AtomicUsize::new(0));
+        let runtime = Runtime::builder()
+            .dense_threads(1)
+            .with_dense_executor(Box::new(PinvFaultExecutor {
+                inner: DefaultDenseExecutor::new(),
+                svd_calls: Arc::clone(&svd_calls),
+                gemm_calls: Arc::clone(&gemm_calls),
+                fail_svd,
+                fail_gemm,
+            }))
+            .build()
+            .unwrap();
+        let provider = Arc::new(CheckedOnlyToy::new(0));
+        let bond = GradedSpace::try_new(
+            Arc::clone(&provider),
+            [(Label::Vacuum, 1), (Label::X, 1)],
+            false,
+        )
+        .unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&bond], [&bond], |trees, _| {
+                if trees.coupled() == &Label::Vacuum {
+                    2.0
+                } else {
+                    3.0
+                }
+            })
+            .unwrap();
+        let before = source.data().to_vec();
+        let result = source.left_polar();
+        if fail_svd.is_some() || fail_gemm.is_some() {
+            assert!(matches!(
+                result,
+                Err(GenericTensorError::Plan(
+                    tenet::typed::CheckedGenericPlanError::Operation(_)
+                ))
+            ));
+        } else {
+            let (w, p) = result.unwrap();
+            assert!(std::ptr::eq(w.provider(), provider.as_ref()));
+            assert!(std::ptr::eq(p.provider(), provider.as_ref()));
+        }
+        assert_eq!(svd_calls.load(Ordering::Relaxed), expected_svd);
+        assert_eq!(gemm_calls.load(Ordering::Relaxed), expected_gemm);
+        assert_eq!(source.data(), before.as_slice());
+    }
+}
+
+#[test]
+fn checked_generic_polar_provider_error_precedes_dense_work() {
+    // What: complete codomain dimensions are queried before domain,
+    // direction, admission, and dense work.
+    let svd_calls = Arc::new(AtomicUsize::new(0));
+    let gemm_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .with_dense_executor(Box::new(PinvFaultExecutor {
+            inner: DefaultDenseExecutor::new(),
+            svd_calls: Arc::clone(&svd_calls),
+            gemm_calls: Arc::clone(&gemm_calls),
+            fail_svd: None,
+            fail_gemm: None,
+        }))
+        .build()
+        .unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let source: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&leg], [&leg]).unwrap();
+    let before = source.data().to_vec();
+    provider.fail_algebra.store(true, Ordering::Relaxed);
+    assert!(matches!(
+        source.left_polar(),
+        Err(GenericTensorError::Plan(
+            tenet::typed::CheckedGenericPlanError::Provider(ToyError::Algebra)
+        ))
+    ));
+    assert_eq!(svd_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(gemm_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(source.data(), before);
 }
 
 #[test]
@@ -2862,6 +3198,103 @@ fn sun_checked_generic_pinv_cross_mu_full_keys_for_both_dtypes() {
             n,
             label,
             Complex64::new(1.0, 0.5),
+            |actual, expected| (actual - expected).norm(),
+        );
+    }
+}
+
+#[cfg(feature = "racah-generated")]
+fn assert_sun_checked_generic_polar_qh<D>(
+    n: usize,
+    label: Vec<i64>,
+    q: [[D; 2]; 2],
+    h: [[D; 2]; 2],
+    close: impl Fn(D, D) -> f64 + Copy,
+) where
+    D: tenet::typed::TensorScalar + fmt::Debug + PartialEq,
+{
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(n).unwrap());
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(label.clone(), 2)], false).unwrap();
+    let build = |matrix: [[D; 2]; 2], fallback: D| {
+        let cross_sector = label.clone();
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], move |trees, index| {
+            let row = index[0] + 2 * index[1];
+            let col = index[2] + 2 * index[3];
+            if row != col {
+                return D::from_real(0.0);
+            }
+            if trees.coupled() == &cross_sector {
+                matrix[trees.codomain_vertices()[0].get() - 1][trees.domain_vertices()[0].get() - 1]
+            } else if trees.codomain_vertices() == trees.domain_vertices() {
+                fallback
+            } else {
+                D::from_real(0.0)
+            }
+        })
+        .unwrap()
+    };
+    let expected_q = build(q, D::from_real(1.0));
+    let expected_h = build(h, D::from_real(2.0));
+    let mut saw_cross_mu = false;
+    for (source_matrix, left) in [(multiply_2x2(q, h), true), (multiply_2x2(h, q), false)] {
+        let source = build(source_matrix, D::from_real(2.0));
+        saw_cross_mu |= (0..source.block_count()).any(|index| {
+            let trees = source.block_fusion_trees(index).unwrap();
+            trees.coupled() == &label
+                && trees.codomain_vertices()[0].get() == 2
+                && trees.domain_vertices()[0].get() == 1
+        });
+        let (actual_q, actual_h) = if left {
+            source.left_polar().unwrap()
+        } else {
+            let (p, w) = source.right_polar().unwrap();
+            (w, p)
+        };
+        assert!(std::ptr::eq(actual_q.provider(), provider.as_ref()));
+        assert!(std::ptr::eq(actual_h.provider(), provider.as_ref()));
+        assert_eq!(actual_q.codomain(), source.codomain());
+        assert_eq!(actual_q.domain(), source.domain());
+        assert_same_checked_generic_layout_and_close(&actual_q, &expected_q, close);
+        assert_same_checked_generic_layout_and_close(&actual_h, &expected_h, close);
+        let rebuilt = if left {
+            actual_q.compose(&actual_h).unwrap()
+        } else {
+            actual_h.compose(&actual_q).unwrap()
+        };
+        assert_same_checked_generic_layout_and_close(&rebuilt, &source, close);
+    }
+    assert!(
+        saw_cross_mu,
+        "SU(N) polar fixture must carry a cross-mu full key"
+    );
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn sun_checked_generic_polar_cross_mu_qh_oracles_for_both_dtypes() {
+    let s = std::f64::consts::FRAC_1_SQRT_2;
+    for (n, label) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
+        assert_sun_checked_generic_polar_qh::<f64>(
+            n,
+            label.clone(),
+            [[0.0, -1.0], [1.0, 0.0]],
+            [[2.0, 0.5], [0.5, 3.0]],
+            |actual, expected| (actual - expected).abs(),
+        );
+        assert_sun_checked_generic_polar_qh::<Complex64>(
+            n,
+            label,
+            [
+                [Complex64::new(s, 0.0), Complex64::new(0.0, s)],
+                [Complex64::new(0.0, s), Complex64::new(s, 0.0)],
+            ],
+            [
+                [Complex64::new(2.0, 0.0), Complex64::new(0.25, 0.5)],
+                [Complex64::new(0.25, -0.5), Complex64::new(3.0, 0.0)],
+            ],
             |actual, expected| (actual - expected).norm(),
         );
     }
