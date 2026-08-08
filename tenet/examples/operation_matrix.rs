@@ -572,7 +572,7 @@ fn run_checked_sun(
 
     let space = GradedSpace::try_new(provider, [(label, degeneracy)], false)?;
     if form_enabled("destination") {
-        println!("# {symmetry}: destination rows excluded: checked-Generic has no public destination API");
+        println!("# {symmetry}: destination rows excluded: the public destination methods retain multiplicity-free dispatch bounds, so the exact SUN fixtures cannot call them");
     }
     for operation in ["permute", "transpose", "repartition"] {
         if !operation_enabled(operation) || !form_enabled("owned") {
@@ -610,7 +610,7 @@ fn run_checked_sun(
     }
 
     if operation_enabled("trace") || operation_enabled("trace_adjoint") {
-        println!("# {symmetry}: trace rows excluded: checked-Generic has no public trace API");
+        println!("# {symmetry}: trace rows excluded: checked-Generic trace dispatch exists, but SUNFusionRule lacks the required SectorCodec");
     }
 
     let runtime = benchmark_runtime()?;

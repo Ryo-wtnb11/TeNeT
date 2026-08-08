@@ -318,7 +318,7 @@ mod checked_generic {
             }
             return;
         }
-        println!("# checked_generic_cold_scope=fresh child process, including process-global Racah caches; timings are medians of three child samples");
+        println!("# checked_generic_cold_scope=fresh child with no prior operation, oracle, or cache-case run; timer starts after mandatory provider/space/tensor fixture construction, so construction-time Racah work is excluded; timings are medians of three child samples");
         for cache in ["enabled", "disabled"] {
             run_median_fixture("U1", cache);
             run_median_fixture("SU3[1;1]", cache);
