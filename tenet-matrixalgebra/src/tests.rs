@@ -1498,6 +1498,38 @@ impl CheckedGenericFusion for LateGenericSpy {
 }
 
 #[test]
+fn checked_generic_polar_covers_scalar_maps() {
+    // What: a rank-zero tensor map is a one-by-one vacuum-sector matrix for
+    // both left and right polar decomposition.
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let empty = FusionProductSpace::new(std::iter::empty::<SectorLeg>());
+    let homspace = FusionTreeHomSpace::new(empty.clone(), empty);
+    let space = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(&provider),
+        homspace,
+    )
+    .unwrap();
+    let data: [f64; 1] = [-3.0];
+    let input = BoundDynamicTensorRef::try_new(&space, &data).unwrap();
+    let mut dense = tenet_dense::DefaultDenseExecutor::new();
+
+    let (left_w, left_p) = left_polar_dyn_checked_generic(&mut dense, &input).unwrap();
+    let (right_p, right_w) = right_polar_dyn_checked_generic(&mut dense, &input).unwrap();
+    assert!(Arc::ptr_eq(left_w.space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(left_p.space().provider_arc(), &provider));
+    assert!((left_w.data()[0].abs() - 1.0).abs() < 1.0e-12);
+    assert!((right_w.data()[0].abs() - 1.0).abs() < 1.0e-12);
+    assert!((left_p.data()[0] - 3.0).abs() < 1.0e-12);
+    assert!((right_p.data()[0] - 3.0).abs() < 1.0e-12);
+    assert!((left_w.data()[0] * left_p.data()[0] - data[0]).abs() < 1.0e-12);
+    assert!((right_p.data()[0] * right_w.data()[0] - data[0]).abs() < 1.0e-12);
+}
+
+#[test]
 fn checked_generic_factor_plan_late_failure_precedes_commit() {
     let (space, _data) = generic_factorization_input();
     let complete = LateGenericSpy {

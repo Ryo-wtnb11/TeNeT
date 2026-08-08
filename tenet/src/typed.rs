@@ -3968,6 +3968,20 @@ where
 }
 
 #[doc(hidden)]
+pub trait TypedTensorPolarDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn left_polar(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
+    fn right_polar(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
+}
+
+#[doc(hidden)]
 pub trait TypedTensorExpDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
@@ -4307,6 +4321,23 @@ where
 
     fn right_null(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
         tensor.right_null_multiplicity_free()
+    }
+}
+
+impl<R, D> TypedTensorPolarDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn left_polar(tensor: &TensorMap<R, D>) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Error> {
+        tensor.left_polar_multiplicity_free()
+    }
+
+    fn right_polar(tensor: &TensorMap<R, D>) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Error> {
+        tensor.right_polar_multiplicity_free()
     }
 }
 
@@ -4848,6 +4879,91 @@ where
         let mut dense = tensor.runtime.lease_dense();
         let factor = tenet_matrixalgebra::right_null_dyn_checked_generic(dense.dense(), &input)?;
         Ok(wrap_factor_on(&tensor.runtime, factor))
+    }
+}
+
+impl<R, D> TypedTensorPolarDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
+    fn left_polar(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<
+        (TensorMap<R, D>, TensorMap<R, D>),
+        GenericTensorError<<R as CheckedGenericFusion>::Error>,
+    > {
+        let mut dense = tensor.runtime.lease_dense();
+        match &tensor.repr {
+            TypedTensorRepr::Owned(body) => {
+                let input =
+                    BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+                        .map_err(Error::from)?;
+                let (w, p) =
+                    tenet_matrixalgebra::left_polar_dyn_checked_generic(dense.dense(), &input)?;
+                Ok((
+                    wrap_factor_on(&tensor.runtime, w),
+                    wrap_factor_on(&tensor.runtime, p),
+                ))
+            }
+            TypedTensorRepr::Adjoint(view) => {
+                let input = BoundDynamicTensorRef::try_new(
+                    &view.parent.space,
+                    view.parent.materialized_dense_data(),
+                )
+                .map_err(Error::from)?;
+                let (p, w) = tenet_matrixalgebra::left_polar_adjoint_parent_dyn_checked_generic(
+                    dense.dense(),
+                    &input,
+                )?;
+                let w = wrap_factor_on(&tensor.runtime, w)
+                    .adjoint()?
+                    .materialized_tensor_uncached()
+                    .map_err(GenericTensorError::from)?;
+                Ok((w, wrap_factor_on(&tensor.runtime, p)))
+            }
+        }
+    }
+
+    fn right_polar(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<
+        (TensorMap<R, D>, TensorMap<R, D>),
+        GenericTensorError<<R as CheckedGenericFusion>::Error>,
+    > {
+        let mut dense = tensor.runtime.lease_dense();
+        match &tensor.repr {
+            TypedTensorRepr::Owned(body) => {
+                let input =
+                    BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+                        .map_err(Error::from)?;
+                let (p, w) =
+                    tenet_matrixalgebra::right_polar_dyn_checked_generic(dense.dense(), &input)?;
+                Ok((
+                    wrap_factor_on(&tensor.runtime, p),
+                    wrap_factor_on(&tensor.runtime, w),
+                ))
+            }
+            TypedTensorRepr::Adjoint(view) => {
+                let input = BoundDynamicTensorRef::try_new(
+                    &view.parent.space,
+                    view.parent.materialized_dense_data(),
+                )
+                .map_err(Error::from)?;
+                let (w, p) = tenet_matrixalgebra::right_polar_adjoint_parent_dyn_checked_generic(
+                    dense.dense(),
+                    &input,
+                )?;
+                let w = wrap_factor_on(&tensor.runtime, w)
+                    .adjoint()?
+                    .materialized_tensor_uncached()
+                    .map_err(GenericTensorError::from)?;
+                Ok((wrap_factor_on(&tensor.runtime, p), w))
+            }
+        }
     }
 }
 
@@ -12664,7 +12780,7 @@ where
     /// it dispatches dense per block), and the
     /// issue #613 Group 4 contract requires any compact fast path to be
     /// individually re-proven — out of scope here.
-    pub fn left_polar(&self) -> Result<(Self, Self), Error> {
+    fn left_polar_multiplicity_free(&self) -> Result<(Self, Self), Error> {
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             let mut dense = self.runtime.lease_dense();
             let mut lease = self.runtime.lease_context()?;
@@ -12711,7 +12827,7 @@ where
     ///
     /// As [`Self::left_polar`]: `O(Σ_c n_c³)`, sectorwise, with a
     /// compact-diagonal payload materialized first.
-    pub fn right_polar(&self) -> Result<(Self, Self), Error> {
+    fn right_polar_multiplicity_free(&self) -> Result<(Self, Self), Error> {
         if let TypedTensorRepr::Adjoint(view) = &self.repr {
             let mut dense = self.runtime.lease_dense();
             let mut lease = self.runtime.lease_context()?;
@@ -14260,6 +14376,23 @@ where
     /// mirror of [`Self::left_null`].
     pub fn right_null(&self) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorNullDispatch<R, D>>::right_null(self)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorPolarDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// TensorKit / MatrixAlgebraKit left polar decomposition `self = W * P`.
+    pub fn left_polar(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
+        <R::Mode as TypedTensorPolarDispatch<R, D>>::left_polar(self)
+    }
+
+    /// TensorKit / MatrixAlgebraKit right polar decomposition `self = P * W`.
+    pub fn right_polar(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
+        <R::Mode as TypedTensorPolarDispatch<R, D>>::right_polar(self)
     }
 }
 

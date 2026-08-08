@@ -1503,6 +1503,66 @@ enum PolarDirection {
     Right,
 }
 
+struct CompactSvdNumericalStage<D> {
+    rows: usize,
+    cols: usize,
+    rank: usize,
+    u: Vec<D>,
+    singular_values: Vec<f64>,
+    vt: Vec<D>,
+}
+
+fn compact_svd_numerical_stage<E, D>(
+    dense: &mut E,
+    matrix: &[D],
+    rows: usize,
+    cols: usize,
+) -> Result<CompactSvdNumericalStage<D>, OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let rank = rows.min(cols);
+    let mut u = vec![D::zero(); rows * rank];
+    let mut singular_values = vec![D::Real::zero(); rank];
+    let mut vt = vec![D::zero(); rank * cols];
+    if rank != 0 {
+        let input_shape = [rows, cols];
+        let input_strides = [1, rows];
+        let u_shape = [rows, rank];
+        let u_strides = [1, rows];
+        let s_shape = [rank];
+        let s_strides = [1];
+        let vt_shape = [rank, cols];
+        let vt_strides = [1, rank];
+        let input = DenseView::new(matrix, &input_shape, &input_strides, 0)
+            .map_err(OperationError::Dense)?;
+        let u_view =
+            DenseViewMut::new(&mut u, &u_shape, &u_strides, 0).map_err(OperationError::Dense)?;
+        let s_view = DenseViewMut::new(&mut singular_values, &s_shape, &s_strides, 0)
+            .map_err(OperationError::Dense)?;
+        let vt_view =
+            DenseViewMut::new(&mut vt, &vt_shape, &vt_strides, 0).map_err(OperationError::Dense)?;
+        dense
+            .svd_into(
+                D::dense_read(input),
+                D::dense_write(u_view),
+                D::Real::dense_write(s_view),
+                D::dense_write(vt_view),
+            )
+            .map_err(OperationError::Dense)?;
+        svd_compact_gauge(&mut u, rows, rows, &mut vt, rank, cols, rank);
+    }
+    Ok(CompactSvdNumericalStage {
+        rows,
+        cols,
+        rank,
+        u,
+        singular_values: singular_values.into_iter().map(Into::into).collect(),
+        vt,
+    })
+}
+
 #[derive(Clone, Copy)]
 enum CompactSvdGauge {
     Left,
@@ -6572,6 +6632,389 @@ fn compile_pinv_region_routes(
     Ok(routes)
 }
 
+#[derive(Clone, Copy)]
+struct PolarRegionRoute {
+    source: usize,
+    w: usize,
+    p: usize,
+}
+
+fn compile_polar_region_routes(
+    source: &[CoupledSectorRegion],
+    w: &[CoupledSectorRegion],
+    p: &[CoupledSectorRegion],
+    source_len: usize,
+    w_len: usize,
+    p_len: usize,
+    direction: PolarDirection,
+) -> Result<Vec<PolarRegionRoute>, OperationError> {
+    let w_by_sector = sector_region_index_map(w)?;
+    let p_by_sector = sector_region_index_map(p)?;
+    let mut used_w = vec![false; w.len()];
+    let mut used_p = vec![false; p.len()];
+    let mut routes = Vec::with_capacity(source.len());
+    for (source_index, source_region) in source.iter().enumerate() {
+        let sector = source_region.coupled();
+        let w_index = sector_region_index_of(&w_by_sector, sector, "polar W")?;
+        let p_index = sector_region_index_of(&p_by_sector, sector, "polar P")?;
+        let w_region = &w[w_index];
+        let p_region = &p[p_index];
+        if w_region.rows() != source_region.rows()
+            || w_region.cols() != source_region.cols()
+            || w_region.row_trees() != source_region.row_trees()
+            || w_region.col_trees() != source_region.col_trees()
+        {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "polar W route does not preserve the source full-tree layout",
+            });
+        }
+        let (dimension, trees) = match direction {
+            PolarDirection::Left => (source_region.cols(), source_region.col_trees()),
+            PolarDirection::Right => (source_region.rows(), source_region.row_trees()),
+        };
+        if p_region.rows() != dimension
+            || p_region.cols() != dimension
+            || p_region.row_trees() != trees
+            || p_region.col_trees() != trees
+        {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "polar P route does not preserve the source full-tree layout",
+            });
+        }
+        validate_region_range(source_region, source_len)?;
+        validate_region_range(w_region, w_len)?;
+        validate_region_range(p_region, p_len)?;
+        used_w[w_index] = true;
+        used_p[p_index] = true;
+        routes.push(PolarRegionRoute {
+            source: source_index,
+            w: w_index,
+            p: p_index,
+        });
+    }
+    if used_w.iter().any(|used| !used) || used_p.iter().any(|used| !used) {
+        return Err(OperationError::UnsupportedTensorContractScope {
+            message: "polar output contains a full-tree route absent from the source",
+        });
+    }
+    Ok(routes)
+}
+
+fn validate_checked_polar_direction<R>(
+    input: &BoundDynamicTensorRef<'_, R, impl DenseBlockScalar>,
+    direction: PolarDirection,
+    error_direction: PolarDirection,
+) -> Result<(), CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+{
+    let space = input.space().space();
+    let rows = coupled_sector_block_dimensions_generic_checked(
+        space.homspace().codomain(),
+        input.space().provider(),
+    )?;
+    let cols = coupled_sector_block_dimensions_generic_checked(
+        space.homspace().domain(),
+        input.space().provider(),
+    )?;
+    for (&sector, &row_count) in &rows {
+        if !direction.accepts(row_count, cols.get(&sector).copied().unwrap_or(0)) {
+            return Err(CheckedGenericFactorPlanError::Operation(
+                error_direction.error(),
+            ));
+        }
+    }
+    for (&sector, &col_count) in &cols {
+        if !rows.contains_key(&sector) && !direction.accepts(0, col_count) {
+            return Err(CheckedGenericFactorPlanError::Operation(
+                error_direction.error(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn project_hermitian_col_major<D: FactorScalar>(matrix: &mut [D], n: usize) {
+    let half = D::from_real(0.5);
+    for col in 0..n {
+        for row in 0..=col {
+            let value =
+                (matrix[row + n * col] + FactorScalar::adjoint(matrix[col + n * row])) * half;
+            matrix[row + n * col] = value;
+            matrix[col + n * row] = FactorScalar::adjoint(value);
+        }
+    }
+}
+
+fn checked_generic_polar_products<E, D>(
+    dense: &mut E,
+    stage: &CompactSvdNumericalStage<D>,
+    direction: PolarDirection,
+) -> Result<(Vec<D>, Vec<D>), OperationError>
+where
+    E: DenseExecutor + ?Sized,
+    D: FactorScalar,
+{
+    let CompactSvdNumericalStage {
+        rows,
+        cols,
+        rank,
+        u,
+        singular_values,
+        vt,
+    } = stage;
+    let mut w = vec![D::zero(); rows * cols];
+    let w_shape = [*rows, *cols];
+    let w_strides = [1, *rows];
+    let u_shape = [*rows, *rank];
+    let u_strides = [1, *rows];
+    let vt_shape = [*rank, *cols];
+    let vt_strides = [1, *rank];
+    let w_view =
+        DenseViewMut::new(&mut w, &w_shape, &w_strides, 0).map_err(OperationError::Dense)?;
+    let u_view = DenseView::new(u, &u_shape, &u_strides, 0).map_err(OperationError::Dense)?;
+    let vt_view = DenseView::new(vt, &vt_shape, &vt_strides, 0).map_err(OperationError::Dense)?;
+    dense
+        .dot_general_into(
+            D::dense_write(w_view),
+            D::dense_read(u_view),
+            D::dense_read(vt_view),
+            &DenseDotConfig::matmul(),
+        )
+        .map_err(OperationError::Dense)?;
+
+    let p_order = match direction {
+        PolarDirection::Left => *cols,
+        PolarDirection::Right => *rows,
+    };
+    let mut p = vec![D::zero(); p_order * p_order];
+    let mut x = match direction {
+        PolarDirection::Left => vt.clone(),
+        PolarDirection::Right => u.clone(),
+    };
+    match direction {
+        PolarDirection::Left => {
+            for (row, sigma) in singular_values.iter().copied().enumerate() {
+                let scale = D::from_real(sigma.sqrt());
+                for col in 0..*cols {
+                    x[row + rank * col] = x[row + rank * col] * scale;
+                }
+            }
+        }
+        PolarDirection::Right => {
+            for (col, sigma) in singular_values.iter().copied().enumerate() {
+                let scale = D::from_real(sigma.sqrt());
+                for row in 0..*rows {
+                    x[row + rows * col] = x[row + rows * col] * scale;
+                }
+            }
+        }
+    }
+    let p_shape = [p_order, p_order];
+    let p_strides = [1, p_order];
+    let p_view =
+        DenseViewMut::new(&mut p, &p_shape, &p_strides, 0).map_err(OperationError::Dense)?;
+    match direction {
+        PolarDirection::Left => {
+            let xh_shape = [*cols, *rank];
+            let xh_strides = [*rank, 1];
+            let x_shape = [*rank, *cols];
+            let x_strides = [1, *rank];
+            let xh =
+                DenseView::new(&x, &xh_shape, &xh_strides, 0).map_err(OperationError::Dense)?;
+            let x = DenseView::new(&x, &x_shape, &x_strides, 0).map_err(OperationError::Dense)?;
+            dense
+                .dot_general_into(
+                    D::dense_write(p_view),
+                    D::dense_read(xh),
+                    D::dense_read(x),
+                    &DenseDotConfig::matmul().with_conjugation(true, false),
+                )
+                .map_err(OperationError::Dense)?;
+        }
+        PolarDirection::Right => {
+            let x_shape = [*rows, *rank];
+            let x_strides = [1, *rows];
+            let xh_shape = [*rank, *rows];
+            let xh_strides = [*rows, 1];
+            let x_view =
+                DenseView::new(&x, &x_shape, &x_strides, 0).map_err(OperationError::Dense)?;
+            let xh =
+                DenseView::new(&x, &xh_shape, &xh_strides, 0).map_err(OperationError::Dense)?;
+            dense
+                .dot_general_into(
+                    D::dense_write(p_view),
+                    D::dense_read(x_view),
+                    D::dense_read(xh),
+                    &DenseDotConfig::matmul().with_conjugation(false, true),
+                )
+                .map_err(OperationError::Dense)?;
+        }
+    }
+    project_hermitian_col_major(&mut p, p_order);
+    Ok((w, p))
+}
+
+fn polar_dyn_checked_generic_reported<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    direction: PolarDirection,
+    error_direction: PolarDirection,
+) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    validate_checked_polar_direction(input, direction, error_direction)?;
+    let source_space = input.space().space();
+    let w_space = input.space().clone();
+    let p_homspace = match direction {
+        PolarDirection::Left => FusionTreeHomSpace::new(
+            source_space.homspace().domain().clone(),
+            source_space.homspace().domain().clone(),
+        ),
+        PolarDirection::Right => FusionTreeHomSpace::new(
+            source_space.homspace().codomain().clone(),
+            source_space.homspace().codomain().clone(),
+        ),
+    };
+    let p_nout = p_homspace.codomain().len();
+    let p_space = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(
+        Arc::clone(input.space().provider_arc()),
+        p_homspace,
+    )?;
+    let source_regions =
+        canonical_generic_sector_regions(source_space.structure(), source_space.nout())?.ok_or(
+            CheckedGenericFactorPlanError::Operation(
+                OperationError::UnsupportedTensorContractScope {
+                    message: "polar requires canonical coupled-sector input storage",
+                },
+            ),
+        )?;
+    let w_regions =
+        canonical_generic_sector_regions(w_space.space().structure(), w_space.space().nout())?
+            .ok_or(CheckedGenericFactorPlanError::Operation(
+                OperationError::UnsupportedTensorContractScope {
+                    message: "polar requires canonical coupled-sector W storage",
+                },
+            ))?;
+    let p_regions = canonical_generic_sector_regions(p_space.space().structure(), p_nout)?.ok_or(
+        CheckedGenericFactorPlanError::Operation(OperationError::UnsupportedTensorContractScope {
+            message: "polar requires canonical coupled-sector P storage",
+        }),
+    )?;
+    let w_len = w_space
+        .space()
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let p_len = p_space
+        .space()
+        .required_len()
+        .map_err(OperationError::from_core_preserving_context)?;
+    let routes = compile_polar_region_routes(
+        &source_regions,
+        &w_regions,
+        &p_regions,
+        input.data().len(),
+        w_len,
+        p_len,
+        direction,
+    )?;
+
+    let mut stages = Vec::with_capacity(routes.len());
+    for route in &routes {
+        let region = &source_regions[route.source];
+        stages.push(
+            compact_svd_numerical_stage(
+                dense,
+                &input.data()[region.range()],
+                region.rows(),
+                region.cols(),
+            )
+            .map_err(CheckedGenericFactorPlanError::from)?,
+        );
+    }
+    let mut w_data = vec![D::zero(); w_len];
+    let mut p_data = vec![D::zero(); p_len];
+    for (route, stage) in routes.iter().zip(&stages) {
+        let (w, p) = checked_generic_polar_products(dense, stage, direction)
+            .map_err(CheckedGenericFactorPlanError::from)?;
+        w_data[w_regions[route.w].range()].copy_from_slice(&w);
+        p_data[p_regions[route.p].range()].copy_from_slice(&p);
+    }
+
+    let w = BoundDynFactor::from_bound(w_space, w_data, source_space.nout(), source_space.nin())
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    let p = BoundDynFactor::from_bound(p_space, p_data, p_nout, p_nout)
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    Ok((w, p))
+}
+
+#[doc(hidden)]
+pub fn left_polar_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    polar_dyn_checked_generic_reported(dense, input, PolarDirection::Left, PolarDirection::Left)
+}
+
+#[doc(hidden)]
+pub fn right_polar_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let (w, p) = polar_dyn_checked_generic_reported(
+        dense,
+        input,
+        PolarDirection::Right,
+        PolarDirection::Right,
+    )?;
+    Ok((p, w))
+}
+
+#[doc(hidden)]
+pub fn left_polar_adjoint_parent_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    parent: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let (w, p) = polar_dyn_checked_generic_reported(
+        dense,
+        parent,
+        PolarDirection::Right,
+        PolarDirection::Left,
+    )?;
+    Ok((p, w))
+}
+
+#[doc(hidden)]
+pub fn right_polar_adjoint_parent_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    parent: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<(BoundDynFactor<R, D>, BoundDynFactor<R, D>), CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    polar_dyn_checked_generic_reported(dense, parent, PolarDirection::Left, PolarDirection::Right)
+}
+
 pub(crate) fn solve_left_by_sector_dyn<E, R, D>(
     dense: &mut E,
     divisor: &BoundDynamicTensorRef<'_, R, D>,
@@ -8714,81 +9157,22 @@ where
     let space = input.space().space();
     let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
         .map_err(CheckedGenericFactorPlanError::from)?;
-    let ranks = matrices
-        .iter()
-        .map(|matrix| SectorRank {
-            sector: matrix.sector,
-            kept: matrix.rows.min(matrix.cols),
-        })
-        .collect::<Vec<_>>();
-    let max_rows = matrices.iter().map(|matrix| matrix.rows).max().unwrap_or(0);
-    let max_cols = matrices.iter().map(|matrix| matrix.cols).max().unwrap_or(0);
-    let max_rank = ranks.iter().map(|rank| rank.kept).max().unwrap_or(0);
-    let mut u_workspace = vec![D::zero(); max_rows * max_rank];
-    let mut s_workspace = vec![D::Real::zero(); max_rank];
-    let mut vt_workspace = vec![D::zero(); max_rank * max_cols];
     let mut pairs = Vec::with_capacity(matrices.len());
     let mut singular_values = Vec::with_capacity(matrices.len());
     for matrix in &matrices {
-        let rank = matrix.rows.min(matrix.cols);
-        let input_shape = [matrix.rows, matrix.cols];
-        let input_strides = [1usize, matrix.rows];
-        let input_view =
-            DenseView::new(&matrix.data, &input_shape, &input_strides, 0).map_err(|error| {
-                CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
-            })?;
-        let u_shape = [matrix.rows, rank];
-        let u_strides = [1usize, max_rows];
-        let s_shape = [rank];
-        let s_strides = [1usize];
-        let vt_shape = [rank, matrix.cols];
-        let vt_strides = [1usize, max_rank];
-        let u_view =
-            DenseViewMut::new(&mut u_workspace, &u_shape, &u_strides, 0).map_err(|error| {
-                CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
-            })?;
-        let s_view =
-            DenseViewMut::new(&mut s_workspace, &s_shape, &s_strides, 0).map_err(|error| {
-                CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
-            })?;
-        let vt_view =
-            DenseViewMut::new(&mut vt_workspace, &vt_shape, &vt_strides, 0).map_err(|error| {
-                CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
-            })?;
-        dense
-            .svd_into(
-                D::dense_read(input_view),
-                D::dense_write(u_view),
-                D::Real::dense_write(s_view),
-                D::dense_write(vt_view),
-            )
-            .map_err(|error| {
-                CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
-            })?;
-        svd_compact_gauge(
-            &mut u_workspace,
-            matrix.rows,
-            max_rows,
-            &mut vt_workspace,
-            rank,
-            matrix.cols,
-            max_rank,
-        );
+        let stage = compact_svd_numerical_stage(dense, &matrix.data, matrix.rows, matrix.cols)
+            .map_err(CheckedGenericFactorPlanError::from)?;
         singular_values.push(SectorSpectrum {
             sector: matrix.sector,
-            values: s_workspace[..rank]
-                .iter()
-                .copied()
-                .map(Into::into)
-                .collect(),
+            values: stage.singular_values,
         });
         pairs.push(FactorPair {
             sector: matrix.sector,
-            kept: rank,
-            left: u_workspace.clone(),
-            left_rows: max_rows,
-            right: vt_workspace.clone(),
-            right_leading: max_rank,
+            kept: stage.rank,
+            left: stage.u,
+            left_rows: stage.rows,
+            right: stage.vt,
+            right_leading: stage.rank,
         });
     }
     let (u, vh) = build_left_right_bound_pair_generic_checked(
