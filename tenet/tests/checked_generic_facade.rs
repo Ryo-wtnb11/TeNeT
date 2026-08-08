@@ -2473,6 +2473,265 @@ fn checked_generic_pinv_uses_a_strict_global_cutoff() {
     assert_eq!(pseudo.data(), &[0.25, 0.0]);
 }
 
+#[test]
+fn checked_generic_null_spaces_cover_rank_cutoff_zero_disjoint_and_side_only_sectors() {
+    // What: Generic null spaces use the documented numerical rank, keep full
+    // zero/side-only directions, drop full-rank sectors, and retain authority.
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let x = GradedSpace::try_new(Arc::clone(&provider), [(Label::X, 2)], false).unwrap();
+    let tolerance = f64::EPSILON * 2.0;
+    for (small, nullity) in [(0.5 * tolerance, 1), (2.0 * tolerance, 0)] {
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&x], [&x], |_, index| match index {
+                [0, 0] => 1.0,
+                [1, 1] => small,
+                _ => 0.0,
+            })
+            .unwrap();
+        for null in [source.left_null().unwrap(), source.right_null().unwrap()] {
+            assert!(std::ptr::eq(null.provider(), provider.as_ref()));
+            if nullity == 0 {
+                assert!(null.data().is_empty());
+            } else {
+                assert_eq!(null.data().len(), 2);
+            }
+        }
+    }
+
+    let zero: TensorMap<_, Complex64> = TensorMap::zeros(&runtime, [&x], [&x]).unwrap();
+    assert_eq!(zero.left_null().unwrap().data().len(), 4);
+    assert_eq!(zero.right_null().unwrap().data().len(), 4);
+
+    let vacuum = GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 3)], false).unwrap();
+    let disjoint: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&x], [&vacuum]).unwrap();
+    let left = disjoint.left_null().unwrap();
+    let right = disjoint.right_null().unwrap();
+    assert_eq!(left.data(), &[1.0, 0.0, 0.0, 1.0]);
+    assert_eq!(right.data().len(), 9);
+    for column in 0..3 {
+        for row in 0..3 {
+            assert_eq!(right.data()[row + 3 * column], f64::from(row == column));
+        }
+    }
+
+    let shared = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(Label::Vacuum, 1), (Label::X, 2)],
+        false,
+    )
+    .unwrap();
+    let unit = GradedSpace::try_new(Arc::clone(&provider), [(Label::Vacuum, 1)], false).unwrap();
+    let codomain_side: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&shared], [&unit], |trees, index| {
+            f64::from(trees.coupled() == &Label::Vacuum && index[0] == index[1])
+        })
+        .unwrap();
+    assert_eq!(codomain_side.left_null().unwrap().data().len(), 4);
+    assert!(codomain_side.right_null().unwrap().data().is_empty());
+}
+
+#[test]
+fn checked_generic_null_dense_failure_is_typed_and_nonpublishing() {
+    // What: a later sector SVD failure crosses the public Generic facade as a
+    // typed plan error without changing the source or returning a partial null.
+    let svd_calls = Arc::new(AtomicUsize::new(0));
+    let runtime = Runtime::builder()
+        .dense_threads(1)
+        .with_dense_executor(Box::new(PinvFaultExecutor {
+            inner: DefaultDenseExecutor::new(),
+            svd_calls: Arc::clone(&svd_calls),
+            gemm_calls: Arc::new(AtomicUsize::new(0)),
+            fail_svd: Some(2),
+            fail_gemm: None,
+        }))
+        .build()
+        .unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let leg = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(Label::Vacuum, 1), (Label::X, 1)],
+        false,
+    )
+    .unwrap();
+    let source: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&leg], [&leg]).unwrap();
+    let before = source.data().to_vec();
+    assert!(matches!(
+        source.left_null(),
+        Err(GenericTensorError::Plan(
+            tenet::typed::CheckedGenericPlanError::Operation(_)
+        ))
+    ));
+    assert_eq!(svd_calls.load(Ordering::Relaxed), 2);
+    assert_eq!(source.data(), before);
+    assert!(std::ptr::eq(source.provider(), provider.as_ref()));
+}
+
+#[cfg(feature = "racah-generated")]
+fn assert_sun_checked_generic_null_projectors<D>(
+    n: usize,
+    label: Vec<i64>,
+    u: [D; 2],
+    v: [D; 2],
+    u_norm_squared: f64,
+    v_norm_squared: f64,
+    adjoint: impl Fn(D) -> D,
+    close: impl Fn(D, D) -> f64,
+) where
+    D: tenet::typed::TensorScalar + fmt::Debug + PartialEq,
+{
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(SUNFusionRule::new(n).unwrap());
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(label, 2)], false).unwrap();
+    let source: TensorMap<_, D> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, index| {
+            let row = index[0] + 2 * index[1];
+            let column = index[2] + 2 * index[3];
+            if row == column {
+                u[trees.codomain_vertices()[0].get() - 1]
+                    * adjoint(v[trees.domain_vertices()[0].get() - 1])
+            } else {
+                D::from_real(0.0)
+            }
+        })
+        .unwrap();
+    assert!((0..source.block_count()).any(|index| {
+        let trees = source.block_fusion_trees(index).unwrap();
+        trees.codomain_vertices()[0].get() == 2
+            && trees.domain_vertices()[0].get() == 1
+            && source.data()[source.block(index).unwrap().offset()] != D::from_real(0.0)
+    }));
+    let outer_multiplicity_sectors = (0..source.block_count())
+        .filter_map(|index| {
+            let trees = source.block_fusion_trees(index).unwrap();
+            trees
+                .codomain_vertices()
+                .iter()
+                .chain(trees.domain_vertices())
+                .any(|vertex| vertex.get() > 1)
+                .then(|| trees.coupled().clone())
+        })
+        .collect::<Vec<_>>();
+
+    let left = source.left_null().unwrap();
+    let right = source.right_null().unwrap();
+    assert!(std::ptr::eq(left.provider(), provider.as_ref()));
+    assert!(std::ptr::eq(right.provider(), provider.as_ref()));
+    let left_adjoint = left.adjoint().unwrap();
+    let left_adjoint = left_adjoint
+        .add(&left_adjoint, D::from_real(1.0), D::from_real(0.0))
+        .unwrap();
+    let right_adjoint = right.adjoint().unwrap();
+    let right_adjoint = right_adjoint
+        .add(&right_adjoint, D::from_real(1.0), D::from_real(0.0))
+        .unwrap();
+    let left_projector = left.compose(&left_adjoint).unwrap();
+    let right_projector = right_adjoint.compose(&right).unwrap();
+    let expected_left: TensorMap<_, D> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, index| {
+            let row = index[0] + 2 * index[1];
+            let column = index[2] + 2 * index[3];
+            if row != column || !outer_multiplicity_sectors.contains(trees.coupled()) {
+                return D::from_real(0.0);
+            }
+            let i = trees.codomain_vertices()[0].get() - 1;
+            let j = trees.domain_vertices()[0].get() - 1;
+            D::from_real(f64::from(i == j))
+                + D::from_real(-1.0 / u_norm_squared) * u[i] * adjoint(u[j])
+        })
+        .unwrap();
+    let expected_right: TensorMap<_, D> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, index| {
+            let row = index[0] + 2 * index[1];
+            let column = index[2] + 2 * index[3];
+            if row != column || !outer_multiplicity_sectors.contains(trees.coupled()) {
+                return D::from_real(0.0);
+            }
+            let i = trees.codomain_vertices()[0].get() - 1;
+            let j = trees.domain_vertices()[0].get() - 1;
+            D::from_real(f64::from(i == j))
+                + D::from_real(-1.0 / v_norm_squared) * v[i] * adjoint(v[j])
+        })
+        .unwrap();
+    for (name, actual, expected) in [
+        ("left", &left_projector, &expected_left),
+        ("right", &right_projector, &expected_right),
+    ] {
+        assert_eq!(actual.block_count(), expected.block_count());
+        for index in 0..actual.block_count() {
+            let actual = actual.block(index).unwrap();
+            let expected = expected.block(index).unwrap();
+            assert_eq!(actual.key(), expected.key());
+            assert_eq!(actual.shape(), expected.shape());
+            assert_eq!(actual.strides(), expected.strides());
+        }
+        for (index, (&actual, &expected)) in actual.data().iter().zip(expected.data()).enumerate() {
+            assert!(
+                close(actual, expected) < 1e-9,
+                "{name} projector mismatch at raw {index}: {actual:?} != {expected:?}"
+            );
+        }
+    }
+
+    for value in left_adjoint.compose(&source).unwrap().data() {
+        assert!(close(*value, D::from_real(0.0)) < 1e-9);
+    }
+    for value in source.compose(&right_adjoint).unwrap().data() {
+        assert!(close(*value, D::from_real(0.0)) < 1e-9);
+    }
+    for gram in [
+        left_adjoint.compose(&left).unwrap(),
+        right.compose(&right_adjoint).unwrap(),
+    ] {
+        for block_index in 0..gram.block_count() {
+            let block = gram.block(block_index).unwrap();
+            for column in 0..block.shape()[1] {
+                for row in 0..block.shape()[0] {
+                    let expected = D::from_real(f64::from(row == column));
+                    let actual = gram.data()
+                        [block.offset() + row * block.strides()[0] + column * block.strides()[1]];
+                    assert!(close(actual, expected) < 1e-9);
+                }
+            }
+        }
+    }
+
+    let lazy = source.adjoint().unwrap();
+    let lazy_left = lazy.left_null().unwrap();
+    let expected_lazy_left = right_adjoint;
+    assert!(std::ptr::eq(lazy_left.provider(), provider.as_ref()));
+    assert_eq!(lazy_left.data(), expected_lazy_left.data());
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn sun_checked_generic_null_projectors_resolve_cross_mu_for_both_dtypes() {
+    for (n, label) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
+        assert_sun_checked_generic_null_projectors::<f64>(
+            n,
+            label.clone(),
+            [1.0, 2.0],
+            [1.0, -1.0],
+            5.0,
+            2.0,
+            |value| value,
+            |actual, expected| (actual - expected).abs(),
+        );
+        assert_sun_checked_generic_null_projectors::<Complex64>(
+            n,
+            label,
+            [Complex64::new(1.0, 1.0), Complex64::new(2.0, -0.5)],
+            [Complex64::new(0.5, -1.0), Complex64::new(-1.5, 2.0)],
+            6.25,
+            7.5,
+            |value| value.conj(),
+            |actual, expected| (actual - expected).norm(),
+        );
+    }
+}
+
 #[cfg(feature = "racah-generated")]
 fn assert_sun_checked_generic_pinv<D>(
     n: usize,

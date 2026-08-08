@@ -444,8 +444,8 @@ impl DenseExecutor for FailSecondSvd {
         self.inner.svd_into(input, u, s, vt)
     }
 
-    fn qr(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
-        panic!("test only exercises SVD")
+    fn qr(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
+        self.inner.qr(input)
     }
 
     fn eigh(&mut self, _: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
@@ -1720,6 +1720,154 @@ fn checked_generic_full_svd_local_shape_error_precedes_provider_query() {
         OperationError::Core(CoreError::DimensionMismatch { .. })
     ));
     assert_eq!(provider.calls.get(), 0);
+}
+
+fn checked_spy_null(
+    left: bool,
+    dense: &mut impl DenseExecutor,
+    input: &BoundDynamicTensorRef<'_, LateGenericSpy, f64>,
+) -> Result<BoundDynFactor<LateGenericSpy, f64>, CheckedGenericFactorPlanError<LateGenericError>> {
+    if left {
+        left_null_dyn_checked_generic(dense, input)
+    } else {
+        right_null_dyn_checked_generic(dense, input)
+    }
+}
+
+#[test]
+fn checked_generic_null_admits_only_after_all_dense_work_and_keeps_exact_authority() {
+    // What: both null sides finish every local SVD/completion before their
+    // data-dependent output admission, whose late error publishes no factor.
+    let (source, _) = generic_factorization_input();
+    let data = vec![0.0; source.space().required_len().unwrap()];
+    for left in [true, false] {
+        let complete_provider = Arc::new(LateGenericSpy {
+            rule: FactorGenericRule,
+            fail_at: usize::MAX,
+            calls: Cell::new(0),
+        });
+        let complete_space = BoundDynamicFusionMapSpace::bind_generic(
+            source.space().clone(),
+            Arc::clone(&complete_provider),
+        )
+        .unwrap();
+        let complete_input = BoundDynamicTensorRef::try_new(&complete_space, &data).unwrap();
+        let mut complete_dense = CountingDense::default();
+        let factor = checked_spy_null(left, &mut complete_dense, &complete_input).unwrap();
+        assert!(Arc::ptr_eq(
+            factor.space().provider_arc(),
+            &complete_provider
+        ));
+        let final_call = complete_provider.calls.get();
+        assert!(final_call > 1);
+        assert!(complete_dense.svd_calls > 1);
+
+        let failing_provider = Arc::new(LateGenericSpy {
+            rule: FactorGenericRule,
+            fail_at: final_call,
+            calls: Cell::new(0),
+        });
+        let failing_space = BoundDynamicFusionMapSpace::bind_generic(
+            source.space().clone(),
+            Arc::clone(&failing_provider),
+        )
+        .unwrap();
+        let failing_input = BoundDynamicTensorRef::try_new(&failing_space, &data).unwrap();
+        let before = failing_input.data().to_vec();
+        let mut failing_dense = CountingDense::default();
+        assert!(matches!(
+            checked_spy_null(left, &mut failing_dense, &failing_input),
+            Err(CheckedGenericFactorPlanError::Provider(LateGenericError(call)))
+                if call == final_call
+        ));
+        assert_eq!(failing_dense.svd_calls, complete_dense.svd_calls);
+        assert_eq!(failing_dense.qr_calls, complete_dense.qr_calls);
+        assert_eq!(failing_input.data(), before);
+        assert!(Arc::ptr_eq(
+            failing_input.space().provider_arc(),
+            &failing_provider
+        ));
+    }
+}
+
+#[test]
+fn checked_generic_null_dense_failure_never_reaches_output_admission() {
+    // What: a later sector SVD failure stops after structural preflight and
+    // before the checked output builder or any scatter can run.
+    let (source, _) = generic_factorization_input();
+    let data = vec![0.0; source.space().required_len().unwrap()];
+    for left in [true, false] {
+        let provider = Arc::new(LateGenericSpy {
+            rule: FactorGenericRule,
+            fail_at: usize::MAX,
+            calls: Cell::new(0),
+        });
+        let checked =
+            BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+                .unwrap();
+        let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+        let before = input.data().to_vec();
+        let expected_preflight = {
+            let probe = LateGenericSpy {
+                rule: FactorGenericRule,
+                fail_at: usize::MAX,
+                calls: Cell::new(0),
+            };
+            let side = if left {
+                source.space().homspace().codomain()
+            } else {
+                source.space().homspace().domain()
+            };
+            coupled_sector_block_dimensions_generic_checked(side, &probe).unwrap();
+            probe.calls.get()
+        };
+        assert!(matches!(
+            checked_spy_null(left, &mut FailSecondSvd::default(), &input),
+            Err(CheckedGenericFactorPlanError::Operation(
+                OperationError::Dense(_)
+            ))
+        ));
+        assert_eq!(provider.calls.get(), expected_preflight);
+        assert_eq!(input.data(), before);
+    }
+}
+
+#[test]
+fn checked_generic_disjoint_null_is_identity_without_dense_calls() {
+    // What: disjoint support returns complete identity bases for both sides
+    // and never enters SVD or completion.
+    let x = SectorId::new(1);
+    let vacuum = SectorId::new(0);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([SectorLeg::new([(x, 2)], false)]),
+        FusionProductSpace::new([SectorLeg::new([(vacuum, 3)], false)]),
+    );
+    let source = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(FactorGenericRule),
+        homspace,
+    )
+    .unwrap();
+    let provider = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&provider))
+            .unwrap();
+    let data = vec![0.0; checked.space().required_len().unwrap()];
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let left = left_null_dyn_checked_generic(&mut RejectExecutorCalls, &input).unwrap();
+    let right = right_null_dyn_checked_generic(&mut RejectExecutorCalls, &input).unwrap();
+    assert_eq!(left.data(), &[1.0, 0.0, 0.0, 1.0]);
+    assert_eq!(right.data().len(), 9);
+    for column in 0..3 {
+        for row in 0..3 {
+            assert_eq!(right.data()[row + 3 * column], f64::from(row == column));
+        }
+    }
+    assert!(Arc::ptr_eq(left.space().provider_arc(), &provider));
+    assert!(Arc::ptr_eq(right.space().provider_arc(), &provider));
 }
 
 #[test]
