@@ -545,6 +545,23 @@ where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
 {
+    // The family split, stated once for this file. `Unique` fusion is a
+    // tree-to-tree bijection with a scalar coefficient, so its builder is a
+    // flat O(#trees) loop emitting `Single` specs; `Simple` fusion needs the
+    // grouped path with its dedup, injectivity check and dense recoupling
+    // rows. TensorKit makes the same split for the same invariant, as two
+    // transformer types selected at one constructor
+    // (`tensors/treetransformers.jl` `AbelianTreeTransformer` versus
+    // `GenericTreeTransformer`).
+    //
+    // Why the predicate recurs below rather than being threaded as a value:
+    // the stages are separate functions with separate bodies — unvalidated,
+    // validated, and validated-with-threads, the last of which exists only on
+    // the `Simple` side because the flat loop has nothing to parallelize — so
+    // there is no single object here to carry the decision the way
+    // TensorKit's transformer does. Collapsing them was tried and rejected:
+    // it orphans the per-family entry points that tests use to pin which
+    // builder a fixture exercises (issue #306's acceptance).
     if rule.fusion_style() == FusionStyleKind::Unique {
         build_unique_all_codomain_tree_transform_group_plan(rule, operation, src_structure)
     } else {
@@ -790,6 +807,9 @@ where
     T: Clone + Add<Output = T> + Zero,
     F: FnMut(&FusionTreePairKey) -> Result<(FusionTreePairKey, T), OperationError>,
 {
+    // A capability guard, not a family choice: this entry point implements
+    // only the bijective lowering, so a `Simple` rule is rejected rather than
+    // rerouted.
     if rule.fusion_style() != FusionStyleKind::Unique {
         return Err(OperationError::UnsupportedFusionStyle {
             operation: Box::new(operation),
@@ -811,6 +831,9 @@ where
     R: MultiplicityFreeFusionSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
 {
+    // A capability guard, not a family choice: this entry point implements
+    // only the bijective lowering, so a `Simple` rule is rejected rather than
+    // rerouted.
     if rule.fusion_style() != FusionStyleKind::Unique {
         return Err(OperationError::UnsupportedFusionStyle {
             operation: Box::new(operation),
@@ -2206,6 +2229,9 @@ where
     R: MultiplicityFreeRigidSymbols,
     R::Scalar: Clone + Add<Output = R::Scalar> + Mul<Output = R::Scalar> + Zero,
 {
+    // A capability guard, not a family choice: this entry point implements
+    // only the bijective lowering, so a `Simple` rule is rejected rather than
+    // rerouted.
     if rule.fusion_style() != FusionStyleKind::Unique {
         return Err(OperationError::UnsupportedFusionStyle {
             operation: Box::new(operation),
