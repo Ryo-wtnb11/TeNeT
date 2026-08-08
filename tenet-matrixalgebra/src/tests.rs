@@ -3585,9 +3585,9 @@ fn typed_factor_axis_sum_overflow_is_exact_without_storage_materialization() {
     assert_eq!(error, OperationError::Core(CoreError::ElementCountOverflow));
 }
 
-fn u1_minimum_matrix(rows: usize, cols: usize) -> TensorMap<f64, 1, 1> {
+fn u1_lowest_label_matrix(rows: usize, cols: usize) -> TensorMap<f64, 1, 1> {
     let rule = U1FusionRule;
-    let minimum = U1Irrep::new(i32::MIN).sector_id();
+    let minimum = U1Irrep::new(i32::MIN + 1).sector_id();
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([SectorLeg::new([(minimum, rows)], false)]),
         FusionProductSpace::new([SectorLeg::new([(minimum, cols)], false)]),
@@ -3631,10 +3631,10 @@ fn assert_matrix_product(
 }
 
 #[test]
-fn compact_factors_do_not_relabel_u1_minimum_domain_sectors() {
-    // What: compact SVD, QR, and LQ return correctly oriented factors at the finite U(1) dual boundary.
+fn compact_factors_do_not_relabel_the_lowest_u1_sector() {
+    // What: compact SVD, QR, and LQ return correctly oriented factors at the lowest U(1) label.
     let rule = U1FusionRule;
-    let tensor = u1_minimum_matrix(3, 2);
+    let tensor = u1_lowest_label_matrix(3, 2);
     let mut dense = tenet_dense::DefaultDenseExecutor::new();
 
     let svd = svd_compact(&mut dense, &bound_tensor_ref!(Arc::new(rule), &tensor)).unwrap();
@@ -3662,10 +3662,10 @@ fn compact_factors_do_not_relabel_u1_minimum_domain_sectors() {
 }
 
 #[test]
-fn eigh_full_does_not_relabel_u1_minimum_domain_sectors() {
-    // What: full EIGH preserves the eigen equation and factor orientation at the finite U(1) dual boundary.
+fn eigh_full_does_not_relabel_the_lowest_u1_sector() {
+    // What: full EIGH preserves the eigen equation and factor orientation at the lowest U(1) label.
     let rule = U1FusionRule;
-    let minimum = U1Irrep::new(i32::MIN).sector_id();
+    let minimum = U1Irrep::new(i32::MIN + 1).sector_id();
     let homspace = FusionTreeHomSpace::new(
         FusionProductSpace::new([SectorLeg::new([(minimum, 2)], false)]),
         FusionProductSpace::new([SectorLeg::new([(minimum, 2)], false)]),
@@ -3698,11 +3698,11 @@ fn eigh_full_does_not_relabel_u1_minimum_domain_sectors() {
 
 #[cfg(target_pointer_width = "64")]
 #[test]
-fn compact_factorizations_do_not_relabel_product_minimum_domain_sectors() {
+fn compact_factorizations_do_not_relabel_product_lowest_u1_sectors() {
     // What: product-sector factors inherit the no-relabel contract for compact SVD, QR, LQ, and full EIGH.
     let rule = product_fusion_rule(FermionParityFusionRule, U1FusionRule);
     let minimum = rule
-        .try_encode_sector(SectorId::new(1), U1Irrep::new(i32::MIN).sector_id())
+        .try_encode_sector(SectorId::new(1), U1Irrep::new(i32::MIN + 1).sector_id())
         .unwrap();
     let matrix = |rows: usize, cols: usize, data: Vec<f64>| {
         let homspace = FusionTreeHomSpace::new(

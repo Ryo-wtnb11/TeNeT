@@ -231,11 +231,11 @@ fn cu1_checked_validation_preserves_the_shared_error_precedence() {
 
 #[test]
 fn u1_codec_round_trips_every_boundary_charge() {
-    // What: the label domain is the full i32 charge range, including both
-    // zigzag boundaries.
+    // What: the label domain keeps every i32 charge except the one whose dual
+    // has no i32 representation.
     assert_round_trip(
         &U1FusionRule,
-        [-7, -1, 0, 1, 9, i32::MIN, i32::MAX].map(U1Irrep::new),
+        [-7, -1, 0, 1, 9, i32::MIN + 1, i32::MAX].map(U1Irrep::new),
     );
 }
 

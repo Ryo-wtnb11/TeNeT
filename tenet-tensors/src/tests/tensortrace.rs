@@ -2909,13 +2909,10 @@ fn plain_tensortrace_rejects_one_block_fusion_tensor_instead_of_dense_trace() {
 }
 
 #[test]
-fn u1_min_dual_leg_is_rejected_at_admission() {
-    // What: a leg whose dual is unrepresentable never becomes a space, so no
-    // trace can observe it. -(i32::MIN) is a real U(1) charge that the i32
-    // encoding cannot hold; admitting the leg would only defer the same
-    // failure to whichever boundary crossing ran first, and which one that is
-    // depends on the caller.
-    let min = U1Irrep::new(i32::MIN).sector_id();
+fn excluded_u1_sector_id_is_rejected_at_admission() {
+    // What: the raw zigzag ID excluded by the label constructor never becomes
+    // a space, so no trace can observe it.
+    let min = SectorId::new(u32::MAX as usize);
     let error = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
         std::sync::Arc::new(U1FusionRule),
         FusionTreeHomSpace::new(
@@ -2927,8 +2924,8 @@ fn u1_min_dual_leg_is_rejected_at_admission() {
     .unwrap_err();
     assert_eq!(
         error,
-        OperationError::FusionAlgebra(Box::new(tenet_core::FusionAlgebraError::U1DualOverflow {
-            charge: i32::MIN
+        OperationError::FusionAlgebra(Box::new(tenet_core::FusionAlgebraError::InvalidSector {
+            sector: min
         }))
     );
 }
