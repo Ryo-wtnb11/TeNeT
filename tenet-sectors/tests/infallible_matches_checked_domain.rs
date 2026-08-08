@@ -155,8 +155,8 @@ fn u1_infallible_entry_points_match_checked_domain() {
         .into_iter()
         .map(|c| U1Irrep::new(c).sector_id())
         .collect();
-    // Only representable when usize is wider than u32 (true for every CI
-    // target); the zigzag codec's domain is exactly 0..=u32::MAX.
+    // The first ID is the excluded U1 charge; the other two exceed the zigzag
+    // storage range on the 64-bit CI targets.
     let invalid = [
         SectorId::new(u32::MAX as usize),
         SectorId::new(u32::MAX as usize + 1),

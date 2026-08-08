@@ -6773,14 +6773,14 @@ mod tests {
         type RightAssociated = PackedProductCodec<Fz2SectorLayout, U1Su2Layout>;
 
         for (parity, charge, twice_spin) in [
-            (z2_even(), i32::MIN, 0),
-            (z2_odd(), -1, 1),
-            (z2_even(), 0, 2),
-            (z2_odd(), i32::MAX, 254),
+            (z2_even(), excluded_u1_id(), 0),
+            (z2_odd(), u1(-1), 1),
+            (z2_even(), u1(0), 2),
+            (z2_odd(), u1(i32::MAX), 254),
         ] {
-            let left = FpU1Codec::encode(parity, u1(charge));
+            let left = FpU1Codec::encode(parity, charge);
             let left_associated = LeftAssociated::encode(left, su2(twice_spin));
-            let right = U1Su2Codec::encode(u1(charge), su2(twice_spin));
+            let right = U1Su2Codec::encode(charge, su2(twice_spin));
             let right_associated = RightAssociated::encode(parity, right);
             assert_eq!(left_associated, right_associated);
         }
@@ -6789,22 +6789,28 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn packed_product_codec_covers_the_builtin_leaf_domains() {
-        // What: the codec represents the complete i32 U1 label domain
-        // together with every currently supported SU2 label; algebraic
-        // overflow behavior is tracked separately in issue #274.
+        // What: the packed codec preserves the full 32-bit U1 component range,
+        // including the raw ID reserved by the semantic label constructor,
+        // together with every currently supported SU2 label.
         type FpU1Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
         type FpU1Layout = ProductSectorLayout<Fz2SectorLayout, U1SectorLayout>;
         type TripleCodec = PackedProductCodec<FpU1Layout, Su2SectorLayout>;
 
-        for charge in [i32::MIN, -1, 0, 1, i32::MAX] {
+        for charge in [
+            excluded_u1_id(),
+            u1(-1),
+            u1(0),
+            u1(1),
+            u1(i32::MAX),
+        ] {
             for twice_spin in [0, 1, 127, 254] {
-                let inner = FpU1Codec::encode(z2_odd(), u1(charge));
+                let inner = FpU1Codec::encode(z2_odd(), charge);
                 let encoded = TripleCodec::encode(inner, su2(twice_spin));
                 let (decoded_inner, decoded_spin) = TripleCodec::decode(encoded).unwrap();
                 let (decoded_parity, decoded_charge) =
                     FpU1Codec::decode(decoded_inner).unwrap();
                 assert_eq!(decoded_parity, z2_odd());
-                assert_eq!(decoded_charge, u1(charge));
+                assert_eq!(decoded_charge, charge);
                 assert_eq!(decoded_spin, su2(twice_spin));
             }
         }
