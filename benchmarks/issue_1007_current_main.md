@@ -11,11 +11,14 @@ algorithms, add caches or prepared APIs, or extend the B/C/D providers.
 - Dense backend: faer
 - Threads: `RAYON_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`,
   `OMP_NUM_THREADS=1`, `MKL_NUM_THREADS=1`
-- Reported times are medians of three fresh-process samples unless noted.
+- P1 operation-matrix and network times are medians of three fresh-process
+  samples. P0 uses the sampling scope stated in its section.
 
-The operation-matrix and cached-network examples emit their authority, backend,
-thread, cache-scope, allocation-scope, raw samples, and the complete row selected
-by median time. Caller allocation counters exclude worker threads, native BLAS
+The operation-matrix wrapper emits authority, backend, threads, cache and
+allocation scopes, raw samples, and the complete row selected by median time.
+The cached-network example emits its CSV, raw samples, cold/cache scope, and the
+complete median row; its environment is recorded above rather than emitted by
+the example. Caller allocation counters exclude worker threads, native BLAS
 allocations, frees, and peak/live bytes.
 
 Representative commands:
@@ -38,8 +41,9 @@ cargo run --release -p tenet-network --example microbench_cached_network \
 ## P0: checked-Generic tree transforms
 
 The existing public-transform measurement uses a tiny outer-multiplicity-two
-fixture. Allocation values below are caller-thread allocation calls and requested
-bytes for one warm public operation.
+fixture. Each case runs in one fresh child, records one cold call, and reports the
+median of seven warm calls within that child. Allocation values below are
+caller-thread allocation calls and requested bytes for one warm public operation.
 
 | Symmetry / operation | Warm time | Allocations | Requested bytes |
 |---|---:|---:|---:|
