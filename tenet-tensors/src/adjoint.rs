@@ -12,14 +12,14 @@ use tenet_core::{
     FusionTreeHomSpace, FusionTreePairKey, MultiplicityFreeRigidSymbols, TensorMap, TensorMapSpace,
 };
 
-use crate::contract::{
-    dispatch_prepare, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, LayoutKeyBuilder,
-};
 #[cfg(test)]
 use crate::contract::{
-    encoded_layout_primer, lowered_layout_primer, lowered_metadata_dispatcher,
+    checked_layout_primer, checked_metadata_dispatcher, encoded_layout_primer,
     reset_scratch_publication_observations, scratch_publication_observations, MetadataOutput,
     MetadataRequest,
+};
+use crate::contract::{
+    dispatch_prepare, BoundDynamicFusionMapSpace, DynamicFusionMapSpace, LayoutKeyBuilder,
 };
 use crate::{CheckedGenericPlanError, ConjugateValue, OperationError};
 
@@ -802,7 +802,7 @@ mod cache_tests {
             FusionProductSpace::new([leg(false), leg(true)]),
             FusionProductSpace::new([leg(true), leg(false)]),
         );
-        lowered_layout_primer(rule, &hom).unwrap();
+        checked_layout_primer(rule, &hom).unwrap();
         let count = hom.fusion_tree_keys(rule).len();
         DynamicFusionMapSpace::from_degeneracy_shapes(rule, hom, vec![vec![1; 4]; count]).unwrap()
     }
@@ -812,7 +812,7 @@ mod cache_tests {
         request: MetadataRequest<'_>,
     ) -> Result<MetadataOutput, OperationError> {
         LOWERED_PRIMER_CALLS.with(|calls| calls.set(calls.get() + 1));
-        lowered_metadata_dispatcher(rule, request)
+        checked_metadata_dispatcher(rule, request)
     }
 
     // Single-charge U(1) source: one coupled sector, block shape [deg, deg].
@@ -1475,7 +1475,7 @@ mod cache_tests {
             );
             assert_eq!(LOWERED_PRIMER_CALLS.with(Cell::get), 0);
             assert_eq!(OUTPUT_ZERO_CALLS.with(Cell::get), 0);
-            assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+            assert_eq!(scratch_publication_observations(), (0, 0, 0));
         }
     }
 
@@ -1626,7 +1626,7 @@ mod cache_tests {
             &rule,
             &source,
             &data,
-            lowered_metadata_dispatcher::<TripleRule>,
+            checked_metadata_dispatcher::<TripleRule>,
         )
         .unwrap();
         crate::reset_global_operation_caches();
@@ -1669,11 +1669,11 @@ mod cache_tests {
         let error = adjoint_space_dyn_with_primer(
             &rule,
             &source,
-            lowered_metadata_dispatcher::<U1FusionRule>,
+            checked_metadata_dispatcher::<U1FusionRule>,
         )
         .unwrap_err();
 
         assert!(matches!(error, OperationError::MissingBlockKey { .. }));
-        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0));
     }
 }
