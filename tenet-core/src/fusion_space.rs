@@ -2773,19 +2773,6 @@ impl FusionTreeHomSpace {
         Arc::clone(&self.cached_fusion_tree_layout(rule).keys)
     }
 
-    /// Test-only convenience over [`Self::prepare_fusion_tree_layout_lowered`]
-    /// (#586 demotion: external callers use the prepare API directly).
-    #[cfg(test)]
-    pub(crate) fn try_fusion_tree_keys_lowered<R>(
-        &self,
-        rule: &R,
-    ) -> Result<Arc<[FusionTreePairKey]>, LoweredFusionTreeBuildError>
-    where
-        R: LoweredMultiplicityFreeAlgebra,
-    {
-        Ok(self.prepare_fusion_tree_layout_lowered(rule)?.commit())
-    }
-
     /// Stages multiplicity-free layout metadata without publishing it.
     #[doc(hidden)]
     pub fn prepare_fusion_tree_layout<R>(&self, rule: &R) -> PreparedFusionTreeLayout
@@ -2796,21 +2783,6 @@ impl FusionTreeHomSpace {
             Ok::<_, std::convert::Infallible>(self.fusion_tree_layout_data_uncached(rule))
         })
         .unwrap_or_else(|error| match error {})
-    }
-
-    /// Stages checked keys and coupled-sector metadata without issuing a
-    /// layout ID or changing cache admission/accounting.
-    #[doc(hidden)]
-    pub fn prepare_fusion_tree_layout_lowered<R>(
-        &self,
-        rule: &R,
-    ) -> Result<PreparedFusionTreeLayout, LoweredFusionTreeBuildError>
-    where
-        R: LoweredMultiplicityFreeAlgebra,
-    {
-        self.prepare_fusion_tree_layout_with(rule, || {
-            self.try_fusion_tree_layout_data_uncached_lowered(rule)
-        })
     }
 
     /// Stages checked layout metadata for an external multiplicity-free
@@ -2895,17 +2867,6 @@ impl FusionTreeHomSpace {
         R: MultiplicityFreeFusionRule,
     {
         self.prepare_fusion_tree_layout(rule).commit_layout()
-    }
-
-    #[cfg(test)]
-    fn try_cached_fusion_tree_layout_lowered<R>(
-        &self,
-        rule: &R,
-    ) -> Result<Arc<FusionTreeHomSpaceLayout>, LoweredFusionTreeBuildError>
-    where
-        R: LoweredMultiplicityFreeAlgebra,
-    {
-        Ok(self.prepare_fusion_tree_layout_lowered(rule)?.commit_layout())
     }
 
     pub fn coupled_subblock_structure<R, Shapes>(
@@ -3154,31 +3115,6 @@ impl FusionTreeHomSpace {
         let codomain = fusion_trees_by_coupled_for_space(rule, self.codomain());
         let domain = fusion_trees_by_coupled_for_space(rule, self.domain());
         fusion_tree_layout_data_from_groups(&codomain, &domain)
-    }
-
-    #[cfg(test)]
-    fn try_fusion_tree_keys_uncached_lowered<R>(
-        &self,
-        rule: &R,
-    ) -> Result<Vec<FusionTreePairKey>, LoweredFusionTreeBuildError>
-    where
-        R: LoweredMultiplicityFreeAlgebra,
-    {
-        let codomain = try_fusion_trees_by_coupled_for_space_lowered(rule, self.codomain())?;
-        let domain = try_fusion_trees_by_coupled_for_space_lowered(rule, self.domain())?;
-        Ok(merge_generic_tree_groups(&codomain, &domain))
-    }
-
-    fn try_fusion_tree_layout_data_uncached_lowered<R>(
-        &self,
-        rule: &R,
-    ) -> Result<FusionTreeHomSpaceLayoutData, LoweredFusionTreeBuildError>
-    where
-        R: LoweredMultiplicityFreeAlgebra,
-    {
-        let codomain = try_fusion_trees_by_coupled_for_space_lowered(rule, self.codomain())?;
-        let domain = try_fusion_trees_by_coupled_for_space_lowered(rule, self.domain())?;
-        Ok(fusion_tree_layout_data_from_groups(&codomain, &domain))
     }
 
     fn try_fusion_tree_layout_data_uncached_checked<R>(

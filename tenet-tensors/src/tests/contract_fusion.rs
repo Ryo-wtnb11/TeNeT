@@ -8245,7 +8245,7 @@ fn nested_product_lowered_dynamic_execution_matches_independent_encoded_oracles(
     };
     let bind_lowered = |homspace: FusionTreeHomSpace| {
         let count = homspace
-            .prepare_fusion_tree_layout_lowered(provider.as_ref())
+            .prepare_fusion_tree_layout_checked(provider.as_ref())
             .unwrap()
             .commit()
             .len();

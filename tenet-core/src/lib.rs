@@ -38,9 +38,6 @@ pub use tenet_sectors::{
 #[cfg(feature = "racah-generated")]
 pub use tenet_sectors::{SUNFusionRule, SUNFusionRuleError};
 
-mod core_rule_bridge;
-pub use core_rule_bridge::{LoweredFusionTreeBuildError, LoweredMultiplicityFreeAlgebra};
-
 include!("storage.rs");
 include!("space.rs");
 include!("sector.rs");

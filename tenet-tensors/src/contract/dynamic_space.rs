@@ -7,9 +7,8 @@ use tenet_core::{
     BlockKey, BlockStructure, CheckedFusionAlgebra, CheckedFusionSpaceError, CheckedGenericFusion,
     CheckedGenericStructureError, CoreError, FusionRule, FusionSpaceAdmission, FusionStyleKind,
     FusionTensorMapSpace, FusionTreeHomSpace, FusionTreePairKey, FusionTreePairOrientation,
-    LoweredFusionTreeBuildError, LoweredMultiplicityFreeAlgebra, MultiplicityFreeFusionRule,
-    MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace, PreparedBlockStructure,
-    PreparedFusionTreeLayout, RuleIdentity, SectorId, SectorLeg,
+    MultiplicityFreeFusionRule, MultiplicityFreeRigidSymbols, OrientedFusionTreeHomSpace,
+    PreparedBlockStructure, PreparedFusionTreeLayout, RuleIdentity, SectorId, SectorLeg,
     StructurallyValidatedFusionTreeSubset,
 };
 
@@ -20,10 +19,8 @@ use tenet_operations::{OutputAxisOrder, TensorContractSpec};
 pub(crate) enum PreparedLayoutKeys {
     Encoded,
     Staged(PreparedFusionTreeLayout),
-    Lowered(PreparedFusionTreeLayout),
-    /// Checked staging for an external multiplicity-free provider. Distinct
-    /// from `Lowered` only in provenance: the built-in lowered codec did not
-    /// produce these keys, so lowered-specific commit accounting must not fire.
+    /// Checked staging: the one enumeration path, used by every
+    /// multiplicity-free provider.
     Checked(PreparedFusionTreeLayout),
 }
 
@@ -37,9 +34,7 @@ impl PreparedLayoutKeys {
         R: MultiplicityFreeFusionRule,
     {
         match self {
-            Self::Staged(prepared) | Self::Lowered(prepared) | Self::Checked(prepared) => {
-                prepared.keys_arc()
-            }
+            Self::Staged(prepared) | Self::Checked(prepared) => prepared.keys_arc(),
             Self::Encoded => homspace.fusion_tree_keys(rule),
         }
     }
@@ -47,11 +42,6 @@ impl PreparedLayoutKeys {
     fn commit(self) {
         let prepared = match self {
             Self::Staged(prepared) | Self::Checked(prepared) => prepared,
-            Self::Lowered(prepared) => {
-                #[cfg(test)]
-                LOWERED_LAYOUT_COMMITS.set(LOWERED_LAYOUT_COMMITS.get() + 1);
-                prepared
-            }
             Self::Encoded => return,
         };
         prepared.commit();
@@ -253,15 +243,6 @@ where
 
 impl<R> LayoutBuildCapability<R>
 where
-    R: LoweredMultiplicityFreeAlgebra + CheckedFusionAlgebra,
-{
-    const fn lowered() -> Self {
-        Self::Legacy(lowered_metadata_dispatcher::<R>)
-    }
-}
-
-impl<R> LayoutBuildCapability<R>
-where
     R: MultiplicityFreeFusionRule + CheckedFusionAlgebra,
 {
     const fn checked() -> Self {
@@ -290,33 +271,6 @@ fn checked_metadata_operation_error(error: CheckedFusionSpaceError) -> Operation
             message: "unknown checked fusion metadata error",
         },
     }
-}
-
-fn lowered_build_operation_error(error: LoweredFusionTreeBuildError) -> OperationError {
-    match error.into_fusion_algebra() {
-        Ok(cause) => OperationError::FusionAlgebra(Box::new(cause)),
-        Err(error) => OperationError::InvalidArgument {
-            message: error.static_message(),
-        },
-    }
-}
-
-#[cfg(test)]
-fn checked_lowered_build_operation_error(error: LoweredFusionTreeBuildError) -> OperationError {
-    OperationError::FusionAlgebra(Box::new(error.into_checked_fusion_algebra()))
-}
-
-pub(crate) fn lowered_layout_primer<R>(
-    rule: &R,
-    homspace: &FusionTreeHomSpace,
-) -> Result<PreparedLayoutKeys, OperationError>
-where
-    R: LoweredMultiplicityFreeAlgebra,
-{
-    homspace
-        .prepare_fusion_tree_layout_lowered(rule)
-        .map(PreparedLayoutKeys::Lowered)
-        .map_err(lowered_build_operation_error)
 }
 
 pub(crate) fn encoded_layout_primer<R>(
@@ -484,17 +438,7 @@ where
     }
 }
 
-pub(crate) fn lowered_metadata_dispatcher<R>(
-    rule: &R,
-    request: MetadataRequest<'_>,
-) -> Result<MetadataOutput, OperationError>
-where
-    R: LoweredMultiplicityFreeAlgebra + CheckedFusionAlgebra,
-{
-    checked_metadata_dispatch_with_primer(rule, request, lowered_layout_primer)
-}
-
-/// Checked external-provider sibling of [`lowered_layout_primer`]: stages a
+/// Checked external-provider sibling of [`checked_layout_primer`]: stages a
 /// complete layout for a rule that certifies only [`CheckedFusionAlgebra`],
 /// without requiring the sealed built-in lowered codec.
 pub(crate) fn checked_layout_primer<R>(
@@ -636,12 +580,11 @@ pub(crate) fn reset_scratch_publication_observations() {
 
 #[cfg(test)]
 /// `(scratch builds, scratch admissions, HomSpace ID requests, layout commits)`.
-pub(crate) fn scratch_publication_observations() -> (usize, usize, usize, usize) {
+pub(crate) fn scratch_publication_observations() -> (usize, usize, usize) {
     (
         SCRATCH_STRUCTURE_BUILDS.get(),
         SCRATCH_STRUCTURE_ADMISSIONS.get(),
         SCRATCH_HOMSPACE_ID_REQUESTS.get(),
-        LOWERED_LAYOUT_COMMITS.get(),
     )
 }
 
@@ -1449,13 +1392,11 @@ where
         shapes: Shapes,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>
-            + LoweredMultiplicityFreeAlgebra
-            + CheckedFusionAlgebra,
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
         Shapes: IntoIterator,
         Shapes::Item: Into<Vec<usize>>,
     {
-        let layout_build = LayoutBuildCapability::lowered();
+        let layout_build = LayoutBuildCapability::checked();
         let space = DynamicFusionMapSpace::from_degeneracy_shapes_with_key_builder(
             provider.as_ref(),
             homspace,
@@ -1531,7 +1472,7 @@ where
         provider: Arc<R>,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeFusionRule + LoweredMultiplicityFreeAlgebra + CheckedFusionAlgebra,
+        R: MultiplicityFreeFusionRule + CheckedFusionAlgebra,
     {
         space.validate_rule(provider.as_ref())?;
         validate_bound_space_invariants(&space)?;
@@ -1543,15 +1484,15 @@ where
             .map_err(checked_metadata_operation_error)?;
         let prepared = proof
             .homspace()
-            .prepare_fusion_tree_layout_lowered(provider.as_ref())
-            .map_err(checked_lowered_build_operation_error)?;
+            .prepare_fusion_tree_layout_checked(provider.as_ref())
+            .map_err(|error| OperationError::FusionAlgebra(Box::new(error)))?;
         space.validate_complete_tree_grid(prepared.keys())?;
-        PreparedLayoutKeys::Lowered(prepared).commit();
+        PreparedLayoutKeys::Checked(prepared).commit();
         space.admission = FusionSpaceAdmission::Complete(provider.rule_identity());
         Ok(Self {
             space,
             provider,
-            layout_build: LayoutBuildCapability::lowered(),
+            layout_build: LayoutBuildCapability::checked(),
         })
     }
 
@@ -1688,11 +1629,9 @@ where
         homspace: FusionTreeHomSpace,
     ) -> Result<Self, OperationError>
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>
-            + LoweredMultiplicityFreeAlgebra
-            + CheckedFusionAlgebra,
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
     {
-        let layout_build = LayoutBuildCapability::lowered();
+        let layout_build = LayoutBuildCapability::checked();
         let prepared = layout_build.prepare(provider.as_ref(), &homspace)?;
         // Why not route this ordinary constructor through the caller-shape
         // expert API: the final HomSpace already owns every leg degeneracy,
@@ -2060,11 +1999,10 @@ impl DynamicFusionMapSpace {
     {
         observe_final_result_layout_build();
         let staged = match prepared {
-            PreparedLayoutKeys::Lowered(prepared) => Some((prepared, true)),
-            PreparedLayoutKeys::Checked(prepared) => Some((prepared, false)),
+            PreparedLayoutKeys::Checked(prepared) => Some(prepared),
             PreparedLayoutKeys::Encoded | PreparedLayoutKeys::Staged(_) => None,
         };
-        if let Some((prepared, _lowered)) = staged {
+        if let Some(prepared) = staged {
             let nout = homspace.codomain().len();
             let nin = homspace.domain().len();
             let subblock_structure = prepared
@@ -2073,11 +2011,6 @@ impl DynamicFusionMapSpace {
             // All fallible final-storage work is complete. Why not commit
             // before building: malformed leg degeneracies or extent overflow
             // must leave process-local layout identity untouched. The commit
-            // count is lowered-provenance only; checked staging must not bump it.
-            #[cfg(test)]
-            if _lowered {
-                LOWERED_LAYOUT_COMMITS.set(LOWERED_LAYOUT_COMMITS.get() + 1);
-            }
             prepared.commit();
             return Ok(Self {
                 nout,
@@ -2220,9 +2153,7 @@ impl DynamicFusionMapSpace {
             .validate_degeneracy_shapes(&keys, &shapes)
             .map_err(OperationError::from_core_preserving_context)?;
         let subblock_structure = match prepared {
-            PreparedLayoutKeys::Staged(prepared)
-            | PreparedLayoutKeys::Lowered(prepared)
-            | PreparedLayoutKeys::Checked(prepared) => {
+            PreparedLayoutKeys::Staged(prepared) | PreparedLayoutKeys::Checked(prepared) => {
                 let structure = prepared
                     .build_complete_from_leg_degeneracies(&homspace)
                     .map_err(OperationError::from_core_preserving_context)?;
@@ -3481,7 +3412,7 @@ mod bound_invariant_tests {
     }
 
     #[test]
-    fn lowered_bind_revalidates_complete_without_replacing_layout() {
+    fn bind_revalidates_complete_without_replacing_layout() {
         // What: a legacy Complete stamp gains checked algebra proof, commits
         // one lowered capability, and retains the caller's exact block layout.
         let _guard = crate::test_support::CACHE_TEST_LOCK
@@ -3501,7 +3432,7 @@ mod bound_invariant_tests {
             FusionSpaceAdmission::Complete(_)
         ));
         assert!(Arc::ptr_eq(&structure, &bound.space.subblock_structure));
-        assert_eq!(scratch_publication_observations(), (0, 0, 0, 1));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0));
 
         let rule = lowered_product_rule();
         let pair = Fz2U1Codec::encode(Z2Irrep::ODD.sector_id(), U1Irrep::new(2).sector_id());
@@ -3525,7 +3456,7 @@ mod bound_invariant_tests {
             FusionSpaceAdmission::Complete(_)
         ));
         assert!(Arc::ptr_eq(&structure, &bound.space.subblock_structure));
-        assert_eq!(scratch_publication_observations(), (0, 0, 0, 1));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0));
     }
 
     #[test]
@@ -3580,7 +3511,7 @@ mod bound_invariant_tests {
             ),
             Err(OperationError::Core(CoreError::FusionRuleMismatch { .. }))
         ));
-        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0));
 
         for admission in [
             FusionSpaceAdmission::Subset(U1FusionRule.rule_identity()),
@@ -3605,7 +3536,7 @@ mod bound_invariant_tests {
                     }
             ));
             assert_eq!(original.admission(), &admission);
-            assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+            assert_eq!(scratch_publication_observations(), (0, 0, 0));
         }
     }
 
@@ -3657,7 +3588,7 @@ mod bound_invariant_tests {
             error,
             OperationError::FusionAlgebra(Box::new(FusionAlgebraError::ProductCodec(expected)))
         );
-        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0));
     }
 
     #[test]
@@ -3701,7 +3632,7 @@ mod bound_invariant_tests {
             original.admission(),
             FusionSpaceAdmission::Subset(_)
         ));
-        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0));
     }
 
     #[test]
@@ -3940,7 +3871,7 @@ mod bound_invariant_tests {
 }
 
 #[cfg(test)]
-mod lowered_metadata_tests {
+mod checked_metadata_tests {
     use super::*;
     use crate::test_support::CACHE_TEST_LOCK;
     use std::cell::Cell;
@@ -3994,7 +3925,7 @@ mod lowered_metadata_tests {
         request: MetadataRequest<'_>,
     ) -> Result<MetadataOutput, OperationError> {
         PRIMER_CALLS.with(|calls| calls.set(calls.get() + 1));
-        lowered_metadata_dispatcher(rule, request)
+        checked_metadata_dispatcher(rule, request)
     }
 
     fn reset_primer_calls() {
@@ -4007,7 +3938,7 @@ mod lowered_metadata_tests {
 
     fn source(rule: &TripleRule) -> DynamicFusionMapSpace {
         let homspace = homspace();
-        lowered_layout_primer(rule, &homspace).unwrap();
+        checked_layout_primer(rule, &homspace).unwrap();
         let count = homspace.fusion_tree_keys(rule).len();
         DynamicFusionMapSpace::from_degeneracy_shapes(rule, homspace, vec![vec![1; 4]; count])
             .unwrap()
@@ -4015,10 +3946,10 @@ mod lowered_metadata_tests {
 
     fn shapes_from_tree_keys<R>(rule: &R, homspace: &FusionTreeHomSpace) -> Vec<Vec<usize>>
     where
-        R: LoweredMultiplicityFreeAlgebra,
+        R: MultiplicityFreeFusionRule + CheckedFusionAlgebra,
     {
         homspace
-            .prepare_fusion_tree_layout_lowered(rule)
+            .prepare_fusion_tree_layout_checked(rule)
             .unwrap()
             .commit()
             .iter()
@@ -4057,9 +3988,7 @@ mod lowered_metadata_tests {
 
     fn assert_final_homspace_matches_shape_oracle<R>(provider: Arc<R>, homspace: FusionTreeHomSpace)
     where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>
-            + LoweredMultiplicityFreeAlgebra
-            + CheckedFusionAlgebra,
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
     {
         let shapes = shapes_from_tree_keys(provider.as_ref(), &homspace);
         let oracle = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
@@ -4090,7 +4019,7 @@ mod lowered_metadata_tests {
         assert_eq!(layout_snapshot(actual.space()), expected_layout);
         assert_eq!(actual.space().required_len().unwrap(), expected_len);
         assert_eq!(legacy_shape_path_builds(), 0);
-        let (scratch_builds, scratch_admissions, _, _) = scratch_publication_observations();
+        let (scratch_builds, scratch_admissions, _) = scratch_publication_observations();
         assert_eq!((scratch_builds, scratch_admissions), (0, 0));
     }
 
@@ -4282,7 +4211,7 @@ mod lowered_metadata_tests {
         .unwrap();
         assert!(Arc::ptr_eq(root.provider_arc(), &provider));
         assert_eq!(legacy_shape_path_builds(), 0);
-        let (scratch_builds, scratch_admissions, _, _) = scratch_publication_observations();
+        let (scratch_builds, scratch_admissions, _) = scratch_publication_observations();
         assert_eq!((scratch_builds, scratch_admissions), (0, 0));
 
         let derived_homspace = FusionTreeHomSpace::new(
@@ -4296,7 +4225,7 @@ mod lowered_metadata_tests {
             .unwrap();
         assert!(Arc::ptr_eq(derived.provider_arc(), &provider));
         assert_eq!(legacy_shape_path_builds(), 0);
-        let (scratch_builds, scratch_admissions, _, _) = scratch_publication_observations();
+        let (scratch_builds, scratch_admissions, _) = scratch_publication_observations();
         assert_eq!((scratch_builds, scratch_admissions), (0, 0));
         let encoded =
             DynamicFusionMapSpace::from_final_homspace(provider.as_ref(), derived_homspace)
@@ -4322,7 +4251,7 @@ mod lowered_metadata_tests {
         )
         .unwrap();
         assert_eq!(legacy_shape_path_builds(), 1);
-        let (scratch_builds, scratch_admissions, _, _) = scratch_publication_observations();
+        let (scratch_builds, scratch_admissions, _) = scratch_publication_observations();
         assert_eq!((scratch_builds, scratch_admissions), (0, 0));
     }
 
@@ -4365,7 +4294,7 @@ mod lowered_metadata_tests {
         let error = DynamicFusionMapSpace::from_final_homspace_with_primer(
             &U1FusionRule,
             overflowing,
-            lowered_metadata_dispatcher::<U1FusionRule>,
+            checked_metadata_dispatcher::<U1FusionRule>,
         )
         .unwrap_err();
 
@@ -4373,7 +4302,7 @@ mod lowered_metadata_tests {
         // Why not compare process-global cache totals: coverage runs unit
         // tests in parallel. These counters attribute publication to this
         // failing transaction only.
-        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0));
     }
 
     #[test]
@@ -4450,24 +4379,25 @@ mod lowered_metadata_tests {
     }
 
     #[test]
-    fn lowered_metadata_error_maps_to_operation_invalid_argument() {
-        // What: malformed built-in product IDs cross into the operation layer
-        // as the same structured invalid-argument variant and static message.
+    fn metadata_error_maps_to_the_exact_codec_cause() {
+        // What: a malformed product ID crosses into the operation layer with
+        // its codec cause intact rather than as a static message. The lowered
+        // enumerator used to flatten this to InvalidArgument; the checked one
+        // is the only enumerator now and it preserves the typed cause.
         let malformed = FusionTreeHomSpace::new(
             FusionProductSpace::new([SectorLeg::new([(SectorId::new(usize::MAX), 1)], false)]),
             FusionProductSpace::new(Vec::<SectorLeg>::new()),
         );
-        let error = lowered_layout_primer(&rule(), &malformed).unwrap_err();
-        assert_eq!(
+        let error = checked_layout_primer(&rule(), &malformed).unwrap_err();
+        assert!(matches!(
             error,
-            OperationError::InvalidArgument {
-                message: "built-in fusion-tree layout contains an invalid product sector",
-            }
-        );
+            OperationError::FusionAlgebra(ref cause)
+                if matches!(**cause, FusionAlgebraError::ProductCodec(_))
+        ));
     }
 
     #[test]
-    fn lowered_algebra_error_maps_to_exact_operation_cause() {
+    fn algebra_error_maps_to_exact_operation_cause() {
         // What: the operation boundary owns the exact lowered U1 closure
         // cause and exposes it through the standard error source chain.
         let overflow = FusionTreeHomSpace::new(
@@ -4481,7 +4411,7 @@ mod lowered_metadata_tests {
             left: i32::MAX,
             right: 1,
         };
-        let error = lowered_layout_primer(&U1FusionRule, &overflow).unwrap_err();
+        let error = checked_layout_primer(&U1FusionRule, &overflow).unwrap_err();
         assert_eq!(
             error,
             OperationError::FusionAlgebra(Box::new(expected.clone()))
@@ -4498,9 +4428,7 @@ mod lowered_metadata_tests {
         homspace: FusionTreeHomSpace,
         expected: FusionAlgebraError,
     ) where
-        R: MultiplicityFreeRigidSymbols<Scalar = f64>
-            + LoweredMultiplicityFreeAlgebra
-            + CheckedFusionAlgebra,
+        R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra,
     {
         let _guard = CACHE_TEST_LOCK
             .lock()
@@ -4515,7 +4443,7 @@ mod lowered_metadata_tests {
         )
         .unwrap_err();
         assert_eq!(error, OperationError::FusionAlgebra(Box::new(expected)));
-        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0));
     }
 
     #[test]
@@ -4610,7 +4538,7 @@ mod lowered_metadata_tests {
             Vec::<Vec<usize>>::new(),
             |rule, homspace| {
                 assert!(homspace.existing_id().is_none());
-                lowered_layout_primer(rule, homspace)
+                checked_layout_primer(rule, homspace)
             },
         )
         .unwrap_err();
@@ -4621,7 +4549,7 @@ mod lowered_metadata_tests {
                 right: 1,
             }))
         );
-        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0));
     }
 
     #[test]
@@ -4642,7 +4570,7 @@ mod lowered_metadata_tests {
             [vec![1]],
             |rule, homspace| {
                 assert!(homspace.existing_id().is_none());
-                lowered_layout_primer(rule, homspace)
+                checked_layout_primer(rule, homspace)
             },
         )
         .unwrap_err();
@@ -4653,7 +4581,7 @@ mod lowered_metadata_tests {
                 actual: 1,
             })
         );
-        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0));
     }
 
     #[test]
@@ -4683,7 +4611,7 @@ mod lowered_metadata_tests {
                 actual: 0,
             })
         );
-        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0));
     }
 
     #[test]
@@ -4832,7 +4760,7 @@ mod lowered_metadata_tests {
             &rule,
             homspace,
             shapes,
-            |rule, homspace| lowered_layout_primer(rule, homspace),
+            |rule, homspace| checked_layout_primer(rule, homspace),
         )
         .unwrap();
 
@@ -4906,7 +4834,7 @@ mod lowered_metadata_tests {
             error,
             OperationError::Core(tenet_core::CoreError::ElementCountOverflow)
         );
-        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0));
     }
 
     #[test]
@@ -4921,7 +4849,7 @@ mod lowered_metadata_tests {
         let homspace =
             FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([]));
         homspace
-            .prepare_fusion_tree_layout_lowered(&U1FusionRule)
+            .prepare_fusion_tree_layout_checked(&U1FusionRule)
             .unwrap()
             .commit();
         assert!(homspace.existing_id().is_none());
@@ -4941,7 +4869,7 @@ mod lowered_metadata_tests {
                 actual: 1,
             })
         );
-        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0));
     }
 
     #[test]
@@ -4975,7 +4903,7 @@ mod lowered_metadata_tests {
                 right: 1,
             }))
         );
-        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0));
     }
 
     #[test]
@@ -4996,7 +4924,7 @@ mod lowered_metadata_tests {
             [Vec::<usize>::new()],
             |rule, homspace| {
                 builds.set(builds.get() + 1);
-                lowered_layout_primer(rule, homspace)
+                checked_layout_primer(rule, homspace)
             },
         )
         .unwrap();
@@ -5009,7 +4937,7 @@ mod lowered_metadata_tests {
             [Vec::<usize>::new()],
             |rule, homspace| {
                 builds.set(builds.get() + 1);
-                lowered_layout_primer(rule, homspace)
+                checked_layout_primer(rule, homspace)
             },
         )
         .unwrap();
@@ -5022,9 +4950,11 @@ mod lowered_metadata_tests {
     }
 
     #[test]
-    fn lowered_transform_reports_exact_u1_min_orientation_failure_without_publication() {
-        // What: moving a representable U1 MIN source leg across the HomSpace
-        // boundary returns its exact checked-dual cause and publishes nothing.
+    fn admission_reports_exact_u1_min_dual_failure_without_publication() {
+        // What: a leg whose dual is unrepresentable is rejected when the space
+        // is admitted, with its exact cause and without publishing anything.
+        // Admitting it would only defer the same failure to whichever boundary
+        // crossing ran first.
         let _guard = CACHE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -5035,17 +4965,14 @@ mod lowered_metadata_tests {
             FusionProductSpace::new([SectorLeg::new([(min, 1)], false)]),
             FusionProductSpace::new([]),
         );
-        let source = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
+        reset_scratch_publication_observations();
+
+        let error = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
             Arc::new(U1FusionRule),
             homspace,
             Vec::<Vec<usize>>::new(),
         )
-        .unwrap();
-        reset_scratch_publication_observations();
-
-        let error = source
-            .transformed_multiplicity_free(&TreeTransformOperation::permute([], [0]))
-            .unwrap_err();
+        .unwrap_err();
 
         assert_eq!(
             error,
@@ -5053,12 +4980,12 @@ mod lowered_metadata_tests {
                 charge: i32::MIN,
             }))
         );
-        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0));
     }
 
     #[cfg(target_pointer_width = "64")]
     #[test]
-    fn lowered_contract_reports_exact_product_odd_min_failure_without_publication() {
+    fn admission_reports_exact_product_odd_min_failure_without_publication() {
         // What: orienting an open fZ2-odd/U1-MIN RHS leg into the result domain
         // returns the nested U1 dual failure before any result layout publication.
         let _guard = CACHE_TEST_LOCK
@@ -5081,16 +5008,20 @@ mod lowered_metadata_tests {
             FusionProductSpace::new([SectorLeg::new([(odd_min, 1)], false)]),
             FusionProductSpace::new([]),
         );
-        let rhs = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
+        reset_scratch_publication_observations();
+
+        // The unrepresentable dual is rejected when the space is admitted, not
+        // when a later operation first needs it: a leg whose dual does not
+        // exist cannot carry adjoint, repartition, bend or transpose, so
+        // admitting it would only move the same failure to whichever operation
+        // ran first.
+        let _ = &lhs;
+        let error = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
             Arc::clone(&provider),
             rhs_homspace,
             Vec::<Vec<usize>>::new(),
         )
-        .unwrap();
-        reset_scratch_publication_observations();
-
-        let error = BoundDynamicFusionMapSpace::contracted_multiplicity_free(&lhs, &rhs, &[], &[])
-            .unwrap_err();
+        .unwrap_err();
 
         assert_eq!(
             error,
@@ -5098,18 +5029,21 @@ mod lowered_metadata_tests {
                 charge: i32::MIN,
             }))
         );
-        assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+        assert_eq!(scratch_publication_observations(), (0, 0, 0));
     }
 
     #[test]
-    fn lowered_transform_invalid_axis_precedes_u1_min_dual_failure() {
+    fn transform_invalid_axis_error_is_reported_exactly() {
         // What: malformed transform axes retain their exact structural error
         // precedence even when a legal boundary crossing would overflow U1 dual.
-        let min = U1Irrep::new(i32::MIN).sector_id();
+        // The min-dual leg is rejected at admission now, so axis validation
+        // and dual representability no longer race: build the precedence
+        // fixture on a leg whose dual exists.
+        let representable = U1Irrep::new(1).sector_id();
         let source = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
             Arc::new(U1FusionRule),
             FusionTreeHomSpace::new(
-                FusionProductSpace::new([SectorLeg::new([(min, 1)], false)]),
+                FusionProductSpace::new([SectorLeg::new([(representable, 1)], false)]),
                 FusionProductSpace::new([]),
             ),
             Vec::<Vec<usize>>::new(),
@@ -6059,7 +5993,7 @@ mod scratch_cache_tests {
         let leg = || FusionProductSpace::new([tenet_core::SectorLeg::new([(half, 1)], false)]);
         let make_hom = || FusionTreeHomSpace::new(leg(), leg());
         let hom = make_hom();
-        lowered_layout_primer(provider.as_ref(), &hom).unwrap();
+        checked_layout_primer(provider.as_ref(), &hom).unwrap();
         let shapes = vec![vec![1; 2]; hom.fusion_tree_keys(provider.as_ref()).len()];
         let lowered = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
             Arc::clone(&provider),
@@ -6088,9 +6022,11 @@ mod scratch_cache_tests {
             FusionProductSpace::new([]),
         );
         for output in [&cloned, &rebound, &derived, &transformed, &contracted] {
+            // The checked enumerator reports the codec cause rather than the
+            // lowered path's flattened static message.
             assert!(matches!(
                 output.prime_derived_homspace(&malformed),
-                Err(OperationError::InvalidArgument { .. })
+                Err(OperationError::FusionAlgebra(_))
             ));
         }
         assert!(encoded.prime_derived_homspace(&malformed).is_ok());
@@ -6099,12 +6035,12 @@ mod scratch_cache_tests {
                 .unwrap();
         assert!(matches!(
             mixed.prime_derived_homspace(&malformed),
-            Err(OperationError::InvalidArgument { .. })
+            Err(OperationError::FusionAlgebra(_))
         ));
     }
 
     #[test]
-    fn lowered_root_constructor_builds_from_lowered_keys() {
+    fn root_constructor_builds_from_checked_keys() {
         // What: the lowered root accepts its lowered key set directly and
         // produces the same complete storage grid as the encoded oracle.
         let provider = Arc::new(tenet_core::SU2FusionRule);
@@ -6112,7 +6048,7 @@ mod scratch_cache_tests {
         let leg = || FusionProductSpace::new([SectorLeg::new([(half, 1)], false)]);
         let hom = FusionTreeHomSpace::new(leg(), leg());
         let lowered_keys = hom
-            .prepare_fusion_tree_layout_lowered(provider.as_ref())
+            .prepare_fusion_tree_layout_checked(provider.as_ref())
             .unwrap()
             .commit();
         let count = lowered_keys.len();
@@ -6148,7 +6084,7 @@ mod scratch_cache_tests {
             BoundDynamicFusionMapSpace::from_final_homspace_multiplicity_free_lowered(
                 provider, malformed,
             ),
-            Err(OperationError::InvalidArgument { .. })
+            Err(OperationError::FusionAlgebra(_))
         ));
     }
 }
@@ -6518,7 +6454,7 @@ mod checked_admission_tests {
                 ),
                 before
             );
-            assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+            assert_eq!(scratch_publication_observations(), (0, 0, 0));
         }
     }
 
@@ -6638,7 +6574,7 @@ mod checked_admission_tests {
                 ),
                 before
             );
-            assert_eq!(scratch_publication_observations(), (0, 0, 0, 0));
+            assert_eq!(scratch_publication_observations(), (0, 0, 0));
         }
     }
 }

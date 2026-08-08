@@ -113,18 +113,6 @@ fn checked_generic_trace_owned_path_reuses_strided_executor() {
     assert_eq!(output, vec![2.0]);
 }
 
-fn lowered_u1_dynamic_space(
-    homspace: FusionTreeHomSpace,
-    shapes: Vec<Vec<usize>>,
-) -> BoundDynamicFusionMapSpace<U1FusionRule> {
-    BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
-        std::sync::Arc::new(U1FusionRule),
-        homspace,
-        shapes,
-    )
-    .unwrap()
-}
-
 fn assert_owned_trace_matches_initialized_for_real_and_complex<R>(
     dst: &BoundDynamicFusionMapSpace<R>,
     src: &BoundDynamicFusionMapSpace<R>,
@@ -1019,148 +1007,6 @@ fn typed_fz2_trace_validates_host_slice_extents_before_mutation() {
         );
         assert_eq!(dst.data(), initial_dst, "{}", case.name);
     }
-}
-
-#[test]
-fn lowered_dynamic_trace_select_reports_u1_min_without_mutating_destination() {
-    // What: checked output selection returns the exact U1 MIN dual failure
-    // before trace terms, result-layout publication, or destination scaling.
-    let min = U1Irrep::new(i32::MIN).sector_id();
-    let zero = U1Irrep::new(0).sector_id();
-    let src = lowered_u1_dynamic_space(
-        FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([(min, 1)], false)]),
-            FusionProductSpace::new([]),
-        ),
-        Vec::new(),
-    );
-    let dst = lowered_u1_dynamic_space(
-        FusionTreeHomSpace::new(
-            FusionProductSpace::new([]),
-            FusionProductSpace::new([SectorLeg::new([(zero, 1)], false)]),
-        ),
-        vec![vec![1]],
-    );
-    let mut dst_data = vec![37.0_f64];
-    crate::contract::reset_scratch_publication_observations();
-    crate::tensortrace::reset_trace_transform_invocations();
-
-    let error = tensortrace_fusion_dyn_into_checked(
-        &dst,
-        &mut dst_data,
-        &src,
-        &[],
-        TensorTraceAxisSpec::new(&[0], &[], &[]),
-        2.0,
-        3.0,
-    )
-    .unwrap_err();
-
-    assert_eq!(
-        error,
-        OperationError::FusionAlgebra(Box::new(tenet_core::FusionAlgebraError::U1DualOverflow {
-            charge: i32::MIN
-        },))
-    );
-    assert_eq!(dst_data, [37.0]);
-    assert_eq!(
-        crate::contract::scratch_publication_observations(),
-        (0, 0, 0, 0)
-    );
-    assert_eq!(crate::tensortrace::take_trace_transform_invocations(), 0);
-}
-
-#[test]
-fn lowered_dynamic_trace_outward_leg_reports_u1_min_without_mutating_destination() {
-    // What: checked trace-pair orientation returns the exact U1 MIN dual
-    // failure before trace terms, result publication, or destination scaling.
-    let min = U1Irrep::new(i32::MIN).sector_id();
-    let zero = U1Irrep::new(0).sector_id();
-    let src = lowered_u1_dynamic_space(
-        FusionTreeHomSpace::new(
-            FusionProductSpace::new([
-                SectorLeg::new([(zero, 1)], false),
-                SectorLeg::new([(min, 1)], false),
-            ]),
-            FusionProductSpace::new([]),
-        ),
-        Vec::new(),
-    );
-    let dst = lowered_u1_dynamic_space(
-        FusionTreeHomSpace::new(FusionProductSpace::new([]), FusionProductSpace::new([])),
-        vec![Vec::new()],
-    );
-    let mut dst_data = vec![41.0_f64];
-    crate::contract::reset_scratch_publication_observations();
-    crate::tensortrace::reset_trace_transform_invocations();
-
-    let error = tensortrace_fusion_dyn_into_checked(
-        &dst,
-        &mut dst_data,
-        &src,
-        &[],
-        TensorTraceAxisSpec::new(&[], &[0], &[1]),
-        2.0,
-        3.0,
-    )
-    .unwrap_err();
-
-    assert_eq!(
-        error,
-        OperationError::FusionAlgebra(Box::new(tenet_core::FusionAlgebraError::U1DualOverflow {
-            charge: i32::MIN
-        },))
-    );
-    assert_eq!(dst_data, [41.0]);
-    assert_eq!(
-        crate::contract::scratch_publication_observations(),
-        (0, 0, 0, 0)
-    );
-    assert_eq!(crate::tensortrace::take_trace_transform_invocations(), 0);
-}
-
-#[test]
-fn lowered_dynamic_trace_invalid_axis_precedes_u1_min_dual_failure() {
-    // What: trace axis validation retains its structural precedence before
-    // checked selection can attempt to dual a U1 MIN source leg.
-    let min = U1Irrep::new(i32::MIN).sector_id();
-    let zero = U1Irrep::new(0).sector_id();
-    let src = lowered_u1_dynamic_space(
-        FusionTreeHomSpace::new(
-            FusionProductSpace::new([SectorLeg::new([(min, 1)], false)]),
-            FusionProductSpace::new([]),
-        ),
-        Vec::new(),
-    );
-    let dst = lowered_u1_dynamic_space(
-        FusionTreeHomSpace::new(
-            FusionProductSpace::new([]),
-            FusionProductSpace::new([SectorLeg::new([(zero, 1)], false)]),
-        ),
-        vec![vec![1]],
-    );
-    let mut dst_data = vec![43.0_f64];
-
-    let error = tensortrace_fusion_dyn_into(
-        &dst,
-        &mut dst_data,
-        &src,
-        &[],
-        TensorTraceAxisSpec::new(&[1], &[], &[]),
-        2.0,
-        3.0,
-    )
-    .unwrap_err();
-
-    assert_eq!(
-        error,
-        OperationError::InvalidAxisSet {
-            tensor: "trace output",
-            axes: vec![1],
-            rank: 1,
-        }
-    );
-    assert_eq!(dst_data, [43.0]);
 }
 
 #[test]
@@ -3060,4 +2906,29 @@ fn plain_tensortrace_rejects_one_block_fusion_tensor_instead_of_dense_trace() {
         }
     );
     assert_eq!(dst.data(), &[0.0]);
+}
+
+#[test]
+fn u1_min_dual_leg_is_rejected_at_admission() {
+    // What: a leg whose dual is unrepresentable never becomes a space, so no
+    // trace can observe it. -(i32::MIN) is a real U(1) charge that the i32
+    // encoding cannot hold; admitting the leg would only defer the same
+    // failure to whichever boundary crossing ran first, and which one that is
+    // depends on the caller.
+    let min = U1Irrep::new(i32::MIN).sector_id();
+    let error = BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
+        std::sync::Arc::new(U1FusionRule),
+        FusionTreeHomSpace::new(
+            FusionProductSpace::new([SectorLeg::new([(min, 1)], false)]),
+            FusionProductSpace::new([]),
+        ),
+        Vec::<Vec<usize>>::new(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        OperationError::FusionAlgebra(Box::new(tenet_core::FusionAlgebraError::U1DualOverflow {
+            charge: i32::MIN
+        }))
+    );
 }

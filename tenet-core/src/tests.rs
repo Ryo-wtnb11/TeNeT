@@ -9934,25 +9934,19 @@ mod tests {
         (key, layout)
     }
 
-    fn assert_lowered_keys_match_encoded_oracle<R>(rule: &R, hom: &FusionTreeHomSpace)
+    fn assert_checked_keys_match_encoded_oracle<R>(rule: &R, hom: &FusionTreeHomSpace)
     where
-        R: LoweredMultiplicityFreeAlgebra,
+        R: MultiplicityFreeFusionRule + CheckedFusionAlgebra,
     {
-        let encoded = hom.fusion_tree_keys_uncached(rule);
-        let lowered = hom.try_fusion_tree_keys_uncached_lowered(rule).unwrap();
-        assert_eq!(lowered, encoded);
-
         let encoded_layout = hom.fusion_tree_layout_data_uncached(rule);
-        let lowered_layout = hom
-            .try_fusion_tree_layout_data_uncached_lowered(rule)
-            .unwrap();
-        assert_eq!(lowered_layout.keys, encoded_layout.keys);
-        assert_eq!(lowered_layout.sectors.len(), encoded_layout.sectors.len());
-        for (actual, expected) in lowered_layout
-            .sectors
-            .iter()
-            .zip(&encoded_layout.sectors)
-        {
+        let checked_layout = hom.try_fusion_tree_layout_data_uncached_checked(rule).unwrap();
+        assert_eq!(checked_layout.keys, encoded_layout.keys);
+        assert_eq!(
+            checked_layout.keys.as_ref(),
+            hom.fusion_tree_keys_uncached(rule).as_slice()
+        );
+        assert_eq!(checked_layout.sectors.len(), encoded_layout.sectors.len());
+        for (actual, expected) in checked_layout.sectors.iter().zip(&encoded_layout.sectors) {
             assert_eq!(actual.start, expected.start);
             assert_eq!(actual.row_count, expected.row_count);
             assert_eq!(actual.col_count, expected.col_count);
@@ -9969,23 +9963,23 @@ mod tests {
     }
 
     #[test]
-    fn lowered_builder_matches_encoded_oracle_for_builtin_ranks_and_products() {
+    fn checked_builder_matches_encoded_oracle_for_builtin_ranks_and_products() {
         // What: every persistent key field and key order stays identical for
         // ranks 0 through 6 across all built-in multiplicity-free algebras.
         for rank in 0..=6 {
-            assert_lowered_keys_match_encoded_oracle(
+            assert_checked_keys_match_encoded_oracle(
                 &U1FusionRule,
                 &singleton_rank_hom(u1(1), rank),
             );
-            assert_lowered_keys_match_encoded_oracle(
+            assert_checked_keys_match_encoded_oracle(
                 &Z2FusionRule,
                 &singleton_rank_hom(z2_odd(), rank),
             );
-            assert_lowered_keys_match_encoded_oracle(
+            assert_checked_keys_match_encoded_oracle(
                 &FermionParityFusionRule,
                 &singleton_rank_hom(z2_odd(), rank),
             );
-            assert_lowered_keys_match_encoded_oracle(
+            assert_checked_keys_match_encoded_oracle(
                 &SU2FusionRule,
                 &singleton_rank_hom(su2(1), rank),
             );
@@ -10013,11 +10007,11 @@ mod tests {
             TripleCodec::encode(Fz2U1Codec::encode(z2_even(), u1(2)), su2(0));
 
         for rank in 0..=6 {
-            assert_lowered_keys_match_encoded_oracle(
+            assert_checked_keys_match_encoded_oracle(
                 &pair_rule,
                 &singleton_rank_hom(pair_sector, rank),
             );
-            assert_lowered_keys_match_encoded_oracle(
+            assert_checked_keys_match_encoded_oracle(
                 &triple_rule,
                 &singleton_rank_hom(triple_sector, rank),
             );
@@ -10035,7 +10029,7 @@ mod tests {
         };
         let multi_tuple_rank_eight =
             FusionTreeHomSpace::new(multi_tuple_side(false), multi_tuple_side(true));
-        assert_lowered_keys_match_encoded_oracle(&triple_rule, &multi_tuple_rank_eight);
+        assert_checked_keys_match_encoded_oracle(&triple_rule, &multi_tuple_rank_eight);
 
         for dual_mask in 0usize..(1 << 3) {
             let all_dual_masks = FusionTreeHomSpace::new(
@@ -10048,7 +10042,7 @@ mod tests {
                     dual_mask & 4 != 0,
                 )]),
             );
-            assert_lowered_keys_match_encoded_oracle(&triple_rule, &all_dual_masks);
+            assert_checked_keys_match_encoded_oracle(&triple_rule, &all_dual_masks);
         }
 
         let asymmetric = FusionTreeHomSpace::new(
@@ -10079,11 +10073,11 @@ mod tests {
                 ),
             ]),
         );
-        assert_lowered_keys_match_encoded_oracle(&triple_rule, &asymmetric);
+        assert_checked_keys_match_encoded_oracle(&triple_rule, &asymmetric);
     }
 
     #[test]
-    fn lowered_and_encoded_entries_share_the_same_layout_cache() {
+    fn checked_and_encoded_entries_share_the_same_layout_cache() {
         // What: old-first and lowered-first construction converge on the same
         // Arc rather than publishing parallel layouts for one semantic key.
         let _guard = test_support::CACHE_TEST_LOCK
@@ -10093,42 +10087,23 @@ mod tests {
 
         reset_core_intern_tables();
         let encoded_first = hom.cached_fusion_tree_layout(&SU2FusionRule);
-        let lowered_second = hom
-            .try_cached_fusion_tree_layout_lowered(&SU2FusionRule)
-            .unwrap();
-        assert!(Arc::ptr_eq(&encoded_first, &lowered_second));
+        let checked_second = hom
+            .prepare_fusion_tree_layout_checked(&SU2FusionRule)
+            .unwrap()
+            .commit_layout();
+        assert!(Arc::ptr_eq(&encoded_first, &checked_second));
 
         reset_core_intern_tables();
-        let lowered_first = hom
-            .try_cached_fusion_tree_layout_lowered(&SU2FusionRule)
-            .unwrap();
+        let checked_first = hom
+            .prepare_fusion_tree_layout_checked(&SU2FusionRule)
+            .unwrap()
+            .commit_layout();
         let encoded_second = hom.cached_fusion_tree_layout(&SU2FusionRule);
-        assert!(Arc::ptr_eq(&lowered_first, &encoded_second));
+        assert!(Arc::ptr_eq(&checked_first, &encoded_second));
     }
 
     #[test]
-    fn lowered_layout_cache_hit_performs_no_decode_or_channel_work() {
-        // What: a warm hit returns the retained layout without entering any
-        // typed decode, forward fold, or backward fusion enumeration.
-        let _guard = test_support::CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        reset_core_intern_tables();
-        let hom = singleton_rank_hom(su2(1), 5);
-        reset_lowered_layout_build_observations();
-        let cold = hom.try_fusion_tree_keys_lowered(&SU2FusionRule).unwrap();
-        let (cold_decodes, cold_channels) = lowered_layout_build_observations();
-        assert!(cold_decodes > 0);
-        assert!(cold_channels > 0);
-
-        reset_lowered_layout_build_observations();
-        let warm = hom.try_fusion_tree_keys_lowered(&SU2FusionRule).unwrap();
-        assert!(Arc::ptr_eq(&cold, &warm));
-        assert_eq!(lowered_layout_build_observations(), (0, 0));
-    }
-
-    #[test]
-    fn prepared_lowered_layout_publishes_only_at_commit() {
+    fn prepared_layout_publishes_only_at_commit() {
         // What: cold preparation enumerates exactly once but does not consume
         // identity or cache admission until its explicit commit point.
         let _guard = test_support::CACHE_TEST_LOCK
@@ -10136,15 +10111,11 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_core_intern_tables();
         reset_fusion_tree_layout_probe_side_effect_calls();
-        reset_lowered_layout_build_observations();
         let hom = singleton_rank_hom(su2(1), 5);
 
         let prepared = hom
-            .prepare_fusion_tree_layout_lowered(&SU2FusionRule)
+            .prepare_fusion_tree_layout_checked(&SU2FusionRule)
             .unwrap();
-        let cold_work = lowered_layout_build_observations();
-        assert!(cold_work.0 > 0);
-        assert!(cold_work.1 > 0);
         // Why not inspect global cache totals: unrelated parallel tests may
         // populate the same process cache. These thread-local probes attribute
         // publication exactly to this transaction.
@@ -10156,8 +10127,8 @@ mod tests {
     }
 
     #[test]
-    fn prepared_lowered_final_structure_reuses_one_checked_enumeration() {
-        // What: cold lowered preparation and the direct leg-degeneracy builder
+    fn prepared_final_structure_reuses_one_checked_enumeration() {
+        // What: cold checked preparation and the direct leg-degeneracy builder
         // match the established single-pass structure without a second
         // decode/channel enumeration or early cache publication.
         let _guard = test_support::CACHE_TEST_LOCK
@@ -10171,18 +10142,12 @@ mod tests {
 
         reset_core_intern_tables();
         reset_fusion_tree_layout_probe_side_effect_calls();
-        reset_lowered_layout_build_observations();
         let prepared = hom
-            .prepare_fusion_tree_layout_lowered(&SU2FusionRule)
+            .prepare_fusion_tree_layout_checked(&SU2FusionRule)
             .unwrap();
-        let prepare_work = lowered_layout_build_observations();
-        assert!(prepare_work.0 > 0);
-        assert!(prepare_work.1 > 0);
         assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
 
-        reset_lowered_layout_build_observations();
         let actual = prepared.build_from_leg_degeneracies(&hom).unwrap();
-        assert_eq!(lowered_layout_build_observations(), (0, 0));
         assert_eq!(actual, expected);
         assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
 
@@ -10191,8 +10156,8 @@ mod tests {
     }
 
     #[test]
-    fn prepared_lowered_complete_structure_hits_without_rebuilding_layout() {
-        // What: a repeated valid lowered finalization validates its target
+    fn prepared_complete_structure_hits_without_rebuilding_layout() {
+        // What: a repeated valid finalization validates its target
         // locally, then reuses the retained complete content without another
         // tree enumeration or cache admission.
         let _guard = test_support::CACHE_TEST_LOCK
@@ -10202,7 +10167,7 @@ mod tests {
         let hom = singleton_rank_hom(su2(1), 5);
 
         let first_prepared = hom
-            .prepare_fusion_tree_layout_lowered(&SU2FusionRule)
+            .prepare_fusion_tree_layout_checked(&SU2FusionRule)
             .unwrap();
         let first = first_prepared
             .build_complete_from_leg_degeneracies(&hom)
@@ -10211,9 +10176,8 @@ mod tests {
         let after_first = complete_hom_space_structure_cache_info();
         assert_eq!(after_first.admissions(), 1);
 
-        reset_lowered_layout_build_observations();
         let second_prepared = hom
-            .prepare_fusion_tree_layout_lowered(&SU2FusionRule)
+            .prepare_fusion_tree_layout_checked(&SU2FusionRule)
             .unwrap();
         let second = second_prepared
             .build_complete_from_leg_degeneracies(&hom)
@@ -10221,7 +10185,6 @@ mod tests {
         second_prepared.commit();
         let after_second = complete_hom_space_structure_cache_info();
 
-        assert_eq!(lowered_layout_build_observations(), (0, 0));
         assert_eq!(first.content_id(), second.content_id());
         assert_eq!(after_second.hits(), after_first.hits() + 1);
         assert_eq!(after_second.admissions(), after_first.admissions());
@@ -10241,7 +10204,7 @@ mod tests {
             FusionProductSpace::new([SectorLeg::new([(u1(1), 3)], true)]),
         );
         let prepared = source
-            .prepare_fusion_tree_layout_lowered(&U1FusionRule)
+            .prepare_fusion_tree_layout_checked(&U1FusionRule)
             .unwrap();
         reset_fusion_tree_layout_probe_side_effect_calls();
         let mismatched = FusionTreeHomSpace::new(
@@ -10291,30 +10254,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_lowered_preparation_is_observationally_read_only() {
-        // What: preparing an already-cached layout performs no enumeration,
-        // ID issue, or admission when abandoned.
-        let _guard = test_support::CACHE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        reset_core_intern_tables();
-        let hom = singleton_rank_hom(su2(1), 5);
-        hom.try_fusion_tree_keys_lowered(&SU2FusionRule).unwrap();
-        reset_fusion_tree_layout_probe_side_effect_calls();
-        reset_lowered_layout_build_observations();
-
-        let prepared = hom
-            .prepare_fusion_tree_layout_lowered(&SU2FusionRule)
-            .unwrap();
-        assert!(!prepared.keys().is_empty());
-        drop(prepared);
-
-        assert_eq!(lowered_layout_build_observations(), (0, 0));
-        assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
-    }
-
-    #[test]
-    fn cached_lowered_commit_readmits_after_core_reset() {
+    fn cached_commit_readmits_after_core_reset() {
         // What: a cached preparation that survives reset republishes its exact
         // retained keys without consuming a fresh layout identity.
         let _guard = test_support::CACHE_TEST_LOCK
@@ -10322,9 +10262,11 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_core_intern_tables();
         let hom = singleton_rank_hom(su2(1), 5);
-        hom.try_fusion_tree_keys_lowered(&SU2FusionRule).unwrap();
+        hom.prepare_fusion_tree_layout_checked(&SU2FusionRule)
+            .unwrap()
+            .commit();
         let prepared = hom
-            .prepare_fusion_tree_layout_lowered(&SU2FusionRule)
+            .prepare_fusion_tree_layout_checked(&SU2FusionRule)
             .unwrap();
         let retained = prepared.keys_arc();
         reset_core_intern_tables();
@@ -10337,7 +10279,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_lowered_commits_share_one_layout_admission() {
+    fn concurrent_commits_share_one_layout_admission() {
         // What: two cold preparations racing to commit converge on one Arc
         // and one cache miss without the losing transaction issuing an ID.
         let _guard = test_support::CACHE_TEST_LOCK
@@ -10353,7 +10295,7 @@ mod tests {
                 std::thread::spawn(move || {
                     reset_fusion_tree_layout_probe_side_effect_calls();
                     let prepared = hom
-                        .prepare_fusion_tree_layout_lowered(&SU2FusionRule)
+                        .prepare_fusion_tree_layout_checked(&SU2FusionRule)
                         .unwrap();
                     barrier.wait();
                     let keys = prepared.commit();
@@ -10374,34 +10316,29 @@ mod tests {
     }
 
     #[test]
-    fn lowered_builder_reports_malformed_ids_and_algebra_closure_without_panicking() {
-        // What: packed decode remains a non-algebra lowered error, while U(1),
-        // SU(2), and recursive product closure failures retain exact causes.
+    fn checked_builder_reports_malformed_ids_and_algebra_closure_without_panicking() {
+        // What: packed decode stays a codec error, while U(1), SU(2), and
+        // recursive product closure failures retain exact causes.
         type Codec = PackedProductCodec<Fz2SectorLayout, U1SectorLayout>;
         type Rule =
             ProductFusionRule<FermionParityFusionRule, U1FusionRule, Codec>;
         let rule = Rule::new(FermionParityFusionRule, U1FusionRule);
         let malformed = singleton_rank_hom(SectorId::new(usize::MAX), 1);
         let error = malformed
-            .try_fusion_tree_keys_uncached_lowered(&rule)
+            .prepare_fusion_tree_layout_checked(&rule)
             .unwrap_err();
         assert_eq!(
-            error.static_message(),
-            "built-in fusion-tree layout contains an invalid product sector"
-        );
-        assert_eq!(
-            error.clone().into_checked_fusion_algebra(),
+            error,
             FusionAlgebraError::ProductCodec(
                 Codec::decode_checked(SectorId::new(usize::MAX)).unwrap_err(),
             )
         );
-        assert!(error.into_fusion_algebra().is_err());
 
         let invalid_z2 = singleton_rank_hom(SectorId::new(2), 1)
-            .try_fusion_tree_keys_uncached_lowered(&Z2FusionRule)
+            .prepare_fusion_tree_layout_checked(&Z2FusionRule)
             .unwrap_err();
         assert_eq!(
-            invalid_z2.into_checked_fusion_algebra(),
+            invalid_z2,
             FusionAlgebraError::InvalidSector {
                 sector: SectorId::new(2),
             }
@@ -10415,10 +10352,10 @@ mod tests {
             FusionProductSpace::new(Vec::<SectorLeg>::new()),
         );
         let error = u1_overflow
-            .try_fusion_tree_keys_uncached_lowered(&U1FusionRule)
+            .try_fusion_tree_layout_data_uncached_checked(&U1FusionRule)
             .unwrap_err();
         assert_eq!(
-            error.into_fusion_algebra().unwrap(),
+            error,
             FusionAlgebraError::U1FusionOverflow {
                 left: i32::MAX,
                 right: 1,
@@ -10434,10 +10371,10 @@ mod tests {
             FusionProductSpace::new(Vec::<SectorLeg>::new()),
         );
         let error = u1_dual_overflow
-            .try_fusion_tree_keys_uncached_lowered(&U1FusionRule)
+            .try_fusion_tree_layout_data_uncached_checked(&U1FusionRule)
             .unwrap_err();
         assert_eq!(
-            error.into_fusion_algebra().unwrap(),
+            error,
             FusionAlgebraError::U1DualOverflow { charge: i32::MIN }
         );
 
@@ -10449,10 +10386,10 @@ mod tests {
             FusionProductSpace::new([]),
         );
         let error = su2_overflow
-            .try_fusion_tree_keys_uncached_lowered(&SU2FusionRule)
+            .try_fusion_tree_layout_data_uncached_checked(&SU2FusionRule)
             .unwrap_err();
         assert_eq!(
-            error.into_fusion_algebra().unwrap(),
+            error,
             FusionAlgebraError::FusionNotRepresentable {
                 left: su2(128),
                 right: su2(127),
@@ -10467,10 +10404,10 @@ mod tests {
             FusionProductSpace::new([]),
         );
         let error = pair_overflow
-            .try_fusion_tree_keys_uncached_lowered(&rule)
+            .try_fusion_tree_layout_data_uncached_checked(&rule)
             .unwrap_err();
         assert_eq!(
-            error.into_fusion_algebra().unwrap(),
+            error,
             FusionAlgebraError::U1FusionOverflow {
                 left: i32::MAX,
                 right: 1,
@@ -10495,10 +10432,10 @@ mod tests {
             FusionProductSpace::new([]),
         );
         let error = triple_overflow
-            .try_fusion_tree_keys_uncached_lowered(&triple_rule)
+            .try_fusion_tree_layout_data_uncached_checked(&triple_rule)
             .unwrap_err();
         assert_eq!(
-            error.into_fusion_algebra().unwrap(),
+            error,
             FusionAlgebraError::U1FusionOverflow {
                 left: i32::MAX,
                 right: 1,
@@ -10506,12 +10443,12 @@ mod tests {
         );
     }
 
-    fn assert_failed_lowered_build_is_transactional<R>(
+    fn assert_failed_checked_build_is_transactional<R>(
         rule: &R,
         hom: &FusionTreeHomSpace,
         expected: FusionAlgebraError,
     ) where
-        R: LoweredMultiplicityFreeAlgebra,
+        R: MultiplicityFreeFusionRule + CheckedFusionAlgebra,
     {
         let _guard = test_support::CACHE_TEST_LOCK
             .lock()
@@ -10520,15 +10457,15 @@ mod tests {
         reset_fusion_tree_layout_probe_side_effect_calls();
         reset_hom_space_intern_calls();
         reset_block_structure_intern_calls();
-        let error = hom.try_fusion_tree_keys_lowered(rule).unwrap_err();
-        assert_eq!(error.into_fusion_algebra().unwrap(), expected);
+        let error = hom.prepare_fusion_tree_layout_checked(rule).unwrap_err();
+        assert_eq!(error, expected);
         assert_eq!(fusion_tree_layout_probe_side_effect_calls(), (0, 0));
         assert_eq!(hom_space_intern_calls(), 0);
         assert_eq!(block_structure_intern_calls(), 0);
     }
 
     #[test]
-    fn failed_lowered_algebra_builds_publish_no_identity_or_intern_state() {
+    fn failed_checked_algebra_builds_publish_no_identity_or_intern_state() {
         // What: invalid built-in U1, SU2, and product closure leaves layout
         // identity/admission, HomSpace, and BlockStructure state untouched.
         let u1_overflow = FusionTreeHomSpace::new(
@@ -10538,7 +10475,7 @@ mod tests {
             ]),
             FusionProductSpace::new([]),
         );
-        assert_failed_lowered_build_is_transactional(
+        assert_failed_checked_build_is_transactional(
             &U1FusionRule,
             &u1_overflow,
             FusionAlgebraError::U1FusionOverflow {
@@ -10554,7 +10491,7 @@ mod tests {
             ]),
             FusionProductSpace::new([]),
         );
-        assert_failed_lowered_build_is_transactional(
+        assert_failed_checked_build_is_transactional(
             &SU2FusionRule,
             &su2_overflow,
             FusionAlgebraError::FusionNotRepresentable {
@@ -10573,7 +10510,7 @@ mod tests {
             ]),
             FusionProductSpace::new([]),
         );
-        assert_failed_lowered_build_is_transactional(
+        assert_failed_checked_build_is_transactional(
             &product_rule,
             &product_overflow,
             FusionAlgebraError::U1FusionOverflow {
@@ -10594,10 +10531,10 @@ mod tests {
             ]),
             FusionProductSpace::new(Vec::<SectorLeg>::new()),
         );
-        let keys = hom
-            .try_fusion_tree_keys_uncached_lowered(&U1FusionRule)
+        let layout = hom
+            .try_fusion_tree_layout_data_uncached_checked(&U1FusionRule)
             .unwrap();
-        assert!(keys.is_empty());
+        assert!(layout.keys.is_empty());
     }
 
     #[test]
@@ -17899,47 +17836,6 @@ mod tests {
     }
 
     #[test]
-    fn lowered_su2_success_stays_below_the_sector_id_boundary() {
-        // What: the core-local lowered bridge preserves the adapter's
-        // representable channel sequence and multiplicity.
-        let rule = SU2FusionRule;
-        let left = SU2Irrep::from_twice_spin(2);
-        let right = SU2Irrep::from_twice_spin(1);
-        let mut channels = Vec::new();
-        rule.try_for_each_lowered_channel(left, right, &mut |channel| {
-            channels.push(channel.twice_spin());
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(channels, vec![1, 3]);
-        assert_eq!(
-            rule.try_lowered_nsymbol(left, right, SU2Irrep::from_twice_spin(1)),
-            Ok(1)
-        );
-    }
-
-    #[test]
-    fn lowered_su2_streaming_stops_at_the_first_emission_error() {
-        // What: lowered SU(2) channel enumeration is streamed, so an emitter
-        // failure does not build or visit later channels.
-        let rule = SU2FusionRule;
-        let mut emissions = 0;
-        let error = LoweredFusionTreeBuildError::invalid_sector(SectorId::new(255));
-        assert_eq!(
-            rule.try_for_each_lowered_channel(
-                SU2Irrep::from_twice_spin(4),
-                SU2Irrep::from_twice_spin(4),
-                &mut |_| {
-                    emissions += 1;
-                    Err(error.clone())
-                },
-            ),
-            Err(error)
-        );
-        assert_eq!(emissions, 1);
-    }
-
-    #[test]
     fn checked_fibonacci_matches_valid_operations_and_rejects_unknown_sectors() {
         // What: Fibonacci's checked companion preserves every valid operation
         // and rejects IDs outside the two-sector algebra with the exact input.
@@ -18158,34 +18054,6 @@ mod tests {
                 Ok(rule.nsymbol(left, right, rule.vacuum()))
             );
         }
-    }
-
-    #[test]
-    fn lowered_u1_errors_preserve_the_checked_algebra_cause() {
-        // What: direct lowered U1 dual and fusion calls own the exact checked
-        // algebra cause instead of retaining only a static classification.
-        let dual = U1FusionRule
-            .try_lowered_dual(U1Irrep::new(i32::MIN))
-            .unwrap_err();
-        assert_eq!(
-            dual.into_fusion_algebra().unwrap(),
-            FusionAlgebraError::U1DualOverflow { charge: i32::MIN }
-        );
-        let mut emit = |_sector| Ok(());
-        let fusion = U1FusionRule
-            .try_for_each_lowered_channel(
-                U1Irrep::new(i32::MAX),
-                U1Irrep::new(1),
-                &mut emit,
-            )
-            .unwrap_err();
-        assert_eq!(
-            fusion.into_fusion_algebra().unwrap(),
-            FusionAlgebraError::U1FusionOverflow {
-                left: i32::MAX,
-                right: 1,
-            }
-        );
     }
 
     #[test]

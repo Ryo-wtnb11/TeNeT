@@ -91,7 +91,7 @@ fn cold_lowered_enumeration_streams_and_builds_once() {
         let homspace = chain_homspace(sector_count);
         let (prepared, bytes, _) = measured(|| {
             homspace
-                .prepare_fusion_tree_layout_lowered(&U1FusionRule)
+                .prepare_fusion_tree_layout_checked(&U1FusionRule)
                 .unwrap()
         });
         let keys = prepared.commit();
@@ -112,13 +112,13 @@ fn cold_lowered_enumeration_streams_and_builds_once() {
     let homspace = chain_homspace(16);
     let (first, cold_bytes, _) = measured(|| {
         homspace
-            .prepare_fusion_tree_layout_lowered(&U1FusionRule)
+            .prepare_fusion_tree_layout_checked(&U1FusionRule)
             .unwrap()
     });
     let cold_keys = first.commit();
     let (second, warm_bytes, _) = measured(|| {
         homspace
-            .prepare_fusion_tree_layout_lowered(&U1FusionRule)
+            .prepare_fusion_tree_layout_checked(&U1FusionRule)
             .unwrap()
     });
     let warm_keys = second.commit();

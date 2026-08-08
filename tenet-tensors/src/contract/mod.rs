@@ -54,14 +54,14 @@ pub use context::{
     TensorContractCache, TensorContractCacheStats, TensorContractExecutionContext,
     TensorContractFusionExecutionContext, TensorContractPlanKey,
 };
-pub(crate) use dynamic_space::{dispatch_prepare, LayoutKeyBuilder};
 #[cfg(test)]
 pub(crate) use dynamic_space::{
-    encoded_layout_primer, fusion_operand_projection_prepares, lowered_layout_primer,
-    lowered_metadata_dispatcher, reset_fusion_operand_projection_prepares,
+    checked_layout_primer, checked_metadata_dispatcher, encoded_layout_primer,
+    fusion_operand_projection_prepares, reset_fusion_operand_projection_prepares,
     reset_scratch_publication_observations, scratch_publication_observations, MetadataOutput,
     MetadataRequest,
 };
+pub(crate) use dynamic_space::{dispatch_prepare, LayoutKeyBuilder};
 pub use dynamic_space::{
     BoundDynamicFusionMapSpace, DynamicFusionMapSpace, FusionOperand,
     PreparedCheckedGenericDynamicSpace, ValidatedDynamicFusionLayout,

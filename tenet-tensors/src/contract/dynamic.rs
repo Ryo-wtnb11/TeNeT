@@ -2895,7 +2895,7 @@ mod tests {
     use tenet_operations::OutputAxisOrder;
 
     use super::super::dynamic_space::{
-        lowered_metadata_dispatcher, MetadataOutput, MetadataRequest,
+        checked_metadata_dispatcher, MetadataOutput, MetadataRequest,
     };
     use super::super::fusion_block::FusionBlockContractWorkspace;
     use super::super::scratch::StorageDynamicFusionScratchWorkspace;
@@ -2909,7 +2909,7 @@ mod tests {
         request: MetadataRequest<'_>,
     ) -> Result<MetadataOutput, OperationError> {
         EXECUTION_PRIMER_CALLS.with(|calls| calls.set(calls.get() + 1));
-        lowered_metadata_dispatcher(rule, request)
+        checked_metadata_dispatcher(rule, request)
     }
 
     fn reset_execution_primer_calls() {

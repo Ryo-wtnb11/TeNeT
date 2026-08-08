@@ -1,58 +1,58 @@
+//! Channel-order and representability contracts the layout enumerator relies
+//! on. These were written against the built-in lowered bridge; the bridge is
+//! gone (issue #977) and the same properties are asserted through the checked
+//! algebra every provider implements, which is now the only enumeration path.
+
 use tenet_core::{
-    CU1FusionRule, CU1Irrep, FermionParityFusionRule, LoweredMultiplicityFreeAlgebra,
-    SU2FusionRule, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep, ZNFusionRule,
-    CU1_MAX_TWICE_CHARGE,
+    CU1FusionRule, CU1Irrep, CheckedFusionAlgebra, FermionParityFusionRule, FusionAlgebraError,
+    SU2FusionRule, SU2Irrep, SectorCodec, U1FusionRule, U1Irrep, Z2FusionRule, Z2Irrep,
+    ZNFusionRule, CU1_MAX_TWICE_CHARGE,
 };
 
-fn assert_lowered<T: LoweredMultiplicityFreeAlgebra>() {}
-
-fn assert_lowered_roundtrip<R>(
+fn assert_codec_roundtrip_and_channels<R>(
     rule: &R,
     left: R::Sector,
     right: R::Sector,
     expected_channels: &[R::Sector],
 ) where
-    R: LoweredMultiplicityFreeAlgebra,
+    R: SectorCodec + CheckedFusionAlgebra,
     R::Sector: std::fmt::Debug,
 {
-    for sector in [left, right, rule.try_lowered_vacuum().unwrap()] {
-        let encoded = rule.try_encode_lowered(sector).unwrap();
-        assert_eq!(rule.try_decode_lowered(encoded).unwrap(), sector);
+    for sector in [&left, &right] {
+        let encoded = rule.encode_sector(sector).unwrap();
+        assert_eq!(&rule.decode_sector(encoded).unwrap(), sector);
     }
-    let dual = rule.try_lowered_dual(left).unwrap();
-    assert_eq!(rule.try_lowered_dual(dual).unwrap(), left);
+    let left_id = rule.encode_sector(&left).unwrap();
+    let right_id = rule.encode_sector(&right).unwrap();
 
-    let mut channels = Vec::new();
-    rule.try_for_each_lowered_channel(left, right, &mut |sector| {
-        channels.push(sector);
-        Ok(())
-    })
-    .unwrap();
+    let dual = rule.try_dual_sector(left_id).unwrap();
+    assert_eq!(rule.try_dual_sector(dual).unwrap(), left_id);
+
+    let channels = rule
+        .try_fusion_channels(left_id, right_id)
+        .unwrap()
+        .into_iter()
+        .map(|id| rule.decode_sector(id).unwrap())
+        .collect::<Vec<_>>();
     assert_eq!(channels, expected_channels);
-    for &coupled in expected_channels {
-        assert_eq!(rule.try_lowered_nsymbol(left, right, coupled).unwrap(), 1);
+    for coupled in expected_channels {
+        let coupled_id = rule.encode_sector(coupled).unwrap();
+        assert_eq!(rule.try_nsymbol(left_id, right_id, coupled_id).unwrap(), 1);
     }
 }
 
 #[test]
-fn built_in_providers_implement_core_rule_bridge_traits() {
-    assert_lowered::<Z2FusionRule>();
-    assert_lowered::<FermionParityFusionRule>();
-    assert_lowered::<U1FusionRule>();
-    assert_lowered::<SU2FusionRule>();
-    assert_lowered::<CU1FusionRule>();
-}
-
-#[test]
-fn cu1_lowered_bridge_keeps_complete_ordered_channels() {
+fn cu1_keeps_complete_ordered_channels() {
+    // What: CU(1) enumerates its three channels in the documented order and
+    // reports an unrepresentable product rather than truncating it.
     let rule = CU1FusionRule;
-    let q = CU1Irrep::from_twice_charge(1);
-    let mut channels = Vec::new();
-    rule.try_for_each_lowered_channel(q, q, &mut |sector| {
-        channels.push(sector);
-        Ok(())
-    })
-    .unwrap();
+    let q = rule.encode_sector(&CU1Irrep::from_twice_charge(1)).unwrap();
+    let channels = rule
+        .try_fusion_channels(q, q)
+        .unwrap()
+        .into_iter()
+        .map(|id| rule.decode_sector(id).unwrap())
+        .collect::<Vec<_>>();
     assert_eq!(
         channels,
         [
@@ -61,46 +61,43 @@ fn cu1_lowered_bridge_keeps_complete_ordered_channels() {
             CU1Irrep::from_twice_charge(2),
         ]
     );
-    let edge = CU1Irrep::from_twice_charge(CU1_MAX_TWICE_CHARGE);
-    let mut emitted = false;
-    let error = rule
-        .try_for_each_lowered_channel(edge, edge, &mut |_| {
-            emitted = true;
-            Ok(())
-        })
-        .unwrap_err();
-    assert!(!emitted);
+
+    let edge = rule
+        .encode_sector(&CU1Irrep::from_twice_charge(CU1_MAX_TWICE_CHARGE))
+        .unwrap();
     assert!(matches!(
-        error.into_checked_fusion_algebra(),
-        tenet_core::FusionAlgebraError::FusionNotRepresentable { .. }
+        rule.try_fusion_channels(edge, edge).unwrap_err(),
+        FusionAlgebraError::FusionNotRepresentable { .. }
     ));
 }
 
 #[test]
-fn built_in_lowered_bridges_roundtrip_and_enumerate_channels() {
-    assert_lowered_roundtrip(&Z2FusionRule, Z2Irrep::ODD, Z2Irrep::ODD, &[Z2Irrep::EVEN]);
-    assert_lowered_roundtrip(
-        &FermionParityFusionRule,
+fn built_in_providers_roundtrip_and_enumerate_channels() {
+    assert_codec_roundtrip_and_channels(
+        &Z2FusionRule,
         Z2Irrep::ODD,
         Z2Irrep::ODD,
         &[Z2Irrep::EVEN],
     );
-    assert_lowered_roundtrip(
-        &U1FusionRule,
-        U1Irrep::new(-2),
-        U1Irrep::new(3),
-        &[U1Irrep::new(1)],
+    assert_codec_roundtrip_and_channels(
+        &FermionParityFusionRule,
+        Z2Irrep::ODD,
+        Z2Irrep::EVEN,
+        &[Z2Irrep::ODD],
     );
-    assert_lowered_roundtrip(
+    assert_codec_roundtrip_and_channels(
+        &U1FusionRule,
+        U1Irrep::new(2),
+        U1Irrep::new(-5),
+        &[U1Irrep::new(-3)],
+    );
+    assert_codec_roundtrip_and_channels(
         &SU2FusionRule,
-        tenet_core::SU2Irrep::from_twice_spin(1),
-        tenet_core::SU2Irrep::from_twice_spin(1),
-        &[
-            tenet_core::SU2Irrep::from_twice_spin(0),
-            tenet_core::SU2Irrep::from_twice_spin(2),
-        ],
+        SU2Irrep::from_twice_spin(1),
+        SU2Irrep::from_twice_spin(1),
+        &[SU2Irrep::from_twice_spin(0), SU2Irrep::from_twice_spin(2)],
     );
 
     let zn = ZNFusionRule::new(5).unwrap();
-    assert_lowered_roundtrip(&zn, zn.irrep(4), zn.irrep(3), &[zn.irrep(2)]);
+    assert_codec_roundtrip_and_channels(&zn, zn.irrep(4), zn.irrep(3), &[zn.irrep(2)]);
 }
