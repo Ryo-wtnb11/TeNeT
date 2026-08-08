@@ -113,18 +113,6 @@ fn checked_generic_trace_owned_path_reuses_strided_executor() {
     assert_eq!(output, vec![2.0]);
 }
 
-fn lowered_u1_dynamic_space(
-    homspace: FusionTreeHomSpace,
-    shapes: Vec<Vec<usize>>,
-) -> BoundDynamicFusionMapSpace<U1FusionRule> {
-    BoundDynamicFusionMapSpace::from_degeneracy_shapes_lowered(
-        std::sync::Arc::new(U1FusionRule),
-        homspace,
-        shapes,
-    )
-    .unwrap()
-}
-
 fn assert_owned_trace_matches_initialized_for_real_and_complex<R>(
     dst: &BoundDynamicFusionMapSpace<R>,
     src: &BoundDynamicFusionMapSpace<R>,
