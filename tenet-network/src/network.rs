@@ -12,14 +12,19 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tenet::core::{
-    CheckedFusionAlgebra, FusionAlgebraError, MultiplicityFreeAdmissionMode,
+    CheckedFusionAlgebra, CheckedGenericAdmissionMode, CheckedGenericFusion,
+    CheckedGenericRigidSymbols, FusionAlgebraError, MultiplicityFreeAdmissionMode,
     MultiplicityFreeRigidSymbols, RuleIdentity, SectorCodec, SectorLeg, TensorStorage,
     TypedSectorAdmission,
 };
 use tenet::prelude::{Error, Runtime, TensorScalar};
 #[cfg(feature = "cuda")]
 use tenet::typed::CudaStorage;
-use tenet::typed::{GradedSpace, NetworkReuseClass, RuntimeDetachedTensorMap, TensorMap};
+use tenet::typed::{
+    GradedSpace, NetworkReuseClass, RuntimeDetachedTensorMap, TensorMap, TypedSpaceModeDispatch,
+    TypedTensorAdjointDispatch, TypedTensorContractDispatch, TypedTensorModeDispatch,
+    TypedTensorTransformDispatch,
+};
 use tenet::RuntimeIdentity;
 #[cfg(feature = "cuda")]
 use tenet::{core::Placement, operations::OperationError};
@@ -91,6 +96,66 @@ fn invalid(message: impl std::fmt::Display) -> Error {
     Error::InvalidArgument(message.to_string())
 }
 
+pub(crate) type HostNetworkError<R> =
+    <<R as TypedSectorAdmission>::Mode as TypedTensorModeDispatch<R>>::FacadeError;
+
+mod host_mode_sealed {
+    pub trait Sealed {}
+
+    impl Sealed for tenet::core::MultiplicityFreeAdmissionMode {}
+    impl Sealed for tenet::core::CheckedGenericAdmissionMode {}
+}
+
+/// Internal Host network policy selected by the provider's admission mode.
+#[doc(hidden)]
+pub trait HostNetworkModeDispatch<R, D>:
+    host_mode_sealed::Sealed
+    + TypedTensorModeDispatch<R>
+    + TypedSpaceModeDispatch<R>
+    + TypedTensorAdjointDispatch<R, D>
+    + TypedTensorContractDispatch<R, D>
+    + TypedTensorTransformDispatch<R, D>
+where
+    R: TypedSectorAdmission<Mode = Self>,
+    D: TensorScalar,
+{
+    const REUSE_DESTINATIONS: bool;
+
+    fn leg_dims<S: TensorStorage<D>>(
+        tensor: &TensorMap<R, D, S>,
+    ) -> Result<Vec<usize>, HostNetworkError<R>>;
+
+    fn contract_step(
+        lhs: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+        destination: &mut Option<TensorMap<R, D>>,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+    ) -> Result<StepOutput<TensorMap<R, D>>, HostNetworkError<R>>;
+
+    fn permute_step(
+        tensor: &TensorMap<R, D>,
+        destination: &mut Option<TensorMap<R, D>>,
+        codomain: &[usize],
+        domain: &[usize],
+    ) -> Result<StepOutput<TensorMap<R, D>>, HostNetworkError<R>>;
+
+    fn trace_pairs(
+        tensor: &TensorMap<R, D>,
+        pairs: &[(usize, usize)],
+    ) -> Result<TensorMap<R, D>, HostNetworkError<R>>;
+
+    fn activate_parked(
+        workspace: &mut NetworkExecutionWorkspace<R, D>,
+        runtime: &Runtime,
+        tensors: &[&TensorMap<R, D>],
+        steps: &[CompiledStep],
+    ) -> Result<(), HostNetworkError<R>>;
+
+    fn park_workspace(workspace: &mut NetworkExecutionWorkspace<R, D>);
+}
+
 #[cfg(feature = "cuda")]
 fn unsupported_cuda_network() -> Error {
     OperationError::UnsupportedTensorContractScope {
@@ -139,18 +204,16 @@ impl Network {
         })
     }
 
-    /// Plans from storage-independent metadata of homogeneous typed
-    /// multiplicity-free tensors; payload storage is never read or transferred.
+    /// Plans from storage-independent metadata of homogeneous typed Host
+    /// tensors; payload storage is never read or transferred.
     pub fn plan<R, D, S>(
         &self,
         tensors: &[&TensorMap<R, D, S>],
         optimizer: &(impl DenseContractionOptimizer + ?Sized),
-    ) -> Result<PlannedNetwork, Error>
+    ) -> Result<PlannedNetwork, HostNetworkError<R>>
     where
-        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-            + MultiplicityFreeRigidSymbols<Scalar = f64>
-            + CheckedFusionAlgebra
-            + SectorCodec,
+        R: TypedSectorAdmission,
+        R::Mode: HostNetworkModeDispatch<R, D>,
         D: TensorScalar,
         S: TensorStorage<D>,
     {
@@ -164,17 +227,45 @@ impl Network {
         self.finish_typed_plan(tensors, ir, plan)
     }
 
+    #[cfg(feature = "opt-path")]
+    pub(crate) fn plan_with_optimizer_fallbacks<R, D, S>(
+        &self,
+        tensors: &[&TensorMap<R, D, S>],
+        optimizer: &dyn DenseContractionOptimizer,
+        fallbacks: &[&dyn DenseContractionOptimizer],
+    ) -> Result<PlannedNetwork, HostNetworkError<R>>
+    where
+        R: TypedSectorAdmission,
+        R::Mode: HostNetworkModeDispatch<R, D>,
+        D: TensorScalar,
+        S: TensorStorage<D>,
+    {
+        let (ir, infos) = self.lower_typed(tensors)?;
+        let plan = if ir.tensors().len() == 1 {
+            ContractionPlan::new(1, self.output.clone(), Vec::new()).map_err(invalid)?
+        } else {
+            let cost = DenseCostModel::from_network(&ir, &infos).map_err(invalid)?;
+            let mut result = ContractionPlan::from_dense_optimizer(&ir, optimizer, &cost);
+            for optimizer in fallbacks {
+                if result.is_ok() {
+                    break;
+                }
+                result = ContractionPlan::from_dense_optimizer(&ir, *optimizer, &cost);
+            }
+            result.map_err(invalid)?
+        };
+        self.finish_typed_plan(tensors, ir, plan)
+    }
+
     /// Wraps an already searched structural order for typed execution.
     pub fn plan_with<R, D, S>(
         &self,
         tensors: &[&TensorMap<R, D, S>],
         plan: ContractionPlan,
-    ) -> Result<PlannedNetwork, Error>
+    ) -> Result<PlannedNetwork, HostNetworkError<R>>
     where
-        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-            + MultiplicityFreeRigidSymbols<Scalar = f64>
-            + CheckedFusionAlgebra
-            + SectorCodec,
+        R: TypedSectorAdmission,
+        R::Mode: HostNetworkModeDispatch<R, D>,
         D: TensorScalar,
         S: TensorStorage<D>,
     {
@@ -187,12 +278,10 @@ impl Network {
         tensors: &[&TensorMap<R, D, S>],
         ir: NetworkIR,
         plan: ContractionPlan,
-    ) -> Result<PlannedNetwork, Error>
+    ) -> Result<PlannedNetwork, HostNetworkError<R>>
     where
-        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-            + MultiplicityFreeRigidSymbols<Scalar = f64>
-            + CheckedFusionAlgebra
-            + SectorCodec,
+        R: TypedSectorAdmission,
+        R::Mode: HostNetworkModeDispatch<R, D>,
         D: TensorScalar,
         S: TensorStorage<D>,
     {
@@ -212,6 +301,7 @@ impl Network {
             })
             .collect::<Vec<_>>();
         self.finish_plan(input_codomain_ranks, lowered_codomain_ranks, ir, plan)
+            .map_err(Into::into)
     }
 
     fn finish_plan(
@@ -251,12 +341,10 @@ impl Network {
     fn lower_typed<R, D, S>(
         &self,
         tensors: &[&TensorMap<R, D, S>],
-    ) -> Result<(NetworkIR, Vec<DenseTensorInfo>), Error>
+    ) -> Result<(NetworkIR, Vec<DenseTensorInfo>), HostNetworkError<R>>
     where
-        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-            + MultiplicityFreeRigidSymbols<Scalar = f64>
-            + CheckedFusionAlgebra
-            + SectorCodec,
+        R: TypedSectorAdmission,
+        R::Mode: HostNetworkModeDispatch<R, D>,
         D: TensorScalar,
         S: TensorStorage<D>,
     {
@@ -265,17 +353,18 @@ impl Network {
                 "network has {} operands but {} tensors were given",
                 self.inputs.len(),
                 tensors.len()
-            )));
+            ))
+            .into());
         }
         if let Some(first) = tensors.first() {
             let runtime = first.runtime().identity();
             let identity = TypedSectorAdmission::typed_rule_identity(first.provider());
             for (index, tensor) in tensors.iter().enumerate().skip(1) {
                 if !runtime.matches(tensor.runtime()) {
-                    return Err(invalid(format!("operand {index} uses a different Runtime")));
+                    return Err(invalid(format!("operand {index} uses a different Runtime")).into());
                 }
                 if identity != TypedSectorAdmission::typed_rule_identity(tensor.provider()) {
-                    return Err(Error::RuleMismatch);
+                    return Err(Error::RuleMismatch.into());
                 }
             }
         }
@@ -289,42 +378,47 @@ impl Network {
                     "operand {i} has {} labels but tensor rank {}",
                     labels.len(),
                     tensor.rank()
-                )));
+                ))
+                .into());
             }
             if let Some(split) = self.codomain_splits[i] {
                 if split != tensor.codomain_rank() {
                     return Err(invalid(format!(
                         "operand {i} puts {split} label(s) before `;` but the tensor's codomain rank is {}",
                         tensor.codomain_rank()
-                    )));
+                    ))
+                    .into());
                 }
             }
             let dims = if self.conj[i] {
                 let split = tensor.codomain_rank();
                 lowered_labels.push(rotate(labels, split));
-                rotate(&tensor.leg_dims()?, split)
+                rotate(
+                    &<R::Mode as HostNetworkModeDispatch<R, D>>::leg_dims(tensor)?,
+                    split,
+                )
             } else {
                 lowered_labels.push(labels.clone());
-                tensor.leg_dims()?
+                <R::Mode as HostNetworkModeDispatch<R, D>>::leg_dims(tensor)?
             };
             infos.push(DenseTensorInfo::new(dims));
             lowered_spaces.push(typed_effective_spaces(tensor, self.conj[i])?);
         }
-        validate_typed_contracted_leg_spaces(&lowered_labels, &lowered_spaces)?;
-        let ir = NetworkIR::from_labels(lowered_labels, self.output.clone()).map_err(invalid)?;
+        validate_typed_contracted_leg_spaces::<R, D>(&lowered_labels, &lowered_spaces)?;
+        let ir = NetworkIR::from_labels(lowered_labels, self.output.clone())
+            .map_err(|error| HostNetworkError::<R>::from(invalid(error)))?;
         Ok((ir, infos))
     }
 }
 
-fn validate_typed_contracted_leg_spaces<R>(
+fn validate_typed_contracted_leg_spaces<R, D>(
     labels: &[Vec<TemporaryLabel>],
     spaces: &[Vec<GradedSpace<R>>],
-) -> Result<(), Error>
+) -> Result<(), HostNetworkError<R>>
 where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec,
+    R: TypedSectorAdmission,
+    R::Mode: HostNetworkModeDispatch<R, D>,
+    D: TensorScalar,
 {
     let mut seen: HashMap<&TemporaryLabel, (usize, usize)> = HashMap::new();
     for (operand, operand_labels) in labels.iter().enumerate() {
@@ -338,7 +432,8 @@ where
             if rhs != &lhs.try_dual()? {
                 return Err(invalid(format!(
                     "space mismatch for contracted label `{label}` between operand {previous_operand} leg {previous_axis} and operand {operand} leg {axis}"
-                )));
+                ))
+                .into());
             }
         }
     }
@@ -348,34 +443,33 @@ where
 fn validate_typed_contracted_pairs<R, D>(
     tensors: &[TensorMap<R, D>],
     pairs: &[InputLegPair],
-) -> Result<(), Error>
+) -> Result<(), HostNetworkError<R>>
 where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec,
+    R: TypedSectorAdmission,
+    R::Mode: HostNetworkModeDispatch<R, D>,
     D: TensorScalar,
 {
     let spaces = tensors
         .iter()
         .map(typed_flat_spaces)
-        .collect::<Result<Vec<_>, Error>>()?;
+        .collect::<Result<Vec<_>, _>>()?;
     for &((lhs_slot, lhs_axis), (rhs_slot, rhs_axis)) in pairs {
         if spaces[rhs_slot][rhs_axis] != spaces[lhs_slot][lhs_axis].try_dual()? {
             return Err(invalid(format!(
                 "contracted input spaces mismatch between operand {lhs_slot} leg {lhs_axis} and operand {rhs_slot} leg {rhs_axis}"
-            )));
+            ))
+            .into());
         }
     }
     Ok(())
 }
 
-fn typed_flat_spaces<R, D, S>(tensor: &TensorMap<R, D, S>) -> Result<Vec<GradedSpace<R>>, Error>
+fn typed_flat_spaces<R, D, S>(
+    tensor: &TensorMap<R, D, S>,
+) -> Result<Vec<GradedSpace<R>>, HostNetworkError<R>>
 where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec,
+    R: TypedSectorAdmission,
+    R::Mode: HostNetworkModeDispatch<R, D>,
     D: TensorScalar,
     S: TensorStorage<D>,
 {
@@ -393,12 +487,10 @@ where
 fn typed_effective_spaces<R, D, S>(
     tensor: &TensorMap<R, D, S>,
     adjoint: bool,
-) -> Result<Vec<GradedSpace<R>>, Error>
+) -> Result<Vec<GradedSpace<R>>, HostNetworkError<R>>
 where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec,
+    R: TypedSectorAdmission,
+    R::Mode: HostNetworkModeDispatch<R, D>,
     D: TensorScalar,
     S: TensorStorage<D>,
 {
@@ -477,7 +569,8 @@ struct CompiledSchedule {
 
 type InputLegPair = ((usize, usize), (usize, usize));
 
-struct CompiledStep {
+#[doc(hidden)]
+pub struct CompiledStep {
     lhs_slot: usize,
     rhs_slot: usize,
     result_slot: usize,
@@ -512,7 +605,8 @@ struct TypedIntermediateBuffers<R, D> {
     parked_oriented: Option<RuntimeDetachedTensorMap<D>>,
 }
 
-enum StepOutput<T> {
+#[doc(hidden)]
+pub enum StepOutput<T> {
     Returned(T),
     Overwritten,
 }
@@ -539,6 +633,159 @@ impl<T> StepOutput<T> {
     fn retain(self, destination: &mut Option<T>) {
         if let Self::Returned(value) = self {
             *destination = Some(value);
+        }
+    }
+}
+
+impl<R, D> HostNetworkModeDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    const REUSE_DESTINATIONS: bool = true;
+
+    fn leg_dims<S: TensorStorage<D>>(tensor: &TensorMap<R, D, S>) -> Result<Vec<usize>, Error> {
+        tensor.leg_dims()
+    }
+
+    fn contract_step(
+        lhs: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+        destination: &mut Option<TensorMap<R, D>>,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+    ) -> Result<StepOutput<TensorMap<R, D>>, Error> {
+        if let Some(destination) = destination {
+            lhs.contract_overwrite_into(
+                rhs,
+                destination,
+                lhs_axes,
+                rhs_axes,
+                output_axes,
+                D::from_real(1.0),
+            )?;
+            Ok(StepOutput::Overwritten)
+        } else {
+            Ok(StepOutput::Returned(lhs.contract(
+                rhs,
+                lhs_axes,
+                rhs_axes,
+                output_axes,
+            )?))
+        }
+    }
+
+    fn permute_step(
+        tensor: &TensorMap<R, D>,
+        destination: &mut Option<TensorMap<R, D>>,
+        codomain: &[usize],
+        domain: &[usize],
+    ) -> Result<StepOutput<TensorMap<R, D>>, Error> {
+        if let Some(destination) = destination {
+            tensor.permute_overwrite_into(destination, codomain, domain, D::from_real(1.0))?;
+            Ok(StepOutput::Overwritten)
+        } else {
+            Ok(StepOutput::Returned(tensor.permute(codomain, domain)?))
+        }
+    }
+
+    fn trace_pairs(
+        tensor: &TensorMap<R, D>,
+        pairs: &[(usize, usize)],
+    ) -> Result<TensorMap<R, D>, Error> {
+        tensor.trace_pairs(pairs)
+    }
+
+    fn activate_parked(
+        workspace: &mut NetworkExecutionWorkspace<R, D>,
+        runtime: &Runtime,
+        tensors: &[&TensorMap<R, D>],
+        steps: &[CompiledStep],
+    ) -> Result<(), Error> {
+        workspace.activate_parked(runtime, tensors, steps)
+    }
+
+    fn park_workspace(workspace: &mut NetworkExecutionWorkspace<R, D>) {
+        workspace.park_runtime_owners();
+    }
+}
+
+impl<R, D> HostNetworkModeDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericRigidSymbols<Scalar = f64>,
+    D: TensorScalar,
+{
+    const REUSE_DESTINATIONS: bool = false;
+
+    fn leg_dims<S: TensorStorage<D>>(
+        tensor: &TensorMap<R, D, S>,
+    ) -> Result<Vec<usize>, HostNetworkError<R>> {
+        tensor
+            .codomain()
+            .into_iter()
+            .chain(tensor.domain())
+            .map(|space| space.dim().map(|dimension| dimension.round() as usize))
+            .collect()
+    }
+
+    fn contract_step(
+        lhs: &TensorMap<R, D>,
+        rhs: &TensorMap<R, D>,
+        _destination: &mut Option<TensorMap<R, D>>,
+        lhs_axes: &[usize],
+        rhs_axes: &[usize],
+        output_axes: &[usize],
+    ) -> Result<StepOutput<TensorMap<R, D>>, HostNetworkError<R>> {
+        Ok(StepOutput::Returned(lhs.contract_ordered(
+            rhs,
+            lhs_axes,
+            rhs_axes,
+            output_axes,
+        )?))
+    }
+
+    fn permute_step(
+        tensor: &TensorMap<R, D>,
+        _destination: &mut Option<TensorMap<R, D>>,
+        codomain: &[usize],
+        domain: &[usize],
+    ) -> Result<StepOutput<TensorMap<R, D>>, HostNetworkError<R>> {
+        Ok(StepOutput::Returned(tensor.permute(codomain, domain)?))
+    }
+
+    fn trace_pairs(
+        _tensor: &TensorMap<R, D>,
+        _pairs: &[(usize, usize)],
+    ) -> Result<TensorMap<R, D>, HostNetworkError<R>> {
+        Err(Error::InvalidArgument(
+            "tensor! intra-operand trace is not supported for checked Generic providers"
+                .to_string(),
+        )
+        .into())
+    }
+
+    fn activate_parked(
+        _workspace: &mut NetworkExecutionWorkspace<R, D>,
+        _runtime: &Runtime,
+        _tensors: &[&TensorMap<R, D>],
+        _steps: &[CompiledStep],
+    ) -> Result<(), HostNetworkError<R>> {
+        Ok(())
+    }
+
+    fn park_workspace(workspace: &mut NetworkExecutionWorkspace<R, D>) {
+        for buffers in &mut workspace.intermediates {
+            buffers.contracted = None;
+            buffers.oriented = None;
+            buffers.parked_contracted = None;
+            buffers.parked_oriented = None;
         }
     }
 }
@@ -876,12 +1123,13 @@ fn cuda_schedule_is_direct(schedule: &CompiledSchedule, input_shapes: &[(usize, 
 
 impl PlannedNetwork {
     /// Executes this plan with a fresh typed workspace.
-    pub fn execute<R, D>(&self, tensors: &[&TensorMap<R, D>]) -> Result<TensorMap<R, D>, Error>
+    pub fn execute<R, D>(
+        &self,
+        tensors: &[&TensorMap<R, D>],
+    ) -> Result<TensorMap<R, D>, HostNetworkError<R>>
     where
-        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-            + MultiplicityFreeRigidSymbols<Scalar = f64>
-            + CheckedFusionAlgebra
-            + SectorCodec,
+        R: TypedSectorAdmission,
+        R::Mode: HostNetworkModeDispatch<R, D>,
         D: TensorScalar,
     {
         self.execute_with_workspace(tensors, &mut NetworkExecutionWorkspace::default())
@@ -892,34 +1140,37 @@ impl PlannedNetwork {
         &self,
         tensors: &[&TensorMap<R, D>],
         workspace: &mut NetworkExecutionWorkspace<R, D>,
-    ) -> Result<TensorMap<R, D>, Error>
+    ) -> Result<TensorMap<R, D>, HostNetworkError<R>>
     where
-        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-            + MultiplicityFreeRigidSymbols<Scalar = f64>
-            + CheckedFusionAlgebra
-            + SectorCodec,
+        R: TypedSectorAdmission,
+        R::Mode: HostNetworkModeDispatch<R, D>,
         D: TensorScalar,
     {
-        let prepared = (|| {
+        let prepared: Result<_, HostNetworkError<R>> = (|| {
             if tensors.len() != self.schedule.input_ranks.len() {
                 return Err(invalid(format!(
                     "plan has {} operands but {} tensors were given",
                     self.schedule.input_ranks.len(),
                     tensors.len()
-                )));
+                ))
+                .into());
             }
             let runtime = tensors
                 .first()
-                .ok_or_else(|| invalid("network execution requires at least one operand"))?
+                .ok_or_else(|| {
+                    HostNetworkError::<R>::from(invalid(
+                        "network execution requires at least one operand",
+                    ))
+                })?
                 .runtime();
             let runtime_identity = runtime.identity();
             let rule_identity = TypedSectorAdmission::typed_rule_identity(tensors[0].provider());
             for (index, &tensor) in tensors.iter().enumerate() {
                 if !runtime_identity.matches(tensor.runtime()) {
-                    return Err(invalid(format!("operand {index} uses a different Runtime")));
+                    return Err(invalid(format!("operand {index} uses a different Runtime")).into());
                 }
                 if rule_identity != TypedSectorAdmission::typed_rule_identity(tensor.provider()) {
-                    return Err(Error::RuleMismatch);
+                    return Err(Error::RuleMismatch.into());
                 }
                 if tensor.rank() != self.schedule.input_ranks[index]
                     || tensor.codomain_rank() != self.input_codomain_ranks[index]
@@ -930,7 +1181,8 @@ impl PlannedNetwork {
                         self.input_codomain_ranks[index],
                         tensor.rank(),
                         tensor.codomain_rank()
-                    )));
+                    ))
+                    .into());
                 }
             }
             let snapshot_matches = workspace.owner_token == Some(self.owner_token)
@@ -957,7 +1209,7 @@ impl PlannedNetwork {
                         Ok((*tensor).clone())
                     }
                 })
-                .collect::<Result<Vec<_>, Error>>()?;
+                .collect::<Result<Vec<_>, HostNetworkError<R>>>()?;
             let new_snapshot = if snapshot_matches {
                 None
             } else {
@@ -980,11 +1232,12 @@ impl PlannedNetwork {
                         .collect::<Vec<_>>(),
                 )
             };
-            let reuse_enabled = new_snapshot
-                .as_ref()
-                .unwrap_or(&workspace.input_snapshot)
-                .iter()
-                .all(|snapshot| snapshot.reuse_class != NetworkReuseClass::Compact);
+            let reuse_enabled = <R::Mode as HostNetworkModeDispatch<R, D>>::REUSE_DESTINATIONS
+                && new_snapshot
+                    .as_ref()
+                    .unwrap_or(&workspace.input_snapshot)
+                    .iter()
+                    .all(|snapshot| snapshot.reuse_class != NetworkReuseClass::Compact);
             Ok((
                 runtime_identity,
                 rule_identity,
@@ -995,7 +1248,12 @@ impl PlannedNetwork {
         })();
         let (runtime_identity, rule_identity, lowered, new_snapshot, reuse_enabled) = prepared?;
         if new_snapshot.is_none() && reuse_enabled {
-            workspace.activate_parked(tensors[0].runtime(), tensors, &self.schedule.steps)?;
+            <R::Mode as HostNetworkModeDispatch<R, D>>::activate_parked(
+                workspace,
+                tensors[0].runtime(),
+                tensors,
+                &self.schedule.steps,
+            )?;
         }
         if let Some(snapshot) = new_snapshot {
             workspace.clear_replay_state();
@@ -1049,12 +1307,12 @@ impl PlannedNetwork {
         let producers = &mut workspace.producers;
         let intermediates = &mut workspace.intermediates;
         for (step_index, step) in self.schedule.steps.iter().enumerate() {
-            let lhs = slots[step.lhs_slot]
-                .as_ref()
-                .ok_or_else(|| invalid("lhs operand already consumed"))?;
-            let rhs = slots[step.rhs_slot]
-                .as_ref()
-                .ok_or_else(|| invalid("rhs operand already consumed"))?;
+            let lhs = slots[step.lhs_slot].as_ref().ok_or_else(|| {
+                HostNetworkError::<R>::from(invalid("lhs operand already consumed"))
+            })?;
+            let rhs = slots[step.rhs_slot].as_ref().ok_or_else(|| {
+                HostNetworkError::<R>::from(invalid("rhs operand already consumed"))
+            })?;
             let fused = step.result_output_axes.is_some();
             let TypedIntermediateBuffers {
                 contracted: contracted_buffer,
@@ -1066,42 +1324,23 @@ impl PlannedNetwork {
             } else {
                 &mut *contracted_buffer
             };
-            let contracted = if reuse_enabled && contract_buffer.is_some() {
-                lhs.contract_overwrite_into(
-                    rhs,
-                    contract_buffer.as_mut().expect("destination checked"),
-                    &step.lhs_contract_axes,
-                    &step.rhs_contract_axes,
-                    &step.contract_output_axes,
-                    D::from_real(1.0),
-                )?;
-                StepOutput::Overwritten
-            } else {
-                StepOutput::Returned(lhs.contract(
-                    rhs,
-                    &step.lhs_contract_axes,
-                    &step.rhs_contract_axes,
-                    &step.contract_output_axes,
-                )?)
-            };
+            let contracted = <R::Mode as HostNetworkModeDispatch<R, D>>::contract_step(
+                lhs,
+                rhs,
+                contract_buffer,
+                &step.lhs_contract_axes,
+                &step.rhs_contract_axes,
+                &step.contract_output_axes,
+            )?;
             let result = if fused {
                 contracted.take(oriented_buffer)
             } else if let Some((codomain, domain)) = &step.result_permutation {
-                let oriented = if reuse_enabled && oriented_buffer.is_some() {
-                    contracted.get(contracted_buffer).permute_overwrite_into(
-                        oriented_buffer.as_mut().expect("destination checked"),
-                        codomain,
-                        domain,
-                        D::from_real(1.0),
-                    )?;
-                    StepOutput::Overwritten
-                } else {
-                    StepOutput::Returned(
-                        contracted
-                            .get(contracted_buffer)
-                            .permute(codomain, domain)?,
-                    )
-                };
+                let oriented = <R::Mode as HostNetworkModeDispatch<R, D>>::permute_step(
+                    contracted.get(contracted_buffer),
+                    oriented_buffer,
+                    codomain,
+                    domain,
+                )?;
                 contracted.retain(contracted_buffer);
                 oriented.take(oriented_buffer)
             } else {
@@ -1123,7 +1362,7 @@ impl PlannedNetwork {
         }
         let result = slots[self.schedule.final_slot]
             .as_ref()
-            .ok_or_else(|| invalid("no final tensor produced"))?;
+            .ok_or_else(|| HostNetworkError::<R>::from(invalid("no final tensor produced")))?;
         if let Some((codomain, domain)) = &self.schedule.final_permutation {
             let output = result.permute(codomain, domain)?;
             let input = slots[self.schedule.final_slot]
@@ -1494,49 +1733,18 @@ mod static_operand_sealed {
 /// }
 /// ```
 ///
-/// Checked Generic providers remain outside this multiplicity-free dispatch
-/// surface:
-///
-/// ```compile_fail
-/// use std::convert::Infallible;
-/// use tenet::core::{
-///     CheckedGenericAdmissionMode, RuleIdentity, SectorId, TypedSectorAdmission,
-/// };
-/// use tenet::typed::TensorMap;
-/// use tenet_network::tensor;
-///
-/// struct CheckedGenericProvider;
-///
-/// impl TypedSectorAdmission for CheckedGenericProvider {
-///     type Sector = SectorId;
-///     type Error = Infallible;
-///     type Mode = CheckedGenericAdmissionMode;
-///
-///     fn typed_rule_identity(&self) -> RuleIdentity {
-///         RuleIdentity::of_type::<Self>()
-///     }
-///     fn try_encode_label(&self, sector: &SectorId) -> Result<SectorId, Infallible> {
-///         Ok(*sector)
-///     }
-///     fn try_decode_label(&self, sector: SectorId) -> Result<SectorId, Infallible> {
-///         Ok(sector)
-///     }
-///     fn try_dual_id(&self, sector: SectorId) -> Result<SectorId, Infallible> {
-///         Ok(sector)
-///     }
-/// }
-///
-/// fn checked_generic(
-///     a: &TensorMap<CheckedGenericProvider, f64>,
-///     b: &TensorMap<CheckedGenericProvider, f64>,
-/// ) {
-///     let _ = tensor!([i; k] = a[i; j] * b[j; k]);
-/// }
-/// ```
+/// Checked Generic providers use the same Host dispatch surface and preserve
+/// their typed provider errors. Intra-operand traces are rejected explicitly:
+/// ordinary checked trace requires stronger pivotal and sector-codec bounds
+/// than network admission.
 #[doc(hidden)]
 pub trait StaticNetworkOperand: static_operand_sealed::Sealed + Sized {
-    fn contract_static(tensors: &[&Self], spec: &'static StaticTopologySpec)
-        -> Result<Self, Error>;
+    type Error;
+
+    fn contract_static(
+        tensors: &[&Self],
+        spec: &'static StaticTopologySpec,
+    ) -> Result<Self, Self::Error>;
 }
 
 /// Preserves each macro operand's concrete typed tensor without conversion.
@@ -1553,7 +1761,7 @@ where
 pub fn contract_static_network<T: StaticNetworkOperand>(
     tensors: &[&T],
     spec: &'static StaticTopologySpec,
-) -> Result<T, Error> {
+) -> Result<T, T::Error> {
     T::contract_static(tensors, spec)
 }
 
@@ -1575,28 +1783,24 @@ fn validate_static_shape<T>(tensors: &[&T], spec: &StaticTopologySpec) -> Result
 
 impl<R, D> static_operand_sealed::Sealed for TensorMap<R, D>
 where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec
-        + Send,
+    R: TypedSectorAdmission + Send + Sync,
+    R::Mode: HostNetworkModeDispatch<R, D>,
     D: TensorScalar + Send + Sync + 'static,
 {
 }
 
 impl<R, D> StaticNetworkOperand for TensorMap<R, D>
 where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec
-        + Send,
+    R: TypedSectorAdmission + Send + Sync,
+    R::Mode: HostNetworkModeDispatch<R, D>,
     D: TensorScalar + Send + Sync + 'static,
 {
+    type Error = HostNetworkError<R>;
+
     fn contract_static(
         tensors: &[&Self],
         spec: &'static StaticTopologySpec,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, Self::Error> {
         validate_static_shape(tensors, spec)?;
         let codomain_ranks = tensors
             .iter()
@@ -1642,14 +1846,16 @@ where
                     "operand {index} has {} labels but tensor rank {}",
                     written.len(),
                     tensor.rank()
-                )));
+                ))
+                .into());
             }
             if let Some(split) = spec.codomain_splits[index] {
                 if split != tensor.codomain_rank() {
                     return Err(invalid(format!(
                         "operand {index} puts {split} label(s) before `;` but the tensor's codomain rank is {}",
                         tensor.codomain_rank()
-                    )));
+                    ))
+                    .into());
                 }
             }
             let (value, labels) = if spec.conj[index] {
@@ -1658,7 +1864,9 @@ where
                 ((*tensor).clone(), written)
             };
             let (pairs, reduced) = split_trace_pairs(index, &labels)?;
-            lowered.push(Some(value.trace_pairs(&pairs)?));
+            lowered.push(Some(
+                <R::Mode as HostNetworkModeDispatch<R, D>>::trace_pairs(&value, &pairs)?,
+            ));
             inputs.push(reduced);
             conj.push(false);
             splits.push(None);
@@ -1708,6 +1916,8 @@ where
         + CheckedFusionAlgebra
         + SectorCodec,
 {
+    type Error = Error;
+
     fn contract_static(
         tensors: &[&Self],
         spec: &'static StaticTopologySpec,

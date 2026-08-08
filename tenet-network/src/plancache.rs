@@ -29,10 +29,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use lru::LruCache;
-use tenet::core::{
-    CheckedFusionAlgebra, FusionAlgebraError, FusionRule, MultiplicityFreeAdmissionMode,
-    MultiplicityFreeRigidSymbols, SectorCodec, TensorStorage, TypedSectorAdmission,
-};
+#[cfg(feature = "cuda")]
+use tenet::core::{CheckedFusionAlgebra, MultiplicityFreeRigidSymbols, SectorCodec};
+use tenet::core::{TensorStorage, TypedSectorAdmission};
 use tenet::prelude::{Error, Runtime, TensorScalar};
 #[cfg(feature = "cuda")]
 use tenet::typed::CudaStorage;
@@ -44,7 +43,10 @@ pub use tenet::plancache::{
 };
 
 use crate::labels::TemporaryLabel;
-use crate::network::{Network, NetworkExecutionWorkspace, PlannedNetwork, StaticTopologySpec};
+use crate::network::{
+    HostNetworkError, HostNetworkModeDispatch, Network, NetworkExecutionWorkspace, PlannedNetwork,
+    StaticTopologySpec,
+};
 use crate::optimizer::GreedyDenseOptimizer;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -193,14 +195,24 @@ struct WorkspacePools {
     accepting: AtomicBool,
 }
 
-struct WorkspacePool<R: FusionRule, D> {
+struct WorkspacePool<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: HostNetworkModeDispatch<R, D>,
+    D: TensorScalar,
+{
     available: Mutex<Vec<IdleWorkspace<R, D>>>,
     counters: Arc<WorkspacePoolCounters>,
     budget: Arc<WorkspaceBudget>,
     registered: AtomicBool,
 }
 
-struct IdleWorkspace<R: FusionRule, D> {
+struct IdleWorkspace<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: HostNetworkModeDispatch<R, D>,
+    D: TensorScalar,
+{
     workspace: NetworkExecutionWorkspace<R, D>,
     charge: usize,
 }
@@ -214,7 +226,12 @@ trait ErasedWorkspacePool: Any + Send + Sync {
     fn deactivate(&self);
 }
 
-struct WorkspaceLease<R: FusionRule, D> {
+struct WorkspaceLease<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: HostNetworkModeDispatch<R, D>,
+    D: TensorScalar,
+{
     pool: Arc<WorkspacePool<R, D>>,
     workspace: Option<NetworkExecutionWorkspace<R, D>>,
     recyclable: bool,
@@ -259,8 +276,9 @@ impl WorkspacePools {
 
     fn host_pool<R, D>(&self) -> Arc<WorkspacePool<R, D>>
     where
-        R: FusionRule + Send + Sync,
-        D: Send + Sync + 'static,
+        R: TypedSectorAdmission + Send + Sync,
+        R::Mode: HostNetworkModeDispatch<R, D>,
+        D: TensorScalar + Send + Sync + 'static,
     {
         if !self.accepting.load(Ordering::SeqCst) {
             return Arc::new(WorkspacePool {
@@ -303,8 +321,9 @@ impl WorkspacePools {
 
 impl<R, D> ErasedWorkspacePool for WorkspacePool<R, D>
 where
-    R: FusionRule + Send + Sync,
-    D: Send + Sync + 'static,
+    R: TypedSectorAdmission + Send + Sync,
+    R::Mode: HostNetworkModeDispatch<R, D>,
+    D: TensorScalar + Send + Sync + 'static,
 {
     fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
         self
@@ -324,7 +343,12 @@ where
     }
 }
 
-impl<R: FusionRule, D> WorkspacePool<R, D> {
+impl<R, D> WorkspacePool<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: HostNetworkModeDispatch<R, D>,
+    D: TensorScalar,
+{
     fn lease(self: &Arc<Self>) -> WorkspaceLease<R, D> {
         let workspace = {
             let mut available = self
@@ -358,7 +382,12 @@ impl<R: FusionRule, D> WorkspacePool<R, D> {
     }
 }
 
-impl<R: FusionRule, D> WorkspaceLease<R, D> {
+impl<R, D> WorkspaceLease<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: HostNetworkModeDispatch<R, D>,
+    D: TensorScalar,
+{
     fn workspace(&mut self) -> &mut NetworkExecutionWorkspace<R, D> {
         self.workspace
             .as_mut()
@@ -370,7 +399,12 @@ impl<R: FusionRule, D> WorkspaceLease<R, D> {
     }
 }
 
-impl<R: FusionRule, D> Drop for WorkspaceLease<R, D> {
+impl<R, D> Drop for WorkspaceLease<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: HostNetworkModeDispatch<R, D>,
+    D: TensorScalar,
+{
     fn drop(&mut self) {
         if std::thread::panicking() || !self.recyclable {
             self.workspace.take();
@@ -378,7 +412,7 @@ impl<R: FusionRule, D> Drop for WorkspaceLease<R, D> {
         }
         if let Some(mut workspace) = self.workspace.take() {
             workspace.clear_slots();
-            workspace.park_runtime_owners();
+            <R::Mode as HostNetworkModeDispatch<R, D>>::park_workspace(&mut workspace);
             let mut available = self
                 .pool
                 .available
@@ -417,13 +451,10 @@ impl CachedPlan {
     pub(crate) fn execute_host<R, D>(
         &self,
         tensors: &[&TensorMap<R, D>],
-    ) -> Result<TensorMap<R, D>, Error>
+    ) -> Result<TensorMap<R, D>, HostNetworkError<R>>
     where
-        R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-            + MultiplicityFreeRigidSymbols<Scalar = f64>
-            + CheckedFusionAlgebra
-            + SectorCodec
-            + Send,
+        R: TypedSectorAdmission + Send + Sync,
+        R::Mode: HostNetworkModeDispatch<R, D>,
         D: TensorScalar + Send + Sync + 'static,
     {
         let pool = self.workspaces.host_pool::<R, D>();
@@ -834,12 +865,11 @@ fn needs_replan_tensors<R, D, S>(
     policy: ReplanPolicy,
     snapshot: &[Vec<usize>],
     tensors: &[&TensorMap<R, D, S>],
-) -> Result<bool, Error>
+) -> Result<bool, HostNetworkError<R>>
 where
-    R: TypedSectorAdmission
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec,
+    R: TypedSectorAdmission,
+    R::Mode: HostNetworkModeDispatch<R, D>,
+    D: TensorScalar,
     S: TensorStorage<D>,
 {
     // The per-operand rank guard must run for every policy: a cache hit can
@@ -870,8 +900,8 @@ where
     let mut changed = false;
     let mut exceeds_factor = false;
     for (operand, dims) in snapshot.iter().enumerate() {
-        for (axis, &snap) in dims.iter().enumerate() {
-            let current = tensors[operand].leg_dim(axis)?;
+        let current_dims = <R::Mode as HostNetworkModeDispatch<R, D>>::leg_dims(tensors[operand])?;
+        for (&snap, current) in dims.iter().zip(current_dims) {
             changed |= snap != current;
             if snap != current {
                 exceeds_factor |= match policy {
@@ -934,12 +964,10 @@ fn plan_fresh<R, D, S>(
     network: &Network,
     tensors: &[&TensorMap<R, D, S>],
     optimizer: &Optimizer,
-) -> Result<PlannedNetwork, Error>
+) -> Result<PlannedNetwork, HostNetworkError<R>>
 where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec,
+    R: TypedSectorAdmission,
+    R::Mode: HostNetworkModeDispatch<R, D>,
     D: TensorScalar,
     S: TensorStorage<D>,
 {
@@ -958,13 +986,8 @@ where
         #[cfg(feature = "opt-path")]
         Optimizer::DynamicProgramming => {
             use crate::pathopt::{OptEinsumPathOptimizer, PathStrategy};
-            match network.plan(
-                tensors,
-                &OptEinsumPathOptimizer::new(PathStrategy::DynamicProgramming),
-            ) {
-                Ok(plan) => Ok(plan),
-                Err(_) => network.plan(tensors, &GreedyDenseOptimizer),
-            }
+            let dynamic = OptEinsumPathOptimizer::new(PathStrategy::DynamicProgramming);
+            network.plan_with_optimizer_fallbacks(tensors, &dynamic, &[&GreedyDenseOptimizer])
         }
         // Legacy `default_dense_plan` fallback chain: auto-hq -> auto -> dp
         // -> greedy. Upstream `opt-einsum-path` errors on some all-dim-1
@@ -972,19 +995,14 @@ where
         #[cfg(feature = "opt-path")]
         Optimizer::AutoHq => {
             use crate::pathopt::{OptEinsumPathOptimizer, PathStrategy};
-            let mut last_error = None;
-            for strategy in [
-                PathStrategy::AutoHq,
-                PathStrategy::Auto,
-                PathStrategy::DynamicProgramming,
-            ] {
-                match network.plan(tensors, &OptEinsumPathOptimizer::new(strategy)) {
-                    Ok(plan) => return Ok(plan),
-                    Err(err) => last_error = Some(err),
-                }
-            }
-            let _ = last_error;
-            network.plan(tensors, &GreedyDenseOptimizer)
+            let auto_hq = OptEinsumPathOptimizer::new(PathStrategy::AutoHq);
+            let auto = OptEinsumPathOptimizer::new(PathStrategy::Auto);
+            let dynamic = OptEinsumPathOptimizer::new(PathStrategy::DynamicProgramming);
+            network.plan_with_optimizer_fallbacks(
+                tensors,
+                &auto_hq,
+                &[&auto, &dynamic, &GreedyDenseOptimizer],
+            )
         }
         #[cfg(feature = "cotengra-python")]
         Optimizer::CotengraPython(config) => network.plan(
@@ -998,7 +1016,8 @@ where
         other => Err(Error::InvalidArgument(format!(
             "optimizer {other:?} is not available in this build \
              (is the matching planner feature enabled?)"
-        ))),
+        ))
+        .into()),
     }
 }
 
@@ -1089,62 +1108,62 @@ pub(crate) fn get_or_plan_static<R, D, S>(
     optimizer: &Optimizer,
     validate_plan: impl Fn(&PlannedNetwork) -> Result<(), Error>,
     make_network: impl FnOnce() -> Result<Network, Error>,
-) -> Result<CachedPlan, Error>
+) -> Result<CachedPlan, HostNetworkError<R>>
 where
-    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
-        + MultiplicityFreeRigidSymbols<Scalar = f64>
-        + CheckedFusionAlgebra
-        + SectorCodec,
+    R: TypedSectorAdmission,
+    R::Mode: HostNetworkModeDispatch<R, D>,
     D: TensorScalar,
     S: TensorStorage<D>,
 {
     let Some(runtime) = tensors.first().map(|tensor| tensor.runtime()) else {
         return Err(Error::InvalidArgument(
             "network execution requires at least one operand".to_string(),
-        ));
+        )
+        .into());
     };
     let key = StaticTopologyKey {
         spec,
         optimizer: topology_optimizer(optimizer),
     };
-    let lookup = runtime.with_plan_cache(|config, slot| -> Result<Lookup, Error> {
-        if !config.enabled {
-            return Ok(Lookup::Disabled);
-        }
-        let Some(cache) = existing_cache_mut(slot) else {
-            return Ok(Lookup::Miss);
-        };
-        let Some(aliases) = cache.static_aliases.peek(&key) else {
-            return Ok(Lookup::Miss);
-        };
-        let Some(alias) = aliases
-            .iter()
-            .find(|alias| static_alias_matches(alias, codomain_ranks))
-        else {
-            return Ok(Lookup::Miss);
-        };
-        if needs_replan_tensors(config.replan, &alias.dims_snapshot, tensors)? {
-            return Ok(Lookup::Miss);
-        }
-        let Some(cached) = alias.cached() else {
-            return Ok(Lookup::Miss);
-        };
-        validate_plan(&cached.planned)?;
-        let topology = alias.topology.clone();
-        cache.static_aliases.promote(&key);
-        Ok(match promote_if_resident(cache, &topology, cached) {
-            Some(cached) => Lookup::Hit(cached),
-            None => Lookup::Miss,
-        })
-    })?;
+    let lookup =
+        runtime.with_plan_cache(|config, slot| -> Result<Lookup, HostNetworkError<R>> {
+            if !config.enabled {
+                return Ok(Lookup::Disabled);
+            }
+            let Some(cache) = existing_cache_mut(slot) else {
+                return Ok(Lookup::Miss);
+            };
+            let Some(aliases) = cache.static_aliases.peek(&key) else {
+                return Ok(Lookup::Miss);
+            };
+            let Some(alias) = aliases
+                .iter()
+                .find(|alias| static_alias_matches(alias, codomain_ranks))
+            else {
+                return Ok(Lookup::Miss);
+            };
+            if needs_replan_tensors(config.replan, &alias.dims_snapshot, tensors)? {
+                return Ok(Lookup::Miss);
+            }
+            let Some(cached) = alias.cached() else {
+                return Ok(Lookup::Miss);
+            };
+            validate_plan(&cached.planned)?;
+            let topology = alias.topology.clone();
+            cache.static_aliases.promote(&key);
+            Ok(match promote_if_resident(cache, &topology, cached) {
+                Some(cached) => Lookup::Hit(cached),
+                None => Lookup::Miss,
+            })
+        })?;
     if let Lookup::Hit(cached) = lookup {
         return Ok(cached);
     }
 
-    let network = make_network()?;
+    let network = make_network().map_err(HostNetworkError::<R>::from)?;
     if matches!(lookup, Lookup::Disabled) {
         let planned = Arc::new(plan_fresh(&network, tensors, optimizer)?);
-        validate_plan(&planned)?;
+        validate_plan(&planned).map_err(HostNetworkError::<R>::from)?;
         return Ok(CachedPlan {
             planned,
             workspaces: Arc::new(WorkspacePools::unpooled()),
@@ -1153,7 +1172,7 @@ where
 
     let dims: Vec<Vec<usize>> = tensors
         .iter()
-        .map(|tensor| tensor.leg_dims())
+        .map(|tensor| <R::Mode as HostNetworkModeDispatch<R, D>>::leg_dims(tensor))
         .collect::<Result<_, _>>()?;
     let topology = topology_for(&network, tensors, optimizer);
 
@@ -1163,28 +1182,29 @@ where
         Replan,
         Miss,
     }
-    let outcome = runtime.with_plan_cache(|config, slot| -> Result<Outcome, Error> {
-        let Some(cache) = existing_cache_mut(slot) else {
-            return Ok(Outcome::Miss);
-        };
-        // `peek` inspects without touching LRU order, so a stale entry that will
-        // be replanned does not count as a use; a genuine hit is promoted to
-        // most-recently-used with an O(1) `promote`.
-        match cache.map.peek(&topology) {
-            Some(entry) if !needs_replan(config.replan, &entry.dims_snapshot, &dims) => {
-                validate_plan(&entry.planned)?;
-                let planned = CachedPlan {
-                    planned: Arc::clone(&entry.planned),
-                    workspaces: Arc::clone(&entry.workspaces),
-                };
-                cache.hits += 1;
-                cache.map.promote(&topology);
-                Ok(Outcome::Hit(planned))
+    let outcome =
+        runtime.with_plan_cache(|config, slot| -> Result<Outcome, HostNetworkError<R>> {
+            let Some(cache) = existing_cache_mut(slot) else {
+                return Ok(Outcome::Miss);
+            };
+            // `peek` inspects without touching LRU order, so a stale entry that will
+            // be replanned does not count as a use; a genuine hit is promoted to
+            // most-recently-used with an O(1) `promote`.
+            match cache.map.peek(&topology) {
+                Some(entry) if !needs_replan(config.replan, &entry.dims_snapshot, &dims) => {
+                    validate_plan(&entry.planned).map_err(HostNetworkError::<R>::from)?;
+                    let planned = CachedPlan {
+                        planned: Arc::clone(&entry.planned),
+                        workspaces: Arc::clone(&entry.workspaces),
+                    };
+                    cache.hits += 1;
+                    cache.map.promote(&topology);
+                    Ok(Outcome::Hit(planned))
+                }
+                Some(_) => Ok(Outcome::Replan),
+                None => Ok(Outcome::Miss),
             }
-            Some(_) => Ok(Outcome::Replan),
-            None => Ok(Outcome::Miss),
-        }
-    })?;
+        })?;
     if let Outcome::Hit(planned) = outcome.clone() {
         runtime.with_plan_cache(|config, slot| {
             install_static_alias(
@@ -1229,7 +1249,7 @@ where
             (fresh, plan_copy)
         }
     };
-    validate_plan(&planned)?;
+    validate_plan(&planned).map_err(HostNetworkError::<R>::from)?;
     let workspace_budget = runtime.with_plan_cache(|config, slot| {
         Arc::clone(&cache_mut(slot, config.workspace_budget_bytes).workspace_budget)
     });
@@ -1237,60 +1257,61 @@ where
         planned,
         workspaces: Arc::new(WorkspacePools::new(workspace_budget)),
     };
-    let winner = runtime.with_plan_cache(|config, slot| -> Result<CachedPlan, Error> {
-        let cache = cache_mut(slot, config.workspace_budget_bytes);
-        if !config.enabled {
-            candidate.workspaces.deactivate_all();
-            return Ok(candidate.clone());
-        }
-        let capacity = lru_capacity(config.capacity);
-        if cache.map.cap() != capacity {
-            cache.map.resize(capacity);
-        }
-        let cached = match cache.map.peek(&topology) {
-            Some(entry) if !needs_replan(config.replan, &entry.dims_snapshot, &dims) => {
-                validate_plan(&entry.planned)?;
-                cache.hits += 1;
-                CachedPlan {
-                    planned: Arc::clone(&entry.planned),
-                    workspaces: Arc::clone(&entry.workspaces),
-                }
+    let winner =
+        runtime.with_plan_cache(|config, slot| -> Result<CachedPlan, HostNetworkError<R>> {
+            let cache = cache_mut(slot, config.workspace_budget_bytes);
+            if !config.enabled {
+                candidate.workspaces.deactivate_all();
+                return Ok(candidate.clone());
             }
-            _ => {
-                cache.topology_materializations += 1;
-                if cache.persist {
-                    if let Some(plan_copy) = &fresh_plan_copy {
-                        cache.disk.insert(topo_key.clone(), plan_copy.clone());
+            let capacity = lru_capacity(config.capacity);
+            if cache.map.cap() != capacity {
+                cache.map.resize(capacity);
+            }
+            let cached = match cache.map.peek(&topology) {
+                Some(entry) if !needs_replan(config.replan, &entry.dims_snapshot, &dims) => {
+                    validate_plan(&entry.planned).map_err(HostNetworkError::<R>::from)?;
+                    cache.hits += 1;
+                    CachedPlan {
+                        planned: Arc::clone(&entry.planned),
+                        workspaces: Arc::clone(&entry.workspaces),
                     }
                 }
-                match outcome {
-                    Outcome::Replan => cache.replans += 1,
-                    _ => cache.misses += 1,
+                _ => {
+                    cache.topology_materializations += 1;
+                    if cache.persist {
+                        if let Some(plan_copy) = &fresh_plan_copy {
+                            cache.disk.insert(topo_key.clone(), plan_copy.clone());
+                        }
+                    }
+                    match outcome {
+                        Outcome::Replan => cache.replans += 1,
+                        _ => cache.misses += 1,
+                    }
+                    let cached = candidate.clone();
+                    cache.map.put(
+                        topology.clone(),
+                        CacheEntry {
+                            planned: Arc::clone(&cached.planned),
+                            workspaces: Arc::clone(&cached.workspaces),
+                            dims_snapshot: dims.clone(),
+                        },
+                    );
+                    cached
                 }
-                let cached = candidate.clone();
-                cache.map.put(
-                    topology.clone(),
-                    CacheEntry {
-                        planned: Arc::clone(&cached.planned),
-                        workspaces: Arc::clone(&cached.workspaces),
-                        dims_snapshot: dims.clone(),
-                    },
-                );
-                cached
-            }
-        };
-        cache.map.promote(&topology);
-        install_static_alias(
-            cache,
-            key,
-            codomain_ranks.to_vec(),
-            dims.clone(),
-            topology.clone(),
-            &cached,
-            capacity,
-        );
-        Ok(cached)
-    })?;
+            };
+            cache.map.promote(&topology);
+            install_static_alias(
+                cache,
+                key,
+                codomain_ranks.to_vec(),
+                dims.clone(),
+                topology.clone(),
+                &cached,
+                capacity,
+            );
+            Ok(cached)
+        })?;
     Ok(winner)
 }
 
