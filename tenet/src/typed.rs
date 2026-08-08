@@ -771,6 +771,92 @@ where
         > + CheckedGenericFusion,
     D: TensorScalar,
 {
+    fn eigh_full_checked_generic(
+        &self,
+    ) -> Result<(Self, Self), GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
+            return self
+                .materialized_tensor_uncached()
+                .map_err(GenericTensorError::Facade)?
+                .eigh_full_checked_generic();
+        }
+        let body = self.owned_body().expect("owned checked Generic EIGH input");
+        let mut dense = self.runtime.lease_dense();
+        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+            .map_err(|error| GenericTensorError::Facade(error.into()))?;
+        let out = tenet_matrixalgebra::eigh_full_dyn_checked_generic(dense.dense(), &input)?;
+        let (v, eigenvalues) = out.into_parts();
+        let d = diagonal_factor_on_checked(
+            &self.runtime,
+            Arc::clone(input.space().provider_arc()),
+            &eigenvalues,
+            D::from_real,
+        )?;
+        Ok((d, wrap_factor_on(&self.runtime, v)))
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericRigidSymbols<Scalar = f64>,
+    D: TensorScalar,
+{
+    fn eigh_trunc_checked_generic(
+        &self,
+        truncation: &Truncation,
+    ) -> Result<CheckedGenericEighTrunc<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>>
+    {
+        if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
+            return self
+                .materialized_tensor_uncached()
+                .map_err(GenericTensorError::Facade)?
+                .eigh_trunc_checked_generic(truncation);
+        }
+        let body = self.owned_body().expect("owned checked Generic EIGH input");
+        let mut dense = self.runtime.lease_dense();
+        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+            .map_err(|error| GenericTensorError::Facade(error.into()))?;
+        let out =
+            tenet_matrixalgebra::eigh_trunc_dyn_checked_generic(dense.dense(), &input, truncation)?;
+        let (v, eigenvalues, error) = out.into_parts();
+        let d = diagonal_factor_on_checked(
+            &self.runtime,
+            Arc::clone(input.space().provider_arc()),
+            &eigenvalues,
+            D::from_real,
+        )?;
+        let provider = input.space().provider();
+        let mut decoded = eigenvalues
+            .into_iter()
+            .map(|entry| {
+                Ok(SectorSpectrum {
+                    sector: provider.try_decode_label(entry.sector)?,
+                    values: entry.values,
+                })
+            })
+            .collect::<Result<Vec<_>, <R as TypedSectorAdmission>::Error>>()
+            .map_err(|error| GenericTensorError::Plan(CheckedGenericPlanError::Provider(error)))?;
+        decoded.sort_by(|left, right| left.sector.cmp(&right.sector));
+        Ok(CheckedGenericEighTrunc {
+            d,
+            v: wrap_factor_on(&self.runtime, v),
+            eigenvalues: decoded,
+            error,
+        })
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
     /// Checked-Generic full QR for owned host tensors.
     fn qr_full_checked_generic(
         &self,
@@ -1190,6 +1276,43 @@ where
     ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, TypedFacadeError<R>>
     {
         <R::Mode as TypedTensorEighValsDispatch<R, D>>::eigh_vals(self)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorEighDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// Hermitian eigendecomposition `A V = V D`, returned as `(D, V)`.
+    /// Signed eigenvalues are stable-sorted by descending magnitude within
+    /// each sector; `D` uses compact diagonal storage.
+    ///
+    /// Checked-Generic inputs preflight identical full row/column fusion-tree
+    /// stacking and Hermiticity in every sector before one dense EIGH per
+    /// populated sector. Both factors retain the exact source provider `Arc`;
+    /// a lazy adjoint is materialized only for this call and stays uncached.
+    pub fn eigh_full(&self) -> Result<(Self, Self), TypedFacadeError<R>> {
+        <R::Mode as TypedTensorEighDispatch<R, D>>::eigh_full(self)
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorEighTruncDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// Truncated [`Self::eigh_full`] with global magnitude selection and a
+    /// quantum-dimension-weighted discarded 2-norm.
+    /// Checked-Generic results use [`CheckedGenericEighTrunc`], leaving the
+    /// legacy [`EighTrunc`] `SectorCodec` bound unchanged.
+    pub fn eigh_trunc(
+        &self,
+        truncation: &Truncation,
+    ) -> Result<<R::Mode as TypedTensorEighTruncDispatch<R, D>>::Output, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorEighTruncDispatch<R, D>>::eigh_trunc(self, truncation)
     }
 }
 
@@ -4093,6 +4216,30 @@ where
 }
 
 #[doc(hidden)]
+pub trait TypedTensorEighDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn eigh_full(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Self::FacadeError>;
+}
+
+#[doc(hidden)]
+pub trait TypedTensorEighTruncDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    type Output;
+    fn eigh_trunc(
+        tensor: &TensorMap<R, D>,
+        truncation: &Truncation,
+    ) -> Result<Self::Output, Self::FacadeError>;
+}
+
+#[doc(hidden)]
 pub trait TypedTensorEigValsDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
@@ -4487,6 +4634,36 @@ where
         tensor: &TensorMap<R, D>,
     ) -> Result<Vec<SectorSpectrum<<R as TypedSectorAdmission>::Sector, f64>>, Error> {
         tensor.eigh_vals_multiplicity_free()
+    }
+}
+
+impl<R, D> TypedTensorEighDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn eigh_full(tensor: &TensorMap<R, D>) -> Result<(TensorMap<R, D>, TensorMap<R, D>), Error> {
+        tensor.eigh_full_multiplicity_free()
+    }
+}
+
+impl<R, D> TypedTensorEighTruncDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    type Output = EighTrunc<R, D>;
+    fn eigh_trunc(
+        tensor: &TensorMap<R, D>,
+        truncation: &Truncation,
+    ) -> Result<Self::Output, Error> {
+        tensor.eigh_trunc_multiplicity_free(truncation)
     }
 }
 
@@ -5216,6 +5393,41 @@ where
         GenericTensorError<<R as CheckedGenericFusion>::Error>,
     > {
         tensor.eigh_vals_checked_generic()
+    }
+}
+
+impl<R, D> TypedTensorEighDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
+    fn eigh_full(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<
+        (TensorMap<R, D>, TensorMap<R, D>),
+        GenericTensorError<<R as CheckedGenericFusion>::Error>,
+    > {
+        tensor.eigh_full_checked_generic()
+    }
+}
+
+impl<R, D> TypedTensorEighTruncDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericRigidSymbols<Scalar = f64>,
+    D: TensorScalar,
+{
+    type Output = CheckedGenericEighTrunc<R, D>;
+    fn eigh_trunc(
+        tensor: &TensorMap<R, D>,
+        truncation: &Truncation,
+    ) -> Result<Self::Output, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        tensor.eigh_trunc_checked_generic(truncation)
     }
 }
 
@@ -7369,6 +7581,34 @@ where
     })
 }
 
+fn diagonal_factor_on_checked<R, E, V>(
+    runtime: &Runtime,
+    provider: Arc<R>,
+    spectrum: &[tenet_matrixalgebra::SectorSpectrum<V>],
+    to_scalar: impl Fn(V) -> E,
+) -> Result<TensorMap<R, E>, CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+    E: TensorScalar,
+    V: Copy,
+{
+    let mut spectrum = spectrum.to_vec();
+    spectrum.sort_unstable_by_key(|entry| entry.sector);
+    let space =
+        tenet_matrixalgebra::diagonal_bond_bound_space_generic_checked(provider, &spectrum)?;
+    let data = spectrum
+        .into_iter()
+        .map(|entry| tenet_matrixalgebra::SectorSpectrum {
+            sector: entry.sector,
+            values: entry.values.into_iter().map(&to_scalar).collect(),
+        })
+        .collect();
+    Ok(TensorMap {
+        runtime: runtime.clone(),
+        repr: owned_repr(TypedTensorBody::diagonal(space, data)),
+    })
+}
+
 /// [`TensorMap::wrap_bound_factor`]'s body, free for the same reason as
 /// [`diagonal_factor_on`].
 fn wrap_factor_on<R, E>(runtime: &Runtime, factor: BoundDynFactor<R, E>) -> TensorMap<R, E> {
@@ -7497,6 +7737,20 @@ pub struct EighTrunc<R: SectorCodec, D, S = Vec<D>> {
     /// both payload dtypes, as TensorKit's Hermitian `D` is.
     pub eigenvalues: Vec<SectorSpectrum<R::Sector>>,
     /// Quantum-dimension-weighted 2-norm of everything discarded.
+    pub error: f64,
+}
+
+/// Checked-Generic truncated Hermitian eigendecomposition result. Provider
+/// labels come from [`TypedSectorAdmission`] without changing [`EighTrunc`]'s
+/// existing public bound.
+pub struct CheckedGenericEighTrunc<R: TypedSectorAdmission, D: TensorScalar> {
+    /// Compact diagonal eigenvalue factor.
+    pub d: TensorMap<R, D>,
+    /// Truncated eigenvector isometry.
+    pub v: TensorMap<R, D>,
+    /// Kept signed eigenvalues per provider-labelled sector.
+    pub eigenvalues: Vec<SectorSpectrum<R::Sector, f64>>,
+    /// Quantum-dimension-weighted discarded 2-norm.
     pub error: f64,
 }
 
@@ -12872,9 +13126,11 @@ where
     /// coupled blocks are not Hermitian, and otherwise
     /// [`Error::Core`] / [`Error::FusionAlgebra`] from the seam — which owns
     /// those rules, so they are not re-checked here.
-    pub fn eigh_full(&self) -> Result<(Self, Self), Error> {
+    fn eigh_full_multiplicity_free(&self) -> Result<(Self, Self), Error> {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
-            return self.materialized_tensor_uncached()?.eigh_full();
+            return self
+                .materialized_tensor_uncached()?
+                .eigh_full_multiplicity_free();
         }
         let mut dense = self.runtime.lease_dense();
         let out = tenet_matrixalgebra::eigh_full_dyn(dense.dense(), &self.bound_ref()?)?;
@@ -12895,9 +13151,14 @@ where
     ///
     /// Exactly [`Self::eigh_full`]'s, plus a malformed `truncation` — validated
     /// where it is applied, not here.
-    pub fn eigh_trunc(&self, truncation: &Truncation) -> Result<EighTrunc<R, D>, Error> {
+    fn eigh_trunc_multiplicity_free(
+        &self,
+        truncation: &Truncation,
+    ) -> Result<EighTrunc<R, D>, Error> {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
-            return self.materialized_tensor_uncached()?.eigh_trunc(truncation);
+            return self
+                .materialized_tensor_uncached()?
+                .eigh_trunc_multiplicity_free(truncation);
         }
         let mut dense = self.runtime.lease_dense();
         let out =

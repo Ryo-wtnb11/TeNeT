@@ -1374,6 +1374,7 @@ struct CountingDense {
     inner: tenet_dense::DefaultDenseExecutor,
     svd_calls: usize,
     qr_calls: usize,
+    eigh_calls: usize,
 }
 
 impl Default for CountingDense {
@@ -1382,6 +1383,7 @@ impl Default for CountingDense {
             inner: tenet_dense::DefaultDenseExecutor::new(),
             svd_calls: 0,
             qr_calls: 0,
+            eigh_calls: 0,
         }
     }
 }
@@ -1399,6 +1401,16 @@ impl DenseExecutor for CountingDense {
 
     fn eigh(&mut self, input: DenseRead<'_>) -> Result<Vec<DenseTensor>, DenseError> {
         self.inner.eigh(input)
+    }
+
+    fn eigh_into(
+        &mut self,
+        input: DenseRead<'_>,
+        values: DenseWrite<'_>,
+        vectors: DenseWrite<'_>,
+    ) -> Result<(), DenseError> {
+        self.eigh_calls += 1;
+        self.inner.eigh_into(input, values, vectors)
     }
 
     fn dot_general_into(
@@ -1629,6 +1641,57 @@ fn checked_generic_full_svd_failure_publishes_no_factors() {
         result,
         Err(crate::CheckedGenericFactorPlanError::Provider(_))
     ));
+}
+
+#[test]
+fn checked_generic_eigh_stages_dense_work_before_checked_factor_admission() {
+    let x = SectorId::new(1);
+    let leg = SectorLeg::new([(x, 1)], false);
+    let homspace = FusionTreeHomSpace::new(
+        FusionProductSpace::new([leg.clone(), leg.clone()]),
+        FusionProductSpace::new([leg.clone(), leg]),
+    );
+    let source = BoundDynamicFusionMapSpace::from_final_homspace_generic(
+        Arc::new(FactorGenericRule),
+        homspace,
+    )
+    .unwrap();
+    let data = vec![0.0; source.space().required_len().unwrap()];
+
+    let failing = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: 1,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), failing).unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = CountingDense::default();
+    assert!(matches!(
+        eigh_full_dyn_checked_generic(&mut dense, &input),
+        Err(CheckedGenericFactorPlanError::Provider(LateGenericError(1)))
+    ));
+    assert_eq!(dense.eigh_calls, 2);
+    assert_eq!(input.data(), data);
+
+    let complete = Arc::new(LateGenericSpy {
+        rule: FactorGenericRule,
+        fail_at: usize::MAX,
+        calls: Cell::new(0),
+    });
+    let checked =
+        BoundDynamicFusionMapSpace::bind_generic(source.space().clone(), Arc::clone(&complete))
+            .unwrap();
+    let input = BoundDynamicTensorRef::try_new(&checked, &data).unwrap();
+    let mut dense = CountingDense::default();
+    let full = eigh_full_dyn_checked_generic(&mut dense, &input).unwrap();
+    assert_eq!(dense.eigh_calls, 2);
+    assert!(Arc::ptr_eq(full.v().space().provider_arc(), &complete));
+    assert!(full
+        .eigenvalues()
+        .iter()
+        .flat_map(|entry| &entry.values)
+        .all(|value| *value == 0.0));
 }
 
 #[test]

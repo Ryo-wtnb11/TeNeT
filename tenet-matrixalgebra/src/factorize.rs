@@ -7859,6 +7859,26 @@ where
     Ok(matricizations)
 }
 
+fn validate_endomorphism_tree_stacking<D>(
+    matricizations: &[SectorMatricization<D>],
+) -> Result<(), OperationError> {
+    for matrix in matricizations {
+        if matrix.rows != matrix.cols
+            || matrix.row_trees.len() != matrix.col_trees.len()
+            || !matrix
+                .row_trees
+                .iter()
+                .zip(&matrix.col_trees)
+                .all(|(row, column)| row == column)
+        {
+            return Err(OperationError::UnsupportedTensorContractScope {
+                message: "eigh requires identical endomorphism row/column fusion-tree stacking",
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Builds provider-bound left and right factor spaces for a generic rule.
 fn build_left_right_bound_spaces_generic<R, D>(
     provider: &Arc<R>,
@@ -8220,15 +8240,12 @@ where
 }
 
 #[doc(hidden)]
-pub fn diagonal_bond_svd_factor_generic_checked<R, D, V>(
+pub fn diagonal_bond_bound_space_generic_checked<R, V>(
     provider: Arc<R>,
     spectrum: &[SectorSpectrum<V>],
-    to_scalar: &dyn Fn(V) -> D,
-) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
+) -> Result<BoundDynamicFusionMapSpace<R>, CheckedGenericFactorPlanError<R::Error>>
 where
     R: CheckedGenericFusion,
-    D: FactorScalar,
-    V: Copy,
 {
     let new_leg = SectorLeg::new(
         spectrum
@@ -8240,8 +8257,22 @@ where
         FusionProductSpace::new([new_leg.clone()]),
         FusionProductSpace::new([new_leg]),
     );
-    let space = BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(provider, homspace)
-        .map_err(CheckedGenericFactorPlanError::from)?;
+    BoundDynamicFusionMapSpace::from_final_homspace_generic_checked(provider, homspace)
+        .map_err(CheckedGenericFactorPlanError::from)
+}
+
+#[doc(hidden)]
+pub fn diagonal_bond_svd_factor_generic_checked<R, D, V>(
+    provider: Arc<R>,
+    spectrum: &[SectorSpectrum<V>],
+    to_scalar: &dyn Fn(V) -> D,
+) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+    V: Copy,
+{
+    let space = diagonal_bond_bound_space_generic_checked(provider, spectrum)?;
     let data = diagonal_bond_data(space.space(), spectrum, to_scalar)
         .map_err(CheckedGenericFactorPlanError::from)?;
     BoundDynFactor::from_bound(space, data, 1, 1).map_err(CheckedGenericFactorPlanError::from)
@@ -9539,6 +9570,175 @@ where
         });
     }
     Ok(singular_values)
+}
+
+/// Checked-Generic full Hermitian eigendecomposition. The exact source
+/// provider remains the authority for the eigenvector factor.
+#[doc(hidden)]
+pub fn eigh_full_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<EighFullDyn<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let provider = input.space().provider_arc();
+    let space = input.space().space();
+    if space.homspace().codomain() != space.homspace().domain() {
+        return Err(CheckedGenericFactorPlanError::Operation(
+            OperationError::UnsupportedTensorContractScope {
+                message: "eigh requires an endomorphism (codomain == domain)",
+            },
+        ));
+    }
+    let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    // Why not trust equal product spaces alone: outer-multiplicity vertices
+    // are part of a tree key, so Hermitian coordinates require identical full
+    // tree stacking, not merely equal coupled-sector dimensions.
+    validate_endomorphism_tree_stacking(&matrices).map_err(CheckedGenericFactorPlanError::from)?;
+    validate_hermitian_matricizations(&matrices).map_err(CheckedGenericFactorPlanError::from)?;
+
+    let max_n = matrices.iter().map(|matrix| matrix.rows).max().unwrap_or(0);
+    let mut values_workspace = vec![D::Real::zero(); max_n];
+    let mut vectors_workspace = vec![D::zero(); max_n * max_n];
+    let mut sorted_vectors = vec![D::zero(); max_n * max_n];
+    let mut eigenvalues = Vec::with_capacity(matrices.len());
+    let mut pairs = Vec::with_capacity(matrices.len());
+    for matrix in &matrices {
+        let n = matrix.rows;
+        let shape = [n, n];
+        let strides = [1usize, n];
+        let input_view = DenseView::new(&matrix.data, &shape, &strides, 0).map_err(|error| {
+            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
+        })?;
+        let values_shape = [n];
+        let values_strides = [1usize];
+        let vectors_strides = [1usize, max_n];
+        let values_view =
+            DenseViewMut::new(&mut values_workspace, &values_shape, &values_strides, 0).map_err(
+                |error| CheckedGenericFactorPlanError::Operation(OperationError::Dense(error)),
+            )?;
+        let vectors_view = DenseViewMut::new(&mut vectors_workspace, &shape, &vectors_strides, 0)
+            .map_err(|error| {
+            CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
+        })?;
+        dense
+            .eigh_into(
+                D::dense_read(input_view),
+                D::Real::dense_write(values_view),
+                D::dense_write(vectors_view),
+            )
+            .map_err(|error| {
+                CheckedGenericFactorPlanError::Operation(OperationError::Dense(error))
+            })?;
+        let values = values_workspace[..n]
+            .iter()
+            .map(|value| (*value).into())
+            .collect::<Vec<f64>>();
+        validate_real_eigenvalues(&values).map_err(CheckedGenericFactorPlanError::from)?;
+        let mut order = (0..n).collect::<Vec<_>>();
+        order.sort_by(|&a, &b| values[b].abs().total_cmp(&values[a].abs()).then(a.cmp(&b)));
+        let sorted_values = order.iter().map(|&index| values[index]).collect();
+        for (position, &index) in order.iter().enumerate() {
+            sorted_vectors[position * n..(position + 1) * n]
+                .copy_from_slice(&vectors_workspace[index * max_n..index * max_n + n]);
+        }
+        let mut vectors = sorted_vectors[..n * n].to_vec();
+        eigenvector_gauge(&mut vectors, n, n, n);
+        eigenvalues.push(SectorSpectrum {
+            sector: matrix.sector,
+            values: sorted_values,
+        });
+        pairs.push(FactorPair {
+            sector: matrix.sector,
+            kept: n,
+            left: vectors,
+            left_rows: n,
+            right: Vec::new(),
+            right_leading: 0,
+        });
+    }
+    let dimensions = matrices
+        .iter()
+        .map(|matrix| (matrix.sector, matrix.rows))
+        .collect::<BTreeMap<_, _>>();
+    let v = build_bound_factor_generic_checked(
+        provider,
+        space.homspace(),
+        &matrices,
+        &pairs,
+        &dimensions,
+        FactorSide::Left,
+    )?;
+    Ok(EighFullDyn { v, eigenvalues })
+}
+
+/// Checked-Generic truncated Hermitian eigendecomposition.
+#[doc(hidden)]
+pub fn eigh_trunc_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+    truncation: &Truncation,
+) -> Result<EighTruncDyn<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericRigidSymbols<Scalar = f64>,
+    D: FactorScalar,
+{
+    let full = eigh_full_dyn_checked_generic(dense, input)?;
+    if matches!(truncation, Truncation::Full) {
+        return Ok(EighTruncDyn {
+            v: full.v,
+            eigenvalues: full.eigenvalues,
+            error: 0.0,
+        });
+    }
+    let decision = decide_bond_truncation_generic_checked(
+        full.v.space().provider(),
+        &full.eigenvalues,
+        truncation,
+    )?;
+    if full
+        .eigenvalues
+        .iter()
+        .zip(&decision.kept)
+        .all(|(entry, &count)| entry.values.len() == count)
+    {
+        return Ok(EighTruncDyn {
+            v: full.v,
+            eigenvalues: full.eigenvalues,
+            error: 0.0,
+        });
+    }
+    let mut eigenvalues = full.eigenvalues;
+    for (entry, &count) in eigenvalues.iter_mut().zip(&decision.kept) {
+        entry.values.truncate(count);
+    }
+    eigenvalues.retain(|entry| !entry.values.is_empty());
+    let kept = eigenvalues
+        .iter()
+        .map(|entry| (entry.sector, entry.values.len()))
+        .collect::<HashMap<_, _>>();
+    let kept_of = |sector| kept.get(&sector).copied().unwrap_or(0);
+    let bond_axis = full.v.space().space().nout();
+    let provider = Arc::clone(full.v.space().provider_arc());
+    let v = sliced_bond_tensor_generic_checked(
+        provider,
+        full.v.space().space(),
+        full.v.data(),
+        bond_axis,
+        &kept_of,
+        bond_axis,
+        1,
+    )?;
+    Ok(EighTruncDyn {
+        v,
+        eigenvalues,
+        error: decision.error,
+    })
 }
 
 /// Checked-Generic Hermitian eigenvalues only. No eigenvector or factor-space
