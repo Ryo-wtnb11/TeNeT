@@ -4654,6 +4654,115 @@ where
     )
 }
 
+/// Checked-Generic numerical left null space.
+///
+/// Structural dimensions are validated before dense work. All SVDs and
+/// completions are then staged before the exact data-dependent bond is
+/// admitted and scattered by the shared checked factor builder.
+#[doc(hidden)]
+pub fn left_null_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let provider = input.space().provider_arc();
+    let space = input.space().space();
+    let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    let mut null_dimensions = coupled_sector_block_dimensions_generic_checked(
+        space.homspace().codomain(),
+        provider.as_ref(),
+    )?;
+    let mut pairs = Vec::new();
+    for matrix in &matrices {
+        let (rank, u_compact, _) =
+            numerical_rank_and_compact_bases(dense, &matrix.data, matrix.rows, matrix.cols)
+                .map_err(CheckedGenericFactorPlanError::from)?;
+        if rank == matrix.rows {
+            null_dimensions.remove(&matrix.sector);
+            continue;
+        }
+        let u =
+            orthonormal_completion(dense, &u_compact, matrix.rows, matrix.rows.min(matrix.cols))
+                .map_err(CheckedGenericFactorPlanError::from)?;
+        let null_dim = matrix.rows - rank;
+        null_dimensions.insert(matrix.sector, null_dim);
+        pairs.push(FactorPair {
+            sector: matrix.sector,
+            kept: null_dim,
+            left: u[matrix.rows * rank..].to_vec(),
+            left_rows: matrix.rows,
+            right: Vec::new(),
+            right_leading: null_dim,
+        });
+    }
+    build_bound_factor_generic_checked(
+        provider,
+        space.homspace(),
+        &matrices,
+        &pairs,
+        &null_dimensions,
+        FactorSide::Left,
+    )
+}
+
+/// Checked-Generic numerical right null space; see
+/// [`left_null_dyn_checked_generic`] for the transaction boundary.
+#[doc(hidden)]
+pub fn right_null_dyn_checked_generic<E, R, D>(
+    dense: &mut E,
+    input: &BoundDynamicTensorRef<'_, R, D>,
+) -> Result<BoundDynFactor<R, D>, CheckedGenericFactorPlanError<R::Error>>
+where
+    E: DenseExecutor + ?Sized,
+    R: CheckedGenericFusion,
+    D: FactorScalar,
+{
+    let provider = input.space().provider_arc();
+    let space = input.space().space();
+    let matrices = sector_matricizations_generic(space.structure(), input.data(), space.nout())
+        .map_err(CheckedGenericFactorPlanError::from)?;
+    let mut null_dimensions = coupled_sector_block_dimensions_generic_checked(
+        space.homspace().domain(),
+        provider.as_ref(),
+    )?;
+    let mut pairs = Vec::new();
+    for matrix in &matrices {
+        let (rank, _, v_compact) =
+            numerical_rank_and_compact_bases(dense, &matrix.data, matrix.rows, matrix.cols)
+                .map_err(CheckedGenericFactorPlanError::from)?;
+        if rank == matrix.cols {
+            null_dimensions.remove(&matrix.sector);
+            continue;
+        }
+        let v =
+            orthonormal_completion(dense, &v_compact, matrix.cols, matrix.rows.min(matrix.cols))
+                .map_err(CheckedGenericFactorPlanError::from)?;
+        let null_dim = matrix.cols - rank;
+        null_dimensions.insert(matrix.sector, null_dim);
+        pairs.push(FactorPair {
+            sector: matrix.sector,
+            kept: null_dim,
+            left: Vec::new(),
+            left_rows: matrix.rows,
+            right: adjoint_col_major(&v[matrix.cols * rank..], matrix.cols, null_dim),
+            right_leading: null_dim,
+        });
+    }
+    build_bound_factor_generic_checked(
+        provider,
+        space.homspace(),
+        &matrices,
+        &pairs,
+        &null_dimensions,
+        FactorSide::Right,
+    )
+}
+
 /// Computes compact singular-vector bases and the documented numerical rank.
 fn numerical_rank_and_compact_bases<E, D>(
     dense: &mut E,

@@ -161,11 +161,10 @@
 //!   idiom only), and that seam does not exist below this facade. The one that
 //!   used to stand beside it is closed — [`TensorMap::exp`] accepts any
 //!   endomorphism since issue #577, through a blockwise Padé arm.
-//! - **Outer multiplicity factorizations** remain outside this leaf. Checked
-//!   `Generic` providers use the ordinary tree transforms, tensor product, and
-//!   direct-owned `contract` / `compose` routes through retained provider
-//!   authority. Lazy adjoint construction and factorizations still retain
-//!   their multiplicity-free bounds.
+//! - Some **outer multiplicity factorization** leaves remain outside this
+//!   facade. Checked `Generic` providers have provider-neutral SVD/QR/LQ,
+//!   numerical null spaces, and the admitted matrix-function subset; each leaf
+//!   documents its own lazy-adjoint and compact-storage boundary.
 //! - **Device execution** is absent, not device representation: the body can
 //!   carry a non-host `S` through [`TensorMap<R, D, S>`], while public
 //!   construction and arithmetic deliberately remain on the default `Vec<D>`
@@ -3959,6 +3958,16 @@ where
 }
 
 #[doc(hidden)]
+pub trait TypedTensorNullDispatch<R, D>: TypedTensorModeDispatch<R>
+where
+    R: TypedSectorAdmission,
+    D: TensorScalar,
+{
+    fn left_null(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Self::FacadeError>;
+    fn right_null(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Self::FacadeError>;
+}
+
+#[doc(hidden)]
 pub trait TypedTensorExpDispatch<R, D>: TypedTensorModeDispatch<R>
 where
     R: TypedSectorAdmission,
@@ -4281,6 +4290,23 @@ where
 {
     fn pinv(tensor: &TensorMap<R, D>, rcond: f64) -> Result<TensorMap<R, D>, Error> {
         tensor.pinv_multiplicity_free(rcond)
+    }
+}
+
+impl<R, D> TypedTensorNullDispatch<R, D> for MultiplicityFreeAdmissionMode
+where
+    R: TypedSectorAdmission<Error = FusionAlgebraError, Mode = MultiplicityFreeAdmissionMode>
+        + MultiplicityFreeRigidSymbols<Scalar = f64>
+        + CheckedFusionAlgebra
+        + SectorCodec,
+    D: TensorScalar,
+{
+    fn left_null(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
+        tensor.left_null_multiplicity_free()
+    }
+
+    fn right_null(tensor: &TensorMap<R, D>) -> Result<TensorMap<R, D>, Error> {
+        tensor.right_null_multiplicity_free()
     }
 }
 
@@ -4770,6 +4796,57 @@ where
             rcond,
         )
         .map_err(Error::from)?;
+        Ok(wrap_factor_on(&tensor.runtime, factor))
+    }
+}
+
+impl<R, D> TypedTensorNullDispatch<R, D> for CheckedGenericAdmissionMode
+where
+    R: TypedSectorAdmission<
+            Error = <R as CheckedGenericFusion>::Error,
+            Mode = CheckedGenericAdmissionMode,
+        > + CheckedGenericFusion,
+    D: TensorScalar,
+{
+    fn left_null(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        if matches!(&tensor.repr, TypedTensorRepr::Adjoint(_)) {
+            return tensor
+                .adjoint()?
+                .right_null()?
+                .adjoint()?
+                .materialized_tensor_uncached()
+                .map_err(GenericTensorError::from);
+        }
+        let body = tensor
+            .owned_body()
+            .expect("checked Generic left-null input is owned after lazy dispatch");
+        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+            .map_err(Error::from)?;
+        let mut dense = tensor.runtime.lease_dense();
+        let factor = tenet_matrixalgebra::left_null_dyn_checked_generic(dense.dense(), &input)?;
+        Ok(wrap_factor_on(&tensor.runtime, factor))
+    }
+
+    fn right_null(
+        tensor: &TensorMap<R, D>,
+    ) -> Result<TensorMap<R, D>, GenericTensorError<<R as CheckedGenericFusion>::Error>> {
+        if matches!(&tensor.repr, TypedTensorRepr::Adjoint(_)) {
+            return tensor
+                .adjoint()?
+                .left_null()?
+                .adjoint()?
+                .materialized_tensor_uncached()
+                .map_err(GenericTensorError::from);
+        }
+        let body = tensor
+            .owned_body()
+            .expect("checked Generic right-null input is owned after lazy dispatch");
+        let input = BoundDynamicTensorRef::try_new(&body.space, body.materialized_dense_data())
+            .map_err(Error::from)?;
+        let mut dense = tensor.runtime.lease_dense();
+        let factor = tenet_matrixalgebra::right_null_dyn_checked_generic(dense.dense(), &input)?;
         Ok(wrap_factor_on(&tensor.runtime, factor))
     }
 }
@@ -12511,7 +12588,7 @@ where
     /// [`Self::qr_compact`]. A lazy adjoint runs the owned parent's
     /// [`Self::right_null`] and returns its detached adjoint, without
     /// materializing the receiver.
-    pub fn left_null(&self) -> Result<Self, Error> {
+    fn left_null_multiplicity_free(&self) -> Result<Self, Error> {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             return self
                 .adjoint()?
@@ -12544,7 +12621,7 @@ where
     /// As [`Self::left_null`]: sectorwise cubic, compact-diagonal payload
     /// materialized dense first. A lazy adjoint mirrors the parent redirect
     /// described there.
-    pub fn right_null(&self) -> Result<Self, Error> {
+    fn right_null_multiplicity_free(&self) -> Result<Self, Error> {
         if matches!(&self.repr, TypedTensorRepr::Adjoint(_)) {
             return self
                 .adjoint()?
@@ -14157,6 +14234,32 @@ where
                 .materialized_dense_data()
                 .len()
         ])
+    }
+}
+
+impl<R, D> TensorMap<R, D>
+where
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorNullDispatch<R, D>,
+    D: TensorScalar,
+{
+    /// Numerical left null space `N : codomain <- W`, with `N^H * self = 0`.
+    ///
+    /// Each coupled sector keeps singular values strictly above
+    /// `epsilon(dtype) * max(rows, cols) * sigma_max`. This is an intentional
+    /// difference from TensorKit/MatrixAlgebraKit's QR-based default, which
+    /// keeps only structural nullity. `W` is a fresh non-dual one-leg space;
+    /// sectors with zero nullity are absent.
+    pub fn left_null(&self) -> Result<Self, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorNullDispatch<R, D>>::left_null(self)
+    }
+
+    /// Numerical right null space `N : W <- domain`, with `self * N^H = 0`.
+    ///
+    /// The cutoff, fresh bond, and TensorKit intentional difference are the
+    /// mirror of [`Self::left_null`].
+    pub fn right_null(&self) -> Result<Self, TypedFacadeError<R>> {
+        <R::Mode as TypedTensorNullDispatch<R, D>>::right_null(self)
     }
 }
 
@@ -16718,6 +16821,68 @@ mod representation_gates {
             .data()
             .iter()
             .all(|value| (*value - 0.5).abs() < 1.0e-12));
+    }
+
+    #[cfg(feature = "racah-generated")]
+    #[test]
+    fn checked_generic_null_lazy_redirects_are_owned_and_keep_receiver_cold() {
+        // What: both null directions use the opposite operation on the owned
+        // parent, detach the final adjoint, and never publish the lazy cache.
+        use tenet_core::SUNFusionRule;
+
+        let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+        let provider = Arc::new(SUNFusionRule::new(3).unwrap());
+        let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 2)], false).unwrap();
+        let source: TensorMap<_, f64> =
+            TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg, &leg], |trees, indices| {
+                let row = indices[0] + 2 * indices[1];
+                let column = indices[2] + 2 * indices[3];
+                f64::from(row == column)
+                    * trees.codomain_vertices()[0].get() as f64
+                    * trees.domain_vertices()[0].get() as f64
+            })
+            .unwrap();
+        let body = Arc::clone(owned(&source));
+        let payload = Arc::clone(&body.data);
+        let lazy = source.adjoint().unwrap();
+        let expected_left = source
+            .right_null()
+            .unwrap()
+            .adjoint()
+            .unwrap()
+            .materialized_tensor_uncached()
+            .unwrap();
+        let expected_right = source
+            .left_null()
+            .unwrap()
+            .adjoint()
+            .unwrap()
+            .materialized_tensor_uncached()
+            .unwrap();
+
+        for (actual, expected) in [
+            (lazy.left_null().unwrap(), expected_left),
+            (lazy.right_null().unwrap(), expected_right),
+        ] {
+            assert!(matches!(&actual.repr, TypedTensorRepr::Owned(_)));
+            assert_eq!(
+                actual.logical_space().space(),
+                expected.logical_space().space()
+            );
+            assert!(actual
+                .data()
+                .iter()
+                .zip(expected.data())
+                .all(|(&actual, &expected)| (actual - expected).abs() < 1e-10));
+            assert!(std::ptr::eq(actual.provider(), provider.as_ref()));
+        }
+        assert!(Arc::ptr_eq(owned(&source), &body));
+        assert!(Arc::ptr_eq(&owned(&source).data, &payload));
+        assert_eq!(materialized_adjoint_builds(&lazy), 0);
+        let TypedTensorRepr::Adjoint(view) = &lazy.repr else {
+            unreachable!()
+        };
+        assert!(view.materialized.get().is_none());
     }
 
     #[cfg(feature = "racah-generated")]
