@@ -3429,7 +3429,9 @@ fn replay_single_blocks<A, D, C>(
     mut kernels: A,
     fused_indices: &mut [usize],
     max_fused_rank: usize,
-    structure: &TreeTransformStructure<C>,
+    layouts: &TreeTransformLayoutTable,
+    coefficients: &[C],
+    storage_conjugate: bool,
     items: &[TreeTransformSingleReplay],
     dst_data: &mut [D],
     dst_start: isize,
@@ -3450,21 +3452,21 @@ where
         let mut zero_strides = Vec::new();
         let fused_index = &mut fused_indices[..max_fused_rank];
         for item in items {
-            let dst_layout = structure.layouts().entry(item.dst_layout);
-            let src_layout = structure.layouts().entry(item.src_layout);
-            let baked = structure.layouts().fused_baked(item.dst_layout);
-            let scale = alpha.scale_by_coefficient(structure.coefficient(item.coefficient));
+            let dst_layout = layouts.entry(item.dst_layout);
+            let src_layout = layouts.entry(item.src_layout);
+            let baked = layouts.fused_baked(item.dst_layout);
+            let scale = alpha.scale_by_coefficient(coefficients[item.coefficient]);
             match mode {
                 DestinationMode::Axpby(beta) => kernels.add_strided_baked_with_index(
                     &mut zero_strides,
                     dst_data,
                     src_data,
-                    structure.layouts().shape(dst_layout),
-                    structure.layouts().strides(dst_layout),
-                    structure.layouts().strides(src_layout),
+                    layouts.shape(dst_layout),
+                    layouts.strides(dst_layout),
+                    layouts.strides(src_layout),
                     dst_layout.offset - dst_start,
                     src_layout.offset,
-                    structure.storage_conjugate(),
+                    storage_conjugate,
                     scale,
                     beta,
                     baked,
@@ -3473,12 +3475,12 @@ where
                 DestinationMode::Overwrite => kernels.copy_scale_strided_baked_with_index(
                     dst_data,
                     src_data,
-                    structure.layouts().shape(dst_layout),
-                    structure.layouts().strides(dst_layout),
-                    structure.layouts().strides(src_layout),
+                    layouts.shape(dst_layout),
+                    layouts.strides(dst_layout),
+                    layouts.strides(src_layout),
                     dst_layout.offset - dst_start,
                     src_layout.offset,
-                    structure.storage_conjugate(),
+                    storage_conjugate,
                     scale,
                     baked,
                     &mut *fused_index,
@@ -3504,7 +3506,9 @@ where
                 kernels,
                 left_indices,
                 max_fused_rank,
-                structure,
+                layouts,
+                coefficients,
+                storage_conjugate,
                 left_items,
                 left_data,
                 dst_start,
@@ -3519,7 +3523,9 @@ where
                 right_kernels,
                 right_indices,
                 max_fused_rank,
-                structure,
+                layouts,
+                coefficients,
+                storage_conjugate,
                 right_items,
                 right_data,
                 boundary,
@@ -3817,7 +3823,9 @@ where
                 kernels.clone(),
                 &mut workspace.fused_indices[..fused_index_len],
                 max_fused_rank,
-                structure,
+                layouts,
+                structure.recoupling_coefficients_dst_src(),
+                storage_conjugate,
                 &schedule.singles,
                 dst_data,
                 0,
