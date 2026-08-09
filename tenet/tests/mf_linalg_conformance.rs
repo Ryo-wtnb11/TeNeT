@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use tenet::core::{
-    product_sector, FermionParityFusionRule, PackedProductCodec, ProductFusionRule,
-    ProductSectorLayout, SU2FusionRule, SU2Irrep, Su2SectorLayout, U1FusionRule, U1Irrep,
-    U1SectorLayout, Z2Irrep, ZNFusionRule,
+    product_sector, FermionParityFusionRule, MultiplicityFreeRigidSymbols, PackedProductCodec,
+    ProductFusionRule, ProductSectorLayout, SU2FusionRule, SU2Irrep, SectorCodec, Su2SectorLayout,
+    U1FusionRule, U1Irrep, U1SectorLayout, Z2Irrep, ZNFusionRule,
 };
 use tenet::prelude::{GradedSpace, Runtime, TensorMap, Truncation};
 
@@ -47,6 +47,12 @@ macro_rules! assert_complex_close {
             );
         }
     }};
+}
+
+macro_rules! assert_provider {
+    ($provider:expr; $($tensor:expr),+ $(,)?) => {
+        $(assert!(std::ptr::eq($tensor.provider(), $provider.as_ref()));)+
+    };
 }
 
 /// The rectangular rows deliberately use a rank-two diagonal embedded in a
@@ -88,13 +94,13 @@ macro_rules! factor_conformance {
             .unwrap();
 
         let (u, s, vh) = tall.svd_compact().unwrap();
-        assert!(std::ptr::eq(u.provider(), provider.as_ref()));
-        assert!(std::ptr::eq(s.provider(), provider.as_ref()));
-        assert!(std::ptr::eq(vh.provider(), provider.as_ref()));
+        assert_provider!(provider; u, s, vh);
         assert_close!(&u.compose(&s).unwrap().compose(&vh).unwrap(), &tall);
         let (u, s, vh) = tall.svd_full().unwrap();
+        assert_provider!(provider; u, s, vh);
         assert_close!(&u.compose(&s).unwrap().compose(&vh).unwrap(), &tall);
         let trunc = tall.svd_trunc(&Truncation::rank(1)).unwrap();
+        assert_provider!(provider; trunc.u, trunc.s, trunc.vh);
         let reconstructed = trunc
             .u
             .compose(&trunc.s)
@@ -104,35 +110,51 @@ macro_rules! factor_conformance {
         let error = reconstructed.add(&tall, 1.0, -1.0).unwrap().norm().unwrap();
         assert!((error - trunc.error).abs() <= 1e-9 * (1.0 + trunc.error));
         assert!(trunc.error > 0.0, $name);
-        assert!(tall
-            .svd_vals()
-            .unwrap()
+        let singular_values = tall.svd_vals().unwrap();
+        assert!(singular_values
             .iter()
             .all(|entry| entry.values == [4.0, 2.0]));
+        let weighted_norm_squared: f64 = singular_values
+            .iter()
+            .map(|entry| {
+                provider.dim_scalar(
+                    SectorCodec::encode_sector(provider.as_ref(), &entry.sector).unwrap(),
+                )
+                    * entry.values.iter().map(|value| value * value).sum::<f64>()
+            })
+            .sum();
+        assert!((tall.norm().unwrap().powi(2) - weighted_norm_squared).abs() <= 1e-9);
 
         let (q, r) = tall.qr_compact().unwrap();
+        assert_provider!(provider; q, r);
         assert_close!(&q.compose(&r).unwrap(), &tall);
         let id = TensorMap::id(&rt, q.domain().iter()).unwrap();
         assert_close!(&q.adjoint().unwrap().compose(&q).unwrap(), &id);
         let (q, r) = tall.left_orth().unwrap();
+        assert_provider!(provider; q, r);
         assert_close!(&q.compose(&r).unwrap(), &tall);
         let (q, r) = tall.qr_full().unwrap();
+        assert_provider!(provider; q, r);
         assert_close!(&q.compose(&r).unwrap(), &tall);
         let id = TensorMap::id(&rt, q.domain().iter()).unwrap();
         assert_close!(&q.adjoint().unwrap().compose(&q).unwrap(), &id);
 
         let (l, q) = wide.lq_compact().unwrap();
+        assert_provider!(provider; l, q);
         assert_close!(&l.compose(&q).unwrap(), &wide);
         let id = TensorMap::id(&rt, q.codomain().iter()).unwrap();
         assert_close!(&q.compose(&q.adjoint().unwrap()).unwrap(), &id);
         let (l, q) = wide.right_orth().unwrap();
+        assert_provider!(provider; l, q);
         assert_close!(&l.compose(&q).unwrap(), &wide);
         let (l, q) = wide.lq_full().unwrap();
+        assert_provider!(provider; l, q);
         assert_close!(&l.compose(&q).unwrap(), &wide);
         let id = TensorMap::id(&rt, q.codomain().iter()).unwrap();
         assert_close!(&q.compose(&q.adjoint().unwrap()).unwrap(), &id);
 
         let left = tall.left_null().unwrap();
+        assert_provider!(provider; left);
         assert!(
             left.adjoint()
                 .unwrap()
@@ -146,6 +168,7 @@ macro_rules! factor_conformance {
         let left_id = TensorMap::id(&rt, left.domain().iter()).unwrap();
         assert_close!(&left.adjoint().unwrap().compose(&left).unwrap(), &left_id);
         let right = wide.right_null().unwrap();
+        assert_provider!(provider; right);
         assert!(
             wide.compose(&right.adjoint().unwrap())
                 .unwrap()
@@ -161,6 +184,7 @@ macro_rules! factor_conformance {
         );
 
         let (w, p) = tall.left_polar().unwrap();
+        assert_provider!(provider; w, p);
         assert_close!(&w.compose(&p).unwrap(), &tall);
         let id = TensorMap::id(&rt, w.domain().iter()).unwrap();
         assert_close!(&w.adjoint().unwrap().compose(&w).unwrap(), &id);
@@ -172,6 +196,7 @@ macro_rules! factor_conformance {
             .flat_map(|s| &s.values)
             .all(|&x| x >= -1e-10));
         let (p, w) = wide.right_polar().unwrap();
+        assert_provider!(provider; p, w);
         assert_close!(&p.compose(&w).unwrap(), &wide);
         let id = TensorMap::id(&rt, w.codomain().iter()).unwrap();
         assert_close!(&w.compose(&w.adjoint().unwrap()).unwrap(), &id);
@@ -189,8 +214,7 @@ macro_rules! factor_conformance {
             })
             .unwrap();
         let (d, v) = h.eigh_full().unwrap();
-        assert!(std::ptr::eq(d.provider(), provider.as_ref()));
-        assert!(std::ptr::eq(v.provider(), provider.as_ref()));
+        assert_provider!(provider; d, v);
         assert_close!(
             &v.compose(&d)
                 .unwrap()
@@ -204,6 +228,7 @@ macro_rules! factor_conformance {
             .iter()
             .all(|entry| entry.values == [4.0, 2.0]));
         let trunc = h.eigh_trunc(&Truncation::rank(1)).unwrap();
+        assert_provider!(provider; trunc.d, trunc.v);
         let reconstructed = trunc
             .v
             .compose(&trunc.d)
@@ -220,6 +245,7 @@ macro_rules! factor_conformance {
             })
             .unwrap();
         let (d, v) = g.eig_full().unwrap();
+        assert_provider!(provider; d, v);
         assert_complex_close!(
             &v.compose(&d).unwrap().compose(&v.inv().unwrap()).unwrap(),
             &g.to_c64()
@@ -230,6 +256,7 @@ macro_rules! factor_conformance {
             .iter()
             .all(|entry| entry.values == [3.0.into(), 1.0.into()]));
         let trunc = g.eig_trunc(&Truncation::rank(1)).unwrap();
+        assert_provider!(provider; trunc.d, trunc.v);
         assert_complex_close!(
             &g.to_c64().compose(&trunc.v).unwrap(),
             &trunc.v.compose(&trunc.d).unwrap()
@@ -238,23 +265,29 @@ macro_rules! factor_conformance {
 
         let id = TensorMap::id(&rt, h.domain().iter()).unwrap();
         let inverse = h.inv().unwrap();
-        assert!(std::ptr::eq(inverse.provider(), provider.as_ref()));
+        assert_provider!(provider; inverse);
         assert_close!(&h.compose(&inverse).unwrap(), &id);
+        let exponential = h.exp().unwrap();
+        assert_provider!(provider; exponential);
         assert_close!(
             &h.scale(-1.0)
                 .exp()
                 .unwrap()
-                .compose(&h.exp().unwrap())
+                .compose(&exponential)
                 .unwrap(),
             &id
         );
-        assert_close!(&h.powi(2).unwrap(), &h.compose(&h).unwrap());
+        let squared = h.powi(2).unwrap();
+        assert_provider!(provider; squared);
+        assert_close!(&squared, &h.compose(&h).unwrap());
         let solved = h.solve(&id).unwrap();
-        assert!(std::ptr::eq(solved.provider(), provider.as_ref()));
+        assert_provider!(provider; solved);
         assert_close!(&solved, &inverse);
-        assert_close!(&id.solve_right(&h).unwrap(), &h.inv().unwrap());
+        let solved_right = id.solve_right(&h).unwrap();
+        assert_provider!(provider; solved_right);
+        assert_close!(&solved_right, &inverse);
         let pseudo = tall.pinv(1e-12).unwrap();
-        assert!(std::ptr::eq(pseudo.provider(), provider.as_ref()));
+        assert_provider!(provider; pseudo);
         assert_close!(
             &tall.compose(&pseudo).unwrap().compose(&tall).unwrap(),
             &tall
@@ -277,6 +310,7 @@ macro_rules! factor_conformance {
             })
             .unwrap();
         let root = diagonal.sqrt().unwrap();
+        assert_provider!(provider; root);
         assert!(root.data().iter().any(|&value| value == 2.0));
         assert!(root.data().iter().any(|&value| value == 3.0));
         assert!(root
