@@ -46,6 +46,22 @@ pub use runtime::{clear_default_runtime, default_runtime, set_default_runtime};
 /// signatures mention. `use tenet::prelude::*;` is the intended import for
 /// everyday tensor code; expert APIs stay available through [`core`], [`dense`],
 /// and the curated [`operations`] and [`matrixalgebra`] facades.
+/// Checked-provider failures remain structured as
+/// [`prelude::GenericTensorError`] variants whose nested errors retain their
+/// standard [`std::error::Error::source`] chains.
+///
+/// ```
+/// use std::error::Error;
+/// use tenet::prelude::GenericTensorError;
+///
+/// fn is_plan<E>(error: &GenericTensorError<E>) -> bool {
+///     matches!(error, GenericTensorError::Plan(_))
+/// }
+///
+/// fn source<E: Error + 'static>(error: &GenericTensorError<E>) -> Option<&(dyn Error + 'static)> {
+///     error.source()
+/// }
+/// ```
 pub mod prelude {
     pub use crate::error::Error;
     #[cfg(feature = "cotengra-python")]
@@ -60,8 +76,8 @@ pub mod prelude {
     };
     pub use crate::typed::{
         CheckedGenericEigTrunc, CheckedGenericEighTrunc, DecodeError, DecodeLimits, EigTrunc,
-        EighTrunc, EncodeError, GenericUnitTensorMapExt, GradedSpace, SvdTrunc, TensorMap,
-        TensorScalar, TypedPersistenceCodec,
+        EighTrunc, EncodeError, GenericTensorError, GenericUnitTensorMapExt, GradedSpace,
+        SectorSpectrum, SvdTrunc, TensorMap, TensorScalar, TypedPersistenceCodec,
     };
     pub use num_complex::Complex64;
     #[allow(deprecated)]
@@ -75,7 +91,7 @@ pub mod prelude {
     pub use tenet_core::{BlockKey, FusionTreePairKey, MultiplicityIndex, SectorId};
     #[cfg(feature = "racah-generated")]
     pub use tenet_core::{SUNFusionRule, SUNFusionRuleError};
-    pub use tenet_matrixalgebra::{SectorSpectrum, Truncation, TruncationSpace};
+    pub use tenet_matrixalgebra::{Truncation, TruncationSpace};
 }
 
 /// Formula-first explanation of TeNeT's tensor-map convention, duals,

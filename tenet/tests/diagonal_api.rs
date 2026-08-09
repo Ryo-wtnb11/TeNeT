@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use tenet::core::{SU2FusionRule, SU2Irrep, U1FusionRule, U1Irrep};
-use tenet::prelude::{Complex64, Runtime};
-use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap};
+use tenet::prelude::{Complex64, GradedSpace, Runtime, SectorSpectrum, TensorMap};
 
 fn runtime() -> Runtime {
     Runtime::builder().dense_threads(1).build().unwrap()
@@ -19,7 +18,7 @@ fn typed_diagonal_preserves_canonical_positions_and_dual_leg() {
     .unwrap()
     .try_dual()
     .unwrap();
-    let values: Vec<_> = bond
+    let values: Vec<SectorSpectrum<U1Irrep, Complex64>> = bond
         .sectors()
         .unwrap()
         .iter()
@@ -36,7 +35,11 @@ fn typed_diagonal_preserves_canonical_positions_and_dual_leg() {
     assert_eq!(tensor.codomain()[0], bond);
     assert_eq!(tensor.domain()[0], bond);
     assert!(tensor.is_diagonal(0.0).unwrap());
-    assert_eq!(tensor.diagonal_spectrum().unwrap().unwrap(), values);
+    let readback: Vec<SectorSpectrum<U1Irrep, Complex64>> =
+        tensor.diagonal_spectrum().unwrap().unwrap();
+    assert_eq!(readback, values);
+    let singular_values: Vec<SectorSpectrum<U1Irrep>> = tensor.svd_vals().unwrap();
+    assert_eq!(singular_values.len(), values.len());
 }
 
 #[test]

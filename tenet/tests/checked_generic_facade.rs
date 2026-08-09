@@ -11,10 +11,9 @@ use tenet::dense::{
     DefaultDenseExecutor, DenseBackend, DenseDotConfig, DenseError, DenseExecutor, DenseRead,
     DenseTensor, DenseWrite,
 };
-use tenet::prelude::{Complex64, Runtime};
+use tenet::prelude::{Complex64, GenericTensorError, Runtime, SectorSpectrum};
 use tenet::typed::{
-    CheckedGenericTensorProductError, GenericTensorError, GradedSpace, NetworkReuseClass,
-    SectorSpectrum, TensorMap, Truncation,
+    CheckedGenericTensorProductError, GradedSpace, NetworkReuseClass, TensorMap, Truncation,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
