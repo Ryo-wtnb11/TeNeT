@@ -37,8 +37,8 @@ Let `d` = per-sector bond degeneracy (the diagonal's essential size, `O(d)`),
 
 | Path | Required order | TeNeT status |
 |------|----------------|--------------|
-| `compose` / `U*S*Vh` | `O(d·n)` scale, `O(d)` store | **compliant** — explicit block scaling (#72) |
-| single-axis composition-equivalent `contract` / `tensor!` with a diagonal | `O(d·n)` scale, `O(d)` store | **compliant** — explicit provider-typed block scaling (#584) and typed macro execution (#750) |
+| `compose` / `U*S*Vh` | `O(d·n)` work; `O(d)` compact diagonal payload; unavoidable other operand/output storage is `O(d·n)`; no `O(d²)` diagonal materialization | **compliant** — explicit block scaling (#72) |
+| single-axis composition-equivalent `contract` / `tensor!` with a diagonal | `O(d·n)` work; `O(d)` compact diagonal payload; unavoidable other operand/output storage is `O(d·n)`; no `O(d²)` diagonal materialization | **compliant** — explicit provider-typed block scaling (#584) and typed macro execution (#750) |
 | other accepted diagonal contraction geometries | derive per geometry | **gap / unproved** — the dense fallback may add a factor `d`; no general order-correct claim |
 
 That row was a genuine order regression — densifying to `O(d²)` and GEMMing
@@ -63,8 +63,8 @@ routes are pinned to the same values and destination space in
    relevant evidence.
 2. Does TeNeT match both orders? If a fallback densifies a structured operand
    or materializes an avoidable intermediate, that is a violation.
-3. Add one explicit fast path at the paying layer, not scattered runtime
-   branches or a combinatorial type zoo, and keep the fallback order-correct.
-4. If the correct order cannot land immediately, file an issue tagged as a
-   complexity-order gap (not a performance nice-to-have) and add order-correct
-   interim guidance.
+3. For a new geometry, add one explicit fast path at the paying layer, not
+   scattered runtime branches or a combinatorial type zoo. If the correct order
+   cannot land immediately, classify the accepted fallback as a
+   complexity-order gap and route it to an issue rather than calling it
+   compliant; provide order-correct interim guidance where one exists.
