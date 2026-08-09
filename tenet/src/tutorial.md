@@ -16,9 +16,9 @@ compile and pass against the current API.
 A [`prelude::Runtime`] is built once and then carried implicitly by every
 tensor created from it (it owns the contraction/tree-transform caches and
 the dense backend). A [`prelude::GradedSpace`] is a graded vector space for one
-tensor leg: `(sector, degeneracy)` pairs plus a dual flag, in TensorKit's
-`U1Space(-1 => 2, 0 => 3, 1 => 2)` style. A [`prelude::TensorMap`] is a
-block-sparse symmetric tensor `codomain <- domain` with dynamic rank.
+tensor leg: `(sector, degeneracy)` pairs plus a dual flag. A
+[`prelude::TensorMap`] is a block-sparse symmetric tensor `codomain <- domain`
+with dynamic rank.
 
 ```rust
 use tenet::prelude::*;
@@ -88,7 +88,7 @@ assert_eq!(a.compose(&b)?.data(), &[10.0, 21.0]);
 ### Scalar dtype
 
 The scalar is the second type parameter: `TensorMap<R, f64>` or
-`TensorMap<R, Complex64>`, analogous to TensorKit's leading scalar argument.
+`TensorMap<R, Complex64>`.
 [`prelude::TensorMap::from_block_fn`] can infer it from the closure. Mixed
 scalar operations are rejected at compile time; widen explicitly with
 [`prelude::TensorMap::to_c64`]. Scalar-returning methods return `D` directly.
@@ -124,7 +124,7 @@ assert!(re.to_c64().compose(&cx).is_ok());
 
 ### Which legs may contract?
 
-Contraction compatibility follows TensorKit's dual-pairing convention:
+Contraction compatibility uses oriented dual pairing:
 the two selected legs must represent dual vector spaces in the current
 codomain/domain orientation. A codomain leg built from `v` contracts a
 domain leg built from the same `v`. To contract two same-side legs
@@ -142,7 +142,7 @@ domain leg built from the same `v`. To contract two same-side legs
 </div>
 
 See [`mathematics`] for the full tensor-map convention, dual, same-side
-contraction, and TensorKit-style `flip` conventions.
+contraction, and categorical `flip` conventions.
 
 Provider, scalar, and storage mismatches are compile-time type errors. Separate
 provider allocations of the same type are admitted only when their semantic
@@ -514,14 +514,11 @@ provider reaches the same `GradedSpace` / `TensorMap` API. The obligations, the
 laws the engine assumes without checking, and the current restrictions are in
 `docs/provider_interface.md`.
 
-For the complete TensorKit-name lookup — every user-facing 0.17 export, its
-TeNeT name, and the rationale for anything spelled or gated differently — see
-`docs/tk_api_parity.md`.
-
 ## 4. Decompositions
 
-All decomposition names follow TensorKit 0.17 / MatrixAlgebraKit, applied
-per coupled sector across the codomain | domain split:
+TeNeT applies decompositions independently per coupled sector across the
+codomain | domain split. Method names use the established
+TensorKit/MatrixAlgebraKit vocabulary where the operation agrees:
 
 - [`prelude::TensorMap::svd_trunc`] — truncated SVD; see below.
 - [`prelude::TensorMap::svd_compact`] / [`prelude::TensorMap::svd_full`] /
@@ -769,7 +766,7 @@ modules:
   [`prelude::TensorMap`] operands.
 
 Storage is column-major inside each dense block; symmetric tensors use the
-TensorKit-equivalent **coupled-sector matrix layout** ([`prelude::TensorMap::data`]
+TeNeT's canonical **coupled-sector matrix layout** ([`prelude::TensorMap::data`]
 exposes the flat storage). Axis numbers are zero-based, codomain axes
 first.
 
@@ -828,11 +825,10 @@ Two details when translating Julia examples: Julia is one-based, TeNeT
 axis lists are zero-based; and TensorKit hides flat block storage behind
 array syntax, while [`prelude::TensorMap::data`] shows it directly.
 
-For the per-export lookup table (every user-facing TensorKit 0.17 function,
-its TeNeT name, and why anything differs), see `docs/tk_api_parity.md`. For the
-internal naming correspondences and storage invariants, see
-`docs/tensorkit_compatibility_table.md`; the current public-cutover rationale is
-recorded in issue #727.
+Function rustdoc records TeNeT's contract and any relevant semantic difference;
+the pinned source coordinates for external correspondence live in
+`tenet/references.md`. The provider-typed public cutover is recorded in issue
+#727.
 
 ## 7. Runtime, backends, and performance
 
