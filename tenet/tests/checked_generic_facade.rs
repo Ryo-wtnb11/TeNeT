@@ -13,7 +13,8 @@ use tenet::dense::{
 };
 use tenet::prelude::{Complex64, Runtime};
 use tenet::typed::{
-    CheckedGenericTensorProductError, GenericTensorError, GradedSpace, TensorMap, Truncation,
+    CheckedGenericTensorProductError, GenericTensorError, GradedSpace, NetworkReuseClass,
+    SectorSpectrum, TensorMap, Truncation,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -22,6 +23,7 @@ enum Label {
     One,
     Two,
     X,
+    AliasX,
     Invalid,
 }
 
@@ -1097,6 +1099,7 @@ impl TypedSectorAdmission for CheckedOnlyToy {
             Label::One if self.use_product_probe => Ok(SectorId::new(1)),
             Label::Two if self.use_product_probe => Ok(SectorId::new(2)),
             Label::X => Ok(self.x()),
+            Label::AliasX => Ok(self.x()),
             Label::One | Label::Two | Label::Invalid => Err(ToyError::InvalidSector),
         }
     }
@@ -1121,6 +1124,284 @@ impl TypedSectorAdmission for CheckedOnlyToy {
 
     fn try_dual_id(&self, sector: SectorId) -> Result<SectorId, Self::Error> {
         CheckedGenericFusion::try_dual(self, sector)
+    }
+}
+
+#[test]
+fn checked_generic_diagonal_is_compact_canonical_and_provider_owned() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new(0));
+    let bond = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(Label::X, 2), (Label::Vacuum, 1)],
+        false,
+    )
+    .unwrap()
+    .try_dual()
+    .unwrap();
+    let real = TensorMap::<_, f64>::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: Label::X,
+                values: vec![2.0, 3.0],
+            },
+            SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![1.0],
+            },
+        ],
+    )
+    .unwrap();
+    assert!(std::ptr::eq(real.provider(), provider.as_ref()));
+    assert_eq!(real.codomain()[0], bond);
+    assert_eq!(real.domain()[0], bond);
+    assert!(!format!("{real:?}").contains("elements: 5"));
+    assert_eq!(
+        real.diagonal_spectrum().unwrap().unwrap(),
+        [
+            SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![1.0],
+            },
+            SectorSpectrum {
+                sector: Label::X,
+                values: vec![2.0, 3.0],
+            },
+        ]
+    );
+    let adjoint = real.adjoint().unwrap();
+    assert!(std::ptr::eq(adjoint.provider(), provider.as_ref()));
+    assert!(adjoint.network_reuse_class(false) == NetworkReuseClass::LazyAdjoint);
+    assert_eq!(real.data(), &[1.0, 2.0, 0.0, 0.0, 3.0]);
+    assert_eq!(adjoint.data(), real.data());
+    assert_eq!(
+        adjoint
+            .adjoint()
+            .unwrap()
+            .diagonal_spectrum()
+            .unwrap()
+            .unwrap(),
+        real.diagonal_spectrum().unwrap().unwrap()
+    );
+
+    let complex = TensorMap::<_, Complex64>::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![Complex64::new(1.0, 1.0)],
+            },
+            SectorSpectrum {
+                sector: Label::X,
+                values: vec![Complex64::new(2.0, -1.0), Complex64::new(3.0, 2.0)],
+            },
+        ],
+    )
+    .unwrap();
+    assert!(std::ptr::eq(complex.provider(), provider.as_ref()));
+    assert_eq!(
+        complex.adjoint().unwrap().data()[0],
+        Complex64::new(1.0, -1.0)
+    );
+}
+
+#[test]
+fn checked_generic_diagonal_rejects_before_layout_and_preserves_error_precedence() {
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    let provider = Arc::new(CheckedOnlyToy::new_product_probe(0));
+    let bond = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(Label::Vacuum, 1), (Label::X, 2)],
+        false,
+    )
+    .unwrap();
+
+    let compact = TensorMap::<_, f64>::diagonal(
+        &runtime,
+        &bond,
+        [
+            SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![1.0],
+            },
+            SectorSpectrum {
+                sector: Label::X,
+                values: vec![2.0, 3.0],
+            },
+        ],
+    )
+    .unwrap();
+    provider.fail_decode.store(true, Ordering::Relaxed);
+    assert!(matches!(
+        compact.diagonal_spectrum(),
+        Err(GenericTensorError::Structure(
+            CheckedGenericStructureError::Provider(ToyError::Decode)
+        ))
+    ));
+    provider.fail_decode.store(false, Ordering::Relaxed);
+
+    reset_provider_queries(&provider);
+    assert!(matches!(
+        TensorMap::<_, f64>::diagonal(
+            &runtime,
+            &bond,
+            [
+                SectorSpectrum { sector: Label::Invalid, values: vec![1.0] },
+                SectorSpectrum { sector: Label::Invalid, values: vec![2.0] },
+            ],
+        ),
+        Err(GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(message)))
+            if message.contains("more than once")
+    ));
+    assert_no_provider_queries(&provider);
+
+    assert!(matches!(
+        TensorMap::<_, f64>::diagonal(
+            &runtime,
+            &bond,
+            [
+                SectorSpectrum {
+                    sector: Label::X,
+                    values: vec![1.0, 2.0]
+                },
+                SectorSpectrum {
+                    sector: Label::Invalid,
+                    values: vec![3.0]
+                },
+            ],
+        ),
+        Err(GenericTensorError::Structure(
+            CheckedGenericStructureError::Provider(ToyError::InvalidSector)
+        ))
+    ));
+    assert!(matches!(
+        TensorMap::<_, f64>::diagonal(
+            &runtime,
+            &bond,
+            [
+                SectorSpectrum { sector: Label::X, values: vec![1.0, 2.0] },
+                SectorSpectrum { sector: Label::AliasX, values: vec![3.0, 4.0] },
+            ],
+        ),
+        Err(GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(message)))
+            if message.contains("both encode")
+    ));
+
+    provider.invalid_style.store(true, Ordering::Relaxed);
+    for (spectra, expected) in [
+        (
+            vec![SectorSpectrum {
+                sector: Label::Vacuum,
+                values: vec![1.0],
+            }],
+            "missing",
+        ),
+        (
+            vec![
+                SectorSpectrum {
+                    sector: Label::Vacuum,
+                    values: vec![1.0],
+                },
+                SectorSpectrum {
+                    sector: Label::One,
+                    values: vec![2.0],
+                },
+            ],
+            "missing",
+        ),
+        (
+            vec![
+                SectorSpectrum {
+                    sector: Label::Vacuum,
+                    values: vec![1.0],
+                },
+                SectorSpectrum {
+                    sector: Label::X,
+                    values: vec![2.0],
+                },
+                SectorSpectrum {
+                    sector: Label::One,
+                    values: vec![4.0],
+                },
+            ],
+            "unknown",
+        ),
+        (
+            vec![
+                SectorSpectrum {
+                    sector: Label::Vacuum,
+                    values: vec![1.0],
+                },
+                SectorSpectrum {
+                    sector: Label::X,
+                    values: vec![2.0],
+                },
+            ],
+            "length",
+        ),
+    ] {
+        assert!(matches!(
+            TensorMap::<_, f64>::diagonal(&runtime, &bond, spectra),
+            Err(GenericTensorError::Facade(tenet::typed::Error::InvalidArgument(message)))
+                if message.contains(expected)
+        ));
+    }
+
+    assert!(matches!(
+        TensorMap::<_, f64>::diagonal(
+            &runtime,
+            &bond,
+            [
+                SectorSpectrum {
+                    sector: Label::Vacuum,
+                    values: vec![1.0]
+                },
+                SectorSpectrum {
+                    sector: Label::X,
+                    values: vec![2.0, 3.0]
+                },
+            ],
+        ),
+        Err(GenericTensorError::Structure(_))
+    ));
+}
+
+#[cfg(feature = "racah-generated")]
+#[test]
+fn sun_checked_generic_diagonal_constructs_standalone_compact_blocks() {
+    use tenet::typed::SUNFusionRule;
+
+    let runtime = Runtime::builder().dense_threads(1).build().unwrap();
+    for (n, adjoint) in [(3, vec![1, 1]), (4, vec![1, 0, 1])] {
+        let provider = Arc::new(SUNFusionRule::new(n).unwrap());
+        let adjoint_id = provider.encode_dynkin(&adjoint).unwrap();
+        assert_eq!(
+            provider
+                .try_nsymbol(adjoint_id, adjoint_id, adjoint_id)
+                .unwrap(),
+            2
+        );
+        let bond =
+            GradedSpace::try_new(Arc::clone(&provider), [(adjoint.clone(), 2)], false).unwrap();
+        let diagonal = TensorMap::<_, f64>::diagonal(
+            &runtime,
+            &bond,
+            [SectorSpectrum {
+                sector: adjoint,
+                values: vec![2.0, 3.0],
+            }],
+        )
+        .unwrap();
+        assert!(std::ptr::eq(diagonal.provider(), provider.as_ref()));
+        assert!(!format!("{diagonal:?}").contains("elements: 4"));
+        // This provider has outer multiplicity two, but a rank-one spectrum has no μ axis.
+        assert_eq!(diagonal.block_count(), 1);
+        assert_eq!(diagonal.block(0).unwrap().shape(), &[2, 2]);
+        assert_eq!(diagonal.block(0).unwrap().strides(), &[1, 2]);
+        assert_eq!(diagonal.data(), &[2.0, 0.0, 0.0, 3.0]);
     }
 }
 

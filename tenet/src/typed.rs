@@ -127,13 +127,16 @@
 //! [`TensorMap::flip`], [`TensorMap::insert_left_unit`],
 //! [`TensorMap::insert_right_unit`], [`TensorMap::remove_unit`]).
 //!
-//! Issue #570 also gave the facade **compact diagonal storage**: a spectrum
-//! factor — `svd_compact`'s and `svd_trunc`'s `s`, `eigh`/`eig`'s `d` — holds
-//! `Σ_c k_c` values rather than the `Σ_c k_c²` block-diagonal buffer they would
-//! fill, which is what TensorKit's `DiagonalTensorMap` is. It is a storage
-//! property and not a type: no signature mentions it, [`TensorMap::data`] still
-//! reports the dense buffer (materialized once, on demand, shared by every
-//! clone), and the operations that can exploit it — [`TensorMap::compose`],
+//! Issue #570 also gave the facade **compact diagonal storage**. For
+//! multiplicity-free providers, the `s` factor from `svd_compact` and
+//! `svd_trunc` is compact; for checked `Generic` providers, only the `d` factor
+//! from EIGH/EIG is compact, while checked SVD publishes its `s` factor densely.
+//! A compact factor holds `Σ_c k_c` values rather than the `Σ_c k_c²`
+//! block-diagonal buffer it would fill, which is what TensorKit's
+//! `DiagonalTensorMap` is. It is a storage property and not a type: no signature
+//! mentions it, [`TensorMap::data`] still reports the dense buffer (materialized
+//! once, on demand, shared by every clone), and the operations that can exploit
+//! it — [`TensorMap::compose`],
 //! [`TensorMap::scale`], [`TensorMap::add`], [`TensorMap::adjoint`],
 //! [`TensorMap::trace_pairs`] on its full-pair arm, and the reductions — do so
 //! silently. The ones that cannot say so in their own
@@ -177,8 +180,9 @@
 //!   change.
 //! - `conj` stays design-gated on its open correctness question for
 //!   non-self-dual sectors. [`TensorMap::adjoint`] is the TensorKit-style lazy
-//!   parent view for dense storage; compact diagonal storage keeps its direct
-//!   `O(Σ_c k_c)` conjugation path.
+//!   parent view for dense storage. A multiplicity-free compact diagonal keeps
+//!   its direct `O(Σ_c k_c)` conjugation path; a checked `Generic` compact
+//!   diagonal uses the lazy parent view instead.
 //!
 //! Adding any of them ahead of its review would bypass the gate that exists to
 //! keep this surface deliberate.
@@ -511,14 +515,15 @@ where
     ///
     /// Dense input uses one compact SVD per nonempty coupled sector,
     /// `O(Σ_c n_c³)`, then folds `S⁺` into a column scaling and recomposes with
-    /// one local GEMM. Compact input uses an **O(rank) elementwise
-    /// cutoff-and-reciprocal arm** over the stored diagonal values and stays
-    /// compact.
+    /// one local GEMM. Multiplicity-free compact input uses an **O(rank)
+    /// elementwise cutoff-and-reciprocal arm** over the stored diagonal values
+    /// and stays compact.
     ///
-    /// Checked Generic supports dense maps only: it admits the swapped output
-    /// with the source's exact provider `Arc` and validates its identity,
-    /// HomSpace, rank, and layout before any SVD/GEMM. Compact checked-Generic
-    /// construction remains unsupported.
+    /// Checked Generic admits the swapped output with the source's exact
+    /// provider `Arc` and validates its identity, HomSpace, rank, and layout
+    /// before any SVD/GEMM. Standalone compact construction is supported, but
+    /// checked `pinv` has no elementwise compact arm: it materializes that input
+    /// for the dense path and publishes a dense result.
     pub fn pinv(&self, rcond: f64) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorPinvDispatch<R, D>>::pinv(self, rcond)
     }
@@ -1225,10 +1230,9 @@ where
     /// value-independent complexification is not expressible in a typed
     /// signature. A wider `sqrt` is a separate phase, not an omission here.
     ///
-    /// Checked Generic currently exposes this operation for dense diagonal
-    /// tensors only. Checked Generic compact construction and compact
-    /// preservation remain unsupported; the compact arm below remains for the
-    /// existing multiplicity-free path.
+    /// Checked Generic standalone compact tensors use the same elementwise arm
+    /// and remain compact. Dense diagonal inputs still take the checked
+    /// off-diagonal-validation path below.
     ///
     /// # Errors
     ///
@@ -1247,10 +1251,9 @@ where
     ///
     /// # Complexity
     ///
-    /// Compact input (the existing multiplicity-free/TensorKit
-    /// `DiagonalTensorMap` path, what those factorizations hand back): the
-    /// **O(rank) elementwise arm** over the `Σ_c k_c` stored
-    /// values, staying compact — so `s.sqrt()` and the two `compose`s around it
+    /// Compact input (the TensorKit `DiagonalTensorMap` path): the **O(rank)
+    /// elementwise arm** over the `Σ_c k_c` stored values, staying compact. On
+    /// the multiplicity-free path, `s.sqrt()` and the two `compose`s around it
     /// are all bond scalings. Dense input: `O(Σ_c n_c²)`, one walk over the
     /// block-diagonal buffer, which is what the off-diagonal check costs; the
     /// root itself is still only `Σ_c n_c` square roots. A dense lazy adjoint
@@ -6779,7 +6782,8 @@ where
     /// # Complexity
     ///
     /// Dense input: `O(Σ_c n_c³)`, one LU solve per coupled sector. Compact
-    /// input (a spectrum factor, TensorKit's `DiagonalTensorMap`): the
+    /// multiplicity-free compact input (a spectrum factor, TensorKit's
+    /// `DiagonalTensorMap`): the
     /// **O(rank) elementwise-reciprocal arm**, `1/s_i` over the `Σ_c k_c`
     /// stored values, and the result stays compact — matching TensorKit's
     /// `inv(::DiagonalTensorMap)`, which is `inv.(d.data)`. Nothing dense is
@@ -6787,11 +6791,12 @@ where
     /// parent and returns a detached owned adjoint of that inverse; it does not
     /// allocate or publish a separate receiver-materialization payload.
     ///
-    /// Checked Generic accepts dense inputs only: it performs the same
-    /// isomorphism preflight, admits the swapped output with the source provider
-    /// `Arc` before output allocation or dense work, and preserves provider
-    /// admission failures as typed errors. Compact checked-Generic construction
-    /// remains unsupported.
+    /// Checked Generic performs the same isomorphism preflight, admits the
+    /// swapped output with the source provider `Arc` before output allocation
+    /// or dense work, and preserves provider admission failures as typed errors.
+    /// Standalone compact construction is supported, but checked `inv` has no
+    /// elementwise compact arm: it materializes that input and publishes a dense
+    /// result.
     pub fn inv(&self) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorInvDispatch<R, D>>::inv(self)
     }
@@ -6827,8 +6832,9 @@ where
     ///
     /// The multiplicity-free **compact** arm is TensorKit's
     /// `exp(::DiagonalTensorMap)`: unconditionally elementwise, with no
-    /// hermiticity gate. Checked-Generic tensors currently use only the dense
-    /// Padé route; checked compact construction is unsupported.
+    /// hermiticity gate. Standalone checked-Generic compact construction is
+    /// supported, but checked `exp` has no compact dispatch: it materializes
+    /// that input and publishes the dense Padé result.
     ///
     /// # Errors
     ///
@@ -6878,13 +6884,16 @@ where
 {
     /// Integer tensor-map power (TensorKit `t ^ p`), using `O(log |p|)`
     /// compositions. Zero returns the multiplicative identity (staying compact
-    /// for compact input); negative powers invert once.
+    /// for multiplicity-free compact input); negative powers invert once.
     ///
     /// For checked-Generic tensors, the exact endomorphism check precedes
     /// provider work. Zero uses the already admitted full block layout without
     /// a provider query or new admission; other exponents inherit the checked
-    /// compose/inverse ordering and errors. Checked-Generic compact
-    /// construction remains unsupported.
+    /// compose/inverse ordering and errors. Standalone checked-Generic compact
+    /// construction is supported, but there is no checked compact power arm:
+    /// exponent one returns the input clone, while zero, negative, and
+    /// magnitude-at-least-two powers enter dense identity, inverse, or compose
+    /// paths respectively.
     ///
     /// # Errors
     ///
@@ -10883,7 +10892,8 @@ where
 
 impl<R, D> TensorMap<R, D>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorRootDispatch<R>,
     D: TensorScalar,
 {
     /// Builds a compact diagonal map `bond <- bond` from labelled sector values.
@@ -10894,35 +10904,75 @@ where
     /// bond's engine-sector order. Each vector must equal that sector's
     /// degeneracy. All validation precedes checked layout admission, and the
     /// supplied dual flag is preserved.
-    pub fn diagonal<I>(runtime: &Runtime, bond: &GradedSpace<R>, spectra: I) -> Result<Self, Error>
+    pub fn diagonal<I>(
+        runtime: &Runtime,
+        bond: &GradedSpace<R>,
+        spectra: I,
+    ) -> Result<Self, TypedFacadeError<R>>
     where
         I: IntoIterator<Item = SectorSpectrum<R::Sector, D>>,
     {
-        let mut supplied = HashMap::new();
-        for entry in spectra {
-            let sector = bond.provider().encode_sector(&entry.sector)?;
-            if supplied.insert(sector, entry.values).is_some() {
-                return Err(Error::InvalidArgument(
-                    "diagonal spectrum has a duplicate sector".into(),
-                ));
-            }
+        let spectra: Vec<_> = spectra.into_iter().collect();
+        let mut labels: Vec<_> = spectra.iter().map(|entry| &entry.sector).collect();
+        labels.sort_unstable();
+        if let Some(duplicate) = labels.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(Error::InvalidArgument(format!(
+                "sector label {:?} is declared more than once",
+                duplicate[0]
+            ))
+            .into());
+        }
+
+        let mut encoded = Vec::with_capacity(spectra.len());
+        for entry in &spectra {
+            encoded.push(
+                TypedSectorAdmission::try_encode_label(bond.provider(), &entry.sector)
+                    .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?,
+            );
+        }
+        let mut by_id: Vec<_> = encoded.iter().enumerate().collect();
+        by_id.sort_unstable_by_key(|(_, id)| *id);
+        if let Some(duplicate) = by_id.windows(2).find(|pair| pair[0].1 == pair[1].1) {
+            return Err(Error::InvalidArgument(format!(
+                "SectorCodec law violation: labels {:?} and {:?} both encode to {:?}",
+                spectra[duplicate[0].0].sector, spectra[duplicate[1].0].sector, duplicate[0].1
+            ))
+            .into());
+        }
+        let mut supplied: HashMap<_, _> = encoded
+            .into_iter()
+            .zip(spectra)
+            .map(|(sector, entry)| (sector, entry.values))
+            .collect();
+        if bond
+            .leg()
+            .sectors()
+            .iter()
+            .any(|sector| !supplied.contains_key(sector))
+        {
+            return Err(Error::InvalidArgument(
+                "diagonal spectrum is missing a bond sector".into(),
+            )
+            .into());
+        }
+        if supplied.len() != bond.leg().sectors().len() {
+            return Err(Error::InvalidArgument(
+                "diagonal spectrum contains an unknown bond sector".into(),
+            )
+            .into());
         }
         let mut spectrum = Vec::with_capacity(bond.degeneracies().len());
         for (&sector, &degeneracy) in bond.leg().sectors().iter().zip(bond.degeneracies()) {
-            let values = supplied.remove(&sector).ok_or_else(|| {
-                Error::InvalidArgument("diagonal spectrum is missing a bond sector".into())
-            })?;
+            let values = supplied
+                .remove(&sector)
+                .expect("complete checked spectrum contains every bond sector");
             if values.len() != degeneracy {
                 return Err(Error::InvalidArgument(
                     "diagonal spectrum length does not match bond degeneracy".into(),
-                ));
+                )
+                .into());
             }
             spectrum.push(tenet_matrixalgebra::SectorSpectrum { sector, values });
-        }
-        if !supplied.is_empty() {
-            return Err(Error::InvalidArgument(
-                "diagonal spectrum contains an unknown bond sector".into(),
-            ));
         }
         let space = Self::build_space(Arc::clone(bond.provider_arc()), &[bond], &[bond])?;
         Ok(Self {
@@ -10933,20 +10983,24 @@ where
 
     /// Returns the compact diagonal spectrum without materializing dense data.
     ///
-    /// This is typed `diag` readback: [`None`] means the tensor is dense;
+    /// This is typed `diag` readback: [`None`] means the representation has no
+    /// directly stored compact spectrum (it is dense or a lazy adjoint);
     /// otherwise it clones only the `O(Σ_c k_c)` compact values in canonical
     /// bond-sector order.
-    pub fn diagonal_spectrum(&self) -> Result<Option<Vec<SectorSpectrum<R::Sector, D>>>, Error> {
+    pub fn diagonal_spectrum(
+        &self,
+    ) -> Result<Option<Vec<SectorSpectrum<R::Sector, D>>>, TypedFacadeError<R>> {
         self.spectrum()
             .map(|spectrum| {
                 spectrum
                     .iter()
                     .map(|entry| {
                         Ok(SectorSpectrum {
-                            sector: self
-                                .logical_space()
-                                .provider()
-                                .decode_sector(entry.sector)?,
+                            sector: TypedSectorAdmission::try_decode_label(
+                                self.logical_space().provider(),
+                                entry.sector,
+                            )
+                            .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?,
                             values: entry.values.clone(),
                         })
                     })
@@ -10954,7 +11008,13 @@ where
             })
             .transpose()
     }
+}
 
+impl<R, D> TensorMap<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+{
     /// Tests a rank-one map for blockwise diagonality without materializing compact storage.
     ///
     /// This matches TensorKit `isdiag` for finite data at `tol = 0`; positive
