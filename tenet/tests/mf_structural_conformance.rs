@@ -54,6 +54,7 @@ fn zn3_index_flip_and_units_keep_the_original_provider() {
     ));
     assert!(flipped.codomain()[0].is_dual());
     assert_eq!(flipped.data(), source.data());
+    assert_eq!(flipped.flip_inverse(&[0]).unwrap().data(), source.data());
 
     let inserted = source.insert_left_unit(1, true).unwrap();
     assert!(std::ptr::eq(inserted.provider(), provider.as_ref()));
@@ -180,17 +181,42 @@ fn zn3_extended_structural_paths_execute_on_the_original_arc() {
     let runtime = runtime();
     let provider = Arc::new(ZNFusionRule::new(3).unwrap());
     let charge = |value| provider.irrep(value);
-    let leg = GradedSpace::try_new(Arc::clone(&provider), [(charge(1), 1)], false).unwrap();
+    let leg = GradedSpace::try_new(
+        Arc::clone(&provider),
+        [(charge(0), 1), (charge(1), 2), (charge(2), 1)],
+        false,
+    )
+    .unwrap();
     let source: TensorMap<_, Complex64> =
-        TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| Complex64::new(1.0, 2.0))
-            .unwrap();
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&leg], |trees, index| {
+            Complex64::new(
+                100.0 * trees.coupled().charge() as f64 + 10.0 * index[0] as f64 + index[1] as f64,
+                index[2] as f64,
+            )
+        })
+        .unwrap();
+    let permuted = source.permute(&[1, 0], &[2]).unwrap();
+    let braided = source.braid(&[1, 0], &[2], &[1, 0, 2]).unwrap();
+    assert_eq!(braided.data(), permuted.data(), "Z3 is bosonic");
+    assert_ne!(
+        permuted.data(),
+        source.data(),
+        "asymmetric raw payload moved"
+    );
+    let restored = permuted.permute(&[1, 0], &[2]).unwrap();
+    assert_eq!(restored.data(), source.data());
+    for index in 0..source.block_count() {
+        assert_eq!(
+            restored.block_fusion_trees(index).unwrap(),
+            source.block_fusion_trees(index).unwrap()
+        );
+    }
     for output in [
         source.adjoint().unwrap(),
-        source.permute(&[0], &[1]).unwrap(),
         source.transpose().unwrap(),
-        source.repartition(0).unwrap(),
-        source.braid(&[0], &[1], &[1, 0]).unwrap(),
-        source.twist(&[0, 1]).unwrap(),
+        source.repartition(1).unwrap(),
+        braided,
+        source.twist(&[0, 1, 2]).unwrap(),
     ] {
         assert!(std::ptr::eq(output.provider(), provider.as_ref()));
     }
@@ -203,10 +229,6 @@ fn zn3_extended_structural_paths_execute_on_the_original_arc() {
         adjoint.domain()[0].provider(),
         provider.as_ref()
     ));
-    assert_eq!(
-        source.adjoint().unwrap().data(),
-        &[Complex64::new(1.0, -2.0)]
-    );
 }
 
 #[test]
@@ -220,7 +242,6 @@ fn cu1_charged_structural_paths_keep_the_original_arc() {
             .unwrap();
     for output in [
         source.adjoint().unwrap(),
-        source.braid(&[0], &[1], &[1, 0]).unwrap(),
         source.twist(&[0, 1]).unwrap(),
         source.flip(&[0]).unwrap(),
         source.insert_right_unit(0, false).unwrap(),
@@ -235,6 +256,18 @@ fn cu1_charged_structural_paths_keep_the_original_arc() {
         source.adjoint().unwrap().data(),
         &[Complex64::new(2.0, -3.0)]
     );
+    let pseudo =
+        GradedSpace::try_new(Arc::clone(&provider), [(CU1Irrep::PSEUDOSCALAR, 1)], false).unwrap();
+    let braid_source: TensorMap<_, f64> =
+        TensorMap::from_block_fn(&runtime, [&leg, &leg], [&pseudo], |_, _| 1.0).unwrap();
+    let permuted = braid_source.permute(&[1, 0], &[2]).unwrap();
+    let braided = braid_source.braid(&[1, 0], &[2], &[0, 1, 2]).unwrap();
+    // `permute` is the symmetric-braiding permutation (not a raw ndarray
+    // transpose), so it and `braid` coincide for CU1.  Both differ from the
+    // raw source by the charged exchange coefficient R(q,q;pseudo) = -1.
+    assert_eq!(permuted.data(), &[-1.0]);
+    assert_eq!(braided.data(), &[-1.0]);
+    assert!(std::ptr::eq(braided.provider(), provider.as_ref()));
     let inserted = source.insert_right_unit(0, false).unwrap();
     assert!(inserted
         .codomain()
@@ -254,13 +287,16 @@ fn su2_and_exact_products_keep_their_provider_through_flip_and_units() {
                 TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
             let flipped = source.flip(&[0]).unwrap();
             let inserted = source.insert_left_unit(1, true).unwrap();
-            for output in [&flipped, &inserted, &inserted.remove_unit(1).unwrap()] {
+            let restored = inserted.remove_unit(1).unwrap();
+            for output in [&flipped, &inserted, &restored] {
                 assert!(std::ptr::eq(output.provider(), provider.as_ref()));
                 assert!(std::ptr::eq(
                     output.codomain()[0].provider(),
                     provider.as_ref()
                 ));
             }
+            assert_eq!(flipped.flip_inverse(&[0]).unwrap().data(), source.data());
+            assert_eq!(restored.data(), source.data());
         }};
     }
     check!(SU2FusionRule, SU2Irrep::from_twice_spin(1));
@@ -337,7 +373,7 @@ fn every_builtin_multiplicity_free_provider_has_cat_and_absorb_execution() {
 fn zn3_and_cu1_arithmetic_contraction_and_reductions_have_scalar_oracles() {
     let runtime = runtime();
     macro_rules! check {
-        ($provider:expr, $label:expr) => {{
+        ($provider:expr, $label:expr, $qdim:expr) => {{
             let provider = Arc::new($provider);
             let leg = GradedSpace::try_new(Arc::clone(&provider), [($label, 1)], false).unwrap();
             let a: TensorMap<_, f64> =
@@ -357,17 +393,20 @@ fn zn3_and_cu1_arithmetic_contraction_and_reductions_have_scalar_oracles() {
             }
             assert_eq!(sum.data(), &[-1.0]);
             assert_eq!(scaled.data(), &[8.0]);
-            assert!(a.norm().unwrap() > 0.0);
-            assert!(a.inner(&b).unwrap() > 0.0);
-            assert!(a.tr().unwrap() > 0.0);
-            assert!(a.trace_pairs(&[(0, 1)]).unwrap().scalar().unwrap() > 0.0);
+            assert!((a.norm().unwrap() - 2.0 * ($qdim as f64).sqrt()).abs() < 1e-12);
+            assert!((a.inner(&b).unwrap() - 6.0 * $qdim).abs() < 1e-12);
+            assert!((a.tr().unwrap() - 2.0 * $qdim).abs() < 1e-12);
+            assert!(
+                (a.trace_pairs(&[(0, 1)]).unwrap().scalar().unwrap() - 2.0 * $qdim).abs() < 1e-12
+            );
         }};
     }
     check!(
         ZNFusionRule::new(3).unwrap(),
-        ZNFusionRule::new(3).unwrap().irrep(1)
+        ZNFusionRule::new(3).unwrap().irrep(1),
+        1.0
     );
-    check!(CU1FusionRule, CU1Irrep::from_twice_charge(1));
+    check!(CU1FusionRule, CU1Irrep::from_twice_charge(1), 2.0);
 
     let provider = Arc::new(FermionParityFusionRule);
     let leg = GradedSpace::try_new(Arc::clone(&provider), [(Z2Irrep::ODD, 1)], false).unwrap();
