@@ -115,7 +115,7 @@ struct State {
 }
 
 impl State {
-    /// Charge-balanced singlet-like start, `∝ ... (|up dn> + |dn up>) ...`
+    /// Charge-balanced entangled start, `∝ ... (|up dn> + |dn up>) ...`
     /// per unit cell: bond B-A carries charge 0, bond A-B charges ±1.
     ///
     /// (A strict Neel product state — phys leg populated only in `+1` on A /

@@ -111,6 +111,10 @@ cargo test --workspace
 cargo doc --workspace --no-deps
 ```
 
+For a complete tensor-network application, follow the guided
+[U(1) iTEBD Heisenberg tutorial](docs/itebd_heisenberg.md) alongside its
+runnable example.
+
 ## Backend Philosophy
 
 **Operators say WHAT to compute; backends say WHICH kernel computes it.** The
@@ -280,6 +284,8 @@ TENET_COTENGRA_UV_PROJECT=tools/cotengra-python \
 
 ## Documentation Map
 
+- [`docs/itebd_heisenberg.md`](docs/itebd_heisenberg.md): guided U(1) iTEBD
+  ground-state calculation for the infinite spin-1/2 Heisenberg chain.
 - [`tenet/src/tutorial.md`](tenet/src/tutorial.md): user-layer tutorial with
   compiling examples.
 - [`tenet/src/mathematics.md`](tenet/src/mathematics.md): tensor-map
