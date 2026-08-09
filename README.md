@@ -1,9 +1,11 @@
 # TeNeT
 
-TeNeT is a Rust tensor-network library for symmetric tensors. A tensor is a map
-`codomain <- domain` stored as fusion-tree-indexed reduced blocks; symmetries
-enter as fusion-rule *providers* rather than as a fixed symmetry list; and
-contraction-path planning is separated from execution.
+TeNeT is a Rust tensor-network library for symmetric tensors. It separates a
+generic symmetric-tensor engine from symmetry-specific fusion data. A tensor is
+a map `codomain <- domain` stored as fusion-tree-indexed reduced blocks.
+Fusion-rule *providers* supply sector labels and categorical data, while the
+engine handles block layouts and tensor operations; contraction-path planning
+remains separate from execution.
 
 Design priority, in this order: Rust-native maintainability and extensibility;
 speed that survives dynamic-rank tensor networks; a usable high-level API.
