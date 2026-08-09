@@ -5339,7 +5339,6 @@ fn checked_generic_full_lq_failure_is_typed_and_nonpublishing() {
 }
 
 #[test]
-#[allow(deprecated)]
 fn checked_only_contract_and_compose_keep_left_authority() {
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let left_provider = Arc::new(CheckedOnlyToy::new(0));
@@ -5359,9 +5358,6 @@ fn checked_only_contract_and_compose_keep_left_authority() {
 
     for output in [
         source.contract(&identity, &[1], &[0], &[0, 1]).unwrap(),
-        source
-            .contract_ordered(&identity, &[1], &[0], &[0, 1])
-            .unwrap(),
         source.compose(&identity).unwrap(),
     ] {
         assert!(std::ptr::eq(output.provider(), left_provider.as_ref()));
@@ -6122,7 +6118,6 @@ fn sun_checked_generic_cat_covers_both_directions_dtypes_and_mu_two_keys() {
 
 #[cfg(feature = "racah-generated")]
 #[test]
-#[allow(deprecated)]
 fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() {
     use tenet::typed::SUNFusionRule;
 
@@ -6154,9 +6149,6 @@ fn sun_adjoint_multiplicity_transforms_round_trip_labels_vertices_and_payload() 
             TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
         for output in [
             tensor.contract(&identity, &[2], &[0], &[0, 1, 2]).unwrap(),
-            tensor
-                .contract_ordered(&identity, &[2], &[0], &[0, 1, 2])
-                .unwrap(),
             tensor.compose(&identity).unwrap(),
         ] {
             assert!(std::ptr::eq(output.provider(), provider.as_ref()));

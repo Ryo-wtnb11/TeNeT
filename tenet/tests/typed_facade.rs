@@ -8620,17 +8620,12 @@ fn cu1_typed_rank_three_permutation_pins_the_gauge_contract_and_recoupling_value
 }
 
 // ---------------------------------------------------------------------------
-// Issue #580, group 6: `contract_ordered`, the documented alias of `contract`.
-//
-// The typed `contract` already takes the explicit output order, so the alias
-// adds a name, not a route. These gates independently pin its typed error
-// surface, edge cases, parallel replay, and external-provider values.
+// Issue #580, group 6: ordered contraction through canonical `contract`.
 // ---------------------------------------------------------------------------
 
 #[test]
-#[allow(deprecated)]
-fn contract_ordered_error_classes_and_their_both_defect_precedence() {
-    // What: the alias preserves the typed contract's error classes and reports
+fn contract_error_classes_and_their_both_defect_precedence() {
+    // What: the typed contract reports
     // a bad output order before a simultaneous contracted-leg mismatch.
     let _guard = cache_lock();
     let second = runtime();
@@ -8695,7 +8690,7 @@ fn contract_ordered_error_classes_and_their_both_defect_precedence() {
     ];
     for &(name, lhs_axes, rhs_axes, output_axes, class) in cases {
         let typed_error = typed
-            .contract_ordered(&typed, lhs_axes, rhs_axes, output_axes)
+            .contract(&typed, lhs_axes, rhs_axes, output_axes)
             .unwrap_err();
         assert!(
             matches!(typed_error, tenet::typed::Error::Operation(_)),
@@ -8725,7 +8720,7 @@ fn contract_ordered_error_classes_and_their_both_defect_precedence() {
     )
     .unwrap();
     let typed_error = typed
-        .contract_ordered(&typed_narrow, &[2], &[0], &[0, 1, 2, 3])
+        .contract(&typed_narrow, &[2], &[0], &[0, 1, 2, 3])
         .unwrap_err();
     assert!(
         format!("{typed_error:?}").contains("LegDegeneracyMismatch"),
@@ -8734,7 +8729,7 @@ fn contract_ordered_error_classes_and_their_both_defect_precedence() {
 
     // Both defects at once: mismatched legs AND a non-permutation output order.
     let typed_both = typed
-        .contract_ordered(&typed_narrow, &[2], &[0], &[0, 0, 1, 2])
+        .contract(&typed_narrow, &[2], &[0], &[0, 0, 1, 2])
         .unwrap_err();
     assert!(
         format!("{typed_both:?}").contains("InvalidPermutation"),
@@ -8745,13 +8740,13 @@ fn contract_ordered_error_classes_and_their_both_defect_precedence() {
     let typed_second: TensorMap<tenet::core::Z2FusionRule, f64> = typed_fixture(&second);
     assert!(matches!(
         typed
-            .contract_ordered(&typed_second, &[2], &[0], &[0, 1, 2, 3])
+            .contract(&typed_second, &[2], &[0], &[0, 1, 2, 3])
             .unwrap_err(),
         tenet::typed::Error::RuntimeMismatch
     ));
 
     // Rule-identity mismatch stays the expert layer's rejection through the
-    // alias name too.
+    // canonical name too.
     let first = Arc::new(ExternalZ3::tagged(0));
     let second_rule = Arc::new(ExternalZ3::tagged(1));
     let lhs = counting_z3(
@@ -8766,7 +8761,7 @@ fn contract_ordered_error_classes_and_their_both_defect_precedence() {
         &z3_dense_leg(&second_rule, 4),
         1.0,
     );
-    let identity_error = lhs.contract_ordered(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
+    let identity_error = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap_err();
     assert!(
         format!("{identity_error:?}").contains("FusionRuleMismatch"),
         "{identity_error:?}"
@@ -8775,7 +8770,7 @@ fn contract_ordered_error_classes_and_their_both_defect_precedence() {
 
 #[test]
 #[allow(deprecated)]
-fn typed_contract_ordered_handles_a_zero_codomain_output_split() {
+fn contract_ordered_delegates_with_a_nonidentity_output_order() {
     let _guard = cache_lock();
     let runtime = runtime();
     let provider = Arc::new(tenet::core::U1FusionRule);
@@ -8795,8 +8790,7 @@ fn typed_contract_ordered_handles_a_zero_codomain_output_split() {
 }
 
 #[test]
-#[allow(deprecated)]
-fn typed_contract_ordered_parallel_su2_replay_matches_serial() {
+fn typed_contract_parallel_su2_replay_matches_serial() {
     let _guard = cache_lock();
 
     fn run(runtime: &Runtime) -> Vec<f64> {
@@ -8815,7 +8809,7 @@ fn typed_contract_ordered_parallel_su2_replay_matches_serial() {
             TensorMap::rand_with_seed(runtime, [&leg, &leg], [&leg, &leg], 224_401).unwrap();
         let rhs: TensorMap<SU2FusionRule, f64> =
             TensorMap::rand_with_seed(runtime, [&leg, &leg], [&leg, &leg], 224_402).unwrap();
-        lhs.contract_ordered(&rhs, &[3, 2], &[0, 1], &[2, 0, 3, 1])
+        lhs.contract(&rhs, &[3, 2], &[0, 1], &[2, 0, 3, 1])
             .unwrap()
             .data()
             .to_vec()
@@ -8833,8 +8827,7 @@ fn typed_contract_ordered_parallel_su2_replay_matches_serial() {
 }
 
 #[test]
-#[allow(deprecated)]
-fn contract_ordered_on_the_external_z3_provider_matches_the_hand_product() {
+fn contract_on_the_external_z3_provider_matches_the_hand_product() {
     // What (gate 5): a typed-only ordered-contraction value check on the
     // external provider. Same fixture as the
     // `contract` hand-product gate: `output_axes = [1, 0]` is the transpose of
@@ -8850,14 +8843,12 @@ fn contract_ordered_on_the_external_z3_provider_matches_the_hand_product() {
     let lhs = counting_z3(&runtime, &rows, &shared, 1.0);
     let rhs = counting_z3(&runtime, &shared, &columns, 7.0);
 
-    let transposed: TensorMap<ExternalZ3, f64> =
-        lhs.contract_ordered(&rhs, &[1], &[0], &[1, 0]).unwrap();
+    let transposed: TensorMap<ExternalZ3, f64> = lhs.contract(&rhs, &[1], &[0], &[1, 0]).unwrap();
     assert_eq!(
         transposed.data(),
         [76.0, 103.0, 130.0, 157.0, 100.0, 136.0, 172.0, 208.0]
     );
-    let identity: TensorMap<ExternalZ3, f64> =
-        lhs.contract_ordered(&rhs, &[1], &[0], &[0, 1]).unwrap();
+    let identity: TensorMap<ExternalZ3, f64> = lhs.contract(&rhs, &[1], &[0], &[0, 1]).unwrap();
     assert_eq!(
         identity.data(),
         [76.0, 100.0, 103.0, 136.0, 130.0, 172.0, 157.0, 208.0]

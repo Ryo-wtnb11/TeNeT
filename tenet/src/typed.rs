@@ -8955,21 +8955,21 @@ impl<R, D, S> TensorMap<R, D, S> {
         self.codomain_rank() + self.domain_rank()
     }
 
-    /// TensorKit-compatible alias for [`Self::codomain_rank`].
+    /// Deprecated alias of [`Self::codomain_rank`].
     #[deprecated(since = "0.1.0", note = "use codomain_rank instead")]
     #[inline]
     pub fn numout(&self) -> usize {
         self.codomain_rank()
     }
 
-    /// TensorKit-compatible alias for [`Self::domain_rank`].
+    /// Deprecated alias of [`Self::domain_rank`].
     #[deprecated(since = "0.1.0", note = "use domain_rank instead")]
     #[inline]
     pub fn numin(&self) -> usize {
         self.domain_rank()
     }
 
-    /// TensorKit-compatible alias for [`Self::rank`].
+    /// Deprecated alias of [`Self::rank`].
     #[deprecated(since = "0.1.0", note = "use rank instead")]
     #[inline]
     pub fn numind(&self) -> usize {
@@ -9011,19 +9011,14 @@ impl<R, D, S> TensorMap<R, D, S> {
         self.legs(self.logical_space().space().homspace().domain())
     }
 
-    /// The codomain legs, in axis order (TensorKit `codomain(t)`).
-    /// Documented alias of
-    /// [`Self::codomain`], using TensorKit's accessor name.
+    /// Deprecated alias of [`Self::codomain`].
     #[deprecated(since = "0.1.0", note = "use codomain instead")]
     #[inline]
     pub fn codomain_spaces(&self) -> Vec<GradedSpace<R>> {
         self.codomain()
     }
 
-    /// The domain legs, in axis order (TensorKit `domain(t)`) — the
-    /// spaces as written, i.e.
-    /// *not* dualized. Documented alias of [`Self::domain`], using
-    /// TensorKit's accessor name.
+    /// Deprecated alias of [`Self::domain`].
     #[deprecated(since = "0.1.0", note = "use domain instead")]
     #[inline]
     pub fn domain_spaces(&self) -> Vec<GradedSpace<R>> {
@@ -10916,7 +10911,7 @@ where
         self.weighted_inner_cuda(lhs, rhs)
     }
 
-    /// Total alias of [`Self::inner`].
+    /// Deprecated alias of [`Self::inner`].
     #[deprecated(since = "0.1.0", note = "use inner instead")]
     #[inline]
     pub fn dot(&self, other: &Self) -> Result<f64, Error> {
@@ -11043,8 +11038,7 @@ where
         })
     }
 
-    /// Total alias of [`Self::contract`] with the same device capability and
-    /// error behavior.
+    /// Deprecated alias of [`Self::contract`].
     #[deprecated(since = "0.1.0", note = "use contract instead")]
     #[inline]
     pub fn contract_ordered(
@@ -12394,7 +12388,7 @@ where
         Ok(())
     }
 
-    /// Total alias of [`Self::contract_overwrite_into`].
+    /// Deprecated alias of [`Self::contract_overwrite_into`].
     #[deprecated(since = "0.1.0", note = "use contract_overwrite_into instead")]
     #[inline]
     #[allow(clippy::too_many_arguments)]
@@ -12886,7 +12880,7 @@ where
         )
     }
 
-    /// Documented alias of [`Self::contract`]: same arguments, same
+    /// Deprecated alias of [`Self::contract`]: same arguments, same
     /// semantics, same compact fast paths and complexity, same errors — the
     /// delegation is total, so everything is stated there once.
     ///
@@ -15017,8 +15011,7 @@ where
         )?))
     }
 
-    /// `LinearAlgebra.dot` / TensorKit `dot(x, y)` — an alias for
-    /// [`Self::inner`].
+    /// Deprecated alias of [`Self::inner`].
     ///
     /// # Errors
     ///
