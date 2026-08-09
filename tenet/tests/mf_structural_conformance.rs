@@ -168,6 +168,7 @@ fn nested_fermionic_su2_product_and_complex_adjoint_are_publicly_conformant() {
         adjoint.domain()[0].provider(),
         provider.as_ref()
     ));
+    assert_eq!(source.twist(&[0, 1]).unwrap().data(), source.data());
     assert_eq!(adjoint.data(), &[Complex64::new(2.0, -3.0)]);
     assert_eq!(
         adjoint.codomain()[0].sectors().unwrap(),
@@ -211,6 +212,9 @@ fn zn3_extended_structural_paths_execute_on_the_original_arc() {
             source.block_fusion_trees(index).unwrap()
         );
     }
+    let twisted = source.twist(&[0, 1, 2]).unwrap();
+    assert_eq!(twisted.data(), source.data(), "ZN(3) has trivial twist");
+    assert_eq!(twisted.data().as_ptr(), source.data().as_ptr());
     for output in [
         source.adjoint().unwrap(),
         source.transpose().unwrap(),
@@ -256,6 +260,8 @@ fn cu1_charged_structural_paths_keep_the_original_arc() {
         source.adjoint().unwrap().data(),
         &[Complex64::new(2.0, -3.0)]
     );
+    assert_eq!(source.twist(&[0, 1]).unwrap().data(), source.data());
+    assert_eq!(source.flip(&[0]).unwrap().data(), source.data());
     let pseudo =
         GradedSpace::try_new(Arc::clone(&provider), [(CU1Irrep::PSEUDOSCALAR, 1)], false).unwrap();
     let braid_source: TensorMap<_, f64> =
@@ -285,7 +291,7 @@ fn su2_and_exact_products_keep_their_provider_through_flip_and_units() {
             let leg = GradedSpace::try_new(Arc::clone(&provider), [($label, 1)], false).unwrap();
             let source: TensorMap<_, f64> =
                 TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
-            let flipped = source.flip(&[0]).unwrap();
+            let flipped = source.flip(&[1]).unwrap();
             let inserted = source.insert_left_unit(1, true).unwrap();
             let restored = inserted.remove_unit(1).unwrap();
             for output in [&flipped, &inserted, &restored] {
@@ -295,7 +301,6 @@ fn su2_and_exact_products_keep_their_provider_through_flip_and_units() {
                     provider.as_ref()
                 ));
             }
-            assert_eq!(flipped.flip_inverse(&[0]).unwrap().data(), source.data());
             assert_eq!(restored.data(), source.data());
         }};
     }
@@ -309,14 +314,56 @@ fn su2_and_exact_products_keep_their_provider_through_flip_and_units() {
             .product(U1FusionRule)
             .product(SU2FusionRule),
         product_sector(
-            product_sector(Z2Irrep::ODD, U1Irrep::new(1)),
+            product_sector(Z2Irrep::ODD, U1Irrep::new(0)),
             SU2Irrep::from_twice_spin(1)
         )
     );
 }
 
 #[test]
-fn every_builtin_multiplicity_free_provider_has_cat_and_absorb_execution() {
+fn dual_nonabelian_flip_pins_the_pivotal_phase() {
+    let runtime = runtime();
+    macro_rules! check {
+        ($provider:expr, $label:expr, $axis:expr, $codomain_dual:expr, $domain_dual:expr) => {{
+            let provider = Arc::new($provider);
+            let plain = GradedSpace::try_new(Arc::clone(&provider), [($label, 1)], false).unwrap();
+            let dual = plain.try_dual().unwrap();
+            let source: TensorMap<_, f64> =
+                TensorMap::from_block_fn(&runtime, [&dual], [&plain], |_, _| 1.0).unwrap();
+            let flipped = source.flip(&[$axis]).unwrap();
+            assert!(std::ptr::eq(flipped.provider(), provider.as_ref()));
+            assert!(std::ptr::eq(
+                flipped.codomain()[0].provider(),
+                provider.as_ref()
+            ));
+            assert!(std::ptr::eq(
+                flipped.domain()[0].provider(),
+                provider.as_ref()
+            ));
+            assert_eq!(flipped.codomain()[0].is_dual(), $codomain_dual);
+            assert_eq!(flipped.domain()[0].is_dual(), $domain_dual);
+            assert_eq!(flipped.data(), &[-1.0]);
+        }};
+    }
+    // Dual SU2 codomain: the forward factor is χθ=-1.
+    check!(SU2FusionRule, SU2Irrep::from_twice_spin(1), 0, false, false);
+    check!(
+        FermionParityFusionRule
+            .product(U1FusionRule)
+            .product(SU2FusionRule),
+        product_sector(
+            product_sector(Z2Irrep::ODD, U1Irrep::new(0)),
+            SU2Irrep::from_twice_spin(1)
+        ),
+        // Plain nested domain: its forward factor is θ=-1.
+        1,
+        true,
+        true
+    );
+}
+
+#[test]
+fn covered_builtin_multiplicity_free_providers_have_cat_and_absorb_execution() {
     let runtime = runtime();
     macro_rules! check {
         ($provider:expr, $label:expr) => {{
