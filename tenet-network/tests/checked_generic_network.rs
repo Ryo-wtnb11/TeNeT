@@ -5,13 +5,18 @@ use std::fmt::{self, Debug};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+#[cfg(feature = "opt-path")]
+use tenet::core::CheckedGenericStructureError;
 use tenet::core::{
-    BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericFusion,
-    CheckedGenericRigidSymbols, CheckedGenericStructureError, FusionStyleKind, GenericFArray,
-    GenericRMatrix, RuleIdentity, SectorId, SectorVec, TypedSectorAdmission,
+    BraidingStyleKind, CheckedGenericAdmissionMode, CheckedGenericFusion, CheckedGenericPivotal,
+    CheckedGenericRigidSymbols, FusionStyleKind, GenericFArray, GenericRMatrix, RuleIdentity,
+    SectorId, SectorVec, TypedSectorAdmission,
 };
 use tenet::prelude::{Complex64, Error, Runtime, TensorScalar};
-use tenet::typed::{BlockFusionTrees, GenericTensorError, GradedSpace, SUNFusionRule, TensorMap};
+use tenet::typed::{
+    BlockFusionTrees, CheckedGenericPlanError, GenericTensorError, GradedSpace, SUNFusionRule,
+    TensorMap,
+};
 #[cfg(feature = "opt-path")]
 use tenet_network::Optimizer;
 use tenet_network::{
@@ -130,6 +135,25 @@ fn assert_sun_network<D: OracleScalar + Send + Sync + 'static>(n: usize, label: 
             .iter()
             .any(|vertex| vertex.get() == 2)
     }));
+    // What: the trace-only macro entrypoint matches the ordinary checked trace
+    // for a tensor that contains a nontrivial multiplicity vertex.
+    let direct_trace = lhs.trace_pairs(&[(0, 2)]).unwrap();
+    let macro_trace = tensor!([b;] = lhs[a, b; a]).unwrap();
+    let macro_trace_replay = tensor!([b;] = lhs[a, b; a]).unwrap();
+    assert_eq!(
+        direct_trace.provider() as *const _,
+        lhs.provider() as *const _
+    );
+    assert_eq!(
+        macro_trace.provider() as *const _,
+        lhs.provider() as *const _
+    );
+    assert_eq!(
+        macro_trace_replay.provider() as *const _,
+        lhs.provider() as *const _
+    );
+    assert_same(&macro_trace, &direct_trace);
+    assert_same(&macro_trace_replay, &direct_trace);
     let middle: TensorMap<_, D> =
         TensorMap::from_block_fn(&runtime, [&rhs_leg], [&rhs_leg], |_, _| D::value(17)).unwrap();
     let tail: TensorMap<_, D> =
@@ -506,6 +530,14 @@ impl CheckedGenericRigidSymbols for InjectedGeneric {
     }
 }
 
+impl CheckedGenericPivotal for InjectedGeneric {
+    fn try_twist_scalar(&self, sector: SectorId) -> Result<f64, Self::Error> {
+        self.symbol()?;
+        CheckedGenericPivotal::try_twist_scalar(&self.inner, sector)
+            .map_err(|_| InjectedError::Provider)
+    }
+}
+
 impl TypedSectorAdmission for InjectedGeneric {
     type Sector = Vec<i64>;
     type Error = InjectedError;
@@ -670,16 +702,30 @@ fn checked_generic_failures_stay_typed_and_workspace_recovers_at_every_step() {
 }
 
 #[test]
-fn checked_generic_static_trace_rejects_without_strengthening_network_admission() {
+fn checked_generic_static_trace_failure_stays_typed_and_does_not_publish_cache_state() {
+    // What: a provider error during trace lowering returns before a static plan
+    // or replay workspace is published, and the same expression can recover.
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(InjectedGeneric::new());
-    let leg = GradedSpace::try_new(provider, [(vec![1, 1], 1)], false).unwrap();
+    let leg = GradedSpace::try_new(Arc::clone(&provider), [(vec![1, 1], 1)], false).unwrap();
     let tensor: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
+    provider.arm_symbol(1);
     let error = tensor!([;] = tensor[a; a]).unwrap_err();
     assert!(
-        matches!(error, GenericTensorError::Facade(Error::InvalidArgument(message)) if message.contains("intra-operand trace"))
+        matches!(
+            error,
+            GenericTensorError::Plan(CheckedGenericPlanError::Provider(InjectedError::Symbol))
+        ),
+        "{error:?}"
     );
+    let stats = plan_cache_stats(&runtime);
+    assert_eq!(stats.entries, 0);
+    assert_eq!(stats.workspaces_created, 0);
+
+    provider.reset_symbols();
+    let traced = tensor!([;] = tensor[a; a]).unwrap();
+    assert_eq!(traced.provider() as *const _, provider.as_ref() as *const _);
 }
 
 #[test]

@@ -50,7 +50,7 @@ or recursively nested `ProductFusionRule` values.
 | `pinv` [5] | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | INTENTIONAL-DIFFERENCE | UNSUPPORTED |
 | Dense diagonal `sqrt` | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
 | Network ordinary planning, contraction/permute replay [6] | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
-| Network intra-operand trace [6] | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | [UNSUPPORTED](https://github.com/Ryo-wtnb11/TeNeT/issues/1005) | UNSUPPORTED |
+| Network intra-operand trace [6] | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
 | Network payload-destination reuse [6] | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | [INTENTIONAL-DIFFERENCE](https://github.com/Ryo-wtnb11/TeNeT/issues/1005) | UNSUPPORTED |
 | v1 Host snapshot (`f64`/`Complex64`; admitted dense, compact, and lazy forms) [7] | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | PROVED | UNSUPPORTED |
 
@@ -73,10 +73,15 @@ Notes:
    The Moore-Penrose identities for the original input hold when the cutoff
    removes only numerical-null directions. Discarding an arbitrary nonzero mode
    instead gives the pseudoinverse of the thresholded effective-rank tensor.
-6. Checked Generic replay delegates each step to ordinary checked contraction
-   and final permutation. Static intra-operand trace rejects explicitly;
-   workspaces reuse allocations, not a caller-visible typed payload destination
-   ([#1005](https://github.com/Ryo-wtnb11/TeNeT/issues/1005)).
+6. Checked Generic replay delegates each step to ordinary checked contraction,
+   permutation, and trace. The macro asks for pivotal provider data only when
+   an operand contains a trace. Host MF workspaces can reuse compatible
+   intermediate payload buffers; checked Generic workspaces reuse plan and
+   workspace containers but create newly admitted intermediates. The final
+   tensor leaves the workspace in both modes, and neither mode accepts a
+   caller-owned payload destination. That public destination boundary remains
+   an [intentional difference](https://github.com/Ryo-wtnb11/TeNeT/issues/1005)
+   from TensorKit's mutating `@tensor C[...] = ...` form.
    Lazy/conjugated checked inputs reject at the same ordinary-operation seam and
    are not silently rerouted through a weaker fallback.
 7. Persistence is provider-neutral; reconstruction dispatches through the
@@ -211,9 +216,10 @@ provider-wide performance conclusion is inferred from SU(3)/SU(4) fixtures.
 
 ## Findings and routing
 
-1. Checked Generic now has the ordinary Host path through network replay. Its
-   static intra-operand trace and typed payload-destination boundaries are
-   [#1005](https://github.com/Ryo-wtnb11/TeNeT/issues/1005); standalone compact
+1. Checked Generic now has the ordinary Host path through network replay and
+   static intra-operand trace. Network execution still returns a new tensor;
+   caller-owned payload destinations remain an intentional difference recorded
+   in [#1005](https://github.com/Ryo-wtnb11/TeNeT/issues/1005). Standalone compact
    construction is [#1004](https://github.com/Ryo-wtnb11/TeNeT/issues/1004).
    Lazy/conjugated contraction still rejects without fallback, and checked CUDA
    remains with [#3](https://github.com/Ryo-wtnb11/TeNeT/issues/3).

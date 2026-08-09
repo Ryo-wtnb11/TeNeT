@@ -6491,8 +6491,7 @@ where
     R: TypedSectorAdmission<
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericPivotal<Scalar = f64>
-        + SectorCodec,
+        > + CheckedGenericPivotal<Scalar = f64>,
     D: TensorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
     fn trace_pairs(
@@ -6511,8 +6510,7 @@ where
     R: TypedSectorAdmission<
             Error = <R as CheckedGenericFusion>::Error,
             Mode = CheckedGenericAdmissionMode,
-        > + CheckedGenericPivotal<Scalar = f64>
-        + SectorCodec,
+        > + CheckedGenericPivotal<Scalar = f64>,
     D: TensorScalar + tenet_tensors::RecouplingCoefficientAction<f64>,
 {
     let rank = tensor.rank();
