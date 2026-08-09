@@ -1,3 +1,4 @@
+use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -62,10 +63,11 @@ impl<T> TreeTransformCompileSpec<T> for ResolvedTreeTransformBlockSpec<'_, T> {
 /// Replay-ready tree-transform descriptor.
 ///
 /// This is the TensorKit-style transformer-build boundary: construction resolves
-/// tree keys, coefficients, block layouts, offsets, and pack/scatter descriptors
-/// against concrete source and destination structures. Hot paths should build
-/// this once and replay it with `tree_transform_execute_with` while reusing a
-/// backend and workspace.
+/// tree keys, block layouts, offsets, and pack/scatter descriptors against
+/// concrete source and destination structures. Matrix-valued categorical
+/// coefficients may be shared across compatible layout bindings. Hot paths
+/// should build this once and replay it with `tree_transform_execute_with`
+/// while reusing a backend and workspace.
 ///
 /// Why not expose mutable compiled fields: the recoupling plan, converted
 /// coefficient cache, and threaded replay schedule all derive from the same
@@ -83,7 +85,7 @@ pub struct TreeTransformStructure<T> {
     identity: Arc<()>,
     blocks: Vec<TreeTransformBlock>,
     layouts: TreeTransformLayoutTable,
-    recoupling_coefficients_dst_src: Vec<T>,
+    recoupling_coefficients_dst_src: TreeTransformCoefficientPayload<T>,
     inactive_dst_layouts: Vec<usize>,
     physical_overwrite_len: Option<usize>,
     recoupling_plan: TreeTransformRecouplingPlan,
@@ -92,12 +94,78 @@ pub struct TreeTransformStructure<T> {
     src_structure: Arc<BlockStructure>,
 }
 
+#[derive(Clone)]
+enum TreeTransformCoefficientPayload<T> {
+    Owned(Vec<T>),
+    Shared(SharedTreeTransformCoefficients<T>),
+}
+
+impl<T: fmt::Debug> fmt::Debug for TreeTransformCoefficientPayload<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_slice().fmt(formatter)
+    }
+}
+
+impl<T: PartialEq> PartialEq for TreeTransformCoefficientPayload<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SharedTreeTransformCoefficients<T>(Arc<Vec<T>>);
+
+impl<T> SharedTreeTransformCoefficients<T> {
+    pub(crate) fn from_vec(coefficients: Vec<T>) -> Self {
+        Self(Arc::new(coefficients))
+    }
+
+    #[inline]
+    pub(crate) fn as_slice(&self) -> &[T] {
+        self.0.as_slice()
+    }
+
+    #[cfg(test)]
+    fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    fn charged_bytes(&self) -> usize {
+        const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
+
+        ARC_CONTROL_BYTES
+            .saturating_add(core::mem::size_of::<Vec<T>>())
+            .saturating_add(self.0.capacity().saturating_mul(core::mem::size_of::<T>()))
+    }
+}
+
+impl<T> TreeTransformCoefficientPayload<T> {
+    #[inline]
+    fn as_slice(&self) -> &[T] {
+        match self {
+            Self::Owned(coefficients) => coefficients,
+            Self::Shared(coefficients) => coefficients.as_slice(),
+        }
+    }
+
+    fn charged_bytes(&self) -> usize {
+        let element_size = core::mem::size_of::<T>();
+        match self {
+            Self::Owned(coefficients) => coefficients.capacity().saturating_mul(element_size),
+            Self::Shared(coefficients) => coefficients.charged_bytes(),
+        }
+    }
+}
+
 impl<T> TreeTransformStructure<T> {
     /// Conservative retained-byte charge for this immutable replay payload.
     ///
     /// This counts owned capacities and the structure identity control block.
     /// The source and destination structures are separate canonical owners, so
     /// only their inline `Arc` handles are included through `size_of::<Self>()`.
+    /// Shared categorical coefficients are conservatively charged in full for
+    /// every bound structure; aggregate unique-byte accounting belongs with a
+    /// future retention policy, not this ownership split.
     #[doc(hidden)]
     pub fn charged_payload_bytes(&self) -> usize {
         const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
@@ -142,10 +210,7 @@ impl<T> TreeTransformStructure<T> {
                 self.layouts.fused_slots.capacity(),
                 core::mem::size_of::<FusedSlot>(),
             ))
-            .saturating_add(vector_bytes(
-                self.recoupling_coefficients_dst_src.capacity(),
-                core::mem::size_of::<T>(),
-            ))
+            .saturating_add(self.recoupling_coefficients_dst_src.charged_bytes())
             .saturating_add(vector_bytes(
                 self.inactive_dst_layouts.capacity(),
                 core::mem::size_of::<usize>(),
@@ -340,8 +405,15 @@ impl<T: Copy> TreeTransformStructure<T> {
         src_structure: Arc<BlockStructure>,
         specs: &[ResolvedTreeTransformBlockSpec<'_, T>],
         storage_conjugate: bool,
+        coefficient_payload: Option<SharedTreeTransformCoefficients<T>>,
     ) -> Result<Self, OperationError> {
-        Self::compile_shared_structures(dst_structure, src_structure, specs, storage_conjugate)
+        Self::compile_shared_structures_with_coefficient_payload(
+            dst_structure,
+            src_structure,
+            specs,
+            storage_conjugate,
+            coefficient_payload,
+        )
     }
 
     pub fn compile_keyed<
@@ -503,6 +575,25 @@ impl<T: Copy> TreeTransformStructure<T> {
     where
         S: TreeTransformCompileSpec<T>,
     {
+        Self::compile_shared_structures_with_coefficient_payload(
+            dst_structure,
+            src_structure,
+            specs,
+            storage_conjugate,
+            None,
+        )
+    }
+
+    fn compile_shared_structures_with_coefficient_payload<S>(
+        dst_structure: Arc<BlockStructure>,
+        src_structure: Arc<BlockStructure>,
+        specs: &[S],
+        storage_conjugate: bool,
+        coefficient_payload: Option<SharedTreeTransformCoefficients<T>>,
+    ) -> Result<Self, OperationError>
+    where
+        S: TreeTransformCompileSpec<T>,
+    {
         let rank = dst_structure.rank();
         if src_structure.rank() != rank {
             return Err(OperationError::StructureRankMismatch {
@@ -517,7 +608,8 @@ impl<T: Copy> TreeTransformStructure<T> {
 
         let mut layouts = TreeTransformLayoutTable::default();
         let mut blocks = Vec::with_capacity(specs.len());
-        let mut recoupling_coefficients_dst_src = Vec::new();
+        let mut recoupling_coefficients_dst_src = coefficient_payload.is_none().then(Vec::new);
+        let mut coefficient_count = 0usize;
         let mut touched_dst_blocks = vec![false; dst_structure.block_count()];
 
         for spec in specs {
@@ -593,8 +685,13 @@ impl<T: Copy> TreeTransformStructure<T> {
                 }
             }
             let element_count = element_count.expect("validated non-empty block");
-            let coefficient_start = recoupling_coefficients_dst_src.len();
-            recoupling_coefficients_dst_src.extend_from_slice(coefficients);
+            let coefficient_start = coefficient_count;
+            coefficient_count = coefficient_count
+                .checked_add(coefficients.len())
+                .ok_or(OperationError::ElementCountOverflow)?;
+            if let Some(owned) = &mut recoupling_coefficients_dst_src {
+                owned.extend_from_slice(coefficients);
+            }
 
             if src_count == 1 && dst_count == 1 {
                 let dst_layout = layouts.entry(dst_layout_start);
@@ -646,6 +743,21 @@ impl<T: Copy> TreeTransformStructure<T> {
             dst_structure.required_len()?,
         )?;
 
+        let recoupling_coefficients_dst_src = match coefficient_payload {
+            Some(coefficients) => {
+                if coefficients.as_slice().len() != coefficient_count {
+                    return Err(OperationError::CoefficientCountMismatch {
+                        expected: coefficient_count,
+                        actual: coefficients.as_slice().len(),
+                    });
+                }
+                TreeTransformCoefficientPayload::Shared(coefficients)
+            }
+            None => TreeTransformCoefficientPayload::Owned(
+                recoupling_coefficients_dst_src.expect("owned coefficient compilation"),
+            ),
+        };
+
         Ok(Self {
             rank,
             storage_conjugate,
@@ -695,7 +807,7 @@ impl<T: Copy> TreeTransformStructure<T> {
     /// Immutable destination-by-source recoupling coefficients.
     #[inline]
     pub fn recoupling_coefficients_dst_src(&self) -> &[T] {
-        &self.recoupling_coefficients_dst_src
+        self.recoupling_coefficients_dst_src.as_slice()
     }
 
     pub fn workspace_lens(&self) -> (usize, usize) {
@@ -729,6 +841,20 @@ impl<T: Copy> TreeTransformStructure<T> {
         &self.identity
     }
 
+    #[cfg(test)]
+    pub(crate) fn shares_coefficient_payload_with(&self, other: &Self) -> bool {
+        match (
+            &self.recoupling_coefficients_dst_src,
+            &other.recoupling_coefficients_dst_src,
+        ) {
+            (
+                TreeTransformCoefficientPayload::Shared(left),
+                TreeTransformCoefficientPayload::Shared(right),
+            ) => left.ptr_eq(right),
+            _ => false,
+        }
+    }
+
     #[inline]
     pub fn recoupling_plan(&self) -> &TreeTransformRecouplingPlan {
         &self.recoupling_plan
@@ -749,7 +875,7 @@ impl<T: Copy> TreeTransformStructure<T> {
     }
 
     pub fn coefficient(&self, index: usize) -> T {
-        self.recoupling_coefficients_dst_src[index]
+        self.recoupling_coefficients_dst_src.as_slice()[index]
     }
 
     #[inline]

@@ -90,9 +90,12 @@ impl<'a, C: Copy> PhysicalOverwriteProof<'a, C> {
 pub struct HostTreeTransformWorkspace<T> {
     zero_strides: Vec<isize>,
     packed: TreeTransformScratchBuffers<HostScratchBuffer<T>, HostScratchBuffer<T>>,
-    // Recoupling matrices converted into the data scalar type for the GEMM
-    // application (TensorKit's basistransform buffer).
+    // Recoupling matrices converted into the data scalar type and packed in
+    // recoupling_plan().entries() execution order. This order is layout
+    // dependent and supplies the GEMM RHS offsets; it is not canonical
+    // categorical U storage (TensorKit's basistransform buffer).
     coefficient_scratch: Vec<T>,
+    // Identity of the structure whose layout-ordered RHS pack is installed.
     coefficient_structure_identity: Option<Weak<()>>,
     chunk_jobs: Vec<DenseGemmBatchJob>,
     chunk_runs: Vec<usize>,
@@ -196,6 +199,9 @@ where
     C: Copy,
 {
     let plan = structure.recoupling_plan();
+    // Why not key by the shared categorical payload alone: different layout
+    // bindings can reorder Multi jobs by element count and therefore require
+    // different packed RHS orders for the same categorical matrices.
     let same_structure = workspace
         .coefficient_structure_identity
         .as_ref()
@@ -209,6 +215,7 @@ where
     workspace
         .coefficient_scratch
         .reserve(plan.coefficient_len());
+    // Preserve entry order: each job's rhs_offset addresses this exact pack.
     for (block_index, _) in plan.entries() {
         let block = recoupling_multi_block(structure, block_index)?;
         let TreeTransformBlock::Multi {
@@ -331,7 +338,8 @@ where
 #[cfg(test)]
 mod coefficient_cache_tests {
     use super::*;
-    use crate::TreeTransformBlockSpec;
+    use crate::{TreeTransformBlockSpec, TreeTransformGroupBlockSpec, TreeTransformGroupPlan};
+    use tenet_core::{BlockKey, BlockSpec, FusionTreePairKey};
 
     fn multi_recoupling_structure(coefficients: [f64; 4]) -> TreeTransformStructure<f64> {
         let block_structure = BlockStructure::packed_column_major(1, [vec![1], vec![1]]).unwrap();
@@ -343,6 +351,43 @@ mod coefficient_cache_tests {
                 vec![0, 1],
                 coefficients.to_vec(),
             )],
+        )
+        .unwrap()
+    }
+
+    fn group_pair(group: usize, vertex: usize) -> FusionTreePairKey {
+        FusionTreePairKey::try_pair_from_sector_ids(
+            [group, group],
+            [],
+            group,
+            [false, false],
+            [],
+            [],
+            [],
+            [vertex],
+            [],
+        )
+        .unwrap()
+    }
+
+    fn two_group_layout(keys: &[FusionTreePairKey; 4], elements: [usize; 2]) -> BlockStructure {
+        let mut offset = 0;
+        BlockStructure::from_blocks_with_rank(
+            2,
+            keys.iter()
+                .enumerate()
+                .map(|(index, key)| {
+                    let block_elements = elements[index / 2];
+                    let block = BlockSpec::column_major_with_key(
+                        BlockKey::from(key.clone()),
+                        vec![block_elements, 1],
+                        offset,
+                    )
+                    .unwrap();
+                    offset += block_elements;
+                    block
+                })
+                .collect(),
         )
         .unwrap()
     }
@@ -364,6 +409,49 @@ mod coefficient_cache_tests {
         workspace.coefficient_scratch.fill(-1.0);
         assert!(ensure_recoupling_coefficients(&mut workspace, &equal_but_distinct).unwrap());
         assert_eq!(workspace.coefficient_scratch, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn categorical_payload_is_repacked_when_layout_reorders_multi_jobs() {
+        // What: structure identity protects a layout-packed execution buffer;
+        // categorical payload identity alone would incorrectly reuse [UA, UB].
+        let keys = [
+            group_pair(0, 1),
+            group_pair(0, 2),
+            group_pair(1, 1),
+            group_pair(1, 2),
+        ];
+        let plan = TreeTransformGroupPlan::new(vec![
+            TreeTransformGroupBlockSpec::try_multi(
+                keys[..2].to_vec(),
+                keys[..2].to_vec(),
+                vec![1.0, 2.0, 3.0, 4.0],
+            )
+            .unwrap(),
+            TreeTransformGroupBlockSpec::try_multi(
+                keys[2..].to_vec(),
+                keys[2..].to_vec(),
+                vec![5.0, 6.0, 7.0, 8.0],
+            )
+            .unwrap(),
+        ]);
+        let a_then_b = two_group_layout(&keys, [1, 2]);
+        let b_then_a = two_group_layout(&keys, [3, 1]);
+        let first = plan.compile_structures(&a_then_b, &a_then_b).unwrap();
+        let second = plan.compile_structures(&b_then_a, &b_then_a).unwrap();
+        assert!(first.shares_coefficient_payload_with(&second));
+        let mut workspace = TreeTransformWorkspace::<f64>::default();
+
+        assert!(ensure_recoupling_coefficients(&mut workspace, &first).unwrap());
+        assert_eq!(
+            workspace.coefficient_scratch,
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+        );
+        assert!(ensure_recoupling_coefficients(&mut workspace, &second).unwrap());
+        assert_eq!(
+            workspace.coefficient_scratch,
+            vec![5.0, 6.0, 7.0, 8.0, 1.0, 2.0, 3.0, 4.0]
+        );
     }
 }
 
@@ -3429,7 +3517,9 @@ fn replay_single_blocks<A, D, C>(
     mut kernels: A,
     fused_indices: &mut [usize],
     max_fused_rank: usize,
-    structure: &TreeTransformStructure<C>,
+    layouts: &TreeTransformLayoutTable,
+    coefficients: &[C],
+    storage_conjugate: bool,
     items: &[TreeTransformSingleReplay],
     dst_data: &mut [D],
     dst_start: isize,
@@ -3450,21 +3540,21 @@ where
         let mut zero_strides = Vec::new();
         let fused_index = &mut fused_indices[..max_fused_rank];
         for item in items {
-            let dst_layout = structure.layouts().entry(item.dst_layout);
-            let src_layout = structure.layouts().entry(item.src_layout);
-            let baked = structure.layouts().fused_baked(item.dst_layout);
-            let scale = alpha.scale_by_coefficient(structure.coefficient(item.coefficient));
+            let dst_layout = layouts.entry(item.dst_layout);
+            let src_layout = layouts.entry(item.src_layout);
+            let baked = layouts.fused_baked(item.dst_layout);
+            let scale = alpha.scale_by_coefficient(coefficients[item.coefficient]);
             match mode {
                 DestinationMode::Axpby(beta) => kernels.add_strided_baked_with_index(
                     &mut zero_strides,
                     dst_data,
                     src_data,
-                    structure.layouts().shape(dst_layout),
-                    structure.layouts().strides(dst_layout),
-                    structure.layouts().strides(src_layout),
+                    layouts.shape(dst_layout),
+                    layouts.strides(dst_layout),
+                    layouts.strides(src_layout),
                     dst_layout.offset - dst_start,
                     src_layout.offset,
-                    structure.storage_conjugate(),
+                    storage_conjugate,
                     scale,
                     beta,
                     baked,
@@ -3473,12 +3563,12 @@ where
                 DestinationMode::Overwrite => kernels.copy_scale_strided_baked_with_index(
                     dst_data,
                     src_data,
-                    structure.layouts().shape(dst_layout),
-                    structure.layouts().strides(dst_layout),
-                    structure.layouts().strides(src_layout),
+                    layouts.shape(dst_layout),
+                    layouts.strides(dst_layout),
+                    layouts.strides(src_layout),
                     dst_layout.offset - dst_start,
                     src_layout.offset,
-                    structure.storage_conjugate(),
+                    storage_conjugate,
                     scale,
                     baked,
                     &mut *fused_index,
@@ -3504,7 +3594,9 @@ where
                 kernels,
                 left_indices,
                 max_fused_rank,
-                structure,
+                layouts,
+                coefficients,
+                storage_conjugate,
                 left_items,
                 left_data,
                 dst_start,
@@ -3519,7 +3611,9 @@ where
                 right_kernels,
                 right_indices,
                 max_fused_rank,
-                structure,
+                layouts,
+                coefficients,
+                storage_conjugate,
                 right_items,
                 right_data,
                 boundary,
@@ -3817,7 +3911,9 @@ where
                 kernels.clone(),
                 &mut workspace.fused_indices[..fused_index_len],
                 max_fused_rank,
-                structure,
+                layouts,
+                structure.recoupling_coefficients_dst_src(),
+                storage_conjugate,
                 &schedule.singles,
                 dst_data,
                 0,

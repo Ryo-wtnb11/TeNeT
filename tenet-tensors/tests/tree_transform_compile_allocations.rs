@@ -497,9 +497,15 @@ fn grouped_multi_compile_borrows_plan_coefficient_matrix() {
         coefficients,
     )];
 
+    ALLOCATIONS.set(0);
+    ALLOCATED_BYTES.set(0);
+    COUNTING.set(true);
     let _ = grouped_plan
         .compile_structures(&structure, &structure)
         .unwrap();
+    COUNTING.set(false);
+    let cold_grouped_allocations = ALLOCATIONS.get();
+    let cold_grouped_bytes = ALLOCATED_BYTES.get();
     let _ =
         TreeTransformStructure::compile_structures(&structure, &structure, &direct_specs).unwrap();
 
@@ -521,6 +527,17 @@ fn grouped_multi_compile_borrows_plan_coefficient_matrix() {
     COUNTING.set(false);
     let grouped_allocations = ALLOCATIONS.get();
     let grouped_bytes = ALLOCATED_BYTES.get();
+
+    // What: first categorical materialization allocates one coefficient data
+    // buffer plus small shared ownership, not a second full-size Arc slice.
+    assert!(
+        cold_grouped_allocations <= direct_allocations + 16,
+        "cold_grouped_allocations={cold_grouped_allocations}, direct_allocations={direct_allocations}"
+    );
+    assert!(
+        cold_grouped_bytes <= direct_bytes + 32 * 1024,
+        "cold_grouped_bytes={cold_grouped_bytes}, direct_bytes={direct_bytes}"
+    );
 
     // What: grouped key resolution may own index/descriptor scratch, but it
     // does not allocate the 256 KiB coefficient matrix a second time.

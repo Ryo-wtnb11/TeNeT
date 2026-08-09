@@ -8766,9 +8766,15 @@ fn measure_checked_generic_transform_case(
             .commit_final_homspace_generic_bound_checked(prepared)
             .unwrap()
     });
-    let (first_space, first_data) =
-        measured_provider_phase(provider.as_ref(), case, "owned_warm_first", || {
-            crate::tree_transform_dyn_owned_checked_generic(
+    let store = Arc::new(RuntimeTreeTransformStore::<f64>::default());
+    let mut context = crate::TreeTransformExecutionContext::<f64, RuleIdentity>::default();
+    context
+        .cache_mut()
+        .bind_runtime_store(Arc::downgrade(&store));
+    let (cold_space, cold_data) =
+        measured_provider_phase(provider.as_ref(), case, "runtime_cold_seed", || {
+            crate::tree_transform_dyn_owned_checked_generic_in_context(
+                &mut context,
                 operation.clone(),
                 &source,
                 &source_data,
@@ -8776,22 +8782,51 @@ fn measure_checked_generic_transform_case(
             )
             .unwrap()
         });
-    let (repeated_space, repeated_data) =
-        measured_provider_phase(provider.as_ref(), case, "owned_warm_repeat", || {
-            crate::tree_transform_dyn_owned_checked_generic(operation, &source, &source_data, 1.0)
-                .unwrap()
-        });
-
-    assert_eq!(committed.space(), first_space.space());
-    assert_eq!(first_space.space(), repeated_space.space());
-    for (actual, expected) in destination_data.iter().zip(&first_data) {
+    let cold_info = store.info();
+    let mut samples_ns = Vec::with_capacity(7);
+    let mut warm_calls = None;
+    let mut warm_output = None;
+    for _ in 0..7 {
+        provider.reset_calls();
+        let started = std::time::Instant::now();
+        let output = crate::tree_transform_dyn_owned_checked_generic_in_context(
+            &mut context,
+            operation.clone(),
+            &source,
+            &source_data,
+            1.0,
+        )
+        .unwrap();
+        samples_ns.push(started.elapsed().as_nanos());
+        let calls = provider.calls.get();
+        assert!(warm_calls.is_none_or(|expected| expected == calls));
+        warm_calls = Some(calls);
+        warm_output = Some(output);
+    }
+    samples_ns.sort_unstable();
+    let warm_info = store.info();
+    println!(
+        "case={case} phase=runtime_warm_hit samples_ns={samples_ns:?} median_ns={} calls={:?} cold_entries={} cold_hits={} cold_misses={} warm_entries={} warm_hits={} warm_misses={}",
+        samples_ns[samples_ns.len() / 2], warm_calls.unwrap(), cold_info.entries(), cold_info.hits(), cold_info.misses(), warm_info.entries(), warm_info.hits(), warm_info.misses()
+    );
+    let (warm_space, warm_data) = warm_output.unwrap();
+    assert_eq!(
+        (cold_info.entries(), cold_info.hits(), cold_info.misses()),
+        (1, 0, 1)
+    );
+    assert_eq!(
+        (warm_info.entries(), warm_info.hits(), warm_info.misses()),
+        (1, 7, 1)
+    );
+    assert_eq!(committed.space(), cold_space.space());
+    assert_eq!(cold_space.space(), warm_space.space());
+    for (actual, expected) in destination_data.iter().zip(&cold_data) {
         assert!((actual - expected).abs() <= 1e-12);
     }
-    for (actual, expected) in first_data.iter().zip(&repeated_data) {
+    for (actual, expected) in cold_data.iter().zip(&warm_data) {
         assert!((actual - expected).abs() <= 1e-12);
     }
-    assert!(Arc::ptr_eq(first_space.provider_arc(), &provider));
-    assert!(Arc::ptr_eq(repeated_space.provider_arc(), &provider));
+    assert!(Arc::ptr_eq(warm_space.provider_arc(), &provider));
 }
 
 /// Measurement only: direct private-phase timings are intentionally kept in
