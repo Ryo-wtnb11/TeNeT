@@ -124,10 +124,10 @@ not provider conformance. Host/device checked-Generic parity belongs to
 real-device test exists and is ignored without CUDA; default CI is not claimed
 to run it. Release/feature topology remains [#129](https://github.com/Ryo-wtnb11/TeNeT/issues/129).
 
-Standalone checked-Generic compact construction is
-[`UNSUPPORTED`](https://github.com/Ryo-wtnb11/TeNeT/issues/1004). Compact
-diagonal factors produced by SVD/EIGH/EIG are nevertheless `PROVED`; #1004 is
-not needed to establish those operation results.
+Standalone checked-Generic compact construction is `PROVED` by
+[#1004](https://github.com/Ryo-wtnb11/TeNeT/issues/1004). Compact diagonal
+factors produced by EIGH/EIG remain `PROVED`; checked SVD currently publishes
+its diagonal factor densely.
 
 ## Current call-path authority
 

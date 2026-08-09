@@ -10883,7 +10883,8 @@ where
 
 impl<R, D> TensorMap<R, D>
 where
-    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    R: TypedSectorAdmission,
+    R::Mode: TypedTensorRootDispatch<R>,
     D: TensorScalar,
 {
     /// Builds a compact diagonal map `bond <- bond` from labelled sector values.
@@ -10894,35 +10895,75 @@ where
     /// bond's engine-sector order. Each vector must equal that sector's
     /// degeneracy. All validation precedes checked layout admission, and the
     /// supplied dual flag is preserved.
-    pub fn diagonal<I>(runtime: &Runtime, bond: &GradedSpace<R>, spectra: I) -> Result<Self, Error>
+    pub fn diagonal<I>(
+        runtime: &Runtime,
+        bond: &GradedSpace<R>,
+        spectra: I,
+    ) -> Result<Self, TypedFacadeError<R>>
     where
         I: IntoIterator<Item = SectorSpectrum<R::Sector, D>>,
     {
-        let mut supplied = HashMap::new();
-        for entry in spectra {
-            let sector = bond.provider().encode_sector(&entry.sector)?;
-            if supplied.insert(sector, entry.values).is_some() {
-                return Err(Error::InvalidArgument(
-                    "diagonal spectrum has a duplicate sector".into(),
-                ));
-            }
+        let spectra: Vec<_> = spectra.into_iter().collect();
+        let mut labels: Vec<_> = spectra.iter().map(|entry| &entry.sector).collect();
+        labels.sort_unstable();
+        if let Some(duplicate) = labels.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(Error::InvalidArgument(format!(
+                "sector label {:?} is declared more than once",
+                duplicate[0]
+            ))
+            .into());
+        }
+
+        let mut encoded = Vec::with_capacity(spectra.len());
+        for entry in &spectra {
+            encoded.push(
+                TypedSectorAdmission::try_encode_label(bond.provider(), &entry.sector)
+                    .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?,
+            );
+        }
+        let mut by_id: Vec<_> = encoded.iter().enumerate().collect();
+        by_id.sort_unstable_by_key(|(_, id)| *id);
+        if let Some(duplicate) = by_id.windows(2).find(|pair| pair[0].1 == pair[1].1) {
+            return Err(Error::InvalidArgument(format!(
+                "SectorCodec law violation: labels {:?} and {:?} both encode to {:?}",
+                spectra[duplicate[0].0].sector, spectra[duplicate[1].0].sector, duplicate[0].1
+            ))
+            .into());
+        }
+        let mut supplied: HashMap<_, _> = encoded
+            .into_iter()
+            .zip(spectra)
+            .map(|(sector, entry)| (sector, entry.values))
+            .collect();
+        if bond
+            .leg()
+            .sectors()
+            .iter()
+            .any(|sector| !supplied.contains_key(sector))
+        {
+            return Err(Error::InvalidArgument(
+                "diagonal spectrum is missing a bond sector".into(),
+            )
+            .into());
+        }
+        if supplied.len() != bond.leg().sectors().len() {
+            return Err(Error::InvalidArgument(
+                "diagonal spectrum contains an unknown bond sector".into(),
+            )
+            .into());
         }
         let mut spectrum = Vec::with_capacity(bond.degeneracies().len());
         for (&sector, &degeneracy) in bond.leg().sectors().iter().zip(bond.degeneracies()) {
-            let values = supplied.remove(&sector).ok_or_else(|| {
-                Error::InvalidArgument("diagonal spectrum is missing a bond sector".into())
-            })?;
+            let values = supplied
+                .remove(&sector)
+                .expect("complete checked spectrum contains every bond sector");
             if values.len() != degeneracy {
                 return Err(Error::InvalidArgument(
                     "diagonal spectrum length does not match bond degeneracy".into(),
-                ));
+                )
+                .into());
             }
             spectrum.push(tenet_matrixalgebra::SectorSpectrum { sector, values });
-        }
-        if !supplied.is_empty() {
-            return Err(Error::InvalidArgument(
-                "diagonal spectrum contains an unknown bond sector".into(),
-            ));
         }
         let space = Self::build_space(Arc::clone(bond.provider_arc()), &[bond], &[bond])?;
         Ok(Self {
@@ -10936,17 +10977,20 @@ where
     /// This is typed `diag` readback: [`None`] means the tensor is dense;
     /// otherwise it clones only the `O(Σ_c k_c)` compact values in canonical
     /// bond-sector order.
-    pub fn diagonal_spectrum(&self) -> Result<Option<Vec<SectorSpectrum<R::Sector, D>>>, Error> {
+    pub fn diagonal_spectrum(
+        &self,
+    ) -> Result<Option<Vec<SectorSpectrum<R::Sector, D>>>, TypedFacadeError<R>> {
         self.spectrum()
             .map(|spectrum| {
                 spectrum
                     .iter()
                     .map(|entry| {
                         Ok(SectorSpectrum {
-                            sector: self
-                                .logical_space()
-                                .provider()
-                                .decode_sector(entry.sector)?,
+                            sector: TypedSectorAdmission::try_decode_label(
+                                self.logical_space().provider(),
+                                entry.sector,
+                            )
+                            .map_err(<R::Mode as TypedTensorModeDispatch<R>>::map_provider_error)?,
                             values: entry.values.clone(),
                         })
                     })
