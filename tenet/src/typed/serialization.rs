@@ -76,7 +76,7 @@ impl Default for DecodeLimits {
             max_rank: 64,
             max_sectors_per_leg: 1 << 20,
             max_blocks: 1 << 20,
-            max_elements: 1 << 32,
+            max_elements: usize::try_from(1_u64 << 32).unwrap_or(usize::MAX),
             max_blob_bytes: 1 << 20,
         }
     }
@@ -123,8 +123,15 @@ where
 /// Failure while parsing, resolving, admitting, or reconstructing a snapshot.
 #[derive(Debug)]
 pub enum DecodeError<C, F> {
-    /// Invalid or unsupported v1 framing or semantic payload.
+    /// Invalid v1 framing or semantic payload.
     InvalidFormat(String),
+    /// The snapshot uses a wire-format version this decoder does not support.
+    UnsupportedVersion {
+        /// Version declared by the snapshot.
+        actual: u16,
+        /// Version implemented by this decoder.
+        supported: u16,
+    },
     /// A declared resource exceeds the caller's decode ceiling.
     LimitExceeded {
         /// Resource being limited.
@@ -146,6 +153,10 @@ impl<C: fmt::Display, F: fmt::Display> fmt::Display for DecodeError<C, F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidFormat(message) => write!(formatter, "invalid typed snapshot: {message}"),
+            Self::UnsupportedVersion { actual, supported } => write!(
+                formatter,
+                "unsupported typed snapshot version {actual}; this decoder supports {supported}"
+            ),
             Self::LimitExceeded {
                 resource,
                 actual,
@@ -170,7 +181,10 @@ where
         match self {
             Self::Codec(error) => Some(error),
             Self::Facade(error) => Some(error),
-            Self::InvalidFormat(_) | Self::LimitExceeded { .. } | Self::ProviderMismatch => None,
+            Self::InvalidFormat(_)
+            | Self::UnsupportedVersion { .. }
+            | Self::LimitExceeded { .. }
+            | Self::ProviderMismatch => None,
         }
     }
 }
@@ -341,9 +355,10 @@ fn read_header<'a, C, F>(
     }
     let version = reader.u16().map_err(DecodeError::InvalidFormat)?;
     if version != VERSION {
-        return Err(DecodeError::InvalidFormat(format!(
-            "unsupported format version {version}"
-        )));
+        return Err(DecodeError::UnsupportedVersion {
+            actual: version,
+            supported: VERSION,
+        });
     }
     let kind = reader.u8().map_err(DecodeError::InvalidFormat)?;
     if kind != expected_kind {
@@ -1489,8 +1504,9 @@ where
             DecodeError::InvalidFormat("typed block is not a fusion-tree pair".to_string())
         })?;
         let entry = spectrum
-            .iter()
-            .find(|entry| entry.sector == pair.coupled())
+            .binary_search_by_key(&pair.coupled(), |entry| entry.sector)
+            .ok()
+            .map(|index| &spectrum[index])
             .ok_or_else(|| {
                 DecodeError::InvalidFormat("compact spectrum is missing a sector".to_string())
             })?;
