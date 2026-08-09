@@ -15714,7 +15714,9 @@ where
 /// right methods differ only at the codomain/domain boundary: left assigns the
 /// boundary position to the domain, while right assigns it to the codomain.
 ///
-/// Failures return [`Self::Error`] and no tensor.
+/// Results retain the same provider instance. Invalid positions or non-unit
+/// legs, provider failures, and output-space validation failures return
+/// [`Self::Error`] and no tensor.
 pub trait GenericUnitTensorMapExt {
     /// Error returned when an operation fails.
     type Error;
