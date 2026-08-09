@@ -136,10 +136,27 @@ fn assert_sun_network<D: OracleScalar + Send + Sync + 'static>(n: usize, label: 
             .any(|vertex| vertex.get() == 2)
     }));
     // What: the trace-only macro entrypoint matches the ordinary checked trace
-    // for a tensor that contains a nontrivial multiplicity vertex.
+    // for a tensor that contains a nontrivial multiplicity vertex. Repeated
+    // calls reuse only the reduced plan and workspace.
     let direct_trace = lhs.trace_pairs(&[(0, 2)]).unwrap();
+    let before_trace_macro = plan_cache_stats(&runtime);
     let macro_trace = tensor!([b;] = lhs[a, b; a]).unwrap();
+    let after_first_trace_macro = plan_cache_stats(&runtime);
     let macro_trace_replay = tensor!([b;] = lhs[a, b; a]).unwrap();
+    let after_trace_macro_replay = plan_cache_stats(&runtime);
+    assert_eq!(
+        after_first_trace_macro.entries,
+        before_trace_macro.entries + 1
+    );
+    assert_eq!(
+        after_trace_macro_replay.entries,
+        after_first_trace_macro.entries
+    );
+    assert!(after_trace_macro_replay.hits > after_first_trace_macro.hits);
+    assert_eq!(
+        after_trace_macro_replay.workspaces_created,
+        after_first_trace_macro.workspaces_created
+    );
     assert_eq!(
         direct_trace.provider() as *const _,
         lhs.provider() as *const _

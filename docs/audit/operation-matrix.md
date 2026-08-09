@@ -73,11 +73,14 @@ Notes:
    The Moore-Penrose identities for the original input hold when the cutoff
    removes only numerical-null directions. Discarding an arbitrary nonzero mode
    instead gives the pseudoinverse of the thresholded effective-rank tensor.
-6. Checked Generic replay delegates each step to ordinary checked contraction,
-   permutation, and trace. The macro asks for pivotal provider data only when
-   an operand contains a trace. Host MF workspaces can reuse compatible
-   intermediate payload buffers; checked Generic workspaces reuse plan and
-   workspace containers but create newly admitted intermediates. The final
+6. For an expression with a repeated label, the macro calls the ordinary
+   checked trace during call-local lowering, before it looks up the reduced
+   contraction/permutation plan. The trace is recomputed on each call; only the
+   reduced plan and its workspace are reused. The macro asks for pivotal
+   provider data only for these trace-bearing expressions. Host MF workspaces
+   can reuse compatible intermediate payload buffers; checked Generic
+   workspaces reuse plan and workspace containers but create newly admitted
+   intermediates. The final
    tensor leaves the workspace in both modes, and neither mode accepts a
    caller-owned payload destination. That public destination boundary remains
    an [intentional difference](https://github.com/Ryo-wtnb11/TeNeT/issues/1005)
