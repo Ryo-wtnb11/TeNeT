@@ -65,18 +65,24 @@ The scalar is the second type parameter: `TensorMap<R, f64>` or
 scalar operations are rejected at compile time; widen explicitly with
 [`prelude::TensorMap::to_c64`]. Scalar-returning methods return `D` directly.
 
+`GradedSpace::try_new` takes a provider value and always constructs a nondual
+space. Call `v.try_dual()?` when the dual space is required. Code that
+intentionally shares an existing provider allocation should replace the former
+`try_new(Arc::clone(&provider), pairs, false)` spelling with
+`try_new_shared(Arc::clone(&provider), pairs)`. Sharing can reuse an expensive
+provider or its performance cache, but does not change tensor semantics.
+
 ```rust
 use tenet::prelude::*;
 
 let rt = Runtime::builder().build()?;
-let v = GradedSpace::try_new_owned(
+let v = GradedSpace::try_new(
     U1FusionRule,
     [
         (U1Irrep::new(-1), 1),
         (U1Irrep::new(0), 2),
         (U1Irrep::new(1), 1),
     ],
-    false,
 )?;
 
 let re = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&v])?;
@@ -127,10 +133,9 @@ use tenet::prelude::*;
 let rt = Runtime::builder().build()?;
 // Works for any charge set, including ones that are not symmetric under
 // negation (a hardcore boson).
-let v = GradedSpace::try_new_owned(
+let v = GradedSpace::try_new(
     U1FusionRule,
     [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
-    false,
 )?;
 
 // Codomain-vs-domain legs of the same GradedSpace contract directly...
@@ -207,10 +212,9 @@ use tenet::prelude::*;
 use tenet_network::tensor;
 
 let rt = Runtime::builder().build()?;
-let v = GradedSpace::try_new_owned(
+let v = GradedSpace::try_new(
     U1FusionRule,
     [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
-    false,
 )?;
 let a = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v, &v], [&v, &v], 1)?;
 let b = TensorMap::<U1FusionRule, f64>::rand_with_seed(&rt, [&v, &v], [&v, &v], 2)?;
@@ -280,10 +284,9 @@ Axes are zero-based and flat: codomain axes first, then domain axes.
 use tenet::prelude::*;
 
 let rt = Runtime::builder().build()?;
-let v = GradedSpace::try_new_owned(
+let v = GradedSpace::try_new(
     U1FusionRule,
     [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
-    false,
 )?;
 let a = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v, &v], [&v, &v])?;
 let b = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v, &v], [&v, &v])?;
@@ -321,10 +324,9 @@ combination, covering TensorKit's `axpy!`/`axpby!`),
 use tenet::prelude::*;
 
 let rt = Runtime::builder().build()?;
-let v = GradedSpace::try_new_owned(
+let v = GradedSpace::try_new(
     U1FusionRule,
     [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
-    false,
 )?;
 let a = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&v])?;
 let b = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&v])?;
@@ -364,10 +366,9 @@ legs at a codomain count while keeping their order (TensorKit `repartition`);
 use tenet::prelude::*;
 
 let rt = Runtime::builder().build()?;
-let v = GradedSpace::try_new_owned(
+let v = GradedSpace::try_new(
     U1FusionRule,
     [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
-    false,
 )?;
 let a = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v, &v], [&v, &v])?;
 
@@ -400,10 +401,9 @@ content queried through [`prelude::GradedSpace::sectors`],
 ```rust
 use tenet::prelude::*;
 
-let v = GradedSpace::try_new_owned(
+let v = GradedSpace::try_new(
     U1FusionRule,
     [(-1, 2), (0, 3), (1, 2)].map(|(q, n)| (U1Irrep::new(q), n)),
-    false,
 )?;
 
 // Enumerate sectors and query membership / degeneracy.
@@ -413,22 +413,20 @@ assert!(v.has_sector(&U1Irrep::new(1))?);
 assert!(!v.has_sector(&U1Irrep::new(9))?);
 
 // fuse (⊗) collapses two legs; oplus (⊕) sums per-sector degeneracies.
-let w = GradedSpace::try_new_owned(
+let w = GradedSpace::try_new(
     U1FusionRule,
     [(U1Irrep::new(0), 1), (U1Irrep::new(1), 1)],
-    false,
 )?;
 assert_eq!(v.fuse(&w)?.dim()?, v.dim()? * w.dim()?);
 assert_eq!(v.oplus(&w)?.degeneracy(&U1Irrep::new(0))?, 3 + 1);
 
 // SU(2) dims are quantum-dimension weighted.
-let s = GradedSpace::try_new_owned(
+let s = GradedSpace::try_new(
     SU2FusionRule,
     [
         (SU2Irrep::from_twice_spin(0), 1),
         (SU2Irrep::from_twice_spin(1), 1),
     ],
-    false,
 )?;
 assert_eq!(s.dim()?, 3.0);
 # Ok::<(), Error>(())
@@ -449,13 +447,12 @@ let rt = Runtime::builder().build()?;
 
 // fZ2 ⊠ U(1): fermion parity together with particle number.
 let rule = FermionParityFusionRule.product(U1FusionRule);
-let v = GradedSpace::try_new_owned(
+let v = GradedSpace::try_new(
     rule,
     [
         (product_sector(Z2Irrep::EVEN, U1Irrep::new(0)), 1),
         (product_sector(Z2Irrep::ODD, U1Irrep::new(1)), 2),
     ],
-    false,
 )?;
 
 let t = TensorMap::<_, f64>::zeros(&rt, [&v], [&v])?;
@@ -557,10 +554,9 @@ against the actual reconstruction distance:
 use tenet::prelude::*;
 
 let rt = Runtime::builder().build()?;
-let v = GradedSpace::try_new_owned(
+let v = GradedSpace::try_new(
     U1FusionRule,
     [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
-    false,
 )?;
 let t = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v, &v], [&v, &v])?;
 
@@ -669,15 +665,13 @@ use tenet_network::tensor;
 let rt = Runtime::builder().build()?;
 
 // Physical leg: spin-1/2 with U(1) Sz charges +-1. Virtual bond legs.
-let p = GradedSpace::try_new_owned(
+let p = GradedSpace::try_new(
     U1FusionRule,
     [(-1, 1), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
-    false,
 )?;
-let v = GradedSpace::try_new_owned(
+let v = GradedSpace::try_new(
     U1FusionRule,
     [(-1, 1), (0, 2), (1, 1)].map(|(q, n)| (U1Irrep::new(q), n)),
-    false,
 )?;
 
 // Two-site wavefunction with two physical and two virtual legs.
@@ -836,10 +830,9 @@ let rt = Runtime::builder()
     .dense_threads(4)
     .plan_cache(PlanCacheConfig::default())
     .build()?;
-let v = GradedSpace::try_new_owned(
+let v = GradedSpace::try_new(
     U1FusionRule,
     [(U1Irrep::new(0), 2), (U1Irrep::new(1), 1)],
-    false,
 )?;
 let a = TensorMap::<U1FusionRule, f64>::rand(&rt, [&v], [&v])?;
 assert!(a.runtime().shares_state_with(&rt));

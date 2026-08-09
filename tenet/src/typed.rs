@@ -7361,8 +7361,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns an error for duplicate labels, two labels with the same encoded
-    /// id, or a non-injective dual map.
+    /// Returns an error for duplicate labels or two labels with the same
+    /// encoded id.
     pub fn try_new<Pairs>(provider: R, pairs: Pairs) -> Result<Self, TypedFacadeError<R>>
     where
         Pairs: IntoIterator<Item = (R::Sector, usize)>,
