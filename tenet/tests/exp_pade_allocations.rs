@@ -112,7 +112,7 @@ fn measure<T>(operation: impl FnOnce() -> T) -> Sample {
 }
 
 fn u1_space(sectors: i32, order: usize) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_shared_provider(
+    GradedSpace::try_new_with_arc(
         Arc::new(U1FusionRule),
         (0..sectors).map(|charge| (U1Irrep::new(charge), order)),
     )
@@ -235,7 +235,7 @@ fn typed_u1_general_exp_matches_the_upper_triangular_oracle() {
     let _measurement = MEASUREMENT_LOCK.lock().unwrap();
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
     let provider = Arc::new(U1FusionRule);
-    let space = GradedSpace::try_new_with_shared_provider(
+    let space = GradedSpace::try_new_with_arc(
         Arc::clone(&provider),
         (0..3).map(|charge| (U1Irrep::new(charge), 2)),
     )

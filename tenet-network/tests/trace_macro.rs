@@ -36,7 +36,7 @@ fn assert_close_c64(lhs: &[Complex64], rhs: &[Complex64], tol: f64) {
 }
 
 fn u1_space() -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_shared_provider(
+    GradedSpace::try_new_with_arc(
         Arc::new(U1FusionRule),
         [
             (U1Irrep::new(-1), 2),
@@ -48,7 +48,7 @@ fn u1_space() -> GradedSpace<U1FusionRule> {
 }
 
 fn su2_space() -> GradedSpace<SU2FusionRule> {
-    GradedSpace::try_new_with_shared_provider(
+    GradedSpace::try_new_with_arc(
         Arc::new(SU2FusionRule),
         [
             (SU2Irrep::from_twice_spin(0), 2),
@@ -60,7 +60,7 @@ fn su2_space() -> GradedSpace<SU2FusionRule> {
 }
 
 fn fz2_space() -> GradedSpace<FermionParityFusionRule> {
-    GradedSpace::try_new_with_shared_provider(
+    GradedSpace::try_new_with_arc(
         Arc::new(FermionParityFusionRule),
         [(Z2Irrep::EVEN, 2), (Z2Irrep::ODD, 3)],
     )
@@ -263,9 +263,7 @@ fn two_trace_pairs_reduce_to_scalar() {
 #[test]
 fn compact_full_trace_preserves_positive_and_supertrace_oracles() {
     let runtime = Runtime::builder().build().unwrap();
-    let u1 =
-        GradedSpace::try_new_with_shared_provider(Arc::new(U1FusionRule), [(U1Irrep::new(0), 3)])
-            .unwrap();
+    let u1 = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 3)]).unwrap();
     let compact = TensorMap::diagonal(
         &runtime,
         &u1,
@@ -307,10 +305,8 @@ fn trace_error_paths_stay_typed() {
     let runtime = Runtime::builder().build().unwrap();
     let provider = Arc::new(U1FusionRule);
     let domain =
-        GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(U1Irrep::new(0), 3)])
-            .unwrap();
-    let codomain =
-        GradedSpace::try_new_with_shared_provider(provider, [(U1Irrep::new(0), 4)]).unwrap();
+        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(U1Irrep::new(0), 3)]).unwrap();
+    let codomain = GradedSpace::try_new_with_arc(provider, [(U1Irrep::new(0), 4)]).unwrap();
     let non_endomorphism =
         TensorMap::<U1FusionRule, f64>::rand_with_seed(&runtime, [&codomain], [&domain], 251)
             .unwrap();

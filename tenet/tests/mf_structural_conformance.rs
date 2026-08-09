@@ -20,7 +20,7 @@ fn zn3_index_flip_and_units_keep_the_original_provider() {
     let runtime = runtime();
     let provider = Arc::new(ZNFusionRule::new(3).unwrap());
     let charge = |value| provider.irrep(value);
-    let leg = GradedSpace::try_new_with_shared_provider(
+    let leg = GradedSpace::try_new_with_arc(
         Arc::clone(&provider),
         [(charge(0), 1), (charge(1), 1), (charge(2), 1)],
     )
@@ -72,14 +72,11 @@ fn z2_cat_and_absorb_have_hand_computed_slabs() {
     let runtime = runtime();
     let provider = Arc::new(Z2FusionRule);
     let codomain =
-        GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(Z2Irrep::EVEN, 2)])
-            .unwrap();
+        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Z2Irrep::EVEN, 2)]).unwrap();
     let lhs_domain =
-        GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(Z2Irrep::EVEN, 1)])
-            .unwrap();
+        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Z2Irrep::EVEN, 1)]).unwrap();
     let rhs_domain =
-        GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(Z2Irrep::EVEN, 2)])
-            .unwrap();
+        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Z2Irrep::EVEN, 2)]).unwrap();
     let lhs: TensorMap<Z2FusionRule, f64> =
         TensorMap::from_block_fn(&runtime, [&codomain], [&lhs_domain], |_, i| {
             (i[0] + 1) as f64
@@ -101,27 +98,15 @@ fn z2_cat_and_absorb_have_hand_computed_slabs() {
 
     let destination: TensorMap<Z2FusionRule, f64> = TensorMap::from_block_fn(
         &runtime,
-        [
-            &GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(Z2Irrep::EVEN, 2)])
-                .unwrap(),
-        ],
-        [
-            &GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(Z2Irrep::EVEN, 3)])
-                .unwrap(),
-        ],
+        [&GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Z2Irrep::EVEN, 2)]).unwrap()],
+        [&GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Z2Irrep::EVEN, 3)]).unwrap()],
         |_, i| (10 * (i[0] + 1) + i[1] + 1) as f64,
     )
     .unwrap();
     let source: TensorMap<Z2FusionRule, f64> = TensorMap::from_block_fn(
         &runtime,
-        [
-            &GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(Z2Irrep::EVEN, 3)])
-                .unwrap(),
-        ],
-        [
-            &GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(Z2Irrep::EVEN, 2)])
-                .unwrap(),
-        ],
+        [&GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Z2Irrep::EVEN, 3)]).unwrap()],
+        [&GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Z2Irrep::EVEN, 2)]).unwrap()],
         |_, i| -((10 * (i[0] + 1) + i[1] + 1) as f64),
     )
     .unwrap();
@@ -135,7 +120,7 @@ fn fermionic_product_contract_otimes_and_reductions_keep_provider_and_signs() {
     let runtime = runtime();
     let provider = Arc::new(FermionParityFusionRule.product(U1FusionRule));
     let odd = product_sector(Z2Irrep::ODD, U1Irrep::new(1));
-    let leg = GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(odd, 1)]).unwrap();
+    let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(odd, 1)]).unwrap();
     let lhs: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
     let rhs: TensorMap<_, f64> =
@@ -168,8 +153,7 @@ fn nested_fermionic_su2_product_and_complex_adjoint_are_publicly_conformant() {
         product_sector(Z2Irrep::ODD, U1Irrep::new(1)),
         SU2Irrep::from_twice_spin(1),
     );
-    let leg =
-        GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(spin_half, 1)]).unwrap();
+    let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(spin_half, 1)]).unwrap();
     let source: TensorMap<_, Complex64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| Complex64::new(2.0, 3.0))
             .unwrap();
@@ -197,7 +181,7 @@ fn zn3_extended_structural_paths_execute_on_the_original_arc() {
     let runtime = runtime();
     let provider = Arc::new(ZNFusionRule::new(3).unwrap());
     let charge = |value| provider.irrep(value);
-    let leg = GradedSpace::try_new_with_shared_provider(
+    let leg = GradedSpace::try_new_with_arc(
         Arc::clone(&provider),
         [(charge(0), 1), (charge(1), 2), (charge(2), 1)],
     )
@@ -254,8 +238,7 @@ fn cu1_charged_structural_paths_keep_the_original_arc() {
     let runtime = runtime();
     let provider = Arc::new(CU1FusionRule);
     let charged = CU1Irrep::from_twice_charge(1);
-    let leg =
-        GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(charged, 1)]).unwrap();
+    let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(charged, 1)]).unwrap();
     let source: TensorMap<_, Complex64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| Complex64::new(2.0, 3.0))
             .unwrap();
@@ -277,11 +260,9 @@ fn cu1_charged_structural_paths_keep_the_original_arc() {
     );
     assert_eq!(source.twist(&[0, 1]).unwrap().data(), source.data());
     assert_eq!(source.flip(&[0]).unwrap().data(), source.data());
-    let pseudo = GradedSpace::try_new_with_shared_provider(
-        Arc::clone(&provider),
-        [(CU1Irrep::PSEUDOSCALAR, 1)],
-    )
-    .unwrap();
+    let pseudo =
+        GradedSpace::try_new_with_arc(Arc::clone(&provider), [(CU1Irrep::PSEUDOSCALAR, 1)])
+            .unwrap();
     let braid_source: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg, &leg], [&pseudo], |_, _| 1.0).unwrap();
     let permuted = braid_source.permute(&[1, 0], &[2]).unwrap();
@@ -306,9 +287,7 @@ fn su2_and_exact_products_keep_their_provider_through_flip_and_units() {
     macro_rules! check {
         ($provider:expr, $label:expr) => {{
             let provider = Arc::new($provider);
-            let leg =
-                GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [($label, 1)])
-                    .unwrap();
+            let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [($label, 1)]).unwrap();
             let source: TensorMap<_, f64> =
                 TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 1.0).unwrap();
             let flipped = source.flip(&[1]).unwrap();
@@ -347,8 +326,7 @@ fn dual_nonabelian_flip_pins_the_pivotal_phase() {
         ($provider:expr, $label:expr, $axis:expr, $codomain_dual:expr, $domain_dual:expr) => {{
             let provider = Arc::new($provider);
             let plain =
-                GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [($label, 1)])
-                    .unwrap();
+                GradedSpace::try_new_with_arc(Arc::clone(&provider), [($label, 1)]).unwrap();
             let dual = plain.try_dual().unwrap();
             let source: TensorMap<_, f64> =
                 TensorMap::from_block_fn(&runtime, [&dual], [&plain], |_, _| 1.0).unwrap();
@@ -391,14 +369,10 @@ fn covered_builtin_multiplicity_free_providers_have_cat_and_absorb_execution() {
         ($provider:expr, $label:expr) => {{
             let provider = Arc::new($provider);
             let codomain =
-                GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [($label, 1)])
-                    .unwrap();
-            let left =
-                GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [($label, 1)])
-                    .unwrap();
+                GradedSpace::try_new_with_arc(Arc::clone(&provider), [($label, 1)]).unwrap();
+            let left = GradedSpace::try_new_with_arc(Arc::clone(&provider), [($label, 1)]).unwrap();
             let right =
-                GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [($label, 1)])
-                    .unwrap();
+                GradedSpace::try_new_with_arc(Arc::clone(&provider), [($label, 1)]).unwrap();
             let a: TensorMap<_, f64> =
                 TensorMap::from_block_fn(&runtime, [&codomain], [&left], |_, _| 1.0).unwrap();
             let b: TensorMap<_, f64> =
@@ -449,9 +423,7 @@ fn zn3_and_cu1_arithmetic_contraction_and_reductions_have_scalar_oracles() {
     macro_rules! check {
         ($provider:expr, $label:expr, $qdim:expr) => {{
             let provider = Arc::new($provider);
-            let leg =
-                GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [($label, 1)])
-                    .unwrap();
+            let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [($label, 1)]).unwrap();
             let a: TensorMap<_, f64> =
                 TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
             let b: TensorMap<_, f64> =
@@ -485,8 +457,7 @@ fn zn3_and_cu1_arithmetic_contraction_and_reductions_have_scalar_oracles() {
     check!(CU1FusionRule, CU1Irrep::from_twice_charge(1), 2.0);
 
     let provider = Arc::new(FermionParityFusionRule);
-    let leg = GradedSpace::try_new_with_shared_provider(Arc::clone(&provider), [(Z2Irrep::ODD, 1)])
-        .unwrap();
+    let leg = GradedSpace::try_new_with_arc(Arc::clone(&provider), [(Z2Irrep::ODD, 1)]).unwrap();
     let a: TensorMap<_, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| 2.0).unwrap();
     let b: TensorMap<_, f64> =

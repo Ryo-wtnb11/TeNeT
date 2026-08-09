@@ -73,7 +73,7 @@ fn measured_allocations<T>(payload_bytes: usize, operation: impl FnOnce() -> T) 
 const STRUCTURAL_TOLERANCE: u64 = 128 * 1024;
 
 fn u1_leg(provider: &Arc<U1FusionRule>, pairs: &[(i32, usize)]) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_shared_provider(
+    GradedSpace::try_new_with_arc(
         Arc::clone(provider),
         pairs
             .iter()
@@ -175,11 +175,8 @@ fn typed_cat_materializes_a_compact_operand_exactly_once() {
     // output.
     const DEGENERACY: usize = 128;
     let runtime = Runtime::builder().dense_threads(1).build().unwrap();
-    let leg = GradedSpace::try_new_with_shared_provider(
-        Arc::new(Z2FusionRule),
-        [(Z2Irrep::EVEN, DEGENERACY)],
-    )
-    .unwrap();
+    let leg = GradedSpace::try_new_with_arc(Arc::new(Z2FusionRule), [(Z2Irrep::EVEN, DEGENERACY)])
+        .unwrap();
     let mut state = 0x5eed_0584u64;
     let tensor: TensorMap<Z2FusionRule, f64> =
         TensorMap::from_block_fn(&runtime, [&leg], [&leg], |_, _| pseudo_random(&mut state))

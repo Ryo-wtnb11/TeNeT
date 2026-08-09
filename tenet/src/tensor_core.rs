@@ -1687,7 +1687,7 @@ mod tests {
         crate::typed::TensorMap<Z2FusionRule, f64>,
     ) {
         let runtime = crate::typed::Runtime::builder().build().unwrap();
-        let leg = crate::typed::GradedSpace::try_new_with_shared_provider(
+        let leg = crate::typed::GradedSpace::try_new_with_arc(
             Arc::new(Z2FusionRule),
             [
                 (tenet_core::Z2Irrep::EVEN, 2),

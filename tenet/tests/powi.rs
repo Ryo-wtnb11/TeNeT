@@ -6,7 +6,7 @@ use tenet::prelude::{Error, Runtime};
 use tenet::typed::{GradedSpace, SectorSpectrum, TensorMap};
 
 fn typed_bond(provider: &Arc<Z2FusionRule>, degeneracy: usize) -> GradedSpace<Z2FusionRule> {
-    GradedSpace::try_new_with_shared_provider(
+    GradedSpace::try_new_with_arc(
         Arc::clone(provider),
         [(Z2Irrep::EVEN, degeneracy), (Z2Irrep::ODD, degeneracy)],
     )
@@ -188,7 +188,7 @@ fn powi_rejects_non_endomorphisms_and_singular_negative_powers() {
 fn dense_powi_matches_hand_computed_matrix_powers() {
     let runtime = Runtime::builder().build().unwrap();
     let provider = Arc::new(Z2FusionRule);
-    let bond = GradedSpace::try_new_with_shared_provider(provider, [(Z2Irrep::EVEN, 2)]).unwrap();
+    let bond = GradedSpace::try_new_with_arc(provider, [(Z2Irrep::EVEN, 2)]).unwrap();
     let matrix = [[2.0, 1.0], [0.0, 3.0]];
     let typed =
         TensorMap::from_block_fn(&runtime, [&bond], [&bond], |_, i| matrix[i[0]][i[1]]).unwrap();

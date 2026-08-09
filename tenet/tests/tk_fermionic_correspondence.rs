@@ -40,7 +40,7 @@ fn scalar(t: TensorMap<FermionParityFusionRule, f64>) -> f64 {
 #[test]
 fn fz2_contractions_match_tensorkit() {
     let rt = Runtime::builder().build().unwrap();
-    let v = GradedSpace::try_new_with_shared_provider(
+    let v = GradedSpace::try_new_with_arc(
         Arc::new(FermionParityFusionRule),
         [(Z2Irrep::EVEN, 1), (Z2Irrep::ODD, 1)],
     )

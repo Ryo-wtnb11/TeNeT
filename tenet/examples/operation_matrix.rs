@@ -589,7 +589,7 @@ fn run_checked_sun(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use tenet::typed::SUNFusionRule;
 
-    let space = GradedSpace::try_new_with_shared_provider(provider, [(label, degeneracy)])?;
+    let space = GradedSpace::try_new_with_arc(provider, [(label, degeneracy)])?;
     if form_enabled("destination") {
         println!("# {symmetry}: destination rows excluded: the public destination methods retain multiplicity-free dispatch bounds, so the exact SUN fixtures cannot call them");
     }

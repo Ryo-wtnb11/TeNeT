@@ -11,9 +11,8 @@ fn direct_and_lazy_adjoint_disjoint_null_spaces_match_tensorkit() {
     let runtime = Runtime::builder().build().unwrap();
     let rule = Arc::new(U1FusionRule);
     let codomain =
-        GradedSpace::try_new_with_shared_provider(Arc::clone(&rule), [(U1Irrep::new(0), 2)])
-            .unwrap();
-    let domain = GradedSpace::try_new_with_shared_provider(rule, [(U1Irrep::new(1), 3)]).unwrap();
+        GradedSpace::try_new_with_arc(Arc::clone(&rule), [(U1Irrep::new(0), 2)]).unwrap();
+    let domain = GradedSpace::try_new_with_arc(rule, [(U1Irrep::new(1), 3)]).unwrap();
     let source: TensorMap<_, f64> = TensorMap::zeros(&runtime, [&codomain], [&domain]).unwrap();
 
     assert!(source.data().is_empty());

@@ -13,7 +13,7 @@ use tenet::dense::{
 use tenet::prelude::{GradedSpace, Runtime, TensorMap, U1FusionRule, U1Irrep};
 
 fn u1_space(entries: [(i32, usize); 3]) -> GradedSpace<U1FusionRule> {
-    GradedSpace::try_new_with_shared_provider(
+    GradedSpace::try_new_with_arc(
         Arc::new(U1FusionRule),
         entries.map(|(charge, degeneracy)| (U1Irrep::new(charge), degeneracy)),
     )

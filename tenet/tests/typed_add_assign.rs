@@ -39,7 +39,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 
 fn tensor(runtime: &Runtime, n: usize, value: f64) -> TensorMap<U1FusionRule, f64> {
     let rule = Arc::new(U1FusionRule);
-    let space = GradedSpace::try_new_with_shared_provider(rule, [(U1Irrep::new(0), n)]).unwrap();
+    let space = GradedSpace::try_new_with_arc(rule, [(U1Irrep::new(0), n)]).unwrap();
     TensorMap::from_block_fn(runtime, [&space], [&space], move |_, ij| {
         if ij[0] == ij[1] {
             value

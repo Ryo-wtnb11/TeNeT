@@ -81,8 +81,7 @@ where
 fn cuda_macro_rejects_trace_before_cache_or_execution() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let space =
-        GradedSpace::try_new_with_shared_provider(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])
-            .unwrap();
+        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let tensor = TensorMap::<_, f64>::rand_with_seed(&runtime, [&space], [&space], 748_090)
         .unwrap()
         .to_cuda()
@@ -101,8 +100,7 @@ fn cuda_macro_rejects_trace_before_cache_or_execution() {
 fn noncanonical_cuda_macro_never_publishes_or_touches_cache_state() {
     let runtime = Runtime::builder().cuda(0).build().unwrap();
     let space =
-        GradedSpace::try_new_with_shared_provider(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])
-            .unwrap();
+        GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     let a = TensorMap::<_, f64>::rand_with_seed(&runtime, [&space], [&space], 748_091).unwrap();
     let b = TensorMap::<_, f64>::rand_with_seed(&runtime, [&space], [&space], 748_092).unwrap();
     let a_cuda = a.to_cuda().unwrap();
@@ -130,23 +128,16 @@ fn noncanonical_cuda_macro_never_publishes_or_touches_cache_state() {
 #[ignore = "requires a real CUDA device"]
 fn canonical_cuda_network_provider_matrix_chain_and_lazy_conj() {
     let runtime = Runtime::builder().cuda(0).dense_threads(1).build().unwrap();
-    let u1 =
-        GradedSpace::try_new_with_shared_provider(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)])
-            .unwrap();
+    let u1 = GradedSpace::try_new_with_arc(Arc::new(U1FusionRule), [(U1Irrep::new(0), 2)]).unwrap();
     cuda_pair(&runtime, &u1, 748_100);
-    let su2 = GradedSpace::try_new_with_shared_provider(
-        Arc::new(SU2FusionRule),
-        [(SU2Irrep::from_twice_spin(0), 2)],
-    )
-    .unwrap();
+    let su2 =
+        GradedSpace::try_new_with_arc(Arc::new(SU2FusionRule), [(SU2Irrep::from_twice_spin(0), 2)])
+            .unwrap();
     cuda_pair(&runtime, &su2, 748_110);
-    let fz2 = GradedSpace::try_new_with_shared_provider(
-        Arc::new(FermionParityFusionRule),
-        [(Z2Irrep::ODD, 2)],
-    )
-    .unwrap();
+    let fz2 = GradedSpace::try_new_with_arc(Arc::new(FermionParityFusionRule), [(Z2Irrep::ODD, 2)])
+        .unwrap();
     cuda_pair(&runtime, &fz2, 748_120);
-    let product = GradedSpace::try_new_with_shared_provider(
+    let product = GradedSpace::try_new_with_arc(
         Arc::new(FermionParityFusionRule.product(U1FusionRule)),
         [(product_sector(Z2Irrep::ODD, U1Irrep::new(0)), 2)],
     )
