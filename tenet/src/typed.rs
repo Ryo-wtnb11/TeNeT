@@ -515,14 +515,15 @@ where
     ///
     /// Dense input uses one compact SVD per nonempty coupled sector,
     /// `O(Σ_c n_c³)`, then folds `S⁺` into a column scaling and recomposes with
-    /// one local GEMM. Compact input uses an **O(rank) elementwise
-    /// cutoff-and-reciprocal arm** over the stored diagonal values and stays
-    /// compact.
+    /// one local GEMM. Multiplicity-free compact input uses an **O(rank)
+    /// elementwise cutoff-and-reciprocal arm** over the stored diagonal values
+    /// and stays compact.
     ///
-    /// Checked Generic supports dense maps only: it admits the swapped output
-    /// with the source's exact provider `Arc` and validates its identity,
-    /// HomSpace, rank, and layout before any SVD/GEMM. Compact checked-Generic
-    /// construction remains unsupported.
+    /// Checked Generic admits the swapped output with the source's exact
+    /// provider `Arc` and validates its identity, HomSpace, rank, and layout
+    /// before any SVD/GEMM. Standalone compact construction is supported, but
+    /// checked `pinv` has no elementwise compact arm: it materializes that input
+    /// for the dense path and publishes a dense result.
     pub fn pinv(&self, rcond: f64) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorPinvDispatch<R, D>>::pinv(self, rcond)
     }
@@ -1229,10 +1230,9 @@ where
     /// value-independent complexification is not expressible in a typed
     /// signature. A wider `sqrt` is a separate phase, not an omission here.
     ///
-    /// Checked Generic currently exposes this operation for dense diagonal
-    /// tensors only. Checked Generic compact construction and compact
-    /// preservation remain unsupported; the compact arm below remains for the
-    /// existing multiplicity-free path.
+    /// Checked Generic standalone compact tensors use the same elementwise arm
+    /// and remain compact. Dense diagonal inputs still take the checked
+    /// off-diagonal-validation path below.
     ///
     /// # Errors
     ///
@@ -1251,10 +1251,9 @@ where
     ///
     /// # Complexity
     ///
-    /// Compact input (the existing multiplicity-free/TensorKit
-    /// `DiagonalTensorMap` path, what those factorizations hand back): the
-    /// **O(rank) elementwise arm** over the `Σ_c k_c` stored
-    /// values, staying compact — so `s.sqrt()` and the two `compose`s around it
+    /// Compact input (the TensorKit `DiagonalTensorMap` path): the **O(rank)
+    /// elementwise arm** over the `Σ_c k_c` stored values, staying compact. On
+    /// the multiplicity-free path, `s.sqrt()` and the two `compose`s around it
     /// are all bond scalings. Dense input: `O(Σ_c n_c²)`, one walk over the
     /// block-diagonal buffer, which is what the off-diagonal check costs; the
     /// root itself is still only `Σ_c n_c` square roots. A dense lazy adjoint
@@ -6783,7 +6782,8 @@ where
     /// # Complexity
     ///
     /// Dense input: `O(Σ_c n_c³)`, one LU solve per coupled sector. Compact
-    /// input (a spectrum factor, TensorKit's `DiagonalTensorMap`): the
+    /// multiplicity-free compact input (a spectrum factor, TensorKit's
+    /// `DiagonalTensorMap`): the
     /// **O(rank) elementwise-reciprocal arm**, `1/s_i` over the `Σ_c k_c`
     /// stored values, and the result stays compact — matching TensorKit's
     /// `inv(::DiagonalTensorMap)`, which is `inv.(d.data)`. Nothing dense is
@@ -6791,11 +6791,12 @@ where
     /// parent and returns a detached owned adjoint of that inverse; it does not
     /// allocate or publish a separate receiver-materialization payload.
     ///
-    /// Checked Generic accepts dense inputs only: it performs the same
-    /// isomorphism preflight, admits the swapped output with the source provider
-    /// `Arc` before output allocation or dense work, and preserves provider
-    /// admission failures as typed errors. Compact checked-Generic construction
-    /// remains unsupported.
+    /// Checked Generic performs the same isomorphism preflight, admits the
+    /// swapped output with the source provider `Arc` before output allocation
+    /// or dense work, and preserves provider admission failures as typed errors.
+    /// Standalone compact construction is supported, but checked `inv` has no
+    /// elementwise compact arm: it materializes that input and publishes a dense
+    /// result.
     pub fn inv(&self) -> Result<Self, TypedFacadeError<R>> {
         <R::Mode as TypedTensorInvDispatch<R, D>>::inv(self)
     }
@@ -6831,8 +6832,9 @@ where
     ///
     /// The multiplicity-free **compact** arm is TensorKit's
     /// `exp(::DiagonalTensorMap)`: unconditionally elementwise, with no
-    /// hermiticity gate. Checked-Generic tensors currently use only the dense
-    /// Padé route; checked compact construction is unsupported.
+    /// hermiticity gate. Standalone checked-Generic compact construction is
+    /// supported, but checked `exp` has no compact dispatch: it materializes
+    /// that input and publishes the dense Padé result.
     ///
     /// # Errors
     ///
@@ -6882,13 +6884,16 @@ where
 {
     /// Integer tensor-map power (TensorKit `t ^ p`), using `O(log |p|)`
     /// compositions. Zero returns the multiplicative identity (staying compact
-    /// for compact input); negative powers invert once.
+    /// for multiplicity-free compact input); negative powers invert once.
     ///
     /// For checked-Generic tensors, the exact endomorphism check precedes
     /// provider work. Zero uses the already admitted full block layout without
     /// a provider query or new admission; other exponents inherit the checked
-    /// compose/inverse ordering and errors. Checked-Generic compact
-    /// construction remains unsupported.
+    /// compose/inverse ordering and errors. Standalone checked-Generic compact
+    /// construction is supported, but there is no checked compact power arm:
+    /// exponent one returns the input clone, while zero, negative, and
+    /// magnitude-at-least-two powers enter dense identity, inverse, or compose
+    /// paths respectively.
     ///
     /// # Errors
     ///
@@ -10978,7 +10983,8 @@ where
 
     /// Returns the compact diagonal spectrum without materializing dense data.
     ///
-    /// This is typed `diag` readback: [`None`] means the tensor is dense;
+    /// This is typed `diag` readback: [`None`] means the representation has no
+    /// directly stored compact spectrum (it is dense or a lazy adjoint);
     /// otherwise it clones only the `O(Σ_c k_c)` compact values in canonical
     /// bond-sector order.
     pub fn diagonal_spectrum(
@@ -11002,7 +11008,13 @@ where
             })
             .transpose()
     }
+}
 
+impl<R, D> TensorMap<R, D>
+where
+    R: MultiplicityFreeRigidSymbols<Scalar = f64> + CheckedFusionAlgebra + SectorCodec,
+    D: TensorScalar,
+{
     /// Tests a rank-one map for blockwise diagonality without materializing compact storage.
     ///
     /// This matches TensorKit `isdiag` for finite data at `tol = 0`; positive
