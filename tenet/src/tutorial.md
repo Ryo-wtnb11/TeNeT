@@ -53,6 +53,10 @@ The example creates a space with charges `-1`, `0`, and `1`, builds two
 deterministic diagonal `TensorMap`s, and contracts them with `tensor!`. Its
 assertions check both the result rank and the analytic squared norm, `50`.
 
+After this first calculation, the guided [U(1) iTEBD Heisenberg
+application](https://github.com/Ryo-wtnb11/TeNeT/blob/main/docs/itebd_heisenberg.md) shows how the same tensor-map
+conventions build a complete ground-state search.
+
 ### Scalar dtype
 
 The scalar is the second type parameter: `TensorMap<R, f64>` or
@@ -545,7 +549,7 @@ Frobenius norm.
 </math>
 </div>
 
-A worked mini-example — split a rank-4 tensor across the current
+A small algebra demonstration — split a rank-4 tensor across the current
 codomain/domain boundary, truncate the bond, and check the reported error
 against the actual reconstruction distance:
 
@@ -606,11 +610,13 @@ For the QR path, the compact factor obeys the usual isometry relation:
 </math>
 </div>
 
-## 5. Worked Example: a U(1) Two-Site Imaginary-Time Step
+## 5. Algebra Demonstration: a U(1) Two-Site Imaginary-Time Step
 
-The simple-update kernel: apply the two-site imaginary-time gate to a
-two-site wavefunction, regroup the legs around the bond, and truncate the
-bond back with `svd_trunc`.
+This doctest demonstrates the tensor algebra: apply a random Hermitian
+two-site imaginary-time gate to a random wavefunction, regroup the legs around
+the bond, and truncate with `svd_trunc`. It is not a Heisenberg Hamiltonian or
+an iTEBD loop. For the physical model and complete algorithm, follow the
+guided [U(1) iTEBD Heisenberg application](https://github.com/Ryo-wtnb11/TeNeT/blob/main/docs/itebd_heisenberg.md).
 
 <div class="math" style="margin: 1.25rem 0; padding: 0.2rem 0; overflow-x: auto;">
 <math display="block" style="font-size: 1.12em; line-height: 1.8;" xmlns="http://www.w3.org/1998/Math/MathML">
@@ -703,8 +709,9 @@ println!("truncation error: {:.3e}", svd.error);
 # Ok::<(), Error>(())
 ```
 
-In a real simple-update loop this step runs once per bond per sweep, with
-the stored bond weights absorbed and re-extracted around each gate.
+In a real update loop this algebra runs once per bond, with the stored bond
+weights absorbed and re-extracted around each gate. The application linked
+above shows that loop without duplicating it here.
 
 ## 6. Under the Hood: the Expert Layers
 
