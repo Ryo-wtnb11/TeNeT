@@ -1,3 +1,4 @@
+use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -93,10 +94,16 @@ pub struct TreeTransformStructure<T> {
     src_structure: Arc<BlockStructure>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 enum TreeTransformCoefficientPayload<T> {
     Owned(Vec<T>),
     Shared(SharedTreeTransformCoefficients<T>),
+}
+
+impl<T: fmt::Debug> fmt::Debug for TreeTransformCoefficientPayload<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_slice().fmt(formatter)
+    }
 }
 
 impl<T: PartialEq> PartialEq for TreeTransformCoefficientPayload<T> {
@@ -106,16 +113,16 @@ impl<T: PartialEq> PartialEq for TreeTransformCoefficientPayload<T> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct SharedTreeTransformCoefficients<T>(Arc<[T]>);
+pub(crate) struct SharedTreeTransformCoefficients<T>(Arc<Vec<T>>);
 
 impl<T> SharedTreeTransformCoefficients<T> {
     pub(crate) fn from_vec(coefficients: Vec<T>) -> Self {
-        Self(coefficients.into())
+        Self(Arc::new(coefficients))
     }
 
     #[inline]
     pub(crate) fn as_slice(&self) -> &[T] {
-        &self.0
+        self.0.as_slice()
     }
 
     #[cfg(test)]
@@ -126,7 +133,9 @@ impl<T> SharedTreeTransformCoefficients<T> {
     fn charged_bytes(&self) -> usize {
         const ARC_CONTROL_BYTES: usize = 2 * core::mem::size_of::<usize>();
 
-        ARC_CONTROL_BYTES.saturating_add(self.0.len().saturating_mul(core::mem::size_of::<T>()))
+        ARC_CONTROL_BYTES
+            .saturating_add(core::mem::size_of::<Vec<T>>())
+            .saturating_add(self.0.capacity().saturating_mul(core::mem::size_of::<T>()))
     }
 }
 
