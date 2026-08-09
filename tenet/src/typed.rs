@@ -7305,8 +7305,8 @@ where
 /// a tensor uses only some of its fusion trees. A dual space stores dual sector
 /// labels and reports `true` from [`Self::is_dual`].
 ///
-/// When a provider query fails, a fallible operation returns the original
-/// provider error. It returns no partial value.
+/// If a provider query fails, the returned error keeps the provider error as
+/// its source. No partial result is returned.
 ///
 /// ```
 /// use std::sync::Arc;
